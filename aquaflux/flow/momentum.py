@@ -281,7 +281,12 @@ class MomentumContinuity(eqx.Module):
             mesh=mesh,
             geometry=geometry,
             properties=properties,
-            gradient_scheme=gradient_scheme,
+            # Prepared for this geometry, alongside the face interpolation factors above and for the
+            # same reason: it is work that depends on the mesh and not on the state, and the residual
+            # is evaluated once per field per Krylov matvec. Binding here rather than at the call
+            # site is also what makes it safe -- this assembler owns the geometry and the scheme
+            # together, so the two cannot be paired with a mismatched mesh later.
+            gradient_scheme=gradient_scheme.bind(mesh, geometry),
             advection_scheme=advection_scheme,
             boundary=boundary.resolve(mesh.face_patches),
             interp_factor=interp_factor,

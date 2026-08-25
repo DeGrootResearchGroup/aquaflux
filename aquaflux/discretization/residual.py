@@ -59,7 +59,7 @@ from .face_flux import FaceContext
 if TYPE_CHECKING:
     from aquaflux.mesh import Mesh, MeshGeometry
     from aquaflux.properties import PropertyModel
-    from aquaflux.schemes import GradientScheme
+    from aquaflux.schemes import GradientScheme, ImposedGradient
 
     from .face_flux import FaceFluxOperator
     from .source import VolumeSource
@@ -175,6 +175,12 @@ class ResidualAssembler(eqx.Module):
         Cell-gradient reconstruction shared by the flux operators' non-orthogonal
         corrections. ``None`` reconstructs no gradient (exact on orthogonal grids, where the
         correction vanishes identically).
+    imposed_gradient : ImposedGradient or None
+        Cells whose gradient of *this equation's field* is known analytically and is to be used in
+        place of a reconstruction. ``None`` (the usual case) reconstructs everywhere. It is a
+        property of the equation rather than of a call, so :meth:`residual` and :meth:`gradient`
+        cannot disagree about it -- which is the point, since a field whose gradient must be imposed
+        needs it imposed wherever it is reconstructed.
     coefficient : str
         The property the flux-type boundary closures (Robin/Neumann) use as their
         diffusion coefficient ``Gamma`` (static; matches the ``DiffusionFlux.coefficient`` of the
@@ -190,6 +196,7 @@ class ResidualAssembler(eqx.Module):
     gradient_scheme: GradientScheme | None
     coefficient: str = eqx.field(static=True)
     boundary: BoundaryConditions
+    imposed_gradient: ImposedGradient | None = None
 
     @classmethod
     def build(
@@ -204,6 +211,7 @@ class ResidualAssembler(eqx.Module):
         transient: TransientTerm | None = None,
         source_operators: tuple[VolumeSource, ...] = (),
         gradient_scheme: GradientScheme | None = None,
+        imposed_gradient: ImposedGradient | None = None,
     ) -> ResidualAssembler:
         """Build an assembler from injected operators, schemes, and boundary closures.
 
@@ -234,6 +242,11 @@ class ResidualAssembler(eqx.Module):
         gradient_scheme : GradientScheme, optional
             Cell-gradient reconstruction for the non-orthogonal corrections; omit on
             orthogonal grids.
+        imposed_gradient : ImposedGradient, optional
+            Cells whose gradient of this equation's field is a model quantity rather than something
+            to reconstruct -- a near-wall ``omega``, whose value is itself imposed, is the standing
+            case. Given here rather than per call so that every reconstruction this assembler makes
+            honours it.
         """
         return cls(
             mesh=mesh,
@@ -244,9 +257,16 @@ class ResidualAssembler(eqx.Module):
                 source_operators=source_operators,
                 transient=transient,
             ),
-            gradient_scheme=gradient_scheme,
+            # Prepared for this geometry: geometry-only reconstruction work hoisted out of the
+            # per-call path, since the residual is evaluated once per field per Krylov matvec. This
+            # assembler owns the geometry and the scheme together, so binding here -- rather than
+            # leaving it to a call site -- is what stops the two being paired with a mismatched mesh.
+            gradient_scheme=(
+                None if gradient_scheme is None else gradient_scheme.bind(mesh, geometry)
+            ),
             coefficient=coefficient,
             boundary=boundary.resolve(mesh.face_patches),
+            imposed_gradient=imposed_gradient,
         )
 
     def boundary_values(
@@ -325,6 +345,10 @@ class ResidualAssembler(eqx.Module):
         threaded into an iterative reconstruction's own linear solve so a partition-coupled gradient
         scheme refreshes its ghost rows each sweep, and is applied again to the returned gradient in
         :meth:`residual` so the flux reads exchanged ghost gradients.
+
+        :attr:`imposed_gradient`, when this assembler carries one, is handed to the scheme rather
+        than applied afterwards, because a scheme that consumes its own reconstructed gradient must
+        impose before that consumer reads it.
         """
         dim = self.mesh.dim
         n_cells = self.mesh.n_cells
@@ -334,7 +358,17 @@ class ResidualAssembler(eqx.Module):
         zero_grad = jnp.zeros((n_cells, dim), dtype=phi.dtype)
         leading_bvals = self.boundary_values(phi, zero_grad, properties)
         gradient = self.gradient_scheme.gradients(
-            phi, self.mesh, self.geometry, leading_bvals, operator_hook=gradient_hook
+            phi,
+            self.mesh,
+            self.geometry,
+            leading_bvals,
+            operator_hook=gradient_hook,
+            imposed=self.imposed_gradient,
+            # A scheme that DIFFERENTIATES a boundary value cannot use the leading-order one: a
+            # gradient-type closure's whole content is a correction, which evaluating at zero
+            # gradient throws away. This lets such a scheme ask for the corrected values at its own
+            # reconstructed gradient; the ones passed above stay leading-order for everything else.
+            boundary_values_at=lambda g: self.boundary_values(phi, g, properties),
         )
         return gradient, self.boundary_values(phi, gradient, properties)
 

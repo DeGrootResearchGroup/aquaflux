@@ -14,7 +14,7 @@ from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import VelocityFields
 from aquaflux.mesh import structured_grid_2d
-from aquaflux.schemes import CorrectedGreenGauss
+from aquaflux.schemes import CorrectedGreenGauss, GradientScheme, ImposedGradient
 from aquaflux.solve import ImplicitNewtonSolver
 from aquaflux.turbulence import (
     SSTClosureFields,
@@ -22,20 +22,21 @@ from aquaflux.turbulence import (
     SSTTurbulence,
     log_layer_shear_rate,
     omega_wall,
+    omega_wall_gradient,
     production_and_limit,
 )
 
 NU = 1e-3
 
 
-def _turbulence(*, explicit_production_limiter=False):
+def _turbulence(*, explicit_production_limiter=False, gradient_scheme=None):
     mesh = structured_grid_2d(6, 4, lx=3.0, ly=1.0, named_boundaries=True)
     geometry = mesh.geometry()
     turb = SSTTurbulence.build(
         SSTModel(),
         mesh,
         geometry,
-        CorrectedGreenGauss(),
+        gradient_scheme or CorrectedGreenGauss(),
         FirstOrderUpwind(),
         density=1.0,
         molecular_viscosity=jnp.full(mesh.n_cells, NU),
@@ -72,6 +73,11 @@ def _closure(turb):
         omega=jnp.full(n, 1.0),
         k=jnp.full(n, 1.0),
         wall_shear_rate=jnp.full(turb.wall_cells.shape, 1.0),
+        # A prescribed closure needs a prescribed imposition too; zero keeps this fixture's omega
+        # gradient the flat field the rest of it is, without leaving the wall cells reconstructed.
+        imposed_omega_gradient=ImposedGradient(
+            turb.wall_cells, jnp.zeros((turb.wall_cells.shape[0], turb.mesh.dim))
+        ),
     )
 
 
@@ -200,6 +206,71 @@ def test_closure_fields_are_well_formed() -> None:
     assert closure.grad_k.shape == (n, mesh.dim)
     assert closure.grad_omega.shape == (n, mesh.dim)
     assert jnp.allclose(closure.omega, omega)
+
+
+def test_the_wall_cells_omega_gradient_is_the_analytical_one() -> None:
+    """Those cells' ``omega`` is imposed, so its gradient is a model quantity and not a reconstruction.
+
+    ``omega_wall`` goes like ``1/d**2`` and the wall face's own ``omega`` comes from a zero-gradient
+    closure, so a linear fit over that stencil is measured at about a quarter of the analytical
+    magnitude. The equality here is exact because the analytical value is *imposed*, not approached.
+    """
+    mesh, turb = _turbulence()
+    n = mesh.n_cells
+    k, omega = jnp.full(n, 0.01), jnp.full(n, 10.0)
+    closure = turb.closure_fields(_velocity(mesh, _shear(n)), k, omega)
+
+    wall = turb.wall_cells
+    expected = omega_wall_gradient(
+        jnp.full(wall.shape[0], NU),
+        turb.wall_distance[wall],
+        k[wall],
+        turb.wall_distance_gradient[wall],
+        closure.grad_k[wall],
+        SSTModel(),
+    )
+    assert jnp.array_equal(closure.grad_omega[wall], expected)
+
+
+def test_the_imposed_wall_gradient_is_handed_to_the_scheme_not_applied_to_its_result() -> None:
+    """Which is the whole point, for any scheme that consumes its own reconstructed gradient.
+
+    :class:`~aquaflux.schemes.MultipleCorrectionGradient` differentiates its first estimate to build
+    the Hessian that corrects the gradient it returns, so an imposition arriving afterwards would
+    leave that Hessian -- and through it every other cell -- built on the near-wall value it
+    replaces. Asserted at the seam rather than through a moved number, because the correction it
+    feeds vanishes identically on a Cartesian grid and a numerical check here would be measuring the
+    mesh.
+    """
+    handed = []
+
+    class _Recording(GradientScheme):
+        """Records the imposition it is handed, and reconstructs with the scheme it wraps."""
+
+        inner: GradientScheme
+
+        def _reconstruct_gradient(
+            self,
+            field,
+            mesh,
+            geometry,
+            boundary_values,
+            *,
+            operator_hook=None,
+            imposed=None,
+            boundary_values_at=None,
+        ):
+            handed.append(imposed)
+            return self.inner.gradients(field, mesh, geometry, boundary_values)
+
+    mesh, turb = _turbulence(gradient_scheme=_Recording(CorrectedGreenGauss()))
+    n = mesh.n_cells
+    turb.closure_fields(_velocity(mesh, _shear(n)), jnp.full(n, 0.01), jnp.full(n, 10.0))
+
+    imposed = [one for one in handed if one is not None]
+    assert len(imposed) == 1  # only omega's; every other field reconstructs freely
+    assert any(one is None for one in handed)
+    assert jnp.array_equal(imposed[0].cells, turb.wall_cells)
 
 
 def test_eddy_viscosity_is_differentiable_in_k() -> None:

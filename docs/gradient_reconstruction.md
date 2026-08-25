@@ -371,10 +371,11 @@ Hessian and re-converges it from zero inside every apply of the outer solve, dis
 previous apply found. {class}`~aquaflux.schemes.PackedSystemSolve` solves the un-eliminated
 system whole, which is how the elimination is checked rather than a production path.
 
-The default is the coupled sweep: it matches the nested pair's accuracy at about a third of the
-face-kernel passes, and the gap widens with mesh skewness — 1.4x at 30 % perturbation, 1.8x at
-40 %, and up to 12x under {class}`~aquaflux.schemes.AveragedNeighbourHessian`, whose Hessian
-system is the expensive one to re-converge.
+The default is the coupled sweep: it matches the nested pair's accuracy at a fraction of the
+face-kernel passes — 40 against 220 for the `20` / `20+10` pair — and the gap widens with mesh
+skewness, 1.4x at 30 % perturbation, 1.8x at 40 %, and up to 12x under
+{class}`~aquaflux.schemes.AveragedNeighbourHessian`, whose Hessian system is the expensive one to
+re-converge.
 
 ```{note}
 The nested path is *faster* on an orthogonal mesh, where the outer solve is nearly trivial and
@@ -408,9 +409,67 @@ The system stays gradient-sized: no enlarged unknown is formed, and the Hessian 
 the sweep rather than an unknown of a larger system. It lives for one reconstruction and starts
 from zero on every call, so the reconstruction remains an exactly linear function of the field.
 
+### Choosing the boundary closure
+
+The Hessian boundary closure is a **property of the mesh**, not a ranking. On well-shaped cells
+{class}`~aquaflux.schemes.OwnerHessian` converges faster; on badly warped ones
+{class}`~aquaflux.schemes.AveragedNeighbourHessian` does — and on cells degenerate enough to leave
+the owner closure's Hessian block singular, it is the only one that converges at all. Both reproduce
+a constant Hessian exactly, so this is a cost choice rather than an accuracy one.
+
+{func}`~aquaflux.schemes.fastest_boundary_closure` measures it, the same way the sweep count is
+measured rather than assumed:
+
+```python
+closure = fastest_boundary_closure(mesh, mesh.geometry())
+scheme = HessianCorrectedGradient.calibrated(mesh, mesh.geometry(), boundary_closure=closure)
+```
+
+The contraction rate is the only criterion, and it is sufficient: a closure whose per-cell block is
+singular does not reconstruct badly, it fails to contract, so it loses on rate by a wide margin.
+
+### Binding a scheme to its geometry
+
+Most of what this scheme does before it sweeps depends only on the geometry: the per-cell blocks
+the two preconditioners invert. Nothing there changes with the field, yet it is rebuilt on every
+reconstruction — and a Krylov matvec re-executes the residual, so it is rebuilt on every matvec
+too. Within one compiled residual the compiler already shares it across the fields being
+reconstructed, so what is left to collect is the repetition *across* residual evaluations.
+
+{meth}`~aquaflux.schemes.GradientScheme.bind` returns the same scheme prepared for one geometry.
+**Assemblers call it for you** — {meth}`~aquaflux.discretization.ResidualAssembler.build` and
+{meth}`~aquaflux.flow.MomentumContinuity.build` bind whatever scheme they are handed, alongside the
+face interpolation factors they already precompute, so an ordinary solve gets this without asking.
+The default implementation returns the scheme unchanged, so schemes with no geometry-only work pay
+nothing.
+
+You only need to call it yourself when you reconstruct gradients outside an assembler:
+
+```python
+scheme = HessianCorrectedGradient().bind(mesh, mesh.geometry())
+```
+
+The gradient it returns is bit-for-bit the one the unbound scheme returns. It is worth most where
+the sweep count is lowest, since the sweeps are what it competes with, and more in three dimensions
+than in two: on a 3D mesh at a calibrated seven sweeps it removes about 13 % of the work of a
+six-field reconstruction, against 8 % in 2D.
+
+```{warning}
+A bound scheme is valid only for the geometry it was bound to. Binding inside the assemblers is what
+makes this safe in normal use: an assembler owns the geometry and the scheme together, so it cannot
+pair a binding with a mesh it was not built for. Because the sweep runs a fixed
+number of times, the preconditioner shapes the answer rather than only the rate at which the sweep
+reaches it, so a stale binding returns a subtly wrong gradient instead of a slower one. A
+cell-count mismatch is refused; a different geometry with the same cell count cannot be detected.
+For the same reason, do not bind outside a region being differentiated with respect to node
+positions — differentiation with respect to the *field* is unaffected.
+```
+
 `sweeps` here is **not** the nested solve's outer count and must be calibrated on its own — a
-coupled sweep costs about three face passes where a nested outer sweep costs eleven, so more of
-them buy less each. {meth}`~aquaflux.schemes.CoupledBlockSweep.calibrated` measures it from the
+coupled sweep costs two face passes where a nested outer sweep costs eleven, so more of them buy
+less each. Calibrating it is also the single largest saving available in this scheme: the sweeps
+are the great majority of a reconstruction's cost, and a count chosen for exactness on quadratic
+fields is far tighter than a flow solve needs. {meth}`~aquaflux.schemes.CoupledBlockSweep.calibrated` measures it from the
 mesh, exactly as the other two schemes' factories do:
 
 ```python
@@ -542,6 +601,163 @@ one matrix-vector product — and walk the ladder one rung past where it stops h
 it turns is not visible from the values before it.
 ```
 
+## Reconstruction without a solve
+
+{class}`~aquaflux.schemes.HessianCorrectedGradient` reaches exactness for quadratic fields by
+solving a coupled gradient--Hessian system: the gradient needs the Hessian through the
+face-curvature term, the Hessian needs the gradient, and the cycle is closed by sweeping until it
+converges. {class}`~aquaflux.schemes.MultipleCorrectionGradient` reaches the same exactness with no
+cycle at all, following Pont et al. (2017).
+
+It rests on one observation about the Green--Gauss sum: handed a linear field of gradient `a`, the
+raw sum does not return `a` -- it returns `M1 a` for a per-cell matrix that depends only on the
+mesh. Recover `M1` by applying the sum to the coordinate fields, and `M1^-1 R` is exact for linear
+fields by construction. Apply that twice and the argument repeats one order up, giving the Hessian;
+the gradient's remaining first-order error is a fixed linear function of that Hessian, and
+subtracting it lifts the gradient to second order.
+
+The result is **two passes over the faces and three per-cell matrix products**, with no system to
+solve, no sweep count, and no per-mesh calibration:
+
+```python
+scheme = MultipleCorrectionGradient().bind(mesh, geometry)
+gradient, hessian = scheme.reconstruct(field, mesh, geometry, boundary_values)
+```
+
+Every correction matrix is obtained by running the operators on coordinate monomials, so there are
+no derived geometric formulas and no volume moments to compute. The reconstruction stays exactly
+linear in the field -- a fixed sequence of fixed linear maps -- so its tangent is that same sequence
+applied to the tangent, with no implicit-function solve.
+
+### The boundary closure matters more than it looks
+
+A boundary condition supplies the field on a boundary face, never its gradient, and this scheme
+differentiates a gradient. {class}`~aquaflux.schemes.GradientBoundaryClosure` fills that gap.
+
+```{warning}
+A closure **must reproduce linear fields exactly**. The correction matrices are calibrated on
+quadratic fields, so they absorb whatever a closure does to a quadratic -- but an error made at
+*linear* order lands in a term those probes never see, and nothing downstream removes it. A raw
+one-sided difference `(phi_face - phi_owner) / (d.n)` is not linear-exact on a skewed mesh, and
+using one costs the reconstruction its accuracy outright.
+```
+
+{class}`~aquaflux.schemes.SkewCorrectedGradient` takes the owner's gradient tangentially and a
+one-sided difference to the boundary value normally, with the non-orthogonal correction that makes it
+linear-exact -- the same term the diffusion flux has always used to extrapolate the same derivative
+to the same place. {class}`~aquaflux.schemes.OwnerGradient` reads no boundary value at all. Which to
+use is not a free choice; see below.
+
+### Choosing the gradient's boundary closure
+
+{class}`~aquaflux.schemes.OwnerGradient` is the default: it takes the owner cell's own gradient and
+never reads a boundary value. On quadrilateral and hexahedral meshes it is exact and the
+better-conditioned of the two, and it is the one that marches a coupled RANS case.
+
+{class}`~aquaflux.schemes.SkewCorrectedGradient` adds the field's boundary value as an extra
+direction, which is what a **corner or edge tetrahedron** is short of. The distinction matters: a
+boundary face closed with the owner's own gradient carries no new direction, so a tetrahedron with
+*one* boundary face still has three informative faces and reconstructs exactly, while one with *two
+or more* is left underdetermined and its correction goes singular. Measured on a perturbed
+tetrahedral mesh under the owner closure, resolved by boundary-face count:
+
+| boundary faces | cells | `max abs(M2^-1)` | max relative error |
+|---|---|---|---|
+| 0 | 72 | 1.97e+00 | 4.46e-15 |
+| 1 | 72 | 4.48e+00 | 7.20e-15 |
+| **2** | **18** | **1.61e+16** | **1.73e+00** |
+
+In practice most meshes sit on the safe side. On a 1.6-million-cell `snappyHexMesh` reactor, all
+3,063 four-faced cells have exactly one boundary face, and the default closure reconstructs a
+quadratic there to `4.9e-12` -- as well as the skew closure, and better conditioned.
+
+```{warning}
+`SkewCorrectedGradient` stalls a coupled RANS march on the pitzDaily benchmark: it clears two
+Reynolds rungs at a full step and then finds no descent direction at all on the target rung. Why is
+not known -- three candidate mechanisms have been measured and refuted. That benchmark is
+quadrilateral and has no tetrahedra, so it does not test the regime this closure exists for; whether
+the stall also appears on a mesh with boundary tetrahedra is untested. Prefer the default, and if
+your mesh forces this closure, watch convergence.
+```
+
+**You do not have to work out which case you are in, and you do not have to choose one closure for
+the whole mesh.** When the scheme binds to a geometry it measures its own correction per cell, and
+wherever the closure you asked for leaves the Hessian singular it uses
+{class}`~aquaflux.schemes.SkewCorrectedGradient` on *those cells'* boundary faces only
+({class}`~aquaflux.schemes.CellwiseFallback`), leaving every other cell on the default. It says so
+once, naming how many cells were repaired.
+
+That is what keeps the accurate answer from costing anything elsewhere: on a mesh with nothing to
+repair -- quadrilateral, hexahedral, and the 12225-cell pitzDaily benchmark among them -- the repair
+fires on **zero** cells and the reconstruction is bit-identical to the plain default, so a case that
+does not need the second closure never pays for it. Pass `fallback=None` to switch the repair off and
+get a warning instead.
+
+#### Boundary values, and reading them at the right gradient
+
+A closure that *differences* a boundary value has a trap under it, worth knowing if you write one. A
+reconstruction is fed boundary values evaluated at **zero** gradient, so that the residual stays a
+single-pass function of the field. A prescribed value does not depend on the gradient and is
+unaffected. A gradient-type condition is: `ZeroGradient` returns `phi_owner + tangential correction`,
+whose correction is evaluated away, leaving the boundary value exactly `phi_owner`. Differencing that
+subtracts a correction nothing added, and dividing by `d.n` -- the smallest distance in the mesh at a
+wall -- turns the residue into a large spurious derivative.
+
+A closure declares
+{attr}`~aquaflux.schemes.GradientBoundaryClosure.reads_boundary_values`, and a reconstruction then
+supplies the **corrected** values, re-evaluated at its own gradient. Measured on pitzDaily, that
+collapses the artifact from `3e7` to `9e-11` on a gradient-type patch while leaving a Dirichlet patch
+exactly unchanged -- which is the control, since a fix that merely suppressed the term would flatten
+both.
+
+### When the gradient is known rather than closed
+
+Separately from that: some cells' gradient is not something to estimate at all. The near-wall `omega`
+of a k--omega closure is the standing case -- those cells do not solve a transport balance, their
+value being fixed by a profile going like `1/d^2`, so the honest gradient there is that profile's
+analytical derivative. Reconstructing it instead returns about a quarter of the right magnitude.
+
+Where the gradient is *known*, say so:
+
+```python
+from aquaflux.schemes import ImposedGradient
+
+imposed = ImposedGradient(wall_cells, analytical_gradient)
+gradient = scheme.gradients(field, mesh, geometry, boundary_values, imposed=imposed)
+```
+
+An imposed gradient is used in place of both the reconstruction at those cells and the closure on
+the boundary faces they own. Every scheme honours it; a scheme that consumes its own reconstructed
+gradient -- which is how the multiple-correction scheme forms its Hessian -- imposes it *before*
+that consumer reads it, which is why this is an argument to the reconstruction rather than a
+correction applied to its result. Give it to a
+{class}`~aquaflux.discretization.ResidualAssembler` at build time and every reconstruction that
+assembler makes honours it, so an equation's residual and its closure fields cannot disagree about
+the same derivative.
+
+This is not a remedy for the closure warning above: it settles the one field whose gradient is
+genuinely known, and does nothing for the patches and fields where nobody knows it.
+
+```{note}
+Imposing a gradient substitutes a model for a reconstruction, so a scheme's exactness contract stops
+at the imposed cells and the cells that read them: the correction matrices are calibrated against
+the operator the scheme would otherwise apply, and an imposed value is by construction not what that
+operator returns. That is the trade taken deliberately -- a consistent operator around a value
+measured four times too small is worse than an inconsistent one around the right value.
+
+It also makes the reconstruction **affine** in the field rather than linear, the imposed values
+being an added constant. The tangent is still the same fixed sequence of fixed linear maps applied
+to the tangent, with no implicit-function solve, which is the property a differentiated solve
+depends on.
+```
+
+{class}`~aquaflux.schemes.HessianCorrectedGradient` takes the same argument but applies it only to
+its converged answer. Projecting it onto the coupled sweep's iterate would change the fixed point
+rather than the path to it, and that fixed point being the Schur solution of the gradient--Hessian
+system is the scheme's whole justification; imposing a gradient there would have to enter as a
+constraint on that system.
+
+
 ## Choosing a scheme
 
 | | mesh it suits | exact for | solve cost |
@@ -549,6 +765,7 @@ it turns is not visible from the values before it.
 | {class}`~aquaflux.schemes.CompactGreenGauss` | near-orthogonal | linear, on orthogonal grids | one pass, no system |
 | {class}`~aquaflux.schemes.CorrectedGreenGauss` | any | linear, on any mesh | a few sparse sweeps |
 | {class}`~aquaflux.schemes.HessianCorrectedGradient` | skewed, where the gradient leads | linear and quadratic | an inner and an outer solve |
+| {class}`~aquaflux.schemes.MultipleCorrectionGradient` | skewed, including tetrahedra | linear and quadratic | **no system: two face passes** |
 
 Two practical points beyond accuracy.
 

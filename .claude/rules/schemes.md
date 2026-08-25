@@ -871,12 +871,13 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     nested path re-converges the Hessian from zero on **every outer apply**, and this closure is
     precisely what makes that convergence expensive — so the arrangement that keeps the Hessian
     iterate between sweeps gains exactly where the closure costs. At matched accuracy (~1e-10),
-    counting face-kernel passes as `outer x (1 + inner)` against the coupled sweep's `3 x sweeps`:
+    counting face-kernel passes as `outer x (1 + inner)` against the coupled sweep's `2 x sweeps`
+    (it was `4 x sweeps` when this table was taken, and the counts below are the corrected ones):
 
     | mesh | nested | coupled sweep | ratio |
     |---|---|---|---|
-    | tetrahedral n=3, weight 0.2 | 1665 passes → 6.2e-11 | **~120 → 2.2e-10** | **~12x** |
-    | hex 5³, perturb 0.25 | 165 passes → 1.9e-11 | **51 → 8.9e-13** | **~3x** |
+    | tetrahedral n=3, weight 0.2 | 1665 passes → 6.2e-11 | **~80 → 2.2e-10** | **~21x** |
+    | hex 5³, perturb 0.25 | 165 passes → 1.9e-11 | **34 → 8.9e-13** | **~4.9x** |
 
     On the tetrahedral mesh the coupled sweep reaches **5.8e-15** at 192 passes, which the nested path
     does not approach at nine times the work. **So the pairing to recommend with this closure is the
@@ -1120,8 +1121,9 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
 
   **⚠️⚠️ `CoupledBlockSweep` IS NOW THE DEFAULT SOLVE PATH (2026-08-23), and the flip cost three
   things that were not obvious from the measurement that justified it.** At the class count of 20 it
-  matches the nested `20/10` pair's accuracy on every exactness fixture at **60 face passes against
-  220** — 3.7x cheaper for the same answer:
+  matches the nested `20/10` pair's accuracy on every exactness fixture at **40 face passes against
+  220** — 5.5x cheaper for the same answer (the count was 60 when this was written, at three passes
+  per sweep; it was four then and is two now):
 
   | fixture | nested 20/10 | coupled 20 |
   |---|---|---|
@@ -1191,7 +1193,816 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   previous outer sweep learned. Sweeping alternately keeps it:
   `h ← h + P_H⁻¹(A_Hg g − A_HH h)` then `g ← g + ω P_g⁻¹(b_g − A_gg g + A_gH h)`, Gauss–Seidel (the
   gradient update uses the Hessian just computed, which is what lets one Hessian sweep per gradient
-  sweep converge at all). One sweep is ~3 face-kernel passes against the nested `1 + inner` ≈ 11.
+  sweep converge at all). One sweep is **2** face-kernel passes against the nested `1 + inner` ≈ 11,
+  each row evaluated once at the argument that yields its own defect rather than once per block and
+  then subtracted — exact, because both rows are linear in `(g, H)` jointly.
+
+  **⚠️⚠️ WHERE THE TIME ACTUALLY GOES IN A RECONSTRUCTION — profiled 2026-08-23, and it redirects the
+  optimization effort this scheme had been attracting.** Configuration, in full: `pitzDaily`
+  (12225 cells, `dim` 2, `n_sym` 3), `CoupledBlockSweep(sweeps=20)`, **`AveragedNeighbourHessian`**
+  at its default weight — ⚠️ **NOT the shipped closure, which is `OwnerHessian`**; see the rate
+  caveat below before carrying the sweeps ladder anywhere — `local_schur_block=True` (the shipped
+  default), jitted and warmed, minimum of four to six runs on an otherwise idle machine. Harness:
+  `validation/gradient_reconstruction_profile.py` — kept in the repository, so this can be re-asked
+  when a default moves.
+
+  | piece | time | share |
+  |---|---|---|
+  | **whole reconstruction** | **26.9 ms** | 100 % |
+  | 20 sweeps (from differencing 40 against 20) | **22.0 ms** | **~82 %** |
+  | geometry-only prologue | ~4.9 ms | ~18 % |
+  | — of which `local_schur_block` | **3.1 ms** | **~11.5 %** |
+  | one sweep | 1.10 ms | 4.1 % |
+
+  Three consequences, and the first is the one that matters:
+
+  - **THE SWEEP COUNT IS THE COST, NOT THE WORK INSIDE A SWEEP.** Merging each row into a single
+    face-kernel evaluation halved the passes per sweep (four → two) and moved the whole
+    reconstruction **9 %**. The reason is that the wasted arguments were **literal zeros**, so XLA
+    was already folding most of that work away — a redundancy that is obvious in the source and
+    largely absent from the compiled program. Against that, the *count* is worth several times as
+    much: the sweep contracts at **0.3152** on this mesh, so
+
+    | sweeps | time | vs 20 | ‖g − g₂₀‖/‖g₂₀‖ |
+    |---|---|---|---|
+    | 20 (shipped) | 26.9 ms | 1.00x | — |
+    | 12 | 18.4 ms | **0.68x** | **1.06e-09** |
+    | 8 | 13.9 ms | **0.52x** | 4.58e-07 |
+    | 6 | 11.8 ms | 0.44x | 1.07e-05 |
+    | 4 | 9.8 ms | 0.36x | 2.99e-04 |
+
+    **Twelve sweeps reproduce twenty to 1e-09 for a third less time.** The class default of 20 is
+    not wrong — it is the count that preserves exactness on quadratic fields — it is simply far
+    tighter than a flow solve stopping at ‖R‖ ~ 1e-6 has any use for. ⚠️ Do **not** read this as
+    licence to lower the class default; a case wanting less should call
+    `CoupledBlockSweep.calibrated(mesh, geometry, tol=...)`.
+
+    **⚠️ THE RATE — AND SO THE WHOLE LADDER — IS A PROPERTY OF THE BOUNDARY CLOSURE, and the table
+    above was taken under the non-default one.** Measured on pitzDaily exactly as
+    `CoupledBlockSweep.calibrated` measures it (relaxation 1.0, `outer(SweptGradientSolve(...))`'s
+    preconditioner, `iters=24`, `seed=0`):
+
+    | closure | rate | sweeps for 1e-4 | for 1e-10 |
+    |---|---|---|---|
+    | **`OwnerHessian` (the shipped default)** | **0.2263** | **7** | **16** |
+    | `AveragedNeighbourHessian` | 0.3152 | 8 | 20 |
+
+    The averaged closure couples each boundary cell to its neighbours, so it contracts more slowly.
+    Note the trap this set: under the averaged closure 1e-10 needs *exactly* 20 sweeps, which matches
+    the class default and made "the default is precisely sized for exactness" look like a clean
+    finding. Under the closure that actually ships it needs **16**, so the default carries margin.
+    `HessianCorrectedGradient.calibrated` returns 7 / 10 / 13 / 16 at 1e-4 / 1e-6 / 1e-8 / 1e-10,
+    which is the `OwnerHessian` row — that disagreement with a hand-computed count is what exposed
+    the closure mismatch, and is why `validation/gradient_reconstruction_profile.py` now measures the
+    rate the way the calibrator does and defaults `PROFILE_CLOSURE` to the shipped one.
+  - **The geometry-only prologue is ~18 % of ONE reconstruction — but a residual reconstructs several
+    fields on one geometry, and XLA ALREADY SHARES IT ACROSS THEM.** ⚠️ An earlier version of this
+    entry said the prologue is "rebuilt on every reconstruction" and sized a geometry cache from that;
+    it is wrong, and it is the *same* mistake as reading the face-pass count as cost — the redundancy
+    is visible in the source and absent from the compiled program. Measured by reconstructing `N`
+    fields on one mesh inside one jit and fitting `t(N) = P + N·S` (pitzDaily, shipped defaults):
+
+    | sweeps | `N`=1 | `N`=2 | `N`=4 | `N`=6 | marginal per extra field | intercept `P` |
+    |---|---|---|---|---|---|---|
+    | 20 | 27.9 ms | 49.0 ms | 91.5 ms | 133.4 ms | **21.1 ms** (≈ the 20 sweeps) | **6.8 ms** |
+    | 2 | 6.6 ms | 7.6 ms | 8.4 ms | 9.6 ms | **0.60 ms** | ~6.0 ms |
+
+    Six fields cost 9.6 ms against one field's 6.6 ms at two sweeps — common-subexpression
+    elimination collapses the six identical prologues to one. **So the prologue is ~5 % of a
+    six-field residual, not 18 %**, and a `bind`-style cache can only collect it *across separate
+    residual evaluations* (successive Krylov matvecs), never within one.
+  - **`local_schur_block` is 11.5 % of a single reconstruction** (≈3 % of a six-field residual) and is
+    load-bearing on skewed meshes — dropping it raises the sweep's contraction rate on the reactor
+    mesh — so this is not an argument for turning it off. It is also **the one piece that would cost
+    no extra memory to cache**: it modifies the outer block in place before inversion rather than
+    producing an array of its own.
+  - **⚠️ WEIGH ANY CACHE AGAINST ITS RESIDENCY, WHICH AT REACTOR SCALE IS THE BINDING CONSTRAINT.**
+    The three cacheable arrays are `hessian_cell_block` `(n, dim, dim)`, the inner preconditioner's
+    inverse `(n, n_sym, n_sym)` and the outer's `(n, dim, dim)`: 1.6 MB total at pitzDaily, 9.5 MB at
+    `bfs3d`, and **659 MB at a 1.6M-cell 3D mesh, 440 MB of it the 6×6 inner inverse**. Peak memory
+    during a reconstruction is *unchanged* — all three are live through the sweep either way — so a
+    cache buys ~5 % of reconstruction time in exchange for making 659 MB permanently resident rather
+    than transient. On the memory-bound target this scheme exists for, that is the wrong trade;
+    calibrating the sweep count is worth six to ten times as much and costs no memory at all.
+
+  ⚠️ **A FACE-PASS COUNT IS A POOR PREDICTOR OF WALL CLOCK HERE, and this file quotes several.** The
+  counts are exact and are fine for comparing arrangements that do genuinely different work (nested
+  against coupled); they are misleading for judging a change that removes passes the compiler was
+  already eliminating. Where a ratio in this file comes from counting passes, it says so.
+
+  **✅ THE SWEEP COUNT IS THE LEVER, CONFIRMED ON A FULL MARCH — 2.61x, BIT-IDENTICAL (2026-08-23).**
+  `pitzDaily` gradient A/B, both arms calibrated to an L2 tolerance of 1e-4 by their own factories
+  (`PITZ_AB_CALIBRATE=1e-4`), against the same case at each scheme's shipped defaults:
+
+  | arm | sweeps | wall | cycles | steps | `x_r/h` |
+  |---|---|---|---|---|---|
+  | corrected Green--Gauss, default | 5 | 736.2 s | 439 | 71 | 8.069 |
+  | corrected Green--Gauss, calibrated | **2** | **605.1 s** | 431 | 71 | **8.069** |
+  | Hessian-corrected, default | 20 | 6690.0 s | 510 | 72 | 8.069 |
+  | Hessian-corrected, calibrated | **7** | **2565.3 s** | **510** | **72** | **8.069** |
+
+  **Read the cycle and step columns: 510 and 72 in BOTH Hessian-corrected arms.** Seven sweeps
+  produce Newton directions the coupled solver cannot distinguish from twenty — not merely a similar
+  trajectory but the same one — and the scheme-versus-scheme field differences are unchanged to four
+  significant figures (`U` 6.665e-03 in both runs). So this is a 2.61x saving for no change in the
+  answer whatsoever, and the identical trajectory is evidence of headroom *below* seven rather than
+  at it. The matched-tolerance cost ratio between the schemes is **4.24x**, against 9.09x at defaults
+  — most of that gap was the two schemes' differing slack, which is the reason this case has a
+  calibrated mode at all. ⚠️ The 2565 s arm also carries the two row merges, worth ~9 % of a
+  reconstruction, so the calibration alone is nearer 2.4x than 2.61x.
+
+  **⚠️⚠️ AND SPENDING THE SWEEP LEVER PROMOTES THE PROLOGUE, WHICH INVERTS THE CACHING VERDICT
+  ABOVE.** The prologue is geometry-only, so it is near-constant while the sweeps shrink around it.
+  Measured by the same `t(N) = P + N·S` fit, shipped closure:
+
+  | sweeps | shared prologue `P` | marginal per field `S` | `P` share of a six-field residual |
+  |---|---|---|---|
+  | 20 | 7.42 ms | 17.61 ms | **6.6 %** |
+  | **7 (calibrated)** | 6.82 ms | 5.64 ms | **16.8 %** |
+
+  At one reconstruction it is starker still: **48 % at seven sweeps against 18 % at twenty**, of which
+  `local_schur_block` alone is ~3.5 ms. So the "~5 % for 659 MB, do not cache" reading recorded above
+  was taken at the *un*-calibrated operating point and does not survive calibration. At the calibrated
+  point the best-ratio cache is the **outer preconditioner's inverse alone**: it carries
+  `local_schur_block`, costs ~4.2 ms of the 6.82 ms prologue, and is `(n, dim, dim)` — **110 MB at
+  1.6M cells against 659 MB for the whole prologue**, whose bulk is the `(n, n_sym, n_sym)` inner
+  inverse that this scheme now rebuilds by algebra anyway. Expect the share to be **higher again in
+  3D**, where `local_schur_block` probes `dim + n_sym = 9` columns rather than 5.
+
+  **The general lesson, and it is the one to carry: optimize in the order that keeps the ranking
+  honest.** Every share here is a fraction of a total that the previous lever changed, so a
+  cost-share table is only valid at the configuration it was taken at — and the largest item at the
+  default configuration was not the largest item after the largest lever was spent.
+
+  **✅ `GradientScheme.bind(mesh, geometry)` IS BUILT (2026-08-23) — geometry-only reconstruction
+  work hoisted out of the per-call path, bit-for-bit identical answers.** The base implementation is
+  the **identity**, which is the honest answer for a single-pass sum or a swept solve whose
+  preconditioner is a per-cell scalar; `HessianCorrectedGradient` overrides it to carry the outer
+  preconditioner, threaded at the single place that is constructed (`_systems(..., prepared_outer=...)`)
+  so all three `HessianSolve` strategies pick it up and none of them changed shape.
+
+  **⚠️ THE ASSEMBLERS CALL IT, AND THAT PLACEMENT IS THE SAFETY PROPERTY, NOT A CONVENIENCE.**
+  `ResidualAssembler.build` and `MomentumContinuity.build` bind the scheme they are handed, beside the
+  face interpolation factors they already precompute. Binding at a *call site* instead would leave a
+  bound scheme and a mesh as two separate things a caller could mispair — and a mispairing is silently
+  wrong rather than slow (below). An assembler owns the geometry and the scheme together, so it cannot
+  create that pairing. It also must **not** go in `__post_init__`: pytree unflattening runs at every
+  jit boundary crossing, so the prologue would be rebuilt there rather than hoisted.
+  ⚠️ Nothing about the numbers fails if the `bind` call is dropped from a factory — the residual just
+  quietly goes back to rebuilding it per matvec — so it is pinned by
+  `test_an_assembler_prepares_its_gradient_scheme_for_its_own_geometry`, and the identity default by
+  `test_a_scheme_with_nothing_to_prepare_is_returned_unchanged` (asserting **identity**, since a
+  scheme returning an equal copy would pass an equality check while defeating the point).
+
+  **⚠️ MEASURE THE SAVING AT THE FIELD COUNT A RESIDUAL ACTUALLY USES, NOT AT ONE FIELD.** The
+  prologue is built **once** per compiled residual (the compiler shares it across fields), so binding
+  removes a fixed amount of work whatever the field count — which reads as a huge saving on a
+  one-field probe and a modest one on the six-field residual that is the real consumer. Measured at a
+  calibrated seven sweeps, arms interleaved so machine drift hits both equally, minimum of seven to
+  nine runs:
+
+  | mesh | `N`=1 | `N`=6 | absolute saving |
+  |---|---|---|---|
+  | pitzDaily, 2D, 12225 cells | 38.5 % | **7.8 %** | 4.3 ms → 2.9 ms |
+  | perturbed hex, 3D, 21952 cells | 37.2 % | **13.0 %** | **26.1 ms → 26.2 ms** |
+
+  Read the last column: in **3D the absolute saving is unchanged between one field and six**
+  (26.1 against 26.2 ms), which is what "built once per residual, removed entirely" predicts. In 2D
+  it falls (4.3 → 2.9 ms), so some of the prologue there is being hidden behind the independent
+  per-field sweeps rather than costing wall clock. **3D is the case that matters and it is the
+  better one**, ~1.7x the 2D share, as `local_schur_block` probing `dim + n_sym` = 9 columns against
+  5 predicts.
+
+  ⚠️ **A ~17 % projection from the serial cost share was too high** — the honest figure is 13 % in
+  3D and 8 % in 2D, because a cost share assumes the work is on the critical path and some of it is
+  not. Project from a share only as an upper bound.
+
+  **Memory, which is the whole reason this is the outer inverse and not the prologue:** `(n, dim, dim)`
+  is **110 MB at 1.6M cells**, against 659 MB for all three geometry arrays — the bulk of which is the
+  `(n, n_sym, n_sym)` inner inverse this scheme now rebuilds by algebra anyway. Peak memory during a
+  reconstruction is unchanged either way; binding converts a transient allocation into a resident one.
+
+  **⚠️ A STALE BINDING IS SILENTLY WRONG, NOT SLOW — this is why it is opt-in and not automatic.** The
+  sweep runs a **fixed** count rather than to a tolerance, so the preconditioner determines the answer
+  and not merely the rate. A cell-count mismatch raises; a *different* geometry at the same cell count
+  cannot be detected. And binding outside a region differentiated with respect to **node positions**
+  freezes the preconditioner into a constant, so the shape derivative comes back wrong rather than
+  failing — differentiation with respect to the *field*, which is what a flow solve does, is
+  unaffected and is pinned by a test comparing the bound and unbound gradients.
+
+  **⚠️⚠️ THE CALIBRATOR MEASURED A PRECONDITIONER THE SCHEME DOES NOT RUN — fixed 2026-08-23, and it
+  was worth 2.8x the sweep count on a skewed mesh.** `HessianCorrectedGradient.calibrated` took
+  `local_schur_block`, forwarded it to `NestedHessianSolve.calibrated`, and **did not forward it to
+  `CoupledBlockSweep.calibrated`** — which then measured the rate through `outer(...)`, whose
+  `use_local_schur_block` defaults to `False`. So the count was derived from the cheaper
+  preconditioner and spent under the shipped one. Measured, rate and the sweeps it implies at 1e-4:
+
+  | mesh / closure | `local_schur_block=False` (what was measured) | `=True` (what runs) |
+  |---|---|---|
+  | pitzDaily 2D, `OwnerHessian` | 0.2263 → 7 | **0.1978 → 6** |
+  | perturbed hex 3D, 35 % | 0.2570 → 7 | 0.2551 → 7 |
+  | **perturbed tetrahedra, `AveragedNeighbourHessian`** | **0.8980 → 64** | **0.6620 → 23** |
+
+  **It hides on well-shaped meshes and bites on exactly the ones this scheme exists for** — the two
+  preconditioners are indistinguishable at 35 % hex perturbation and differ by 2.8x in cost on
+  tetrahedra, which is why no fixture caught it. Pinned now by
+  `test_the_coupled_sweep_calibrates_against_the_preconditioner_it_will_run_with`, on a tet mesh for
+  that reason, asserting **both** directions so that forwarding a constant would not satisfy it.
+
+  ⚠️ **`tools/sibling_builders.py` CANNOT SEE THIS PAIR, and that is its third blind spot.** The two
+  factories are siblings by **contract** — both are `HessianSolve.calibrated` implementations reached
+  from the same branch of one caller — but they construct *different* classes (`CoupledBlockSweep`
+  against `SweptGradientSolve`), and the tool pairs builders by the class they construct. It reports
+  `NestedHessianSolve.calibrated`'s `local_schur_block` as "only here" against an unrelated builder
+  and never compares the pair that actually drifted. **A polymorphic factory family is invisible to
+  it**, on top of the naming and `@classmethod` blind spots already recorded — so when the thing you
+  are checking is one interface's factory implemented several ways, read the surfaces by hand.
+
+  **⚠️⚠️ MEASURED ON THE UV REACTOR (2026-08-23) — the mesh this scheme exists for, and the numbers
+  do NOT resemble pitzDaily's.** 1 635 909 cells, 5 249 365 faces, `dim` 3, snappyHexMesh; interior
+  face skewness median 0.0022 / p99 0.2013 / max 0.3505, face planarity min 0.877 (pitzDaily is
+  planar to 1.000000 and p99-skewed 0.0158). Contraction rate of the coupled sweep, measured as
+  `CoupledBlockSweep.calibrated` measures it, `iters=24`, peak RSS 9.3–10.8 GB.
+  Harness: `validation/uvreactor_openfoam/gradient_sweep_calibration.py --rate` (or `UV_RATE=1`).
+
+  | closure | `local_schur_block` | ω | rate | sweeps @1e-4 | @1e-6 |
+  |---|---|---|---|---|---|
+  | `OwnerHessian` (shipped) | **True** | **1.00** | **0.5378** | **15** | 23 |
+  | `OwnerHessian` | True | 1.05 | 0.5585 | 16 | 24 |
+  | `OwnerHessian` | True | 1.10 | 0.5894 | 18 | 27 |
+  | `OwnerHessian` | **False** | 1.00 | **2.0145** | **DIVERGES** | — |
+  | **`AveragedNeighbourHessian`** | **True** | **1.00** | **0.4385** | **12** | 17 |
+  | `AveragedNeighbourHessian` | True | 1.10 | 0.4913 | 13 | 20 |
+  | `AveragedNeighbourHessian` | **False** | 1.00 | **4.9196** | **DIVERGES** | — |
+
+  Four things, and the first two are binding.
+
+  - **`local_schur_block=False` DIVERGES on this mesh** — 2.01 and 4.92, not merely slower. So it is
+    not an optimization to be traded off here; it is required. This also sets the true price of the
+    calibrator defect fixed the same day: measuring the `False` preconditioner would have returned a
+    rate above one, which `sweeps_for` clamps to `cap` — **64 sweeps where 15 are needed**, on the
+    target mesh, silently.
+  - **OVER-RELAXATION IS REFUTED HERE, AND THE OPTIMUM IS AT OR JUST BELOW 1.0 — closure-dependent.**
+    ⚠️ An earlier version of this entry said "do not ship a non-unit relaxation", which is broader
+    than the data: it was written from the over-relaxed half of the ladder before the under-relaxed
+    half had run. The full sweep (`local_schur_block=True`):
+
+    | ω | 0.60 | 0.70 | 0.80 | 0.90 | 1.00 | 1.05 | 1.10 |
+    |---|---|---|---|---|---|---|---|
+    | `OwnerHessian` | 0.7078 | 0.6203 | 0.5347 | **0.4946** | 0.5378 | 0.5585 | 0.5894 |
+    | `AveragedNeighbourHessian` | 0.7101 | 0.6238 | 0.5419 | 0.4666 | **0.4385** | 0.4715 | 0.4913 |
+
+    The owner closure has a genuine interior optimum at **0.90** (14 sweeps against 15); the averaged
+    closure — the one to prefer on this mesh — is optimal at **1.00**, with both sides worse. So the
+    correct statement is that *over*-relaxation is refuted and the optimum sits at or just below
+    unity, not that unity is always right. Note the consequence for polynomial acceleration: under
+    the preferred closure the degree-one polynomial is **already at its optimum**, so any gain from
+    that family has to come from degree two or higher. A relaxation tuned on pitzDaily (1.05–1.10,
+    worth a sweep there) costs 1–3 sweeps here, which is the transferable warning.
+  - **`AveragedNeighbourHessian` is the FASTER closure on this mesh** (0.4385 against 0.5378, 12
+    sweeps against 15) where on pitzDaily it is the slower one (0.3038 against 0.1978). It was
+    adopted for exactness on cells whose `A_HH` the owner closure leaves singular; that it also
+    converges faster here is a second, independent reason to prefer it on skewed meshes — and a
+    reminder that closure choice is a per-mesh question, not a global ranking.
+  - **The sweep count does not transfer between meshes and the spread is wide**: 6 sweeps on
+    pitzDaily, 12–15 here, 23 on synthetic tetrahedra. Any cost projection for this scheme taken from
+    pitzDaily understates the reactor by 2–2.5x on the sweeps alone, before 3D's dearer per-sweep
+    cost. Calibrate per mesh; the class default of 20 is neither safe (it is below what the tet mesh
+    needs) nor economical (it is above what pitzDaily needs).
+
+  **⚠️ REPLACING THE COUPLED RECONSTRUCTION WITH A LOCAL LEAST-SQUARES FIT IS A POOR BET ON A SKEWED
+  MESH — and the evidence is in the source paper, so check there before re-proposing it (2026-08-23).**
+  The reasoning that leads here is sound and will recur: the sweeps are ~82 % of a reconstruction, the
+  count is set by a contraction rate of 0.54 on the reactor, and information propagates one cell-ring
+  per sweep — so ~15 rings of propagation are being spent to produce what is intrinsically a local
+  quadratic fit. A k-exact least-squares reconstruction gets exactness for quadratics *directly*, at
+  roughly one pass, stays exactly linear in the field (so the cheap tangent survives), and is a far
+  better shape for a GPU than fifteen sequential global sweeps with reductions.
+
+  **What kills it is the MAXIMUM error in poor cells, which is the regime this scheme exists for.**
+  Betchen & Straatman (2010) benchmark against Baserinia & Stubley's **second-order** least-squares
+  reconstruction — a quadratic fit, so the comparison is close to this proposal rather than to the
+  ordinary linear-LSQ gradient — and report its maximum gradient and Hessian errors as "of the order
+  of those observed in the first-order Gauss' theorem approach", i.e. the second-order advantage is
+  lost entirely in the worst cells. The worst error sat one layer of tetrahedra off a curved
+  boundary, where the local aspect ratios and the Hessian components were both large, on a grid whose
+  **mean** aspect ratio was only 1.23 (max 3.44) — a good grid. They attribute it to Mavriplis (1993,
+  *Revisiting the least squares procedure for gradient reconstruction on unstructured meshes*), who
+  found that even inverse-distance-weighted least squares fails near highly skewed volumes on
+  tetrahedral grids. The UV reactor is exactly that regime: skewness p99 0.20, face planarity down to
+  0.877, with the worst cells in the boundary layers.
+
+  ⚠️ **One distinction to keep, because it decides what the evidence does and does not cover.**
+  Baserinia & Stubley's scheme is **coupled**, not a local fit: the same paper reports it *diverging*
+  under block-Jacobi and needing "a stabilized, pre-conditioned conjugate gradient procedure". So the
+  head-to-head in that paper is not against a purely local k-exact fit. The Mavriplis result it rests
+  on **is** about local weighted least squares, so the max-error objection still reaches the local
+  version — but do not cite Betchen's table as a direct measurement of it.
+
+  **THE SURVIVING DIRECTION IS LEAST SQUARES AS A PRECONDITIONER, NOT AS THE ANSWER.** Use a local
+  fit to precondition the existing coupled system. The fixed point stays Betchen's, so accuracy and
+  poor-cell robustness are unchanged **by construction**; a preconditioner that is bad in a skewed
+  cell costs convergence *rate* there and never accuracy, which neutralizes precisely the documented
+  failure. It attacks the only quantity that sets the cost — the rate — which neither relaxation
+  (refuted on the reactor, both directions) nor Krylov acceleration (forfeits the exact linearity
+  that keeps the tangent cheap) can touch. Unbuilt and unmeasured.
+
+  **Two calibration points from the same paper, worth having before judging our own numbers:**
+  - **They report 33 block-Jacobi iterations** to converge the reconstruction on their tetrahedral
+    grid. Our 12–15 sweeps on the reactor — Gauss–Seidel with a Schur-block preconditioner rather
+    than block-Jacobi — is **this method's cost, not an inefficiency in this implementation.**
+  - **They exclude building the coefficient matrices from their reported timings**, treating them as
+    precomputed per geometry. That is our prologue, and it is independent support for `bind`: the
+    same split, and the same judgement about which side of it that work belongs on.
+
+  **❌ SUB-SOLVING EITHER BLOCK OF THE COUPLED SWEEP IS REFUTED (2026-08-23) — the rate is set by the
+  INTER-CELL coupling, and no cell-local preconditioner can reach it.** The proposal is a natural one
+  and will recur: the gradient block `A_gg` is essentially the corrected Green--Gauss operator, so
+  replace the per-cell block-Jacobi inverse in the sweep's gradient update with `k` fixed sweeps of
+  that block (a truncated Neumann series -- fixed count, so still exactly linear in the field). The
+  same for the Hessian block, and for both. Measured as the coupled sweep's contraction rate, at
+  `local_schur_block=True`, `iters=24`:
+
+  | arm | inner=1 | 2 | 3 | 4 |
+  |---|---|---|---|---|
+  | pitzDaily, gradient block | **0.1978** | 0.2285 | 0.2254 | 0.2256 |
+  | pitzDaily, Hessian block | **0.1978** | 0.1980 | 0.1980 | — |
+  | pitzDaily, both | **0.1978** | 0.2287 | 0.2255 | — |
+  | hex 3D p=0.35, gradient block | **0.2701** | 0.2698 | 0.2685 | 0.2686 |
+  | hex 3D p=0.35, Hessian block | 0.2701 | **0.2489** | 0.2484 | — |
+  | hex 3D p=0.35, both | 0.2701 | 0.2350 | 0.2349 | — |
+
+  Every arm **saturates by two or three inner sweeps** — so the limit is what an *exact* block inverse
+  would give — and none pays for its cost. Counting kernel passes (one Hessian pass plus `k` gradient
+  passes per outer sweep), the best arm is 3D Hessian sub-solve at 21 passes against the baseline's
+  16. On pitzDaily the gradient arm is **worse than the per-cell block**, which is the recorded
+  "inverting the wrong operator more accurately" signature: block Gauss--Seidel's gradient update
+  wants the Schur complement, not `A_gg`, and the per-cell local Schur block approximates the former
+  while an exact `A_gg` sub-solve converges to the latter.
+
+  **The three results together say where the rate actually lives, which is the durable finding.**
+  `local_schur_block` is worth everything on the reactor (2.0145 → 0.4385, divergence to convergence),
+  yet sub-solving either block is worth nothing. That is consistent, because the local Schur block
+  **is** the exact per-cell Schur complement of the joint `[g, H]` block — so the sweep already
+  inverts each cell's coupled block essentially exactly, and the intra-cell coupling is exhausted.
+  What remains in a 0.44--0.54 rate is **inter-cell**, which is why a preconditioner that cannot see
+  past one cell moves it not at all.
+
+  **CONSEQUENCE FOR WHAT TO TRY NEXT: any real gain needs REACH, not accuracy.** A better cell-local
+  inverse is closed. What is not closed is a preconditioner spanning more than one cell — a local
+  least-squares operator over a two-ring stencil is the obvious candidate, and its documented weakness
+  (large maximum error in skewed cells) is harmless in a preconditioner, where a bad cell costs
+  convergence rate and never accuracy. See the least-squares entry above for why that weakness rules
+  it out as a *replacement* and not as a preconditioner.
+
+  **❌ POLYNOMIAL ACCELERATION AND EVERY PER-SWEEP RELAXATION SCHEDULE ARE BOUNDED AT ~1 SWEEP —
+  measured on the reactor 2026-08-23, and the bound covers more than it looks like.** The proposal
+  recurs in several disguises: Chebyshev on the error operator, fourth-kind Chebyshev, "cascading"
+  smoothers with an escalating per-sweep ω, or simply a schedule `ω₁…ω_N` instead of one ω. **They are
+  all the same object.** Starting from zero, `N` steps of `x ← x + ωₖ P⁻¹(b − A x)` leave the residual
+  `Π(I − ωₖ P⁻¹A) r₀` — a degree-`N` polynomial with `q(0) = 1` — and GMRES minimizes over exactly
+  that class. So **one GMRES run bounds the entire family**, and a fixed-coefficient member does
+  strictly worse because it cannot adapt to the right-hand side.
+
+  Measured on the reactor (`AveragedNeighbourHessian`, `local_schur_block=True`, ω = 1, residuals of
+  the same system on the same right-hand side):
+
+  | k | sweep residual | best possible polynomial | headroom |
+  |---|---|---|---|
+  | 5 | 1.579e+00 | 5.967e-01 | 2.65x |
+  | 7 | 1.154e-01 | 6.013e-02 | 1.92x |
+  | 10 | 3.051e-03 | 1.451e-03 | **2.10x** |
+
+  The headroom **collapses** from 552x at k=1 to ~2x in the operating range, and 2x in residual at a
+  per-step factor of ~0.3 is **one sweep of thirteen**. Harness:
+  `validation/uvreactor_openfoam/gradient_sweep_calibration.py --spectrum`.
+
+  ⚠️ **DO NOT COMPARE EITHER AGAINST `rate^k` — that compares an ERROR with a RESIDUAL and is
+  meaningless on an operator this nonnormal.** A first version of this measurement did exactly that
+  and reported GMRES as *worse* than the sweep, which is impossible for a minimizer over the class the
+  sweep belongs to; that impossibility is what caught it. On pitzDaily the sweep's residual **grows to
+  ~650 before it contracts at all**, so the asymptotic rate is nowhere near achievable early — which is
+  also why rate-based projections of Chebyshev gains (1.5–2x) are far too optimistic here.
+
+  **❌ COARSE-GRID AND MULTIGRID METHODS ARE CLOSED.** An *ideal* two-level cycle — geometric
+  aggregation, exact Galerkin coarse operator, exact coarse solve, the existing exact per-cell block as
+  smoother — measured **0.1–1.4 %, and 0.0 % at ν = 2**, across meshes bracketing the reactor's rate
+  from both sides, on a harness first shown to find the textbook 1.5x on a Poisson control. Two-level
+  with an exact coarse solve **bounds every deeper hierarchy**, so this closes deep AMG, W-cycles and
+  every coarsening rate at once. The mechanism: this operator is **second kind** — a bounded
+  perturbation of the identity, spectrum measured in [0.71, 1.18] — so its rate is set by mesh
+  *quality*, not mesh *size* (0.151 at 4³ falling to 0.151 at 10³, while a Poisson control climbs
+  0.919 → 0.969). Multigrid removes h-dependence; there is none here to remove.
+  ⚠️ **Those two-level numbers were measured on synthetic fixtures with a scratchpad harness and are
+  NOT re-adjudicable as recorded** — treat them as strong but unreproducible. What *is* re-adjudicable,
+  and corroborates them independently on the real mesh, is the mode locality below: a coarse space
+  represents smooth error, and this error is not smooth.
+
+  **✅ THE SLOW MODE IS EXTREMELY LOCALIZED, WHICH IS THE POSITIVE RESULT OF THE CAMPAIGN.** Dominant
+  eigenvector of the error operator, same probe:
+
+  | mesh | worst 0.1 % of cells hold | worst 1 % hold | roughness `\|v − avg v\|/\|v\|` |
+  |---|---|---|---|
+  | pitzDaily | 34.3 % | **95.4 %** | 0.49 |
+  | **UV reactor** | **100.0 %** (1000x population share) | 100.0 % | **1.15** |
+
+  On the reactor the entire slow mode lives on ~1600 cells of 1.6M, at cell-scale roughness. That
+  closes the coarse-grid family from the other direction and **opens the one candidate the memory
+  arithmetic previously killed**: a Schwarz/patch correction costed over *all* cells is 7.4 GB and is
+  dominated, but over the worst 0.1 % it is ~1600 × 9 × 63 doubles ≈ **7 MB**, at ~0.1 % of a sweep.
+  The selection is legal under the linearity constraint because the eigenvector is a property of the
+  **geometry-only** operator, so the patch set is a mesh constant chosen once — not a field-dependent
+  branch. ⚠️ Unmeasured and decisive before building: **the sub-dominant rate.** If a cluster of
+  similarly-slow modes sits on *different* cells, the patch set grows and the memory argument returns.
+
+  **From the literature, two items that bear directly on this scheme:**
+  - **Betchen & Straatman measured the failure mode of a fixed sweep count in the source paper**:
+    terminating after four sweeps gave **22 % error in a Hessian component** where 33 were needed for
+    1e-4, on a tetrahedral mesh of *mean* aspect ratio 1.23 and max 3.44. Syrakos et al. (2017)
+    measure the same effect from the other side — a fixed corrector count buys a pre-asymptotic window
+    of apparent higher order that a fine enough mesh destroys. **Validate any reduced count against an
+    accuracy fixture, not only against a residual rate.**
+  - **Nishikawa (2018) uses a skewness-dependent diagonal boost**, geometry-only, introduced because
+    "a serious convergence difficulty may be encountered in the case that cells have all skewed faces".
+    That lands exactly on the localized mode measured above, preserves exact linearity, and is cheap.
+    Unbuilt.
+
+  **The structural alternative, if the sweep is ever to be removed rather than accelerated:**
+  Setzwein, Ess & Gerlinger (JCP 446, 2021) apply the Green–Gauss operator to the 1-exact gradient and
+  correct the result with a **per-cell 6×6 matrix depending solely on mesh geometry, inverted before
+  the simulation** — an O(h) Hessian and a 2-exact gradient in two face passes plus one precomputed
+  matvec, with **no global system, no iteration and no convergence test**. Against 13 sweeps × 2 passes
+  that is ~3 passes; memory is `(n, n_sym, n_sym)` = 440 MB at 1.6M cells, and the matrix reduces to
+  the identity on Cartesian grids. ⚠️ **Its accuracy claim is derived by Taylor analysis and never
+  measured** — the paper carries no error-versus-`h` table for the Hessian, and the authors' own flux
+  benchmark found the correction had "only minor effects". Closing that gap is the prerequisite, and
+  would itself be a contribution.
+
+  **✅ `MultipleCorrectionGradient` IS BUILT (2026-08-24) — the same exactness contract with NO
+  system to solve.** `aquaflux/schemes/multiple_correction.py`, following Pont, Brenner, Cinnella,
+  Maugars & Robinet (JCP 350, 2017); Setzwein, Ess & Gerlinger (JCP 446, 2021) is the vertex-centred
+  adaptation and points back to Pont for the cell-centred correction matrices. Both papers are in
+  the reference folder.
+
+  **The construction.** The raw Green--Gauss sum handed a linear field of gradient `a` returns
+  `M1 a`, not `a`. Recover `M1` by applying the sum to the coordinate fields; `D1 = M1⁻¹R` is then
+  linear-exact. Apply `D1` twice for an inconsistent Hessian, recover `M2` as what that returns for
+  each quadratic basis field, and `M2⁻¹` repairs it. `D1`'s own first-order error on a quadratic is
+  a fixed linear function of the Hessian, so subtracting it lifts the gradient to second order.
+  **Two face passes and three per-cell matrix products**, against the coupled sweep's 12--15 sweeps
+  of two passes on the reactor.
+
+  **Every correction matrix is PROBED, not derived** — the operators run on coordinate monomials,
+  the same device `cell_diagonal_block` uses. So there are no geometric formulas to port, no volume
+  moments, and the corrections cannot drift from the operators they correct.
+
+  Measured (`validation/multiple_correction/exactness_probe.py`, and the JAX path reproduces it):
+
+  | | quadrilateral | hexahedral | tetrahedral |
+  |---|---|---|---|
+  | gradient error on a quadratic | 1.9e-15 | 1.3e-15 | 2.2e-14 |
+  | Hessian error | 3.8e-14 | 1.2e-14 | 3.0e-13 |
+  | `cond(M1)` / `cond(M2)` | 2.2 / 2.9 | 2.0 / 2.9 | 4.8 / 6.9e2 |
+
+  Compare `cond(A_HH)` = **1.01e18** for the coupled scheme on tetrahedra under `OwnerHessian`. The
+  matrices this scheme inverts are small, local and well conditioned, which is *why* it needs no
+  iteration. Order of accuracy on a smooth non-polynomial field reproduces Pont's Figs. 10 and 11 —
+  gradient → 2, Hessian → 1 — and an uncorrected control fails by 12--97 % and 1.4--8.5x, which is
+  what makes the exactness result mean something.
+
+  **Exactly linear in the field, verified rather than assumed**: `jvp(t)` equals the map applied to
+  `t` **bit for bit** (`0.0` difference), `f(0) = 0`, reverse mode matches a central difference to
+  1e-8. So the tangent is an unrolled apply, not an implicit-function solve.
+
+  **⚠️⚠️ THE BOUNDARY CLOSURE MUST REPRODUCE LINEAR FIELDS EXACTLY, and this is the non-obvious
+  rule the whole scheme turns on.** The corrections are probed on the *quadratic* basis, so they
+  absorb whatever a closure does to a quadratic — but an error made at *linear* order lands in a
+  term those probes never see and nothing removes it. Measured, on tetrahedra:
+
+  | closure | linear-exact | quadratic exactness | `cond(M2)` |
+  |---|---|---|---|
+  | `OwnerGradient` | yes | **fails** (7e-2) | 9.1e17 |
+  | neighbour-averaged | yes | fails (8.7e-2) | 2.4e17 |
+  | raw one-sided difference | **no** | fails (1.1e0, worse than owner) | — |
+  | **`SkewCorrectedGradient`** | yes | **5.2e-14** | 6.9e2 |
+
+  Two separate lessons there. `OwnerGradient` is linear-exact and still fails on tetrahedra, for a
+  *dimensional* reason — four faces, one or two carrying no direction the owner's gradient has not
+  already supplied, against six Hessian components. And the raw one-sided difference fails for the
+  *other* reason, being linear-inexact on a skewed mesh; it uses more information than the owner
+  closure and does worse. ⚠️ Note also that neighbour-averaging, the fix that rescued this scheme's
+  own `A_HH`, makes things *worse* here — do not reason by analogy between the two schemes.
+
+  **`non_orthogonal_correction` (`schemes/interpolation.py`) is the shared term that makes the
+  default closure legal**, and `discretization/diffusion.py` now calls it too — it had the same
+  formula inline, having always needed it to extrapolate the same derivative to the same place.
+  ⚠️ That is the one home; a second copy in either caller is the defect.
+
+  **Not yet done**: no A/B against the coupled scheme on a march, nothing measured at 1.6M cells or
+  through snappyHexMesh's hanging-node interfaces, and the distributed path raises (it needs the
+  reconstructed gradient halo-exchanged once between the two passes — a real gap, but not the
+  structural bar the coupled scheme has).
+
+  **✅✅ `MultipleCorrectionGradient` IS FASTER THAN CORRECTED GREEN--GAUSS ON A REAL MARCH
+  (pitzDaily, 2026-08-24)** — a quadratic-exact reconstruction for less than the linear-exact one.
+  Same case, same field-split preconditioner, same probe reach 5, same continuation, same commit:
+
+  | arm | wall | cycles | steps | `x_r/h` |
+  |---|---|---|---|---|
+  | `CorrectedGreenGauss` (default sweeps) | 739.5 s | 439 | 71 | 8.069 |
+  | **`MultipleCorrectionGradient`** (`OwnerGradient`) | **703.7 s** | **437** | 73 | **8.069** |
+  | `HessianCorrectedGradient`, calibrated 7 sweeps | 2565.3 s | 510 | 72 | 8.069 |
+  | `HessianCorrectedGradient`, 20 sweeps | 6690.0 s | 510 | 72 | 8.069 |
+
+  **Read the cycle column first: 437 against 439.** The preconditioner sees the two arms identically,
+  so the wall clock is the reconstruction and not a preconditioning artifact — the check this case
+  exists to make. ⚠️ The two Betchen rows predate `bind` and the row merges and are stale in its
+  favour, but not by a factor that reaches this conclusion.
+
+  **⚠️⚠️ `SkewCorrectedGradient` STALLS THIS CASE DEAD, and the reason is about what a boundary value
+  MEANS — not about the closure's accuracy.** It converges the first two Reynolds rungs to the
+  standard arm's residual to three significant figures (7.277e-06 against 7.255e-06 at step 28, and a
+  step-for-step identical rung-2 transition) and then fails on the **first step of the target rung**:
+  α = 0.001 immediately, β escalated to its 16.0 cap, residual frozen at 1.074e-01 for every
+  subsequent step. Not a degradation — no descent direction at all.
+
+  **⚠️⚠️ THE CAUSE IS NOW MEASURED, AND IT IS NEITHER OF THE TWO ACCOUNTS PREVIOUSLY RECORDED HERE:
+  `SkewCorrectedGradient` CORRECTS TWICE ON EVERY GRADIENT-TYPE PATCH (2026-08-24).** A
+  reconstruction is fed **leading-order** boundary values — the closures evaluated at *zero*
+  gradient, deliberately, so the residual stays a single-pass function of the field
+  (`residual.py::_gradient`). A Dirichlet value does not depend on the gradient and is unaffected. A
+  gradient-type one is: `ZeroGradient.face_value` is `phi_owner + tangential_correction(...)`, whose
+  correction is evaluated away — so the boundary value handed in is **exactly** `phi_owner`. The
+  closure then forms `rise = bval − phi_owner − non_orthogonal_correction(...)` = `−corr`, and
+  divides it by `d·n`, the smallest length in the mesh at a wall. **The entire normal derivative it
+  reports on such a patch is an artifact of subtracting a correction the boundary value never
+  added.**
+
+  Measured on pitzDaily (`validation/multiple_correction/boundary_closure_probe.py`,
+  MultipleCorrection + skew, analytical near-wall omega, leading-order boundary values):
+
+  | patch | kind | max \|bval − phi_P\| | med \|d·n\| | med \|rise/d·n\| | max |
+  |---|---|---|---|---|---|
+  | inlet | Dirichlet | **3.225e+04** | 7.9e-04 | 3.3e+05 | 4.1e+07 |
+  | outlet | ZeroGradient | **0.000e+00** | 2.6e-03 | 1.7e+03 | **3.0e+07** |
+  | upperWall | ZeroGradient | **0.000e+00** | 1.8e-04 | 1.1e+02 | **1.4e+05** |
+  | lowerWall | ZeroGradient | **0.000e+00** | 5.1e-04 | 8.0e-01 | 1.5e+04 |
+
+  **Exactly zero on every gradient-type patch, and only there** — the Dirichlet inlet carries a real
+  difference, which is what the correction exists for. `OwnerGradient` never reads a boundary value
+  and marches.
+
+  ⚠️ **Two earlier accounts are SUPERSEDED and should not be repeated.** "The wall value is huge and
+  gets amplified by `1/(d·n)`" is wrong — the value is the cell's own. "The wall `omega` value is a
+  modelling device rather than data, so the closure imposes a spurious near-zero normal derivative"
+  is the right *neighbourhood* but the wrong mechanism, and it mis-predicts: it says the problem is
+  `omega`-specific and would yield to imposing that field's gradient. It does not (below), because
+  the defect is in the closure's arithmetic and applies to every field on every gradient-type patch
+  — the outlet included, where `d·n` is not even small and the artifact still reaches `3e7`.
+
+  **⚠️⚠️ MEASURED: THE `ImposedGradient` SEAM DOES NOT RESCUE THIS CLOSURE — two cold marches,
+  2026-08-24.** With the analytical wall-`omega` gradient imposed on the wall cells *and* their
+  boundary faces, and (second run) also threaded into the omega equation's own assembler so the
+  residual and the closure fields impose the same derivative, the march reproduces the stall
+  **exactly**: first step of the target rung, α = 0.001, β at its 2.0 start, `|R|` 1.079e-01 and
+  1.082e-01 against the pre-fix 1.074e-01. Both runs cleared Re/100 and Re/10 at α = 1.000
+  throughout. That is the direct evidence for the paragraph above: fixing `omega` cannot fix a defect
+  that is not about `omega`.
+
+  Two sub-mechanisms were tested and **refuted** on the way, both worth not re-proposing:
+  - **Not the correction matrices.** On this mesh `cond(M2⁻¹)` is median 2 / max **2.14** under skew
+    against median 2 / max **3.49** under owner, and `|gradient_defect|` is identical to three
+    figures. Skew is the *better*-conditioned of the two here.
+  - **Not "the Hessian correction is negligible so the closure cannot matter".** It is not
+    negligible: `|defect·hessian|` reaches **41 %** of `|first|`, and skew's Hessian tail is **2.8×**
+    owner's (1.94e12 against 6.96e11). The closure does reach the returned gradient — through the
+    Hessian, which is the only route, since the first pass reads no face gradient.
+
+  **✅ THE DOUBLE CORRECTION IS FIXED — `boundary_values_at` — AND ⚠️ IT DOES NOT FIX THE MARCH.** A
+  scheme that *differentiates* a boundary value now asks the caller to re-evaluate its closures at
+  the reconstruction's own gradient (`GradientScheme.gradients(boundary_values_at=…)`, supplied by
+  `ResidualAssembler._gradient`); a closure declares whether it needs them
+  (`GradientBoundaryClosure.reads_boundary_values`, `False` on `OwnerGradient`, so that path pays
+  nothing). Measured on the same patches, with the Dirichlet arm as the control that makes it
+  readable — a fix that merely suppressed the term would have flattened that one too:
+
+  | patch | kind | leading order | corrected |
+  |---|---|---|---|
+  | inlet | Dirichlet | 4.075e+07 | **4.075e+07** |
+  | outlet | ZeroGradient | 3.023e+07 | **8.841e-11** |
+  | upperWall | ZeroGradient | 1.434e+05 | **7.946e-08** |
+  | lowerWall | ZeroGradient | 1.523e+04 | **1.070e-08** |
+
+  **Eighteen orders down on the gradient-type patches, and the march is BIT-FOR-BIT AS STALLED** —
+  step 50 of the target rung, α = 0.001, `|R|` 1.082e-01, identical to the two runs before it. So the
+  double correction was a genuine defect worth fixing on its own terms, and it is **not** the cause.
+
+  ⚠️⚠️ **THREE MECHANISMS PROPOSED, THREE REFUTED BY MEASUREMENT. The cause of this stall is
+  UNKNOWN, and that is the honest state.** Do not re-propose: (i) the wall `omega` gradient, (ii) the
+  correction matrices' conditioning, (iii) the closure's double correction. Each was measured, not
+  argued, and each left the stall unchanged to three figures. What is *not* in doubt: `OwnerGradient`
+  never reads a boundary value and marches the case; `SkewCorrectedGradient` does and does not.
+
+  **⚠️⚠️ MEASURED ON THE REACTOR MESH (2026-08-24), AND IT REFUTES THE OBVIOUS INFERENCE: BOTH
+  CLOSURES RECONSTRUCT A QUADRATIC EXACTLY THERE.** The reasoning that "the reactor has boundary
+  tetrahedra, therefore `OwnerGradient` fails there" was written into this file and is **wrong**.
+  Measured with `validation/uvreactor_openfoam/multiple_correction_closures.py` on the full 1,635,909-cell
+  snappyHexMesh mesh (5,249,365 faces, 377,421 cells owning a boundary face), reusing
+  `gradient_sweep_calibration.probe_field`'s quadratic and its median/p99/max error:
+
+  | closure | gradient error median / p99 / max | `max \|M2⁻¹\|` |
+  |---|---|---|
+  | **`OwnerGradient`** (the default) | 1.317e-13 / 7.006e-13 / **4.906e-12** | **1.86e+01** |
+  | `SkewCorrectedGradient` | 1.305e-13 / 6.987e-13 / 2.056e-11 | 9.35e+00 |
+
+  Both exact; the default is *better* on the max. **So the default is right for the reactor, and no
+  closure conflict exists between it and pitzDaily.**
+
+  **⚠️⚠️ A SINGULAR CORRECTION IS PLATFORM-DEPENDENT IN MAGNITUDE — large and finite on one machine,
+  NON-FINITE on another (found by CI, 2026-08-24).** The same tetrahedral mesh gives `max |M2⁻¹|` of
+  **1.61e16** under macOS Accelerate and **NaN** under the BLAS on the GitHub runners, and the
+  reconstruction there is a 173 % error locally against NaN on CI. Neither is wrong — inverting a
+  singular matrix has no defined answer — but it makes every `x > threshold` test of a *failure*
+  wrong, because **every comparison against NaN is False**. Three tests here asserted the failure
+  that way and passed locally while failing on CI; they now negate the success condition instead.
+
+  **Two live comparisons had the same defect and are fixed:**
+  - `_undetermined_cells` selected with `worst > limit`, so a NaN correction would **not** be
+    detected and the repair would silently decline to fire on exactly the cells that need it. Now
+    `~(worst <= limit)`.
+  - `fastest_boundary_closure` compared `rate < best_rate`, so a closure whose rate came back
+    non-finite lost *by accident* rather than on its merits. Non-finite now maps to infinity, making
+    the ordering total.
+  - ⚠️⚠️ **And the worse half, which the first CI fix did not catch: the singular closure's rate came
+    back as `2.2e-308`, not as NaN.** `contraction_rate` deliberately maps an annihilated probe to
+    `finfo.tiny` (a correction identically zero on the mesh genuinely has rate zero), and on a
+    **singular** system the probe is annihilated by arithmetic instead — so the broken closure was
+    reported as a **perfect** contraction and won. Same mesh, same closure: **8.64** under macOS
+    Accelerate, **2.2e-308** under CI's BLAS. `ContractionRate` now reports `annihilated`, and the
+    selector treats an annihilated candidate as unusable; neither shipped candidate can annihilate
+    the probe legitimately, and the one case where that would be genuine makes them equivalent
+    anyway. Pinned by simulating the floor rather than waiting for the platform that produces it —
+    which is why it went unnoticed in the first place.
+
+  **Consequence for tests on degenerate meshes (binding):** assert the property that survives the
+  platform — "does not contract", "is not exact" — never the magnitude of a singular result. The
+  numbers quoted in this file for singular cases are macOS numbers and are illustrative of *scale*
+  only.
+
+  **⚠️ THE FAILING SHAPE IS A TETRAHEDRON WITH *TWO OR MORE* BOUNDARY FACES — a corner or edge tet,
+  not a tet at a boundary.** Resolved by boundary-face count on the synthetic tetrahedral fixture
+  under `OwnerGradient`, which is what makes the reactor result explicable rather than surprising:
+
+  | boundary faces | cells | `max \|M2⁻¹\|` | max relative error |
+  |---|---|---|---|
+  | 0 | 72 | 1.97e+00 | 4.46e-15 |
+  | 1 | 72 | 4.48e+00 | 7.20e-15 |
+  | **2** | **18** | **1.61e+16** | **1.73e+00** |
+
+  Exactly those 18 cells exceed 1e-6, and no others. The reactor has **3,063 four-faced cells and
+  every one has exactly ONE boundary face**, which is why it is unaffected; the synthetic fixture has
+  18 with two, which is why it is the harsher test. A count of *boundary tetrahedra* therefore does
+  not predict failure — the count of boundary faces *per* tetrahedron does.
+
+  **✅ THE SCHEME NOW DETECTS THIS ITSELF AT BIND TIME — `_warn_if_underdetermined`.** `M2⁻¹` is
+  already built there, and a healthy one is order unity (measured 2–7 across quadrilateral,
+  hexahedral, and tetrahedral-under-skew); an underdetermined one runs to `1e16`. So the check is on
+  the real quantity rather than on a cell-shape heuristic, and it discriminates on the **pair**:
+  silent for quad/owner, hex/owner and tet/skew, and warns only for tet/owner — naming
+  `SkewCorrectedGradient` as the way out. Once per process, and skipped under a tracer. Pinned by all
+  four combinations, because a detector that fired on every tetrahedral mesh, or on every owner
+  closure, would be useless.
+
+  ⚠️ **WHETHER `SkewCorrectedGradient` STALLS A MARCH ON A MESH THAT NEEDS IT IS STILL UNTESTED, but
+  the reason is narrower than it first looked.** The stall is measured only on pitzDaily, which is 2D
+  quadrilateral with **no tetrahedra at all** — so it says nothing about the regime the skew closure
+  exists for. Two corrections to earlier statements here:
+  - **A reactor march does exist** (`validation/uvreactor_openfoam/march.py` + `case.py`, on the
+    `claude/uv-reactor-gpu-test-52eea5` branch — Reynolds continuation, dual-time, refreshed
+    preconditioner). "No march for the reactor" was wrong. It is GPU-scale, and this case's own README
+    records case assembly plus `hybrid_initialize` being OOM-killed at full scale on a shared
+    development machine, so it is not a run to start here.
+  - **But the reactor would not test the question anyway**, because its four-faced cells all have one
+    boundary face and `OwnerGradient` reconstructs it exactly (above). A reactor march under skew
+    would answer the *weaker* and still-useful question — is the stall pitzDaily-specific or general
+    on a 3D polyhedral mesh — not whether skew is safe where it is *required*.
+
+  What would settle the original question is a marchable case containing tetrahedra with **two or
+  more boundary faces**, which no case here has. Until then: the skew closure is unproven on a march
+  anywhere, broken on the one march that exists, and needed only on a cell shape none of the shipped
+  cases contain.
+
+  **✅✅ THE ACCURATE CLOSURE NO LONGER HAS TO BE CHOSEN FOR THE WHOLE MESH — `CellwiseFallback`
+  (2026-08-24).** The two closures fail in opposite regimes and both regimes are **local**, so
+  neither has to be global. `MultipleCorrectionGradient.bind` measures `M2⁻¹` per cell, and where the
+  requested closure leaves it singular it rebuilds through
+  `CellwiseFallback(cells, primary, secondary)` — the fallback on those cells' boundary faces, the
+  primary everywhere else. `fallback` defaults to `SkewCorrectedGradient`; `None` restores the
+  warn-and-be-wrong behaviour. `Corrections` now carries the **effective** closure, and
+  `reconstruct` applies *that* rather than the requested one — otherwise the correction would be
+  probed through one operator and applied through another, which is this module's own recorded trap.
+
+  | mesh | cells repaired | gradient error | `max \|M2⁻¹\|` |
+  |---|---|---|---|
+  | tetrahedral | **18** | 1.31e-15 / 1.87e-14 / **3.91e-14** | 1.88e+01 |
+  | hexahedral | 0 | — **bit-identical to owner** | 2.69e+00 |
+  | quadrilateral | 0 | — **bit-identical to owner** | 2.53e+00 |
+  | **pitzDaily (12225)** | **0** | — **bit-identical to owner**, no warning | 2.31e+00 |
+
+  **This is what keeps the accurate answer from stalling the march.** On pitzDaily the repair fires on
+  **zero** cells and the reconstruction is bit-identical to the `OwnerGradient` arm measured at
+  689.8 s / 437 cycles / `x_r/h` 8.069 — so the default configuration never applies the stalling
+  closure there at all, and the march result transfers without re-running. Nothing is rebuilt when
+  nothing is wrong, so a healthy mesh pays one comparison rather than a second correction build.
+
+  ⚠️ **What this does NOT do is explain the stall of GLOBAL skew, which is still unknown.** The
+  fallback removes the need to apply it globally; it does not make it safe to. On a mesh that *does*
+  need repair the closure runs on those few cells, and whether that is safe on a march is untested —
+  no case here has both the cell shape and a march. A fourth candidate difference was measured and is
+  recorded as unquantified rather than as a cause: at a developed near-wall `omega` field the two
+  closures' reconstructed `|grad omega|` differs by up to **16.6 % on 490 of 12225 cells** (median
+  0), which persists *after* the `boundary_values_at` fix. At the cold initial condition the coupled
+  residual agrees to 0.9–14 % per block and the Jacobian action to **2 %**, so whatever it is, it is
+  a developed-state effect.
+
+  ⚠️ **A design defect found by writing the fallback, and worth remembering: a defaulted `eqx.field`
+  on an abstract base makes every subclass field defaulted too.** `reads_boundary_values` was
+  declared that way and `CellwiseFallback` — the first closure needing *required* state — could not
+  be written at all (`non-default argument 'cells' follows default argument`). It is a plain class
+  attribute now, which subclasses override by assignment.
+
+  **✅ CONSEQUENCE — `MultipleCorrectionGradient.boundary_closure` NOW DEFAULTS TO `OwnerGradient`
+  (changed 2026-08-24).** The scheme is new and unreleased, so the default is set by what works:
+  the owner closure marches every case here and is exact and better conditioned on quad/hex meshes.
+  `SkewCorrectedGradient` remains the choice for a mesh with boundary **tetrahedra**, where the owner
+  closure leaves the six Hessian components underdetermined (`cond(M2)` 9e17) — the trade is now
+  explicit rather than hidden in a default. `tests/unit/test_multiple_correction.py` pairs each mesh
+  with the closure that suits it, and `PITZ_AB_MULTICORR_CLOSURE` defaults to `owner`.
+
+  **✅ RESOLVED (2026-08-24) BY PASSING THE GRADIENT IN, NOT BY A BETTER CLOSURE — `ImposedGradient`
+  (`schemes/gradient.py`).** The diagnosis above is exactly right and the fix follows from it: a
+  closure exists to supply a derivative nobody knows, and at a wall `omega` somebody does. It cannot
+  be baked into a closure, because `omega_wall_gradient` reads `k` and `grad k` and so changes every
+  residual evaluation.
+
+  `ImposedGradient(cells, gradient)` is handed **to** `gradients()`. `GradientScheme.gradients` is
+  now a template method that applies it to whatever `_reconstruct_gradient` returns — so every
+  scheme honours it — and passes it down, so a scheme with somewhere earlier to put it can use it
+  there. The multiple-correction scheme imposes at three points: on the first-order-exact gradient
+  **before** the second pass differentiates it, on the boundary faces those cells own (in place of
+  the closure), and on the returned gradient, since the second-order defect is a defect of the
+  *reconstruction* and subtracting it from an imposed value would corrupt what was imposed.
+  `turbulence/transport.py::_wall_omega_gradient` builds it; `closure_fields` passes it through
+  `_field_gradient` → `ResidualAssembler.gradient(imposed=…)`.
+
+  **This fixes both of the pre-existing problems the stall exposed** (neither introduced by this
+  scheme, both affecting the shipped schemes equally):
+  - `_imposed_wall_omega_gradient` (**gone — it is now `_wall_omega_gradient`, which RETURNS an
+    `ImposedGradient` instead of applying one**) patched the gradient **returned** by `gradients()`, while
+    the multiple-correction scheme builds its Hessian from its *internal* `g1` and returns
+    `g2 = g1 − H2·h` — so the correction arrived **after** the quantity it should have informed. It
+    now arrives before. Any scheme whose output depends on an internally reconstructed derivative had
+    this problem.
+  - `omega_wall_gradient`'s docstring records the magnitude nothing corrected: the reconstruction is
+    ~0.26x the analytical one in the fixed cells. The imposed value is now what the Hessian pass and
+    the wall faces see, rather than that quarter-sized estimate.
+
+  ⚠️ **What it does NOT fix, and this is a real remaining gap:** the same docstring records that
+  **the first interior ring reconstructs roughly twice too large**, and that ring is still overridden
+  by nothing. Imposing a *gradient* cannot reach it — the ring's own first pass is a Green–Gauss sum
+  over `omega` **values**, and the wall cells' values are unchanged. Fixing that would mean changing
+  what `omega`'s wall boundary *value* means, which is a turbulence-model decision and not a gradient
+  seam.
+
+  ⚠️ **It reaches `ResidualAssembler.gradient` and NOT `ResidualAssembler.residual`** — the gradient
+  a residual reconstructs for its own non-orthogonal correction is still unimposed, exactly as
+  before. Deliberate, and pre-existing: the ω rows at those cells are the *fixation*, and the one
+  path that reads their gradient is the diffusion `corr` on faces to interior neighbours, measured at
+  **0.03 %** on pitzDaily (`.claude/rules/turbulence.md`). Threading it there is a bigger change (the
+  imposition would have to be a property of the assembler, not an argument to one accessor) for a
+  measured-negligible return.
+
+  ⚠️ **Imposing a gradient puts the reconstruction off its own exactness contract at those cells and
+  the cells that read them**, deliberately: the correction matrices are probed against the operator
+  the scheme would otherwise apply (`_build_corrections` runs the closure, and knows nothing of a
+  state-dependent imposition), and an imposed value is by construction not what that operator
+  returns. The trade is the one the post-hoc wall-omega patch already took — a consistent operator
+  around a value four times too small is worse than an inconsistent one around the right value.
+
+  **`HessianCorrectedGradient` takes the same argument and applies it ONLY to its converged answer —
+  a deliberate decision, not an omission.** Projecting the imposition onto the coupled sweep's
+  gradient iterate would change the **fixed point** rather than the path to it, and that fixed point
+  being the Schur solution of the gradient–Hessian system is the scheme's whole justification (see
+  the `CoupledBlockSweep` entry). An imposed gradient would have to enter as a *constraint on that
+  system*, which is real work and not something this seam licenses.
+
+  **With nothing imposed every scheme is byte-identical**, pinned by
+  `test_imposing_nothing_is_byte_identical_to_never_having_been_asked`. **With something imposed the
+  reconstruction is AFFINE in the field, not linear** — the imposed values are an added constant, so
+  `f(0) ≠ 0`. Its tangent is still the same unrolled apply and not an implicit-function solve, which
+  is the half a differentiated solve depends on;
+  `test_an_imposed_reconstruction_is_affine_with_the_same_linear_part` pins both halves, against the
+  unimposed linearity test that pins the default path.
 
   **⚠️ MEASURE IT AGAINST A CALIBRATED NESTED SOLVE, NOT THE SHIPPED DEFAULT.** Against `20/10` it
   looks like 2.0× forward and 3.1× on the tangent — but `20/10` is heavily over-provisioned on the

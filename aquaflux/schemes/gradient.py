@@ -91,10 +91,129 @@ class _CorrectedTerms(NamedTuple):
     volume: jnp.ndarray  # (n_cells,) cell volumes
 
 
+class ImposedGradient(eqx.Module):
+    """A gradient that is *known* on some cells, imposed on a reconstruction rather than reconstructed.
+
+    Some cells' gradient is a model quantity rather than something a stencil should estimate. The
+    near-wall ``omega`` of a k--omega closure is the standing example: those cells do not solve a
+    transport balance at all, their value being fixed by a profile going like ``1 / d**2``, so the
+    honest gradient there is that profile's analytical derivative. Reconstructing it instead is not
+    merely imprecise -- a linear fit over cells whose wall distance varies sharply returns about a
+    quarter of the analytical magnitude, and the neighbouring ring roughly twice too much.
+
+    Overwriting the gradient a scheme *returns* is not enough for every scheme, which is why this is
+    passed **in** rather than applied **after**. A reconstruction that consumes its own first
+    estimate -- to build a Hessian by differentiating it, say -- would consume the value being
+    replaced and correct it only once the damage was done.
+
+    ⚠️ **Imposing a gradient substitutes a model for a reconstruction, so a scheme's exactness
+    contract stops at the imposed cells and the cells that read them.** Correction matrices are
+    calibrated against the operator a scheme would otherwise apply, and an imposed value is by
+    construction not what that operator returns. That is the trade taken deliberately: a consistent
+    operator around a value measured four times too small is worse than an inconsistent one around
+    the right value.
+
+    Attributes
+    ----------
+    cells : jnp.ndarray
+        Indices of the cells whose gradient is imposed, shape ``(n_imposed,)``.
+    gradient : jnp.ndarray
+        The gradient imposed there, shape ``(n_imposed, dim)``.
+
+    Examples
+    --------
+    >>> import jax.numpy as jnp
+    >>> imposed = ImposedGradient(jnp.array([1]), jnp.array([[3.0, 4.0]]))
+    >>> imposed.impose(jnp.zeros((3, 2)))
+    Array([[0., 0.],
+           [3., 4.],
+           [0., 0.]], dtype=float64)
+    """
+
+    cells: jnp.ndarray
+    gradient: jnp.ndarray
+
+    def impose(self, gradient: jnp.ndarray) -> jnp.ndarray:
+        """``gradient`` with the imposed rows overwritten.
+
+        Parameters
+        ----------
+        gradient : jnp.ndarray
+            A cell gradient, shape ``(n_cells, dim)``.
+
+        Returns
+        -------
+        jnp.ndarray
+            The same array with rows :attr:`cells` set to :attr:`gradient`; shape unchanged.
+        """
+        return gradient.at[self.cells].set(self.gradient)
+
+    def impose_on_faces(
+        self, face_gradient: jnp.ndarray, face_cells: FaceCellConnectivity
+    ) -> jnp.ndarray:
+        """``face_gradient`` with every boundary face of an imposed cell carrying that cell's gradient.
+
+        A boundary closure exists to supply a derivative a boundary condition does not carry. Where
+        a caller has imposed one it is not missing, and closing it from the field values there
+        contradicts the model that imposed it: on a wall ``omega`` face the boundary value is itself
+        a zero-gradient closure, so differencing against it imposes a near-zero normal derivative
+        exactly where the modelled profile diverges.
+
+        Interior faces are untouched -- they interpolate from two cells, both of which already carry
+        the imposition.
+
+        Parameters
+        ----------
+        face_gradient : jnp.ndarray
+            The gradient on every face as a closure left it, shape ``(n_faces, dim)``.
+        face_cells : FaceCellConnectivity
+            The face->cell incidence.
+
+        Returns
+        -------
+        jnp.ndarray
+            The same array with the imposed cells' boundary faces overwritten.
+        """
+        owner = face_cells.owner
+        shape = (face_cells.n_cells, face_gradient.shape[-1])
+        values = jnp.zeros(shape, dtype=face_gradient.dtype).at[self.cells].set(self.gradient)
+        flagged = jnp.zeros(face_cells.n_cells, dtype=bool).at[self.cells].set(True)
+        take = flagged[owner] & ~face_cells.interior
+        return jnp.where(take[:, None], values[owner], face_gradient)
+
+
 class GradientScheme(eqx.Module):
     """Strategy interface: reconstruct cell gradients from a cell field."""
 
-    @abc.abstractmethod
+    def bind(self, mesh: Mesh, geometry: MeshGeometry) -> GradientScheme:
+        """Return this scheme prepared for one geometry, ready to reconstruct on it repeatedly.
+
+        A reconstruction may do work that depends only on the geometry, and a solver calls it over
+        and over on the same mesh — once per field, and once per Krylov matvec, since a matvec
+        re-evaluates the residual. This is where a scheme hoists that work out of the per-call path.
+
+        The default returns the scheme unchanged, which is the honest answer for a reconstruction
+        that has nothing geometry-only worth holding: a single-pass Green--Gauss sum, or a swept
+        solve whose preconditioner is a per-cell scalar it is cheaper to recompute than to carry.
+        Assemblers call this when they are built, so a scheme that overrides it is prepared once by
+        every consumer without any of them knowing which schemes benefit.
+
+        Parameters
+        ----------
+        mesh : Mesh
+            The mesh to prepare for.
+        geometry : MeshGeometry
+            That mesh's face and cell metrics.
+
+        Returns
+        -------
+        GradientScheme
+            A scheme equivalent to this one on that geometry. Implementations must return the *same*
+            reconstruction, not an approximation of it -- preparing is a cost change, never an
+            accuracy one.
+        """
+        return self
+
     def gradients(
         self,
         field: jnp.ndarray,
@@ -103,8 +222,14 @@ class GradientScheme(eqx.Module):
         boundary_values: jnp.ndarray,
         *,
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        imposed: ImposedGradient | None = None,
+        boundary_values_at: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
         """Cell gradients of ``field``, shape ``(n_cells, dim)``.
+
+        The reconstruction itself is :meth:`_reconstruct_gradient`; this wrapper is where an
+        imposed gradient is guaranteed to reach the answer, so that every scheme honours it whether
+        or not it has anywhere earlier to put it.
 
         Parameters
         ----------
@@ -123,13 +248,37 @@ class GradientScheme(eqx.Module):
             the already-exchanged ``field`` and so ignores it; a scheme whose reconstruction couples
             across partitions in a way this per-apply exchange cannot make serial-exact must raise
             when it is not ``None``, never silently return a wrong owned gradient.
+        imposed : ImposedGradient, optional
+            Cells whose gradient the caller knows analytically and wants used instead of a
+            reconstruction. ``None`` (the default) reconstructs everywhere, and leaves every scheme
+            here byte-identical to one that had never heard of the argument.
+        boundary_values_at : callable, optional
+            ``gradient -> boundary_values``: the caller's boundary closures re-evaluated at a
+            reconstructed gradient. ``boundary_values`` above is those closures evaluated at *zero*
+            gradient, which keeps the residual a single pass over the field but leaves a
+            gradient-type condition carrying none of its own correction. A scheme that
+            **differentiates** a boundary value needs the corrected one, and this is how it asks.
+            ``None`` (the default) leaves every scheme reconstructing exactly as before.
+
+        Returns
+        -------
+        jnp.ndarray
+            Cell gradients, shape ``(n_cells, dim)``; the imposed rows carry exactly what was
+            imposed.
         """
+        gradient = self._reconstruct_gradient(
+            field,
+            mesh,
+            geometry,
+            boundary_values,
+            operator_hook=operator_hook,
+            imposed=imposed,
+            boundary_values_at=boundary_values_at,
+        )
+        return gradient if imposed is None else imposed.impose(gradient)
 
-
-class CompactGreenGauss(GradientScheme):
-    """One-shot Green–Gauss with linearly-interpolated interior face values."""
-
-    def gradients(
+    @abc.abstractmethod
+    def _reconstruct_gradient(
         self,
         field: jnp.ndarray,
         mesh: Mesh,
@@ -137,11 +286,37 @@ class CompactGreenGauss(GradientScheme):
         boundary_values: jnp.ndarray,
         *,
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        imposed: ImposedGradient | None = None,
+        boundary_values_at: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+    ) -> jnp.ndarray:
+        """The reconstruction itself; see :meth:`gradients` for the arguments.
+
+        The extension point every scheme implements. ``imposed`` is passed down rather than left to
+        :meth:`gradients` because a scheme that *consumes* its own reconstructed gradient -- to
+        differentiate it into a Hessian, say -- must impose before that consumer reads it, not after.
+        A scheme with no such internal consumer may ignore the argument entirely: :meth:`gradients`
+        applies it to whatever comes back either way.
+        """
+
+
+class CompactGreenGauss(GradientScheme):
+    """One-shot Green–Gauss with linearly-interpolated interior face values."""
+
+    def _reconstruct_gradient(
+        self,
+        field: jnp.ndarray,
+        mesh: Mesh,
+        geometry: MeshGeometry,
+        boundary_values: jnp.ndarray,
+        *,
+        operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        imposed: ImposedGradient | None = None,
+        boundary_values_at: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
         # No iterative solve: an owned cell's one-shot gradient is exact once its `field` halo is
         # filled, so the per-apply ghost exchange (`operator_hook`) has nothing to correct here. The
         # distributed residual still exchanges the *final* gradient for the flux (its `gradient_hook`).
-        del operator_hook
+        del operator_hook, imposed, boundary_values_at
         face_geometry, cell_geometry = geometry.face, geometry.cell
         face_cells = mesh.face_cells
         g = interpolation_factor(face_cells, geometry)
@@ -855,10 +1030,25 @@ class ContractionRate(NamedTuple):
         multiplies the remaining error.
     half_budget_rate : float
         The same estimate at half the budget, which is what :attr:`settling_ratio` compares against.
+    annihilated : bool
+        Whether some iterate's norm reached zero, which makes :attr:`rate` a floor rather than a
+        measurement. It is reported instead of being folded into the rate because the two causes
+        cannot be told apart from the number alone: a correction that is identically zero on the mesh
+        really does have rate zero, while a **singular** system annihilates the probe through
+        arithmetic and has no rate at all. A caller comparing candidates must reject the second --
+        see :func:`fastest_boundary_closure` -- and one measuring a single known-good system can
+        ignore this.
+
+        ⚠️ Which of the two happens is platform-dependent, so a caller that ignores this on a
+        degenerate mesh is making a platform-dependent decision. Measured on the same perturbed
+        tetrahedral mesh under an owner Hessian closure: a rate of **8.64** under macOS Accelerate
+        against **2.2e-308** (the smallest normal double, this floor) under the BLAS on the CI
+        runners -- a diverging closure reported as a perfect one.
     """
 
     rate: float
     half_budget_rate: float
+    annihilated: bool = False
 
     @property
     def settling_ratio(self) -> float:
@@ -968,7 +1158,7 @@ def contraction_rate(
     @jax.jit
     def run(v: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
         def body(k, carry):
-            v, log_full, log_half = carry
+            v, log_full, log_half, annihilated = carry
             v = v - preconditioner.apply(operator(v))
             n = norm(v)
             # An iteration that annihilates the probe (a mesh whose correction is identically zero)
@@ -978,16 +1168,25 @@ def contraction_rate(
             positive = n > 0
             v = v / jnp.where(positive, n, 1.0)
             log_n = jnp.log(jnp.where(positive, n, jnp.finfo(n.dtype).tiny))
-            return v, log_full + log_n, log_half + jnp.where(k < half, log_n, 0.0)
+            return (
+                v,
+                log_full + log_n,
+                log_half + jnp.where(k < half, log_n, 0.0),
+                annihilated | ~positive,
+            )
 
         zero = jnp.zeros((), v.dtype)
-        _, log_full, log_half = jax.lax.fori_loop(0, iters, body, (v, zero, zero))
-        return jnp.exp(log_full / iters), jnp.exp(log_half / half)
+        _, log_full, log_half, annihilated = jax.lax.fori_loop(
+            0, iters, body, (v, zero, zero, jnp.zeros((), bool))
+        )
+        return jnp.exp(log_full / iters), jnp.exp(log_half / half), annihilated
 
     v = jax.random.normal(jax.random.PRNGKey(seed), system.shape)
     v = v / norm(v)
     try:
-        full, halfway = (float(x) for x in run(v))
+        full_a, half_a, annihilated_a = run(v)
+        full, halfway = float(full_a), float(half_a)
+        annihilated = bool(annihilated_a)
     except (jax.errors.ConcretizationTypeError, jax.errors.TracerArrayConversionError) as exc:
         raise ValueError(_TRACED_GEOMETRY_MESSAGE) from exc
     if not (math.isfinite(full) and math.isfinite(halfway)):
@@ -996,7 +1195,7 @@ def contraction_rate(
             "iteration overflowed rather than merely diverging, so the operator or preconditioner is "
             "likely mis-assembled."
         )
-    return ContractionRate(full, halfway)
+    return ContractionRate(full, halfway, annihilated)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1115,6 +1314,101 @@ class SweepCalibration:
         """
         rate = contraction_rate(system, iters=self.iters, seed=self.seed)
         return self.sweeps_for(rate.rate)
+
+
+def fastest_boundary_closure(
+    mesh: Mesh,
+    geometry: MeshGeometry,
+    *,
+    candidates: tuple[HessianBoundaryClosure, ...] | None = None,
+    local_schur_block: bool = True,
+    relaxation: float = 1.0,
+    iters: int = SweepCalibration.iters,
+    seed: int = SweepCalibration.seed,
+) -> HessianBoundaryClosure:
+    """The Hessian boundary closure whose coupled sweep converges fastest **on this mesh**.
+
+    The closure is not a global ranking — it is a property of the mesh, and the two shipped choices
+    swap places. On a well-shaped mesh the owner closure is the faster (a contraction rate of 0.198
+    against 0.304 on the pitzDaily benchmark, six sweeps against eight); on a heavily warped one the
+    neighbour-averaged closure is (0.4385 against 0.5378 on a 1.6M-cell reactor mesh with interior
+    face skewness p99 0.20 and face planarity down to 0.877, twelve sweeps against fifteen). Picking
+    one in advance is therefore wrong on half the meshes it will meet, which is what this measures
+    away — the same argument, and the same instrument, as calibrating the sweep count rather than
+    assuming it.
+
+    **The contraction rate subsumes solvability, which is why it is the only criterion here.** Both
+    shipped closures reproduce a constant Hessian exactly, so neither trades accuracy for speed; what
+    separates them on bad cells is that the owner closure can leave a cell's Hessian block singular,
+    and a closure whose block is singular does not merely reconstruct badly — it fails to contract at
+    all, and so loses on rate by a wide margin rather than winning on it.
+
+    Parameters
+    ----------
+    mesh : Mesh
+        The mesh to measure against; its geometry must be concrete, since the comparison is made
+        outside any traced or differentiated region.
+    geometry : MeshGeometry
+        That mesh's face and cell metrics.
+    candidates : tuple of HessianBoundaryClosure, optional
+        The closures to compare (default: :class:`OwnerHessian` and
+        :class:`AveragedNeighbourHessian`, the two that are exact for a quadratic). Pass a tuple to
+        compare a calibrated blend weight, or to add a closure of your own.
+    local_schur_block, relaxation : optional
+        The configuration the scheme will run with; both change the rate, so both must match what
+        will run or this measures a system nobody solves. Defaults are the shipped ones.
+    iters, seed : int, optional
+        Passed to :func:`contraction_rate`.
+
+    Returns
+    -------
+    HessianBoundaryClosure
+        The candidate with the lowest measured rate. Ties go to the earlier candidate, so the default
+        order prefers the cheaper owner closure when the two are indistinguishable.
+
+    Examples
+    --------
+    >>> from aquaflux.mesh import structured_grid_2d
+    >>> from aquaflux.schemes import OwnerHessian, fastest_boundary_closure
+    >>> mesh = structured_grid_2d(4, 4, 1.0, 1.0)
+    >>> isinstance(fastest_boundary_closure(mesh, mesh.geometry()), OwnerHessian)
+    True
+    """
+    if candidates is None:
+        candidates = (OwnerHessian(), AveragedNeighbourHessian())
+    if not candidates:
+        raise ValueError("fastest_boundary_closure needs at least one candidate closure.")
+
+    # ⚠️ Seeded with NaN-safety in mind: a closure that leaves a cell's Hessian block singular can
+    # produce a NON-FINITE rate rather than a large one, and `NaN < best` is False -- so a plain
+    # comparison would let such a closure lose *by accident* rather than on its merits, and would
+    # rank two broken closures by their order in the list. A non-finite rate is mapped to infinity
+    # below, which makes the ordering total and the choice independent of that order.
+    best, best_rate = None, math.inf
+    for closure in candidates:
+        systems = HessianCorrectedGradient._systems(mesh, geometry, closure)
+        inner = systems.inner()
+        measured = contraction_rate(
+            systems.coupled_error(
+                relaxation,
+                systems.outer_preconditioner(inner, local_schur_block),
+                inner.preconditioner,
+            ),
+            iters=iters,
+            seed=seed,
+        )
+        rate = float(measured.rate)
+        # A candidate whose probe was annihilated has no measured rate, only the floor the estimator
+        # reports in its place -- and on a closure that leaves a cell's Hessian block singular that
+        # floor reads as a PERFECT contraction, which would make the broken closure win. Both
+        # candidates here are approximations, so neither can annihilate the probe legitimately; the
+        # one case where that would be genuine (a correction identically zero on the mesh) makes the
+        # closures equivalent anyway, so ranking them both unusable loses nothing.
+        if measured.annihilated or not math.isfinite(rate):
+            rate = math.inf
+        if best is None or rate < best_rate:
+            best, best_rate = closure, rate
+    return best
 
 
 def narrow_gradient_sweeps(tree: _Tree, sweeps: int) -> _Tree:
@@ -1308,9 +1602,18 @@ class CoupledBlockSweep(HessianSolve):
     Attributes
     ----------
     sweeps : int
-        Number of coupled sweeps (static). One sweep costs about three face-kernel passes against the
+        Number of coupled sweeps (static). One sweep costs **two** face-kernel passes against the
         nested path's ``1 + inner``, so a given accuracy is reached for far less work -- but the count
         needed is not the nested path's outer count and has to be calibrated on its own.
+
+        ⚠️ **The count is what this costs, not the work inside one sweep, and the two are easy to
+        confuse.** On a 12225-cell mesh the sweeps are ~82 % of a reconstruction, and *halving* the
+        face-kernel passes per sweep (from four to two, by merging each row into one evaluation) moved
+        the whole reconstruction by only 9 %: the compiler was already folding away most of the
+        redundant work, because the arguments being wasted were literal zeros rather than runtime
+        values. Cutting the count is worth several times as much -- on that mesh the sweep contracts
+        at 0.315, so twelve sweeps reproduce twenty to ``1e-9`` for a third less time. Calibrate the
+        count before optimizing the sweep.
     relaxation : float
         Damping on the gradient update, in ``(0, 1]``. A differentiable leaf.
     """
@@ -1347,6 +1650,7 @@ class CoupledBlockSweep(HessianSolve):
         floor: int = SweepCalibration.floor,
         cap: int = SweepCalibration.cap,
         seed: int = SweepCalibration.seed,
+        local_schur_block: bool = True,
         boundary_closure: HessianBoundaryClosure | None = None,
     ) -> CoupledBlockSweep:
         """Build this sweep with its count **measured from the mesh** rather than assumed.
@@ -1365,6 +1669,14 @@ class CoupledBlockSweep(HessianSolve):
             region.
         tol, iters, floor, cap, seed
             The shared calibration settings; see :class:`SweepCalibration`.
+        local_schur_block : bool, optional
+            As on :class:`HessianCorrectedGradient` (default ``True``). ⚠️ **It must match the value
+            the scheme will run with, because it selects the preconditioner and so the rate.** It is
+            not a detail on a skewed mesh: on perturbed tetrahedra under
+            :class:`AveragedNeighbourHessian` the two preconditioners contract at 0.6620 and 0.8980,
+            which is 23 sweeps against 86 for the same tolerance. Where the cell shapes are good it
+            barely registers (0.2551 against 0.2570 at 35 % hex perturbation), which is why a
+            mismatch here hides on easy meshes and surfaces on the ones this scheme exists for.
 
         Returns
         -------
@@ -1393,15 +1705,20 @@ class CoupledBlockSweep(HessianSolve):
         >>> CoupledBlockSweep.calibrated(mesh, mesh.geometry()).sweeps
         6
         """
-        # The closure changes the operator whose rate is being measured, so it has to be the
-        # one the scheme will run with -- the same reason the scheme's own factory takes it.
+        # The closure and the preconditioner both change the operator whose rate is being measured,
+        # so both have to be the ones the scheme will run with -- the same reason the scheme's own
+        # factory takes them. Reached through `outer_preconditioner` rather than `outer`, which would
+        # additionally build the Schur operator this sweep never applies.
         systems = HessianCorrectedGradient._systems(
             mesh, geometry, OwnerHessian() if boundary_closure is None else boundary_closure
         )
         inner = systems.inner()
-        outer = systems.outer(SweptGradientSolve(warn_tol=None), inner)
         rate = contraction_rate(
-            systems.coupled_error(cls.relaxation, outer.preconditioner, inner.preconditioner),
+            systems.coupled_error(
+                cls.relaxation,
+                systems.outer_preconditioner(inner, local_schur_block),
+                inner.preconditioner,
+            ),
             iters=iters,
             seed=seed,
         )
@@ -1608,7 +1925,7 @@ class CorrectedGreenGauss(GradientScheme):
         )
         return fc.scatter_conservative(scale(t.area_vector, phi_base))
 
-    def gradients(
+    def _reconstruct_gradient(
         self,
         field: jnp.ndarray,
         mesh: Mesh,
@@ -1616,7 +1933,13 @@ class CorrectedGreenGauss(GradientScheme):
         boundary_values: jnp.ndarray,
         *,
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        imposed: ImposedGradient | None = None,
+        boundary_values_at: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
+        # No internal consumer: this scheme solves for the gradient and returns it, so an imposed
+        # row is applied by `gradients` and nothing here reads the row it replaces. It never
+        # differentiates a boundary value either, so the corrected ones are of no use to it.
+        del imposed, boundary_values_at
         t = self.terms(mesh, geometry)
         system = self.system(t, self.preconditioner)
         return self.solver.solve(
@@ -1971,9 +2294,10 @@ class NestedHessianSolve(HessianSolve):
     its operator applies.
 
     ⚠️ **This is the slower path on the meshes this scheme exists for**, because it discards what the
-    previous outer apply learned about the Hessian: 1.4x the face-kernel passes of
-    :class:`CoupledBlockSweep` at 30 % grid perturbation, 1.8x at 40 %, and up to 12x under
-    :class:`AveragedNeighbourHessian`, whose Hessian system is the expensive one to re-converge. It is
+    previous outer apply learned about the Hessian: 1.4x the cost of :class:`CoupledBlockSweep` at
+    30 % grid perturbation, 1.8x at 40 %, and up to 12x under :class:`AveragedNeighbourHessian`,
+    whose Hessian system is the expensive one to re-converge. Those ratios were measured while one
+    coupled sweep cost four face-kernel passes rather than today's two, so they understate the gap. It is
     faster only on an orthogonal mesh, where the outer solve is nearly trivial and there is nothing to
     save — and where this scheme has no advantage worth its cost anyway.
 
@@ -2144,6 +2468,8 @@ class _HessianSystems(NamedTuple):
     inner: Callable[[], GradientSystem]
     outer: Callable[[GradientSolve, GradientSystem], GradientSystem]
     outer_preconditioner: Callable[..., GradientPreconditioner]
+    hessian_row_defect: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
+    gradient_row_defect: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
     block_sweep: Callable[..., jnp.ndarray]
     coupled_error: Callable[..., GradientSystem]
 
@@ -2273,9 +2599,13 @@ class HessianCorrectedGradient(GradientScheme):
         apply of the outer solve; :class:`PackedSystemSolve` solves the un-eliminated ``[g, h]``
         system whole, which is the check that the elimination changes nothing.
 
-        The default is the coupled sweep because it matches the nested pair's accuracy at a third of
-        the face-kernel passes, and is worth 1.4x at 30 % grid perturbation, 1.8x at 40 %, and up to
-        12x under :class:`AveragedNeighbourHessian`. ⚠️ It is *slower* on an orthogonal mesh, where
+        The default is the coupled sweep because it matches the nested pair's accuracy at a fraction
+        of the face-kernel passes -- 40 against 220 for the ``20`` / ``20+10`` pair -- and is worth
+        1.4x at 30 % grid perturbation, 1.8x at 40 %, and up to 12x under
+        :class:`AveragedNeighbourHessian`. ⚠️ Those speed ratios were measured while one sweep cost
+        **four** passes rather than today's two, so they understate the coupled path; the pass counts
+        themselves are exact. And read either against the caveat on
+        :attr:`CoupledBlockSweep.sweeps`: a face-pass count is a poor predictor of wall clock here. ⚠️ It is *slower* on an orthogonal mesh, where
         the nested outer solve is nearly trivial — which is also a mesh on which this scheme has no
         advantage worth its cost.
     local_schur_block : bool
@@ -2313,8 +2643,9 @@ class HessianCorrectedGradient(GradientScheme):
     hessian_solve: HessianSolve = eqx.field(default_factory=CoupledBlockSweep)
     local_schur_block: bool = eqx.field(static=True, default=True)
     boundary_closure: HessianBoundaryClosure = eqx.field(default_factory=OwnerHessian)
+    prepared_outer: GradientPreconditioner | None = None
 
-    def gradients(
+    def _reconstruct_gradient(
         self,
         field: jnp.ndarray,
         mesh: Mesh,
@@ -2322,6 +2653,8 @@ class HessianCorrectedGradient(GradientScheme):
         boundary_values: jnp.ndarray,
         *,
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        imposed: ImposedGradient | None = None,
+        boundary_values_at: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
         if operator_hook is not None:
             raise NotImplementedError(
@@ -2332,11 +2665,87 @@ class HessianCorrectedGradient(GradientScheme):
                 "solve — not yet built. Use CorrectedGreenGauss with SweptGradientSolve for a "
                 "distributed non-orthogonal gradient."
             )
+        # ⚠️ Deliberately applied by `gradients` to the converged answer, and NOT projected onto the
+        # sweep's gradient iterate, which would be the analogue of what the multiple-correction
+        # scheme does. Overwriting rows of an iterate changes the fixed point rather than the path
+        # to it: the coupled sweep's whole justification is that its fixed point is the Schur
+        # solution of the gradient--Hessian system, and a projected sweep converges to a different
+        # system's answer. Imposing a gradient here would have to enter as a constraint on that
+        # system -- a real piece of work, and not one this seam licenses.
+        del imposed, boundary_values_at
+        if self.prepared_outer is not None and self.prepared_outer.inverse.shape[0] != mesh.n_cells:
+            raise ValueError(
+                "this gradient scheme was bound to a geometry of "
+                f"{self.prepared_outer.inverse.shape[0]} cells and is being asked to reconstruct on "
+                f"one of {mesh.n_cells}. A bound scheme carries that geometry's outer preconditioner, "
+                "which with a fixed sweep count changes the reconstructed gradient and not merely "
+                "how fast it converges -- so it cannot be reused across meshes. Call bind() again "
+                "for this geometry, or drop the binding."
+            )
         return self.hessian_solve.gradients(
-            self._systems(mesh, geometry, self.boundary_closure),
+            self._systems(mesh, geometry, self.boundary_closure, self.prepared_outer),
             field,
             boundary_values,
             local_schur_block=self.local_schur_block,
+        )
+
+    def bind(self, mesh: Mesh, geometry: MeshGeometry) -> HessianCorrectedGradient:
+        """This scheme carrying the outer preconditioner it would otherwise rebuild every call.
+
+        The outer preconditioner is geometry-only, yet it is rebuilt on every reconstruction --
+        every field, and every Krylov matvec, since a matvec re-executes the residual. Within one
+        compiled residual the compiler already shares it across the fields, so what binding
+        collects is the repetition *across* residual evaluations.
+
+        It is worth most where the sweep count is lowest, because the sweeps are what it is
+        competing with: on pitzDaily the whole geometry prologue is ~18 % of a reconstruction at
+        twenty sweeps and ~48 % at the seven a 1e-4 calibration asks for, of which this
+        preconditioner is over half. It is also the cheapest part of that prologue to hold --
+        ``(n_cells, dim, dim)``, against the ``(n_cells, n_sym, n_sym)`` inner inverse that is four
+        times larger in three dimensions and that this scheme now rebuilds by algebra anyway.
+
+        Parameters
+        ----------
+        mesh : Mesh
+            The mesh to bind to; its geometry must be concrete.
+        geometry : MeshGeometry
+            That mesh's face and cell metrics.
+
+        Returns
+        -------
+        HessianCorrectedGradient
+            The same scheme carrying this geometry's outer preconditioner.
+
+        Notes
+        -----
+        ⚠️ **A bound scheme is valid for the geometry it was bound to and no other.** With a fixed
+        sweep count the preconditioner determines the answer, not merely the rate at which the sweep
+        reaches it, so a stale binding returns a subtly wrong gradient rather than a slower one. A
+        cell-count mismatch is refused outright; a *different* geometry with the same cell count
+        cannot be detected and is the caller's responsibility.
+
+        For the same reason, do not bind outside a region being differentiated with respect to the
+        **geometry** (node positions, say): the bound preconditioner is then a constant that the
+        differentiation cannot see through, and the shape derivative comes back wrong rather than
+        failing. Binding is transparent to differentiation with respect to the *field*, which is
+        what a flow solve differentiates.
+
+        Examples
+        --------
+        >>> from aquaflux.schemes import HessianCorrectedGradient
+        >>> from aquaflux.mesh import structured_grid_2d
+        >>> mesh = structured_grid_2d(4, 4, 1.0, 1.0)
+        >>> scheme = HessianCorrectedGradient().bind(mesh, mesh.geometry())
+        >>> scheme.prepared_outer is None
+        False
+        """
+        systems = self._systems(mesh, geometry, self.boundary_closure)
+        prepared = systems.outer_preconditioner(systems.inner(), self.local_schur_block)
+        return HessianCorrectedGradient(
+            hessian_solve=self.hessian_solve,
+            local_schur_block=self.local_schur_block,
+            boundary_closure=self.boundary_closure,
+            prepared_outer=prepared,
         )
 
     @classmethod
@@ -2422,7 +2831,13 @@ class HessianCorrectedGradient(GradientScheme):
         # One field, so one strategy is built and it is the one that will run -- there is no second
         # path left carrying counts nobody measured.
         solve: HessianSolve = (
-            CoupledBlockSweep.calibrated(mesh, geometry, boundary_closure=closure, **settings)
+            CoupledBlockSweep.calibrated(
+                mesh,
+                geometry,
+                local_schur_block=local_schur_block,
+                boundary_closure=closure,
+                **settings,
+            )
             if coupled
             else NestedHessianSolve.calibrated(
                 mesh,
@@ -2445,12 +2860,23 @@ class HessianCorrectedGradient(GradientScheme):
         mesh: Mesh,
         geometry: MeshGeometry,
         boundary_closure: HessianBoundaryClosure | None = None,
+        prepared_outer: GradientPreconditioner | None = None,
     ) -> _HessianSystems:
         """Assemble this scheme's linear systems from the geometry — everything but the field.
 
         The reconstruction solves these and the calibration measures them, so they are assembled
         here once for both: a count measured against a different assembly than the one that runs
         would be calibrating the wrong operator.
+
+        Parameters
+        ----------
+        prepared_outer : GradientPreconditioner, optional
+            The outer system's preconditioner, already built for this geometry by
+            :meth:`HessianCorrectedGradient.bind`. Supplied, ``outer_preconditioner`` returns it
+            instead of rebuilding it, which is the point of binding — it is geometry-only and is
+            otherwise rebuilt on every reconstruction. It is threaded here, at the one place the
+            preconditioner is constructed, so every :class:`HessianSolve` strategy picks it up
+            without any of them changing shape.
         """
         closure = OwnerHessian() if boundary_closure is None else boundary_closure
         dim = mesh.dim
@@ -2691,13 +3117,36 @@ class HessianCorrectedGradient(GradientScheme):
             return pack(gradient_rhs(fld, bvals), zero_u)
 
         # ---- Schur elimination of the Hessian block.
-        def gradient_and_hessian_rows(g):
-            """``(A_gg·g, A_Hg·g)`` — the outer operator needs both, from one pass over the faces."""
-            rhs_g = face_cells.scatter(
+        def a_gg(g):
+            """``A_gg·g`` — the gradient equation's own row, with the Hessian held at zero."""
+            return scale(g, vol) - face_cells.scatter(
                 *gradient_face_terms(g, zero_h, g, zero_h, zero_h, zero_f, zero_b)
             )
+
+        def gradient_and_hessian_rows(g):
+            """``(A_gg·g, A_Hg·g)`` — the outer operator needs both, from one pass over the faces."""
             rhs_h = face_cells.scatter(*hessian_face_terms(g, zero_h, g, zero_h, zero_h))
-            return scale(g, vol) - rhs_g, reduce_hessian(-rhs_h)
+            return a_gg(g), reduce_hessian(-rhs_h)
+
+        def hessian_row_defect(g, u):
+            """``A_Hg·g − A_HH·u`` in ONE evaluation of the Hessian equation rather than two.
+
+            This is the quantity the coupled sweep drives to zero, and writing it as a difference of
+            two rows spends two passes over the faces on something one pass produces — over the
+            **largest** field in the scheme, the Hessian equation carrying a tensor per face where
+            the gradient equation carries a vector.
+
+            The saving is exact rather than an approximation: `hessian_face_terms` is linear in the
+            gradient and the Hessian jointly, so evaluating it at ``(-g, h)`` gives
+            ``H(0, h) − H(g, 0)`` — precisely the combination wanted. The boundary closure is linear
+            too and the ``g`` half contributes nothing to it, so ``boundary_hessian(h)`` is the right
+            argument for the merged call.
+            """
+            h = expand_symmetric(u, dim)
+            return reduce_hessian(
+                -vol[:, None, None] * h
+                + face_cells.scatter(*hessian_face_terms(-g, h, -g, h, boundary_hessian(h)))
+            )
 
         def a_hh(u):
             # The innermost loop: only the Hessian equation, so the gradient equation's face-curvature
@@ -2714,10 +3163,28 @@ class HessianCorrectedGradient(GradientScheme):
                 *gradient_face_terms(zero_g, h, zero_g, h, boundary_hessian(h), zero_f, zero_b)
             )
 
-        # Per-cell diagonal blocks, from the same face kernel the operators are built from. `A_gg`'s
-        # is `(dim, dim)` and acts on the gradient directly; the reduced Hessian equation's is
-        # `(n_sym, n_sym)` and no longer factors — imposing symmetry couples the two tensor indices
-        # that the Kronecker structure above kept apart.
+        def gradient_row_defect(g, u):
+            """``A_gg·g − A_gH·u`` in ONE evaluation of the gradient equation rather than two.
+
+            The companion of :func:`hessian_row_defect`, on the other row and for the same reason:
+            `gradient_face_terms` is linear in the gradient and the Hessian jointly, so evaluating it
+            once at ``(g, −h)`` gives ``G(g, 0) − G(0, h)`` — precisely the combination the sweep's
+            gradient update needs. The boundary closure is linear too, so ``boundary_hessian(−h)`` is
+            the right argument for the merged call.
+
+            This is the more valuable of the two merges even though it saves the same one pass, because
+            the gradient equation is evaluated **twice** per sweep against the Hessian equation's once,
+            and it is the pass that carries the face-curvature and warp terms.
+            """
+            h = expand_symmetric(-u, dim)
+            return scale(g, vol) - face_cells.scatter(
+                *gradient_face_terms(g, h, g, h, boundary_hessian(h), zero_f, zero_b)
+            )
+
+        # `A_gg`'s per-cell diagonal block, probed from the same face kernel the operator is built
+        # from, so the two cannot drift. The reduced Hessian equation's block is `(n_sym, n_sym)` and
+        # no longer factors — imposing symmetry couples the two tensor indices that the Kronecker
+        # structure above kept apart — but it needs no probe at all; see `inner()`.
         def gg_owner(probe):
             owner_side, _ = gradient_face_terms(
                 probe, zero_h, zero_g, zero_h, zero_h, zero_f, zero_b
@@ -2730,31 +3197,26 @@ class HessianCorrectedGradient(GradientScheme):
             )
             return face_cells.scatter(no_face_g, neighbour_side)
 
-        def hh_reduced_owner(probe):
-            lit = expand_symmetric(probe, dim)
-            owner_side, _ = hessian_face_terms(
-                zero_g, lit, zero_g, zero_h, prepared_closure.diagonal(lit)
-            )
-            return reduce_hessian(face_cells.scatter(owner_side, no_face_h))
-
-        def hh_reduced_neighbour(probe):
-            _, side = hessian_face_terms(
-                zero_g, zero_h, zero_g, expand_symmetric(probe, dim), zero_h
-            )
-            return reduce_hessian(face_cells.scatter(no_face_h, side))
-
         def inner():
-            # `cell_diagonal_block`'s explicit-diagonal shortcut does not apply after the reduction:
-            # the diagonal term is no longer `vol · I` in the packed coordinates, so it is probed
-            # alongside the two face halves instead of being added as a scalar.
-            def column(unit):
-                probe = jnp.broadcast_to(unit, (n_cells, n_sym))
-                diagonal = reduce_hessian(vol[:, None, None] * expand_symmetric(probe, dim))
-                return diagonal - hh_reduced_owner(probe) - hh_reduced_neighbour(probe)
+            """The reduced Hessian system, whose per-cell block costs NO pass over the faces.
 
-            _, columns = jax.lax.scan(
-                lambda carry, unit: (carry, column(unit)), None, jnp.eye(n_sym)
-            )
+            The unreduced Hessian equation's per-cell action is exactly ``H ↦ H·C`` for the
+            ``(dim, dim)`` block ``C`` built above — that is the Kronecker structure `A_P` already
+            relies on — and the reduction is the fixed linear map ``(A_P E)ᵀ``. So the reduced block's
+            column for the unit component ``e_a`` is ``contract_symmetric(E(e_a)·C·C) / vol``:
+            per-cell arithmetic on a small dense matrix already in hand.
+
+            Probing it instead costs ``n_sym`` evaluations of the face kernel — twelve passes over the
+            faces in three dimensions, each gathering a tensor per face — to recover a block that the
+            algebra gives for nothing. It is the same quantity either way, and a unit test pins the
+            two against each other; this route simply does not pay for it.
+            """
+            # `E(e_a)` for each unit component, cell-independent, so the einsum below contracts a
+            # fixed `(dim, dim)` against the per-cell block rather than broadcasting a tensor field.
+            basis = expand_symmetric(jnp.eye(n_sym), dim)
+            columns = jax.vmap(
+                lambda unit: reduce_hessian(jnp.einsum("ij,nlj->nil", unit, hessian_cell_block))
+            )(basis)
             block = jnp.moveaxis(columns, 0, -1)
             return GradientSystem(CellBlockJacobi(jnp.linalg.inv(block)), a_hh, (n_cells, n_sym))
 
@@ -2846,6 +3308,8 @@ class HessianCorrectedGradient(GradientScheme):
             inner solve it would never run — so reaching it through `outer` would mean handing that
             call a strategy chosen only to be discarded.
             """
+            if prepared_outer is not None:
+                return prepared_outer
             block = cell_diagonal_block(gg_owner, gg_neighbour, vol, n_cells, dim)
             if use_local_schur_block:
                 block = local_schur_block(block, inner_system.preconditioner.inverse)
@@ -2871,14 +3335,16 @@ class HessianCorrectedGradient(GradientScheme):
             # vectors known to be zero.
             def step(carry, _):
                 g, h = carry
-                # One pass gives both of this iterate's rows -- the gradient equation's and the
-                # Hessian equation's -- so the sweep costs three face-kernel passes, not four.
-                a_gg_g, a_hg_g = gradient_and_hessian_rows(g)
-                h_next = h + hessian_preconditioner.apply(a_hg_g - a_hh(h))
+                # TWO face-kernel evaluations, not four: each row is evaluated ONCE, at the argument
+                # that yields the defect that row's update needs, rather than once per block and then
+                # subtracted. Both rows are linear in `(g, H)` jointly, which is what makes the
+                # merged argument exact rather than an approximation -- see `hessian_row_defect` and
+                # `gradient_row_defect`.
+                h_next = h + hessian_preconditioner.apply(hessian_row_defect(g, h))
                 # Gauss-Seidel, not Jacobi: the gradient update uses the Hessian just computed. That
                 # is what lets a single Hessian sweep per gradient sweep converge at all.
                 g_next = g + sweep.relaxation * gradient_preconditioner.apply(
-                    rhs_g - a_gg_g + a_gh(h_next)
+                    rhs_g - gradient_row_defect(g, h_next)
                 )
                 return (g_next, h_next), None
 
@@ -2928,6 +3394,8 @@ class HessianCorrectedGradient(GradientScheme):
             inner=inner,
             outer=outer,
             outer_preconditioner=outer_preconditioner,
+            hessian_row_defect=hessian_row_defect,
+            gradient_row_defect=gradient_row_defect,
             block_sweep=block_sweep,
             coupled_error=coupled_error,
         )

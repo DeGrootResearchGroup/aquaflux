@@ -30,6 +30,7 @@ from aquaflux.schemes import (
     AveragedNeighbourHessian,
     CellBlockJacobi,
     CompactGreenGauss,
+    ContractionRate,
     CorrectedGreenGauss,
     CoupledBlockSweep,
     ExactCellBlock,
@@ -46,6 +47,7 @@ from aquaflux.schemes import (
     SweptGradientSolve,
     cell_diagonal_block,
     contraction_rate,
+    fastest_boundary_closure,
     narrow_gradient_sweeps,
 )
 from aquaflux.schemes import gradient as gradient_module
@@ -1982,3 +1984,347 @@ def test_narrowing_reaches_the_coupled_sweep_as_well_as_the_swept_solve() -> Non
         HessianCorrectedGradient(hessian_solve=NestedHessianSolve()), 3
     ).hessian_solve
     assert nested.solver.sweeps == 3 and nested.hessian_solver.sweeps == 3
+
+
+def test_the_merged_hessian_defect_is_the_difference_of_the_two_rows_it_replaces() -> None:
+    """The coupled sweep evaluates the Hessian equation ONCE where it used to evaluate it twice, and
+    the saving is only legitimate if the kernel is linear in the gradient and the Hessian *jointly*.
+
+    That is the property pinned here, because it is the one an unrelated change could break: a term
+    added to ``hessian_face_terms`` that mixes ``g`` and ``h`` — a product, a limiter, anything not
+    linear in the pair — would leave the sweep silently solving a different system, converging to
+    something plausible and wrong rather than failing.
+
+    Two identities together establish it. The ``h``-only branch must BE the inner operator's row, tying
+    the merged path to the operator the preconditioner was built for; and the merged evaluation must
+    equal the sum of its one-sided parts, which is joint linearity stated directly.
+    """
+    mesh = perturbed_grid_2d(5, 5, perturb=0.25, seed=0)
+    geometry = mesh.geometry()
+    systems = HessianCorrectedGradient._systems(mesh, geometry)
+    n_cells, dim = mesh.n_cells, mesh.dim
+    n_sym = gradient_module.symmetric_components(dim)
+
+    rng = np.random.default_rng(0)
+    g = jnp.asarray(rng.standard_normal((n_cells, dim)))
+    u = jnp.asarray(rng.standard_normal((n_cells, n_sym)))
+    zero_g, zero_u = jnp.zeros((n_cells, dim)), jnp.zeros((n_cells, n_sym))
+
+    # With the gradient zeroed the defect is exactly `-A_HH u`, and exactly rather than nearly: the
+    # merged call reduces to the same arithmetic the operator does.
+    assert np.array_equal(
+        np.asarray(systems.hessian_row_defect(zero_g, u)),
+        -np.asarray(systems.inner().operator(u)),
+    )
+
+    # Joint linearity. Not bit-exact, because evaluating once at `(-g, h)` contracts the multiply-adds
+    # differently from evaluating twice and subtracting -- the same rounding the scanned sweeps and
+    # the `dot` helper carry, and one unit in the last place rather than an approximation.
+    both = np.asarray(systems.hessian_row_defect(g, u))
+    apart = np.asarray(systems.hessian_row_defect(g, zero_u)) + np.asarray(
+        systems.hessian_row_defect(zero_g, u)
+    )
+    assert np.abs(both - apart).max() <= 1e-15 * max(np.abs(apart).max(), 1.0)
+
+
+def test_the_merged_gradient_defect_is_the_difference_of_the_two_rows_it_replaces() -> None:
+    """The sweep's gradient update is the same one-pass merge, on the row that is evaluated twice.
+
+    ``A_gg·g − A_gH·u`` is what the update needs, and evaluating the two blocks separately spends two
+    passes over the faces on something one pass produces. As with the Hessian row, the saving rests on
+    ``gradient_face_terms`` being linear in ``(g, h)`` **jointly**, so that is what is pinned — a term
+    that mixed the two would leave the sweep converging to something plausible and wrong.
+
+    The un-eliminated coupled operator supplies the reference: its gradient block *is* ``A_gg·g +
+    A_gH·u``, so evaluating it at ``−u`` gives the combination the merged call must reproduce, without
+    restating either block here.
+    """
+    mesh = perturbed_grid_2d(5, 5, perturb=0.25, seed=0)
+    systems = HessianCorrectedGradient._systems(mesh, mesh.geometry())
+    n_cells, dim = mesh.n_cells, mesh.dim
+    n_sym = gradient_module.symmetric_components(dim)
+
+    rng = np.random.default_rng(1)
+    g = jnp.asarray(rng.standard_normal((n_cells, dim)))
+    u = jnp.asarray(rng.standard_normal((n_cells, n_sym)))
+    zero_g, zero_u = jnp.zeros((n_cells, dim)), jnp.zeros((n_cells, n_sym))
+
+    packed = jnp.concatenate([g, -u], axis=1)
+    reference = np.asarray(systems.coupled.operator(packed)[:, :dim])
+    merged = np.asarray(systems.gradient_row_defect(g, u))
+    assert np.abs(merged - reference).max() <= 1e-14 * max(np.abs(reference).max(), 1.0)
+
+    # Joint linearity stated directly, as for the Hessian row.
+    apart = np.asarray(systems.gradient_row_defect(g, zero_u)) + np.asarray(
+        systems.gradient_row_defect(zero_g, u)
+    )
+    assert np.abs(merged - apart).max() <= 1e-14 * max(np.abs(apart).max(), 1.0)
+
+
+@pytest.mark.parametrize(
+    "mesh",
+    [
+        perturbed_grid_2d(4, 4, perturb=0.25, seed=3),
+        perturbed_grid_3d(3, 3, 3, perturb=0.2, seed=5),
+    ],
+    ids=["quadrilateral", "hexahedral"],
+)
+def test_the_reduced_hessian_block_matches_the_operator_it_preconditions(mesh) -> None:
+    """The reduced Hessian block is built by algebra rather than by probing the faces, and this is
+    what says the algebra is the same quantity the probes returned.
+
+    The reference is deliberately neither implementation: the inner operator is materialized densely,
+    one cell-component at a time, and each cell's own diagonal block is read straight off it. That is
+    far too expensive for a real mesh and exactly right for a small one — it shares no shortcut with
+    the code under test, so it cannot agree with it for the wrong reason.
+
+    ⚠️ The block's orientation is the trap here, not its values. ``cell_diagonal_block`` probes the
+    Hessian equation through a single tensor row, so what it returns is the **transpose** of the
+    matrix that equation multiplies by; getting that backwards produces a block that is plausible,
+    symmetric on symmetric meshes, and wrong by a few percent on skewed ones.
+    """
+    systems = HessianCorrectedGradient._systems(mesh, mesh.geometry())
+    n_cells = mesh.n_cells
+    n_sym = gradient_module.symmetric_components(mesh.dim)
+    inner = systems.inner()
+
+    def column(index):
+        cell, component = divmod(index, n_sym)
+        return inner.operator(jnp.zeros((n_cells, n_sym)).at[cell, component].set(1.0))
+
+    dense = jax.vmap(column)(jnp.arange(n_cells * n_sym)).reshape(n_cells, n_sym, n_cells, n_sym)
+    reference = np.stack([np.asarray(dense[c, :, c, :]).T for c in range(n_cells)])
+    built = np.asarray(jnp.linalg.inv(inner.preconditioner.inverse))
+    assert np.abs(built - reference).max() <= 1e-12 * np.abs(reference).max()
+
+
+@pytest.mark.parametrize(
+    "mesh",
+    [
+        perturbed_grid_2d(6, 6, perturb=0.25, seed=1),
+        perturbed_grid_3d(4, 4, 4, perturb=0.2, seed=2),
+    ],
+    ids=["quadrilateral", "hexahedral"],
+)
+def test_binding_the_outer_preconditioner_changes_the_cost_and_not_the_answer(mesh) -> None:
+    """A bound scheme must return the SAME gradient, bit for bit, not merely a close one.
+
+    The outer preconditioner is geometry-only, so binding it is meant to be pure bookkeeping. But
+    the sweep runs a fixed number of times rather than to a tolerance, which means the
+    preconditioner determines the answer and not just how fast the sweep reaches it — so anything
+    that disturbs it shows up as a wrong gradient rather than a slower one, and equality to a
+    tolerance would not catch a subtly different preconditioner.
+    """
+    geometry = mesh.geometry()
+    scheme = HessianCorrectedGradient(hessian_solve=CoupledBlockSweep(sweeps=7))
+    bound = scheme.bind(mesh, geometry)
+    assert bound.prepared_outer is not None
+
+    rng = np.random.default_rng(4)
+    field = jnp.asarray(rng.standard_normal((mesh.n_cells,)))
+    boundary_values = jnp.zeros((mesh.n_faces,))
+
+    plain = scheme.gradients(field, mesh, geometry, boundary_values)
+    cached = bound.gradients(field, mesh, geometry, boundary_values)
+    assert np.array_equal(np.asarray(plain), np.asarray(cached))
+
+
+def test_a_bound_scheme_refuses_a_geometry_it_was_not_bound_to() -> None:
+    """Reusing a binding across meshes is silently wrong, so it is refused.
+
+    The failure this prevents is not a crash but a plausible answer: the preconditioner belongs to
+    one geometry, and with a fixed sweep count it shapes the result. A cell-count mismatch is the
+    detectable half and is rejected here; a different geometry at the same cell count cannot be
+    detected and is documented as the caller's responsibility.
+    """
+    bound_to = perturbed_grid_2d(6, 6, perturb=0.25, seed=1)
+    other = perturbed_grid_2d(5, 5, perturb=0.25, seed=1)
+    scheme = HessianCorrectedGradient().bind(bound_to, bound_to.geometry())
+
+    with pytest.raises(ValueError, match="bound to a geometry of"):
+        scheme.gradients(
+            jnp.zeros((other.n_cells,)),
+            other,
+            other.geometry(),
+            jnp.zeros((other.n_faces,)),
+        )
+
+
+def test_binding_leaves_the_gradient_differentiable_in_the_field() -> None:
+    """Binding must be transparent to the differentiation a flow solve actually performs.
+
+    The bound preconditioner is a constant with respect to the field, which is correct and is the
+    whole point — but a constant that accidentally severed the field's own path would still return
+    finite numbers, so this compares the derivative against the unbound scheme's rather than merely
+    asserting it is finite.
+    """
+    mesh = perturbed_grid_2d(5, 5, perturb=0.2, seed=6)
+    geometry = mesh.geometry()
+    scheme = HessianCorrectedGradient(hessian_solve=CoupledBlockSweep(sweeps=6))
+    bound = scheme.bind(mesh, geometry)
+
+    rng = np.random.default_rng(7)
+    field = jnp.asarray(rng.standard_normal((mesh.n_cells,)))
+    boundary_values = jnp.zeros((mesh.n_faces,))
+
+    def total(sch, phi):
+        return jnp.sum(sch.gradients(phi, mesh, geometry, boundary_values) ** 2)
+
+    plain = jax.grad(lambda phi: total(scheme, phi))(field)
+    cached = jax.grad(lambda phi: total(bound, phi))(field)
+    assert np.abs(np.asarray(plain)).max() > 0.0
+    assert np.array_equal(np.asarray(plain), np.asarray(cached))
+
+
+def test_an_assembler_prepares_its_gradient_scheme_for_its_own_geometry() -> None:
+    """Assemblers bind the scheme they are given, and this is what keeps that true.
+
+    Binding is a pure cost change, so nothing about the numbers would fail if the call were dropped
+    — the residual would simply go back to rebuilding geometry-only work on every evaluation, once
+    per field per Krylov matvec, and no test would notice. That is the failure this pins.
+
+    Binding belongs here rather than at the call site for a reason worth stating: the assembler owns
+    the geometry and the scheme *together*, so it cannot pair a binding with a mesh it was not built
+    for — the mismatch a caller doing this by hand could create.
+    """
+    from aquaflux.boundary import BoundaryConditions, ZeroGradient
+    from aquaflux.discretization import DiffusionFlux, ResidualAssembler
+    from aquaflux.properties import Constant, PropertyModel
+
+    mesh = perturbed_grid_2d(5, 5, perturb=0.2, seed=8)
+    geometry = mesh.geometry()
+    scheme = HessianCorrectedGradient(hessian_solve=CoupledBlockSweep(sweeps=6))
+
+    def assembler_with(gradient_scheme):
+        return ResidualAssembler.build(
+            mesh,
+            geometry,
+            PropertyModel({"diffusivity": Constant(1.0)}),
+            (DiffusionFlux(),),
+            BoundaryConditions({"boundary": ZeroGradient()}),
+            gradient_scheme=gradient_scheme,
+        )
+
+    assembler = assembler_with(scheme)
+    assert assembler.gradient_scheme.prepared_outer is not None
+
+    # Preparing must not have moved the answer. Compare against the same assembler holding the
+    # unprepared scheme, which is what the residual was before this became automatic.
+    unbound = eqx.tree_at(
+        lambda a: a.gradient_scheme, assembler, scheme, is_leaf=lambda x: x is None
+    )
+    rng = np.random.default_rng(9)
+    phi = jnp.asarray(rng.standard_normal((mesh.n_cells,)))
+    assert np.array_equal(np.asarray(assembler.residual(phi)), np.asarray(unbound.residual(phi)))
+
+
+def test_a_scheme_with_nothing_to_prepare_is_returned_unchanged() -> None:
+    """The interface default is an identity, not a placeholder that quietly copies.
+
+    Most reconstructions have no geometry-only work worth holding, and for those ``bind`` must be
+    free — an assembler calls it on every scheme it is handed, without knowing which ones benefit.
+    Identity is asserted rather than equality, since a scheme that rebuilt an equal copy on every
+    assembler construction would pass an equality check while defeating the point.
+    """
+    mesh = perturbed_grid_2d(4, 4, perturb=0.2, seed=10)
+    scheme = CorrectedGreenGauss()
+    assert scheme.bind(mesh, mesh.geometry()) is scheme
+
+
+def test_the_coupled_sweep_calibrates_against_the_preconditioner_it_will_run_with() -> None:
+    """A sweep count measured under one preconditioner and spent under another is the wrong count.
+
+    ``local_schur_block`` selects the outer preconditioner, so it sets the sweep's contraction rate
+    and therefore the count. The factory took the parameter and did not forward it, so the count came
+    from the cheaper preconditioner while the scheme ran the other one.
+
+    ⚠️ **This hides on well-shaped meshes and bites on the ones the scheme exists for.** At 35 % hex
+    perturbation the two preconditioners contract at 0.2551 and 0.2570 — indistinguishable, and any
+    test built on such a mesh would have passed throughout. On perturbed tetrahedra they are 0.6620
+    and 0.8980, which is 23 sweeps against 64 for the same tolerance, so that is the mesh used here.
+
+    Both directions are pinned, because forwarding a *constant* would satisfy either one alone.
+    """
+    mesh = tetrahedral_grid_3d(4, perturb=0.15, seed=3)
+    geometry = mesh.geometry()
+    closure = AveragedNeighbourHessian()
+
+    with_block = CoupledBlockSweep.calibrated(
+        mesh, geometry, boundary_closure=closure, local_schur_block=True
+    ).sweeps
+    without_block = CoupledBlockSweep.calibrated(
+        mesh, geometry, boundary_closure=closure, local_schur_block=False
+    ).sweeps
+    assert with_block < without_block
+
+    # The scheme's own factory must hand its field down rather than letting the default stand in.
+    for local_schur_block, expected in ((True, with_block), (False, without_block)):
+        scheme = HessianCorrectedGradient.calibrated(
+            mesh, geometry, boundary_closure=closure, local_schur_block=local_schur_block
+        )
+        assert scheme.local_schur_block is local_schur_block
+        assert scheme.hessian_solve.sweeps == expected
+
+
+def test_the_fastest_boundary_closure_is_the_mesh_s_choice_not_a_global_ranking() -> None:
+    """The two shipped closures swap places with mesh quality, which is the reason to measure.
+
+    On well-shaped cells the owner closure contracts faster; on cells bad enough to leave its Hessian
+    block singular it cannot contract at all and the neighbour-averaged closure wins. Both regimes are
+    checked, because a selector that always returned one of them would pass either test alone.
+    """
+    good = perturbed_grid_2d(6, 6, perturb=0.2, seed=1)
+    assert isinstance(fastest_boundary_closure(good, good.geometry()), OwnerHessian)
+
+    degenerate = tetrahedral_grid_3d(4, perturb=0.15, seed=3)
+    picked = fastest_boundary_closure(degenerate, degenerate.geometry())
+    assert isinstance(picked, AveragedNeighbourHessian)
+
+
+def test_the_selector_rejects_a_candidate_whose_probe_was_annihilated() -> None:
+    """The singular closure must lose, whether its rate comes back huge or as the estimator's floor.
+
+    Which of the two happens is PLATFORM-DEPENDENT and cost a CI run to find: the same mesh and
+    closure measure 8.64 under macOS Accelerate and 2.2e-308 -- the smallest normal double, the floor
+    `contraction_rate` reports for an annihilated probe -- under the BLAS on the CI runners. The
+    second reads as a *perfect* contraction, so a selector comparing rates alone hands the singular
+    closure the win precisely where it is broken.
+
+    The floor is simulated rather than waited for, since the platform that produces it is not the one
+    this test usually runs on -- which is the whole reason it went unnoticed.
+    """
+    mesh = tetrahedral_grid_3d(4, perturb=0.15, seed=3)
+    measured = []
+    real = gradient_module.contraction_rate
+
+    def annihilate_the_first(system, **kwargs):
+        """Report the first candidate as annihilated, exactly as the CI platform does."""
+        measured.append(system)
+        if len(measured) == 1:
+            return ContractionRate(np.finfo(np.float64).tiny, np.finfo(np.float64).tiny, True)
+        return real(system, **kwargs)
+
+    gradient_module.contraction_rate = annihilate_the_first
+    try:
+        picked = fastest_boundary_closure(mesh, mesh.geometry())
+    finally:
+        gradient_module.contraction_rate = real
+
+    assert len(measured) == 2  # it did not stop at the apparently-perfect first candidate
+    assert isinstance(picked, AveragedNeighbourHessian)
+
+
+def test_the_closure_selector_compares_only_what_it_is_given() -> None:
+    """The candidate list is the whole search, so a single candidate comes back unchanged.
+
+    This is what lets a caller compare a calibrated blend weight, or a closure of their own, rather
+    than only the two defaults -- and it pins that the selector is not quietly consulting a fixed
+    list of its own.
+    """
+    mesh = perturbed_grid_2d(5, 5, perturb=0.2, seed=4)
+    only = AveragedNeighbourHessian(weight=0.4)
+    picked = fastest_boundary_closure(mesh, mesh.geometry(), candidates=(only,))
+    assert picked is only
+
+    with pytest.raises(ValueError, match="at least one candidate"):
+        fastest_boundary_closure(mesh, mesh.geometry(), candidates=())

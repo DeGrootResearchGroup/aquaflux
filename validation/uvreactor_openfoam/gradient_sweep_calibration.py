@@ -42,6 +42,7 @@ scale; prefer the default reference unless its own self-check reports it unconve
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import resource
 import sys
@@ -53,17 +54,21 @@ sys.path.insert(0, str(HERE.parents[1]))
 
 import aquaflux  # noqa: E402,F401  (enables x64)
 import equinox as eqx  # noqa: E402
+import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 from aquaflux.io import read_openfoam  # noqa: E402
 from aquaflux.mesh.quality import face_planarity  # noqa: E402
 from aquaflux.schemes import (  # noqa: E402
+    AveragedNeighbourHessian,
     CorrectedGreenGauss,
     GmresGradientSolve,
     HessianCorrectedGradient,
     NestedHessianSolve,
+    OwnerHessian,
     SweptGradientSolve,
 )
+from aquaflux.schemes.gradient import contraction_rate  # noqa: E402
 from aquaflux.schemes.interpolation import interpolation_factor  # noqa: E402
 from aquaflux.vectors import norm_squared  # noqa: E402
 
@@ -90,6 +95,24 @@ OUTER_INNER_SWEEPS = int(os.environ.get("UV_OUTER_INNER", "6"))
 # So the relaxation is part of what has to be calibrated per mesh, not a constant: swept alongside the
 # sweep count, because the two trade against each other (heavier damping needs more sweeps).
 OUTER_RELAXATIONS = tuple(float(x) for x in os.environ.get("UV_OUTER_RELAX", "1.0").split(","))
+#: Relaxations to measure the COUPLED sweep's contraction rate at, under ``--rate``. A rate is one
+#: cheap measurement where an accuracy rung is a full reconstruction, so a ladder here is affordable
+#: on a mesh where the ladder above is not. Over-relaxation has an interior optimum on well-shaped
+#: cells and moves back toward 1.0 as they degrade, so the point of measuring it here is to find out
+#: which regime this mesh is in -- not to confirm a value found on a synthetic one.
+RATE_RELAXATIONS = tuple(
+    float(x) for x in os.environ.get("UV_RATE_RELAX", "1.0,1.05,1.1").split(",")
+)
+#: Which ``local_schur_block`` settings ``--rate`` measures (default both). Worth restricting once a
+#: mesh has answered the question: on the UV reactor the cheap preconditioner does not merely
+#: converge more slowly, it DIVERGES (rate 2.01 against 0.54), so measuring it again spends half the
+#: run re-establishing a known result. Keep both on an unfamiliar mesh -- which of the two is usable
+#: is exactly what a first run is for.
+RATE_SCHUR_BLOCKS = tuple(x != "0" for x in os.environ.get("UV_RATE_SCHUR", "1,0").split(","))
+#: Krylov depth for `--spectrum`. Each step holds one more `(n_cells, dim + n_sym)` vector on the
+#: host, ~118 MB at 1.6M cells, so this is the knob to lower if the probe will not fit.
+SPECTRUM_STEPS = int(os.environ.get("UV_SPECTRUM_STEPS", "12"))
+SPECTRUM_POWER_STEPS = int(os.environ.get("UV_SPECTRUM_POWER", "40"))
 
 
 def peak_rss_gb() -> float:
@@ -267,6 +290,165 @@ def reconstruct(scheme, field, mesh, geometry, bvals, label):
     return gradient
 
 
+def coupled_sweep_rates(mesh, geometry) -> None:
+    """Measure the coupled block sweep's contraction rate on this mesh, and what it implies.
+
+    The rate is what sets the sweep count: `ceil(log(tol) / log(rate))`. It is one estimate rather
+    than a ladder of reconstructions, so this fits where the accuracy ladder does not -- and it is
+    the quantity that says whether a mesh sits in the regime the defaults were calibrated for.
+
+    Three things are varied, because each has been measured to matter on some mesh and not on
+    others: the boundary closure (it changes the operator), ``local_schur_block`` (it selects the
+    outer preconditioner, and the two differ only where cells are bad), and the relaxation.
+    """
+    print("\ncoupled block sweep -- contraction rate", flush=True)
+    print(
+        f"  {'closure':<26} {'schur blk':>9} {'relax':>6} {'rate':>8} "
+        f"{'sweeps@1e-4':>12} {'@1e-6':>7}",
+        flush=True,
+    )
+    for closure_name, closure in (
+        ("OwnerHessian (shipped)", OwnerHessian()),
+        ("AveragedNeighbourHessian", AveragedNeighbourHessian()),
+    ):
+        systems = HessianCorrectedGradient._systems(mesh, geometry, closure)
+        inner = systems.inner()
+        for local_schur_block in RATE_SCHUR_BLOCKS:
+            preconditioner = systems.outer_preconditioner(inner, local_schur_block)
+            for relaxation in RATE_RELAXATIONS:
+                measured = contraction_rate(
+                    systems.coupled_error(relaxation, preconditioner, inner.preconditioner)
+                ).rate
+                if measured < 1.0:
+                    counts = tuple(
+                        math.ceil(math.log(tol) / math.log(measured)) for tol in (1e-4, 1e-6)
+                    )
+                    shown = f"{counts[0]:>12} {counts[1]:>7}"
+                else:
+                    shown = f"{'DIVERGES':>12} {'--':>7}"
+                print(
+                    f"  {closure_name:<26} {local_schur_block!s:>9} {relaxation:>6.2f} "
+                    f"{measured:>8.4f} {shown}   (peak {peak_rss_gb():.2f} GB)",
+                    flush=True,
+                )
+            del preconditioner
+        del systems, inner
+
+
+def spectrum_probe(mesh, geometry) -> None:
+    """What kind of error the sweep is left with, and what any polynomial could do about it.
+
+    Two questions, one pass, because both are properties of the same operator and both decide what
+    is worth building next.
+
+    **How much headroom a polynomial method has.** The sweep's residual after `k` steps is
+    ``M^k b`` -- itself a degree-`k` polynomial of the preconditioned operator with ``q(0) = 1`` --
+    and GMRES minimizes over exactly that class. So GMRES's count is an *upper bound* on any
+    fixed-coefficient acceleration (Chebyshev and friends), which cannot adapt to the right-hand
+    side and so does strictly worse. Both are read as residuals of the same system on the same
+    right-hand side; comparing either against the asymptotic rate raised to `k` compares an error
+    with a residual and is meaningless on an operator this nonnormal.
+
+    **What the slow mode looks like.** The dominant eigenvector of the error operator says which
+    remaining candidate can touch it: a smooth, delocalized mode is what a coarse grid represents,
+    and a mode concentrated on a few bad cells is what a targeted patch solve reaches. Reported as
+    the share of energy on the worst cells, and as how much one neighbour-averaging pass changes it.
+    """
+    closure = AveragedNeighbourHessian()
+    systems = HessianCorrectedGradient._systems(mesh, geometry, closure)
+    inner = systems.inner()
+    err = systems.coupled_error(
+        1.0, systems.outer_preconditioner(inner, True), inner.preconditioner
+    )
+    shape = err.shape
+    apply_a = jax.jit(err.operator)  # v -> (I - M) v
+    apply_m = jax.jit(lambda v: v - err.operator(v))  # v -> M v
+
+    rng = np.random.default_rng(0)
+    b = jnp.asarray(rng.standard_normal(shape))
+    norm_b = float(jnp.linalg.norm(b))
+
+    print("\ncoupled block sweep -- polynomial headroom", flush=True)
+    stationary, residual = [], b
+    for _ in range(SPECTRUM_STEPS):
+        residual = apply_m(residual)
+        stationary.append(float(jnp.linalg.norm(residual)) / norm_b)
+    del residual
+    print(f"  stationary residuals measured (peak {peak_rss_gb():.2f} GB)", flush=True)
+
+    basis = [np.asarray(b).ravel() / norm_b]
+    hessenberg = np.zeros((SPECTRUM_STEPS + 1, SPECTRUM_STEPS))
+    optimal = []
+    for k in range(SPECTRUM_STEPS):
+        w = np.asarray(apply_a(jnp.asarray(basis[k].reshape(shape)))).ravel()
+        for j in range(k + 1):
+            hessenberg[j, k] = basis[j] @ w
+            w = w - hessenberg[j, k] * basis[j]
+        hessenberg[k + 1, k] = np.linalg.norm(w)
+        if hessenberg[k + 1, k] < 1e-14:
+            break
+        basis.append(w / hessenberg[k + 1, k])
+        unit = np.zeros(k + 2)
+        unit[0] = 1.0
+        y, *_ = np.linalg.lstsq(hessenberg[: k + 2, : k + 1], unit, rcond=None)
+        optimal.append(float(np.linalg.norm(hessenberg[: k + 2, : k + 1] @ y - unit)))
+
+    print(f"  {'k':>3} {'sweep resid':>13} {'best poly':>13} {'headroom':>9}", flush=True)
+    for k in range(len(optimal)):
+        print(
+            f"  {k + 1:>3} {stationary[k]:>13.3e} {optimal[k]:>13.3e} "
+            f"{stationary[k] / optimal[k]:>8.2f}x",
+            flush=True,
+        )
+
+    def first_below(seq, tol=1e-4):
+        return next((i + 1 for i, v in enumerate(seq) if v < tol), None)
+
+    print(
+        f"  applications to 1e-4: plain sweep {first_below(stationary)}, "
+        f"best polynomial {first_below(optimal)}   (peak {peak_rss_gb():.2f} GB)",
+        flush=True,
+    )
+    del basis
+
+    # ---- the slow mode's character.
+    print("\ncoupled block sweep -- the dominant error mode", flush=True)
+    v = jnp.asarray(rng.standard_normal(shape))
+    v = v / jnp.linalg.norm(v)
+    for _ in range(SPECTRUM_POWER_STEPS):
+        v = apply_m(v)
+        v = v / jnp.linalg.norm(v)
+
+    energy = jnp.sum(v**2, axis=1)
+    order = jnp.argsort(energy)[::-1]
+    total = float(jnp.sum(energy))
+    n_cells = mesh.n_cells
+    for share in (0.001, 0.01, 0.10):
+        take = max(1, int(share * n_cells))
+        held = float(jnp.sum(energy[order[:take]])) / total
+        print(
+            f"  worst {100 * share:>5.1f}% of cells hold {100 * held:>5.1f}% of the mode's energy "
+            f"({held / share:>6.1f}x their population share)",
+            flush=True,
+        )
+
+    face_cells = mesh.face_cells
+    interior = face_cells.interior[:, None]
+    owner, neighbour = face_cells.owner, face_cells.safe_neighbour
+    summed = jnp.zeros_like(v).at[owner].add(jnp.where(interior, v[neighbour], 0.0))
+    summed = summed.at[neighbour].add(jnp.where(interior, v[owner], 0.0))
+    counts = jnp.zeros((n_cells, 1), dtype=v.dtype).at[owner].add(interior.astype(v.dtype))
+    counts = counts.at[neighbour].add(interior.astype(v.dtype))
+    averaged = summed / jnp.maximum(counts, 1.0)
+    roughness = float(jnp.linalg.norm(v - averaged) / jnp.linalg.norm(v))
+    print(
+        f"  roughness |v - avg(v)| / |v| = {roughness:.4f}   "
+        f"(0 = perfectly smooth, so a coarse grid represents it; ~1 = cell-scale)",
+        flush=True,
+    )
+    print(f"  peak RSS {peak_rss_gb():.2f} GB", flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     # Optional, with a ``UV_MESH`` fallback: this is written for a mesh large enough to need
@@ -279,6 +461,20 @@ def main() -> None:
         nargs="?",
         default=os.environ.get("UV_MESH"),
         help="path to a polyMesh directory (or set UV_MESH)",
+    )
+    parser.add_argument(
+        "--spectrum",
+        action="store_true",
+        default=os.environ.get("UV_SPECTRUM", "") not in ("", "0"),
+        help="measure the polynomial headroom and the dominant error mode, then stop",
+    )
+    parser.add_argument(
+        # `UV_RATE` for the same reason `UV_MESH` exists: `validation/run_case.sh` invokes a script
+        # with no arguments, and this is the mode most likely to be run through it.
+        "--rate",
+        action="store_true",
+        default=os.environ.get("UV_RATE", "") not in ("", "0"),
+        help="measure the coupled sweep's contraction rate and stop (cheap; skips the ladders)",
     )
     parser.add_argument(
         "--exact",
@@ -315,6 +511,14 @@ def main() -> None:
     print(f"  peak RSS after import + geometry: {peak_rss_gb():.2f} GB", flush=True)
     skewness_census(mesh, geometry)
 
+    if args.spectrum:
+        spectrum_probe(mesh, geometry)
+        return
+
+    if args.rate:
+        coupled_sweep_rates(mesh, geometry)
+        return
+
     field, bvals, analytic = probe_field(geometry)
 
     # ORDER: the ladder runs CHEAPEST-FIRST and the reference runs LAST, which is the opposite of
@@ -326,7 +530,10 @@ def main() -> None:
     # them all to compare at the end is free next to one more reconstruction.
     print("\ninner (Hessian) solve -- reconstruction vs a converged reference", flush=True)
     print("  inner sweeps (cheapest first; the reference runs last)", flush=True)
-    default_sweeps = HessianCorrectedGradient().hessian_solver.sweeps
+    # The ladder below calibrates the NESTED arrangement's inner solve, so the count to mark is that
+    # arrangement's own default -- not the scheme's, whose default is now the coupled sweep and whose
+    # count means something different.
+    default_sweeps = NestedHessianSolve().hessian_solver.sweeps
     measured: list[tuple[int, np.ndarray]] = []
     for sweeps in sorted(INNER_LADDER):
         gradient = reconstruct(
