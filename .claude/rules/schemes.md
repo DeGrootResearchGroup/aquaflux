@@ -1838,7 +1838,7 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
 
   Every other block lands at 1e-4 to 3e-2. **The descent slope is the same in both arms and negative**
   (−2.6831e-02 against −2.6830e-02), so this is not a direction problem — it is the finite-step
-  curvature, which is the shape `.claude/rules/solve-globalization-log.md` already records as
+  curvature, which is the shape `.claude/notes/solve-globalization-log.md` already records as
   "descent is necessary but not sufficient".
 
   **Why twenty orders: `omega` is transported as `log omega`, so the correction is a LOG increment and
