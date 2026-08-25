@@ -259,6 +259,7 @@ def test_the_imposed_wall_gradient_is_handed_to_the_scheme_not_applied_to_its_re
             operator_hook=None,
             imposed=None,
             boundary_values_at=None,
+            boundary_chain=None,
         ):
             handed.append(imposed)
             return self.inner.gradients(field, mesh, geometry, boundary_values)

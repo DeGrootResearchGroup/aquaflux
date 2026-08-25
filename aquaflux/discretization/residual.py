@@ -50,6 +50,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 
 from aquaflux.boundary import BoundaryConditions
@@ -369,8 +370,37 @@ class ResidualAssembler(eqx.Module):
             # gradient throws away. This lets such a scheme ask for the corrected values at its own
             # reconstructed gradient; the ones passed above stay leading-order for everything else.
             boundary_values_at=lambda g: self.boundary_values(phi, g, properties),
+            # Which patches derive their value from the owner cell, read off the closures themselves
+            # rather than declared: one where the boundary value follows `phi_P`, zero where it is
+            # prescribed, and in between for a Robin condition. A scheme uses it to give its first
+            # pass the value consistent with the cell's own field there, instead of one asserting a
+            # normal derivative an unconverged iterate does not have -- a linear-order error no
+            # correction calibrated on quadratics can remove.
+            boundary_chain=self._boundary_chain(phi, zero_grad, properties),
         )
         return gradient, self.boundary_values(phi, gradient, properties)
+
+    def _boundary_chain(
+        self,
+        phi: jnp.ndarray,
+        gradient: jnp.ndarray,
+        properties: dict[str, jnp.ndarray],
+    ) -> jnp.ndarray:
+        """``d(boundary value)/d(phi_owner)`` per face, shape ``(n_faces,)``.
+
+        Differentiated from the closures rather than declared, so it cannot disagree with them and
+        needs no new information from a boundary condition: a prescribed value does not move with the
+        owner and returns zero, a zero-gradient or Neumann one follows it exactly and returns one, and
+        a Robin condition returns the fraction it actually carries.
+
+        The gradient is held fixed, so this is the derivative through the *value* alone -- the
+        gradient's own contribution is what the scheme is folding in.
+        """
+        return jax.jvp(
+            lambda p: self.boundary_values(p, gradient, properties),
+            (phi,),
+            (jnp.ones_like(phi),),
+        )[1]
 
     def gradient(self, phi: jnp.ndarray) -> jnp.ndarray:
         """Reconstructed cell gradients of ``phi``, shape ``(n_cells, dim)``.
