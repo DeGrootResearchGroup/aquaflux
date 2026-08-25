@@ -1199,8 +1199,9 @@ def coupled_continuation(
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     cycle_budget: int | None = None,
     positivity_floor: float = 0.0,
-    positivity_projection: bool = False,
+    positivity_projection: bool = True,
     jacobian_gradient_sweeps: int | None = None,
+    jacobian_production_viscosity: bool = False,
     **preconditioner_kwargs: object,
 ) -> ForwardStep:
     """Build the pseudo-transient continuation step for the coupled Newton solve.
@@ -1345,6 +1346,18 @@ def coupled_continuation(
         ``schur_scaling``, ``velocity``). Ignored when ``reuse`` is given, since the flow block is then
         carried over rather than rebuilt.
 
+    jacobian_production_viscosity : bool
+        Freeze ``k`` inside the k-production's eddy viscosity in the **operator** the shifted solve
+        differentiates, leaving the residual it is driving to zero exact (see
+        :func:`frozen_production_viscosity`). ``nu_t`` is proportional to ``k``, so the production is
+        too, and differentiating that puts a negative term on the k row's Jacobian diagonal which the
+        pseudo-time shift then has to cancel. ``False`` (default) is byte-identical.
+
+        ⚠️ **A caller supplying its own ``probe`` must build it from the same stand-in.** A probe built
+        here follows the operator automatically, but one passed in does not, and a preconditioner
+        assembled from a different matrix than the one being solved is a preconditioner for the wrong
+        problem -- measured at 22--26 restart cycles a step against 4--14 when the two were mismatched,
+        the stand-in differing from the exact operator by a term the size of the k row's own diagonal.
     jacobian_gradient_sweeps : int, optional
         Cap the gradient reconstruction's sweeps in the copy of the residual the **forward Jacobian**
         is differentiated from, leaving the residual itself untouched -- so the root the march lands on
@@ -1405,6 +1418,7 @@ def coupled_continuation(
         step_limit=positive_k_limit(coupled, floor=positivity_floor),
         step_projection=(positive_k_projection(coupled) if positivity_projection else None),
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
+        jacobian_production_viscosity=jacobian_production_viscosity,
     )
 
 
@@ -1780,6 +1794,7 @@ class CoupledJacobianProbe:
     plan: ColumnProbePlan
     structure: ProbeGather
     gradient_sweeps: int | None = None
+    production_viscosity_frozen: bool = eqx.field(static=True, default=False)
 
     @classmethod
     def build(
@@ -1790,6 +1805,7 @@ class CoupledJacobianProbe:
         gradient_sweeps: int | None = None,
         *,
         active_rows: np.ndarray | None = None,
+        production_viscosity_frozen: bool = False,
     ) -> CoupledJacobianProbe:
         """Colour the cell graph at these reaches and precompute the de-compression for it.
 
@@ -1809,6 +1825,18 @@ class CoupledJacobianProbe:
             Probe a copy of the residual whose corrected-gradient solve is capped at this many
             Richardson sweeps, rather than the residual itself. See :meth:`narrow`. ``None`` (default)
             probes the residual as it stands.
+        production_viscosity_frozen : bool
+            Materialize the Jacobian of the **frozen-production** copy
+            (:func:`frozen_production_viscosity`) rather than of ``coupled`` itself. Set it whenever
+            the solve runs with ``jacobian_production_viscosity``: the preconditioner must be
+            assembled from the operator the Krylov iteration APPLIES, and those two differ by a term
+            the size of the k row's own diagonal. ``False`` (default) is byte-identical.
+
+            ⚠️ **This is not the same axis as ``gradient_sweeps`` even though both go through**
+            :meth:`narrow`. That one narrows the probe while the operator stays exact — its purpose is
+            to make the colouring collision-free. This one follows an operator that has already
+            changed. Setting the wrong one leaves a preconditioner built for a matrix nobody solves:
+            measured on the pitzDaily target rung at 18--28 restart cycles a step against 4--14.
         active_rows : np.ndarray, optional
             Exclude field-pair blocks from the materialized pattern entirely -- for a probe built
             specifically to feed one consumer that is known never to read some sub-block of the
@@ -1823,7 +1851,9 @@ class CoupledJacobianProbe:
             The shared probe.
         """
         plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach, active_rows)
-        return cls(plan, block_stencil_gather_map(plan), gradient_sweeps)
+        return cls(
+            plan, block_stencil_gather_map(plan), gradient_sweeps, production_viscosity_frozen
+        )
 
     def narrow(self, coupled: CoupledRANS) -> CoupledRANS:
         """The assembler this probe differentiates -- ``coupled``, or a reduced-sweep copy of it.
@@ -1859,7 +1889,46 @@ class CoupledJacobianProbe:
         CoupledRANS
             The narrowed copy, or ``coupled`` itself when no cap was asked for.
         """
-        return _probed_assembler(coupled, self.gradient_sweeps)
+        narrowed = _probed_assembler(coupled, self.gradient_sweeps)
+        # Both stand-ins land here, which is what keeps every consumer -- the initial build, the
+        # refresh hook, and the rebind across a Reynolds rung -- materializing the same operator the
+        # Krylov solve applies, without any of them knowing there are two axes.
+        return (
+            frozen_production_viscosity(narrowed) if self.production_viscosity_frozen else narrowed
+        )
+
+
+def frozen_production_viscosity(coupled: CoupledRANS) -> CoupledRANS:
+    """``coupled`` with ``k`` frozen inside the k-production's eddy viscosity.
+
+    The Patankar treatment of the one term that drives the k row's Jacobian diagonal negative:
+    ``nu_t`` is proportional to ``k``, so the production ``nu_t S**2`` is too, and subtracting a
+    source that grows with its own variable puts a negative term on that row's diagonal. See
+    :attr:`~aquaflux.turbulence.SSTTurbulence.explicit_production_viscosity` for what that costs and
+    what freezing it buys.
+
+    ⚠️ **The copy is for a Jacobian stand-in only** -- pass its ``residual`` as the operator a shifted
+    solve differentiates, so the true residual still decides where the march lands and the converged
+    root and its implicit-function-theorem adjoint are untouched. This term is active everywhere, not
+    only where some cap bites, so a *residual* carrying it would make the sensitivity wrong
+    everywhere.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The assembled coupled system.
+
+    Returns
+    -------
+    CoupledRANS
+        A copy whose turbulence assembler carries the flag. ``coupled`` itself is unchanged.
+    """
+    # `dataclasses.replace`, not `eqx.tree_at`: the flag is a STATIC field, so it lives in the
+    # treedef rather than among the leaves and `tree_at` cannot address it at all.
+    return dataclasses.replace(
+        coupled,
+        turbulence=dataclasses.replace(coupled.turbulence, explicit_production_viscosity=True),
+    )
 
 
 def _probed_assembler(coupled: CoupledRANS, gradient_sweeps: int | None) -> CoupledRANS:
@@ -1952,6 +2021,7 @@ def _coupled_step(
     step_limit: Callable[..., jnp.ndarray] | None = None,
     step_projection: Callable[..., jnp.ndarray] | None = None,
     jacobian_gradient_sweeps: int | None = None,
+    jacobian_production_viscosity: bool = False,
 ) -> ForwardStep:
     """Assemble the pseudo-transient / dual-time step around an already-composed shift policy.
 
@@ -1993,6 +2063,18 @@ def _coupled_step(
         See :class:`~aquaflux.solve.PseudoTransientStep` and :class:`~aquaflux.solve.DualTimeStep`.
     forward_solver, block_scaled_norm, residual_norm, inner_observer, refresh_on_cycles, inner_refresh, cycle_budget, step_limit, step_projection
         The linear solve, the progress measure and the per-step guards. See the two step classes.
+    jacobian_production_viscosity : bool
+        Freeze ``k`` inside the k-production's eddy viscosity in the **operator** the shifted solve
+        differentiates, leaving the residual it is driving to zero exact (see
+        :func:`frozen_production_viscosity`). ``nu_t`` is proportional to ``k``, so the production is
+        too, and differentiating that puts a negative term on the k row's Jacobian diagonal which the
+        pseudo-time shift then has to cancel. ``False`` (default) is byte-identical.
+
+        ⚠️ **A caller supplying its own ``probe`` must build it from the same stand-in.** A probe built
+        here follows the operator automatically, but one passed in does not, and a preconditioner
+        assembled from a different matrix than the one being solved is a preconditioner for the wrong
+        problem -- measured at 22--26 restart cycles a step against 4--14 when the two were mismatched,
+        the stand-in differing from the exact operator by a term the size of the k row's own diagonal.
     jacobian_gradient_sweeps : int, optional
         Cap the gradient reconstruction's sweeps in the copy of the residual the **forward Jacobian**
         is differentiated from, leaving the residual itself untouched. ``None`` (the default)
@@ -2044,10 +2126,13 @@ def _coupled_step(
         )
     # The residual whose Jacobian--vector product is the Krylov operator. `None` leaves the step
     # differentiating the residual it is driving to zero, exactly as before.
+    jacobian_operator = _probed_assembler(coupled, jacobian_gradient_sweeps)
+    if jacobian_production_viscosity:
+        jacobian_operator = frozen_production_viscosity(jacobian_operator)
     jacobian_residual = (
         None
-        if jacobian_gradient_sweeps is None
-        else _probed_assembler(coupled, jacobian_gradient_sweeps).residual
+        if jacobian_gradient_sweeps is None and not jacobian_production_viscosity
+        else jacobian_operator.residual
     )
     schedule = SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent, beta_floor=beta_floor)
     # The forward solve stops in the SAME measure object the march reports and accepts steps in, so a
@@ -2138,6 +2223,7 @@ def _monolithic_factor_step(
     step_limit: Callable[..., jnp.ndarray] | None = None,
     step_projection: Callable[..., jnp.ndarray] | None = None,
     jacobian_gradient_sweeps: int | None = None,
+    jacobian_production_viscosity: bool = False,
     grow: int = 0,
     descent_backoff: int = 0,
     descent_test: bool = False,
@@ -2177,6 +2263,7 @@ def _monolithic_factor_step(
         step_limit=step_limit,
         step_projection=step_projection,
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
+        jacobian_production_viscosity=jacobian_production_viscosity,
     )
 
 
@@ -2211,11 +2298,12 @@ def coupled_lu_continuation(
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     cycle_budget: int | None = None,
     positivity_floor: float = 0.0,
-    positivity_projection: bool = False,
+    positivity_projection: bool = True,
     grow: int = 0,
     descent_backoff: int = 0,
     descent_test: bool = False,
     jacobian_gradient_sweeps: int | None = None,
+    jacobian_production_viscosity: bool = False,
 ) -> ForwardStep:
     """Build a pseudo-transient continuation step preconditioned by a monolithic **complete** coupled LU.
 
@@ -2296,6 +2384,18 @@ def coupled_lu_continuation(
         ``inner_steps > 1``); see :class:`~aquaflux.solve.DualTimeStep`. ``None`` (default) leaves the
         step byte-identical. Forward-only -- do not set it on a differentiated solve.
 
+    jacobian_production_viscosity : bool
+        Freeze ``k`` inside the k-production's eddy viscosity in the **operator** the shifted solve
+        differentiates, leaving the residual it is driving to zero exact (see
+        :func:`frozen_production_viscosity`). ``nu_t`` is proportional to ``k``, so the production is
+        too, and differentiating that puts a negative term on the k row's Jacobian diagonal which the
+        pseudo-time shift then has to cancel. ``False`` (default) is byte-identical.
+
+        ⚠️ **A caller supplying its own ``probe`` must build it from the same stand-in.** A probe built
+        here follows the operator automatically, but one passed in does not, and a preconditioner
+        assembled from a different matrix than the one being solved is a preconditioner for the wrong
+        problem -- measured at 22--26 restart cycles a step against 4--14 when the two were mismatched,
+        the stand-in differing from the exact operator by a term the size of the k row's own diagonal.
     jacobian_gradient_sweeps : int, optional
         Cap the gradient reconstruction's sweeps in the copy of the residual the **forward Jacobian**
         is differentiated from, leaving the residual itself untouched -- so the root the march lands on
@@ -2361,6 +2461,7 @@ def coupled_lu_continuation(
         step_limit=positive_k_limit(coupled, floor=positivity_floor),
         step_projection=(positive_k_projection(coupled) if positivity_projection else None),
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
+        jacobian_production_viscosity=jacobian_production_viscosity,
         grow=grow,
         descent_backoff=descent_backoff,
         descent_test=descent_test,
@@ -2401,7 +2502,7 @@ def coupled_amg_continuation(
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     cycle_budget: int | None = None,
     positivity_floor: float = 0.0,
-    positivity_projection: bool = False,
+    positivity_projection: bool = True,
     grow: int = 0,
     descent_backoff: int = 0,
     descent_test: bool = False,
@@ -2414,6 +2515,7 @@ def coupled_amg_continuation(
     probe: CoupledJacobianProbe | None = None,
     preconditioner: MonolithicAmgPreconditioner | None = None,
     jacobian_gradient_sweeps: int | None = None,
+    jacobian_production_viscosity: bool = False,
 ) -> ForwardStep:
     """Build a pseudo-transient continuation step preconditioned by a monolithic **algebraic-multigrid** V-cycle.
 
@@ -2527,15 +2629,29 @@ def coupled_amg_continuation(
         fraction-to-the-boundary rule and is byte-identical to it. It does not move the converged root
         or the adjoint -- at a root the correction vanishes and the limiter is inactive for any floor.
     positivity_projection : bool
-        Additionally clip each cell's OWN ``k`` correction, so a cell that would cross zero is held
-        back alone instead of shortening the step for every cell (see
-        :func:`~aquaflux.solve.positive_block_projection`). Prefer this to raising ``positivity_floor``
-        where one numerically-dead cell is setting the step length: a floor postpones that collapse by
-        a fixed number of decades and cannot remove it, because ``(k + floor)`` decays by the same
-        ``1 - tau`` per capped step whatever the floor is, whereas clipping removes the coupling
-        between that cell and the rest. Applied before the cap, which then finds nothing binding and
-        reports ``1``. ``False`` (default) is byte-identical. Like the floor it does not move the
-        converged root or the adjoint -- at a root the correction vanishes and it clips nothing.
+        Clip each cell's OWN ``k`` correction, so a cell that would cross zero is held back alone
+        instead of shortening the step for every cell (see
+        :func:`~aquaflux.solve.positive_block_projection`). **``True`` is the default**, for the
+        reason below; ``False`` restores the plain global cap. Applied before the cap, which then
+        finds nothing binding and reports ``1``. Like the floor it does not move the converged root
+        or the adjoint -- at a root the correction vanishes and it clips nothing.
+
+        ⚠️ **The global cap it replaces is a step-length device controlled by the single worst entry
+        of the smallest-magnitude block, and it has been measured losing a march outright.** On a
+        separating coupled-RANS benchmark every failing step length was the cap rather than a rung of
+        the line search's ladder -- ``0.003108``, ``0.154``, ``0.0004484``, none a power of one half
+        and the last *below the shortest rung*, which only the cap can produce -- and the march then
+        died in the ``1 - tau``-per-step collapse :func:`~aquaflux.solve.positive_block_projection`
+        derives, its inner residual running ``8.462e-06 -> 8.353e-08 -> 8.353e-10`` at ratios of
+        exactly ``0.01``. Raising ``positivity_floor`` cannot remove that: ``(k + floor)`` decays by
+        the same factor whatever the floor is, so a floor buys decades and nothing else.
+
+        Measured on that benchmark, the arm that stalls under the cap completes under the projection,
+        and **the arm that already worked gets faster**: 703.7 s / 437 cycles / 73 steps under the cap
+        against 664.0 s / 459 cycles / 67 steps under the projection, both reaching the same
+        reattachment length to four figures. Two reconstructions whose costs differed sharply under
+        the cap land within 0.5 % of each other under the projection -- which is the point: the cap
+        let one cell's correction set the step for every degree of freedom in the state.
     field_split : bool
         Precondition with a **block-triangular field split** — separate multigrid hierarchies for the
         ``[u, v, w, p]`` saddle and the ``[k, ω]`` transported scalars, retaining one triangle of the
@@ -2596,6 +2712,18 @@ def coupled_amg_continuation(
         the root either way, so a stale V-cycle can only ever cost Krylov cycles — never the converged
         state or its adjoint.
 
+    jacobian_production_viscosity : bool
+        Freeze ``k`` inside the k-production's eddy viscosity in the **operator** the shifted solve
+        differentiates, leaving the residual it is driving to zero exact (see
+        :func:`frozen_production_viscosity`). ``nu_t`` is proportional to ``k``, so the production is
+        too, and differentiating that puts a negative term on the k row's Jacobian diagonal which the
+        pseudo-time shift then has to cancel. ``False`` (default) is byte-identical.
+
+        ⚠️ **A caller supplying its own ``probe`` must build it from the same stand-in.** A probe built
+        here follows the operator automatically, but one passed in does not, and a preconditioner
+        assembled from a different matrix than the one being solved is a preconditioner for the wrong
+        problem -- measured at 22--26 restart cycles a step against 4--14 when the two were mismatched,
+        the stand-in differing from the exact operator by a term the size of the k row's own diagonal.
     jacobian_gradient_sweeps : int, optional
         Cap the gradient reconstruction's sweeps in the copy of the residual the **forward Jacobian**
         is differentiated from, leaving the residual itself untouched -- so the root the march lands on
@@ -2669,6 +2797,11 @@ def coupled_amg_continuation(
             # ever becomes a parameter here, this must move with it. `None` when not splitting, so a
             # monolithic build (which DOES read every block) is unaffected.
             active_rows=groups.active_rows() if field_split else None,
+            # A preconditioner must be assembled from the operator the Krylov iteration APPLIES. When
+            # the step differentiates a stand-in, so must the probe -- otherwise the two differ by a
+            # term the size of the k row's own diagonal, which is a preconditioner for a matrix nobody
+            # solves. A caller supplying its own `probe` has to set this itself.
+            production_viscosity_frozen=jacobian_production_viscosity,
         )
     plan, structure = probe.plan, probe.structure
     frozen = jax.lax.stop_gradient(reference_state)
@@ -2766,6 +2899,7 @@ def coupled_amg_continuation(
         # nothing binding. `None` (default) leaves the cap the only constraint, byte-identically.
         step_projection=(positive_k_projection(coupled) if positivity_projection else None),
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
+        jacobian_production_viscosity=jacobian_production_viscosity,
         grow=grow,
         descent_backoff=descent_backoff,
         descent_test=descent_test,
@@ -4257,8 +4391,9 @@ def mass_flow_coupled_continuation(
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     cycle_budget: int | None = None,
     positivity_floor: float = 0.0,
-    positivity_projection: bool = False,
+    positivity_projection: bool = True,
     jacobian_gradient_sweeps: int | None = None,
+    jacobian_production_viscosity: bool = False,
     **preconditioner_kwargs: object,
 ) -> ForwardStep:
     """The pseudo-transient continuation step for the **mass-flow-constrained** coupled Newton solve.
@@ -4328,6 +4463,7 @@ def mass_flow_coupled_continuation(
         step_limit=positive_k_limit(coupled, floor=positivity_floor),
         step_projection=(positive_k_projection(coupled) if positivity_projection else None),
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
+        jacobian_production_viscosity=jacobian_production_viscosity,
     )
 
 

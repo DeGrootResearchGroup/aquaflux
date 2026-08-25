@@ -227,9 +227,22 @@ FILL_LEVELS, SWEEPS, COARSE_EQ_LIMIT, PC_BETA_FLOOR = 1, 4, 2000, 0.05
 FIELD_SPLIT = os.environ.get("PITZ_FIELD_SPLIT", "1") not in ("", "0")
 TRAILING_SWEEPS = 1
 
-#: Clip each cell's own correction rather than scaling the whole step by the worst cell. Off by
-#: default and byte-identical off; it removes a failure mode rather than buying speed.
-POSITIVITY_PROJECTION = os.environ.get("PITZ_K_POSITIVITY_PROJECTION", "") not in ("", "0")
+#: Clip each cell's own correction rather than scaling the whole step by the worst cell. **ON since
+#: 2026-08-25**, because on this case the plain global cap was measured losing a march outright.
+#:
+#: Every failing step length under the cap was the cap and not a rung of the line search's ladder
+#: (`0.003108`, `0.154`, `0.0004484` -- none a power of one half, the last BELOW the shortest rung),
+#: and the march then died in the `1 - tau`-per-step collapse `positive_block_projection` derives, its
+#: inner residual running `8.462e-06 -> 8.353e-08 -> 8.353e-10` at ratios of exactly 0.01. Raising
+#: `K_POSITIVITY_FLOOR` cannot remove that -- `(k + floor)` decays by the same factor whatever the
+#: floor is.
+#:
+#: Measured here, same commit, same everything else: an arm that stalls at the target rung under the
+#: cap completes under the projection, and **the arm that already worked got faster** -- 703.7 s /
+#: 437 cycles / 73 steps against 664.0 s / 459 cycles / 67 steps, both `x_r/h` 8.069. Two gradient
+#: reconstructions whose costs differ sharply under the cap land within 0.5 % of each other under it.
+#: `PITZ_K_POSITIVITY_PROJECTION=0` restores the cap.
+POSITIVITY_PROJECTION = os.environ.get("PITZ_K_POSITIVITY_PROJECTION", "1") not in ("", "0")
 
 #: ⚠️ THE WALL CONDITION ON `k`, AND IT IS A CHOICE OF PROBLEM RATHER THAN OF SOLVER. Turbulent
 #: fluctuations vanish at a no-slip wall, so `k -> 0` and `Dirichlet(0)` is the textbook condition --

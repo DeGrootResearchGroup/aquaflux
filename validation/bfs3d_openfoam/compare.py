@@ -735,8 +735,16 @@ _TRAILING_SMOOTHER_NOTE = (
 K_POSITIVITY_FLOOR = float(os.environ.get("BFS3D_K_POSITIVITY_FLOOR", "1e-8") or 0.0)
 
 #: Clip each cell's OWN `k` correction rather than capping the whole step by the worst cell
-#: (`BFS3D_K_POSITIVITY_PROJECTION=1`). Off by default and byte-identical off, pending an end-to-end
-#: measurement on this case.
+#: (`BFS3D_K_POSITIVITY_PROJECTION=1`). ⚠️ **Still off HERE, and deliberately: the library default and
+#: the sibling case both moved to ON on 2026-08-25, on a measurement taken on the sibling and NOT on
+#: this case.** There the cap was losing a march outright -- every failing step length was the cap
+#: rather than a rung of the ladder, one of them below the shortest rung, followed by the `1 - tau`
+#: collapse derived below -- and turning the projection on completed that march AND made the
+#: already-working arm faster (703.7 s / 73 steps -> 664.0 s / 67 steps, same answer).
+#:
+#: This case has never been marched under it, so flipping it here would be an unmeasured change to a
+#: validated 3D result. Run the A/B and flip it if it holds; until then this case is deliberately out
+#: of step with its sibling, which is a state worth knowing about rather than discovering.
 #:
 #: This is the structural answer to what the floor above can only postpone. The cap is a minimum over
 #: cells, so the stagnant corner where the step face, the floor and a side wall meet -- no shear, so no
