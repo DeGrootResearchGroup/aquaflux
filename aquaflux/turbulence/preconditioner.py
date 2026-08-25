@@ -152,13 +152,22 @@ def _scalar_operator_pieces(
     """The frozen scalar convection-diffusion-reaction operator, as sparse pieces (no fixed cells).
 
     Shared by the AMG preconditioner and the pseudo-time shift diagonal: both need the same interior
-    stencil (``viscous + first-order-upwind convection``) and the same reaction-plus-boundary diagonal.
+    stencil (``viscous + first-order-upwind convection``) and the same raw reaction-plus-boundary
+    diagonal.
 
-    Returns ``(owner_e, nb_e, visc_int, mdot_int, boundary_diagonal, n)`` -- the interior-face edge
+    Returns ``(owner_e, nb_e, visc_int, mdot_int, reaction_diagonal, n)`` -- the interior-face edge
     endpoints, the per-edge flux-continuous diffusion conductance ``Gamma_P A / denom`` and owner-outward volume flux
-    ``mdot``, the clamped reaction+boundary diagonal, and the cell count. Value fixations (e.g. the
+    ``mdot``, the **unclamped** reaction+boundary diagonal, and the cell count. Value fixations (e.g. the
     omega near-wall cells) are *not* applied here -- each consumer imposes its own (the preconditioner
     detaches them from the aggregation; the shift zeroes them).
+
+    **The sign treatment is the consumer's too, and the two need opposite ones.** A source that grows
+    with the field lowers this entry and can take it negative. The preconditioner must *drop* that
+    (``maximum(., 0)``): an indefinite operator is not one an aggregation V-cycle can coarsen, and a
+    softer preconditioner only costs iterations. The pseudo-time shift must instead keep its
+    **magnitude** (``abs``), because a row destabilized by its own source is exactly a row whose local
+    pseudo-timestep has to be *smaller* -- i.e. whose shift has to be *larger*. Clamping here served
+    both consumers from one array and so silently handed the shift the preconditioner's answer.
     """
     face_cells = mesh.face_cells
     owner_e, nb_e, interior_faces = face_cells.interior_edges()
@@ -183,12 +192,8 @@ def _scalar_operator_pieces(
     interior_outflow = np.zeros(n)
     np.add.at(interior_outflow, owner_e, mdot_int)
     np.add.at(interior_outflow, nb_e, -mdot_int)
-    boundary_diagonal = np.asarray(jax.lax.stop_gradient(j_dot_one)) - interior_outflow
-    # Clamp non-negative: any residual anti-diffusive source (e.g. an active production limiter not
-    # already made explicit) would make the operator indefinite and its V-cycle diverge; dropping it
-    # keeps an M-matrix and only softens the preconditioner (it approximates the Jacobian).
-    boundary_diagonal = np.maximum(boundary_diagonal, 0.0)
-    return owner_e, nb_e, visc_int, mdot_int, boundary_diagonal, n
+    reaction_diagonal = np.asarray(jax.lax.stop_gradient(j_dot_one)) - interior_outflow
+    return owner_e, nb_e, visc_int, mdot_int, reaction_diagonal, n
 
 
 def scalar_transport_shift_diagonal(
@@ -200,6 +205,7 @@ def scalar_transport_shift_diagonal(
     reference: jnp.ndarray,
     *,
     fixed_cells: jnp.ndarray | None = None,
+    source_feedback: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """The pseudo-time shift diagonal for a scalar transport equation -- the ``a_P`` analogue.
 
@@ -224,6 +230,9 @@ def scalar_transport_shift_diagonal(
         (``phi - target`` directly, ``log(phi/target)`` under a log parametrization) (e.g. the omega near-wall cells).
         Their shift is zeroed: an exact algebraic constraint needs no pseudo-time damping (a full
         Newton step converges it in one), and shifting an identity row only slows it.
+    source_feedback : jnp.ndarray, optional
+        Per-cell ``d(source)/d(phi)``, volume-integrated, that ``residual_fn`` does **not** carry --
+        see :func:`scalar_transport_shift_diagonal_parts`.
 
     Returns
     -------
@@ -231,7 +240,14 @@ def scalar_transport_shift_diagonal(
         The non-negative per-cell shift diagonal ``d``, shape ``(n_cells,)``.
     """
     convective, dissipative = scalar_transport_shift_diagonal_parts(
-        mesh, geometry, diffusivity, volume_flux, residual_fn, reference, fixed_cells=fixed_cells
+        mesh,
+        geometry,
+        diffusivity,
+        volume_flux,
+        residual_fn,
+        reference,
+        fixed_cells=fixed_cells,
+        source_feedback=source_feedback,
     )
     return convective + dissipative
 
@@ -245,6 +261,7 @@ def scalar_transport_shift_diagonal_parts(
     reference: jnp.ndarray,
     *,
     fixed_cells: jnp.ndarray | None = None,
+    source_feedback: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """The convective and dissipative buckets of the scalar shift diagonal, per cell.
 
@@ -254,7 +271,7 @@ def scalar_transport_shift_diagonal_parts(
 
     - ``convective`` -- the first-order-upwind outflow (owner loses when ``mdot > 0``, neighbour when
       ``mdot < 0``) scattered to each cell.
-    - ``dissipative`` -- the diffusion stiffness on both incident cells plus the clamped
+    - ``dissipative`` -- the diffusion stiffness on both incident cells plus the **magnitude** of the
       reaction+Dirichlet boundary diagonal.
 
     Their sum is :func:`scalar_transport_shift_diagonal`. Both are zeroed on any ``fixed_cells`` (an
@@ -266,16 +283,36 @@ def scalar_transport_shift_diagonal_parts(
     ----------
     mesh, geometry, diffusivity, volume_flux, residual_fn, reference, fixed_cells
         As :func:`scalar_transport_shift_diagonal`.
+    source_feedback : jnp.ndarray, optional
+        Per-cell ``d(source)/d(phi)``, volume-integrated, that ``residual_fn`` does **not** carry --
+        a term the *solved* equation has on its diagonal but this residual's frozen coefficients hide,
+        so the ``J . 1`` row sum cannot see it. Positive means destabilizing (the residual subtracts
+        its sources, so a source growing with the field lowers ``dR/dphi``), and it is subtracted from
+        the reaction diagonal before the magnitude is taken. ``None`` (default) leaves the diagonal as
+        ``residual_fn`` reports it.
+
+        The k equation of a **coupled** RANS residual is the case this exists for: its ``nu_t`` is a
+        live function of ``k``, so the production ``nu_t S**2`` is proportional to ``k`` and feeds
+        ``k`` back into itself, while the frozen-closure ``k`` residual the shift is built from reads
+        ``nu_t`` as a constant array and contains no ``k`` in that term at all. The shift then
+        describes a *different* equation's diagonal, and near a wall the two differ by more than the
+        whole shift.
 
     Returns
     -------
     tuple of jnp.ndarray
         ``(convective, dissipative)``, each shape ``(n_cells,)`` and ``>= 0``.
     """
-    owner_e, nb_e, visc_int, mdot_int, boundary_diagonal, n = _scalar_operator_pieces(
+    owner_e, nb_e, visc_int, mdot_int, reaction_diagonal, n = _scalar_operator_pieces(
         mesh, geometry, diffusivity, volume_flux, residual_fn, reference
     )
-    dissipative = boundary_diagonal.copy()  # reaction + Dirichlet boundary stiffness (>= 0)
+    if source_feedback is not None:
+        reaction_diagonal = reaction_diagonal - np.asarray(jax.lax.stop_gradient(source_feedback))
+    # Magnitude, not the preconditioner's non-negative clamp (see `_scalar_operator_pieces`): a row
+    # whose reaction diagonal has gone negative is destabilized by its own source, so its local
+    # pseudo-timestep must be SMALLER -- its shift larger. Clamping to zero removes the damping in
+    # exactly the cells that need it, and leaves `J + beta d` a near-cancellation there.
+    dissipative = np.abs(reaction_diagonal)
     np.add.at(dissipative, owner_e, visc_int)  # diffusion stiffness on both incident cells
     np.add.at(dissipative, nb_e, visc_int)
     convective = np.zeros(n)
@@ -350,9 +387,14 @@ def scalar_transport_preconditioner(
     """
     if method not in ("twolevel", "air"):
         raise ValueError(f"unknown method {method!r}; use 'twolevel' or 'air'")
-    owner_e, nb_e, visc_int, mdot_int, boundary_diagonal, n = _scalar_operator_pieces(
+    owner_e, nb_e, visc_int, mdot_int, reaction_diagonal, n = _scalar_operator_pieces(
         mesh, geometry, diffusivity, volume_flux, residual_fn, reference
     )
+    # Clamp non-negative: any residual anti-diffusive source (e.g. an active production limiter not
+    # already made explicit) would make the operator indefinite and its V-cycle diverge; dropping it
+    # keeps an M-matrix and only softens the preconditioner (it approximates the Jacobian). The shift
+    # takes the opposite treatment on the same array -- see `_scalar_operator_pieces`.
+    boundary_diagonal = np.maximum(reaction_diagonal, 0.0)
 
     if fixed_cells is not None:
         fixed = np.asarray(fixed_cells)
@@ -361,7 +403,6 @@ def scalar_transport_preconditioner(
         keep = ~(is_fixed[owner_e] | is_fixed[nb_e])
         owner_e, nb_e = owner_e[keep], nb_e[keep]
         visc_int, mdot_int = visc_int[keep], mdot_int[keep]
-        boundary_diagonal = boundary_diagonal.copy()
         # Identity rows: the residual there is the value fixation, not a transport balance. A unit
         # diagonal presumes the fixation row has unit derivative in the solved unknown -- true of the
         # row forms in use, but a caller rescaling this operator for a reparametrized block must take

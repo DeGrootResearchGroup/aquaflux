@@ -53,6 +53,7 @@ from aquaflux.turbulence.coupled import (
     CoupledRANS,
     CoupledRANSLayout,
     LiveViscosityVelocityParts,
+    _coupled_shift_policy,
     _row_jacobian_scale,
     coupled_amg_continuation,
     coupled_continuation,
@@ -130,6 +131,65 @@ def _healthy_state(mesh, coupled, seed=0):
     k = 0.05 + 0.01 * jax.random.uniform(keys[2], (n,))
     omega = 10.0 + jax.random.uniform(keys[3], (n,))
     return coupled.pack_state(flow, k, omega)
+
+
+def _frozen_closure(coupled, state):
+    """The frozen closure and mass flux ``_coupled_shift_policy`` builds its scalar operators from."""
+    flow, k, omega = coupled.physical_fields(state)
+    closure = coupled.turbulence.closure_fields(coupled.momentum.velocity_fields(flow), k, omega)
+    mdot = coupled.momentum.with_eddy_viscosity(closure.nu_t).mass_flux(flow)
+    return closure, mdot, k
+
+
+def test_the_coupled_k_shift_carries_the_productions_own_feedback() -> None:
+    """The coupled k shift is built for the coupled k row, not for the frozen-closure one (#312).
+
+    ``_coupled_shift_policy`` builds its k shift diagonal from ``k_residual(mdot, closure)``, whose
+    ``nu_t`` is a frozen array — so the production ``nu_t S**2`` contains no ``k`` and the ``J . 1``
+    row sum it reads shows no production feedback whatever. The residual actually being marched
+    recomputes ``nu_t = a_1 k / max(a_1 omega, S F_2)`` from the current ``k``, so that production is
+    proportional to ``k`` and its feedback is what drives the coupled k row's diagonal negative. A
+    shift blind to it is the diagonal of a *different* equation, and ``J + beta d`` then near-cancels
+    in exactly the cells the damping exists for.
+
+    Two things are pinned. The wiring: the coupled policy asks for the live-``nu_t`` shift, and the
+    default stays off so a **segregated** sweep — which genuinely does freeze ``nu_t`` — keeps the
+    frozen-closure diagonal it is entitled to. And that the term bites: under strong shear the
+    production takes some rows' reaction diagonal negative, and the shift there **grows**.
+    """
+    assert (
+        inspect.signature(SSTTurbulence.k_shift_policy).parameters["live_eddy_viscosity"].default
+        is False
+    )
+
+    mesh, coupled = _cavity()
+    n = mesh.n_cells
+    keys = jax.random.split(jax.random.PRNGKey(3), 4)
+    # Strong shear at a low omega: production large against destruction, which is the regime the
+    # feedback matters in. A quiescent state would leave the two shifts all but identical.
+    flow = coupled.momentum.pack(
+        2.0 * jax.random.normal(keys[0], (n, mesh.dim)), 0.1 * jax.random.normal(keys[1], (n,))
+    )
+    state = coupled.pack_state(
+        flow,
+        0.05 + 0.01 * jax.random.uniform(keys[2], (n,)),
+        1.0 + jax.random.uniform(keys[3], (n,)),
+    )
+    closure, mdot, k = _frozen_closure(coupled, state)
+    frozen = coupled.turbulence.k_shift_policy(mdot, closure, k).shift_diagonal
+    live = coupled.turbulence.k_shift_policy(
+        mdot, closure, k, live_eddy_viscosity=True
+    ).shift_diagonal
+
+    # `build_flow_block=False`: the shift diagonal is the whole subject here, and the flow block is
+    # the expensive half of the policy.
+    policy = _coupled_shift_policy(coupled, state, None, build_flow_block=False)
+    assert jnp.array_equal(policy.k_shift_transport, live)
+    assert not jnp.allclose(frozen, live)
+    # Where the production has taken the reaction diagonal negative the magnitude is kept, so the
+    # damping there is stronger rather than clamped away.
+    assert float(jnp.max(live / frozen)) > 1.0
+    assert bool(jnp.all(live >= 0.0))
 
 
 def test_coupled_build_rejects_a_turbulence_density_that_disagrees_with_the_flow_assembler() -> (
@@ -736,8 +796,6 @@ def test_refreshing_the_policy_rebuilds_transport_and_carries_the_coordinate_fac
     pinned in ``test_scalar_transport_preconditioner``. ``method=None`` and the symmetric viscous
     velocity block keep the policy build robust to the two synthetic states.
     """
-    from aquaflux.turbulence.coupled import _coupled_shift_policy
-
     mesh, base_coupled = _cavity()
     coupled = CoupledRANS.build(
         base_coupled.momentum, base_coupled.turbulence, omega_transform=LogScalars()

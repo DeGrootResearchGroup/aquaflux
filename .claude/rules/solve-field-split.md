@@ -330,9 +330,12 @@ deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` fr
       `solve-amg-multigrid.md`. **Re-measure this slice before citing the 50 minutes as a cost.**
     **Neither is a verdict on the method, and this is MEASURED rather than argued.** Both builders assume
     an M-matrix-like operator, and `scalar_transport_preconditioner` never hands them one that isn't:
-    `_scalar_operator_pieces` **clamps its reaction diagonal non-negative** for exactly this reason (an
+    it **clamps `_scalar_operator_pieces`' reaction diagonal non-negative** for exactly this reason (an
     anti-diffusive source would make the operator indefinite and its V-cycle diverge). The Jacobian slice
-    is the unclamped truth, so it is simply not in these builders' domain. PETSc GAMG with an ILU(0) or
+    is the unclamped truth, so it is simply not in these builders' domain. (The clamp moved *out* of
+    `_scalar_operator_pieces` and into this consumer on 2026-08-25 — the pseudo-time shift is the other
+    consumer of the same array and needs the opposite treatment, `abs`. Nothing about the preconditioner
+    changed; see the k-shift entry in `turbulence.md`.) PETSc GAMG with an ILU(0) or
     Jacobi smoother is untroubled because it assumes none of this. Built on the **transport** operator
     instead, at the same state on the same mesh, both are perfectly healthy:
 
