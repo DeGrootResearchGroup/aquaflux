@@ -313,15 +313,15 @@ def _flow_boundary_census(coupled, state) -> None:
     scalar transport equations, made here for pressure and velocity -- which that probe never
     reaches, and which take a different route to their boundary values. A scalar equation's
     reconstruction is fed its closures through
-    :meth:`~aquaflux.discretization.ResidualAssembler.boundary_values`, and so can be asked to
-    re-evaluate them at the reconstructed gradient. The flow block's are
-    :meth:`~aquaflux.flow.FlowBoundary.pressure_face` / ``velocity_face``, which take **no gradient
-    at all**: a zero-gradient face value there is the owner's own value, permanently.
+    :meth:`~aquaflux.discretization.ResidualAssembler.boundary_values`; the flow block's are
+    :meth:`~aquaflux.flow.FlowBoundary.pressure_face` / ``velocity_face``, evaluated at the
+    reconstructed gradient by its own two-pass fold. Both therefore carry the tangential
+    non-orthogonal correction, and the reported normal derivative below is the *field's*.
 
-    So on a zero-gradient flow patch ``bval - phi_owner`` is exactly zero however the gradient is
-    reconstructed, and the closure's whole reported normal derivative is
-    ``-non_orthogonal_correction / (d.n)``. Read the ``max |bval - phi_P|`` column first: a zero
-    there means every number to its right is an artifact.
+    Read the ``max |bval - phi_P|`` column first. On a gradient-type patch it is the correction
+    itself, so a **zero** there says the closures are being read at a zero gradient -- and every
+    number to its right is then an artifact rather than a measurement, since the rise the closure
+    divides by ``d.n`` is a term nothing added.
     """
     momentum, mesh, geometry = coupled.momentum, coupled.momentum.mesh, coupled.momentum.geometry
     fields = momentum.flow_fields(coupled.layout.unpack(state)[0])
@@ -416,21 +416,18 @@ def _flow_gradient_difference(built, state) -> None:
 
 
 def _corrected_flow_pressure_gradient(built, state) -> None:
-    """Does supplying the flow block a CORRECTED boundary pressure recover the owner reconstruction?
+    """How far the flow block's CORRECTED boundary pressure moves its reconstruction.
 
-    The scalar equations get their fix through
-    :meth:`~aquaflux.discretization.ResidualAssembler.boundary_values`, which takes a gradient and so
-    can be re-evaluated at the reconstruction's own. The flow block has no such call: its closures take
-    no gradient, so its boundary pressure is the leading-order value permanently. What the corrected
-    value *would* be is nonetheless computable here, generally and without restating the case's patch
-    kinds:
+    The flow closures take the owner's reconstructed gradient, so the boundary pressure the
+    reconstruction and the fluxes read carries its own tangential non-orthogonal correction; the
+    leading-order value (the closures at a **zero** gradient, which is what feeds the first pass) is
+    built here by hand so the two can be compared at one state. On a gradient-type patch they differ
+    by exactly ``non_orthogonal_correction(g_owner, d, n)``, and the census above is where that
+    difference shows up as a reported normal derivative.
 
-        ``p_face(g) = p_face_leading + chain * non_orthogonal_correction(g_owner, d, n)``
-
-    where ``chain = d(p_face)/d(p_owner)`` -- one on a gradient-type patch, zero on a prescribed one,
-    and read off the case's own closures by differentiating them rather than by declaring which is
-    which. If the skew arm's reconstruction moves toward the owner arm's when fed that, the flow
-    block's leading-order boundary value is what separates them.
+    ``chain = d(p_face)/d(p_owner)`` -- one on a gradient-type patch, zero on a prescribed one -- is
+    read off the case's own closures by differentiating them rather than by declaring which is which,
+    and reported to say how many faces the correction can reach at all.
     """
     momentum = built["skew"].momentum
     mesh, geometry = momentum.mesh, momentum.geometry
@@ -440,26 +437,30 @@ def _corrected_flow_pressure_gradient(built, state) -> None:
         for name, coupled in built.items()
     }
     pressure = fields["skew"].pressure
-    leading = fields["skew"].boundary_pressure
+    normal = geometry.face.normal
 
-    def boundary_pressure(p):
+    def boundary_pressure(p, gradient):
         return momentum.boundary.apply(
             face_cells,
             jnp.zeros(mesh.n_faces),
-            lambda bc, faces, owner: bc.pressure_face(p[owner]),
+            lambda bc, faces, owner: bc.pressure_face(
+                p[owner],
+                gradient[owner],
+                geometry.face.centroid[faces] - geometry.cell.centroid[owner],
+                normal[faces],
+                geometry.face.centroid[faces],
+            ),
         )
 
-    chain = jax.jvp(boundary_pressure, (pressure,), (jnp.ones_like(pressure),))[1]
-    displacement = geometry.face.centroid - geometry.cell.centroid[face_cells.owner]
-    normal = geometry.face.normal
-
-    def corrected(gradient):
-        return leading + chain * non_orthogonal_correction(
-            gradient[face_cells.owner], displacement, normal
-        )
-
-    repaired = momentum.gradient_scheme.gradients(
-        pressure, mesh, geometry, leading, boundary_values_at=corrected
+    zero_gradient = jnp.zeros((mesh.n_cells, mesh.dim))
+    leading = boundary_pressure(pressure, zero_gradient)
+    chain = jax.jvp(
+        lambda p: boundary_pressure(p, zero_gradient), (pressure,), (jnp.ones_like(pressure),)
+    )[1]
+    # The leading-order arm the shipped two-pass fold replaced: the same first pass, but with the
+    # closures never re-read at the gradient it produces.
+    uncorrected = momentum.gradient_scheme.gradients(
+        pressure, mesh, geometry, leading, boundary_chain=chain
     )
     print(
         f"  d(p_face)/d(p_owner) is 1 on {int(jnp.sum(chain > 0.5))} boundary faces "
@@ -467,11 +468,18 @@ def _corrected_flow_pressure_gradient(built, state) -> None:
         " (prescribed)",
         flush=True,
     )
+    corrected_bvals = fields["skew"].boundary_pressure
+    rise = np.abs(np.asarray(corrected_bvals - leading))[~np.asarray(face_cells.interior)]
+    print(
+        f"  the correction the closures now carry: max {rise.max():.3e}, med {np.median(rise):.3e} "
+        "over the boundary faces",
+        flush=True,
+    )
     owner_grad = np.asarray(fields["owner"].grad_pressure)
     print(f"  {'grad p arm':<28} {'rel L2 vs owner':>17} {'rel max':>12}", flush=True)
     for label, value in (
-        ("skew, leading-order bvals", np.asarray(fields["skew"].grad_pressure)),
-        ("skew, corrected bvals", np.asarray(repaired)),
+        ("skew, leading-order bvals", np.asarray(uncorrected)),
+        ("skew, corrected bvals (shipped)", np.asarray(fields["skew"].grad_pressure)),
     ):
         print(
             f"  {label:<28} "

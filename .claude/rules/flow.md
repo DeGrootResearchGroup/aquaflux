@@ -121,7 +121,8 @@ Engineering Principles.
     deliberately the lightweight path** (boundary velocity + the shared `_velocity_gradient` only, **no**
     `a_P`/`mdot`): the eddy viscosity a segregated sweep needs comes before the mass flux is even
     defined, so dragging the Rhie–Chow assembly through it would defeat the point. Same formula as the
-    bundle (both compose `_boundary_fields` + `_velocity_gradient`), so no duplication. Pinned by
+    bundle (both read `_velocity_gradient`, which returns the gradient **and** the boundary velocity
+    consistent with it), so no duplication. Pinned by
     `test_flow_fields_accessors_agree_with_the_bundle` / `test_velocity_fields_skips_the_rhie_chow_assembly`.
   - **The kinematic half is its own bundle, `VelocityFields` (`velocity`, `boundary_velocity`,
     `gradient`), nested inside `FlowFields` (binding — Principle 3).** It is exactly the part of a flow
@@ -243,26 +244,46 @@ Engineering Principles.
     velocity/pressure parts, though, are **not re-implemented** here: `velocity_face`/`pressure_face`
     now **delegate to the scalar `Dirichlet`/`ZeroGradient` closures** — one per velocity component
     (`_prescribed_components` → per-component `Dirichlet`/`DirichletField`; a zero-gradient outlet →
-    `ZeroGradient` per component) and one for the pressure — via the module helpers
-    `_leading_order_face_value` / `_velocity_face` / `_pressure_face`. Only `mass_flux` stays
-    flow-specific (and `VelocityInlet.mass_flux` reuses its own `velocity_face`). This also removed
+    `ZeroGradient` per component) and one for the pressure — via the module helpers `_face_value` /
+    `_velocity_face`. Only `mass_flux` stays flow-specific (and `VelocityInlet.mass_flux` reuses the
+    patch's own prescribed value through `_prescribed_reference_velocity`). This also removed
     the duplicated `MovingWall._wall` / `VelocityInlet._inlet` broadcasts. Still **no shared base
     class** with `BoundaryCondition` — composition, not inheritance. (A constant-velocity spec is a
     static `(dim,)` sequence, so `_prescribed_components` indexes it directly — a `jnp.asarray` +
     `float()` there does not concretize under `jit`.)
-  - **`corr` reconciliation (leading-order now; two-pass is the tracked follow-up).** The delegated
-    scalar closures are evaluated at a **zero reconstructed gradient** (the flow assembler passes no
-    boundary-face gradient), so the tangential non-orthogonal correction vanishes and the value is
-    the bare owner value / prescribed value — deliberately leading-order, exact on orthogonal grids.
-    Because the flow path now *reuses* `ZeroGradient` (and its single-homed `_tangential_correction`)
-    rather than re-deriving it, the deferred fix is purely to feed a real gradient in place of the
-    zero. The scalar path additionally does a one-step flux refinement (`residual.py::_gradient`:
-    leading-order boundary → reconstruct gradient → full corr-included boundary → flux); the flow
-    assembler is single-pass and lacks it. Bringing corr into the flow boundary flux **is** the
-    deferred boundary-gradient fold-in (it needs that two-pass and entangles the gradient scheme with
-    the BC closures) and must land for both paths together, with an analytical skewed-flow test — not
-    as a local edit. Both paths are currently leading-order at non-Dirichlet skewed boundaries;
-    documented as deliberate, not drift.
+  - **`corr` reconciliation — DONE, the flow block runs the scalar path's two passes (#313).**
+    `velocity_face` / `pressure_face` take the owner's reconstructed gradient and the
+    owner-centroid→face displacement `d`, so the delegated `ZeroGradient` carries its tangential
+    non-orthogonal correction instead of returning the bare owner value. `MomentumContinuity`
+    supplies it in `_velocity_gradient` / `_pressure_gradient`, which are the shape
+    `residual.py::_gradient` has always had: leading-order boundary values (the closures at a **zero**
+    gradient, which keeps the residual one pass over the state) feed the reconstruction, and the
+    returned pair is `(gradient, closures re-evaluated at it)` — the second being what the viscous
+    flux and the pressure force read. `boundary_values_at` is passed into both reconstructions, so a
+    scheme that *differences* a boundary value gets the corrected one; the previously-noted
+    impossibility ("its closures accept no gradient") is gone. On an orthogonal grid `d ∥ n`, the
+    correction vanishes and the two passes agree exactly, so **nothing moves on an orthogonal mesh**.
+    - Velocity closes **per component**: component `i` reads row `i` of the `(n_cells, dim, dim)`
+      gradient tensor and nothing else of it, which is what lets `_boundary_velocity_component` hand a
+      scheme's per-scalar `boundary_values_at` one component's own `(n_cells, dim)` gradient with the
+      other rows zero-filled rather than plumbed through.
+    - `VelocityInlet.mass_flux` reads `_prescribed_reference_velocity` rather than calling
+      `velocity_face` with fabricated arguments: a prescribed value depends on neither the owner state
+      nor its gradient, so the mass-flux signature does not have to grow two arguments its closure
+      would ignore.
+    - **⚠️ This changes the shipped default's answer on a non-orthogonal mesh** — the *first* pass
+      reads boundary values, so every gradient scheme is affected, not only one that differences them.
+      Any archived bit-identity comparison taken before this is void on a skewed mesh.
+    - Pinned analytically: `tests/integration/test_skewed_flow.py` opens the Couette domain into a
+      `PressureOutlet` (zero-gradient velocity, and the exact field has `grad u·n = 0` there because
+      the perturbation leaves boundary nodes in place). Under `MultipleCorrectionGradient` the outlet
+      face velocity is the exact field to **0.0** and the momentum residual at the exact field is
+      **8.3e-17**; with the second pass removed those become **1.15e-2** and **2.8e-2**. Only the
+      momentum block is asserted: `PressureOutlet.mass_flux` builds its through-flow from the *owner*
+      velocity `u_P·n` rather than the face velocity, so continuity keeps a **1.4e-3** residue that
+      this change does not touch — a separate approximation of that closure, and the obvious next one.
+      (Configuration for every number here: 8×8 perturbed grid, `perturb=0.2`, `seed=2`,
+      `MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None)`, Stokes, x64.)
 - **The turbulence closure enters through `eddy_viscosity`, and `μ_eff = μ + ρν_t` is formed ONCE, in
   `MomentumContinuity.viscosity` (binding).** `ν_t` (**kinematic**, the closure's own quantity) rides
   on its own differentiable leaf, set by `with_eddy_viscosity(nu_t)`; `viscosity` adds it to the

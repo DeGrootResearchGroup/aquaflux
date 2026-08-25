@@ -24,9 +24,17 @@ re-implemented here: they *are* the scalar :class:`~aquaflux.boundary.Dirichlet`
 :class:`~aquaflux.boundary.ZeroGradient` closures applied to each velocity component and to the
 pressure. This module composes those closures rather than re-deriving prescribed-value and
 zero-gradient face values, so the two paths share one implementation (including the tangential
-non-orthogonal correction). Each is evaluated at a **zero reconstructed gradient** — the flow
-assembler reconstructs no boundary-face gradient — which drops that correction, giving a
-leading-order boundary value: exact on orthogonal grids, leading-order on skewed ones.
+non-orthogonal correction).
+
+Each velocity and pressure closure takes the owner cell's **reconstructed gradient** and the
+owner-centroid-to-face displacement ``d``, so the tangential non-orthogonal correction
+``grad phi_P . (d - (d.n) n)`` is carried rather than dropped: on a skewed mesh a zero-gradient
+patch returns ``phi_P + corr`` and not the bare owner value. The caller supplies that gradient in
+two passes — leading-order values (evaluated at a zero gradient) feed the reconstruction, and the
+reconstructed gradient then closes the values the fluxes consume — which is what keeps the
+residual a single pass over the state while leaving a gradient-type condition carrying its own
+correction. On an orthogonal grid ``d`` is parallel to ``n``, the correction vanishes, and the two
+passes agree exactly.
 """
 
 from __future__ import annotations
@@ -40,17 +48,22 @@ from aquaflux.boundary import Dirichlet, DirichletField, ZeroGradient
 from aquaflux.vectors import dot
 
 
-def _leading_order_face_value(
-    closure, phi_owner: jnp.ndarray, normal: jnp.ndarray, centroid: jnp.ndarray
+def _face_value(
+    closure,
+    phi_owner: jnp.ndarray,
+    grad_owner: jnp.ndarray,
+    d: jnp.ndarray,
+    normal: jnp.ndarray,
+    centroid: jnp.ndarray,
 ) -> jnp.ndarray:
-    """A scalar closure's boundary value at zero reconstructed gradient — its leading-order value.
+    """A scalar closure's boundary value for one flow field, shape ``(n,)``.
 
-    The coupled-flow assembler reconstructs no boundary-face gradient, so the closure is evaluated
-    with a zero owner gradient; its tangential non-orthogonal correction then vanishes, leaving the
-    value that is exact on orthogonal grids and leading-order on skewed ones. Only the prescribed
-    (:class:`~aquaflux.boundary.Dirichlet`) and zero-gradient (:class:`~aquaflux.boundary.ZeroGradient`)
-    closures are used here, and their leading-order value is independent of the owner-to-face
-    displacement, so that too is passed as zero.
+    The single point where the flow path calls a scalar face-value closure, so the arguments the
+    flow does not carry are supplied in one place. Only the prescribed
+    (:class:`~aquaflux.boundary.Dirichlet`, :class:`~aquaflux.boundary.DirichletField`) and
+    zero-gradient (:class:`~aquaflux.boundary.ZeroGradient`) closures are used here, and none of
+    them reads the diffusion coefficient — the flux-type (Neumann/Robin) closures do — so a unit
+    ``Gamma_P`` is passed rather than plumbing the momentum viscosity to a closure that ignores it.
 
     Parameters
     ----------
@@ -58,47 +71,51 @@ def _leading_order_face_value(
         The scalar face-value closure to evaluate.
     phi_owner : jnp.ndarray
         Owner cell values, shape ``(n,)``.
+    grad_owner : jnp.ndarray
+        Owner cell gradients of this field, shape ``(n, dim)`` (the non-orthogonal correction).
+    d : jnp.ndarray
+        Owner-centroid → face-centroid displacement, shape ``(n, dim)``.
     normal : jnp.ndarray
-        Owner-outward unit normals, shape ``(n, k)`` (``k`` is the spatial dimension for a velocity
-        component; a placeholder axis for the pressure, whose closure ignores it here).
+        Owner-outward unit normals, shape ``(n, dim)``.
     centroid : jnp.ndarray
-        Face centroids, shape ``(n, k)`` (used by a spatially-varying prescribed profile).
+        Face centroids, shape ``(n, dim)`` (used by a spatially-varying prescribed profile).
     """
-    zeros = jnp.zeros((*phi_owner.shape, normal.shape[-1]))
     gamma = jnp.ones(phi_owner.shape)
-    return closure.face_value(phi_owner, zeros, zeros, normal, gamma, centroid)
+    return closure.face_value(phi_owner, grad_owner, d, normal, gamma, centroid)
 
 
 def _velocity_face(
-    component_closures, velocity_owner: jnp.ndarray, normal: jnp.ndarray, centroid: jnp.ndarray
+    component_closures,
+    velocity_owner: jnp.ndarray,
+    grad_velocity_owner: jnp.ndarray,
+    d: jnp.ndarray,
+    normal: jnp.ndarray,
+    centroid: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Boundary velocity ``(n, dim)`` from one scalar closure per velocity component."""
+    """Boundary velocity ``(n, dim)`` from one scalar closure per velocity component.
+
+    Component ``i`` reads row ``i`` of the owner velocity-gradient tensor — ``grad u_i`` — and
+    nothing else of it, so the components close independently of one another.
+    """
     columns = [
-        _leading_order_face_value(closure, velocity_owner[:, i], normal, centroid)
+        _face_value(closure, velocity_owner[:, i], grad_velocity_owner[:, i], d, normal, centroid)
         for i, closure in enumerate(component_closures)
     ]
     return jnp.stack(columns, axis=1)
 
 
-def _pressure_face(closure, pressure_owner: jnp.ndarray) -> jnp.ndarray:
-    """Boundary pressure from a scalar closure, evaluated at leading order.
-
-    The flow path carries no reconstructed pressure gradient at the boundary, so a placeholder
-    normal/centroid suffices — the closure's correction is zero at a zero gradient.
-    """
-    placeholder = jnp.zeros((*pressure_owner.shape, 1))
-    return _leading_order_face_value(closure, pressure_owner, placeholder, placeholder)
-
-
 def _prescribed_reference_velocity(bc, normal: jnp.ndarray, centroid: jnp.ndarray) -> jnp.ndarray:
     """The prescribed face velocity of a patch that imposes one, shape ``(n, dim)``.
 
-    A prescribed velocity is a Dirichlet value: it does not depend on the owner cell, so evaluating
-    the patch's own face closure at a quiescent interior returns it exactly — including a
-    spatially-varying profile, which is a function of the face centroids alone. Reusing the closure
-    keeps the prescribed value defined in one place per patch.
+    A prescribed velocity is a Dirichlet value: it depends on neither the owner cell nor its
+    gradient, so evaluating the patch's own face closure at a quiescent interior with a zero
+    gradient and a zero displacement returns it exactly — including a spatially-varying profile,
+    which is a function of the face centroids alone. Reusing the closure keeps the prescribed value
+    defined in one place per patch.
     """
-    return bc.velocity_face(jnp.zeros(centroid.shape), normal, centroid)
+    quiescent = jnp.zeros(centroid.shape)
+    zero_gradient = jnp.zeros((*centroid.shape, centroid.shape[-1]))
+    return bc.velocity_face(quiescent, zero_gradient, quiescent, normal, centroid)
 
 
 def _component(profile, i: int):
@@ -125,7 +142,12 @@ class FlowBoundary(eqx.Module):
 
     @abc.abstractmethod
     def velocity_face(
-        self, velocity_owner: jnp.ndarray, normal: jnp.ndarray, centroid: jnp.ndarray
+        self,
+        velocity_owner: jnp.ndarray,
+        grad_velocity_owner: jnp.ndarray,
+        d: jnp.ndarray,
+        normal: jnp.ndarray,
+        centroid: jnp.ndarray,
     ) -> jnp.ndarray:
         """Boundary face velocity vectors, shape ``(n, dim)``.
 
@@ -133,6 +155,11 @@ class FlowBoundary(eqx.Module):
         ----------
         velocity_owner : jnp.ndarray
             Owner-cell velocity per face, shape ``(n, dim)``.
+        grad_velocity_owner : jnp.ndarray
+            Owner-cell velocity-gradient tensor per face, shape ``(n, dim, dim)``
+            (``[f, i, j] = d u_i/d x_j``); component ``i``'s closure reads row ``i``.
+        d : jnp.ndarray
+            Owner-centroid → face-centroid displacement per face, shape ``(n, dim)``.
         normal : jnp.ndarray
             Owner-outward unit normals, shape ``(n, dim)``.
         centroid : jnp.ndarray
@@ -140,8 +167,29 @@ class FlowBoundary(eqx.Module):
         """
 
     @abc.abstractmethod
-    def pressure_face(self, pressure_owner: jnp.ndarray) -> jnp.ndarray:
-        """Boundary face pressure, shape ``(n,)``."""
+    def pressure_face(
+        self,
+        pressure_owner: jnp.ndarray,
+        grad_pressure_owner: jnp.ndarray,
+        d: jnp.ndarray,
+        normal: jnp.ndarray,
+        centroid: jnp.ndarray,
+    ) -> jnp.ndarray:
+        """Boundary face pressure, shape ``(n,)``.
+
+        Parameters
+        ----------
+        pressure_owner : jnp.ndarray
+            Owner-cell pressure per face, shape ``(n,)``.
+        grad_pressure_owner : jnp.ndarray
+            Owner-cell pressure gradient per face, shape ``(n, dim)``.
+        d : jnp.ndarray
+            Owner-centroid → face-centroid displacement per face, shape ``(n, dim)``.
+        normal : jnp.ndarray
+            Owner-outward unit normals, shape ``(n, dim)``.
+        centroid : jnp.ndarray
+            Face centroids, shape ``(n, dim)`` (for a spatially-varying prescribed pressure).
+        """
 
     @abc.abstractmethod
     def mass_flux(
@@ -278,12 +326,14 @@ class FlowBoundary(eqx.Module):
 class NoSlipWall(FlowBoundary):
     """A stationary solid wall: zero velocity, zero-gradient pressure, no through-flow."""
 
-    def velocity_face(self, velocity_owner, normal, centroid):
+    def velocity_face(self, velocity_owner, grad_velocity_owner, d, normal, centroid):
         dim = velocity_owner.shape[1]
-        return _velocity_face([Dirichlet(value=0.0)] * dim, velocity_owner, normal, centroid)
+        return _velocity_face(
+            [Dirichlet(value=0.0)] * dim, velocity_owner, grad_velocity_owner, d, normal, centroid
+        )
 
-    def pressure_face(self, pressure_owner):
-        return _pressure_face(ZeroGradient(), pressure_owner)
+    def pressure_face(self, pressure_owner, grad_pressure_owner, d, normal, centroid):
+        return _face_value(ZeroGradient(), pressure_owner, grad_pressure_owner, d, normal, centroid)
 
     def mass_flux(
         self,
@@ -323,14 +373,19 @@ class MovingWall(FlowBoundary):
 
     velocity: object = eqx.field(static=True)
 
-    def velocity_face(self, velocity_owner, normal, centroid):
+    def velocity_face(self, velocity_owner, grad_velocity_owner, d, normal, centroid):
         dim = velocity_owner.shape[1]
         return _velocity_face(
-            _prescribed_components(self.velocity, dim), velocity_owner, normal, centroid
+            _prescribed_components(self.velocity, dim),
+            velocity_owner,
+            grad_velocity_owner,
+            d,
+            normal,
+            centroid,
         )
 
-    def pressure_face(self, pressure_owner):
-        return _pressure_face(ZeroGradient(), pressure_owner)
+    def pressure_face(self, pressure_owner, grad_pressure_owner, d, normal, centroid):
+        return _face_value(ZeroGradient(), pressure_owner, grad_pressure_owner, d, normal, centroid)
 
     def mass_flux(
         self,
@@ -369,14 +424,19 @@ class VelocityInlet(FlowBoundary):
 
     velocity: object = eqx.field(static=True)
 
-    def velocity_face(self, velocity_owner, normal, centroid):
+    def velocity_face(self, velocity_owner, grad_velocity_owner, d, normal, centroid):
         dim = velocity_owner.shape[1]
         return _velocity_face(
-            _prescribed_components(self.velocity, dim), velocity_owner, normal, centroid
+            _prescribed_components(self.velocity, dim),
+            velocity_owner,
+            grad_velocity_owner,
+            d,
+            normal,
+            centroid,
         )
 
-    def pressure_face(self, pressure_owner):
-        return _pressure_face(ZeroGradient(), pressure_owner)
+    def pressure_face(self, pressure_owner, grad_pressure_owner, d, normal, centroid):
+        return _face_value(ZeroGradient(), pressure_owner, grad_pressure_owner, d, normal, centroid)
 
     def mass_flux(
         self,
@@ -390,7 +450,10 @@ class VelocityInlet(FlowBoundary):
         centroid,
         rho,
     ):
-        u_in = self.velocity_face(velocity_owner, normal, centroid)
+        # The inlet velocity is prescribed, so it is the patch's own face closure read at a
+        # quiescent interior -- the same value `velocity_face` returns for any owner state, without
+        # this signature having to carry the velocity gradient a Dirichlet closure would ignore.
+        u_in = _prescribed_reference_velocity(self, normal, centroid)
         return rho * dot(u_in, normal) * area
 
     def reference_velocity(self, normal, centroid):
@@ -408,12 +471,16 @@ class PressureOutlet(FlowBoundary):
 
     pressure: float
 
-    def velocity_face(self, velocity_owner, normal, centroid):
+    def velocity_face(self, velocity_owner, grad_velocity_owner, d, normal, centroid):
         dim = velocity_owner.shape[1]
-        return _velocity_face([ZeroGradient()] * dim, velocity_owner, normal, centroid)
+        return _velocity_face(
+            [ZeroGradient()] * dim, velocity_owner, grad_velocity_owner, d, normal, centroid
+        )
 
-    def pressure_face(self, pressure_owner):
-        return _pressure_face(Dirichlet(value=self.pressure), pressure_owner)
+    def pressure_face(self, pressure_owner, grad_pressure_owner, d, normal, centroid):
+        return _face_value(
+            Dirichlet(value=self.pressure), pressure_owner, grad_pressure_owner, d, normal, centroid
+        )
 
     def mass_flux(
         self,

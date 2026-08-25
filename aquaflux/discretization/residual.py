@@ -28,7 +28,7 @@ object built by :meth:`ResidualAssembler.build` and evaluated by
 :meth:`ResidualAssembler.residual`. They are separate because the two halves have genuinely
 different consumers: a coupled system that reconstructs its own gradients and evaluates its own
 boundary closures — the momentum block reconstructs one velocity-gradient *tensor* shared across
-its components, from boundary closures that take no gradient — arrives already holding a context,
+its components, from vector-valued flow boundary conditions — arrives already holding a context,
 and needs only the balance. :class:`CellBalance` therefore stores nothing but its operators and
 reads the mesh, the geometry, and the boundary values off the context it is handed, exactly as the
 flux operators themselves do.
@@ -80,7 +80,7 @@ class CellBalance(eqx.Module):
     :class:`ResidualAssembler` builds that context and delegates here, which is how a scalar
     transport equation uses it. A coupled system that forms its own context drives this directly —
     the momentum block reconstructs one velocity-gradient *tensor* shared across its components,
-    from boundary closures that take no gradient, so it cannot share the assembler's context step
+    from vector-valued flow boundary conditions, so it cannot share the assembler's context step
     but assembles the identical balance.
 
     Attributes

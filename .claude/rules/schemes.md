@@ -1781,7 +1781,8 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   **✅ THE DOUBLE CORRECTION IS FIXED — `boundary_values_at` — AND ⚠️ IT DOES NOT FIX THE MARCH.** A
   scheme that *differentiates* a boundary value now asks the caller to re-evaluate its closures at
   the reconstruction's own gradient (`GradientScheme.gradients(boundary_values_at=…)`, supplied by
-  `ResidualAssembler._gradient`); a closure declares whether it needs them
+  `ResidualAssembler._gradient` and — since #313 — by `MomentumContinuity`'s velocity and pressure
+  reconstructions too); a closure declares whether it needs them
   (`GradientBoundaryClosure.reads_boundary_values`, `False` on `OwnerGradient`, so that path pays
   nothing). Measured on the same patches, with the Dirichlet arm as the control that makes it
   readable — a fix that merely suppressed the term would have flattened that one too:
@@ -2166,9 +2167,11 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   boundary condition: one on an owner-derived patch, zero on a prescribed one, and the fraction a
   Robin condition actually carries, with the value blended in the same proportion. Supplied by
   `ResidualAssembler._gradient` and by `MomentumContinuity` (per velocity **component** — a patch may
-  treat them differently, and a single tangent of ones would sum them). ⚠️ **This is the one
-  boundary-consistency repair the flow block CAN take**: its closures accept no gradient, so
-  `boundary_values_at` is unavailable there, but this derivative needs no gradient at all.
+  treat them differently, and a single tangent of ones would sum them). The gradient is held fixed
+  while it is differentiated, so this is the derivative through the *value* alone — the gradient's own
+  contribution is what the scheme folds in. (Until #313 this was the **only** boundary-consistency
+  repair the flow block could take, because its closures accepted no gradient; they take one now, so
+  it passes `boundary_values_at` as well.)
 
   **Marched end to end on pitzDaily, and the answer does not move** -- which is the acceptance
   criterion for a discretisation change at a boundary:
@@ -2195,14 +2198,20 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   the boundary-cell gradient at 8 cells across and falling as `h` (0.76 %, 0.37 % at 16 and 32),
   against the 58 % that does *not* fall without this.
 
-  **⚠️ SEPARATELY, AND FOUND ON THE WAY: THE `boundary_values_at` FIX NEVER REACHED THE FLOW BLOCK.
-  It is not this stall's cause, and it is a live defect.** Three call sites in the library reconstruct
-  a gradient — `ResidualAssembler._gradient` and `MomentumContinuity`'s velocity and pressure
-  reconstructions — and **only the first passes `boundary_values_at`**. The flow block cannot pass it
-  as things stand: `FlowBoundary.pressure_face` / `velocity_face` take **no gradient argument at all**
-  (`_pressure_face` evaluates its closure at a zero gradient by construction), so a zero-gradient flow
-  face value is the owner cell's own value permanently, whatever gradient is reconstructed. The double
-  correction is therefore fully live there for any closure that reads a boundary value.
+  **⚠️ SEPARATELY, AND FOUND ON THE WAY: THE `boundary_values_at` FIX HAD NEVER REACHED THE FLOW
+  BLOCK. FIXED IN #313; the census below is what it was measured on, and is kept for the trap it
+  taught.** Three call sites in the library reconstruct a gradient — `ResidualAssembler._gradient` and
+  `MomentumContinuity`'s velocity and pressure reconstructions — and only the first passed
+  `boundary_values_at`. The flow block could not: `FlowBoundary.pressure_face` / `velocity_face` took
+  **no gradient argument at all**, so a zero-gradient flow face value was the owner cell's own value
+  permanently, whatever gradient was reconstructed, and the double correction was fully live there for
+  any closure that reads a boundary value. Both closures now take the owner gradient and the
+  owner-centroid→face displacement, and both flow reconstructions run the two-pass shape and pass
+  `boundary_values_at` — see `.claude/rules/flow.md`'s `corr` reconciliation bullet for the shape and
+  the analytical test. **The numbers below are therefore a record of the defect, not of current
+  behaviour**; the ratio they establish (a spurious normal derivative four times the real gradient at
+  the outlet) is what makes the repair worth its cost, and the closing "1e-4 on this mesh" is why it
+  was never *visible* on pitzDaily.
 
   Measured at the divergence iterate, on the flow block's own faces (`closure_stall_probe.py`'s census
   mirrors `boundary_closure_probe.py`, which only ever reached the scalar equations):
@@ -2221,9 +2230,12 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   `chain = d(p_face)/d(p_owner)` read off the case's own closures by differentiating them) moves the
   reconstructed pressure gradient by **1e-4 relative** — 2.577e-02 against 2.578e-02 as a difference
   from the owner arm. pitzDaily's worst face angle is ~6°, so the non-orthogonal correction is ~0.1 %
-  of the local variation and the double correction is negligible here. **Record it as a latent defect
-  measured not to bite on a nearly-orthogonal mesh, not as a fixed one** — it is the same defect the
-  scalar path was repaired for, and a skewed mesh would feel it.
+  of the local variation and the double correction is negligible here. **That is why it survived: a
+  defect measured not to bite on a nearly-orthogonal mesh reads as "not a problem" until someone runs
+  a skewed one.** Repaired in #313; the analytical pin lives on an 8×8 grid perturbed by 0.2 of a cell,
+  where the same defect moves the outlet's face velocity by 1.15e-2 and the momentum residual at the
+  exact Stokes field by 2.8e-2 — i.e. the size of the effect is a property of the *mesh*, and pitzDaily
+  is the benign end of it, not the representative one.
 
   Worth keeping beside that: the two closures' reconstructed flow gradients differ **only on the 555
   boundary-owning cells** (relative L2 6.7e-02 for `grad p`, 4.5e-02 and 1.9e-02 for the velocity
