@@ -107,6 +107,12 @@ VALIDATION_INTERNAL_REACHES = {
     # block inverses out of the same pieces the shipped V-cycle uses.
     "_CsrOperator",
     "_diagonal_approximate_inverse",
+    # The step ladder itself, reached by the closure probe so that "which step length is admissible
+    # here" is answered by the search a march actually walks rather than by a second one written
+    # beside it. That question is the whole of that harness, and a re-implementation would answer it
+    # about the wrong ladder -- which rung is kept depends on the fallback rule and the growth cap,
+    # neither of which is obvious from the outside.
+    "backtracking_line_search",
 }
 
 

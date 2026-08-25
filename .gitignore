@@ -61,3 +61,8 @@ aquaflux/solve/_ilu0.c
 
 # Case-runner logs: one per run, timestamped; artifacts of a measurement, not sources.
 validation/**/run-*.log
+
+# States and march logs a probe writes for its own later runs. They are recomputable from the case
+# (one ramp, minutes) and a checkpoint is a snapshot of a measurement rather than a source.
+validation/**/stall-*.npz
+validation/**/stall-*.log

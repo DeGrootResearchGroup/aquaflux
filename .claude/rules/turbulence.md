@@ -87,6 +87,48 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     edge only (k/ν_t is finite where the cap bites). The unlimited `α S²` over-stiffened the ω equation
     in high-strain / transient regions — one of the robustness gaps behind the near-wall `k` collapse
     (#126). ω needs no such flag (its cap is already field-independent).
+  - **⚠️⚠️ THE `k` ROW'S JACOBIAN DIAGONAL IS NEGATIVE AT NEAR-WALL CELLS, AND ONLY THE PSEUDO-TIME
+    SHIFT KEEPS IT POSITIVE — measured 2026-08-24 on pitzDaily.** `nu_t = a_1 k / max(a_1 omega, S F_2)`
+    is proportional to `k`, so `P_k` is proportional to `k`, and subtracting a source that grows with
+    the variable puts a **negative** term on that row's diagonal. Measured at a wall cell of the
+    pitzDaily target rung: `J_kk` between **-1.22e-03 and -1.95e-03** against a shift `beta d_k` of
+    **+2.31e-03** at the case's `beta_start = 0.5` — so the effective diagonal keeps only **16-47 %**
+    of the shift, and is a difference of two similar numbers.
+    - **The consequence is an amplifier on everything upstream.** Four gradient reconstructions at that
+      one cell differ by **12 %** in `|grad u|` and in `P_k`, and by **30×** in the `k` correction the
+      Newton step asks for, purely because a 12 % move in `J_kk` is a 3× move in the near-cancelling
+      sum. The `k` correction then reaches **+4000×** the local `k`, in the increasing direction that
+      `positive_block_limit` does not guard (it bounds only entries that could cross zero). The
+      near-wall `omega` fixation row `log omega = log omega_wall(k)` hands that straight to `omega`,
+      whose log transport exponentiates it — which is how a 12 % gradient difference loses a march.
+      The full trail, with the four-way tables, is in `.claude/rules/schemes.md` under the
+      `SkewCorrectedGradient` stall; `validation/pitzdaily_gradient_ab/closure_stall_probe.py`
+      re-measures any of it at a saved state.
+    - **The Patankar treatment this points at is NOT the flag below.** `explicit_production_limiter`
+      freezes the **cap's** `k`; what drives the diagonal negative here is the **production's own**
+      `k`-dependence through `nu_t`, which is differentiated whatever that flag says (the production is
+      well under its cap at these cells — 83 against 315 — so the cap is not involved at all).
+    - ⚠️ **Build it through `_shifted_solve`'s `jacobian_fn` seam, not with a `stop_gradient` in the
+      residual.** The flag below is an adjoint hazard precisely because it changes what AD linearizes;
+      `jacobian_fn` replaces only the **forward** Krylov operator, leaving the residual, the root and
+      the IFT adjoint untouched.
+    - **✅ BUILT AND TESTED AT ONE STATE, AND IT WORKS (2026-08-24).**
+      `validation/pitzdaily_gradient_ab/closure_stall_probe.py::frozen_production_residual` evaluates
+      the `k` equation's eddy viscosity at a `stop_gradient`-ed `k` and is used as the operator only.
+      At the pitzDaily target-rung iterate, β = 0.5, cell 10824: `J_kk` goes **-1.74e-03 → +4.80e-03**,
+      the effective diagonal **5.77e-04 → 7.12e-03**, `max |dk/k|` over the wall cells **2136 → 6.4**,
+      `max |d log omega|` **15.6 → 0.119**, and the line search goes from `alpha` 0.25 to a **full
+      step** reaching `|G|/|G0|` 0.103 against 0.783.
+    - **The result that confirms the mechanism is that the arms COLLAPSE ONTO EACH OTHER.** Three
+      gradient reconstructions whose exact `J_kk` spans 60 % (-1.22e-03, -1.74e-03, -1.95e-03) — and
+      whose step quality orders the same way — give **+4.7892e-03, +4.7958e-03, +4.7985e-03** under the
+      freeze, identical to 0.2 %, with `dk/k` of 6.0/6.4/6.7 and full steps to within 1 % of each other.
+      So that one derivative was the whole of the reconstruction sensitivity.
+    - ⚠️ **One state, one shift, NO MARCH.** A quasi-Newton operator can cost convergence rate near the
+      root, and this iterate is not near it. The probe also replaces `closure.nu_t`, which reaches the
+      `k` **diffusivity** as well as the production, so it is not surgically the production term; and
+      the near-wall blend's own `k` and the Menter cap's `k` are untouched. The march A/B is the test
+      that matters.
   - **⚠️ `explicit_production_limiter` now defaults to `False` (the EXACT operator) — measured
     2026-08-15, and the old `True` default was a silent adjoint hazard.** The flag freezes the cap's
     `k` in the **linearization** only (a Patankar / deferred-correction treatment). That is free only
