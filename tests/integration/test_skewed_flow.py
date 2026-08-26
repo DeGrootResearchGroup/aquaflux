@@ -8,8 +8,14 @@ linear velocity is represented exactly, so the discrete divergence and the press
 the exact field and the solver reproduces it to solver tolerance even on a non-orthogonal mesh.
 
 A plain owner/neighbour blend (the pre-correction behaviour) leaves an ``O(skew)`` error on such a
-mesh, so the tight tolerance here is what distinguishes the integration-point reconstruction. All
-boundaries are Dirichlet velocity, so the deferred boundary tangential correction does not enter.
+mesh, so the tight tolerance here is what distinguishes the integration-point reconstruction. In
+:func:`test_stokes_couette_is_exact_on_a_skewed_mesh` all boundaries are Dirichlet velocity, so no
+boundary tangential correction enters at all.
+
+:func:`test_a_zero_gradient_flow_patch_carries_its_tangential_correction` opens one side into a
+pressure outlet, whose velocity closure is zero-gradient, and is the case that *does* exercise the
+correction: the boundary face value is then ``u_P + grad u_P . (d - (d.n) n)``, and dropping that
+term reports the owner cell's own velocity at a face displaced tangentially from it.
 """
 
 from __future__ import annotations
@@ -19,9 +25,15 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.boundary import BoundaryConditions
-from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall, VelocityInlet
+from aquaflux.flow import (
+    MomentumContinuity,
+    MovingWall,
+    NoSlipWall,
+    PressureOutlet,
+    VelocityInlet,
+)
 from aquaflux.properties import Constant, PropertyModel
-from aquaflux.schemes import CorrectedGreenGauss
+from aquaflux.schemes import CorrectedGreenGauss, MultipleCorrectionGradient, OwnerGradient
 from aquaflux.solve import newton_step
 
 from tests.support.meshes import perturbed_grid_2d
@@ -63,3 +75,84 @@ def test_stokes_couette_is_exact_on_a_skewed_mesh() -> None:
     u_exact = np.asarray(_couette(geom.cell.centroid))
     error = np.max(np.abs(np.asarray(velocity) - u_exact))
     assert error < 1e-6
+
+
+def _open_couette(n: int = 8, perturb: float = 0.2, seed: int = 2):
+    """The same Couette domain with the right side opened into a pressure outlet.
+
+    ``u = (y, 0)`` with ``p = 0`` is still the exact solution, and the outlet's closures are exact
+    for it: the velocity is zero-gradient there and the exact field has ``grad u . n = 0`` on that
+    patch (the perturbation leaves boundary nodes in place, so the right faces keep the normal
+    ``(1, 0)`` exactly), while the prescribed ``p_b = 0`` is the exact pressure. What the
+    perturbation *does* move is the owner centroid behind each of those faces, so ``d`` picks up a
+    tangential component and the zero-gradient closure's correction becomes load-bearing.
+
+    Reconstructed with :class:`~aquaflux.schemes.MultipleCorrectionGradient`, which is exact for a
+    quadratic field on any mesh — so the reconstructed gradient carries no error of its own and the
+    boundary values are the only thing under test. (Corrected Green--Gauss caps near first order on
+    a skewed mesh: on this same 8x8 grid it reconstructs the linear field's unit gradient to 11 %,
+    which would blur the comparison rather than sharpen it.)
+    """
+    mesh = perturbed_grid_2d(
+        n, n, lx=1.0, ly=1.0, perturb=perturb, seed=seed, named_boundaries=True
+    )
+    geom = mesh.geometry()
+    assembler = MomentumContinuity.build(
+        mesh,
+        geom,
+        PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
+        MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None),
+        BoundaryConditions(
+            {
+                "top": MovingWall(velocity=(1.0, 0.0)),  # u = (1, 0) at y = 1
+                "bottom": NoSlipWall(),  # u = (0, 0) at y = 0
+                "left": VelocityInlet(velocity=_couette),  # u = (y, 0)
+                "right": PressureOutlet(pressure=0.0),  # zero-gradient velocity, p = 0
+            }
+        ),
+    )
+    exact = assembler.pack(_couette(geom.cell.centroid), jnp.zeros(mesh.n_cells))
+    return mesh, geom, assembler, exact
+
+
+def test_a_zero_gradient_flow_patch_carries_its_tangential_correction() -> None:
+    """The outlet's face velocity is the exact field there, not the owner cell's own velocity.
+
+    A zero-gradient closure states that the *normal* derivative vanishes, not that the face value
+    equals the owner value: on a mesh where the owner centroid sits off the face normal the two
+    differ by the field's variation along the tangential offset. Evaluating the closure at the
+    reconstructed gradient recovers the exact value to round-off here; evaluating it at a zero
+    gradient — which is all the flow block could do before it carried one — returns the owner value,
+    and the error is the tangential displacement itself.
+    """
+    mesh, geom, assembler, exact = _open_couette()
+    fields = assembler.flow_fields(exact).velocity_fields
+    faces = np.asarray(mesh.face_patches.indices("right"))
+    owner = np.asarray(mesh.face_cells.owner)[faces]
+
+    exact_face = np.asarray(_couette(geom.face.centroid[faces]))
+    corrected = np.asarray(fields.boundary_velocity[faces])
+    uncorrected = np.asarray(fields.velocity[owner])  # the closure at a zero gradient
+
+    assert np.max(np.abs(corrected - exact_face)) < 1e-13
+    # The correction is not merely present but load-bearing: without it the patch is wrong by the
+    # tangential offset -- 1.2e-2 on this mesh, ten orders of magnitude above the round-off above.
+    assert np.max(np.abs(uncorrected - exact_face)) > 1e-3
+
+
+def test_the_momentum_balance_vanishes_at_the_exact_field_through_an_outlet() -> None:
+    """With the outlet's face velocity exact, the momentum residual at the exact field is round-off.
+
+    The consequence of the boundary value for the equations that read it: the viscous flux at the
+    outlet is built from that face value, so a face value carrying no tangential correction leaves a
+    spurious wall-normal difference divided by ``d.n``. The exact Stokes field then fails to satisfy
+    the discrete momentum balance on a skewed mesh, which is the defect this pins.
+
+    Only the momentum block is asserted. The continuity residual does **not** vanish here, and not
+    because of any boundary value: :meth:`~aquaflux.flow.PressureOutlet.mass_flux` builds its
+    through-flow from the **owner** velocity ``u_P . n`` rather than from the face velocity, a
+    separate approximation of that closure that this test deliberately does not depend on.
+    """
+    _, _, assembler, exact = _open_couette()
+    momentum_residual, _ = assembler.unpack(assembler.residual(exact))
+    assert np.max(np.abs(np.asarray(momentum_residual))) < 1e-13

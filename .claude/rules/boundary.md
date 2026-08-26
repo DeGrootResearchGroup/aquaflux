@@ -75,9 +75,10 @@ reconstruction's boundary input.
   (three coupled outputs; `mdot` has no single-field analogue). So do **not** add a shared base or
   make `FlowBoundary` inherit here — the intended coupling is composition (see `.claude/rules/flow.md`).
   The one place the two must not drift is the tangential-correction formula `_tangential_correction`:
-  keep it single-homed here so any consumer (scalar or flow) reuses it. The flow zero-gradient
-  closures currently drop `corr` (leading-order); reconciling that into the flow flux is the
-  boundary-gradient two-pass fold-in, tracked in `flow.md`.
+  keep it single-homed here so any consumer (scalar or flow) reuses it. Since #313 the flow closures
+  carry `corr` as well — `velocity_face` / `pressure_face` take the owner gradient and the
+  owner-centroid→face displacement, and the flow assembler runs the same two-pass fold the scalar path
+  runs, so both consumers reach this formula through the identical route.
 
 ## Testability seam
 Each BC closure is unit-tested on a single boundary face with a known cell value and
