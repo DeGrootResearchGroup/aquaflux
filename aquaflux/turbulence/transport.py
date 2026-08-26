@@ -710,7 +710,14 @@ class SSTTurbulence(eqx.Module):
             ),
             self.k_boundary,
             source_operators=(
-                self._k_production(closure, near_wall),
+                KProduction(
+                    self._production_viscosity(closure),
+                    closure.strain_rate,
+                    closure.omega,
+                    self.model,
+                    explicit_limiter=self.explicit_production_limiter,
+                    near_wall=near_wall,
+                ),
                 KDestruction(closure.omega, self.model, near_wall=near_wall),
             ),
         )
@@ -736,23 +743,6 @@ class SSTTurbulence(eqx.Module):
             closure.strain_rate,
             self.molecular_viscosity,
             self.wall_distance,
-        )
-
-    def _k_production(self, closure: SSTClosureFields, near_wall: NearWallKClosure) -> KProduction:
-        """The k-production operator for this sweep's ``closure``.
-
-        Built here rather than inline in :meth:`k_residual` because the pseudo-time shift diagonal
-        needs the *same* operator to ask it for its k-feedback rate
-        (:meth:`~aquaflux.turbulence.KProduction.feedback_rate`); a second construction would drift
-        from the residual's the first time a constructor argument changed.
-        """
-        return KProduction(
-            self._production_viscosity(closure),
-            closure.strain_rate,
-            closure.omega,
-            self.model,
-            explicit_limiter=self.explicit_production_limiter,
-            near_wall=near_wall,
         )
 
     def _near_wall_closure(self, wall_shear_rate: jnp.ndarray) -> NearWallKClosure:
@@ -907,7 +897,6 @@ class SSTTurbulence(eqx.Module):
         reference: jnp.ndarray,
         shift_basis: ShiftBasis,
         fixed_cells: jnp.ndarray | None = None,
-        source_feedback: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Combine the scalar shift diagonal's convective/dissipative parts through ``shift_basis``.
 
@@ -915,9 +904,6 @@ class SSTTurbulence(eqx.Module):
         :class:`~aquaflux.solve.LocalCourantBasis` (weight ``1``) reproduces the full operator
         diagonal (uniform under-relaxation); a convective basis (weight ``0``) gives a local convective
         pseudo-time step on the scalar.
-
-        ``source_feedback`` is the volume-integrated source derivative ``residual_fn`` does not carry
-        (see :func:`~aquaflux.turbulence.preconditioner.scalar_transport_shift_diagonal_parts`).
         """
         convective, dissipative = scalar_transport_shift_diagonal_parts(
             self.mesh,
@@ -927,7 +913,6 @@ class SSTTurbulence(eqx.Module):
             residual_fn,
             reference,
             fixed_cells=fixed_cells,
-            source_feedback=source_feedback,
         )
         return shift_basis.local_diagonal(convective, dissipative)
 
@@ -939,7 +924,6 @@ class SSTTurbulence(eqx.Module):
         *,
         preconditioner: ScalarTransportPreconditioner | None = None,
         shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
-        live_eddy_viscosity: bool = False,
     ) -> ScalarShiftPolicy:
         """The pseudo-transient continuation policy for the k-equation solve.
 
@@ -962,42 +946,12 @@ class SSTTurbulence(eqx.Module):
         preconditioner : ScalarTransportPreconditioner, optional
             The preconditioner for the shifted solve (from :meth:`k_preconditioner`), or ``None`` for
             a shift-only (unpreconditioned) continuation solve.
-        live_eddy_viscosity : bool
-            Whether the residual this shift damps differentiates through ``nu_t``. A **segregated**
-            k-solve freezes ``nu_t`` for the sweep, so ``False`` (the default) is right there and the
-            shift is the frozen-closure operator diagonal exactly. A **coupled** residual recomputes
-            ``nu_t = a_1 k / max(a_1 omega, S F_2)`` from the current ``k``, so the production
-            ``nu_t S**2`` is proportional to ``k`` and feeds ``k`` back into itself -- a term the
-            frozen-closure residual used to build the shift contains no trace of, and which is what
-            drives the coupled k row's Jacobian diagonal negative. Set it there, and the production's
-            feedback rate (:meth:`~aquaflux.turbulence.KProduction.feedback_rate`) is folded into the
-            diagonal so the shift describes the equation actually being solved. Left off, the two can
-            differ by more than the whole shift in a wall-adjacent cell, and ``J + beta d`` is then a
-            near-cancellation there rather than a damped row -- so a small upstream difference in the
-            velocity gradient comes out as a large difference in the correction the step asks for.
         """
         diffusivity = self._diffusivity(
             closure.nu_t, closure.f1, self.model.sigma_k1, self.model.sigma_k2
         )
-        feedback = None
-        if live_eddy_viscosity:
-            production = self._k_production(
-                closure, self._near_wall_closure(closure.wall_shear_rate)
-            )
-            feedback = production.feedback_rate(
-                reference,
-                self.geometry.cell.volume,
-                # The identity `dP_k/dk = P_k/k` rests on `nu_t` tracking `k`. If this assembler
-                # freezes it, that path contributes no feedback and folding one in would over-damp.
-                live_viscosity=not self.explicit_production_viscosity,
-            )
         shift_diagonal = self._scalar_shift_diagonal(
-            diffusivity.values,
-            mdot,
-            self.k_residual(mdot, closure),
-            reference,
-            shift_basis,
-            source_feedback=feedback,
+            diffusivity.values, mdot, self.k_residual(mdot, closure), reference, shift_basis
         )
         return ScalarShiftPolicy(shift_diagonal, preconditioner)
 
@@ -1044,15 +998,6 @@ class SSTTurbulence(eqx.Module):
         As :meth:`k_shift_policy`, with the omega diffusivity and the near-wall fixed cells: their
         shift is zeroed, since an exact value fixation needs no pseudo-time damping (a full Newton
         step converges it in one) and shifting an identity row only slows it.
-
-        **There is deliberately no ``live_eddy_viscosity`` counterpart here.** That switch exists
-        because the k production ``nu_t S**2`` is proportional to ``k`` once ``nu_t`` is live, so it
-        sits on the k row's own diagonal. The omega production ``alpha min(S**2, cap)`` carries no
-        solved ``omega`` at all -- what it gains from a live closure is a dependence on ``k`` and
-        ``nu_t``, which is an off-diagonal coupling to *another* block and not this row's time scale.
-        The one omega source that does read the solved field, the cross-diffusion ``~ 1 / omega``,
-        contributes with the *stabilizing* sign and is orders below the destruction's ``2 beta omega``
-        wherever it is not simply zeroed as a wall fixation.
         """
         diffusivity = self._diffusivity(
             closure.nu_t, closure.f1, self.model.sigma_omega1, self.model.sigma_omega2

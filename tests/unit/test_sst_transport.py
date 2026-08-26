@@ -11,13 +11,12 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
-from aquaflux.discretization import FaceContext, FirstOrderUpwind
+from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import VelocityFields
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.schemes import CorrectedGreenGauss, GradientScheme, ImposedGradient
 from aquaflux.solve import ImplicitNewtonSolver
 from aquaflux.turbulence import (
-    KProduction,
     SSTClosureFields,
     SSTModel,
     SSTTurbulence,
@@ -89,135 +88,6 @@ def _velocity(mesh, gradient):
         boundary_velocity=jnp.zeros((mesh.n_faces, mesh.dim)),
         gradient=gradient,
     )
-
-
-def _live_production(turb, k, omega, strain_rate, *, explicit_limiter=False, near_wall=None):
-    """A :class:`KProduction` whose ``nu_t`` is recomputed from ``k`` — the coupled residual's form."""
-    nu_t = turb.model.eddy_viscosity(
-        k, omega, strain_rate, turb.molecular_viscosity, turb.wall_distance
-    )
-    return KProduction(
-        nu_t,
-        strain_rate,
-        omega,
-        turb.model,
-        explicit_limiter=explicit_limiter,
-        near_wall=near_wall,
-    )
-
-
-def test_k_production_feedback_rate_is_the_derivative_a_live_eddy_viscosity_gives() -> None:
-    """``KProduction.feedback_rate`` is exactly ``d(source)/dk`` when ``nu_t`` tracks ``k`` (#312).
-
-    The operator holds ``nu_t`` as a frozen array, so ``nu_t S**2`` contains no ``k`` and a residual
-    built from it shows no production feedback on the k row at all. A coupled RANS residual recomputes
-    ``nu_t = a_1 k / max(a_1 omega, S F_2)`` from the current ``k``, which makes the production
-    proportional to ``k`` and puts that feedback on the diagonal. The closed form must reproduce the
-    derivative *that* residual has, and it does so to machine precision — in both branches of the
-    Menter cap and under either linearization of it.
-
-    Checked away from the near-wall blend (``near_wall=None``): there the modelled production is only
-    very nearly linear in ``k``, so the closed form is documented as an estimate rather than an
-    identity, and pinning it to machine precision would pin the wrong claim.
-
-    The reference derivative is taken as ``J . 1`` rather than a materialized Jacobian — the source is
-    a per-cell term, so its row sums *are* its diagonal, and it is also the exact quantity the shift
-    diagonal reads. A term that stopped being per-cell would separate the two and fail here.
-    """
-    mesh, turb = _turbulence()
-    n = mesh.n_cells
-    context = FaceContext(
-        mesh.face_cells, turb.geometry, jnp.zeros(mesh.n_faces), jnp.zeros((n, mesh.dim)), {}
-    )
-    volume = turb.geometry.cell.volume
-    k = 0.02 + 0.05 * jax.random.uniform(jax.random.PRNGKey(0), (n,))
-    # Two operating points: the cap idle (large omega damps nu_t), and the cap binding everywhere.
-    for label, omega, strain_rate in (
-        ("uncapped", jnp.full(n, 10.0), jnp.full(n, 1.0)),
-        ("capped", jnp.full(n, 0.05), jnp.full(n, 20.0)),
-    ):
-        production, limit = production_and_limit(
-            _live_production(turb, k, omega, strain_rate).nu_t, strain_rate, omega, k, turb.model
-        )
-        assert bool(jnp.all((production > limit) == (label == "capped"))), label
-        for explicit_limiter in (False, True):
-
-            def source(field, explicit_limiter=explicit_limiter, o=omega, s=strain_rate):
-                return _live_production(
-                    turb, field, o, s, explicit_limiter=explicit_limiter
-                ).source(field, context)
-
-            automatic = jax.jvp(source, (k,), (jnp.ones_like(k),))[1]
-            closed = _live_production(
-                turb, k, omega, strain_rate, explicit_limiter=explicit_limiter
-            ).feedback_rate(k, volume)
-            assert jnp.allclose(closed, automatic, rtol=1e-12, atol=0.0), (
-                label,
-                explicit_limiter,
-            )
-        # A frozen cap removes the term where it binds, and only there.
-        frozen = _live_production(turb, k, omega, strain_rate, explicit_limiter=True).feedback_rate(
-            k, volume
-        )
-        assert bool(jnp.all((frozen == 0.0) == (label == "capped"))), label
-
-
-def test_k_production_feedback_rate_is_zero_when_the_production_viscosity_is_frozen() -> None:
-    """A frozen production ``nu_t`` removes the identity's premise, so the rate must follow it.
-
-    ``explicit_production_viscosity`` evaluates the production's ``nu_t`` at a ``stop_gradient``-ed
-    ``k`` — which is precisely the derivative ``feedback_rate`` exists to report. With it set there is
-    no production feedback to fold into the shift, and folding one in anyway would over-damp the row.
-    Only the Menter cap's own ``k`` survives, and only while the cap is both binding and exact.
-    """
-    mesh, turb = _turbulence()
-    n = mesh.n_cells
-    volume = turb.geometry.cell.volume
-    k = 0.02 + 0.05 * jax.random.uniform(jax.random.PRNGKey(0), (n,))
-    omega, strain_rate = jnp.full(n, 10.0), jnp.full(n, 1.0)  # the cap is idle here
-    operator = _live_production(turb, k, omega, strain_rate)
-    assert bool(jnp.all(operator.feedback_rate(k, volume, live_viscosity=False) == 0.0))
-    assert bool(jnp.all(operator.feedback_rate(k, volume) > 0.0))
-
-    # It must also match AD of the frozen-viscosity source, not merely be zero by fiat.
-    def frozen_source(field):
-        nu_t = turb.model.eddy_viscosity(
-            jax.lax.stop_gradient(field),
-            omega,
-            strain_rate,
-            turb.molecular_viscosity,
-            turb.wall_distance,
-        )
-        context = FaceContext(
-            mesh.face_cells, turb.geometry, jnp.zeros(mesh.n_faces), jnp.zeros((n, mesh.dim)), {}
-        )
-        return KProduction(nu_t, strain_rate, omega, turb.model).source(field, context)
-
-    automatic = jax.jvp(frozen_source, (k,), (jnp.ones_like(k),))[1]
-    assert jnp.allclose(
-        operator.feedback_rate(k, volume, live_viscosity=False), automatic, rtol=1e-12, atol=0.0
-    )
-
-
-def test_k_production_feedback_rate_vanishes_at_a_non_positive_k() -> None:
-    """No division by nothing at ``k <= 0``, and no NaN in a derivative taken through it.
-
-    Every branch of the production is already clamped to zero at a non-positive ``k`` (the cap carries
-    ``maximum(k, 0)`` and ``nu_t`` is clamped at its source), so the feedback rate there is genuinely
-    zero rather than an arbitrary floored quotient — and the guarded division must leave the *unused*
-    branch's denominator finite, or the rate is finite while its gradient is NaN.
-    """
-    mesh, turb = _turbulence()
-    n = mesh.n_cells
-    volume = turb.geometry.cell.volume
-    omega, strain_rate = jnp.full(n, 10.0), jnp.full(n, 1.0)
-    k = jnp.full(n, 0.05).at[0].set(-1e-6).at[1].set(0.0)
-    operator = _live_production(turb, k, omega, strain_rate)
-    rate = operator.feedback_rate(k, volume)
-    assert float(rate[0]) == 0.0 and float(rate[1]) == 0.0
-    assert bool(jnp.all(rate[2:] > 0.0))
-    tangent = jax.jvp(lambda f: operator.feedback_rate(f, volume), (k,), (jnp.ones_like(k),))[1]
-    assert bool(jnp.all(jnp.isfinite(tangent)))
 
 
 def test_build_identifies_the_wall_adjacent_cells() -> None:

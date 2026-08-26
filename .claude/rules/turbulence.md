@@ -212,89 +212,6 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
   `.claude/rules/solve-globalization.md`; making them pytrees breaks both the IFT adjoint and the jit cache.
   `ScaledScalarPreconditioner(inner, scale)` wraps one with a fixed per-cell output factor — the
   reciprocal chain-rule scaling a log-transformed scalar block needs (above); also a frozen dataclass.
-  - **⚠️ THE COUPLED k SHIFT MUST CARRY THE PRODUCTION'S OWN FEEDBACK — it is built from the
-    *segregated* operator and so cannot see the term that destabilizes the row (binding, #312,
-    fixed 2026-08-25).** `_coupled_shift_policy` → `k_shift_policy` → `scalar_transport_shift_diagonal_parts`
-    is handed `residual_fn = k_residual(mdot, closure)`, in which `KProduction` reads `closure.nu_t` as a
-    **frozen array**: `production = nu_t * strain_rate**2` contains no `k` at all, so the `J·1` the shift
-    is built from carries the destruction feedback and **none** of the production feedback. The residual
-    actually being marched recomputes `nu_t = a₁k/max(a₁ω, S F₂)` from the current `k`, so the production
-    is proportional to `k` and `dP_k/dk = P_k/k` exactly — and that term is what drives the coupled k
-    row's Jacobian diagonal negative. `scalar_transport_shift_diagonal`'s own docstring calls the shift
-    "the equation's own operator diagonal"; at near-wall cells it was the diagonal of a *different*
-    equation.
-    - **Measured** (pitzDaily, 12225 cells, coupled RANS, target-rung iterate, cell 10824 — a
-      `lowerWall`/`outlet` corner — at β = 0.5, before the fix): coupled k row diagonal `J_kk` =
-      **−1.9482e-03**, shift diagonal `d_k` = **+4.6196e-03**, difference **+6.5678e-03**. The
-      production feedback `P_k/k` per unit volume is **+2.0750e+03** and the implied cell volume
-      **3.1652e-06** against **3.2e-06** derived independently from the wall distance — so the
-      difference between the shift and the actual diagonal **is** the production feedback, to 1.1 %.
-      Consequence: `J_kk + β·d_k` is a near-cancellation keeping only **16–47 %** of the shift, so
-      anything upstream is amplified — four gradient reconstructions differing by 12 % in the velocity
-      gradient at that cell asked for k corrections differing **30×**. ⚠️ This is a single-state
-      measurement at one β on one case; it has not been re-taken since the fix, and no march has been
-      re-run against it.
-    - **The fix is the closed form, not a second jvp.** `KProduction.feedback_rate(field, volume)`
-      returns `P̃_k·V/k` off the same `production_and_limit` expressions `source` forms — one elementwise
-      pass, exact to machine precision against `J·1` of a live-`ν_t` production in **both** cap branches
-      (pinned in `test_sst_transport.py`), and an *estimate* only under the near-wall blend, where the
-      modelled production is merely very nearly linear in `k` (measured up to 36 % off the AD derivative
-      on the 6×4 fixture — read it as a time scale, never as the Jacobian). Zero at `k ≤ 0`, where every
-      branch of the production is already clamped to zero, so no floor constant is needed.
-    - **`live_eddy_viscosity` is OPT-IN and the coupled path is the only caller.** A segregated sweep
-      genuinely does freeze `ν_t`, so the frozen-closure diagonal is the *right* one there and the
-      feedback term is correctly absent; `_coupled_shift_policy` passes `live_eddy_viscosity=True`.
-      Pinned both ways in `test_coupled_rans.py`, including the signature default, so the wiring cannot
-      be dropped silently. ⚠️ **This does NOT make the segregated shift bit-identical** — the `abs`
-      change below reaches it too, wherever its own reaction diagonal is negative, which a segregated
-      k solve does reach: with the production cap active and the limiter left exact, `dR/dk` there is
-      `β*ω·V − 10β*ω·V < 0`. The shift grows in those cells (more damping) instead of losing them to a
-      clamp. The fast, slow and validation tiers all passed unchanged, but do not describe the
-      segregated path as untouched. (⚠️ The five `test_bfs3d_species.py` validation tests skip in any
-      checkout without that case's mesh data, so the **3D** coupled case was not exercised here.)
-    - **The exact Jacobian is untouched** — no quasi-Newton stand-in, so the near-root convergence rate is
-      unchanged — and the shift is `stop_gradient`-ed and vanishes at the root, so the adjoint is unaffected.
-    - **⚠️ IT COMPOSES WITH `explicit_production_viscosity`, AND HAD TO BE MADE TO.** That flag (the other
-      fix for this same negative diagonal, landed separately) evaluates the production's `ν_t` at a
-      `stop_gradient`-ed `k` — which is *exactly the derivative this closed form reports*. With it set the
-      premise `dP_k/dk = P_k/k` is false, and folding a feedback in anyway would over-damp the row it was
-      meant to rescue. `feedback_rate(..., live_viscosity=)` takes it as an **argument** rather than
-      inferring it, because a frozen `ν_t` array and a live one are indistinguishable once formed;
-      `k_shift_policy` passes `not self.explicit_production_viscosity`. Pinned against AD of the
-      frozen-viscosity source, so it is zero for the right reason and not by fiat.
-    - ⚠️ **What this does NOT cover: the flag used as documented, on a SEPARATE Jacobian stand-in copy.**
-      Then `_coupled_shift_policy` reads the *main* assembler (flag off) and folds the feedback in, while
-      the operator the shift is added to comes from the copy (flag on) and has no such term — so the shift
-      over-damps relative to its operator. Reconciling that needs `_shifted_solve`'s `jacobian_fn` seam
-      plumbed into the shift policy, which is beyond #312. It is not a correctness bug (the stand-in exists
-      precisely to make `J_kk` positive, so extra damping costs step length, not sign), but do not assume
-      the two are consistent when both are in play. **Unmeasured.**
-    - **How this relates to the two candidates the stall investigation left open** (the `SkewCorrectedGradient`
-      entry in `schemes.md`): it is neither of them, and it is meant to make one of them unnecessary.
-      *Patankar-treating the production in the Jacobian* (freezing `ν_t`'s `k`-dependence through
-      `_shifted_solve`'s `jacobian_fn`) removes the negative term by solving a different operator — a
-      quasi-Newton trade whose cost near the root that entry itself flags as unmeasured. *Raising β until
-      the shift clears the cancellation* is the same statement from the other side, but as a **global**
-      step-control setting standing in for a **per-cell** modelling error. This fixes the modelling error:
-      the shift was simply not the diagonal of the equation being marched, and now is. ⚠️ **No march has
-      been run against any of the three**, so this is not evidence that it beats them — only that it does
-      not pay their price.
-    - **⚠️ `tools/sibling_builders.py` CANNOT SEE the `k_shift_policy` / `omega_shift_policy` pair** — it
-      recognizes builders by *name* (`build`/`create`/`make`/`from_*`/`calibrated`), and neither is one, so
-      its silence here is not clearance. The asymmetry was judged by hand and is genuine: ω's production
-      carries no solved `ω` at all (a live closure gives it a dependence on `k`/`ν_t`, an **off-diagonal**
-      coupling, not this row's time scale), and its one field-reading source, the `~1/ω` cross-diffusion,
-      has the *stabilizing* sign and is orders below `2βω`. That reason is written at the difference, in
-      `omega_shift_policy`'s own docstring, rather than only here.
-  - **⚠️ ONE ARRAY, TWO CONSUMERS NEEDING OPPOSITE SIGN TREATMENTS (binding, #312).** `_scalar_operator_pieces`
-    used to clamp `boundary_diagonal = max(J·1 − interior_outflow, 0)` for **both** its consumers. That is
-    correct for the **preconditioner** (an indefinite operator is not one an aggregation V-cycle can
-    coarsen; a softer preconditioner costs only iterations) and **wrong for the shift**, where a
-    destabilizing source means the local pseudo-timestep must be *smaller*, i.e. the shift *larger* —
-    clamping removed the damping in exactly the cells that need it. `_scalar_operator_pieces` now returns
-    the **raw** reaction diagonal; `scalar_transport_preconditioner` applies `max(·, 0)` and
-    `scalar_transport_shift_diagonal_parts` applies `abs(·)`. Sharing a *value* between consumers with
-    opposite needs is the failure shape, not sharing the derivation — the derivation is still one home.
   - **Which continuation a solve runs is ONE injected source, not two parallel branches (binding, #278,
     2026-08-20).** `solve_coupled` needs a continuation twice — the initial build and every refresh —
     and those were written as two independent two-way branches (`refresh.builder` vs the default
@@ -606,6 +523,48 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
         preconditioner rescale, a row-equilibrated norm — must ask each row for its derivative rather
         than assume every row is a transport balance. The shift diagonal escapes this only because it is
         **zeroed** on fixed cells, so mis-scaling zero is still zero.
+  - **⚠️⚠️ REFUTED BY MEASUREMENT — "give the k shift the production feedback and take `abs` of the
+    reaction diagonal" (issue #312, shipped as PR #317, REVERTED 2026-08-26).** The diagnosis was right
+    and the prescription was wrong; it shipped green and made the case it targeted **worse**. Do not
+    re-propose the `abs` half without reading this.
+    - **The diagnosis stands.** `_coupled_shift_policy` builds the k shift from `k_residual(mdot,
+      closure)`, whose `KProduction` reads `closure.nu_t` as a frozen array — so `nu_t·S²` holds no `k`
+      and the `J·1` row sum carries the destruction feedback and none of the production's. The coupled
+      residual's `nu_t = a₁k/max(a₁ω, S F₂)` is live, so `dP_k/dk = P_k/k`. On pitzDaily at the target
+      rung's clipped iterate, cell 10824, that term is **+6.57e-03** against a shift of **+4.61e-03**.
+    - **The prescription does not follow.** "A destabilizing source means the shift must be larger" is
+      right about intent, but `abs` is taken of the **net**: the reaction term goes `r → |r − f|`, which
+      is *smaller* than `r` whenever `f < 2r`. Measured `f/r = 1.48`, so the shift **halved**.
+    - **Measured, both arms, same iterate, β = 0.5, `analyze` mode of
+      `validation/pitzdaily_gradient_ab/closure_stall_probe.py` at `stall-iterate-skew.npz`** (the
+      `exact` operator rows; compiled ILU(0) live, `PITZ_STALL_BETAS` default ladder):
+
+      | arm | `βd_k` before → after | `J_kk + βd` before → after | kept α before → after |
+      |---|---|---|---|
+      | skew | 2.3066e-03 → 1.1448e-03 | **+3.6004e-04 → −8.0181e-04** | **0.03125 → 0.005371** |
+      | owner | 2.3140e-03 → 1.0393e-03 | +5.7462e-04 → −7.0015e-04 | **0.25 → 0.006645** |
+
+      `J_kk + βd` flips sign and the kept step degrades **6×** (skew) and **38×** (owner). The
+      pre-merge `d_k` = 4.6132e-03 reproduces the issue's own 4.6196e-03, so the baseline is the state
+      the issue measured.
+    - **⚠️ NO TEST TIER CAN SEE THIS, which is why it shipped.** Fast, slow and validation were all
+      green, and unit tests pinned `feedback_rate` against AD to 2.2e-16 — correctly, since the closed
+      form is right; it is the *consumer* that is wrong. **Nothing anywhere asserts step productivity on
+      pitzDaily**, so a change that halves a shift is invisible to every gate. A shift-diagonal change
+      must be measured on `closure_stall_probe.py`'s `analyze` mode before it merges; green tiers are
+      not evidence about it.
+    - **What was NOT refuted, and is worth re-landing on its own:** `KProduction.feedback_rate` (exact
+      against AD in both cap branches under either linearization, an estimate only under the near-wall
+      blend), and returning the reaction diagonal **unclamped** from `_scalar_operator_pieces` with the
+      preconditioner keeping its own `max(·, 0)` — that pair is a behaviour-preserving separation. What
+      is refuted is `abs(·)` on the shift and `live_eddy_viscosity=True` on the coupled path.
+    - **The untried variant is `|r| + |f|`** — add the destabilizing magnitude rather than net it, which
+      at this cell predicts `J_kk + βd` = **+3.65e-03**. Arithmetic only; **unmeasured**, and it must be
+      measured on the probe, not on the tiers.
+    - **`explicit_production_viscosity` already addresses #312** and is the reason the revert costs
+      nothing: at this same cell and iterate its `frozen` rows give `J_kk` **+4.78e-03**, α **1**, and
+      `|G|/|G0|` **0.103**, against the exact operator's stalled 0.975.
+
   - **⚠️ THE ω SHIFT DIAGONAL INHERITS ω's DYNAMIC RANGE — the root of the "never rebuild the shift"
     rule, and (measured) a ~11–37× step-productivity penalty (2026-07-25, #33).** The coupled shift for
     the log-solved ω block is `d_ω = transport_diagonal × jacobian_scale`, and under `LogScalars` that
