@@ -744,16 +744,42 @@ _TRAILING_SMOOTHER_NOTE = (
 K_POSITIVITY_FLOOR = float(os.environ.get("BFS3D_K_POSITIVITY_FLOOR", "1e-8") or 0.0)
 
 #: Clip each cell's OWN `k` correction rather than capping the whole step by the worst cell
-#: (`BFS3D_K_POSITIVITY_PROJECTION=1`). ⚠️ **Still off HERE, and deliberately: the library default and
-#: the sibling case both moved to ON on 2026-08-25, on a measurement taken on the sibling and NOT on
-#: this case.** There the cap was losing a march outright -- every failing step length was the cap
-#: rather than a rung of the ladder, one of them below the shortest rung, followed by the `1 - tau`
-#: collapse derived below -- and turning the projection on completed that march AND made the
-#: already-working arm faster (703.7 s / 73 steps -> 664.0 s / 67 steps, same answer).
+#: (`BFS3D_K_POSITIVITY_PROJECTION=1`). ⚠️ **OFF HERE, and deliberately, against the library default and
+#: the sibling case -- which both moved to ON on 2026-08-25 on a measurement taken on the sibling.**
+#: There the cap was losing a march outright: every failing step length was the cap rather than a rung
+#: of the ladder, one of them below the shortest rung, and the march then died in the `1 - tau` collapse
+#: derived below. Turning the projection on completed that march AND made the already-working arm faster
+#: (703.7 s / 73 steps -> 664.0 s / 67 steps, same answer).
 #:
-#: This case has never been marched under it, so flipping it here would be an unmeasured change to a
-#: validated 3D result. Run the A/B and flip it if it holds; until then this case is deliberately out
-#: of step with its sibling, which is a state worth knowing about rather than discovering.
+#: ⚠️ **IT DOES NOT CARRY OVER. Marched here as a controlled pair (2026-08-25, every other setting in
+#: this file at its default, only this one varying, back to back on one machine), it reaches the SAME
+#: root and costs 41 % more Krylov cycles and 40 % more wall:**
+#:
+#:     |            | cap only (shipped) | + projection |
+#:     |------------|--------------------|--------------|
+#:     | steps      | 69                 | 62           |
+#:     | cycles     | 365                | 515          |
+#:     | wall       | 2268 s             | 3166 s       |
+#:     | capped (L) | 26                 | 0            |
+#:     | escalations| 7                  | 11           |
+#:     | mid-span `x_r/h` | 8.3611       | 8.3611       |
+#:
+#: The mechanism does exactly what it claims -- the cap never binds once, against 26 times -- and the
+#: projection WINS the first two rungs outright (35 steps / 142 cycles / 851 s against 39 / 162 / 958).
+#: **The whole loss is the target rung**, where it spends 373 cycles and 2315 s against 203 and 1310,
+#: at 13.8 cycles per step against 6.8. What the cap was buying there is visible in the log: with the
+#: step no longer shortened, the line search takes full steps into iterates the carried preconditioner
+#: solves badly (inner solves pinned at 12 cycles where the shipped arm's run 2-5, and one attempt at
+#: `alpha` 1.000 whose inner residual reaches 2.7e+10), each of which trips the `RETRY_ON_CYCLES`
+#: bailout below and redoes the step -- 8 cycle-triggered redos against 3. So on THIS case the global
+#: cap is not only a positivity device; it is doing globalization work, and the per-cell clip removes
+#: that without replacing it.
+#:
+#: Consistent with the earlier full-march pair on this case (2026-08-11), which found the two arms
+#: identical at 329 cycles apiece and concluded the projection was worth keeping for robustness and not
+#: for speed. Under today's defaults the neutral result has become a real cost, so the reasoning stands
+#: and the price has risen. **Open, and untested:** `RETRY_ON_CYCLES` is calibrated under the cap, so
+#: whether the target-rung loss is the projection or a stale bailout threshold is not established here.
 #:
 #: This is the structural answer to what the floor above can only postpone. The cap is a minimum over
 #: cells, so the stagnant corner where the step face, the floor and a side wall meet -- no shear, so no

@@ -1219,10 +1219,53 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   floor, and removing the cap's global coupling altogether — and none moved the cycle count.
 
   **Keep the projection for ROBUSTNESS, not speed.** It eliminates the positivity lock-up outright (the
-  mode that killed the 77-step march and the β = 16 runaways), and it is off by default and
-  byte-identical off (`positivity_projection=False`, `BFS3D_K_POSITIVITY_PROJECTION` unset). It is not
-  *dominated* — it removes a failure mode nothing else does — so it is not a deletion candidate, but it
-  must not be sold as a performance feature.
+  mode that killed the 77-step march and the β = 16 runaways). It is not *dominated* — it removes a
+  failure mode nothing else does — so it is not a deletion candidate, but it must not be sold as a
+  performance feature.
+
+  ⚠️ **"off by default" is now only true of THIS CASE. The LIBRARY default flipped to `True` on
+  2026-08-25** (all four continuation builders, and `pitzdaily_openfoam` with them), on a pitzDaily
+  measurement where the cap was losing a march outright. `bfs3d_openfoam` keeps
+  `K_POSITIVITY_PROJECTION` off, so `positivity_projection=False` is a case override now, not the
+  inherited default.
+
+  ✅ **RE-ADJUDICATED AT TODAY'S DEFAULTS (2026-08-25, #314): the neutral result above has become a
+  41 % CYCLE COST, and the conclusion — robustness, not speed — is unchanged and now has a price.**
+  Same controlled pair, only `positivity_projection` varying, back to back on one machine.
+
+  *Configuration:* `bfs3d`, three-rung Reynolds continuation, field split on, `simplesmooth` flow inverse
+  (2 sweeps, frozen coarsening), in-framework trailing inverse, `zerogradient` `k` wall, floor `1e-08`,
+  `retry_on_cycles` 10, `cycle_budget` 42, `forward_rtol` 0.3, compiled ILU(0) live, at `e46564a` (i.e.
+  after the flow boundary-closure and coupled-`k`-shift fixes of #312/#313, which move this march:
+  the cap arm is 69 steps here against the 67 of the last pair on record).
+
+  | | cap only | projection |
+  |---|---|---|
+  | steps | 69 | **62** |
+  | **Krylov cycles** | **365** | 515 (+41 %) |
+  | wall | **2268 s** | 3166 s (+40 %) |
+  | positivity-limited (`L`) steps | 26 | **0** |
+  | escalations | **7** | 11 |
+  | mid-span `x_r/h` | 8.3611 | 8.3611 |
+
+  **The loss is entirely the TARGET rung, and the projection WINS the two below it** — 35 steps / 142
+  cycles / 851 s against 39 / 162 / 958. On the target rung it spends 373 cycles / 2315 s against 203 /
+  1310, which is **13.8 Krylov cycles per step against 6.8**.
+
+  **Why: the global cap was doing globalization work, and the per-cell clip removes it without replacing
+  it.** With the step no longer shortened, the line search takes full steps into iterates the carried
+  preconditioner solves badly — inner solves pinned at 12 cycles where the cap arm's run 2–5, and one
+  attempt at α = 1.000 whose inner residual reaches **2.7e+10** — and each such solve trips
+  `retry_on_cycles` and redoes the step at unchanged β: **8 cycle-triggered redos against 3**. Note the
+  summary row's cycle count is the ACCEPTED attempt only, so the +150 cycles is real per-solve cost and
+  the discarded attempts are extra wall on top.
+  ⚠️ **This does NOT re-open Mode 2 as "the cascade reappears through the descent test".** The 2026-08-11
+  pair saw the descent test take over; here the trigger is the *cycle* bailout, which did not exist in
+  that bundle. Same conclusion by a different route.
+  ⚠️ **UNTESTED, and the obvious next probe:** `retry_on_cycles = 10` was calibrated under the cap, so
+  whether the target-rung loss belongs to the projection or to a threshold that no longer suits it is
+  not established. It is a hardcoded constant in the case (no environment override), so a third arm
+  needs a code edit.
 
   **⚠️ REFUTED — "rescaling promotes collapsed-`k` rows and inflates their corrections" is FALSE. Do not
   re-propose it (measured 2026-08-11, `k_row_scale_probe.py`).** The proposed explanation for why the
