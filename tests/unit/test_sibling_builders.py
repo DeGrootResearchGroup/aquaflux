@@ -101,6 +101,31 @@ class SchemeTwo:
 """
 
 
+# A classmethod factory whose name is in no convention list -- the blind spot the structural test
+# closes. Both build the same class from the same surface; only `slow` differs.
+_UNCONVENTIONALLY_NAMED_FACTORIES = """
+class Solve:
+    def __init__(self, count, warn=None):
+        pass
+
+
+def _fitted(system, *, a=0, b=0, c=0, d=0, e=0, warn=None):
+    return Solve(system, warn=warn)
+
+
+class SchemeOne:
+    @classmethod
+    def by_counts(cls, mesh, *, a=0, b=0, c=0, d=0, e=0):
+        return cls(solver=_fitted(mesh, a=a, b=b, c=c, d=d, e=e))
+
+
+class SchemeTwo:
+    @classmethod
+    def by_counts(cls, mesh, *, a=0, b=0, c=0, d=0, e=0, slow=None):
+        return cls(solver=_fitted(mesh, a=a, b=b, c=c, d=d, e=e), slow=slow)
+"""
+
+
 def _run(source: str, tmp_path: Path) -> str:
     package = tmp_path / "pkg"
     package.mkdir()
@@ -161,6 +186,20 @@ def test_it_reaches_classmethod_factories_that_return_cls(tmp_path: Path) -> Non
     """
     out = _run(_CLASSMETHOD_FACTORIES, tmp_path)
     assert "SchemeOne.calibrated" in out and "SchemeTwo.calibrated" in out
+    assert "'slow'" in out, "the drifted keyword is the actionable half of the report"
+
+
+def test_it_reaches_a_classmethod_factory_no_naming_convention_covers(tmp_path: Path) -> None:
+    """The name list cannot be the primary test, because it is blind to every name nobody added.
+
+    That blindness has cost twice, and each time the fix was to teach it one more name -- which leaves
+    the next naming style just as invisible, and a factory it cannot see reports as a clean tree rather
+    than as a gap. A ``@classmethod`` whose body returns ``cls(...)`` is a factory whatever it is
+    called, so the shape is what qualifies it and the name list is only the fallback for factories
+    whose construction the syntax tree cannot follow.
+    """
+    out = _run(_UNCONVENTIONALLY_NAMED_FACTORIES, tmp_path)
+    assert "SchemeOne.by_counts" in out and "SchemeTwo.by_counts" in out
     assert "'slow'" in out, "the drifted keyword is the actionable half of the report"
 
 

@@ -35,8 +35,31 @@ import ast
 import itertools
 import pathlib
 
-#: Methods that build and return something, by convention, alongside module-level functions.
+#: Methods that build and return something, by convention, alongside module-level functions. A
+#: ``@classmethod`` returning ``cls(...)`` is recognized structurally as well (see `_is_factory`), so
+#: this list only has to cover factories whose construction the syntax tree cannot see.
 _FACTORY_METHODS = ("build", "create", "make", "calibrated")
+
+
+def _is_factory(member: ast.FunctionDef) -> bool:
+    """Whether a class member builds and returns something, so its surface belongs in the report.
+
+    Two ways to qualify, and the second is the one that matters. **By name** — ``build`` / ``create``
+    / ``make`` / ``calibrated`` / ``from_*`` — covers a factory whose construction happens somewhere
+    this tool cannot follow. **By shape** — a ``@classmethod`` whose body returns ``cls(...)`` — needs
+    no naming convention at all, which is the point: a name list is blind to every factory nobody
+    thought to add to it, and a pair this tool cannot see reports as a clean tree rather than as a gap.
+    That blindness has twice let a builder surface drift unreported, so the structural test is the
+    primary one and the name list is the fallback.
+    """
+    if member.name in _FACTORY_METHODS or member.name.startswith("from_"):
+        return True
+    decorated = any(
+        isinstance(d, ast.Name) and d.id == "classmethod" for d in member.decorator_list
+    )
+    # Naming the owner "cls" makes `_returned_calls` report a `return cls(...)` as the literal name
+    # "cls", which is the question being asked -- rather than repeating its walk over returns here.
+    return decorated and "cls" in _returned_calls(member, owner="cls")
 
 
 def _returned_calls(fn: ast.FunctionDef, owner: str = "") -> set[str]:
@@ -117,9 +140,7 @@ def _builders(root: pathlib.Path):
                     yield "", node
                 elif isinstance(node, ast.ClassDef):
                     for member in node.body:
-                        if isinstance(member, ast.FunctionDef) and (
-                            member.name in _FACTORY_METHODS or member.name.startswith("from_")
-                        ):
+                        if isinstance(member, ast.FunctionDef) and _is_factory(member):
                             yield node.name, member
 
         tails = {
