@@ -520,7 +520,7 @@ def main():
     pc_beta = max(march_beta, FLOOR) if march_beta > 0 else 0.0
 
     coupled = compare.build_case()["coupled"]
-    n_fields = coupled.layout.dim + 3
+    n_fields = coupled.layout.n_fields
     n_dofs = n_fields * coupled.layout.n_cells
     print(
         f"{'=' * 100}\nzero-shift ILU({compare.FILL_LEVELS}) pattern census and pivots, monolithic "

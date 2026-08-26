@@ -103,6 +103,7 @@ from .hierarchy_inverse import HierarchyBlockInverse
 from .ilu_inverse import IluSmoothedInverse, ilu_smoothed_inverse
 from .ilu0 import COMPILED, Ilu0
 from .refresh_timing import PhaseTimer, RefreshTiming
+from .state import CellFields, FieldLayout, GlobalDofs, StateBlock, SubLayout
 from .lu_preconditioner import MonolithicLuPreconditioner
 from .forward_step import (
     ForwardStep,
@@ -194,6 +195,7 @@ __all__ = [
     "BlockColouring",
     "BlockScaledNorm",
     "BlockTriangularFieldSplit",
+    "CellFields",
     "CellMajor",
     "CellOrder",
     "CflResidualDualTimeControl",
@@ -207,8 +209,10 @@ __all__ = [
     "DualTimeStep",
     "EliminationOrdering",
     "FieldGroups",
+    "FieldLayout",
     "FieldSplitAmgPreconditioner",
     "ForwardStep",
+    "GlobalDofs",
     "HierarchyBlockInverse",
     "HostFactors",
     "HostPreconditioner",
@@ -248,11 +252,13 @@ __all__ = [
     "ShiftedForwardStep",
     "SimpleSmoothedInverse",
     "SmoothedHierarchy",
+    "StateBlock",
     "StateCheckpointer",
     "StepAcceptance",
     "StepControl",
     "StepOutcome",
     "StepReport",
+    "SubLayout",
     "SwitchedEvolutionRelaxation",
     "TransposedPreconditioner",
     "VelocityShiftParts",

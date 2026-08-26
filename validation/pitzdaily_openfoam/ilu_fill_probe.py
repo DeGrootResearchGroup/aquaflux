@@ -402,7 +402,7 @@ ARMS = ("ilu0", "ilu1", "gamg-0x4", "gamg-1x4")
 
 
 def run_case(name, coupled, betas, reach=3, arms=ARMS, localize=False):
-    dim = coupled.layout.dim
+    dim = coupled.momentum.mesh.dim
     n_fields = dim + 3
     names = FIELDS2 if dim == 2 else FIELDS3
     n = coupled.layout.n_cells

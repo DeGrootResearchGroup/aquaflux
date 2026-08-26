@@ -2,72 +2,35 @@
 
 The monolithic ``(velocity, pressure)`` unknown is stored as one flat vector laid out
 ``[vel_0, vel_1, ..., vel_{dim-1}, pressure]`` (each block ``n_cells`` long). The slice arithmetic
-that packs/unpacks that layout is a distinct responsibility from residual assembly, so it lives in
-this small, mesh-free :class:`BlockStateLayout` object rather than being open-coded (and repeated)
-across the residual and its preconditioner. It is testable in isolation — ``BlockStateLayout(dim,
-n_cells)`` — and reusable by any future coupled system (e.g. energy coupling).
+that packs/unpacks that layout is a distinct responsibility from residual assembly, and it is the
+same arithmetic every other coupled state in the package needs, so it is not written here: this
+module only *names* the flow system's blocks over the shared
+:class:`~aquaflux.solve.FieldLayout`. A coupled system that carries the flow state as a sub-state
+(the Reynolds-averaged ``[flow, k, omega]`` unknown) nests the layout built here rather than
+restating its widths.
 """
 
 from __future__ import annotations
 
-import equinox as eqx
-import jax.numpy as jnp
+from aquaflux.solve import FieldLayout
+
+__all__ = ["flow_state_layout"]
 
 
-class BlockStateLayout(eqx.Module):
-    """Pack/unpack of the flat ``[vel_0..vel_{dim-1}, pressure]`` block state.
+def flow_state_layout(dim: int, n_cells: int) -> FieldLayout:
+    """The flat ``[vel_0..vel_{dim-1}, pressure]`` layout of a momentum-continuity state.
 
-    Attributes
+    Parameters
     ----------
     dim : int
-        Number of velocity components (spatial dimension), static.
+        Number of velocity components (spatial dimension).
     n_cells : int
-        Number of cells (each block's length), static.
+        Number of cells; each block is that long per field.
+
+    Returns
+    -------
+    FieldLayout
+        Blocks ``"velocity"`` (``dim`` fields, read out as ``(n_cells, dim)``) then ``"pressure"``
+        (one field, ``(n_cells,)``), of total length ``(dim + 1) * n_cells``.
     """
-
-    dim: int = eqx.field(static=True)
-    n_cells: int = eqx.field(static=True)
-
-    @property
-    def size(self) -> int:
-        """Length of the flat state vector, ``(dim + 1) * n_cells``."""
-        return (self.dim + 1) * self.n_cells
-
-    def unpack(self, state: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
-        """Split the flat state into velocity ``(n_cells, dim)`` and pressure ``(n_cells,)``.
-
-        Parameters
-        ----------
-        state : jnp.ndarray
-            Flat state vector, shape ``((dim + 1) * n_cells,)``.
-
-        Returns
-        -------
-        velocity, pressure : jnp.ndarray
-            Velocity ``(n_cells, dim)`` and pressure ``(n_cells,)``.
-        """
-        blocks = state.reshape(self.dim + 1, self.n_cells)
-        return blocks[: self.dim].T, blocks[self.dim]
-
-    def pack(self, velocity: jnp.ndarray, pressure: jnp.ndarray) -> jnp.ndarray:
-        """Assemble per-component velocity and pressure into the flat vector.
-
-        Parameters
-        ----------
-        velocity : jnp.ndarray
-            Per-component velocity, shape ``(n_cells, dim)``.
-        pressure : jnp.ndarray
-            Pressure, shape ``(n_cells,)``.
-
-        Returns
-        -------
-        jnp.ndarray
-            Flat state vector, shape ``((dim + 1) * n_cells,)``.
-        """
-        # Component-first layout [vel_0, ..., vel_{dim-1}, pressure], each block (n_cells,): stack as
-        # (dim + 1, n_cells) blocks -- the same view `unpack` reads -- and flatten row-major.
-        return jnp.concatenate([velocity.T, pressure[None, :]]).reshape(-1)
-
-    def zeros(self) -> jnp.ndarray:
-        """A zero flat state vector, shape ``((dim + 1) * n_cells,)``."""
-        return jnp.zeros(self.size)
+    return FieldLayout.cell_fields(n_cells, velocity=dim, pressure=1)

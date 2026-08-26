@@ -132,7 +132,7 @@ def main():
     coupled = case["coupled"]
     mesh = coupled.momentum.mesh
     n = mesh.n_cells
-    n_fields = coupled.layout.dim + 3
+    n_fields = coupled.layout.n_fields
     owner, nb, _ = mesh.face_cells.interior_edges()
     owner, nb = np.asarray(owner), np.asarray(nb)
 
@@ -152,7 +152,7 @@ def main():
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
         matvec, plan, batched, _PROBE_BATCH_SIZE, structure
     )
-    groups = FieldGroups(n_cells=n, n_leading_fields=n_fields - 2, n_trailing_fields=2)
+    groups = FieldGroups.by_counts(n_cells=n, n_leading_fields=n_fields - 2, n_trailing_fields=2)
     a_ll, _, _, a_tt = groups.blocks(jacobian)
     del jacobian
     gc.collect()

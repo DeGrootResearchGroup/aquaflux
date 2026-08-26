@@ -18,7 +18,13 @@ Engineering Principles.
 ## Status — BUILT (steady laminar, Poiseuille-validated)
 - **`momentum.py` — `MomentumContinuity`.** The coupled residual over the flat state
   `[vel_0..vel_{dim-1}, pressure]` (the system-first layout; `pack`/`unpack` convert to
-  `(velocity, pressure)`). Per component the momentum balance is a scalar transport of `u_i`
+  `(velocity, pressure)`). **That layout is not written here.** `state.py::flow_state_layout(dim,
+  n_cells)` only *names* this system's `velocity` / `pressure` blocks over the shared
+  `solve/state.py::FieldLayout`, which owns every piece of `f * n_cells + i` arithmetic in the
+  package (#285 — there is no `BlockStateLayout` class). `MomentumContinuity.layout` is **public**
+  (it was `_layout`) because the coupled RANS state nests this very object as its `flow` block
+  rather than rebuilding one from `dim` and `n_cells`; `pack`/`unpack`/`initial_state` delegate to
+  it. Per component the momentum balance is a scalar transport of `u_i`
   — advection (`mdot·u_i`) + viscous diffusion (μ as the coefficient) + pressure force
   (`p_f n_i A`) — **and all three are `FaceFluxOperator`s composed by the shared `CellBalance`**,
   the same object that assembles every scalar transport equation (`.claude/rules/discretization.md`).

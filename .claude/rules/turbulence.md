@@ -1038,8 +1038,11 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
 ## The coupled solve — `CoupledRANS` / `solve_coupled`
 
 - **`coupled.py` — `CoupledRANS`, `solve_coupled` (Option 2, the target engine).** The monolithic
-  residual `R(u, p, k, ω)` over the flat `[flow…, k, ω]` state (`CoupledRANSLayout`, whose `unpack`
-  yields the momentum block's own `[u,p]` sub-vector so `MomentumContinuity` runs on it unchanged),
+  residual `R(u, p, k, ω)` over the flat `[flow…, k, ω]` state — `coupled_rans_layout(momentum.layout)`,
+  a `solve/state.py::FieldLayout` that **nests the momentum block's own layout** as its `flow` block, so
+  `unpack` yields the `[u,p]` sub-vector and `MomentumContinuity` runs on it unchanged (#285; there is no
+  `CoupledRANSLayout` class and no `layout.dim` — `layout.n_fields`, `layout.field_offset("k")`,
+  `layout.slice_of("k")`, and the mesh's own `dim`) —
   with **nothing frozen**: μ_t, the strain `S(u)`, the Rhie–Chow flux, and the closure are live, so
   one Newton solve sees the exact cross-block Jacobian. Globalized by `coupled_continuation`
   (a block `CoupledShiftPolicy` = velocity `a_P` shift ⊕ the k/ω transport-diagonal shifts, and a

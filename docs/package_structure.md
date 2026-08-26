@@ -96,7 +96,7 @@ cfd/                                  # repo root
 │   │   └── collection.py             #   BoundaryConditions: named {patch: closure} collection bound to a mesh's patches, applied by the shared iterate-patches → gather owner → set fold
 │   │
 │   ├── flow/                         # the coupled pressure–velocity (u, v[, w], p) block
-│   │   ├── state.py                  #   BlockStateLayout: the flat [vel_0..vel_{dim-1}, pressure] layout (pack/unpack); FlowFields / VelocityFields
+│   │   ├── state.py                  #   flow_state_layout: the flow system's named [velocity, pressure] blocks over solve/state.py's FieldLayout
 │   │   ├── momentum.py               #   MomentumContinuity: the coupled residual (each momentum component is a CellBalance over Diffusion/PressureForce/Advection; Rhie–Chow continuity; pressure pin; takes a PropertyModel → viscosity/density) + PressureForce
 │   │   ├── source.py                 #   MomentumSource (vector volume source: source/face_force/diagonal, the diagonal added to a_P) + UniformBodyForce; where buoyancy, porous drag, rotating-frame terms attach
 │   │   ├── rhie_chow.py              #   interior_mass_flux + momentum_diagonal / frozen_momentum_diagonal_parts (viscous + convective)
@@ -117,7 +117,7 @@ cfd/                                  # repo root
 │   │   ├── sources.py                #   the SST source terms as VolumeSource operators: KProduction/KDestruction, OmegaProduction/OmegaDestruction/OmegaCrossDiffusion
 │   │   ├── strain.py                 #   strain_rate_magnitude: the scalar invariant the closure consumes
 │   │   ├── boundary.py               #   wall and inlet values: omega_wall, nut_wall, inlet_k/inlet_omega, wall_y_star, wall_shear_stress (y+-insensitive wall treatment)
-│   │   ├── coupled.py                #   CoupledRANS: the monolithic residual R(u, p, k, ω) + CoupledRANSLayout
+│   │   ├── coupled.py                #   CoupledRANS: the monolithic residual R(u, p, k, ω) + coupled_rans_layout
 │   │   ├── driver.py                 #   solve_segregated: the segregated outer loop coupling the flow solve to the closure
 │   │   ├── continuation.py           #   pseudo-transient continuation for the (k, ω) scalar transport solves
 │   │   ├── reynolds.py               #   solve_reynolds_continuation: reach a high-Reynolds root through easier lower-Re ones
@@ -126,6 +126,7 @@ cfd/                                  # repo root
 │   │   └── diagnostics.py            #   named physical fields of a coupled state, for march-log reporting
 │   │
 │   ├── solve/                        # Newton on the residual, the differentiated linear solve, and the AMG that preconditions it
+│   │   ├── state.py                  #   FieldLayout + CellFields / SubLayout / GlobalDofs: the flat field-major state as named, variable-length blocks (every coupled system's one layout)
 │   │   ├── newton.py                 #   newton_step: the Newton correction on the cell residual
 │   │   ├── implicit.py               #   ImplicitNewtonSolver: Newton to convergence + the implicit-function-theorem adjoint (one transpose solve, not the iteration on the tape)
 │   │   ├── linear.py                 #   solve_linear: differentiable matrix-free linear solve, optional left/right preconditioning; relative_residual_gmres
@@ -142,7 +143,7 @@ cfd/                                  # repo root
 │   │   ├── frozen_operator.py        #   convection_diffusion_operator / decouple_dof: the one assembler of the frozen operator every AMG consumer coarsens
 │   │   ├── amg_preconditioner.py     #   MonolithicAmgPreconditioner for the coupled saddle-point solve
 │   │   ├── lu_preconditioner.py      #   MonolithicLuPreconditioner (complete sparse LU)
-│   │   ├── field_split.py            #   BlockTriangularFieldSplit: block-triangular field-split preconditioning for flow-plus-transport
+│   │   ├── field_split.py            #   FieldGroups (a two-group partition view over a FieldLayout) + BlockTriangularFieldSplit: block-triangular field-split preconditioning for flow-plus-transport
 │   │   ├── hierarchy_inverse.py      #   HierarchyBlockInverse: the shared body of a traced block inverse (hierarchy, in-place refresh, transpose)
 │   │   ├── saddle_multigrid.py       #   SimpleSmoothedInverse: a traced multigrid over the flow saddle, smoothed by SIMPLE relaxation
 │   │   ├── ilu_inverse.py            #   IluSmoothedInverse: the same hierarchy applied on the host, smoothed by an incomplete factorization

@@ -47,6 +47,7 @@ from aquaflux.schemes.interpolation import (
     interpolate_to_face,
     interpolation_factor,
 )
+from aquaflux.solve import FieldLayout
 from aquaflux.vectors import dot
 
 from .rhie_chow import (
@@ -56,7 +57,7 @@ from .rhie_chow import (
     momentum_diagonal_parts,
 )
 from .source import MomentumSource, reject_unsupported_face_force
-from .state import BlockStateLayout
+from .state import flow_state_layout
 
 if TYPE_CHECKING:
     from aquaflux.discretization import AdvectionScheme
@@ -301,21 +302,25 @@ class MomentumContinuity(eqx.Module):
     # --- state layout ------------------------------------------------------------------
 
     @property
-    def _layout(self) -> BlockStateLayout:
-        """The flat-vector block layout ``[vel_0..vel_{dim-1}, pressure]`` for this system's state."""
-        return BlockStateLayout(self.mesh.dim, self.mesh.n_cells)
+    def layout(self) -> FieldLayout:
+        """The flat-vector block layout ``[vel_0..vel_{dim-1}, pressure]`` for this system's state.
+
+        Public because a coupled system that carries this state as a sub-state nests **this** object
+        rather than restating the flow block's widths.
+        """
+        return flow_state_layout(self.mesh.dim, self.mesh.n_cells)
 
     def unpack(self, state: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
         """Split the flat state into velocity ``(n_cells, dim)`` and pressure ``(n_cells,)``."""
-        return self._layout.unpack(state)
+        return self.layout.unpack(state)
 
     def pack(self, velocity_residual: jnp.ndarray, pressure_residual: jnp.ndarray) -> jnp.ndarray:
         """Assemble component momentum residuals and the continuity residual into a flat vector."""
-        return self._layout.pack(velocity_residual, pressure_residual)
+        return self.layout.pack(velocity_residual, pressure_residual)
 
     def initial_state(self) -> jnp.ndarray:
         """A zero flat state vector, shape ``((dim + 1) n_cells,)``."""
-        return self._layout.zeros()
+        return self.layout.zeros()
 
     def with_eddy_viscosity(
         self, eddy_viscosity: jnp.ndarray, wall_eddy_viscosity: jnp.ndarray | None = None

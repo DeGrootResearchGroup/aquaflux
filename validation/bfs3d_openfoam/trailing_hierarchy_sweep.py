@@ -386,12 +386,8 @@ def main() -> None:
     pc_beta = max(march_beta, FLOOR) if march_beta > 0 else 0.0
 
     coupled = compare.build_case()["coupled"]
-    n_fields = coupled.layout.dim + 3
-    groups = FieldGroups(
-        n_cells=coupled.layout.n_cells,
-        n_leading_fields=coupled.layout.dim + 1,
-        n_trailing_fields=N_TRAILING,
-    )
+    n_fields = coupled.layout.n_fields
+    groups = FieldGroups.split_before(coupled.layout, "k")
     print(
         f"{'=' * 118}\ntrailing [k, omega] block ALONE over {groups.n_cells} cells, "
         f"GMRES to rtol {RTOL:.0e} on the TRUE residual (restart 15)\n"

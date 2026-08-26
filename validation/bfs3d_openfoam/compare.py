@@ -1362,11 +1362,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         coupled,
         column_reach=COLUMN_REACH,
         active_rows=(
-            FieldGroups(
-                n_cells=coupled.layout.n_cells,
-                n_leading_fields=coupled.layout.dim + 1,
-                n_trailing_fields=2,
-            ).active_rows()
+            FieldGroups.split_before(coupled.layout, "k").active_rows()
             if FIELD_SPLIT
             else None
         ),

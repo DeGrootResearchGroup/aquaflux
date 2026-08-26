@@ -83,7 +83,7 @@ def permute_cells(cell_major, order, n_fields):
 
 
 def run(name, coupled, betas, arms=("ilu0", "ilu1"), reach=3):
-    dim = coupled.layout.dim
+    dim = coupled.momentum.mesh.dim
     n_fields = dim + 3
     names = FIELDS2 if dim == 2 else FIELDS3
     n = coupled.layout.n_cells

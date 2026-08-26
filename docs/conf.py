@@ -44,6 +44,7 @@ SUBPACKAGE_GROUPS = {
         ("Quality and connectivity diagnostics", ["quality", "distance", "graph"]),
     ],
     "solve": [
+        ("The coupled state's layout", ["state"]),
         ("Nonlinear solve", ["implicit", "newton"]),
         (
             "The pseudo-transient march",

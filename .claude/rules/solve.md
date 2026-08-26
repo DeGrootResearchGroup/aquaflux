@@ -218,6 +218,50 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
 
 ## Contracts — the API boundary
 
+- **`state.py` — BUILT (#285): `FieldLayout` is the ONE flat field-major state layout, and nothing
+  else may re-derive `f * n_cells + i` (binding).** A coupled state is one flat vector, field-major,
+  described by an ordered tuple of named `StateBlock`s over a cell count. Three block kinds cover
+  everything the solvers need: `CellFields(name, n_fields)` (whole per-cell fields, read out
+  `(n_cells,)` for a scalar and `(n_cells, n_fields)` for a vector), `SubLayout(name, layout)` (a
+  nested sub-state, read out **flat** so its owner unpacks it with its own layout), and
+  `GlobalDofs(name, count)` (degrees of freedom attached to no cell — a constraint multiplier). The
+  object is mesh-free, array-free, hashable, and a pytree with **zero** leaves, so it rides inside a
+  differentiated module or as a static field indifferently.
+  - **Why it exists.** The same concept had **three** implementations in three subpackages —
+    `flow/state.py::BlockStateLayout`, `turbulence/coupled.py::CoupledRANSLayout`, and
+    `solve/field_split.py::FieldGroups` — each with its own vocabulary, none composing the others,
+    and each of the first two carrying a docstring saying it existed so the arithmetic was not
+    open-coded. `CoupledRANSLayout` said it carried the flow layout "verbatim" and then re-derived
+    `flow_size = (dim + 1) * n_cells` and hand-sliced `pack`/`unpack`; `coupled.py::_k_block`
+    computed a block range a fourth time. Adding an unknown to the flow state meant edits in three
+    packages.
+  - **The three are now compositions of the one.** `flow/state.py::flow_state_layout(dim, n_cells)`
+    names the flow system's `velocity` / `pressure` blocks; `turbulence/coupled.py::coupled_rans_layout(flow)`
+    **nests that layout** as the `flow` block and adds `k` and `omega`, so the flow block's widths are
+    stated exactly once; `_k_block` is gone (`coupled.layout.slice_of("k")`). `MomentumContinuity.layout`
+    is public for exactly this — the coupled builder takes the assembler's own layout object rather
+    than rebuilding one from `dim` and `n_cells`.
+  - **A bordered state is an extra named block, not a special case.** The mass-flow-constrained march
+    carries `[flow…, k, omega, beta]`; `_mass_flow_layout(coupled)` is
+    `coupled.layout.appended(GlobalDofs("mass_flow", 1))`, and the block-scaled measure reads its
+    `sizes` instead of hand-building `(flow_size, n, n, 1)`.
+  - **`FieldGroups` is a partition VIEW over a layout, not parallel arithmetic** — see
+    `solve-field-split.md`. It holds the layout and a leading field count, derives `n_dofs` /
+    `leading` / `trailing` from it, and refuses a layout carrying a `GlobalDofs` block, because a
+    partition into whole fields cannot describe a multiplier belonging to no field.
+  - ⚠️ **`FieldLayout` has no `dim`, and there is no `layout.dim` anywhere.** Number of *fields* is
+    `layout.n_fields`; the fields *before* a block are `layout.field_offset(name)`; the spatial
+    dimension is a property of the mesh (`coupled.momentum.mesh.dim`), which is where every former
+    `layout.dim` call site now reads it. The old spellings `layout.dim + 3` and `layout.dim + 1` are
+    now `layout.n_fields` and `layout.field_offset("k")` — both of which survive a block being added.
+  - **The surface is deliberately only what is used.** `span(first, last)`, `sub(name)`,
+    `width(name)` and `block(name)` were written and **deleted before the change landed**: nothing
+    outside their own tests called any of them, and a nested layout is reached from the assembler
+    that owns it (`momentum.layout`) rather than back out of the state it was nested into. Add one
+    back when a consumer needs it, not in anticipation.
+  - Pinned by `tests/unit/test_state.py` (mesh-free: shape, addressing, packing, the bordered
+    extension, the construction refusals, and the zero-leaf/hashable pytree properties).
+
 - **`linear.py` — BUILT.** `solve_linear(matvec, b, solver, preconditioner=None)` is a
   matrix-free wrapper over `lineax` (default restarted GMRES); `lineax` supplies the
   **implicit-diff of the linear solve** (the Krylov loop is not taped). This is the load-bearing

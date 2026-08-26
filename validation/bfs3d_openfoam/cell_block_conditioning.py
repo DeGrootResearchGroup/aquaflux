@@ -99,7 +99,7 @@ def main():
     data = np.load(CASE / f"checkpoints/state-{index:05d}.npz")
     state = jnp.asarray(data["state"])
     coupled = compare.build_case()["coupled"]
-    n_fields = coupled.layout.dim + 3
+    n_fields = coupled.layout.n_fields
     n_cells = coupled.layout.n_cells
     plan = _coupled_jacobian_plan(coupled, 3)
     structure = block_stencil_gather_map(plan)

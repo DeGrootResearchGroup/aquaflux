@@ -32,7 +32,7 @@ def _laplacian_2d(n: int) -> sp.csr_matrix:
 @pytest.fixture(scope="module")
 def groups() -> FieldGroups:
     """Four leading fields and two trailing ones, the shape of the coupled Reynolds-averaged split."""
-    return FieldGroups(n_cells=20 * 20, n_leading_fields=4, n_trailing_fields=2)
+    return FieldGroups.by_counts(n_cells=20 * 20, n_leading_fields=4, n_trailing_fields=2)
 
 
 @pytest.fixture(scope="module")

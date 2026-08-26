@@ -483,12 +483,8 @@ def main() -> None:
     selected += tuple(a for a in sorted(only or ()) if a not in selected)
 
     coupled = compare.build_case()["coupled"]
-    n_fields = coupled.layout.dim + 3
-    groups = FieldGroups(
-        n_cells=coupled.layout.n_cells,
-        n_leading_fields=coupled.layout.dim + 1,
-        n_trailing_fields=2,
-    )
+    n_fields = coupled.layout.n_fields
+    groups = FieldGroups.split_before(coupled.layout, "k")
     print(
         f"{'=' * 92}\nturbulence-smoother sweep: leading half held at {FLOW_SMOOTHER!r}, "
         f"trailing half varied\narms: {', '.join(selected)}\n"

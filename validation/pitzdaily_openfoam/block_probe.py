@@ -17,7 +17,7 @@ from ilu_fill_probe import assemble, ilu_pivots, ksp_solve, materialize
 from state_probe import openfoam_state
 
 coupled = P.build_pitz("corrected")
-nf, n = coupled.layout.dim + 3, coupled.layout.n_cells
+nf, n = coupled.layout.n_fields, coupled.layout.n_cells
 
 
 def sub(A, b, keep):

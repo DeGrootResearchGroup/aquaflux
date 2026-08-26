@@ -1419,7 +1419,7 @@ def _leading_inverse(spec):
             n_cells = sp.csr_matrix(block).shape[0] // n_group_fields
             return build_block_triangular_field_split(
                 block,
-                FieldGroups(
+                FieldGroups.by_counts(
                     n_cells=n_cells,
                     n_leading_fields=n_group_fields - 1,  # u, v, w
                     n_trailing_fields=1,  # p
@@ -2689,12 +2689,8 @@ def main():
     pc_beta = max(march_beta, FLOOR) if march_beta > 0 else 0.0
 
     coupled = compare.build_case()["coupled"]
-    n_fields = coupled.layout.dim + 3
-    groups = FieldGroups(
-        n_cells=coupled.layout.n_cells,
-        n_leading_fields=coupled.layout.dim + 1,  # u, v, w, p -- the saddle
-        n_trailing_fields=2,  # k, omega -- the transported scalars
-    )
+    n_fields = coupled.layout.n_fields
+    groups = FieldGroups.split_before(coupled.layout, "k")  # [u,v,w,p] leads, [k,omega] trails
     print(
         f"{'=' * 100}\nfield split: {groups.n_leading_fields} leading + {groups.n_trailing_fields} "
         f"trailing fields over {groups.n_cells} cells\nbundle: plain aggregation, "

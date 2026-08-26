@@ -449,8 +449,8 @@ def main() -> None:
 
     coupled = compare.build_case()["coupled"]
     n_cells = coupled.layout.n_cells
-    n_flow = coupled.layout.dim + 1
-    groups = FieldGroups(n_cells, n_flow, coupled.layout.dim + 3 - n_flow)
+    n_flow = coupled.layout.field_offset("k")
+    groups = FieldGroups(coupled.layout, n_flow)
     print(
         f"pitzDaily flow block [u, v, p]: {groups.n_leading_dofs} of {groups.n_dofs} dofs over "
         f"{n_cells} cells, reach {REACH}, Ilu0 COMPILED={COMPILED}\n"

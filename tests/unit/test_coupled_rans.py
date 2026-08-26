@@ -21,6 +21,7 @@ import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import DifferenceRow, FirstOrderUpwind, LogRatioRow
 from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall
+from aquaflux.flow.state import flow_state_layout
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss, CorrectedGreenGauss, SweptGradientSolve
@@ -51,13 +52,13 @@ from aquaflux.turbulence.coupled import (
     _FACTORIZATION_FORWARD,
     CoupledJacobianProbe,
     CoupledRANS,
-    CoupledRANSLayout,
     LiveViscosityVelocityParts,
     _coupled_shift_policy,
     _row_jacobian_scale,
     coupled_amg_continuation,
     coupled_continuation,
     coupled_lu_continuation,
+    coupled_rans_layout,
     coupled_scaled_norm,
     frozen_production_viscosity,
     mass_flow_coupled_continuation,
@@ -72,10 +73,12 @@ WALLS = ("top", "bottom", "left", "right")
 
 
 def test_layout_round_trips_and_sizes() -> None:
-    layout = CoupledRANSLayout(dim=2, n_cells=5)
-    assert layout.flow_size == (2 + 1) * 5
+    layout = coupled_rans_layout(flow_state_layout(dim=2, n_cells=5))
+    flow_size = layout.sizes[0]
+    assert flow_size == (2 + 1) * 5
     assert layout.size == (2 + 3) * 5
-    flow = jnp.arange(layout.flow_size, dtype=float)
+    assert layout.names == ("flow", "k", "omega")
+    flow = jnp.arange(flow_size, dtype=float)
     k = 10.0 + jnp.arange(5, dtype=float)
     omega = 100.0 + jnp.arange(5, dtype=float)
     state = layout.pack(flow, k, omega)
@@ -711,7 +714,7 @@ def test_segregated_prologues_match_the_eager_assembly() -> None:
 
 def test_layout_matches_the_assembler_dimensions() -> None:
     mesh, coupled = _cavity()
-    assert coupled.layout.dim == mesh.dim
+    assert coupled.momentum.mesh.dim == mesh.dim
     assert coupled.layout.n_cells == mesh.n_cells
     assert coupled.pack_state(
         coupled.momentum.initial_state(),
@@ -1320,12 +1323,12 @@ def test_the_k_positivity_builders_address_the_k_block_and_defer_to_the_transfor
 
     Worth its own test for two reasons. The slice ``((dim + 1) n, (dim + 2) n)`` is block-order
     knowledge, so a builder that computed it independently would drift silently when the order
-    changed -- here both read one helper, and this pins the answer. And these builders are the only
-    place the projection is constructed for a coupled case, so a missing import in the module would
-    otherwise surface for the first time in the middle of a march rather than here.
+    changed -- here both ask the layout for the block by name, and this pins the answer. And these
+    builders are the only place the projection is constructed for a coupled case, so a missing import
+    in the module would otherwise surface for the first time in the middle of a march rather than here.
 
-    The builders read only the transform and the block layout, so a stub carrying those two is a
-    sufficient collaborator -- no mesh, no assembled case.
+    The builders read only the transform and the block layout, and a layout is mesh-free, so a stub
+    carrying those two is a sufficient collaborator -- no mesh, no assembled case.
     """
     from types import SimpleNamespace
 
@@ -1334,7 +1337,8 @@ def test_the_k_positivity_builders_address_the_k_block_and_defer_to_the_transfor
 
     n, dim = 7, 3
     direct = SimpleNamespace(
-        k_transform=DirectScalars(), layout=SimpleNamespace(n_cells=n, dim=dim)
+        k_transform=DirectScalars(),
+        layout=coupled_rans_layout(flow_state_layout(dim=dim, n_cells=n)),
     )
 
     cap = positive_k_limit(direct)
@@ -1353,7 +1357,7 @@ def test_the_k_positivity_builders_address_the_k_block_and_defer_to_the_transfor
     assert float(cap(phi, clipped)) == pytest.approx(1.0)  # the cap now finds nothing binding
 
     # A log variable is positive by construction, so neither constrains it.
-    logged = SimpleNamespace(k_transform=LogScalars(), layout=SimpleNamespace(n_cells=n, dim=dim))
+    logged = SimpleNamespace(k_transform=LogScalars(), layout=direct.layout)
     assert positive_k_limit(logged) is None
     assert positive_k_projection(logged) is None
 
@@ -1701,11 +1705,9 @@ def test_freezing_the_production_viscosity_changes_the_operator_and_not_the_resi
     # And the difference is confined to the k block: the momentum closure, the omega equation and the
     # k diffusivity all keep the live eddy viscosity, so only the production's own derivative moved.
     layout = exact.layout
-    assert jnp.array_equal(frozen_action[: layout.flow_size], exact_action[: layout.flow_size])
-    n = layout.n_cells
-    assert jnp.array_equal(
-        frozen_action[layout.flow_size + n :], exact_action[layout.flow_size + n :]
-    )
+    flow_block, omega_block = layout.slice_of("flow"), layout.slice_of("omega")
+    assert jnp.array_equal(frozen_action[flow_block], exact_action[flow_block])
+    assert jnp.array_equal(frozen_action[omega_block], exact_action[omega_block])
 
 
 def test_every_continuation_builder_defaults_to_the_per_entry_positivity_projection() -> None:

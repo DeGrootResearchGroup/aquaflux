@@ -326,7 +326,10 @@ Schur approximates worst, which is why the arrangement matters.
 
 {func}`~aquaflux.solve.build_block_triangular_field_split` builds the split directly if you
 want one outside a continuation. {class}`~aquaflux.solve.FieldGroups` says where the
-partition falls:
+partition falls — as a view over the state's own {class}`~aquaflux.solve.FieldLayout`, so
+where you hold an assembled case you can name the split against its blocks
+(`FieldGroups.split_before(coupled.layout, "k")`) instead of counting fields. Given only a
+raw field-major matrix, give the counts:
 
 ```python
 from aquaflux.solve import (
@@ -336,7 +339,7 @@ from aquaflux.solve import (
     simple_smoothed_inverse,
 )
 
-groups = FieldGroups(n_cells=mesh.n_cells, n_leading_fields=4, n_trailing_fields=2)
+groups = FieldGroups.by_counts(n_cells=mesh.n_cells, n_leading_fields=4, n_trailing_fields=2)
 split = build_block_triangular_field_split(
     matrix,          # the assembled six-field Jacobian, as a scipy sparse matrix
     groups,

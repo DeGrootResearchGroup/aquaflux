@@ -117,9 +117,12 @@ for k/ω), which then converges in 10 s at 23040 cells to `|Σ R| = 8.2e-15`.
 - **Multi-species / reacting systems (the aquakin coupling).** A reaction network couples N species
   tightly, so it wants one `(n_cells × n_species)` residual rather than N scalar ones; the present
   `VolumeSource` seam carries other fields as frozen constructor state, which is a *lagged* coupling.
-  Prerequisite: the flat multi-block layout needs one home — `flow/state.py::BlockStateLayout` and
-  `turbulence/coupled.py::CoupledRANSLayout` are already two hand-rolled versions of it, and a
-  species system would be the third.
+  ✅ **The prerequisite is met (#285): the flat multi-block layout has one home,
+  `solve/state.py::FieldLayout`** — named, variable-length blocks over a field-major vector, of which
+  `flow_state_layout` and `coupled_rans_layout` are now compositions rather than the two hand-rolled
+  versions this line used to warn about. A species system declares `CellFields("species", n_species)`
+  (or one block per species) and gets its packing, its block slices and its share of a block-wise
+  residual measure from the same object; it does not add a third layout.
 - **Residence-time distribution.** A transient tracer pulse on a frozen steady flow. Reachable now —
   `TransientTerm` is wired — and it does **not** need transient momentum, which is a separate and
   much larger piece (it needs a transient-consistent Rhie–Chow; see `.claude/rules/flow.md`).

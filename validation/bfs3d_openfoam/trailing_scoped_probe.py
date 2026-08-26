@@ -206,7 +206,7 @@ def main() -> None:
     case = compare.build_case()
     coupled = case["coupled"]
     n_cells = coupled.layout.n_cells
-    n_fields = coupled.layout.dim + 3
+    n_fields = coupled.layout.n_fields
     print(
         f"[case] {n_cells} cells, {n_fields} fields, peak RSS so far {peak_bytes() / 1e9:.2f} GB",
         flush=True,

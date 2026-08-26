@@ -158,12 +158,8 @@ def main() -> None:
     pc_beta = max(march_beta, FLOOR) if march_beta > 0 else 0.0
 
     coupled = compare.build_case()["coupled"]
-    n_fields = coupled.layout.dim + 3
-    groups = FieldGroups(
-        n_cells=coupled.layout.n_cells,
-        n_leading_fields=coupled.layout.dim + 1,
-        n_trailing_fields=N_TRAILING,
-    )
+    n_fields = coupled.layout.n_fields
+    groups = FieldGroups.split_before(coupled.layout, "k")
     print(f"{'=' * 96}\ncell-block conditioning, [k, omega] block, {name} -- {description}")
     print(f"operator beta {march_beta}, preconditioner beta {pc_beta}\n{'=' * 96}", flush=True)
 

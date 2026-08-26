@@ -160,7 +160,7 @@ def main():
     coupled = case["coupled"]
     mesh = coupled.momentum.mesh
     n = mesh.n_cells
-    n_fields = coupled.layout.dim + 3
+    n_fields = coupled.layout.n_fields
 
     path = CASE / "checkpoints" / f"{name}.npz"
     if not path.exists():

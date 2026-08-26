@@ -76,14 +76,10 @@ def main() -> None:
     from aquaflux.solve import FieldGroups, block_stencil_gather_map
     from aquaflux.turbulence.coupled import _coupled_jacobian_plan
 
-    n_fields = coupled.layout.dim + 3
+    n_fields = coupled.layout.n_fields
     plan = _coupled_jacobian_plan(coupled, 3)
     jacobian = materialize(coupled, state, plan, block_stencil_gather_map(plan), n_fields)
-    groups = FieldGroups(
-        n_cells=coupled.layout.n_cells,
-        n_leading_fields=coupled.layout.dim + 1,
-        n_trailing_fields=2,
-    )
+    groups = FieldGroups.split_before(coupled.layout, "k")
     flow = sp.csr_matrix(jacobian[groups.leading, :][:, groups.leading])
     print(f"  flow block: {flow.shape[0]} dofs, {flow.nnz} nnz", flush=True)
 

@@ -38,7 +38,7 @@ from ilu_fill_probe import (  # noqa: E402
 
 
 def run(label, coupled, betas, nu):
-    n_fields = coupled.layout.dim + 3
+    n_fields = coupled.layout.n_fields
     n = coupled.layout.n_cells
     ratio, interior = skew_metrics(coupled)
     ar = P.cell_aspect_ratio(coupled)

@@ -158,9 +158,9 @@ def main() -> None:
     description = STATES[name].description
 
     coupled = compare.build_case()["coupled"]
-    n_fields = coupled.layout.dim + 3
+    n_fields = coupled.layout.n_fields
     n_cells = coupled.layout.n_cells
-    names = NAMES_3D if coupled.layout.dim == 3 else ("u", "v", "p", "k", "omega")
+    names = NAMES_3D if coupled.momentum.mesh.dim == 3 else ("u", "v", "p", "k", "omega")
     print(f"{'=' * 78}\n{name}: {description}\n{n_fields} fields over {n_cells} cells\n{'=' * 78}")
     state = load_state(name)
 

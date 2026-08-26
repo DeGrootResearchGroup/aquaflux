@@ -102,7 +102,7 @@ def test_the_real_factor_types_satisfy_the_declared_contract() -> None:
 
     n = 12
     operator = (sp.random(n, n, density=0.4, random_state=0, format="csr") + sp.eye(n) * 5).tocsr()
-    groups = FieldGroups(n_cells=6, n_leading_fields=1, n_trailing_fields=1)
+    groups = FieldGroups.by_counts(n_cells=6, n_leading_fields=1, n_trailing_fields=1)
     leading, _, trailing_by_leading, trailing = groups.blocks(operator)
     split = BlockTriangularFieldSplit(
         _ExactInverse(leading.toarray()),

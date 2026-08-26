@@ -39,7 +39,9 @@ def _operator(seed: int = 0) -> sp.csr_matrix:
 
 
 def _groups() -> FieldGroups:
-    return FieldGroups(n_cells=N_CELLS, n_leading_fields=N_LEADING, n_trailing_fields=N_TRAILING)
+    return FieldGroups.by_counts(
+        n_cells=N_CELLS, n_leading_fields=N_LEADING, n_trailing_fields=N_TRAILING
+    )
 
 
 def _pair(flow_first: bool = True):

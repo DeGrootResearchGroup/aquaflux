@@ -48,16 +48,12 @@ def case():
     coupled = CoupledRANS.build(momentum, turbulence)
     flow, k, omega = hybrid_initialize(momentum, turbulence)
     state = coupled.pack_state(flow, k, omega)
-    n_fields = coupled.layout.dim + 3
+    n_fields = coupled.layout.n_fields
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
         lambda v: _jacobian_matvec(coupled, state, v),
         _coupled_jacobian_plan(coupled, 3),
     )
-    groups = FieldGroups(
-        n_cells=coupled.layout.n_cells,
-        n_leading_fields=coupled.layout.dim + 1,
-        n_trailing_fields=2,
-    )
+    groups = FieldGroups.split_before(coupled.layout, "k")
     # A shift keeps the cold operator away from the singular limit, as the march's own step does.
     shifted = MonolithicAmgPreconditioner._shifted(jacobian, np.full(groups.n_dofs, 0.5))
     return {

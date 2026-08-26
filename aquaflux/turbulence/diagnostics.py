@@ -115,7 +115,7 @@ def coupled_fields(coupled) -> Callable[[jnp.ndarray], Mapping[str, jnp.ndarray]
     >>> MarchLogger(metrics=metrics)  # doctest: +SKIP
     """
     momentum, turbulence = coupled.momentum, coupled.turbulence
-    dim = coupled.layout.dim
+    dim = coupled.momentum.mesh.dim
     velocity_names = coupled_equation_names(dim)[:dim]
 
     def fields(state: jnp.ndarray) -> Mapping[str, jnp.ndarray]:
@@ -186,7 +186,7 @@ def coupled_residuals(
     --------
     >>> MarchLogger(residuals=coupled_residuals(coupled, engine, seed))  # doctest: +SKIP
     """
-    names = coupled_equation_names(coupled.layout.dim)
+    names = coupled_equation_names(coupled.momentum.mesh.dim)
     # One-element list rather than `nonlocal`: the closure only ever rebinds it, and a mutable cell
     # keeps that visible at the point of use.
     equilibrate_at = [reference_state]
