@@ -2657,7 +2657,9 @@ def coupled_amg_continuation(
         is free.** On a three-dimensional separating benchmark where the cap loses nothing, the same
         controlled pair goes the other way: the projection reaches the identical root in fewer outer
         steps and costs about 40 % more Krylov cycles and wall time, all of it on the final
-        continuation rung. The cap turns out to be doing globalization work there as well as keeping
+        continuation rung. (That pair was taken before the coupled-``k`` shift returned to its earlier
+        form, so its magnitudes are pending re-adjudication; what it establishes -- that a case can pay
+        for the projection rather than be rescued by it -- does not turn on them.) The cap turns out to be doing globalization work there as well as keeping
         ``k`` positive -- with the step no longer shortened, the line search takes full steps into
         iterates the carried preconditioner solves badly. Both cases keep their own setting. If a case
         is not losing marches to the cap, measure before assuming the projection is an improvement to

@@ -761,9 +761,15 @@ K_POSITIVITY_FLOOR = float(os.environ.get("BFS3D_K_POSITIVITY_FLOOR", "1e-8") or
 #:     | cycles     | 365                | 515          |
 #:     | wall       | 2268 s             | 3166 s       |
 #:     | capped (L) | 26                 | 0            |
-#:     | escalations| 7                  | 11           |
+#:     | step redos | 7                  | 11           |
 #:     | mid-span `x_r/h` | 8.3611       | 8.3611       |
 #:
+#:
+#: ⚠️ **TAKEN AT `e46564a`, WHICH CARRIED A COUPLED-`k`-SHIFT CHANGE REVERTED THE NEXT DAY.** The revert
+#: alters the `k` shift diagonal, and that is the term this limiter clips against -- the shift sets the
+#: `k` correction, and the cap and the projection are two ways of bounding it. Both arms ran under it, so
+#: the pair is controlled and the qualitative reading holds, but re-run before quoting the figures. The
+#: default here is unaffected: it was off before this measurement and nothing here argues for flipping it.
 #: The mechanism does exactly what it claims -- the cap never binds once, against 26 times -- and the
 #: projection WINS the first two rungs outright (35 steps / 142 cycles / 851 s against 39 / 162 / 958).
 #: **The whole loss is the target rung**, where it spends 373 cycles and 2315 s against 203 and 1310,
@@ -771,7 +777,7 @@ K_POSITIVITY_FLOOR = float(os.environ.get("BFS3D_K_POSITIVITY_FLOOR", "1e-8") or
 #: step no longer shortened, the line search takes full steps into iterates the carried preconditioner
 #: solves badly (inner solves pinned at 12 cycles where the shipped arm's run 2-5, and one attempt at
 #: `alpha` 1.000 whose inner residual reaches 2.7e+10), each of which trips the `RETRY_ON_CYCLES`
-#: bailout below and redoes the step -- 8 cycle-triggered redos against 3. So on THIS case the global
+#: bailout below and redoes the step -- 8 cycle-triggered redos against 2. So on THIS case the global
 #: cap is not only a positivity device; it is doing globalization work, and the per-cell clip removes
 #: that without replacing it.
 #:

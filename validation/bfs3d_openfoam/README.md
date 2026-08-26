@@ -175,8 +175,16 @@ coarsening, in-framework trailing inverse, `zerogradient` wall condition on `k`,
 | Krylov cycles | **365** | 515 (+41 %) |
 | wall | **2268 s** | 3166 s (+40 %) |
 | positivity-capped (`L`) steps | 26 | **0** |
-| escalations | **7** | 11 |
+| step redos | **7** | 11 |
 | mid-span `x_r/h` | 8.3611 | 8.3611 |
+
+> ⚠️ **These numbers were taken at `e46564a`, which carried a coupled-`k`-shift change that was reverted
+> the next day.** The revert alters the `k` shift diagonal, which is the term the positivity limiter
+> clips against — the shift sets the `k` correction, and the cap and the projection are two ways of
+> bounding it. Both arms ran under it, so the pair is still controlled and the qualitative reading holds,
+> but the figures describe a code state the library no longer has and should be re-run before being
+> quoted. The default here is unaffected: it was off before this measurement and nothing here argues for
+> flipping it.
 
 The mechanism does exactly what it claims — the cap never binds once, against 26 times — and the
 projection **wins the first two rungs outright** (35 steps / 142 cycles / 851 s against 39 / 162 / 958).
@@ -186,7 +194,7 @@ cycles per step against 6.8.
 What the cap was buying there is visible in the log. With the step no longer shortened, the line search
 takes full steps into iterates the carried preconditioner solves badly — inner solves pinned at 12 cycles
 where the shipped arm's run 2–5, and one attempt at `alpha` 1.000 whose inner residual reaches 2.7e+10 —
-and each such solve trips the per-solve cycle bailout and redoes the step, 8 times against 3. So the
+and each such solve trips the per-solve cycle bailout and redoes the step, **8 times against 2**. So the
 global cap is not only a positivity device on this case; it is doing globalization work, and clipping per
 cell removes that without replacing it. The projection stays available
 (`BFS3D_K_POSITIVITY_PROJECTION=1`) and off by default here.

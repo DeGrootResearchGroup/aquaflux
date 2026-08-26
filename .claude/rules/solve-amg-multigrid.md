@@ -1245,7 +1245,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   | **Krylov cycles** | **365** | 515 (+41 %) |
   | wall | **2268 s** | 3166 s (+40 %) |
   | positivity-limited (`L`) steps | 26 | **0** |
-  | escalations | **7** | 11 |
+  | step redos (`eN` flag) | **7** | 11 |
   | mid-span `x_r/h` | 8.3611 | 8.3611 |
 
   **The loss is entirely the TARGET rung, and the projection WINS the two below it** — 35 steps / 142
@@ -1256,12 +1256,24 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   it.** With the step no longer shortened, the line search takes full steps into iterates the carried
   preconditioner solves badly — inner solves pinned at 12 cycles where the cap arm's run 2–5, and one
   attempt at α = 1.000 whose inner residual reaches **2.7e+10** — and each such solve trips
-  `retry_on_cycles` and redoes the step at unchanged β: **8 cycle-triggered redos against 3**. Note the
+  `retry_on_cycles` and redoes the step at unchanged β: **8 cycle-triggered redos against 2**. Note the
   summary row's cycle count is the ACCEPTED attempt only, so the +150 cycles is real per-solve cost and
   the discarded attempts are extra wall on top.
   ⚠️ **This does NOT re-open Mode 2 as "the cascade reappears through the descent test".** The 2026-08-11
   pair saw the descent test take over; here the trigger is the *cycle* bailout, which did not exist in
   that bundle. Same conclusion by a different route.
+  ⚠️⚠️ **THESE NUMBERS WERE TAKEN AT `e46564a`, WHICH CARRIED THE COUPLED-`k`-SHIFT CHANGE OF #317 —
+  REVERTED THE NEXT DAY (#322, `db2b87c`). RE-ADJUDICATE BEFORE RELYING ON THEM.** The revert removes
+  `live_eddy_viscosity=True` from `_coupled_shift_policy`'s `k` transport, so the `k` shift diagonal is
+  a different quantity now — and that is not a distant confound, it is the term the positivity limiter
+  clips against: the shift sets `dk`, and the cap and the projection are two ways of bounding `dk`.
+  Measured on the sibling, the reverted change **halved** the shift, flipped the sign of `J_kk + βd`,
+  and degraded the kept step length 6–38×. Both arms here ran under it, so the PAIR is still controlled
+  and the qualitative reading (the cap binds 26 times against 0; the projection wins the two lower rungs
+  and loses the target one) is what the logs say — but every number in the table above describes a code
+  state `main` no longer has. The case default stays off either way: it was off before this measurement
+  and nothing here argues for flipping it.
+
   ⚠️ **UNTESTED, and the obvious next probe:** `retry_on_cycles = 10` was calibrated under the cap, so
   whether the target-rung loss belongs to the projection or to a threshold that no longer suits it is
   not established. It is a hardcoded constant in the case (no environment override), so a third arm
