@@ -97,7 +97,8 @@ shape of a seam:
    `pytest tests/unit/test_validation_api.py`. It checks that every name a case imports still exists
    and every literal keyword it passes is still accepted — **including keywords passed to a method on
    an imported class** (`CoupledRANS.build(...)`, `SSTTurbulence.build(...)`, `MomentumContinuity
-   .build(...)`), which is how every case constructs its assemblers.
+   .build(...)`), which is how every case constructs its assemblers — and that no function in a case
+   reads a module global that only one branch of an `if`/`try` binds.
 2. **Then use judgement on what the guard cannot see** (below), and if the change plausibly reaches a
    case, *run that case* — `validation/run_case.sh <case>` — before considering the change done.
 3. **When you change the march machinery, ask whether the OTHER case should get it too.** Every
@@ -137,6 +138,24 @@ sites across `validation/`, 28 of them carrying keywords, none of them seen. The
 that form too, and `test_the_checker_reaches_a_call_on_an_imported_CLASS_not_only_a_bare_name` pins
 that it does — the coverage gap sat exactly where the cases spend their configuration, and looked
 identical to coverage that worked.
+
+⚠️ **And until 2026-08-25 nothing anywhere could see a case whose DEFAULT configuration does not start.**
+A case settings module configures itself by branching — one block per arm, each binding its own per-arm
+name — and then reads the arms back through a branch of its own. When a rename moves one arm and not the
+other's reader, the surviving branch names a global only the *other* arm binds, and the case dies with a
+`NameError` in the one line whose job is to say what the run is. Three things are quiet about it at once:
+the name **is** bound at module level, so `ruff`'s undefined-name rule is correct to say nothing; the read
+sits in a function body, so even importing the module would not reach it; and no tier runs these files.
+That is how `bfs3d_openfoam/compare.py` spent five days unable to start at its own default —
+`FLOW_INVERSE == 'native'` survived the `native` → `simplesmooth` rename in the banner ternary alone
+(`a2ed044`), so the default arm reached `_HOST_FLOW`, which only the `hostilu` arm defines. The guard now
+reports this shape (`test_the_cases_do_not_read_a_global_that_only_one_branch_binds`), and
+`test_the_branch_checker_separates_a_real_hazard_from_the_idioms_around_it` pins both directions, because
+the idioms it must stay quiet about — a name bound by both arms, an arm that raises instead of binding, a
+helper defined inside the branch that binds it — are what a naive version of this check drowns in.
+**The structural fix is the one to prefer over the guard**: have each arm record its settings under ONE
+shared name (`LEADING_SETTINGS`) beside the object it built, so the reader never branches and the hazard
+cannot be written. The guard is what catches the next module that does branch.
 
 ## Known API gaps these cases exposed
 

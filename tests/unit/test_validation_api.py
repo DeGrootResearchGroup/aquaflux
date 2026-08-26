@@ -22,7 +22,14 @@ milliseconds and can live in the always-on gate:
 
 * every name a case imports from ``aquaflux`` still exists;
 * every **literal keyword argument** a case passes to an ``aquaflux`` callable is one that callable
-  accepts.
+  accepts;
+* no function in a case reads a module global that only ONE branch of an ``if``/``try`` binds -- the
+  shape a settings module falls into when it configures itself one block per arm and then reads the
+  arms back through a branch of its own. That is a ``NameError`` on whichever arm nobody re-checked,
+  and it is invisible to the lint gate (the name IS bound at module level), to an import (the read is
+  in a function body) and to every tier. It shipped: a rename left one arm naming the other's
+  settings, and the 3D backward-facing-step case could not start at its DEFAULT configuration for
+  five days.
 
 ⚠️ **The main entry point is partly inside the blind spot.** ``solve_coupled`` takes
 ``**continuation_kwargs`` and forwards them to whichever continuation builder it is given, so *every*
@@ -45,6 +52,7 @@ from __future__ import annotations
 import ast
 import importlib
 import inspect
+import symtable
 from pathlib import Path
 
 import pytest
@@ -170,6 +178,161 @@ def _rejected_keywords(path: Path) -> list[str]:
     return offenders
 
 
+#: Statements after which control does not reach the rest of the block, so a branch ending in one
+#: constrains nothing about what is bound when the block is left.
+_LEAVES = (ast.Raise, ast.Return, ast.Continue, ast.Break)
+
+
+def _assigned(target: ast.AST):
+    """The plain names an assignment target binds; subscript and attribute targets bind none."""
+    if isinstance(target, ast.Name):
+        yield target.id
+    elif isinstance(target, ast.Starred):
+        yield from _assigned(target.value)
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for element in target.elts:
+            yield from _assigned(element)
+
+
+def _binds(node: ast.AST):
+    """The names one statement binds in the scope it sits in, ignoring its nested blocks."""
+    if isinstance(node, ast.Assign):
+        for target in node.targets:
+            yield from _assigned(target)
+    elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+        yield from _assigned(node.target)
+    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        yield node.name
+    elif isinstance(node, (ast.Import, ast.ImportFrom)):
+        for alias in node.names:
+            yield (alias.asname or alias.name).split(".")[0]
+    elif isinstance(node, (ast.For, ast.AsyncFor)):
+        yield from _assigned(node.target)
+    elif isinstance(node, ast.With):
+        for item in node.items:
+            if item.optional_vars is not None:
+                yield from _assigned(item.optional_vars)
+
+
+def _reached(body: list[ast.stmt]) -> bool:
+    """Whether control can fall out of ``body``; a branch that raises cannot."""
+    return bool(body) and not any(isinstance(statement, _LEAVES) for statement in body)
+
+
+def _certainly_bound(body: list[ast.stmt]) -> set[str]:
+    """The names ``body`` binds on **every** path through it.
+
+    A two-armed ``if`` binds what both arms bind; a ``try`` binds what its body and every handler that
+    can fall through all bind. A handler that re-raises is excluded, which is what makes the common
+    ``try: x = f() / except ValueError: raise SystemExit(...)`` shape count as a definite binding.
+    Loops are treated as bodies rather than as branches -- a module-level loop that binds a name and
+    then reads it in the same block is idiom, not a hazard, and treating it as one is pure noise.
+    """
+    bound: set[str] = set()
+    for node in body:
+        bound |= set(_binds(node))
+        if isinstance(node, ast.If):
+            arms = [arm for arm in (node.body, node.orelse) if _reached(arm)]
+            bound |= set.intersection(*map(_certainly_bound, arms)) if len(arms) == 2 else set()
+        elif isinstance(node, ast.Try):
+            handlers = [handler.body for handler in node.handlers if _reached(handler.body)]
+            attempted = _certainly_bound(node.body) | _certainly_bound(node.orelse)
+            bound |= (
+                attempted
+                if not handlers
+                else set.intersection(attempted, *map(_certainly_bound, handlers))
+            )
+            bound |= _certainly_bound(node.finalbody)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.While, ast.With)):
+            bound |= _certainly_bound(node.body)
+        if isinstance(node, _LEAVES):
+            break
+    return bound
+
+
+def _branch_bound(
+    body: list[ast.stmt], guard: ast.stmt | None, found: dict[str, ast.stmt]
+) -> dict[str, ast.stmt]:
+    """Map each name bound inside an ``if``/``try`` branch to the outermost branch that binds it."""
+    for node in body:
+        if guard is not None:
+            for name in _binds(node):
+                found.setdefault(name, guard)
+        if isinstance(node, ast.If):
+            _branch_bound(node.body, guard or node, found)
+            _branch_bound(node.orelse, guard or node, found)
+        elif isinstance(node, ast.Try):
+            _branch_bound(node.body, guard or node, found)
+            for handler in node.handlers:
+                _branch_bound(handler.body, guard or node, found)
+            _branch_bound(node.orelse, guard or node, found)
+            _branch_bound(node.finalbody, guard, found)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.While, ast.With)):
+            _branch_bound(node.body, guard, found)
+            _branch_bound(getattr(node, "orelse", []), guard, found)
+    return found
+
+
+def _function_scopes(table: symtable.SymbolTable, prefix: str = ""):
+    """Every function scope in the module, with the dotted name a reader can find it by."""
+    for child in table.get_children():
+        name = f"{prefix}{child.get_name()}"
+        if child.get_type() == "function":
+            yield name, child
+        yield from _function_scopes(child, f"{name}.")
+
+
+def _conditional_reads(source: str, label: str) -> list[str]:
+    """Functions that read a module global bound only inside one branch of an ``if``/``try``.
+
+    The failure this names is a settings module that configures itself by branching -- one block per
+    arm, each binding its own per-arm name -- and is then read back by a function that picks the name
+    with a branch of its own. Once the two branches disagree, the arm nobody re-checked reads a name
+    that does not exist, and the case dies with a ``NameError`` before its first step.
+
+    Nothing else sees it. The name IS bound at module level as far as any static tool is concerned, so
+    the lint gate is quiet; the read is inside a function body, so importing the module is quiet too;
+    and no test tier runs these files. It shipped exactly this way: a rename left one arm of such a
+    ternary naming the other arm's settings, and the case's DEFAULT configuration could not start for
+    five days.
+
+    A read from a scope that is itself defined inside the binding branch is fine and is not reported.
+
+    Parameters
+    ----------
+    source : str
+        The module source to check.
+    label : str
+        How to name the module in a message -- normally its path relative to the repository root.
+
+    Returns
+    -------
+    list of str
+        One message per offending read, empty when there are none.
+    """
+    tree = ast.parse(source)
+    risky = {
+        name: guard
+        for name, guard in _branch_bound(tree.body, None, {}).items()
+        if name not in _certainly_bound(tree.body)
+    }
+    if not risky:
+        return []
+    offenders = []
+    for name, scope in _function_scopes(symtable.symtable(source, label, "exec")):
+        for symbol in scope.get_symbols():
+            guard = risky.get(symbol.get_name())
+            if guard is None or symbol.is_local() or not symbol.is_referenced():
+                continue
+            if guard.lineno <= scope.get_lineno() <= (guard.end_lineno or guard.lineno):
+                continue  # the reader is itself defined inside the branch that binds it
+            offenders.append(
+                f"{label}: {name}() reads `{symbol.get_name()}`, which is bound only inside the "
+                f"branch at line {guard.lineno}"
+            )
+    return offenders
+
+
 @pytest.mark.skipif(not _cases(), reason="this checkout carries no validation cases")
 def test_the_cases_import_names_that_still_exist() -> None:
     """A rename that misses these files breaks a study rather than a test -- which is found later.
@@ -243,3 +406,60 @@ def test_the_checker_reaches_a_call_on_an_imported_CLASS_not_only_a_bare_name() 
     assert called("CoupledRANS.no_such_method(x=1)\n") == ("CoupledRANS.no_such_method", None)
     # A call on something the case built itself is not resolvable and must be left alone.
     assert called("solver.step(x=1)\n") is None
+
+
+@pytest.mark.skipif(not _cases(), reason="this checkout carries no validation cases")
+def test_the_cases_do_not_read_a_global_that_only_one_branch_binds() -> None:
+    """A case that configures itself by branching must not read one arm's name from the other's.
+
+    This is the one break in this module that neither of the checks above can see and that importing
+    the module cannot see either: the name exists at module level, and the read is inside a function.
+    """
+    offenders = [
+        problem
+        for path in _cases()
+        for problem in _conditional_reads(path.read_text(), str(path.relative_to(_ROOT)))
+    ]
+
+    assert offenders == [], (
+        "validation cases read a global that only one branch binds:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_branch_checker_separates_a_real_hazard_from_the_idioms_around_it() -> None:
+    """Both directions, because a check that objects to everything and one that sees nothing agree.
+
+    The hazard is a name bound in only one arm and read outside it. The idioms it must stay quiet
+    about are the ones this repository's cases are written in: a name bound by both arms, a name whose
+    other arm raises instead of binding, and a helper defined inside the branch that binds it.
+    """
+    hazard = (
+        "import os\nif os.environ.get('X'):\n    SETTINGS = {}\ndef run():\n    return SETTINGS\n"
+    )
+    (problem,) = _conditional_reads(hazard, "case.py")
+    assert "run() reads `SETTINGS`" in problem and "line 2" in problem
+
+    both_arms = (
+        "import os\nif os.environ.get('X'):\n    SETTINGS = {}\nelse:\n    SETTINGS = {'a': 1}\n"
+        "def run():\n    return SETTINGS\n"
+    )
+    assert _conditional_reads(both_arms, "case.py") == []
+
+    raising_arm = (
+        "import os\ntry:\n    SETTINGS = int(os.environ['X'])\nexcept ValueError:\n"
+        "    raise SystemExit('bad X')\ndef run():\n    return SETTINGS\n"
+    )
+    assert _conditional_reads(raising_arm, "case.py") == []
+
+    reader_inside = (
+        "import os\nif os.environ.get('X'):\n    SETTINGS = {}\n\n    def run():\n"
+        "        return SETTINGS\n"
+    )
+    assert _conditional_reads(reader_inside, "case.py") == []
+
+    # A local of the same name is not a read of the global, or every case would report.
+    shadowed = (
+        "import os\nif os.environ.get('X'):\n    SETTINGS = {}\ndef run():\n    SETTINGS = {}\n"
+        "    return SETTINGS\n"
+    )
+    assert _conditional_reads(shadowed, "case.py") == []
