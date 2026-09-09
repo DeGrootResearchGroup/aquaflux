@@ -141,8 +141,23 @@ jobs:
       github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
       && github.event.action != 'labeled'
     runs-on: ubuntu-latest
-    # Observed 13-20 min; the cap is headroom over that, not a target.
-    timeout-minutes: 25
+    # THE OBSERVED RANGE IS 18.7 TO 30+ MIN, AND RUN-TO-RUN RUNNER VARIANCE SETS IT.
+    # The "13-20 min" this cap used to be sized against was measured while the per-test
+    # `--timeout` was 300s, which was KILLING THE WORKER on a ~400s distributed test and ending
+    # the job early -- those runs never timed the suite, they died partway through it (one shows
+    # `worker 'gw2' crashed while running test_distributed_residual_matches_serial_on_skewed_mesh`
+    # with 980 of 1313 tests run, at 12:54). Raising that per-test timeout to 900s let the tier
+    # run to completion for the first time and revealed a true cost of 18.7-30 min -- against a
+    # 25-minute cap, which then cancelled intermittently on branches that had changed nothing
+    # related (issue-285 at 25.2, issue-314 at 25.3 and 30.0).
+    #
+    # The spread is the runner, not the interpreter: one main commit ran py3.11 in 23:12 against
+    # py3.12's 21:55 (5.9%), and a later main commit ran py3.11 FASTER than py3.12 (18.7 vs 20.7).
+    # A cap without roughly 2x headroom over the median is therefore a coin flip, not a signal.
+    #
+    # This is a HANG BACKSTOP, not a cost budget: `--timeout=900` below names a hung test long
+    # before this fires, so the cost of setting it generously is only paid by a genuinely stuck job.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -180,6 +195,19 @@ jobs:
         # `--durations=15` is what makes the next such incident diagnosable: without it nothing
         # anywhere records how long a test took, so "did it exceed the timeout" cannot be answered
         # from the log at all.
+        #
+        # PRESERVING THE JAX PERSISTENT COMPILATION CACHE ACROSS RUNS WOULD BUY NOTHING HERE.
+        # Measured, not assumed, because it is an obvious thing to reach for: `import aquaflux`
+        # enables that cache with a 2.0s `jax_persistent_cache_min_compile_time_secs` floor, and
+        # the tests that set this tier's wall clock -- the distributed `shard_map` ones, each
+        # spawning a fresh interpreter -- compile 7184 separate XLA programs whose LARGEST takes
+        # 0.05s. Not one clears the floor, so the cache is still 0 bytes after a full run of them
+        # and an `actions/cache` entry would restore an empty directory. Their cost is 25.2s of
+        # XLA compilation spread over those 7184 tiny programs (44.5% of a 56.5s child) plus the
+        # tracing and dispatch around them -- eager per-op work in mesh and partition setup, which
+        # is where any real saving would have to come from, not from caching codegen.
+        # (Measured 2026-09-09 on macOS arm64, jax 0.10.2, x64 on, one thread per process,
+        # `test_distributed_gradient.py` `_MATCHES` child at 4 simulated devices.)
         #
         # `-rs` lists every skipped test WITH ITS REASON. A skip and a pass are the same exit
         # status, so without it a module that never ran here is indistinguishable from one that

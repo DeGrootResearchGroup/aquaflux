@@ -583,6 +583,19 @@ to this tier:
   small multiple of what the succeeding arm needs — which is also the fairer test, since it stops the
   failing arm from being one that was simply given fewer steps.
 
+**⚠️ A UNIT JOB CANCELLED AT ITS CAP LOOKS EXACTLY LIKE YOUR REGRESSION AND USUALLY IS NOT** — the
+same trap the slow shards' duration balancing carries, one tier up. The unit job's wall clock is set
+by run-to-run runner variance, not by the change under test or the interpreter: one `main` commit ran
+py3.11 in 23:12 against py3.12's 21:55, and a later `main` commit ran py3.11 *faster* than py3.12
+(18.7 vs 20.7 min). Before attributing a cancellation to your branch, check whether unrelated branches
+are cancelling too, and compare the *other* interpreter on your own run — a branch whose py3.12 leg is
+faster than main's did not slow the suite down. Two measured facts to save the re-derivation: the tier
+costs 18.7-30 min end to end, and **preserving the JAX persistent compilation cache across CI runs
+buys nothing** — the distributed `shard_map` tests that set the wall clock compile 7184 XLA programs
+whose largest takes 0.05s, so none clears the 2.0s persistence floor and the cache stays empty. Their
+cost is eager per-op tracing and dispatch in mesh/partition setup, which is where a real saving would
+have to come from. (`.github/workflows/ci.yml` carries both measurements with their configuration.)
+
 None of this licenses weakening a check to make it quick. A finite-difference-validated adjoint costs
 three solves and is the point of the project; that is a test spending what it must.
 
