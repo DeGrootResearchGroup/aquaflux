@@ -19,9 +19,10 @@ aquaflux setup, as requested for this study:
   its gradient, slope-limited so the reconstruction stays bounded). The stiff k/omega scalars use
   bounded first-order upwind: a second-order stencil there lets the coupled Newton step drive omega
   negative (a Newton-update, M-matrix effect the limiter does not prevent -- see ``solve_aquaflux``);
-* **corrected Green-Gauss** gradients (:class:`aquaflux.schemes.CorrectedGreenGauss`, the
-  skewness/non-orthogonality-corrected reconstruction -- the analogue of OpenFOAM's ``corrected``
-  surface-normal / non-orthogonal treatment);
+* **multiple-correction** gradients (:class:`aquaflux.schemes.MultipleCorrectionGradient`), a
+  quadratic-exact reconstruction in two face passes -- the skewness/non-orthogonality correction this
+  mesh needs (the analogue of OpenFOAM's ``corrected`` surface-normal treatment), reached without the
+  Richardson sweeps that would push the differentiated residual further across the cell graph;
 * **log-variable omega** (:class:`aquaflux.turbulence.LogScalars` on ``omega_transform``): ``omega =
   e^w`` stays strictly positive under any Newton step. Without it a direct-omega step drives omega
   negative once the recirculation forms, poisoning ``nu_t = k/omega`` while the residual stays finite
@@ -81,7 +82,12 @@ from aquaflux.discretization import FirstOrderUpwind, LimitedUpwind
 from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, VelocityInlet
 from aquaflux.io import read_openfoam
 from aquaflux.properties import Constant, PropertyModel
-from aquaflux.schemes import CorrectedGreenGauss, SweptGradientSolve, VenkatakrishnanLimiter
+from aquaflux.schemes import (
+    CorrectedGreenGauss,
+    MultipleCorrectionGradient,
+    SweptGradientSolve,
+    VenkatakrishnanLimiter,
+)
 from aquaflux.solve import (
     COMPILED as ILU0_COMPILED,
 )
@@ -104,6 +110,7 @@ from aquaflux.solve import (
 from aquaflux.turbulence import (
     CoupledJacobianProbe,
     CoupledRANS,
+    GeometricReynoldsSchedule,
     LogScalars,
     SSTModel,
     SSTTurbulence,
@@ -171,6 +178,16 @@ RTOL, ATOL = 0.0, 1e-5
 #: `N_POINTS` is the number of INTERMEDIATE rungs: 2 gives Re/100, Re/10, target, matching the
 #: three-dimensional case.
 N_POINTS = int(os.environ.get("PITZ_N_POINTS", "2"))
+
+#: The Reynolds-number multiplier per continuation rung. The default decade is a round number in log
+#: space rather than a measured one: geometric spacing is justified (the convective nonlinearity scales
+#: multiplicatively with Re) but the value is not.
+#:
+#: Varying it alone changes two things at once, so it is only interpretable when paired with
+#: `PITZ_N_POINTS`: the anchor sits at `RATIO ** N_POINTS`, so holding that product fixed varies the
+#: ladder's *granularity* at a fixed *span*, which is the comparison worth making. `10 ** 2`,
+#: `3.1623 ** 4` and `2.1544 ** 6` all anchor at Re/100.
+RATIO = float(os.environ.get("PITZ_RATIO", "10.0"))
 
 #: The dual-time inner loop. `inner_tol` 1e-2 rather than a tighter value: measured on the
 #: three-dimensional case, 1e-3 bought nothing over 1e-2 while costing a third of the march.
@@ -373,8 +390,15 @@ JACOBI_TRAILING = {"max_coarse": COARSE_EQ_LIMIT, "equilibrate": False}
 #: on a genuinely skewed mesh needs `sweeps + 1`, in three dimensions as much as in two. The sibling
 #: gets 3 for free and that is luck, not physics.
 #:
-#: ⚠️ REACH 5 IS NECESSARY AND NOT SUFFICIENT, AND THAT PAIRING IS THE WHOLE POINT. Measured against
-#: the smoother fill beside it, on the leading block at beta = 2:
+#: ⚠️ **EVERYTHING ABOVE IS ABOUT THE SWEPT RECONSTRUCTION, AND THE DEFAULT NO LONGER USES ONE.** The
+#: shipped `GRADIENT` is the two-face-pass `MultipleCorrectionGradient`, whose residual carries
+#: **exactly zero** Jacobian mass beyond distance 3 at every skewness measured -- so a probe at reach 3
+#: recovers it exactly, and 3 is the default. Reach is a property of that scheme rather than of this
+#: mesh; `validation/gradient_stencil_reach.py` re-measures it in about a minute.
+#:
+#: ⚠️⚠️ **SET IT BACK TO 5 IF YOU SET `PITZ_GRADIENT=swept`, AND READ THIS BEFORE VARYING EITHER.** The
+#: swept scheme's residual reaches `sweeps + 1`, and reach 5 is then NECESSARY AND NOT SUFFICIENT --
+#: measured against the smoother fill beside it, on the leading block at beta = 2:
 #:
 #:      reach 3 + fill 1   fails  (300 matvecs, true residual 3.36)
 #:      reach 5 + fill 0   fails  (300 matvecs, true residual 3.50)
@@ -382,12 +406,13 @@ JACOBI_TRAILING = {"max_coarse": COARSE_EQ_LIMIT, "equilibrate": False}
 #:
 #: Neither alone is worth anything, which is exactly how a one-variable-at-a-time sweep misleads: reach
 #: 5 was measured "step-for-step identical, 35% dearer, buys nothing" and reverted -- a correct
-#: measurement of the wrong pair. Vary these two together or not at all.
+#: measurement of the wrong pair. Under the swept scheme, vary these two together or not at all.
 #:
-#: The error reach 3 leaves is ~2e-07 concentrated in the PRESSURE column, which enters the residual
-#: only through gradients and so inherits the sweep-extended stencil undiluted. Because a colouring is
-#: collision-free only for its own pattern, that is corruption of near entries rather than truncation.
-STENCIL_REACH = int(os.environ.get("PITZ_STENCIL_REACH", "5"))
+#: The error reach 3 leaves *under the swept scheme* is ~2e-07 concentrated in the PRESSURE column,
+#: which enters the residual only through gradients and so inherits the sweep-extended stencil
+#: undiluted. Because a colouring is collision-free only for its own pattern, that is corruption of near
+#: entries rather than truncation -- which is what the two-pass scheme has nothing of.
+STENCIL_REACH = int(os.environ.get("PITZ_STENCIL_REACH", "3"))
 
 #: Cap the gradient's Richardson sweeps FOR THE PROBE ONLY. The sweeps are what carry the stencil out
 #: on a skewed mesh, so narrowing them shortens the reach the residual needs -- and only the
@@ -418,6 +443,25 @@ JACOBIAN_GRADIENT_SWEEPS = (
 #: far coupling onto near entries instead of capturing it.
 GRADIENT_SWEEPS = int(os.environ.get("PITZ_GRADIENT_SWEEPS", "4"))
 
+#: Which gradient reconstruction the case runs. `swept` (default) is the shipped corrected
+#: Green-Gauss whose `A_g^-1` apply is a fixed number of Richardson sweeps; `multcorr` is the
+#: two-face-pass scheme that reaches the same quadratic-exact contract with no solve.
+#:
+#: ⚠️ **The choice is coupled to `PITZ_STENCIL_REACH`, and that is the point of having it.** Each
+#: Richardson sweep couples a cell one further ring, so the swept residual reaches `sweeps + 1` -- on
+#: a randomly perturbed grid, measured reach 5 at the shipped four sweeps, against **3 with exactly
+#: zero mass beyond distance 3** for `multcorr`, at every skewness tested. A probe at reach 3
+#: therefore recovers the two-pass Jacobian exactly, where against the swept one it would fold far
+#: couplings onto near entries. Vary the two together; `validation/gradient_stencil_reach.py`
+#: re-measures both halves in about a minute.
+GRADIENT = os.environ.get("PITZ_GRADIENT", "multcorr")
+_GRADIENTS = {
+    "swept": lambda: CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=GRADIENT_SWEEPS)),
+    "multcorr": MultipleCorrectionGradient,
+}
+if GRADIENT not in _GRADIENTS:
+    raise SystemExit(f"PITZ_GRADIENT={GRADIENT!r} is not one of {sorted(_GRADIENTS)}")
+
 #: ⚠️ UNIFORM PROBING REACH, deliberately, where the sibling case shortens two columns. Its
 #: `(3,3,3,3,2,2)` is a SIX-field layout and was measured on that mesh and those schemes; the analogous
 #: five-field value here is unmeasured, and the record is emphatic that shortening the pressure column
@@ -439,9 +483,48 @@ CYCLE_BUDGET = 42
 #: knowing before reading an escalation as evidence about the preconditioner. Override per run so the
 #: value lands in the run record; the default is unchanged.
 BETA_START = float(os.environ.get("PITZ_BETA_START", "0.5"))
-CONTROL = CflResidualDualTimeControl(
-    beta_start=BETA_START, beta_min=0.005, grow=1.5, backoff=2.0, grow_above=0.5, backoff_below=0.25
-)
+
+#: The starting shift for a **warm** rung -- one seeded by a converged root a Reynolds step below it,
+#: rather than by the cold hybrid initialization the lowest rung starts from.
+#:
+#: One `beta_start` served both situations, which are not alike: the cold rung's seed is far from any
+#: root and genuinely needs heavy damping, while a warm rung is handed a converged field one
+#: continuation step away. Both then spend the same `ceil(ln(beta_start / beta_min) / ln(grow))` steps
+#: walking the shift back down -- twelve of them at the values here -- before the march can take a full
+#: pseudo-timestep, and that descent is a fixed cost per rung no matter how good the seed is.
+#:
+#: Lowering it is a bet with two ways to pay and one way to lose. It removes descent steps, and the
+#: early steps it removes are the expensive ones (the same self-start measurement quoted above: 140
+#: Krylov applications at beta 0.5 against 32 at 0.05). Against that, a shift that starts below what the
+#: rung can take is caught by the retry ladder rather than by a divergence -- but a caught step costs
+#: two to six ordinary ones, so enough of them would give the saving back.
+#:
+#: Defaults to `BETA_START`, so an unset environment reproduces the single-constant behaviour exactly.
+BETA_START_WARM = float(os.environ.get("PITZ_BETA_START_WARM", str(BETA_START)))
+
+
+def dual_time_control(beta_start: float) -> CflResidualDualTimeControl:
+    """The case's dual-time control at a chosen starting shift.
+
+    One construction site for the control's settings, so the cold and warm rungs differ in the single
+    value that is meant to differ between them and cannot drift apart in the rest.
+
+    Parameters
+    ----------
+    beta_start : float
+        The shift strength the rung's first step runs at, before the control adapts it.
+    """
+    return CflResidualDualTimeControl(
+        beta_start=beta_start,
+        beta_min=0.005,
+        grow=1.5,
+        backoff=2.0,
+        grow_above=0.5,
+        backoff_below=0.25,
+    )
+
+
+CONTROL = dual_time_control(BETA_START)
 
 #: ⚠️ REFRESH THE FROZEN PRECONDITIONER, ON SOLVE COST, EXACTLY AS THE THREE-DIMENSIONAL CASE DOES.
 #: Frozen at the cold reference state for a whole march, the preconditioner goes stale precisely as the
@@ -548,14 +631,15 @@ def build_case(model=None, gradient_scheme=None):
         ``wall_omega_viscous_coeff``) is how a wall-treatment study compares blend shapes on the same
         case -- e.g. a large exponent to reproduce the ``max(omega_vis, omega_log)`` blend.
     gradient_scheme : GradientScheme, optional
-        The gradient reconstruction, used by momentum and turbulence alike. Defaults to
-        :class:`~aquaflux.schemes.CorrectedGreenGauss` -- the benchmark's own choice, described below.
+        The gradient reconstruction, used by momentum and turbulence alike. Defaults to whatever
+        ``GRADIENT`` selects -- :class:`~aquaflux.schemes.MultipleCorrectionGradient`, described below.
         Injected so a scheme study compares reconstructions on this exact case rather than on a second
         copy of it. ⚠️ A scheme whose residual reaches further across the cell graph than
         ``stencil_reach`` needs that raised to match: the coloured probe folds coupling beyond its
         reach onto near entries instead of dropping it, so an under-reaching probe corrupts the
-        preconditioner rather than approximating it. ``CorrectedGreenGauss`` at the default sweeps
-        carries *exactly zero* mass beyond reach 5, which is what makes this case's default exact;
+        preconditioner rather than approximating it. The default reconstruction carries *exactly zero*
+        mass beyond reach 3 and ``CorrectedGreenGauss`` beyond ``sweeps + 1``, which is what makes each
+        of those pairings exact;
         :class:`~aquaflux.schemes.HessianCorrectedGradient` does not have that cut-off at any sweep
         setting, so a study that swaps it in needs a preconditioner that is not built by probing --
         which is why that comparison lives in the sibling ``pitzdaily_gradient_ab`` case rather than
@@ -579,11 +663,7 @@ def build_case(model=None, gradient_scheme=None):
     # converged corrected-gradient to machine precision in the default few sweeps -- and the
     # reconstructed gradient, the coupled residual, and the reattachment length are all unchanged from a
     # much higher sweep count, so paying for more sweeps only enlarges the differentiated residual.
-    grad = (
-        CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=GRADIENT_SWEEPS))
-        if gradient_scheme is None
-        else gradient_scheme
-    )
+    grad = _GRADIENTS[GRADIENT]() if gradient_scheme is None else gradient_scheme
     # Momentum advection: second-order upwind = Venkatakrishnan-limited linear upwind (the upwind cell
     # reconstructed to the face with its corrected-Green-Gauss gradient, slope-limited so the
     # reconstruction is monotonicity-bounded) -- the analogue of OpenFOAM's `Gauss linearUpwind`.
@@ -662,7 +742,7 @@ def _gradient_scheme_label(scheme):
     only the class cannot be read against a recorded measurement.
     """
     if scheme is None:
-        return f"CorrectedGreenGauss (swept {GRADIENT_SWEEPS})"
+        scheme = _GRADIENTS[GRADIENT]()
     solver = getattr(scheme, "solver", None)
     sweeps = getattr(solver, "sweeps", None)
     return f"{type(scheme).__name__}" + (f" (swept {sweeps})" if sweeps is not None else "")
@@ -740,8 +820,14 @@ def solve_aquaflux(
         ("inner forward rtol (row-scaled) / restart", f"{FORWARD_RTOL} / {FORWARD_RESTART}"),
         ("cycle budget", CYCLE_BUDGET),
         ("retry on cycles / alpha", f"{RETRY.abort_above_cycles} / {RETRY.on_alpha}"),
-        ("step control", f"{type(CONTROL).__name__} (beta_start {BETA_START})"),
-        ("Reynolds continuation points", N_POINTS),
+        (
+            "step control",
+            f"{type(CONTROL).__name__} (beta_start {BETA_START} cold / {BETA_START_WARM} warm)",
+        ),
+        (
+            "Reynolds continuation points",
+            f"{N_POINTS} (ratio {RATIO:g}, anchor Re/{RATIO**N_POINTS:g})",
+        ),
         ("k wall BC", K_WALL),
         ("preconditioner refresh", f"on {REFRESH_ON_CYCLES} restart cycles (mid-step)"),
         ("smoother fill / sweeps / coarse limit", f"{FILL_LEVELS} / {SWEEPS} / {COARSE_EQ_LIMIT}"),
@@ -846,7 +932,15 @@ def solve_aquaflux(
             inner_observer=logger.on_inner,
         )
         shared_preconditioner[:] = [engine.shift_policy.preconditioner]
-        return dict(continuation=engine, refresh=RefreshPolicy(precondition_step=refresh))
+        # The lowest rung (`index == 1`) is the one that self-starts from the hybrid initialization;
+        # every rung above it is handed the converged root below it. They get their own starting shift
+        # for that reason -- see `BETA_START_WARM`. With the environment unset the two are equal and
+        # this is the same control the solve would have used anyway.
+        return dict(
+            continuation=engine,
+            refresh=RefreshPolicy(precondition_step=refresh),
+            step_control=dual_time_control(BETA_START if point.index == 1 else BETA_START_WARM),
+        )
 
     checkpoints = (
         StateCheckpointer(checkpoint_dir, every=1, keep=CHECKPOINT_KEEP)
@@ -861,6 +955,7 @@ def solve_aquaflux(
             atol=ATOL,
             intermediate_rtol=None,  # every rung stops at the same ABSOLUTE bar
             intermediate_atol=ATOL,
+            schedule=GeometricReynoldsSchedule(ratio=RATIO),
             step_control=CONTROL,
             retry=RETRY,
             point_setup=point_setup,

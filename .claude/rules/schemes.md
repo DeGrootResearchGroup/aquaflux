@@ -1719,6 +1719,49 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   exists to make. ⚠️ The two Betchen rows predate `bind` and the row merges and are stale in its
   favour, but not by a factor that reaches this conclusion.
 
+
+  **✅✅✅ AND ITS REAL PRIZE IS THE STENCIL REACH, WHICH THAT COMPARISON HELD FIXED — 32 % OF pitzDaily
+  WALL CLOCK (measured 2026-09-08).** The table above ran both arms at probe reach 5, so it priced the
+  reconstruction and not what the reconstruction *permits*. Each Richardson sweep couples a cell one ring
+  further, so the swept residual reaches `sweeps + 1`; two face passes have no sweep count to push
+  anything outward. Measured on the scalar-Laplace probe (`validation/gradient_stencil_reach.py`,
+  extended with this arm), at every skewness tested:
+
+  | scheme | reach | Jacobian mass beyond distance 3 | error vs the ANALYTIC gradient (skew 0.05 / 0.25 / 0.40) |
+  |---|---|---|---|
+  | swept, 4 (the shipped count) | **5** | 1.5e-7 … 1.5e-4 | 1.07e-2 / 1.91e-2 / 2.96e-2 |
+  | exact Krylov solve of the same system | 7–11 | same | 1.07e-2 / 1.91e-2 / 3.02e-2 |
+  | **`MultipleCorrectionGradient`** | **3** | **exactly 0.000e+00** | **7.11e-3 / 7.39e-3 / 7.77e-3** |
+
+  Two findings, and the second was not expected. A probe at reach 3 recovers the two-pass Jacobian
+  **exactly** — nothing to fold, so the "vary reach and fill together or not at all" pairing rule has
+  nothing to bite on. And the corrected-Green–Gauss system's *own exact solution* is ~4x less accurate
+  than the two-pass answer at high skew: **the sweeps converge faithfully to a worse answer**, and every
+  sweep past ~2 buys no accuracy while pushing the stencil one more ring out. The two-pass error is also
+  near skew-independent (7.11e-3 → 7.77e-3 over an 8x skew range) where corrected Green–Gauss degrades 3x.
+
+  *Configuration:* pitzDaily 12225 cells, `N_POINTS=2`, `beta_start` 0.5, `CflResidualDualTimeControl`
+  defaults, stop `(0.0, 1e-5)`, `simplesmooth` leading inverse, compiled ILU(0) live; `PITZ_GRADIENT` and
+  `PITZ_STENCIL_REACH` the only variables.
+
+  | arm | steps | cycles | wall | s/cycle | esc | `x_r/h` | `nut` peak |
+  |---|---|---|---|---|---|---|---|
+  | `CorrectedGreenGauss` (swept 4), reach 5 | 64 | 421 | **750 s** | 1.78 | 1 | 8.0686 | 417.36 |
+  | **`MultipleCorrectionGradient`, reach 3** | 69 | 417 | **506 s** | **1.21** | **0** | 8.0686 | 417.52 |
+
+  **Same root** (`x_r/h` identical to four decimals, `nut` peak within 0.04 %, `ux` 0.0189 against
+  0.0191) and **essentially the same work** — 417 cycles against 421 — at **32 % less wall clock**,
+  because each cycle meets a Jacobian of roughly half the nonzeros. Per-cycle cost 1.21 s against 1.78 s
+  is the whole of it, and the preconditioner refresh halves outright (59 s against 124 s, its coloured
+  probe 28 s against 56 s). One escalation becomes none. Well outside this case's ~3 % replicate spread.
+
+  ⚠️ **THIS IS A SKEWED-MESH RESULT AND DOES NOT TRANSFER TO `bfs3d`.** That case is a rectilinear
+  blockMesh, skew-free to round-off, so its sweeps are inert and it already floors at reach 3 — it sets
+  no `stencil_reach` at all. What this changes is the standing warning that "`stencil_reach = 3` IS A
+  PROPERTY OF SKEW-FREE MESHES, NOT OF THE DISCRETIZATION … the sibling gets 3 for free and that is luck,
+  not physics": with a two-pass reconstruction, reach 3 becomes a property of the **scheme**, so a case on
+  a genuinely skewed mesh gets it too. **Neither case has adopted it as a default** — both still build
+  `CorrectedGreenGauss`; `PITZ_GRADIENT=multcorr` selects it on pitzDaily.
   **⚠️⚠️ `SkewCorrectedGradient` STALLS THIS CASE DEAD, and the reason is about what a boundary value
   MEANS — not about the closure's accuracy.** It converges the first two Reynolds rungs to the
   standard arm's residual to three significant figures (7.277e-06 against 7.255e-06 at step 28, and a
