@@ -591,10 +591,21 @@ py3.11 in 23:12 against py3.12's 21:55, and a later `main` commit ran py3.11 *fa
 are cancelling too, and compare the *other* interpreter on your own run — a branch whose py3.12 leg is
 faster than main's did not slow the suite down. Two measured facts to save the re-derivation: the tier
 costs 18.7-30 min end to end, and **preserving the JAX persistent compilation cache across CI runs
-buys nothing** — the distributed `shard_map` tests that set the wall clock compile 7184 XLA programs
+buys nothing** — the distributed `shard_map` tests (see below) compile 7184 XLA programs
 whose largest takes 0.05s, so none clears the 2.0s persistence floor and the cache stays empty. Their
 cost is eager per-op tracing and dispatch in mesh/partition setup, which is where a real saving would
 have to come from. (`.github/workflows/ci.yml` carries both measurements with their configuration.)
+
+**Those `shard_map` tests now run in their own CI job, selected by the `distributed` marker.** Mixed
+into the unit job under `-n auto` they oversubscribed the runner — each xdist worker forks a child
+that wants the whole machine — and the contention, not the work, set the tier's wall clock: one test
+costing ~241 s when healthy ran past the **900 s per-test timeout**, which `--timeout-method=thread`
+cannot interrupt, so it killed the worker and reported `node down: Not properly terminated` with no
+mention of a timeout anywhere. **That failure reads as a crash in the test and is not one** — check
+what else was running before believing it. Membership is by marker rather than by path, and
+`tests/unit/test_distributed_marker.py` fails if a module that spawns simulated devices lacks it, so
+a new one cannot quietly rejoin the contended job. The local fast gate still runs them inline; this
+split is a property of a 4-core runner, not of the tests.
 
 None of this licenses weakening a check to make it quick. A finite-difference-validated adjoint costs
 three solves and is the point of the project; that is a test spending what it must.

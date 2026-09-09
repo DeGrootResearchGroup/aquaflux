@@ -130,10 +130,9 @@ jobs:
 
   # ---- Fast unit tests (always-on) --------------------------------------------
   # Most unit tests are cheap and homogeneous (peak ~5 GB in one process), so they
-  # run unsharded across xdist workers (`-n auto`). The wall-clock driver, though, is
-  # the handful of distributed (`shard_map`) tests, each of which spawns a fresh
-  # interpreter to set the simulated device count before JAX starts and then compiles
-  # a sharded program -- that fixed cost, not the cheap tests, sets the budget below.
+  # run unsharded across xdist workers (`-n auto`). The `distributed` tests are excluded
+  # and run in their own job below -- they each fork a child that wants the whole machine,
+  # so mixed in here they oversubscribe the runner and set this job's whole wall clock.
   # Two interpreters, since a unit-level regression can be version-specific.
   unit:
     name: unit tests (py${{ matrix.python-version }})
@@ -214,7 +213,52 @@ jobs:
         # passed -- which is how two modules gated on an optional solver library went four days
         # without running while every required check stayed green.
         run: >-
-          pytest tests/unit -m "not slow and not validation" -q -rs -n auto
+          pytest tests/unit -m "not slow and not validation and not distributed" -q -rs -n auto
+          --durations=15 --timeout=900 --timeout-method=thread --max-worker-restart=0
+
+  # ---- Distributed (shard_map) tests (always-on) ------------------------------
+  # These have their own job because of how they run, not because of what they cover: each
+  # spawns a FRESH INTERPRETER (the simulated device count must be set before JAX starts) that
+  # then compiles a multi-device program. That child wants the whole machine, so under `-n auto`
+  # in the unit job four xdist workers forked four such children onto four runner cores, and the
+  # contention -- not the work -- set the tier's wall clock. One of them, costing ~241s when the
+  # tier is healthy, ran past the 900s per-test timeout there; `--timeout-method=thread` cannot
+  # interrupt a test, so that KILLED THE WORKER and reported `node down: Not properly terminated`
+  # against it with no mention of a timeout, which reads as a crash in the test rather than as
+  # oversubscription. Isolated here they do not compete with 1300 other tests.
+  #
+  # `-n 2` rather than `-n auto`: two workers each forking one child is four processes on the
+  # four cores of a hosted runner. Raising it re-creates the oversubscription this job exists to
+  # remove. Membership is by marker and enforced by `tests/unit/test_distributed_marker.py`, so a
+  # new module that spawns simulated devices cannot quietly rejoin the contended job.
+  distributed:
+    name: distributed tests (py${{ matrix.python-version }})
+    if: >-
+      github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+      && github.event.action != 'labeled'
+    runs-on: ubuntu-latest
+    # Eleven tests, each a fresh interpreter and a multi-device compilation. Generous because a
+    # hang backstop is what this is; `--timeout` below names a stuck test first.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package and test dependencies
+        run: pip install -e ".[test]"
+
+      - name: Run the distributed tests
+        run: >-
+          pytest tests/unit -m "distributed and not slow and not validation" -q -rs -n 2
           --durations=15 --timeout=900 --timeout-method=thread --max-worker-restart=0
 
   # ---- Fast integration tests (always-on, sharded) ----------------------------
@@ -267,7 +311,7 @@ jobs:
   # them, which must not block). Update branch protection to require `fast gate`.
   fast-gate:
     name: fast gate
-    needs: [lint, docs, unit, integration]
+    needs: [lint, docs, unit, distributed, integration]
     if: >-
       always() && github.event_name != 'schedule'
       && github.event_name != 'workflow_dispatch'
@@ -276,11 +320,12 @@ jobs:
     steps:
       - name: Require the always-on gates to pass
         run: |
-          for job in lint docs unit integration; do
+          for job in lint docs unit distributed integration; do
             case "$job" in
               lint) r="${{ needs.lint.result }}" ;;
               docs) r="${{ needs.docs.result }}" ;;
               unit) r="${{ needs.unit.result }}" ;;
+              distributed) r="${{ needs.distributed.result }}" ;;
               integration) r="${{ needs.integration.result }}" ;;
             esac
             echo "$job: $r"
