@@ -28,7 +28,15 @@ small mesh and few sweeps keep every compile and the grad tape small.
 
 from __future__ import annotations
 
+import pytest
+
 from tests.support.devices import run_on_simulated_devices
+
+# Every test in this module spawns a fresh interpreter that compiles a multi-device program,
+# so the marker collects them into a CI job of their own. Run alongside the rest of the tier
+# they oversubscribe the runner -- each worker forks a child that wants the whole machine --
+# and a test that costs ~4 minutes on its own has exceeded a 15-minute per-test timeout there.
+pytestmark = pytest.mark.distributed
 
 # Shared setup: a skewed mesh, a diffusion assembler whose gradient is the iterative
 # CorrectedGreenGauss with a fixed-sweep solve, and its distributed counterpart on four devices.
