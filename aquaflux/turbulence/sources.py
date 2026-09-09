@@ -244,6 +244,7 @@ class KProduction(VolumeSource):
     near_wall: NearWallKClosure | None = None
 
     def source(self, field: jnp.ndarray, context: FaceContext) -> jnp.ndarray:
+        cap_field = jax.lax.stop_gradient(field) if self.explicit_limiter else field
         # The Menter cap `10 β* k ω` is an upper bound on a non-negative production, so it must not be
         # allowed to go negative: at a transiently negative `k` the unclamped limit wins the `min` and
         # turns this term into a SINK, driving `k` further down -- the production term deepening the very
@@ -252,83 +253,13 @@ class KProduction(VolumeSource):
         # model choice: both are off-solution, inactive at convergence where `k > 0`, so the converged
         # field and its sensitivity are untouched. `KDestruction` deliberately keeps the RAW `k`, which is
         # what preserves that row's diagonal.
-        production, limit = self._branches(field)
+        production, limit = production_and_limit(
+            self.nu_t, self.strain_rate, self.omega, cap_field, self.model
+        )
         limited = jnp.minimum(production, limit)
         if self.near_wall is not None:
             limited = self.near_wall.production(limited, field)
         return limited * context.geometry.cell.volume
-
-    def _branches(self, field: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
-        """``(production, limit)`` at ``field``, with ``explicit_limiter`` applied to the cap's ``k``.
-
-        Where the cap's ``k`` is read is the one decision this operator makes beyond the shared
-        expressions in :func:`production_and_limit`, and both :meth:`source` and
-        :meth:`feedback_rate` have to make it the same way — a value and its own derivative cannot
-        come from two different linearizations of the same term.
-        """
-        cap_field = jax.lax.stop_gradient(field) if self.explicit_limiter else field
-        return production_and_limit(self.nu_t, self.strain_rate, self.omega, cap_field, self.model)
-
-    def feedback_rate(
-        self, field: jnp.ndarray, volume: jnp.ndarray, *, live_viscosity: bool = True
-    ) -> jnp.ndarray:
-        r"""``d(source)/dk`` where ``ν_t`` is a **live** function of ``k``, in closed form.
-
-        The k-production is the term that makes a coupled RANS residual's k row differ from the
-        frozen-closure one this operator is constructed with. Here ``ν_t`` is a constant array, so
-        ``ν_t S²`` holds no ``k`` at all; in a coupled residual ``ν_t = a₁ k / max(a₁ ω, S F₂)`` is
-        proportional to ``k``, so the production is too and its derivative is its own value over
-        ``k``. The capped branch ``10 β* k ω`` is proportional to ``k`` outright, so the same identity
-        covers it — except under ``explicit_limiter``, where the cap's ``k`` is frozen and a capped
-        cell's source is constant in ``k``, contributing nothing.
-
-        Closed form on purpose: it is one elementwise pass over the same expressions
-        :meth:`source` forms, with no second Jacobian-vector product, so a caller that needs this
-        per cell (the pseudo-time shift diagonal) pays nothing for it.
-
-        Parameters
-        ----------
-        field : jnp.ndarray
-            The turbulent kinetic energy to evaluate at, shape ``(n_cells,)``.
-        volume : jnp.ndarray
-            Cell volumes, shape ``(n_cells,)`` — the same integration :meth:`source` applies.
-        live_viscosity : bool
-            Whether the ``ν_t`` handed to this operator really does track ``k`` in the residual being
-            described. ``True`` (default) is the coupled residual. ``False`` says it was frozen at a
-            ``stop_gradient``-ed ``k`` (the Patankar stand-in
-            :attr:`~aquaflux.turbulence.SSTTurbulence.explicit_production_viscosity` builds), which is
-            the *premise of this whole identity* — with it gone the uncapped branch contributes
-            nothing, and only the cap's own ``k`` remains. It is an argument rather than something
-            read off ``ν_t`` because a frozen array and a live one are indistinguishable once formed.
-
-        Returns
-        -------
-        jnp.ndarray
-            The volume-integrated feedback rate, shape ``(n_cells,)`` and ``>= 0``.
-
-        Notes
-        -----
-        Exact in the wall-resolved interior; in a wall-adjacent cell under the near-wall blend it is
-        an estimate, because the modelled production is only *very nearly* linear in ``k`` there (the
-        wall shear stress and the log-layer mean shear each scale like ``sqrt(k)``, but the blend
-        weight carries its own weak dependence). The consumer is a local time scale, not a Jacobian,
-        so an estimate is the right currency — but do not read this as the exact derivative there.
-
-        At ``k <= 0`` every branch above is already clamped to zero, so the rate is zero rather than a
-        division by nothing; the guarded quotient keeps the unused branch's denominator finite so no
-        NaN reaches a derivative taken through it.
-        """
-        production, limit = self._branches(field)
-        capped = production > limit
-        k_linear = jnp.where(
-            capped,
-            jnp.zeros_like(limit) if self.explicit_limiter else limit,
-            production if live_viscosity else jnp.zeros_like(production),
-        )
-        if self.near_wall is not None:
-            k_linear = self.near_wall.production(k_linear, field)
-        positive = field > 0.0
-        return jnp.where(positive, k_linear * volume / jnp.where(positive, field, 1.0), 0.0)
 
 
 class KDestruction(VolumeSource):

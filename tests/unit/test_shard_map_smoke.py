@@ -15,7 +15,15 @@ process has already initialized JAX — the same reason `test_x64_import` uses a
 
 from __future__ import annotations
 
+import pytest
+
 from tests.support.devices import run_on_simulated_devices
+
+# Every test in this module spawns a fresh interpreter that compiles a multi-device program,
+# so the marker collects them into a CI job of their own. Run alongside the rest of the tier
+# they oversubscribe the runner -- each worker forks a child that wants the whole machine --
+# and a test that costs ~4 minutes on its own has exceeded a 15-minute per-test timeout there.
+pytestmark = pytest.mark.distributed
 
 _SUBPROCESS = r"""
 import numpy as np

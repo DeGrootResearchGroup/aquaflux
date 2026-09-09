@@ -46,6 +46,7 @@ from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import (
     CorrectedGreenGauss,
     GmresGradientSolve,
+    MultipleCorrectionGradient,
     SweptGradientSolve,
 )
 from tests.support.meshes import perturbed_grid_2d
@@ -65,8 +66,30 @@ def _smooth(x):
     return jnp.sin(3.0 * x[..., 0]) * jnp.cos(2.0 * x[..., 1])
 
 
-def _assembler(mesh, scheme):
-    boundary = DirichletField(field_fn=_linear)
+def _smooth_gradient(x):
+    """The analytical gradient of :func:`_smooth` -- the accuracy reference.
+
+    ⚠️ The ``vs exact`` column below is departure from the Krylov solve of the *corrected Green-Gauss*
+    system, which is truncation error for the swept ladder and is what a sweep count buys. It is
+    **not** an accuracy measure for a scheme that solves a different system: a reconstruction can sit
+    far from corrected Green-Gauss's answer and nearer the true gradient. Any arm that is not a
+    truncation of that system has to be read in this column instead.
+    """
+    sin3x, cos3x = jnp.sin(3.0 * x[..., 0]), jnp.cos(3.0 * x[..., 0])
+    sin2y, cos2y = jnp.sin(2.0 * x[..., 1]), jnp.cos(2.0 * x[..., 1])
+    return jnp.stack([3.0 * cos3x * cos2y, -2.0 * sin3x * sin2y], axis=-1)
+
+
+def _assembler(mesh, scheme, field_fn=_linear):
+    """The scalar-Laplace assembler, closed by the exact ``field_fn`` on every boundary.
+
+    ⚠️ **The closure must be built from the field being reconstructed.** The reach half of this
+    harness imposes ``_linear`` (the exact discrete solution, so the residual is the thing under
+    study); an *accuracy* measurement on ``_smooth`` has to rebuild with ``_smooth``, or every arm is
+    dominated by boundary cells closed against the wrong field — measured, that reads as a ~5x
+    relative error for every scheme alike and says nothing about any of them.
+    """
+    boundary = DirichletField(field_fn=field_fn)
     return ResidualAssembler.build(
         mesh,
         mesh.geometry(),
@@ -101,9 +124,24 @@ def _cell_graph_distance(mesh) -> np.ndarray:
     return distance
 
 
+def _arms():
+    """The reconstructions to compare, as ``(label, scheme)`` -- the swept ladder, then the rest.
+
+    The swept arms are what the sweep count controls; ``exact`` solves the same system by Krylov and
+    is the accuracy each is measured against. ``multcorr`` is the odd one out and the reason this
+    harness is worth re-running: :class:`~aquaflux.schemes.MultipleCorrectionGradient` reaches the
+    same quadratic-exact contract in **two face passes and no solve**, so it has no sweep count to
+    push the residual outward and its reach is a property of the scheme rather than of a calibration.
+    """
+    arms = [(str(n), CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=n))) for n in SWEEPS]
+    arms.append(("exact", CorrectedGreenGauss(solver=GmresGradientSolve())))
+    arms.append(("multcorr", MultipleCorrectionGradient()))
+    return arms
+
+
 def main() -> None:
     print(f"\nscalar Laplace, {CELLS}x{CELLS} randomly perturbed grid, all-Dirichlet\n")
-    header = f"{'skew':>6} {'sweeps':>7} {'reach':>6} {'beyond d=2':>12} {'beyond d=3':>12} {'grad err':>10}"
+    header = f"{'skew':>6} {'scheme':>7} {'reach':>6} {'beyond d=2':>12} {'beyond d=3':>12} {'vs exact':>10} {'vs analytic':>12}"
     for perturb in SKEWS:
         mesh = perturbed_grid_2d(CELLS, CELLS, perturb=perturb, seed=1, named_boundaries=True)
         distance = _cell_graph_distance(mesh)
@@ -112,23 +150,26 @@ def main() -> None:
 
         exact = _assembler(mesh, CorrectedGreenGauss(solver=GmresGradientSolve()))
         exact_gradient = exact.gradient(curved)
+        analytic = _smooth_gradient(mesh.geometry().cell.centroid)
         total = np.abs(np.asarray(jax.jacfwd(exact.residual)(zero))).sum()
 
         print(header)
-        for sweeps in (*SWEEPS, None):
-            solver = GmresGradientSolve() if sweeps is None else SweptGradientSolve(sweeps=sweeps)
-            case = _assembler(mesh, CorrectedGreenGauss(solver=solver))
+        for label, scheme in _arms():
+            case = _assembler(mesh, scheme)
             jacobian = np.abs(np.asarray(jax.jacfwd(case.residual)(zero)))
             live = jacobian > 1e-13 * jacobian.max()
             error = float(
                 jnp.linalg.norm(case.gradient(curved) - exact_gradient)
                 / jnp.linalg.norm(exact_gradient)
             )
+            # Accuracy needs its own assembler, closed on the field being reconstructed.
+            matched = _assembler(mesh, scheme, field_fn=_smooth).gradient(curved)
+            truth = float(jnp.linalg.norm(matched - analytic) / jnp.linalg.norm(analytic))
             print(
-                f"{perturb:>6.2f} {'exact' if sweeps is None else sweeps:>7} "
+                f"{perturb:>6.2f} {label:>7} "
                 f"{int(distance[live].max()):>6} "
                 f"{jacobian[distance > 2].sum() / total:>12.3e} "
-                f"{jacobian[distance > 3].sum() / total:>12.3e} {error:>10.2e}"
+                f"{jacobian[distance > 3].sum() / total:>12.3e} {error:>10.2e} {truth:>12.2e}"
             )
         print()
 

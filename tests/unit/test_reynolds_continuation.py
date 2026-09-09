@@ -7,7 +7,10 @@ schedule (physics-free) and the molecular-viscosity rescale on a small built cou
 
 from __future__ import annotations
 
+import math
+
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -18,6 +21,7 @@ from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.turbulence import (
+    AdaptiveReynoldsSchedule,
     CoupledRANS,
     GeometricReynoldsSchedule,
     SSTModel,
@@ -28,28 +32,107 @@ from aquaflux.turbulence import (
 RHO, NU, U_IN = 1.0, 1e-3, 1.0
 
 
-# --- GeometricReynoldsSchedule (pure, no mesh) ------------------------------------------
+# --- the schedules (pure, no mesh) ------------------------------------------------------
+
+
+def _walk(schedule, n_points: int) -> list[float]:
+    """The ladder a schedule produces when every rung converges -- the whole-ramp view.
+
+    A schedule is asked for one scale at a time so it can react to a failure, so a test that wants the
+    ladder has to walk it. This is that walk, and nothing else in the library does it.
+    """
+    scale = schedule.anchor(n_points)
+    ladder = [scale]
+    while scale > 1.0:
+        scale = schedule.next_scale(tuple(ladder), None)
+        ladder.append(scale)
+    return ladder
 
 
 def test_schedule_zero_points_is_the_target_alone() -> None:
-    assert GeometricReynoldsSchedule().scales(0) == (1.0,)
+    assert _walk(GeometricReynoldsSchedule(), 0) == [1.0]
 
 
 def test_schedule_default_decade_per_step() -> None:
-    assert GeometricReynoldsSchedule().scales(1) == (10.0, 1.0)
-    assert GeometricReynoldsSchedule().scales(2) == (100.0, 10.0, 1.0)
-    assert GeometricReynoldsSchedule().scales(3) == (1000.0, 100.0, 10.0, 1.0)
+    assert _walk(GeometricReynoldsSchedule(), 1) == [10.0, 1.0]
+    assert _walk(GeometricReynoldsSchedule(), 2) == [100.0, 10.0, 1.0]
+    assert _walk(GeometricReynoldsSchedule(), 3) == [1000.0, 100.0, 10.0, 1.0]
 
 
 def test_schedule_descends_to_one_and_has_n_plus_one_points() -> None:
-    scales = GeometricReynoldsSchedule().scales(4)
-    assert len(scales) == 5
-    assert scales[-1] == 1.0  # dissolves at the target
-    assert list(scales) == sorted(scales, reverse=True)  # strictly descending anchor -> target
+    ladder = _walk(GeometricReynoldsSchedule(), 4)
+    assert len(ladder) == 5 == GeometricReynoldsSchedule().planned_total(4)
+    assert ladder[-1] == 1.0  # dissolves at the target
+    assert ladder == sorted(ladder, reverse=True)  # strictly descending anchor -> target
 
 
 def test_schedule_ratio_is_configurable() -> None:
-    assert GeometricReynoldsSchedule(ratio=4.0).scales(2) == (16.0, 4.0, 1.0)
+    assert _walk(GeometricReynoldsSchedule(ratio=4.0), 2) == [16.0, 4.0, 1.0]
+
+
+def test_a_ratio_that_does_not_divide_the_anchor_still_lands_exactly_on_the_target() -> None:
+    # Repeated division drifts off 1.0; without the snap the ramp would end on a spurious extra rung
+    # at 1.0000000000000002 -- a companion microscopically different from the target.
+    ladder = _walk(GeometricReynoldsSchedule(ratio=3.1623), 4)
+    assert len(ladder) == 5
+    assert ladder[-1] == 1.0
+
+
+def test_the_geometric_schedule_gives_up_when_a_rung_fails() -> None:
+    # Its defining property: the ladder is fixed in advance, so there is nothing gentler to fall back
+    # to and the caller is told to re-run with a deeper anchor.
+    assert GeometricReynoldsSchedule().next_scale((100.0,), 10.0) is None
+
+
+# --- AdaptiveReynoldsSchedule -----------------------------------------------------------
+
+
+def test_the_adaptive_schedule_matches_the_geometric_one_when_nothing_fails() -> None:
+    assert _walk(AdaptiveReynoldsSchedule(), 2) == _walk(GeometricReynoldsSchedule(), 2)
+
+
+def test_a_failed_rung_retreats_to_the_geometric_mean() -> None:
+    # Halving the step in the log of the viscosity scale -- the parameterization the ramp is
+    # geometric in, so a bisection there bisects the step.
+    retreat = AdaptiveReynoldsSchedule().next_scale((100.0,), 10.0)
+    assert retreat == pytest.approx(math.sqrt(100.0 * 10.0))
+    assert 10.0 < retreat < 100.0  # strictly between the root in hand and the scale that failed
+
+
+def test_repeated_failures_bisect_again_and_eventually_give_up() -> None:
+    schedule = AdaptiveReynoldsSchedule()
+    root, attempt, retreats = 100.0, 10.0, 0
+    while (nxt := schedule.next_scale((root,), attempt)) is not None:
+        # A retreat moves back TOWARD the root, and the ramp descends, so a gentler step is a LARGER
+        # viscosity scale -- nearer the rung already converged, not nearer the target.
+        assert attempt < nxt < root
+        attempt, retreats = nxt, retreats + 1
+        assert retreats < 50, "retreating did not terminate"
+    assert retreats > 1  # it does retreat more than once before giving up
+    assert root / attempt < AdaptiveReynoldsSchedule().min_ratio + 0.05
+
+
+def test_the_step_recovers_gradually_after_a_retreat() -> None:
+    # Without recovery the ramp would carry one hard rung's caution to the target; with it unbounded
+    # the rung after a retreat would jump straight back to the step that had just failed.
+    schedule = AdaptiveReynoldsSchedule()
+    after_retreat = schedule.next_scale((100.0, math.sqrt(1000.0)), None)
+    achieved = 100.0 / math.sqrt(1000.0)
+    assert math.sqrt(1000.0) / after_retreat == pytest.approx(achieved * schedule.recovery)
+    assert (
+        achieved < achieved * schedule.recovery < schedule.ratio
+    )  # between the two, not at either
+
+
+def test_the_step_never_grows_past_the_base_ratio() -> None:
+    schedule = AdaptiveReynoldsSchedule(ratio=10.0, recovery=100.0)
+    assert 100.0 / schedule.next_scale((1000.0, 100.0), None) == pytest.approx(10.0)
+
+
+def test_a_failed_anchor_gives_up_because_there_is_nothing_to_retreat_toward() -> None:
+    # No converged root exists yet, and a gentler step is not the remedy -- the ramp has to start
+    # lower, which is `n_points`.
+    assert AdaptiveReynoldsSchedule().next_scale((), 100.0) is None
 
 
 def test_negative_points_raise() -> None:
@@ -337,3 +420,73 @@ def test_point_setup_receives_the_points_position_in_the_ramp(monkeypatch) -> No
     assert [p.viscosity_scale for p in seen] == [100.0, 10.0, 1.0]
     assert [p.is_target for p in seen] == [False, False, True]  # only the true-viscosity point
     assert seen[1].label == "point 2/3 (Re/10)"
+
+
+# --- the retreat, end to end through the wrapper ----------------------------------------
+
+
+def _fail_at(monkeypatch, doomed):
+    """Patch ``solve_coupled`` to fail at the scales in ``doomed``, recording every attempt.
+
+    ``doomed`` is consumed as a set of scales that raise the convergence guard the *first* time they
+    are attempted, so a retreat that later re-attempts a gentler scale succeeds.
+    """
+    import aquaflux.turbulence.reynolds as reynolds
+
+    attempts, remaining = [], set(doomed)
+    result = (jnp.zeros(3), jnp.ones(1), jnp.ones(1))
+
+    def fake_solve_coupled(coupled, flow=None, k=None, omega=None, **kwargs):
+        scale = float(coupled.momentum.properties.properties["viscosity"].value / (RHO * NU))
+        attempts.append(round(scale, 6))
+        if round(scale, 6) in remaining:
+            remaining.discard(round(scale, 6))
+            raise eqx.EquinoxRuntimeError("stand-in for the convergence guard")
+        return result
+
+    monkeypatch.setattr(reynolds, "solve_coupled", fake_solve_coupled)
+    return attempts
+
+
+def test_a_failed_rung_retreats_and_the_ramp_continues(monkeypatch) -> None:
+    """The point of the adaptive schedule: a rung that fails costs a gentler retry, not the run.
+
+    The rungs already converged are kept -- the retry is seeded by the last converged root rather than
+    restarting the ramp -- which is what makes this cheaper than the caller re-running at a larger
+    ``n_points``.
+    """
+    attempts = _fail_at(monkeypatch, doomed={10.0})
+    solve_reynolds_continuation(
+        _tiny_coupled(), n_points=2, rtol=1e-10, schedule=AdaptiveReynoldsSchedule()
+    )
+    assert attempts[0] == 100.0  # the anchor
+    assert attempts[1] == 10.0  # the decade step, which fails
+    assert attempts[2] == pytest.approx(math.sqrt(1000.0), rel=1e-6)  # the retreat, gentler
+    assert attempts[-1] == 1.0  # and the ramp still reaches the target
+    assert len(attempts) > 4  # it did not simply skip the rungs it could not take
+
+
+def test_the_same_failure_ENDS_the_run_under_the_fixed_ladder(monkeypatch) -> None:
+    """The control for the test above: without an adaptive schedule this is still a hard failure.
+
+    Keeping both pins that the retreat is the schedule's doing and not something the loop now does for
+    every schedule -- the default must stay exactly as unforgiving as it was.
+    """
+    _fail_at(monkeypatch, doomed={10.0})
+    with pytest.raises(RuntimeError, match="offered no gentler step"):
+        solve_reynolds_continuation(_tiny_coupled(), n_points=2, rtol=1e-10)
+
+
+def test_a_failed_TARGET_rung_also_retreats(monkeypatch) -> None:
+    """The target is the hardest point on the ramp, so it is the one most worth inserting a rung before.
+
+    A loop that special-cased the final solve could not do this; the rung and the target take the same
+    path precisely so that they share the retreat.
+    """
+    attempts = _fail_at(monkeypatch, doomed={1.0})
+    solve_reynolds_continuation(
+        _tiny_coupled(), n_points=1, rtol=1e-10, schedule=AdaptiveReynoldsSchedule()
+    )
+    assert attempts[:2] == [10.0, 1.0]  # anchor, then the target, which fails
+    assert 1.0 < attempts[2] < 10.0  # a rung inserted between the last root and the target
+    assert attempts[-1] == 1.0  # and the target is then reached

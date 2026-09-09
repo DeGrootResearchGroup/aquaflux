@@ -1531,12 +1531,8 @@ def _coupled_shift_policy(
     # factor below, which a refresh carries frozen, so the temporal ratio transport(state)/transport(ref)
     # has the range cancel and the shift does not inherit omega's growth (the freeze the old carried
     # product suffered -- see the docstring).
-    # `live_eddy_viscosity=True` because THIS residual recomputes `nu_t` from the current `k`: the
-    # production `nu_t S**2` is then proportional to `k` and feeds it back into itself, which the
-    # frozen-closure k residual the diagonal is built from contains no trace of. Without it the shift
-    # is a different equation's diagonal, and near a wall the difference exceeds the whole shift.
     k_transport = coupled.turbulence.k_shift_policy(
-        mdot, closure, k_ref, shift_basis=basis, live_eddy_viscosity=True
+        mdot, closure, k_ref, shift_basis=basis
     ).shift_diagonal
     omega_transport = coupled.turbulence.omega_shift_policy(
         mdot, closure, omega_ref, shift_basis=basis

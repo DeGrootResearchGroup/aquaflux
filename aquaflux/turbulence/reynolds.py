@@ -18,6 +18,7 @@ solution seeds the next higher Re), and the final target solve.
 from __future__ import annotations
 
 import inspect
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -48,15 +49,18 @@ class ReynoldsPoint:
     ----------
     index : int
         Which point this is, **1-based** (``1`` is the lowest-Reynolds anchor).
-    total : int
-        How many points the ramp has, including the target (``n_points + 1``).
+    total : int or None
+        How many points the ramp has, including the target, or ``None`` when that is not knowable in
+        advance. A schedule that may retreat onto a gentler step after a rung fails does not know how
+        many rungs it will take until it has taken them, so it reports ``None`` and the label renders
+        the index alone.
     viscosity_scale : float
         The factor the molecular viscosity is multiplied by at this point (``1.0`` at the target, larger
         below it). The Reynolds number is reduced by the same factor.
     """
 
     index: int
-    total: int
+    total: int | None
     viscosity_scale: float
 
     @property
@@ -66,28 +70,67 @@ class ReynoldsPoint:
 
     @property
     def label(self) -> str:
-        """A short human label, e.g. ``"point 2/3 (Re/10)"`` -- so every driver need not format one."""
+        """A short human label, e.g. ``"point 2/3 (Re/10)"`` -- so every driver need not format one.
+
+        Renders the index alone (``"point 2 (Re/10)"``) when the ramp's length is not known ahead of
+        time, which is the case for any schedule that may retreat onto a gentler step.
+        """
         scaling = "target Re" if self.is_target else f"Re/{self.viscosity_scale:g}"
-        return f"point {self.index}/{self.total} ({scaling})"
+        position = f"{self.index}" if self.total is None else f"{self.index}/{self.total}"
+        return f"point {position} ({scaling})"
 
 
 class ReynoldsSchedule(Protocol):
-    """The intermediate Reynolds numbers a continuation visits, as molecular-viscosity scale factors.
+    """The Reynolds numbers a continuation visits, as molecular-viscosity scale factors.
 
-    A schedule maps the one integer ``n_points`` to the multiplicative factors applied to the case's
-    molecular viscosity, from the lowest-Re anchor down to the target. Each factor ``> 1`` is a
-    lower-Reynolds companion problem (``Re`` reduced by that factor); the sequence ends at ``1.0`` (the
-    true target). It is a pure function of ``n_points`` -- no mesh, no state -- so it is trivially
-    unit-testable.
+    A schedule decides where the ramp starts and, one rung at a time, where it goes next. Each factor
+    ``> 1`` is a lower-Reynolds companion problem (``Re`` reduced by that factor); ``1.0`` is the true
+    target and ends the ramp.
+
+    **It is asked for the next scale one rung at a time rather than for the whole ladder up front**,
+    which is what lets a schedule react to a rung that failed. A schedule that does not care can ignore
+    the history and emit a fixed ladder (:class:`GeometricReynoldsSchedule`); one that does can shorten
+    its step and try again (:class:`AdaptiveReynoldsSchedule`). Every method is a pure function of the
+    arguments it is given -- no mesh, no state, no field -- so a schedule is trivially unit-testable and
+    the loop that drives it owns all the bookkeeping.
     """
 
-    def scales(self, n_points: int) -> tuple[float, ...]:
-        """The ``n_points + 1`` viscosity-scale factors, descending to ``1.0`` (the target).
+    def anchor(self, n_points: int) -> float:
+        """The viscosity scale of the first, lowest-Reynolds rung.
 
         Parameters
         ----------
         n_points : int
-            The number of lower-Reynolds continuation points (``>= 0``).
+            The user's one number: how deep below the target the ramp is anchored (``>= 0``). ``0``
+            anchors at the target itself, i.e. no continuation.
+        """
+        ...
+
+    def next_scale(self, converged: tuple[float, ...], failed: float | None) -> float | None:
+        """The next viscosity scale to attempt, ``1.0`` for the target, or ``None`` to give up.
+
+        Parameters
+        ----------
+        converged : tuple of float
+            The scales of the rungs that have converged so far, in the order they were solved; empty
+            before the first has. ``converged[-1]`` is the scale the current seed is a root of, and
+            ``converged[-2] / converged[-1]`` is the step the ramp last took successfully.
+        failed : float or None
+            The scale that has just **failed** to converge, or ``None`` when the previous attempt
+            succeeded (so this call is being asked for an ordinary next rung).
+
+        Returns
+        -------
+        float or None
+            The scale to attempt, which must be strictly less than ``converged[-1]`` and at least
+            ``1.0``; or ``None`` to abandon the continuation, which the caller reports as a failure.
+        """
+        ...
+
+    def planned_total(self, n_points: int) -> int | None:
+        """How many points the ramp will visit including the target, or ``None`` if not knowable.
+
+        Only used to label a rung for a human. A schedule that may retreat cannot answer, and says so.
         """
         ...
 
@@ -97,8 +140,9 @@ class GeometricReynoldsSchedule(eqx.Module):
 
     With ``ratio = 10`` (the default, one decade per step) the anchor sits at ``Re_target / 10 ** N``
     and every step raises ``Re`` by a decade, so ``n_points`` is the number of decades of continuation:
-    ``scales(1) == (10.0, 1.0)`` anchors one decade below the target, ``scales(2) == (100.0, 10.0,
-    1.0)`` two decades below. Geometric spacing is the natural choice because the convective
+    ``n_points = 1`` anchors one decade below the target and visits ``(10.0, 1.0)``; ``n_points = 2``
+    anchors two decades below and visits ``(100.0, 10.0, 1.0)``. Geometric spacing is the natural
+    choice because the convective
     nonlinearity scales multiplicatively with ``Re``, and each up-step is seeded by a *converged*
     neighbour, so a factor-``ratio`` jump from a converged solution is far easier than the same jump
     from a cold start. A harder target is reached by raising ``n_points`` (deeper anchor, more rungs).
@@ -112,16 +156,114 @@ class GeometricReynoldsSchedule(eqx.Module):
 
     ratio: float = eqx.field(static=True, default=10.0)
 
-    def scales(self, n_points: int) -> tuple[float, ...]:
-        """The viscosity-scale factors ``(ratio ** N, ..., ratio, 1.0)`` for ``N = n_points``.
+    def anchor(self, n_points: int) -> float:
+        """``ratio ** n_points`` -- the anchor sits that many steps below the target."""
+        return float(self.ratio**n_points)
 
-        Parameters
-        ----------
-        n_points : int
-            The number of lower-Reynolds continuation points (``>= 0``); ``0`` yields ``(1.0,)`` -- the
-            target alone, i.e. no continuation.
+    def next_scale(self, converged: tuple[float, ...], failed: float | None) -> float | None:
+        """One step down from the last converged rung, or ``None`` if a rung failed.
+
+        **A failed rung ends the continuation**, which is this schedule's defining property: the ladder
+        is fixed in advance, so there is nothing gentler to fall back to and the caller is told to
+        re-run with a larger ``n_points``. :class:`AdaptiveReynoldsSchedule` is the one that retreats.
         """
-        return tuple(float(self.ratio ** (n_points - i)) for i in range(n_points + 1))
+        if failed is not None:
+            return None
+        return _step_down(converged[-1], self.ratio)
+
+    def planned_total(self, n_points: int) -> int:
+        """``n_points + 1`` -- the ladder is fixed, so its length is known before it is walked."""
+        return n_points + 1
+
+
+class AdaptiveReynoldsSchedule(eqx.Module):
+    """Geometric spacing that **retreats onto a gentler step** when a rung fails, rather than giving up.
+
+    The fixed ladder's weakness is that its step is chosen before anything is known: a rung that turns
+    out to be too big a jump ends the whole continuation, discarding every rung already converged, and
+    the caller is told to re-run from the beginning with a larger ``n_points``. That retry loop is the
+    standard step-size control of numerical continuation with the human as the controller and a full
+    restart as the retry -- so this closes it, keeping the converged rungs and shortening only the step
+    that failed.
+
+    On a failure the next attempt is the **geometric mean** of the root already in hand and the scale
+    that failed from it, which halves the step in the log of the viscosity scale -- the parameterization
+    the ramp is geometric in, so a bisection there is a bisection of the step. Repeated failures bisect
+    again, and the schedule gives up once the step has shrunk below :attr:`min_ratio`, since a step that
+    small is evidence the difficulty is not the jump size. After a retreat the step is allowed to grow
+    back by :attr:`recovery` per successful rung, capped at :attr:`ratio`: without that the ramp would
+    carry one hard rung's caution all the way to the target, and with it unbounded the rung after a
+    retreat would jump straight back to the step that had just failed.
+
+    **This adapts the spacing, not the aggression.** It reacts only to whether a rung converged, which
+    is the one signal available without observing the march -- deliberately, because three independent
+    attempts to *predict* a bad continuation step from cheaper signals have all failed here (a static
+    census on the three-dimensional case, a line-search-trend rule, and the curvature of the solution
+    path, which ranked the step that diverged as the safest of three). Reacting to the outcome is what
+    is left, and it is what continuation codes do.
+
+    Attributes
+    ----------
+    ratio : float
+        The Reynolds-number multiplier per rung when nothing has gone wrong -- the step this schedule
+        returns to, and never exceeds. Default ``10.0`` (static).
+    recovery : float
+        How much of the step is won back per successful rung after a retreat, as a multiplier on the
+        step last achieved. ``1.0`` never recovers; large values return to ``ratio`` immediately.
+        Default ``1.5`` (static).
+    min_ratio : float
+        The step below which the schedule stops retreating and reports failure, as a ratio of the last
+        converged scale to the proposed one. Default ``1.05`` (static).
+    """
+
+    ratio: float = eqx.field(static=True, default=10.0)
+    recovery: float = eqx.field(static=True, default=1.5)
+    min_ratio: float = eqx.field(static=True, default=1.05)
+
+    def anchor(self, n_points: int) -> float:
+        """``ratio ** n_points`` -- the same anchor as the fixed ladder, since only the path adapts."""
+        return float(self.ratio**n_points)
+
+    def next_scale(self, converged: tuple[float, ...], failed: float | None) -> float | None:
+        """A gentler scale after a failure, otherwise one step down from the last converged rung."""
+        if failed is not None:
+            if not converged:
+                # The anchor itself failed. There is no converged root to retreat toward, and a
+                # gentler step is not the remedy: the ramp has to START lower, which is `n_points`.
+                return None
+            root = converged[-1]
+            retreat = math.sqrt(root * float(failed))
+            return None if root / retreat < self.min_ratio else retreat
+        root = converged[-1]
+        achieved = converged[-2] / root if len(converged) >= 2 else self.ratio
+        return _step_down(root, min(self.ratio, achieved * self.recovery))
+
+    def planned_total(self, n_points: int) -> None:
+        """``None`` -- how many rungs this takes is not known until it has taken them."""
+        return None
+
+
+#: A hard cap on rung ATTEMPTS, so a schedule that never descends fails loudly instead of running for
+#: ever. It bounds a defect, not a hard case: a schedule's own ``min_ratio`` is what limits how far it
+#: retreats, and a ramp that legitimately needs this many rungs is one whose step is far too small.
+_MAX_ATTEMPTS = 100
+
+#: How close to ``1.0`` a computed scale must be to count as having ARRIVED at the target. A ladder
+#: built by repeated division lands on ``1.0`` exactly only when the ratio divides the anchor exactly,
+#: so without this a ramp at, say, ``ratio = 3.1623`` would finish with a spurious extra rung at
+#: ``1.0000000000000002`` -- a companion microscopically different from the target, solved for nothing
+#: and reported as its own point.
+_TARGET_TOLERANCE = 1e-9
+
+
+def _step_down(scale: float, factor: float) -> float:
+    """``scale / factor``, snapped to exactly ``1.0`` once it has reached the target.
+
+    The one home for "take a step down the ladder", so the two schedules cannot disagree about when a
+    ramp has arrived.
+    """
+    stepped = float(scale) / float(factor)
+    return 1.0 if stepped <= 1.0 + _TARGET_TOLERANCE else stepped
 
 
 #: The keywords that drive the *solve* rather than configure a continuation, derived from
@@ -176,8 +318,11 @@ def solve_reynolds_continuation(
         The number of lower-Reynolds continuation points before the target (``>= 0``). ``0`` is a plain
         direct solve (no continuation). This is the whole user surface.
     schedule : ReynoldsSchedule, optional
-        The intermediate Reynolds spacing; defaults to :class:`GeometricReynoldsSchedule` (one decade
-        per step, anchor at ``Re_target / 10 ** n_points``).
+        The Reynolds spacing; defaults to :class:`GeometricReynoldsSchedule` (one decade per step,
+        anchor at ``Re_target / 10 ** n_points``), whose ladder is fixed in advance and whose failure
+        ends the continuation. Pass :class:`AdaptiveReynoldsSchedule` to have a rung that fails
+        **retreat onto a gentler step** and carry on from the rungs already converged, instead of
+        discarding them and asking for a re-run at a larger ``n_points``.
     intermediate_rtol : float or None
         The relative residual tolerance for the **lower-Re** points, overriding ``rtol`` from
         ``solve_kwargs`` for those solves only (the target solve always uses the caller's ``rtol``).
@@ -262,7 +407,6 @@ def solve_reynolds_continuation(
     if n_points < 0:
         raise ValueError(f"n_points must be >= 0, got {n_points}")
     schedule = schedule or GeometricReynoldsSchedule()
-    scales = schedule.scales(n_points)
 
     # Build the companions from a stopped copy so the ramp -- which only makes an initial guess --
     # never tapes onto the target-Re adjoint.
@@ -316,23 +460,54 @@ def solve_reynolds_continuation(
         )
 
     seed: tuple[jnp.ndarray | None, jnp.ndarray | None, jnp.ndarray | None] = (None, None, None)
-    for index, scale in enumerate(scales[:-1]):
-        companion = frozen.with_scaled_molecular_viscosity(scale)
+    converged: list[float] = []
+    total = schedule.planned_total(n_points)
+    attempt = schedule.anchor(n_points)
+
+    for _ in range(_MAX_ATTEMPTS):
+        # A rung and the target take the SAME path, differing only in which assembler and which
+        # keywords they get. That is what lets a failed TARGET retreat too -- it is the hardest point
+        # on the ramp, so it is the one most worth being able to insert a rung in front of, and a loop
+        # that special-cased it could not. The target still runs on the live `coupled`, so its adjoint
+        # is the direct solve's; every lower-Re rung runs on the stopped copy and never tapes.
+        is_target = attempt <= 1.0 + _TARGET_TOLERANCE
+        assembler = coupled if is_target else frozen.with_scaled_molecular_viscosity(attempt)
+        point = ReynoldsPoint(len(converged) + 1, total, 1.0 if is_target else float(attempt))
         try:
-            point = ReynoldsPoint(index + 1, len(scales), float(scale))
-            flow, k, omega = _point_solve(companion, seed, ramp_kwargs, point)
+            flow, k, omega = _point_solve(
+                assembler, seed, target_kwargs if is_target else ramp_kwargs, point
+            )
         except eqx.EquinoxRuntimeError as exc:
-            raise RuntimeError(
-                f"Reynolds-continuation point {index + 1} of {n_points} "
-                f"(molecular viscosity scaled by {scale:g}, i.e. Reynolds number reduced by "
-                f"{scale:g}x) failed to converge. Increase n_points for a gentler ramp, or check the "
-                f"case at this Reynolds number directly."
-            ) from exc
+            retreat = schedule.next_scale(tuple(converged), float(attempt))
+            if retreat is None:
+                raise RuntimeError(
+                    f"Reynolds-continuation {point.label} (molecular viscosity scaled by "
+                    f"{attempt:g}, i.e. Reynolds number reduced by {attempt:g}x) failed to converge, "
+                    f"and {type(schedule).__name__} offered no gentler step to retreat onto. Increase "
+                    f"n_points for a deeper anchor, use AdaptiveReynoldsSchedule to shorten a failed "
+                    f"step automatically, or check the case at this Reynolds number directly."
+                ) from exc
+            attempt = retreat
+            continue
+
+        if is_target:
+            return flow, k, omega
+        converged.append(float(attempt))
         # Stop the seed so the next companion's solve (and, ultimately, the target adjoint) does not
         # tape onto this intermediate root.
         seed = tuple(jax.lax.stop_gradient(field) for field in (flow, k, omega))
 
-    # The final point is the true target: the live `coupled` (so its adjoint is the direct solve's),
-    # seeded by the last converged lower-Re solution, with the full solve_kwargs.
-    target = ReynoldsPoint(len(scales), len(scales), float(scales[-1]))
-    return _point_solve(coupled, seed, target_kwargs, target)
+        following = schedule.next_scale(tuple(converged), None)
+        if following is None or following >= attempt:
+            raise RuntimeError(
+                f"{type(schedule).__name__} did not advance the ramp after converging at viscosity "
+                f"scale {attempt:g}: it returned {following!r}, which is not a smaller scale. A "
+                f"schedule must descend strictly toward 1.0 so the continuation terminates."
+            )
+        attempt = following
+
+    raise RuntimeError(
+        f"Reynolds continuation did not reach the target in {_MAX_ATTEMPTS} rung attempts "
+        f"(last scale {attempt:g}, {len(converged)} rungs converged). This is a runaway schedule "
+        f"rather than a hard case: raise the schedule's min_ratio so it stops retreating sooner."
+    )

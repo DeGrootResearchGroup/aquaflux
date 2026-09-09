@@ -64,8 +64,9 @@ from .preconditioner import (
     scalar_transport_shift_diagonal,
 )
 from .reynolds import (
-    ReynoldsPoint,
+    AdaptiveReynoldsSchedule,
     GeometricReynoldsSchedule,
+    ReynoldsPoint,
     ReynoldsSchedule,
     solve_reynolds_continuation,
 )
@@ -83,6 +84,7 @@ from .strain import strain_rate_magnitude
 from .transport import SSTClosureFields, SSTTurbulence, WallFixedResidual
 
 __all__ = [
+    "AdaptiveReynoldsSchedule",
     "AirAmgPreconditioner",
     "ConvectionAmgPreconditioner",
     "CoupledJacobianProbe",

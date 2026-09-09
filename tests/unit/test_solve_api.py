@@ -103,6 +103,15 @@ VALIDATION_INTERNAL_REACHES = {
     "_cell_graph",
     "_aggregation_edges",
     "_mis_aggregate",
+    # The strength graph and the Vanek aggregation, reached by the local-descent probe to build a
+    # "line-like" block smoother out of the coarsening the preconditioner already uses. A line through
+    # an anisotropic near-wall layer is a chain of strong couplings, so the strength filter is the
+    # algebraic form of that construction -- and running the real one is the point, since a
+    # re-implementation would answer the question about a different grouping than the solver's.
+    # (What it measured: these aggregates are isotropic blobs, median size 7, so they are NOT a line
+    # substitute -- which is itself a finding about `_aggregate`, and one only the real one can give.)
+    "_strength_classical",
+    "_aggregate",
     # The level operator and the SIMPLE splitting, reached by the field-split probe to build candidate
     # block inverses out of the same pieces the shipped V-cycle uses.
     "_CsrOperator",
