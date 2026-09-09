@@ -531,7 +531,11 @@ recorded as having the compiled kernel live (see the kernel-provenance warning e
 
 This also re-frames the independently recorded `beta_start = 4` run being **worse** than
 `beta_start = 0.5`: consistent with β being the wrong direction on this case rather than with anything
-about the preconditioner. `PITZ_BETA_START` remains untried in the low direction.
+about the preconditioner. `PITZ_BETA_START` itself — the **cold** rung's start — remains untried in the
+low direction. The *warm* rungs' start has since been split off as `PITZ_BETA_START_WARM` and swept: 0.1
+is a clean win and 0.05 diverges the target rung, with the cliff falling between them and depending on
+the rung rather than the case. See the `reynolds.py` entry in `.claude/rules/turbulence.md` for the
+table and the configuration; the low-direction question for the cold rung is separate and still open.
 
 ### ✅ RESOLVED — the cost guard and the shift escalation are now separate responses (2026-08-17)
 

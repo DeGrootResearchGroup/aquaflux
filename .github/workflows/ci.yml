@@ -130,10 +130,9 @@ jobs:
 
   # ---- Fast unit tests (always-on) --------------------------------------------
   # Most unit tests are cheap and homogeneous (peak ~5 GB in one process), so they
-  # run unsharded across xdist workers (`-n auto`). The wall-clock driver, though, is
-  # the handful of distributed (`shard_map`) tests, each of which spawns a fresh
-  # interpreter to set the simulated device count before JAX starts and then compiles
-  # a sharded program -- that fixed cost, not the cheap tests, sets the budget below.
+  # run unsharded across xdist workers (`-n auto`). The `distributed` tests are excluded
+  # and run in their own job below -- they each fork a child that wants the whole machine,
+  # so mixed in here they oversubscribe the runner and set this job's whole wall clock.
   # Two interpreters, since a unit-level regression can be version-specific.
   unit:
     name: unit tests (py${{ matrix.python-version }})
@@ -141,8 +140,23 @@ jobs:
       github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
       && github.event.action != 'labeled'
     runs-on: ubuntu-latest
-    # Observed 13-20 min; the cap is headroom over that, not a target.
-    timeout-minutes: 25
+    # THE OBSERVED RANGE IS 18.7 TO 30+ MIN, AND RUN-TO-RUN RUNNER VARIANCE SETS IT.
+    # The "13-20 min" this cap used to be sized against was measured while the per-test
+    # `--timeout` was 300s, which was KILLING THE WORKER on a ~400s distributed test and ending
+    # the job early -- those runs never timed the suite, they died partway through it (one shows
+    # `worker 'gw2' crashed while running test_distributed_residual_matches_serial_on_skewed_mesh`
+    # with 980 of 1313 tests run, at 12:54). Raising that per-test timeout to 900s let the tier
+    # run to completion for the first time and revealed a true cost of 18.7-30 min -- against a
+    # 25-minute cap, which then cancelled intermittently on branches that had changed nothing
+    # related (issue-285 at 25.2, issue-314 at 25.3 and 30.0).
+    #
+    # The spread is the runner, not the interpreter: one main commit ran py3.11 in 23:12 against
+    # py3.12's 21:55 (5.9%), and a later main commit ran py3.11 FASTER than py3.12 (18.7 vs 20.7).
+    # A cap without roughly 2x headroom over the median is therefore a coin flip, not a signal.
+    #
+    # This is a HANG BACKSTOP, not a cost budget: `--timeout=900` below names a hung test long
+    # before this fires, so the cost of setting it generously is only paid by a genuinely stuck job.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -181,12 +195,70 @@ jobs:
         # anywhere records how long a test took, so "did it exceed the timeout" cannot be answered
         # from the log at all.
         #
+        # PRESERVING THE JAX PERSISTENT COMPILATION CACHE ACROSS RUNS WOULD BUY NOTHING HERE.
+        # Measured, not assumed, because it is an obvious thing to reach for: `import aquaflux`
+        # enables that cache with a 2.0s `jax_persistent_cache_min_compile_time_secs` floor, and
+        # the tests that set this tier's wall clock -- the distributed `shard_map` ones, each
+        # spawning a fresh interpreter -- compile 7184 separate XLA programs whose LARGEST takes
+        # 0.05s. Not one clears the floor, so the cache is still 0 bytes after a full run of them
+        # and an `actions/cache` entry would restore an empty directory. Their cost is 25.2s of
+        # XLA compilation spread over those 7184 tiny programs (44.5% of a 56.5s child) plus the
+        # tracing and dispatch around them -- eager per-op work in mesh and partition setup, which
+        # is where any real saving would have to come from, not from caching codegen.
+        # (Measured 2026-09-09 on macOS arm64, jax 0.10.2, x64 on, one thread per process,
+        # `test_distributed_gradient.py` `_MATCHES` child at 4 simulated devices.)
+        #
         # `-rs` lists every skipped test WITH ITS REASON. A skip and a pass are the same exit
         # status, so without it a module that never ran here is indistinguishable from one that
         # passed -- which is how two modules gated on an optional solver library went four days
         # without running while every required check stayed green.
         run: >-
-          pytest tests/unit -m "not slow and not validation" -q -rs -n auto
+          pytest tests/unit -m "not slow and not validation and not distributed" -q -rs -n auto
+          --durations=15 --timeout=900 --timeout-method=thread --max-worker-restart=0
+
+  # ---- Distributed (shard_map) tests (always-on) ------------------------------
+  # These have their own job because of how they run, not because of what they cover: each
+  # spawns a FRESH INTERPRETER (the simulated device count must be set before JAX starts) that
+  # then compiles a multi-device program. That child wants the whole machine, so under `-n auto`
+  # in the unit job four xdist workers forked four such children onto four runner cores, and the
+  # contention -- not the work -- set the tier's wall clock. One of them, costing ~241s when the
+  # tier is healthy, ran past the 900s per-test timeout there; `--timeout-method=thread` cannot
+  # interrupt a test, so that KILLED THE WORKER and reported `node down: Not properly terminated`
+  # against it with no mention of a timeout, which reads as a crash in the test rather than as
+  # oversubscription. Isolated here they do not compete with 1300 other tests.
+  #
+  # `-n 2` rather than `-n auto`: two workers each forking one child is four processes on the
+  # four cores of a hosted runner. Raising it re-creates the oversubscription this job exists to
+  # remove. Membership is by marker and enforced by `tests/unit/test_distributed_marker.py`, so a
+  # new module that spawns simulated devices cannot quietly rejoin the contended job.
+  distributed:
+    name: distributed tests (py${{ matrix.python-version }})
+    if: >-
+      github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+      && github.event.action != 'labeled'
+    runs-on: ubuntu-latest
+    # Eleven tests, each a fresh interpreter and a multi-device compilation. Generous because a
+    # hang backstop is what this is; `--timeout` below names a stuck test first.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package and test dependencies
+        run: pip install -e ".[test]"
+
+      - name: Run the distributed tests
+        run: >-
+          pytest tests/unit -m "distributed and not slow and not validation" -q -rs -n 2
           --durations=15 --timeout=900 --timeout-method=thread --max-worker-restart=0
 
   # ---- Fast integration tests (always-on, sharded) ----------------------------
@@ -239,7 +311,7 @@ jobs:
   # them, which must not block). Update branch protection to require `fast gate`.
   fast-gate:
     name: fast gate
-    needs: [lint, docs, unit, integration]
+    needs: [lint, docs, unit, distributed, integration]
     if: >-
       always() && github.event_name != 'schedule'
       && github.event_name != 'workflow_dispatch'
@@ -248,11 +320,12 @@ jobs:
     steps:
       - name: Require the always-on gates to pass
         run: |
-          for job in lint docs unit integration; do
+          for job in lint docs unit distributed integration; do
             case "$job" in
               lint) r="${{ needs.lint.result }}" ;;
               docs) r="${{ needs.docs.result }}" ;;
               unit) r="${{ needs.unit.result }}" ;;
+              distributed) r="${{ needs.distributed.result }}" ;;
               integration) r="${{ needs.integration.result }}" ;;
             esac
             echo "$job: $r"

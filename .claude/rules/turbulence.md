@@ -1843,11 +1843,360 @@ tuning follow-up noted above.
     long it takes to *reach* the basin**, not by the residual level it must ultimately hit, and do not
     read a rising cycle count near the start as a preconditioner failure.
   - **Schedule is an injected `ReynoldsSchedule` (a `Protocol`), default `GeometricReynoldsSchedule`
-    (one decade per step).** `scales(n_points)` returns the `n_points+1` molecular-viscosity scale
-    factors, descending to `1.0` (the target): `(10^N, …, 10, 1)`. Geometric because the nonlinearity
-    scales multiplicatively with Re and each up-step is seeded by a converged neighbour; `n_points` is
-    the number of decades of continuation (anchor at `Re_target/10^N`). `ratio` is an advanced knob.
-    The schedule is pure (no mesh/state), unit-tested directly.
+    (one decade per step). ⚠️ IT IS ASKED FOR ONE SCALE AT A TIME, NOT FOR THE WHOLE LADDER — there is
+    no `scales(n_points)` method (removed 2026-09-08).** Three pure methods: `anchor(n_points)` (where
+    the ramp starts, `ratio ** n_points`), `next_scale(converged, failed)` (the next scale to attempt,
+    `1.0` for the target, `None` to give up) and `planned_total(n_points)` (the label's denominator, or
+    `None` when the length is not knowable). `converged` is the scales of the rungs solved so far and
+    `failed` is the scale that has just failed, or `None` after a success — so one method covers both
+    "where next" and "that was too big", as a pure function of the history with no hidden state.
+    Geometric because the nonlinearity scales multiplicatively with Re and each up-step is seeded by a
+    converged neighbour; `n_points` is the number of decades (anchor at `Re_target/10^N`), and `ratio`
+    is an advanced knob. Unit-tested directly, by walking the ladder.
+    - **Why the interface changed: the fixed ladder could not express a step-size control, and a
+      continuation without one is unusual.** The whole ladder was previously computed before any solve
+      ran, so a rung that failed ended the continuation and the caller was told to re-run at a larger
+      `n_points` — discarding every rung already converged. That is the standard step-size rejection of
+      numerical continuation with the human as the controller and a full restart as the retry.
+    - **`AdaptiveReynoldsSchedule` closes that loop (BUILT 2026-09-08).** On a failure it retreats to
+      the **geometric mean** of the root in hand and the scale that failed — a bisection in `ln(scale)`,
+      the parameterization the ramp is geometric in — keeping the converged rungs and re-seeding from
+      the last root. Repeated failures bisect again; it gives up below `min_ratio` (default 1.05), since
+      a step that small is evidence the difficulty is not the jump size. After a retreat the step grows
+      back by `recovery` (default 1.5) per successful rung, capped at `ratio`: without it one hard rung's
+      caution is carried to the target, with it unbounded the next rung jumps straight back to the step
+      that just failed. **It reacts only to whether a rung converged** — the one signal available without
+      observing the march, and deliberately so, given that three independent attempts to *predict* a bad
+      step have all failed here (see the entry above).
+    - **The rung and the target take the SAME path through the loop**, differing only in which assembler
+      and which keywords they get, which is what lets a failed **target** retreat too — it is the hardest
+      point on the ramp and so the one most worth inserting a rung in front of. The target still runs on
+      the live `coupled`, so its adjoint is unchanged.
+    - **`GeometricReynoldsSchedule` returns `None` from `next_scale` on a failure, so the DEFAULT IS
+      EXACTLY AS UNFORGIVING AS BEFORE.** Pinned by a pair of tests that drive the same simulated failure
+      through both schedules — one recovers, one raises — so the retreat cannot leak into the default.
+    - `ReynoldsPoint.total` is now `int | None`, and `label` renders the index alone when it is `None`.
+    - **⚠️ A TANGENT (EULER) PREDICTOR BETWEEN RUNGS IS COUNTERPRODUCTIVE AT THE DEFAULT DECADE, AND ONLY
+      PAYS ON A MUCH FINER LADDER (measured 2026-09-08, `validation/continuation_seed_error.py`).**
+      The seed handed to the next rung is the previous rung's converged fields unchanged, wrong by first
+      order in the continuation parameter, so the obvious repair is to carry it along the solution path:
+      parameterize by `lam = ln(scale)` (constant `dlam = -ln(ratio)` on a geometric schedule), solve
+      `J v = -dR/dlam` at the converged state, and hand over `u* + dlam v`. **The benefit is boundable
+      without building any of it**, which is what makes this cheap to settle: expanding the residual about
+      `u*` gives `R(u* + dlam v, lam+dlam) ~= R(u*, lam+dlam) - dlam dR/dlam`, so the predictor removes
+      *exactly* the term `dlam dR/dlam` and nothing else — one parameter-direction JVP, no Jacobian and no
+      linear solve. `dR/dlam` is exact by AD (`with_scaled_molecular_viscosity` scales live leaves; matched
+      a central difference to **7.4e-10** relative), so no difference quotient is needed.
+
+      *Configuration:* `bfs3d` (23040 cells), converged target root at `lam = 0` (checkpoints 69 and 62 of
+      `march-20260825-213445.log`, agreeing to four figures), scored in the row-equilibrated
+      `coupled_scaled_norm` the march stops on, rebuilt at each companion viscosity. Ratio of the
+      tangent's residual to the plain seed's, per rung spacing:
+
+      | spacing | `dlam` | onward (the direction of travel) | back along the arc |
+      |---|---|---|---|
+      | **10 (the default)** | 2.303 | **1.23 — 23 % WORSE** | 0.52 |
+      | 5 | 1.609 | 0.90 | 0.45 |
+      | 3.16 | 1.151 | 0.71 | 0.38 |
+      | 2 | 0.693 | 0.50 | 0.31 |
+      | 1.5 | 0.405 | 0.29 | 0.21 |
+      | 1.2 | 0.182 | 0.09 | 0.10 |
+
+      **At a decade the predictor makes the seed worse**, because `dlam = 2.303` is not a small number and
+      the second-order term it cannot cancel exceeds the first-order term it does. Its advantage is
+      `O(dlam^2)` against the plain seed's `O(dlam)`, so it only appears once the rungs are packed closely
+      — which makes "add a predictor" and "use a finer ladder" **one change, not two**. Read the ratio
+      column only: the absolute residuals are not comparable across rows, because the row scales are
+      rebuilt at each companion's viscosity; the ratio uses one measure for both of its terms and is clean.
+      ⚠️ **Direction matters and a one-ended probe cannot settle the decade case.** A converged checkpoint
+      sits at the *target*, so positive `dlam` walks back up the arc rather than along the direction of
+      travel; the two signs differ by 2.4x at a decade and agree by ratio 2. The direction of travel gives
+      the pessimistic answer. ⚠️ **Measured at the converged target root only** — both checkpoints are that
+      same root, so their agreement shows the instrument is deterministic, not that the path curvature is
+      the same at lower Re. The back-along-the-arc column is the less curved one at equal `|dlam|`, which
+      hints the early rungs may do better than the target rung; untested.
+    - **⚠️ AND A FINER LADDER IS NOT CURRENTLY AFFORDABLE, BECAUSE beta RESTARTS AT EVERY RUNG.** Each rung
+      is its own `solve_coupled`, and `control_state` is initialized to `None` *inside* it, threaded across
+      the refresh segments, and discarded at the return — so every rung re-seeds `beta_start` and re-walks
+      the shift down. At the cases' `CflResidualDualTimeControl(beta_start=0.5, beta_min=0.005, grow=1.5)`
+      that is `ceil(ln(100)/ln(1.5))` = **12 steps of pure descent per rung**, independent of seed quality;
+      rung 1 of the march below hit exactly 12 with zero backoffs, and all three rungs start at 0.5000.
+      Spanning `Re/100` to the target at ratio 1.5 needs 12 rungs, so 144+ steps against the present 69.
+      **Do not read this as "carry beta across rungs" being the missing plumbing.** The carry across
+      *refresh* boundaries is built and shipped (the sawtooth fix, worth ~4x: a pitzDaily rung went ~75
+      steps to ~22 at `beta_min` 0.02); a *cross-step* carry of the escalated beta was built and
+      **rejected** at ~24 % slower, from damping inertia. The rung-boundary carry is untried, and what is
+      recorded points against it: on pitzDaily a constant `beta = 0.05` (a jump straight to a big
+      pseudo-timestep) went non-finite at step 2 — "the gradual ramp is essential" — and at
+      `beta_min = 0.005` a 10x Reynolds jump from a loose seed overshot the bubble in one step (`x_r/h`
+      3.7 to 8.7, relaxing back) at a recovery cost of several expensive steps. Carrying beta into a new
+      rung *is* that configuration. **But every one of those measurements was taken at a 10x jump**, and
+      the fine ladder's whole premise is that the jump is small, so they do not transfer by themselves.
+      The safer lever is to make `beta_start` a function of the rung spacing rather than carrying beta
+      across a discontinuity — the control can still back off, where a carry starts past the point of no
+      return — and `PITZ_BETA_START` is on record as **untried in the low direction** (see
+      `.claude/rules/solve-amg-multigrid.md`, where `beta_start = 4` measured worse than `0.5`).
+    - **✅ A LOWER STARTING SHIFT ON THE *WARM* RUNGS IS A REAL WIN AT 0.1 AND CATASTROPHIC AT 0.05 — and
+      the cliff is PER RUNG, not per case (measured 2026-09-08, pitzDaily).** `beta_start` was one constant
+      serving two unlike situations: the lowest rung self-starts from `hybrid_initialize` and genuinely
+      needs heavy damping, while every rung above it is handed a *converged root* one Reynolds step below.
+      Splitting them (`PITZ_BETA_START_WARM`, applied through the existing `point_setup` seam keyed on
+      `ReynoldsPoint.index`, so no library change) and sweeping the warm value:
+
+      | `beta_start` warm | rung 1 `Re/100` | rung 2 `Re/10` | rung 3 target | total steps | cycles | wall | esc |
+      |---|---|---|---|---|---|---|---|
+      | **0.5** (the single-constant baseline) | 28 | 19 | 17 | 64 | 421 | 750 s | 1 |
+      | **0.1** | 28 | **17** | **14** | **59** | **403** | **712 s** | **0** |
+      | 0.05 | 28 | **14** | **64, killed** | 106+ | 327 | 824+ | **9** |
+
+      *Configuration:* pitzDaily 12225 cells, `N_POINTS=2`, `CflResidualDualTimeControl(beta_min=0.005,
+      grow=1.5, backoff=2.0, grow_above=0.5, backoff_below=0.25)`, stop `(rtol, atol) = (0.0, 1e-5)`,
+      `MAX_STEPS` 150/rung, compiled ILU(0) live, all three arms run back to back on one machine state.
+      ⚠️ **Swept corrected Green–Gauss at 4 sweeps and probe reach 5 — the case default WHEN THIS RAN,
+      since moved to `MultipleCorrectionGradient` at reach 3, which is 32 % faster on the same root.**
+      The arms are still a valid comparison with each other; their absolute walls are not comparable to
+      anything measured after the move.
+
+      **0.1 is a clean win and costs nothing in robustness:** −8 % steps, −4 % cycles, −5 % wall, the same
+      root (`x_r/h` 8.0686, `nut` peak within 0.04 %), and it *removed* the baseline's one escalation
+      rather than adding any. Rung 1 is bit-identical across all three arms (28 steps / 130 cycles) and the
+      trajectories part exactly at the first warm step, so this is a controlled experiment rather than a
+      pair of runs.
+
+      **0.05 gives the sharpest result in the sweep: it is the BEST arm on rung 2 (14 steps against the
+      baseline's 19) and a catastrophe on rung 3.** The target rung's *first* step at 0.05 escalated, the
+      march then diverged to `‖R‖ = 2.2e+15`, ground back down ~150x per step at zero Krylov cycles, and
+      stalled with the line search collapsed to `alpha = 0.000` while the retry ladder drove beta to
+      **16.0** — 320x its start and 32x the baseline's. Killed at step 106 (818 s, nine escalations) three
+      orders from the stopping bar. ⚠️ **Its cycle total (327) is LOWER than the baseline's 421, because
+      the diverged steps cost no cycles at all — cycles are meaningless for a failed arm; read steps and
+      the escalation count.**
+
+      **What this settles, and it is not "0.1 is the right number".** A single warm constant is still the
+      wrong *shape*: the value that was best on rung 2 destroyed rung 3, so what the shift has to track is
+      **how hard this particular rung is**, which rises with Reynolds number — not whether the rung is warm
+      or cold. The cold/warm split is strictly better than one constant and strictly worse than a rule. It
+      also locates the safety boundary precisely: at 0.1 the one clipped step (`alpha = 0.125`) was caught
+      **inside the step control**, which backed beta off x2 and carried on; at 0.05 the clip escaped into
+      the **retry ladder** and from there into divergence. That is the line a rule has to stay on the right
+      side of, and it is a property of the rung, not of the case.
+    - **❌ PATH GEOMETRY DOES NOT PREDICT WHICH RUNG IS DANGEROUS — the curvature measure ranks the one
+      that blew up as the SAFEST of the three (measured 2026-09-08, `validation/continuation_seed_error.py`).**
+      The natural way to choose a rung spacing rather than fixing it at a decade is to ask how far the
+      solution path stays linear over the step: with `E0(dlam) = ‖R(u*, lam0+dlam)‖` and
+      `E1(dlam) = ‖R(u*, lam0+dlam) - dlam dR/dlam‖`, the ratio `tau = E1/E0` is the dimensionless
+      fraction of the step the first-order model fails to explain, and `tau -> 1` marks the point where
+      neglected curvature matches the entire linear term. A schedule holding `tau` constant instead of
+      `dlam` constant would then take large steps where the path is straight and small ones where it
+      bends. **It does not work.** Measured at each rung's own converged root on pitzDaily (`N_POINTS=2`,
+      the run reproducing 28/19/17 steps and 421 cycles exactly, under the swept gradient at reach 5
+      that was the default then), for the shipped decade step:
+
+      | converged root | `lam0` | `E0` | `tau` | what the next rung actually did |
+      |---|---|---|---|---|
+      | rung 1 (`Re/100`) | `ln 100` | 1.663e-1 | **0.599** | 19 steps; **survived** `beta_start` 0.05 (14 steps, 0 escalations) |
+      | rung 2 (`Re/10`) | `ln 10` | 1.175e-1 | **0.278** | 17 steps; **diverged** at `beta_start` 0.05 to `‖R‖ = 2.2e+15` |
+      | target | `0` | 2.668e-2 | 1.105 | — (a step *past* the target; matches `bfs3d`'s 1.23) |
+
+      `tau` calls the step into the target **twice as safe** as the step into `Re/10`, and it is the one
+      that catastrophically fails. `E0` ranks them the same wrong way (the dangerous step starts at the
+      *lower* residual). So neither the seed error nor the path curvature sees the danger, and the reason
+      is structural rather than a bad threshold: **both are parameter-space quantities, and what makes a
+      high-Reynolds rung dangerous is state-space stiffness** — how far the shifted Newton step stays
+      trustworthy — which no amount of information about how `R` varies with `lam` can reach.
+
+      **What the probe IS validated for: `E0` predicts the next rung's starting residual exactly**, before
+      running it — 1.6629e-1 against the log's `reference |R0| = 1.6629e-1`, and 1.1745e-1 against
+      1.1745e-1, five figures each. That makes it a sound way to *equalize* seed quality across a ladder,
+      which is a different job from predicting difficulty, and it costs nothing: a residual evaluation is
+      **3.7 ms against 14.5 s for a march step** on this case, so a six-point search over `dlam` is 0.15 %
+      of one step.
+
+      ⚠️ **This is now the THIRD refuted predictor of a bad continuation step**, after the sibling case's
+      step-0 diagnostic (every static signal) and an `alpha`-trend rule tried here (growth taken on a
+      falling `alpha` 9 times with 0 bad outcomes — 9 false positives for the 1 event it would have
+      caught). Three independent attempts from three different signal families all fail, which is strong
+      support for the detect-then-react design the sibling case already settled on. **Adapt the spacing
+      from the previous rung's observed cost; do not predict it from the path.**
+    - **❌ A LOCAL SMOOTHER DOES NOT REMOVE THE LADDER — no local direction makes real progress at the
+      cold start (measured 2026-09-08, `validation/point_implicit_step.py`).** The hypothesis was
+      attractive: the recorded cold-start failure is "no `beta` makes step 1 descend", which is a
+      statement about the *shifted Newton family* `-(J + beta D)^-1 R` only. Mavriplis (Computers and
+      Fluids 220:104859, 2021) makes the small-pseudo-timestep limit `-D^-1 R` for a local operator `D`
+      instead of an explicit step, on the observation that local nonlinear solvers converge where PTC
+      stagnates. If that direction reached the target root, the whole ladder — 64 of pitzDaily's steps,
+      against 17 in the target rung — would be unnecessary.
+
+      *Configuration:* pitzDaily 12225 cells, cold `hybrid_initialize` at the **true target** viscosity,
+      scored in `coupled_scaled_norm`, step length swept over 15 decades. Best `‖R‖/‖R0‖` reached:
+
+      | direction | `‖step‖/‖u‖` | best ratio | iterated x5 |
+      |---|---|---|---|
+      | explicit `-R/V` (the PTC small-shift limit) | 7.8e+05 | 1.0000 (none) | — |
+      | row-scaled `-R/d` on the shift diagonal | 1.0e-02 | 0.9974 | — |
+      | point-implicit `-D^-1 R`, per-cell block | 1.2e-01 | 0.9991 | **non-finite** |
+      | strength-of-connection aggregate blocks | 2.1e-01 | 1.0000 (none) | **non-finite** |
+
+      **The best any of them achieves is a 0.26 % reduction**, and the iterated form — five damped
+      nonlinear sweeps, which is the shape of the actual smoothing term — goes non-finite at every
+      damping tried. Descent directions exist at this state; they are simply worthless.
+
+      **The decisive number is not in that table.** The cold state at the target has `‖R‖ = 2.35e-2`,
+      while the anchor rung at `Re/100` *starts* at `8.71e-2` and converges in 28 steps — **the
+      unreachable state has the LOWER residual**. So this is a basin question, not a descent question,
+      and it is the same shape as the two refuted predictors above: the ladder's measured contribution is
+      mean-flow topology (79 % of the final reattachment length at the anchor, turbulence 90 % wrong),
+      and no local relaxation manufactures a recirculation bubble.
+
+      ⚠️ **What this does NOT refute, stated precisely.** `D` here is a *linear* block solve over Vaněk
+      aggregates (median size 7); Mavriplis's is a three-stage **line**-preconditioned nonlinear RK, and
+      a line through an anisotropic layer is a thin wall-normal chain, not a blob — the aggregation used
+      here is the multigrid coarsening, which is built to be isotropic. And the published method is the
+      **blend** `(M/tau + J) dw = -(I + (M/tau) D^-1) R`, a Newton step with a smoothed right-hand side;
+      only its small-`tau` endpoint was tested. A faithful test needs a real line construction and the
+      blended right-hand side, which is an implementation rather than a probe.
+
+      ⚠️ **And a self-inflicted trap worth carrying: `_materialize_jacobian` returns the Jacobian
+      FIELD-major.** The cell-major permutation is applied *around* the V-cycle, not baked in, so reading
+      per-cell blocks with `tobsr(blocksize=(n_fields, n_fields))` — as the cell-block harnesses do only
+      *after* permuting — groups `n_fields` consecutive **cells of one field**. Doing that here produced a
+      step 600x the state norm and an apparent refutation that was pure indexing.
+    - **❌ A FINER LADDER AT THE SAME SPAN LOSES ~22 % OF WALL — the decade is not obviously the wrong
+      round number (measured 2026-09-08, pitzDaily).** Every earlier ladder study varied `n_points`,
+      which moves the *span* (how deep the anchor sits) and the *granularity* together; this holds the
+      span at `Re/100` and varies only granularity, which is the comparison the "why 10?" question
+      actually needs. `PITZ_RATIO` (paired with `PITZ_N_POINTS` so the product is fixed) is the hook.
+
+      | ladder | rungs | steps | cycles | wall | escalations | `x_r/h` |
+      |---|---|---|---|---|---|---|
+      | **ratio 10** (shipped) | 3 | **64** | **421** | **750 s** | 1 | 8.0686 |
+      | ratio 3.1623 | 5 | 99 | 455 | 918 s | **0** | 8.0686 |
+
+      *Configuration:* pitzDaily 12225 cells, `beta_start` 0.5 both arms, `CflResidualDualTimeControl(
+      beta_min=0.005, grow=1.5, backoff=2.0, grow_above=0.5, backoff_below=0.25)`, stop `(0.0, 1e-5)`,
+      compiled ILU(0) live, run back to back. Rung 1 is identical in both (28 steps / 130 cycles — the
+      same anchor), so the arms differ only below it. ⚠️ **Swept gradient, probe reach 5 — the default
+      when this ran, since moved; the per-rung walls do not carry across that change.**
+
+      **The finer rungs really are individually cheaper, and it still loses.** Per-rung wall runs
+      261 / 173 / 158 / 150 / 176 s against the baseline's 259 / 275 / 216 — every rung after the anchor
+      is cheaper than either of the baseline's, and cycles rise only 8 % (421 → 455) because a smaller
+      jump makes each step easier. What sinks it is **step count**: 99 against 64, because each rung pays
+      its own `beta_start`-to-`beta_min` descent. Fitting `wall = steps x f + cycles x c` across the two
+      arms gives **f ~ 3.6 s per step and c ~ 1.23 s per cycle**, so the 35 extra steps cost ~126 s of
+      pure per-step overhead against ~42 s of extra Krylov — i.e. **the loss is the descents, not the
+      work**.
+
+      **What the finer ladder DOES buy is robustness: zero escalations against the baseline's one.** That
+      is the axis an adaptive schedule is for, and it is not visible in the wall clock. Note also that
+      this makes the warm-`beta_start` result worth more here than its own 5 % suggests: a ladder paying
+      four descents instead of two has twice as much to gain from shortening them, and the two were not
+      measured together.
+    - **Where a 3-rung march's time actually goes (measured, `march-20260825-213445.log`).** Same bundle as
+      the equilibration A/B in `.claude/rules/solve-amg-multigrid.md`: `bfs3d`, `N_POINTS=2`, field split,
+      ILU(0)x4, probe reach 3/3/3/3/2/2, dual-time `inner_steps`/`inner_tol` 5/0.01, `refresh_on_cycles` 3,
+      retry on cycles/alpha 10/0.01, cycle budget 42, forward restart 15, PC beta floor 0.05, stop
+      `(rtol, atol) = (0.0, 1e-5)`, k wall `zerogradient`, k positivity floor 1e-8.
+
+      | rung | steps | wall | s/step | cycles | cycles/step | s/cycle |
+      |---|---|---|---|---|---|---|
+      | 1 `Re/100` | 14 | 292 s | 20.9 | 41 | 2.9 | 7.1 |
+      | 2 `Re/10` | 25 | 666 s | 26.6 | 121 | 4.8 | 5.5 |
+      | 3 target | 30 | 1310 s | 43.7 | 203 | 6.8 | 6.5 |
+      | total | **69** | **2268 s** | 32.9 | **365** | 5.3 | 6.2 |
+
+      **The cost per cycle is flat across rungs; what grows is cycles per step** (2.9 to 6.8), i.e. the
+      preconditioner weakening as the case hardens — so the target rung is 58 % of the march because it
+      needs more cycles, not dearer ones. Preconditioner refresh is **466 s (21 %)** over 69 logged
+      asides, of which the coloured Jacobian probe is ~320 s.
+      ⚠️ **That figure was first recorded as 364 s / 16 %, and both that and `march_log_compare.py`'s own
+      1 % were parser undercounts of the same shape.** A step's preconditioner aside is written
+      `pc full 3.6s`, `pc none 0.0s`, `pc none inner 3.0s` **or** `pc none 2x inner 2x 6.3s` — the kinds
+      *compose*, so any pattern that enumerates them (`pc (full|inner|none) Ns`) or caps the words before
+      the number silently drops the compound forms, which is where the cost is. The tool now matches `pc`
+      and takes the first seconds figure on the line; both totals were re-derived independently before
+      this entry was changed. Steps cost about the same whatever
+      beta is doing (target rung: 43.8 s/step while beta descends, 41 s/step at the floor), so **a step
+      removed is ~33 s saved wherever it is removed**. The eight most expensive steps are 31.5 % of the
+      march, and four consecutive ones in the target rung (52-55, spanning a beta escalation to 2.22)
+      are ~20 % on their own.
+      ⚠️ **`t(s)` in a march log is cumulative over the WHOLE march and does not reset at a rung
+      boundary.** Differencing it per rung inflates every rung after the first — read here as 3518 s
+      before it was caught, against the true 2268 s. The per-rung wall is the difference of the boundary
+      values, never the last row.
+    - **WHAT THE LITERATURE ACTUALLY DOES — a survey against primary sources (2026-09-08).** Five parallel
+      literature threads, checked against source code (ADflow, PETSc, SU2, AUTO), manuals (FUN3D, CFL3D,
+      Fluent) and the books themselves (Allgower & Georg 2003; Deuflhard 2004). Recorded because a
+      finding that lives outside these files can be cited but never re-adjudicated.
+      - **Reynolds-number continuation is established in two communities and essentially absent from a
+        third.** It is standard infrastructure for *bifurcation* work, and routine as a Newton
+        globalization for *laminar incompressible* Navier–Stokes — Farrell, Mitchell & Wechsung (SIAM J.
+        Sci. Comput. 41(5):A3073, 2019, §5.1): "we employ simple continuation in Reynolds number as a
+        globalization device". In *engineering aerodynamics* it is absent, and deliberately: the Toronto
+        homotopy line continues in artificial **dissipation**, Bristol in **angle of attack**.
+      - **⚠️ THERE IS A PUBLISHED OBJECTION TO RE SPECIFICALLY, AND THIS PROJECT MEASURED IT
+        INDEPENDENTLY.** Hicken & Zingg (AIAA-2009-4139; AIAA-2011-3237, verbatim in both):
+        "Reynolds-number continuation affects only the momentum and energy equations. Moreover, the
+        influence of the Reynolds number is different in the momentum and energy equations … folds can
+        be introduced when using Reynolds-number continuation" (citing Walker, SIAM J. Sci. Comput.
+        21(3), 1999). The first clause is exactly the momentum-only measurement above: scaling both
+        blocks displaces the target root's ω residual **1355×** more than scaling momentum alone. Theory
+        says the regularization is non-uniform; this case says by three orders of magnitude. The **fold**
+        clause names a failure mode unrelated to step size or damping, which a monotone sweep cannot
+        pass — though Farrell et al. reach Re 10000 on a cavity *and a backward-facing step* with only a
+        line search, so it does not appear to bite there.
+      - **⚠️⚠️ ORDER CONTINUATION AND GRID SEQUENCING ARE CONTRAINDICATED FOR THIS PROJECT'S CASES, AND
+        THE REASON IS SEPARATION.** Both are near-universal practice (FUN3D `first_order_iterations`,
+        CFL3D `nitfo`, Fluent's first-to-higher-order blending, ADflow's first-order Jacobian, SU2's
+        permanent `MUSCL_TURB=NO`), and the ramp is `stop_gradient`-ed so either would be free of the
+        adjoint. **Do not reach for them here anyway.** Hemker & Koren (*Numerical Methods for Fluid
+        Dynamics III*, 1988, p. 162), on a shock/boundary-layer interaction with a separation bubble:
+        "the **first-order distribution typically is the distribution belonging to a non-separating
+        flow** … the first-order solution has to be rejected." It does not misplace the bubble, it has
+        **no bubble** — and both flagship cases are separated flows reported by reattachment length,
+        with the ladder's measured contribution being mean-flow bubble development (79 % of final length
+        at the anchor). Chisholm & Zingg (JCP 228(9), 2009) agree from the coupling side on a separated
+        high-lift case: "a fully coupled turbulence model appears to be an important aspect of achieving
+        convergence for such flows." CFL3D ships its own knob **recommended off** (`nitfol = 0`).
+      - **The per-rung shift restart has named precedent on BOTH sides**, so it is a choice: ADflow's
+        `ANKCFLReset` documents carrying the CFL across successive solves as an option, and PETSc's
+        `TSPSEUDO` offers `-ts_pseudo_increment_dt_from_initial_dt`. The step-control literature is
+        one-sided though — **every rule in it is a recursion on the previous step**: Deuflhard's
+        (5.25)/(5.46) cannot be written without `Δλ_{ν−1}`, AUTO's `RDS` is `INTENT(INOUT)`,
+        LOCA/MATCONT/pde2path all carry it. Two refinements: a failure-reduced step should climb back
+        **geometrically, not snap back** (LOCA states this), and a carried step needs a **dead band** or
+        it oscillates between the grow and shrink bands (AUTO, MATCONT, pde2path all have one;
+        `AdaptiveReynoldsSchedule` does **not**, and should).
+      - **⚠️ A CONTRACTION-BASED (Deuflhard / Newton–Kantorovich) STEP CONTROL IS THE WRONG FAMILY HERE,
+        AND SOMEONE ELSE ALREADY PAID TO FIND OUT.** It is the theoretically founded rule — affine
+        covariant, `(g(Θ̄)/g(Θ₀))^{1/p}` with `g(Θ) = √(1+4Θ) − 1`, computable from the first two
+        corrector corrections. Brown & Zingg (AIAA-2013-2370, §V.E) tried it on RANS and abandoned it:
+        "**the relaxation that we apply to both the linear system and nonlinear sub-problems reduces the
+        effectiveness of these error models**". This case runs `forward_rtol = 0.3` — exactly that
+        condition. They kept the *distance* and *angle* monitors and dropped contraction. A fourth
+        independent argument for detect-then-react, alongside the three refuted predictors above.
+      - **Two existing design choices are independently corroborated.** Yildirim, Kenway, Mader &
+        Martins (JCP 397:108741, 2019) use `θ_phys = 0.99` on the turbulence variable, checking **only
+        negative-direction updates** — the same rule and constant as `positive_k_limit`. And Hicken et
+        al. (2011) §II.C recommend "equation scaling … that ensures the 2-norm of the residuals are the
+        same order of magnitude", which is `coupled_scaled_norm` arrived at separately.
+      - **Grid sequencing is not the prize it looks like.** CFL3D's Table 7-1 gives multigrid ~10× but
+        full multigrid only **1.33× on top in 2D and nothing in 3D**. Yildirim et al.'s 1172-case study
+        finds deepening a multigrid startup 3→5 levels worth 2.9×, yet a well-globalized
+        approximate-Newton solver **on the finest grid alone** matches the best of them. Wackers & Koren
+        (JCP 226(2), 2007) find nonlinear multigrid "does not work for the RANS equations" — the
+        turbulence source is a small difference of large terms and "the model needs a minimum grid
+        resolution … typically about 20 cells over the thickness of a boundary layer", the same shape of
+        objection as this case's wall-function-off measurement one level down.
+      - **Continuation in a turbulence-model parameter is an open problem**, flagged as future work by
+        both groups best placed to do it (Hicken et al. 2011; Brown & Zingg 2013 conclusions). Anything
+        built there is novel work, not adapted practice.
+      - ⚠️ **Not verified, and not to be cited as if it were:** Seydel's step-control formula (which both
+        Allgower & Georg's lineage and Tuckerman & Barkley defer to); Keller on step selection; Carey &
+        Krishnan (1985), the single classical citation the whole Toronto line uses for
+        Re-as-globalization; and Xu et al. (2023), doi:10.3390/aerospace10030230, likely the best single
+        survey, which returned 403 everywhere. Pueyo & Zingg's numbers come from the thesis, not the
+        journal paper. The LOCA report's printed Eq. (2.8) contradicts its own shipped code — use the code.
   - **Case reconstruction at a scaled ν is `CoupledRANS.with_scaled_molecular_viscosity(factor)` — one
     home for where ν lives.** The molecular viscosity sits in **two** leaves that must move together —
     the momentum block's dynamic `μ` (its `PropertyModel` `"viscosity"`) and the turbulence block's

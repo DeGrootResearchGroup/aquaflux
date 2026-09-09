@@ -10,6 +10,7 @@ side effects of ``import aquaflux``.
 
 from __future__ import annotations
 
+import importlib.util as _importlib_util
 import os as _os
 from pathlib import Path as _Path
 
@@ -36,9 +37,65 @@ _jax.config.update("jax_enable_x64", True)
 # This is process-wide JAX state, so it is a documented side effect of the import.
 # Override the location with ``AQUAFLUX_COMPILATION_CACHE_DIR`` (respecting
 # ``XDG_CACHE_HOME``), or disable it entirely with ``AQUAFLUX_DISABLE_COMPILATION_CACHE=1``
-# (e.g. on a read-only or ephemeral filesystem). A failure to configure the cache
-# (an unwritable path) is non-fatal: the import proceeds, only without caching.
+# (e.g. on a read-only or ephemeral filesystem); set its size bound in gibibytes with
+# ``AQUAFLUX_COMPILATION_CACHE_MAX_GIB`` (negative for no bound). A failure to configure
+# the cache (an unwritable path) is non-fatal: the import proceeds, only without caching.
+
+# Bound the cache so it cannot grow without limit. JAX's default
+# ``jax_compilation_cache_max_size`` is ``-1``, which its own least-recently-used (LRU)
+# implementation reads as "no eviction" -- so an unbounded cache never prunes anything and
+# only ever grows. A long-lived checkout accumulated tens of gigabytes of month-old entries
+# this way, dominated by a handful of ~1 GiB coupled-solve programs. Setting a byte bound
+# turns on real LRU eviction, which is what keeps the cache a cache.
+_DEFAULT_CACHE_MAX_BYTES = 10 * 1024**3
+_CACHE_UNBOUNDED = -1
+
+
+def _cache_max_bytes(raw: str | None) -> int:
+    """Return the cache size bound in bytes for a ``...MAX_GIB`` environment value.
+
+    Parameters
+    ----------
+    raw : str or None
+        The raw environment value, in gibibytes. ``None`` or empty selects the default
+        bound; a NEGATIVE value selects no bound (JAX's ``-1``); an unparseable value
+        falls back to the default, because a typo in an environment variable must not
+        decide how much disk this cache is allowed to use. ``0`` is taken literally, as a
+        bound of zero bytes -- it is deliberately not folded into "no bound", since a
+        reader who writes ``0`` means less caching, and the opposite reading would hand
+        them the unbounded growth this bound exists to prevent.
+
+    Returns
+    -------
+    int
+        The bound in bytes, or ``-1`` for unbounded.
+    """
+    if raw is None or not raw.strip():
+        return _DEFAULT_CACHE_MAX_BYTES
+    try:
+        gib = float(raw)
+    except ValueError:
+        return _DEFAULT_CACHE_MAX_BYTES
+    return _CACHE_UNBOUNDED if gib < 0 else int(gib * 1024**3)
+
+
+def _cache_eviction_is_supported() -> bool:
+    """Report whether JAX can enforce a cache size bound in this environment.
+
+    JAX's bounded cache takes an inter-process lock through ``filelock``. That package is a
+    declared dependency, so this is normally true; it is checked rather than assumed because
+    of how the failure presents (see :func:`_enable_compilation_cache`).
+
+    Returns
+    -------
+    bool
+        True when ``filelock`` can be imported.
+    """
+    return _importlib_util.find_spec("filelock") is not None
+
+
 def _enable_compilation_cache() -> None:
+    """Point JAX's persistent compilation cache at a bounded on-disk location."""
     if _os.environ.get("AQUAFLUX_DISABLE_COMPILATION_CACHE"):
         return
     cache_dir = _os.environ.get("AQUAFLUX_COMPILATION_CACHE_DIR")
@@ -51,8 +108,18 @@ def _enable_compilation_cache() -> None:
         # Cache only genuinely expensive compilations (the solve steps), not the many
         # sub-second jits, so the cache stays small and useful.
         _jax.config.update("jax_persistent_cache_min_compile_time_secs", 2.0)
-    except OSError:
-        # An unwritable cache location must not break `import aquaflux`.
+        # ⚠️ SETTING THE BOUND WITHOUT ``filelock`` DISABLES THE CACHE ENTIRELY, and does it
+        # quietly: every read and write then fails with a ``UserWarning`` naming the missing
+        # package, the cache stores nothing at all, and the only visible symptom is warning
+        # noise during compilation. That is strictly worse than an unbounded cache, so an
+        # environment that cannot evict is left merely unbounded rather than silently dead.
+        if _cache_eviction_is_supported():
+            bound = _cache_max_bytes(_os.environ.get("AQUAFLUX_COMPILATION_CACHE_MAX_GIB"))
+            _jax.config.update("jax_compilation_cache_max_size", bound)
+    except Exception:
+        # Caching is an optimization, so no failure configuring it may break the import --
+        # an unwritable path, a read-only filesystem, or a JAX release that renames one of
+        # these settings. Deliberately broad for that reason.
         pass
 
 

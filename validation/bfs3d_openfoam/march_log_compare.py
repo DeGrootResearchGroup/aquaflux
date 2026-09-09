@@ -50,11 +50,17 @@ _STEP_ROW = re.compile(
 #: The continuation-rung banner, e.g. ``[point 3/3 (target Re)]``. The label is kept verbatim; it
 #: names the physical rung ("Re/100", "target Re") which is what a reader wants beside the counts.
 _RUNG = re.compile(r"^\[point (\d+)/(\d+) \(([^)]*)\)\]")
-#: The preconditioner-cost aside. It comes in three forms -- ``pc full`` (the hierarchy was rebuilt),
-#: ``pc inner`` (an existing hierarchy was re-fitted mid-step), and ``pc none`` (nothing was rebuilt) --
-#: and all three carry the seconds this step spent in the preconditioner. Matching only ``pc full``
-#: undercounts the total by an order of magnitude, because the mid-step re-fits are the bulk of it.
-_PC = re.compile(r"\|\s*pc (full|inner|none) ([\d.]+)s")
+#: The preconditioner-cost aside, matched by its SECONDS rather than by its kind.
+#:
+#: ⚠️ **The kinds compose, and enumerating them undercounts by an order of magnitude.** A step's aside
+#: is written ``pc full 3.6s``, ``pc none 0.0s``, ``pc none inner 3.0s`` or ``pc none 2x inner 2x 6.3s``
+#: -- the mid-step re-fit is a *compound* label, not one of three words. A pattern of the form
+#: ``pc (full|inner|none) ([\d.]+)s`` therefore matches only the two simple forms and silently drops
+#: every compound one, which is where the cost actually is: on ``run-20260908-170738.log`` it reported
+#: **10 s (1 %)** against the log's true **118 s (15.7 %)** over 38 refreshes, and the same shape on the
+#: three-dimensional case. This matches ``pc`` and then the first seconds figure on the line, so a new
+#: qualifier cannot hide the cost again.
+_PC = re.compile(r"\|\s*pc\b[^|]*?([\d.]+)s")
 #: The breakdown inside a rebuilding aside, e.g. ``(probe 11.5 assemble 0.2 refactor 1.9)``. Absent on
 #: a ``pc none`` step, and the ``other`` term is present only when the build did something unusual.
 _PC_PARTS = re.compile(r"probe ([\d.]+) assemble ([\d.]+) refactor ([\d.]+)")
@@ -158,7 +164,7 @@ def parse(path: Path) -> Run:
 
         cost = _PC.search(line)
         if cost:
-            pc_seconds += float(cost.group(2))
+            pc_seconds += float(cost.group(1))
             parts = _PC_PARTS.search(line)
             if parts:
                 probe_seconds += float(parts.group(1))

@@ -149,10 +149,14 @@ def solve_aquaflux_continuation(**solve_kwargs: object) -> dict:
     coupled, momentum, geom = case["coupled"], case["momentum"], case["geom"]
     centroid = np.asarray(geom.cell.centroid)
 
-    scales = GeometricReynoldsSchedule().scales(N_POINTS)
+    schedule = GeometricReynoldsSchedule()
+    anchor = schedule.anchor(N_POINTS)
+    # The anchor and the ratio, not the whole ladder: a schedule is asked for one scale at a time so
+    # that it can shorten a step that fails, and a ladder printed up front would be a guess for any
+    # schedule that does.
     print(
-        f"[cfg] Reynolds ramp (viscosity scales) = {scales}  ->  Re ~ "
-        f"{', '.join(f'{1.0 / s:g}x' for s in scales)} target; "
+        f"[cfg] Reynolds ramp anchored at Re/{anchor:g}, ratio {schedule.ratio:g} per rung "
+        f"({N_POINTS} rungs before the target); "
         f"inner_steps={INNER_STEPS} beta_start={CONTROL.beta_start} beta_min={CONTROL.beta_min} "
         f"rtol={RTOL} preconditioner=complete-LU({LU_BACKEND}) refreshed per step",
         flush=True,
