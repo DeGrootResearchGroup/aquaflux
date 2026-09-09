@@ -165,6 +165,7 @@ skip = "*.pyc,*.c,.git,build,dist,*.egg-info,.ruff_cache,.pytest_cache"
 markers = [
     "validation: scientific validation against analytical/published solutions (slow)",
     "slow: multi-minute solves; excluded from the fast gate, run in full on merge",
+    "distributed: spawns a fresh interpreter per test to compile a multi-device program; run in its own CI job so these do not oversubscribe the runner",
 ]
 testpaths = ["tests"]
 # A marker that is not declared above becomes a collection ERROR rather than a warning. The tiers are

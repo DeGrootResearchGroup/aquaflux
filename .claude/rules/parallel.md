@@ -271,17 +271,31 @@ The same two tests on the same commit took **901 s** and **521 s** at system loa
 was saturating the machine) — a run that is void for cost, but the *ratio* is the point: an order of
 magnitude, with no assertion and no log line to say the machine was the cause.
 
-That is what puts these tests near the per-test timeout on a hosted runner, where four xdist workers
-and their spawned children share four cores. Six of them (collection indices 216–221) land in **one**
-worker's initial `--dist load` chunk, so they also run back to back rather than spread out. At the
-300 s timeout the workflow used until 2026-08-25, one crossed it **twice in three days** — and
-`--timeout-method=thread` cannot interrupt a test, so it *kills the worker*, which xdist reports as
-`node down: Not properly terminated` and `worker 'gwN' crashed while running <test>`, indistinguishable
-from an OOM kill and with no mention of a timeout anywhere. The timeout is now 900 s, a deadlock guard
-under the job's own cap, and the job reports `--durations=15` so the next incident has a number in it.
+That is what put these tests near the per-test timeout on a hosted runner, where four xdist workers
+and their spawned children shared four cores. Six of them land in **one** worker's initial
+`--dist load` chunk, so they also ran back to back rather than spread out. At the 300 s timeout the
+workflow used until 2026-08-25, one crossed it **twice in three days** — and `--timeout-method=thread`
+cannot interrupt a test, so it *kills the worker*, which xdist reports as `node down: Not properly
+terminated` and `worker 'gwN' crashed while running <test>`, indistinguishable from an OOM kill and
+with no mention of a timeout anywhere.
+
+**⚠️ RAISING THE TIMEOUT TO 900 s DID NOT FIX THIS — it crossed that too.** On 2026-09-09
+`test_distributed_swept_gradient_adjoint_matches_and_unsupported_solves_refuse`, which costs ~241 s
+when the tier is healthy, went silent for **1074 s** and killed its worker, while its neighbours in
+the same run finished at their normal 139–390 s. A timeout is a deadlock guard; it was never the
+thing to tune, because the cost was contention and a bigger allowance just moves where it bites.
+
+**These tests therefore carry `pytestmark = pytest.mark.distributed` and run in their own CI job at
+`-n 2`** — two workers each forking one child is four processes on four cores, where `-n auto`
+alongside the other ~1300 unit tests was eight. Measured on the same eleven tests, isolation is worth
+3–4x per test: the one that died drops to 108 s, and 390 s / 171 s / 142 s become 95 s / 79 s / 42 s.
+Membership is by marker rather than by path, and `tests/unit/test_distributed_marker.py` fails if a
+module importing the spawn helper lacks it, so a new one cannot quietly rejoin the contended job. The
+local fast gate still runs them inline — the split is a property of a 4-core runner, not of the tests.
 
 Before adding another device test, account for its cost. The cheapest lever is fewer subprocesses, but
-each one's peak memory is why the existing checks were split across them in the first place.
+each one's peak memory is why the existing checks were split across them in the first place, and
+`-n 2` above is sized to the runner, not to the test count — raising it re-creates the contention.
 
 ## Not yet built
 
