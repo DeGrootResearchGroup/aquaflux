@@ -139,7 +139,7 @@ def main() -> None:
     case = build_case()
     coupled, momentum, turbulence = case["coupled"], case["momentum"], case["turbulence"]
     print(
-        f"case built in {time.time() - t0:.1f}s, {coupled.layout.dim}D, "
+        f"case built in {time.time() - t0:.1f}s, {coupled.momentum.mesh.dim}D, "
         f"{momentum.mesh.n_cells} cells",
         flush=True,
     )

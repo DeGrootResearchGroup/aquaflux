@@ -124,10 +124,8 @@ def main() -> None:
     entry = STATES[name]
     march_beta, description = entry.march_beta, entry.description
     coupled = compare.build_case()["coupled"]
-    n_fields, n_cells = coupled.layout.dim + 3, coupled.layout.n_cells
-    groups = FieldGroups(
-        n_cells=n_cells, n_leading_fields=coupled.layout.dim + 1, n_trailing_fields=2
-    )
+    n_fields, n_cells = coupled.layout.n_fields, coupled.layout.n_cells
+    groups = FieldGroups.split_before(coupled.layout, "k")
     print(f"{'=' * 88}\n{name}: {description}\nmarch shift {march_beta}\n{'=' * 88}", flush=True)
     state = load_state(name)
     base = _coupled_shift_policy(coupled, state, "twolevel")

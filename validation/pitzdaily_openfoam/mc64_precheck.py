@@ -90,8 +90,8 @@ def diagonal_dominance(matrix, n_fields: int, names: tuple[str, ...]) -> None:
 
 def main():
     coupled = compare.build_case()["coupled"]
-    n_fields = coupled.layout.dim + 3
-    names = FIELDS2 if coupled.layout.dim == 2 else FIELDS3
+    n_fields = coupled.layout.n_fields
+    names = FIELDS2 if coupled.momentum.mesh.dim == 2 else FIELDS3
     state = sweep.load_state(coupled, None)
     base = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS)
     print(

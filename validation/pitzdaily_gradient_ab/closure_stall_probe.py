@@ -290,7 +290,7 @@ def _engine_at(coupled, state):
 def _blocks(coupled, vector):
     """A coupled vector split into ``[u, v, p, k, omega]`` per-block arrays."""
     flow, k, omega = coupled.layout.unpack(vector)
-    n, dim = coupled.layout.n_cells, coupled.layout.dim
+    n, dim = coupled.layout.n_cells, coupled.momentum.mesh.dim
     velocity, pressure = flow[: dim * n].reshape(n, dim), flow[dim * n :]
     return [velocity[:, i] for i in range(dim)] + [pressure, k, omega]
 
@@ -758,7 +758,7 @@ def _frozen_production_test(built, engines, state, steps, measures, beta) -> Non
         # cell instead would put a different row in each line, which is how a diagonal was first
         # reported here with the opposite sign to the one measured a section earlier.
         cell = int(np.argmax(np.abs(np.asarray(_blocks(coupled, steps[BASELINE][beta])[-1]))))
-        unit = jnp.zeros_like(state).at[coupled.layout.flow_size + cell].set(1.0)
+        unit = jnp.zeros_like(state).at[coupled.layout.slice_of("k").start + cell].set(1.0)
 
         for label, jacobian in (
             ("exact", coupled.residual),
@@ -854,7 +854,7 @@ def _k_row_anatomy(built, engines, state, steps, beta) -> None:
         for cell in hotspots:
             # One directional derivative per cell: the tangent is a single 1 on that cell's k unknown,
             # so the k row of the response IS that row's own diagonal.
-            tangent = jnp.zeros_like(state).at[layout.flow_size + cell].set(1.0)
+            tangent = jnp.zeros_like(state).at[layout.slice_of("k").start + cell].set(1.0)
             j_kk = float(
                 _blocks(coupled, jax.jvp(coupled.residual, (state,), (tangent,))[1])[-2][cell]
             )

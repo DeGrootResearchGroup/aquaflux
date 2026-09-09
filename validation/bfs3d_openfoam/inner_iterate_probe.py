@@ -230,7 +230,7 @@ def main():
         flush=True,
     )
     coupled = compare.build_case()["coupled"]
-    n_fields = coupled.layout.dim + 3
+    n_fields = coupled.layout.n_fields
     plan = _coupled_jacobian_plan(coupled, 3)
     structure = block_stencil_gather_map(plan)
 

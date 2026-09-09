@@ -14,9 +14,13 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 from aquaflux.solve import (
+    CellFields,
+    FieldLayout,
+    GlobalDofs,
     HierarchyBlockInverse,
     JacobiSmoothedInverse,
     SimpleSmoothedInverse,
+    SubLayout,
     air_inverse,
 )
 from aquaflux.solve.field_split import (
@@ -40,7 +44,7 @@ class ExactInverse:
 @pytest.fixture
 def groups() -> FieldGroups:
     """Four cells, three leading fields and two trailing ones -- deliberately not square or equal."""
-    return FieldGroups(n_cells=4, n_leading_fields=3, n_trailing_fields=2)
+    return FieldGroups.by_counts(n_cells=4, n_leading_fields=3, n_trailing_fields=2)
 
 
 @pytest.fixture
@@ -97,8 +101,30 @@ class TestFieldGroups:
         np.testing.assert_allclose(rebuilt, operator)
 
     def test_an_empty_side_is_refused(self):
+        with pytest.raises(ValueError, match="at least one field"):
+            FieldGroups.by_counts(n_cells=4, n_leading_fields=5, n_trailing_fields=0)
         with pytest.raises(ValueError, match="not a split"):
-            FieldGroups(n_cells=4, n_leading_fields=5, n_trailing_fields=0)
+            FieldGroups(FieldLayout.cell_fields(4, all_of_them=5), 5)
+
+    def test_a_bordered_state_is_refused_because_its_border_belongs_to_no_field(self):
+        """A partition into whole fields cannot describe a constraint multiplier."""
+        bordered = FieldLayout.cell_fields(4, flow=3, k=1).appended(GlobalDofs("mass_flow", 1))
+        with pytest.raises(ValueError, match="whole per-cell field"):
+            FieldGroups(bordered, 3)
+
+    def test_split_before_names_the_partition_against_the_states_own_blocks(self):
+        layout = FieldLayout(
+            4,
+            (
+                SubLayout("flow", FieldLayout.cell_fields(4, velocity=3, pressure=1)),
+                CellFields("k", 1),
+                CellFields("omega", 1),
+            ),
+        )
+        groups = FieldGroups.split_before(layout, "k")
+        assert groups.n_leading_fields == 4
+        assert groups.n_trailing_fields == 2
+        assert groups.leading == slice(0, 16)
 
     def test_a_mismatched_matrix_is_refused(self, groups):
         with pytest.raises(ValueError, match="describes"):

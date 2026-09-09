@@ -488,7 +488,7 @@ def main():
         del arguments[index : index + 2]
     arms = [a for a in ARMS if not arguments or any(word in a.label for word in arguments)]
     coupled = compare.build_case()["coupled"]
-    n_fields = coupled.layout.dim + 3
+    n_fields = coupled.layout.n_fields
     state = load_state(coupled, state_path)
     cache = {}  # this state's materialized Jacobians, by reach (see `jacobian`)
     base = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS)

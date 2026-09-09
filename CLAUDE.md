@@ -291,7 +291,7 @@ found and fixed**; treat them as binding, not aspirational.
   strategy family inline (`if inner == "smoothed"/"multigrid"/"jacobi"`), is several classes: extract
   a builder plus an **injected strategy hierarchy** (the `InnerSchurSolver` / `VelocityBlockSolver`
   pattern, mirroring the operator/scheme/BC strategies). Inline flat-vector index arithmetic for a
-  state layout is a missing value object (`BlockStateLayout`).
+  state layout is a missing value object (`solve/state.py::FieldLayout`).
 
 - **Concrete trigger:** *if you are about to pass an object's raw arrays to a function, thread a loose
   per-cell/per-face array a second time, add a forwarding property, duck-type a lookalike of an
@@ -1227,9 +1227,16 @@ After **every code change**, before considering the task complete, review and ac
      a factory writing `return cls(...)` looked like it built nothing and never entered the report at
      all. That is worse than the first blind spot: not a quiet pair but **no pair**, indistinguishable
      from a clean tree. It now also knows `calibrated` and credits `cls(...)` to its owning class.
-     **The general lesson, now twice: this tool sees builders by NAME and construction by CONVENTION,
-     so a new factory naming style is invisible to it until it is taught — check that it can see your
-     pair (its report names both sides) before reading its silence as a clean report.**
+     ⚠️ **The NAME half of that was still a blind spot, and it is closed structurally (2026-08-25, #285):
+     a `@classmethod` whose body returns `cls(...)` is a factory whatever it is called.** Teaching the
+     list one more name each time leaves the next naming style just as invisible — three new factories
+     (`FieldLayout.cell_fields`, `FieldGroups.by_counts`, `FieldGroups.split_before`) would have been
+     unseen on the day they were written. The shape test is now primary and `_FACTORY_METHODS` is the
+     fallback for factories whose construction the syntax tree cannot follow; pinned by
+     `test_it_reaches_a_classmethod_factory_no_naming_convention_covers`, whose fixture the previous
+     tool is blind to. **The standing lesson survives the fix: a pair this tool cannot see reports as a
+     clean tree, so check that it names both sides of your pair before reading its silence as a clean
+     report.**
 
    Ruff is pinned via the `lint` extra (`pip install -e ".[lint]"`). Not needed for
    docs/config-only changes touching no `.py` files.

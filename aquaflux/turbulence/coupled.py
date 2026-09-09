@@ -58,12 +58,15 @@ from aquaflux.solve import (
     NO_REFRESH,
     NO_RETRIES,
     BlockScaledNorm,
+    CellFields,
     ColumnProbePlan,
     DivergenceGuard,
     DualTimeStep,
     FieldGroups,
+    FieldLayout,
     FieldSplitAmgPreconditioner,
     ForwardStep,
+    GlobalDofs,
     ImplicitNewtonSolver,
     LocalCourantBasis,
     MonolithicAmgPreconditioner,
@@ -80,6 +83,7 @@ from aquaflux.solve import (
     ShiftTerm,
     StepControl,
     StepReport,
+    SubLayout,
     SwitchedEvolutionRelaxation,
     TransposedPreconditioner,
     VelocityShiftParts,
@@ -207,66 +211,29 @@ class LogScalars(ScalarVariableTransform):
         return LogRatioRow()
 
 
-class CoupledRANSLayout(eqx.Module):
-    """Pack/unpack of the flat coupled state ``[flow..., k, omega]``.
+def coupled_rans_layout(flow: FieldLayout) -> FieldLayout:
+    """The flat coupled state layout ``[flow..., k, omega]``.
 
     The flow block is the momentum assembler's own ``[vel_0..vel_{dim-1}, pressure]`` layout
-    (:class:`~aquaflux.flow.state.BlockStateLayout`) carried verbatim, so the flow sub-vector is
-    handed to :class:`~aquaflux.flow.MomentumContinuity` unchanged; ``k`` and ``omega`` follow as two
-    ``n_cells``-long blocks. Mesh-free and testable in isolation, mirroring ``BlockStateLayout``.
+    (:meth:`~aquaflux.flow.MomentumContinuity.layout`) **nested verbatim**, so the flow sub-vector is
+    handed to :class:`~aquaflux.flow.MomentumContinuity` unchanged and its widths are never restated
+    here; ``k`` and ``omega`` follow as two ``n_cells``-long scalar blocks.
 
-    Attributes
+    Parameters
     ----------
-    dim : int
-        Number of velocity components (spatial dimension), static.
-    n_cells : int
-        Number of cells (each scalar block's length), static.
+    flow : FieldLayout
+        The momentum-continuity state's layout.
+
+    Returns
+    -------
+    FieldLayout
+        Blocks ``"flow"`` (the nested layout, read out as the flat flow sub-vector), ``"k"`` and
+        ``"omega"``, of total length ``(dim + 3) * n_cells``.
     """
-
-    dim: int = eqx.field(static=True)
-    n_cells: int = eqx.field(static=True)
-
-    @property
-    def flow_size(self) -> int:
-        """Length of the flow sub-vector, ``(dim + 1) * n_cells``."""
-        return (self.dim + 1) * self.n_cells
-
-    @property
-    def size(self) -> int:
-        """Length of the full coupled state, ``(dim + 3) * n_cells``."""
-        return (self.dim + 3) * self.n_cells
-
-    def unpack(self, state: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Split the coupled state into the flow sub-vector, ``k``, and ``omega``.
-
-        Parameters
-        ----------
-        state : jnp.ndarray
-            Flat coupled state, shape ``((dim + 3) * n_cells,)``.
-
-        Returns
-        -------
-        flow, k, omega : jnp.ndarray
-            The flat flow state ``((dim + 1) n_cells,)`` and the two fields ``(n_cells,)``.
-        """
-        n = self.n_cells
-        flow_size = self.flow_size
-        flow = state[:flow_size]
-        k = state[flow_size : flow_size + n]
-        omega = state[flow_size + n :]
-        return flow, k, omega
-
-    def pack(self, flow: jnp.ndarray, k: jnp.ndarray, omega: jnp.ndarray) -> jnp.ndarray:
-        """Assemble the flow sub-vector and the two fields into the flat coupled state.
-
-        Parameters
-        ----------
-        flow : jnp.ndarray
-            The flat flow state ``[vel..., pressure]``, shape ``((dim + 1) n_cells,)``.
-        k, omega : jnp.ndarray
-            The turbulence fields, shape ``(n_cells,)``.
-        """
-        return jnp.concatenate([flow, k, omega])
+    return FieldLayout(
+        flow.n_cells,
+        (SubLayout("flow", flow), CellFields("k", 1), CellFields("omega", 1)),
+    )
 
 
 class CoupledRANS(eqx.Module):
@@ -426,9 +393,9 @@ class CoupledRANS(eqx.Module):
         )
 
     @property
-    def layout(self) -> CoupledRANSLayout:
+    def layout(self) -> FieldLayout:
         """The coupled state layout ``[flow..., k, omega]`` for this system."""
-        return CoupledRANSLayout(self.momentum.mesh.dim, self.momentum.mesh.n_cells)
+        return coupled_rans_layout(self.momentum.layout)
 
     def pack_state(self, flow: jnp.ndarray, k: jnp.ndarray, omega: jnp.ndarray) -> jnp.ndarray:
         """Assemble a coupled state from a flow state and the two turbulence fields."""
@@ -548,7 +515,7 @@ class CoupledShiftPolicy(eqx.Module):
 
     Attributes
     ----------
-    layout : CoupledRANSLayout
+    layout : FieldLayout
         The coupled state layout, for packing the block-diagonal shift and preconditioner.
     momentum : MomentumContinuity
         The flow assembler at the reference effective viscosity. It is the **shift's** dependency and
@@ -592,7 +559,7 @@ class CoupledShiftPolicy(eqx.Module):
         unchanged from the historical shift; a convective basis gives a local convective time step.
     """
 
-    layout: CoupledRANSLayout
+    layout: FieldLayout
     momentum: MomentumContinuity
     k_shift_transport: jnp.ndarray
     k_jacobian_scale: jnp.ndarray
@@ -627,7 +594,7 @@ class CoupledShiftPolicy(eqx.Module):
         # Full-state base shift: d_vel on every velocity component, 0 on pressure, the frozen scalar
         # transport diagonals on k and omega.
         flow_diagonal = self.momentum.pack(
-            jnp.broadcast_to(d_vel[:, None], (n_cells, self.layout.dim)), jnp.zeros(n_cells)
+            jnp.broadcast_to(d_vel[:, None], (n_cells, self.momentum.mesh.dim)), jnp.zeros(n_cells)
         )
         # The scalar shift diagonal is transport-time-scale * coordinate factor; kept as two fields so a
         # refresh rebuilds the transport half and carries the coordinate half (see `_coupled_shift_policy`).
@@ -964,9 +931,17 @@ def _coupled_residual_norm(coupled: CoupledRANS, reference_state: jnp.ndarray) -
     the opt-in ``block_scaled_norm=True`` alternative to the default :func:`coupled_scaled_norm`, which
     additionally equilibrates each row by its own diagonal.
     """
-    n = coupled.momentum.mesh.n_cells
-    sizes = (coupled.layout.flow_size, n, n)
-    return BlockScaledNorm(sizes, _coupled_block_scales(coupled, reference_state))
+    return BlockScaledNorm(coupled.layout.sizes, _coupled_block_scales(coupled, reference_state))
+
+
+def _mass_flow_layout(coupled: CoupledRANS) -> FieldLayout:
+    """The coupled layout bordered with the mass-flow constraint's scalar multiplier.
+
+    The constrained march carries the augmented state ``[flow..., k, omega, beta]``. ``beta`` is one
+    degree of freedom belonging to no cell, so it is an ordinary extra block of the layout rather than
+    a length appended by hand wherever the augmented system's shape is wanted.
+    """
+    return coupled.layout.appended(GlobalDofs("mass_flow", 1))
 
 
 def _mass_flow_residual_norm(coupled: CoupledRANS, reference_state: jnp.ndarray) -> BlockScaledNorm:
@@ -976,10 +951,8 @@ def _mass_flow_residual_norm(coupled: CoupledRANS, reference_state: jnp.ndarray)
     trailing scalar constraint is a bulk-velocity (velocity-magnitude) equation, so it shares the
     flow block's reference scale.
     """
-    n = coupled.momentum.mesh.n_cells
     s_flow, s_k, s_omega = _coupled_block_scales(coupled, reference_state)
-    sizes = (coupled.layout.flow_size, n, n, 1)
-    return BlockScaledNorm(sizes, (s_flow, s_k, s_omega, s_flow))
+    return BlockScaledNorm(_mass_flow_layout(coupled).sizes, (s_flow, s_k, s_omega, s_flow))
 
 
 def positive_k_limit(coupled: CoupledRANS, tau: float = 0.99, floor: float = 0.0):
@@ -1015,20 +988,8 @@ def positive_k_limit(coupled: CoupledRANS, tau: float = 0.99, floor: float = 0.0
     """
     if not isinstance(coupled.k_transform, DirectScalars):
         return None
-    start, stop = _k_block(coupled)
-    return positive_block_limit(start, stop, tau, floor)
-
-
-def _k_block(coupled: CoupledRANS) -> tuple[int, int]:
-    """The half-open slice of the flat coupled state holding ``k``.
-
-    Its one home: the positivity constructions each need this slice, and re-deriving
-    ``((dim + 1) * n, (dim + 2) * n)`` at each of them is a formula that drifts when the block order
-    changes.
-    """
-    layout = coupled.layout
-    n, dim = layout.n_cells, layout.dim
-    return (dim + 1) * n, (dim + 2) * n
+    k_block = coupled.layout.slice_of("k")
+    return positive_block_limit(k_block.start, k_block.stop, tau, floor)
 
 
 def positive_k_projection(coupled: CoupledRANS, tau: float = 0.99, floor: float = 0.0):
@@ -1066,8 +1027,8 @@ def positive_k_projection(coupled: CoupledRANS, tau: float = 0.99, floor: float 
     """
     if not isinstance(coupled.k_transform, DirectScalars):
         return None
-    start, stop = _k_block(coupled)
-    return positive_block_projection(start, stop, tau, floor)
+    k_block = coupled.layout.slice_of("k")
+    return positive_block_projection(k_block.start, k_block.stop, tau, floor)
 
 
 def coupled_scaled_norm(
@@ -1121,7 +1082,7 @@ def coupled_scaled_norm(
         preferred for shrinking its own denominator rather than its residual).
     """
     layout = coupled.layout
-    n, dim = layout.n_cells, layout.dim
+    n, dim = layout.n_cells, coupled.momentum.mesh.dim
     tiny = 1e-300
 
     diagonal = jax.lax.stop_gradient(shift_policy.shift_term(state).diagonal)
@@ -1755,7 +1716,7 @@ def _coupled_jacobian_plan(
     if column_reach is None:
         return ColumnProbePlan.uniform(
             block_stencil_colouring(owner, nb, n_cells, stencil_reach),
-            coupled.layout.dim + 3,
+            coupled.layout.n_fields,
             active_rows=active_rows,
         )
     return column_probe_plan(
@@ -2786,11 +2747,8 @@ def coupled_amg_continuation(
     # The partition a field split fits, needed here (not only below) because it decides which
     # off-diagonal triangle a probe built for it never has to store -- see `active_rows` just below.
     # Building it costs nothing and is unused when `field_split` is false.
-    groups = FieldGroups(
-        n_cells=coupled.layout.n_cells,
-        n_leading_fields=coupled.layout.dim + 1,  # u, v, w, p -- the saddle
-        n_trailing_fields=2,  # k, omega -- the transported scalars
-    )
+    # `[u, v, w, p]` (the saddle) leads, `[k, omega]` (the transported scalars) trail.
+    groups = FieldGroups.split_before(coupled.layout, "k")
     # The colouring plan and the fixed CSR structure + gather map that de-compresses a probe into it. Both
     # are mesh-fixed, so a caller building several steps over one case (a Reynolds continuation, or a step
     # and its refresh hook) supplies one shared `probe` and nothing here is rebuilt.
@@ -4342,7 +4300,7 @@ class _MassFlowBorderedPolicy(eqx.Module):
 
     def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
         """The augmented block-diagonal shift and the bordered preconditioner at ``phi``."""
-        inner_term = self.inner.shift_term(phi[:-1])
+        inner_term = self.inner.shift_term(phi[: self.inner.layout.size])
         diagonal = jnp.append(inner_term.diagonal, 0.0)
 
         def make_preconditioner(relaxation: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:

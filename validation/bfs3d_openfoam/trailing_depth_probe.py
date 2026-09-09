@@ -191,12 +191,8 @@ class _Operator:
 def main() -> None:
     name = sys.argv[1] if len(sys.argv) > 1 else "state-00067"
     coupled = compare.build_case()["coupled"]
-    n_fields = coupled.layout.dim + 3
-    groups = FieldGroups(
-        n_cells=coupled.layout.n_cells,
-        n_leading_fields=coupled.layout.dim + 1,
-        n_trailing_fields=N_TRAILING,
-    )
+    n_fields = coupled.layout.n_fields
+    groups = FieldGroups.split_before(coupled.layout, "k")
 
     checkpoint_dir = CASE / "checkpoints"
     have_checkpoint = name in STATES and (checkpoint_dir / f"{name}.npz").exists()

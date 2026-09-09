@@ -141,7 +141,7 @@ def main():
     case = compare.build_case()
     mesh = case["coupled"].momentum.mesh
     n = mesh.n_cells
-    n_fields = case["coupled"].layout.dim + 3
+    n_fields = case["coupled"].layout.n_fields
     owner, nb, _ = mesh.face_cells.interior_edges()
     owner, nb = np.asarray(owner), np.asarray(nb)
 

@@ -175,9 +175,7 @@ def main() -> None:
     case = compare.build_case()
     coupled = case["coupled"]
     n_cells = coupled.layout.n_cells
-    groups = FieldGroups(
-        n_cells=n_cells, n_leading_fields=coupled.layout.dim + 1, n_trailing_fields=N_TRAILING
-    )
+    groups = FieldGroups.split_before(coupled.layout, "k")
     pc_beta = (
         compare.PC_BETA_FLOOR
         if np.isnan(shift_recorded)

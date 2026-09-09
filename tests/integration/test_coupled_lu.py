@@ -230,7 +230,7 @@ def test_lu_beta_tracking_refresh_makes_the_lu_exact_at_the_current_beta(case) -
 
     # the shifted operator the step actually solves at this beta
     n_cells = coupled.momentum.mesh.n_cells
-    n_fields = coupled.layout.dim + 3
+    n_fields = coupled.layout.n_fields
     owner, nb, _ = coupled.momentum.mesh.face_cells.interior_edges()
     colouring = block_stencil_colouring(np.asarray(owner), np.asarray(nb), n_cells, 3)
     frozen = jax.lax.stop_gradient(state)

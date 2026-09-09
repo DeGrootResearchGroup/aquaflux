@@ -99,11 +99,7 @@ def build_preconditioner(companion, state, plan, structure, shift):
         matvec,
         plan,
         shift,
-        FieldGroups(
-            n_cells=companion.layout.n_cells,
-            n_leading_fields=companion.layout.dim + 1,
-            n_trailing_fields=2,
-        ),
+        FieldGroups.split_before(companion.layout, "k"),
         smoother_fill_levels=compare.FILL_LEVELS,
         smoother_sweeps=compare.SWEEPS,
         trailing_smoother_sweeps=compare.TRAILING_SWEEPS,

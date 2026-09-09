@@ -112,11 +112,18 @@ deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` fr
     - **The partition is free, because the coupled state is FIELD-major.** Degree of freedom
       `(cell i, field f)` sits at `f·n_cells + i`, so a split on a *field* boundary is a split into two
       **contiguous ranges**: `[u,v,w,p]` is `[0, (dim+1)·n)` and `[k,ω]` the rest. Vectors are sliced,
-      not gathered, and the four blocks are contiguous submatrices. `FieldGroups` owns that arithmetic
-      so no consumer re-derives `f·n_cells + i` inline; `tests/integration/test_coupled_field_split.py`
-      pins the partition against `CoupledRANSLayout.unpack`, which is the one thing that would be
-      silently wrong rather than loudly wrong — a partition off by one field still preconditions, it
-      just preconditions a mislabelled operator.
+      not gathered, and the four blocks are contiguous submatrices. Since #285 `FieldGroups` is a
+      **view over the state's own `FieldLayout`** (`solve/state.py`) rather than a second description
+      of it: it holds the layout plus a leading field count, and takes `n_dofs` / `leading` /
+      `trailing` from the layout's own arithmetic, so no consumer — this one included — re-derives
+      `f·n_cells + i` inline. Build it with **`FieldGroups.split_before(coupled.layout, "k")`**, which
+      names the split against the state's blocks and therefore moves with them; `FieldGroups.by_counts(
+      n_cells, n_leading_fields, n_trailing_fields)` is for a probe holding a raw field-major matrix
+      and no assembled case. A layout carrying a `GlobalDofs` block (a bordered state) is **refused**:
+      a multiplier belongs to no field, so it belongs to no field group.
+      `tests/integration/test_coupled_field_split.py` pins the partition against the coupled layout's
+      own `unpack`, which is the one thing that would be silently wrong rather than loudly wrong — a
+      partition off by one field still preconditions, it just preconditions a mislabelled operator.
     - **It needs no JAX wrapper of its own.** `MonolithicAmgPreconditioner.matvec()` reads only
       `factors.n_dofs` and `factors.apply(r, transpose=…)`, both of which the split has, so it rides the
       existing `pure_callback` path unchanged. Each diagonal block is an ordinary `AmgVCycle`

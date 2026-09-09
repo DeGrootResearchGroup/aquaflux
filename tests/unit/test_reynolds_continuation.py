@@ -349,7 +349,7 @@ def test_point_setup_builds_per_point_kwargs_and_materializes_the_first_seed(mon
 
     coupled = _tiny_coupled()
     n = coupled.momentum.mesh.n_cells
-    dim = coupled.layout.dim
+    dim = coupled.momentum.mesh.dim
     # A correctly-shaped stand-in converged state, so each point's seed packs into the next cleanly.
     fields = (jnp.zeros((dim + 1) * n), jnp.full(n, 0.5), jnp.full(n, 100.0))
 
@@ -401,7 +401,7 @@ def test_point_setup_receives_the_points_position_in_the_ramp(monkeypatch) -> No
 
     coupled = _tiny_coupled()
     n = coupled.momentum.mesh.n_cells
-    dim = coupled.layout.dim
+    dim = coupled.momentum.mesh.dim
     fields = (jnp.zeros((dim + 1) * n), jnp.full(n, 0.5), jnp.full(n, 100.0))
 
     monkeypatch.setattr(reynolds, "solve_coupled", lambda c, *a, **k: fields)

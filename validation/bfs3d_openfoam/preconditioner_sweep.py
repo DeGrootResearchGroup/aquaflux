@@ -396,7 +396,7 @@ def main():
     else:
         states = hard_states(int(sys.argv[1]) if len(sys.argv) > 1 else 1)
     coupled = compare.build_case()["coupled"]
-    n_fields = coupled.layout.dim + 3
+    n_fields = coupled.layout.n_fields
     reach3 = _coupled_jacobian_plan(coupled, 3)
     struct3 = block_stencil_gather_map(ColumnProbePlan.uniform(reach3, n_fields))
     for path, march_beta, label in states:

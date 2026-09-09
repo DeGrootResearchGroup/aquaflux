@@ -60,6 +60,7 @@ from .multigrid import (
     refresh_air_hierarchy,
 )
 from .refresh_timing import PhaseTimer
+from .state import FieldLayout
 
 __all__ = [
     "BlockTriangularFieldSplit",
@@ -80,54 +81,119 @@ class FieldGroups:
     contiguous ranges, which is what makes a field split cheap here — vectors are sliced rather than
     gathered, and the operator's four blocks are contiguous submatrices.
 
-    This object owns that arithmetic so no consumer re-derives ``f * n_cells + i`` inline. It carries no
-    matrix and no vector, only the shape of the partition.
+    This is a **view over a** :class:`~aquaflux.solve.FieldLayout`, not a second description of the same
+    state: the layout owns the block structure and the ``f * n_cells + i`` arithmetic, and this adds only
+    where the two groups meet. So a split can be named against the state's own blocks
+    (:meth:`split_before`) rather than counted out by hand, and it moves with the layout when a field is
+    added.
 
     Attributes
     ----------
-    n_cells : int
-        Cells in the mesh.
+    layout : FieldLayout
+        The state's block layout. Every degree of freedom must belong to a whole per-cell field
+        (:attr:`~aquaflux.solve.FieldLayout.is_cell_major`) — a bordered state's trailing multiplier
+        belongs to no field, so it belongs to no field group either.
     n_leading_fields : int
-        Fields in the leading group, taken from the start of the field order.
-    n_trailing_fields : int
-        Fields in the trailing group, immediately following the leading one.
+        Fields in the leading group, taken from the start of the field order; the rest trail.
 
     Raises
     ------
     ValueError
-        If either group is empty or a count is negative — a "split" with an empty side is the monolithic
-        preconditioner wearing a disguise, and silently accepting it would report a field-split result
-        that was never a field split.
+        If the layout carries degrees of freedom outside the per-cell fields, or if either group would be
+        empty — a "split" with an empty side is the monolithic preconditioner wearing a disguise, and
+        silently accepting it would report a field-split result that was never a field split.
     """
 
-    n_cells: int
+    layout: FieldLayout
     n_leading_fields: int
-    n_trailing_fields: int
 
     def __post_init__(self) -> None:
-        if self.n_cells <= 0:
-            raise ValueError(f"n_cells must be positive, got {self.n_cells}")
-        if self.n_leading_fields <= 0 or self.n_trailing_fields <= 0:
+        if not self.layout.is_cell_major:
             raise ValueError(
-                "both groups must hold at least one field, got "
-                f"{self.n_leading_fields} leading and {self.n_trailing_fields} trailing; a split with "
-                "an empty side is not a split."
+                f"a field partition needs every dof to belong to a whole per-cell field, but this "
+                f"layout is {self.layout.size} dofs over {self.layout.n_fields} fields and "
+                f"{self.layout.n_cells} cells (blocks {list(self.layout.names)})."
             )
+        if not 0 < self.n_leading_fields < self.layout.n_fields:
+            raise ValueError(
+                f"both groups must hold at least one of the layout's {self.layout.n_fields} fields, "
+                f"got {self.n_leading_fields} leading; a split with an empty side is not a split."
+            )
+
+    @classmethod
+    def by_counts(cls, n_cells: int, n_leading_fields: int, n_trailing_fields: int) -> FieldGroups:
+        """The partition of a state known only by its field counts, with no named blocks.
+
+        For a caller holding a raw field-major operator rather than an assembled system — a probe over a
+        materialized Jacobian, or a test fixture. Where the state's own layout is at hand, prefer
+        :meth:`split_before`, which cannot fall out of step with it.
+
+        Parameters
+        ----------
+        n_cells : int
+            Cells in the mesh.
+        n_leading_fields, n_trailing_fields : int
+            Fields in each group.
+
+        Returns
+        -------
+        FieldGroups
+            The partition, over an anonymous two-block layout.
+
+        Raises
+        ------
+        ValueError
+            If either count is not positive — the empty-side refusal, raised by the block it would
+            leave empty.
+        """
+        layout = FieldLayout.cell_fields(
+            n_cells, leading=n_leading_fields, trailing=n_trailing_fields
+        )
+        return cls(layout, n_leading_fields)
+
+    @classmethod
+    def split_before(cls, layout: FieldLayout, name: str) -> FieldGroups:
+        """The partition that puts every block before ``name`` in the leading group.
+
+        Parameters
+        ----------
+        layout : FieldLayout
+            The state's block layout.
+        name : str
+            The first block of the trailing group — ``"k"`` for the split that separates a coupled
+            Reynolds-averaged state's pressure-velocity saddle from its transported scalars.
+
+        Returns
+        -------
+        FieldGroups
+            The partition.
+        """
+        return cls(layout, layout.field_offset(name))
+
+    @property
+    def n_cells(self) -> int:
+        """Cells in the mesh."""
+        return self.layout.n_cells
+
+    @property
+    def n_trailing_fields(self) -> int:
+        """Fields in the trailing group."""
+        return self.layout.n_fields - self.n_leading_fields
 
     @property
     def n_fields(self) -> int:
         """Total fields per cell."""
-        return self.n_leading_fields + self.n_trailing_fields
+        return self.layout.n_fields
 
     @property
     def n_dofs(self) -> int:
         """Total degrees of freedom."""
-        return self.n_fields * self.n_cells
+        return self.layout.size
 
     @property
     def n_leading_dofs(self) -> int:
         """Degrees of freedom in the leading group."""
-        return self.n_leading_fields * self.n_cells
+        return self.layout.field_dofs(self.n_leading_fields)
 
     @property
     def leading(self) -> slice:

@@ -142,12 +142,8 @@ def main() -> None:
     )
 
     coupled = compare.build_case()["coupled"]
-    n_fields = coupled.layout.dim + 3
-    groups = fsp.FieldGroups(
-        n_cells=coupled.layout.n_cells,
-        n_leading_fields=coupled.layout.dim + 1,
-        n_trailing_fields=2,
-    )
+    n_fields = coupled.layout.n_fields
+    groups = fsp.FieldGroups.split_before(coupled.layout, "k")
 
     plan = fsp._coupled_jacobian_plan(coupled, 3, compare.COLUMN_REACH)
     structure = fsp.block_stencil_gather_map(plan)

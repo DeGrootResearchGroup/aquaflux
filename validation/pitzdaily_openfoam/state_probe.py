@@ -54,7 +54,7 @@ def openfoam_state(coupled):
 
 
 def run(label, coupled, state, betas, reach=3):
-    n_fields = coupled.layout.dim + 3
+    n_fields = coupled.layout.n_fields
     n = coupled.layout.n_cells
     residual = coupled.residual(state)
     assert bool(jnp.all(jnp.isfinite(residual))), f"{label}: residual is NOT finite"
