@@ -2143,6 +2143,21 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   step length for all 61125 degrees of freedom. `positive_block_projection` clips each entry's own
   correction instead, so a bad entry costs only itself.
 
+  ⚠️ **THIS IS A pitzDaily RESULT AND IT DOES NOT GENERALIZE — the 3D sibling was A/B'd on 2026-08-25
+  (#314) and the projection costs it 41 % more Krylov cycles and 40 % more wall**, same root
+  (`x_r/h` 8.3611 both arms), 69 steps → 62. `bfs3d_openfoam` therefore keeps
+  `K_POSITIVITY_PROJECTION` **off**, deliberately out of step with the library default this table set.
+  The projection still does exactly what it claims there (the cap binds 26 times against 0) and still
+  wins the first two continuation rungs outright; the whole loss is the target rung, where the global
+  cap turns out to have been doing **globalization** work — with the step no longer shortened, the line
+  search takes full steps into iterates the carried preconditioner solves badly (inner solves pinned at
+  12 cycles against 2–5, one attempt at α = 1.000 reaching an inner residual of 2.7e+10), each tripping
+  that case's per-solve cycle bailout. Full numbers and configuration in
+  `.claude/rules/solve-amg-multigrid.md`.
+  **So read the table above as "the cap can lose a march and the projection can rescue it", which is
+  what justifies the default — NOT as "the projection is free".** On a case where the cap is not losing
+  the march, it is not.
+
   **WHERE TO LOOK NEXT:**
   - **A cap on the log-`omega` increment does NOT work — checked against the measured ladders, not
     assumed.** A fraction-to-the-boundary analogue limiting `omega` to a factor `e**2` per step gives

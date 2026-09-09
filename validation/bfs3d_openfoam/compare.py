@@ -574,7 +574,8 @@ def _flush_print(message: str) -> None:
     print(message, flush=True)
 
 
-#: ⚠️ THE DEFAULT IS `native`, NOT AN INCOMPLETE-LU ARM, AND THE REASON IS ROBUSTNESS RATHER THAN SPEED.
+#: ⚠️ THE DEFAULT IS `simplesmooth`, NOT AN INCOMPLETE-LU ARM, AND THE REASON IS ROBUSTNESS RATHER
+#: THAN SPEED.
 #: An incomplete-LU factorization is sensitive to the elimination ORDER in a way that has repeatedly
 #: produced arms differing by orders of magnitude on this operator (measured: the same ILU(0) construction
 #: takes 1 cycle under one cell ordering and fails to converge in 38 under another, on the same block).
@@ -582,20 +583,28 @@ def _flush_print(message: str) -> None:
 #: (batched per-cell/per-level dense solves and sparse matvecs only), so it is also the only one of the
 #: three arms with a route to a GPU. A full-march A/B at this default against a matched `hostilu` run
 #: reached the identical root (`x_r/h` 8.3611) at a real wall-clock cost (349 cumulative cycles / 1782 s
-#: against 208 / 1403 s) -- native is not the faster arm here, it is the one that does not depend on an
-#: elimination order this case has already been bitten by, and the one this project's GPU direction needs.
+#: against 208 / 1403 s) -- `simplesmooth` is not the faster arm here, it is the one that does not depend
+#: on an elimination order this case has already been bitten by, and the one this project's GPU direction
+#: needs.
 #: `BFS3D_FLOW_INVERSE=hostilu` / `petsc` restore the two PETSc-backed arms, and both stay measured and
 #: runnable so the comparison can be re-adjudicated.
 FLOW_INVERSE = os.environ.get("BFS3D_FLOW_INVERSE", "simplesmooth")
 if FLOW_INVERSE not in ("petsc", "simplesmooth", "hostilu"):
     raise SystemExit(
-        f"BFS3D_FLOW_INVERSE={FLOW_INVERSE!r} is not one of ['petsc', 'native', 'hostilu']"
+        f"BFS3D_FLOW_INVERSE={FLOW_INVERSE!r} is not one of ['petsc', 'simplesmooth', 'hostilu']"
     )
 LEADING_INVERSE = None
+#: The selected arm's own settings, recorded beside the object they built so the configuration banner
+#: can print them without re-deriving which arm is live. `None` for `petsc`, which builds no leading
+#: inverse of ours. Set in the SAME branch that builds the inverse: a banner that instead re-branched on
+#: `FLOW_INVERSE` to pick between two per-arm names referred, on the default arm, to a name only the
+#: other arm defines -- so the case died with a `NameError` before its first step, in the one line whose
+#: job is to say what the run is.
+LEADING_SETTINGS = None
 if FLOW_INVERSE == "hostilu":
-    #: The SAME hierarchy the `native` arm coarsens with, applied on the host and smoothed by a zero-fill
-    #: incomplete factorization instead of SIMPLE relaxation -- so `petsc` against `hostilu` differs in the
-    #: coarsening alone, which is what makes it the arm that isolates it.
+    #: The SAME hierarchy the `simplesmooth` arm coarsens with, applied on the host and smoothed by a
+    #: zero-fill incomplete factorization instead of SIMPLE relaxation -- so `petsc` against `hostilu`
+    #: differs in the coarsening alone, which is what makes it the arm that isolates it.
     #:
     #: MEASURED ON A FULL MARCH, which is the only honest measure once the preconditioner's shape
     #: changes: against `petsc` at the same commit on the same machine, 61 steps / 208 cycles / 1246 s
@@ -612,7 +621,7 @@ if FLOW_INVERSE == "hostilu":
     #: this smoother. And every arm TIES at a positive shift (2 cycles apiece at beta 0.1), so it
     #: cannot be calibrated on a step-initial state at all: the march's hard operators are its mid-step
     #: inner iterates.
-    _HOST_FLOW = dict(
+    LEADING_SETTINGS = dict(
         sweeps=int(os.environ.get("BFS3D_FLOW_SWEEPS", "1")),
         cycles=1,
         strength_threshold=0.25,
@@ -623,7 +632,7 @@ if FLOW_INVERSE == "hostilu":
         prolongation_smoothing="none",
     )
 
-    LEADING_INVERSE = ilu_smoothed_inverse(**_HOST_FLOW)
+    LEADING_INVERSE = ilu_smoothed_inverse(**LEADING_SETTINGS)
 if FLOW_INVERSE == "simplesmooth":
     #: The arm measured best on single states: strength-of-connection aggregation with no singleton
     #: aggregates, five levels, a per-cell block velocity splitting and an undamped correction.
@@ -645,7 +654,7 @@ if FLOW_INVERSE == "simplesmooth":
     #: own build cost -- an isolated single build of the same recipe took ~1 s); frozen, it stayed at
     #: ~4 s across every refresh in a full 3-rung march. `BFS3D_FLOW_FROZEN_COARSENING=0` restores the
     #: class default (re-coarsen every refresh) for re-adjudicating the trade against coarse-space quality.
-    _SIMPLE_FLOW = dict(
+    LEADING_SETTINGS = dict(
         sweeps=int(os.environ.get("BFS3D_FLOW_SWEEPS", "2")),
         pressure_sweeps=2,
         strength_threshold=0.25,
@@ -663,7 +672,7 @@ if FLOW_INVERSE == "simplesmooth":
         ),
     )
 
-    LEADING_INVERSE = simple_smoothed_inverse(**_SIMPLE_FLOW, report=_flush_print)
+    LEADING_INVERSE = simple_smoothed_inverse(**LEADING_SETTINGS, report=_flush_print)
 
 
 if TRAILING_INVERSE is not None and DUMP_TRAILING_BLOCK:
@@ -735,16 +744,48 @@ _TRAILING_SMOOTHER_NOTE = (
 K_POSITIVITY_FLOOR = float(os.environ.get("BFS3D_K_POSITIVITY_FLOOR", "1e-8") or 0.0)
 
 #: Clip each cell's OWN `k` correction rather than capping the whole step by the worst cell
-#: (`BFS3D_K_POSITIVITY_PROJECTION=1`). ⚠️ **Still off HERE, and deliberately: the library default and
-#: the sibling case both moved to ON on 2026-08-25, on a measurement taken on the sibling and NOT on
-#: this case.** There the cap was losing a march outright -- every failing step length was the cap
-#: rather than a rung of the ladder, one of them below the shortest rung, followed by the `1 - tau`
-#: collapse derived below -- and turning the projection on completed that march AND made the
-#: already-working arm faster (703.7 s / 73 steps -> 664.0 s / 67 steps, same answer).
+#: (`BFS3D_K_POSITIVITY_PROJECTION=1`). ⚠️ **OFF HERE, and deliberately, against the library default and
+#: the sibling case -- which both moved to ON on 2026-08-25 on a measurement taken on the sibling.**
+#: There the cap was losing a march outright: every failing step length was the cap rather than a rung
+#: of the ladder, one of them below the shortest rung, and the march then died in the `1 - tau` collapse
+#: derived below. Turning the projection on completed that march AND made the already-working arm faster
+#: (703.7 s / 73 steps -> 664.0 s / 67 steps, same answer).
 #:
-#: This case has never been marched under it, so flipping it here would be an unmeasured change to a
-#: validated 3D result. Run the A/B and flip it if it holds; until then this case is deliberately out
-#: of step with its sibling, which is a state worth knowing about rather than discovering.
+#: ⚠️ **IT DOES NOT CARRY OVER. Marched here as a controlled pair (2026-08-25, every other setting in
+#: this file at its default, only this one varying, back to back on one machine), it reaches the SAME
+#: root and costs 41 % more Krylov cycles and 40 % more wall:**
+#:
+#:     |            | cap only (shipped) | + projection |
+#:     |------------|--------------------|--------------|
+#:     | steps      | 69                 | 62           |
+#:     | cycles     | 365                | 515          |
+#:     | wall       | 2268 s             | 3166 s       |
+#:     | capped (L) | 26                 | 0            |
+#:     | step redos | 7                  | 11           |
+#:     | mid-span `x_r/h` | 8.3611       | 8.3611       |
+#:
+#:
+#: ⚠️ **TAKEN AT `e46564a`, WHICH CARRIED A COUPLED-`k`-SHIFT CHANGE REVERTED THE NEXT DAY.** The revert
+#: alters the `k` shift diagonal, and that is the term this limiter clips against -- the shift sets the
+#: `k` correction, and the cap and the projection are two ways of bounding it. Both arms ran under it, so
+#: the pair is controlled and the qualitative reading holds, but re-run before quoting the figures. The
+#: default here is unaffected: it was off before this measurement and nothing here argues for flipping it.
+#: The mechanism does exactly what it claims -- the cap never binds once, against 26 times -- and the
+#: projection WINS the first two rungs outright (35 steps / 142 cycles / 851 s against 39 / 162 / 958).
+#: **The whole loss is the target rung**, where it spends 373 cycles and 2315 s against 203 and 1310,
+#: at 13.8 cycles per step against 6.8. What the cap was buying there is visible in the log: with the
+#: step no longer shortened, the line search takes full steps into iterates the carried preconditioner
+#: solves badly (inner solves pinned at 12 cycles where the shipped arm's run 2-5, and one attempt at
+#: `alpha` 1.000 whose inner residual reaches 2.7e+10), each of which trips the `RETRY_ON_CYCLES`
+#: bailout below and redoes the step -- 8 cycle-triggered redos against 2. So on THIS case the global
+#: cap is not only a positivity device; it is doing globalization work, and the per-cell clip removes
+#: that without replacing it.
+#:
+#: Consistent with the earlier full-march pair on this case (2026-08-11), which found the two arms
+#: identical at 329 cycles apiece and concluded the projection was worth keeping for robustness and not
+#: for speed. Under today's defaults the neutral result has become a real cost, so the reasoning stands
+#: and the price has risen. **Open, and untested:** `RETRY_ON_CYCLES` is calibrated under the cap, so
+#: whether the target-rung loss is the projection or a stale bailout threshold is not established here.
 #:
 #: This is the structural answer to what the floor above can only postpone. The cap is a minimum over
 #: cells, so the stagnant corner where the step face, the floor and a side wall meet -- no shear, so no
@@ -1249,9 +1290,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         # under test.
         (
             "flow inverse",
-            FLOW_INVERSE
-            if LEADING_INVERSE is None
-            else f"{FLOW_INVERSE} {_SIMPLE_FLOW if FLOW_INVERSE == 'native' else _HOST_FLOW}",
+            FLOW_INVERSE if LEADING_SETTINGS is None else f"{FLOW_INVERSE} {LEADING_SETTINGS}",
         ),
         # ⚠️ WHICH incomplete-LU IMPLEMENTATION IS LIVE, because the two differ by orders of magnitude
         # in speed and nothing recorded which one a run used. `Ilu0` ships a pure-Python reference twin

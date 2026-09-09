@@ -1088,7 +1088,7 @@ def _sub_inverse(kind):
     # other than its label is the worst failure mode a study like this has, because every check
     # downstream of it still passes.
     if kind != "simplesmooth":
-        raise ValueError(f"unknown sub-block inverse {kind!r}; use 'petsc' or 'native'.")
+        raise ValueError(f"unknown sub-block inverse {kind!r}; use 'petsc' or 'simplesmooth'.")
 
     def build(sub, n_sub_fields):
         return JacobiSmoothedInverse(

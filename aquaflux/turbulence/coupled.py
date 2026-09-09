@@ -2652,6 +2652,18 @@ def coupled_amg_continuation(
         reattachment length to four figures. Two reconstructions whose costs differed sharply under
         the cap land within 0.5 % of each other under the projection -- which is the point: the cap
         let one cell's correction set the step for every degree of freedom in the state.
+
+        ⚠️ **That is a case where the cap was losing the march. It is not a claim that the projection
+        is free.** On a three-dimensional separating benchmark where the cap loses nothing, the same
+        controlled pair goes the other way: the projection reaches the identical root in fewer outer
+        steps and costs about 40 % more Krylov cycles and wall time, all of it on the final
+        continuation rung. (That pair was taken before the coupled-``k`` shift returned to its earlier
+        form, so its magnitudes are pending re-adjudication; what it establishes -- that a case can pay
+        for the projection rather than be rescued by it -- does not turn on them.) The cap turns out to be doing globalization work there as well as keeping
+        ``k`` positive -- with the step no longer shortened, the line search takes full steps into
+        iterates the carried preconditioner solves badly. Both cases keep their own setting. If a case
+        is not losing marches to the cap, measure before assuming the projection is an improvement to
+        it.
     field_split : bool
         Precondition with a **block-triangular field split** — separate multigrid hierarchies for the
         ``[u, v, w, p]`` saddle and the ``[k, ω]`` transported scalars, retaining one triangle of the

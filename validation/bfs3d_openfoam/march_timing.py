@@ -36,11 +36,12 @@ def main() -> None:
         f"field split: {compare.FIELD_SPLIT}  |  refresh at {compare.REFRESH_ON_CYCLES} cycles",
         flush=True,
     )
-    # The host arm's own settings, every one of them, because two runs that differ only in a sweep
+    # The selected arm's own settings, every one of them, because two runs that differ only in a sweep
     # count or in whether the coarsening is frozen would otherwise produce identical headers -- and a
-    # timing comparison between them is then unattributable after the fact.
-    if compare.FLOW_INVERSE == "simplesmooth":
-        print(f"native flow block: {compare._SIMPLE_FLOW}", flush=True)
+    # timing comparison between them is then unattributable after the fact. Read off the one name the
+    # case records them under, so a new arm is covered without editing this line.
+    if compare.LEADING_SETTINGS is not None:
+        print(f"flow block settings: {compare.LEADING_SETTINGS}", flush=True)
     log_path = compare._fresh_log(HERE / "march_timing.log")
     started = time.time()
     result = compare.solve_aquaflux(log_path=log_path, checkpoint_dir=HERE / "checkpoints")

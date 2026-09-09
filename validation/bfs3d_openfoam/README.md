@@ -152,6 +152,60 @@ transposable, so the exact coupled adjoint (the point of a differentiable solver
 V-cycle — verified against finite differences on a channel case
 (`tests/integration/test_coupled_amg.py`). It needs the optional `petsc` dependency (`pip install aquaflux[petsc]`).
 
+## The k-positivity cap is doing globalization work here, and the per-cell clip removes it
+
+The step limiter that keeps `k` positive comes in two forms. The **cap** scales the whole step by the
+worst cell, so one numerically-dead cell sets the step length for all 23040 — on this mesh the stagnant
+corner where the step face, the floor and a side wall meet, which has no shear, hence no `k` production,
+hence `k` decaying with nothing to arrest it. The **per-cell projection** clips each cell's own `k`
+correction instead, leaving the cap to compute exactly 1. The projection is the library default and the
+2D sibling case's, on a measurement taken there: it rescued a march the cap was losing outright, and made
+the arm that already worked faster.
+
+**It does not carry over.** Run here as a controlled pair — everything else at its default, only this
+setting varying, back to back on one machine — both arms reach the same root and the projection costs
+41 % more Krylov cycles and 40 % more wall. *Measured 2026-08-25 at the settings this file describes:
+three-rung Reynolds continuation, field split on, `simplesmooth` flow inverse at 2 sweeps with frozen
+coarsening, in-framework trailing inverse, `zerogradient` wall condition on `k`, positivity floor
+`1e-08`, compiled incomplete-LU kernel live.*
+
+| | cap only (shipped) | + projection |
+|---|---|---|
+| steps | 69 | **62** |
+| Krylov cycles | **365** | 515 (+41 %) |
+| wall | **2268 s** | 3166 s (+40 %) |
+| positivity-capped (`L`) steps | 26 | **0** |
+| step redos | **7** | 11 |
+| mid-span `x_r/h` | 8.3611 | 8.3611 |
+
+> ⚠️ **These numbers were taken at `e46564a`, which carried a coupled-`k`-shift change that was reverted
+> the next day.** The revert alters the `k` shift diagonal, which is the term the positivity limiter
+> clips against — the shift sets the `k` correction, and the cap and the projection are two ways of
+> bounding it. Both arms ran under it, so the pair is still controlled and the qualitative reading holds,
+> but the figures describe a code state the library no longer has and should be re-run before being
+> quoted. The default here is unaffected: it was off before this measurement and nothing here argues for
+> flipping it.
+
+The mechanism does exactly what it claims — the cap never binds once, against 26 times — and the
+projection **wins the first two rungs outright** (35 steps / 142 cycles / 851 s against 39 / 162 / 958).
+The whole loss is the **target rung**: 373 cycles and 2315 s against 203 and 1310, which is 13.8 Krylov
+cycles per step against 6.8.
+
+What the cap was buying there is visible in the log. With the step no longer shortened, the line search
+takes full steps into iterates the carried preconditioner solves badly — inner solves pinned at 12 cycles
+where the shipped arm's run 2–5, and one attempt at `alpha` 1.000 whose inner residual reaches 2.7e+10 —
+and each such solve trips the per-solve cycle bailout and redoes the step, **8 times against 2**. So the
+global cap is not only a positivity device on this case; it is doing globalization work, and clipping per
+cell removes that without replacing it. The projection stays available
+(`BFS3D_K_POSITIVITY_PROJECTION=1`) and off by default here.
+
+This is consistent with the earlier full-march pair on this case, which found the two arms identical at
+329 Krylov cycles apiece and concluded the projection was worth keeping for robustness rather than for
+speed. Under today's defaults that neutral result has become a real cost, so the conclusion stands and
+the price has risen. **One thing this pair does not settle:** the per-solve cycle bailout was calibrated
+under the cap, so whether the target-rung loss belongs to the projection or to a threshold that no longer
+suits it is untested.
+
 ## Near-wall caveat
 
 This mesh **straddles** the sublayer/log crossover rather than sitting cleanly on one side, and that is
