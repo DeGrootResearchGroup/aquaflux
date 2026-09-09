@@ -45,6 +45,13 @@ dependencies = [
     "diffrax>=0.7",
     "numpy>=1.24",
     "scipy>=1.10",
+    # filelock: the inter-process lock JAX's *bounded* persistent compilation cache takes
+    # when evicting. It is a hard dependency rather than an optional one because of how its
+    # absence presents: with a size bound set and filelock missing, every cache read and
+    # write fails with a warning and the cache silently stores nothing -- worse than having
+    # no bound at all. `aquaflux/__init__.py` degrades to an unbounded cache if it is
+    # somehow absent, but the bound is the point, so it ships as a dependency.
+    "filelock>=3.12",
     # NOTE: pydantic + pyyaml are intentionally NOT dependencies yet. The
     # YAML→AST model format is the last layer to be built; it is added when that
     # work starts, not before. Do not add them to scaffold empty structure.
