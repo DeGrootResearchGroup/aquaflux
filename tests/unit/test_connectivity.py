@@ -7,6 +7,7 @@ hand-built index arrays — no mesh, no geometry.
 
 from __future__ import annotations
 
+import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.mesh import (
@@ -203,6 +204,49 @@ def test_interior_and_safe_neighbour_are_stored_not_recomputed():
     fc = _line_face_cells()
     assert fc.interior is fc.interior
     assert fc.safe_neighbour is fc.safe_neighbour
+
+
+def test_tree_at_on_owner_or_neighbour_leaves_the_cached_fields_stale():
+    """Patching `owner`/`neighbour` in place with `eqx.tree_at` does NOT recompute the cache.
+
+    This is exactly the risk the class docstring warns about, pinned here so it stays true: JAX
+    pytree unflattening (what `tree_at` rebuilds a node through) bypasses `__init__`/
+    `__post_init__`, so the three fields derived from `neighbour` keep describing the *old*
+    topology after `owner`/`neighbour` are swapped for a new one of a different shape. A relation
+    reaching this state must never be built by patching an existing instance -- see
+    `with_topology` for the sanctioned way to change one's topology.
+    """
+    fc = _line_face_cells()  # owner=[0,1,0,2], neighbour=[1,2,-1,-1] -> interior=[T,T,F,F]
+    stale = eqx.tree_at(
+        lambda c: (c.owner, c.neighbour), fc, (jnp.array([2, 1, 0]), jnp.array([-1, -1, -1]))
+    )
+    # every face is now boundary-only (3 faces, all `-1`), but `interior` still holds the OLD
+    # 4-face, two-interior mask -- shape mismatch included, to make the staleness unmistakable
+    np.testing.assert_array_equal(np.asarray(stale.interior), [True, True, False, False])
+    np.testing.assert_array_equal(np.asarray(stale.owner), [2, 1, 0])
+
+
+def test_with_topology_rebuilds_the_cached_fields_from_the_new_topology():
+    """`with_topology` is the safe alternative: it goes through the constructor, so the cache
+    reflects the new `owner`/`neighbour` rather than the old one."""
+    fc = _line_face_cells()  # owner=[0,1,0,2], neighbour=[1,2,-1,-1]
+    new_owner, new_neighbour = jnp.array([2, 1, 0]), jnp.array([-1, -1, -1])
+    rebuilt = fc.with_topology(new_owner, new_neighbour)
+    np.testing.assert_array_equal(np.asarray(rebuilt.owner), np.asarray(new_owner))
+    np.testing.assert_array_equal(np.asarray(rebuilt.interior), [False, False, False])
+    np.testing.assert_array_equal(np.asarray(rebuilt.safe_neighbour), np.asarray(new_owner))
+    # n_cells and neighbour_offset carry across unchanged
+    assert rebuilt.n_cells == fc.n_cells
+    assert rebuilt.neighbour_offset is fc.neighbour_offset
+
+
+def test_with_topology_carries_the_periodic_offset_across():
+    """A periodic relation's `neighbour_offset` survives a `with_topology` rebuild untouched."""
+    fc = _periodic_line_face_cells()
+    rebuilt = fc.with_topology(fc.owner, fc.neighbour)
+    np.testing.assert_allclose(
+        np.asarray(rebuilt.neighbour_offset), np.asarray(fc.neighbour_offset)
+    )
 
 
 def test_combine_face_values_takes_interior_then_boundary():

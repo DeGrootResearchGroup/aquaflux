@@ -30,7 +30,7 @@ import jax.numpy as jnp
 import numpy as np
 from scipy.sparse.csgraph import reverse_cuthill_mckee
 
-from .connectivity import FaceCellConnectivity, interior_mask
+from .connectivity import interior_mask
 from .graph import cell_adjacency_coo
 from .mesh import Mesh
 
@@ -85,10 +85,10 @@ def permute_cells(mesh: Mesh, perm) -> Mesh:
     # remap interior neighbours through the permutation; keep the boundary sentinel (-1)
     neighbour_new = jnp.where(interior_mask(neighbour), perm[jnp.clip(neighbour, 0)], -1)
     # A periodic seam's neighbour-image translation is per *face*, and faces are neither reordered
-    # nor swapped owner-for-neighbour here, so it carries across unchanged.
-    face_cells = FaceCellConnectivity(
-        owner_new, neighbour_new, mesh.n_cells, mesh.face_cells.neighbour_offset
-    )
+    # nor swapped owner-for-neighbour here, so it carries across unchanged -- `with_topology`
+    # rebuilds through the constructor rather than patching the existing relation's fields, so the
+    # derived interior/safe-neighbour arrays recompute from the new owner/neighbour.
+    face_cells = mesh.face_cells.with_topology(owner_new, neighbour_new)
     zones = eqx.tree_at(lambda z: z.label, mesh.cell_zones, mesh.cell_zones.label[inverse])
     renumbered = eqx.tree_at(
         lambda m: (m.face_cells, m.cell_zones),

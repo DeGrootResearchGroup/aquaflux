@@ -220,6 +220,15 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
     `__post_init__`, not properties recomputed on every access (issue #109, fixed 2026-08-18)** — a
     recomputed property folds away outside a loop but not inside a traced `while_loop` body (a
     Krylov matvec), where the compare-plus-select used to run on every iteration instead of once.
+    **That caching means they go stale under any pytree surgery that skips `__init__` — `eqx.tree_at`
+    on `owner`/`neighbour` of an existing instance included (issue #268, fixed 2026-09-09).** No
+    runtime hook catches this: JAX pytree unflattening (what `tree_at`/`jit`/`vmap` rebuild a node
+    through) bypasses `__init__`/`__post_init__`, and `eqx.Module.__check_init__` — the hook that
+    looks like a fix — is documented to run only inside `__init__`, so it is bypassed the same way.
+    The fix is structural, not a check: `with_topology(owner, neighbour)` is the one sanctioned way
+    to change an existing relation's topology (it rebuilds through the constructor, carrying
+    `n_cells`/`neighbour_offset` across), and `permute_cells` now calls it instead of hand-rolling the
+    reconstruction — never patch `owner`/`neighbour` on an existing instance directly.
     `n_faces` is still a **derived** property (`owner.shape[0]`), so it cannot disagree with the
     arrays it describes — unlike `n_cells`, which is stored because it is *not* recoverable that way
     (no face need reference the last cell). It is what a consumer sizes a per-face accumulator at
