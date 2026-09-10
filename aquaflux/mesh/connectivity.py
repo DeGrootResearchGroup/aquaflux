@@ -92,6 +92,24 @@ class FaceCellConnectivity(eqx.Module):
     the two are equivalent there; **inside** a traced ``while_loop`` body (a Krylov matvec, say)
     they do not fold, and the compare-plus-select would run on every iteration instead of once.
 
+    ⚠️ **This makes the three cached fields go stale under any pytree surgery that skips
+    ``__init__``** — ``eqx.tree_at`` on ``owner``/``neighbour`` of an *existing* instance, or any
+    other rebuild that goes through ``jax.tree_util`` unflattening rather than the constructor.
+    Every subsequent :meth:`scatter`/:meth:`scatter_max`/:meth:`scatter_min` call would then route
+    boundary/interior contributions using the old connectivity. **No runtime check catches this**:
+    JAX pytree unflattening (the mechanism behind ``tree_at``, ``jit``, ``vmap``, …) reconstructs a
+    pytree node directly from its leaves, bypassing ``__init__``/``__post_init__`` — and an
+    ``eqx.Module``'s ``__check_init__`` hook, which might look like a fix, is bypassed the same way,
+    by design (it is documented to run only inside ``__init__``, precisely so model surgery can
+    replace a leaf with anything, including a tracer). So the invariant "these three fields agree
+    with ``owner``/``neighbour``" is enforced only by never constructing an inconsistent instance in
+    the first place: **to change the topology of an existing relation, always rebuild through
+    :meth:`with_topology` (or the constructor directly) — never patch ``owner``/``neighbour`` on one
+    in place.** :func:`aquaflux.mesh.reorder.permute_cells` is the model to follow: it computes a
+    fresh ``owner``/``neighbour``, rebuilds the whole connectivity through the constructor, and only
+    then swaps that whole (already-consistent) object into the mesh via ``tree_at`` — it never
+    reaches *inside* an existing ``FaceCellConnectivity`` to patch a field.
+
     Attributes
     ----------
     owner : jnp.ndarray of int, shape ``(n_faces,)``
@@ -134,6 +152,29 @@ class FaceCellConnectivity(eqx.Module):
         object.__setattr__(
             self, "_neighbour_scatter_index", jnp.where(interior, self.neighbour, self.n_cells)
         )
+
+    def with_topology(self, owner: jnp.ndarray, neighbour: jnp.ndarray) -> FaceCellConnectivity:
+        """A new relation on a relabelled ``owner``/``neighbour``.
+
+        The sanctioned way to change an existing relation's topology: it goes through the
+        constructor, so :attr:`interior`, :attr:`safe_neighbour` and the internal scatter index are
+        recomputed from the new arrays rather than risk going stale (see the class docstring) —
+        never patch :attr:`owner`/:attr:`neighbour` on an existing instance with ``eqx.tree_at``.
+        :attr:`n_cells` and :attr:`neighbour_offset` carry across unchanged.
+
+        Parameters
+        ----------
+        owner : jnp.ndarray of int, shape ``(n_faces,)``
+            The new owner cell index per face.
+        neighbour : jnp.ndarray of int, shape ``(n_faces,)``
+            The new neighbour cell index per face (``< 0`` marks a boundary face).
+
+        Returns
+        -------
+        FaceCellConnectivity
+            A freshly constructed relation with the given topology.
+        """
+        return type(self)(owner, neighbour, self.n_cells, self.neighbour_offset)
 
     @property
     def n_faces(self) -> int:
