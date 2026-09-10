@@ -354,16 +354,26 @@ or read the gate's own log — `$TMPDIR/aquaflux-tests-<worktree>-fast-*.log`, w
 pytest summary. For the record, the gate described above finished at **13:00** for 1482 passed / 1
 skipped, half again the documented 6:34-8:53 range and a further measure of what the collision cost.
 
-**Until a guard exists, the check is manual and it is on the person starting the *tests*, not the case:**
-run `validation/run_case.sh --status` before `tools/fastgate.sh`, not only before another case. Checking
-once and launching twice is the specific way this failed — the status was clean when the case was queued
-and stale by the time the gate followed it.
+**Wherever the gate does not refuse on its own, the check is manual and it is on the person starting the
+*tests*, not the case:** run `validation/run_case.sh --status` before `tools/fastgate.sh`, not only before
+another case. Checking once and launching twice is the specific way this failed — the status was clean
+when the case was queued and stale by the time the gate followed it. **A guard closing this direction has
+been written and is pending review**; when it lands, the manual check still applies under `CI`, under any
+force-override, and in a checkout that predates it.
+
+⚠️ **The reverse direction stays open even then, and it is worth knowing which half is covered.** A guard
+on the gate can ask `run_case.sh` whether a case is live, because a case writes a run-file. Nothing asks
+the question the other way: **a case cannot see a running test tier, because no tier writes a run-file**.
+Both collisions recorded here were gate-after-case, so that half covers every instance actually observed
+— but "case starts on top of a gate" remains available, and closing it means giving the gate a run-file
+of its own, which is a larger change than the one that was asked for.
 
 ⚠️ **Do not read this as a knowledge gap to be closed by documentation.** Three sessions on the evening
 this was recorded all knew the one-heavy-job-at-a-time rule and it happened anyway, because the rule is
 enforced for one pair of jobs and merely known for the other. The durable fix is to make the collision
-unavailable — teach the gate to consult the machine-global run-file and refuse or warn — and this entry
-exists to stop the wall-clock numbers being trusted in the meantime, not to substitute for that.
+unavailable rather than better documented — teach the gate to consult the machine-global run-file and
+refuse or warn — and this entry's job is to stop the wall-clock numbers being trusted, never to stand in
+for that. Read it as a record of what happened and what the measurements are worth, not as the remedy.
 
 ## `bfs3d_species` — the newest case, and what it depends on
 
