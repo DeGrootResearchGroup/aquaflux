@@ -799,11 +799,16 @@
     are different objectives, and on a march that has to transport a front across the domain, distance
     is the one that matters.** This is the fourth time on this case that a residual improvement has
     pointed the opposite way from the physics — judge a march on `x_r/h`, never on ‖R‖.
-    - **The fallback when NOTHING is admissible is the longest FINITE rung, not the shortest (binding).**
-      Returning the shortest is a near-null step that changes nothing, which the divergence guard then
-      accepts as finite: the march reports a step and stands still. That is a *guaranteed* stall rather
-      than a slow one, and it is what produced the `α = 0.001` signature (`0.001 = 1/2**10`, the smallest
-      rung of the shipped 10-rung ladder — a value that means "nothing passed", not a sentinel).
+    - **The fallback when NOTHING is admissible is the longest ADMISSIBLE rung, not the shortest
+      (binding).** Returning the shortest is a near-null step that changes nothing, which the divergence
+      guard then accepts as finite: the march reports a step and stands still. That is a *guaranteed*
+      stall rather than a slow one, and it is what produced the `α = 0.001` signature (`0.001 = 1/2**10`,
+      the smallest rung of the shipped 10-rung ladder — a value that means "nothing passed", not a
+      sentinel).
+      ⚠️ **"Admissible" used to mean only FINITE, and finite is a very weak bound — see
+      `fallback_growth` at the end of this file.** A rung must now also be under
+      `fallback_growth * reference_norm`; the *longest qualifying* one still wins, so this reasoning is
+      unchanged, but a rung 130 decades above the reference no longer qualifies at all.
     - **The ladder can extend ABOVE α = 1 (`grow` rungs of doubling; default 0 = off).** Measured on a
       developed state: the full step moved the reattachment not at all, while `α ≈ 5.7` moved it four
       times further **and already sat inside the tolerance the acceptance rule allowed** — it was simply
@@ -1119,3 +1124,69 @@
         `rtol=1e-3` with `stagnation_iters=40`, which makes that reachable. **Practical rule:** treat
         "preconditioner ⇒ cost only" as true when solves converge comfortably, and stop trusting it
         once the cycle count is climbing toward the solver's limits.
+
+## Bounding the line-search fallback (`fallback_growth`), 2026-09-09
+
+**BUILT, and it removes a recorded catastrophe outright.** The `beta_start_warm = 0.05` arm on pitzDaily
+was on record as unusable -- 64 steps on the target rung, nine escalations, `beta` driven to 16.0, killed
+three orders from the stopping bar. **That was this hole**, and with it closed the same arm completes in
+58 steps / 390 cycles / 521 s with the target rung in 16.
+
+- **The hole.** When no rung of `backtracking_line_search`'s ladder reduces the measure, the search
+  returned the longest **finite** one, and "finite" is a very weak bound: on pitzDaily it returned a rung
+  the search had *itself measured* at `1.567e+127`, and `forward_march` then took it as the next anchor
+  unconditionally (`state = outcome.phi`, no best-of-attempts, no fallback to the pre-step state). The
+  fallback exists to avoid a null step, which is a fair argument against the *shortest* rung and no
+  argument at all for keeping one 130 decades above the reference. The search had the number in hand and
+  did not use it. A 2026-07-27 change had bounded this fallback in *length*; its **damage** was left
+  unbounded.
+
+- **The change.** `backtracking_line_search` gains `fallback_growth` (default `100.0`): a fallback rung
+  must be finite **and** under `fallback_growth * reference_norm`. Where several qualify the longest
+  still wins, so the fallback shortens rather than vanishing. Where **none** qualifies the search returns
+  `alpha = 0` -- iterate untouched, reporting `reference_norm`, which is exactly its measure there -- so
+  nothing poisoned is handed on, and the zero `alpha` is precisely the signal the march's `on_alpha`
+  retry already exists for.
+  ⚠️ **A search with no finite rung at all is a separate case and is deliberately UNCHANGED**: it still
+  reports a non-finite measure, because the divergence guard, the acceptance policy and the Newton
+  driver's convergence guard all test that number with `isfinite`
+  (`test_a_search_with_no_finite_rung_reports_a_NON_FINITE_measure` pins it).
+
+- **Why 100, measured rather than chosen.** Across two *healthy* pitzDaily arms the fallback fired on
+  **0 of 360** inner iterations -- the dual-time inner search is strict-descent, so an accepted rung
+  always reduces the measure and a fallback is by construction never reached. The largest benign fallback
+  seen anywhere was **4.5x** (and an existing unit test pins a legitimate 5x one); the harmful ones were
+  **9.2e+28** and above. Twenty-odd decades of daylight, so the value is not delicate.
+
+- **Free on a healthy march, confirmed empirically rather than by argument.** A re-run reproduced its
+  cold and warm rungs *exactly* -- 26 steps / 130 cycles / 4 clips and 12 / 123 / 4, identical to the
+  pre-change run -- which is what the 0-of-360 measurement predicts.
+
+- **What it is worth, measured two ways.** At the excursion it was built for, same anchor and same
+  direction: **before** `5.488e-02 -> 5.067e+27` at `alpha = 1.000`; **after** `5.488e-02 -> 7.301e-02`
+  at `alpha = 0.125`, the step ending *below* its rung's own reference. And end to end, on the shipped
+  bundle (`MultipleCorrectionGradient` at `STENCIL_REACH = 3`), the `0.05` arm that previously could not
+  finish:
+
+  | rung | steps | cycles | wall | esc |
+  |---|---|---|---|---|
+  | Re/100 | 28 | 123 | 186 s | 0 |
+  | Re/10 | 14 | 116 | 131 s | 0 |
+  | target Re | **16** | 151 | 204 s | 2 |
+  | **TOTAL** | **58** | **390** | **521 s** | 2 |
+
+  `x_r/h` **8.0686**, the usual root. The target rung ran at `alpha = 0.008` with two escalations -- the
+  globalization working hard and working as designed, which is what it could not do while a poisoned
+  anchor was being handed to it.
+
+- ⚠️ **DO NOT READ "16 STEPS" AS A GOOD NUMBER.** A healthy target rung on this case takes **14 to 20**
+  steps across the arms on record (`0.5` -> 17, `0.1` -> 14, the `multcorr` arm -> 20). 16 is mid-field.
+  What is notable is that the rung completed at all rather than becoming the 64-step failure.
+
+- **CONSEQUENCE, and it is the reason to land this on its own:** a recorded verdict that
+  `beta_start_warm = 0.05` is "catastrophic", and the binding statement that carrying `beta` across
+  Reynolds rungs is *blocked* because it means starting warm rungs low, were **both properties of this
+  hole** rather than of the shift. They are retracted. What remains open is the ordinary trade --
+  descent steps saved against a rung meeting a shift below what it can take -- for which the reference
+  points are the arm above and the recorded `0.1` arm (59 / 403 / 712, zero escalations, on the previous
+  bundle).

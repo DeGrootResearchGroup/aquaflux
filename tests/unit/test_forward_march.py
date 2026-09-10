@@ -1393,3 +1393,60 @@ def test_a_search_with_no_finite_rung_reports_a_NON_FINITE_measure() -> None:
     assert float(step.alpha) == 0.5**4  # the shortest rung, exactly as before
     # ...and it agrees with what a caller recomputing at that iterate would have found.
     assert not bool(jnp.isfinite(jnp.linalg.norm(poisoned(step.phi))))
+
+
+def test_the_fallback_refuses_a_rung_that_is_finite_but_an_excursion() -> None:
+    """ "Finite" is far too weak a bound on a fallback rung, and unbounded it poisons the march.
+
+    Measured on a coupled march: with nothing admissible, the search returned a rung it had itself
+    evaluated at ~1.5e+129 times the reference. A dual-time step has no acceptance policy and the
+    march's divergence test defaults to catching only non-finiteness, so that rung became the next
+    anchor. The fallback exists to avoid a null step, not to license an excursion.
+    """
+    phi, delta, reference = jnp.array([1.0]), jnp.array([1.0]), jnp.asarray(1.0)
+
+    def blows_up(p):  # every rung is finite, and every rung is enormous
+        return jnp.exp(30.0 * p)
+
+    unbounded = backtracking_line_search(
+        blows_up, phi, delta, reference, steps=4, fallback_growth=jnp.inf
+    )
+    bounded = backtracking_line_search(blows_up, phi, delta, reference, steps=4)
+
+    # Unbounded, the search hands back the longest finite rung however vast its measure.
+    assert float(unbounded.alpha) == 1.0
+    assert float(unbounded.residual_norm) > 1e20
+    # Bounded, no finite rung is under the ceiling, so no step is taken at all -- and the reported
+    # measure is the untouched iterate's own, not the excursion's.
+    assert float(bounded.alpha) == 0.0
+    assert jnp.allclose(bounded.phi, phi)
+    assert jnp.allclose(bounded.residual_norm, reference)
+
+
+def test_the_bounded_fallback_prefers_a_shorter_rung_to_no_step() -> None:
+    """The ceiling shortens the fallback where it can, and only gives up when nothing fits under it."""
+    phi, delta, reference = jnp.array([1.0]), jnp.array([1.0]), jnp.asarray(1.0)
+
+    def steep(p):  # alpha=1 -> 1.2e5 (over a ceiling of 100), alpha=1/2 -> 3.5e2, alpha=1/4 -> ~19
+        return jnp.exp(11.7 * p) / jnp.exp(11.7)
+
+    step = backtracking_line_search(steep, phi, delta, reference, steps=6, fallback_growth=100.0)
+
+    assert 0.0 < float(step.alpha) < 1.0  # a real step, shorter than the full one
+    assert float(step.residual_norm) <= 100.0 * float(reference)
+    assert jnp.allclose(step.residual_norm, jnp.linalg.norm(steep(step.phi)))
+
+
+def test_a_healthy_fallback_is_untouched_by_the_ceiling() -> None:
+    """The ceiling must not disturb an ordinary fallback, which is the common non-admissible case.
+
+    Across two healthy marches of the coupled case the fallback fired on 0 of 360 inner iterations,
+    and the largest benign fallback observed anywhere was 4.5x the reference -- more than twenty
+    decades below the default ceiling. This pins that a modest fallback still takes the full step.
+    """
+    phi, delta, reference = jnp.array([1.0]), jnp.array([4.0]), jnp.asarray(1.0)
+
+    def residual(p):  # every rung increases the residual; the full step lands at 5x the reference
+        return p
+
+    assert float(backtracking_line_search(residual, phi, delta, reference, steps=4).alpha) == 1.0
