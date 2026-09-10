@@ -551,6 +551,18 @@ def solve_reynolds_continuation(
     )
 
 
+#: The exponent relating a station's re-damping to the station's own viscosity ratio,
+#: ``redamping = ratio ** _REDAMPING_EXPONENT``.
+#:
+#: **An empirical fit through ONE calibrated point, not a derived law.** ``0.6`` is the value that
+#: reproduces the measured-good four-station setting on pitzDaily -- ``3.162 ** 0.6 = 2.0`` -- and it
+#: interpolates sensibly, giving ``1.12`` at 24 stations where the viscosity moves only 1.21x per
+#: station. What justifies the *shape* rather than the number is that a station warrants damping in
+#: proportion to how far it moves the problem, which a constant cannot express: the same constant is
+#: simultaneously too little at a coarse ramp and a runaway at a fine one.
+_REDAMPING_EXPONENT = 0.6
+
+
 class ViscosityRampHomotopy:
     """Walk the molecular viscosity down to the case's own value **within a single march**.
 
@@ -568,11 +580,19 @@ class ViscosityRampHomotopy:
     Marching the stations in one loop keeps the state, the shift and the preconditioner across every
     parameter change, and converges the target and nothing else.
 
-    **A station spans several steps, and that is not a tuning choice.** Whatever follows the parameter
-    downstream is refitted on a change: here that is the frozen preconditioner, whose refresh hook is
-    re-pointed through ``rebind`` and forced to a full rebuild. That rebuild is the most expensive
-    single operation in the march, so moving the viscosity every step would cost far more than the
-    steps it saves. :attr:`steps_per_station` is how many outer steps a station is held for.
+    **⚠️ A station was believed to need several steps, and on this case that is REFUTED (2026-09-10).**
+    The argument was that a station change re-points the refresh hook through ``rebind`` and forces a
+    full preconditioner rebuild -- the most expensive single operation in the march -- so moving the
+    viscosity every step would cost more than the steps it saves. Measured on pitzDaily the rebuild is
+    **1.2-1.6 s** against a **~9 s** outer step, about a sixth of one, and per-step viscosity is the
+    *cheapest* schedule tried: 24 stations x 1 step at ``redamping = 1.0`` costs **191** restart cycles
+    against **261** for 4 x 3 at 2.0. :attr:`steps_per_station` is how many outer steps a station is
+    held for, and on this case the answer is one.
+
+    **⚠️ The cost balance inverts on a larger case, so treat that as a pitzDaily calibration rather than
+    a general rule.** On the three-dimensional sibling a full re-materialize is recorded at ~36 s
+    against a ~34 s outer step -- a whole step per rebuild instead of a sixth of one -- so a fine ramp
+    would roughly double it there. Measure before carrying these numbers across.
 
     The ramp is **geometric**, for the same reason the ladder is: the convective nonlinearity scales
     multiplicatively with the Reynolds number, so equal ratios are equal difficulty. Station ``s`` of
@@ -611,9 +631,15 @@ class ViscosityRampHomotopy:
     steps_per_station : int
         Outer steps each ramp station is held for. The target station is held for as long as the march
         needs, so this bounds only the ramp: it occupies ``stations * steps_per_station`` steps.
-    redamping : float
+    redamping : float, optional
         What to multiply the pseudo-transient shift by on entering each ramp station, asking the march
         to re-damp for a problem that just got harder. ``1.0`` disables it.
+
+        **Defaults to the station's own viscosity ratio raised to :data:`_REDAMPING_EXPONENT`**, so a
+        station that barely moves the problem barely damps -- and to exactly ``1.0`` at
+        ``steps_per_station == 1``, which is a requirement rather than a rounding (see Raises). A
+        constant cannot serve both ends of the range: the value calibrated for a coarse ramp is a
+        runaway on a fine one.
 
         **Not a tuning knob but the ramp's answer to a measured failure.** Within a station the shift
         control divides β by its own ``grow`` each step, so a station of ``s`` steps divides it by
@@ -645,7 +671,10 @@ class ViscosityRampHomotopy:
     Raises
     ------
     ValueError
-        If ``anchor < 1``, or ``stations < 1``, or ``steps_per_station < 1``.
+        If ``anchor < 1``, or ``stations < 1``, or ``steps_per_station < 1``, or ``redamping < 1``, or
+        ``redamping != 1`` when ``steps_per_station == 1`` -- every step then *enters* a station, so the
+        march holds the step control on every step and it never adapts at all, leaving the shift to
+        run away as ``beta_start * redamping ** n``.
     """
 
     def __init__(
@@ -655,7 +684,7 @@ class ViscosityRampHomotopy:
         anchor: float,
         stations: int,
         steps_per_station: int,
-        redamping: float = 2.0,
+        redamping: float | None = None,
         rebind: Callable[[CoupledRANS], None] | None = None,
     ) -> None:
         if anchor < 1.0:
@@ -666,14 +695,27 @@ class ViscosityRampHomotopy:
             raise ValueError(f"stations must be >= 1, got {stations}")
         if steps_per_station < 1:
             raise ValueError(f"steps_per_station must be >= 1, got {steps_per_station}")
+        ratio = float(anchor) ** (1.0 / int(stations))
+        if redamping is None:
+            # Track the station's own size rather than sit at a constant: a station that moves the
+            # viscosity a little warrants little damping. `1.0` at one step per station is not a
+            # rounding of that rule but a requirement of it -- see the guard below.
+            redamping = 1.0 if int(steps_per_station) == 1 else ratio**_REDAMPING_EXPONENT
         if redamping < 1.0:
             raise ValueError(
                 f"redamping must be >= 1 (a station change damps, never accelerates), got {redamping}"
+            )
+        if int(steps_per_station) == 1 and redamping != 1.0:
+            raise ValueError(
+                "redamping must be exactly 1.0 when steps_per_station == 1: every step then enters a "
+                "station, so the step control is held on every step and never adapts at all, and the "
+                f"shift becomes beta_start * redamping ** n. Got redamping={redamping}."
             )
         self.coupled = coupled
         self.anchor = float(anchor)
         self.stations = int(stations)
         self.steps_per_station = int(steps_per_station)
+        self.ratio = ratio
         self.redamping = float(redamping)
         self.rebind = rebind
         # The station whose assembler `_assembler` currently holds. -1 is "none entered yet", which is

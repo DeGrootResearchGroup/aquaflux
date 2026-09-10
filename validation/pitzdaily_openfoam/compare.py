@@ -202,8 +202,9 @@ RATIO = float(os.environ.get("PITZ_RATIO", "10.0"))
 #: Measured on this case, both arms reaching `x_r/h` 8.0686 and `nu_t` peak 417.8, uncontended, warm
 #: compilation cache, commit 72c9a96, `simplesmooth` flow inverse:
 #:
-#:     ladder (PITZ_RAMP=off)          69 outer steps / 417 restart cycles / 555 s
-#:     ramp   (the default)            40 outer steps / 261 restart cycles / 363 s
+#:     ladder (PITZ_RAMP=off)                69 outer steps / 417 restart cycles / 555 s
+#:     ramp, 4 stations x 3 steps            40 outer steps / 261 restart cycles / 363 s
+#:     ramp, 24 stations x 1 step (default)  33 outer steps / 191 restart cycles / 296 s
 #:
 #: ⚠️ Read the CYCLE column. Outer-step and restart-cycle counts are deterministic and survive machine
 #: contention; wall clock does not -- a bit-identical trajectory measured 1325 s against 555 s on this
@@ -225,12 +226,20 @@ RATIO = float(os.environ.get("PITZ_RATIO", "10.0"))
 #: converges the target and nothing else. The ramp spans the SAME viscosity range as the ladder
 #: (`RATIO ** N_POINTS`), so the two arms differ in how the span is walked, not in how far.
 #:
-#: ⚠️ A station spans several steps ON PURPOSE. Each change re-points the refresh hook and forces a
-#: FULL preconditioner rebuild -- the most expensive single operation in the march -- so moving the
-#: viscosity every step would cost far more than the steps it saves.
+#: ⚠️ ONE STEP PER STATION, and the opposite was believed until it was measured. The argument for long
+#: stations was that each change re-points the refresh hook and forces a FULL preconditioner rebuild,
+#: so per-step viscosity would cost more than it saves. On this case a rebuild is 1.2-1.6 s against a
+#: ~9 s outer step -- a sixth of one -- and the fine ramp is the cheapest schedule tried (11 arms).
+#: The reason it wins is not the rebuild accounting but the shift: at 24 stations the viscosity moves
+#: 1.21x per station instead of 3.16x, so the problem barely moves, no re-damping is needed, and beta
+#: descends monotonically through the ramp. The coarse schedule's re-damping very nearly cancelled the
+#: descent (net 0.889 per station), handing the target station beta = 0.936 and making it re-descend
+#: beta itself -- the very cost this arm exists to remove, recreated inside the ramp.
+#: ⚠️ THE BALANCE INVERTS ON A LARGER CASE: on the 3D sibling a rebuild is ~36 s against a ~34 s step.
+#: These values are a pitzDaily calibration; measure before carrying them anywhere else.
 RAMP = os.environ.get("PITZ_RAMP", "continuous")
-RAMP_STATIONS = int(os.environ.get("PITZ_RAMP_STATIONS", "4"))
-RAMP_STEPS_PER_STATION = int(os.environ.get("PITZ_RAMP_STEPS", "3"))
+RAMP_STATIONS = int(os.environ.get("PITZ_RAMP_STATIONS", "24"))
+RAMP_STEPS_PER_STATION = int(os.environ.get("PITZ_RAMP_STEPS", "1"))
 
 #: ⚠️ RE-DAMP ON ENTERING EACH STATION, AND THIS IS LOAD-BEARING RATHER THAN A KNOB. Within a station
 #: the control divides the shift by `grow` every step (1.5 ** 3 = 3.375 per station here). Unopposed,
@@ -246,7 +255,9 @@ RAMP_STEPS_PER_STATION = int(os.environ.get("PITZ_RAMP_STEPS", "3"))
 #: mismatch's size is not the discriminator either: this same march converged at beta = 0.005 against
 #: the same 0.05 preconditioner (a 10x mismatch) with alpha = 1.000, where 4.2x was fatal mid-ramp.
 #: The wall belongs to `(state, beta)`. Damping while the problem MOVES is the distinction.
-RAMP_REDAMPING = float(os.environ.get("PITZ_RAMP_REDAMPING", "2.0"))
+RAMP_REDAMPING = (
+    float(os.environ["PITZ_RAMP_REDAMPING"]) if "PITZ_RAMP_REDAMPING" in os.environ else None
+)
 
 #: The dual-time inner loop. `inner_tol` 1e-2 rather than a tighter value: measured on the
 #: three-dimensional case, 1e-3 bought nothing over 1e-2 while costing a third of the march.

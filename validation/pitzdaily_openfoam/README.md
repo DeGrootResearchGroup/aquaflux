@@ -86,7 +86,10 @@ exact coupled adjoint).
 
 **The default is a single march whose viscosity ramps down to the case's own value.** It walks the same
 span the rung ladder does — anchored at `RATIO ** N_POINTS` below the target — holding each of
-`PITZ_RAMP_STATIONS` geometric stations for `PITZ_RAMP_STEPS` outer steps before arriving. Setting
+`PITZ_RAMP_STATIONS` geometric stations for `PITZ_RAMP_STEPS` outer steps before arriving. The
+default is 24 stations of one step: fine enough that the viscosity moves only 1.21x per station,
+so the problem barely moves between steps and the pseudo-timestep can grow monotonically through
+the whole ramp rather than being re-damped at every change. Setting
 `PITZ_RAMP=off` returns to the rung ladder, which is kept as the comparison arm rather than as a
 supported path. Both arms build their preconditioner, logging and step control through the same code,
 so they differ in how the span is traversed and not in how far.

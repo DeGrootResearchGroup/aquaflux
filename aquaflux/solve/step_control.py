@@ -164,6 +164,28 @@ class ShiftStrengthControl(eqx.Module):
         At ``factor = 2`` the net is ``3.375 / 2 = 1.69`` per station -- β roughly halves, reaching
         0.062 rather than 0.004, and the wall is never approached.
 
+        **⚠️ CORRECTED 2026-09-10 — the arithmetic above omitted the hold, and the error hid why the
+        coarse schedule under-performs.** An entering step is HELD, so it forgoes its own ``/grow``: a
+        station of ``s`` steps divides β only ``s - 1`` times, and the net is
+        ``redamping * grow ** (1 - s)``, **not** ``redamping / grow ** s``. At ``(3, 2.0)`` that is
+        ``2 / 1.5² = 0.889`` — β barely moves across a station instead of halving. Measured, the shipped
+        four-station ramp hands the target station β = **0.936**, not the 0.062 the old arithmetic
+        predicted, and the target then spends ~13 of its 28 steps walking β down to ``beta_min``. That
+        is the *same* "every rung restarts the pseudo-timestep ramp" cost the homotopy exists to
+        delete — removed from between the rungs and re-created inside the ramp.
+
+        The re-damping is therefore a **workaround for a coarse ramp, not a requirement of the
+        design**. Make the stations fine enough and it is unnecessary: at 24 stations of one step the
+        viscosity moves 1.21x per station instead of 3.16x, the problem barely moves, and β descends
+        monotonically straight through the 0.012 that was fatal at four stations. That is this
+        docstring's own ``(state, β)`` point one level down — the lever is to make the problem move
+        LESS PER STEP, not to damp after it has moved a lot. Measured on pitzDaily: 24x1 at
+        ``redamping = 1.0`` costs **191** restart cycles against **261** for 4x3 at 2.0.
+
+        ⚠️ ``redamping > 1`` is structurally wrong at ``steps_per_station == 1``: every step then enters
+        a station, so the control is held on every step and never adapts at all — β becomes
+        ``redamping ** n`` and runs away. Nothing currently rejects that combination.
+
         ⚠️ **The wall is a property of ``(state, β)``, not of β.** The same march converged comfortably
         at β = 0.005 once the ramp had arrived and the state had settled -- ``alpha`` 1.000 at 3-5
         cycles a step, at a shift that was fatal mid-ramp. So this must NOT be implemented as a floor

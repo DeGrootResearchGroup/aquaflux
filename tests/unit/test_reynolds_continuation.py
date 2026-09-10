@@ -683,3 +683,42 @@ def test_the_ramp_refuses_a_configuration_that_cannot_walk_down_to_the_target(kw
     """An anchor below one ramps the wrong way, and a zero budget is a ramp that never runs."""
     with pytest.raises(ValueError, match=message):
         ViscosityRampHomotopy(_tiny_coupled(), **kwargs)
+
+
+def test_the_ramp_derives_its_re_damping_from_the_stations_own_ratio() -> None:
+    """A station that barely moves the problem barely damps -- which a constant cannot express.
+
+    Pinned at both ends of the range rather than at one point: the coarse setting must reproduce the
+    value that was calibrated by measurement, and the fine one must come out near unity, because the
+    same constant serving both is exactly what the derivation replaces.
+    """
+    coarse = ViscosityRampHomotopy(_tiny_coupled(), anchor=100.0, stations=4, steps_per_station=3)
+    fine = ViscosityRampHomotopy(_tiny_coupled(), anchor=100.0, stations=24, steps_per_station=3)
+
+    assert coarse.redamping == pytest.approx(2.0, rel=1e-2)  # the measured-good four-station value
+    assert fine.redamping == pytest.approx(1.12, rel=1e-2)
+    assert coarse.redamping == pytest.approx(coarse.ratio**0.6)
+
+
+def test_one_step_per_station_forces_re_damping_off() -> None:
+    """At one step per station every step ENTERS one, so the control is held on every step.
+
+    It then never adapts at all and the shift is whatever ``redamping ** n`` makes it -- a runaway, not
+    a damping. The default must therefore be exactly 1.0 there whatever the ratio rule would give, and
+    an explicit value must be refused rather than silently corrected.
+    """
+    ramp = ViscosityRampHomotopy(_tiny_coupled(), anchor=100.0, stations=24, steps_per_station=1)
+    assert ramp.redamping == 1.0
+
+    with pytest.raises(ValueError, match=r"must be exactly 1\.0 when steps_per_station == 1"):
+        ViscosityRampHomotopy(
+            _tiny_coupled(), anchor=100.0, stations=24, steps_per_station=1, redamping=2.0
+        )
+
+
+def test_an_explicit_re_damping_still_overrides_the_derived_one() -> None:
+    """The derivation is a default, not a policy -- a caller who measured a value keeps it."""
+    ramp = ViscosityRampHomotopy(
+        _tiny_coupled(), anchor=100.0, stations=4, steps_per_station=3, redamping=3.0
+    )
+    assert ramp.redamping == 3.0
