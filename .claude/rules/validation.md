@@ -307,6 +307,29 @@ What the same comparison *does* establish, at no cost: step 1's `|R|` is **bit-i
 across the contended and the quiet run — a stronger form of the determinism above than agreement to four
 figures.
 
+⚠️ **Contention is only ONE of the reasons a timing does not travel, and the other two are cross-checkout
+rather than cross-process — the same lesson, three instances, all invisible in the log.** The root
+briefing already records both of the others; what follows is only the connection to this section, so that
+a reader chasing an unexplained wall-clock difference checks all three rather than the one they happened
+to read about.
+
+- **The compiled ILU(0) kernel is a gitignored artifact.** A fresh worktree silently runs the pure-Python
+  twin, and its timings are incomparable to any other checkout's until `tools/build_ext.sh` has been run
+  there. `ilu0.COMPILED` says which is live and both cases' banners print it — check it, because nothing
+  else will. (This is not hypothetical housekeeping: the worktree this entry was written in reported
+  `COMPILED = False` while it was being written.)
+- **The JAX compilation cache is shared but keyed on the compiled program.** A branch carrying different
+  solver code takes misses in a warm checkout, so the first run on a new branch is partly measuring
+  compilation. Nothing in the log distinguishes that from the case being slower.
+
+Together with the step-1 confound above: **a cold-cache premium and a contention premium are two of at
+least three ways the same seconds can go missing, and a single run separates none of them.** A bound of
+roughly 90-360 s has been proposed for the cold-cache half by grading it against the contention ratios;
+it is **not recorded here**, because it assumes single-threaded compilation is starved by a `-n auto`
+tier in the same proportion as the numerics, and that assumption is exactly the one this section declines
+to make elsewhere. The run that would settle it — quiet machine, deliberately cold cache, extension
+built — is cheap and has not been done.
+
 ⚠️ **`pgrep -f "tools/fastgate.sh"` DOES NOT TELL YOU WHETHER A GATE IS RUNNING.** It matches any
 *watcher* whose own command line contains that string — an `until ! pgrep -f "tools/fastgate.sh"; do
 sleep` loop matches itself and waits forever — so the poll reports "running" long after the gate exited,
