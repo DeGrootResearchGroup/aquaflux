@@ -194,10 +194,23 @@ N_POINTS = int(os.environ.get("PITZ_N_POINTS", "2"))
 #: `3.1623 ** 4` and `2.1544 ** 6` all anchor at Re/100.
 RATIO = float(os.environ.get("PITZ_RATIO", "10.0"))
 
-#: ⚠️ WALK THE VISCOSITY DOWN INSIDE ONE MARCH INSTEAD OF SOLVING A LADDER OF RUNGS
-#: (`PITZ_RAMP=continuous`). The ladder above solves each Reynolds rung as its own march, which pays
-#: two costs per rung that a single march does not, both measured on this case at the shipped
-#: configuration (69 outer steps, 417 restart cycles, 929 s of marching after a 396 s cold compile):
+#: ⚠️ THE DEFAULT SINCE 2026-09-10: WALK THE VISCOSITY DOWN INSIDE ONE MARCH RATHER THAN SOLVING A
+#: LADDER OF RUNGS. `PITZ_RAMP=off` returns to `solve_reynolds_continuation`, which is kept as the
+#: comparison arm rather than as a supported path -- this case is where the coupled march's work lands,
+#: and it lands on the ramp.
+#:
+#: Measured on this case, both arms reaching `x_r/h` 8.0686 and `nu_t` peak 417.8, uncontended, warm
+#: compilation cache, commit 72c9a96, `simplesmooth` flow inverse:
+#:
+#:     ladder (PITZ_RAMP=off)          69 outer steps / 417 restart cycles / 555 s
+#:     ramp   (the default)            40 outer steps / 261 restart cycles / 363 s
+#:
+#: ⚠️ Read the CYCLE column. Outer-step and restart-cycle counts are deterministic and survive machine
+#: contention; wall clock does not -- a bit-identical trajectory measured 1325 s against 555 s on this
+#: machine depending only on what else was running.
+#:
+#: The ladder solves each Reynolds rung as its own march, which pays two costs per rung that a single
+#: march does not:
 #:
 #:   * **Each rung is converged, and the next rung's viscosity jump immediately undoes it.** Rung 1
 #:     spent 12 of its 28 steps taking `|R|` from 4.5e-04 to 7.2e-06 -- and rung 2 opened at 4.5e-02,
@@ -215,7 +228,7 @@ RATIO = float(os.environ.get("PITZ_RATIO", "10.0"))
 #: ⚠️ A station spans several steps ON PURPOSE. Each change re-points the refresh hook and forces a
 #: FULL preconditioner rebuild -- the most expensive single operation in the march -- so moving the
 #: viscosity every step would cost far more than the steps it saves.
-RAMP = os.environ.get("PITZ_RAMP", "off")
+RAMP = os.environ.get("PITZ_RAMP", "continuous")
 RAMP_STATIONS = int(os.environ.get("PITZ_RAMP_STATIONS", "4"))
 RAMP_STEPS_PER_STATION = int(os.environ.get("PITZ_RAMP_STEPS", "3"))
 
@@ -964,6 +977,17 @@ def solve_aquaflux(
         (
             "Reynolds continuation points",
             f"{N_POINTS} (ratio {RATIO:g}, anchor Re/{RATIO**N_POINTS:g})",
+        ),
+        # ⚠️ HOW THE SPAN ABOVE IS WALKED, because the two arms read identically without it. The ramp
+        # arm reports `[point 1/1 ...]` and otherwise logs nothing about its own schedule, so a run's
+        # stations, station length and re-damping were not recoverable from its log -- and a schedule
+        # comparison whose arms cannot be told apart afterwards is not a measurement.
+        (
+            "viscosity ramp",
+            f"{RAMP_STATIONS} stations x {RAMP_STEPS_PER_STATION} steps "
+            f"({RAMP_STATIONS * RAMP_STEPS_PER_STATION} ramp steps), redamping {RAMP_REDAMPING:g}"
+            if RAMP == "continuous"
+            else f"off ({RAMP}) -- the span is walked as a rung ladder",
         ),
         ("k wall BC", K_WALL),
         ("preconditioner refresh", f"on {REFRESH_ON_CYCLES} restart cycles (mid-step)"),

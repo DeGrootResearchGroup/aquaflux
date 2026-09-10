@@ -1763,7 +1763,13 @@ tuning follow-up noted above.
     at the defaults) and four of them take β 0.5 → 0.013, onto this case's measured wall at β ≈ 0.012.
     See the `redamp` bullet in `.claude/rules/solve-march.md` for the failure and the four-arm
     measurement; the short version is 40 steps / 261 cycles with it against 50 / 301 without.
-  - **The validation arm is `PITZ_RAMP=continuous` on `validation/pitzdaily_openfoam/compare.py`**, with
+  - **⚠️ IT IS THE DEFAULT on `validation/pitzdaily_openfoam/compare.py` since 2026-09-10** (`PITZ_RAMP`,
+    with `PITZ_RAMP=off` returning to `solve_reynolds_continuation` as the comparison arm rather than as
+    a supported path). Flipped on the user's decision that the coupled march's upcoming work lands here
+    and the ladder is not being developed further. **⚠️ The ramp has been measured on THIS CASE ONLY and
+    on one run per arm** — `bfs3d_openfoam` has never run it, and that case is where the ladder's rung
+    structure was originally calibrated, so it is the one most likely to disagree. The defaults are
+    configured with
     `PITZ_RAMP_STATIONS` / `PITZ_RAMP_STEPS`. It anchors at `RATIO ** N_POINTS`, i.e. **the same span the
     ladder walks**, so the two arms differ in how the span is traversed and not in how far — and it
     builds its engine by calling the ladder arm's own `point_setup`, so they are preconditioned, logged

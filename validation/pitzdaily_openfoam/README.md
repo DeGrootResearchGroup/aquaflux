@@ -82,13 +82,14 @@ Log-ω transport is separately validated on a smaller channel
 (`tests/integration/test_coupled_rans.py`: converges to the direct fixed point, ω > 0 by construction,
 exact coupled adjoint).
 
-### Two ways to walk the Reynolds span
+### How the Reynolds span is walked
 
-The rung ladder above is the default (`PITZ_RAMP=off`). `PITZ_RAMP=continuous` walks the **same**
-viscosity span — anchored at `RATIO ** N_POINTS` below the target — inside a **single** march instead,
-holding each of `PITZ_RAMP_STATIONS` geometric stations for `PITZ_RAMP_STEPS` outer steps before
-arriving at the case's own viscosity. Both arms build their preconditioner, logging and step control
-through the same code, so they differ in how the span is traversed and not in how far.
+**The default is a single march whose viscosity ramps down to the case's own value.** It walks the same
+span the rung ladder does — anchored at `RATIO ** N_POINTS` below the target — holding each of
+`PITZ_RAMP_STATIONS` geometric stations for `PITZ_RAMP_STEPS` outer steps before arriving. Setting
+`PITZ_RAMP=off` returns to the rung ladder, which is kept as the comparison arm rather than as a
+supported path. Both arms build their preconditioner, logging and step control through the same code,
+so they differ in how the span is traversed and not in how far.
 
 The ladder pays two costs per rung that one march does not, and a run of the default arm shows both:
 
@@ -104,8 +105,8 @@ eddy viscosity, on a quiet machine with a warm compilation cache:
 
 | arm | outer steps | restart cycles | wall |
 |---|---|---|---|
-| Reynolds ladder (the default) | 69 | 417 | 555 s |
-| single march, viscosity ramp | 40 | 261 | 363 s |
+| Reynolds ladder (`PITZ_RAMP=off`) | 69 | 417 | 555 s |
+| single march, viscosity ramp (default) | 40 | 261 | 363 s |
 
 Read the restart-cycle column rather than the clock: cycle counts are deterministic, while a wall time
 on a shared machine moves with whatever else is running (a parallel test tier alongside this case was
