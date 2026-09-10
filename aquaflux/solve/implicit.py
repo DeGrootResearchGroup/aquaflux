@@ -277,6 +277,7 @@ def backtracking_line_search(
     growth=1.0,
     grow=0,
     max_alpha=jnp.inf,
+    fallback_growth=100.0,
 ):
     """Backtrack the step length: the largest ``alpha`` in ``{2**grow, ..., 1, ..., 1/2**steps}`` with
     ``norm(R(phi + alpha delta)) < reference_norm``, falling back to the longest finite rung no longer
@@ -331,6 +332,17 @@ def backtracking_line_search(
         full step, and a ladder starting at one cannot reach it. A growth rung is only ever reachable
         by **passing** the acceptance test: the fallback taken when nothing is admissible is capped at
         the full step, so it can never land on one.
+    fallback_growth : float, optional
+        The most a **fallback** rung may raise the measure above ``reference_norm`` and still be taken
+        (default ``100.0``). A fallback is only reached when nothing passed the acceptance test, so it
+        is expected to be worse than the reference -- this bounds *how much* worse. Where every finite
+        rung exceeds it the search returns ``alpha = 0``: the iterate untouched, reporting
+        ``reference_norm``, which is exactly its measure there, so nothing poisoned is handed on and
+        the zero ``alpha`` tells the march what happened. ``jnp.inf`` restores the unbounded fallback.
+
+        A search with **no finite rung at all** is a separate case and is unchanged: it still reports
+        a non-finite measure, because the divergence guard, the acceptance policy and the Newton
+        driver's convergence guard all test this number with ``isfinite``.
     max_alpha : float or jnp.ndarray, optional
         An upper bound on the step fraction, applied to **every** rung including the growth rungs.
         The seam for a constraint the residual cannot express: a field that must stay positive gives
@@ -393,6 +405,18 @@ def backtracking_line_search(
     # the divergence guard then accepts as finite, so the march reports a step and stands still -- a
     # guaranteed stall rather than a slow one, and the observed failure mode on a stiff coupled march.
     #
+    # ...but "finite" is a very weak bound, and on its own it is not enough. Measured on a coupled RANS
+    # march, a fallback returned a rung this search had itself evaluated at 1.5e+129 times the
+    # reference; nothing downstream rejected it (a dual-time step has no acceptance policy, and the
+    # march's divergence test defaults to catching only non-finiteness), so it became the next anchor.
+    # `fallback_growth` bounds the fallback the way `growth` bounds acceptance.
+    #
+    # Why a default far above any healthy value and far below any harmful one: across two healthy
+    # marches of that case the fallback fired on 0 of 360 inner iterations -- the inner search is
+    # strict-descent, so an accepted rung always reduces the measure and a fallback is by construction
+    # never reached -- the largest benign fallback seen anywhere was 4.5x, and the harmful ones were
+    # 9.2e+28 and above. Twenty-odd decades of daylight, so the value is not delicate.
+    #
     # The cap at one is not incidental. Without it, extending the ladder upward also extends the
     # FALLBACK upward, so a step with no admissible length quietly becomes a multiple of the full step:
     # measured with two growth rungs, a march took alpha = 4 as a fallback and multiplied its residual
@@ -404,6 +428,10 @@ def backtracking_line_search(
     # compiles once. Walking longest-first means the first finite rung encountered IS the longest
     # finite one, so the fallback needs no second pass.
     admissible = growth * reference_norm
+    # The ceiling on a FALLBACK rung. Distinct from `admissible`, and necessarily much looser: a
+    # fallback is by definition a rung that failed the acceptance test, so it is expected to be worse
+    # than the reference -- just not unboundedly worse.
+    bounded = fallback_growth * reference_norm
     lowest = -grow  # rung index; alpha = 0.5**index, so negative indices are steps longer than one
 
     # Each rung's measure is carried beside its alpha -- both for the accepted rung and for the
@@ -411,34 +439,55 @@ def backtracking_line_search(
     # returned pair describes two different steps. This is what lets the caller judge the step it
     # gets without evaluating the residual again at a point the ladder already visited.
     def cond(carry):
-        index, _, _, found, _, _, _ = carry
+        index, _, _, found, _, _, _, _ = carry
         return (~found) & (index <= steps)
 
     def body(carry):
-        index, chosen, chosen_norm, _, longest_finite, longest_norm, seen_finite = carry
+        (
+            index,
+            chosen,
+            chosen_norm,
+            _,
+            longest_finite,
+            longest_norm,
+            seen_eligible,
+            seen_finite,
+        ) = carry
         # Capped, not rejected: the cap makes an admissible step reachable by construction.
         alpha = jnp.minimum(0.5**index, max_alpha)
         value = norm(residual_fn(phi + alpha * delta))
         finite = jnp.isfinite(value)
         accepted = finite & (value < admissible)
-        # The fallback candidate ignores rungs longer than the full step (index < 0).
-        eligible = finite & (index >= 0)
-        first_finite = eligible & ~seen_finite
+        # The fallback candidate ignores rungs longer than the full step (index < 0), and -- unlike
+        # the plain finiteness test that used to gate it -- must also come in under `bounded`.
+        finite_here = finite & (index >= 0)
+        eligible = finite_here & (value <= bounded)
+        first_eligible = eligible & ~seen_eligible
         return (
             index + 1,
             jnp.where(accepted, alpha, chosen),
             jnp.where(accepted, value, chosen_norm),
             accepted,
-            jnp.where(first_finite, alpha, longest_finite),
-            jnp.where(first_finite, value, longest_norm),
-            seen_finite | eligible,
+            jnp.where(first_eligible, alpha, longest_finite),
+            jnp.where(first_eligible, value, longest_norm),
+            seen_eligible | eligible,
+            seen_finite | finite_here,
         )
 
     shortest = jnp.minimum(jnp.asarray(0.5**steps), max_alpha)
     # The seeds are only ever read when the loop found nothing finite at all, in which case every
     # rung's measure was non-finite and so is this one -- which is what the divergence guard is for.
     seed_norm = jnp.asarray(jnp.inf, dtype=jnp.asarray(reference_norm).dtype)
-    _, chosen, chosen_norm, found, longest_finite, longest_norm, _ = jax.lax.while_loop(
+    (
+        _,
+        chosen,
+        chosen_norm,
+        found,
+        longest_finite,
+        longest_norm,
+        seen_eligible,
+        seen_finite,
+    ) = jax.lax.while_loop(
         cond,
         body,
         (
@@ -449,10 +498,22 @@ def backtracking_line_search(
             shortest,
             seed_norm,
             jnp.asarray(False),
+            jnp.asarray(False),
         ),
     )
-    alpha = jnp.where(found, chosen, longest_finite)
-    return LineSearchStep(phi + alpha * delta, alpha, jnp.where(found, chosen_norm, longest_norm))
+    # Three outcomes, in order of preference. An admissible rung is taken as before. Failing that, the
+    # longest rung that is finite AND under `bounded`. Failing THAT -- every finite rung is an
+    # excursion -- no step at all: `alpha = 0` leaves the iterate untouched and reports its own
+    # measure, which is `reference_norm` exactly, so nothing poisoned is handed on and the zero alpha
+    # tells the march what happened. The last case is deliberately NOT reached when no rung was finite
+    # at all: that keeps the non-finite seed, because every consumer of this measure tests it with
+    # `isfinite` and a finite one would present a poisoned step as a healthy one.
+    stalled = seen_finite & ~seen_eligible
+    alpha = jnp.where(found, chosen, jnp.where(stalled, jnp.zeros_like(chosen), longest_finite))
+    measure = jnp.where(
+        found, chosen_norm, jnp.where(stalled, jnp.asarray(reference_norm), longest_norm)
+    )
+    return LineSearchStep(phi + alpha * delta, alpha, measure)
 
 
 def _damped_newton_step(
