@@ -77,7 +77,8 @@ paths:
       stated once, with what to do about it, at the top of `.claude/rules/solve-globalization.md`. The
       numbers are here; the lesson is there. Before `rebase`, the ratio rule
       mis-read each station change as divergence and doubled β at two of four changes. That was wrong
-      *and* was the only thing holding β out of a regime the preconditioner cannot invert. Removing it,
+      *and* was the only thing holding β out of a regime where the frozen preconditioner stops tracking
+      the operator. Removing it,
       β walked 0.5 → 0.148 → 0.044 → **0.013** (`grow ** steps_per_station` = `1.5³` = 3.375 per
       station, unopposed) into a wall at **β ≈ 0.012**: the line search collapsed to `alpha = 0`, `|R|`
       went 4.4e-03 → 4.4e-01, and the retry ladder escalated β to ~2 to recover. Cost: 50 steps / 301
@@ -87,6 +88,18 @@ paths:
       old brake did, since `_adapt` chose brake *instead of* grow rather than in addition to it. A test
       written expecting `factor ** changes` measured `(factor * grow) ** changes`; the implementation
       was right and the expectation wrong.
+    - **⚠️ TWO DIFFERENT FLOORS, and conflating them mis-states the mechanism.** `beta_min`
+      (on the step control) floors the shift the **operator** is solved with; `beta_floor` (on the
+      preconditioner refresh, `PC_BETA_FLOOR = 0.05` on this case) floors only the preconditioner's
+      **copy** — `pc_beta = max(beta, beta_floor)` — so the V-cycle stays in a regime it inverts well
+      while the solved system keeps the small shift it needs for pseudo-transient progress. During the
+      collapse the preconditioner was built at **0.05 throughout and never saw 0.012**, so this is not
+      "a shift the preconditioner cannot invert": it is the **operator/preconditioner mismatch** that
+      opens once the operator's β falls below that floor.
+      And the mismatch's *size* is not the discriminator either — the same march later converged
+      comfortably at β = 0.005 against the same 0.05 preconditioner, a **10x** mismatch, where **4.2x**
+      was fatal mid-ramp. That is the `(state, β)` point again, and it is the reason a floor on either
+      quantity is the wrong repair.
     - **⚠️ THE WALL BELONGS TO `(state, β)`, NOT TO β — do NOT build a learned floor under β.** The same
       march converged at **β = 0.005** with `alpha` 1.000 at 3-5 cycles a step once the ramp had
       arrived and the state had settled — a shift that was fatal at step 13 and comfortable at step 47.
@@ -107,10 +120,13 @@ paths:
       the floor. `redamp` infers nothing: it damps during exactly the interval in which the problem is
       changing and stops when it stops, so the control is never asked to tell a wrong step from a
       changed problem — it is told, from outside, at the one moment the answer is certain.
-    - **Corollary: no single `beta_min` can be right for this case, so "pick a better constant" is not
-      the repair either.** 0.005 is an order of magnitude *below* the wall the march hit mid-ramp and
-      is *exactly* where it converges once arrived. The shipped value was never justified against
-      evidence; this measurement says it is unjustifiable as a constant.
+    - **⚠️ Corollary, CORRECTED: the suspicious constant is `PC_BETA_FLOOR`, not `beta_min`.** An
+      earlier draft of this entry said no single `beta_min` could be right here. That was wrong, and it
+      came from conflating the two floors above: `beta_min = 0.005` is demonstrably *fine* — the march
+      converges there, comfortably, at the settled state. What the collapse locates is the level at
+      which the preconditioner **stops following** the operator, and that is `PC_BETA_FLOOR = 0.05`, a
+      value chosen against no recorded evidence on this case. Whether 0.05 is right, and whether the
+      floor should track the ramp rather than sit still, is open and unmeasured.
     - `shift_factor` defaults to `1.0` on the protocol, so a homotopy indifferent to the shift pays
       nothing and the march is byte-identical to one that never asks.
   - **The damping anchor `‖R₀‖` is taken at the FIRST STATION, not at the target.** It is the scale the

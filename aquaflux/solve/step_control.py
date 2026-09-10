@@ -181,11 +181,19 @@ class ShiftStrengthControl(eqx.Module):
         told, from outside, at the one moment that answer is known for certain. That is why it does not
         degrade over a long march the way a learned bound does.
 
-        **A corollary worth stating, because the obvious repair is also wrong.** The same measurement
-        says no single ``beta_min`` can be right for this case: 0.005 is an order of magnitude *below*
-        the wall the march hit mid-ramp and is *exactly* where it converges once arrived. "Pick a better
-        constant" therefore does not fix it, and neither does learning one. What the march needs is
-        nothing forbidden and damping applied while the problem moves.
+        **⚠️ Two different floors, and they are easy to conflate.** :attr:`ShiftStrengthControl.beta_min`
+        bounds the shift the **operator** is solved with. A preconditioner refresh separately floors its
+        **own copy** (``pc_beta = max(beta, beta_floor)``), so the frozen operator can be built at a
+        larger shift than the one being solved — deliberately, since the V-cycle degrades as the shift
+        vanishes while the operator still needs the small one to make progress. The wall this method
+        exists for is therefore **not** a shift the preconditioner cannot invert; it is the mismatch
+        that opens once the operator's shift falls below that floor. On the measured case the
+        preconditioner sat at 0.05 throughout and never saw the 0.012 the operator reached.
+
+        Nor is the mismatch's *size* the discriminator: the same march converged comfortably at an
+        operator shift of 0.005 against that same 0.05 preconditioner — a 10x mismatch — where 4.2x was
+        fatal mid-ramp. Which is the ``(state, β)`` point once more, and the reason a floor under either
+        quantity is the wrong repair.
         """
         beta = state[0] if isinstance(state, tuple) else state
         memo = state[1] if isinstance(state, tuple) else None

@@ -1298,6 +1298,17 @@ After **every code change**, before considering the task complete, review and ac
    - **The matching `.claude/rules/*.md`** — the per-subsystem design record: binding decisions,
      interfaces, class/function names, file paths, and `BUILT` / `Not yet built` status. Inline
      the fact rather than pointing at any private note.
+     ⚠️ **"Matching" means the rule whose `paths:` GLOB THE FILE YOU EDITED — check the frontmatter,
+     do not go by subject.** This item asks which file *describes* your change; it does not ask whether
+     that file will be *read*, and those come apart precisely when a rule's `paths:` and its prose have
+     drifted. A rule that does not glob the file it governs never auto-loads for the person editing it,
+     so binding prose put there is invisible exactly when it is needed. Two sessions hit this on one
+     evening (2026-09-09) and **both passed this checklist as written**: one added methods to
+     `solve/step_control.py` and recorded them in `solve-march.md` (which globs `march.py`, not
+     `step_control.py`); the other *edited a binding class contract* into the same wrong file, making it
+     more load-bearing on the way. Neither error is visible from the prose alone, and neither is visible
+     from the `paths:` alone — only from checking them against each other. `grep -l "<the file you
+     edited>" .claude/rules/*.md` answers it in one command.
    - **`CLAUDE.md`** — architecture decision, public-API or package-structure change, new
      dependency, or workflow/tooling change.
    - **`README.md`** — public API, install/dependencies, examples, or the feature list.

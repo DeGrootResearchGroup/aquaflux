@@ -226,8 +226,13 @@ RAMP_STEPS_PER_STATION = int(os.environ.get("PITZ_RAMP_STEPS", "3"))
 #: the retry ladder escalated beta to ~2 to recover -- 50 steps / 301 cycles against 36 / 269 for the
 #: same march that never went there. At 2.0 the net is 3.375 / 2 = 1.69 per station, so beta halves
 #: per station and bottoms at 0.062.
-#: The wall belongs to `(state, beta)`, NOT to beta: this same march converged at beta = 0.005 with
-#: alpha = 1.000 once the ramp had arrived. Damping while the problem MOVES is the distinction.
+#: ⚠️ Two different floors here, and they are easy to conflate. `CONTROL.beta_min` (0.005) bounds the
+#: shift the OPERATOR is solved with; `PC_BETA_FLOOR` (0.05) floors only the preconditioner's own copy.
+#: The preconditioner sat at 0.05 throughout the collapse and never saw 0.012 -- so the wall is the
+#: operator/preconditioner MISMATCH opening up, not a shift the V-cycle cannot invert. And the
+#: mismatch's size is not the discriminator either: this same march converged at beta = 0.005 against
+#: the same 0.05 preconditioner (a 10x mismatch) with alpha = 1.000, where 4.2x was fatal mid-ramp.
+#: The wall belongs to `(state, beta)`. Damping while the problem MOVES is the distinction.
 RAMP_REDAMPING = float(os.environ.get("PITZ_RAMP_REDAMPING", "2.0"))
 
 #: The dual-time inner loop. `inner_tol` 1e-2 rather than a tighter value: measured on the

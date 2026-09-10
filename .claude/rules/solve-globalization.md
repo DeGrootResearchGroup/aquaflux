@@ -31,8 +31,10 @@ The instance, in full in this file's `redamp` entry and in `.claude/rules/solve-
 residual-ratio control mis-read a homotopy's station change as divergence and braked. The mis-reading
 was real — a station change raises the residual because the *problem* changed, not because the step
 was wrong — and removing it was correct. It was also the only thing holding the shift out of a regime
-the preconditioner cannot invert: the shift then walked into a wall, the line search collapsed to
-`alpha = 0`, `|R|` rose two orders, and the retry ladder had to escalate to recover. **The principled
+where the frozen preconditioner stops tracking the operator: the shift walked into a wall, the line
+search collapsed to `alpha = 0`, `|R|` rose two orders, and the retry ladder had to escalate to
+recover. (Not "a shift the preconditioner cannot invert" — the preconditioner's own copy of the shift
+is floored separately and never went that low. See the mechanism note in `.claude/rules/solve-march.md`.) **The principled
 replacement had to reproduce the accidental brake's own arithmetic before it worked.**
 
 What to take from it, none of which is specific to that mechanism:
@@ -40,10 +42,15 @@ What to take from it, none of which is specific to that mechanism:
 - **Before deleting a damping behaviour, ask what it is holding, not only whether it is right.** Those
   are different questions and the second does not answer the first.
   - **This applies to ACCIDENTS as much as to defects — to anything nobody put there deliberately.**
-    The brake above was a mis-reading; `beta_min = 0.005` is the same shape from the other direction, a
-    constant chosen against no evidence that has been silently bounding this case's descent for as long
-    as the case has existed. Neither was designed, both were load-bearing, and an unexamined constant is
-    harder to notice than a wrong rule because nothing about it looks like a decision.
+    The brake above was a mis-reading; the preconditioner's own shift floor (`beta_floor`, 0.05 on that
+    case) is the same shape from the other direction — a constant chosen against no recorded evidence
+    that silently decides where the frozen operator stops following the real one. Neither was designed,
+    both were load-bearing, and an unexamined constant is harder to notice than a wrong rule because
+    nothing about it looks like a decision.
+    ⚠️ An earlier draft named the *march's* `beta_min` here instead. That was a conflation of two
+    different floors and it was wrong: `beta_min = 0.005` is fine on that case — the march converges
+    there. Left as a correction rather than deleted, because the two floors are easy to mistake for
+    one and the mistake changes which knob you reach for.
 - **A correct fix that makes the case worse is evidence about the SYSTEM, not about the fix.** The
   right response is to find what the defect was doing and supply it deliberately — not to revert, and
   not to ship the defect on the grounds that it works.
