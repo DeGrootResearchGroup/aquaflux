@@ -171,6 +171,31 @@ paths:
     and translate them into `SwitchedEvolutionRelaxation(...)` at the one construction line — a factory
     building the real object, not a shim. A *stateful* or α-driven damping rule is **not** a schedule; it
     is a `StepControl` on the eager march (see `march.py`).
+  - **Three boundary responses on `ShiftStrengthControl`, and what each keeps is the whole design
+    (`carry_beta` long-standing; `rebase` and `redamp` BUILT 2026-09-09).** The carried state is
+    `(beta, memo)`; each of these is an *outside event changed the situation, keep what still applies*
+    seam, and they differ only in what still applies:
+    | method | called when | keeps | drops |
+    |---|---|---|---|
+    | `carry_beta` | a β-escalation retry | the memo | — (β replaced) |
+    | `rebase` | a `ResidualHomotopy` station change, one step later | β | the ratio reference |
+    | `redamp` | that station change, on the entering step | the memo | — (β scaled) |
+    `carry_beta` keeps the memo because an escalation changes only how far the march steps through the
+    **same** residual; `rebase` drops it because the next residual is a **different function** and a
+    ratio across that boundary divides two incomparable numbers.
+    - **⚠️ `rebase`'s contract is "drop the ratio REFERENCE, keep everything else that still applies",
+      NOT "clear the memo" — a subclass whose memo carries more than the reference MUST override it.**
+      The base clears the whole memo, correct only because the base's memo *is* the reference. A richer
+      memo (a live growth rate, a cap) would lose those, and the failure is silent in the worst way: the
+      ratio then defaults to `1.0` on every adaptation, so the brake `rebase` exists to stop mis-firing
+      stops firing *at all*, which is indistinguishable from the rebase working. For the same reason,
+      **call these rather than unpacking `(beta, previous_residual) = state`** at a call site — that
+      keeps typechecking after a memo grows a field and quietly stops supplying a reference.
+    - **`redamp` is not optional and is not a knob.** Without it the shift descends by
+      `grow ** steps_per_station` per station, unopposed, and walks through the level the next station
+      can carry. The failure, the four-arm measurement, and why a learned floor under β or a cap on the
+      growth rate are both *refuted* alternatives are in `.claude/rules/solve-march.md` under
+      `ResidualHomotopy` / `redamp` — read there rather than restating here.
   - **The shift's SPATIAL distribution is an injected `ShiftBasis` (`solve/shift_basis.py`) — the
     spatial twin of the `RelaxationSchedule` (binding).** `RelaxationSchedule` sets *how much* damping
     (the scalar β); `ShiftBasis` sets the per-cell base diagonal `d` the shift `β d` is built on, from
