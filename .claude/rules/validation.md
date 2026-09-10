@@ -290,12 +290,21 @@ second gate **13:00**, for two jobs that alone are roughly 8-9 minutes each. **C
 trade of latency for throughput — it is a loss on both sides**, which matters when arguing for a guard,
 because nobody is giving up throughput they were actually getting.
 
-⚠️ *State that as a shape, not as a ratio against the tier's documented 6:34-8:53.* **Neither gate that
-evening ran clean**, so there is no uncontended arm in this comparison, and the documented range is from
-another worktree at another tier composition on another date (the two gates ran 1498 and 1482 tests). The
-unimpeachable claim is the one above — two ~8-9 minute jobs taking 17:25 and 13:00 when overlapped. One
-uncontended gate on this machine would upgrade it from a shape to a measurement and costs ~9 minutes; it
-has not been run.
+**It is a measurement, not a shape — the uncontended arm was run the same evening.** Three gates, one
+machine, one night, within 1 % of each other in test count, so composition is not the variable:
+
+| gate | tests | wall | vs clean |
+|---|---|---|---|
+| clean (no case running) | 1494 | **8:44** | — |
+| overlapping a case | 1498 | **17:25** | **2.0x** |
+| overlapping a case | 1482 | **13:00** | **1.5x** |
+
+And the makespan is worse too, which is the part with no counter-argument. The gate alone is 8:44 and that
+case alone is 9:15; **back to back the pair finishes in ~18:00, overlapped the later one finished at
+~22:05** — four minutes later, with *both* jobs individually slowed on the way. There is no throughput
+being bought here to trade latency for. (This supersedes an earlier reading of the 17:25 against the
+tier's documented 6:34-8:53, which was not a fair anchor: different worktree, tier composition and date.
+The three rows above are the comparison that holds.)
 
 **The `--status` line was clean throughout.** At 22:09, mid-slow-arm, the machine sat at load **13.4** with
 **0.73 GB** free while `run_case.sh --status` reported one case and nothing else — because what was
@@ -374,6 +383,30 @@ enforced for one pair of jobs and merely known for the other. The durable fix is
 unavailable rather than better documented — teach the gate to consult the machine-global run-file and
 refuse or warn — and this entry's job is to stop the wall-clock numbers being trusted, never to stand in
 for that. Read it as a record of what happened and what the measurements are worth, not as the remedy.
+
+## ⚠️ A report about a run is not the run's own record (the evening's actual lesson)
+
+**Every correction in the section above was an account being preferred to a record that was already on
+disk.** The pattern is worth more than any of its instances, and it generalizes past machine contention —
+one of these had nothing to do with load:
+
+| got wrong | from | settled by |
+|---|---|---|
+| which job loaded a slow march | a peer's account plus timing structure | the gate's own `$TMPDIR` log |
+| whether a gate was still running | a process-table match | that log's last line |
+| which PR changed which files | a `HEAD..origin/main` range spanning two merges | `git show --stat <sha>` |
+| a wall-clock baseline | the runner's guarantee about *cases* | nothing — it was withdrawn |
+
+**The records were right every time; the accounts were wrong every time.** Three records earned that:
+the gate's log (`$TMPDIR/aquaflux-tests-<worktree>-fast-<stamp>.log`, pytest summary on the last line),
+`run_case.sh`'s run-file, and `git show`. Three sources did not: a peer's report, one's own recollection,
+and the process table.
+
+**This is not a new rule — it is the one `run_case.sh` was built to embody**, and its own header says so:
+the most valuable thing it produces is not the log but that *"is this run mine, and what is it testing?"
+has a written answer*, a question that has been got wrong from the process table alone. Reach for the
+written answer first. The cost of not doing so, measured here, was four wrong claims in one evening
+between two sessions that were each checking the other's work.
 
 ## `bfs3d_species` — the newest case, and what it depends on
 
