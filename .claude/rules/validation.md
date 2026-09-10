@@ -253,9 +253,12 @@ two logs align line for line. Both print rung 1's closing row on their own line 
     |   28 |    194 | 0.0050 |  1 |   2 | 7.214e-06 | 1.000 |     |     <- quiet machine
 
 **Every column is identical except `t(s)`, which differs 4.6x** — step count, `beta`, inner count, cycles,
-`|R|` to all four figures, `a_min`. A second, cross-session pair agrees the same way on whole-march totals
-(**69 steps / 417 cycles**, `x_r/h` **8.069 against 8.0686**). Steps, cycles, escalations, line-search
-clips and the converged root are deterministic and contention cannot move them. Wall clock is a different
+`|R|` to all four figures, `a_min`. The same holds over the **whole** march: both runs finish at
+**69 steps / 417 cycles**, final `|R|` **5.771e-06**, `Ux` in **[-2.694, 10.222]** — every digit — against
+**1325 s and 555 s** of wall clock, a **2.4x** spread on an identical trajectory. (Both on the compiled
+host ILU kernel, per their banners; see the cross-checkout confounds below for why that has to be said.)
+Steps, cycles, escalations, line-search clips and the converged root are deterministic and contention
+cannot move them. Wall clock is a different
 matter: this project already records ~15 % run-to-run spread on an *uncontended* per-application timing,
 and 4.6x is far outside that. **A contended run is still good evidence about counts and worthless about
 seconds** — keep its step and cycle columns, discard its timings, exactly as for a run that spanned a
@@ -271,17 +274,28 @@ that window**:
 |---|---|---|---|---|
 | 1 | entirely inside it | 499 s | 157 s | **3.2x** |
 | 2 | ~90 %, the gate ends mid-rung | 229 s | 168 s | **1.4x** |
-| 3 | none — it starts after the gate ends | 194 s | *pending* | *the control* |
+| 3 | none — it starts after the gate ends | 194 s | 186 s | **1.04x** — *the control* |
 
-**That graded structure is the evidence, not the endpoint ratio.** A confound would have to be graded the
-same way to explain it, and the one arm that overlapped nothing is the control. (Its quiet half was still
-marching when this was written. The extrapolation looked like noise; it is deliberately **not** recorded
-here, because an extrapolated control is not a control — fill it in when the run lands.)
+**That graded structure is the evidence, not the endpoint ratio, and the control is what makes it one.**
+The ratio reaches unity exactly where the overlap does: 8 s in 190 on a machine with a documented ~15 %
+spread is not a small effect, it is *no* effect. Anyone arguing the slow arm differed in some other way
+now has to explain why that difference confined itself to the two rungs that overlapped a known job.
+(Measuring each rung from the previous rung's last step partitions the march with no gaps; measuring from
+each rung's own first step instead gives 499/157, 215/160, 176/170 — the same three ratios within 2 %, so
+the conclusion does not rest on the convention.)
 
-⚠️ **And the cost is MUTUAL, which is the part that argues for a guard rather than a convention.** That
-gate took **17:25** against a documented 6:34-8:53 for the same tier — it was slowed by the case as surely
-as the case was slowed by it. Run in sequence the two jobs are roughly 8 and 9 minutes; run together the
-gate alone took 17. **Concurrency here is not a trade of latency for throughput, it is a loss on both.**
+⚠️ **And the cost is MUTUAL, which is the part that argues for a guard rather than a convention.** The
+gate was slowed by the case as surely as the case was slowed by it: it took **17:25**, and the evening's
+second gate **13:00**, for two jobs that alone are roughly 8-9 minutes each. **Concurrency here is not a
+trade of latency for throughput — it is a loss on both sides**, which matters when arguing for a guard,
+because nobody is giving up throughput they were actually getting.
+
+⚠️ *State that as a shape, not as a ratio against the tier's documented 6:34-8:53.* **Neither gate that
+evening ran clean**, so there is no uncontended arm in this comparison, and the documented range is from
+another worktree at another tier composition on another date (the two gates ran 1498 and 1482 tests). The
+unimpeachable claim is the one above — two ~8-9 minute jobs taking 17:25 and 13:00 when overlapped. One
+uncontended gate on this machine would upgrade it from a shape to a measurement and costs ~9 minutes; it
+has not been run.
 
 **The `--status` line was clean throughout.** At 22:09, mid-slow-arm, the machine sat at load **13.4** with
 **0.73 GB** free while `run_case.sh --status` reported one case and nothing else — because what was
