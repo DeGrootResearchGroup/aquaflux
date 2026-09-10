@@ -58,6 +58,42 @@ def test_limiter_stays_in_unit_interval() -> None:
     assert psi.max() <= 1.0 + 1e-12
 
 
+def test_limiter_uses_the_periodic_image_across_a_seam() -> None:
+    """A smooth periodic field must not be limited at a periodic seam.
+
+    Before the fix, the neighbour side's unlimited increment was formed against the raw
+    (non-periodic-image) neighbour centroid, which across a periodic seam sits a full domain
+    length away rather than one cell width -- collapsing `psi` toward 0 there for any field, no
+    matter how smooth. `face_cells.neighbour_centroid` is the fix: it gathers the neighbour's
+    periodic image instead, matching the displacement `LimitedUpwind.face_value` reconstructs on.
+    """
+    lx = 1.0
+    mesh = structured_grid_2d(8, 4, lx=lx, ly=1.0, periodic=("x",), named_boundaries=True)
+    geom = mesh.geometry()
+
+    def field(x):
+        return jnp.cos(2.0 * jnp.pi * x[..., 0] / lx)
+
+    grad = CorrectedGreenGauss().gradients(
+        field(geom.cell.centroid), mesh, geom, field(geom.face.centroid)
+    )
+    psi = VenkatakrishnanLimiter(k=5.0).limit(
+        field(geom.cell.centroid), grad, mesh.face_cells, geom
+    )
+
+    fc = mesh.face_cells
+    seam_faces = np.asarray(jnp.any(fc.neighbour_offset != 0.0, axis=-1))
+    assert seam_faces.any(), "fixture must actually carry a periodic seam"
+    seam_cells = set(np.asarray(fc.owner)[seam_faces].tolist()) | set(
+        np.asarray(fc.neighbour)[seam_faces].tolist()
+    )
+    # 0.95 comfortably separates "correctly unlimited" (~0.99, curvature-limited only, matching
+    # the non-seam cells) from the pre-fix bug, which on this fixture collapsed the seam cells'
+    # psi to ~0.47 by forming the unlimited increment against a raw neighbour centroid a full
+    # domain length away instead of the periodic image.
+    assert np.asarray(psi)[list(seam_cells)].min() > 0.95
+
+
 def test_limiter_is_differentiable() -> None:
     """jax.grad flows through the limiter (min/max and the smooth ratio) without NaNs."""
     mesh = structured_grid_2d(8, 8)
