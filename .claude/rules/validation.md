@@ -240,8 +240,10 @@ cannot be written. The guard is what catches the next module that does branch.
 starting on top of a running one — and the fast tier is unambiguously a heavy job on this machine.** It
 runs `pytest -n auto --dist loadfile`, which on the 11-core, 19 GB machine these cases are measured on
 peaks around **6.4 GB** and, launched beside a live pitzDaily march, drove the load average past **22**
-with free memory at **0.73 GB**. A gate that normally takes 6:34–8:53 sat at 97 % for several minutes and
-ran to about **10 minutes**; every wall-clock number in the case's log for that window is contaminated.
+with free memory at **0.73 GB**. It happened **twice in one evening**, from two different worktrees, one
+minute and four minutes into someone else's case — and the two gates took **17:25** and **13:00** against
+a documented 6:34-8:53 for that tier. Every wall-clock number in a case log overlapping such a window is
+contaminated, and so is the gate's own.
 
 **What contention does and does not move — and this is the useful half, because it needs no clock.** The
 cleanest instance is a matched pair in ONE worktree at ONE commit, differing only in machine load, whose
@@ -259,12 +261,33 @@ and 4.6x is far outside that. **A contended run is still good evidence about cou
 seconds** — keep its step and cycle columns, discard its timings, exactly as for a run that spanned a
 machine sleep.
 
-⚠️ **Do not read `895 -> 194` as "contention costs 4.6x" either.** What loaded the machine during the slow
-arm was never identified: at 22:09 it showed a load average of **13.4** with **0.73 GB** free while
-`run_case.sh --status` reported nothing but that one case. So the slow arm is "loaded by something, not a
-second case" and the ratio is a demonstration that the clock column moves, not a measurement of by how
-much. **That the status line can read clean while the machine is at load 13.4 is the whole argument for
-this section** — the runner reports on cases, and cases are not what was there.
+**`895 -> 194` IS an attributable cost, and the attribution is graded.** The loader is known and was read
+from its own log rather than reported: a fast tier in another worktree, `21:55:02 -> 22:12:27`,
+`1045.13s (0:17:25)`, 1498 passed — one minute after the case launched at `21:54:04`. Splitting the slow
+march at its rung boundaries against the quiet one, the ratio tracks **how much of each rung overlapped
+that window**:
+
+| rung | overlap with the gate | slow | quiet | ratio |
+|---|---|---|---|---|
+| 1 | entirely inside it | 499 s | 157 s | **3.2x** |
+| 2 | ~90 %, the gate ends mid-rung | 229 s | 168 s | **1.4x** |
+| 3 | none — it starts after the gate ends | 194 s | *pending* | *the control* |
+
+**That graded structure is the evidence, not the endpoint ratio.** A confound would have to be graded the
+same way to explain it, and the one arm that overlapped nothing is the control. (Its quiet half was still
+marching when this was written. The extrapolation looked like noise; it is deliberately **not** recorded
+here, because an extrapolated control is not a control — fill it in when the run lands.)
+
+⚠️ **And the cost is MUTUAL, which is the part that argues for a guard rather than a convention.** That
+gate took **17:25** against a documented 6:34-8:53 for the same tier — it was slowed by the case as surely
+as the case was slowed by it. Run in sequence the two jobs are roughly 8 and 9 minutes; run together the
+gate alone took 17. **Concurrency here is not a trade of latency for throughput, it is a loss on both.**
+
+**The `--status` line was clean throughout.** At 22:09, mid-slow-arm, the machine sat at load **13.4** with
+**0.73 GB** free while `run_case.sh --status` reported one case and nothing else — because what was
+loading it was a *test tier*, and a test tier is not a case. **That is the whole argument for this
+section**: not that the runner missed something unexplained, but that it is blind to a job class we run
+constantly, and here that job class is named, timed, and measured.
 
 ⚠️ **There is currently NO trustworthy wall-clock baseline for pitzDaily from any session.** A figure of
 518 s circulated this evening as "uncontended" and has been withdrawn by the session that produced it: it
