@@ -97,7 +97,7 @@ from aquaflux.solve import (
     relative_residual_gmres,
 )
 
-from .initialization import hybrid_initialize
+from .initialization import hybrid_initialize, wall_consistent_omega
 from .preconditioner import ScalarTransportPreconditioner, ScaledScalarPreconditioner
 from .sources import production_and_limit
 
@@ -108,7 +108,7 @@ _DEFAULT_SHIFT_BASIS = LocalCourantBasis()
 if TYPE_CHECKING:
     from aquaflux.flow import MomentumContinuity
 
-    from .transport import SSTTurbulence
+    from .transport import SSTClosureFields, SSTTurbulence
 
 
 class ScalarVariableTransform(eqx.Module):
@@ -401,6 +401,32 @@ class CoupledRANS(eqx.Module):
         """Assemble a coupled state from a flow state and the two turbulence fields."""
         return self.layout.pack(flow, k, omega)
 
+    def effective_momentum(
+        self, flow: jnp.ndarray, k: jnp.ndarray, omega: jnp.ndarray
+    ) -> tuple[SSTClosureFields, MomentumContinuity]:
+        """The SST closure at ``(flow, k, omega)`` and the flow assembler re-viscosified by it.
+
+        The closure carries ``nu_t`` and the mean strain, so it is built first and ``nu_t`` taken from
+        it -- :meth:`eddy_viscosity` would otherwise recompute the strain the closure already formed.
+        Both halves are returned because the two consumers want different ones: the coupled residual
+        needs the closure for its ``k`` / ``omega`` equations as well as the assembler, while a caller
+        that only wants the momentum block at the current ``mu_eff = mu + rho nu_t`` drops it.
+
+        Parameters
+        ----------
+        flow : jnp.ndarray
+            The flat flow state ``[vel_0..vel_{dim-1}, pressure]``, shape ``((dim + 1) n_cells,)``.
+        k, omega : jnp.ndarray
+            The **physical** turbulence fields, shape ``(n_cells,)`` each (not the solved unknowns --
+            recover them with :meth:`physical_fields`).
+
+        Returns
+        -------
+        tuple of (SSTClosureFields, MomentumContinuity)
+            The closure at these fields, and the flow assembler carrying its eddy viscosity.
+        """
+        return _effective_momentum(self.momentum, self.turbulence, flow, k, omega)
+
     def residual(self, state: jnp.ndarray) -> jnp.ndarray:
         """The coupled residual ``R(u, p, k, omega)`` for the flat state, same shape as ``state``.
 
@@ -418,13 +444,7 @@ class CoupledRANS(eqx.Module):
         differentiation supplies the chain-rule Jacobian.
         """
         flow, k, omega = self.physical_fields(state)
-
-        # The closure carries nu_t and the mean strain, so build it first and take nu_t from it --
-        # eddy_viscosity would otherwise recompute the same strain and nu_t the closure already forms.
-        closure = self.turbulence.closure_fields(self.momentum.velocity_fields(flow), k, omega)
-        momentum = self.momentum.with_eddy_viscosity(
-            closure.nu_t, self.turbulence.wall_face_eddy_viscosity(k)
-        )
+        closure, momentum = self.effective_momentum(flow, k, omega)
 
         # One Rhie--Chow assembly at the re-viscosified state feeds both the flow residual and the
         # mass flux the scalars advect on.
@@ -486,10 +506,7 @@ class LiveViscosityVelocityParts(eqx.Module):
             )
         k = self.k_transform.to_physical(k_solved)
         omega = self.omega_transform.to_physical(omega_solved)
-        closure = self.turbulence.closure_fields(self.momentum.velocity_fields(flow), k, omega)
-        live = self.momentum.with_eddy_viscosity(
-            closure.nu_t, self.turbulence.wall_face_eddy_viscosity(k)
-        )
+        _closure, live = _effective_momentum(self.momentum, self.turbulence, flow, k, omega)
         velocity, _pressure = live.unpack(flow)
         return live.momentum_matrix_diagonal_parts(velocity)
 
@@ -643,6 +660,53 @@ class CoupledShiftPolicy(eqx.Module):
         flow and scalar preconditioners, transposed by the implicit solver.
         """
         return lambda state: self.shift_term(state).make_preconditioner(jnp.asarray(0.0))
+
+
+def _effective_momentum(
+    momentum: MomentumContinuity,
+    turbulence: SSTTurbulence,
+    flow: jnp.ndarray,
+    k: jnp.ndarray,
+    omega: jnp.ndarray,
+) -> tuple[SSTClosureFields, MomentumContinuity]:
+    """The closure at ``(flow, k, omega)`` and ``momentum`` re-viscosified by it.
+
+    Free of :class:`CoupledRANS` so the consumer that holds the pair of assemblers without holding the
+    coupled one -- :class:`LiveViscosityVelocityParts`, which forms the shift at the current effective
+    viscosity -- reaches the same three lines as :meth:`CoupledRANS.effective_momentum` rather than
+    repeating them. ``k`` and ``omega`` are the **physical** fields.
+    """
+    closure = turbulence.closure_fields(momentum.velocity_fields(flow), k, omega)
+    return closure, momentum.with_eddy_viscosity(
+        closure.nu_t, turbulence.wall_face_eddy_viscosity(k)
+    )
+
+
+def wall_consistent_state(coupled: CoupledRANS, state: jnp.ndarray) -> jnp.ndarray:
+    """``state`` with its near-wall ``omega`` rows re-imposed at **this** assembler's viscosity.
+
+    The coupled counterpart of :func:`~aquaflux.turbulence.wall_consistent_omega`. Those rows are a
+    value fixation whose value the model prescribes from the molecular viscosity, so a state inherited
+    from a solve at a different viscosity holds a number this residual says is wrong -- by the viscosity
+    ratio exactly. The flow and ``k`` are returned untouched.
+
+    **Forward-only seed device.** The residual fixes these cells at this same value whatever the seed
+    held, so the root and its adjoint cannot move; and it is a no-op when the viscosity has not changed.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The coupled assembler at the viscosity the march will run at.
+    state : jnp.ndarray
+        The flat coupled state ``[vel..., pressure, k, omega]``, shape ``((dim + 3) n_cells,)``.
+
+    Returns
+    -------
+    jnp.ndarray
+        The state with its wall-cell ``omega`` replaced, shape unchanged.
+    """
+    flow, k, omega = coupled.physical_fields(state)
+    return coupled.state_from_physical(flow, k, wall_consistent_omega(coupled.turbulence, k, omega))
 
 
 def eddy_viscosity_drift(
@@ -1444,6 +1508,14 @@ def _coupled_shift_policy(
     closure = coupled.turbulence.closure_fields(
         coupled.momentum.velocity_fields(flow_ref), k_ref, omega_ref
     )
+    # ⚠️ These three lines are `_effective_momentum` MINUS the wall-face eddy viscosity, and the
+    # omission is not yet justified -- it is recorded here rather than silently unified, because routing
+    # this through the shared helper would change the frozen operators on a wall-function mesh and that
+    # is a measurement, not a refactor. The case for it being inert: everything built from this
+    # assembler here is a *frozen* quantity taken at `boundary_corrected=False`, the plain all-faces
+    # form, which never consults the per-face boundary viscosity the wall leaf overrides. The case
+    # against: nothing checks that, and the leaf also reaches the velocity block's operator. Settle it
+    # by measuring, not by pattern-matching the helper.
     momentum = coupled.momentum.with_eddy_viscosity(closure.nu_t)
     # The coupled flow block uses the convection-aware velocity AMG, not the viscous-smoothed default:
     # a RANS case is high-Reynolds, and the Peclet-blind smoothed velocity block produces a poor

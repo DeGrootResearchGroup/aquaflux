@@ -166,3 +166,53 @@ def hybrid_initialize(
     omega = jnp.maximum(omega, near_wall_omega)
     omega = jnp.maximum(omega, omega_floor)
     return flow, k, omega
+
+
+def wall_consistent_omega(
+    turbulence: SSTTurbulence, k: jnp.ndarray, omega: jnp.ndarray
+) -> jnp.ndarray:
+    """Re-impose the wall-cell ``omega`` this assembler's residual fixes, discarding the carried value.
+
+    The near-wall ``omega`` rows are **not solved** -- they are a value fixation, and the value is the
+    model quantity ``omega_wall(nu, d, k)``. Its viscous branch is ``C 6 nu / (beta_1 d^2)``, *linear in
+    the molecular viscosity*, so the fixed value is a function of a case parameter rather than of the
+    flow. A state carried over from a solve at a different viscosity therefore holds, in those cells, a
+    number this assembler's residual says is wrong -- by the viscosity ratio, exactly.
+
+    This restores them. It calls the same :func:`~aquaflux.turbulence.boundary.omega_wall` at the same
+    cells and distances the residual's own fixation calls, so the two cannot disagree; and it **assigns**
+    rather than taking a maximum, because a fixed value is not a floor. (The cold-start seeding a few
+    lines above does take a maximum, which is right there -- it is raising a smooth interpolant onto a
+    profile -- and is a no-op for this job whenever the new viscosity is *lower*, which on a Reynolds
+    continuation it always is.)
+
+    **Nothing else moves.** The interior ``omega``, ``k`` and the flow are a converged field and are
+    returned untouched; only rows whose value the model prescribes are re-prescribed.
+
+    ⚠️ **This is a forward seed device.** It changes the state a march starts from; the root and its
+    adjoint are properties of the residual, which fixes these cells at this same value regardless of what
+    the seed held. It has no effect at all when the viscosity has not changed.
+
+    Parameters
+    ----------
+    turbulence : SSTTurbulence
+        The closure **at the viscosity the march will run at** -- the whole point is that its
+        ``molecular_viscosity`` differs from the one the state was converged at.
+    k, omega : jnp.ndarray
+        The **physical** turbulence fields, shape ``(n_cells,)`` each. ``k`` is read because the blend's
+        log branch does; it is not modified.
+
+    Returns
+    -------
+    jnp.ndarray
+        ``omega`` with its wall-cell values replaced, shape unchanged.
+    """
+    cells = turbulence.wall_cells
+    return omega.at[cells].set(
+        omega_wall(
+            turbulence.molecular_viscosity[cells],
+            turbulence.wall_distance[cells],
+            k[cells],
+            turbulence.model,
+        )
+    )

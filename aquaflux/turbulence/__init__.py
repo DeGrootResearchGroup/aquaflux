@@ -49,12 +49,13 @@ from .coupled import (
     coupled_continuation,
     coupled_lu_continuation,
     coupled_lu_refreshing_continuation,
+    wall_consistent_state,
     eddy_viscosity_drift,
     lu_beta_tracking_refresh,
     solve_coupled,
 )
 from .driver import bulk_velocity, solve_segregated
-from .initialization import hybrid_initialize
+from .initialization import hybrid_initialize, wall_consistent_omega
 from .preconditioner import (
     AirAmgPreconditioner,
     ConvectionAmgPreconditioner,
@@ -144,6 +145,8 @@ __all__ = [
     "solve_reynolds_continuation",
     "solve_segregated",
     "strain_rate_magnitude",
+    "wall_consistent_omega",
+    "wall_consistent_state",
     "wall_function_weight",
     "wall_k_diffusivity",
     "wall_shear_stress",

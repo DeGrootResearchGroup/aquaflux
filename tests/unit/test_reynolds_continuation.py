@@ -422,6 +422,99 @@ def test_point_setup_receives_the_points_position_in_the_ramp(monkeypatch) -> No
     assert seen[1].label == "point 2/3 (Re/10)"
 
 
+def test_seed_projection_replaces_the_state_the_point_actually_solves_from(monkeypatch) -> None:
+    """``seed_projection`` corrects the seed itself, and ``point_setup`` then sees the corrected one.
+
+    The order is the point of the test, not a detail: a per-point continuation built by ``point_setup``
+    freezes at the state it is handed, so if the projection ran afterwards the preconditioner would be
+    fitted to a state the solve never visits. It is also why the projection cannot be expressed through
+    ``point_setup``, which returns keyword arguments while the seed travels positionally.
+    """
+    import aquaflux.turbulence.reynolds as reynolds
+
+    coupled = _tiny_coupled()
+    n = coupled.momentum.mesh.n_cells
+    dim = coupled.momentum.mesh.dim
+    fields = (jnp.zeros((dim + 1) * n), jnp.full(n, 0.5), jnp.full(n, 100.0))
+
+    solved, setups = [], []
+
+    def fake_solve_coupled(c, flow=None, k=None, omega=None, **kwargs):
+        solved.append(None if flow is None else float(flow[0]))
+        return fields
+
+    monkeypatch.setattr(reynolds, "solve_coupled", fake_solve_coupled)
+    monkeypatch.setattr(reynolds, "hybrid_initialize", lambda momentum, turbulence: fields)
+
+    def seed_projection(companion, state, point):
+        return state.at[0].set(float(point.index))  # a marker only a projection could put there
+
+    def point_setup(companion, state, point):
+        setups.append(float(state[0]))
+        return {}
+
+    solve_reynolds_continuation(
+        coupled,
+        n_points=2,
+        rtol=1e-10,
+        seed_projection=seed_projection,
+        point_setup=point_setup,
+    )
+
+    # Every point solves from the projected seed, including the lowest -- whose seed is materialized
+    # from the hybrid start for exactly this reason.
+    assert solved == [1.0, 2.0, 3.0]
+    # And `point_setup` is handed the projected state, not the one the projection was given.
+    assert setups == [1.0, 2.0, 3.0]
+
+
+def test_seed_projection_none_leaves_the_ramp_untouched(monkeypatch) -> None:
+    """The default must not materialize the lowest point's seed, which is the one observable
+    difference the hook's plumbing could otherwise leak into the ungated path."""
+    calls = _record_solves(monkeypatch)
+    solve_reynolds_continuation(_tiny_coupled(), n_points=2, rtol=1e-10)
+    assert [c["seed_is_none"] for c in calls] == [True, False, False]
+
+
+def test_a_projection_that_declines_a_point_leaves_that_point_untouched(monkeypatch) -> None:
+    """Returning the state unchanged is a real no-op, not a round-trip through the transforms.
+
+    The usual shape of a projection is that it acts on the *handovers* and declines the anchor, which
+    inherits nothing. Unpacking the state to physical fields and back inverts the scalar transforms, so
+    a declined point would otherwise be re-seeded with a state differing in its last bits under a
+    log-solved field -- and this project compares march trajectories bit-for-bit across arms, so a
+    declined rung has to stay identical to the arm it is being compared against.
+    """
+    import aquaflux.turbulence.reynolds as reynolds
+
+    coupled = _tiny_coupled()
+    n = coupled.momentum.mesh.n_cells
+    dim = coupled.momentum.mesh.dim
+    fields = (jnp.zeros((dim + 1) * n), jnp.full(n, 0.5), jnp.full(n, 100.0))
+
+    seeded = []
+
+    def fake_solve_coupled(c, flow=None, k=None, omega=None, **kwargs):
+        seeded.append((flow, k, omega))
+        return fields
+
+    monkeypatch.setattr(reynolds, "solve_coupled", fake_solve_coupled)
+    monkeypatch.setattr(reynolds, "hybrid_initialize", lambda momentum, turbulence: fields)
+
+    solve_reynolds_continuation(
+        coupled,
+        n_points=1,
+        rtol=1e-10,
+        seed_projection=lambda companion, state, point: state,  # declines every point
+    )
+
+    # The very objects the ramp already held, not equal-valued rebuilds of them.
+    for flow, k, omega in seeded:
+        assert flow is fields[0]
+        assert k is fields[1]
+        assert omega is fields[2]
+
+
 # --- the retreat, end to end through the wrapper ----------------------------------------
 
 

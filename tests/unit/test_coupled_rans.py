@@ -62,6 +62,7 @@ from aquaflux.turbulence.coupled import (
     frozen_production_viscosity,
     mass_flow_coupled_continuation,
     solve_coupled,
+    wall_consistent_state,
 )
 
 from tests.support.meshes import perturbed_grid_2d
@@ -1821,3 +1822,92 @@ def test_the_cap_leaves_the_residual_itself_alone() -> None:
             _cavity(mesh=mesh, gradient=coupled.momentum.gradient_scheme)[1].residual(state)
         ),
     )
+
+
+def test_effective_momentum_is_the_assembler_the_residual_itself_uses() -> None:
+    """The shared re-viscosification seam reproduces the residual's own flow block, bit for bit.
+
+    ``effective_momentum`` exists so the coupled residual and the callers that want only the momentum
+    block at the current ``mu_eff`` read one implementation. That is worth nothing unless what it
+    returns really is what the residual assembles with, so compare the flow block it produces against
+    the flow block of the coupled residual rather than re-deriving the closure here and asserting the
+    two derivations agree.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    flow, k, omega = coupled.physical_fields(state)
+    closure, momentum = coupled.effective_momentum(flow, k, omega)
+
+    # Both halves are checked against an INDEPENDENT derivation, never against the coupled residual --
+    # `CoupledRANS.residual` now calls this method, so comparing the two would compare it with itself
+    # and would pass for any nu_t whatsoever. That tautology is what an earlier version of this test
+    # asserted, and it would have been blind to the regressions the consolidation could actually cause.
+    independent = coupled.momentum.with_eddy_viscosity(
+        coupled.turbulence.closure_fields(coupled.momentum.velocity_fields(flow), k, omega).nu_t,
+        coupled.turbulence.wall_face_eddy_viscosity(k),
+    )
+    assert bool(jnp.array_equal(momentum.residual(flow), independent.residual(flow)))
+    assert bool(jnp.array_equal(closure.nu_t, coupled.eddy_viscosity(state)))
+
+    # ⚠️ And the WALL-FACE half specifically, which the eddy-viscosity comparison above cannot see: it
+    # rides a separate leaf and reaches only the boundary diffusion coefficient. Dropping it is a real
+    # and recorded failure mode on a wall-function mesh (the wall model's viscosity and the wall cell's
+    # log-layer `k/omega` value differ by a large factor there), so pin that it is carried.
+    without_wall = coupled.momentum.with_eddy_viscosity(closure.nu_t)
+    assert not bool(jnp.array_equal(momentum.residual(flow), without_wall.residual(flow)))
+
+
+def test_wall_omega_repair_drives_the_fixation_rows_to_zero_after_a_viscosity_change() -> None:
+    """The repaired value is the one the RESIDUAL fixes, checked against the residual and not against
+    a second copy of the formula.
+
+    This is the property that matters: a near-wall ``omega`` row is a value fixation, so a state holding
+    the right value has *zero* residual there. Asserting that the function reproduces ``omega_wall`` would
+    only check one transcription against another; driving the residual to zero checks it against the
+    equation being solved.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    cells = coupled.turbulence.wall_cells
+    n = mesh.n_cells
+    fixed = slice((coupled.momentum.mesh.dim + 2) * n, (coupled.momentum.mesh.dim + 3) * n)
+
+    # Converge the fixation rows at THIS viscosity first, so the only thing the rung change introduces
+    # is the viscosity itself -- otherwise the "before" is polluted by the state never having satisfied
+    # them at all.
+    at_home = wall_consistent_state(coupled, state)
+    assert float(jnp.max(jnp.abs(coupled.residual(at_home)[fixed][cells]))) < 1e-12
+
+    # Hand that state to a companion at one tenth the viscosity, exactly as a Reynolds rung does.
+    companion = coupled.with_scaled_molecular_viscosity(0.1)
+    carried = float(jnp.max(jnp.abs(companion.residual(at_home)[fixed][cells])))
+    repaired = wall_consistent_state(companion, at_home)
+    after = float(jnp.max(jnp.abs(companion.residual(repaired)[fixed][cells])))
+
+    assert carried > 1.0  # the carried value really is wrong at the new viscosity
+    assert after < 1e-12  # and the repair lands exactly on the row
+
+
+def test_wall_omega_repair_touches_only_the_rows_the_model_prescribes() -> None:
+    """Flow, ``k`` and interior ``omega`` are a converged field and must come through untouched -- a
+    repair that moved them would be changing the answer, not restoring a boundary condition."""
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    companion = coupled.with_scaled_molecular_viscosity(0.1)
+    repaired = wall_consistent_state(companion, state)
+
+    flow, k, omega = coupled.physical_fields(state)
+    flow_after, k_after, omega_after = coupled.physical_fields(repaired)
+    assert bool(jnp.array_equal(flow_after, flow))
+    assert bool(jnp.array_equal(k_after, k))
+
+    moved = jnp.where(omega_after != omega)[0]
+    assert bool(jnp.array_equal(jnp.sort(moved), jnp.sort(coupled.turbulence.wall_cells)))
+
+
+def test_wall_omega_repair_is_a_no_op_at_an_unchanged_viscosity() -> None:
+    """It corrects a *parameter* change, so with no parameter change there is nothing to correct. This
+    is what makes it safe to apply unconditionally at every continuation point."""
+    mesh, coupled = _cavity()
+    repaired_once = wall_consistent_state(coupled, _healthy_state(mesh, coupled))
+    assert bool(jnp.array_equal(wall_consistent_state(coupled, repaired_once), repaired_once))

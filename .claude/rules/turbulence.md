@@ -1659,6 +1659,24 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     the branches genuinely differ (a low-Re or fine mesh makes the assertion vacuous). The seed therefore
     runs **after** `k` is settled — the log branch reads `sqrt(k)`, so seeding it against the bare Laplace
     interpolant (k≈0 in a wall-bounded interior) would evaluate the closure at a `k` the solve never sees.
+    - **⚠️ AND THE SAME RULE APPLIES AT EVERY REYNOLDS-CONTINUATION HANDOVER, WHERE IT WAS BEING BROKEN
+      (fixed 2026-09-09, `wall_consistent_omega` / `wall_consistent_state`, default OFF).** The rule
+      above is honoured by `hybrid_initialize` at the **cold start** and was violated at every **rung
+      boundary**: a rung inherits the previous rung's converged root, and `omega_wall`'s viscous branch
+      `C·6ν/(β₁d²)` is **linear in ν**, so the carried value is wrong for the new rung by the viscosity
+      ratio — a decade at the default ladder, the same magnitude as the original regression's "~10× at
+      y+ = 100". Measured on pitzDaily's rung 2 → 3 handover: those 472 rows sit at **4.7e-16** at the
+      rung they were converged at and at **mean 2.2890 / max 2.3026** at the next, against
+      `ln(10) = 2.302585`; re-imposing them takes `|R0|` **1.1729e-01 → 3.0318e-02 (3.87×)** with every
+      other block unchanged to four significant figures *in fixed scales*, and moves `ω` at those cells
+      by a median factor of exactly **0.1000**.
+      **It is a correctness fix and nothing more, which is measured rather than assumed**: marched, the
+      better seed buys nothing (14 steps on the rung either way) and is not what carries an aggressive
+      warm shift through the target rung. The reason to expect that is structural — the shift is exactly
+      zero on a fixation row, so the first inner solve enforces it whatever `beta` is; the march repairs
+      in step 1 what the seed repair does for free. Reached through
+      `solve_reynolds_continuation(seed_projection=…)`; harness
+      `validation/pitzdaily_openfoam/seed_repair_probe.py`.
   - **Body-force-driven domains need equilibrium levels, not interpolants (binding).** A
     streamwise-periodic channel has **no inlet**, so both smoothed fields are degenerate: `k` is the
     harmonic interpolant between all-zero wall Dirichlets (**identically zero**), and `ω` is a

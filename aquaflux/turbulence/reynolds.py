@@ -291,6 +291,7 @@ def solve_reynolds_continuation(
     intermediate_rtol: float | None = 1e-2,
     intermediate_atol: float | None = None,
     point_setup: Callable[[CoupledRANS, jnp.ndarray, ReynoldsPoint], dict] | None = None,
+    seed_projection: Callable[[CoupledRANS, jnp.ndarray, ReynoldsPoint], jnp.ndarray] | None = None,
     **solve_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system by Reynolds-number continuation, returning the target-Re root.
@@ -368,6 +369,28 @@ def solve_reynolds_continuation(
         from :func:`~aquaflux.turbulence.solve_coupled`'s defaults, and the seed is passed through as-is
         (the lowest point self-starts inside ``solve_coupled``). When set, its keys **override** any
         ``continuation`` / ``reference_state`` in ``solve_kwargs`` (they are mutually exclusive uses).
+    seed_projection : callable, optional
+        ``(companion, seed_state, point) -> state``, a **per-point correction of the seed itself**,
+        applied to the packed coupled state before that point's solve begins. It exists because a rung
+        inherits the previous rung's converged root, and **not everything in that state is a solved
+        quantity**: some of it is imposed by the model from the case parameters, and those parts are
+        wrong for the new rung by construction.
+        :func:`~aquaflux.turbulence.wall_consistent_state` is the correction written for it::
+
+            seed_projection=lambda comp, state, point: wall_consistent_state(comp, state)
+
+        It is the seam ``point_setup`` cannot be: that hook returns *keyword arguments* and the seed
+        travels positionally, so a correction to the state has nowhere to go through it.
+
+        **Forward-only, and it cannot move the answer.** It changes where a point's march starts and
+        nothing else; the root each point converges to and the target adjoint are properties of the
+        residual. Every point's result is ``stop_gradient``-ed before it seeds the next in any case.
+
+        ⚠️ **Returning the argument unchanged is a true no-op, and a correction that declines a point
+        should do exactly that.** The state is only unpacked and repacked when the projection returns
+        something different, because that round trip inverts the scalar transforms and is not the
+        identity in floating point under a log-solved field -- and a declined rung has to stay
+        bit-identical to the arm it is being compared against.
     **solve_kwargs
         Forwarded to every per-Re :func:`~aquaflux.turbulence.solve_coupled`. ``continuation`` and
         ``reference_state`` are **target-specific** (a preconditioner frozen at the target viscosity),
@@ -450,14 +473,29 @@ def solve_reynolds_continuation(
         # the seed (hybrid start for the lowest point) so the per-point continuation freezes at the same
         # state the solve begins from, then merge the point's own continuation / precondition_step over
         # the base kwargs.
-        if point_setup is None:
+        if point_setup is None and seed_projection is None:
             return solve_coupled(assembler, *seed_fields, **base_kwargs)
         if seed_fields[0] is None:
             seed_fields = hybrid_initialize(assembler.momentum, assembler.turbulence)
         packed = assembler.state_from_physical(*seed_fields)
-        return solve_coupled(
-            assembler, *seed_fields, **{**base_kwargs, **point_setup(assembler, packed, point)}
-        )
+        # The projection runs BEFORE `point_setup`, so a per-point continuation is frozen at the state
+        # the solve will actually begin from rather than at the one it was handed. The two hooks would
+        # otherwise disagree about where the point starts, which is exactly the kind of mismatch the
+        # seed materialization above exists to prevent.
+        if seed_projection is not None:
+            projected = seed_projection(assembler, packed, point)
+            # ⚠️ Identity-checked, so returning the state unchanged is genuinely a no-op. Unpacking is
+            # not free of consequence: `physical_fields` inverts the scalar transforms, so a state that
+            # round-trips through `state_from_physical` and back differs from the original in its last
+            # bits under a log-solved field (`exp(log(w))` is not the identity in floating point). A
+            # projection that declines to act on a given point -- the usual shape, since the correction
+            # belongs to a *handover* and the anchor inherits nothing -- must leave that point's march
+            # bit-identical, or the arms it is being compared against are not matched where they agree.
+            if projected is not packed:
+                packed = projected
+                seed_fields = assembler.physical_fields(packed)
+        extra = {} if point_setup is None else point_setup(assembler, packed, point)
+        return solve_coupled(assembler, *seed_fields, **{**base_kwargs, **extra})
 
     seed: tuple[jnp.ndarray | None, jnp.ndarray | None, jnp.ndarray | None] = (None, None, None)
     converged: list[float] = []
