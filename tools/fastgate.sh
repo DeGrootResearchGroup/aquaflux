@@ -18,7 +18,23 @@
 #   tools/fastgate.sh all             everything
 #   tools/fastgate.sh <tier> -k name  remaining arguments are passed through to pytest
 #
-# Exits with pytest's status, so it composes in a shell `&&` chain and in a hook.
+# Exits with pytest's status, so it composes in a shell `&&` chain and in a hook. Two statuses are the
+# script's own rather than pytest's: 2 for a tier it does not recognize, and 3 for refusing to start
+# beside a running validation case (see below).
+#
+# It REFUSES TO START WHILE A VALIDATION CASE IS RUNNING, because the mutual exclusion those cases rely
+# on is over *cases* and a test tier is not one -- so nothing stopped a gate landing on top of a march,
+# and on 2026-09-09 that happened three times in one evening between three sessions that all knew the
+# one-heavy-job-at-a-time rule. It is not a knowledge problem: the rule is ENFORCED for case-vs-case and
+# merely known for tier-vs-case, so this closes the half that was only known.
+#
+# The cost is symmetric, which is the part worth knowing -- it is not a trade of one job's latency for
+# another's throughput. In the measured collision the fast tier alone took 17:25 against its usual
+# 6:34-8:53 while the case it landed on ran 3.2x slow over the overlap. Both jobs lost; run end to end
+# they are about 8 and 9 minutes.
+#
+# Override with FASTGATE_FORCE=1 when you mean it (a quick `-k` on one test beside a long march is
+# usually harmless). The check is skipped under CI, which runs no cases.
 #
 # The FAST tier runs across worker processes (pytest-xdist), because it is the tier that runs on
 # every change and its wall clock is what makes or breaks the edit-test loop. Three details are
@@ -48,6 +64,24 @@
 set -uo pipefail
 
 "$(dirname "$0")/check_hooks.sh" || true
+
+# --- refuse to start beside a running validation case --------------------------------------------
+# Asks `run_case.sh` rather than reading the run-file here: that script owns the file's format and the
+# liveness rule, and a second copy of either is the duplication that made this class of bug possible in
+# the first place. A missing or unrunnable script is not this gate's problem, so it degrades to running.
+RUN_CASE="$(dirname "$0")/../validation/run_case.sh"
+if [ -z "${CI:-}" ] && [ -z "${FASTGATE_FORCE:-}" ] && [ -x "$RUN_CASE" ]; then
+  if CASE_PID=$("$RUN_CASE" --running 2>/dev/null); then
+    printf 'fastgate: a validation case is running (pid %s) -- refusing to start a test tier.\n' \
+      "$CASE_PID" >&2
+    printf '\n' >&2
+    "$RUN_CASE" --status 2>/dev/null | sed 's/^/  /' >&2
+    printf '\n' >&2
+    printf '  Both jobs lose when these overlap: the case slows and so does the tier.\n' >&2
+    printf '  Wait for it (validation/run_case.sh --wait), or FASTGATE_FORCE=1 to run anyway.\n' >&2
+    exit 3
+  fi
+fi
 
 TIER="${1:-fast}"
 [ $# -gt 0 ] && shift
