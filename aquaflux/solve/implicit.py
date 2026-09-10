@@ -280,8 +280,10 @@ def backtracking_line_search(
     fallback_growth=100.0,
 ):
     """Backtrack the step length: the largest ``alpha`` in ``{2**grow, ..., 1, ..., 1/2**steps}`` with
-    ``norm(R(phi + alpha delta)) < reference_norm``, falling back to the longest finite rung no longer
-    than the full step if none is admissible.
+    ``norm(R(phi + alpha delta)) < reference_norm``. When none is admissible it falls back to the
+    longest rung that is no longer than the full step, finite, **and** within ``fallback_growth`` of
+    ``reference_norm`` -- and to ``alpha = 0``, leaving the iterate untouched, when no finite rung
+    comes in under that bound.
 
     The ladder is walked by a ``lax.while_loop`` that **stops at the first (largest) reducing rung**,
     so a step whose full length already descends (the common case near the root) costs a single

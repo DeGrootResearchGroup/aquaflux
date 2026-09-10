@@ -1353,8 +1353,10 @@ def test_the_line_search_reports_the_fallback_rungs_own_measure() -> None:
     """When nothing is admissible the kept rung is not the last one walked -- and the pair must agree.
 
     The ladder walks longest-first and stops at the first admissible rung; with none, it falls back to
-    the longest FINITE rung, which it passed several evaluations earlier. Carrying the accepted rung's
-    measure alone would then describe a step that was not taken, so the fallback carries its own.
+    the longest rung that is finite and within ``fallback_growth`` of ``reference_norm`` -- here the
+    full step, at 5x a ``reference_norm`` of 1 -- which it passed several evaluations earlier. Carrying
+    the accepted rung's measure alone would then describe a step that was not taken, so the fallback
+    carries its own.
     """
     phi, delta, reference = jnp.array([1.0]), jnp.array([4.0]), jnp.asarray(1.0)
 
@@ -1365,7 +1367,7 @@ def test_the_line_search_reports_the_fallback_rungs_own_measure() -> None:
 
     assert (
         float(step.alpha) == 1.0
-    )  # the fallback: the longest finite rung, capped at the full step
+    )  # the fallback: the longest qualifying rung, capped at the full step
     assert jnp.allclose(step.phi, phi + delta)
     assert jnp.allclose(step.residual_norm, jnp.linalg.norm(residual(step.phi)))
 
