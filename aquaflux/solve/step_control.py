@@ -140,6 +140,137 @@ class ShiftStrengthControl(eqx.Module):
         memo = state[1] if isinstance(state, tuple) else None
         return (float(beta), memo)
 
+    def redamp(self, state: object, factor: float) -> object:
+        """The carried state with β multiplied by ``factor``, memo untouched.
+
+        Called by :func:`~aquaflux.solve.forward_march` on the first step of a new
+        :class:`~aquaflux.solve.ResidualHomotopy` station, to re-damp *deliberately* for a problem that
+        has just changed. It is the companion of :meth:`rebase`, and the two fire on **different
+        steps**: this on the step that first faces the new station, that on the step after, which is
+        the first whose residual ratio would straddle the boundary.
+
+        **Why a station change warrants damping at all.** The shift the march has walked down to is
+        calibrated against the station it walked down *through*. The next station is harder -- a lower
+        viscosity, a stronger convective nonlinearity -- so the same β is a larger effective
+        pseudo-timestep on a problem less able to take it. Damping on a parameter change is the same
+        reasoning a continuation applies when it re-damps each new rung; a within-march homotopy simply
+        has no rung boundary to hang it on.
+
+        **Measured, on a pitzDaily four-station viscosity ramp.** Within a station the ramp divides β by
+        ``grow`` each step -- ``1.5 ** 3 = 3.375`` per station at three steps each. Undamped, that takes
+        β 0.5 → 0.148 → 0.044 → **0.013**, and the case has a wall at **β ≈ 0.012**: the line search
+        collapsed to ``alpha = 0``, ``|R|`` went 4.4e-03 → 4.4e-01, and the retry ladder had to escalate
+        β to ~2 to recover, costing 14 steps and 32 restart cycles against the same march re-damped.
+        At ``factor = 2`` the net is ``3.375 / 2 = 1.69`` per station -- β roughly halves, reaching
+        0.062 rather than 0.004, and the wall is never approached.
+
+        **⚠️ CORRECTED 2026-09-10 — the arithmetic above omitted the hold, and the error hid why the
+        coarse schedule under-performs.** An entering step is HELD, so it forgoes its own ``/grow``: a
+        station of ``s`` steps divides β only ``s - 1`` times, and the net is
+        ``redamping * grow ** (1 - s)``, **not** ``redamping / grow ** s``. At ``(3, 2.0)`` that is
+        ``2 / 1.5² = 0.889`` — β barely moves across a station instead of halving. Measured, the shipped
+        four-station ramp hands the target station β = **0.936**, not the 0.062 the old arithmetic
+        predicted, and the target then spends ~13 of its 28 steps walking β down to ``beta_min``. That
+        is the *same* "every rung restarts the pseudo-timestep ramp" cost the homotopy exists to
+        delete — removed from between the rungs and re-created inside the ramp.
+
+        The re-damping is therefore a **workaround for a coarse ramp, not a requirement of the
+        design**. Make the stations fine enough and it is unnecessary: at 24 stations of one step the
+        viscosity moves 1.21x per station instead of 3.16x, the problem barely moves, and β descends
+        monotonically straight through the 0.012 that was fatal at four stations. That is this
+        docstring's own ``(state, β)`` point one level down — the lever is to make the problem move
+        LESS PER STEP, not to damp after it has moved a lot. Measured on pitzDaily: 24x1 at
+        ``redamping = 1.0`` costs **191** restart cycles against **261** for 4x3 at 2.0.
+
+        ⚠️ ``redamping > 1`` is structurally wrong at ``steps_per_station == 1``: every step then enters
+        a station, so the control is held on every step and never adapts at all — β becomes
+        ``redamping ** n`` and runs away. Nothing currently rejects that combination.
+
+        ⚠️ **The wall is a property of ``(state, β)``, not of β.** The same march converged comfortably
+        at β = 0.005 once the ramp had arrived and the state had settled -- ``alpha`` 1.000 at 3-5
+        cycles a step, at a shift that was fatal mid-ramp. So this must NOT be implemented as a floor
+        under β: a floor learned from the collapse would forbid exactly the low-shift convergence that
+        finishes the march. Damping *while the problem is moving*, and only then, is the distinction
+        that matters.
+
+        **Why this is on firmer ground than a floor or a rate cap, which is the whole reason to prefer
+        it.** Both of those infer a property of the *shift* from the march's behaviour -- "a collapse
+        here means β is too small", "a brake here means the rate is too fast" -- and an inference like
+        that decays as the state moves, because the evidence was gathered at a state the march has
+        since left. This infers nothing. It damps during exactly the interval in which the problem is
+        changing, and stops when it stops; the control is never asked to distinguish "the residual rose
+        because the step was wrong" from "the residual rose because the problem changed", it is simply
+        told, from outside, at the one moment that answer is known for certain. That is why it does not
+        degrade over a long march the way a learned bound does.
+
+        **⚠️ Two different floors, and they are easy to conflate.** :attr:`ShiftStrengthControl.beta_min`
+        bounds the shift the **operator** is solved with. A preconditioner refresh separately floors its
+        **own copy** (``pc_beta = max(beta, beta_floor)``), so the frozen operator can be built at a
+        larger shift than the one being solved — deliberately, since the V-cycle degrades as the shift
+        vanishes while the operator still needs the small one to make progress. The wall this method
+        exists for is therefore **not** a shift the preconditioner cannot invert; it is the mismatch
+        that opens once the operator's shift falls below that floor. On the measured case the
+        preconditioner sat at 0.05 throughout and never saw the 0.012 the operator reached.
+
+        Nor is the mismatch's *size* the discriminator: the same march converged comfortably at an
+        operator shift of 0.005 against that same 0.05 preconditioner — a 10x mismatch — where 4.2x was
+        fatal mid-ramp. Which is the ``(state, β)`` point once more, and the reason a floor under either
+        quantity is the wrong repair.
+        """
+        beta = state[0] if isinstance(state, tuple) else state
+        memo = state[1] if isinstance(state, tuple) else None
+        return (float(beta) * float(factor), memo)
+
+    def rebase(self, state: object) -> object:
+        """The carried state with the remembered residual DROPPED, keeping β -- the mirror of
+        :meth:`carry_beta`.
+
+        Called by :func:`~aquaflux.solve.forward_march` at a boundary where the **problem itself
+        changed**, which today means a :class:`~aquaflux.solve.ResidualHomotopy` moving to its next
+        station. The two methods exist for opposite reasons and the asymmetry is the point:
+        ``carry_beta`` keeps the memo because a β escalation changes only how far the march steps
+        through the *same* residual, so the reference stays valid; this drops it because the next
+        residual is a *different function* and a ratio formed across that boundary divides two
+        incomparable numbers.
+
+        **What it prevents, measured on a pitzDaily viscosity ramp.** A station change lowers the
+        molecular viscosity, which raises the residual because the new problem is harder --
+        not because the march is diverging. :class:`CflResidualDualTimeControl` brakes on
+        ``ratio > rise_ratio``, so it read the change as an overshoot and doubled β: on a four-station
+        ramp it fired at two of the four changes (β 0.132 -> 0.263 and 0.117 -> 0.234), each with
+        ``alpha = 1.000`` -- so the inner loop was perfectly comfortable and the brake was spurious.
+        Each one then cost the ~2 steps of growth needed to undo it.
+
+        Dropping the memo makes the next adaptation see ``memo is None``, which the ratio rules already
+        treat as "no reference yet, let α alone drive this step" -- the same path the first step of a
+        march takes. So the control resumes forming ratios one step later, within the new station,
+        where they mean something again.
+
+        This is deliberately NOT the same as holding β across a refresh boundary
+        (:meth:`next_step` with ``previous is None``). There the residual function is unchanged and only
+        the preconditioner moved, so the reference is still valid and worth keeping; here it is not.
+
+        A **memoryless** control (:class:`DualTimeControl`, whose memo is always ``None``) is unaffected
+        by construction -- rebasing it returns an equal state -- which is correct: α carries no
+        cross-problem reference to invalidate.
+
+        **⚠️ THE CONTRACT IS "DROP THE RATIO REFERENCE, KEEP EVERYTHING ELSE THAT STILL APPLIES" --
+        not "clear the memo". A SUBCLASS WHOSE MEMO CARRIES MORE THAN THE REFERENCE MUST OVERRIDE
+        THIS.** The implementation here clears the whole memo, which is correct *only* because this
+        base's memo **is** the reference and nothing else. A memo that also carried, say, a live growth
+        rate or a cap would lose both -- and the failure is silent in the worst way: the ratio would
+        then default to ``1.0`` on every adaptation, so the brake this method exists to stop
+        mis-firing would stop firing *at all*, which from the outside is indistinguishable from the
+        rebase working perfectly. Override it to drop the reference and rebuild the rest.
+
+        For the same reason, **call this rather than unpacking the carried state** at a call site.
+        ``(beta, previous_residual) = state`` keeps typechecking and running after the memo grows a
+        field, and quietly stops supplying a reference; going through the class keeps the shape the
+        control's own business.
+        """
+        beta = state[0] if isinstance(state, tuple) else state
+        return (float(beta), None)
+
 
 class DualTimeControl(ShiftStrengthControl):
     """Ramp the pseudo-timestep of a :class:`~aquaflux.solve.DualTimeStep` march by a Courant rule.

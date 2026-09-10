@@ -20,6 +20,44 @@ paths:
 > not here.** Update this file's architecture/binding prose only when an investigation reaches a
 > durable verdict (see `solve.md`'s "Where new content goes").
 
+## ⚠️ A DEFECT THAT FIRES FOR THE WRONG REASON CAN BE LOAD-BEARING (binding, measured 2026-09-09)
+
+**A globalization defect can be the only thing holding the march out of a bad regime, so fixing it
+*correctly* is what breaks the case.** Read this before removing any damping behaviour you have
+diagnosed as wrong — the diagnosis being right does not make the removal safe, and the failure lands
+one or more steps later, far from the change.
+
+The instance, in full in this file's `redamp` entry and in `.claude/rules/solve-march.md`: a
+residual-ratio control mis-read a homotopy's station change as divergence and braked. The mis-reading
+was real — a station change raises the residual because the *problem* changed, not because the step
+was wrong — and removing it was correct. It was also the only thing holding the shift out of a regime
+where the frozen preconditioner stops tracking the operator: the shift walked into a wall, the line
+search collapsed to `alpha = 0`, `|R|` rose two orders, and the retry ladder had to escalate to
+recover. (Not "a shift the preconditioner cannot invert" — the preconditioner's own copy of the shift
+is floored separately and never went that low. See the mechanism note in `.claude/rules/solve-march.md`.) **The principled
+replacement had to reproduce the accidental brake's own arithmetic before it worked.**
+
+What to take from it, none of which is specific to that mechanism:
+
+- **Before deleting a damping behaviour, ask what it is holding, not only whether it is right.** Those
+  are different questions and the second does not answer the first.
+  - **This applies to ACCIDENTS as much as to defects — to anything nobody put there deliberately.**
+    The brake above was a mis-reading; the preconditioner's own shift floor (`beta_floor`, 0.05 on that
+    case) is the same shape from the other direction — a constant chosen against no recorded evidence
+    that silently decides where the frozen operator stops following the real one. Neither was designed,
+    both were load-bearing, and an unexamined constant is harder to notice than a wrong rule because
+    nothing about it looks like a decision.
+    ⚠️ An earlier draft named the *march's* `beta_min` here instead. That was a conflation of two
+    different floors and it was wrong: `beta_min = 0.005` is fine on that case — the march converges
+    there. Left as a correction rather than deleted, because the two floors are easy to mistake for
+    one and the mistake changes which knob you reach for.
+- **A correct fix that makes the case worse is evidence about the SYSTEM, not about the fix.** The
+  right response is to find what the defect was doing and supply it deliberately — not to revert, and
+  not to ship the defect on the grounds that it works.
+- **Measure the removal on its own before combining it with anything.** The intermediate arm (the fix
+  alone, no replacement) is what located the wall; a run that changed both at once would have shown a
+  number and no mechanism.
+
 ## Globalization — forward step, continuation, line search
 
 - **`ShiftedStep` is the shared body of the two shifted forward steps (`solve/continuation.py`, BUILT
@@ -171,6 +209,31 @@ paths:
     and translate them into `SwitchedEvolutionRelaxation(...)` at the one construction line — a factory
     building the real object, not a shim. A *stateful* or α-driven damping rule is **not** a schedule; it
     is a `StepControl` on the eager march (see `march.py`).
+  - **Three boundary responses on `ShiftStrengthControl`, and what each keeps is the whole design
+    (`carry_beta` long-standing; `rebase` and `redamp` BUILT 2026-09-09).** The carried state is
+    `(beta, memo)`; each of these is an *outside event changed the situation, keep what still applies*
+    seam, and they differ only in what still applies:
+    | method | called when | keeps | drops |
+    |---|---|---|---|
+    | `carry_beta` | a β-escalation retry | the memo | — (β replaced) |
+    | `rebase` | a `ResidualHomotopy` station change, one step later | β | the ratio reference |
+    | `redamp` | that station change, on the entering step | the memo | — (β scaled) |
+    `carry_beta` keeps the memo because an escalation changes only how far the march steps through the
+    **same** residual; `rebase` drops it because the next residual is a **different function** and a
+    ratio across that boundary divides two incomparable numbers.
+    - **⚠️ `rebase`'s contract is "drop the ratio REFERENCE, keep everything else that still applies",
+      NOT "clear the memo" — a subclass whose memo carries more than the reference MUST override it.**
+      The base clears the whole memo, correct only because the base's memo *is* the reference. A richer
+      memo (a live growth rate, a cap) would lose those, and the failure is silent in the worst way: the
+      ratio then defaults to `1.0` on every adaptation, so the brake `rebase` exists to stop mis-firing
+      stops firing *at all*, which is indistinguishable from the rebase working. For the same reason,
+      **call these rather than unpacking `(beta, previous_residual) = state`** at a call site — that
+      keeps typechecking after a memo grows a field and quietly stops supplying a reference.
+    - **`redamp` is not optional and is not a knob.** Without it the shift descends by
+      `grow ** steps_per_station` per station, unopposed, and walks through the level the next station
+      can carry. The failure, the four-arm measurement, and why a learned floor under β or a cap on the
+      growth rate are both *refuted* alternatives are in `.claude/rules/solve-march.md` under
+      `ResidualHomotopy` / `redamp` — read there rather than restating here.
   - **The shift's SPATIAL distribution is an injected `ShiftBasis` (`solve/shift_basis.py`) — the
     spatial twin of the `RelaxationSchedule` (binding).** `RelaxationSchedule` sets *how much* damping
     (the scalar β); `ShiftBasis` sets the per-cell base diagonal `d` the shift `β d` is built on, from

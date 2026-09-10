@@ -1739,6 +1739,99 @@ tuning follow-up noted above.
   residual in the wrong scales. Consequences: the reporter is **stateful and order-dependent** (once per
   step, in order — `field_change_metrics`'s contract), and a reporter built partway through a march
   **must be seeded** with that segment's `seed_state` or its first step is scaled at its own end state.
+- **`ViscosityRampHomotopy` — the SAME Reynolds span walked inside ONE march (`reynolds.py`, BUILT
+  2026-09-09).** The `ResidualHomotopy` alternative to the rung ladder below: `stations` geometric
+  viscosity stations from `anchor` down to exactly `1.0`, each held for `steps_per_station` outer steps,
+  handed to `solve_coupled(homotopy=…)`. What it removes is measured in
+  `.claude/rules/solve-march.md`'s `ResidualHomotopy` bullet — read the numbers there rather than
+  restating them: in one sentence, the ladder converges every seed rung to a bar the next rung's
+  viscosity jump undoes by three to four orders of magnitude, and restarts the pseudo-timestep ramp at
+  every rung.
+  - **The target station is the CALLER'S OWN assembler, by identity, not `with_scaled_molecular_viscosity(1.0)`.**
+    Numerically the same problem; **not** the same object, and the assembler is the differentiable
+    parameter pytree the adjoint is taken with respect to. The homotopy dissolves at the target exactly
+    as the ladder does, so the root and its adjoint belong to the case. Pinned by an `is` assertion.
+  - **`rebind` is what keeps the preconditioner honest, and it is per station CHANGE.** The hook is
+    `amg_beta_tracking_refresh(...).rebind`, which discards the previous companion's probe and forces a
+    full re-materialize; the ramp calls it only when the station index moves, which is the whole reason
+    a station spans several steps.
+  - **It is a plain mutable object, not an `equinox.Module`** — it caches the current station and
+    re-points the refresh as a side effect. Like the refresh hook it drives, it runs only on the eager
+    forward-only march and must never be on a differentiated path.
+  - **⚠️ `redamping` defaults to `ratio ** 0.6` — the station's OWN size, not a constant (2026-09-10).**
+    A station warrants damping in proportion to how far it moves the problem, which a constant cannot
+    express: `2.0` is calibrated for a 4-station ramp (`3.162 ** 0.6`) and is a *runaway* on a 24-station
+    one. Forced to exactly `1.0` at `steps_per_station == 1`, and an explicit value refused there,
+    because every step then enters a station, the control is held on every step and never adapts, and
+    β becomes `beta_start * redamping ** n`. The exponent is an empirical fit through one measured
+    point, not a law — see `_REDAMPING_EXPONENT`.
+  - **⚠️ THE SCHEDULE WAS AN ARBITRARY GUESS AND A POOR ONE — 11 arms, 2026-09-10, pitzDaily,
+    uncontended, warm cache, all reaching `x_r/h` 8.0686.** `24 stations x 1 step, redamping 1.0` costs
+    **191** restart cycles against **261** for the original `4 x 3, 2.0` and **417** for the ladder.
+    - **The mechanism, which is the finding.** Net shift change per station is
+      `redamping * grow ** (1 - steps_per_station)` — an entering step is HELD and forgoes its own
+      `/grow`. At `(3, 2.0)` that is `2 / 1.5² = 0.889`, so **β barely descends across the ramp**: the
+      target station is handed β = **0.936** and then spends ~13 of its 28 steps walking β down. That
+      is the *same* per-rung shift restart the homotopy exists to delete, removed from between the rungs
+      and recreated inside the ramp. It is why the target station's cost is near-invariant across coarse
+      schedules (231/232/235/238/242 cycles for five of them) — the schedule cannot reach it.
+    - **Why the fine ramp is safe at β ≈ 0.012, which was the measured wall.** At 24 stations the
+      viscosity moves `1.21x` per station instead of `3.16x`, so the state barely moves and no damping
+      response is warranted. That is the `(state, β)` rule one level down: **the lever is to make the
+      problem move less per step, not to damp after it has moved a lot.**
+    - **Interior optimum, broad basin:** 12 → 246, 24 → **191**, 32 → 225, 48 → 245 cycles. Past ~32 the
+      ramp's own steps and rebuilds outweigh what the target station has left to give (its cost floors
+      near 40 cycles).
+    - **Granularity is the lever, not ramp length** — at a fixed 24 ramp steps, `8 x 3, r=2` costs 286
+      against `24 x 1, r=1`'s 191.
+    - **Anchor depth: leave it.** Re/10 271, Re/100 **261**, Re/1000 436 cycles (at `4 x 3`). Re/100 is
+      at or near the optimum and Re/10 within 4 %.
+    - **Adaptive `steps_per_station` is NOT expressible** — the whole `ResidualHomotopy` protocol keys on
+      the outer-step index and is never handed the state, the residual or a `StepReport`. Widening it is
+      a design change, and the fine-ramp result says the answer is small stations rather than a clever
+      rule for leaving one.
+  - **⚠️ THE PRECONDITIONER IS REFRESHED PER STATION CHANGE, AND THAT IS CORRECT — but "a full rebuild is
+    the most expensive operation in the march" is REFUTED on this case.** Measured, a full
+    re-materialize is **1.2-1.6 s** against a **~9 s** outer step. A control arm isolates it: `4 x 3` with
+    `PITZ_REFRESH_ON_CYCLES=1` (a rebuild essentially every step) costs 253 cycles against 261 — so
+    preconditioner freshness is worth ~3 % and the remaining ~27 % of the fine ramp's win is the
+    viscosity/β path, not the refresh.
+    - **The shift-only refresh branch cannot substitute.** It re-adds `β d` to the *diagonal* of a frozen
+      Jacobian, while viscosity enters every viscous *edge* coefficient — `rebind`'s own docstring says a
+      shift-only refresh would reuse a Jacobian probed at a different viscosity. On this arm the cheap
+      branch does not exist at all (`materialize_drift=None` ⇒ no gate ⇒ every refresh is full or none).
+    - **`refresh_on_cycles` needs no reset at a station change** — its state lives in the dual-time step's
+      `while_loop` carry and never crosses a step.
+    - **Drift within a station is nil on the ramp and heavy on the target**: all 16 cost-triggered inner
+      refreshes fire in the target station, zero across the 12 ramp steps.
+    - ⚠️ **The balance shifts on `bfs3d`, by less than the record claimed.** Measured 2026-09-10 from
+      that case's own march log: a full re-materialize is **11.5 s** against a ~34 s mean outer step --
+      a third of a step, so 24 stations cost ~8 steps of overhead there against ~4 here. The **~36 s**
+      figure previously carried in this file and quoted into two docstrings was taken from the record
+      rather than from a log and is **wrong by 3x**; it made a fine ramp look disqualified on `bfs3d`
+      when the rebuild cost does not disqualify it. What the one (aborted) `bfs3d` ramp arm actually
+      showed is a **shift** mismatch, not a rebuild one: that case opens at `beta_start = 2.0` against
+      pitzDaily's 0.5, so the ramp began four times stiffer, escalated to 4.0, and was still clipping
+      (`a_min` 0.5-0.57) at step 29 where pitzDaily's fine ramp held 1.000 throughout. Untested to
+      convergence there -- the arm was killed at 44 minutes. These remain pitzDaily calibrations.
+  - **⚠️ Latent defect, unfixed: `rebind` does not reset `_staleness_beta_gate`'s bookkeeping**, and nor
+    does the mid-step `refresh_at`. Both rebuild the standing factorization at a β the gate never sees,
+    so `last["beta"]`/`last["since"]` go stale and the gate can fire spuriously *or* decline when the
+    factorization really is mismatched. Inert on pitzDaily (`beta_rel_change=inf`, `refresh_every=1e9`),
+    but live for any finite `beta_rel_change` — including the example published in
+    `docs/preconditioning.md`.
+  - **⚠️ IT IS THE DEFAULT on `validation/pitzdaily_openfoam/compare.py` since 2026-09-10** (`PITZ_RAMP`,
+    with `PITZ_RAMP=off` returning to `solve_reynolds_continuation` as the comparison arm rather than as
+    a supported path). Flipped on the user's decision that the coupled march's upcoming work lands here
+    and the ladder is not being developed further. **⚠️ The ramp has been measured on THIS CASE ONLY and
+    on one run per arm** — `bfs3d_openfoam` has never run it, and that case is where the ladder's rung
+    structure was originally calibrated, so it is the one most likely to disagree. The defaults are
+    configured with
+    `PITZ_RAMP_STATIONS` / `PITZ_RAMP_STEPS`. It anchors at `RATIO ** N_POINTS`, i.e. **the same span the
+    ladder walks**, so the two arms differ in how the span is traversed and not in how far — and it
+    builds its engine by calling the ladder arm's own `point_setup`, so they are preconditioned, logged
+    and step-controlled identically. A second builder written beside it would drift a keyword at a time.
+
 - **`reynolds.py` — Reynolds-number continuation (BUILT).** `solve_reynolds_continuation(coupled,
   n_points, *, schedule=None, **solve_kwargs)` reaches a high-Re coupled root through a homotopy in
   Reynolds number: `n_points` lower-Re solves from an easy anchor up to the target, each seeded by the

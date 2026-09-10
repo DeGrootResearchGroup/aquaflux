@@ -19,6 +19,7 @@ import jax.numpy as jnp
 import pytest
 from aquaflux.solve import (
     NO_RETRIES,
+    CflResidualDualTimeControl,
     CoefficientDriftTrigger,
     ConstantRelaxation,
     CycleGrowthTrigger,
@@ -1452,3 +1453,460 @@ def test_a_healthy_fallback_is_untouched_by_the_ceiling() -> None:
         return p
 
     assert float(backtracking_line_search(residual, phi, delta, reference, steps=4).alpha) == 1.0
+
+
+# --- the within-march homotopy -----------------------------------------------------------------
+
+
+class _CubicRamp:
+    """A ``ResidualHomotopy`` over ``_Cubic``: walk ``theta`` from a start value down to the target.
+
+    The stations are cube roots of the states they converge to, so a station's root is a *different*
+    point from the target's -- which is what makes "did the march stop at the wrong station?"
+    observable rather than a distinction only the bookkeeping can see.
+    """
+
+    def __init__(self, target, start, stations, steps_per_station, redamping=1.0):
+        self.target = target
+        self.start = start
+        self.stations = stations
+        self.steps_per_station = steps_per_station
+        # Defaults to 1.0 -- NO re-damping -- so a test of the rebase isolates the rebase. The two
+        # mechanisms fire on adjacent steps for different reasons, and a fixture that switched both on
+        # could not tell which one moved beta.
+        self.redamping = redamping
+        self.entered: list[int] = []  # one entry per `enter` call: the station it was asked for
+        self.changes: list[float] = []  # one entry per station CHANGE: the theta it moved to
+        self._station = -1
+        self._residual = _Cubic(target)
+
+    def station(self, step: int) -> int:
+        return min(step // self.steps_per_station, self.stations)
+
+    def enter(self, step: int):
+        station = self.station(step)
+        self.entered.append(station)
+        if station != self._station:
+            self._station = station
+            frac = 1.0 - station / self.stations
+            theta = (
+                self.target * (self.start / self.target) ** frac
+                if station < self.stations
+                else self.target
+            )
+            self._residual = _Cubic(theta)
+            self.changes.append(float(jnp.asarray(theta).ravel()[0]))
+        return self._residual
+
+    def arrived(self, step: int) -> bool:
+        return self.station(step) >= self.stations
+
+    def shift_factor(self, step: int) -> float:
+        del step
+        return self.redamping
+
+
+def test_a_march_with_no_homotopy_is_unchanged() -> None:
+    """The default must be byte-identical -- an added seam that moves the incumbent path is a defect."""
+    residual, phi0, _root = _march_and_solver_inputs()
+    step = DampedNewtonStep(line_search=10)
+    kwargs = dict(max_steps=50, rtol=1e-10, atol=1e-12)
+
+    without = forward_march(step, residual, phi0, **kwargs)
+    explicit_none = forward_march(step, residual, phi0, homotopy=None, **kwargs)
+
+    assert without.converged and explicit_none.converged
+    assert jnp.array_equal(without.state, explicit_none.state)
+    assert len(without.reports) == len(explicit_none.reports)
+
+
+def test_the_march_reaches_the_TARGET_root_through_the_ramp() -> None:
+    """The homotopy dissolves: the state the march returns solves the target residual, not a station's.
+
+    The stations converge to visibly different roots (theta walks a decade), so landing on the target's
+    cube root is not something an unwired homotopy could produce by accident.
+    """
+    target = jnp.array([8.0, 27.0, 64.0])
+    homotopy = _CubicRamp(target, start=target * 100.0, stations=3, steps_per_station=2)
+    step = DampedNewtonStep(line_search=10)
+
+    result = forward_march(
+        step,
+        _Cubic(target),
+        jnp.ones_like(target),
+        max_steps=60,
+        rtol=1e-10,
+        atol=1e-12,
+        homotopy=homotopy,
+    )
+
+    assert result.converged
+    assert jnp.allclose(result.state, jnp.cbrt(target), atol=1e-8)
+
+
+def test_the_march_genuinely_solves_each_station_not_only_the_target() -> None:
+    """Reachability: the residual the homotopy hands back is the one the steps actually drive.
+
+    An unwired ``homotopy`` leaves the march bit-identical to one that ignored it, and every property
+    asserted of it would then hold for a reason unrelated to the seam. Marching a ramp whose stations
+    are far from the target and stopping the moment the ramp ends shows the state has been carried to
+    the LAST STATION's root -- which only happens if the stations were the residuals being solved.
+    """
+    target = jnp.array([8.0, 27.0, 64.0])
+    # Three ramp stations of six steps each, and a budget of exactly those eighteen: the march is cut
+    # off the moment the ramp ends, so what it holds is the ramp's work rather than the target's. Six
+    # steps is comfortably enough for a damped Newton to settle this cubic at each station, so the
+    # state is AT a station's root and not somewhere between two of them.
+    homotopy = _CubicRamp(target, start=target * 1000.0, stations=3, steps_per_station=6)
+    step = DampedNewtonStep(line_search=10)
+
+    ramped = forward_march(
+        step,
+        _Cubic(target),
+        jnp.ones_like(target),
+        max_steps=18,
+        rtol=1e-10,
+        atol=1e-12,
+        homotopy=homotopy,
+    )
+    ignored = forward_march(
+        step,
+        _Cubic(target),
+        jnp.ones_like(target),
+        max_steps=18,
+        rtol=1e-10,
+        atol=1e-12,
+    )
+
+    # The two marches spent the same budget on demonstrably different problems: the one that ignored
+    # the ramp sat on the target's root the whole time.
+    assert not ramped.converged
+    assert jnp.allclose(ignored.state, jnp.cbrt(target), atol=1e-8)
+    # The LAST RAMP STATION's root is where the ramped march is -- theta a decade above the target.
+    last_station_theta = target * (1000.0 ** (1.0 - 2 / 3))
+    assert jnp.allclose(ramped.state, jnp.cbrt(last_station_theta), rtol=1e-6)
+
+
+def test_the_march_may_not_stop_on_tolerance_before_the_ramp_arrives() -> None:
+    """A converged intermediate station is not a converged answer, and the stopping test must know it.
+
+    The march is started AT the first station's exact root, so its residual is zero on step one and the
+    tolerance test is satisfied immediately. Without the arrival gate the march would return there and
+    report ``converged`` -- at a state that does not solve the target at all.
+    """
+    target = jnp.array([8.0, 27.0, 64.0])
+    start = target * 100.0
+    homotopy = _CubicRamp(target, start=start, stations=3, steps_per_station=2)
+    step = DampedNewtonStep(line_search=10)
+
+    result = forward_march(
+        step,
+        _Cubic(target),
+        jnp.cbrt(start),
+        max_steps=60,
+        rtol=1e-10,
+        atol=1e-12,
+        homotopy=homotopy,
+    )
+
+    assert len(result.reports) > homotopy.stations * homotopy.steps_per_station
+    assert result.converged
+    assert jnp.allclose(result.state, jnp.cbrt(target), atol=1e-8)
+
+
+def test_a_march_cut_off_inside_the_ramp_does_not_report_convergence() -> None:
+    """``converged`` is the caller's guard, and mid-ramp it must be False however small the residual is.
+
+    Same construction as above -- started on a station's own root, so the residual test passes on every
+    ramp step -- but the budget ends before arrival. A ``True`` here would hand a driver an
+    intermediate-viscosity state as if it were the answer.
+    """
+    target = jnp.array([8.0, 27.0, 64.0])
+    start = target * 100.0
+    homotopy = _CubicRamp(target, start=start, stations=4, steps_per_station=2)
+    step = DampedNewtonStep(line_search=10)
+
+    result = forward_march(
+        step,
+        _Cubic(target),
+        jnp.cbrt(start),
+        max_steps=3,
+        rtol=1e-10,
+        atol=1e-12,
+        homotopy=homotopy,
+    )
+
+    assert not result.converged
+    assert len(result.reports) == 3
+
+
+def test_the_homotopy_is_entered_once_per_step_and_changes_once_per_station() -> None:
+    """A station spans several steps: whatever a change costs downstream is paid per change, not per step.
+
+    This is the property that makes the design affordable -- the motivating consumer refits a frozen
+    preconditioner on each change -- so it is pinned rather than left to the implementation's goodwill.
+    """
+    target = jnp.array([8.0, 27.0, 64.0])
+    homotopy = _CubicRamp(target, start=target * 100.0, stations=3, steps_per_station=4)
+    step = DampedNewtonStep(line_search=10)
+
+    result = forward_march(
+        step,
+        _Cubic(target),
+        jnp.ones_like(target),
+        max_steps=12,
+        rtol=1e-10,
+        atol=1e-12,
+        homotopy=homotopy,
+    )
+
+    steps = len(result.reports)
+    # `enter` is also called once before the loop, for the damping anchor at the first station.
+    assert homotopy.entered == [0] + [homotopy.station(i) for i in range(steps)]
+    # Four steps per station over 12 steps: stations 0, 1, 2 -- three changes, not twelve.
+    assert len(homotopy.changes) == 3
+
+
+# --- rebasing a residual-keyed control at a station boundary ------------------------------------
+
+
+class _RecordingCfl(CflResidualDualTimeControl):
+    """A ``CflResidualDualTimeControl`` that records the ``(beta, memo)`` it is handed each call.
+
+    The rebase happens to the state *before* ``next_step`` sees it, so the memo the control actually
+    adapts from is the observable that distinguishes a rebased march from one that is not. Recording
+    it here reads that directly rather than inferring it from the beta trajectory, which several other
+    effects also move.
+    """
+
+    seen: list = eqx.field(static=True, default_factory=list)
+
+    def next_step(self, base_step, previous, state):
+        self.seen.append(None if state is None else state[1])
+        return super().next_step(base_step, previous, state)
+
+
+class _NoRebase:
+    """A step control that delegates ``next_step`` and deliberately exposes no ``rebase``.
+
+    Reproduces the march exactly as it ran before the rebase existed, which is what makes the
+    comparison below a test of the fix rather than of the fixture. It is also a real case and not only
+    a stub: :func:`~aquaflux.solve.forward_march` reaches the rebase through ``getattr``, so a
+    third-party control that does not implement it degrades to precisely this behaviour.
+    """
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    def next_step(self, base_step, previous, state):
+        return self.inner.next_step(base_step, previous, state)
+
+
+def _ramp_march(homotopy, control, steps, start=1000.0):
+    """Run a short controlled march over ``homotopy``'s stations on a shifted step.
+
+    ⚠️ Starts **near** the first station's root, not on it. Landing exactly on it makes ``‖R₀‖``
+    zero, and that anchor is what the step's line search measures descent against -- with a zero
+    reference nothing is admissible, every step falls through to the non-descent fallback, and the
+    march freezes with ``alpha = 1.000`` and an unchanging residual. A test built on that fixture
+    passes without exercising anything, which is the failure easiest to mistake for a result.
+    """
+    theta = jnp.array([8.0, 27.0, 64.0])
+    base = PseudoTransientStep(
+        _UnitShiftPolicy(),
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
+        line_search=8,
+    )
+    return forward_march(
+        base,
+        _Cubic(theta),
+        jnp.cbrt(theta * start) * 1.05,
+        max_steps=steps,
+        rtol=1e-12,
+        atol=1e-14,
+        step_control=control,
+        homotopy=homotopy,
+    )
+
+
+def test_rebase_drops_the_remembered_residual_and_keeps_the_shift() -> None:
+    """The mirror of ``carry_beta``: β survives, the reference does not."""
+    control = CflResidualDualTimeControl(beta_start=0.5)
+
+    assert control.rebase((0.25, 3.5)) == (0.25, None)
+    assert control.carry_beta((0.25, 3.5), 0.5) == (0.5, 3.5)  # the sibling, unchanged
+
+
+def test_rebasing_a_memoryless_control_changes_nothing() -> None:
+    """``DualTimeControl`` keys on α alone, so it carries no cross-problem reference to invalidate."""
+    control = DualTimeControl(beta_start=0.5)
+
+    assert control.rebase((0.25, None)) == (0.25, None)
+
+
+def test_the_march_rebases_the_control_at_a_station_change() -> None:
+    """Reachability: the control adapts from ``memo is None`` on the step after a station change.
+
+    Read off the state the control is actually handed, rather than off β -- β is moved by the grow
+    rule, the back-off rule and the clamp as well, so asserting on it would pass for reasons unrelated
+    to the rebase.
+    """
+    target = jnp.array([8.0, 27.0, 64.0])
+    homotopy = _CubicRamp(target, start=target * 1000.0, stations=3, steps_per_station=2)
+    control = _RecordingCfl(beta_start=0.5, seen=[])
+
+    result = _ramp_march(homotopy, control, steps=6)
+
+    steps = len(result.reports)
+    # Station changes at steps 2 and 4, so the calls that STRADDLE one are those for steps 3 and 5:
+    # each divides step (n-1)'s residual by step (n-2)'s across the boundary.
+    straddling = [
+        n for n in range(steps) if n >= 2 and homotopy.station(n - 1) != homotopy.station(n - 2)
+    ]
+    assert straddling, "the fixture must actually cross a station boundary"
+    for n in straddling:
+        assert control.seen[n] is None, f"step {n} adapted across a station change"
+
+
+def test_a_station_change_does_not_brake_the_shift() -> None:
+    """The defect this fixes: a harder new station raises the residual, and the control read it as
+    an overshoot and doubled β.
+
+    The unrebased arm is the control, and it is what makes this a test of the fix rather than of the
+    fixture -- the same march, the same stations, differing only in whether the reference is dropped.
+    """
+    target = jnp.array([8.0, 27.0, 64.0])
+
+    def run(rebasing):
+        homotopy = _CubicRamp(target, start=target * 1000.0, stations=3, steps_per_station=2)
+        control = CflResidualDualTimeControl(beta_start=0.5, backoff=2.0)
+        return _ramp_march(homotopy, control if rebasing else _NoRebase(control), steps=6)
+
+    braked = run(rebasing=False)
+    fixed = run(rebasing=True)
+
+    # Every step of the rebased arm was comfortable, so nothing legitimately justified a brake.
+    assert all(r.alpha >= 0.99 for r in fixed.reports)
+    assert max(r.shift for r in fixed.reports) <= max(r.shift for r in braked.reports)
+
+
+def test_no_station_change_brakes_the_shift_however_far_the_residual_JUMPS() -> None:
+    """The strong form, at EVERY boundary rather than at the ones that happened to fire.
+
+    The weaker test above compares two arms on aggregate shift, which a fix that ran at only some
+    boundaries would still pass -- and on the real march only two of four station changes braked, so
+    "it did not brake here" is indistinguishable from "the rebase silently did not run here" without
+    forcing the issue. This gives every station enough steps to converge, so each change lands a
+    residual jump of many orders (a converged station's residual is ~0; the next station's, at the
+    same state, is the whole gap between their roots). Every boundary then *must* brake if the
+    reference is not re-based.
+
+    Both directions are asserted at each boundary, which is what makes the fixture honest: the
+    unrebased arm proves the jump really does trip the brake, and the rebased arm proves the fix
+    catches all of them and not a subset.
+    """
+    target = jnp.array([8.0, 27.0, 64.0])
+    stations, per = 3, 4  # four steps is ample for a damped Newton to settle this cubic
+
+    def run(rebasing):
+        homotopy = _CubicRamp(
+            target, start=target * 1000.0, stations=stations, steps_per_station=per
+        )
+        control = CflResidualDualTimeControl(beta_start=0.5, backoff=2.0)
+        return homotopy, _ramp_march(
+            homotopy, control if rebasing else _NoRebase(control), steps=stations * per
+        )
+
+    _h_braked, braked = run(rebasing=False)
+    homotopy, fixed = run(rebasing=True)
+
+    # The step that ADAPTS across a boundary is the one after the first step of a new station.
+    straddling = [
+        n
+        for n in range(len(fixed.reports))
+        if n >= 2 and homotopy.station(n - 1) != homotopy.station(n - 2)
+    ]
+    assert len(straddling) >= 2, "the fixture must cross at least two station boundaries"
+
+    for n in straddling:
+        assert braked.reports[n].shift > braked.reports[n - 1].shift, (
+            f"step {n} did not brake without the rebase -- the fixture is not tripping the rule, "
+            f"so the rebased arm passing below would prove nothing"
+        )
+        assert fixed.reports[n].shift <= fixed.reports[n - 1].shift, (
+            f"step {n} braked despite the rebase -- the reference survived a station change"
+        )
+
+
+# --- deliberate re-damping on entering a station ------------------------------------------------
+
+
+def test_entering_a_station_re_damps_the_shift_by_the_homotopy_s_factor() -> None:
+    """The shift is multiplied by ``shift_factor`` on the step that first faces a new station.
+
+    Exactly the factor, not the factor further adapted: the control is HELD for that step, so the
+    re-damping is the step's whole adaptation rather than something the grow rule immediately erodes.
+    """
+    target = jnp.array([8.0, 27.0, 64.0])
+    homotopy = _CubicRamp(
+        target, start=target * 1000.0, stations=3, steps_per_station=2, redamping=2.0
+    )
+    control = DualTimeControl(beta_start=0.5, beta_min=1e-6, beta_max=1e6, grow=1.5)
+
+    result = _ramp_march(homotopy, control, steps=6)
+
+    shifts = [r.shift for r in result.reports]
+    entering = [n for n in range(1, len(shifts)) if homotopy.station(n) != homotopy.station(n - 1)]
+    assert entering, "the fixture must cross a station boundary"
+    for n in entering:
+        assert shifts[n] == pytest.approx(shifts[n - 1] * 2.0), (
+            f"step {n} entered a station without the re-damping being applied cleanly"
+        )
+
+
+def test_re_damping_is_off_by_default_so_a_plain_homotopy_march_is_unchanged() -> None:
+    """``shift_factor`` of 1.0 must leave the march byte-identical to one that never asks.
+
+    The protocol's own default is 1.0, so a homotopy that does not care about the shift pays nothing
+    and behaves exactly as it did before this seam existed.
+    """
+    target = jnp.array([8.0, 27.0, 64.0])
+
+    def run(redamping):
+        homotopy = _CubicRamp(
+            target, start=target * 1000.0, stations=3, steps_per_station=2, redamping=redamping
+        )
+        return _ramp_march(homotopy, DualTimeControl(beta_start=0.5), steps=6)
+
+    assert [r.shift for r in run(1.0).reports] == [r.shift for r in run(1.0).reports]
+    assert [r.shift for r in run(2.0).reports] != [r.shift for r in run(1.0).reports]
+
+
+def test_re_damping_keeps_the_shift_above_a_level_the_undamped_ramp_walks_through() -> None:
+    """The property the pitzDaily failure is about: the undamped ramp descends far further.
+
+    Within a station the control divides the shift by ``grow`` each step, so the descent per station
+    is ``grow ** steps_per_station``; re-damping by ``factor`` leaves a net of
+    ``grow ** steps / factor``. This pins that the damped arm's *minimum* shift stays well above the
+    undamped arm's -- which on the real case is the difference between approaching a wall at
+    ``beta ~ 0.012`` and stopping short of it.
+    """
+    target = jnp.array([8.0, 27.0, 64.0])
+
+    def run(redamping):
+        homotopy = _CubicRamp(
+            target, start=target * 1000.0, stations=4, steps_per_station=3, redamping=redamping
+        )
+        control = DualTimeControl(beta_start=0.5, beta_min=1e-9, beta_max=1e6, grow=1.5)
+        return _ramp_march(homotopy, control, steps=12)
+
+    undamped = min(r.shift for r in run(1.0).reports)
+    damped = min(r.shift for r in run(2.0).reports)
+
+    # Three station changes over four stations. Each is worth ``factor * grow``, not ``factor``: the
+    # control is HELD on an entering step, so that step also forgoes its usual division by ``grow``.
+    # That is not an accident of the implementation -- it is what reproduces the behaviour the
+    # accidental brake had, which replaced a grow division rather than adding to one, and which is the
+    # arm that converged in 36 steps.
+    assert damped > undamped
+    assert damped / undamped == pytest.approx((2.0 * 1.5) ** 3, rel=1e-6)

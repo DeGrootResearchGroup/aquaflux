@@ -113,6 +113,80 @@ class MarchResult(NamedTuple):
     control_state: object = None
 
 
+class ResidualHomotopy(Protocol):
+    """Which problem each outer step of a march solves, on a path ending at the target problem.
+
+    Structural interface only (a ``Protocol``). A march normally drives **one** residual to zero. A
+    homotopy replaces that with a short sequence of *stations* -- residuals of the same shape,
+    differing in a physical parameter -- walked within a **single** march, the last of which is the
+    target problem itself.
+
+    **What this buys over solving each station as its own march.** Solving a sequence of related
+    problems one full solve at a time (a Reynolds-number ladder, say) pays two costs per station that
+    a within-march walk does not. Each solve converges its station to a stopping tolerance even though
+    the station is only a *seed* for the next one -- and the parameter jump that follows immediately
+    undoes that convergence, so the polishing is discarded work. And each solve restarts its step
+    control, so a pseudo-timestep ramp walks back up from its starting shift at every station
+    regardless of how good the seed it was handed is. Marching the stations in one loop keeps the
+    state, the shift and the preconditioner, and converges only the last one.
+
+    **The stopping test is gated on arrival.** A march running a homotopy may not stop on its residual
+    tolerance until :meth:`arrived` is true, because a small residual at an intermediate station says
+    nothing about the target problem. :func:`forward_march` enforces this; an implementation only has
+    to answer honestly.
+
+    **Stations are coarser than steps, deliberately.** :meth:`enter` is called once per outer step, but
+    an implementation is expected to hold a station for several steps: whatever a station change costs
+    downstream -- refitting a frozen preconditioner to the new parameter is the motivating case -- is
+    paid once per *change*, not once per step, so moving the parameter every step can cost far more
+    than the steps it saves.
+    """
+
+    def enter(self, step: int) -> Callable[[jnp.ndarray], jnp.ndarray]:
+        """Make the station outer step ``step`` runs current, and return its residual ``phi -> R(phi)``.
+
+        Called once per outer step, before the step is taken. **May have side effects** -- that is what
+        "enter" names: an implementation that must re-point a preconditioner refresh at the new station
+        does it here, so the operator the step solves against and the residual it drives agree.
+
+        Return a **bound method of a module** rather than a freshly-built closure, for the same reason
+        :func:`forward_march`'s own ``residual_fn`` must be one: its arrays then ride as dynamic leaves
+        and each step stays a compilation-cache hit instead of recompiling per station.
+        """
+
+    def arrived(self, step: int) -> bool:
+        """Whether outer step ``step`` runs the **target** problem, so the march may stop on tolerance."""
+
+    def shift_factor(self, step: int) -> float:
+        """What to multiply the pseudo-transient shift by when outer step ``step`` **enters** a station.
+
+        ``1.0`` within a station (the ordinary case, and the value a homotopy that wants no shift
+        response returns always). Greater than one at a change, asking the march to re-damp because the
+        problem just got harder -- the same response a continuation makes at a rung boundary, which a
+        within-march homotopy has nowhere else to hang.
+
+        Read **only** on a step where :meth:`station` differs from the previous step's, so a value
+        returned elsewhere is ignored.
+        """
+        return 1.0
+
+    def station(self, step: int) -> int:
+        """Which station outer step ``step`` runs, as an index that only ever increases.
+
+        The march needs this to spot a **change**, because a change is a discontinuity in the residual
+        and some march machinery is only valid within one station. Concretely, a step control that
+        keys on the residual *ratio* forms that ratio across consecutive steps, and the ratio is
+        meaningful only when both residuals came from the same station -- a station change raises the
+        residual because the problem got harder, which such a control would otherwise read as
+        divergence and brake on. :func:`forward_march` therefore rebases the control at a change (see
+        :meth:`~aquaflux.solve.ShiftStrengthControl.rebase`).
+
+        Only equality between adjacent steps is read, never the value or the spacing, so an
+        implementation may number stations however it likes as long as consecutive steps within one
+        station compare equal.
+        """
+
+
 class RefreshTrigger(Protocol):
     """Decides, from a march's step history, whether the frozen preconditioner should be rebuilt.
 
@@ -415,6 +489,7 @@ def forward_march(
     retry: RetryPolicy = NO_RETRIES,
     stop_on_limit_stall: int | None = 3,
     on_retry: Callable[[str, int, float], None] | None = None,
+    homotopy: ResidualHomotopy | None = None,
 ) -> MarchResult:
     """March the residual eagerly, reporting each step and stopping early if the trigger fires.
 
@@ -505,6 +580,18 @@ def forward_march(
         the trigger and the control it is **forward-only** -- an impure mutation that must never be on a
         differentiated path. ``None`` (the default) leaves the preconditioner untouched, byte-identical to
         before.
+    homotopy : ResidualHomotopy, optional
+        Walk a sequence of related problems within this one march, ending at the target. When given,
+        each outer step drives ``homotopy.enter(step)`` instead of ``residual_fn``, and the march may
+        **not** stop on its residual tolerance until ``homotopy.arrived(step)`` -- a converged
+        intermediate station is not a converged answer. ``residual_fn`` stays the **target** residual
+        and is what ``reference_norm`` defaults to, so the stopping bar is the target problem's
+        throughout rather than a moving one. ``None`` (the default) marches ``residual_fn`` alone and
+        is byte-identical.
+
+        The damping anchor ``‖R₀‖`` is taken at the **first station** rather than at the target, since
+        it is the scale the first step's inner loop is judged against; with no homotopy that is
+        ``residual_fn`` and nothing changes.
     solver : lineax.AbstractLinearSolver, optional
         The linear solver for each step; defaults to ``forward_step.default_solver()``.
     retry : RetryPolicy
@@ -560,7 +647,11 @@ def forward_march(
     # never inherited, so a segment resumed after a refresh restarts its ramp. It is fixed for the
     # whole segment: recomputing it per step would hold the ratio at one, pinning the shift at its
     # starting strength and freezing the march.
-    residual_norm_0 = jnp.asarray(norm(residual_fn(phi0)))
+    # The anchor is the scale the FIRST step's inner loop is judged against, so it is taken at the
+    # station that step actually runs. With no homotopy that is `residual_fn` and this is unchanged.
+    residual_norm_0 = jnp.asarray(
+        norm(residual_fn(phi0) if homotopy is None else homotopy.enter(0)(phi0))
+    )
     reference = float(residual_norm_0) if reference_norm is None else float(reference_norm)
 
     # Both thresholds are knowable INSIDE a step -- the cost one the moment a solve returns, the
@@ -581,7 +672,19 @@ def forward_march(
     def converged_at(residual_norm: float) -> bool:
         return bool(within_tolerance(jnp.asarray(residual_norm), reference, rtol, atol))
 
-    while len(reports) < max_steps and not converged_at(current) and not triggered:
+    # Whether the step just set up runs the TARGET problem. A homotopy march may not stop on the
+    # residual tolerance before it does -- a small residual at an intermediate station says nothing
+    # about the target -- so this starts False and the loop always takes at least one step. Without a
+    # homotopy it is True throughout and the stopping test is unchanged.
+    arrived = homotopy is None
+
+    while len(reports) < max_steps and not (converged_at(current) and arrived) and not triggered:
+        # The station this step drives. `enter` is where a homotopy re-points whatever must follow the
+        # parameter (a preconditioner refresh), so it runs before the control and the refresh below.
+        step_residual = residual_fn
+        if homotopy is not None:
+            step_residual = homotopy.enter(len(reports))
+            arrived = homotopy.arrived(len(reports))
         # A step control reshapes the base step from the previous report (None runs it unchanged, so
         # the loop is byte-identical). It threads its own state; the march stays ignorant of β.
         active_step = forward_step
@@ -593,9 +696,43 @@ def forward_march(
             # would stop comparing like with like. The swap is a compilation-cache hit as long as the
             # measure carries its scales as data over a fixed block structure.
             active_step = eqx.tree_at(lambda s: s.residual_norm, active_step, norm_builder(state))
+        # Entering a new station: re-damp deliberately, and HOLD the control for this step so it does
+        # not immediately adapt the re-damping away. The hold is the same treatment a refresh boundary
+        # gets, for the neighbouring reason -- there the preconditioner moved under the march, here the
+        # residual did. Without the re-damping the shift walks straight through the level the new
+        # station can carry: measured on a pitzDaily ramp, into a line-search collapse and a
+        # two-order residual excursion the retry ladder then had to climb back out of.
+        entering = (
+            homotopy is not None
+            and reports
+            and homotopy.station(len(reports)) != homotopy.station(len(reports) - 1)
+        )
+        previous_report = reports[-1] if reports else None
+        if entering and step_control is not None:
+            redamp = getattr(step_control, "redamp", None)
+            factor = float(homotopy.shift_factor(len(reports)))
+            if redamp is not None and factor != 1.0:
+                control_state = redamp(control_state, factor)
+                previous_report = None  # hold: the re-damping is this step's adaptation
         if step_control is not None:
+            # A residual-ratio rule divides the last step's residual by the one before it, and that
+            # ratio only means something when both came from the SAME station. The previous step began
+            # a new one here, so the pair straddles a change of problem: drop the remembered residual
+            # and let the control fall back to alpha for one step, exactly as it does on the first step
+            # of a march. Without this the control reads the residual rise that a harder new station
+            # causes as an overshoot and brakes on it -- measured firing at two of four station changes
+            # on a pitzDaily viscosity ramp, both with a fully comfortable inner loop.
+            # Not a hold (`previous=None`, the refresh boundary's treatment): there the residual
+            # function is unchanged and its reference is still worth keeping, and here it is not.
+            if (
+                homotopy is not None
+                and len(reports) >= 2
+                and homotopy.station(len(reports) - 1) != homotopy.station(len(reports) - 2)
+                and (rebase := getattr(step_control, "rebase", None)) is not None
+            ):
+                control_state = rebase(control_state)
             active_step, control_state = step_control.next_step(
-                active_step, reports[-1] if reports else None, control_state
+                active_step, previous_report, control_state
             )
         # Check the step can support what was ASKED FOR -- loudly, and once. The escalation drives the
         # pseudo-transient shift, which `ForwardStep` does not promise (see `RetryPolicy.require_shifted`);
@@ -623,7 +760,7 @@ def forward_march(
             precondition_step(active_step, state)
         prestep_state = state
         outcome, residual_norm = _march_step(
-            active_step, residual_fn, prestep_state, residual_norm_0, solver
+            active_step, step_residual, prestep_state, residual_norm_0, solver
         )
         # A step can go bad three ways -- a non-finite / diverging correction, a step length collapsed
         # to `retry.on_alpha`, or a solve truncated by `retry.abort_above_cycles` -- and they DO NOT
@@ -694,7 +831,7 @@ def forward_march(
                 # with escalation should let a doubling through: re-matching is what this call asks for.
                 precondition_step(active_step, prestep_state)
             outcome, residual_norm = _march_step(
-                active_step, residual_fn, prestep_state, residual_norm_0, solver
+                active_step, step_residual, prestep_state, residual_norm_0, solver
             )
         # Divergence retry -- the FALLBACK for a non-finite correction β-escalation could not fix. An
         # inexact preconditioner can return a non-finite correction where the loose
@@ -714,7 +851,7 @@ def forward_march(
                 # `ForwardStep` in full. Unchanged beta here in any case; nothing escalated.
                 on_retry("solver", retries + 1, float(_shift_of(active_step) or 0.0))
             outcome, residual_norm = _march_step(
-                active_step, residual_fn, prestep_state, residual_norm_0, retry.solver
+                active_step, step_residual, prestep_state, residual_norm_0, retry.solver
             )
         # Carry an escalated β forward into the control. The escalation raised β because the control had
         # driven it too low for this operator; without carrying that back, the next `next_step` recomputes
@@ -770,7 +907,7 @@ def forward_march(
     return MarchResult(
         state=state,
         reports=tuple(reports),
-        converged=converged_at(current),
+        converged=converged_at(current) and arrived,
         triggered=triggered,
         control_state=control_state,
     )

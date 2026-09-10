@@ -97,6 +97,7 @@ from aquaflux.solve import (
 from aquaflux.turbulence import (
     CoupledJacobianProbe,
     CoupledRANS,
+    GeometricReynoldsSchedule,
     LogScalars,
     SSTModel,
     SSTTurbulence,
@@ -105,6 +106,7 @@ from aquaflux.turbulence import (
     coupled_fields,
     coupled_residuals,
     solve_reynolds_continuation,
+    solve_reynolds_ramp,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -151,6 +153,40 @@ RTOL, ATOL = 0.0, 1e-5
 # at a higher Reynolds number where the cold Re/10 solve may stop converging. `BFS3D_N_POINTS=1 ...`
 # runs the one-rung ladder.
 N_POINTS = int(os.environ.get("BFS3D_N_POINTS", "2"))
+# The ladder's spacing, named once so the ramp arm can span exactly the range the ladder spans.
+# `GeometricReynoldsSchedule()` is what `solve_reynolds_continuation` builds for itself when given
+# none, so passing it explicitly is the same ladder -- it is here so the two arms cannot disagree
+# about where the anchor sits.
+SCHEDULE = GeometricReynoldsSchedule()
+
+# Whether the Reynolds span is walked as a LADDER of converged rungs (`off`, the default here) or as
+# ONE march whose molecular viscosity ramps down to the target (`continuous`). Both span the same
+# range -- the ramp's anchor is the ladder's own `RATIO ** N_POINTS` -- so they differ in HOW the span
+# is walked, not in how far. `BFS3D_RAMP=continuous` selects the ramp.
+#
+# ⚠️ THE DEFAULT IS THE LADDER HERE AND `continuous` ON THE TWO-DIMENSIONAL SIBLING, and that split is
+# deliberate rather than an oversight: the schedule that wins is decided by what a station change costs
+# on the case, and the two cases are far apart on it. Every station change re-points the preconditioner
+# refresh and forces a FULL re-materialize, so a ramp of `n` stations buys its shorter march with `n`
+# rebuilds. On the sibling a rebuild is 1.2-1.6 s against a ~9 s outer step -- a sixth of one, so 24 of
+# them are nearly free. Measured here (2026-08-25 three-rung ladder, field split on, `simplesmooth`
+# flow inverse, column reach 3/3/3/3/2/2, ILU(0) / 4 sweeps): a full rebuild is ~10 s against a ~33 s
+# mean outer step, a THIRD of a step, so the same 24 stations cost ~7 outer steps of pure overhead.
+#
+# ⚠️ ONE STEP PER STATION unless you have measured otherwise. Above one, the ramp re-damps the shift on
+# entering each station, and an entering step is HELD -- so a station of `s` steps divides beta only
+# `s - 1` times and the re-damping very nearly cancels the descent. The march then arrives at the
+# target station with the shift still high and has to walk it down there, which is the same cost the
+# ramp exists to delete, re-created inside the ramp.
+RAMP = os.environ.get("BFS3D_RAMP", "off")
+RAMP_STATIONS = int(os.environ.get("BFS3D_RAMP_STATIONS", "24"))
+RAMP_STEPS_PER_STATION = int(os.environ.get("BFS3D_RAMP_STEPS", "1"))
+#: `None` takes `ViscosityRampHomotopy`'s derived default (the station's own viscosity ratio raised to
+#: a fitted exponent, and exactly 1.0 at one step per station, where re-damping every step would make
+#: the shift run away rather than damp).
+RAMP_REDAMPING = (
+    float(os.environ["BFS3D_RAMP_REDAMPING"]) if "BFS3D_RAMP_REDAMPING" in os.environ else None
+)
 # The dual-time inner loop: at most `INNER_STEPS` shifted Newton iterations per outer timestep, stopping
 # once `|G|` has fallen to `INNER_TOL` of the step's own starting residual.
 #
@@ -1327,6 +1363,13 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         # rebuilt, and a run that re-matches on a β escalation is a different arm from one that does not.
         ("refresh on beta mismatch", "off" if REFRESH_ON_BETA == float("inf") else REFRESH_ON_BETA),
         ("Reynolds continuation points", N_POINTS),
+        (
+            "Reynolds span walked as",
+            f"{RAMP_STATIONS} stations x {RAMP_STEPS_PER_STATION} steps, redamping "
+            f"{'derived' if RAMP_REDAMPING is None else format(RAMP_REDAMPING, 'g')}"
+            if RAMP == "continuous"
+            else f"a rung ladder ({RAMP})",
+        ),
         # Both are swept, so both must be printed: without them two differently-configured runs produce
         # identical banners, which is the failure this table exists to prevent.
         ("dual-time inner steps / tol", f"{INNER_STEPS} / {INNER_TOL:g}"),
@@ -1401,9 +1444,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         coupled,
         column_reach=COLUMN_REACH,
         active_rows=(
-            FieldGroups.split_before(coupled.layout, "k").active_rows()
-            if FIELD_SPLIT
-            else None
+            FieldGroups.split_before(coupled.layout, "k").active_rows() if FIELD_SPLIT else None
         ),
     )
     # With the cycle trigger on, the scheduled cadences are switched OFF so it REPLACES them: as an
@@ -1497,6 +1538,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             max_steps=MAX_STEPS,
             rtol=RTOL,
             atol=ATOL,
+            schedule=SCHEDULE,
             intermediate_rtol=None,  # every rung stops at the same ABSOLUTE bar
             intermediate_atol=ATOL,
             step_control=CONTROL,
@@ -1514,7 +1556,19 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         | solve_kwargs
     )
     try:
-        flow, k, omega = solve_reynolds_continuation(coupled, N_POINTS, **options)
+        if RAMP == "continuous":
+            # The SAME viscosity span the ladder walks, and the SAME `point_setup` and options, so the
+            # two arms differ in how the span is walked and in nothing else.
+            flow, k, omega = solve_reynolds_ramp(
+                coupled,
+                anchor=SCHEDULE.anchor(N_POINTS),
+                stations=RAMP_STATIONS,
+                steps_per_station=RAMP_STEPS_PER_STATION,
+                redamping=RAMP_REDAMPING,
+                **options,
+            )
+        else:
+            flow, k, omega = solve_reynolds_continuation(coupled, N_POINTS, **options)
     finally:
         if log_file is not None:
             log_file.close()

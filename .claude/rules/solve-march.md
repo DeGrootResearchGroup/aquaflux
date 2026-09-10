@@ -18,6 +18,132 @@ paths:
 
 ## The observed march — forward_march, triggers, controls, logging
 
+- **`ResidualHomotopy` — a continuation walked INSIDE one march, not as a ladder of marches (BUILT
+  2026-09-09).** A `Protocol` on `forward_march(homotopy=…)` with two methods: `enter(step)` makes the
+  station that step solves current and returns its residual, and `arrived(step)` says whether that
+  station is the **target**. `None` (the default) is byte-identical and is pinned by a test, since an
+  added seam that moves the incumbent path is a defect rather than a feature.
+  - **What it is for, quantified on pitzDaily's shipped Reynolds ladder (2026-09-09, `simplesmooth`
+    flow inverse, `N_POINTS=2`, `RATIO=10`, `BETA_START=0.5`, `beta_min=0.005`, `grow=1.5`,
+    `INNER_STEPS=5`, cold compile cache; 69 outer steps / 417 restart cycles / 1325 s total of which
+    **396 s was XLA compilation before step 1**, so 929 s of marching; `x_r/h` 8.07 vs OpenFOAM 7.74).**
+    Solving each rung as its own march pays two costs a single march does not, and BOTH are visible in
+    that one log:
+      * **Every rung is converged and the next rung's viscosity jump immediately undoes it.** Rung 1
+        spent **12 of its 28 steps** taking `|R|` 4.5e-04 → 7.2e-06; rung 2 opened at 4.5e-02 — **six
+        thousand times worse**. Rung 2 converged to 4.6e-06 and the target opened at 3.0e-03. A seed
+        does not need to be a root, and those polishing steps are discarded work.
+      * **Every rung restarts the pseudo-timestep ramp.** `beta` reopens at `BETA_START` per rung and
+        walks down one `1/grow` notch per **outer step** — `ceil(ln(100)/ln(1.5)) = 12` steps at these
+        values, measured with `a_min = 1.000` on all eleven comfortable ones, i.e. the control had no
+        reason for caution and crawled anyway. Rungs 1/2/3 spent 12/15/16 steps there.
+    Per rung, on the quiet re-run: 28 steps / 123 cycles / 157 s, 21 / 139 / 160 s, 20 / 155 / 170 s.
+    (⚠️ The wall clocks above are from an **uncontended** run; a first attempt at the same march was
+    contended by a parallel test tier and read 1325 s against 555 s for a **bit-identical** trajectory
+    — same 69/417, same final `|R|` 5.771e-06. Counts survive contention; clocks do not.)
+  - **⚠️ THE MEASURED RESULT, four arms, all reaching `x_r/h` 8.0686 and `nu_t` peak 417.8 (2026-09-09,
+    commit 72c9a96, uncontended, warm compile cache, compiled ILU live, `simplesmooth` flow inverse,
+    `PITZ_RAMP_STATIONS=4`, `PITZ_RAMP_STEPS=3`).** Read the **cycle** column: it is the cost measure
+    that survives a bad clock.
+
+    | arm | steps | cycles | wall |
+    |---|---|---|---|
+    | Reynolds ladder (shipped) | 69 | 417 | 555 s |
+    | ramp, station brake left mis-firing | 36 | 269 | 356 s |
+    | ramp, `rebase` only | 50 | 301 | 453 s |
+    | **ramp, `rebase` + `redamp`** | **40** | **261** | **363 s** |
+
+    Against the ladder that is **1.7x steps, 1.60x cycles, 1.53x wall**. The last two rows are the
+    whole argument for `redamp` and are covered in its own entry below.
+  - **⚠️ THE STOPPING TEST IS GATED ON ARRIVAL, and this is the load-bearing correctness property.** A
+    small residual at an intermediate station says nothing about the target, so `forward_march` may not
+    stop — and `MarchResult.converged` may not be `True` — until `arrived`. Both directions are pinned
+    by starting a march **at a station's own exact root**, where the tolerance test passes on step one:
+    without the gate it returns there and reports success at a state that does not solve the target.
+  - **⚠️ A STATION SPANS SEVERAL STEPS ON PURPOSE — moving the parameter every step is the expensive
+    mistake.** A station change re-points the refresh hook (`amg_beta_tracking_refresh(...).rebind`),
+    whose `forced_full["pending"]` overrides **both** gates and forces a FULL coloured-probe
+    re-materialize on the next `precondition_step` — the most expensive single operation in the march,
+    and the case's largest allocation. Per-step viscosity would therefore buy a handful of steps and pay
+    a full rebuild for each. `steps_per_station` is the knob; the cost argument is why it exists.
+  - **⚠️ `redamp` — RE-DAMP ON ENTERING A STATION, AND THE MARCH BREAKS WITHOUT IT (BUILT 2026-09-09).**
+    `ShiftStrengthControl.redamp(state, factor)` multiplies β by `ResidualHomotopy.shift_factor(step)`
+    on the step that first faces a new station, and `forward_march` **holds** the control for that step.
+    It is the companion of `rebase` and they fire on **adjacent steps for different reasons**: this on
+    the entering step, that on the next one, which is the first whose ratio would straddle the boundary.
+    - **⚠️ THE SPURIOUS BRAKE `rebase` REMOVES WAS LOAD-BEARING.** This is the case's instance of a
+      general globalization lesson — *a defect that fires for the wrong reason can be the only thing
+      holding the march out of a bad regime, so fixing it correctly is what breaks the case* — which is
+      stated once, with what to do about it, at the top of `.claude/rules/solve-globalization.md`. The
+      numbers are here; the lesson is there. Before `rebase`, the ratio rule
+      mis-read each station change as divergence and doubled β at two of four changes. That was wrong
+      *and* was the only thing holding β out of a regime where the frozen preconditioner stops tracking
+      the operator. Removing it,
+      β walked 0.5 → 0.148 → 0.044 → **0.013** (`grow ** steps_per_station` = `1.5³` = 3.375 per
+      station, unopposed) into a wall at **β ≈ 0.012**: the line search collapsed to `alpha = 0`, `|R|`
+      went 4.4e-03 → 4.4e-01, and the retry ladder escalated β to ~2 to recover. Cost: 50 steps / 301
+      cycles against 36 / 269 for the march that never went there.
+    - **The hold is load-bearing and reproduces the accident's arithmetic exactly.** An entering step
+      forgoes its usual `/grow`, so a change is worth `factor * grow`, not `factor` — which is what the
+      old brake did, since `_adapt` chose brake *instead of* grow rather than in addition to it. A test
+      written expecting `factor ** changes` measured `(factor * grow) ** changes`; the implementation
+      was right and the expectation wrong.
+    - **⚠️ TWO DIFFERENT FLOORS, and conflating them mis-states the mechanism.** `beta_min`
+      (on the step control) floors the shift the **operator** is solved with; `beta_floor` (on the
+      preconditioner refresh, `PC_BETA_FLOOR = 0.05` on this case) floors only the preconditioner's
+      **copy** — `pc_beta = max(beta, beta_floor)` — so the V-cycle stays in a regime it inverts well
+      while the solved system keeps the small shift it needs for pseudo-transient progress. During the
+      collapse the preconditioner was built at **0.05 throughout and never saw 0.012**, so this is not
+      "a shift the preconditioner cannot invert": it is the **operator/preconditioner mismatch** that
+      opens once the operator's β falls below that floor.
+      And the mismatch's *size* is not the discriminator either — the same march later converged
+      comfortably at β = 0.005 against the same 0.05 preconditioner, a **10x** mismatch, where **4.2x**
+      was fatal mid-ramp. That is the `(state, β)` point again, and it is the reason a floor on either
+      quantity is the wrong repair.
+    - **⚠️ THE WALL BELONGS TO `(state, β)`, NOT TO β — do NOT build a learned floor under β.** The same
+      march converged at **β = 0.005** with `alpha` 1.000 at 3-5 cycles a step once the ramp had
+      arrived and the state had settled — a shift that was fatal at step 13 and comfortable at step 47.
+      A floor learned from the collapse would forbid exactly the low-shift convergence that finishes
+      the march. Damping *while the problem moves*, and only then, is the distinction.
+    - **Default `redamping = 2.0`** — one `backoff`'s worth, the control's own calibrated response to
+      "this β is too aggressive". It damps at **every** change where the accident happened to brake at
+      two of four, so it is the more conservative arm; measured, that is the better trade: β sits near
+      1.0 through the ramp at **2 restart cycles a step** (against 21-22 for the collapsed arm), and the
+      cheap steps more than pay for the four extra. **261 cycles beats the accident's 269** — the
+      principled fix is not merely as good as the accident, it is better, on the measure that counts.
+    - **⚠️ TWO NEIGHBOURING MECHANISMS ARE REFUTED, and this is why `redamp` is preferred rather than
+      merely chosen.** A **floor under β learned from the collapse** and a **cap on the growth RATE**
+      (a "ceiling", from the sibling accelerating-ramp work) both *infer* a property of the shift from
+      the march's behaviour — "a collapse here means β is too small", "a brake here means the rate is
+      too fast". Such an inference decays as the state moves, because the evidence was gathered at a
+      state the march has since left, and the `(state, β)` datum above is a direct counterexample to
+      the floor. `redamp` infers nothing: it damps during exactly the interval in which the problem is
+      changing and stops when it stops, so the control is never asked to tell a wrong step from a
+      changed problem — it is told, from outside, at the one moment the answer is certain.
+    - **⚠️ Corollary, CORRECTED: the suspicious constant is `PC_BETA_FLOOR`, not `beta_min`.** An
+      earlier draft of this entry said no single `beta_min` could be right here. That was wrong, and it
+      came from conflating the two floors above: `beta_min = 0.005` is demonstrably *fine* — the march
+      converges there, comfortably, at the settled state. What the collapse locates is the level at
+      which the preconditioner **stops following** the operator, and that is `PC_BETA_FLOOR = 0.05`, a
+      value chosen against no recorded evidence on this case. Whether 0.05 is right, and whether the
+      floor should track the ramp rather than sit still, is open and unmeasured.
+    - `shift_factor` defaults to `1.0` on the protocol, so a homotopy indifferent to the shift pays
+      nothing and the march is byte-identical to one that never asks.
+  - **The damping anchor `‖R₀‖` is taken at the FIRST STATION, not at the target.** It is the scale the
+    first step's inner loop is judged against, so it has to be the problem that step runs; with no
+    homotopy it is `residual_fn` and nothing moves. `residual_fn` stays the **target** residual and is
+    what `reference_norm` defaults to, so the *stopping bar* is the target problem's throughout rather
+    than a moving one.
+  - **The row-scaled measure and the drift measure stay on the TARGET assembler, deliberately.** One
+    yardstick across every station makes progress comparable down the log; the arrival gate is what
+    makes it safe, since the march can only *stop* where the residual really is the target's.
+  - **⚠️ Reachability is easy to fake here and is pinned explicitly.** An unwired `homotopy` leaves the
+    march bit-identical, and every property asserted of it then holds for an unrelated reason. The test
+    marches a ramp whose stations have visibly different roots and cuts the budget off exactly at
+    arrival, so the state must sit on the **last ramp station's** root — which only happens if the
+    stations were the residuals actually being driven.
+
+
 - **⚠️ `MarchLogger.on_step` and `.on_checkpoint` are MUTUALLY EXCLUSIVE renderings of one event —
   wire one, never both (measured 2026-08-15).** Both call `_log`; they differ only in whether the
   injected case metrics are appended (`on_checkpoint` has the state, `on_step` does not). But

@@ -82,6 +82,44 @@ Log-ω transport is separately validated on a smaller channel
 (`tests/integration/test_coupled_rans.py`: converges to the direct fixed point, ω > 0 by construction,
 exact coupled adjoint).
 
+### How the Reynolds span is walked
+
+**The default is a single march whose viscosity ramps down to the case's own value.** It walks the same
+span the rung ladder does — anchored at `RATIO ** N_POINTS` below the target — holding each of
+`PITZ_RAMP_STATIONS` geometric stations for `PITZ_RAMP_STEPS` outer steps before arriving. The
+default is 24 stations of one step: fine enough that the viscosity moves only 1.21x per station,
+so the problem barely moves between steps and the pseudo-timestep can grow monotonically through
+the whole ramp rather than being re-damped at every change. Setting
+`PITZ_RAMP=off` returns to the rung ladder, which is kept as the comparison arm rather than as a
+supported path. Both arms build their preconditioner, logging and step control through the same code,
+so they differ in how the span is traversed and not in how far.
+
+The ladder pays two costs per rung that one march does not, and a run of the default arm shows both:
+
+- **Each rung is converged, and the next rung's viscosity jump immediately undoes it.** Rung 1 spent 12
+  of its 28 outer steps taking `|R|` from 4.5e-04 to 7.2e-06 — and rung 2 opened at 4.5e-02, some six
+  thousand times worse. A seed for the next Reynolds number does not need to be a root.
+- **Each rung restarts the pseudo-timestep ramp.** The shift reopens at its starting value on every
+  rung and is walked back down one factor per outer step — twelve steps at the shipped settings, taken
+  with the inner line search reporting a full step throughout, so the caution bought nothing.
+
+Measured on this case, all four arms reaching the same reattachment (`x_r/h` 8.0686) and the same peak
+eddy viscosity, on a quiet machine with a warm compilation cache:
+
+| arm | outer steps | restart cycles | wall |
+|---|---|---|---|
+| Reynolds ladder (`PITZ_RAMP=off`) | 69 | 417 | 555 s |
+| single march, viscosity ramp (default) | 40 | 261 | 363 s |
+
+Read the restart-cycle column rather than the clock: cycle counts are deterministic, while a wall time
+on a shared machine moves with whatever else is running (a parallel test tier alongside this case was
+measured to inflate it 2.4x on a bit-identical trajectory).
+
+A single march keeps the state, the shift and the preconditioner across every viscosity change and
+converges the target alone. A station deliberately spans several steps: each change refits the frozen
+preconditioner in full, which is the most expensive single operation in the march, so moving the
+viscosity every step would cost more than the steps it saves.
+
 When judging convergence, read the **per-field relative** residuals, not the absolute `||R||`: the
 latter is dominated by ω's ~1e5 near-wall scale and looks stalled while the flow is nearly converged.
 

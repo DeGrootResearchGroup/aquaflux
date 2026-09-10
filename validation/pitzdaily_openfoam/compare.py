@@ -118,6 +118,7 @@ from aquaflux.turbulence import (
     coupled_amg_continuation,
     coupled_fields,
     solve_reynolds_continuation,
+    solve_reynolds_ramp,
     wall_consistent_state,
 )
 
@@ -189,6 +190,73 @@ N_POINTS = int(os.environ.get("PITZ_N_POINTS", "2"))
 #: ladder's *granularity* at a fixed *span*, which is the comparison worth making. `10 ** 2`,
 #: `3.1623 ** 4` and `2.1544 ** 6` all anchor at Re/100.
 RATIO = float(os.environ.get("PITZ_RATIO", "10.0"))
+
+#: ⚠️ THE DEFAULT SINCE 2026-09-10: WALK THE VISCOSITY DOWN INSIDE ONE MARCH RATHER THAN SOLVING A
+#: LADDER OF RUNGS. `PITZ_RAMP=off` returns to `solve_reynolds_continuation`, which is kept as the
+#: comparison arm rather than as a supported path -- this case is where the coupled march's work lands,
+#: and it lands on the ramp.
+#:
+#: Measured on this case, both arms reaching `x_r/h` 8.0686 and `nu_t` peak 417.8, uncontended, warm
+#: compilation cache, commit 72c9a96, `simplesmooth` flow inverse:
+#:
+#:     ladder (PITZ_RAMP=off)                69 outer steps / 417 restart cycles / 555 s
+#:     ramp, 4 stations x 3 steps            40 outer steps / 261 restart cycles / 363 s
+#:     ramp, 24 stations x 1 step (default)  33 outer steps / 191 restart cycles / 296 s
+#:
+#: ⚠️ Read the CYCLE column. Outer-step and restart-cycle counts are deterministic and survive machine
+#: contention; wall clock does not -- a bit-identical trajectory measured 1325 s against 555 s on this
+#: machine depending only on what else was running.
+#:
+#: The ladder solves each Reynolds rung as its own march, which pays two costs per rung that a single
+#: march does not:
+#:
+#:   * **Each rung is converged, and the next rung's viscosity jump immediately undoes it.** Rung 1
+#:     spent 12 of its 28 steps taking `|R|` from 4.5e-04 to 7.2e-06 -- and rung 2 opened at 4.5e-02,
+#:     six thousand times worse. Rung 2 then converged to 4.6e-06 and the target opened at 3.0e-03.
+#:     Every one of those polishing steps was discarded work: a seed does not need to be a root.
+#:   * **Each rung restarts the pseudo-timestep ramp.** `beta` reopens at `BETA_START` on every rung
+#:     and walks back to `beta_min` one `1/grow` notch per outer step -- 12 steps at these values,
+#:     measured with `a_min = 1.000` on all of them, i.e. the control had no reason for caution and
+#:     crawled anyway. Rungs 1, 2 and 3 spent 12, 15 and 16 steps there.
+#:
+#: One march keeps the state, the shift and the preconditioner across every viscosity change and
+#: converges the target and nothing else. The ramp spans the SAME viscosity range as the ladder
+#: (`RATIO ** N_POINTS`), so the two arms differ in how the span is walked, not in how far.
+#:
+#: ⚠️ ONE STEP PER STATION, and the opposite was believed until it was measured. The argument for long
+#: stations was that each change re-points the refresh hook and forces a FULL preconditioner rebuild,
+#: so per-step viscosity would cost more than it saves. On this case a rebuild is 1.2-1.6 s against a
+#: ~9 s outer step -- a sixth of one -- and the fine ramp is the cheapest schedule tried (11 arms).
+#: The reason it wins is not the rebuild accounting but the shift: at 24 stations the viscosity moves
+#: 1.21x per station instead of 3.16x, so the problem barely moves, no re-damping is needed, and beta
+#: descends monotonically through the ramp. The coarse schedule's re-damping very nearly cancelled the
+#: descent (net 0.889 per station), handing the target station beta = 0.936 and making it re-descend
+#: beta itself -- the very cost this arm exists to remove, recreated inside the ramp.
+#: ⚠️ THE BALANCE SHIFTS ON A LARGER CASE: on the 3D sibling a rebuild is 11.5 s against a ~34 s mean
+#: step (measured 2026-09-10) -- a third of a step rather than a sixth. An earlier note here said ~36 s,
+#: a whole step, taken from the design record rather than a log; it is wrong by 3x.
+#: These values are a pitzDaily calibration; measure before carrying them anywhere else.
+RAMP = os.environ.get("PITZ_RAMP", "continuous")
+RAMP_STATIONS = int(os.environ.get("PITZ_RAMP_STATIONS", "24"))
+RAMP_STEPS_PER_STATION = int(os.environ.get("PITZ_RAMP_STEPS", "1"))
+
+#: ⚠️ RE-DAMP ON ENTERING EACH STATION, AND THIS IS LOAD-BEARING RATHER THAN A KNOB. Within a station
+#: the control divides the shift by `grow` every step (1.5 ** 3 = 3.375 per station here). Unopposed,
+#: that walks beta 0.5 -> 0.148 -> 0.044 -> 0.013 across four stations, and this case has a wall at
+#: beta ~ 0.012: measured, the line search collapsed to alpha = 0, |R| went 4.4e-03 -> 4.4e-01, and
+#: the retry ladder escalated beta to ~2 to recover -- 50 steps / 301 cycles against 36 / 269 for the
+#: same march that never went there. At 2.0 the net is 3.375 / 2 = 1.69 per station, so beta halves
+#: per station and bottoms at 0.062.
+#: ⚠️ Two different floors here, and they are easy to conflate. `CONTROL.beta_min` (0.005) bounds the
+#: shift the OPERATOR is solved with; `PC_BETA_FLOOR` (0.05) floors only the preconditioner's own copy.
+#: The preconditioner sat at 0.05 throughout the collapse and never saw 0.012 -- so the wall is the
+#: operator/preconditioner MISMATCH opening up, not a shift the V-cycle cannot invert. And the
+#: mismatch's size is not the discriminator either: this same march converged at beta = 0.005 against
+#: the same 0.05 preconditioner (a 10x mismatch) with alpha = 1.000, where 4.2x was fatal mid-ramp.
+#: The wall belongs to `(state, beta)`. Damping while the problem MOVES is the distinction.
+RAMP_REDAMPING = (
+    float(os.environ["PITZ_RAMP_REDAMPING"]) if "PITZ_RAMP_REDAMPING" in os.environ else None
+)
 
 #: The dual-time inner loop. `inner_tol` 1e-2 rather than a tighter value: measured on the
 #: three-dimensional case, 1e-3 bought nothing over 1e-2 while costing a third of the march.
@@ -859,6 +927,22 @@ def solve_aquaflux(
             "Reynolds continuation points",
             f"{N_POINTS} (ratio {RATIO:g}, anchor Re/{RATIO**N_POINTS:g})",
         ),
+        # ⚠️ HOW THE SPAN ABOVE IS WALKED, because the two arms read identically without it. The ramp
+        # arm reports `[point 1/1 ...]` and otherwise logs nothing about its own schedule, so a run's
+        # stations, station length and re-damping were not recoverable from its log -- and a schedule
+        # comparison whose arms cannot be told apart afterwards is not a measurement.
+        (
+            "viscosity ramp",
+            # ⚠️ `RAMP_REDAMPING` is None unless the environment sets it -- the homotopy derives the
+            # value -- so this must not format it as a number. It did, and the case could not start at
+            # its OWN DEFAULT: every arm of the schedule sweep set the variable explicitly, so the one
+            # configuration nobody passed was the one nobody ran.
+            f"{RAMP_STATIONS} stations x {RAMP_STEPS_PER_STATION} steps "
+            f"({RAMP_STATIONS * RAMP_STEPS_PER_STATION} ramp steps), redamping "
+            f"{'derived' if RAMP_REDAMPING is None else format(RAMP_REDAMPING, 'g')}"
+            if RAMP == "continuous"
+            else f"off ({RAMP}) -- the span is walked as a rung ladder",
+        ),
         ("k wall BC", K_WALL),
         ("preconditioner refresh", f"on {REFRESH_ON_CYCLES} restart cycles (mid-step)"),
         ("smoother fill / sweeps / coarse limit", f"{FILL_LEVELS} / {SWEEPS} / {COARSE_EQ_LIMIT}"),
@@ -1002,7 +1086,20 @@ def solve_aquaflux(
         | solve_kwargs
     )
     try:
-        flow, k, omega = solve_reynolds_continuation(coupled, N_POINTS, **solve_options)
+        if RAMP == "continuous":
+            # The SAME viscosity span the ladder walks (its anchor sits `RATIO ** N_POINTS` below the
+            # target) and the SAME `point_setup` and options, so the two arms differ in how the span is
+            # walked and in nothing else. That is what makes them comparable.
+            flow, k, omega = solve_reynolds_ramp(
+                coupled,
+                anchor=RATIO**N_POINTS,
+                stations=RAMP_STATIONS,
+                steps_per_station=RAMP_STEPS_PER_STATION,
+                redamping=RAMP_REDAMPING,
+                **solve_options,
+            )
+        else:
+            flow, k, omega = solve_reynolds_continuation(coupled, N_POINTS, **solve_options)
     finally:
         if log_file is not sys.stdout:
             log_file.close()

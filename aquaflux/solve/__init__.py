@@ -139,6 +139,7 @@ from .march import (
     CycleGrowthTrigger,
     MarchResult,
     RefreshTrigger,
+    ResidualHomotopy,
     forward_march,
 )
 from .march_log import MarchLogger, combine_metrics, field_change_metrics
@@ -239,6 +240,7 @@ __all__ = [
     "RefreshTrigger",
     "RelaxationSchedule",
     "RelaxedFarFromRoot",
+    "ResidualHomotopy",
     "ResidualNorm",
     "ResidualRatioDualTimeControl",
     "RetryPolicy",

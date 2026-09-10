@@ -1314,6 +1314,29 @@ After **every code change**, before considering the task complete, review and ac
    - **The matching `.claude/rules/*.md`** — the per-subsystem design record: binding decisions,
      interfaces, class/function names, file paths, and `BUILT` / `Not yet built` status. Inline
      the fact rather than pointing at any private note.
+     ⚠️ **"Matching" means the rule whose `paths:` GLOB THE FILE YOU EDITED — check the frontmatter,
+     do not go by subject.** This item asks which file *describes* your change; it does not ask whether
+     that file will be *read*, and those come apart precisely when a rule's `paths:` and its prose have
+     drifted. A rule that does not glob the file it governs never auto-loads for the person editing it,
+     so binding prose put there is invisible exactly when it is needed. Two sessions hit this on one
+     evening (2026-09-09) and **both passed this checklist as written**: one added methods to
+     `solve/step_control.py` and recorded them in `solve-march.md` (which globs `march.py`, not
+     `step_control.py`); the other *edited a binding class contract* into the same wrong file, making it
+     more load-bearing on the way. Neither error is visible from the prose alone, and neither is visible
+     from the `paths:` alone — only from checking them against each other. Read the **frontmatter**, not
+     the file:
+
+     ```
+     for f in .claude/rules/*.md; do sed -n '/^paths:/,/^---/p' "$f" | grep -q "<file you edited>" && echo "$f"; done
+     ```
+
+     ⚠️ **A plain `grep -l "<file>" .claude/rules/*.md` is NOT the same question and gives the wrong
+     answer here** — it matches prose mentions as well as globs. Asked for `solve/step_control.py` it
+     returns three rules where only **one** globs that file, and one of the false positives is
+     `solve-march.md`, i.e. precisely the wrong rule this item exists to steer you away from. (That
+     mis-check was written into this very paragraph on its first draft and caught by running it, which
+     is the general lesson: before trusting a command's output, confirm it answers the question you are
+     asking and not a neighbouring one.)
    - **`CLAUDE.md`** — architecture decision, public-API or package-structure change, new
      dependency, or workflow/tooling change.
    - **`README.md`** — public API, install/dependencies, examples, or the feature list.
