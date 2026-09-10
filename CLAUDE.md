@@ -1307,8 +1307,20 @@ After **every code change**, before considering the task complete, review and ac
      `solve/step_control.py` and recorded them in `solve-march.md` (which globs `march.py`, not
      `step_control.py`); the other *edited a binding class contract* into the same wrong file, making it
      more load-bearing on the way. Neither error is visible from the prose alone, and neither is visible
-     from the `paths:` alone — only from checking them against each other. `grep -l "<the file you
-     edited>" .claude/rules/*.md` answers it in one command.
+     from the `paths:` alone — only from checking them against each other. Read the **frontmatter**, not
+     the file:
+
+     ```
+     for f in .claude/rules/*.md; do sed -n '/^paths:/,/^---/p' "$f" | grep -q "<file you edited>" && echo "$f"; done
+     ```
+
+     ⚠️ **A plain `grep -l "<file>" .claude/rules/*.md` is NOT the same question and gives the wrong
+     answer here** — it matches prose mentions as well as globs. Asked for `solve/step_control.py` it
+     returns three rules where only **one** globs that file, and one of the false positives is
+     `solve-march.md`, i.e. precisely the wrong rule this item exists to steer you away from. (That
+     mis-check was written into this very paragraph on its first draft and caught by running it, which
+     is the general lesson: before trusting a command's output, confirm it answers the question you are
+     asking and not a neighbouring one.)
    - **`CLAUDE.md`** — architecture decision, public-API or package-structure change, new
      dependency, or workflow/tooling change.
    - **`README.md`** — public API, install/dependencies, examples, or the feature list.
