@@ -118,6 +118,7 @@ from aquaflux.turbulence import (
     coupled_amg_continuation,
     coupled_fields,
     solve_reynolds_continuation,
+    wall_consistent_state,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -503,6 +504,35 @@ BETA_START = float(os.environ.get("PITZ_BETA_START", "0.5"))
 BETA_START_WARM = float(os.environ.get("PITZ_BETA_START_WARM", str(BETA_START)))
 
 
+#: Re-impose the near-wall `omega` the residual fixes at each WARM Reynolds rung
+#: (`PITZ_SEED_REPAIR=wall`). Those rows are not solved -- they are a value fixation at
+#: `omega_wall(nu, d, k)`, whose viscous branch is linear in the molecular viscosity -- so a rung
+#: handed the previous rung's converged root holds, in those cells, a number the model itself says is
+#: wrong, by the viscosity ratio exactly. Measured at this case's rung 2 -> 3 handover: `|R0|`
+#: 1.1746e-01 -> 3.0587e-02 (3.84x), every other block unchanged to four significant figures in FIXED
+#: scales. Costs one elementwise evaluation.
+#:
+#: ⚠️ **Default off, and it is a CORRECTNESS fix rather than a performance one.** Marched, the better
+#: seed buys nothing -- 14 steps on rung 2 with it or without -- and it is not what carries an
+#: aggressive warm shift through the target rung either. Enable it because seeding a known-wrong
+#: imposed value is wrong, not because it is expected to be faster.
+SEED_REPAIR = os.environ.get("PITZ_SEED_REPAIR", "off")
+
+
+def _seed_projection(companion, state, point):
+    """Repair a WARM rung's seed; leave the cold rung's alone.
+
+    What is corrected is a property of the *handover*: a rung inherits a root converged at the previous
+    viscosity, and the wall-`omega` fixation the residual imposes is computed from that viscosity. The
+    lowest rung inherits nothing -- it starts from `hybrid_initialize`, which already seeds this closure
+    itself -- so there is nothing there to correct, and leaving it alone keeps rung 1 bit-identical
+    across arms, which is what makes it a control rather than an arm.
+    """
+    if point.index == 1 or SEED_REPAIR != "wall":
+        return state
+    return wall_consistent_state(companion, state)
+
+
 def dual_time_control(beta_start: float) -> CflResidualDualTimeControl:
     """The case's dual-time control at a chosen starting shift.
 
@@ -824,6 +854,7 @@ def solve_aquaflux(
             "step control",
             f"{type(CONTROL).__name__} (beta_start {BETA_START} cold / {BETA_START_WARM} warm)",
         ),
+        ("seed repair (warm rungs)", SEED_REPAIR),
         (
             "Reynolds continuation points",
             f"{N_POINTS} (ratio {RATIO:g}, anchor Re/{RATIO**N_POINTS:g})",
@@ -959,6 +990,7 @@ def solve_aquaflux(
             step_control=CONTROL,
             retry=RETRY,
             point_setup=point_setup,
+            seed_projection=_seed_projection if SEED_REPAIR != "off" else None,
             scaled_norm=True,  # rebuild the row scales each outer step
             on_checkpoint=(
                 logger.on_checkpoint
