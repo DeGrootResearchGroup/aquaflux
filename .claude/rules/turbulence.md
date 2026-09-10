@@ -1804,8 +1804,16 @@ tuning follow-up noted above.
       `while_loop` carry and never crosses a step.
     - **Drift within a station is nil on the ramp and heavy on the target**: all 16 cost-triggered inner
       refreshes fire in the target station, zero across the 12 ramp steps.
-    - ⚠️ **The balance inverts on `bfs3d`**: a full re-materialize is ~36 s there against a ~34 s outer
-      step, so a rebuild costs a whole step rather than a sixth of one. These are pitzDaily calibrations.
+    - ⚠️ **The balance shifts on `bfs3d`, by less than the record claimed.** Measured 2026-09-10 from
+      that case's own march log: a full re-materialize is **11.5 s** against a ~34 s mean outer step --
+      a third of a step, so 24 stations cost ~8 steps of overhead there against ~4 here. The **~36 s**
+      figure previously carried in this file and quoted into two docstrings was taken from the record
+      rather than from a log and is **wrong by 3x**; it made a fine ramp look disqualified on `bfs3d`
+      when the rebuild cost does not disqualify it. What the one (aborted) `bfs3d` ramp arm actually
+      showed is a **shift** mismatch, not a rebuild one: that case opens at `beta_start = 2.0` against
+      pitzDaily's 0.5, so the ramp began four times stiffer, escalated to 4.0, and was still clipping
+      (`a_min` 0.5-0.57) at step 29 where pitzDaily's fine ramp held 1.000 throughout. Untested to
+      convergence there -- the arm was killed at 44 minutes. These remain pitzDaily calibrations.
   - **⚠️ Latent defect, unfixed: `rebind` does not reset `_staleness_beta_gate`'s bookkeeping**, and nor
     does the mid-step `refresh_at`. Both rebuild the standing factorization at a β the gate never sees,
     so `last["beta"]`/`last["since"]` go stale and the gate can fire spuriously *or* decline when the

@@ -590,9 +590,14 @@ class ViscosityRampHomotopy:
     held for, and on this case the answer is one.
 
     **⚠️ The cost balance inverts on a larger case, so treat that as a pitzDaily calibration rather than
-    a general rule.** On the three-dimensional sibling a full re-materialize is recorded at ~36 s
-    against a ~34 s outer step -- a whole step per rebuild instead of a sixth of one -- so a fine ramp
-    would roughly double it there. Measure before carrying these numbers across.
+    a general rule.** On the three-dimensional sibling a full re-materialize is **11.5 s** against a
+    ~34 s mean outer step (measured 2026-09-10 on the shipped three-rung ladder, 23040 cells, field
+    split on, `simplesmooth`, column reach 3/3/3/3/2/2) -- a third of a step rather than a sixth, so 24
+    stations cost ~8 outer steps of overhead there against ~4 here.
+    ⚠️ An earlier draft of this paragraph said ~36 s, i.e. a whole step per rebuild and ~25 steps of
+    overhead. That figure came from the design record rather than from a log and is **wrong by 3x**;
+    the arithmetic built on it made a fine ramp look disqualified on that case when it is not. Measure
+    before carrying any of these numbers across -- including these.
 
     The ramp is **geometric**, for the same reason the ladder is: the convective nonlinearity scales
     multiplicatively with the Reynolds number, so equal ratios are equal difficulty. Station ``s`` of
@@ -777,3 +782,127 @@ class ViscosityRampHomotopy:
     def ramp_steps(self) -> int:
         """Outer steps the ramp occupies before the target station begins."""
         return self.stations * self.steps_per_station
+
+
+#: The keywords :func:`solve_reynolds_ramp` must NOT forward, derived from the two signatures rather
+#: than listed by hand. They are the ones the ladder owns and :func:`solve_coupled` does not, so
+#: forwarding one is a ``TypeError`` -- and a hand-maintained list goes stale silently the day a new
+#: ladder-only keyword is added, in a place nothing compares against the signature it came from.
+_LADDER_ONLY = (
+    frozenset(inspect.signature(solve_reynolds_continuation).parameters)
+    - frozenset(inspect.signature(solve_coupled).parameters)
+    # `inspect.signature` names the `**kwargs` parameter itself; it is not a keyword anyone passes.
+    - {"solve_kwargs"}
+)
+
+
+def solve_reynolds_ramp(
+    coupled: CoupledRANS,
+    *,
+    anchor: float,
+    stations: int,
+    steps_per_station: int,
+    point_setup: Callable[[CoupledRANS, jnp.ndarray, ReynoldsPoint], dict],
+    redamping: float | None = None,
+    **solve_kwargs: object,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Walk the same Reynolds span :func:`solve_reynolds_continuation` walks, inside **one** march.
+
+    The ladder solves each Reynolds rung as its own converged march. That pays twice per rung: the rung
+    is converged and the next rung's viscosity jump immediately undoes it, and each rung restarts the
+    pseudo-transient shift at ``beta_start`` and walks it back down again. A single march driven by a
+    :class:`ViscosityRampHomotopy` keeps the state, the shift and the preconditioner across every
+    viscosity change and converges the target and nothing else.
+
+    The two are configured **identically**: this takes the ladder's own ``point_setup`` and the ladder's
+    own solve options, calls the hook once for the single anchor station, and forwards everything
+    :func:`solve_coupled` accepts. That is what makes the two comparable as arms of one experiment -- a
+    second configuration surface written beside the first would drift from it one keyword at a time.
+
+    Whether the ramp is cheaper than the ladder is a property of the **case**, not of the method, and
+    the deciding quantity is what a station change costs. A change re-points the preconditioner refresh
+    through :attr:`ViscosityRampHomotopy.rebind` and forces a full re-materialize, so the schedule's
+    cost is ``stations`` rebuilds against the outer steps it saves. Measure that ratio on a case before
+    carrying a schedule to it: it is small on a two-dimensional case (a rebuild is a fraction of an
+    outer step) and much larger on a three-dimensional one.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The target assembler, at the case's own molecular viscosity. The march ends on this object, so
+        the root and its adjoint belong to the case.
+    anchor : float
+        The factor the molecular viscosity is multiplied by at the first station. Pass the ladder's own
+        anchor (its ``ratio ** n_points``) for the two arms to span the same range.
+    stations : int
+        How many ramp stations the span is divided into, geometrically.
+    steps_per_station : int
+        Outer steps each ramp station is held for.
+    point_setup : callable
+        The ladder's per-rung configuration hook, called **once**, for the anchor station. Its returned
+        keywords are merged over the forwarded options exactly as the ladder merges them, and a
+        ``refresh`` among them supplies the hook the homotopy re-points at each station.
+
+        It is a **named parameter rather than one of the forwarded options**, so a caller hands over the
+        ladder's options dict whole -- ``point_setup`` inside it binds here -- instead of pulling one
+        keyword out and passing it separately, which is the same keyword twice and a ``TypeError``.
+    redamping : float, optional
+        Passed through to :class:`ViscosityRampHomotopy`; ``None`` takes its derived default.
+    **solve_kwargs
+        The ladder's options. Keywords the ladder owns and :func:`solve_coupled` does not
+        (``schedule``, ``intermediate_rtol`` / ``intermediate_atol``, ``seed_projection``, ``n_points``)
+        are dropped, so one options dict can drive either arm; the rest are forwarded.
+
+    Returns
+    -------
+    tuple of jnp.ndarray
+        The converged target ``(flow, k, omega)``, as :func:`solve_coupled` returns.
+
+    Raises
+    ------
+    ValueError
+        If ``point_setup`` returns a ``refresh`` whose ``precondition_step`` cannot be re-pointed. Such
+        a hook stays bound to the anchor's assembler, so every station after the first would be solved
+        against a preconditioner built for a different viscosity -- a silently worse march rather than
+        an error, which is why it is rejected here.
+    """
+    # Materialize the seed rather than letting `solve_coupled` self-start, because the anchor station's
+    # preconditioner must be frozen at the state the march actually begins from -- the same reason the
+    # ladder materializes it before calling `point_setup`.
+    seed_fields = hybrid_initialize(coupled.momentum, coupled.turbulence)
+    state = coupled.state_from_physical(*seed_fields)
+    first = coupled.with_scaled_molecular_viscosity(anchor)
+    extra = point_setup(first, state, ReynoldsPoint(1, 1, float(anchor)))
+    homotopy = ViscosityRampHomotopy(
+        coupled,
+        anchor=anchor,
+        stations=stations,
+        steps_per_station=steps_per_station,
+        redamping=redamping,
+        rebind=_rebinding(extra),
+    )
+    passed = {key: value for key, value in solve_kwargs.items() if key not in _LADDER_ONLY}
+    return solve_coupled(coupled, *seed_fields, homotopy=homotopy, **{**passed, **extra})
+
+
+def _rebinding(extra: dict) -> Callable[[CoupledRANS], None] | None:
+    """The station-change hook hidden in a ``point_setup``'s returned ``refresh``, or ``None``.
+
+    A case whose ``point_setup`` returns no refresh policy has no frozen preconditioner to re-point, and
+    ``None`` is then the honest answer. A case that returns one whose hook cannot be re-pointed is a
+    different thing entirely -- a misconfiguration whose only symptom would be a slow march -- so the
+    two are distinguished rather than both answered with ``None``.
+    """
+    refresh = extra.get("refresh")
+    if refresh is None:
+        return None
+    hook = getattr(refresh, "precondition_step", None)
+    rebind = getattr(hook, "rebind", None)
+    if rebind is None:
+        raise ValueError(
+            "point_setup returned a refresh whose precondition_step cannot be re-pointed at another "
+            f"companion ({type(hook).__name__} has no `rebind`). Every station after the first would "
+            "then solve against a preconditioner built for the anchor's viscosity. Build the hook with "
+            "a refresh that exposes `rebind` (e.g. `amg_beta_tracking_refresh`), or return no refresh."
+        )
+    return rebind

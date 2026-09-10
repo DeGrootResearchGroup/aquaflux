@@ -71,6 +71,7 @@ from .reynolds import (
     ReynoldsPoint,
     ReynoldsSchedule,
     solve_reynolds_continuation,
+    solve_reynolds_ramp,
 )
 from .sources import (
     production_and_limit,
@@ -145,6 +146,7 @@ __all__ = [
     "scalar_transport_shift_diagonal",
     "solve_coupled",
     "solve_reynolds_continuation",
+    "solve_reynolds_ramp",
     "solve_segregated",
     "strain_rate_magnitude",
     "wall_consistent_omega",

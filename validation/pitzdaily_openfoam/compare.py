@@ -112,16 +112,13 @@ from aquaflux.turbulence import (
     CoupledRANS,
     GeometricReynoldsSchedule,
     LogScalars,
-    ReynoldsPoint,
     SSTModel,
     SSTTurbulence,
-    ViscosityRampHomotopy,
     amg_beta_tracking_refresh,
     coupled_amg_continuation,
     coupled_fields,
-    hybrid_initialize,
-    solve_coupled,
     solve_reynolds_continuation,
+    solve_reynolds_ramp,
     wall_consistent_state,
 )
 
@@ -235,7 +232,9 @@ RATIO = float(os.environ.get("PITZ_RATIO", "10.0"))
 #: descends monotonically through the ramp. The coarse schedule's re-damping very nearly cancelled the
 #: descent (net 0.889 per station), handing the target station beta = 0.936 and making it re-descend
 #: beta itself -- the very cost this arm exists to remove, recreated inside the ramp.
-#: ⚠️ THE BALANCE INVERTS ON A LARGER CASE: on the 3D sibling a rebuild is ~36 s against a ~34 s step.
+#: ⚠️ THE BALANCE SHIFTS ON A LARGER CASE: on the 3D sibling a rebuild is 11.5 s against a ~34 s mean
+#: step (measured 2026-09-10) -- a third of a step rather than a sixth. An earlier note here said ~36 s,
+#: a whole step, taken from the design record rather than a log; it is wrong by 3x.
 #: These values are a pitzDaily calibration; measure before carrying them anywhere else.
 RAMP = os.environ.get("PITZ_RAMP", "continuous")
 RAMP_STATIONS = int(os.environ.get("PITZ_RAMP_STATIONS", "24"))
@@ -847,67 +846,6 @@ def _gradient_scheme_label(scheme):
     return f"{type(scheme).__name__}" + (f" (swept {sweeps})" if sweeps is not None else "")
 
 
-#: The keywords `solve_reynolds_continuation` owns and `solve_coupled` does not, so the ramp arm can
-#: be handed the SAME options dict the ladder arm builds rather than a second one written beside it.
-#: A ladder-only keyword reaching `solve_coupled` is a `TypeError`, so this list is load-bearing.
-_LADDER_ONLY = (
-    "intermediate_rtol",
-    "intermediate_atol",
-    "schedule",
-    "point_setup",
-    "seed_projection",
-)
-
-
-def _ramped_solve(coupled, momentum, turbulence, point_setup, solve_options):
-    """Solve the case as ONE march whose viscosity walks down to the target, not as a rung ladder.
-
-    The alternative to :func:`~aquaflux.turbulence.solve_reynolds_continuation` for the same span of
-    Reynolds numbers -- see the `RAMP` comment above for what the ladder pays that this does not.
-
-    The anchor station's engine is built by the ladder arm's own `point_setup`, called once, so the two
-    arms are preconditioned, logged and step-controlled identically and differ only in how the
-    viscosity span is walked. That is what makes them comparable; a second builder written here would
-    drift from it a keyword at a time.
-
-    Parameters
-    ----------
-    coupled : CoupledRANS
-        The target assembler, at the case's own viscosity.
-    momentum, turbulence
-        The blocks the hybrid initial condition is built from.
-    point_setup : callable
-        The ladder arm's per-rung configuration hook, reused for the single anchor station.
-    solve_options : dict
-        The ladder arm's options; the ladder-only keywords are dropped and the rest passed through.
-
-    Returns
-    -------
-    tuple
-        ``(flow, k, omega)``, as :func:`~aquaflux.turbulence.solve_coupled` returns.
-    """
-    # The same span the ladder walks: its anchor sits `RATIO ** N_POINTS` below the target.
-    anchor = RATIO**N_POINTS
-    # Materialize the seed here rather than letting `solve_coupled` self-start, because the anchor
-    # station's preconditioner must be frozen at the state the march actually begins from -- the same
-    # reason the ladder materializes it before calling `point_setup`.
-    seed_fields = hybrid_initialize(momentum, turbulence)
-    state = coupled.state_from_physical(*seed_fields)
-    first = coupled.with_scaled_molecular_viscosity(anchor)
-    extra = point_setup(first, state, ReynoldsPoint(1, 1, float(anchor)))
-    # `point_setup` returns the refresh POLICY; the hook it wraps is what follows the viscosity.
-    homotopy = ViscosityRampHomotopy(
-        coupled,
-        anchor=anchor,
-        stations=RAMP_STATIONS,
-        steps_per_station=RAMP_STEPS_PER_STATION,
-        redamping=RAMP_REDAMPING,
-        rebind=extra["refresh"].precondition_step.rebind,
-    )
-    passed = {k: v for k, v in solve_options.items() if k not in _LADDER_ONLY}
-    return solve_coupled(coupled, *seed_fields, homotopy=homotopy, **{**passed, **extra})
-
-
 def solve_aquaflux(
     *,
     log_path=None,
@@ -995,8 +933,13 @@ def solve_aquaflux(
         # comparison whose arms cannot be told apart afterwards is not a measurement.
         (
             "viscosity ramp",
+            # ⚠️ `RAMP_REDAMPING` is None unless the environment sets it -- the homotopy derives the
+            # value -- so this must not format it as a number. It did, and the case could not start at
+            # its OWN DEFAULT: every arm of the schedule sweep set the variable explicitly, so the one
+            # configuration nobody passed was the one nobody ran.
             f"{RAMP_STATIONS} stations x {RAMP_STEPS_PER_STATION} steps "
-            f"({RAMP_STATIONS * RAMP_STEPS_PER_STATION} ramp steps), redamping {RAMP_REDAMPING:g}"
+            f"({RAMP_STATIONS * RAMP_STEPS_PER_STATION} ramp steps), redamping "
+            f"{'derived' if RAMP_REDAMPING is None else format(RAMP_REDAMPING, 'g')}"
             if RAMP == "continuous"
             else f"off ({RAMP}) -- the span is walked as a rung ladder",
         ),
@@ -1144,8 +1087,16 @@ def solve_aquaflux(
     )
     try:
         if RAMP == "continuous":
-            flow, k, omega = _ramped_solve(
-                coupled, momentum, turbulence, point_setup, solve_options
+            # The SAME viscosity span the ladder walks (its anchor sits `RATIO ** N_POINTS` below the
+            # target) and the SAME `point_setup` and options, so the two arms differ in how the span is
+            # walked and in nothing else. That is what makes them comparable.
+            flow, k, omega = solve_reynolds_ramp(
+                coupled,
+                anchor=RATIO**N_POINTS,
+                stations=RAMP_STATIONS,
+                steps_per_station=RAMP_STEPS_PER_STATION,
+                redamping=RAMP_REDAMPING,
+                **solve_options,
             )
         else:
             flow, k, omega = solve_reynolds_continuation(coupled, N_POINTS, **solve_options)

@@ -722,3 +722,216 @@ def test_an_explicit_re_damping_still_overrides_the_derived_one() -> None:
         _tiny_coupled(), anchor=100.0, stations=4, steps_per_station=3, redamping=3.0
     )
     assert ramp.redamping == 3.0
+
+
+# --- the ramp ARM: one march over the ladder's span, configured by the ladder's own hooks ---------
+
+
+def _ramp_arm_fixtures(monkeypatch):
+    """Stub out the solve and the hybrid start, and record what the ramp arm hands ``solve_coupled``.
+
+    Returns ``(coupled, calls, fields)``: the target assembler, the recorded call dicts, and the
+    correctly-shaped stand-in converged fields the stubs pass around.
+    """
+    import aquaflux.turbulence.reynolds as reynolds
+
+    coupled = _tiny_coupled()
+    n = coupled.momentum.mesh.n_cells
+    dim = coupled.momentum.mesh.dim
+    fields = (jnp.zeros((dim + 1) * n), jnp.full(n, 0.5), jnp.full(n, 100.0))
+    calls: list[dict] = []
+
+    def fake_solve_coupled(assembler, flow=None, k=None, omega=None, **kwargs):
+        scale = float(assembler.momentum.properties.properties["viscosity"].value / (RHO * NU))
+        calls.append({"scale": scale, "seed_is_none": flow is None, "kwargs": kwargs})
+        return fields
+
+    monkeypatch.setattr(reynolds, "solve_coupled", fake_solve_coupled)
+    monkeypatch.setattr(reynolds, "hybrid_initialize", lambda momentum, turbulence: fields)
+    return coupled, calls, fields
+
+
+def test_the_ramp_arm_is_one_warm_started_solve_on_the_target_carrying_the_homotopy(
+    monkeypatch,
+) -> None:
+    """The whole point of the arm: ONE march, on the case's own assembler, walking the span inside it.
+
+    The ladder's `n` rungs are `n + 1` separate converged solves; this must be a single call, and it
+    must be on the target -- the root and its adjoint belong to the case, not to a rescaled companion.
+    """
+    from aquaflux.turbulence import solve_reynolds_ramp
+
+    coupled, calls, _ = _ramp_arm_fixtures(monkeypatch)
+
+    solve_reynolds_ramp(
+        coupled,
+        anchor=100.0,
+        stations=24,
+        steps_per_station=1,
+        point_setup=lambda companion, state, point: {},
+        rtol=1e-10,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["scale"] == pytest.approx(1.0)
+    # Warm-started from the materialized seed, so the anchor station's preconditioner is frozen at the
+    # state the march actually begins from rather than at one solve_coupled invents afterwards.
+    assert calls[0]["seed_is_none"] is False
+    homotopy = calls[0]["kwargs"]["homotopy"]
+    assert isinstance(homotopy, ViscosityRampHomotopy)
+    assert (homotopy.anchor, homotopy.stations, homotopy.steps_per_station) == (100.0, 24, 1)
+    assert calls[0]["kwargs"]["rtol"] == 1e-10
+
+
+def test_the_ramp_arm_configures_its_anchor_station_through_the_ladders_own_point_setup(
+    monkeypatch,
+) -> None:
+    """Called ONCE, with the anchor's companion -- and its keywords merged, exactly as the ladder does.
+
+    Reusing the hook is what makes the two arms comparable: they are then preconditioned, logged and
+    step-controlled identically and differ only in how the viscosity span is walked.
+    """
+    from aquaflux.turbulence import solve_reynolds_ramp
+
+    coupled, calls, _ = _ramp_arm_fixtures(monkeypatch)
+    seen = []
+
+    def point_setup(companion, state, point):
+        scale = float(companion.momentum.properties.properties["viscosity"].value / (RHO * NU))
+        seen.append((scale, point.index, point.total, point.viscosity_scale))
+        return {"tag": scale}
+
+    solve_reynolds_ramp(
+        coupled, anchor=100.0, stations=4, steps_per_station=3, point_setup=point_setup
+    )
+
+    assert seen == [(100.0, 1, 1, 100.0)]
+    assert calls[0]["kwargs"]["tag"] == 100.0
+
+
+def test_the_ramp_arm_drops_exactly_the_keywords_the_ladder_owns(monkeypatch) -> None:
+    """One options dict must drive either arm, so the ladder-only keywords are stripped, not forwarded.
+
+    Forwarding one is a ``TypeError`` at ``solve_coupled``. The set is derived from the two signatures
+    rather than listed, so a keyword added to the ladder cannot quietly break this arm later.
+    """
+    from aquaflux.turbulence import solve_reynolds_ramp
+    from aquaflux.turbulence.reynolds import _LADDER_ONLY
+
+    coupled, calls, _ = _ramp_arm_fixtures(monkeypatch)
+
+    # The ladder's OWN options dict, handed over whole -- `point_setup` included, because that is how
+    # a case calls this and passing it separately beside the dict is the same keyword twice.
+    ladder_options = dict(
+        schedule=GeometricReynoldsSchedule(ratio=10.0),
+        intermediate_rtol=1e-2,
+        intermediate_atol=1e-5,
+        seed_projection=lambda assembler, state, point: state,
+        point_setup=lambda companion, state, point: {},
+        rtol=1e-10,
+        atol=1e-5,
+        max_steps=7,
+    )
+    solve_reynolds_ramp(coupled, anchor=100.0, stations=4, steps_per_station=3, **ladder_options)
+
+    passed = calls[0]["kwargs"]
+    assert not (_LADDER_ONLY & set(passed))
+    assert (passed["rtol"], passed["atol"], passed["max_steps"]) == (1e-10, 1e-5, 7)
+
+
+def test_the_ladder_only_keywords_are_derived_from_the_two_signatures() -> None:
+    """Pinned against the signatures themselves, because a hand-copied list goes stale in silence.
+
+    The failure it guards is one-directional and invisible: a keyword added to the ladder and not to
+    this set is forwarded to ``solve_coupled``, which raises -- but only in whichever case selects the
+    ramp arm, which no test tier runs.
+    """
+    import inspect
+
+    from aquaflux.turbulence import solve_coupled, solve_reynolds_continuation
+    from aquaflux.turbulence.reynolds import _LADDER_ONLY
+
+    ladder = set(inspect.signature(solve_reynolds_continuation).parameters)
+    solve = set(inspect.signature(solve_coupled).parameters)
+    assert _LADDER_ONLY == ladder - solve - {"solve_kwargs"}
+    assert {"schedule", "intermediate_rtol", "intermediate_atol", "seed_projection"} <= _LADDER_ONLY
+    # `point_setup` is the ramp arm's own parameter and never travels in the forwarded options.
+    assert "point_setup" in _LADDER_ONLY
+
+
+def test_the_ramp_arm_hands_the_homotopy_the_refreshs_own_rebind(monkeypatch) -> None:
+    """A station change must re-point the frozen preconditioner at the station's own assembler.
+
+    Without it every station after the first solves against a V-cycle built for the anchor's
+    viscosity -- a march that still converges, only slowly, which is why it is wired rather than left
+    to a case to remember.
+    """
+    from aquaflux.solve import RefreshPolicy
+    from aquaflux.turbulence import solve_reynolds_ramp
+
+    coupled, calls, _ = _ramp_arm_fixtures(monkeypatch)
+    rebound: list[float] = []
+
+    def precondition_step(active_step, state):  # pragma: no cover - never called here
+        raise AssertionError("the stub march does not step")
+
+    precondition_step.rebind = lambda companion: rebound.append(
+        float(companion.momentum.properties.properties["viscosity"].value / (RHO * NU))
+    )
+
+    solve_reynolds_ramp(
+        coupled,
+        anchor=100.0,
+        stations=2,
+        steps_per_station=1,
+        point_setup=lambda companion, state, point: {
+            "refresh": RefreshPolicy(precondition_step=precondition_step)
+        },
+    )
+
+    homotopy = calls[0]["kwargs"]["homotopy"]
+    # Driving the homotopy's own stations is what proves the wiring: each entry re-points the hook at
+    # that station's viscosity, ending at the target's own 1.0.
+    for step in range(3):
+        homotopy.enter(step)
+    assert rebound == pytest.approx([100.0, 10.0, 1.0])
+
+
+def test_a_refresh_that_cannot_be_repointed_is_refused_rather_than_ignored(monkeypatch) -> None:
+    """Its only symptom would be a slower march, so it must raise instead of quietly passing ``None``."""
+    from aquaflux.solve import RefreshPolicy
+    from aquaflux.turbulence import solve_reynolds_ramp
+
+    coupled, _, _ = _ramp_arm_fixtures(monkeypatch)
+
+    with pytest.raises(ValueError, match="cannot be re-pointed"):
+        solve_reynolds_ramp(
+            coupled,
+            anchor=100.0,
+            stations=2,
+            steps_per_station=1,
+            point_setup=lambda companion, state, point: {
+                "refresh": RefreshPolicy(precondition_step=lambda step, state: None)
+            },
+        )
+
+
+def test_no_refresh_at_all_is_not_an_error(monkeypatch) -> None:
+    """A case with no frozen preconditioner has nothing to re-point, and ``None`` is the honest answer.
+
+    Distinguished from the case above deliberately: answering both with ``None`` would turn a real
+    misconfiguration into a silent slowdown.
+    """
+    from aquaflux.turbulence import solve_reynolds_ramp
+
+    coupled, calls, _ = _ramp_arm_fixtures(monkeypatch)
+
+    solve_reynolds_ramp(
+        coupled,
+        anchor=100.0,
+        stations=2,
+        steps_per_station=1,
+        point_setup=lambda companion, state, point: {},
+    )
+
+    assert calls[0]["kwargs"]["homotopy"].rebind is None
