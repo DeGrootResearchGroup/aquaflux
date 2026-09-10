@@ -243,14 +243,28 @@ peaks around **6.4 GB** and, launched beside a live pitzDaily march, drove the l
 with free memory at **0.73 GB**. A gate that normally takes 6:34–8:53 sat at 97 % for several minutes and
 ran to about **10 minutes**; every wall-clock number in the case's log for that window is contaminated.
 
-**What contention does and does not move — and this is the useful half, because it needs no clock.** Two
-runs of the same pitzDaily configuration, one heavily contended and one of unknown contention, agree at
-**69 steps / 417 cycles** and `x_r/h` **8.069 against 8.0686**. Steps, cycles, escalations, line-search
+**What contention does and does not move — and this is the useful half, because it needs no clock.** The
+cleanest instance is a matched pair in ONE worktree at ONE commit, differing only in machine load, whose
+two logs align line for line. Both print rung 1's closing row on their own line 738:
+
+    |   28 |    895 | 0.0050 |  1 |   2 | 7.214e-06 | 1.000 |     |     <- loaded machine
+    |   28 |    194 | 0.0050 |  1 |   2 | 7.214e-06 | 1.000 |     |     <- quiet machine
+
+**Every column is identical except `t(s)`, which differs 4.6x** — step count, `beta`, inner count, cycles,
+`|R|` to all four figures, `a_min`. A second, cross-session pair agrees the same way on whole-march totals
+(**69 steps / 417 cycles**, `x_r/h` **8.069 against 8.0686**). Steps, cycles, escalations, line-search
 clips and the converged root are deterministic and contention cannot move them. Wall clock is a different
 matter: this project already records ~15 % run-to-run spread on an *uncontended* per-application timing,
-and this is far outside that. **A contended run is still good evidence about counts and worthless about
+and 4.6x is far outside that. **A contended run is still good evidence about counts and worthless about
 seconds** — keep its step and cycle columns, discard its timings, exactly as for a run that spanned a
 machine sleep.
+
+⚠️ **Do not read `895 -> 194` as "contention costs 4.6x" either.** What loaded the machine during the slow
+arm was never identified: at 22:09 it showed a load average of **13.4** with **0.73 GB** free while
+`run_case.sh --status` reported nothing but that one case. So the slow arm is "loaded by something, not a
+second case" and the ratio is a demonstration that the clock column moves, not a measurement of by how
+much. **That the status line can read clean while the machine is at load 13.4 is the whole argument for
+this section** — the runner reports on cases, and cases are not what was there.
 
 ⚠️ **There is currently NO trustworthy wall-clock baseline for pitzDaily from any session.** A figure of
 518 s circulated this evening as "uncontended" and has been withdrawn by the session that produced it: it
