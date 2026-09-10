@@ -402,6 +402,15 @@ the gate's log (`$TMPDIR/aquaflux-tests-<worktree>-fast-<stamp>.log`, pytest sum
 `run_case.sh`'s run-file, and `git show`. Three sources did not: a peer's report, one's own recollection,
 and the process table.
 
+⚠️ **And a record can be authoritative about the wrong question, which is the failure mode hardest to
+see.** On a machine where every session pushes as the same GitHub account, **a pull request's author field
+does not identify which session wrote it** — three PRs opened that evening by three different sessions all
+report the same author. It arrives from an API rather than from anyone's memory, so it *reads* as a record,
+but it records the account and the question being asked is about the actor. That is circumstantial in
+exactly the way the process table is. What settles authorship is the work itself: which worktree contains
+the code (`grep` for a symbol the change introduces), and which branch has a remote ref at all. Before
+trusting a field, check that it answers the question you are asking and not a neighbouring one.
+
 **This is not a new rule — it is the one `run_case.sh` was built to embody**, and its own header says so:
 the most valuable thing it produces is not the log but that *"is this run mine, and what is it testing?"
 has a written answer*, a question that has been got wrong from the process table alone. Reach for the
