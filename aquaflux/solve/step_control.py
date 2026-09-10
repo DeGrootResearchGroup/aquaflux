@@ -170,6 +170,22 @@ class ShiftStrengthControl(eqx.Module):
         under β: a floor learned from the collapse would forbid exactly the low-shift convergence that
         finishes the march. Damping *while the problem is moving*, and only then, is the distinction
         that matters.
+
+        **Why this is on firmer ground than a floor or a rate cap, which is the whole reason to prefer
+        it.** Both of those infer a property of the *shift* from the march's behaviour -- "a collapse
+        here means β is too small", "a brake here means the rate is too fast" -- and an inference like
+        that decays as the state moves, because the evidence was gathered at a state the march has
+        since left. This infers nothing. It damps during exactly the interval in which the problem is
+        changing, and stops when it stops; the control is never asked to distinguish "the residual rose
+        because the step was wrong" from "the residual rose because the problem changed", it is simply
+        told, from outside, at the one moment that answer is known for certain. That is why it does not
+        degrade over a long march the way a learned bound does.
+
+        **A corollary worth stating, because the obvious repair is also wrong.** The same measurement
+        says no single ``beta_min`` can be right for this case: 0.005 is an order of magnitude *below*
+        the wall the march hit mid-ramp and is *exactly* where it converges once arrived. "Pick a better
+        constant" therefore does not fix it, and neither does learning one. What the march needs is
+        nothing forbidden and damping applied while the problem moves.
         """
         beta = state[0] if isinstance(state, tuple) else state
         memo = state[1] if isinstance(state, tuple) else None

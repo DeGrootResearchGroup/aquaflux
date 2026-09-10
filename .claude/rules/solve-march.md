@@ -95,6 +95,19 @@ paths:
       1.0 through the ramp at **2 restart cycles a step** (against 21-22 for the collapsed arm), and the
       cheap steps more than pay for the four extra. **261 cycles beats the accident's 269** — the
       principled fix is not merely as good as the accident, it is better, on the measure that counts.
+    - **⚠️ TWO NEIGHBOURING MECHANISMS ARE REFUTED, and this is why `redamp` is preferred rather than
+      merely chosen.** A **floor under β learned from the collapse** and a **cap on the growth RATE**
+      (a "ceiling", from the sibling accelerating-ramp work) both *infer* a property of the shift from
+      the march's behaviour — "a collapse here means β is too small", "a brake here means the rate is
+      too fast". Such an inference decays as the state moves, because the evidence was gathered at a
+      state the march has since left, and the `(state, β)` datum above is a direct counterexample to
+      the floor. `redamp` infers nothing: it damps during exactly the interval in which the problem is
+      changing and stops when it stops, so the control is never asked to tell a wrong step from a
+      changed problem — it is told, from outside, at the one moment the answer is certain.
+    - **Corollary: no single `beta_min` can be right for this case, so "pick a better constant" is not
+      the repair either.** 0.005 is an order of magnitude *below* the wall the march hit mid-ramp and
+      is *exactly* where it converges once arrived. The shipped value was never justified against
+      evidence; this measurement says it is unjustifiable as a constant.
     - `shift_factor` defaults to `1.0` on the protocol, so a homotopy indifferent to the shift pays
       nothing and the march is byte-identical to one that never asks.
   - **The damping anchor `‖R₀‖` is taken at the FIRST STATION, not at the target.** It is the scale the
