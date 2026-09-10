@@ -234,6 +234,189 @@ cannot be written. The guard is what catches the next module that does branch.
   it folds far couplings onto near entries. Probe every arm at a uniform reach whenever a monolithic arm
   is in the comparison, or the arms are not being compared on the same matrix.
 
+## ⚠️ `run_case.sh` GUARDS AGAINST A SECOND CASE AND NOT AGAINST A TEST TIER (measured 2026-09-09)
+
+**The runner's mutual exclusion is over *cases*. `tools/fastgate.sh` is not a case, so nothing stops it
+starting on top of a running one — and the fast tier is unambiguously a heavy job on this machine.** It
+runs `pytest -n auto --dist loadfile`, which on the 11-core, 19 GB machine these cases are measured on
+peaks around **6.4 GB** and, launched beside a live pitzDaily march, drove the load average past **22**
+with free memory at **0.73 GB**. It happened **twice in one evening**, from two different worktrees, one
+minute and four minutes into someone else's case — and the two gates took **17:25** and **13:00** against
+a documented 6:34-8:53 for that tier. Every wall-clock number in a case log overlapping such a window is
+contaminated, and so is the gate's own.
+
+**What contention does and does not move — and this is the useful half, because it needs no clock.** The
+cleanest instance is a matched pair in ONE worktree at ONE commit, differing only in machine load, whose
+two logs align line for line. Both print rung 1's closing row on their own line 738:
+
+    |   28 |    895 | 0.0050 |  1 |   2 | 7.214e-06 | 1.000 |     |     <- loaded machine
+    |   28 |    194 | 0.0050 |  1 |   2 | 7.214e-06 | 1.000 |     |     <- quiet machine
+
+**Every column is identical except `t(s)`, which differs 4.6x** — step count, `beta`, inner count, cycles,
+`|R|` to all four figures, `a_min`. The same holds over the **whole** march: both runs finish at
+**69 steps / 417 cycles**, final `|R|` **5.771e-06**, `Ux` in **[-2.694, 10.222]** — every digit — against
+**1325 s and 555 s** of wall clock, a **2.4x** spread on an identical trajectory. (Both on the compiled
+host ILU kernel, per their banners; see the cross-checkout confounds below for why that has to be said.)
+Steps, cycles, escalations, line-search clips and the converged root are deterministic and contention
+cannot move them. Wall clock is a different
+matter: this project already records ~15 % run-to-run spread on an *uncontended* per-application timing,
+and 4.6x is far outside that. **A contended run is still good evidence about counts and worthless about
+seconds** — keep its step and cycle columns, discard its timings, exactly as for a run that spanned a
+machine sleep.
+
+**`895 -> 194` IS an attributable cost, and the attribution is graded.** The loader is known and was read
+from its own log rather than reported: a fast tier in another worktree, `21:55:02 -> 22:12:27`,
+`1045.13s (0:17:25)`, 1498 passed — one minute after the case launched at `21:54:04`. Splitting the slow
+march at its rung boundaries against the quiet one, the ratio tracks **how much of each rung overlapped
+that window**:
+
+| rung | overlap with the gate | slow | quiet | ratio |
+|---|---|---|---|---|
+| 1 | entirely inside it | 499 s | 157 s | **3.2x** |
+| 2 | ~90 %, the gate ends mid-rung | 229 s | 168 s | **1.4x** |
+| 3 | none — it starts after the gate ends | 194 s | 186 s | **1.04x** — *the control* |
+
+**That graded structure is the evidence, not the endpoint ratio, and the control is what makes it one.**
+The ratio reaches unity exactly where the overlap does: 8 s in 190 on a machine with a documented ~15 %
+spread is not a small effect, it is *no* effect. Anyone arguing the slow arm differed in some other way
+now has to explain why that difference confined itself to the two rungs that overlapped a known job.
+(Measuring each rung from the previous rung's last step partitions the march with no gaps; measuring from
+each rung's own first step instead gives 499/157, 215/160, 176/170 — the same three ratios within 2 %, so
+the conclusion does not rest on the convention.)
+
+⚠️ **And the cost is MUTUAL, which is the part that argues for a guard rather than a convention.** The
+gate was slowed by the case as surely as the case was slowed by it: it took **17:25**, and the evening's
+second gate **13:00**, for two jobs that alone are roughly 8-9 minutes each. **Concurrency here is not a
+trade of latency for throughput — it is a loss on both sides**, which matters when arguing for a guard,
+because nobody is giving up throughput they were actually getting.
+
+**It is a measurement, not a shape — the uncontended arm was run the same evening.** Three gates, one
+machine, one night, within 1 % of each other in test count, so composition is not the variable:
+
+| gate | tests | wall | vs clean |
+|---|---|---|---|
+| clean (no case running) | 1494 | **8:44** | — |
+| overlapping a case | 1498 | **17:25** | **2.0x** |
+| overlapping a case | 1482 | **13:00** | **1.5x** |
+
+And the makespan is worse too, which is the part with no counter-argument. The gate alone is 8:44 and that
+case alone is 9:15; **back to back the pair finishes in ~18:00, overlapped the later one finished at
+~22:05** — four minutes later, with *both* jobs individually slowed on the way. There is no throughput
+being bought here to trade latency for. (This supersedes an earlier reading of the 17:25 against the
+tier's documented 6:34-8:53, which was not a fair anchor: different worktree, tier composition and date.
+The three rows above are the comparison that holds.)
+
+**The `--status` line was clean throughout.** At 22:09, mid-slow-arm, the machine sat at load **13.4** with
+**0.73 GB** free while `run_case.sh --status` reported one case and nothing else — because what was
+loading it was a *test tier*, and a test tier is not a case. **That is the whole argument for this
+section**: not that the runner missed something unexplained, but that it is blind to a job class we run
+constantly, and here that job class is named, timed, and measured.
+
+⚠️ **There is currently NO trustworthy wall-clock baseline for pitzDaily from any session.** A figure of
+518 s circulated this evening as "uncontended" and has been withdrawn by the session that produced it: it
+was taken under `run_case.sh`'s guarantee, which establishes only that no other *case* was running and
+says nothing about a test tier or anything else on the machine. Any speedup ratio built on it inherits
+that, so do not quote one. This is the "record what a measurement was taken under" rule biting in its
+sharpest form — the number was not wrong, it was **unfalsifiable**, and it had already been adopted by a
+second session before its author caught it.
+
+⚠️ **A run that changes two variables at once separates neither — and the tempting attribution here is
+wrong twice over.** The contaminated march reached step 1 at `t = 396 s`; a later run reached it at
+**37 s**. That run was quiet **and** cache-warm, against a bad run that was contended **and** cache-cold,
+so the honest statement is *"roughly 10x, cause not isolated"* — **not** "a cold cache costs six minutes",
+which is what both sessions involved were about to write. Isolating it needs a third arm: quiet machine,
+cache deliberately cold. Until someone runs one, quote the pair only with this caveat attached.
+What the same comparison *does* establish, at no cost: step 1's `|R|` is **bit-identical** (`5.668e-02`)
+across the contended and the quiet run — a stronger form of the determinism above than agreement to four
+figures.
+
+⚠️ **Contention is only ONE of the reasons a timing does not travel, and the other two are cross-checkout
+rather than cross-process — the same lesson, three instances, all invisible in the log.** The root
+briefing already records both of the others; what follows is only the connection to this section, so that
+a reader chasing an unexplained wall-clock difference checks all three rather than the one they happened
+to read about.
+
+- **The compiled ILU(0) kernel is a gitignored artifact.** A fresh worktree silently runs the pure-Python
+  twin, and its timings are incomparable to any other checkout's until `tools/build_ext.sh` has been run
+  there. `ilu0.COMPILED` says which is live and both cases' banners print it — check it, because nothing
+  else will. (This is not hypothetical housekeeping: the worktree this entry was written in reported
+  `COMPILED = False` while it was being written.)
+- **The JAX compilation cache is shared but keyed on the compiled program.** A branch carrying different
+  solver code takes misses in a warm checkout, so the first run on a new branch is partly measuring
+  compilation. Nothing in the log distinguishes that from the case being slower.
+
+Together with the step-1 confound above: **a cold-cache premium and a contention premium are two of at
+least three ways the same seconds can go missing, and a single run separates none of them.** A bound of
+roughly 90-360 s has been proposed for the cold-cache half by grading it against the contention ratios;
+it is **not recorded here**, because it assumes single-threaded compilation is starved by a `-n auto`
+tier in the same proportion as the numerics, and that assumption is exactly the one this section declines
+to make elsewhere. The run that would settle it — quiet machine, deliberately cold cache, extension
+built — is cheap and has not been done.
+
+⚠️ **`pgrep -f "tools/fastgate.sh"` DOES NOT TELL YOU WHETHER A GATE IS RUNNING.** It matches any
+*watcher* whose own command line contains that string — an `until ! pgrep -f "tools/fastgate.sh"; do
+sleep` loop matches itself and waits forever — so the poll reports "running" long after the gate exited,
+and a session gating on it will either stall or raise a false alarm at a peer. This is the same
+self-matching trap the root briefing records for a case waiter, one tool along. Match the **real**
+process (`bash tools/fastgate.sh`, or the `python -m pytest` it spawns) with the watcher shells excluded,
+or read the gate's own log — `$TMPDIR/aquaflux-tests-<worktree>-fast-*.log`, whose last line is the
+pytest summary. For the record, the gate described above finished at **13:00** for 1482 passed / 1
+skipped, half again the documented 6:34-8:53 range and a further measure of what the collision cost.
+
+**Wherever the gate does not refuse on its own, the check is manual and it is on the person starting the
+*tests*, not the case:** run `validation/run_case.sh --status` before `tools/fastgate.sh`, not only before
+another case. Checking once and launching twice is the specific way this failed — the status was clean
+when the case was queued and stale by the time the gate followed it. **A guard closing this direction has
+been written and is pending review**; when it lands, the manual check still applies under `CI`, under any
+force-override, and in a checkout that predates it.
+
+⚠️ **The reverse direction stays open even then, and it is worth knowing which half is covered.** A guard
+on the gate can ask `run_case.sh` whether a case is live, because a case writes a run-file. Nothing asks
+the question the other way: **a case cannot see a running test tier, because no tier writes a run-file**.
+Both collisions recorded here were gate-after-case, so that half covers every instance actually observed
+— but "case starts on top of a gate" remains available, and closing it means giving the gate a run-file
+of its own, which is a larger change than the one that was asked for.
+
+⚠️ **Do not read this as a knowledge gap to be closed by documentation.** Three sessions on the evening
+this was recorded all knew the one-heavy-job-at-a-time rule and it happened anyway, because the rule is
+enforced for one pair of jobs and merely known for the other. The durable fix is to make the collision
+unavailable rather than better documented — teach the gate to consult the machine-global run-file and
+refuse or warn — and this entry's job is to stop the wall-clock numbers being trusted, never to stand in
+for that. Read it as a record of what happened and what the measurements are worth, not as the remedy.
+
+## ⚠️ A report about a run is not the run's own record (the evening's actual lesson)
+
+**Every correction in the section above was an account being preferred to a record that was already on
+disk.** The pattern is worth more than any of its instances, and it generalizes past machine contention —
+one of these had nothing to do with load:
+
+| got wrong | from | settled by |
+|---|---|---|
+| which job loaded a slow march | a peer's account plus timing structure | the gate's own `$TMPDIR` log |
+| whether a gate was still running | a process-table match | that log's last line |
+| which PR changed which files | a `HEAD..origin/main` range spanning two merges | `git show --stat <sha>` |
+| a wall-clock baseline | the runner's guarantee about *cases* | nothing — it was withdrawn |
+
+**The records were right every time; the accounts were wrong every time.** Three records earned that:
+the gate's log (`$TMPDIR/aquaflux-tests-<worktree>-fast-<stamp>.log`, pytest summary on the last line),
+`run_case.sh`'s run-file, and `git show`. Three sources did not: a peer's report, one's own recollection,
+and the process table.
+
+⚠️ **And a record can be authoritative about the wrong question, which is the failure mode hardest to
+see.** On a machine where every session pushes as the same GitHub account, **a pull request's author field
+does not identify which session wrote it** — three PRs opened that evening by three different sessions all
+report the same author. It arrives from an API rather than from anyone's memory, so it *reads* as a record,
+but it records the account and the question being asked is about the actor. That is circumstantial in
+exactly the way the process table is. What settles authorship is the work itself: which worktree contains
+the code (`grep` for a symbol the change introduces), and which branch has a remote ref at all. Before
+trusting a field, check that it answers the question you are asking and not a neighbouring one.
+
+**This is not a new rule — it is the one `run_case.sh` was built to embody**, and its own header says so:
+the most valuable thing it produces is not the log but that *"is this run mine, and what is it testing?"
+has a written answer*, a question that has been got wrong from the process table alone. Reach for the
+written answer first. The cost of not doing so, measured here, was four wrong claims in one evening
+between two sessions that were each checking the other's work.
+
 ## `bfs3d_species` — the newest case, and what it depends on
 
 A passive tracer on `bfs3d_openfoam`'s flow (see `.claude/rules/transport.md` for the two-arm design
