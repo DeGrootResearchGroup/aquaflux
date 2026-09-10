@@ -248,6 +248,16 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   face_cells, geometry)`. Physics-free (verified in `tests/unit/test_limiter.py`), injected into
   `LimitedUpwind(limiter=…)` in `discretization/advection.py`, and evaluated only when that scheme
   runs (a diffusion-only or first-order solve never forms `psi`). See `.claude/rules/discretization.md`.
+  **The per-face unlimited increment gathers its neighbour-side position through
+  `face_cells.neighbour_centroid`, not by indexing the cell centroid directly (issue #143, fixed
+  2026-09-09).** A raw `cell_geometry.centroid[neighbour]` is the neighbour's true position, which
+  across a periodic seam sits a full domain length from the face rather than one cell width — the
+  same displacement bug `neighbour_centroid` exists to prevent everywhere else, and the one
+  `LimitedUpwind.face_value` already avoided. `face_limiter` now takes the per-face position as an
+  argument (`cell_geometry.centroid[owner]` on the owner side, `face_cells.neighbour_centroid(...)`
+  on the neighbour side) instead of deriving it from the cell index internally, so both spend the
+  same displacement the reconstruction applies. Latent until now: no shipped case pairs a periodic
+  mesh with a limiter (the periodic cases run unlimited or first-order advection).
 - **`gradient.py` — BUILT so far:** `GradientScheme` (interface) → `CompactGreenGauss`
   (one-shot `∇φ_P = (1/V_P) Σ φ_ip S_f`, linear-interpolated interior faces). Verified in
   `tests/unit/test_gradient.py`: linear-exact + 2nd-order on orthogonal grids;

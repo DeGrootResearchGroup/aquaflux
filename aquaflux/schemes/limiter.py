@@ -91,9 +91,15 @@ class VenkatakrishnanLimiter(Limiter):
         eps2 = cell_geometry.volume * self.k**3  # eps^2 = vol K^3 (Venkatakrishnan softening)
         x_face = face_geometry.centroid
 
-        def face_limiter(cell):
-            """Venkatakrishnan psi for each face as seen from ``cell``."""
-            delta_minus = dot(gradient[cell], x_face - cell_geometry.centroid[cell])
+        def face_limiter(cell, x_cell):
+            """Venkatakrishnan psi for each face as seen from ``cell`` at position ``x_cell``.
+
+            ``x_cell`` is a gathered per-face position, not derived from ``cell`` by indexing:
+            across a periodic seam the neighbour side's *position* is the neighbour's periodic
+            image, not its raw centroid, while every field gather (``phi``, ``gradient``, ...) off
+            ``cell`` stays unshifted, since field values are periodic and positions are not.
+            """
+            delta_minus = dot(gradient[cell], x_face - x_cell)
             # Regularize away from zero, treating zero as positive (sign of +1 at x == 0) so a
             # vanishing increment (constant field) gives psi -> 1 rather than 0/0.
             sign = jnp.where(delta_minus >= 0.0, 1.0, -1.0)
@@ -113,5 +119,9 @@ class VenkatakrishnanLimiter(Limiter):
         # boundary face's neighbour side from the reduction, whatever value face_limiter gives it
         # there (a boundary face reads safe_neighbour == owner, so its neighbour-side value is just
         # a harmless second copy of the owner-side one, discarded before it can matter).
-        psi = face_cells.scatter_min(face_limiter(owner), face_limiter(neighbour))
+        owner_limiter = face_limiter(owner, cell_geometry.centroid[owner])
+        neighbour_limiter = face_limiter(
+            neighbour, face_cells.neighbour_centroid(cell_geometry.centroid)
+        )
+        psi = face_cells.scatter_min(owner_limiter, neighbour_limiter)
         return jnp.clip(psi, 0.0, 1.0)
