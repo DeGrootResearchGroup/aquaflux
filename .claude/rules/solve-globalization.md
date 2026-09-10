@@ -39,6 +39,11 @@ What to take from it, none of which is specific to that mechanism:
 
 - **Before deleting a damping behaviour, ask what it is holding, not only whether it is right.** Those
   are different questions and the second does not answer the first.
+  - **This applies to ACCIDENTS as much as to defects — to anything nobody put there deliberately.**
+    The brake above was a mis-reading; `beta_min = 0.005` is the same shape from the other direction, a
+    constant chosen against no evidence that has been silently bounding this case's descent for as long
+    as the case has existed. Neither was designed, both were load-bearing, and an unexamined constant is
+    harder to notice than a wrong rule because nothing about it looks like a decision.
 - **A correct fix that makes the case worse is evidence about the SYSTEM, not about the fix.** The
   right response is to find what the defect was doing and supply it deliberately — not to revert, and
   not to ship the defect on the grounds that it works.
