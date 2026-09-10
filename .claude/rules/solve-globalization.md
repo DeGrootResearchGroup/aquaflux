@@ -20,6 +20,32 @@ paths:
 > not here.** Update this file's architecture/binding prose only when an investigation reaches a
 > durable verdict (see `solve.md`'s "Where new content goes").
 
+## ⚠️ A DEFECT THAT FIRES FOR THE WRONG REASON CAN BE LOAD-BEARING (binding, measured 2026-09-09)
+
+**A globalization defect can be the only thing holding the march out of a bad regime, so fixing it
+*correctly* is what breaks the case.** Read this before removing any damping behaviour you have
+diagnosed as wrong — the diagnosis being right does not make the removal safe, and the failure lands
+one or more steps later, far from the change.
+
+The instance, in full in this file's `redamp` entry and in `.claude/rules/solve-march.md`: a
+residual-ratio control mis-read a homotopy's station change as divergence and braked. The mis-reading
+was real — a station change raises the residual because the *problem* changed, not because the step
+was wrong — and removing it was correct. It was also the only thing holding the shift out of a regime
+the preconditioner cannot invert: the shift then walked into a wall, the line search collapsed to
+`alpha = 0`, `|R|` rose two orders, and the retry ladder had to escalate to recover. **The principled
+replacement had to reproduce the accidental brake's own arithmetic before it worked.**
+
+What to take from it, none of which is specific to that mechanism:
+
+- **Before deleting a damping behaviour, ask what it is holding, not only whether it is right.** Those
+  are different questions and the second does not answer the first.
+- **A correct fix that makes the case worse is evidence about the SYSTEM, not about the fix.** The
+  right response is to find what the defect was doing and supply it deliberately — not to revert, and
+  not to ship the defect on the grounds that it works.
+- **Measure the removal on its own before combining it with anything.** The intermediate arm (the fix
+  alone, no replacement) is what located the wall; a run that changed both at once would have shown a
+  number and no mechanism.
+
 ## Globalization — forward step, continuation, line search
 
 - **`ShiftedStep` is the shared body of the two shifted forward steps (`solve/continuation.py`, BUILT

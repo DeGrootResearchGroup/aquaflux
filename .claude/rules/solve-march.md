@@ -71,8 +71,11 @@ paths:
     on the step that first faces a new station, and `forward_march` **holds** the control for that step.
     It is the companion of `rebase` and they fire on **adjacent steps for different reasons**: this on
     the entering step, that on the next one, which is the first whose ratio would straddle the boundary.
-    - **⚠️ THE SPURIOUS BRAKE `rebase` REMOVES WAS LOAD-BEARING — this is the finding, and it is a
-      nasty shape: fixing a defect CORRECTLY is what broke the case.** Before `rebase`, the ratio rule
+    - **⚠️ THE SPURIOUS BRAKE `rebase` REMOVES WAS LOAD-BEARING.** This is the case's instance of a
+      general globalization lesson — *a defect that fires for the wrong reason can be the only thing
+      holding the march out of a bad regime, so fixing it correctly is what breaks the case* — which is
+      stated once, with what to do about it, at the top of `.claude/rules/solve-globalization.md`. The
+      numbers are here; the lesson is there. Before `rebase`, the ratio rule
       mis-read each station change as divergence and doubled β at two of four changes. That was wrong
       *and* was the only thing holding β out of a regime the preconditioner cannot invert. Removing it,
       β walked 0.5 → 0.148 → 0.044 → **0.013** (`grow ** steps_per_station` = `1.5³` = 3.375 per
