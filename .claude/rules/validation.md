@@ -234,6 +234,43 @@ cannot be written. The guard is what catches the next module that does branch.
   it folds far couplings onto near entries. Probe every arm at a uniform reach whenever a monolithic arm
   is in the comparison, or the arms are not being compared on the same matrix.
 
+## ⚠️ `run_case.sh` GUARDS AGAINST A SECOND CASE AND NOT AGAINST A TEST TIER (measured 2026-09-09)
+
+**The runner's mutual exclusion is over *cases*. `tools/fastgate.sh` is not a case, so nothing stops it
+starting on top of a running one — and the fast tier is unambiguously a heavy job on this machine.** It
+runs `pytest -n auto --dist loadfile`, which on the 11-core, 19 GB machine these cases are measured on
+peaks around **6.4 GB** and, launched beside a live pitzDaily march, drove the load average past **22**
+with free memory at **0.73 GB**. A gate that normally takes 6:34–8:53 sat at 97 % for several minutes and
+ran to about **10 minutes**; every wall-clock number in the case's log for that window is contaminated.
+
+**What contention does and does not move — and this is the useful half, because it needs no clock.** Two
+runs of the same pitzDaily configuration, one heavily contended and one of unknown contention, agree at
+**69 steps / 417 cycles** and `x_r/h` **8.069 against 8.0686**. Steps, cycles, escalations, line-search
+clips and the converged root are deterministic and contention cannot move them. Wall clock is a different
+matter: this project already records ~15 % run-to-run spread on an *uncontended* per-application timing,
+and this is far outside that. **A contended run is still good evidence about counts and worthless about
+seconds** — keep its step and cycle columns, discard its timings, exactly as for a run that spanned a
+machine sleep.
+
+⚠️ **There is currently NO trustworthy wall-clock baseline for pitzDaily from any session.** A figure of
+518 s circulated this evening as "uncontended" and has been withdrawn by the session that produced it: it
+was taken under `run_case.sh`'s guarantee, which establishes only that no other *case* was running and
+says nothing about a test tier or anything else on the machine. Any speedup ratio built on it inherits
+that, so do not quote one. This is the "record what a measurement was taken under" rule biting in its
+sharpest form — the number was not wrong, it was **unfalsifiable**, and it had already been adopted by a
+second session before its author caught it.
+
+**Until a guard exists, the check is manual and it is on the person starting the *tests*, not the case:**
+run `validation/run_case.sh --status` before `tools/fastgate.sh`, not only before another case. Checking
+once and launching twice is the specific way this failed — the status was clean when the case was queued
+and stale by the time the gate followed it.
+
+⚠️ **Do not read this as a knowledge gap to be closed by documentation.** Three sessions on the evening
+this was recorded all knew the one-heavy-job-at-a-time rule and it happened anyway, because the rule is
+enforced for one pair of jobs and merely known for the other. The durable fix is to make the collision
+unavailable — teach the gate to consult the machine-global run-file and refuse or warn — and this entry
+exists to stop the wall-clock numbers being trusted in the meantime, not to substitute for that.
+
 ## `bfs3d_species` — the newest case, and what it depends on
 
 A passive tracer on `bfs3d_openfoam`'s flow (see `.claude/rules/transport.md` for the two-arm design
