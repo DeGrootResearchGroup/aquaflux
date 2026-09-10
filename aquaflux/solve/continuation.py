@@ -1084,10 +1084,12 @@ class DualTimeStep(ShiftedStep):
                 # `‖G‖`, which is exactly what it was handed as its measure, so no second evaluation.
                 new_gnorm = searched.residual_norm
                 # An inner step that does NOT reduce ‖G‖ took the line search's non-descent fallback,
-                # which still reports alpha = 1 (the longest finite rung ≤ the full step). Fold that into
-                # the reported min-alpha as 0, so a step control reads it as "struggling" (shrink the
-                # pseudo-timestep) rather than "comfortable" (grow it). The monotone search means no
-                # descent ⇔ the fallback fired, so `new_gnorm < gnorm` detects it exactly.
+                # which keeps the longest rung within `fallback_growth` of `gnorm` -- usually the full
+                # step, so alpha still reads 1 -- and returns alpha = 0 when no finite rung qualifies.
+                # Fold either into the reported min-alpha as 0, so a step control reads it as
+                # "struggling" (shrink the pseudo-timestep) rather than "comfortable" (grow it). The
+                # monotone search means no descent ⇔ the fallback fired, so `new_gnorm < gnorm` detects
+                # it exactly; the alpha = 0 case reports `gnorm` itself and so is caught by the same test.
                 descended = new_gnorm < gnorm
                 if inner_observer is not None:
                     # Surface this inner iteration's trajectory (‖G‖ before/after, its solve's raw cycle

@@ -1190,3 +1190,18 @@ three orders from the stopping bar. **That was this hole**, and with it closed t
   descent steps saved against a rung meeting a shift below what it can take -- for which the reference
   points are the arm above and the recorded `0.1` arm (59 / 403 / 712, zero escalations, on the previous
   bundle).
+
+- ⚠️ **This change shipped with its documentation sync INCOMPLETE, and the reason is the recorded blind
+  spot rather than carelessness (found and repaired 2026-09-09, one merge later).** Four passages went on
+  describing the unbounded fallback after it was gone: `backtracking_line_search`'s own **docstring
+  summary line** (contradicted by the `fallback_growth` entry a hundred lines below it), the comment in
+  `DualTimeStep`'s inner loop that folds a non-descent into `a_min`, `MarchLogger.on_inner`'s explanation
+  of the `alpha` column, and `solve-march.md` in two places -- one of them the log-reading rule that
+  `a_min=0.000` beside `alpha=1.000` is the non-descent signature, which stopped being the only one the
+  moment `alpha = 0` became reachable. **The Stale-Record Check's identifier grep cannot see any of
+  them**: `fallback_growth` is a *new* name, so nothing was renamed, and every false claim is spelled in
+  ordinary English -- "the longest finite rung", "the longest finite trial step". That is precisely the
+  case the checklist's "grep for the CLAIM, not only for the symbol" exists for, and it was still missed.
+  **The phrase to grep when this behaviour changes again is `longest finite`** -- it reaches every site
+  that describes this fallback, including the several that are correct, which is what a claim-grep is
+  supposed to do: it hands you the whole set to adjudicate rather than only the ones that were renamed.

@@ -369,11 +369,15 @@ class MarchLogger:
 
         **``alpha`` here is not the step row's ``a_min``.** This is *this* iteration's backtracking
         factor, and it reads ``1.000`` even when the line search failed to descend at all -- the
-        non-descent fallback returns the longest finite trial step. The step row instead reports the
+        non-descent fallback keeps the longest trial step within ``fallback_growth`` of the norm it was
+        handed, which is usually the full one. It reads ``0.000`` in the one remaining case, where no
+        finite rung comes in under that bound and the search declines to move. The step row reports the
         minimum over the step's iterations with any non-descending iteration folded in as ``0``. So a
         step row of ``a_min=0.000`` beside inner rows of ``alpha=1.000`` is not a contradiction: it
         means an iteration took its full step and still did not reduce ``‖G‖``. **``rate`` identifies
-        those exactly** -- ``rate >= 1`` is the non-descent case, since the search is monotone.
+        those exactly** -- ``rate >= 1`` is the non-descent case, since the search is monotone, and it
+        catches the ``alpha=0.000`` case too: an untouched iterate is reported at the norm it started
+        from, so ``rate`` is exactly ``1``.
 
         Rows open a block on the step's first inner iteration and the step row closes it. The block is
         written **as the step runs** while the step row is written once it returns, so the summary

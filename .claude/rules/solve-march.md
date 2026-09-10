@@ -542,11 +542,17 @@ paths:
       reported norm are one measure by construction. Break that and the convergence test runs against a
       residual history measured in a different scale from the reference it is compared with.
       **The fallback rung is the trap, and it is pinned.** The ladder walks longest-first and stops at
-      the first admissible rung; when *nothing* is admissible it falls back to the longest finite rung,
-      passed several evaluations earlier — so `LineSearchStep` carries that rung's measure alongside the
-      accepted one. Reporting the accepted rung's norm on a fallback describes a step that was not taken
+      the first admissible rung; when *nothing* is admissible it falls back to the longest rung that is
+      finite **and** within `fallback_growth` (default `100.0`) of `reference_norm`, passed several
+      evaluations earlier — so `LineSearchStep` carries that rung's measure alongside the accepted one.
+      Reporting the accepted rung's norm on a fallback describes a step that was not taken
       (`test_the_line_search_reports_the_fallback_rungs_own_measure`, which fails with `inf` if the
-      fallback carry is dropped).
+      fallback carry is dropped). Where **no** finite rung comes in under that bound the search instead
+      returns `alpha = 0` and reports `reference_norm` — the iterate untouched, which is exactly its
+      measure there — so the poisoned rung is never handed on as the next anchor. A search with no
+      finite rung *at all* is a third case and is deliberately unchanged: it still reports a non-finite
+      measure, because the divergence guard, the acceptance policy and the convergence guard all test
+      that number with `isfinite`.
       **`DualTimeStep` forms it rather than inheriting it**, which is correct rather than an oversight:
       its inner loop converges the *shifted* `G` at a held reference, so every measure it formed is of
       `G`, while the driver judges the step by the steady `R`, and `G(phi_next) != R(phi_next)` whenever
@@ -674,11 +680,14 @@ paths:
     breaks the grid.
   - **`a_min` (step) vs `alpha` (inner) — different quantities, deliberately named apart.** An inner
     iteration's `alpha` is its own backtracking factor, and it reads **1.0 even when the line search
-    failed to descend** (the non-descent fallback returns the longest finite trial step). The step
-    reports the **minimum over its iterations with any non-descending one folded in as 0**. So
-    `a_min=0.000` beside `alpha=1.000` is a real state — a full step that did not reduce `‖G‖` — not a
-    contradiction. In the inner table **`rate ≥ 1` identifies those iterations exactly**, since the
-    search is monotone.
+    failed to descend** (the non-descent fallback keeps the longest rung within `fallback_growth` of
+    the norm it was handed, usually the full step). The step reports the **minimum over its iterations
+    with any non-descending one folded in as 0**. So `a_min=0.000` beside `alpha=1.000` is a real
+    state — a full step that did not reduce `‖G‖` — not a contradiction. Since 2026-09-09 an inner
+    `alpha` may also read **0.000**, the case where no finite rung came in under `fallback_growth` and
+    the search declined to move at all; that iterate is reported at the norm it started from. In the
+    inner table **`rate ≥ 1` identifies every non-descending iteration exactly**, since the search is
+    monotone — the `alpha=0.000` case lands at `rate = 1`.
   - **Diagnostics are opt-in through one `detail` argument (BUILT).** `MarchLogger(detail=…)` selects
     from `{"inner", "fields", "residuals", "pc"}`; empty (the default) is the plain one-row-per-step log. They are
     debugging/profiling instruments — several lines per step — not something a routine run should pay
