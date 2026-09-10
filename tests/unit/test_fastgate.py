@@ -91,9 +91,31 @@ def _tree(tmp_path: Path, **modules: str) -> Path:
 _XDIST_MARKERS = ("PYTEST_XDIST_WORKER", "PYTEST_XDIST_WORKER_COUNT", "PYTEST_XDIST_TESTRUNUID")
 
 
+#: A run-file in the shape `validation/run_case.sh` writes, naming ``pid``. Only the pid is read (the
+#: rest is echoed back to a human), so a live process of any kind stands in for a march.
+_RUN_FILE = "pid={pid}\nscript=validation/pitzdaily_openfoam/compare.py\nlog=/tmp/pretend.log\n"
+
+
+def _case_running(tmp_path: Path, pid: int) -> dict[str, str]:
+    """Overrides that make the gate believe a validation case with ``pid`` is running.
+
+    Points ``TMPDIR`` at a throwaway directory and writes the run-file there, so the test never reads
+    -- or worse, writes -- the machine-global one that real runs on this machine use. It also clears
+    ``CI``, which the guard treats as "no cases here" and which :func:`_run` otherwise sets.
+    """
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir(exist_ok=True)
+    (tmpdir / "aquaflux-case-run").write_text(_RUN_FILE.format(pid=pid))
+    return {"TMPDIR": str(tmpdir), "CI": ""}
+
+
 def _run(cwd: Path, *args: str, **overrides: str) -> subprocess.CompletedProcess[str]:
-    """Run the gate in ``cwd``. ``CI`` is set so the hooks warning cannot colour the output."""
-    environment = dict(os.environ, CI="1", **overrides)
+    """Run the gate in ``cwd``. ``CI`` is set so the hooks warning cannot colour the output.
+
+    Built by unpacking rather than ``dict(os.environ, CI=..., **overrides)`` so a caller may override
+    ``CI`` itself -- the case-collision guard keys on it, and that form raises on the duplicate.
+    """
+    environment = {**os.environ, "CI": "1", **overrides}
     for marker in _XDIST_MARKERS:
         environment.pop(marker, None)
     return subprocess.run(
@@ -257,3 +279,80 @@ def test_the_parallelism_can_be_turned_off_for_a_one_off_run(tmp_path: Path) -> 
     """
     assert _worker_of(tmp_path, "fast", _WORKER_PROBE, FASTGATE_JOBS="0") == "serial"
     assert _worker_of(tmp_path, "fast", _WORKER_PROBE, "-n0") == "serial"
+
+
+def test_it_REFUSES_to_start_a_tier_while_a_validation_case_is_running(tmp_path: Path) -> None:
+    """The guard this script grew for: a test tier is not a case, so nothing used to stop one landing
+    on top of a march.
+
+    `run_case.sh` refuses a second *case*, which is where the mutual exclusion stopped -- and on
+    2026-09-09 a gate landed on a running case three times in one evening, between three sessions that
+    all knew the one-heavy-job-at-a-time rule. The rule was enforced for one pair of jobs and merely
+    known for the other, so knowing it was not what mattered.
+    """
+    tree = _tree(tmp_path, test_ok=_CHATTER)
+    with subprocess.Popen(["sleep", "60"]) as case:
+        try:
+            result = _run(tree, "fast", str(tree), **_case_running(tmp_path, case.pid))
+        finally:
+            case.terminate()
+
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "refusing to start a test tier" in result.stderr
+    assert str(case.pid) in result.stderr  # it names what it is waiting for
+    assert "1 passed" not in result.stdout  # and pytest never ran
+
+
+def test_the_refusal_can_be_overridden_deliberately(tmp_path: Path) -> None:
+    """`FASTGATE_FORCE=1` runs anyway -- a `-k` on one test beside a long march is usually harmless,
+    and a guard with no way past it gets worked around rather than obeyed."""
+    tree = _tree(tmp_path, test_ok=_CHATTER)
+    with subprocess.Popen(["sleep", "60"]) as case:
+        try:
+            result = _run(
+                tree,
+                "fast",
+                str(tree),
+                FASTGATE_FORCE="1",
+                **_case_running(tmp_path, case.pid),
+            )
+        finally:
+            case.terminate()
+
+    assert result.returncode == 0
+    assert "1 passed" in result.stdout
+
+
+def test_a_case_that_has_EXITED_does_not_block_the_gate(tmp_path: Path) -> None:
+    """A stale run-file must not wedge the gate shut.
+
+    The run-file outlives a case that crashed or was killed, so liveness is a `kill -0` on the recorded
+    pid rather than the file's existence -- and that rule lives in `run_case.sh`, which this asks rather
+    than re-implementing. A guard that answered "yes" forever would be worse than no guard: it fails
+    closed on every future run and the fix is not obvious from the message.
+    """
+    tree = _tree(tmp_path, test_ok=_CHATTER)
+    case = subprocess.Popen(["sleep", "60"])
+    case.terminate()
+    case.wait()
+
+    result = _run(tree, "fast", str(tree), **_case_running(tmp_path, case.pid))
+
+    assert result.returncode == 0
+    assert "1 passed" in result.stdout
+
+
+def test_the_guard_is_skipped_under_CI(tmp_path: Path) -> None:
+    """CI runs no validation cases, and a stray run-file in a shared runner temp directory must not be
+    able to fail a required check. Every other test here relies on this, since `_run` sets ``CI``."""
+    tree = _tree(tmp_path, test_ok=_CHATTER)
+    with subprocess.Popen(["sleep", "60"]) as case:
+        try:
+            overrides = _case_running(tmp_path, case.pid)
+            overrides["CI"] = "1"
+            result = _run(tree, "fast", str(tree), **overrides)
+        finally:
+            case.terminate()
+
+    assert result.returncode == 0
+    assert "1 passed" in result.stdout

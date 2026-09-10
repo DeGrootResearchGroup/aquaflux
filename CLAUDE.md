@@ -546,10 +546,14 @@ wrapper does not pass through, but never through a pipe: this suite prints libra
 *after* the summary, so `| tail -n` shows the chatter, hides the result, and returns `tail`'s exit
 status — which is `0` however the run went. Its own behaviour — that a failing run exits non-zero,
 that the summary survives the chatter, that the skip count is reported, that a mistyped tier is
-refused, that the fast tier parallelizes while the heavy tiers do not — is pinned by
-`tests/unit/test_fastgate.py`, for the same reason `check_hooks.sh` and `sibling_builders.py` are: a
-runner that had stopped propagating a failure looks exactly like a passing suite, and every other
-check in this project is read through it.
+refused, that the fast tier parallelizes while the heavy tiers do not, and that it refuses to start
+beside a running validation case (with `FASTGATE_FORCE` past it, no wedge from a stale run-file, and
+no guard under `CI`) — is pinned by `tests/unit/test_fastgate.py`, for the same reason
+`check_hooks.sh` and `sibling_builders.py` are: a runner that had stopped propagating a failure looks
+exactly like a passing suite, and every other check in this project is read through it.
+⚠️ Note the cost of the escape hatch in the sentence above: **invoking `pytest` directly skips the
+case guard as well as everything else the wrapper does**, so it is the one route that can still put a
+tier on top of a march without saying so.
 
 **The fast tier runs across worker processes; the `slow` and `validation` tiers do not.** That split
 is a memory decision, not a preference: the heavy tiers' solves each hold gigabytes of live JAX
@@ -829,6 +833,18 @@ free-memory and load pre-flight; a refusal to start a second case; and a run-fil
 worktree, branch, commit and case settings. Its most valuable output is not the log — it is that
 **"is this run mine, and what is it testing?" has a written answer**, a question that has been got
 wrong from the process table alone.
+
+**⚠️ That mutual exclusion was over *cases*, and a TEST TIER IS NOT A CASE — so `tools/fastgate.sh` now
+refuses to start beside a running case too (exit 3; `FASTGATE_FORCE=1` to override, skipped under `CI`).**
+On 2026-09-09 a gate landed on a running march three times in one evening, between three sessions that
+all knew the one-heavy-job-at-a-time rule: it was *enforced* for case-vs-case and merely *known* for
+tier-vs-case, and knowing it turned out not to be what mattered. **The cost is symmetric, which is the
+part worth internalizing — this is not a trade of one job's latency for another's throughput.** In the
+measured collision the fast tier alone took **17:25** against its usual 6:34–8:53 while the case it
+landed on ran **3.2×** slow over the overlap; run end to end they are about 8 and 9 minutes. Both jobs
+lost. The gate asks `validation/run_case.sh --running` rather than reading the run-file itself, so the
+file's format and the `kill -0` liveness rule keep one home — a second copy of either is the duplication
+that made this class of collision possible to begin with.
 
 ### What no runner can enforce (binding)
 

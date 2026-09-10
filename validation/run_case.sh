@@ -28,6 +28,7 @@
 #   validation/run_case.sh <script.py>          launch, print how to watch, return immediately
 #   validation/run_case.sh <script.py> --wait   launch and block until it exits
 #   validation/run_case.sh --status             what is running, since when, under what settings
+#   validation/run_case.sh --running            exit 0 and print the pid if a case is live, else 1
 #   validation/run_case.sh --wait               block on whatever is already running
 #   validation/run_case.sh <script.py> --force  start even if the health pre-flight objects
 #
@@ -104,6 +105,18 @@ live_pid() {
   if kill -0 "$pid" 2>/dev/null; then printf '%s' "$pid"; else rm -f "$RUN_FILE"; fi
 }
 
+# The same question as `--status`, answered by EXIT STATUS so another script can branch on it without
+# parsing prose. It exists because `tools/fastgate.sh` has to ask it before starting a test tier, and a
+# second implementation of "is a case live" would be one more copy of the run-file's format and of the
+# `kill -0` liveness rule -- the two things this file exists to own. Prints the pid so a caller can name
+# it in its own message.
+is_running() {
+  local pid
+  pid=$(live_pid)
+  [ -n "$pid" ] || return 1
+  printf '%s\n' "$pid"
+}
+
 show_status() {
   local pid
   pid=$(live_pid)
@@ -133,7 +146,10 @@ for arg in "$@"; do
   case "$arg" in
     --wait)   WANT_WAIT=1 ;;
     --force)  FORCE=1 ;;
-    --status) show_status; exit 0 ;;
+    --status)  show_status; exit 0 ;;
+    # `if`, not `is_running; exit $?`: under `set -e` a bare failing call exits the shell before
+    # the `exit` runs -- with the right status here by luck, which is not a thing to rely on.
+    --running) if is_running; then exit 0; else exit 1; fi ;;
     -*)       die "unknown option $arg" ;;
     *)        SCRIPT="$arg" ;;
   esac
