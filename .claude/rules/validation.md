@@ -260,6 +260,26 @@ that, so do not quote one. This is the "record what a measurement was taken unde
 sharpest form — the number was not wrong, it was **unfalsifiable**, and it had already been adopted by a
 second session before its author caught it.
 
+⚠️ **A run that changes two variables at once separates neither — and the tempting attribution here is
+wrong twice over.** The contaminated march reached step 1 at `t = 396 s`; a later run reached it at
+**37 s**. That run was quiet **and** cache-warm, against a bad run that was contended **and** cache-cold,
+so the honest statement is *"roughly 10x, cause not isolated"* — **not** "a cold cache costs six minutes",
+which is what both sessions involved were about to write. Isolating it needs a third arm: quiet machine,
+cache deliberately cold. Until someone runs one, quote the pair only with this caveat attached.
+What the same comparison *does* establish, at no cost: step 1's `|R|` is **bit-identical** (`5.668e-02`)
+across the contended and the quiet run — a stronger form of the determinism above than agreement to four
+figures.
+
+⚠️ **`pgrep -f "tools/fastgate.sh"` DOES NOT TELL YOU WHETHER A GATE IS RUNNING.** It matches any
+*watcher* whose own command line contains that string — an `until ! pgrep -f "tools/fastgate.sh"; do
+sleep` loop matches itself and waits forever — so the poll reports "running" long after the gate exited,
+and a session gating on it will either stall or raise a false alarm at a peer. This is the same
+self-matching trap the root briefing records for a case waiter, one tool along. Match the **real**
+process (`bash tools/fastgate.sh`, or the `python -m pytest` it spawns) with the watcher shells excluded,
+or read the gate's own log — `$TMPDIR/aquaflux-tests-<worktree>-fast-*.log`, whose last line is the
+pytest summary. For the record, the gate described above finished at **13:00** for 1482 passed / 1
+skipped, half again the documented 6:34-8:53 range and a further measure of what the collision cost.
+
 **Until a guard exists, the check is manual and it is on the person starting the *tests*, not the case:**
 run `validation/run_case.sh --status` before `tools/fastgate.sh`, not only before another case. Checking
 once and launching twice is the specific way this failed — the status was clean when the case was queued
