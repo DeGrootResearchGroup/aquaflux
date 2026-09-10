@@ -7,6 +7,7 @@ schedule (physics-free) and the molecular-viscosity rescale on a small built cou
 
 from __future__ import annotations
 
+import itertools
 import math
 
 import aquaflux  # noqa: F401  (enables x64)
@@ -26,6 +27,7 @@ from aquaflux.turbulence import (
     GeometricReynoldsSchedule,
     SSTModel,
     SSTTurbulence,
+    ViscosityRampHomotopy,
     solve_reynolds_continuation,
 )
 
@@ -583,3 +585,101 @@ def test_a_failed_TARGET_rung_also_retreats(monkeypatch) -> None:
     assert attempts[:2] == [10.0, 1.0]  # anchor, then the target, which fails
     assert 1.0 < attempts[2] < 10.0  # a rung inserted between the last root and the target
     assert attempts[-1] == 1.0  # and the target is then reached
+
+
+# --- the within-march viscosity ramp ----------------------------------------------------
+
+
+def test_the_ramp_walks_the_viscosity_geometrically_down_to_exactly_the_target() -> None:
+    """Equal ratios between stations, and the last one is the case's own viscosity exactly.
+
+    Geometric rather than linear because the convective nonlinearity scales multiplicatively with the
+    Reynolds number, so equal *ratios* are equal difficulty; and exactly ``1.0`` at the end because a
+    ramp that stopped near the target would leave the march solving a slightly wrong problem.
+    """
+    ramp = ViscosityRampHomotopy(_tiny_coupled(), anchor=100.0, stations=4, steps_per_station=3)
+    scales = [ramp.scale(s) for s in range(5)]
+
+    assert scales[0] == 100.0
+    assert scales[-1] == 1.0
+    ratios = [a / b for a, b in itertools.pairwise(scales)]
+    assert all(math.isclose(r, ratios[0]) for r in ratios)
+    assert math.isclose(ratios[0], 100.0 ** (1 / 4))
+
+
+def test_the_ramp_holds_each_station_for_its_step_budget_and_then_arrives() -> None:
+    """The step-to-station map, and that arrival is exactly where the ramp's budget ends."""
+    ramp = ViscosityRampHomotopy(_tiny_coupled(), anchor=100.0, stations=3, steps_per_station=2)
+
+    assert [ramp.station(i) for i in range(8)] == [0, 0, 1, 1, 2, 2, 3, 3]
+    assert [ramp.arrived(i) for i in range(8)] == [False] * 6 + [True, True]
+    assert ramp.ramp_steps == 6
+
+
+def test_the_ramp_rebinds_once_per_station_change_not_once_per_step() -> None:
+    """The affordability property: a station change refits a preconditioner, so it must be rare.
+
+    Moving the viscosity every step would force a full preconditioner rebuild every step -- the most
+    expensive operation in the march -- which would cost far more than the steps the ramp saves.
+    """
+    seen: list[float] = []
+    coupled = _tiny_coupled()
+    ramp = ViscosityRampHomotopy(
+        coupled,
+        anchor=100.0,
+        stations=3,
+        steps_per_station=4,
+        rebind=lambda assembler: seen.append(
+            float(jnp.asarray(assembler.turbulence.molecular_viscosity).ravel()[0])
+        ),
+    )
+
+    for step in range(12):
+        ramp.enter(step)
+
+    assert len(seen) == 3  # twelve steps, three stations
+    assert math.isclose(seen[0], NU * 100.0, rel_tol=1e-12)
+
+
+def test_the_ramp_hands_back_the_CASES_OWN_assembler_at_the_target() -> None:
+    """Identity, not a rescale by one: the root and its adjoint must belong to the case.
+
+    ``with_scaled_molecular_viscosity(1.0)`` returns a different object holding a multiplied array. It
+    is numerically the same problem, but the assembler is the differentiable parameter pytree the
+    adjoint is taken with respect to, so handing back a copy is not the same thing as handing back the
+    case.
+    """
+    coupled = _tiny_coupled()
+    ramp = ViscosityRampHomotopy(coupled, anchor=100.0, stations=2, steps_per_station=1)
+
+    assert ramp.enter(0).__self__ is not coupled  # a ramp station is a rescaled companion
+    assert ramp.enter(2).__self__ is coupled  # the target station is the case itself
+
+
+def test_each_station_is_the_assembler_at_that_stations_own_scale() -> None:
+    """The wiring: the station handed to the march is the case rescaled by that station's own factor.
+
+    That the rescale itself moves both viscosity leaves consistently is
+    ``test_coupled_rescale_scales_both_viscosity_leaves``; what is pinned here is that the ramp feeds
+    it :meth:`scale` and hands the result on, rather than that the rescale works.
+    """
+    coupled = _tiny_coupled()
+    ramp = ViscosityRampHomotopy(coupled, anchor=100.0, stations=2, steps_per_station=1)
+
+    for step in (0, 1):
+        station = ramp.enter(step).__self__
+        assert _dynamic_viscosity(station) == pytest.approx(ramp.scale(step) * RHO * NU)
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        (dict(anchor=0.5, stations=2, steps_per_station=1), "anchor must be >= 1"),
+        (dict(anchor=10.0, stations=0, steps_per_station=1), "stations must be >= 1"),
+        (dict(anchor=10.0, stations=2, steps_per_station=0), "steps_per_station must be >= 1"),
+    ],
+)
+def test_the_ramp_refuses_a_configuration_that_cannot_walk_down_to_the_target(kwargs, message):
+    """An anchor below one ramps the wrong way, and a zero budget is a ramp that never runs."""
+    with pytest.raises(ValueError, match=message):
+        ViscosityRampHomotopy(_tiny_coupled(), **kwargs)

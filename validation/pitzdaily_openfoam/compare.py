@@ -112,11 +112,15 @@ from aquaflux.turbulence import (
     CoupledRANS,
     GeometricReynoldsSchedule,
     LogScalars,
+    ReynoldsPoint,
     SSTModel,
     SSTTurbulence,
+    ViscosityRampHomotopy,
     amg_beta_tracking_refresh,
     coupled_amg_continuation,
     coupled_fields,
+    hybrid_initialize,
+    solve_coupled,
     solve_reynolds_continuation,
     wall_consistent_state,
 )
@@ -189,6 +193,42 @@ N_POINTS = int(os.environ.get("PITZ_N_POINTS", "2"))
 #: ladder's *granularity* at a fixed *span*, which is the comparison worth making. `10 ** 2`,
 #: `3.1623 ** 4` and `2.1544 ** 6` all anchor at Re/100.
 RATIO = float(os.environ.get("PITZ_RATIO", "10.0"))
+
+#: ⚠️ WALK THE VISCOSITY DOWN INSIDE ONE MARCH INSTEAD OF SOLVING A LADDER OF RUNGS
+#: (`PITZ_RAMP=continuous`). The ladder above solves each Reynolds rung as its own march, which pays
+#: two costs per rung that a single march does not, both measured on this case at the shipped
+#: configuration (69 outer steps, 417 restart cycles, 929 s of marching after a 396 s cold compile):
+#:
+#:   * **Each rung is converged, and the next rung's viscosity jump immediately undoes it.** Rung 1
+#:     spent 12 of its 28 steps taking `|R|` from 4.5e-04 to 7.2e-06 -- and rung 2 opened at 4.5e-02,
+#:     six thousand times worse. Rung 2 then converged to 4.6e-06 and the target opened at 3.0e-03.
+#:     Every one of those polishing steps was discarded work: a seed does not need to be a root.
+#:   * **Each rung restarts the pseudo-timestep ramp.** `beta` reopens at `BETA_START` on every rung
+#:     and walks back to `beta_min` one `1/grow` notch per outer step -- 12 steps at these values,
+#:     measured with `a_min = 1.000` on all of them, i.e. the control had no reason for caution and
+#:     crawled anyway. Rungs 1, 2 and 3 spent 12, 15 and 16 steps there.
+#:
+#: One march keeps the state, the shift and the preconditioner across every viscosity change and
+#: converges the target and nothing else. The ramp spans the SAME viscosity range as the ladder
+#: (`RATIO ** N_POINTS`), so the two arms differ in how the span is walked, not in how far.
+#:
+#: ⚠️ A station spans several steps ON PURPOSE. Each change re-points the refresh hook and forces a
+#: FULL preconditioner rebuild -- the most expensive single operation in the march -- so moving the
+#: viscosity every step would cost far more than the steps it saves.
+RAMP = os.environ.get("PITZ_RAMP", "off")
+RAMP_STATIONS = int(os.environ.get("PITZ_RAMP_STATIONS", "4"))
+RAMP_STEPS_PER_STATION = int(os.environ.get("PITZ_RAMP_STEPS", "3"))
+
+#: ⚠️ RE-DAMP ON ENTERING EACH STATION, AND THIS IS LOAD-BEARING RATHER THAN A KNOB. Within a station
+#: the control divides the shift by `grow` every step (1.5 ** 3 = 3.375 per station here). Unopposed,
+#: that walks beta 0.5 -> 0.148 -> 0.044 -> 0.013 across four stations, and this case has a wall at
+#: beta ~ 0.012: measured, the line search collapsed to alpha = 0, |R| went 4.4e-03 -> 4.4e-01, and
+#: the retry ladder escalated beta to ~2 to recover -- 50 steps / 301 cycles against 36 / 269 for the
+#: same march that never went there. At 2.0 the net is 3.375 / 2 = 1.69 per station, so beta halves
+#: per station and bottoms at 0.062.
+#: The wall belongs to `(state, beta)`, NOT to beta: this same march converged at beta = 0.005 with
+#: alpha = 1.000 once the ramp had arrived. Damping while the problem MOVES is the distinction.
+RAMP_REDAMPING = float(os.environ.get("PITZ_RAMP_REDAMPING", "2.0"))
 
 #: The dual-time inner loop. `inner_tol` 1e-2 rather than a tighter value: measured on the
 #: three-dimensional case, 1e-3 bought nothing over 1e-2 while costing a third of the march.
@@ -778,6 +818,67 @@ def _gradient_scheme_label(scheme):
     return f"{type(scheme).__name__}" + (f" (swept {sweeps})" if sweeps is not None else "")
 
 
+#: The keywords `solve_reynolds_continuation` owns and `solve_coupled` does not, so the ramp arm can
+#: be handed the SAME options dict the ladder arm builds rather than a second one written beside it.
+#: A ladder-only keyword reaching `solve_coupled` is a `TypeError`, so this list is load-bearing.
+_LADDER_ONLY = (
+    "intermediate_rtol",
+    "intermediate_atol",
+    "schedule",
+    "point_setup",
+    "seed_projection",
+)
+
+
+def _ramped_solve(coupled, momentum, turbulence, point_setup, solve_options):
+    """Solve the case as ONE march whose viscosity walks down to the target, not as a rung ladder.
+
+    The alternative to :func:`~aquaflux.turbulence.solve_reynolds_continuation` for the same span of
+    Reynolds numbers -- see the `RAMP` comment above for what the ladder pays that this does not.
+
+    The anchor station's engine is built by the ladder arm's own `point_setup`, called once, so the two
+    arms are preconditioned, logged and step-controlled identically and differ only in how the
+    viscosity span is walked. That is what makes them comparable; a second builder written here would
+    drift from it a keyword at a time.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The target assembler, at the case's own viscosity.
+    momentum, turbulence
+        The blocks the hybrid initial condition is built from.
+    point_setup : callable
+        The ladder arm's per-rung configuration hook, reused for the single anchor station.
+    solve_options : dict
+        The ladder arm's options; the ladder-only keywords are dropped and the rest passed through.
+
+    Returns
+    -------
+    tuple
+        ``(flow, k, omega)``, as :func:`~aquaflux.turbulence.solve_coupled` returns.
+    """
+    # The same span the ladder walks: its anchor sits `RATIO ** N_POINTS` below the target.
+    anchor = RATIO**N_POINTS
+    # Materialize the seed here rather than letting `solve_coupled` self-start, because the anchor
+    # station's preconditioner must be frozen at the state the march actually begins from -- the same
+    # reason the ladder materializes it before calling `point_setup`.
+    seed_fields = hybrid_initialize(momentum, turbulence)
+    state = coupled.state_from_physical(*seed_fields)
+    first = coupled.with_scaled_molecular_viscosity(anchor)
+    extra = point_setup(first, state, ReynoldsPoint(1, 1, float(anchor)))
+    # `point_setup` returns the refresh POLICY; the hook it wraps is what follows the viscosity.
+    homotopy = ViscosityRampHomotopy(
+        coupled,
+        anchor=anchor,
+        stations=RAMP_STATIONS,
+        steps_per_station=RAMP_STEPS_PER_STATION,
+        redamping=RAMP_REDAMPING,
+        rebind=extra["refresh"].precondition_step.rebind,
+    )
+    passed = {k: v for k, v in solve_options.items() if k not in _LADDER_ONLY}
+    return solve_coupled(coupled, *seed_fields, homotopy=homotopy, **{**passed, **extra})
+
+
 def solve_aquaflux(
     *,
     log_path=None,
@@ -1002,7 +1103,12 @@ def solve_aquaflux(
         | solve_kwargs
     )
     try:
-        flow, k, omega = solve_reynolds_continuation(coupled, N_POINTS, **solve_options)
+        if RAMP == "continuous":
+            flow, k, omega = _ramped_solve(
+                coupled, momentum, turbulence, point_setup, solve_options
+            )
+        else:
+            flow, k, omega = solve_reynolds_continuation(coupled, N_POINTS, **solve_options)
     finally:
         if log_file is not sys.stdout:
             log_file.close()

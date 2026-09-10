@@ -67,6 +67,7 @@ from .preconditioner import (
 from .reynolds import (
     AdaptiveReynoldsSchedule,
     GeometricReynoldsSchedule,
+    ViscosityRampHomotopy,
     ReynoldsPoint,
     ReynoldsSchedule,
     solve_reynolds_continuation,
@@ -111,6 +112,7 @@ __all__ = [
     "ScalarTransportPreconditioner",
     "ScalarVariableTransform",
     "ScaledScalarPreconditioner",
+    "ViscosityRampHomotopy",
     "WallFixedResidual",
     "amg_beta_tracking_refresh",
     "bulk_velocity",

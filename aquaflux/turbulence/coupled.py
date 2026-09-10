@@ -75,6 +75,7 @@ from aquaflux.solve import (
     PseudoTransientStep,
     RefreshPolicy,
     RefreshTiming,
+    ResidualHomotopy,
     ResidualNorm,
     RetryPolicy,
     RowScaledNorm,
@@ -3958,6 +3959,7 @@ def solve_coupled(
     on_checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     retry: RetryPolicy = NO_RETRIES,
     on_retry: Callable[[str, int, float], None] | None = None,
+    homotopy: ResidualHomotopy | None = None,
     **continuation_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system ``R(u, p, k, omega) = 0`` by one monolithic Newton solve.
@@ -4302,6 +4304,7 @@ def solve_coupled(
                 precondition_step=refresh.precondition_step,
                 retry=retry,
                 on_retry=on_retry,
+                homotopy=homotopy,
             )
             state = result.state
             control_state = result.control_state

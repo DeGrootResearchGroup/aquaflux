@@ -1739,6 +1739,36 @@ tuning follow-up noted above.
   residual in the wrong scales. Consequences: the reporter is **stateful and order-dependent** (once per
   step, in order — `field_change_metrics`'s contract), and a reporter built partway through a march
   **must be seeded** with that segment's `seed_state` or its first step is scaled at its own end state.
+- **`ViscosityRampHomotopy` — the SAME Reynolds span walked inside ONE march (`reynolds.py`, BUILT
+  2026-09-09).** The `ResidualHomotopy` alternative to the rung ladder below: `stations` geometric
+  viscosity stations from `anchor` down to exactly `1.0`, each held for `steps_per_station` outer steps,
+  handed to `solve_coupled(homotopy=…)`. What it removes is measured in
+  `.claude/rules/solve-march.md`'s `ResidualHomotopy` bullet — read the numbers there rather than
+  restating them: in one sentence, the ladder converges every seed rung to a bar the next rung's
+  viscosity jump undoes by three to four orders of magnitude, and restarts the pseudo-timestep ramp at
+  every rung.
+  - **The target station is the CALLER'S OWN assembler, by identity, not `with_scaled_molecular_viscosity(1.0)`.**
+    Numerically the same problem; **not** the same object, and the assembler is the differentiable
+    parameter pytree the adjoint is taken with respect to. The homotopy dissolves at the target exactly
+    as the ladder does, so the root and its adjoint belong to the case. Pinned by an `is` assertion.
+  - **`rebind` is what keeps the preconditioner honest, and it is per station CHANGE.** The hook is
+    `amg_beta_tracking_refresh(...).rebind`, which discards the previous companion's probe and forces a
+    full re-materialize; the ramp calls it only when the station index moves, which is the whole reason
+    a station spans several steps.
+  - **It is a plain mutable object, not an `equinox.Module`** — it caches the current station and
+    re-points the refresh as a side effect. Like the refresh hook it drives, it runs only on the eager
+    forward-only march and must never be on a differentiated path.
+  - **⚠️ `redamping` (default 2.0) is NOT a tuning knob — the ramp walks into a wall without it.** The
+    shift control divides β by `grow` every step, so an unopposed station costs `grow ** steps` (3.375
+    at the defaults) and four of them take β 0.5 → 0.013, onto this case's measured wall at β ≈ 0.012.
+    See the `redamp` bullet in `.claude/rules/solve-march.md` for the failure and the four-arm
+    measurement; the short version is 40 steps / 261 cycles with it against 50 / 301 without.
+  - **The validation arm is `PITZ_RAMP=continuous` on `validation/pitzdaily_openfoam/compare.py`**, with
+    `PITZ_RAMP_STATIONS` / `PITZ_RAMP_STEPS`. It anchors at `RATIO ** N_POINTS`, i.e. **the same span the
+    ladder walks**, so the two arms differ in how the span is traversed and not in how far — and it
+    builds its engine by calling the ladder arm's own `point_setup`, so they are preconditioned, logged
+    and step-controlled identically. A second builder written beside it would drift a keyword at a time.
+
 - **`reynolds.py` — Reynolds-number continuation (BUILT).** `solve_reynolds_continuation(coupled,
   n_points, *, schedule=None, **solve_kwargs)` reaches a high-Re coupled root through a homotopy in
   Reynolds number: `n_points` lower-Re solves from an easy anchor up to the target, each seeded by the

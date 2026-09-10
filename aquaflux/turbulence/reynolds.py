@@ -549,3 +549,189 @@ def solve_reynolds_continuation(
         f"(last scale {attempt:g}, {len(converged)} rungs converged). This is a runaway schedule "
         f"rather than a hard case: raise the schedule's min_ratio so it stops retreating sooner."
     )
+
+
+class ViscosityRampHomotopy:
+    """Walk the molecular viscosity down to the case's own value **within a single march**.
+
+    The :class:`~aquaflux.solve.ResidualHomotopy` counterpart of :func:`solve_reynolds_continuation`,
+    and the difference between them is what it exists for. The continuation solves each Reynolds rung
+    as its **own** march: every rung is converged to a stopping tolerance and every rung restarts its
+    step control. Both are pure loss on a rung whose only job is to seed the next one. Measured on a
+    backward-facing step at ``Re ~ 25000`` with a two-decade ladder, the first rung spent 12 of its 28
+    outer steps taking the residual from ``4.5e-04`` to ``7.2e-06`` -- and the decade of viscosity that
+    followed put it straight back to ``4.5e-02``, six thousand times worse, so every one of those 12
+    steps was discarded. Over the same handover the pseudo-timestep ramp restarted at its opening shift
+    and spent a further 12 steps walking back down, a cost the docstring of that ramp notes is the same
+    whether the seed it was handed was good or not.
+
+    Marching the stations in one loop keeps the state, the shift and the preconditioner across every
+    parameter change, and converges the target and nothing else.
+
+    **A station spans several steps, and that is not a tuning choice.** Whatever follows the parameter
+    downstream is refitted on a change: here that is the frozen preconditioner, whose refresh hook is
+    re-pointed through ``rebind`` and forced to a full rebuild. That rebuild is the most expensive
+    single operation in the march, so moving the viscosity every step would cost far more than the
+    steps it saves. :attr:`steps_per_station` is how many outer steps a station is held for.
+
+    The ramp is **geometric**, for the same reason the ladder is: the convective nonlinearity scales
+    multiplicatively with the Reynolds number, so equal ratios are equal difficulty. Station ``s`` of
+    ``stations`` runs the viscosity scaled by ``anchor ** (1 - s / stations)``, from ``anchor`` at
+    ``s = 0`` down to the target's own viscosity at ``s = stations``, which is the last station and the
+    only one that may satisfy the march's stopping test.
+
+    **⚠️ A station change is a compilation-cache hit only if the momentum viscosity is an ARRAY.**
+    :meth:`~aquaflux.properties.Constant.scaled` on a plain Python ``float`` produces a value that
+    rides on the *static* side of a jitted function and is compared by value, so every station would be
+    a fresh cache key and recompile the whole coupled solve -- which on a real case is minutes per
+    station and would swamp everything this class saves. Build the property as
+    ``Constant(jnp.asarray(rho * nu))``. This is the same trap the rung ladder carries, but it bites
+    harder here because a ramp changes the viscosity more often than a ladder does.
+
+    **The target station is the case's own assembler**, not a copy scaled by one. The march's root and
+    its adjoint therefore belong to the target problem exactly, as they do under the ladder -- the
+    homotopy dissolves at the target rather than leaving a rescaled residual behind.
+
+    This is a plain mutable object rather than an :class:`equinox.Module` because it caches the station
+    it is currently on and re-points a preconditioner refresh as a side effect. It runs only on the
+    eager, forward-only march (like the refresh hook it drives) and must never be on a differentiated
+    path.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The **target** assembler -- the case at its own molecular viscosity.
+    anchor : float
+        The molecular-viscosity multiplier the ramp starts at, i.e. the Reynolds number is divided by
+        this at the first station. Must be ``>= 1``.
+    stations : int
+        How many stations the ramp is walked in before the target. ``stations`` ramp stations are
+        visited (``s = 0 .. stations - 1``) and the target is station ``stations``, so the ratio
+        between neighbours is ``anchor ** (1 / stations)``. Must be ``>= 1``.
+    steps_per_station : int
+        Outer steps each ramp station is held for. The target station is held for as long as the march
+        needs, so this bounds only the ramp: it occupies ``stations * steps_per_station`` steps.
+    redamping : float
+        What to multiply the pseudo-transient shift by on entering each ramp station, asking the march
+        to re-damp for a problem that just got harder. ``1.0`` disables it.
+
+        **Not a tuning knob but the ramp's answer to a measured failure.** Within a station the shift
+        control divides β by its own ``grow`` each step, so a station of ``s`` steps divides it by
+        ``grow ** s`` -- ``1.5 ** 3 = 3.375`` at the defaults. Left unopposed on a pitzDaily
+        four-station ramp that walks β 0.5 → 0.148 → 0.044 → **0.013**, and the case has a wall at
+        **β ≈ 0.012**: the line search collapsed to ``alpha = 0``, ``|R|`` went 4.4e-03 → 4.4e-01, and
+        the retry ladder had to escalate β to ~2 to recover -- 14 outer steps and 32 restart cycles
+        worse than the same march re-damped. The default ``2.0`` leaves a net ``3.375 / 2 = 1.69`` per
+        station, so β roughly halves per station and reaches 0.062 rather than 0.004.
+
+        ⚠️ It is a **damping while the problem moves**, not a floor under β. The same march converged
+        comfortably at β = 0.005 once the ramp had arrived and the state settled, at a shift that was
+        fatal mid-ramp -- so the wall belongs to ``(state, β)`` and a learned floor would forbid the
+        low-shift convergence that finishes the march.
+    rebind : callable, optional
+        ``assembler -> None``, called on every station **change** to re-point whatever must follow the
+        viscosity -- in practice a preconditioner refresh hook's ``rebind``, so the operator each step
+        is preconditioned by is fitted to the station that step solves. ``None`` leaves the
+        preconditioner alone, which is correct only if it is rebuilt by some other means.
+
+    Examples
+    --------
+    A two-decade ramp in four stations of three steps each, re-pointing an AMG refresh::
+
+        homotopy = ViscosityRampHomotopy(
+            coupled, anchor=100.0, stations=4, steps_per_station=3, rebind=refresh.rebind
+        )
+
+    Raises
+    ------
+    ValueError
+        If ``anchor < 1``, or ``stations < 1``, or ``steps_per_station < 1``.
+    """
+
+    def __init__(
+        self,
+        coupled: CoupledRANS,
+        *,
+        anchor: float,
+        stations: int,
+        steps_per_station: int,
+        redamping: float = 2.0,
+        rebind: Callable[[CoupledRANS], None] | None = None,
+    ) -> None:
+        if anchor < 1.0:
+            raise ValueError(
+                f"anchor must be >= 1 (the ramp walks DOWN to the target), got {anchor}"
+            )
+        if stations < 1:
+            raise ValueError(f"stations must be >= 1, got {stations}")
+        if steps_per_station < 1:
+            raise ValueError(f"steps_per_station must be >= 1, got {steps_per_station}")
+        if redamping < 1.0:
+            raise ValueError(
+                f"redamping must be >= 1 (a station change damps, never accelerates), got {redamping}"
+            )
+        self.coupled = coupled
+        self.anchor = float(anchor)
+        self.stations = int(stations)
+        self.steps_per_station = int(steps_per_station)
+        self.redamping = float(redamping)
+        self.rebind = rebind
+        # The station whose assembler `_assembler` currently holds. -1 is "none entered yet", which is
+        # not a station index, so the first `enter` always counts as a change and rebinds.
+        self._station = -1
+        self._assembler = coupled
+
+    def station(self, step: int) -> int:
+        """The station index outer step ``step`` runs, saturating at :attr:`stations` (the target)."""
+        return min(step // self.steps_per_station, self.stations)
+
+    def scale(self, station: int) -> float:
+        """The molecular-viscosity multiplier at ``station``; exactly ``1.0`` at the target."""
+        if station >= self.stations:
+            return 1.0
+        return float(self.anchor ** (1.0 - station / self.stations))
+
+    def enter(self, step: int) -> Callable[[jnp.ndarray], jnp.ndarray]:
+        """Make this step's station current -- rebinding on a change -- and return its residual.
+
+        Returns ``assembler.residual`` as a **bound method**, so its arrays ride as dynamic leaves of a
+        pytree and the compiled step stays a cache hit across a station change rather than recompiling
+        the whole coupled solve at each one.
+        """
+        station = self.station(step)
+        if station != self._station:
+            self._station = station
+            scale = self.scale(station)
+            # The target station is the caller's own assembler, not `with_scaled_molecular_viscosity(1)`
+            # -- the root and adjoint must belong to the case, and a rescale by one is a different
+            # object holding a multiplied array rather than the original.
+            self._assembler = (
+                self.coupled
+                if station >= self.stations
+                else self.coupled.with_scaled_molecular_viscosity(scale)
+            )
+            if self.rebind is not None:
+                self.rebind(self._assembler)
+        return self._assembler.residual
+
+    def arrived(self, step: int) -> bool:
+        """Whether ``step`` runs the target problem, which is the only station that may stop the march."""
+        return self.station(step) >= self.stations
+
+    def shift_factor(self, step: int) -> float:
+        """:attr:`redamping` -- the march re-damps by the same factor at every station change.
+
+        Uniform across stations because the ramp is geometric: every change is the same multiplicative
+        step in viscosity, so every change is the same increment in difficulty and warrants the same
+        response. A non-geometric schedule would want this to track its own step sizes.
+
+        The march reads it only on a step that enters a new station, so the constant is not applied
+        anywhere else.
+        """
+        del step
+        return self.redamping
+
+    @property
+    def ramp_steps(self) -> int:
+        """Outer steps the ramp occupies before the target station begins."""
+        return self.stations * self.steps_per_station
