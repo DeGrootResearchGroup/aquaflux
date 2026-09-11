@@ -1747,10 +1747,12 @@ tuning follow-up noted above.
   restating them: in one sentence, the ladder converges every seed rung to a bar the next rung's
   viscosity jump undoes by three to four orders of magnitude, and restarts the pseudo-timestep ramp at
   every rung.
-  - **The target station is the CALLER'S OWN assembler, by identity, not `with_scaled_molecular_viscosity(1.0)`.**
+  - **The target station is the CALLER'S OWN assembler, by identity, not a rescale by one.**
     Numerically the same problem; **not** the same object, and the assembler is the differentiable
     parameter pytree the adjoint is taken with respect to. The homotopy dissolves at the target exactly
-    as the ladder does, so the root and its adjoint belong to the case. Pinned by an `is` assertion.
+    as the ladder does, so the root and its adjoint belong to the case. The `companion` strategy is
+    never consulted for the target, so this holds under **either** scaling. Pinned by an `is` assertion
+    per strategy.
   - **`rebind` is what keeps the preconditioner honest, and it is per station CHANGE.** The hook is
     `amg_beta_tracking_refresh(...).rebind`, which discards the previous companion's probe and forces a
     full re-materialize; the ramp calls it only when the station index moves, which is the whole reason
@@ -1804,16 +1806,327 @@ tuning follow-up noted above.
       `while_loop` carry and never crosses a step.
     - **Drift within a station is nil on the ramp and heavy on the target**: all 16 cost-triggered inner
       refreshes fire in the target station, zero across the 12 ramp steps.
-    - ⚠️ **The balance shifts on `bfs3d`, by less than the record claimed.** Measured 2026-09-10 from
-      that case's own march log: a full re-materialize is **11.5 s** against a ~34 s mean outer step --
-      a third of a step, so 24 stations cost ~8 steps of overhead there against ~4 here. The **~36 s**
-      figure previously carried in this file and quoted into two docstrings was taken from the record
-      rather than from a log and is **wrong by 3x**; it made a fine ramp look disqualified on `bfs3d`
-      when the rebuild cost does not disqualify it. What the one (aborted) `bfs3d` ramp arm actually
-      showed is a **shift** mismatch, not a rebuild one: that case opens at `beta_start = 2.0` against
-      pitzDaily's 0.5, so the ramp began four times stiffer, escalated to 4.0, and was still clipping
-      (`a_min` 0.5-0.57) at step 29 where pitzDaily's fine ramp held 1.000 throughout. Untested to
-      convergence there -- the arm was killed at 44 minutes. These remain pitzDaily calibrations.
+    - ⚠️ **The balance shifts on `bfs3d` by less than the record claimed, and the "overhead" framing
+      DOUBLE-COUNTS.** Measured 2026-09-10 from that case's own march logs: a full re-materialize is
+      **11.5 s** against a ~34 s mean outer step. The **~36 s** figure previously carried here and
+      quoted into two docstrings came from the record rather than from a log and is **wrong by 3x**; it
+      made a fine ramp look disqualified on `bfs3d` when it is not. But "24 stations cost ~8 steps of
+      overhead" is wrong for a second, independent reason: **the ladder rebuilds too.** Counting the
+      `pc …` lines in both logs (23040 cells, field split on, `simplesmooth`, column reach 3/3/3/3/2/2,
+      ILU(0)/4 sweeps, `REFRESH_ON_CYCLES=3`, `PC_BETA_FLOOR=0.05`):
+
+      | arm | steps | preconditioner builds | pc seconds | share of wall |
+      |---|---|---|---|---|
+      | ladder (converged) | 59 | 33 (28 cost-triggered inner refreshes) | 391 s | 20 % |
+      | ramp, 24x1 (aborted) | 32 | 37 (23 station-triggered + 7 inner) | 490 s | 29 % |
+
+      Comparable **totals per march**, because the ladder's `refresh_on_cycles` fires on nearly every
+      step of its long target rung. The station rebuilds largely **replace** those rather than adding
+      to them, so a schedule may not be costed as `stations x rebuild`.
+    - ⚠️ **THE FIRST `bfs3d` RAMP ARM WAS SEEDED AT THE WRONG VISCOSITY — a defect in
+      `solve_reynolds_ramp`, not a property of the ramp (found and fixed 2026-09-10).** It called
+      `hybrid_initialize(coupled…)` — the **target** assembler — while the march's first station solves
+      the **anchor**. The ladder calls it on the companion. `hybrid_initialize` reads
+      `turbulence.molecular_viscosity` to seed the near-wall `omega` at the profile that assembler's
+      residual *fixes* there, so the seed put every wall-adjacent cell off its own boundary condition —
+      exactly the residual the seeding exists to remove. Measured on `bfs3d` at anchor 100: `omega`
+      differed by up to **90x**, `flow` and `k` not at all. In the march that is the anchor's first step
+      opening at a row-scaled **9.60e-01 against 3.29e-01**, a line search collapsing to `alpha` 0.016,
+      **two discarded attempts**, a retry escalation of β to **4.0**, and ~10 further steps spent
+      walking the shift back down.
+      - ⚠️ **So the earlier reading of that arm — "`bfs3d` opens at `beta_start = 2.0` against
+        pitzDaily's 0.5, the ramp began four times stiffer" — is FALSE and is deleted.** Both cases set
+        `beta_start = 0.5`; the 2.0/4.0 in that log is the **retry ladder escalating**, i.e. an effect
+        of the bad seed, not a setting. A shift regime read off a march is not a case parameter until
+        the parameter itself has been read.
+      - **Fixed by seeding from the anchor companion**, which is what makes the docstring's claim that
+        the two arms are "configured identically" true. Pinned by
+        `test_the_ramp_arm_seeds_the_hybrid_start_from_the_anchor_not_from_the_target`; the pre-existing
+        ramp tests stub `hybrid_initialize` **without inspecting its arguments**, which is how this
+        shipped and why the new test records what it was handed.
+      - ⚠️ **`tools/sibling_builders.py` cannot see this pair, and that is a THIRD blind spot of the
+        same family** as the private-delegation and `@classmethod` ones. `solve_reynolds_continuation`
+        and `solve_reynolds_ramp` are two public builders of one thing from one options dict — the exact
+        shape the checklist item exists to catch — but both `return solve_coupled(...)`, a **function**,
+        and the tool credits construction only to a capitalized callee or `cls(...)`. Neither is
+        credited with building anything, so the pair never enters the report at all: **no pair reported
+        is indistinguishable from a clean tree.**
+      - ⚠️ **RE-MEASURED ON pitzDaily (2026-09-10), AND THE FIX COSTS THAT CASE 55 % MORE CYCLES.** All
+        four numbers below are from this tree (commit `a403752` + the fix), `PITZ_RAMP_STATIONS=24`,
+        `PITZ_RAMP_STEPS=1`, `N_POINTS=2` ratio 10 (anchor Re/100), `BETA_START=0.5`, `beta_min=0.005`,
+        `grow=1.5`, `backoff=2.0`, field split on, `simplesmooth` flow inverse, `jacobi_smoothed`
+        trailing inverse, `REFRESH_ON_CYCLES=3`, `PC_BETA_FLOOR=0.05`, stop `rtol=0, atol=1e-5`,
+        compiled ILU(0) live. Every arm reaches `x_r/h` **8.0686** and none takes a retry.
+
+        | arm | steps | restart cycles |
+        |---|---|---|
+        | rung ladder | 69 | 417 |
+        | ramp 24 x 1, **pre-fix** (two runs, identical) | 33 | **191** |
+        | ramp 24 x 1, **post-fix** | 38 | **297** |
+
+        - **The tree reproduces the recorded ladder EXACTLY, rung for rung** — 28/123, 21/139, 20/155,
+          final `|R|` 5.771e-06 — so these are comparable to the older record rather than a new baseline.
+          That also makes the pre-fix ramp's two identical runs (33/191 both times) a genuine
+          determinism check: this arm does not vary run to run, so a single post-fix run is decisive.
+        - **⚠️ THE MECHANISM, WHICH INVERTS THE OBVIOUS READING OF THE DEFECT.** The ramp **terminates at
+          the target**, so a seed built at the *target's* viscosity starts `omega` where it has to end —
+          only the flow and `k` need develop. The anchor seed, correct for station 0, is ~90x too large
+          near the walls and must be walked back **down** across all 24 stations. **The defect was
+          accidentally a better warm start for a homotopy that ends at the target.** Correctness and
+          cheapness point opposite ways here, and the fix buys the former.
+        - **What the fix is still right for:** it makes the two arms genuinely comparable. Verified —
+          the post-fix ramp's step 1 (`|R|` 5.668e-02, 2 inners, 2 cycles, `a_min` 1.000) is *identical*
+          to the ladder's, as it must be, since both solve the anchor from the same seed with the same
+          preconditioner. Pre-fix, that step read `|R|` 2.393e-01 at `a_min` **0.125** and pushed β up
+          to 1.0, costing three steps to walk back down — degraded quietly, **without ever tripping the
+          retry ladder** (0 retries in every arm), which is why it went unnoticed here.
+        - **The ramp still beats the ladder either way** — 1.40x on cycles post-fix against 2.18x
+          pre-fix — so nothing here argues for reverting to the ladder on this case.
+        - ⚠️ **NOTHING HERE ESTABLISHES THAT THE FIX HELPED `bfs3d`.** That case's comparison is
+          fixed-ramp (240) against ladder (349); its *unfixed* ramp was killed unconverged, so no
+          fix-vs-no-fix number exists there. On the only case where both seedings ran to convergence,
+          the unfixed one is cheaper. Do not generalize the `bfs3d` win into a claim about the seed.
+        - ⚠️ **WHICH VISCOSITY A STATION SCALES IS AN INJECTED STRATEGY (`companion=`, BUILT
+          2026-09-10), and the alternative exists to make the seed question UNREPRESENTABLE.**
+          `scale_both_blocks` (the default) moves the momentum block's `mu` and the closure's `nu`
+          together, so each station is a genuine lower-Reynolds problem — the path the rung ladder
+          walks. `scale_momentum_only` moves the momentum block alone. It is injected rather than
+          branched on a flag because the two make different claims about what an intermediate station
+          *is*, and because the choice decides which seed the march opens from —
+          `solve_reynolds_ramp` builds its seed from the companion it is given, so the two cannot
+          disagree.
+          - **The structural point, which outweighs the cycle counts.** `hybrid_initialize` reads the
+            **closure's** molecular viscosity to place the near-wall `omega`. Leave the closure alone
+            and the anchor's and the target's turbulence blocks are the *same object*, so a hybrid start
+            built at either is identical — the seed defect above cannot be expressed at all. Pinned by
+            `test_scaling_momentum_only_makes_the_anchor_and_target_hybrid_starts_IDENTICAL`, which also
+            asserts the contrast (scaling both blocks *does* move the seed).
+          - ⚠️ **AN INTERMEDIATE STATION IS THEN NOT A PHYSICAL REYNOLDS NUMBER.** The momentum equation
+            sees a viscosity the closure does not, so the SST blending functions and the wall treatment
+            are evaluated against the case's own viscosity throughout and no single `Re` describes the
+            station. That is legitimate for a homotopy — the path need only be traversable and end
+            exactly at the target, which it does, since the target is the caller's own assembler by
+            identity under either strategy (pinned) — but a result quoted from an intermediate station
+            is **not** a lower-Reynolds solution, and "Reynolds continuation" is a misnomer for this arm.
+          - **⚠️ MEASURED ON pitzDaily (2026-09-10, same bundle as the table above), and BOTH predicted
+            effects appear and partly cancel:** 32 outer steps / **264** cycles, `x_r/h` 8.0686, no
+            retries — against the correctly-seeded both-blocks ramp's 38 / **297** and the
+            defect-seeded 33 / **191**.
+
+            | arm | steps | ramp stations | target station | total |
+            |---|---|---|---|---|
+            | both blocks, post-fix | 38 | 179 | 118 | 297 |
+            | momentum only | 32 | **214** | **50** | **264** |
+
+            The split *is* the mechanism. The transported scalars carry their target stiffness from the
+            first step, so the ramp costs **214 cycles against 179** with `alpha` clipped to 0.25–0.5 for
+            a dozen consecutive steps and the inner loop at its cap — the predicted risk, real. Against
+            it, `omega` arrives already at its target profile, so the target station costs **50 against
+            118**. Net 33 cycles better than the correct both-blocks arm, and the fewest outer steps of
+            any arm measured on this case.
+          - **⚠️ STATION SWEEP (2026-09-10, same bundle, `steps_per_station=1` throughout): the station
+            count is a WEAK lever for this strategy, and the prediction that drove the sweep was wrong.**
+
+            | stations | steps | cycles | retries |
+            |---|---|---|---|
+            | 4 | 27 | 237 | 2 |
+            | 8 | 28 | 240 | 3 |
+            | 12 | 28 | 238 | 4 |
+            | **16** | **27** | **227** | **0** |
+            | 24 | 32 | 264 | 0 |
+
+            All five reach `x_r/h` **8.0686**. The expectation was a monotone "coarser is better",
+            because momentum-only front-loads its cost into the stations. Instead **4/8/12 are a flat
+            plateau** — 237/240/238, a **3-cycle spread over a 3x range of station counts** — and the
+            best point is **16, in the interior**.
+            - **⚠️ READ THE RETRY COLUMN, NOT ONLY THE CYCLES.** 4/8/12 reach ~238 cycles by **grinding
+              through the low-β wall**: 2, 3 and 4 retries respectively, with `alpha` pinned at 0.25 for
+              a stretch of consecutive steps. 16 and 24 take **none**. So 16 is not a marginal 4 % win
+              over 237 — it is the only coarse-ish point that gets there *cleanly*, which is a different
+              and more durable property. A reader comparing only totals would pick 4 and inherit the
+              grind.
+            - **Where flow-only stands on this case at its own best schedule:** ladder 417, both-blocks
+              post-fix 297, **flow-only 16 x 1 = 227**, both-blocks pre-fix (defect-seeded) 191. So it is
+              **24 % cheaper than the correctly-seeded both-blocks ramp** and 1.84x the ladder, while
+              still not reaching what the defect achieved by accident. It is the best *principled*
+              configuration measured here.
+            - One run per point, one case, one step per station. `steps_per_station > 1` is untested for
+              this strategy, and so is every point above 24.
+          - **⚠️ MEASURED ON `bfs3d` TOO (2026-09-10), AND IT WINS BY MORE THERE — 21 % over the
+            both-blocks ramp and 46 % over the ladder.** Schedule held at **24 x 1 deliberately**, the
+            same as that case's both-blocks arm, so the *only* difference is the scaling strategy;
+            everything else is the case's own defaults (23040 cells, anchor Re/100, `beta_start=0.5`,
+            field split on, `simplesmooth` / `jacobi`, ILU(0) inert — both blocks supply their own
+            inverse — `PC_BETA_FLOOR=0.05`, `REFRESH_ON_CYCLES=3`, stop `rtol=0, atol=1e-5`).
+
+            | arm | steps | ramp stations | target station | total | retries | `x_r/h` |
+            |---|---|---|---|---|---|---|
+            | rung ladder | 59 | — | — | 349 | — | 8.3611 |
+            | ramp, both blocks | 39 | 122 | 118 (15 steps) | 240 | 3 | 8.966 |
+            | **ramp, momentum only** | **31** | **151** | **39 (7 steps)** | **190** | 3 | **8.3611** |
+
+            - **⚠️ THE SPLIT IS THE RESULT, and it is starker here than on the sibling.** Momentum-only
+              pays **more** in the ramp (151 against 122) — the `k`/`omega` stiffness is real and arrives
+              immediately: step 1's residual **grew 6.8x** (`G` 1.911e-01 -> 1.295e+00, `alpha` 0.002),
+              took three attempts, and escalated β to 2.0 before the march could start, against a clean
+              3-cycle `alpha = 1.000` first step for both-blocks. `alpha` then sat at 0.25-0.5 through the
+              mid-ramp. Against that, its target station costs **39 cycles over 7 steps against 118 over
+              15** — a **3x** saving, because `omega` arrives already at its target profile. Net -50.
+            - **Every cost is in the `k`/`omega` block and every gain is in not having to move `omega`.**
+              That is the cleanest evidence yet that the two blocks want *different instruments*:
+              continuation for the momentum block's convective nonlinearity, and damping (a larger
+              pseudo-transient shift) for the closure's stiff source terms. `CoupledShiftPolicy.shift_term`
+              already packs the shift **per block** (`coupled.py`, `flow_diagonal` and the two scalar
+              transport diagonals, packed a line apart), so a per-block β multiplier is a small change
+              rather than a redesign.
+            - **⚠️ BUILT AND SWEPT (`turbulence_damping`, 2026-09-10). A CONSTANT RATIO WINS 16 %, AND
+              THE OPTIMUM IS INTERIOR AND SHARP.** The k/ω rows' shift diagonal is multiplied by
+              `turbulence_damping`, so they run at an effective `turbulence_damping * beta` while the
+              velocity rows keep `beta`. Swept on pitzDaily, momentum-only scaling at its own best
+              **16 x 1**, everything else that case's defaults; `gamma = 1` is a **control** and
+              reproduced the recorded 27 / 227 **exactly**, so the knob is a true no-op at 1.0 and every
+              difference below is the damping.
+
+              | `turbulence_damping` | steps | restart cycles | retries |
+              |---|---|---|---|
+              | 1 (control) | 27 | 227 | 0 |
+              | **2** | **27** | **191** | 0 |
+              | 5 | 29 | 206 | 0 |
+              | 10 | 41 | **305** | 0 |
+
+              - **⚠️ THE TWO MARCH PHASES WANT OPPOSITE RATIOS, WHICH IS WHY NO CONSTANT IS GOOD.**
+                *Early* more damping is monotonically better — cycles to reach step 5 are 17 / 12 / 12 /
+                **11** at `gamma` 1 / 2 / 5 / 10, with `|R|` 1.14e-02 / 9.29e-03 / 6.98e-03 /
+                **5.72e-03**. *Late* it reverses hard: `gamma = 5` stalled once (`|R|` 1.327e-03 ->
+                1.324e-03 across a step) and `gamma = 10` stalled twice and went **backwards**
+                (9.503e-04 -> 9.548e-04) at 15–17 cycles a step, finishing **worse than no damping at
+                all**. `gamma = 2` wins not by being best anywhere but by being the least-bad compromise.
+              - **⚠️ NO ARM TOOK A SINGLE RETRY, `gamma = 10` INCLUDED.** Damping does exactly what it is
+                for — it stabilizes the step — and its cost is **lag**, not instability: the closure
+                trails the mean flow and the coupled residual cannot fall. Read a damping failure as a
+                stalled residual at healthy `alpha`, never as a divergence.
+              - **`gamma = 2` reaches 191, which is what the seeding defect achieved by accident** — the
+                first principled configuration to match it (correct seed, matched arms, zero retries).
+              - **The physical reading, and what it implies for a schedule.** Early the closure is far
+                from equilibrium with a flow that barely exists, so heavy damping lets it settle without
+                destabilizing; once it is near equilibrium, the same damping only makes it lag. So the
+                ratio wants to **start high and taper**. ⚠️ **A step-indexed schedule is the wrong
+                form** — this project has three recorded failures of predicting march behaviour from
+                static signals, and `beta` already decays as the march develops, so tying the ratio to
+                `beta / beta_0` reuses a signal the control already measures.
+              - ⚠️ **A taper is a SEAM change, not a parameter.** `ShiftTerm` deliberately returns a
+                **base** diagonal that the step later scales by `beta` (`solve/continuation.py`), so a
+                ratio that varies with `beta` must be applied where `beta` is known — in the step, not
+                in the policy. The constant was cheap precisely because it folds into the diagonal once.
+              - One run per point, four coarse points, one case. The 191-vs-206 gap is inside this
+                case's usual spread; the 305 is far outside it.
+            - **⚠️ `TurbulenceDamping` IS A STRATEGY, AND THE TAPER KEYS ON THE CLOSURE'S OWN RESIDUAL
+              (BUILT 2026-09-10).** `ConstantDamping(ratio)` is the sweep above; `ResidualTaperedDamping`
+              starts at `initial` and releases toward exactly `1` as `turbulence_residual_norm` falls
+              against a reference taken at the state the march opens from. Reaching exactly 1 is what
+              keeps the shift's dissolution at the root — and hence the converged solution and its
+              adjoint — untouched.
+              - **⚠️ `beta / beta_0` WAS THE OBVIOUS KEY AND IS THE WRONG ONE, for two reasons, both
+                checked against a log rather than reasoned.** `beta` is **adaptive**: the retry ladder
+                *raises* it on a bad step, so a beta-keyed ratio would spike the damping exactly when the
+                march is already struggling. And `beta` **floors at `beta_min` early** — step 13 of 41 in
+                the `gamma = 10` run — after which the ratio would be frozen for the whole remaining
+                march, *including every step where the damping does its damage*. The mechanism would be
+                inert precisely where it is needed.
+              - **⚠️ THE RESIDUAL WAS ALREADY FREE, which is why the protocol grew an argument.**
+                `PseudoTransientStep` evaluates `R(phi)` on the line immediately before it asks for the
+                shift, so `ShiftPolicy.shift_term(phi, residual=None)` now offers it. Re-deriving the
+                same quantity inside the policy would be one value computed in two places. The argument
+                is **optional** so the five policies that do not care are untouched.
+              - **It reads the k/omega rows only** (`turbulence_residual_norm`), because the two blocks
+                settle on different schedules and a whole-state norm is dominated by the mean flow — the
+                damping would then release on the *flow's* progress. Deliberately the **unscaled** norm:
+                the march re-equilibrates its row scales every outer step, so a ratio of two scaled norms
+                mixes progress with a change of measure.
+              - **A residual that RISES re-damps**, which is the same response `redamp` makes on entering
+                a continuation station, reached from a different direction. Clamped at `initial`, so a
+                march that gets worse than it started cannot run away to an unbounded shift.
+              - ⚠️ **Widening that protocol broke 21 tests, all of them STUB policies in `tests/`.** The
+                six library implementations were found and updated; seven stubs implementing the same
+                protocol were not, because the search was a string match on one exact type annotation.
+                **Find implementers of a Protocol structurally (AST), not by grepping a signature** — this
+                is the same shape as `sibling_builders.py`'s blind spots: a check that cannot see the case
+                reports clean.
+              - **⚠️ THE TAPER IS BUILT AND UNPROVEN: IT IS UNREACHABLE FROM BOTH VALIDATION CASES, AND
+                THE FIRST ATTEMPT MEASURED AS A CONSTANT (2026-09-10).** Run on pitzDaily at
+                `initial = 10`, momentum-only, 16 x 1: **41 steps / 305 restart cycles** — *bit-identical*
+                to constant `gamma = 10`, including its stall at steps 21→22. It never released. Two
+                independent causes, both measured rather than reasoned:
+                - **The reference was frozen at the ANCHOR's seed, and a continuation makes the problem
+                  HARDER as it walks.** Holding the state fixed and moving only the viscosity from anchor
+                  to target, `|R_turb|` *rises* 10 % (2.664e+02 → 2.930e+02). The ratio is therefore
+                  above 1 at every station, and the clamp pins the factor at `initial` for the whole
+                  march. **A reference is physics and must be rebuilt on refresh** — the same split this
+                  module already makes between `k_shift_transport` (rebuilt) and `k_jacobian_scale`
+                  (carried). `TurbulenceDamping.rebased` now does that, and is tested.
+                - ⚠️ **BUT `rebased` NEVER RUNS FROM EITHER CASE.** Both pass a finished `continuation=`
+                  to `solve_coupled`, so the continuation source is `_FinishedContinuation`, which *by
+                  design* cannot re-freeze the step; only `precondition_step` fires, and that rebuilds
+                  the **preconditioner**, not the shift policy. `_coupled_shift_policy(..., reuse=…)` is
+                  never reached. A `pc full` line in the log is **not** evidence that the shift policy
+                  was refreshed — that mis-read is what made the fix look plausible before it was tested.
+                - **Making it live needs `RefreshPolicy(builder=…)` in the case**, which re-freezes the
+                  policy per station — a change to how the case configures its solve, and one that would
+                  re-base every arm in the tables above, since all of them were measured *without* policy
+                  refreshes. Not done.
+                - **`PITZ_TURB_TAPER` now REFUSES rather than running inert**, for the same reason the
+                  `FILL_LEVELS` banner had to say `(INERT)`: a setting that silently does nothing is how
+                  a measurement gets attributed to a mechanism that was never active.
+            - **It also lands the ladder's `x_r/h` (8.3611) where the both-blocks ramp landed 8.966.**
+              Suggestive only: `atol = 1e-5` does not pin that metric to a cell on this mesh (see the
+              entry above), and this is one run per arm. Do not quote it as an accuracy result.
+            - One run, one schedule. **`bfs3d`'s own station sweep is untested**, and the sibling's sweep
+              puts momentum-only's optimum at **16**, not the 24 used here — so 190 is this strategy's
+              cost at a schedule fitted for a different one, and is probably not its best.
+        - **The remaining 11-arm sweep is still orphaned** (225 / 245 / 246 / 261 / 269 / 286 cycles, the
+          24-station interior optimum, the granularity and anchor-depth arms): all were taken pre-fix,
+          and the one arm re-measured moved by 55 %, so the fitted station count in particular cannot be
+          carried forward.
+  - **⚠️ THE MEASURED `bfs3d` RESULT — the ramp WINS on this case too, 2026-09-10.** Both arms at commit
+    `a403752` plus the seed fix, 23040 cells, `N_POINTS=2` (anchor Re/100), `RAMP_STATIONS=24`,
+    `RAMP_STEPS=1`, `redamping` derived (= 1.0 at one step per station), `CflResidualDualTimeControl`
+    `beta_start=0.5 beta_min=0.005 grow=1.5 backoff=2.0`, `INNER_STEPS/TOL` 5 / 1e-2, field split on,
+    `simplesmooth` flow inverse, `jacobi` turbulence inverse, column reach 3/3/3/3/2/2, ILU(0) / 4
+    sweeps / coarse 2000, `PC_BETA_FLOOR=0.05`, `REFRESH_ON_CYCLES=3`, `CYCLE_BUDGET=42`,
+    `RETRY_ON_CYCLES/ALPHA` 10 / 0.01, stop `rtol=0, atol=1e-5` on the row-scaled residual, `k` wall
+    `zerogradient`, compiled ILU(0) live.
+
+    | arm | steps | restart cycles | retries | final \|R\| | mid-span `x_r/h` |
+    |---|---|---|---|---|---|
+    | rung ladder (shipped) | 59 | **349** | — | 1.830e-06 | 8.361 |
+    | ramp, 24 x 1 | **39** | **240** | 3 | 9.887e-06 | 8.966 |
+
+    **34 % fewer outer steps, 31 % fewer restart cycles.** Per phase: the ramp's 24 stations cost 122
+    cycles and its target station 15 steps / **118**, against the ladder's target rung of 21 steps /
+    **192** — which is the homotopy's whole thesis working, because the ramp *enters* the target at
+    `|R|` **8.09e-04** where the ladder's target rung opened at **5.93e-02**, 73x worse, having just
+    thrown away a converged rung.
+    - ⚠️ **ONE RUN PER ARM — no spread.** The record already warns that this case's target-rung cost
+      swings by +-275 s with how many β escalations it needs, and an earlier ladder pair ordered two
+      totals the other way round. A 31 % cycle margin is well outside that, but it is one run.
+    - ⚠️ **NO WALL-CLOCK RESULT, and the reason is worth knowing.** The ramp run spanned a **clamshell
+      sleep** (lid closed 15:01:35, six minutes in; the machine then cycled through DarkWake for the
+      rest). `run_case.sh`'s `caffeinate -ims` holds off *idle* sleep and cannot stop a lid close, which
+      that script's own header already says. The case reported 4569 s and its march log 2101 s **because
+      they use different clocks** — `march_log` uses `time.monotonic`, which on macOS does **not tick
+      during sleep**, so a large gap between the two is a *sleep detector*. Counts are deterministic and
+      unaffected; per this project's own rule the timings are discarded.
+    - ⚠️ **THE TWO ARMS REPORT DIFFERENT `x_r/h` (8.966 vs 8.361) AND IT IS THE STOPPING BAR, NOT THE
+      METHOD.** Established by comparing the checkpointed states rather than by arguing from a metric
+      quantized to ~0.6h cell bins: the two converged states differ by rel L2 **3.75e-03**, while the
+      **ladder's own** state moved **4.95e-03** between its step 57 (`|R|` 9.75e-05) and step 59
+      (1.83e-06). The arms are closer to each other than the ladder was to itself two steps earlier, so
+      they are converging to one root — the ramp merely stopped at 9.89e-06 where the ladder overshot
+      to 1.83e-06.
+      **The standing consequence is about the BAR: `atol = 1e-5` does not pin this case's headline
+      quantity to a cell.** That indicts the ladder's 8.361 exactly as much as the ramp's 8.966 — the
+      ladder's number is not more trustworthy, it is luckier. Anything comparing `x_r/h` across arms
+      must converge tighter or report the metric with the residual it was measured at.
   - **⚠️ Latent defect, unfixed: `rebind` does not reset `_staleness_beta_gate`'s bookkeeping**, and nor
     does the mid-step `refresh_at`. Both rebuild the standing factorization at a β the gate never sees,
     so `last["beta"]`/`last["since"]` go stale and the gate can fire spuriously *or* decline when the

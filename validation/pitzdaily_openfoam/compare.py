@@ -112,13 +112,17 @@ from aquaflux.turbulence import (
     CoupledRANS,
     GeometricReynoldsSchedule,
     LogScalars,
+    ResidualTaperedDamping,
     SSTModel,
     SSTTurbulence,
     amg_beta_tracking_refresh,
     coupled_amg_continuation,
     coupled_fields,
+    scale_both_blocks,
+    scale_momentum_only,
     solve_reynolds_continuation,
     solve_reynolds_ramp,
+    turbulence_residual_norm,
     wall_consistent_state,
 )
 
@@ -237,6 +241,67 @@ RATIO = float(os.environ.get("PITZ_RATIO", "10.0"))
 #: a whole step, taken from the design record rather than a log; it is wrong by 3x.
 #: These values are a pitzDaily calibration; measure before carrying them anywhere else.
 RAMP = os.environ.get("PITZ_RAMP", "continuous")
+#: Which viscosity a ramp station scales (`PITZ_RAMP_SCALE`). `both` (the default) makes each station a
+#: genuine lower-Reynolds problem, the same path the rung ladder walks. `flow` scales the momentum
+#: block only and leaves the closure at the case's own viscosity, which keeps the near-wall `omega` at
+#: its target profile for the whole march instead of starting it a viscosity-ratio high and walking it
+#: back down -- at the price of stations that are not a physical Reynolds number, and of `k`/`omega`
+#: carrying their target stiffness from the first step. Which of those dominates is a property of the
+#: case; see the README.
+#: How much harder the `k`/`omega` rows are damped than the flow rows (`PITZ_TURB_DAMPING`): their
+#: shift diagonal is multiplied by this, so they run at an effective `TURB_DAMPING * beta` while the
+#: velocity rows keep `beta`. `1.0` (the default) is the single shift the march has always used.
+#:
+#: The motivation is the split the scaling arms exposed: the momentum block's difficulty is the
+#: convective nonlinearity, which the viscosity ramp weakens directly, while the closure's is its stiff
+#: source terms, which the ramp barely touches and a diagonal shift addresses squarely. Sharing one
+#: `beta` means it is set by whichever block is more fragile. The shift vanishes at the root, so this
+#: moves the path and neither the converged solution nor its adjoint.
+#:
+#: ⚠️ It raises the closure's effective floor to `TURB_DAMPING * beta_min`, and the step control still
+#: adapts ONE `beta` against a global line search -- so a constant ratio is the honest form, and a
+#: per-block adaptive shift would need the control to grow a per-block signal first.
+#: ⚠️ SWEPT 2026-09-10 on momentum-only scaling at 16 x 1, this file's other defaults, one run each.
+#: `1` is a control and reproduced the recorded 27 steps / 227 cycles exactly.
+#:
+#:     gamma    1      2      5     10
+#:     steps   27     27     29     41
+#:     cycles 227    191    206    305
+#:
+#: The optimum is INTERIOR and sharp: 2 wins by 16%, and 10 is worse than no damping at all. The two
+#: march phases want opposite ratios -- early, more damping is monotonically better (cycles to step 5:
+#: 17/12/12/11), and late it reverses (gamma 5 stalls once, gamma 10 stalls twice and moves BACKWARDS).
+#: ⚠️ No arm took a retry, gamma=10 included: damping does stabilize the step, and its cost is the
+#: closure LAGGING the mean flow, which reads as a stalled residual at healthy alpha, not a divergence.
+TURB_DAMPING = float(os.environ.get("PITZ_TURB_DAMPING", "1.0"))
+#: Taper the ratio from `TURB_DAMPING` down to 1 on the CLOSURE's own residual (`PITZ_TURB_TAPER`),
+#: instead of holding it constant. `0` (the default) keeps the constant.
+#:
+#: The sweep above is why: the ratio that is best early is the worst late, so no constant serves both
+#: phases. The taper keys on `turbulence_residual_norm`, NOT on `beta / beta_0` -- `beta` is adaptive
+#: (a retry RAISES it, so the damping would spike exactly when the march is struggling) and it FLOORS
+#: at `beta_min` early (step 13 of 41 in the gamma=10 run), after which a beta-keyed ratio would be
+#: frozen for the rest of the march, including every step where the damping does its damage.
+TURB_TAPER = float(os.environ.get("PITZ_TURB_TAPER", "0") or 0.0)
+if TURB_TAPER:
+    raise SystemExit(
+        "PITZ_TURB_TAPER is UNREACHABLE on this case as configured, and would run silently as a\n"
+        "constant PITZ_TURB_DAMPING rather than tapering.\n\n"
+        "The taper re-derives its reference when the shift policy is re-frozen at a developed state.\n"
+        "This case passes a finished `continuation=` to `solve_coupled`, so the continuation source is\n"
+        "`_FinishedContinuation`, which by design cannot re-freeze the step -- only the PRECONDITIONER\n"
+        "is refreshed. The reference therefore stays at the anchor's, and under a viscosity ramp the\n"
+        "problem gets HARDER as it walks (|R_turb| rises ~10% anchor->target at a fixed state), so the\n"
+        "clamped ratio never leaves 1 and the factor never leaves its initial value. Measured: 41 steps\n"
+        "/ 305 cycles, bit-identical to the constant it was meant to replace.\n\n"
+        "To make it live, pass `RefreshPolicy(builder=...)` so the policy is re-frozen per station --\n"
+        "and re-measure the other arms, which were all taken without policy refreshes."
+    )
+RAMP_SCALE = os.environ.get("PITZ_RAMP_SCALE", "both")
+_RAMP_SCALINGS = {"both": scale_both_blocks, "flow": scale_momentum_only}
+if RAMP_SCALE not in _RAMP_SCALINGS:
+    raise SystemExit(f"PITZ_RAMP_SCALE={RAMP_SCALE!r} is not one of {sorted(_RAMP_SCALINGS)}")
+RAMP_COMPANION = _RAMP_SCALINGS[RAMP_SCALE]
 RAMP_STATIONS = int(os.environ.get("PITZ_RAMP_STATIONS", "24"))
 RAMP_STEPS_PER_STATION = int(os.environ.get("PITZ_RAMP_STEPS", "1"))
 
@@ -276,6 +341,15 @@ K_POSITIVITY_FLOOR = 1e-8
 FORWARD_RTOL, FORWARD_RESTART = 0.3, 15
 FORWARD_MAX_RESTARTS = 14
 
+#: ⚠️ **THIS WHOLE BUNDLE IS UNREACHABLE AT THE CURRENT DEFAULTS — see `_ILU_SMOOTHER_LIVE` below.**
+#: Every measurement in it was taken when the leading `[u, v, p]` block was inverted by the incomplete-LU
+#: -smoothed hierarchy these settings configure. `FLOW_INVERSE` now defaults to `simplesmooth`, which
+#: supplies that block's inverse directly, and the trailing block's is supplied too, so nothing here is
+#: constructed on the default path. The bullets below are kept because they are the record of a real
+#: measurement and because the settings revive the moment a block's inverse is `None` -- but they are
+#: **not** a description of how a march at the defaults is preconditioned, and a run banner quoting them
+#: is not evidence about that march. Read them as history for the ILU path, not as live configuration.
+#:
 #: ⚠️ THE VALIDATED SMOOTHER BUNDLE, AND NONE OF IT IS OPTIONAL. These are the library defaults'
 #: opposites, and each was measured on the sibling case at adjoint-grade tolerance:
 #:   * ⚠️ `FILL_LEVELS` **1** HERE, WHERE THE SIBLING CASE USES 0 -- THE TWO RANK THIS OPPOSITELY, AND
@@ -432,6 +506,20 @@ LEADING_INVERSE = (
     if FLOW_INVERSE == "simplesmooth"
     else None
 )
+
+#: Whether `FILL_LEVELS` / `SWEEPS` / `COARSE_EQ_LIMIT` reach the preconditioner at all.
+#:
+#: ⚠️ They configure an incomplete-LU-smoothed hierarchy built ONLY for a block whose own inverse was
+#: not supplied: the field split takes `leading_inverse(...)` when one is given and falls back to
+#: building that hierarchy otherwise, and likewise for the trailing block. Under the field split this
+#: file always supplies the trailing (Jacobi-smoothed) inverse, and `FLOW_INVERSE` supplies the leading
+#: one unless it names neither strategy -- so at the defaults BOTH are given, neither fallback is taken,
+#: and these three settings are dead. Note `hostilu` does not revive them either: it is
+#: `ilu_smoothed_inverse(**HOST_FLOW)`, which carries its own fill and sweeps.
+#: The banner used to print them regardless, which is how a reader (and a solver study) comes to
+#: believe a march was preconditioned by a smoother that was never constructed. A banner is the primary
+#: record of what a measurement was taken under, so it must separate a live setting from a carried one.
+_ILU_SMOOTHER_LIVE = not FIELD_SPLIT or LEADING_INVERSE is None
 
 #: The trailing `[k, omega]` block's inverse: the differentiable-framework nodal hierarchy, which the
 #: sibling case defaults to after a controlled pair measured it ahead of the host V-cycle (67 steps and
@@ -940,12 +1028,19 @@ def solve_aquaflux(
             f"{RAMP_STATIONS} stations x {RAMP_STEPS_PER_STATION} steps "
             f"({RAMP_STATIONS * RAMP_STEPS_PER_STATION} ramp steps), redamping "
             f"{'derived' if RAMP_REDAMPING is None else format(RAMP_REDAMPING, 'g')}"
+            f", scaling {RAMP_SCALE}"
+            f", turbulence damping {TURB_DAMPING:g}"
+            f"{f' tapered^{TURB_TAPER:g}' if TURB_TAPER else ' (constant)'}"
             if RAMP == "continuous"
             else f"off ({RAMP}) -- the span is walked as a rung ladder",
         ),
         ("k wall BC", K_WALL),
         ("preconditioner refresh", f"on {REFRESH_ON_CYCLES} restart cycles (mid-step)"),
-        ("smoother fill / sweeps / coarse limit", f"{FILL_LEVELS} / {SWEEPS} / {COARSE_EQ_LIMIT}"),
+        (
+            "smoother fill / sweeps / coarse limit",
+            f"{FILL_LEVELS} / {SWEEPS} / {COARSE_EQ_LIMIT}"
+            + ("" if _ILU_SMOOTHER_LIVE else "  (INERT: both blocks supply their own inverse)"),
+        ),
         ("preconditioner beta floor", PC_BETA_FLOOR),
         ("field split / trailing sweeps", f"{FIELD_SPLIT} / {TRAILING_SWEEPS}"),
         (
@@ -1010,6 +1105,21 @@ def solve_aquaflux(
     #: between them, so a rung needs the V-cycle FITTED to it, not a fresh object.
     shared_preconditioner: list = []
 
+    def _damping(companion, seed_state):
+        """Constant, or tapered from the closure's residual at the state this rung opens from.
+
+        The reference is taken at the rung's OWN seed, so the taper measures progress from where the
+        march actually starts rather than from a state it never visits.
+        """
+        if not TURB_TAPER:
+            return TURB_DAMPING
+        return ResidualTaperedDamping(
+            initial=TURB_DAMPING,
+            reference=turbulence_residual_norm(companion.layout, companion.residual(seed_state)),
+            layout=companion.layout,
+            exponent=TURB_TAPER,
+        )
+
     def point_setup(companion, seed_state, point):
         """Configure each Reynolds rung, re-fitting the one preconditioner to it.
 
@@ -1023,6 +1133,7 @@ def solve_aquaflux(
         engine = coupled_amg_continuation(
             companion,
             seed_state,
+            turbulence_damping=_damping(companion, seed_state),
             inner_steps=INNER_STEPS,
             inner_tol=INNER_TOL,
             probe=probe,
@@ -1096,6 +1207,7 @@ def solve_aquaflux(
                 stations=RAMP_STATIONS,
                 steps_per_station=RAMP_STEPS_PER_STATION,
                 redamping=RAMP_REDAMPING,
+                companion=RAMP_COMPANION,
                 **solve_options,
             )
         else:

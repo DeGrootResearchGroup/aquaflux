@@ -60,12 +60,26 @@ paths:
     stop — and `MarchResult.converged` may not be `True` — until `arrived`. Both directions are pinned
     by starting a march **at a station's own exact root**, where the tolerance test passes on step one:
     without the gate it returns there and reports success at a state that does not solve the target.
-  - **⚠️ A STATION SPANS SEVERAL STEPS ON PURPOSE — moving the parameter every step is the expensive
-    mistake.** A station change re-points the refresh hook (`amg_beta_tracking_refresh(...).rebind`),
-    whose `forced_full["pending"]` overrides **both** gates and forces a FULL coloured-probe
-    re-materialize on the next `precondition_step` — the most expensive single operation in the march,
-    and the case's largest allocation. Per-step viscosity would therefore buy a handful of steps and pay
-    a full rebuild for each. `steps_per_station` is the knob; the cost argument is why it exists.
+  - **⚠️ "A STATION SPANS SEVERAL STEPS ON PURPOSE" IS RETRACTED (2026-09-10). Per-step viscosity is the
+    CHEAPEST schedule measured, on both cases that have run it.** The claim here was that a station
+    change re-points the refresh hook (`amg_beta_tracking_refresh(...).rebind`), whose
+    `forced_full["pending"]` overrides **both** gates and forces a FULL coloured-probe re-materialize —
+    "the most expensive single operation in the march" — so moving the parameter every step would pay a
+    rebuild per step for a handful of saved steps. The mechanism is real; **every quantitative half of
+    the argument is wrong.**
+    - **A full re-materialize is a FRACTION of an outer step, not the march's most expensive operation**:
+      1.2–1.6 s against ~9 s on pitzDaily, 11.5 s against a ~34 s mean outer step on `bfs3d`.
+    - **`24 x 1` beats `4 x 3`** — 191 restart cycles against 261 on pitzDaily (11 arms; the numbers and
+      the mechanism are in `.claude/rules/turbulence.md` under `ViscosityRampHomotopy`).
+    - **⚠️ The rebuilds are largely SUBSTITUTIVE, not additive** — the arithmetic "n stations cost n
+      rebuilds of pure overhead" double-counts, because the ladder rebuilds too, on
+      `refresh_on_cycles`, and does so on nearly every step of its long target rung. Counted from both
+      `bfs3d` march logs' own `pc …` lines (23040 cells, field split on, `simplesmooth`, column reach
+      3/3/3/3/2/2, ILU(0)/4 sweeps, `REFRESH_ON_CYCLES=3`): the **ladder** did 33 builds / 391 s over 59
+      steps (28 of them cost-triggered inner refreshes), the **ramp** 37 builds / 490 s over 32 steps.
+      Comparable totals per march — the station rebuilds mostly *replace* the cost-triggered ones.
+    `steps_per_station` remains the knob; what it is for is a schedule that has been *measured on its
+    case*, not a standing preference for coarse stations.
   - **⚠️ `redamp` — RE-DAMP ON ENTERING A STATION, AND THE MARCH BREAKS WITHOUT IT (BUILT 2026-09-09).**
     `ShiftStrengthControl.redamp(state, factor)` multiplies β by `ResidualHomotopy.shift_factor(step)`
     on the step that first faces a new station, and `forward_march` **holds** the control for that step.

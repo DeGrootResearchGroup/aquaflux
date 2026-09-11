@@ -105,6 +105,8 @@ from aquaflux.turbulence import (
     coupled_amg_continuation,
     coupled_fields,
     coupled_residuals,
+    scale_both_blocks,
+    scale_momentum_only,
     solve_reynolds_continuation,
     solve_reynolds_ramp,
 )
@@ -164,14 +166,58 @@ SCHEDULE = GeometricReynoldsSchedule()
 # range -- the ramp's anchor is the ladder's own `RATIO ** N_POINTS` -- so they differ in HOW the span
 # is walked, not in how far. `BFS3D_RAMP=continuous` selects the ramp.
 #
-# ⚠️ THE DEFAULT IS THE LADDER HERE AND `continuous` ON THE TWO-DIMENSIONAL SIBLING, and that split is
-# deliberate rather than an oversight: the schedule that wins is decided by what a station change costs
-# on the case, and the two cases are far apart on it. Every station change re-points the preconditioner
-# refresh and forces a FULL re-materialize, so a ramp of `n` stations buys its shorter march with `n`
-# rebuilds. On the sibling a rebuild is 1.2-1.6 s against a ~9 s outer step -- a sixth of one, so 24 of
-# them are nearly free. Measured here (2026-08-25 three-rung ladder, field split on, `simplesmooth`
-# flow inverse, column reach 3/3/3/3/2/2, ILU(0) / 4 sweeps): a full rebuild is ~10 s against a ~33 s
-# mean outer step, a THIRD of a step, so the same 24 stations cost ~7 outer steps of pure overhead.
+# ⚠️ MEASURED HERE 2026-09-10, ONE RUN PER ARM, and the ramp WINS on this case: 39 outer steps / 240
+# restart cycles against the ladder's 59 / 349 -- 34% fewer steps, 31% fewer cycles, same root. The
+# ramp's 24 stations cost 122 cycles and its target station 15 steps / 118, against the ladder's target
+# rung of 21 steps / 192, because the ramp ENTERS the target at |R| 8.09e-04 where the ladder's target
+# rung opened at 5.93e-02 -- 73x worse, having just discarded a converged rung.
+#
+# ⚠️ The two arms report DIFFERENT mid-span x_r/h (ramp 8.966, ladder 8.361) and that is the STOPPING
+# BAR, not the method. Their converged states differ by rel L2 3.75e-03, while the ladder's own state
+# moved 4.95e-03 between |R| 9.75e-05 and its final 1.83e-06 -- i.e. the arms are closer to each other
+# than the ladder was to itself two steps earlier. `ATOL = 1e-5` does not pin x_r/h to a cell on this
+# mesh (the bins are ~0.6h apart), which indicts the ladder's number as much as the ramp's. Converge
+# tighter before comparing x_r/h across arms, or quote it with the residual it was taken at.
+#
+# The default is left at the ladder pending a second run per arm; nothing measured argues for it.
+#
+# ⚠️ MEASURED 2026-09-10, all three arms on one tree, 24 x 1 for both ramps so the only difference is
+# the scaling strategy:
+#
+#     arm                      steps   ramp   target   cycles   x_r/h
+#     rung ladder                 59      -        -      349   8.3611
+#     ramp, both blocks           39    122      118      240   8.966
+#     ramp, momentum only         31    151       39      190   8.3611
+#
+# `BFS3D_RAMP_SCALE=flow` is 21% cheaper than the both-blocks ramp and 46% cheaper than the ladder. The
+# SPLIT is the finding: momentum-only pays MORE in the ramp (151 vs 122, and its first step's residual
+# grows 6.8x before three attempts settle it) because k/omega carry their target stiffness from step
+# one -- but its target station costs 39 cycles over 7 steps against 118 over 15, because `omega`
+# arrives already at its target profile. Every cost is in the turbulence block; every gain is in not
+# having to move `omega`.
+#
+# ⚠️ 24 stations is a BOTH-BLOCKS calibration. The sibling case's sweep puts momentum-only's optimum at
+# 16, so 190 is this strategy's cost at somebody else's schedule and is probably not its best. This
+# case's own station sweep is untested, as is a second run of any arm.
+#
+# ⚠️ THE DEFAULT IS THE LADDER HERE AND `continuous` ON THE TWO-DIMENSIONAL SIBLING. The rationale used
+# to be a cost argument, and the arithmetic in it DOUBLE-COUNTED -- read this before reviving it. Every
+# station change re-points the preconditioner refresh and forces a FULL re-materialize, and a rebuild
+# here is ~11.5 s against a ~34 s mean outer step (a third of one) where on the sibling it is 1.2-1.6 s
+# against ~9 s (a sixth). That much is measured and stands. What does NOT follow is "so 24 stations cost
+# ~7 outer steps of pure overhead": the LADDER rebuilds too, on `REFRESH_ON_CYCLES`, and does so on
+# nearly every step of its long target rung. Counted from the two arms' own march logs (2026-09-10,
+# 23040 cells, this file's settings), the ladder did 33 rebuilds / 391 s over 59 steps against the
+# ramp's 37 / 490 s over 32 -- comparable per-march totals. A station's rebuild largely REPLACES a
+# cost-triggered one rather than adding to it, so a schedule may not be costed as `stations x rebuild`.
+#
+# ⚠️ The first ramp arm run here was invalid: `solve_reynolds_ramp` seeded `hybrid_initialize` from the
+# TARGET assembler while its first station solves the ANCHOR, and that seeding reads the molecular
+# viscosity to place the near-wall `omega`. At this case's anchor (Re/100) that put `omega` off by up to
+# 90x, and the anchor's first step opened at a row-scaled 9.60e-01 instead of 3.29e-01, collapsing the
+# line search and escalating the shift to 4.0 before the march could start. Fixed upstream; the ramp's
+# first step is now bit-identical to the ladder's, as it must be (same problem, same seed, same
+# preconditioner).
 #
 # ⚠️ ONE STEP PER STATION unless you have measured otherwise. Above one, the ramp re-damps the shift on
 # entering each station, and an entering step is HELD -- so a station of `s` steps divides beta only
@@ -179,6 +225,17 @@ SCHEDULE = GeometricReynoldsSchedule()
 # target station with the shift still high and has to walk it down there, which is the same cost the
 # ramp exists to delete, re-created inside the ramp.
 RAMP = os.environ.get("BFS3D_RAMP", "off")
+#: Which viscosity a ramp station scales (`BFS3D_RAMP_SCALE`). `both` (the default) makes each station
+#: a genuine lower-Reynolds problem -- the path the rung ladder walks. `flow` scales the momentum block
+#: only, leaving the closure at the case's own viscosity, so the near-wall `omega` stays at its target
+#: profile for the whole march instead of starting a viscosity-ratio high and being walked back down.
+#: The trade is that `k`/`omega` then carry their target stiffness from the first step, and THIS CASE is
+#: where that block is hardest -- so the balance here need not resemble the sibling's.
+RAMP_SCALE = os.environ.get("BFS3D_RAMP_SCALE", "both")
+_RAMP_SCALINGS = {"both": scale_both_blocks, "flow": scale_momentum_only}
+if RAMP_SCALE not in _RAMP_SCALINGS:
+    raise SystemExit(f"BFS3D_RAMP_SCALE={RAMP_SCALE!r} is not one of {sorted(_RAMP_SCALINGS)}")
+RAMP_COMPANION = _RAMP_SCALINGS[RAMP_SCALE]
 RAMP_STATIONS = int(os.environ.get("BFS3D_RAMP_STATIONS", "24"))
 RAMP_STEPS_PER_STATION = int(os.environ.get("BFS3D_RAMP_STEPS", "1"))
 #: `None` takes `ViscosityRampHomotopy`'s derived default (the station's own viscosity ratio raised to
@@ -713,6 +770,18 @@ if FLOW_INVERSE == "simplesmooth":
 
 if TRAILING_INVERSE is not None and DUMP_TRAILING_BLOCK:
     TRAILING_INVERSE = _dumping(TRAILING_INVERSE)
+
+#: Whether `FILL_LEVELS` / `SWEEPS` / `COARSE_EQ_LIMIT` reach the preconditioner at all.
+#:
+#: ⚠️ They configure an incomplete-LU-smoothed hierarchy that is built ONLY for a block whose own
+#: inverse was not supplied: the field split takes `leading_inverse(...)` when one is given and falls
+#: back to building that hierarchy otherwise, and likewise for the trailing block. With both inverses
+#: set -- this file's default, a SIMPLE-smoothed flow block and a Jacobi-smoothed k/omega block --
+#: neither fallback is taken and these three settings are dead. The banner said them anyway, which is
+#: how a reader (and a solver study) comes to believe a march was preconditioned by a smoother that was
+#: never constructed. A banner is the primary record of what a measurement was taken under, so it has
+#: to distinguish a live setting from a carried one.
+_ILU_SMOOTHER_LIVE = not FIELD_SPLIT or LEADING_INVERSE is None or TRAILING_INVERSE is None
 
 
 def _jacobi_trailing_description() -> str:
@@ -1367,6 +1436,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             "Reynolds span walked as",
             f"{RAMP_STATIONS} stations x {RAMP_STEPS_PER_STATION} steps, redamping "
             f"{'derived' if RAMP_REDAMPING is None else format(RAMP_REDAMPING, 'g')}"
+            f", scaling {RAMP_SCALE}"
             if RAMP == "continuous"
             else f"a rung ladder ({RAMP})",
         ),
@@ -1376,7 +1446,11 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         ("forward restart", FORWARD_RESTART),
         ("retry on cycles / alpha", f"{RETRY_ON_CYCLES} / {RETRY_ON_ALPHA}"),
         ("cycle budget", CYCLE_BUDGET),
-        ("smoother fill / sweeps / coarse limit", f"{FILL_LEVELS} / {SWEEPS} / {COARSE_EQ_LIMIT}"),
+        (
+            "smoother fill / sweeps / coarse limit",
+            f"{FILL_LEVELS} / {SWEEPS} / {COARSE_EQ_LIMIT}"
+            + ("" if _ILU_SMOOTHER_LIVE else "  (INERT: both blocks supply their own inverse)"),
+        ),
         ("preconditioner beta floor", PC_BETA_FLOOR),
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
         ("k wall BC", K_WALL),
@@ -1565,6 +1639,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
                 stations=RAMP_STATIONS,
                 steps_per_station=RAMP_STEPS_PER_STATION,
                 redamping=RAMP_REDAMPING,
+                companion=RAMP_COMPANION,
                 **options,
             )
         else:
