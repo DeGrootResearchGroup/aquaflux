@@ -26,7 +26,7 @@ from aquaflux.solve import (
 
 
 class _TrivialShiftPolicy(eqx.Module):
-    def shift_term(self, phi):
+    def shift_term(self, phi, residual=None):
         return ShiftTerm(diagonal=jnp.ones_like(phi), make_preconditioner=lambda _relaxation: None)
 
 

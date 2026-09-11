@@ -74,7 +74,7 @@ class ScalarShiftPolicy(eqx.Module):
     shift_diagonal: jnp.ndarray
     preconditioner: ScalarTransportPreconditioner | None = None
 
-    def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
+    def shift_term(self, phi: jnp.ndarray, residual: jnp.ndarray | None = None) -> ShiftTerm:
         """The base shift diagonal and the (beta-independent) frozen preconditioner at ``phi``."""
         precond = self.preconditioner
 

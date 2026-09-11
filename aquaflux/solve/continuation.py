@@ -189,8 +189,15 @@ class ShiftPolicy(Protocol):
     the acceptance/escalation loop and never imports any problem specifics.
     """
 
-    def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
-        """The base shift diagonal and the ``β -> M`` preconditioner factory at iterate ``phi``."""
+    def shift_term(self, phi: jnp.ndarray, residual: jnp.ndarray | None = None) -> ShiftTerm:
+        """The base shift diagonal and the ``β -> M`` preconditioner factory at iterate ``phi``.
+
+        ``residual`` is ``R(phi)`` when the caller already has it, and ``None`` when it does not. It is
+        offered rather than re-derived because the step evaluates it immediately before asking for the
+        shift, so a policy whose diagonal depends on how far the state is from a root can read that
+        without a second residual evaluation. A policy that does not care ignores it, which is why it is
+        optional rather than required.
+        """
 
 
 class StepAcceptance(Protocol):
@@ -556,7 +563,9 @@ class PseudoTransientStep(ShiftedStep):
         ) -> StepOutcome:
             residual = residual_fn(phi)
             residual_norm = norm(residual)
-            term = policy.shift_term(phi)  # base diagonal + β -> M, from the same iterate
+            # `residual` is `R(phi)`, computed just above: a policy that tapers its shift on how far
+            # the state is from a root reads it here rather than evaluating the residual twice.
+            term = policy.shift_term(phi, residual)  # base diagonal + β -> M, from the same iterate
             # The injected schedule sets the base shift strength for this step's first attempt (SER by
             # default: strong damping while ‖R‖ is large, easing to zero at the root). Escalation below
             # only grows it from here on a rejected attempt.

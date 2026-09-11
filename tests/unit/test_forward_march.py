@@ -290,7 +290,7 @@ def test_march_reports_every_step_to_an_observer() -> None:
 class _UnitShiftPolicy(eqx.Module):
     """A trivial pseudo-transient shift policy (unit diagonal, no preconditioner) for a scalar root."""
 
-    def shift_term(self, phi):
+    def shift_term(self, phi, residual=None):
         return ShiftTerm(diagonal=jnp.ones_like(phi), make_preconditioner=lambda _relaxation: None)
 
 

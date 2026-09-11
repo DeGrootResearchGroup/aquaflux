@@ -40,7 +40,7 @@ class UniformShiftPolicy(eqx.Module):
 
     strength: float = eqx.field(static=True, default=1.0)
 
-    def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
+    def shift_term(self, phi: jnp.ndarray, residual=None) -> ShiftTerm:
         diagonal = self.strength * jnp.ones_like(phi)
         return ShiftTerm(diagonal, lambda relaxation: None)
 

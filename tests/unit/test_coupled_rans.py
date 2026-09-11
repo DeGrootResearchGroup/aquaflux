@@ -700,7 +700,7 @@ def test_refresh_trigger_is_rejected_under_differentiation() -> None:
 class _TrivialShiftPolicy(eqx.Module):
     """A shift policy with a unit diagonal and no preconditioner -- enough to build a step object."""
 
-    def shift_term(self, phi):
+    def shift_term(self, phi, residual=None):
         return ShiftTerm(diagonal=jnp.ones_like(phi), make_preconditioner=lambda _relaxation: None)
 
 
@@ -920,7 +920,7 @@ def test_live_velocity_shift_parts_map_the_solved_unknown_back_to_physical() -> 
 class _TrivialShiftPolicy(eqx.Module):
     """A minimal shift policy for constructing a step without a mesh (see test_step_control.py)."""
 
-    def shift_term(self, phi):
+    def shift_term(self, phi, residual=None):
         return ShiftTerm(diagonal=jnp.ones_like(phi), make_preconditioner=lambda _r: None)
 
 
