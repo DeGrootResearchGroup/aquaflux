@@ -2176,13 +2176,16 @@ tuning follow-up noted above.
     factorization really is mismatched. Inert on pitzDaily (`beta_rel_change=inf`, `refresh_every=1e9`),
     but live for any finite `beta_rel_change` — including the example published in
     `docs/preconditioning.md`.
-  - **⚠️ IT IS THE DEFAULT on `validation/pitzdaily_openfoam/compare.py` since 2026-09-10** (`PITZ_RAMP`,
-    with `PITZ_RAMP=off` returning to `solve_reynolds_continuation` as the comparison arm rather than as
-    a supported path). Flipped on the user's decision that the coupled march's upcoming work lands here
-    and the ladder is not being developed further. **⚠️ The ramp has been measured on THIS CASE ONLY and
-    on one run per arm** — `bfs3d_openfoam` has never run it, and that case is where the ladder's rung
-    structure was originally calibrated, so it is the one most likely to disagree. The defaults are
-    configured with
+  - **⚠️ IT IS THE DEFAULT ON BOTH CASES** — `validation/pitzdaily_openfoam/compare.py` since 2026-09-10
+    (`PITZ_RAMP`) and `validation/bfs3d_openfoam/compare.py` since 2026-09-11 (`BFS3D_RAMP`), with `off`
+    returning to `solve_reynolds_continuation` as the comparison arm rather than as a supported path.
+    Flipped on the user's decision that the coupled march's upcoming work lands here and the ladder is
+    not being developed further. `bfs3d` was the case most likely to disagree — it is where the ladder's
+    rung structure was originally calibrated — and it does not: the ramp is 31 % cheaper there
+    (240 against 349 cycles at both-blocks scaling, 190 at momentum-only, 148 with that case's damping
+    optimum). **Still one run per arm on each case.** `bfs3d` additionally defaults to
+    `BFS3D_RAMP_SCALE=flow`, i.e. momentum-only stations; pitzDaily still defaults to `both`. The
+    defaults are configured with
     `PITZ_RAMP_STATIONS` / `PITZ_RAMP_STEPS`. It anchors at `RATIO ** N_POINTS`, i.e. **the same span the
     ladder walks**, so the two arms differ in how the span is traversed and not in how far — and it
     builds its engine by calling the ladder arm's own `point_setup`, so they are preconditioned, logged

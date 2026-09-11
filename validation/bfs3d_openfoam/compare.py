@@ -161,10 +161,10 @@ N_POINTS = int(os.environ.get("BFS3D_N_POINTS", "2"))
 # about where the anchor sits.
 SCHEDULE = GeometricReynoldsSchedule()
 
-# Whether the Reynolds span is walked as a LADDER of converged rungs (`off`, the default here) or as
-# ONE march whose molecular viscosity ramps down to the target (`continuous`). Both span the same
-# range -- the ramp's anchor is the ladder's own `RATIO ** N_POINTS` -- so they differ in HOW the span
-# is walked, not in how far. `BFS3D_RAMP=continuous` selects the ramp.
+# Whether the Reynolds span is walked as ONE march whose molecular viscosity ramps down to the target
+# (`continuous`, the default since 2026-09-11) or as a LADDER of converged rungs (`off`, kept as the
+# comparison arm). Both span the same range -- the ramp's anchor is the ladder's own
+# `RATIO ** N_POINTS` -- so they differ in HOW the span is walked, not in how far.
 #
 # ⚠️ MEASURED HERE 2026-09-10, ONE RUN PER ARM, and the ramp WINS on this case: 39 outer steps / 240
 # restart cycles against the ladder's 59 / 349 -- 34% fewer steps, 31% fewer cycles, same root. The
@@ -224,14 +224,25 @@ SCHEDULE = GeometricReynoldsSchedule()
 # `s - 1` times and the re-damping very nearly cancels the descent. The march then arrives at the
 # target station with the shift still high and has to walk it down there, which is the same cost the
 # ramp exists to delete, re-created inside the ramp.
-RAMP = os.environ.get("BFS3D_RAMP", "off")
-#: Which viscosity a ramp station scales (`BFS3D_RAMP_SCALE`). `both` (the default) makes each station
-#: a genuine lower-Reynolds problem -- the path the rung ladder walks. `flow` scales the momentum block
-#: only, leaving the closure at the case's own viscosity, so the near-wall `omega` stays at its target
-#: profile for the whole march instead of starting a viscosity-ratio high and being walked back down.
-#: The trade is that `k`/`omega` then carry their target stiffness from the first step, and THIS CASE is
-#: where that block is hardest -- so the balance here need not resemble the sibling's.
-RAMP_SCALE = os.environ.get("BFS3D_RAMP_SCALE", "both")
+RAMP = os.environ.get("BFS3D_RAMP", "continuous")
+#: Which viscosity a ramp station scales (`BFS3D_RAMP_SCALE`). `flow` (the default since 2026-09-11)
+#: scales the momentum block only, leaving the closure at the case's own viscosity, so the near-wall
+#: `omega` stays at its target profile for the whole march instead of starting a viscosity-ratio high
+#: and being walked back down. `both` makes each station a genuine lower-Reynolds problem -- the path
+#: the rung ladder walks -- and is kept as the comparison arm.
+#:
+#: ⚠️ The trade is that `k`/`omega` carry their target stiffness from the first step, and it is REAL:
+#: momentum-only pays MORE in the ramp (151 cycles against 122) and 3x less in the target station (39
+#: against 118), for a net 190 against 240. Every cost is in the closure block and every gain is in not
+#: having to move `omega` -- which is what motivated damping that block separately (`TURB_DAMPING`),
+#: and damping then takes the ramp back down to 114.
+#:
+#: ⚠️ An intermediate station is then NOT a physical Reynolds number: the momentum equation sees a
+#: viscosity the closure does not, so no single `Re` describes it. Legitimate for a homotopy -- the path
+#: need only be traversable and end exactly at the target, which it does, the target being the caller's
+#: own assembler by identity -- but a result quoted from an intermediate station is not a lower-Reynolds
+#: solution.
+RAMP_SCALE = os.environ.get("BFS3D_RAMP_SCALE", "flow")
 _RAMP_SCALINGS = {"both": scale_both_blocks, "flow": scale_momentum_only}
 if RAMP_SCALE not in _RAMP_SCALINGS:
     raise SystemExit(f"BFS3D_RAMP_SCALE={RAMP_SCALE!r} is not one of {sorted(_RAMP_SCALINGS)}")
@@ -247,27 +258,34 @@ RAMP_COMPANION = _RAMP_SCALINGS[RAMP_SCALE]
 #: blocks want different instruments: continuation for the momentum block's convective nonlinearity,
 #: damping for the closure's stiff sources.
 #:
-#: ⚠️ MEASURED HERE (2026-09-11), momentum-only at 24 x 1 against this case's own recorded control,
-#: everything else default; both arms reach mid-span `x_r/h` 8.3611:
+#: ⚠️ SWEPT HERE (2026-09-11) on the momentum-only ramp at 24 x 1 -- which is now this case's default
+#: arm, so the sweep and the shipped configuration are the same thing. One run per arm, everything else
+#: default, all four reaching mid-span `x_r/h` 8.3611:
 #:
-#:     arm            steps  cycles  ramp(24)  target  escalations
-#:     gamma = 1         31     190       151      39            2
-#:     gamma = 2         31     163       130      33            0
+#:     gamma   steps  cycles  ramp(24)  target  esc  handover |R|
+#:         1      31     190       151      39    2     4.337e-04
+#:         2      31     163       130      33    0     4.267e-04
+#:         3      32     148       114      34    1     5.646e-04
+#:         5      39     169       117      52    4     2.392e-03
 #:
-#: 14% cheaper, better in BOTH phases, and it removes both escalations -- against 12% on the sibling
-#: (227 -> 200 at gamma 1 -> 2, whose sweep continues 212 at 5 and 329 at 10, so the optimum is
-#: interior and near 2 on both cases).
+#: `gamma = 3` is the default: an interior optimum, 22% below the undamped control. The `gamma = 1`
+#: control was re-run on the current tree and is **bit-identical over all 31 steps** to the archived
+#: one, so these four arms share a base.
+#:
+#: ⚠️ THE OPTIMUM DIFFERS BETWEEN THE TWO CASES -- 3 here, 2 on pitzDaily (227 / 200 / 212 / 329 at
+#: gamma 1 / 2 / 5 / 10). Adjacent, but do not carry either number to a third case without measuring.
 #:
 #: ⚠️ Damping's cost is LAG, not instability: on the sibling, gamma=10 took 64 steps with zero
 #: escalations, zero stalls and alpha=1.000 throughout, the residual simply crawling at ~0.74 per step.
 #: Read a damping failure as a residual that will not fall at healthy alpha, never as a divergence.
 #:
-#: ⚠️ PAST THE OPTIMUM it stops removing the closure's work and merely DEFERS it: on the sibling the
-#: end-of-ramp residual degrades 2.81e-3 / 5.80e-3 / 1.01e-2 at gamma 2 / 5 / 10 while the target's cost
-#: rises 71 / 110 / 229, so a cheaper ramp is borrowed rather than earned. At gamma = 2 on THIS case it
-#: is earned -- both arms hand the target station the same residual (4.27e-4 vs 4.34e-4). Either way,
-#: judge this knob on the TOTAL, never on a phase.
-TURB_DAMPING = float(os.environ.get("BFS3D_TURB_DAMPING", "1.0"))
+#: ⚠️ PAST THE OPTIMUM it stops removing the closure's work and merely DEFERS it, and the table above
+#: shows the turn: from gamma 3 to 5 the ramp barely improves (114 -> 117) while the handover residual
+#: degrades 4x (5.6e-4 -> 2.4e-3), the target's cost rises (34 -> 52) and the escalations go 1 -> 4. The
+#: sibling shows the same past ITS optimum (handover 2.81e-3 / 5.80e-3 / 1.01e-2 at gamma 2 / 5 / 10,
+#: target 71 / 110 / 229). So a cheap ramp past the optimum is borrowed, not earned -- judge this knob
+#: on the TOTAL, never on a phase.
+TURB_DAMPING = float(os.environ.get("BFS3D_TURB_DAMPING", "3.0"))
 RAMP_STATIONS = int(os.environ.get("BFS3D_RAMP_STATIONS", "24"))
 RAMP_STEPS_PER_STATION = int(os.environ.get("BFS3D_RAMP_STEPS", "1"))
 #: `None` takes `ViscosityRampHomotopy`'s derived default (the station's own viscosity ratio raised to
