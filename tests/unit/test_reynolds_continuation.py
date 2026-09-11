@@ -724,6 +724,324 @@ def test_an_explicit_re_damping_still_overrides_the_derived_one() -> None:
     assert ramp.redamping == 3.0
 
 
+# --- damping the closure's rows harder than the flow's ------------------------------------------
+
+
+def _shift_diagonal(coupled, state, damping):
+    """The full-state shift diagonal a monolithically preconditioned step reads, at ``damping``."""
+    from aquaflux.turbulence.coupled import _DEFAULT_SHIFT_BASIS, _monolithic_shift_source
+
+    source = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS, None, damping)
+    return source.shift_term(state).diagonal
+
+
+def _seeded_state(coupled):
+    from aquaflux.turbulence import hybrid_initialize
+
+    return coupled.state_from_physical(*hybrid_initialize(coupled.momentum, coupled.turbulence))
+
+
+def test_turbulence_damping_scales_the_closures_rows_and_leaves_the_flow_rows_alone() -> None:
+    """The whole point: one shift for the flow, a harder one for the stiff source terms.
+
+    The two blocks are hard for different reasons -- the momentum block's convective nonlinearity,
+    which a viscosity continuation weakens, against the closure's stiff sources, which it barely
+    touches -- so the shift they share must be able to differ between them.
+    """
+    coupled = _tiny_coupled()
+    state = _seeded_state(coupled)
+    n, dim = coupled.momentum.mesh.n_cells, coupled.momentum.mesh.dim
+    flow = (dim + 1) * n
+
+    plain = _shift_diagonal(coupled, state, 1.0)
+    damped = _shift_diagonal(coupled, state, 10.0)
+
+    assert jnp.allclose(plain[:flow], damped[:flow])
+    assert jnp.allclose(damped[flow:], 10.0 * plain[flow:])
+
+
+def test_a_damping_of_one_is_bit_identical_to_no_damping_at_all() -> None:
+    """The default must not move any incumbent march by a rounding."""
+    coupled = _tiny_coupled()
+    state = _seeded_state(coupled)
+    assert jnp.array_equal(
+        _shift_diagonal(coupled, state, 1.0), _shift_diagonal(coupled, state, 1.0)
+    )
+    from aquaflux.turbulence.coupled import _DEFAULT_SHIFT_BASIS, _monolithic_shift_source
+
+    default = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS)
+    assert default.turbulence_damping.factor(None) == 1.0
+    assert jnp.array_equal(default.shift_term(state).diagonal, _shift_diagonal(coupled, state, 1.0))
+
+
+def test_the_shift_still_vanishes_at_the_root_under_damping() -> None:
+    """Why this cannot move the answer: the shift TERM is ``beta * d * (phi - phi_n)``.
+
+    Whatever the per-block multiplier, a state that solves the steady residual has ``phi == phi_n``
+    and the whole term is zero -- so damping changes the path a march takes and neither the converged
+    root nor its adjoint. That is the same property that licenses ``beta`` itself, and it is the reason
+    this is a globalization knob rather than a model change.
+    """
+    coupled = _tiny_coupled()
+    state = _seeded_state(coupled)
+    for damping in (1.0, 3.0, 25.0):
+        term = _shift_diagonal(coupled, state, damping)
+        assert jnp.all(jnp.isfinite(term))
+        # `d * (phi - phi_n)` at `phi == phi_n`, which is what the march adds to the residual.
+        assert jnp.allclose(term * (state - state), 0.0)
+
+
+def test_a_refresh_CARRIES_the_damping_rather_than_dropping_it_to_one() -> None:
+    """A refresh rebuilds the transport diagonal; the caller's damping is configuration, not state.
+
+    ``shift_basis`` and ``velocity_shift_parts`` are carried across a refresh for exactly this reason,
+    and a damping silently reset to ``1.0`` mid-march would be invisible -- the march would simply get
+    harder at the step the preconditioner was refreshed.
+    """
+    from aquaflux.turbulence.coupled import (
+        _DEFAULT_SHIFT_BASIS,
+        _coupled_shift_policy,
+        _monolithic_shift_source,
+    )
+
+    coupled = _tiny_coupled()
+    state = _seeded_state(coupled)
+    built = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS, None, 7.0)
+    assert built.turbulence_damping.factor(None) == 7.0
+
+    refreshed = _coupled_shift_policy(
+        coupled, state, None, reuse=built, turbulence_damping=1.0, build_flow_block=False
+    )
+    assert refreshed.turbulence_damping.factor(None) == 7.0
+
+
+# --- tapering the damping on the closure's own residual ------------------------------------------
+
+
+def test_the_taper_starts_at_its_initial_ratio_and_reaches_exactly_one_at_convergence() -> None:
+    """The two ends that matter: damped where the closure is far from equilibrium, released at the root.
+
+    Reaching exactly ``1`` is what keeps the shift's dissolution at the root intact -- the converged
+    solution and its adjoint are untouched however the taper is shaped.
+    """
+    from aquaflux.turbulence import ResidualTaperedDamping
+
+    coupled = _tiny_coupled()
+    reference = jnp.asarray(4.0)
+    taper = ResidualTaperedDamping(initial=10.0, reference=reference, layout=coupled.layout)
+
+    n = coupled.momentum.mesh.n_cells
+    at_reference = coupled.layout.pack(
+        jnp.zeros((coupled.momentum.mesh.dim + 1) * n),
+        jnp.full(n, 4.0 / jnp.sqrt(2 * n)),
+        jnp.full(n, 4.0 / jnp.sqrt(2 * n)),
+    )
+    assert taper.factor(at_reference) == pytest.approx(10.0, rel=1e-6)
+
+    converged = jnp.zeros_like(at_reference)
+    assert taper.factor(converged) == pytest.approx(1.0)
+
+
+def test_the_taper_opens_at_its_initial_ratio_when_no_residual_exists_yet() -> None:
+    """The march's FIRST shift is built before any residual is formed -- and that is the step the
+    damping is most for, so ``None`` must not read as "converged"."""
+    from aquaflux.turbulence import ResidualTaperedDamping
+
+    coupled = _tiny_coupled()
+    taper = ResidualTaperedDamping(initial=8.0, reference=jnp.asarray(1.0), layout=coupled.layout)
+    assert taper.factor(None) == pytest.approx(8.0)
+
+
+def test_the_taper_reads_the_CLOSURE_residual_and_ignores_the_flow_rows() -> None:
+    """The point of keying on the turbulence block: the mean flow's residual must not move the ratio.
+
+    The two blocks settle on different schedules, so a rule that read the whole-state norm would be
+    dominated by the flow and would release the damping on the flow's progress rather than the
+    closure's.
+    """
+    from aquaflux.turbulence import ResidualTaperedDamping
+
+    coupled = _tiny_coupled()
+    n, dim = coupled.momentum.mesh.n_cells, coupled.momentum.mesh.dim
+    taper = ResidualTaperedDamping(initial=5.0, reference=jnp.asarray(1.0), layout=coupled.layout)
+
+    quiet_flow = coupled.layout.pack(jnp.zeros((dim + 1) * n), jnp.full(n, 0.1), jnp.full(n, 0.1))
+    loud_flow = coupled.layout.pack(
+        jnp.full((dim + 1) * n, 1e3), jnp.full(n, 0.1), jnp.full(n, 0.1)
+    )
+    assert taper.factor(quiet_flow) == pytest.approx(float(taper.factor(loud_flow)))
+
+
+def test_a_residual_that_RISES_re_damps_rather_than_releasing() -> None:
+    """A continuation station change moves the problem, so the closure is far from equilibrium again.
+
+    The taper's response there is to damp harder, which is the same thing
+    ``ShiftStrengthControl.redamp`` does on entering a station -- reached from a different direction.
+    """
+    from aquaflux.turbulence import ResidualTaperedDamping, turbulence_residual_norm
+
+    coupled = _tiny_coupled()
+    n, dim = coupled.momentum.mesh.n_cells, coupled.momentum.mesh.dim
+    flow = jnp.zeros((dim + 1) * n)
+    settled = coupled.layout.pack(flow, jnp.full(n, 0.01), jnp.full(n, 0.01))
+    disturbed = coupled.layout.pack(flow, jnp.full(n, 0.5), jnp.full(n, 0.5))
+    reference = turbulence_residual_norm(coupled.layout, disturbed)
+
+    taper = ResidualTaperedDamping(initial=6.0, reference=reference, layout=coupled.layout)
+    assert float(taper.factor(disturbed)) > float(taper.factor(settled))
+
+
+def test_the_taper_is_clamped_so_a_residual_above_its_reference_never_exceeds_the_initial() -> None:
+    """A march that gets worse than it started must not run away to an unbounded shift."""
+    from aquaflux.turbulence import ResidualTaperedDamping
+
+    coupled = _tiny_coupled()
+    n, dim = coupled.momentum.mesh.n_cells, coupled.momentum.mesh.dim
+    taper = ResidualTaperedDamping(initial=3.0, reference=jnp.asarray(1.0), layout=coupled.layout)
+    blown_up = coupled.layout.pack(jnp.zeros((dim + 1) * n), jnp.full(n, 1e6), jnp.full(n, 1e6))
+    assert taper.factor(blown_up) == pytest.approx(3.0)
+
+
+def test_damping_below_one_is_refused_because_damping_never_accelerates() -> None:
+    """Both strategies: a factor under 1 would *reduce* the closure's shift below the flow's."""
+    from aquaflux.turbulence import ConstantDamping, ResidualTaperedDamping
+
+    coupled = _tiny_coupled()
+    with pytest.raises(ValueError, match="never accelerates"):
+        ConstantDamping(0.5)
+    with pytest.raises(ValueError, match="never accelerates"):
+        ResidualTaperedDamping(initial=0.5, reference=jnp.asarray(1.0), layout=coupled.layout)
+
+
+def test_the_step_hands_the_shift_policy_the_residual_it_already_computed() -> None:
+    """Why the protocol grew an argument rather than the damping re-deriving ``R(phi)``.
+
+    ``PseudoTransientStep`` evaluates the residual immediately before asking for the shift, so a
+    state-dependent policy reads it for free; computing it a second time inside the policy would be the
+    same quantity derived in two places.
+    """
+    import inspect
+
+    from aquaflux.solve import continuation
+
+    source = inspect.getsource(continuation)
+    assert "policy.shift_term(phi, residual)" in source
+
+
+def test_a_refresh_REBUILDS_the_tapers_reference_rather_than_carrying_it() -> None:
+    """The defect that made the first taper inert, pinned.
+
+    A reference is physics -- how hard the closure's problem is *now* -- so a refresh must re-derive it
+    at the developed state, exactly as ``k_shift_transport`` is re-derived while ``k_jacobian_scale`` is
+    carried. Carried instead, a continuation march measures the taper against the anchor's problem,
+    which is the easiest it ever sees, and the factor never leaves ``initial``.
+    """
+    from aquaflux.turbulence import ResidualTaperedDamping, turbulence_residual_norm
+    from aquaflux.turbulence.coupled import (
+        _DEFAULT_SHIFT_BASIS,
+        _coupled_shift_policy,
+        _monolithic_shift_source,
+    )
+
+    coupled = _tiny_coupled()
+    state = _seeded_state(coupled)
+    stale = ResidualTaperedDamping(initial=9.0, reference=jnp.asarray(1e9), layout=coupled.layout)
+    built = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS, None, stale)
+    assert float(built.turbulence_damping.reference) == pytest.approx(1e9)
+
+    refreshed = _coupled_shift_policy(coupled, state, None, reuse=built, build_flow_block=False)
+    # The configuration survives; the reference is the one this state actually implies.
+    assert refreshed.turbulence_damping.initial == 9.0
+    assert float(refreshed.turbulence_damping.reference) == pytest.approx(
+        float(turbulence_residual_norm(coupled.layout, coupled.residual(state))), rel=1e-9
+    )
+
+
+def test_a_constant_damping_is_unchanged_by_a_rebase() -> None:
+    """Nothing to re-derive, so the rebase must be an identity rather than a silent reset."""
+    from aquaflux.turbulence import ConstantDamping
+
+    coupled = _tiny_coupled()
+    constant = ConstantDamping(4.0)
+    assert constant.rebased(coupled, _seeded_state(coupled)) is constant
+
+
+# --- which viscosity a station scales -------------------------------------------------------------
+
+
+def test_scaling_both_blocks_moves_the_momentum_and_the_closure_together() -> None:
+    """The default: a station is a genuine lower-Reynolds problem, so both viscosities move."""
+    from aquaflux.turbulence import scale_both_blocks
+
+    coupled = _tiny_coupled()
+    scaled = scale_both_blocks(coupled, 100.0)
+
+    assert float(scaled.momentum.properties.properties["viscosity"].value) == pytest.approx(
+        float(coupled.momentum.properties.properties["viscosity"].value) * 100.0
+    )
+    assert jnp.allclose(
+        scaled.turbulence.molecular_viscosity, coupled.turbulence.molecular_viscosity * 100.0
+    )
+
+
+def test_scaling_momentum_only_leaves_the_closures_viscosity_untouched() -> None:
+    """The alternative: only the convective nonlinearity is weakened, the closure is not touched."""
+    from aquaflux.turbulence import scale_momentum_only
+
+    coupled = _tiny_coupled()
+    scaled = scale_momentum_only(coupled, 100.0)
+
+    assert float(scaled.momentum.properties.properties["viscosity"].value) == pytest.approx(
+        float(coupled.momentum.properties.properties["viscosity"].value) * 100.0
+    )
+    assert jnp.allclose(
+        scaled.turbulence.molecular_viscosity, coupled.turbulence.molecular_viscosity
+    )
+
+
+def test_scaling_momentum_only_makes_the_anchor_and_target_hybrid_starts_IDENTICAL() -> None:
+    """Why the alternative is interesting: it removes the seed choice rather than answering it.
+
+    ``hybrid_initialize`` reads the closure's molecular viscosity to place the near-wall ``omega``, so
+    under :func:`scale_both_blocks` an anchor-built seed and a target-built one differ there by the
+    viscosity ratio -- the whole reason the ramp arm has to be explicit about which one it opens from.
+    Leaving the closure alone makes the two seeds the same fields, so the question cannot be got wrong.
+    """
+    from aquaflux.turbulence import hybrid_initialize, scale_both_blocks, scale_momentum_only
+
+    coupled = _tiny_coupled()
+    target = hybrid_initialize(coupled.momentum, coupled.turbulence)
+
+    momentum_only = scale_momentum_only(coupled, 100.0)
+    for mine, theirs in zip(
+        hybrid_initialize(momentum_only.momentum, momentum_only.turbulence), target, strict=True
+    ):
+        assert jnp.allclose(mine, theirs)
+
+    # The contrast that makes the point: scaling both blocks moves the seed.
+    both = scale_both_blocks(coupled, 100.0)
+    assert not all(
+        jnp.allclose(mine, theirs)
+        for mine, theirs in zip(
+            hybrid_initialize(both.momentum, both.turbulence), target, strict=True
+        )
+    )
+
+
+def test_the_ramp_still_ends_on_the_callers_own_assembler_under_either_scaling() -> None:
+    """The target station is never built by the strategy -- the root and adjoint belong to the case."""
+    from aquaflux.turbulence import scale_both_blocks, scale_momentum_only
+
+    for companion in (scale_both_blocks, scale_momentum_only):
+        ramp = ViscosityRampHomotopy(
+            _tiny_coupled(), anchor=100.0, stations=4, steps_per_station=1, companion=companion
+        )
+        ramp.enter(0)
+        assert ramp._assembler is not ramp.coupled
+        ramp.enter(4)
+        assert ramp._assembler is ramp.coupled
+
+
 # --- the ramp ARM: one march over the ladder's span, configured by the ladder's own hooks ---------
 
 
@@ -781,6 +1099,42 @@ def test_the_ramp_arm_is_one_warm_started_solve_on_the_target_carrying_the_homot
     assert isinstance(homotopy, ViscosityRampHomotopy)
     assert (homotopy.anchor, homotopy.stations, homotopy.steps_per_station) == (100.0, 24, 1)
     assert calls[0]["kwargs"]["rtol"] == 1e-10
+
+
+def test_the_ramp_arm_seeds_the_hybrid_start_from_the_anchor_not_from_the_target(
+    monkeypatch,
+) -> None:
+    """The seed is built at the viscosity the march BEGINS at, which is the anchor's, not the target's.
+
+    ``hybrid_initialize`` reads the assembler's own molecular viscosity to seed the near-wall ``omega``
+    at the profile that assembler's residual fixes there. Seeded from the target while the first station
+    solves the anchor, every wall-adjacent cell starts off its own boundary condition by the viscosity
+    ratio -- exactly the residual the seeding exists to remove, and by construction invisible to any
+    check that stubs ``hybrid_initialize`` without looking at what it was handed. Measured on a
+    three-dimensional backward-facing step at a hundredfold anchor, that mismatch moved ``omega`` by up
+    to 90x and cost the anchor's first step two discarded attempts and a shift escalation to 4.0.
+    """
+    import aquaflux.turbulence.reynolds as reynolds
+    from aquaflux.turbulence import solve_reynolds_ramp
+
+    coupled, _, fields = _ramp_arm_fixtures(monkeypatch)
+    seeded_with: list[float] = []
+
+    def recording_hybrid_initialize(momentum, turbulence):
+        seeded_with.append(float(momentum.properties.properties["viscosity"].value / (RHO * NU)))
+        return fields
+
+    monkeypatch.setattr(reynolds, "hybrid_initialize", recording_hybrid_initialize)
+
+    solve_reynolds_ramp(
+        coupled,
+        anchor=100.0,
+        stations=24,
+        steps_per_station=1,
+        point_setup=lambda companion, state, point: {},
+    )
+
+    assert seeded_with == [pytest.approx(100.0)]
 
 
 def test_the_ramp_arm_configures_its_anchor_station_through_the_ladders_own_point_setup(

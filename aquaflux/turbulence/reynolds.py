@@ -563,6 +563,68 @@ def solve_reynolds_continuation(
 _REDAMPING_EXPONENT = 0.6
 
 
+def scale_both_blocks(coupled: CoupledRANS, scale: float) -> CoupledRANS:
+    """Scale the molecular viscosity of **both** blocks -- a true lower-Reynolds-number companion.
+
+    Every intermediate station is then a self-consistent physical problem at ``Re / scale``, which is
+    what makes the ramp's path the same one :func:`solve_reynolds_continuation` walks in rungs.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The target assembler.
+    scale : float
+        The molecular-viscosity multiplier; ``> 1`` lowers the Reynolds number.
+
+    Returns
+    -------
+    CoupledRANS
+        The companion at that viscosity.
+    """
+    return coupled.with_scaled_molecular_viscosity(scale)
+
+
+def scale_momentum_only(coupled: CoupledRANS, scale: float) -> CoupledRANS:
+    """Scale the **momentum** block's molecular viscosity and leave the closure's alone.
+
+    The continuation exists to weaken the *convective* nonlinearity, which lives in the momentum
+    equation; scaling the closure's molecular viscosity is incidental to that mechanism and has one
+    concrete cost. The closure's viscosity sets the near-wall ``omega`` the residual fixes (and the
+    blending functions read it), so scaling it makes wall ``omega`` up to the viscosity ratio larger at
+    the anchor -- a value the ramp must then walk all the way back down, having started the field far
+    from where it has to end. Leaving the closure at the case's own viscosity keeps ``omega`` at its
+    target profile for the whole march, and makes the anchor's and the target's turbulence blocks the
+    *same object*, so a hybrid start built at either is identical.
+
+    ⚠️ **An intermediate station is then NOT a physical Reynolds number.** The momentum equation sees a
+    viscosity the closure does not, so no single ``Re`` describes it, and the blending functions and
+    wall treatment are evaluated against the case's own viscosity throughout. That is legitimate for a
+    homotopy -- the path need only be traversable and end exactly at the target, which it does, since
+    ``scale = 1`` is the caller's own assembler -- but the stations are a numerical path rather than a
+    sequence of physical problems, and a result quoted from one is not a lower-Reynolds solution.
+
+    ⚠️ **The corresponding risk is that the transported scalars never get an easy phase.** Under
+    :func:`scale_both_blocks` the ``k``/``omega`` equations are as slack as the momentum block at the
+    anchor; here they carry their target stiffness from the first step. Whether that costs more than
+    the ``omega`` round trip it saves is a property of the case and has to be measured.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The target assembler.
+    scale : float
+        The multiplier applied to the momentum block's molecular viscosity only.
+
+    Returns
+    -------
+    CoupledRANS
+        The companion, sharing the target's turbulence block unchanged.
+    """
+    return eqx.tree_at(
+        lambda c: c.momentum, coupled, coupled.momentum.with_scaled_molecular_viscosity(scale)
+    )
+
+
 class ViscosityRampHomotopy:
     """Walk the molecular viscosity down to the case's own value **within a single march**.
 
@@ -589,11 +651,15 @@ class ViscosityRampHomotopy:
     against **261** for 4 x 3 at 2.0. :attr:`steps_per_station` is how many outer steps a station is
     held for, and on this case the answer is one.
 
-    **⚠️ The cost balance inverts on a larger case, so treat that as a pitzDaily calibration rather than
-    a general rule.** On the three-dimensional sibling a full re-materialize is **11.5 s** against a
-    ~34 s mean outer step (measured 2026-09-10 on the shipped three-rung ladder, 23040 cells, field
-    split on, `simplesmooth`, column reach 3/3/3/3/2/2) -- a third of a step rather than a sixth, so 24
-    stations cost ~8 outer steps of overhead there against ~4 here.
+    **⚠️ Treat that as a pitzDaily calibration rather than a general rule, and do NOT cost a schedule as
+    `stations x rebuild`.** On the three-dimensional sibling a full re-materialize is **11.5 s** against
+    a ~34 s mean outer step (measured 2026-09-10, 23040 cells, field split on, `simplesmooth`, column
+    reach 3/3/3/3/2/2) -- a third of a step rather than a sixth. But a station's rebuild is not
+    *additional* cost: a march driven by a cost-triggered refresh rebuilds at a similar total rate
+    anyway. Counted from that case's own march logs, the rung ladder did **33** rebuilds over 59 steps
+    (28 of them cost-triggered) against this ramp's **37** over 32 -- comparable totals, because the
+    ladder's trigger fires on nearly every step of its long final rung. A station change largely
+    *replaces* one of those rather than adding one.
     ⚠️ An earlier draft of this paragraph said ~36 s, i.e. a whole step per rebuild and ~25 steps of
     overhead. That figure came from the design record rather than from a log and is **wrong by 3x**;
     the arithmetic built on it made a fine ramp look disqualified on that case when it is not. Measure
@@ -664,6 +730,15 @@ class ViscosityRampHomotopy:
         viscosity -- in practice a preconditioner refresh hook's ``rebind``, so the operator each step
         is preconditioned by is fitted to the station that step solves. ``None`` leaves the
         preconditioner alone, which is correct only if it is rebuilt by some other means.
+    companion : callable, optional
+        ``(coupled, scale) -> CoupledRANS``, **which viscosity a station scales**. Defaults to
+        :func:`scale_both_blocks`, whose stations are genuine lower-Reynolds problems;
+        :func:`scale_momentum_only` leaves the closure at the case's own viscosity, which keeps
+        ``omega`` at its target profile for the whole march at the price of stations that are not a
+        physical Reynolds number. Injected rather than branched on a flag because the two make
+        different claims about what an intermediate station *is*, and the choice changes which seed a
+        march should open from. It is never called for the target, whose assembler is the caller's own
+        object by identity.
 
     Examples
     --------
@@ -691,6 +766,7 @@ class ViscosityRampHomotopy:
         steps_per_station: int,
         redamping: float | None = None,
         rebind: Callable[[CoupledRANS], None] | None = None,
+        companion: Callable[[CoupledRANS, float], CoupledRANS] = scale_both_blocks,
     ) -> None:
         if anchor < 1.0:
             raise ValueError(
@@ -723,6 +799,7 @@ class ViscosityRampHomotopy:
         self.ratio = ratio
         self.redamping = float(redamping)
         self.rebind = rebind
+        self.companion = companion
         # The station whose assembler `_assembler` currently holds. -1 is "none entered yet", which is
         # not a station index, so the first `enter` always counts as a change and rebinds.
         self._station = -1
@@ -753,9 +830,7 @@ class ViscosityRampHomotopy:
             # -- the root and adjoint must belong to the case, and a rescale by one is a different
             # object holding a multiplied array rather than the original.
             self._assembler = (
-                self.coupled
-                if station >= self.stations
-                else self.coupled.with_scaled_molecular_viscosity(scale)
+                self.coupled if station >= self.stations else self.companion(self.coupled, scale)
             )
             if self.rebind is not None:
                 self.rebind(self._assembler)
@@ -804,6 +879,7 @@ def solve_reynolds_ramp(
     steps_per_station: int,
     point_setup: Callable[[CoupledRANS, jnp.ndarray, ReynoldsPoint], dict],
     redamping: float | None = None,
+    companion: Callable[[CoupledRANS, float], CoupledRANS] = scale_both_blocks,
     **solve_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Walk the same Reynolds span :func:`solve_reynolds_continuation` walks, inside **one** march.
@@ -819,12 +895,13 @@ def solve_reynolds_ramp(
     :func:`solve_coupled` accepts. That is what makes the two comparable as arms of one experiment -- a
     second configuration surface written beside the first would drift from it one keyword at a time.
 
-    Whether the ramp is cheaper than the ladder is a property of the **case**, not of the method, and
-    the deciding quantity is what a station change costs. A change re-points the preconditioner refresh
-    through :attr:`ViscosityRampHomotopy.rebind` and forces a full re-materialize, so the schedule's
-    cost is ``stations`` rebuilds against the outer steps it saves. Measure that ratio on a case before
-    carrying a schedule to it: it is small on a two-dimensional case (a rebuild is a fraction of an
-    outer step) and much larger on a three-dimensional one.
+    Whether the ramp is cheaper than the ladder is a property of the **case**, not of the method, so
+    measure a schedule on a case before carrying it there. A station change re-points the
+    preconditioner refresh through :attr:`ViscosityRampHomotopy.rebind` and forces a full
+    re-materialize -- but that is not ``stations`` rebuilds of *extra* cost, because a march driven by
+    a cost-triggered refresh rebuilds at a similar rate regardless, and a station change largely
+    replaces one of those. Counted on a three-dimensional backward-facing step, the ladder rebuilt 33
+    times over 59 steps and this ramp 37 times over 32.
 
     Parameters
     ----------
@@ -848,6 +925,10 @@ def solve_reynolds_ramp(
         keyword out and passing it separately, which is the same keyword twice and a ``TypeError``.
     redamping : float, optional
         Passed through to :class:`ViscosityRampHomotopy`; ``None`` takes its derived default.
+    companion : callable, optional
+        Passed through to :class:`ViscosityRampHomotopy` -- which viscosity a station scales. It also
+        decides this function's **seed**, which is built from the anchor companion it returns, so the
+        two cannot disagree about what problem the march opens on.
     **solve_kwargs
         The ladder's options. Keywords the ladder owns and :func:`solve_coupled` does not
         (``schedule``, ``intermediate_rtol`` / ``intermediate_atol``, ``seed_projection``, ``n_points``)
@@ -869,9 +950,18 @@ def solve_reynolds_ramp(
     # Materialize the seed rather than letting `solve_coupled` self-start, because the anchor station's
     # preconditioner must be frozen at the state the march actually begins from -- the same reason the
     # ladder materializes it before calling `point_setup`.
-    seed_fields = hybrid_initialize(coupled.momentum, coupled.turbulence)
-    state = coupled.state_from_physical(*seed_fields)
-    first = coupled.with_scaled_molecular_viscosity(anchor)
+    #
+    # ⚠️ Seeded from the ANCHOR station, not from the target. `hybrid_initialize` reads the assembler's
+    # own molecular viscosity to seed the near-wall `omega` at the profile the residual fixes there, so
+    # a seed built at the target's viscosity puts every wall-adjacent cell off the anchor's own boundary
+    # condition by the viscosity ratio -- which is the residual that seeding exists to remove. Measured
+    # on a three-dimensional backward-facing step with a hundredfold anchor: `omega` differed by up to
+    # 90x (`flow` and `k` not at all), and the anchor's first step opened at a row-scaled 9.60e-01
+    # against 3.29e-01 from its own seed, collapsing the line search to alpha 0.016 and costing two
+    # discarded attempts and a shift escalation to 4.0 before the march could begin.
+    first = companion(coupled, anchor)
+    seed_fields = hybrid_initialize(first.momentum, first.turbulence)
+    state = first.state_from_physical(*seed_fields)
     extra = point_setup(first, state, ReynoldsPoint(1, 1, float(anchor)))
     homotopy = ViscosityRampHomotopy(
         coupled,
@@ -880,6 +970,7 @@ def solve_reynolds_ramp(
         steps_per_station=steps_per_station,
         redamping=redamping,
         rebind=_rebinding(extra),
+        companion=companion,
     )
     passed = {key: value for key, value in solve_kwargs.items() if key not in _LADDER_ONLY}
     return solve_coupled(coupled, *seed_fields, homotopy=homotopy, **{**passed, **extra})
