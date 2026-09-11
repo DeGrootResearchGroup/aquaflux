@@ -2111,10 +2111,37 @@ tuning follow-up noted above.
                 across both cases is an **interior optimum near 2**: up to it the damping removes work,
                 past it the cheaper ramp is borrowed from the target. Do not quote the deferral as an
                 argument against damping; it is an argument against a *large* ratio.
-              - **Both cases, one number.** `gamma = 2` is the best measured constant on each, at -12 %
-                (pitzDaily 227 -> 200) and -14 % (`bfs3d` 190 -> 163), with the same converged root and
-                no retries on either. It is **not** a shipped default — both cases default to
-                `turbulence_damping = 1.0` and the library to `ConstantDamping(1.0)`.
+              - **⚠️ THE RATIO AND THE STATION COUNT INTERACT, so neither transfers alone (2026-09-11).**
+                Swept jointly on `bfs3d`'s momentum-only ramp, one run per arm, all reaching mid-span
+                `x_r/h` 8.3611. `march` is the march's own monotonic clock, which does not tick through
+                a machine sleep:
+
+                | stations | gamma | steps | cycles | ramp | target | esc | pc | march |
+                |---|---|---|---|---|---|---|---|---|
+                | 24 | 3 | 32 | **148** | 114 | 34 | 1 | 453 s | 1322 s |
+                | 12 | 2 | 27 | 154 | 42 | 112 | 2 | 249 s | 1145 s |
+                | 12 | 3 | 29 | 159 | 47 | 112 | 0 | 259 s | 1059 s |
+                | **12** | **5** | 29 | 150 | 44 | 106 | **0** | 245 s | **1001 s** |
+                | 12 | 8 | 29 | **141** | 54 | 87 | 4 | 256 s | 1186 s |
+                | 8 | 3 | 26 | 157 | 33 | 124 | 1 | 231 s | 1063 s |
+
+                **At 24 stations `gamma = 5` is worse than 3 (169 against 148); at 12 it is better (150
+                against 159).** A coarser ramp is a larger disturbance per station for the closure to
+                absorb, so the optimum ratio rises as the ramp coarsens — which means a station count
+                calibrated at `gamma = 1` does not survive the introduction of damping, and a `gamma`
+                calibrated at one station count does not transfer to another. `bfs3d` ships **12
+                stations at `gamma = 5`**; pitzDaily's optimum is **2** at 16 stations.
+              - **⚠️⚠️ RESTART CYCLES ARE THE WRONG INSTRUMENT FOR A SCHEDULE ON THIS CASE, TWICE OVER,
+                and both ways they flatter the wrong arm.** *(a)* They cannot see preconditioner
+                rebuilds, and a station change **forces a full re-materialize** — so the station count
+                is literally a count of forced-full rebuilds, at 11-16 s each here. By cycles, 24
+                stations wins (148 against 159); by the clock it loses by 25 %. On pitzDaily a rebuild
+                is ~1.5 s and cycles do decide, which is why the two cases' station optima differ.
+                *(b)* They omit **rejected attempts** — the count is recorded only on acceptance, so a
+                step whose attempts were all rejected contributes `0`. `gamma = 8` therefore posts the
+                fewest cycles of any arm (141) while being the second slowest (1186 s): its four
+                escalations are four discarded shifted solves the count never mentions. Judge a
+                schedule here on the march clock **and** the escalation count, with cycles third.
               - One run per arm. The pitzDaily arm is **deterministic** — an earlier configuration ran
                 twice and gave 33 / 191 both times — so single runs separate arms there; that is a
                 property of that case, not a general licence, and `bfs3d`'s own target-rung cost is on

@@ -258,9 +258,8 @@ RAMP_COMPANION = _RAMP_SCALINGS[RAMP_SCALE]
 #: blocks want different instruments: continuation for the momentum block's convective nonlinearity,
 #: damping for the closure's stiff sources.
 #:
-#: ⚠️ SWEPT HERE (2026-09-11) on the momentum-only ramp at 24 x 1 -- which is now this case's default
-#: arm, so the sweep and the shipped configuration are the same thing. One run per arm, everything else
-#: default, all four reaching mid-span `x_r/h` 8.3611:
+#: ⚠️ SWEPT HERE (2026-09-11) on the arm now shipped, so the calibration and the default are the same
+#: configuration. First at 24 stations, one run per arm, all reaching mid-span `x_r/h` 8.3611:
 #:
 #:     gamma   steps  cycles  ramp(24)  target  esc  handover |R|
 #:         1      31     190       151      39    2     4.337e-04
@@ -268,12 +267,17 @@ RAMP_COMPANION = _RAMP_SCALINGS[RAMP_SCALE]
 #:         3      32     148       114      34    1     5.646e-04
 #:         5      39     169       117      52    4     2.392e-03
 #:
-#: `gamma = 3` is the default: an interior optimum, 22% below the undamped control. The `gamma = 1`
-#: control was re-run on the current tree and is **bit-identical over all 31 steps** to the archived
-#: one, so these four arms share a base.
+#: The `gamma = 1` control was re-run on the current tree and is **bit-identical over all 31 steps** to
+#: the archived one, so those arms share a base and the shift-strength fix is confirmed a no-op at
+#: ratio 1 on a real march.
 #:
-#: ⚠️ THE OPTIMUM DIFFERS BETWEEN THE TWO CASES -- 3 here, 2 on pitzDaily (227 / 200 / 212 / 329 at
-#: gamma 1 / 2 / 5 / 10). Adjacent, but do not carry either number to a third case without measuring.
+#: ⚠️ **The default is 5, not the 3 that table picks**, because the station count moved to 12 and the
+#: two knobs interact -- see `RAMP_STATIONS` for the joint sweep. At 24 stations gamma 5 is worse than
+#: 3; at 12 it is better. A gamma calibrated at one station count does not transfer to another.
+#:
+#: ⚠️ THE OPTIMUM DIFFERS BETWEEN THE TWO CASES -- 5 here at 12 stations, 2 on pitzDaily at 16 (227 /
+#: 200 / 212 / 329 at gamma 1 / 2 / 5 / 10). Do not carry either number to a third case, or to a
+#: different schedule on this one, without measuring.
 #:
 #: ⚠️ Damping's cost is LAG, not instability: on the sibling, gamma=10 took 64 steps with zero
 #: escalations, zero stalls and alpha=1.000 throughout, the residual simply crawling at ~0.74 per step.
@@ -285,8 +289,41 @@ RAMP_COMPANION = _RAMP_SCALINGS[RAMP_SCALE]
 #: sibling shows the same past ITS optimum (handover 2.81e-3 / 5.80e-3 / 1.01e-2 at gamma 2 / 5 / 10,
 #: target 71 / 110 / 229). So a cheap ramp past the optimum is borrowed, not earned -- judge this knob
 #: on the TOTAL, never on a phase.
-TURB_DAMPING = float(os.environ.get("BFS3D_TURB_DAMPING", "3.0"))
-RAMP_STATIONS = int(os.environ.get("BFS3D_RAMP_STATIONS", "24"))
+TURB_DAMPING = float(os.environ.get("BFS3D_TURB_DAMPING", "5.0"))
+#: How many geometric viscosity stations the ramp walks (`BFS3D_RAMP_STATIONS`), one outer step each.
+#:
+#: ⚠️ 12, NOT the 24 this case used before damping existed -- and the two knobs INTERACT, so they were
+#: swept jointly (2026-09-11, one run per arm, all reaching mid-span `x_r/h` 8.3611). `march` is the
+#: march's own monotonic clock, which does not tick through a machine sleep:
+#:
+#:     stations  gamma  steps  cyc  ramp  target  esc  pc(s)  march(s)
+#:           24      3     32  148   114      34    1  453.3      1322
+#:           12      2     27  154    42     112    2  248.5      1145
+#:           12      3     29  159    47     112    0  259.4      1059
+#:           12      5     29  150    44     106    0  244.7      1001
+#:           12      8     29  141    54      87    4  255.7      1186
+#:            8      3     26  157    33     124    1  231.4      1063
+#:
+#: ⚠️⚠️ RESTART CYCLES ARE THE WRONG INSTRUMENT FOR THIS KNOB, TWICE OVER, and both ways they flatter
+#: the wrong arm:
+#:   * They cannot see preconditioner rebuilds. A station change FORCES a full re-materialize, so the
+#:     station count IS a count of forced-full rebuilds -- 11-16 s each on this mesh. Halving the
+#:     stations halves them and lets the rest take the cheap shift-only branch: 453s -> 259s. By cycles
+#:     24 stations "wins" (148 vs 159 at gamma 3); by wall clock it loses by 25%.
+#:   * They omit REJECTED attempts entirely -- the count is recorded only on acceptance, so a step whose
+#:     attempts were all rejected contributes 0. `gamma = 8` therefore posts the FEWEST cycles of any
+#:     arm (141) while being the second slowest (1186s), because its 4 escalations are four discarded
+#:     shifted solves the count never mentions.
+#: Judge a schedule here on the march clock AND the escalation count, with cycles as a third reading.
+#:
+#: The optimum moved UP in gamma as the ramp coarsened -- at 24 stations gamma 5 was worse than 3 (169
+#: vs 148 cycles), at 12 it is better (150 vs 159) -- which is the expected direction: a bigger jump per
+#: station is a larger disturbance for the closure to absorb. That coupling is why a station count
+#: calibrated at gamma = 1 does not survive the introduction of damping.
+#:
+#: Below 12 the curve is flat (8 stations is 1063s against 12's 1059s at gamma 3) and the handover
+#: residual keeps degrading, so 12 is the coarse end of a plateau rather than a peak.
+RAMP_STATIONS = int(os.environ.get("BFS3D_RAMP_STATIONS", "12"))
 RAMP_STEPS_PER_STATION = int(os.environ.get("BFS3D_RAMP_STEPS", "1"))
 #: `None` takes `ViscosityRampHomotopy`'s derived default (the station's own viscosity ratio raised to
 #: a fitted exponent, and exactly 1.0 at one step per station, where re-damping every step would make
