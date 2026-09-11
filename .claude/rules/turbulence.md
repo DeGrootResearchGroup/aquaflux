@@ -1979,104 +1979,147 @@ tuning follow-up noted above.
               already packs the shift **per block** (`coupled.py`, `flow_diagonal` and the two scalar
               transport diagonals, packed a line apart), so a per-block β multiplier is a small change
               rather than a redesign.
-            - **⚠️ BUILT AND SWEPT (`turbulence_damping`, 2026-09-10). A CONSTANT RATIO WINS 16 %, AND
-              THE OPTIMUM IS INTERIOR AND SHARP.** The k/ω rows' shift diagonal is multiplied by
-              `turbulence_damping`, so they run at an effective `turbulence_damping * beta` while the
-              velocity rows keep `beta`. Swept on pitzDaily, momentum-only scaling at its own best
-              **16 x 1**, everything else that case's defaults; `gamma = 1` is a **control** and
-              reproduced the recorded 27 / 227 **exactly**, so the knob is a true no-op at 1.0 and every
-              difference below is the damping.
+            - **⚠️ BUILT AND SWEPT (`turbulence_damping`, 2026-09-10/11). A CONSTANT RATIO OF 2 WINS
+              12 %, THE OPTIMUM IS INTERIOR, AND EVERY SCHEDULE TRIED IS DOMINATED BY IT.** The k/ω
+              rows' shift **strength** is multiplied by `turbulence_damping`, so they run at an
+              effective `turbulence_damping * beta` while the velocity rows keep `beta`.
+              - **⚠️⚠️ IT MULTIPLIES THE STRENGTH, NOT THE BASE DIAGONAL — and the first implementation
+                did the latter, which silently moved the march's own stopping bar.** The shift's base
+                diagonal is *also* the row scale of `coupled_scaled_norm`, the measure the march is
+                steered by, stopped on (`atol = 1e-5`) and compared across arms with. Folding the ratio
+                into it divided the k/ω rows of that measure by `gamma`, so **every damped arm ran to a
+                different physical bar, the looser bar going to the larger gamma.** Nothing reports
+                this: each arm's log looks normal and its `|R|` is self-consistent. The first recorded
+                sweep — "27/191, 29/206, 41/305 at gamma 2/5/10, gamma=10 stalling twice and going
+                backwards" — was taken under it and is **deleted**; re-measured honestly, `gamma = 10`
+                takes **64 steps with zero stalls**, so the confound had been hiding a third of that
+                arm's length. Damping now rides on `ShiftTerm.row_relaxation`, a closure of `beta`
+                applied in the step, and `coupled_scaled_norm` reads the undamped diagonal. Pinned both
+                ways (`test_damping_leaves_the_BASE_DIAGONAL_alone_...`).
+              - **The honest sweep.** pitzDaily, momentum-only scaling at **16 x 1**, everything else
+                that case's defaults, one run per arm, all reaching `x_r/h` 8.0686, zero escalations
+                except where noted. `gamma = 1` is a control and reproduces the recorded 27 / 227
+                exactly, so the knob is a true no-op at 1.0.
 
-              | `turbulence_damping` | steps | restart cycles | retries |
-              |---|---|---|---|
-              | 1 (control) | 27 | 227 | 0 |
-              | **2** | **27** | **191** | 0 |
-              | 5 | 29 | 206 | 0 |
-              | 10 | 41 | **305** | 0 |
+                | arm | steps | cycles | ramp (16 steps) | target station | `|R|` handed over |
+                |---|---|---|---|---|---|
+                | `gamma = 1` | 27 | 227 | — | ~84 | — |
+                | **`gamma = 2`** | 29 | **200** | 129 | **71** | 2.814e-03 |
+                | `gamma = 5` | 33 | 212 | 102 | 110 | 5.796e-03 |
+                | `gamma = 10` | 64 | 329 | **100** | 229 | 1.005e-02 |
+                | `gamma = 20` | — | — | 119 | — | — |
+                | taper 2 → 1 on `beta` | 28 | 234 | 150 | 84 | — |
+                | taper 10 → 1 on `beta` | 39 | 319 | 135 | 184 | — |
+                | taper 10 → 1 on `|R_turb|` | killed | — | 183 | stalling | — |
+                | station-keyed 5 → 2 | 29 | 211 | 102 | 109 | 5.796e-03 |
 
-              - **⚠️ THE TWO MARCH PHASES WANT OPPOSITE RATIOS, WHICH IS WHY NO CONSTANT IS GOOD.**
-                *Early* more damping is monotonically better — cycles to reach step 5 are 17 / 12 / 12 /
-                **11** at `gamma` 1 / 2 / 5 / 10, with `|R|` 1.14e-02 / 9.29e-03 / 6.98e-03 /
-                **5.72e-03**. *Late* it reverses hard: `gamma = 5` stalled once (`|R|` 1.327e-03 ->
-                1.324e-03 across a step) and `gamma = 10` stalled twice and went **backwards**
-                (9.503e-04 -> 9.548e-04) at 15–17 cycles a step, finishing **worse than no damping at
-                all**. `gamma = 2` wins not by being best anywhere but by being the least-bad compromise.
-              - **⚠️ NO ARM TOOK A SINGLE RETRY, `gamma = 10` INCLUDED.** Damping does exactly what it is
-                for — it stabilizes the step — and its cost is **lag**, not instability: the closure
-                trails the mean flow and the coupled residual cannot fall. Read a damping failure as a
-                stalled residual at healthy `alpha`, never as a divergence.
-              - **`gamma = 2` reaches 191, which is what the seeding defect achieved by accident** — the
-                first principled configuration to match it (correct seed, matched arms, zero retries).
-              - **The physical reading, and what it implies for a schedule.** Early the closure is far
-                from equilibrium with a flow that barely exists, so heavy damping lets it settle without
-                destabilizing; once it is near equilibrium, the same damping only makes it lag. So the
-                ratio wants to **start high and taper**. ⚠️ **A step-indexed schedule is the wrong
-                form** — this project has three recorded failures of predicting march behaviour from
-                static signals, and `beta` already decays as the march develops, so tying the ratio to
-                `beta / beta_0` reuses a signal the control already measures.
-              - ⚠️ **A taper is a SEAM change, not a parameter.** `ShiftTerm` deliberately returns a
-                **base** diagonal that the step later scales by `beta` (`solve/continuation.py`), so a
-                ratio that varies with `beta` must be applied where `beta` is known — in the step, not
-                in the policy. The constant was cheap precisely because it folds into the diagonal once.
-              - One run per point, four coarse points, one case. The 191-vs-206 gap is inside this
-                case's usual spread; the 305 is far outside it.
-            - **⚠️ `TurbulenceDamping` IS A STRATEGY, AND THE TAPER KEYS ON THE CLOSURE'S OWN RESIDUAL
-              (BUILT 2026-09-10).** `ConstantDamping(ratio)` is the sweep above; `ResidualTaperedDamping`
-              starts at `initial` and releases toward exactly `1` as `turbulence_residual_norm` falls
-              against a reference taken at the state the march opens from. Reaching exactly 1 is what
-              keeps the shift's dissolution at the root — and hence the converged solution and its
-              adjoint — untouched.
-              - **⚠️ `beta / beta_0` WAS THE OBVIOUS KEY AND IS THE WRONG ONE, for two reasons, both
-                checked against a log rather than reasoned.** `beta` is **adaptive**: the retry ladder
-                *raises* it on a bad step, so a beta-keyed ratio would spike the damping exactly when the
-                march is already struggling. And `beta` **floors at `beta_min` early** — step 13 of 41 in
-                the `gamma = 10` run — after which the ratio would be frozen for the whole remaining
-                march, *including every step where the damping does its damage*. The mechanism would be
-                inert precisely where it is needed.
-              - **⚠️ THE RESIDUAL WAS ALREADY FREE, which is why the protocol grew an argument.**
-                `PseudoTransientStep` evaluates `R(phi)` on the line immediately before it asks for the
-                shift, so `ShiftPolicy.shift_term(phi, residual=None)` now offers it. Re-deriving the
-                same quantity inside the policy would be one value computed in two places. The argument
-                is **optional** so the five policies that do not care are untouched.
-              - **It reads the k/omega rows only** (`turbulence_residual_norm`), because the two blocks
-                settle on different schedules and a whole-state norm is dominated by the mean flow — the
-                damping would then release on the *flow's* progress. Deliberately the **unscaled** norm:
-                the march re-equilibrates its row scales every outer step, so a ratio of two scaled norms
-                mixes progress with a change of measure.
-              - **A residual that RISES re-damps**, which is the same response `redamp` makes on entering
-                a continuation station, reached from a different direction. Clamped at `initial`, so a
-                march that gets worse than it started cannot run away to an unbounded shift.
-              - ⚠️ **Widening that protocol broke 21 tests, all of them STUB policies in `tests/`.** The
-                six library implementations were found and updated; seven stubs implementing the same
-                protocol were not, because the search was a string match on one exact type annotation.
-                **Find implementers of a Protocol structurally (AST), not by grepping a signature** — this
-                is the same shape as `sibling_builders.py`'s blind spots: a check that cannot see the case
-                reports clean.
-              - **⚠️ THE TAPER IS BUILT AND UNPROVEN: IT IS UNREACHABLE FROM BOTH VALIDATION CASES, AND
-                THE FIRST ATTEMPT MEASURED AS A CONSTANT (2026-09-10).** Run on pitzDaily at
-                `initial = 10`, momentum-only, 16 x 1: **41 steps / 305 restart cycles** — *bit-identical*
-                to constant `gamma = 10`, including its stall at steps 21→22. It never released. Two
-                independent causes, both measured rather than reasoned:
-                - **The reference was frozen at the ANCHOR's seed, and a continuation makes the problem
-                  HARDER as it walks.** Holding the state fixed and moving only the viscosity from anchor
-                  to target, `|R_turb|` *rises* 10 % (2.664e+02 → 2.930e+02). The ratio is therefore
-                  above 1 at every station, and the clamp pins the factor at `initial` for the whole
-                  march. **A reference is physics and must be rebuilt on refresh** — the same split this
-                  module already makes between `k_shift_transport` (rebuilt) and `k_jacobian_scale`
-                  (carried). `TurbulenceDamping.rebased` now does that, and is tested.
-                - ⚠️ **BUT `rebased` NEVER RUNS FROM EITHER CASE.** Both pass a finished `continuation=`
-                  to `solve_coupled`, so the continuation source is `_FinishedContinuation`, which *by
-                  design* cannot re-freeze the step; only `precondition_step` fires, and that rebuilds
-                  the **preconditioner**, not the shift policy. `_coupled_shift_policy(..., reuse=…)` is
-                  never reached. A `pc full` line in the log is **not** evidence that the shift policy
-                  was refreshed — that mis-read is what made the fix look plausible before it was tested.
-                - **Making it live needs `RefreshPolicy(builder=…)` in the case**, which re-freezes the
-                  policy per station — a change to how the case configures its solve, and one that would
-                  re-base every arm in the tables above, since all of them were measured *without* policy
-                  refreshes. Not done.
-                - **`PITZ_TURB_TAPER` now REFUSES rather than running inert**, for the same reason the
-                  `FILL_LEVELS` banner had to say `(INERT)`: a setting that silently does nothing is how
-                  a measurement gets attributed to a mechanism that was never active.
+              - **⚠️⚠️ THE FINDING THAT SUBSUMES THE REST: DAMPING DOES NOT REMOVE THE CLOSURE'S WORK, IT
+                DEFERS IT.** The phase split looks real and large — the ramp's cost falls monotonically
+                with `gamma` (129 → 102 → 100, turning back up at 20) while the target station's rises
+                (71 → 110 → 229) — so "damp the ramp, release at the target" appears to be worth
+                ramp 100 + target 71 = ~171 against the best constant's 200. **It is not available, and
+                that was measured rather than argued.** The station-keyed arm gets its cheap ramp exactly
+                as asked (102 cycles, matching constant `gamma = 5` *to the cycle*), and switching the
+                target station to `gamma = 2` then buys **one** cycle: 109 against constant-5's 110.
+                The target's cost is set by **the state the ramp hands it**, not by its own ratio, and
+                the handover residual scales with how hard the ramp damped (2.81e-3 / 5.80e-3 / 1.01e-2
+                at `gamma` 2 / 5 / 10). The two phases are **one budget**, and it is smallest at a
+                constant 2. Do not quote a per-phase cost as a saving.
+              - **⚠️ EVERY SIGNAL A SHIFT POLICY CAN READ MEASURES PROGRESS, AND PROGRESS SATURATES
+                INSIDE THE RAMP.** That is why both tapers fail, and it is the same defect in each:
+                keyed on `beta` the release is complete by **step 12 of the 16-step ramp** (the control
+                floors `beta` there), keyed on `|R_turb|` by **step 6** — the closure residual falls
+                100x in six steps, being dominated by the initial transient rather than by how far the
+                closure is from equilibrium. Both therefore spend the entire release inside the phase
+                that wants the damping and hand the target station a ratio of 1. Replay it on any run
+                with `validation/pitzdaily_openfoam/damping_taper_trace.py`, which reconstructs the
+                ratio actually applied from the checkpoints — a march log reports the ratio nowhere, and
+                a taper whose signal never moves is a *constant* wearing a taper's name.
+              - **⚠️ NO ARM TOOK A RETRY ON A CONSTANT RATIO, `gamma = 10` INCLUDED** (the beta-keyed
+                taper took five, see below). Damping does what it is for — it stabilizes the step — and
+                its cost is **lag**: `gamma = 10` runs 64 steps at `alpha = 1.000` throughout with the
+                residual crawling at ~0.74 per step for 34 steps at 3 cycles each. **Read a damping
+                failure as a residual that will not fall at healthy `alpha`, never as a divergence.**
+              - **⚠️ A `beta`-KEYED RATIO AND THE CONTROL'S OWN ESCALATION FORM A POSITIVE FEEDBACK
+                LOOP.** The retry ladder raises `beta` on a bad step, which raises the ratio, which makes
+                the closure lag harder, which keeps the residual from falling. Measured on the
+                `10 -> 1` arm: over steps 20-27 `gamma` climbed back to 6.4 while the residual rose
+                monotonically (3.15e-3 → 4.96e-3) and the control kept growing `beta` on cheap 2-cycle
+                steps; five escalations, ~90 cycles lost. ⚠️ This refutes the defence that "a retry
+                raising the damping is the response a bad step wants".
+              - **The strategies, all reachable and all measurable.** `ConstantDamping(ratio)`,
+                `BetaTaperedDamping(initial, beta_start, beta_min, exponent)` (linear in `log beta`,
+                since a Courant control moves `beta` geometrically), and
+                `ResidualTaperedDamping(initial, reference, layout, exponent)`. ⚠️ **Ending at `1` is a
+                choice about the PATH, not a correctness requirement** — the shift term is
+                `beta d (phi - phi_n)`, zero at the root whatever multiplies it, which is what licenses
+                a constant ratio at all. A taper ending *above* 1 is equally legitimate and is not
+                currently expressible.
+              - **⚠️ `ConstantDamping.ratio` IS STORED AS A JAX ARRAY, NOT THE FLOAT IT IS CONSTRUCTED
+                FROM.** `equinox.filter_jit` partitions on "is this an array", so a Python float rides
+                on the **static** side and is compared by value — swapping one per station would
+                recompile the entire coupled solve at every station, the same trap a `float` molecular
+                viscosity sprang on the Reynolds ramp. Pinned by
+                `test_swapping_the_damping_RATIO_is_a_compilation_cache_hit_not_a_recompile`.
+              - **⚠️ TWO PLUMBING DEFECTS MADE A RESIDUAL-KEYED POLICY STRUCTURALLY INERT, AND NEITHER
+                WAS THE CAUSE FIRST RECORDED.** The first recorded diagnosis — a reference frozen at the
+                anchor while a continuation makes the problem harder, so the clamp pins the factor — is
+                **true and was not load-bearing**; `rebased` exists and is tested, but the taper could
+                not have released whatever its reference was, because: (a)
+                `MonolithicFactorShiftPolicy.shift_term` rebuilt its `ShiftTerm` from
+                `base.shift_term(phi).diagonal` alone, dropping the residual on the way in and the
+                per-row multiplier on the way out; and (b) **`DualTimeStep` never passed the residual at
+                all** — and every case that wants a damping runs `inner_steps > 1`, i.e. that step. Both
+                fixed and pinned (`test_the_dual_time_step_hands_the_policy_the_residual_it_just_computed`,
+                `test_the_residual_taper_survives_the_MONOLITHIC_WRAPPER_the_cases_actually_run`). The
+                standing lesson: **a wrapper that rebuilds a `ShiftTerm` from `.diagonal` drops
+                everything else in silence** — the march runs and the behaviour simply never happens.
+              - **⚠️ Widening `ShiftPolicy.shift_term` broke 21 tests, all of them STUB policies in
+                `tests/`.** The six library implementations were found and updated; seven stubs were not,
+                because the search was a string match on one exact type annotation. **Find implementers
+                of a Protocol structurally (AST), not by grepping a signature** — the same shape as
+                `sibling_builders.py`'s blind spots: a check that cannot see the case reports clean.
+              - **`solve_coupled(station_step=...)` / `forward_march(station_step=...)` — the seam a
+                station-varying setting needs (BUILT 2026-09-11).** `(step, station, arrived) -> step`,
+                called once per outer step when a homotopy is running, letting the caller reshape the
+                forward step for the station it is about to run. It exists because the discriminator a
+                per-station setting needs — *which station is this* — is known only to the march, while
+                everything the shift policy can read is a progress measure. ⚠️ It must swap **array**
+                leaves over a fixed structure (`eqx.tree_at`), exactly as the march's own per-step
+                measure swap does, or every station recompiles the solve. **Its measured verdict is
+                negative** (the non-composition result above) — it is kept because it is the instrument
+                that established that, and because nothing else can express a per-station setting.
+              - **✅ IT TRANSFERS TO `bfs3d`, AND THERE IT IS FREE IN BOTH PHASES (2026-09-11).** The
+                same ratio, measured on the case the whole idea came from. Momentum-only at **24 x 1**
+                (matched to that case's recorded control), everything else its defaults: 23040 cells,
+                anchor Re/100, `beta_start` 0.5, field split on, `simplesmooth` / `jacobi`, column reach
+                3/3/3/3/2/2, ILU(0) x 4, coarse 2000, `PC_BETA_FLOOR` 0.05, `REFRESH_ON_CYCLES` 3, stop
+                `rtol=0, atol=1e-5`, compiled ILU(0) live. Both arms reach mid-span `x_r/h` **8.3611**.
+
+                | arm | steps | cycles | ramp (24 steps) | target station | escalations |
+                |---|---|---|---|---|---|
+                | `gamma = 1` (control) | 31 | 190 | 151 | 39 | 2 |
+                | **`gamma = 2`** | 31 | **163** | **130** | **33** | **0** |
+
+                **14 % cheaper, better in BOTH phases, and it removes both escalations** — against 12 %
+                on the sibling. The control reproduces the recorded 31 / 190 / ramp 151 / target 39
+                exactly, so this is one tree, two arms, one variable.
+              - **⚠️ SO THE DEFERRAL IS A PROPERTY OF THE RATIO, NOT OF DAMPING.** On `bfs3d` the
+                cheaper ramp costs nothing at the handover — both arms enter the target station at the
+                same residual (4.27e-4 against 4.34e-4) — whereas on pitzDaily the handover degrades
+                monotonically from `gamma` 2 to 10 (2.81e-3 / 5.80e-3 / 1.01e-2). The consistent reading
+                across both cases is an **interior optimum near 2**: up to it the damping removes work,
+                past it the cheaper ramp is borrowed from the target. Do not quote the deferral as an
+                argument against damping; it is an argument against a *large* ratio.
+              - **Both cases, one number.** `gamma = 2` is the best measured constant on each, at -12 %
+                (pitzDaily 227 -> 200) and -14 % (`bfs3d` 190 -> 163), with the same converged root and
+                no retries on either. It is **not** a shipped default — both cases default to
+                `turbulence_damping = 1.0` and the library to `ConstantDamping(1.0)`.
+              - One run per arm. The pitzDaily arm is **deterministic** — an earlier configuration ran
+                twice and gave 33 / 191 both times — so single runs separate arms there; that is a
+                property of that case, not a general licence, and `bfs3d`'s own target-rung cost is on
+                record as swinging +-275 s with how many escalations it needs (the `gamma = 2` arm takes
+                none, which is part of why it is cheaper).
             - **It also lands the ladder's `x_r/h` (8.3611) where the both-blocks ramp landed 8.966.**
               Suggestive only: `atol = 1e-5` does not pin that metric to a cell on this mesh (see the
               entry above), and this is one run per arm. Do not quote it as an accuracy result.

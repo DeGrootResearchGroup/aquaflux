@@ -174,10 +174,39 @@ class ShiftTerm(NamedTuple):
         ``relaxation -> M`` giving the frozen preconditioner ``M`` (a matvec approximating the
         *shifted* operator's inverse) for a given ``β``, or ``None`` for an unpreconditioned solve.
         Passed the same ``β`` the diagonal is scaled by, so ``M`` inverts the same shifted operator.
+    row_relaxation : callable or None
+        ``relaxation -> scale``, a per-row multiplier on ``β`` of the diagonal's shape, so the shift
+        becomes ``β scale(β) d`` and different blocks may run at different pseudo-timesteps. ``None``
+        (the default) is one ``β`` for the whole state.
+
+        A **closure of β rather than an array**, for the same reason ``make_preconditioner`` is one: the
+        step escalates ``β`` between attempts, so anything that depends on it must be evaluated at the
+        value actually used and not at the one current when the diagonal was formed. Folding a
+        block-dependent factor into ``diagonal`` instead silently multiplies the shift's **floor** —
+        ``β`` reaches the step already clamped at ``beta_min``, so a constant factor there keeps that
+        block damped after the march has switched damping off for every other one.
     """
 
     diagonal: jnp.ndarray
     make_preconditioner: Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray] | None]
+    row_relaxation: Callable[[jnp.ndarray], jnp.ndarray] | None = None
+
+    def shift(self, relaxation: jnp.ndarray) -> jnp.ndarray:
+        """The shift ``β scale(β) d`` actually added to the Jacobian diagonal, shape ``(n_dof,)``.
+
+        The one place the base diagonal and the per-row multiplier are combined. Every consumer that
+        needs the shift at a given ``β`` -- the step that adds it to the operator, and anything
+        assembling a preconditioner for that same shifted operator -- goes through this, so the two
+        cannot disagree about what "the shift" is.
+
+        Parameters
+        ----------
+        relaxation : jnp.ndarray
+            The shift strength ``β``, a scalar, as the step will actually use it (already clamped).
+        """
+        if self.row_relaxation is None:
+            return relaxation * self.diagonal
+        return relaxation * self.row_relaxation(relaxation) * self.diagonal
 
 
 class ShiftPolicy(Protocol):
@@ -579,7 +608,9 @@ class PseudoTransientStep(ShiftedStep):
             def attempt(relaxation: jnp.ndarray) -> _Attempt:
                 # The shift only reshapes the forward path (like the preconditioner it damps), so it
                 # is detached: it never perturbs the converged state or its adjoint.
-                shift = jax.lax.stop_gradient(relaxation * term.diagonal)  # β d over the full state
+                # `row_relaxation` lets a block run at its own pseudo-timestep, evaluated at the β
+                # this attempt actually uses rather than the one current when `term` was formed.
+                shift = jax.lax.stop_gradient(term.shift(relaxation))  # β scale(β) d, full state
                 # Preconditioner inverts the *same* shifted operator it is damped by. The solve does
                 # not throw: a non-convergent shifted system yields a candidate the acceptance test
                 # rejects (triggering more damping), rather than raising.
@@ -1008,12 +1039,18 @@ class DualTimeStep(ShiftedStep):
             reference = phi  # φⁿ, held across the inner loop
             # ‖R(φⁿ)‖ = ‖G(φⁿ)‖: the transient term β d (φ − φⁿ) is zero at the anchor, so the honest
             # steady residual at the anchor and the inner loop's starting G-norm are the same number.
-            reference_norm = norm(residual_fn(reference))
+            reference_residual = residual_fn(reference)
+            reference_norm = norm(reference_residual)
             relaxation = schedule.relaxation(reference_norm, residual_norm_0)
-            term = policy.shift_term(reference)
+            # Hand the policy the residual just computed rather than letting it re-derive R(φⁿ): a
+            # policy whose shift depends on how far the state is from a root then reads it for free.
+            # ⚠️ Omitting it here does NOT fail — `residual` is optional, so such a policy silently
+            # falls back to its no-residual branch and runs as a constant. That is how a per-block
+            # damping tapered on the residual measured as a no-op on this very path.
+            term = policy.shift_term(reference, reference_residual)
             # The shift only reshapes the forward path (like the preconditioner it damps), so detach it:
             # it never perturbs the converged state or its adjoint.
-            shift = jax.lax.stop_gradient(relaxation * term.diagonal)  # β d over the full state
+            shift = jax.lax.stop_gradient(term.shift(relaxation))  # β scale(β) d, full state
             preconditioner = term.make_preconditioner(relaxation)
             target = inner_tol * reference_norm
 

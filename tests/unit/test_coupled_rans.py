@@ -1437,7 +1437,11 @@ def _stub_step(preconditioner, beta, diagonal):
 
     from aquaflux.solve import ShiftTerm
 
-    base = SimpleNamespace(shift_term=lambda _phi: ShiftTerm(diagonal, lambda _relaxation: None))
+    # Accepts the optional residual even though the refresh hook does not pass one: a stand-in that
+    # is narrower than the protocol breaks silently the day a caller starts supplying it.
+    base = SimpleNamespace(
+        shift_term=lambda _phi, _residual=None: ShiftTerm(diagonal, lambda _relaxation: None)
+    )
     return SimpleNamespace(
         relaxation_schedule=SimpleNamespace(beta=beta),
         shift_policy=SimpleNamespace(preconditioner=preconditioner, base=base),

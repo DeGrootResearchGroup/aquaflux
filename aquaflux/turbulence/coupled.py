@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import abc
 import dataclasses
+import math
 import time
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, NamedTuple, Protocol
@@ -555,11 +556,20 @@ class TurbulenceDamping(eqx.Module):
     :class:`ResidualTaperedDamping`). Implementations differ in what they read to decide.
     """
 
-    def factor(self, residual: jnp.ndarray | None) -> jnp.ndarray:
-        """The multiplier on the closure's shift diagonal, ``>= 1``.
+    def factor(self, relaxation: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
+        """The multiplier on the closure's shift strength, ``>= 1``.
+
+        ⚠️ **It multiplies the shift STRENGTH, never the diagonal.** The two differ where it matters:
+        ``beta`` reaches the step already clamped at ``beta_min``, so a factor folded into the diagonal
+        multiplies that floor and the closure never stops being damped -- and the diagonal is also the
+        row scale of the march's own residual measure
+        (:func:`coupled_scaled_norm`), so damping it silently divides the ``k``/``omega`` rows of the
+        quantity the march is steered and judged by. Returning a factor here keeps both honest.
 
         Parameters
         ----------
+        relaxation : jnp.ndarray
+            The shift strength ``beta`` this attempt will actually use, a scalar, already clamped.
         residual : jnp.ndarray or None
             The full coupled residual at this iterate when the caller has it, else ``None`` (the first
             shift a march builds, before any residual has been formed).
@@ -584,20 +594,26 @@ class ConstantDamping(TurbulenceDamping):
 
     Attributes
     ----------
-    ratio : float
-        The multiplier, ``>= 1``.
+    ratio : jnp.ndarray
+        The multiplier, ``>= 1``. **Stored as a JAX array, not as the Python float it is usually
+        constructed from**, so that swapping it on a live march is a compilation-cache hit rather than
+        a full recompile of the coupled solve: ``equinox.filter_jit`` partitions on "is this an array",
+        so a Python float would ride on the *static* side and be compared by value. That is what makes a
+        ratio the caller varies between continuation stations affordable at all -- the same trap a
+        ``float`` molecular viscosity sprang on the Reynolds ramp, where every rung recompiled.
     """
 
-    ratio: float = 1.0
+    ratio: jnp.ndarray = eqx.field(converter=jnp.asarray, default=1.0)
 
     def __check_init__(self) -> None:
-        if self.ratio < 1.0:
+        # Concrete at construction -- a damping is configured outside the march, never inside a trace.
+        if float(self.ratio) < 1.0:
             raise ValueError(f"ratio must be >= 1 (damping never accelerates), got {self.ratio}")
 
-    def factor(self, residual: jnp.ndarray | None) -> jnp.ndarray:
-        """``ratio``, whatever the state."""
-        del residual
-        return jnp.asarray(float(self.ratio))
+    def factor(self, relaxation: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
+        """``ratio``, whatever the shift or the state."""
+        del relaxation, residual
+        return self.ratio
 
     def rebased(self, coupled: CoupledRANS, state: jnp.ndarray) -> TurbulenceDamping:
         """Unchanged -- a constant has no reference to re-derive."""
@@ -626,8 +642,12 @@ class ResidualTaperedDamping(TurbulenceDamping):
     actually about.
 
     The factor is ``1 + (initial - 1) * min(1, |R_turb| / reference) ** exponent``, so it starts at
-    ``initial`` and reaches exactly ``1`` as the closure converges -- which keeps the shift's dissolution
-    at the root, and hence the converged solution and its adjoint, untouched.
+    ``initial`` and reaches ``1`` as the closure converges.
+
+    ⚠️ **Ending at ``1`` is a choice about the PATH, not a correctness requirement** -- the shift term is
+    ``beta d (phi - phi_n)``, which is zero at ``phi == phi_n`` whatever multiplies it, so *any* factor
+    dissolves at the root and leaves the converged solution and its adjoint untouched. That is what
+    licenses :class:`ConstantDamping` at all. A taper is therefore free to end above ``1``.
 
     A residual that **rises** -- as it does when a continuation station moves the problem -- raises the
     factor again, which is the same response
@@ -658,12 +678,13 @@ class ResidualTaperedDamping(TurbulenceDamping):
                 f"initial must be >= 1 (damping never accelerates), got {self.initial}"
             )
 
-    def factor(self, residual: jnp.ndarray | None) -> jnp.ndarray:
+    def factor(self, relaxation: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
         """The tapered multiplier; ``initial`` when no residual is available yet.
 
         The march's very first shift is built before any residual exists, and that is the step the
         damping is most for -- so ``None`` opens at ``initial`` rather than at ``1``.
         """
+        del relaxation
         if residual is None:
             return jnp.asarray(float(self.initial))
         share = jnp.clip(turbulence_residual_norm(self.layout, residual) / self.reference, 0.0, 1.0)
@@ -685,6 +706,88 @@ class ResidualTaperedDamping(TurbulenceDamping):
             layout=coupled.layout,
             exponent=self.exponent,
         )
+
+
+class BetaTaperedDamping(TurbulenceDamping):
+    """Damp the closure hard while the pseudo-timestep is small, and release as the shift relaxes.
+
+    **Why a taper rather than a constant.** Measured on a backward-facing-step sibling (pitzDaily, 16
+    momentum-only viscosity stations, one run per point), the ratio that is best early is the worst
+    late. Cycles to reach step 5 fall monotonically with the ratio -- 17 / 12 / 12 / 11 at 1 / 2 / 5 /
+    10 -- while the totals are 227 / **191** / 206 / **305**: at 10 the march stalls twice in the late
+    phase, its residual moving *backwards* (9.503e-04 -> 9.548e-04) at 15-17 restart cycles a step, and
+    finishes worse than no damping at all. Early the closure is far from equilibrium with a flow that
+    barely exists and heavy damping lets it settle; once it is near equilibrium the same damping only
+    makes it lag the mean flow, and the coupled residual cannot fall.
+
+    **Why ``beta`` is the key.** It is the quantity the march already measures its own development by:
+    a Courant-ramped control grows the pseudo-timestep (lowers ``beta``) exactly as the flow settles, so
+    ``beta`` falling *is* the transition from the phase that wants damping to the phase that does not.
+    Two objections that look fatal and are not:
+
+    * ``beta`` **floors at** ``beta_min``, early -- step 13 of 41 on the measured run. What it freezes
+      at is ``factor = 1``, i.e. the taper switched off, which is the end state the taper is walking
+      toward anyway. A signal that saturates *at the value it is meant to reach* is not inert.
+    * ``beta`` is **adaptive**, so the retry ladder raises it on a bad step and the damping rises with
+      it. That is the response a bad step wants -- a step that had to be re-damped is one whose closure
+      was moving too fast -- so the coupling runs the right way round, not the wrong one.
+
+    The share is taken in ``log beta`` because a Courant control moves ``beta`` geometrically (one
+    ``/grow`` per comfortable step), so a share linear in ``log beta`` releases linearly in **outer
+    steps** -- an even release over the descent rather than one spent in its first few steps.
+
+    ⚠️ **The endpoints must be the step control's own.** ``beta_start`` and ``beta_min`` say where the
+    taper opens and where it reaches exactly ``1``; if they disagree with the control's, the taper still
+    runs, but it reaches ``1`` somewhere the march never visits (too low: the closure stays damped for
+    the whole march; too high: the damping is spent before it is needed). Nothing detects that -- wire
+    all three from the same constants.
+
+    ⚠️ **Ending at ``1`` is a choice about the PATH, not a correctness requirement.** The shift term is
+    ``beta d (phi - phi_n)``, zero at ``phi == phi_n`` whatever multiplies it, so any factor dissolves at
+    the root -- which is what licenses :class:`ConstantDamping` in the first place. Read ``beta_min`` as
+    "where the taper stops releasing", and note that a taper ending above ``1`` is equally legitimate and
+    is not expressible here.
+
+    Attributes
+    ----------
+    initial : float
+        The ratio at ``beta_start``, ``>= 1``.
+    beta_start : float
+        The shift strength the march opens at -- where the factor is ``initial``.
+    beta_min : float
+        The control's floor -- where the factor reaches ``1``. A ``beta`` at or below it is undamped.
+    exponent : float
+        Shapes the release: ``1`` is linear in ``log beta`` (and so in outer steps), ``> 1`` holds the
+        damping longer.
+    """
+
+    initial: float
+    beta_start: float
+    beta_min: float
+    exponent: float = 1.0
+
+    def __check_init__(self) -> None:
+        if self.initial < 1.0:
+            raise ValueError(
+                f"initial must be >= 1 (damping never accelerates), got {self.initial}"
+            )
+        if not 0.0 < self.beta_min < self.beta_start:
+            raise ValueError(
+                "the taper needs a span to run over: 0 < beta_min < beta_start, got "
+                f"beta_min={self.beta_min}, beta_start={self.beta_start}"
+            )
+
+    def factor(self, relaxation: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
+        """``1 + (initial - 1) * share ** exponent``, with ``share`` the fraction of the descent left.
+
+        ``share = log(beta / beta_min) / log(beta_start / beta_min)``, clipped to ``[0, 1]`` so a
+        ``beta`` escalated above ``beta_start`` damps at ``initial`` rather than running away, and one
+        at the floor damps at exactly ``1``.
+        """
+        del residual
+        span = math.log(self.beta_start / self.beta_min)
+        share = jnp.clip(jnp.log(relaxation / self.beta_min) / span, 0.0, 1.0)
+        return 1.0 + (self.initial - 1.0) * share**self.exponent
 
 
 def as_damping(damping: TurbulenceDamping | float) -> TurbulenceDamping:
@@ -755,10 +858,13 @@ class CoupledShiftPolicy(eqx.Module):
         parts (the scalar shift diagonals are pre-combined at build time). The default
         :class:`~aquaflux.solve.LocalCourantBasis` (weight ``1``) is ``a_P`` -- uniform under-relaxation,
         unchanged from the historical shift; a convective basis gives a local convective time step.
-    turbulence_damping : float
-        How much harder the ``k``/``omega`` rows are damped than the flow rows: their shift diagonal is
-        multiplied by this, so those rows run at an effective ``turbulence_damping * beta`` while the
-        velocity rows keep ``beta``. ``1.0`` (the default) is a single shift for the whole state.
+    turbulence_damping : TurbulenceDamping
+        How much harder the ``k``/``omega`` rows are damped than the flow rows: the shift **strength**
+        on those rows is multiplied by this, so they run at an effective ``turbulence_damping * beta``
+        while the velocity rows keep ``beta``. ``ConstantDamping(1.0)`` (the default) is a single shift
+        for the whole state. It rides on the strength rather than on the base diagonal
+        (:meth:`TurbulenceDamping.factor` says why), so it reaches the shift and the preconditioner
+        fitted to it, and reaches neither the shift's floor nor the march's residual measure.
 
         **The two blocks are hard for different reasons, and one scalar shift has to satisfy both.** The
         momentum block's difficulty is the convective nonlinearity, which a viscosity continuation
@@ -771,10 +877,11 @@ class CoupledShiftPolicy(eqx.Module):
         ``phi == phi_n``), so this changes the *path* a march takes and neither the converged solution
         nor its adjoint -- the same property that licenses ``beta`` itself.
 
-        ⚠️ **It raises the closure's effective shift floor to** ``turbulence_damping * beta_min``, and the
-        step control still adapts a single ``beta`` against a **global** line search, so it cannot see
-        which block is asking for the caution. A constant ratio is therefore the honest form; a per-block
-        adaptive shift is a different design and needs the control to grow a per-block signal first.
+        ⚠️ **The step control still adapts a single ``beta`` against a GLOBAL line search**, so it cannot
+        see which block is asking for the caution -- which is why the ratio is a strategy the caller
+        chooses (a constant, or a taper keyed on something the march already measures) rather than
+        something the control adapts. A per-block adaptive shift is a different design and needs the
+        control to grow a per-block signal first.
     """
 
     layout: FieldLayout
@@ -820,15 +927,25 @@ class CoupledShiftPolicy(eqx.Module):
         )
         # The scalar shift diagonal is transport-time-scale * coordinate factor; kept as two fields so a
         # refresh rebuilds the transport half and carries the coordinate half (see `_coupled_shift_policy`).
-        # `turbulence_damping` multiplies ONLY the two scalar halves, so the closure's rows run at an
-        # effective `turbulence_damping * beta` while the velocity rows keep `beta`. The shift vanishes
-        # at the root, so this moves the path and not the answer.
-        damping = self.turbulence_damping.factor(residual)
         diagonal = self.layout.pack(
             flow_diagonal,
-            jax.lax.stop_gradient(damping * self.k_shift_transport * self.k_jacobian_scale),
-            jax.lax.stop_gradient(damping * self.omega_shift_transport * self.omega_jacobian_scale),
+            jax.lax.stop_gradient(self.k_shift_transport * self.k_jacobian_scale),
+            jax.lax.stop_gradient(self.omega_shift_transport * self.omega_jacobian_scale),
         )
+
+        def row_relaxation(relaxation: jnp.ndarray) -> jnp.ndarray:
+            """``turbulence_damping`` on the two scalar blocks, ``1`` on the flow rows.
+
+            The closure's rows then run at an effective ``damping * beta`` while the velocity rows keep
+            ``beta``. The shift vanishes at the root either way, so this moves the path and not the
+            answer. It rides here rather than in ``diagonal`` for the two reasons
+            :meth:`TurbulenceDamping.factor` gives: the diagonal multiplies the CLAMPED ``beta``, so a
+            factor there survives the floor the march switches damping off at; and the same diagonal is
+            the row scale of the march's residual measure, which damping must not touch.
+            """
+            gamma = self.turbulence_damping.factor(relaxation, residual)
+            scalar = jnp.full((n_cells,), gamma)
+            return self.layout.pack(jnp.ones_like(flow_diagonal), scalar, scalar)
 
         def make_preconditioner(relaxation: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
             block = self.flow_preconditioner
@@ -859,7 +976,7 @@ class CoupledShiftPolicy(eqx.Module):
 
             return precondition
 
-        return ShiftTerm(diagonal, make_preconditioner)
+        return ShiftTerm(diagonal, make_preconditioner, row_relaxation)
 
     def adjoint_factory(self) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]:
         """The ``state -> M`` factory for the adjoint transpose solve (the composition at ``beta = 0``).
@@ -1316,8 +1433,13 @@ def coupled_scaled_norm(
 
     * **Row scale** -- each row's own diagonal coefficient, taken from the pseudo-transient shift's
       base diagonal, which is exactly that quantity per block (the momentum ``a_P`` on velocity, the
-      transport diagonal on ``k`` and ``omega``) and so cannot drift from it. Two rows are not covered
-      by it and are supplied here:
+      transport diagonal on ``k`` and ``omega``) and so cannot drift from it. ⚠️ **The base diagonal,
+      not the shift** -- the strength ``beta`` and any per-block multiplier on it
+      (:attr:`CoupledShiftPolicy.turbulence_damping`) are solver settings, and folding one into the row
+      scale would divide that block's reported residual by it: the march would be steered, stopped and
+      compared on a measure that moves with its own damping, so two damping settings could not be
+      compared at all. Two rows are not covered by the diagonal and are supplied here:
+
       - **Continuity carries no diagonal** -- it is a constraint, so the shift leaves it at zero. Its
         residual is a mass imbalance, and the natural scale of the same units is the cell's mass
         throughput ``sum_f max(mdot_f, 0)``. Dividing by it needs no pressure difference, so it stays
@@ -1935,14 +2057,19 @@ class MonolithicFactorShiftPolicy(eqx.Module):
         phi : jnp.ndarray
             The flat coupled state ``[flow..., k, omega]``, shape ``((dim + 3) n_cells,)``.
         """
-        diagonal = self.base.shift_term(phi).diagonal
+        # ⚠️ Forward BOTH of the base term's β-dependent parts. A wrapper that rebuilds a `ShiftTerm`
+        # from only `.diagonal` silently discards whatever else the base put there, and the loss is
+        # invisible: the march runs, and the dropped behaviour simply never happens. That is exactly how
+        # an earlier per-block damping measured as a no-op on this path.
+        base = self.base.shift_term(phi, residual)
+        diagonal = base.diagonal
         if getattr(self.preconditioner, "solves_exactly_on_host", False):
             # The step applies the host exact-Jacobian full solve directly (see `_shifted_solve`):
             # `preconditioner.exact_solve(phi, -rhs, shift)`. The shift already carries the relaxation.
-            return ShiftTerm(diagonal, lambda relaxation: self.preconditioner)
+            return ShiftTerm(diagonal, lambda relaxation: self.preconditioner, base.row_relaxation)
         apply = self.preconditioner.matvec()
         # The factorization is frozen, so the preconditioner does not depend on the shift strength.
-        return ShiftTerm(diagonal, lambda relaxation: apply)
+        return ShiftTerm(diagonal, lambda relaxation: apply, base.row_relaxation)
 
     def adjoint_factory(self) -> TransposedPreconditioner:
         """The ``state -> M^T`` factory for the adjoint transpose solve.
@@ -2252,8 +2379,14 @@ def _frozen_shift_diagonal(base: CoupledShiftPolicy, beta: float, state: jnp.nda
     ``beta`` scales the base policy's shift diagonal; the ``stop_gradient`` keeps the frozen
     factorization off the differentiation path. Shared by the initial build and every in-place refresh,
     for the complete-LU and multigrid preconditioners alike.
+
+    It asks the term for the shift at ``beta`` rather than scaling the diagonal itself, so a policy
+    that runs a block at its own pseudo-timestep (:attr:`CoupledShiftPolicy.turbulence_damping`)
+    preconditions the operator it actually forms. Open-coding ``beta * diagonal`` here would drop that
+    factor silently -- the march would run, and the preconditioner would simply be fitted to a
+    different operator than the one being solved.
     """
-    return np.asarray(beta * jax.lax.stop_gradient(base.shift_term(state).diagonal))
+    return np.asarray(jax.lax.stop_gradient(base.shift_term(state).shift(beta)))
 
 
 def _coupled_step(
@@ -3607,7 +3740,7 @@ def _beta_tracking_refresh(
             _report_refresh("none", started)
             return
         frozen = jax.lax.stop_gradient(state)
-        shift = pc_beta * np.asarray(jax.lax.stop_gradient(policy.base.shift_term(state).diagonal))
+        shift = np.asarray(jax.lax.stop_gradient(policy.base.shift_term(state).shift(pc_beta)))
         if branch == "shift":
             # The Jacobian still matches the flow, so only the shift needs re-adding. Note the shift is
             # `pc_beta * d(state)` and the per-cell `d` tracks the state even where `pc_beta` is pinned,
@@ -3667,8 +3800,10 @@ def _beta_tracking_refresh(
         pc = bound_step["step"].shift_policy.preconditioner
         beta = max(float(bound_step["step"].relaxation_schedule.beta), beta_floor)
         frozen = jax.lax.stop_gradient(jnp.asarray(iterate))
-        shift = beta * np.asarray(
-            jax.lax.stop_gradient(bound_step["step"].shift_policy.base.shift_term(frozen).diagonal)
+        shift = np.asarray(
+            jax.lax.stop_gradient(
+                bound_step["step"].shift_policy.base.shift_term(frozen).shift(beta)
+            )
         )
         _report_refresh(
             "inner",
@@ -4195,6 +4330,7 @@ def solve_coupled(
     retry: RetryPolicy = NO_RETRIES,
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
+    station_step: Callable[[ForwardStep, int, bool], ForwardStep] | None = None,
     **continuation_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system ``R(u, p, k, omega) = 0`` by one monolithic Newton solve.
@@ -4210,6 +4346,15 @@ def solve_coupled(
     ----------
     coupled : CoupledRANS
         The coupled residual assembler; **the differentiable parameter pytree** for the adjoint.
+    station_step : callable, optional
+        ``(step, station, arrived) -> step``, forwarded to
+        :func:`~aquaflux.solve.forward_march`: reshape the forward step for the continuation station it
+        is about to run. The use it exists for is a per-block damping that differs between a homotopy's
+        intermediate stations and its target -- measured on a viscosity ramp, the closure's rows want a
+        much larger share of the shift while the ramp is walking than once the target problem is
+        reached, and no signal a shift policy can read for itself distinguishes those. Forward-only
+        (the march's other observation seams are), and ``None`` (the default) is byte-identical.
+        ⚠️ It must swap **array** leaves over a fixed structure or every station recompiles the solve.
     flow, k, omega : jnp.ndarray or None
         The initial flow state ``((dim + 1) n_cells,)`` and turbulence fields ``(n_cells,)``. **Leave
         any of them ``None`` to self-start from a hybrid initial condition**
@@ -4540,6 +4685,7 @@ def solve_coupled(
                 retry=retry,
                 on_retry=on_retry,
                 homotopy=homotopy,
+                station_step=station_step,
             )
             state = result.state
             control_state = result.control_state
@@ -4610,14 +4756,24 @@ class _MassFlowBorderedPolicy(eqx.Module):
 
     def shift_term(self, phi: jnp.ndarray, residual: jnp.ndarray | None = None) -> ShiftTerm:
         """The augmented block-diagonal shift and the bordered preconditioner at ``phi``."""
-        inner_term = self.inner.shift_term(phi[: self.inner.layout.size])
+        inner = phi[: self.inner.layout.size]
+        inner_term = self.inner.shift_term(
+            inner, None if residual is None else residual[: self.inner.layout.size]
+        )
         diagonal = jnp.append(inner_term.diagonal, 0.0)
 
         def make_preconditioner(relaxation: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
             coupled_m = inner_term.make_preconditioner(relaxation)
             return _bordered_preconditioner(lambda _w: coupled_m, self.force, self.average)(phi)
 
-        return ShiftTerm(diagonal, make_preconditioner)
+        # The bordered constraint row carries no shift (its diagonal entry is zero above), so it needs
+        # no per-row scale; appending 1.0 keeps the multiplier the same shape as the diagonal.
+        row_relaxation = (
+            None
+            if inner_term.row_relaxation is None
+            else lambda relaxation: jnp.append(inner_term.row_relaxation(relaxation), 1.0)
+        )
+        return ShiftTerm(diagonal, make_preconditioner, row_relaxation)
 
     def adjoint_factory(self) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]:
         """The ``state -> M`` factory for the adjoint transpose solve (the composition at ``beta = 0``)."""

@@ -1506,6 +1506,91 @@ class _CubicRamp:
         return self.redamping
 
 
+def test_the_station_hook_reshapes_the_step_for_the_station_it_is_about_to_run() -> None:
+    """The seam by which a change of PROBLEM can be matched by a change to how the step is DAMPED.
+
+    Every signal a shift policy can read for itself -- the shift strength, the residual -- measures
+    *progress*, which is a different quantity from *which station this is*; on a short ramp they come
+    apart completely, since progress saturates long before the last station begins. So the station
+    index has to arrive from the march, which is the only thing that knows it.
+    """
+    residual, phi0, _root = _march_and_solver_inputs()
+    ramp = _CubicRamp(target=8.0, start=64.0, stations=3, steps_per_station=2)
+    seen: list[tuple[int, bool]] = []
+
+    def station_step(step, station, arrived):
+        seen.append((station, arrived))
+        return step
+
+    forward_march(
+        DampedNewtonStep(line_search=10),
+        residual,
+        phi0,
+        max_steps=8,
+        rtol=1e-10,
+        atol=1e-12,
+        homotopy=ramp,
+        station_step=station_step,
+    )
+
+    assert seen, "the hook was never called"
+    # One call per outer step, carrying that step's own station. Compared against `station(i)` rather
+    # than against the homotopy's `entered` log, which carries one extra leading entry: the march
+    # enters station 0 once BEFORE the loop, to take the reference norm.
+    assert [station for station, _ in seen] == [ramp.station(i) for i in range(len(seen))]
+    assert [arrived for _, arrived in seen] == [station >= 3 for station, _ in seen]
+
+
+def test_the_step_the_station_hook_RETURNS_is_the_one_that_is_taken() -> None:
+    """A hook whose result were discarded would look identical from the outside -- the march would run,
+    and the reshaping would simply never happen. That is the failure mode the per-block damping already
+    hit twice, so pin the return value rather than the call."""
+    residual, phi0, _root = _march_and_solver_inputs()
+    ramp = _CubicRamp(target=8.0, start=64.0, stations=3, steps_per_station=2)
+
+    def crippled(step, station, arrived):
+        del step, station, arrived
+        return DampedNewtonStep(line_search=0)  # no line search at all
+
+    plain = forward_march(
+        DampedNewtonStep(line_search=10),
+        residual,
+        phi0,
+        max_steps=8,
+        rtol=1e-10,
+        atol=1e-12,
+        homotopy=_CubicRamp(8.0, 64.0, 3, 2),
+    )
+    reshaped = forward_march(
+        DampedNewtonStep(line_search=10),
+        residual,
+        phi0,
+        max_steps=8,
+        rtol=1e-10,
+        atol=1e-12,
+        homotopy=ramp,
+        station_step=crippled,
+    )
+
+    assert not jnp.array_equal(plain.state, reshaped.state)
+
+
+def test_the_station_hook_is_ignored_without_a_homotopy_and_is_byte_identical_when_absent() -> None:
+    """There are no stations without a homotopy, so there is nothing for the hook to key on."""
+    residual, phi0, _root = _march_and_solver_inputs()
+    step = DampedNewtonStep(line_search=10)
+    kwargs = dict(max_steps=50, rtol=1e-10, atol=1e-12)
+
+    def explode(_step, _station, _arrived):
+        raise AssertionError("the hook must not be consulted without a homotopy")
+
+    without = forward_march(step, residual, phi0, **kwargs)
+    with_hook = forward_march(step, residual, phi0, station_step=explode, **kwargs)
+
+    assert jnp.array_equal(without.state, with_hook.state)
+    assert len(without.reports) == len(with_hook.reports)
+
+
 def test_a_march_with_no_homotopy_is_unchanged() -> None:
     """The default must be byte-identical -- an added seam that moves the incumbent path is a defect."""
     residual, phi0, _root = _march_and_solver_inputs()

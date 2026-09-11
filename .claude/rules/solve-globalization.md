@@ -308,9 +308,36 @@ What to take from it, none of which is specific to that mechanism:
     basis (e.g. a Fluent-style global min-physical-time-scale) is a new `ShiftBasis`; do not branch the
     policies.
 
+  - **`ShiftTerm` has THREE parts, and two of them are closures of `β` for the same reason (2026-09-11).**
+    `diagonal` is the base per-row time scale; `make_preconditioner(β)` builds the inverse of the
+    operator that `β` actually shifts; and `row_relaxation(β)` is an optional per-row multiplier on the
+    strength, so different blocks may run at different pseudo-timesteps. `ShiftTerm.shift(β)` is the one
+    place they are combined — `β · row_relaxation(β) · diagonal` — and **every** consumer goes through
+    it, including anything assembling a preconditioner for that same shifted operator, so the operator
+    and its inverse cannot disagree about what "the shift" is.
+    - **⚠️ A BLOCK FACTOR MUST NOT BE FOLDED INTO `diagonal`, for two independent reasons.** `β` reaches
+      the step **already clamped** at `beta_min`, so a factor in the diagonal multiplies the *floor* and
+      that block never stops being damped after the march has switched the damping off for every other
+      one. And the base diagonal doubles as the **row scale of the row-equilibrated residual measure**
+      (`coupled_scaled_norm`), so a factor there divides that block's reported residual — silently
+      moving the bar the march is steered by, stopped on and compared across arms with. Both bit once;
+      see `.claude/rules/turbulence.md` under `turbulence_damping`.
+    - **⚠️ A WRAPPER POLICY THAT REBUILDS A `ShiftTerm` FROM `.diagonal` ALONE DROPS THE REST IN
+      SILENCE** — the march runs and the dropped behaviour simply never happens. Two shipped wrappers
+      did exactly that (`MonolithicFactorShiftPolicy`, `_MassFlowBorderedPolicy`), which is how a
+      per-block damping measured as a no-op. Forward every part, and find the wrappers **structurally**
+      (AST), not by grepping the callee's name.
+    - **`residual` is `R(φ)` when the caller has it and `None` otherwise**, offered because both steps
+      evaluate it immediately before asking for the shift, so a policy whose shift depends on the
+      distance from a root reads it for free. ⚠️ **It is optional, so omitting it does not fail** — such
+      a policy quietly falls back to its no-residual branch and runs as a constant. `DualTimeStep`
+      omitted it until 2026-09-11 while computing the very same value one line above, which made every
+      residual-dependent policy inert on every case that runs `inner_steps > 1`. Pinned on both steps.
+
   - **Two injected seams**, both `Protocol`s: the physics comes from a **`ShiftPolicy`**
-  (`shift_term(φ) -> ShiftTerm(diagonal, make_preconditioner)`; `ShiftTerm.diagonal` is the full-state
-  base shift, `make_preconditioner(β)` the frozen shifted `M`), and the per-attempt accept/reject
+  (`shift_term(φ, residual=None) -> ShiftTerm(diagonal, make_preconditioner, row_relaxation)`;
+  `ShiftTerm.diagonal` is the full-state base shift, `make_preconditioner(β)` the frozen shifted `M`),
+  and the per-attempt accept/reject
   decision from a **`StepAcceptance`** (`accept(candidate_norm, residual_norm, residual_norm_0,
   attempt) -> bool`). The escalation-loop *mechanics* (grow `β`, cap at `max_escalations`, carry the
   best candidate) stay in the engine; only the decision is delegated. Default acceptance is

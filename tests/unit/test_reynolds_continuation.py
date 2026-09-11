@@ -12,6 +12,7 @@ import math
 
 import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -727,12 +728,25 @@ def test_an_explicit_re_damping_still_overrides_the_derived_one() -> None:
 # --- damping the closure's rows harder than the flow's ------------------------------------------
 
 
-def _shift_diagonal(coupled, state, damping):
-    """The full-state shift diagonal a monolithically preconditioned step reads, at ``damping``."""
+class _StubHostPreconditioner:
+    """The narrowest stand-in ``MonolithicFactorShiftPolicy`` accepts: it only asks for a matvec."""
+
+    solves_exactly_on_host = False
+
+    def matvec(self):
+        return lambda x: x
+
+
+def _shift(coupled, state, damping, beta=0.5):
+    """The full-state shift ``beta scale(beta) d`` a monolithically preconditioned step forms.
+
+    The production quantity: damping multiplies the shift STRENGTH, not the base diagonal, so a test
+    that read ``.diagonal`` would see no damping at all and pass for the wrong reason.
+    """
     from aquaflux.turbulence.coupled import _DEFAULT_SHIFT_BASIS, _monolithic_shift_source
 
     source = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS, None, damping)
-    return source.shift_term(state).diagonal
+    return source.shift_term(state).shift(jnp.asarray(beta))
 
 
 def _seeded_state(coupled):
@@ -753,25 +767,90 @@ def test_turbulence_damping_scales_the_closures_rows_and_leaves_the_flow_rows_al
     n, dim = coupled.momentum.mesh.n_cells, coupled.momentum.mesh.dim
     flow = (dim + 1) * n
 
-    plain = _shift_diagonal(coupled, state, 1.0)
-    damped = _shift_diagonal(coupled, state, 10.0)
+    plain = _shift(coupled, state, 1.0)
+    damped = _shift(coupled, state, 10.0)
 
     assert jnp.allclose(plain[:flow], damped[:flow])
     assert jnp.allclose(damped[flow:], 10.0 * plain[flow:])
+
+
+def test_swapping_the_damping_RATIO_is_a_compilation_cache_hit_not_a_recompile() -> None:
+    """What makes a per-station damping affordable at all, and it is a property of one field's TYPE.
+
+    ``equinox.filter_jit`` partitions on "is this an array": array leaves are traced, everything else
+    rides on the **static** side and is compared by value, so a change there is a new cache key. A
+    ratio stored as the Python float it is constructed from would therefore recompile the entire
+    coupled solve once per station -- turning the cheapest setting in the march into its dominant cost,
+    which is exactly what a ``float`` molecular viscosity did to the Reynolds ramp.
+
+    The check is the one ``filter_jit`` itself makes: the two policies' static halves must be equal,
+    and the ratio must land in the dynamic half.
+    """
+    from aquaflux.turbulence import ConstantDamping
+    from aquaflux.turbulence.coupled import _DEFAULT_SHIFT_BASIS, _monolithic_shift_source
+
+    coupled = _tiny_coupled()
+    state = _seeded_state(coupled)
+    five, two = (
+        _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS, None, gamma)
+        for gamma in (5.0, 2.0)
+    )
+
+    assert eqx.is_array(ConstantDamping(5.0).ratio), "the ratio must be traced, not static"
+    dynamic_five, static_five = eqx.partition(five, eqx.is_array)
+    dynamic_two, static_two = eqx.partition(two, eqx.is_array)
+    assert eqx.tree_equal(static_five, static_two) is True
+    assert jax.tree.structure(dynamic_five) == jax.tree.structure(dynamic_two)
+
+    # And the swap a station hook performs keeps that property, rather than only a fresh build doing so.
+    swapped = eqx.tree_at(lambda p: p.turbulence_damping, five, ConstantDamping(2.0))
+    assert float(swapped.turbulence_damping.factor(jnp.asarray(0.5), None)) == 2.0
+    assert eqx.tree_equal(eqx.partition(swapped, eqx.is_array)[1], static_two) is True
+
+
+def test_damping_leaves_the_BASE_DIAGONAL_alone_so_the_marchs_measure_cannot_move_with_it() -> None:
+    """The row scale of ``coupled_scaled_norm`` IS this diagonal, so damping must not reach it.
+
+    A factor folded into the diagonal divides the ``k``/``omega`` rows of the residual the march is
+    steered by, stopped on, and compared across arms with -- so two damping settings would be judged
+    on two different measures and could not be compared at all. It would also multiply the shift's
+    FLOOR, since ``beta`` arrives already clamped at ``beta_min``.
+    """
+    from aquaflux.turbulence.coupled import (
+        _DEFAULT_SHIFT_BASIS,
+        _monolithic_shift_source,
+        coupled_scaled_norm,
+    )
+
+    coupled = _tiny_coupled()
+    state = _seeded_state(coupled)
+    plain, damped = (
+        _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS, None, gamma)
+        for gamma in (1.0, 10.0)
+    )
+    assert jnp.array_equal(plain.shift_term(state).diagonal, damped.shift_term(state).diagonal)
+
+    residual = coupled.residual(state)
+    assert coupled_scaled_norm(coupled, plain, state)(residual) == pytest.approx(
+        float(coupled_scaled_norm(coupled, damped, state)(residual))
+    )
 
 
 def test_a_damping_of_one_is_bit_identical_to_no_damping_at_all() -> None:
     """The default must not move any incumbent march by a rounding."""
     coupled = _tiny_coupled()
     state = _seeded_state(coupled)
-    assert jnp.array_equal(
-        _shift_diagonal(coupled, state, 1.0), _shift_diagonal(coupled, state, 1.0)
-    )
     from aquaflux.turbulence.coupled import _DEFAULT_SHIFT_BASIS, _monolithic_shift_source
 
     default = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS)
-    assert default.turbulence_damping.factor(None) == 1.0
-    assert jnp.array_equal(default.shift_term(state).diagonal, _shift_diagonal(coupled, state, 1.0))
+    assert default.turbulence_damping.factor(jnp.asarray(0.5), None) == 1.0
+
+    # The multiplier rides through as an array of ones, and `beta * 1.0 == beta` exactly in IEEE
+    # arithmetic -- so an undamped march is bit-identical, not merely close.
+    beta = jnp.asarray(0.5)
+    term = default.shift_term(state)
+    assert jnp.array_equal(term.shift(beta), beta * term.diagonal)
+    assert jnp.array_equal(_shift(coupled, state, 1.0, 0.5), beta * term.diagonal)
 
 
 def test_the_shift_still_vanishes_at_the_root_under_damping() -> None:
@@ -785,7 +864,7 @@ def test_the_shift_still_vanishes_at_the_root_under_damping() -> None:
     coupled = _tiny_coupled()
     state = _seeded_state(coupled)
     for damping in (1.0, 3.0, 25.0):
-        term = _shift_diagonal(coupled, state, damping)
+        term = _shift(coupled, state, damping)
         assert jnp.all(jnp.isfinite(term))
         # `d * (phi - phi_n)` at `phi == phi_n`, which is what the march adds to the residual.
         assert jnp.allclose(term * (state - state), 0.0)
@@ -807,12 +886,12 @@ def test_a_refresh_CARRIES_the_damping_rather_than_dropping_it_to_one() -> None:
     coupled = _tiny_coupled()
     state = _seeded_state(coupled)
     built = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS, None, 7.0)
-    assert built.turbulence_damping.factor(None) == 7.0
+    assert built.turbulence_damping.factor(jnp.asarray(0.5), None) == 7.0
 
     refreshed = _coupled_shift_policy(
         coupled, state, None, reuse=built, turbulence_damping=1.0, build_flow_block=False
     )
-    assert refreshed.turbulence_damping.factor(None) == 7.0
+    assert refreshed.turbulence_damping.factor(jnp.asarray(0.5), None) == 7.0
 
 
 # --- tapering the damping on the closure's own residual ------------------------------------------
@@ -821,8 +900,9 @@ def test_a_refresh_CARRIES_the_damping_rather_than_dropping_it_to_one() -> None:
 def test_the_taper_starts_at_its_initial_ratio_and_reaches_exactly_one_at_convergence() -> None:
     """The two ends that matter: damped where the closure is far from equilibrium, released at the root.
 
-    Reaching exactly ``1`` is what keeps the shift's dissolution at the root intact -- the converged
-    solution and its adjoint are untouched however the taper is shaped.
+    Ending at ``1`` is a choice about the path rather than a correctness requirement -- the shift term
+    is zero at the root whatever multiplies it, which is what licenses a CONSTANT ratio at all -- so what
+    this pins is the taper's declared shape, not an invariant.
     """
     from aquaflux.turbulence import ResidualTaperedDamping
 
@@ -836,10 +916,10 @@ def test_the_taper_starts_at_its_initial_ratio_and_reaches_exactly_one_at_conver
         jnp.full(n, 4.0 / jnp.sqrt(2 * n)),
         jnp.full(n, 4.0 / jnp.sqrt(2 * n)),
     )
-    assert taper.factor(at_reference) == pytest.approx(10.0, rel=1e-6)
+    assert taper.factor(jnp.asarray(0.5), at_reference) == pytest.approx(10.0, rel=1e-6)
 
     converged = jnp.zeros_like(at_reference)
-    assert taper.factor(converged) == pytest.approx(1.0)
+    assert taper.factor(jnp.asarray(0.5), converged) == pytest.approx(1.0)
 
 
 def test_the_taper_opens_at_its_initial_ratio_when_no_residual_exists_yet() -> None:
@@ -849,7 +929,7 @@ def test_the_taper_opens_at_its_initial_ratio_when_no_residual_exists_yet() -> N
 
     coupled = _tiny_coupled()
     taper = ResidualTaperedDamping(initial=8.0, reference=jnp.asarray(1.0), layout=coupled.layout)
-    assert taper.factor(None) == pytest.approx(8.0)
+    assert taper.factor(jnp.asarray(0.5), None) == pytest.approx(8.0)
 
 
 def test_the_taper_reads_the_CLOSURE_residual_and_ignores_the_flow_rows() -> None:
@@ -869,7 +949,9 @@ def test_the_taper_reads_the_CLOSURE_residual_and_ignores_the_flow_rows() -> Non
     loud_flow = coupled.layout.pack(
         jnp.full((dim + 1) * n, 1e3), jnp.full(n, 0.1), jnp.full(n, 0.1)
     )
-    assert taper.factor(quiet_flow) == pytest.approx(float(taper.factor(loud_flow)))
+    assert taper.factor(jnp.asarray(0.5), quiet_flow) == pytest.approx(
+        float(taper.factor(jnp.asarray(0.5), loud_flow))
+    )
 
 
 def test_a_residual_that_RISES_re_damps_rather_than_releasing() -> None:
@@ -888,7 +970,9 @@ def test_a_residual_that_RISES_re_damps_rather_than_releasing() -> None:
     reference = turbulence_residual_norm(coupled.layout, disturbed)
 
     taper = ResidualTaperedDamping(initial=6.0, reference=reference, layout=coupled.layout)
-    assert float(taper.factor(disturbed)) > float(taper.factor(settled))
+    assert float(taper.factor(jnp.asarray(0.5), disturbed)) > float(
+        taper.factor(jnp.asarray(0.5), settled)
+    )
 
 
 def test_the_taper_is_clamped_so_a_residual_above_its_reference_never_exceeds_the_initial() -> None:
@@ -899,7 +983,7 @@ def test_the_taper_is_clamped_so_a_residual_above_its_reference_never_exceeds_th
     n, dim = coupled.momentum.mesh.n_cells, coupled.momentum.mesh.dim
     taper = ResidualTaperedDamping(initial=3.0, reference=jnp.asarray(1.0), layout=coupled.layout)
     blown_up = coupled.layout.pack(jnp.zeros((dim + 1) * n), jnp.full(n, 1e6), jnp.full(n, 1e6))
-    assert taper.factor(blown_up) == pytest.approx(3.0)
+    assert taper.factor(jnp.asarray(0.5), blown_up) == pytest.approx(3.0)
 
 
 def test_damping_below_one_is_refused_because_damping_never_accelerates() -> None:
@@ -913,19 +997,125 @@ def test_damping_below_one_is_refused_because_damping_never_accelerates() -> Non
         ResidualTaperedDamping(initial=0.5, reference=jnp.asarray(1.0), layout=coupled.layout)
 
 
-def test_the_step_hands_the_shift_policy_the_residual_it_already_computed() -> None:
-    """Why the protocol grew an argument rather than the damping re-deriving ``R(phi)``.
+# --- tapering the damping on the shift strength --------------------------------------------------
 
-    ``PseudoTransientStep`` evaluates the residual immediately before asking for the shift, so a
-    state-dependent policy reads it for free; computing it a second time inside the policy would be the
-    same quantity derived in two places.
+
+def test_the_residual_taper_survives_the_MONOLITHIC_WRAPPER_the_cases_actually_run() -> None:
+    """The plumbing that decided whether the residual taper was ever live, end to end on the real path.
+
+    Both flagship cases precondition monolithically, so their shift policy is a
+    ``MonolithicFactorShiftPolicy`` wrapping the block one. A wrapper that rebuilt its ``ShiftTerm``
+    from ``base.shift_term(phi).diagonal`` alone dropped BOTH the residual on the way in and the
+    per-row multiplier on the way out -- in silence, so the march ran and the taper simply never
+    happened. Asserting on the base policy alone cannot see that; this drives the wrapper.
     """
-    import inspect
+    from aquaflux.turbulence import ResidualTaperedDamping, turbulence_residual_norm
+    from aquaflux.turbulence.coupled import (
+        _DEFAULT_SHIFT_BASIS,
+        MonolithicFactorShiftPolicy,
+        _monolithic_shift_source,
+    )
 
-    from aquaflux.solve import continuation
+    coupled = _tiny_coupled()
+    state = _seeded_state(coupled)
+    n, dim = coupled.momentum.mesh.n_cells, coupled.momentum.mesh.dim
+    flow = (dim + 1) * n
 
-    source = inspect.getsource(continuation)
-    assert "policy.shift_term(phi, residual)" in source
+    residual = coupled.residual(state)
+    taper = ResidualTaperedDamping(
+        initial=10.0,
+        reference=turbulence_residual_norm(coupled.layout, residual),
+        layout=coupled.layout,
+    )
+    base = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS, None, taper)
+    wrapped = MonolithicFactorShiftPolicy(base, _StubHostPreconditioner())
+
+    beta = jnp.asarray(0.5)
+    at_reference = wrapped.shift_term(state, residual).shift(beta)
+    converged = wrapped.shift_term(state, jnp.zeros_like(residual)).shift(beta)
+    plain = _shift(coupled, state, 1.0, 0.5)
+
+    assert jnp.allclose(at_reference[flow:], 10.0 * plain[flow:])
+    assert jnp.allclose(converged[flow:], plain[flow:])
+    assert jnp.allclose(at_reference[:flow], plain[:flow])
+
+
+def test_the_beta_taper_opens_at_its_initial_ratio_and_reaches_exactly_one_at_the_floor() -> None:
+    """The two ends that matter: damped while the pseudo-timestep is small, released once it is not.
+
+    Ending at ``1`` is the taper's declared shape, not a correctness requirement (the shift is zero at
+    the root whatever multiplies it, which is what licenses a constant ratio) -- and it is why ``beta``
+    flooring early is not the objection it looks like: what the taper freezes at is the value it was
+    walking toward.
+    """
+    from aquaflux.turbulence import BetaTaperedDamping
+
+    taper = BetaTaperedDamping(initial=10.0, beta_start=0.5, beta_min=0.005)
+    assert taper.factor(jnp.asarray(0.5), None) == pytest.approx(10.0)
+    assert taper.factor(jnp.asarray(0.005), None) == pytest.approx(1.0)
+
+
+def test_the_beta_taper_is_clamped_at_BOTH_ends_so_an_escalation_cannot_run_away() -> None:
+    """The retry ladder RAISES ``beta`` on a bad step, and a sub-floor ``beta`` is still a floor.
+
+    Above ``beta_start`` the factor holds at ``initial`` rather than growing without bound -- the right
+    direction (a step that had to be re-damped is one whose closure was moving too fast) but a bounded
+    amount of it.
+    """
+    from aquaflux.turbulence import BetaTaperedDamping
+
+    taper = BetaTaperedDamping(initial=4.0, beta_start=0.5, beta_min=0.005)
+    assert taper.factor(jnp.asarray(16.0), None) == pytest.approx(4.0)
+    assert taper.factor(jnp.asarray(1e-8), None) == pytest.approx(1.0)
+
+
+def test_the_beta_taper_releases_linearly_in_LOG_beta_so_it_is_linear_in_outer_steps() -> None:
+    """A Courant control divides ``beta`` by a constant per comfortable step, so ``log beta`` is what
+    moves linearly with the step index. Keyed on ``beta`` itself the release would be spent in the
+    first few steps of a descent that spans a dozen."""
+    from aquaflux.turbulence import BetaTaperedDamping
+
+    taper = BetaTaperedDamping(initial=11.0, beta_start=1.0, beta_min=1e-4)
+    # Geometric in beta -> arithmetic in the factor.
+    factors = [float(taper.factor(jnp.asarray(1e-1 * 10.0**-i), None)) for i in range(3)]
+    assert factors == pytest.approx([8.5, 6.0, 3.5])
+
+
+def test_the_beta_taper_refuses_a_span_it_cannot_run_over() -> None:
+    """``beta_min >= beta_start`` is not a taper at all -- and it would divide by zero or invert."""
+    from aquaflux.turbulence import BetaTaperedDamping
+
+    with pytest.raises(ValueError, match="never accelerates"):
+        BetaTaperedDamping(initial=0.5, beta_start=0.5, beta_min=0.005)
+    with pytest.raises(ValueError, match="needs a span"):
+        BetaTaperedDamping(initial=4.0, beta_start=0.005, beta_min=0.5)
+    with pytest.raises(ValueError, match="needs a span"):
+        BetaTaperedDamping(initial=4.0, beta_start=0.5, beta_min=0.0)
+
+
+def test_a_beta_tapered_shift_is_damped_at_the_start_and_undamped_at_the_floor() -> None:
+    """End to end on the real policy: the same object gives two different shifts at two betas.
+
+    This is what a factor folded into the base diagonal could not do -- ``beta`` reaches the step
+    already clamped, so a diagonal factor multiplies the floor and the closure is still damped at the
+    step the march has switched damping off for every other block.
+    """
+    from aquaflux.turbulence import BetaTaperedDamping
+
+    coupled = _tiny_coupled()
+    state = _seeded_state(coupled)
+    n, dim = coupled.momentum.mesh.n_cells, coupled.momentum.mesh.dim
+    flow = (dim + 1) * n
+    taper = BetaTaperedDamping(initial=10.0, beta_start=0.5, beta_min=0.005)
+
+    opened = _shift(coupled, state, taper, beta=0.5)
+    floored = _shift(coupled, state, taper, beta=0.005)
+    plain_open = _shift(coupled, state, 1.0, beta=0.5)
+    plain_floor = _shift(coupled, state, 1.0, beta=0.005)
+
+    assert jnp.allclose(opened[flow:], 10.0 * plain_open[flow:])
+    assert jnp.allclose(floored[flow:], plain_floor[flow:])
+    assert jnp.allclose(opened[:flow], plain_open[:flow])
 
 
 def test_a_refresh_REBUILDS_the_tapers_reference_rather_than_carrying_it() -> None:

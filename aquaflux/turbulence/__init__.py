@@ -32,6 +32,7 @@ from .boundary import (
 from .continuation import ScalarShiftPolicy, scalar_pseudo_transient_solve
 from .diagnostics import coupled_equation_names, coupled_fields, coupled_residuals
 from .coupled import (
+    BetaTaperedDamping,
     ConstantDamping,
     ResidualTaperedDamping,
     TurbulenceDamping,
@@ -95,6 +96,7 @@ from .transport import SSTClosureFields, SSTTurbulence, WallFixedResidual
 __all__ = [
     "AdaptiveReynoldsSchedule",
     "AirAmgPreconditioner",
+    "BetaTaperedDamping",
     "ConstantDamping",
     "ConvectionAmgPreconditioner",
     "CoupledJacobianProbe",

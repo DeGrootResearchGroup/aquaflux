@@ -143,6 +143,30 @@ paths:
       floor should track the ramp rather than sit still, is open and unmeasured.
     - `shift_factor` defaults to `1.0` on the protocol, so a homotopy indifferent to the shift pays
       nothing and the march is byte-identical to one that never asks.
+  - **`station_step(step, station, arrived) -> step` — reshape the STEP for the station, the counterpart
+    of what a homotopy does to the PROBLEM (BUILT 2026-09-11).** Called once per outer step while a
+    homotopy is running, before the step control; `None` (the default) is byte-identical, and it is not
+    consulted at all without a homotopy, since there are no stations then.
+    - **Why it cannot live in the shift policy.** A policy is handed the iterate, the residual and `β` —
+      all three measure *progress*, which is a different quantity from *which station this is*, and on a
+      short ramp they come apart completely. Measured on a 16-station pitzDaily ramp: a per-block damping
+      keyed on `β` has released fully by step 12 (the control floors `β` there) and one keyed on the
+      closure residual by step **6** (it falls 100x in six steps, being dominated by the initial
+      transient). Both spend their whole release inside the ramp and hand the target station nothing.
+      The station index is known only to the march, which is why it arrives from here.
+    - ⚠️ **Return a step differing only in ARRAY leaf values** (`eqx.tree_at` over a fixed structure),
+      exactly as the march's own per-step measure swap does. `equinox.filter_jit` compares non-array
+      leaves by value on the static side, so swapping a Python scalar recompiles the whole solve once
+      per station — turning the cheapest setting in the march into its dominant cost. That is not
+      hypothetical: the same trap, via a `float` molecular viscosity, cost ~10 % of a `bfs3d` march.
+    - **⚠️ ITS FIRST MEASURED VERDICT IS NEGATIVE, AND THE RESULT IS WORTH MORE THAN THE SEAM.** The
+      motivating use — damp a closure block harder while a viscosity ramp walks, release at the target —
+      does not pay, because **the phases are not separable budgets**. The station-keyed arm got its cheap
+      ramp exactly as asked (102 cycles, matching the constant-ratio arm *to the cycle*) and switching
+      the target station's ratio then bought **one** cycle. The target's cost is set by the state the
+      ramp hands it, and a harder-damped ramp hands over a worse one. Full data in
+      `.claude/rules/turbulence.md` under `turbulence_damping`. The seam is kept because it is the
+      instrument that established that, and because nothing else can express a per-station setting.
   - **The damping anchor `‖R₀‖` is taken at the FIRST STATION, not at the target.** It is the scale the
     first step's inner loop is judged against, so it has to be the problem that step runs; with no
     homotopy it is `residual_fn` and nothing moves. `residual_fn` stays the **target** residual and is

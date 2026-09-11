@@ -490,6 +490,7 @@ def forward_march(
     stop_on_limit_stall: int | None = 3,
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
+    station_step: Callable[[ForwardStep, int, bool], ForwardStep] | None = None,
 ) -> MarchResult:
     """March the residual eagerly, reporting each step and stopping early if the trigger fires.
 
@@ -592,6 +593,23 @@ def forward_march(
         The damping anchor ``‖R₀‖`` is taken at the **first station** rather than at the target, since
         it is the scale the first step's inner loop is judged against; with no homotopy that is
         ``residual_fn`` and nothing changes.
+    station_step : callable, optional
+        ``(step, station, arrived) -> step``, letting the caller reshape the forward step for the
+        station it is about to run -- the counterpart, on the *step*, of what a homotopy does to the
+        *problem*. Only consulted when a ``homotopy`` is given; ``None`` (the default) is
+        byte-identical.
+
+        It exists because a station change is a change of problem, and how hard a step should be
+        damped is a property of the problem: a path whose intermediate stations are easier than the
+        target may want a different damping on the way than at the end, and nothing else in the march
+        can express that. Every signal a shift policy can read on its own -- the shift strength, the
+        residual -- measures *progress*, which is a different thing from *which station this is* and
+        on a short ramp saturates long before the last one begins.
+
+        ⚠️ **Return a step differing only in ARRAY leaf values.** ``equinox.filter_jit`` compares
+        non-array leaves by value on the static side, so swapping a Python scalar recompiles the whole
+        solve at every station -- turning the cheapest possible setting into the dominant cost of the
+        march. Swap with ``equinox.tree_at`` over a fixed structure, as the measure above is swapped.
     solver : lineax.AbstractLinearSolver, optional
         The linear solver for each step; defaults to ``forward_step.default_solver()``.
     retry : RetryPolicy
@@ -696,6 +714,18 @@ def forward_march(
             # would stop comparing like with like. The swap is a compilation-cache hit as long as the
             # measure carries its scales as data over a fixed block structure.
             active_step = eqx.tree_at(lambda s: s.residual_norm, active_step, norm_builder(state))
+        if station_step is not None and homotopy is not None:
+            # Let the caller reshape the step for the station it is about to run -- the seam by which
+            # anything a homotopy changes about the PROBLEM can be matched by a change to how the step
+            # is DAMPED. `enter` already re-points what must follow the parameter downstream; this is
+            # its counterpart on the step itself, and it is here rather than inside the homotopy
+            # because the march owns the step and a homotopy knows nothing about a step's internals.
+            #
+            # ⚠️ Whatever it swaps must be an ARRAY leaf over a fixed structure, exactly as the measure
+            # above must be: `filter_jit` compares non-array leaves by value on the static side, so
+            # swapping a Python scalar recompiles the whole solve once per station and turns a
+            # station-varying setting into the most expensive thing in the march.
+            active_step = station_step(active_step, homotopy.station(len(reports)), bool(arrived))
         # Entering a new station: re-damp deliberately, and HOLD the control for this step so it does
         # not immediately adapt the re-damping away. The hold is the same treatment a refresh boundary
         # gets, for the neighbouring reason -- there the preconditioner moved under the march, here the

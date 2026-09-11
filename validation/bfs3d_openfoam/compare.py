@@ -236,6 +236,38 @@ _RAMP_SCALINGS = {"both": scale_both_blocks, "flow": scale_momentum_only}
 if RAMP_SCALE not in _RAMP_SCALINGS:
     raise SystemExit(f"BFS3D_RAMP_SCALE={RAMP_SCALE!r} is not one of {sorted(_RAMP_SCALINGS)}")
 RAMP_COMPANION = _RAMP_SCALINGS[RAMP_SCALE]
+#: How much harder the `k`/`omega` rows are damped than the flow rows (`BFS3D_TURB_DAMPING`): the shift
+#: STRENGTH on those rows is multiplied by this, so they run at an effective `TURB_DAMPING * beta` while
+#: the velocity rows keep `beta`. `1.0` (the default) is the single shift this case has always used.
+#:
+#: The motivation came from THIS case: under a momentum-only ramp its two phases split cleanly -- the
+#: ramp cost 151 cycles against the both-blocks arm's 122, and the target station 39 against 118, a 3x
+#: saving, because `omega` arrives already at its target profile. Every cost was in the k/omega block
+#: and every gain was in not having to move it, which is the sharpest evidence on record that the two
+#: blocks want different instruments: continuation for the momentum block's convective nonlinearity,
+#: damping for the closure's stiff sources.
+#:
+#: ⚠️ MEASURED HERE (2026-09-11), momentum-only at 24 x 1 against this case's own recorded control,
+#: everything else default; both arms reach mid-span `x_r/h` 8.3611:
+#:
+#:     arm            steps  cycles  ramp(24)  target  escalations
+#:     gamma = 1         31     190       151      39            2
+#:     gamma = 2         31     163       130      33            0
+#:
+#: 14% cheaper, better in BOTH phases, and it removes both escalations -- against 12% on the sibling
+#: (227 -> 200 at gamma 1 -> 2, whose sweep continues 212 at 5 and 329 at 10, so the optimum is
+#: interior and near 2 on both cases).
+#:
+#: ⚠️ Damping's cost is LAG, not instability: on the sibling, gamma=10 took 64 steps with zero
+#: escalations, zero stalls and alpha=1.000 throughout, the residual simply crawling at ~0.74 per step.
+#: Read a damping failure as a residual that will not fall at healthy alpha, never as a divergence.
+#:
+#: ⚠️ PAST THE OPTIMUM it stops removing the closure's work and merely DEFERS it: on the sibling the
+#: end-of-ramp residual degrades 2.81e-3 / 5.80e-3 / 1.01e-2 at gamma 2 / 5 / 10 while the target's cost
+#: rises 71 / 110 / 229, so a cheaper ramp is borrowed rather than earned. At gamma = 2 on THIS case it
+#: is earned -- both arms hand the target station the same residual (4.27e-4 vs 4.34e-4). Either way,
+#: judge this knob on the TOTAL, never on a phase.
+TURB_DAMPING = float(os.environ.get("BFS3D_TURB_DAMPING", "1.0"))
 RAMP_STATIONS = int(os.environ.get("BFS3D_RAMP_STATIONS", "24"))
 RAMP_STEPS_PER_STATION = int(os.environ.get("BFS3D_RAMP_STEPS", "1"))
 #: `None` takes `ViscosityRampHomotopy`'s derived default (the station's own viscosity ratio raised to
@@ -1440,6 +1472,9 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             if RAMP == "continuous"
             else f"a rung ladder ({RAMP})",
         ),
+        # Printed unconditionally, including at its default: a damping ratio is invisible in a march
+        # log otherwise, and two differently-damped runs would produce identical banners.
+        ("turbulence damping", f"{TURB_DAMPING:g}"),
         # Both are swept, so both must be printed: without them two differently-configured runs produce
         # identical banners, which is the failure this table exists to prevent.
         ("dual-time inner steps / tol", f"{INNER_STEPS} / {INNER_TOL:g}"),
@@ -1569,6 +1604,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         engine = coupled_amg_continuation(
             companion,
             seed_state,
+            turbulence_damping=TURB_DAMPING,
             inner_steps=INNER_STEPS,
             inner_tol=INNER_TOL,
             probe=probe,
