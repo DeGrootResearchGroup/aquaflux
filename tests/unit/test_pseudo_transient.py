@@ -46,7 +46,7 @@ class UniformShiftPolicy(eqx.Module):
 
     strength: float = eqx.field(static=True, default=1.0)
 
-    def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
+    def shift_term(self, phi: jnp.ndarray, residual=None) -> ShiftTerm:
         diagonal = self.strength * jnp.ones_like(phi)
         return ShiftTerm(diagonal, lambda relaxation: None)
 
@@ -54,6 +54,90 @@ class UniformShiftPolicy(eqx.Module):
 def _residual(phi: jnp.ndarray, theta: jnp.ndarray) -> jnp.ndarray:
     """A nonlinear residual with root ``phi = cbrt(theta)`` (per component)."""
     return phi**3 - theta
+
+
+class _RecordingShiftPolicy(eqx.Module):
+    """``UniformShiftPolicy`` that records the ``(phi, residual)`` pairs it is asked about."""
+
+    seen: list = eqx.field(static=True)
+
+    def shift_term(self, phi: jnp.ndarray, residual=None) -> ShiftTerm:
+        self.seen.append((phi, residual))
+        return ShiftTerm(jnp.ones_like(phi), lambda relaxation: None)
+
+
+class _BlockDampedShiftPolicy(eqx.Module):
+    """A uniform shift with the SECOND component damped ``ratio`` times harder.
+
+    ``through_the_diagonal`` picks which route the factor takes: folded into the base diagonal, or
+    carried as a ``row_relaxation`` closure the step applies at the ``beta`` it actually uses. At a
+    fixed ``beta`` the two are the same number, which is what makes them comparable.
+    """
+
+    ratio: float = eqx.field(static=True, default=4.0)
+    through_the_diagonal: bool = eqx.field(static=True, default=False)
+
+    def shift_term(self, phi: jnp.ndarray, residual=None) -> ShiftTerm:
+        scale = jnp.array([1.0, self.ratio])
+        if self.through_the_diagonal:
+            return ShiftTerm(scale * jnp.ones_like(phi), lambda relaxation: None)
+        return ShiftTerm(jnp.ones_like(phi), lambda relaxation: None, lambda relaxation: scale)
+
+
+def test_the_step_hands_the_policy_the_residual_it_just_computed() -> None:
+    """Why the protocol grew an argument rather than a policy re-deriving ``R(phi)`` itself.
+
+    The step evaluates the residual on the line before it asks for the shift, so a policy whose shift
+    depends on how far the state is from a root reads it for free; deriving the same quantity a second
+    time inside the policy would be one value computed in two places.
+    """
+    theta = jnp.array([8.0, 27.0])
+    seen: list = []
+    step = PseudoTransientStep(
+        _RecordingShiftPolicy(seen=seen),
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
+    )
+    phi0 = jnp.array([0.7, 1.3])
+
+    def residual_theta(phi: jnp.ndarray) -> jnp.ndarray:
+        return _residual(phi, theta)
+
+    # One step, driven directly: a whole march runs inside a `while_loop`, where a recorded array is a
+    # tracer that cannot be read afterwards.
+    step.stepper()(
+        residual_theta, phi0, jnp.linalg.norm(residual_theta(phi0)), step.default_solver()
+    )
+
+    assert seen, "the policy was never asked for a shift"
+    assert all(residual is not None for _phi, residual in seen)
+    for phi, residual in seen:
+        assert jnp.allclose(residual, residual_theta(phi))
+
+
+def test_a_row_relaxation_reaches_the_SHIFTED_OPERATOR_not_just_the_policy() -> None:
+    """The plumbing that decides whether a per-block pseudo-timestep exists at all.
+
+    A wrapper policy that rebuilds a ``ShiftTerm`` from ``.diagonal`` alone drops the multiplier in
+    silence: the march still runs and the damping simply never happens. So the check is that the two
+    routes to the SAME shift give the same march bit for bit, and that damping one block really does
+    change the trajectory -- if it did not, the first assertion would hold for the wrong reason.
+    """
+    theta = jnp.array([8.0, 27.0])
+
+    def march(policy):
+        step = PseudoTransientStep(policy, relaxation_schedule=ConstantRelaxation(beta=2.0))
+        solver = ImplicitNewtonSolver(rtol=1e-10, atol=1e-10, max_steps=200, forward_step=step)
+        return solver.solve(_residual, jnp.ones_like(theta), theta)
+
+    by_row = march(_BlockDampedShiftPolicy(ratio=4.0))
+    by_diagonal = march(_BlockDampedShiftPolicy(ratio=4.0, through_the_diagonal=True))
+    undamped = march(_BlockDampedShiftPolicy(ratio=1.0))
+
+    assert jnp.array_equal(by_row, by_diagonal)
+    assert jnp.allclose(by_row, jnp.cbrt(theta), atol=1e-6)
+    # The shift vanishes at the root, so damping moves the path and not the answer -- which is why the
+    # trajectories, not the roots, are what separates a live multiplier from a dropped one.
+    assert not jnp.array_equal(by_row, undamped)
 
 
 def test_pseudo_transient_engine_runs_without_flow() -> None:
@@ -513,7 +597,7 @@ class _SaddleShift(eqx.Module):
     continuity, being an algebraic constraint with no time derivative, carries zero.
     """
 
-    def shift_term(self, phi):
+    def shift_term(self, phi, residual=None):
         del phi
         return ShiftTerm(jnp.array([1.0, 0.0]), lambda relaxation: None)
 

@@ -60,12 +60,26 @@ paths:
     stop — and `MarchResult.converged` may not be `True` — until `arrived`. Both directions are pinned
     by starting a march **at a station's own exact root**, where the tolerance test passes on step one:
     without the gate it returns there and reports success at a state that does not solve the target.
-  - **⚠️ A STATION SPANS SEVERAL STEPS ON PURPOSE — moving the parameter every step is the expensive
-    mistake.** A station change re-points the refresh hook (`amg_beta_tracking_refresh(...).rebind`),
-    whose `forced_full["pending"]` overrides **both** gates and forces a FULL coloured-probe
-    re-materialize on the next `precondition_step` — the most expensive single operation in the march,
-    and the case's largest allocation. Per-step viscosity would therefore buy a handful of steps and pay
-    a full rebuild for each. `steps_per_station` is the knob; the cost argument is why it exists.
+  - **⚠️ "A STATION SPANS SEVERAL STEPS ON PURPOSE" IS RETRACTED (2026-09-10). Per-step viscosity is the
+    CHEAPEST schedule measured, on both cases that have run it.** The claim here was that a station
+    change re-points the refresh hook (`amg_beta_tracking_refresh(...).rebind`), whose
+    `forced_full["pending"]` overrides **both** gates and forces a FULL coloured-probe re-materialize —
+    "the most expensive single operation in the march" — so moving the parameter every step would pay a
+    rebuild per step for a handful of saved steps. The mechanism is real; **every quantitative half of
+    the argument is wrong.**
+    - **A full re-materialize is a FRACTION of an outer step, not the march's most expensive operation**:
+      1.2–1.6 s against ~9 s on pitzDaily, 11.5 s against a ~34 s mean outer step on `bfs3d`.
+    - **`24 x 1` beats `4 x 3`** — 191 restart cycles against 261 on pitzDaily (11 arms; the numbers and
+      the mechanism are in `.claude/rules/turbulence.md` under `ViscosityRampHomotopy`).
+    - **⚠️ The rebuilds are largely SUBSTITUTIVE, not additive** — the arithmetic "n stations cost n
+      rebuilds of pure overhead" double-counts, because the ladder rebuilds too, on
+      `refresh_on_cycles`, and does so on nearly every step of its long target rung. Counted from both
+      `bfs3d` march logs' own `pc …` lines (23040 cells, field split on, `simplesmooth`, column reach
+      3/3/3/3/2/2, ILU(0)/4 sweeps, `REFRESH_ON_CYCLES=3`): the **ladder** did 33 builds / 391 s over 59
+      steps (28 of them cost-triggered inner refreshes), the **ramp** 37 builds / 490 s over 32 steps.
+      Comparable totals per march — the station rebuilds mostly *replace* the cost-triggered ones.
+    `steps_per_station` remains the knob; what it is for is a schedule that has been *measured on its
+    case*, not a standing preference for coarse stations.
   - **⚠️ `redamp` — RE-DAMP ON ENTERING A STATION, AND THE MARCH BREAKS WITHOUT IT (BUILT 2026-09-09).**
     `ShiftStrengthControl.redamp(state, factor)` multiplies β by `ResidualHomotopy.shift_factor(step)`
     on the step that first faces a new station, and `forward_march` **holds** the control for that step.
@@ -129,6 +143,30 @@ paths:
       floor should track the ramp rather than sit still, is open and unmeasured.
     - `shift_factor` defaults to `1.0` on the protocol, so a homotopy indifferent to the shift pays
       nothing and the march is byte-identical to one that never asks.
+  - **`station_step(step, station, arrived) -> step` — reshape the STEP for the station, the counterpart
+    of what a homotopy does to the PROBLEM (BUILT 2026-09-11).** Called once per outer step while a
+    homotopy is running, before the step control; `None` (the default) is byte-identical, and it is not
+    consulted at all without a homotopy, since there are no stations then.
+    - **Why it cannot live in the shift policy.** A policy is handed the iterate, the residual and `β` —
+      all three measure *progress*, which is a different quantity from *which station this is*, and on a
+      short ramp they come apart completely. Measured on a 16-station pitzDaily ramp: a per-block damping
+      keyed on `β` has released fully by step 12 (the control floors `β` there) and one keyed on the
+      closure residual by step **6** (it falls 100x in six steps, being dominated by the initial
+      transient). Both spend their whole release inside the ramp and hand the target station nothing.
+      The station index is known only to the march, which is why it arrives from here.
+    - ⚠️ **Return a step differing only in ARRAY leaf values** (`eqx.tree_at` over a fixed structure),
+      exactly as the march's own per-step measure swap does. `equinox.filter_jit` compares non-array
+      leaves by value on the static side, so swapping a Python scalar recompiles the whole solve once
+      per station — turning the cheapest setting in the march into its dominant cost. That is not
+      hypothetical: the same trap, via a `float` molecular viscosity, cost ~10 % of a `bfs3d` march.
+    - **⚠️ ITS FIRST MEASURED VERDICT IS NEGATIVE, AND THE RESULT IS WORTH MORE THAN THE SEAM.** The
+      motivating use — damp a closure block harder while a viscosity ramp walks, release at the target —
+      does not pay, because **the phases are not separable budgets**. The station-keyed arm got its cheap
+      ramp exactly as asked (102 cycles, matching the constant-ratio arm *to the cycle*) and switching
+      the target station's ratio then bought **one** cycle. The target's cost is set by the state the
+      ramp hands it, and a harder-damped ramp hands over a worse one. Full data in
+      `.claude/rules/turbulence.md` under `turbulence_damping`. The seam is kept because it is the
+      instrument that established that, and because nothing else can express a per-station setting.
   - **The damping anchor `‖R₀‖` is taken at the FIRST STATION, not at the target.** It is the scale the
     first step's inner loop is judged against, so it has to be the problem that step runs; with no
     homotopy it is `residual_fn` and nothing moves. `residual_fn` stays the **target** residual and is

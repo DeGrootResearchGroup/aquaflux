@@ -144,7 +144,7 @@ class MomentumShiftPolicy(eqx.Module):
     shift_basis: ShiftBasis = LocalCourantBasis()
     velocity_shift_parts: VelocityShiftParts | None = None
 
-    def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
+    def shift_term(self, phi: jnp.ndarray, residual: jnp.ndarray | None = None) -> ShiftTerm:
         """The base velocity shift diagonal and the ``β -> M`` shifted preconditioner at ``phi``.
 
         Parameters

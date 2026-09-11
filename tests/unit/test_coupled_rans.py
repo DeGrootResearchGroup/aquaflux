@@ -700,7 +700,7 @@ def test_refresh_trigger_is_rejected_under_differentiation() -> None:
 class _TrivialShiftPolicy(eqx.Module):
     """A shift policy with a unit diagonal and no preconditioner -- enough to build a step object."""
 
-    def shift_term(self, phi):
+    def shift_term(self, phi, residual=None):
         return ShiftTerm(diagonal=jnp.ones_like(phi), make_preconditioner=lambda _relaxation: None)
 
 
@@ -920,7 +920,7 @@ def test_live_velocity_shift_parts_map_the_solved_unknown_back_to_physical() -> 
 class _TrivialShiftPolicy(eqx.Module):
     """A minimal shift policy for constructing a step without a mesh (see test_step_control.py)."""
 
-    def shift_term(self, phi):
+    def shift_term(self, phi, residual=None):
         return ShiftTerm(diagonal=jnp.ones_like(phi), make_preconditioner=lambda _r: None)
 
 
@@ -1437,7 +1437,11 @@ def _stub_step(preconditioner, beta, diagonal):
 
     from aquaflux.solve import ShiftTerm
 
-    base = SimpleNamespace(shift_term=lambda _phi: ShiftTerm(diagonal, lambda _relaxation: None))
+    # Accepts the optional residual even though the refresh hook does not pass one: a stand-in that
+    # is narrower than the protocol breaks silently the day a caller starts supplying it.
+    base = SimpleNamespace(
+        shift_term=lambda _phi, _residual=None: ShiftTerm(diagonal, lambda _relaxation: None)
+    )
     return SimpleNamespace(
         relaxation_schedule=SimpleNamespace(beta=beta),
         shift_policy=SimpleNamespace(preconditioner=preconditioner, base=base),

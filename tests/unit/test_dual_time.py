@@ -40,7 +40,7 @@ class UniformShiftPolicy(eqx.Module):
 
     strength: float = eqx.field(static=True, default=1.0)
 
-    def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
+    def shift_term(self, phi: jnp.ndarray, residual=None) -> ShiftTerm:
         diagonal = self.strength * jnp.ones_like(phi)
         return ShiftTerm(diagonal, lambda relaxation: None)
 
@@ -48,6 +48,47 @@ class UniformShiftPolicy(eqx.Module):
 def _residual(phi: jnp.ndarray, theta: jnp.ndarray) -> jnp.ndarray:
     """A nonlinear residual with root ``phi = cbrt(theta)`` (per component)."""
     return phi**3 - theta
+
+
+class _RecordingShiftPolicy(eqx.Module):
+    """``UniformShiftPolicy`` that records the ``(phi, residual)`` pairs it is asked about."""
+
+    seen: list = eqx.field(static=True)
+
+    def shift_term(self, phi: jnp.ndarray, residual=None) -> ShiftTerm:
+        self.seen.append((phi, residual))
+        return ShiftTerm(jnp.ones_like(phi), lambda relaxation: None)
+
+
+def test_the_dual_time_step_hands_the_policy_the_residual_it_just_computed() -> None:
+    """A policy whose shift depends on the distance from a root must reach it on THIS path too.
+
+    ⚠️ The argument is optional, so omitting it does not fail -- such a policy quietly falls back to
+    its no-residual branch and runs as a constant. That is exactly how a per-block damping tapered on
+    the closure's residual once measured as a no-op: every case that wants it runs `inner_steps > 1`,
+    i.e. this step, which computes `R(phi_n)` for its own anchor norm and then discarded it.
+    """
+    theta = jnp.array([8.0, 27.0])
+    seen: list = []
+    step = DualTimeStep(
+        _RecordingShiftPolicy(seen=seen),
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
+        inner_steps=3,
+        inner_tol=1e-6,
+    )
+    phi0 = jnp.array([0.7, 1.3])
+
+    def residual_theta(phi: jnp.ndarray) -> jnp.ndarray:
+        return _residual(phi, theta)
+
+    step.stepper()(
+        residual_theta, phi0, jnp.linalg.norm(residual_theta(phi0)), step.default_solver()
+    )
+
+    assert seen, "the policy was never asked for a shift"
+    assert all(residual is not None for _phi, residual in seen)
+    for phi, residual in seen:
+        assert jnp.allclose(residual, residual_theta(phi))
 
 
 def _solver(step: DualTimeStep, max_steps: int = 200) -> ImplicitNewtonSolver:

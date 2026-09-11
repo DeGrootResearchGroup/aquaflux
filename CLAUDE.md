@@ -551,6 +551,17 @@ beside a running validation case (with `FASTGATE_FORCE` past it, no wedge from a
 no guard under `CI`) — is pinned by `tests/unit/test_fastgate.py`, for the same reason
 `check_hooks.sh` and `sibling_builders.py` are: a runner that had stopped propagating a failure looks
 exactly like a passing suite, and every other check in this project is read through it.
+
+⚠️ **THE PIPE RULE APPLIES TO `fastgate.sh` ITSELF, NOT ONLY TO BARE `pytest` — and knowing the rule is
+not what protects you.** `tools/fastgate.sh … | tail -4` has the identical defect the paragraph above
+describes: the pipeline's status is `tail`'s `0` whatever pytest did, *and* the `-n` truncates away the
+`FAILED (pytest exit N)` block the script prints, so what survives is the final `full log:` line — which
+reads exactly like a pass. Observed 2026-09-10, in a session that had quoted this very rule an hour
+earlier: a run with **21 failures** was read as green, and the next measurement was launched against
+broken code before a log grep caught it. **Redirect (`> file`) and read the script's own exit status;
+never pipe it, and never judge it by its last few lines.** The failure is silent in both directions at
+once — the status lies and the evidence is cropped — which is why the wrapper exists and why wrapping
+the wrapper undoes it.
 ⚠️ Note the cost of the escape hatch in the sentence above: **invoking `pytest` directly skips the
 case guard as well as everything else the wrapper does**, so it is the one route that can still put a
 tier on top of a march without saying so.

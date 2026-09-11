@@ -75,6 +75,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
@@ -108,17 +109,23 @@ from aquaflux.solve import (
     simple_smoothed_inverse,
 )
 from aquaflux.turbulence import (
+    BetaTaperedDamping,
+    ConstantDamping,
     CoupledJacobianProbe,
     CoupledRANS,
     GeometricReynoldsSchedule,
     LogScalars,
+    ResidualTaperedDamping,
     SSTModel,
     SSTTurbulence,
     amg_beta_tracking_refresh,
     coupled_amg_continuation,
     coupled_fields,
+    scale_both_blocks,
+    scale_momentum_only,
     solve_reynolds_continuation,
     solve_reynolds_ramp,
+    turbulence_residual_norm,
     wall_consistent_state,
 )
 
@@ -237,6 +244,151 @@ RATIO = float(os.environ.get("PITZ_RATIO", "10.0"))
 #: a whole step, taken from the design record rather than a log; it is wrong by 3x.
 #: These values are a pitzDaily calibration; measure before carrying them anywhere else.
 RAMP = os.environ.get("PITZ_RAMP", "continuous")
+#: Which viscosity a ramp station scales (`PITZ_RAMP_SCALE`). `both` (the default) makes each station a
+#: genuine lower-Reynolds problem, the same path the rung ladder walks. `flow` scales the momentum
+#: block only and leaves the closure at the case's own viscosity, which keeps the near-wall `omega` at
+#: its target profile for the whole march instead of starting it a viscosity-ratio high and walking it
+#: back down -- at the price of stations that are not a physical Reynolds number, and of `k`/`omega`
+#: carrying their target stiffness from the first step. Which of those dominates is a property of the
+#: case; see the README.
+#: The shift strength the control is allowed to descend to. It is the march's development scale: the
+#: control divides `beta` by `grow` per comfortable step, so a rung spends
+#: `ceil(ln(beta_start / BETA_MIN) / ln(grow))` steps reaching it -- 12 at these values -- and after
+#: that `beta` is pinned and stops carrying any information about the march's phase. `TURB_TAPER` keys
+#: on exactly that descent, so the two must be read together.
+BETA_MIN = 0.005
+
+#: How much harder the `k`/`omega` rows are damped than the flow rows (`PITZ_TURB_DAMPING`): the shift
+#: STRENGTH on those rows is multiplied by this, so they run at an effective `TURB_DAMPING * beta`
+#: while the velocity rows keep `beta`. `1.0` (the default) is the single shift the march has always
+#: used.
+#:
+#: The motivation is the split the scaling arms exposed: the momentum block's difficulty is the
+#: convective nonlinearity, which the viscosity ramp weakens directly, while the closure's is its stiff
+#: source terms, which the ramp barely touches and a diagonal shift addresses squarely. Sharing one
+#: `beta` means it is set by whichever block is more fragile. The shift vanishes at the root, so this
+#: moves the path and neither the converged solution nor its adjoint.
+#:
+#: ⚠️ The step control still adapts ONE `beta` against a global line search, so it cannot see which
+#: block is asking for the caution -- which is why the ratio is a strategy the caller picks rather than
+#: something the control adapts. A per-block adaptive shift would need a per-block signal first.
+#: ⚠️⚠️ SWEPT 2026-09-10 on momentum-only scaling at 16 x 1, this file's other defaults, one run each --
+#: AND MEASURED UNDER A CONFOUND THE LIBRARY HAS SINCE REMOVED, so re-measure before quoting it.
+#: `1` is a control and reproduced the recorded 27 steps / 227 cycles exactly.
+#:
+#:     gamma    1      2      5     10
+#:     steps   27     27     29     41
+#:     cycles 227    191    206    305
+#:
+#: The confound: the damping was folded into the shift's base DIAGONAL, and that diagonal is also the
+#: row scale of `coupled_scaled_norm` -- the measure the march is steered by, stopped on (`atol` 1e-5)
+#: and compared across arms with. So every arm above divided its own `k`/`omega` residual rows by its
+#: own gamma, i.e. each ran to a different physical bar, with the looser bar going to the larger gamma.
+#: The bias favours large gamma throughout, which cuts both ways here: gamma=2's 16% win over the
+#: control is partly bought by it, while gamma=10's finishing WORSE than no damping at all is if
+#: anything understated. The damping now multiplies the shift STRENGTH and leaves the diagonal alone,
+#: so the measure no longer moves with the knob and the arms are comparable.
+#:
+#: What the sweep established that the confound does not touch, because it is read WITHIN an arm: the
+#: two march phases want opposite ratios -- early, more damping is monotonically better (cycles to step
+#: 5: 17/12/12/11), and late it reverses (gamma 5 stalls once, gamma 10 stalls twice and moves
+#: BACKWARDS). And no arm took a retry, gamma=10 included: damping does stabilize the step, and its
+#: cost is the closure LAGGING the mean flow, which reads as a stalled residual at healthy alpha rather
+#: than as a divergence.
+TURB_DAMPING = float(os.environ.get("PITZ_TURB_DAMPING", "1.0"))
+#: Taper the ratio from `TURB_DAMPING` down to 1 instead of holding it constant (`PITZ_TURB_TAPER`,
+#: the taper's exponent; `0`, the default, keeps the constant). `PITZ_TURB_TAPER_KEY` picks WHAT the
+#: release is keyed on -- `residual` (the default) or `beta`.
+#:
+#: ⚠️ THE PHASE SPLIT IS THE MOTIVATION, AND IT IS MEASURED (2026-09-10, momentum-only at 16 x 1, this
+#: file's other defaults, one run per arm, all reaching x_r/h 8.0686, all under the corrected measure):
+#:
+#:     arm            steps  cycles  esc   ramp(16)  target
+#:     gamma = 1         27     227    0         --      --
+#:     gamma = 2         29     200    0        129      71
+#:     gamma = 10        64     329    0        100     229
+#:     taper 2 -> 1      28     234    0        150      84
+#:     taper 10 -> 1     39     319    5        135     184
+#:
+#: `gamma = 10` buys the CHEAPEST ramp of any arm and the worst target station. So the two phases want
+#: opposite ratios, and the prize for a taper that gets both is ramp 100 + target 71 = ~171 against the
+#: best constant's 200 -- IF they compose, which is untested.
+#:
+#: ⚠️ `gamma = 10`'s cost is LAG, not instability: 64 steps, zero escalations, zero stalls, alpha =
+#: 1.000 throughout, the residual crawling at ~0.74 per step for 34 steps at 3 cycles each. Read a
+#: damping failure as a residual that will not fall at healthy alpha, never as a divergence.
+#:
+#: ⚠️ WHY `beta` IS THE WRONG KEY -- measured, not argued. `beta` reaches `BETA_MIN` at step 12 of the
+#: 16-step ramp, so a beta-keyed release is spent ENTIRELY INSIDE the phase that wants the damping, and
+#: the target station inherits gamma = 1. Its ramp costs 135 against the constant's 100 and its target
+#: is no better than undamped. `beta` is anti-aligned with the phase structure it was meant to track.
+#: A second, separate defect: `beta` is adaptive, so the retry ladder RAISES it and the damping rises
+#: with it -- in the `10 -> 1` arm gamma climbed back to 6.4 over steps 20-27 while the residual rose
+#: monotonically, five escalations, ~90 cycles lost. The damping and the control's own reaction to a
+#: bad step form a positive feedback loop.
+#:
+#: The residual has neither property: it does not floor during the ramp, and it is what the two phases
+#: actually differ in. `turbulence_residual_norm` reads the k/omega rows only, because the blocks settle
+#: on different schedules and a whole-state norm would release the closure's damping on the FLOW's
+#: progress.
+#:
+#: ⚠️ The recorded reason the residual key was once inert does NOT apply to a momentum-only arm, which
+#: is why it is the default here. That diagnosis -- the reference is frozen at the seed while a
+#: continuation makes the problem harder as it walks, so the clamp pins the factor at `initial` -- was
+#: measured under BOTH-BLOCKS scaling, where each station changes the closure's own viscosity. Under
+#: `scale_momentum_only` the closure's assembler is the same object at every station, so the walk
+#: cannot move its residual that way. Whether it releases on the schedule the table above wants is the
+#: open question, and it is answerable from the run: `PITZ_CHECKPOINT_KEEP` high enough to keep every
+#: step lets `turbulence_residual_norm` be replayed per step and the applied gamma reconstructed.
+#: The ratio the TARGET station runs at, once the viscosity ramp has arrived (`PITZ_TURB_DAMPING_TARGET`).
+#: `PITZ_TURB_DAMPING` then applies to the ramp stations only. Unset means one ratio for the whole
+#: march, which is byte-identical to the single-constant behaviour.
+#:
+#: ⚠️⚠️ MEASURED, AND THE PHASES DO NOT COMPOSE -- so this knob is an instrument, not a win. The split
+#: looks large and real: the ramp's cost falls from 129 cycles at gamma=2 to 102 at 5 and 100 at 10
+#: (turning back up to 119 at 20), while the target station's rises from 71 at gamma=2 to 110 at 5 and
+#: 229 at 10. Best-of-both would be ~171 against the best single constant's 200. It is not available:
+#:
+#:     arm             ramp  target  total   R handed to the target
+#:     gamma = 2        129      71    200   2.814e-03
+#:     gamma = 5        102     110    212   5.796e-03
+#:     gamma = 10       100     229    329   1.005e-02
+#:     station 5 -> 2   102     109    211   5.796e-03
+#:
+#: The `5 -> 2` arm gets its cheap ramp exactly as asked -- 102 cycles, matching constant gamma=5 to
+#: the cycle -- and switching the TARGET to 2 then buys **one** cycle. The target's cost is set by the
+#: STATE THE RAMP HANDS IT, not by its own ratio, and the handover residual scales with how hard the
+#: ramp damped. So a cheap ramp is not earned, it is BORROWED: damping does not remove the closure's
+#: work, it defers it. The two phases are one budget, and that budget is smallest at a constant 2.
+#:
+#: ⚠️ A TAPER CANNOT EXPRESS THIS, which is why the knob is a pair of constants rather than a shape.
+#: Every signal a shift policy can read for itself measures march PROGRESS, and progress saturates
+#: long before the last station: keyed on `beta` the release is complete by step 12 of the 16-step
+#: ramp, keyed on the closure residual by step 6 (measured -- `damping_taper_trace.py` replays it from
+#: the checkpoints). Both therefore spend the whole release inside the phase that wants the damping and
+#: hand the target station a ratio of 1. The discriminator is the station index, which only the march
+#: knows, and `solve_coupled(station_step=...)` is how it arrives.
+TURB_DAMPING_TARGET = float(os.environ.get("PITZ_TURB_DAMPING_TARGET", "0") or 0.0)
+TURB_TAPER = float(os.environ.get("PITZ_TURB_TAPER", "0") or 0.0)
+TURB_TAPER_KEY = os.environ.get("PITZ_TURB_TAPER_KEY", "residual")
+if TURB_TAPER_KEY not in ("residual", "beta"):
+    raise SystemExit(f"PITZ_TURB_TAPER_KEY must be 'residual' or 'beta', got {TURB_TAPER_KEY!r}")
+#: How the banner says which of the three shapes ran. A damping that reports only its INITIAL ratio
+#: reads identically whether it tapered or not, and the taper is the whole variable under test.
+_TURB_DAMPING_SHAPE = (
+    f" tapered on {TURB_TAPER_KEY}, exponent {TURB_TAPER:g}"
+    if TURB_TAPER
+    else (
+        f" on the ramp, {TURB_DAMPING_TARGET:g} at the target"
+        if TURB_DAMPING_TARGET
+        else " (constant)"
+    )
+)
+RAMP_SCALE = os.environ.get("PITZ_RAMP_SCALE", "both")
+_RAMP_SCALINGS = {"both": scale_both_blocks, "flow": scale_momentum_only}
+if RAMP_SCALE not in _RAMP_SCALINGS:
+    raise SystemExit(f"PITZ_RAMP_SCALE={RAMP_SCALE!r} is not one of {sorted(_RAMP_SCALINGS)}")
+RAMP_COMPANION = _RAMP_SCALINGS[RAMP_SCALE]
 RAMP_STATIONS = int(os.environ.get("PITZ_RAMP_STATIONS", "24"))
 RAMP_STEPS_PER_STATION = int(os.environ.get("PITZ_RAMP_STEPS", "1"))
 
@@ -276,6 +428,15 @@ K_POSITIVITY_FLOOR = 1e-8
 FORWARD_RTOL, FORWARD_RESTART = 0.3, 15
 FORWARD_MAX_RESTARTS = 14
 
+#: ⚠️ **THIS WHOLE BUNDLE IS UNREACHABLE AT THE CURRENT DEFAULTS — see `_ILU_SMOOTHER_LIVE` below.**
+#: Every measurement in it was taken when the leading `[u, v, p]` block was inverted by the incomplete-LU
+#: -smoothed hierarchy these settings configure. `FLOW_INVERSE` now defaults to `simplesmooth`, which
+#: supplies that block's inverse directly, and the trailing block's is supplied too, so nothing here is
+#: constructed on the default path. The bullets below are kept because they are the record of a real
+#: measurement and because the settings revive the moment a block's inverse is `None` -- but they are
+#: **not** a description of how a march at the defaults is preconditioned, and a run banner quoting them
+#: is not evidence about that march. Read them as history for the ILU path, not as live configuration.
+#:
 #: ⚠️ THE VALIDATED SMOOTHER BUNDLE, AND NONE OF IT IS OPTIONAL. These are the library defaults'
 #: opposites, and each was measured on the sibling case at adjoint-grade tolerance:
 #:   * ⚠️ `FILL_LEVELS` **1** HERE, WHERE THE SIBLING CASE USES 0 -- THE TWO RANK THIS OPPOSITELY, AND
@@ -432,6 +593,20 @@ LEADING_INVERSE = (
     if FLOW_INVERSE == "simplesmooth"
     else None
 )
+
+#: Whether `FILL_LEVELS` / `SWEEPS` / `COARSE_EQ_LIMIT` reach the preconditioner at all.
+#:
+#: ⚠️ They configure an incomplete-LU-smoothed hierarchy built ONLY for a block whose own inverse was
+#: not supplied: the field split takes `leading_inverse(...)` when one is given and falls back to
+#: building that hierarchy otherwise, and likewise for the trailing block. Under the field split this
+#: file always supplies the trailing (Jacobi-smoothed) inverse, and `FLOW_INVERSE` supplies the leading
+#: one unless it names neither strategy -- so at the defaults BOTH are given, neither fallback is taken,
+#: and these three settings are dead. Note `hostilu` does not revive them either: it is
+#: `ilu_smoothed_inverse(**HOST_FLOW)`, which carries its own fill and sweeps.
+#: The banner used to print them regardless, which is how a reader (and a solver study) comes to
+#: believe a march was preconditioned by a smoother that was never constructed. A banner is the primary
+#: record of what a measurement was taken under, so it must separate a live setting from a carried one.
+_ILU_SMOOTHER_LIVE = not FIELD_SPLIT or LEADING_INVERSE is None
 
 #: The trailing `[k, omega]` block's inverse: the differentiable-framework nodal hierarchy, which the
 #: sibling case defaults to after a controlled pair measured it ahead of the host V-cycle (67 steps and
@@ -614,7 +789,7 @@ def dual_time_control(beta_start: float) -> CflResidualDualTimeControl:
     """
     return CflResidualDualTimeControl(
         beta_start=beta_start,
-        beta_min=0.005,
+        beta_min=BETA_MIN,
         grow=1.5,
         backoff=2.0,
         grow_above=0.5,
@@ -940,12 +1115,19 @@ def solve_aquaflux(
             f"{RAMP_STATIONS} stations x {RAMP_STEPS_PER_STATION} steps "
             f"({RAMP_STATIONS * RAMP_STEPS_PER_STATION} ramp steps), redamping "
             f"{'derived' if RAMP_REDAMPING is None else format(RAMP_REDAMPING, 'g')}"
+            f", scaling {RAMP_SCALE}"
+            f", turbulence damping {TURB_DAMPING:g}"
+            f"{_TURB_DAMPING_SHAPE}"
             if RAMP == "continuous"
             else f"off ({RAMP}) -- the span is walked as a rung ladder",
         ),
         ("k wall BC", K_WALL),
         ("preconditioner refresh", f"on {REFRESH_ON_CYCLES} restart cycles (mid-step)"),
-        ("smoother fill / sweeps / coarse limit", f"{FILL_LEVELS} / {SWEEPS} / {COARSE_EQ_LIMIT}"),
+        (
+            "smoother fill / sweeps / coarse limit",
+            f"{FILL_LEVELS} / {SWEEPS} / {COARSE_EQ_LIMIT}"
+            + ("" if _ILU_SMOOTHER_LIVE else "  (INERT: both blocks supply their own inverse)"),
+        ),
         ("preconditioner beta floor", PC_BETA_FLOOR),
         ("field split / trailing sweeps", f"{FIELD_SPLIT} / {TRAILING_SWEEPS}"),
         (
@@ -1010,6 +1192,32 @@ def solve_aquaflux(
     #: between them, so a rung needs the V-cycle FITTED to it, not a fresh object.
     shared_preconditioner: list = []
 
+    def _damping(companion, seed_state, beta_start):
+        """Constant, or tapered from `TURB_DAMPING` down to 1 on the chosen key.
+
+        The `beta` key's endpoints are the rung's OWN control endpoints, taken from the same values the
+        control is built from a few lines below: a taper whose span disagreed with the control's would
+        still run, and would reach 1 somewhere the march never visits, with nothing to detect it. The
+        `residual` key's reference is the closure residual at the state this rung OPENS from, so the
+        taper measures progress from where the march actually starts rather than from a state it never
+        visits.
+        """
+        if not TURB_TAPER:
+            return TURB_DAMPING
+        if TURB_TAPER_KEY == "beta":
+            return BetaTaperedDamping(
+                initial=TURB_DAMPING,
+                beta_start=beta_start,
+                beta_min=BETA_MIN,
+                exponent=TURB_TAPER,
+            )
+        return ResidualTaperedDamping(
+            initial=TURB_DAMPING,
+            reference=turbulence_residual_norm(companion.layout, companion.residual(seed_state)),
+            layout=companion.layout,
+            exponent=TURB_TAPER,
+        )
+
     def point_setup(companion, seed_state, point):
         """Configure each Reynolds rung, re-fitting the one preconditioner to it.
 
@@ -1020,9 +1228,11 @@ def solve_aquaflux(
         """
         logger.note(f"[{point.label}]")
         refresh.rebind(companion)
+        beta_start = BETA_START if point.index == 1 else BETA_START_WARM
         engine = coupled_amg_continuation(
             companion,
             seed_state,
+            turbulence_damping=_damping(companion, seed_state, beta_start),
             inner_steps=INNER_STEPS,
             inner_tol=INNER_TOL,
             probe=probe,
@@ -1054,7 +1264,7 @@ def solve_aquaflux(
         return dict(
             continuation=engine,
             refresh=RefreshPolicy(precondition_step=refresh),
-            step_control=dual_time_control(BETA_START if point.index == 1 else BETA_START_WARM),
+            step_control=dual_time_control(beta_start),
         )
 
     checkpoints = (
@@ -1063,9 +1273,28 @@ def solve_aquaflux(
         else None
     )
 
+    def station_damping(step, station, arrived):
+        """Damp the closure's rows harder while the viscosity ramp is walking than at the target.
+
+        The ramp and the target station want opposite ratios, and by a wide margin (see
+        `TURB_DAMPING_TARGET`). Nothing the shift policy can read for itself separates them -- every
+        such signal measures march progress, which saturates inside the ramp -- so the station index
+        arrives from the march, which is the only thing that knows it.
+
+        The swap is `eqx.tree_at` over one ARRAY leaf, so each station is a compilation-cache hit
+        rather than a recompile of the whole coupled solve.
+        """
+        del station
+        ratio = TURB_DAMPING_TARGET if arrived else TURB_DAMPING
+        return eqx.tree_at(
+            lambda s: s.shift_policy.base.turbulence_damping, step, ConstantDamping(ratio)
+        )
+
     solve_options = (
         dict(
             max_steps=MAX_STEPS,
+            # `None` unless a target ratio was asked for, which keeps a single-ratio march unchanged.
+            station_step=station_damping if TURB_DAMPING_TARGET else None,
             rtol=RTOL,
             atol=ATOL,
             intermediate_rtol=None,  # every rung stops at the same ABSOLUTE bar
@@ -1096,6 +1325,7 @@ def solve_aquaflux(
                 stations=RAMP_STATIONS,
                 steps_per_station=RAMP_STEPS_PER_STATION,
                 redamping=RAMP_REDAMPING,
+                companion=RAMP_COMPANION,
                 **solve_options,
             )
         else:
