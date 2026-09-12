@@ -578,6 +578,24 @@ def _aggregate(owner: np.ndarray, nb: np.ndarray, n: int) -> tuple[np.ndarray, i
 # patched post-hoc (which fights the constant-preserving smoothed prolongation).
 
 
+def _level_inv_diagonal(diagonal: jnp.ndarray, block_inverse: jnp.ndarray | None) -> jnp.ndarray:
+    """``1 / diagonal``, or zero where a per-cell block inverse is used instead.
+
+    Shared by :class:`_SparseLevel` and :class:`_AirLevel`, whose ``__post_init__`` each derive this
+    from their own ``diagonal`` + ``block_inverse`` fields — one home so the guard below cannot drift
+    off one of the two levels again (it once had, see #271).
+
+    On a nodal (``block_inverse is not None``) level the smoother reads ``block_inverse`` and never
+    this, and the scalar diagonal it would invert is not required to be nonzero there — only the
+    weaker precondition that each cell's own block is invertible holds (:func:`_cell_block_inverse`
+    enforces that; the scalar-positivity guard in :func:`_diagonal_inverse_operator` is skipped for a
+    nodal level for the same reason). A bare reciprocal there could therefore store an infinity (or a
+    meaningless finite value from a negative diagonal) that nothing reads; zero is inert and does not
+    look like a value.
+    """
+    return jnp.zeros_like(diagonal) if block_inverse is not None else 1.0 / diagonal
+
+
 class _SparseLevel(eqx.Module):
     """One smoothed-aggregation level: a general sparse operator + its prolongation, all frozen.
 
@@ -617,14 +635,17 @@ class _SparseLevel(eqx.Module):
     # because it sizes the reshape.
     block_inverse: jnp.ndarray | None = None  # (n_cells, b, b), or None for a scalar level
     block_size: int = eqx.field(static=True, default=1)
-    # `1.0 / diagonal`, derived in `__post_init__` rather than at every smoother apply: `diagonal`
-    # is a build-time frozen constant, so its reciprocal is one too, and re-dividing it inside a
-    # traced smoother body (called once per V-cycle visit to this level, many times per solve)
-    # repeats the same n-element divide for no reason a build-time field does not already remove.
-    inv_diagonal: jnp.ndarray = None  # (n,) 1.0 / diagonal
+    # `_level_inv_diagonal(diagonal, block_inverse)`, derived in `__post_init__` rather than at every
+    # smoother apply: `diagonal` is a build-time frozen constant, so its reciprocal is one too, and
+    # re-dividing it inside a traced smoother body (called once per V-cycle visit to this level, many
+    # times per solve) repeats the same n-element divide for no reason a build-time field does not
+    # already remove.
+    inv_diagonal: jnp.ndarray = None  # (n,) see `_level_inv_diagonal`
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "inv_diagonal", 1.0 / self.diagonal)
+        object.__setattr__(
+            self, "inv_diagonal", _level_inv_diagonal(self.diagonal, self.block_inverse)
+        )
 
     def prolongation_scipy(self) -> sp.coo_matrix | None:
         """This level's prolongation as a host ``scipy`` COO matrix, or ``None`` on the coarsest level.
@@ -2009,21 +2030,13 @@ class _AirLevel(eqx.Module):
     # discards the within-cell coupling between fields, which on a coupled scalar pair exceeds the
     # diagonal itself -- so a multi-field level neither smooths nor reliably contracts without this.
     block_inverse: jnp.ndarray | None = None
-    # `1.0 / diagonal`, derived in `__post_init__` rather than at every FC-Jacobi sweep -- see
-    # `_SparseLevel.inv_diagonal`, the same reasoning.
-    inv_diagonal: jnp.ndarray = None  # (n,) 1.0 / diagonal
+    # `_level_inv_diagonal(diagonal, block_inverse)`, derived in `__post_init__` rather than at every
+    # FC-Jacobi sweep -- see `_SparseLevel.inv_diagonal`, the same reasoning.
+    inv_diagonal: jnp.ndarray = None  # (n,) see `_level_inv_diagonal`
 
     def __post_init__(self) -> None:
-        # On a block level the smoother reads `block_inverse` and never this, and the scalar diagonal it
-        # would invert is not required to be nonzero there (only the cell block must be invertible), so
-        # taking the reciprocal could store an infinity nothing reads. Left at zero instead, which is
-        # inert and does not look like a value.
         object.__setattr__(
-            self,
-            "inv_diagonal",
-            jnp.zeros_like(self.diagonal)
-            if self.block_inverse is not None
-            else 1.0 / self.diagonal,
+            self, "inv_diagonal", _level_inv_diagonal(self.diagonal, self.block_inverse)
         )
 
     def prolongation_scipy(self) -> sp.csr_matrix | None:

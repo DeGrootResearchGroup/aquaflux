@@ -2381,11 +2381,11 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   does not go through `_coo_apply` at all: every level's own operator applies via `_CsrOperator`
   (`BCSR` matmul), a proper CSR primitive that needs no sortedness hint.
 - **Frozen level diagonals are inverted ONCE, in `__post_init__`, not on every smoother apply (issue
-  #110's second finding, fixed 2026-08-18).** `_SparseLevel`/`_AirLevel` both carry `inv_diagonal`
-  (`1.0 / diagonal`), derived automatically the moment either is constructed — the same
-  `__post_init__` + `object.__setattr__` pattern `FaceCellConnectivity` uses for `interior` /
-  `safe_neighbour` (issue #109), so every existing constructor call site (the builders, `refit`, and
-  the one hand-built test level) gets it for free without passing it explicitly.
+  #110's second finding, fixed 2026-08-18).** `_SparseLevel`/`_AirLevel` both carry `inv_diagonal`,
+  derived automatically the moment either is constructed — the same `__post_init__` +
+  `object.__setattr__` pattern `FaceCellConnectivity` uses for `interior` / `safe_neighbour` (issue
+  #109), so every existing constructor call site (the builders, `refit`, and the one hand-built test
+  level) gets it for free without passing it explicitly.
   `_chebyshev_smooth`/`_jacobi_smooth`/`_jacobi_smooth_zero` read `level.inv_diagonal` instead of
   re-dividing; `_fc_jacobi` additionally hoists `omega * mask * inv_diagonal` out of its per-sweep
   loops (computed once per call instead of once per sweep) — `omega` stays a **solve-time** argument
@@ -2396,6 +2396,24 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   smoother's jaxpr, traced in isolation, closes over `inv_diagonal` as a constant and never over the
   raw `diagonal` (checked via `ClosedJaxpr.consts`, which distinguishes this from Chebyshev's other,
   unrelated scalar-derived divides that a blanket "no `div` primitive" check would have flagged too).
+  - **⚠️ THE TWO `__post_init__` BODIES DRIFTED, AND THE DRIFT WAS A LATENT DEFECT, NOT JUST DUPLICATION
+    (issue #271, fixed 2026-09-12).** Both originally computed the bare `1.0 / diagonal` this entry
+    describes. `_AirLevel` later grew a guard (block-aware lAIR, above) — a nodal level's smoother reads
+    `block_inverse` and never `inv_diagonal`, and the *scalar* diagonal a nodal level's `diagonal` field
+    carries is not required to be nonzero there (`_diagonal_inverse_operator` skips
+    `_require_positive_diagonal` whenever `block_size > 1`, since only each cell's own block need be
+    invertible) — so a bare reciprocal could store an infinity nothing reads. `_SparseLevel` never got
+    the same guard, so a nodal `_SparseLevel` (from `build_convection_hierarchy(..., block_size>1)`,
+    consumed by `SimpleSmoothedInverse`/`JacobiSmoothedInverse`) could carry `inv_diagonal = inf` at any
+    cell whose own scalar diagonal entry is zero or negative — inert today only because every consumer
+    of a nodal level's smoother branches on `block_inverse` before ever reading `inv_diagonal`
+    (`_chebyshev_smooth`, the only unconditional reader, is reachable only through
+    `smoothed_multigrid_solve`, whose hierarchies come solely from `build_smoothed_hierarchy`, always
+    `block_size=1`). Both bodies now call one shared `_level_inv_diagonal(diagonal, block_inverse)`, so
+    the guard cannot drift off one of the two levels again. Pinned by
+    `test_block_sparse_level_stores_a_finite_inv_diagonal_on_a_zero_scalar_diagonal`
+    (`tests/unit/test_multigrid.py`), the `_SparseLevel` mirror of the block-AIR fixture
+    `test_block_air_builds_where_the_scalar_diagonal_is_negative` already pins for `_AirLevel`.
 - **⚠️ NARROWED (2026-08-18): the defect below is specific to a PLAIN (untresholded) deep coarsening,
   not to depth itself — a strength-thresholded deep hierarchy does not reproduce it.** The prohibition
   below was against adding a depth knob at all; `HierarchyBlockInverse`'s shared base (#197) exposed
