@@ -2111,10 +2111,59 @@ tuning follow-up noted above.
                 across both cases is an **interior optimum near 2**: up to it the damping removes work,
                 past it the cheaper ramp is borrowed from the target. Do not quote the deferral as an
                 argument against damping; it is an argument against a *large* ratio.
-              - **Both cases, one number.** `gamma = 2` is the best measured constant on each, at -12 %
-                (pitzDaily 227 -> 200) and -14 % (`bfs3d` 190 -> 163), with the same converged root and
-                no retries on either. It is **not** a shipped default — both cases default to
-                `turbulence_damping = 1.0` and the library to `ConstantDamping(1.0)`.
+              - **⚠️ THE RATIO AND THE STATION COUNT INTERACT, so neither transfers alone (2026-09-11).**
+                Swept jointly on `bfs3d`'s momentum-only ramp, one run per arm, all reaching mid-span
+                `x_r/h` 8.3611. `march` is the march's own monotonic clock, which does not tick through
+                a machine sleep:
+
+                | stations | gamma | steps | cycles | ramp | target | esc | pc | march |
+                |---|---|---|---|---|---|---|---|---|
+                | 24 | 3 | 32 | **148** | 114 | 34 | 1 | 453 s | 1322 s |
+                | 12 | 2 | 27 | 154 | 42 | 112 | 2 | 249 s | 1145 s |
+                | 12 | 3 | 29 | 159 | 47 | 112 | 0 | 259 s | 1059 s |
+                | **12** | **5** | 29 | 150 | 44 | 106 | **0** | 245 s | **1001 s** |
+                | 12 | 8 | 29 | **141** | 54 | 87 | 4 | 256 s | 1186 s |
+                | 8 | 3 | 26 | 157 | 33 | 124 | 1 | 231 s | 1063 s |
+
+                **At 24 stations `gamma = 5` is worse than 3 (169 against 148); at 12 it is better (150
+                against 159).** A coarser ramp is a larger disturbance per station for the closure to
+                absorb, so the optimum ratio rises as the ramp coarsens — which means a station count
+                calibrated at `gamma = 1` does not survive the introduction of damping, and a `gamma`
+                calibrated at one station count does not transfer to another.
+              - **⚠️ THE TWO CASES WANT OPPOSITE SCHEDULES, AND THE DISCRIMINATOR IS THE REBUILD COST.**
+                `bfs3d` ships **12 stations at `gamma = 5`**, pitzDaily **16 at `gamma = 3`**. Swept on
+                pitzDaily under momentum-only scaling, one run per arm, all reaching `x_r/h` 8.0686:
+
+                | stations | gamma | steps | cycles | ramp | target | pc | march |
+                |---|---|---|---|---|---|---|---|
+                | 16 | 1 | 27 | 227 | — | — | — | — |
+                | 16 | 2 | 29 | 200 | 129 | 71 | — | — |
+                | **16** | **3** | 31 | **196** | 112 | 84 | 47 s | 290 s |
+                | 16 | 5 | 33 | 212 | 102 | 110 | — | — |
+                | 16 | 10 | 64 | 329 | 100 | 229 | — | — |
+                | 12 | 3 | 34 | 254 | 62 | 192 | 44 s | 328 s |
+
+                **Coarsening loses here and wins there**, for one reason: a station change forces a full
+                preconditioner re-materialize, which costs 11–16 s on `bfs3d` (24–34 % of that march,
+                so buying fewer of them pays for a worse handover) and ~1.5 s on pitzDaily (44–47 s
+                total, 13 %, so there is nothing to buy and the worse handover simply costs — 12
+                stations cuts the ramp 112 → 62 and explodes the target 84 → 192). **Neither schedule
+                transfers; sweep the pair on any new case.**
+              - **The pitzDaily gain decomposes cleanly**, each step measured: both-blocks 24 stations
+                `gamma = 1` **297** → momentum-only 24 **264** (−11 %, scaling) → momentum-only 16
+                **227** (−14 %, stations) → `gamma = 3` **196** (−14 %, damping). 34 % in total, and
+                `bfs3d` is 349 (rung ladder) → 150 by the same three levers.
+              - **⚠️⚠️ RESTART CYCLES ARE THE WRONG INSTRUMENT FOR A SCHEDULE ON THIS CASE, TWICE OVER,
+                and both ways they flatter the wrong arm.** *(a)* They cannot see preconditioner
+                rebuilds, and a station change **forces a full re-materialize** — so the station count
+                is literally a count of forced-full rebuilds, at 11-16 s each here. By cycles, 24
+                stations wins (148 against 159); by the clock it loses by 25 %. On pitzDaily a rebuild
+                is ~1.5 s and cycles do decide, which is why the two cases' station optima differ.
+                *(b)* They omit **rejected attempts** — the count is recorded only on acceptance, so a
+                step whose attempts were all rejected contributes `0`. `gamma = 8` therefore posts the
+                fewest cycles of any arm (141) while being the second slowest (1186 s): its four
+                escalations are four discarded shifted solves the count never mentions. Judge a
+                schedule here on the march clock **and** the escalation count, with cycles third.
               - One run per arm. The pitzDaily arm is **deterministic** — an earlier configuration ran
                 twice and gave 33 / 191 both times — so single runs separate arms there; that is a
                 property of that case, not a general licence, and `bfs3d`'s own target-rung cost is on
@@ -2176,13 +2225,16 @@ tuning follow-up noted above.
     factorization really is mismatched. Inert on pitzDaily (`beta_rel_change=inf`, `refresh_every=1e9`),
     but live for any finite `beta_rel_change` — including the example published in
     `docs/preconditioning.md`.
-  - **⚠️ IT IS THE DEFAULT on `validation/pitzdaily_openfoam/compare.py` since 2026-09-10** (`PITZ_RAMP`,
-    with `PITZ_RAMP=off` returning to `solve_reynolds_continuation` as the comparison arm rather than as
-    a supported path). Flipped on the user's decision that the coupled march's upcoming work lands here
-    and the ladder is not being developed further. **⚠️ The ramp has been measured on THIS CASE ONLY and
-    on one run per arm** — `bfs3d_openfoam` has never run it, and that case is where the ladder's rung
-    structure was originally calibrated, so it is the one most likely to disagree. The defaults are
-    configured with
+  - **⚠️ IT IS THE DEFAULT ON BOTH CASES** — `validation/pitzdaily_openfoam/compare.py` since 2026-09-10
+    (`PITZ_RAMP`) and `validation/bfs3d_openfoam/compare.py` since 2026-09-11 (`BFS3D_RAMP`), with `off`
+    returning to `solve_reynolds_continuation` as the comparison arm rather than as a supported path.
+    Flipped on the user's decision that the coupled march's upcoming work lands here and the ladder is
+    not being developed further. `bfs3d` was the case most likely to disagree — it is where the ladder's
+    rung structure was originally calibrated — and it does not: the ramp is 31 % cheaper there
+    (240 against 349 cycles at both-blocks scaling, 190 at momentum-only, 148 with that case's damping
+    optimum). **Still one run per arm on each case.** `bfs3d` additionally defaults to
+    `BFS3D_RAMP_SCALE=flow`, i.e. momentum-only stations; pitzDaily still defaults to `both`. The
+    defaults are configured with
     `PITZ_RAMP_STATIONS` / `PITZ_RAMP_STEPS`. It anchors at `RATIO ** N_POINTS`, i.e. **the same span the
     ladder walks**, so the two arms differ in how the span is traversed and not in how far — and it
     builds its engine by calling the ladder arm's own `point_setup`, so they are preconditioned, logged
