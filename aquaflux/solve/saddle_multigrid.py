@@ -592,15 +592,7 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
         for level in hierarchy.levels:
             if level.coarse_inv is not None:
                 continue
-            operator = level.operator
-            level_matrix = sp.csr_matrix(
-                (
-                    np.asarray(operator.data),
-                    np.asarray(operator.indices),
-                    np.asarray(operator.indptr),
-                ),
-                shape=operator.shape,
-            )
+            level_matrix = level.operator.to_scipy()
             # The formed Schur is discarded: nothing here applies it, and the smoother's traced copy
             # is the one the cycle uses. A diagnostic that wants it in host form calls `_simple_pieces`
             # itself and takes it from the pair.

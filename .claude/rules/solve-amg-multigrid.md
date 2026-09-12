@@ -2078,6 +2078,18 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
 > The rest of `solve.md`'s "Binding decisions" carries the general Newton/adjoint decisions and a
 > short pointer to this section; these are the `multigrid.py`-specific ones, moved here in full.
 
+- **Reading a frozen level back onto the host has one home per array it owns — `_CsrOperator.to_scipy()`
+  and `_SparseLevel`/`_AirLevel.prolongation_scipy()` (binding, #287).** Every host-side consumer of a
+  traced level's arrays — the host-smoothed inverse factorizing an operator, a march refresh re-deriving
+  a hierarchy at a new operator, a SIMPLE-smoothed level forming its Schur pieces — needs the exact same
+  `indptr`/`indices`/`data` → `scipy.sparse.csr_matrix` and `p_*` → prolongation reconstructions, and
+  four call sites (`ilu_inverse.py`, `saddle_multigrid.py`'s `derive_extras`, `SmoothedHierarchy.refit`,
+  `refresh_air_hierarchy`) each open-coded them. `_CsrOperator.to_scipy()` is the exact inverse of the
+  existing `from_scipy`; `prolongation_scipy()` is level-kind-specific because `_SparseLevel` stores a
+  COO triple (`p_frow`/`p_ccol`/`p_val`, one prolongation doubling as the transposed restriction) while
+  `_AirLevel` stores an independent CSR-shaped one (`p_row`/`p_col`/`p_val`, restriction and
+  prolongation kept apart) — so there is no single shared method across the two classes, only one per
+  class. No behaviour change; each call site is a byte-identical reconstruction of what it built inline.
 - **`solve/multigrid.py` is a pure operator-coarsening library — operator-in, uniformly (binding).**
   **Every** builder takes an assembled `a: sp.csr_matrix` — `build_smoothed_hierarchy(a)`,
   `build_convection_hierarchy(a)`, `build_air_hierarchy(a)` — and none takes a mesh, edge arrays, or

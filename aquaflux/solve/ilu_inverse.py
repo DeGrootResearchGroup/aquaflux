@@ -135,28 +135,6 @@ class _LevelSmoother:
         return self.sweep(operator, b, x, transpose) if self.sweeps > 1 else x
 
 
-def _to_scipy(level) -> sp.csr_matrix:
-    """That level's operator as a host CSR matrix, read off the traced record."""
-    return sp.csr_matrix(
-        (
-            np.asarray(level.operator.data),
-            np.asarray(level.operator.indices),
-            np.asarray(level.operator.indptr),
-        ),
-        shape=level.operator.shape,
-    )
-
-
-def _prolongation(level) -> sp.csr_matrix | None:
-    """That level's prolongation as a host CSR matrix, or ``None`` on the coarsest level."""
-    if level.p_frow is None:
-        return None
-    return sp.coo_matrix(
-        (np.asarray(level.p_val), (np.asarray(level.p_frow), np.asarray(level.p_ccol))),
-        shape=(level.n, level.n_coarse),
-    ).tocsr()
-
-
 class IluSmoothedInverse:
     """A frozen V-cycle over the traced hierarchy, relaxed on the host by an incomplete factorization.
 
@@ -230,13 +208,14 @@ class IluSmoothedInverse:
         for level in self._hierarchy.levels:
             coarse = None if level.coarse_inv is None else np.asarray(level.coarse_inv)
             if coarse is not None:
-                self._levels.append(_HostLevel(_to_scipy(level), None, None, coarse))
+                self._levels.append(_HostLevel(level.operator.to_scipy(), None, None, coarse))
                 continue
-            operator = _to_scipy(level)
+            operator = level.operator.to_scipy()
+            prolongation = level.prolongation_scipy()
             self._levels.append(
                 _HostLevel(
                     operator,
-                    _prolongation(level),
+                    None if prolongation is None else prolongation.tocsr(),
                     _LevelSmoother(operator, level.block_size, self._sweeps, self._ordering),
                     None,
                 )
