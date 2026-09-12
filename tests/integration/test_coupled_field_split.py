@@ -197,6 +197,53 @@ def test_the_split_continuation_converges_to_the_monolithic_fixed_point():
     assert float(jnp.linalg.norm(omega_s - omega_m) / jnp.linalg.norm(omega_m)) < 1e-4
 
 
+def test_coupled_amg_continuation_reads_one_flow_first_for_both_call_sites(case, monkeypatch):
+    """The probe's dropped-triangle pattern and the split's own ordering must agree.
+
+    ``coupled_amg_continuation`` decides which triangle to drop from the materialized pattern
+    (``FieldGroups.active_rows``) and which triangle the split itself retains
+    (``FieldSplitAmgPreconditioner.build``) at two separate call sites. Before this test both read
+    independent ``flow_first`` defaults that happened to agree; a caller changing one without the
+    other would silently precondition the wrong triangle -- the probe would still drop it for
+    whichever ordering *it* was told, and a split built under a *different* ordering would then read
+    a zero where the real coupling block belongs, with no error raised.
+    """
+    from aquaflux.solve import FieldGroups, FieldSplitAmgPreconditioner
+    from aquaflux.turbulence import coupled_amg_continuation
+
+    from tests.integration.test_coupled_amg import SMOOTHER_FILL
+
+    coupled, state = case["coupled"], case["state"]
+    seen = {}
+
+    real_active_rows = FieldGroups.active_rows
+
+    def spy_active_rows(self, *, flow_first=True):
+        seen["active_rows"] = flow_first
+        return real_active_rows(self, flow_first=flow_first)
+
+    monkeypatch.setattr(FieldGroups, "active_rows", spy_active_rows)
+
+    real_build = FieldSplitAmgPreconditioner.build.__func__
+
+    def spy_build(cls, *args, flow_first=True, **kwargs):
+        seen["split_build"] = flow_first
+        return real_build(cls, *args, flow_first=flow_first, **kwargs)
+
+    monkeypatch.setattr(FieldSplitAmgPreconditioner, "build", classmethod(spy_build))
+
+    coupled_amg_continuation(
+        coupled,
+        state,
+        field_split=True,
+        flow_first=False,
+        smoother_fill_levels=SMOOTHER_FILL,
+        coarse_eq_limit=200,
+    )
+
+    assert seen == {"active_rows": False, "split_build": False}
+
+
 def test_the_split_refreshes_in_place_onto_the_same_object(case):
     """A mid-march refresh must MUTATE the preconditioner, not replace it.
 

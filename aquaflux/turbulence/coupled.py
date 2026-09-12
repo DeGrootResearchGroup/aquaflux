@@ -2907,6 +2907,7 @@ def coupled_amg_continuation(
     descent_backoff: int = 0,
     descent_test: bool = False,
     field_split: bool = False,
+    flow_first: bool = True,
     trailing_smoother_sweeps: int = 1,
     leading_options: dict | None = None,
     trailing_options: dict | None = None,
@@ -3070,6 +3071,16 @@ def coupled_amg_continuation(
         coupling between them exactly — instead of one hierarchy over all six fields. Only which frozen
         inverse is fitted changes; the operator stays monolithic, so the differentiated Jacobian and the
         coupled adjoint are untouched. Incompatible with ``host_exact_forward_solve``.
+    flow_first : bool
+        Solve the ``[u, v, w, p]`` group first and retain the ``[k, ω]``-by-flow coupling — the ordering
+        :func:`~aquaflux.solve.build_block_triangular_field_split` calls ``flow_first`` and its own
+        default. Ignored without ``field_split=True``. This one value governs both the split this
+        builder fits *and* the pattern its own probe materializes (:meth:`~aquaflux.solve.FieldGroups.active_rows`,
+        which the probe consults to skip storing the triangle a split with this ordering never reads) —
+        threaded to a single argument here rather than left as two independent defaults that happen to
+        agree, since a caller changing one without the other would silently precondition the wrong
+        triangle: the probe would still drop the triangle for the *old* ordering, and the split built
+        under the *new* one would find it missing.
     trailing_smoother_sweeps : int
         Level-smoother sweeps on the ``[k, omega]`` half of the split, **one** by default against
         ``smoother_sweeps``' two on the saddle. The transported scalars are a much easier operator than
@@ -3203,11 +3214,12 @@ def coupled_amg_continuation(
             # built here specifically for one need not materialize that block at all -- it is a
             # fifth or more of the pattern on a coupled RANS mesh (measured on a three-dimensional
             # backward-facing step) and pure waste otherwise: computed, stored, and thrown away by
-            # `FieldGroups.blocks` the moment the split is fitted. `flow_first` matches
-            # `FieldSplitAmgPreconditioner.build`'s own (unexposed) default ordering; if that default
-            # ever becomes a parameter here, this must move with it. `None` when not splitting, so a
+            # `FieldGroups.blocks` the moment the split is fitted. `flow_first` is this function's own
+            # parameter, read here and passed to `FieldSplitAmgPreconditioner.build` below -- the same
+            # value reaches both, so the triangle this drops from the pattern cannot disagree with the
+            # triangle the split it is a pattern for actually keeps. `None` when not splitting, so a
             # monolithic build (which DOES read every block) is unaffected.
-            active_rows=groups.active_rows() if field_split else None,
+            active_rows=groups.active_rows(flow_first=flow_first) if field_split else None,
             # A preconditioner must be assembled from the operator the Krylov iteration APPLIES. When
             # the step differentiates a stand-in, so must the probe -- otherwise the two differ by a
             # term the size of the k row's own diagonal, which is a preconditioner for a matrix nobody
@@ -3261,6 +3273,7 @@ def coupled_amg_continuation(
                 plan,
                 shift,
                 groups,
+                flow_first=flow_first,
                 trailing_smoother_sweeps=trailing_smoother_sweeps,
                 leading_options=leading_options,
                 trailing_options=trailing_options,
