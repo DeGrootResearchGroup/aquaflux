@@ -593,9 +593,10 @@ def test_the_repair_is_exact_where_it_fires_and_absent_where_it_need_not() -> No
     The two shipped closures fail in opposite regimes, so choosing one globally means accepting one
     of the two failures everywhere. Choosing per cell -- by measuring the correction, not by counting
     faces -- gives the accurate one where it is needed and leaves the rest of the mesh on a closure
-    that reads no boundary value at all. The second assertion is the load-bearing one: on a mesh with
-    nothing to repair the result must be *bit-identical*, or the repair is a change to every case
-    rather than to the cases that need it.
+    that reads no boundary value at all. `fallback` defaults to `None`, so the repair has to be asked
+    for explicitly; the second assertion is the load-bearing one: on a mesh with nothing to repair,
+    asking for it anyway must be *bit-identical* to not asking, or the repair is a change to every
+    case rather than to the cases that need it.
     """
     tetrahedral, hexahedral = QUADRATIC_MESHES[2], QUADRATIC_MESHES[1]
 
@@ -603,8 +604,10 @@ def test_the_repair_is_exact_where_it_fires_and_absent_where_it_need_not() -> No
     geometry = case["geometry"]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        repaired = MultipleCorrectionGradient().bind(tetrahedral, geometry)
-        raw = MultipleCorrectionGradient(fallback=None).bind(tetrahedral, geometry)
+        repaired = MultipleCorrectionGradient(fallback=SkewCorrectedGradient()).bind(
+            tetrahedral, geometry
+        )
+        raw = MultipleCorrectionGradient().bind(tetrahedral, geometry)  # fallback=None, the default
     assert isinstance(repaired.prepared.closure, CellwiseFallback)
     args = (case["cell_values"], tetrahedral, geometry, case["face_values"])
     error = np.abs(np.asarray(repaired.gradients(*args)) - case["gradient"]).max()
@@ -616,23 +619,50 @@ def test_the_repair_is_exact_where_it_fires_and_absent_where_it_need_not() -> No
     geometry = case["geometry"]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
+        requested = MultipleCorrectionGradient(fallback=SkewCorrectedGradient()).bind(
+            hexahedral, geometry
+        )
         default = MultipleCorrectionGradient().bind(hexahedral, geometry)
-        disabled = MultipleCorrectionGradient(fallback=None).bind(hexahedral, geometry)
-    assert not isinstance(default.prepared.closure, CellwiseFallback)
+    assert not isinstance(requested.prepared.closure, CellwiseFallback)
     args = (case["cell_values"], hexahedral, geometry, case["face_values"])
     assert np.array_equal(
-        np.asarray(default.gradients(*args)), np.asarray(disabled.gradients(*args))
+        np.asarray(requested.gradients(*args)), np.asarray(default.gradients(*args))
     )
 
 
 def test_the_repair_says_so_rather_than_silently_changing_the_closure() -> None:
-    """A caller asked for one closure and got another on some cells; that has to be visible."""
+    """Asking for the repair and getting a different closure on some cells has to be visible."""
     multiple_correction._FALLBACK_WARNED = False
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        MultipleCorrectionGradient().bind(QUADRATIC_MESHES[2], QUADRATIC_MESHES[2].geometry())
+        MultipleCorrectionGradient(fallback=SkewCorrectedGradient()).bind(
+            QUADRATIC_MESHES[2], QUADRATIC_MESHES[2].geometry()
+        )
     fired = [w for w in caught if "underdetermined" in str(w.message)]
     assert len(fired) == 1
     message = str(fired[0].message)
     assert "OwnerGradient" in message and "SkewCorrectedGradient" in message
     assert "18 of 162" in message  # how many cells, so the reader can judge the scale
+
+
+def test_the_default_leaves_undetermined_cells_unrepaired_and_names_the_opt_in() -> None:
+    """`fallback` defaults to `None`: nothing is silently installed on the cells that need it.
+
+    The closure that repairs those cells is measured (see `SkewCorrectedGradient`'s own docstring)
+    to destabilize a coupled march at an unconverged iterate on exactly the cells it would be
+    installed on, so it must be requested by a caller who has weighed that, not defaulted onto every
+    mesh with a corner tetrahedron. The warning is what makes the unrepaired state visible and names
+    the opt-in, rather than requiring a reader to already know it exists.
+    """
+    multiple_correction._FALLBACK_WARNED = False
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        scheme = MultipleCorrectionGradient().bind(  # fallback=None, the default
+            QUADRATIC_MESHES[2], QUADRATIC_MESHES[2].geometry()
+        )
+    assert not isinstance(scheme.prepared.closure, CellwiseFallback)
+    fired = [w for w in caught if "underdetermined" in str(w.message)]
+    assert len(fired) == 1
+    message = str(fired[0].message)
+    assert "fallback=SkewCorrectedGradient()" in message
+    assert "18 of 162" in message

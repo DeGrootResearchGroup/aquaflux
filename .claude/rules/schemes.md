@@ -2410,8 +2410,7 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   neither has to be global. `MultipleCorrectionGradient.bind` measures `M2⁻¹` per cell, and where the
   requested closure leaves it singular it rebuilds through
   `CellwiseFallback(cells, primary, secondary)` — the fallback on those cells' boundary faces, the
-  primary everywhere else. `fallback` defaults to `SkewCorrectedGradient`; `None` restores the
-  warn-and-be-wrong behaviour. `Corrections` now carries the **effective** closure, and
+  primary everywhere else. `Corrections` now carries the **effective** closure, and
   `reconstruct` applies *that* rather than the requested one — otherwise the correction would be
   probed through one operator and applied through another, which is this module's own recorded trap.
 
@@ -2422,11 +2421,26 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   | quadrilateral | 0 | — **bit-identical to owner** | 2.53e+00 |
   | **pitzDaily (12225)** | **0** | — **bit-identical to owner**, no warning | 2.31e+00 |
 
-  **This is what keeps the accurate answer from stalling the march.** On pitzDaily the repair fires on
-  **zero** cells and the reconstruction is bit-identical to the `OwnerGradient` arm measured at
-  689.8 s / 437 cycles / `x_r/h` 8.069 — so the default configuration never applies the stalling
-  closure there at all, and the march result transfers without re-running. Nothing is rebuilt when
-  nothing is wrong, so a healthy mesh pays one comparison rather than a second correction build.
+  **This is what keeps the accurate answer from stalling the march ON A MESH THAT ASKS FOR THE
+  REPAIR.** On pitzDaily the repair fires on **zero** cells and the reconstruction is bit-identical to
+  the `OwnerGradient` arm measured at 689.8 s / 437 cycles / `x_r/h` 8.069 — so a case that asks for
+  `fallback=SkewCorrectedGradient()` on this mesh never actually applies the stalling closure anywhere,
+  and the march result transfers without re-running. Nothing is rebuilt when nothing is wrong, so a
+  healthy mesh pays one comparison rather than a second correction build.
+
+  **⚠️ `fallback` DEFAULTS TO `None`, NOT TO `SkewCorrectedGradient()` (corrected; it shipped the
+  other way for a time).** The table above shows the repair is free wherever the mesh does not need
+  it, but says nothing about whether it is *safe* wherever it does — and it is not, in general: the
+  repair's only tool is `SkewCorrectedGradient`, and that closure reads a boundary value on every face
+  it is installed on, which is exactly what the entry above measures destabilizing a coupled march at
+  an unconverged iterate. Defaulting the fallback on installed that risk on every mesh with a corner
+  tetrahedron the first time such a mesh reached a real march, with no case in this repository able to
+  say whether it was safe there (no shipped mesh has both the cell shape and a march). With the default
+  `None`, a mesh whose closure leaves cells underdetermined gets a warning naming the count and the
+  opt-in (`fallback=SkewCorrectedGradient()`) instead of a silent repair — a caller decides with their
+  own mesh and case in view, rather than the library deciding for every mesh in one direction. Nothing
+  in the table above changes: it is still true that asking for the repair on pitzDaily costs nothing,
+  which is the argument *for* asking when a mesh is known to need it.
 
   ⚠️ **What this does NOT do is explain the stall of GLOBAL skew, which is still unknown.** The
   fallback removes the need to apply it globally; it does not make it safe to. On a mesh that *does*

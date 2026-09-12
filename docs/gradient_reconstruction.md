@@ -738,18 +738,25 @@ matrix the scheme already inverts rather than needing an iteration.
 Which patches those are is read off your boundary conditions by differentiating them, so nothing needs
 declaring and it cannot disagree with the conditions themselves.
 
-**You do not have to work out which case you are in, and you do not have to choose one closure for
-the whole mesh.** When the scheme binds to a geometry it measures its own correction per cell, and
-wherever the closure you asked for leaves the Hessian singular it uses
-{class}`~aquaflux.schemes.SkewCorrectedGradient` on *those cells'* boundary faces only
+**You do not have to choose one closure for the whole mesh, and you do not have to repair every cell
+the same way.** Pass `fallback=`{class}`~aquaflux.schemes.SkewCorrectedGradient` `()` and, when the
+scheme binds to a geometry, it measures its own correction per cell and uses that closure on *only*
+the boundary faces of the cells where the one you asked for leaves the Hessian singular
 ({class}`~aquaflux.schemes.CellwiseFallback`), leaving every other cell on the default. It says so
 once, naming how many cells were repaired.
 
-That is what keeps the accurate answer from costing anything elsewhere: on a mesh with nothing to
-repair -- quadrilateral, hexahedral, and the 12225-cell pitzDaily benchmark among them -- the repair
-fires on **zero** cells and the reconstruction is bit-identical to the plain default, so a case that
-does not need the second closure never pays for it. Pass `fallback=None` to switch the repair off and
-get a warning instead.
+```{warning}
+`fallback` defaults to `None` -- it does **not** repair those cells for you. The closure that can
+repair them is the one the warning above measures destabilizing a coupled march on exactly the cells
+it would be installed on, so installing it silently on every mesh with a corner tetrahedron would be
+choosing that risk on the caller's behalf. With `fallback=None` the scheme instead warns, once, naming
+how many cells are affected and that `fallback=SkewCorrectedGradient()` is the repair -- so decide with
+your own mesh and case in view, not by default.
+```
+
+On a mesh with nothing to repair -- quadrilateral, hexahedral, and the 12225-cell pitzDaily benchmark
+among them -- asking for the repair anyway fires it on **zero** cells and the reconstruction is
+bit-identical to not asking, so a case that does not need the second closure never pays for it.
 
 #### Boundary values, and reading them at the right gradient
 

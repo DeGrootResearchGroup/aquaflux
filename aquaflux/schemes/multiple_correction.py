@@ -412,11 +412,17 @@ class MultipleCorrectionGradient(GradientScheme):
         with boundary **tetrahedra**, where the owner closure leaves the Hessian underdetermined).
     fallback : GradientBoundaryClosure or None
         Used on the boundary faces of any cell :attr:`boundary_closure` cannot determine, leaving
-        every other cell alone (:class:`CellwiseFallback`). Defaults to
-        :class:`SkewCorrectedGradient`, which supplies the direction a corner tetrahedron is short
-        of. ``None`` disables the repair and warns instead. On a mesh with no such cells nothing is
-        rebuilt and the reconstruction is byte-identical either way — measured on quadrilateral and
-        hexahedral meshes, and on a 1.6M-cell snappyHexMesh mesh.
+        every other cell alone (:class:`CellwiseFallback`). Defaults to ``None``, which leaves such
+        cells amplifying and warns rather than repairing them. :class:`SkewCorrectedGradient`
+        supplies the direction a corner tetrahedron is short of and repairs them, but it also reads
+        a boundary value on every boundary face it is installed on — including every one of the
+        undetermined cells' own — and that closure is measured to destabilize a coupled march badly
+        at an unconverged iterate on exactly those cells (see its own docstring). A repair chosen
+        without knowing the mesh needs it is therefore not a safe default: pass it explicitly once
+        you have looked at the mesh and decided the corner-tetrahedron accuracy is worth that risk.
+        On a mesh with no undetermined cells nothing is built either way and the reconstruction is
+        byte-identical regardless of this setting — measured on quadrilateral and hexahedral meshes,
+        and on a 1.6M-cell snappyHexMesh mesh.
     prepared : Corrections or None
         The geometry-only correction matrices, present once :meth:`bind` has been called. ``None``
         rebuilds them on every reconstruction, which is correct but wasteful — an assembler binds
@@ -426,7 +432,7 @@ class MultipleCorrectionGradient(GradientScheme):
     """
 
     boundary_closure: GradientBoundaryClosure = eqx.field(default_factory=OwnerGradient)
-    fallback: GradientBoundaryClosure | None = eqx.field(default_factory=SkewCorrectedGradient)
+    fallback: GradientBoundaryClosure | None = None
     prepared: Corrections | None = None
 
     def bind(self, mesh: Mesh, geometry: MeshGeometry) -> MultipleCorrectionGradient:
@@ -788,9 +794,13 @@ def _warn_unrepairable(cells: jnp.ndarray, closure, total: int) -> None:
     _FALLBACK_WARNED = True
     warnings.warn(
         f"MultipleCorrectionGradient: {cells.size} of {total} cells leave the Hessian "
-        f"underdetermined under {type(closure).__name__}, and no fallback closure was given (or the "
-        f"fallback is the same closure). The reconstruction amplifies in those cells instead of "
-        f"being exact for quadratics there.",
+        f"underdetermined under {type(closure).__name__} (a tetrahedron with two or more boundary "
+        f"faces is the usual cause), and no fallback closure was given (or the fallback is the same "
+        f"closure). The reconstruction amplifies in those cells instead of being exact for "
+        f"quadratics there. Passing `fallback=SkewCorrectedGradient()` repairs it, at the cost of "
+        f"reading a boundary value on those cells' faces -- which SkewCorrectedGradient's own "
+        f"docstring documents destabilizing a coupled march at an unconverged iterate, so weigh that "
+        f"before opting in.",
         stacklevel=2,
     )
 
