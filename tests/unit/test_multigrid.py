@@ -20,7 +20,6 @@ import scipy.sparse as sp
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.solve.frozen_operator import convection_diffusion_operator, decouple_dof
 from aquaflux.solve.multigrid import (
-    _AGGREGATE_STATS,
     _cell_graph,
     _chebyshev_smooth,
     _CsrOperator,
@@ -239,7 +238,7 @@ def test_avoid_singletons_reaches_the_aggressively_coarsened_level() -> None:
     a = _anisotropic_poisson(24, 24, aspect_ratio=100.0)
 
     def singletons_per_level(avoid_singletons):
-        _AGGREGATE_STATS.clear()
+        stats: list[dict] = []
         build_convection_hierarchy(
             a,
             max_coarse=20,
@@ -248,8 +247,9 @@ def test_avoid_singletons_reaches_the_aggressively_coarsened_level() -> None:
             aggressive_levels=1,
             strength_threshold=0.25,
             avoid_singletons=avoid_singletons,
+            stats=stats,
         )
-        return [level["singletons"] for level in _AGGREGATE_STATS]
+        return [level["singletons"] for level in stats]
 
     without = singletons_per_level(False)
     with_repair = singletons_per_level(True)

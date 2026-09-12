@@ -38,7 +38,6 @@ import scipy.sparse as sp
 
 from .hierarchy_inverse import HierarchyBlockInverse
 from .multigrid import (
-    _AGGREGATE_STATS,
     SmoothedHierarchy,
     _CsrOperator,
     _operator_matvec,
@@ -571,13 +570,6 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
     def cycle(self):
         return _simple_smoothed_cycle
 
-    def _after_coarsening(self) -> None:
-        """Capture this build's aggregate statistics, then derive the smoother over the hierarchy."""
-        # Snapshot NOW, while the accumulator still describes this build: it is module-level and every
-        # later hierarchy overwrites it, so reading it at report time is reading someone else's.
-        self._aggregate_stats = list(_AGGREGATE_STATS[-(len(self._hierarchy.levels) - 1) :])
-        super()._after_coarsening()
-
     def derive_extras(self, hierarchy) -> dict:
         """The per-level SIMPLE pieces over ``hierarchy``, and the build record.
 
@@ -622,10 +614,11 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
         # stopped because it reached its coarse limit, and it says nothing about whether a single
         # aggregation had to represent the error across a hundredfold jump.
         #
-        # These come from THIS inverse's own last coarsening, captured when it ran. Reading the module
-        # accumulator here instead would print whichever hierarchy aggregated most recently -- and on
-        # the refit path nothing aggregates at all, so it printed another block's aggregates as if they
-        # were this one's. A frozen coarsening still HAS aggregates; they are the ones below.
+        # These come from THIS inverse's own last coarsening, into a list `_coarsen` hands the builder
+        # for exactly this build -- never a shared accumulator another hierarchy could have written to
+        # since. A frozen-coarsening refresh calls `refit`, not `_coarsen`, so it aggregates nothing new;
+        # `self._aggregate_stats` then still holds this same inverse's own last real aggregation, which
+        # is the honest thing to report (a frozen coarsening still HAS aggregates, just not new ones).
         for depth, stat in enumerate(self._aggregate_stats):
             self._report(
                 f"      aggregates level {depth}: {stat['aggregates']} of size "
