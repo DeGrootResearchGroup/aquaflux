@@ -20,7 +20,7 @@ from aquaflux.io.reader import MeshReader
 from aquaflux.mesh import Mesh, collapse_extruded_direction
 
 from .assembler import assemble
-from .foamfile import read_foam_body
+from .foamfile import read_foam_body, resolve_polymesh_dir
 from .grammar import (
     parse_boundary,
     parse_cell_zones,
@@ -29,23 +29,6 @@ from .grammar import (
     parse_vector_list,
 )
 from .records import PolyMeshData
-
-
-def _resolve_polymesh_dir(path) -> Path:
-    """Resolve ``path`` to a polyMesh directory, accepting either it or an enclosing case directory.
-
-    Raises
-    ------
-    FileNotFoundError
-        If neither ``path`` nor ``path/constant/polyMesh`` contains a ``points`` file.
-    """
-    path = Path(path)
-    for candidate in (path, path / "constant" / "polyMesh"):
-        if (candidate / "points").exists():
-            return candidate
-    raise FileNotFoundError(
-        f"no polyMesh found at {path} (looked for a 'points' file there and in constant/polyMesh)"
-    )
 
 
 class OpenFOAMReader(MeshReader):
@@ -68,7 +51,7 @@ class OpenFOAMReader(MeshReader):
             Either the polyMesh directory itself or an OpenFOAM case directory containing
             ``constant/polyMesh``.
         """
-        self.directory = str(_resolve_polymesh_dir(directory))
+        self.directory = str(resolve_polymesh_dir(directory))
 
     def _read_field(self, filename: str, parser: Callable, *, required: bool = True):
         """Read and parse one polyMesh file's body; ``None`` if optional and absent.

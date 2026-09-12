@@ -51,6 +51,65 @@ def list_envelope(body: str) -> tuple[int, str]:
     raise ValueError("unbalanced parentheses in list body")
 
 
+BOUNDARY_FIELD_RE = re.compile(r"\bboundaryField\s*\{", re.DOTALL)
+
+
+def matching_brace(text: str, open_index: int) -> int:
+    """Index of the ``}`` matching the ``{`` at ``open_index``.
+
+    Matched by depth rather than by regex, so a patch dictionary holding a nested
+    ``value nonuniform List<scalar> N ( … )`` entry is handled correctly.
+
+    Raises
+    ------
+    ValueError
+        If the braces are unbalanced.
+    """
+    depth = 0
+    for i in range(open_index, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    raise ValueError("unbalanced braces")
+
+
+def split_boundary_blocks(body: str) -> dict[str, str]:
+    """Split a field file's ``boundaryField { … }`` into ``{patch name: dictionary body}``.
+
+    Shared by the field reader, which parses each block's values, and the field writer, which
+    copies each block through unchanged so a written field keeps the case's own boundary
+    conditions. The blocks are returned as raw text: what a patch dictionary may contain depends on
+    its ``type``, and neither caller needs that interpreted.
+
+    Parameters
+    ----------
+    body : str
+        The comment-stripped field-file body.
+
+    Returns
+    -------
+    dict of {str: str}
+        Patch name to the text between its braces, in file order. Empty when the body has no
+        ``boundaryField`` entry.
+    """
+    match = BOUNDARY_FIELD_RE.search(body)
+    if match is None:
+        return {}
+    open_index = match.end() - 1
+    inner = body[open_index + 1 : matching_brace(body, open_index)]
+    blocks: dict[str, str] = {}
+    cursor = 0
+    while (brace := inner.find("{", cursor)) != -1:
+        words = inner[cursor:brace].split()
+        close = matching_brace(inner, brace)
+        blocks[words[-1] if words else ""] = inner[brace + 1 : close]
+        cursor = close + 1
+    return blocks
+
+
 def _check_count(kind: str, declared: int, found: int) -> None:
     """Raise if a list's declared count disagrees with the number of elements parsed."""
     if declared != found:

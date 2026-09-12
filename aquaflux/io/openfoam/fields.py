@@ -30,25 +30,9 @@ import numpy as np
 from aquaflux.mesh import Mesh
 
 from .foamfile import read_foam_body
-from .grammar import list_envelope
+from .grammar import BOUNDARY_FIELD_RE, list_envelope, split_boundary_blocks
 
-# A ``boundaryField { patch { … } patch { … } }`` entry: the patch name and its dictionary body,
-# matched by brace depth rather than by regex so a nested ``value nonuniform … ( … )`` list is safe.
-_BOUNDARY_FIELD_RE = re.compile(r"\bboundaryField\s*\{", re.DOTALL)
 _UNIFORM_RE = re.compile(r"\buniform\s+(-?[\d.eE+-]+)")
-
-
-def _matching_brace(text: str, open_index: int) -> int:
-    """Index of the ``}`` matching the ``{`` at ``open_index``."""
-    depth = 0
-    for i in range(open_index, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return i
-    raise ValueError("unbalanced braces")
 
 
 def _values(body: str, count: int, what: str) -> np.ndarray:
@@ -99,22 +83,13 @@ def parse_scalar_field(body: str, n_internal: int, patch_sizes: dict[str, int]) 
     internal_match = re.search(r"\binternalField\b", body)
     if internal_match is None:
         raise ValueError("field has no internalField entry")
-    boundary_match = _BOUNDARY_FIELD_RE.search(body)
+    boundary_match = BOUNDARY_FIELD_RE.search(body)
     internal_end = boundary_match.start() if boundary_match else len(body)
     parts = [_values(body[internal_match.end() : internal_end], n_internal, "internalField")]
 
     if patch_sizes and boundary_match is None:
         raise ValueError("field has no boundaryField entry")
-    blocks: dict[str, str] = {}
-    if boundary_match is not None:
-        open_index = boundary_match.end() - 1
-        inner = body[open_index + 1 : _matching_brace(body, open_index)]
-        cursor = 0
-        while (brace := inner.find("{", cursor)) != -1:
-            name = inner[cursor:brace].split()[-1] if inner[cursor:brace].split() else ""
-            close = _matching_brace(inner, brace)
-            blocks[name] = inner[brace + 1 : close]
-            cursor = close + 1
+    blocks = split_boundary_blocks(body)
 
     for name, size in patch_sizes.items():
         if name not in blocks:

@@ -88,11 +88,65 @@ def is_binary(foam: FoamFile) -> bool:
     return foam.header.get("format", "ascii").strip().lower() == "binary"
 
 
+def resolve_polymesh_dir(path) -> Path:
+    """Resolve ``path`` to a polyMesh directory, accepting either it or an enclosing case directory.
+
+    Shared by the reader, which builds a mesh from it, and the field writer, which consults its
+    ``points`` to recover which axis a two-dimensional case was collapsed along.
+
+    Raises
+    ------
+    FileNotFoundError
+        If neither ``path`` nor ``path/constant/polyMesh`` contains a ``points`` file.
+    """
+    path = Path(path)
+    for candidate in (path, path / "constant" / "polyMesh"):
+        if (candidate / "points").exists():
+            return candidate
+    raise FileNotFoundError(
+        f"no polyMesh found at {path} (looked for a 'points' file there and in constant/polyMesh)"
+    )
+
+
+def read_foam_file(path) -> FoamFile:
+    """Read an OpenFOAM file from disk into its header and body, rejecting binary format.
+
+    The one place a file on disk becomes a parsed OpenFOAM file, so the ASCII-only limitation is
+    enforced once rather than at each caller. Readers that need only the payload go through
+    :func:`read_foam_body`; the field writer comes here instead, because the header's ``class``
+    entry is part of what a written field inherits.
+
+    Parameters
+    ----------
+    path : str or Path
+        The file to read.
+
+    Returns
+    -------
+    FoamFile
+        Its ``FoamFile`` header entries and comment-stripped payload body.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the file does not exist.
+    NotImplementedError
+        If the file declares ``format binary;`` -- detected rather than misread.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"OpenFOAM file not found: {path}")
+    foam = parse_foamfile(path.read_text())
+    if is_binary(foam):
+        raise NotImplementedError(f"{path} is in binary format; only ASCII files are supported")
+    return foam
+
+
 def read_foam_body(path) -> str:
     """Read an OpenFOAM file from disk and return its payload body, rejecting binary format.
 
-    The one place a file on disk becomes a parseable body, so the ASCII-only limitation is enforced
-    once rather than at each reader. Both the polyMesh reader and the field readers go through it.
+    The body half of :func:`read_foam_file`, which owns the read and the binary gate. Both the
+    polyMesh reader and the field readers go through this.
 
     Parameters
     ----------
@@ -109,12 +163,6 @@ def read_foam_body(path) -> str:
     FileNotFoundError
         If the file does not exist.
     NotImplementedError
-        If the file declares ``format binary;`` -- detected rather than misread.
+        If the file declares ``format binary;``.
     """
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"OpenFOAM file not found: {path}")
-    foam = parse_foamfile(path.read_text())
-    if is_binary(foam):
-        raise NotImplementedError(f"{path} is in binary format; only ASCII files are supported")
-    return foam.body
+    return read_foam_file(path).body

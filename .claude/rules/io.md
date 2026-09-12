@@ -11,7 +11,8 @@ paths:
 > *math/format*, never the reference code, the `.claude/` rules, the design notes, or the author's
 > own papers. **Acronyms:** spell out compressed-sparse-row (CSR) at first use per file.
 
-Reading external mesh formats into an aquaflux `Mesh` (and, later, writing them out). This package
+Reading external mesh formats into an aquaflux `Mesh`, and writing computed cell fields back out
+(mesh writing itself is still deferred). This package
 owns **file-format concerns only**; `aquaflux/mesh/` owns mesh representation. Governed by the root
 `CLAUDE.md` Engineering Principles.
 
@@ -50,10 +51,15 @@ Three pure seams so ~80% of the logic tests with no filesystem (separate I/O fro
     faithful 3D mesh, then collapse when `empty` patches are present. Accepts a case dir (resolves
     `constant/polyMesh`) or the polyMesh dir directly. `_read_field` handles the *optional*-file
     case and delegates the rest to `foamfile.read_foam_body`.
-  - **`foamfile.read_foam_body(path)` is the one place a file on disk becomes a parseable body**,
-    so the ASCII-only limitation is enforced once. It lives beside the `is_binary` predicate it
-    uses. **`reader.py` is NOT the package's only file I/O** — `fields.py` reads files too; what is
-    centralized is the *binary gate*, and its home is `read_foam_body`.
+  - **`foamfile.read_foam_file(path)` is the one place a file on disk becomes a parsed OpenFOAM
+    file**, so the ASCII-only limitation is enforced once. It lives beside the `is_binary` predicate
+    it uses, and `read_foam_body(path)` is its body half (`read_foam_file(path).body`) for the
+    callers that need no header. **`reader.py` is NOT the package's only file I/O** — `fields.py`
+    and `field_writer.py` open files too; what is centralized is the *binary gate*.
+    ⚠️ The split exists because the **writer needs the header** — a field inherits its `class` from
+    its template — and `read_foam_body` throws the header away. Adding a second read+gate in the
+    writer would have put the ASCII limitation in two places, which is the one thing this seam is
+    for.
   - `fields.py` — **reading a scalar field written on an already-imported mesh** (`phi` above all).
     `parse_scalar_field(body, n_internal, patch_sizes)` is pure and tests on snippets;
     `read_surface_scalar_field(path, mesh)` places the values on the mesh's faces, and
@@ -64,6 +70,137 @@ Three pure seams so ~80% of the logic tests with no filesystem (separate I/O fro
     also returns the internal block *only*: a `volScalarField`'s `boundaryField` holds **face**
     values, a different quantity on a different index space, so concatenating them as the surface
     reader does would produce something no consumer wants.
+
+## Structure — BUILT (OpenFOAM field writer, ASCII) — 2026-09-12
+
+Writing computed cell fields back into the case they were read from, as an ordinary time directory,
+so a solved state can be opened by the tools the reference solution is opened with — or used to
+restart a run. `io/openfoam/field_writer.py`, exported as `write_openfoam_time` (a whole time
+directory) and `write_openfoam_field` (one file).
+
+**⚠️ THE DESIGN DECISION THAT CARRIES THIS: ONLY THE INTERNAL VALUES ARE OURS.** Dimensions and the
+whole per-patch `boundaryField` dictionary are copied verbatim from a **template** — the case's own
+field of the same name, normally in `0/`. Three things follow, and each is a reason not to "improve"
+this into a boundary-condition translator:
+- **It is what makes the output restartable** rather than merely viewable. The boundary conditions
+  are the case's own by construction, spelled the way its solver expects, so there is no aquaflux-BC
+  → OpenFOAM-BC mapping to get wrong or to keep in step with either side.
+- **It handles the types this package cannot reconstruct at all.** An `empty` patch is *removed from
+  the mesh* by the 2D collapse, so a writer working from the imported mesh could not put it back.
+  Copying the dictionary does, and a test pins exactly that.
+- **It removes the units table.** A field's `dimensions` has one home — the template — so there is
+  no second place for it to be recorded and disagree.
+
+**Why the internal block is a straight dump, with no permutation.** A cell's aquaflux index *is*
+OpenFOAM's: `assemble` derives cell indices from the `owner`/`neighbour` labels it reads rather than
+renumbering, and `collapse_extruded_direction` keeps cells at their indices (it removes faces, not
+cells — `mesh/collapse.py`'s own docstring states this). ⚠️ **Faces are the opposite** — the collapse
+does renumber them — which is a second, independent reason the patch dictionaries are copied rather
+than rebuilt from the mesh.
+
+**⚠️ A 2D vector field is padded back to three components, and the dropped axis is genuinely NOT
+recoverable from the `Mesh`** — `collapse_extruded_direction` infers it, slices with it, and
+discards it, so `node_coords` really is `(n_nodes, 2)` and a y-extruded case collapses to a mesh
+byte-identical to a z-extruded one. There is no "plane the flat cells lie in" left to inspect.
+
+**It IS recoverable from the case on disk, and `write_openfoam_time` does that by default**
+(`infer_extruded_axis`). The collapse keeps surviving axes in **ascending** order and preserves
+their coordinate values, so there are only three candidates and the polyMesh's extents on the two
+axes a candidate keeps must equal the collapsed mesh's own two extents — exactly one matches. That
+is an identification, not the heuristic "take the thinnest axis", which would misread a domain thin
+in a resolved direction. Ambiguity (no match, or several) raises and asks for the axis rather than
+guessing.
+
+⚠️ **The reason this is cheap is worth keeping, because the obvious objection is wrong.** Parsing
+`points` sounds expensive at reactor scale — but **a mesh that needs this is one cell thick by
+construction**, so it is never one of the large ones (pitzDaily's `points` is 916 KB); a genuinely 3D
+mesh is never collapsed and never asks. The expensive meshes and the ambiguous meshes are disjoint
+sets. It is also only consulted when a **vector** field arrives with two components, so a
+scalar-only or 3D write opens nothing.
+
+`extruded_axis` survives as an explicit override — for a write with no case to consult, or when the
+extents cannot decide. `format_volume_field` and `write_openfoam_field` keep the plain `int` default
+of `-1`, since neither is handed a case directory.
+
+**Measured:** pitzDaily infers axis 2, and the Docker restart below is reproduced exactly through the
+inference path (no `extruded_axis` passed).
+
+**Refuses a non-finite field by default** (`allow_non_finite=True` to override). The point of
+writing is that it can be read back, and a solver handed a NaN restart fails in a way that never
+names this file.
+
+**Verified by an actual restart, not only by a round trip (2026-09-12).** Round trip through this
+package's own reader is exact (`0.000e+00`, not "close") on the committed pitzDaily case and on a
+`structured_grid_2d`, with values encoding their own cell index so a permutation would be visible
+rather than plausible. Then, against `openfoam13:latest` in Docker
+(`docker run --rm -v "$PWD":/work -w /work/case openfoam13:latest foamRun`): OpenFOAM's own converged
+`2000/` fields were read through aquaflux, written back as `2500/` by this writer, and `foamRun`
+restarted from `2500` for five iterations. **The velocity was handed to the writer as TWO
+components** so the 2D padding path is what the solver reads — a zero on the wrong axis makes the
+restart nonsense and the first residual says so.
+
+**It matches a control to every digit printed.** Against `foamRun` continuing from OpenFOAM's own
+`2000/` with `phi` removed, first-iteration initial residuals:
+
+| | control (OpenFOAM's own fields) | restarted from ours |
+|---|---|---|
+| Ux | 0.000657723 | **0.000657723** |
+| Uy | 0.00685219 | **0.00685219** |
+| p | 0.0127883 | **0.0127883** |
+| omega | 0.81593 | **0.81593** |
+| k | 0.0269429 | **0.0269429** |
+
+⚠️ **`omega`'s initial residual is ~0.8 in BOTH arms** — that is `omegaWallFunction` overwriting the
+near-wall values each iteration, not a defect in the written file. Read it against the control, never
+on its own.
+
+**⚠️ `phi` IS NOT WRITTEN, AND THAT IS THE WHOLE OF THE DIFFERENCE FROM A TRUE CONTINUATION.** A time
+directory OpenFOAM writes also holds `phi`, the face flux (`surfaceScalarField`), which this cell
+field writer does not produce; a solver restarting without it recomputes it from `U`. Measured: with
+`phi` present the control's first Ux residual is `0.000616969` against our `0.000657723`, and
+**deleting `phi` from the control collapses that gap to zero** — which is how the cause was
+established rather than guessed. So a restart from this writer is correct and stable, but is a
+*re-derived* flux restart, not a bit-identical continuation.
+
+**⚠️⚠️ AND THAT IS A DECISION, NOT A GAP TO CLOSE LATER — DO NOT "FIX" IT BY WRITING aquaflux's
+`phi`.** `phi` is not merely "the flux on a face": its defining property is **discrete
+divergence-freeness with respect to one particular continuity operator**. That is exactly why
+`.claude/rules/transport.md` makes it binding that a scalar advects on the flow's own Rhie--Chow flux
+and never on a rebuilt `(u·n)A` — a rebuilt one "satisfies no discrete continuity, so a uniform
+tracer would not stay uniform". **That argument is symmetric.** aquaflux's flux is conservative in
+*aquaflux's* operator — its differentiated `a_P`, its flux-continuous harmonic conductance, its
+non-orthogonal correction, its coupled p--U block — and there is no reason `fvc::div(phi) == 0` in
+OpenFOAM's operator except by coincidence. Writing it would therefore *not* beat omitting it (the
+first pressure correction projects it onto OpenFOAM's own manifold either way, which is what
+recomputing from `U` already does), could plausibly be **worse** than the `fvc::flux(U)` OpenFOAM
+forms with its own interpolation, and would silently assert a conservativeness that does not hold —
+in a file that looks right. Note also that OpenFOAM's incompressible `phi` is **volumetric** while
+aquaflux's primitive is `mass_flux` (`volume_flux(mdot, rho)` is derived), so the two are not even
+the same kind of quantity once density varies.
+
+*Separately* it would also be hard — `phi` is a **face** field and the `empty`-patch collapse
+renumbers faces, which is why `read_surface_scalar_field` refuses to run on a 2D case at all. But the
+difficulty is the second reason, not the first; if the renumbering were solved tomorrow the answer
+would still be no. ⚠️ This is argued from the discretization, not measured: writing an aquaflux
+solution's flux into a case and reporting `fvc::div(phi)` would settle it outright, and is the check
+to run before anyone reopens this.
+
+**⚠️⚠️ THE TRAP THAT ONLY A REAL SOLVER RUN FOUND: `value $internalField;`.** A `0` directory gives a
+patch the interior value by macro, and it is well defined only while that interior value is
+*uniform*. This writer always writes a list, so a macro carried through literally expands **every
+cell** onto the patch. OpenFOAM rejects it with `compound has already been transferred from token` at
+the patch's `value` — an error naming neither the macro nor the cause. The fix is that
+`$internalField` resolves against the **template's** own internal entry, which is what the entry
+meant where it was written; `FieldTemplate.internal_field` exists only to carry it. Every *other*
+`$name` is left alone deliberately — the whole `boundaryField` and `dimensions` are carried across, so
+those still resolve, and `internalField` is the one entry this writer replaces.
+
+**`template_time` is a real choice, and both options restart.** `"0"` (the default) gives the case's
+*intended* boundary conditions, with any macro resolved against that file's uniform value. A solved
+time directory instead gives the solved per-patch `value` lists. The second is the closer
+continuation; the first is the more honest statement of the case's boundary conditions and does not
+carry another solver's values into your output.
+
 
 ## Binding decisions
 - **A polyMesh is always 3D; a 2D case is one cell thick between two `empty` patches.** The reader
@@ -98,9 +235,14 @@ Three pure seams so ~80% of the logic tests with no filesystem (separate I/O fro
     fails on most of the boundary.
 
 ## Deferred (additive; no seam changes)
-Binary polyMesh; `faceZones`/`pointZones`; `.gz` compression / multi-region cases; **mesh writing**
-(a future `MeshWriter` counterpart to `MeshReader`); other formats (Gmsh/VTK/CGNS) as new
-`MeshReader` subclasses under `io/<format>/`.
+Binary polyMesh; `faceZones`/`pointZones`; `.gz` compression / multi-region cases; **mesh**
+**writing** (a future `MeshWriter` counterpart to `MeshReader` — note the *field* writer above
+is a different thing and does not need one, since it writes into a case whose mesh is already
+on disk); other formats (Gmsh/VTK/CGNS) as new `MeshReader` subclasses under `io/<format>/`.
+A format-agnostic `FieldWriter` ABC is deliberately **not** extracted yet: there is one
+implementation, and the natural shape of the next one (a single file holding every field, which
+needs the mesh topology) differs enough that a contract drawn now would be drawn from one
+example. Extract it when the second writer exists.
 
 ## Testability seam (satisfied)
 - **Parse** — grammar/foamfile on string snippets (`tests/unit/test_foamfile.py`), no files.
