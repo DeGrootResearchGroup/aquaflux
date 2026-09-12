@@ -669,45 +669,30 @@ def _smallest_index(values: np.ndarray) -> np.ndarray:
     return values.astype(np.int32) if values.size == 0 or values.max() < 2**31 else values
 
 
-class MonolithicAmgPreconditioner(HostPreconditioner):
-    """The coupled algebraic-multigrid preconditioner as JAX matvecs, wrapping a frozen :class:`AmgVCycle`.
+class MaterializedJacobianPreconditioner(HostPreconditioner):
+    """Shared machinery for a preconditioner fitted to the coloured-probe materialized coupled Jacobian.
 
-    The algebraic-multigrid counterpart of
-    :class:`~aquaflux.solve.lu_preconditioner.MonolithicLuPreconditioner`, with the identical interface
-    (:meth:`build`, :meth:`refresh_in_place`, :meth:`matvec`) so it is a drop-in for the coupled
-    continuation's :class:`~aquaflux.turbulence.MonolithicFactorShiftPolicy`. Not an
-    :class:`equinox.Module`: the V-cycle is a host PETSc object, held by a caller and captured in the
-    ``jax.pure_callback`` closure rather than threaded through the jit as a traced argument. Because the
-    V-cycle is frozen (its coefficients ``stop_gradient``-ed by the solver), the callback is never
-    differentiated: the forward solve calls ``M`` and the adjoint's transpose solve calls ``M^T``, both only
-    in forward evaluations.
+    Extracted from :class:`MonolithicAmgPreconditioner` (#287) once a sibling —
+    :class:`~aquaflux.solve.field_split.FieldSplitAmgPreconditioner` — needed the materialize/shift/cache
+    machinery without the monolithic-only state built around one :class:`AmgVCycle` (the host exact solve,
+    its jvp shell, the fixed-pattern cell-major assembler). Holding both classes' *union* on one base was
+    what forced the split to inherit attributes it cannot honour (a raising ``has_exact_solve``) and
+    re-implement its refresh bodies with parameters that do nothing on that path. What is here is exactly
+    what both need: probing the Jacobian, adding the pseudo-transient shift, and caching the unshifted
+    Jacobian so a shift-only refresh need not re-probe.
     """
 
     def __init__(
         self,
-        vcycle: AmgVCycle,
-        residual_fn: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        factors,
         jacobian_no_shift: sp.csr_matrix | None = None,
         n_fields: int | None = None,
-        assembler: ShiftedCellMajorOperator | None = None,
     ) -> None:
-        super().__init__(vcycle)
-        self._residual_fn = residual_fn
-        # The fixed-pattern shift/equilibrate/reorder assembler, present exactly when the materialize ran
-        # on a precomputed ``structure`` (which is what guarantees the pattern is the same every refresh).
-        # ``None`` falls back to the generic sparse path, which works for any pattern.
-        self._assembler = assembler
+        super().__init__(factors)
         # The materialized jvp Jacobian *without* the pseudo-transient shift, cached so a β-only refresh
-        # (:meth:`refresh_shift_in_place`) can re-add a new ``β d`` diagonal without re-running the coloured jvp probe.
+        # (``refresh_shift_in_place``) can re-add a new ``β d`` diagonal without re-running the coloured jvp probe.
         self._jacobian_no_shift = jacobian_no_shift
         self._n_fields = n_fields
-        # A jitted jvp ``(phi, w) -> J(phi) w`` for the host exact solve's shell operator, called eagerly
-        # on the host inside the solve's pure_callback (linearizing at the current iterate ``phi``).
-        self._jvp = (
-            jax.jit(lambda phi, w: jax.jvp(residual_fn, (phi,), (w,))[1])
-            if residual_fn is not None
-            else None
-        )
 
     @staticmethod
     def _materialize_jacobian(
@@ -746,6 +731,48 @@ class MonolithicAmgPreconditioner(HostPreconditioner):
         from .sparse_jacobian import shifted_jacobian
 
         return shifted_jacobian(jacobian_no_shift, shift_diagonal)
+
+    def destroy(self) -> None:
+        """Release the frozen inverse's own resources and the cached Jacobian."""
+        self.factors.destroy()
+        self._jacobian_no_shift = None
+
+
+class MonolithicAmgPreconditioner(MaterializedJacobianPreconditioner):
+    """The coupled algebraic-multigrid preconditioner as JAX matvecs, wrapping a frozen :class:`AmgVCycle`.
+
+    The algebraic-multigrid counterpart of
+    :class:`~aquaflux.solve.lu_preconditioner.MonolithicLuPreconditioner`, with the identical interface
+    (:meth:`build`, :meth:`refresh_in_place`, :meth:`matvec`) so it is a drop-in for the coupled
+    continuation's :class:`~aquaflux.turbulence.MonolithicFactorShiftPolicy`. Not an
+    :class:`equinox.Module`: the V-cycle is a host PETSc object, held by a caller and captured in the
+    ``jax.pure_callback`` closure rather than threaded through the jit as a traced argument. Because the
+    V-cycle is frozen (its coefficients ``stop_gradient``-ed by the solver), the callback is never
+    differentiated: the forward solve calls ``M`` and the adjoint's transpose solve calls ``M^T``, both only
+    in forward evaluations.
+    """
+
+    def __init__(
+        self,
+        vcycle: AmgVCycle,
+        residual_fn: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        jacobian_no_shift: sp.csr_matrix | None = None,
+        n_fields: int | None = None,
+        assembler: ShiftedCellMajorOperator | None = None,
+    ) -> None:
+        super().__init__(vcycle, jacobian_no_shift=jacobian_no_shift, n_fields=n_fields)
+        self._residual_fn = residual_fn
+        # The fixed-pattern shift/equilibrate/reorder assembler, present exactly when the materialize ran
+        # on a precomputed ``structure`` (which is what guarantees the pattern is the same every refresh).
+        # ``None`` falls back to the generic sparse path, which works for any pattern.
+        self._assembler = assembler
+        # A jitted jvp ``(phi, w) -> J(phi) w`` for the host exact solve's shell operator, called eagerly
+        # on the host inside the solve's pure_callback (linearizing at the current iterate ``phi``).
+        self._jvp = (
+            jax.jit(lambda phi, w: jax.jvp(residual_fn, (phi,), (w,))[1])
+            if residual_fn is not None
+            else None
+        )
 
     @staticmethod
     def _assembler_for(
@@ -863,16 +890,15 @@ class MonolithicAmgPreconditioner(HostPreconditioner):
         plan,
         shift_diagonal: np.ndarray,
         *,
-        smoother_fill_levels: int = 1,
-        smoother_sweeps: int = 2,
         batched_matvec: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         probe_batch_size: int | None = None,
         structure: ProbeGather | None = None,
     ) -> tuple[tuple[str, float], ...]:
         """Rebuild the V-cycle at a developed state and swap it IN PLACE (no new object).
 
-        The arguments are :meth:`build`'s, evaluated at the developed state. Because this preconditioner is
-        held as a **static field** of the shift policy and :meth:`matvec` reads ``self.factors`` at call
+        The smoother configuration is fixed at :meth:`build` and cannot be changed by a refresh — this
+        takes only the arguments that describe the new state, evaluated at it. Because this preconditioner
+        is held as a **static field** of the shift policy and :meth:`matvec` reads ``self.factors`` at call
         time, mutating the V-cycle here re-preconditions the **same compiled** Krylov solve (a compilation
         cache hit -- no recompile).
 
@@ -889,7 +915,6 @@ class MonolithicAmgPreconditioner(HostPreconditioner):
             say *where* a refresh spent its time; the three call for different fixes and are
             indistinguishable in an aggregate.
         """
-        del smoother_fill_levels, smoother_sweeps  # the smoother config is fixed at build
         timer = PhaseTimer()
         self._jacobian_no_shift = self._materialize_jacobian(
             matvec, plan, batched_matvec, probe_batch_size, structure
@@ -951,11 +976,6 @@ class MonolithicAmgPreconditioner(HostPreconditioner):
     def has_exact_solve(self) -> bool:
         """Whether the host exact-Jacobian forward solve is available (built with ``host_exact_solve=True``)."""
         return self.factors.has_exact_solve and self._jvp is not None
-
-    def destroy(self) -> None:
-        """Release the V-cycle's PETSc objects and the cached Jacobian (see :meth:`AmgVCycle.destroy`)."""
-        self.factors.destroy()
-        self._jacobian_no_shift = None
 
     @property
     def solves_exactly_on_host(self) -> bool:

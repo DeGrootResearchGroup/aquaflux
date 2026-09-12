@@ -31,6 +31,17 @@ paths:
   `spilu` on the 23k-cell `bfs3d` case's 38.7M-nnz, ~280-nnz/row Jacobian ran **>7.5 min and never
   finished** at `fill_factor=30`, RSS <2 GB — before being deleted as dominated by these two; see
   `solve-direct-preconditioners.md`.)
+  - **`MonolithicAmgPreconditioner`'s materialize/shift/cache machinery lives on a shared base,
+    `MaterializedJacobianPreconditioner` (binding, #287, 2026-09-11).** `FieldSplitAmgPreconditioner`
+    (`solve-field-split.md`) needed the same coloured-probe-materialize + shift-diagonal + cached-Jacobian
+    machinery without the monolithic-only state built around one `AmgVCycle` — the fixed-pattern
+    cell-major assembler (`_assembler_for`/`_cell_major`) and the host exact-solve jvp shell
+    (`residual_fn`/`_jvp`/`exact_solve`/`has_exact_solve`/`solves_exactly_on_host`), none of which a split
+    ever forms. Those stay on `MonolithicAmgPreconditioner`; `_materialize_jacobian`, `_shifted` and
+    `destroy` (and the `_jacobian_no_shift`/`_n_fields` cache) moved to the new base, which both classes
+    now subclass directly — see `solve-direct-preconditioners.md`'s `HostFactors` entry for why this
+    matters (a base reading anything off `self.factors` beyond `n_dofs`+`apply` is a requirement on every
+    subclass, and the pre-extraction shape of this exact pair is the worked example).
   - **The V-cycle is a fixed LINEAR operator (one `pc.apply`, not an inner Krylov solve), so it is a
     drop-in for the same callback-matvec interface as the complete LU and — being linear and transposable —
     serves the adjoint's transpose solve through the multigrid's own transpose (`pc.applyTranspose`), with

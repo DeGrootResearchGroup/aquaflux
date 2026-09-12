@@ -49,7 +49,7 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from .amg_preconditioner import MonolithicAmgPreconditioner, build_amg_vcycle
+from .amg_preconditioner import MaterializedJacobianPreconditioner, build_amg_vcycle
 from .frozen_operator import equilibrate_cell_major
 from .hierarchy_inverse import HierarchyBlockInverse
 from .multigrid import (
@@ -612,16 +612,18 @@ class _TrailingFirstFieldSplit(BlockTriangularFieldSplit):
         return blocks[1]
 
 
-class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
-    """The field split as JAX matvecs, with the same lifecycle as the monolithic V-cycle it replaces.
+class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
+    """The field split as JAX matvecs, sharing the materialized-Jacobian machinery with the monolithic PC.
 
-    A subclass rather than a sibling because everything outside the preconditioner's *construction* is
-    genuinely shared: the coloured jvp probe that materializes the coupled Jacobian, the
-    ``jax.pure_callback`` matvec that reads ``self.factors`` at call time (so an in-place refresh
-    re-preconditions the same compiled solve), and the teardown. Only how the frozen inverse is fitted to
-    the matrix differs, so only that is overridden — which is what lets a march swap between the two by
-    changing one construction line and keep the shift policy, forward solver, step tail and refresh hooks
-    common.
+    A sibling of :class:`~aquaflux.solve.amg_preconditioner.MonolithicAmgPreconditioner` over the shared
+    :class:`~aquaflux.solve.amg_preconditioner.MaterializedJacobianPreconditioner` base (#287), rather than
+    a subclass of the monolithic class itself: only the coloured jvp probe that materializes the coupled
+    Jacobian, the shift-diagonal add, the ``jax.pure_callback`` matvec (which reads ``self.factors`` at
+    call time, so an in-place refresh re-preconditions the same compiled solve) and the teardown are
+    genuinely shared — those live on the base. Everything the monolithic class builds *from* one
+    :class:`~aquaflux.solve.AmgVCycle` (the fixed-pattern cell-major assembler, the host exact-solve jvp
+    shell) is monolithic-only, and inheriting it forced this class to override a raising ``has_exact_solve``
+    and to declare two smoother parameters on its own refresh that a split's construction never reads.
 
     The monolithic path equilibrates and reorders the **whole** matrix to cell-major before handing it to
     one V-cycle; a split does that **per block**, inside each block's own ``build_amg_vcycle``, because the
@@ -629,8 +631,9 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
     assembler the monolithic refresh precomputes has no counterpart here.
 
     .. warning::
-       ``refresh_in_place`` is forward-march only, for the same reason as its base: the mutation is impure
-       and would corrupt an adjoint transpose solve that read the inverse between its own calls.
+       ``refresh_in_place`` is forward-march only, for the same reason as the monolithic class's: the
+       mutation is impure and would corrupt an adjoint transpose solve that read the inverse between its
+       own calls.
     """
 
     def __init__(
@@ -652,16 +655,19 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
     def has_exact_solve(self) -> bool:
         """Always ``False``: a block-triangular split offers no host exact solve.
 
-        The base answers this by asking its frozen inverse, which is sound when that inverse is a single
-        :class:`~aquaflux.solve.AmgVCycle` and false here -- the split's is a
-        :class:`BlockTriangularFieldSplit`, which has no such solve to offer, because a host exact solve
-        inverts the whole shifted operator in one host call and a split deliberately never forms it.
-        Without this override the base's attribute lookup **raises**, and the raise is then invisible:
-        both callers ask through ``getattr(pc, "solves_exactly_on_host", False)`` -- the right spelling for the
-        factorization preconditioners, which genuinely lack the attribute -- and a default swallows an
-        ``AttributeError`` coming from inside a property body just as readily as a missing name. The
-        answer it produced was accidentally the correct ``False``, which is why this went unnoticed.
+        The split's frozen inverse is a :class:`BlockTriangularFieldSplit`, which has no such solve to
+        offer, because a host exact solve inverts the whole shifted operator in one host call and a split
+        deliberately never forms it. Answered here explicitly rather than by asking ``self.factors`` for
+        it (see the base's :class:`~aquaflux.solve.host_preconditioner.HostFactors` docstring on why a
+        capability not in that contract belongs on the concrete class) — both production callers ask
+        through ``getattr(pc, "solves_exactly_on_host", False)``, so a missing or a raising attribute would
+        read identically as ``False`` and hide a real defect just as easily as the correct answer.
         """
+        return False
+
+    @property
+    def solves_exactly_on_host(self) -> bool:
+        """Always ``False``, for the same reason as :attr:`has_exact_solve`."""
         return False
 
     @classmethod
@@ -742,19 +748,17 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
         plan,
         shift_diagonal: np.ndarray,
         *,
-        smoother_fill_levels: int = 0,
-        smoother_sweeps: int = 4,
         batched_matvec: Callable | None = None,
         probe_batch_size: int | None = None,
         structure: ProbeGather | None = None,
     ) -> tuple[tuple[str, float], ...]:
         """Re-materialize at the developed state and re-fit both blocks IN PLACE.
 
-        Returns the same ``("probe", s), ("assemble", s), ("refactor", s)`` breakdown the monolithic
-        refresh reports, so a march log reads identically for either preconditioner. Here "assemble" is
-        only the diagonal shift — the per-block equilibration is inside the refactor.
+        The smoother configuration is fixed at :meth:`build` and cannot be changed by a refresh. Returns
+        the same ``("probe", s), ("assemble", s), ("refactor", s)`` breakdown the monolithic refresh
+        reports, so a march log reads identically for either preconditioner. Here "assemble" is only the
+        diagonal shift — the per-block equilibration is inside the refactor.
         """
-        del smoother_fill_levels, smoother_sweeps  # the smoother config is fixed at build
         timer = PhaseTimer()
         self._jacobian_no_shift = self._materialize_jacobian(
             matvec, plan, batched_matvec, probe_batch_size, structure

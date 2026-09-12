@@ -124,7 +124,8 @@ deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` fr
       `tests/integration/test_coupled_field_split.py` pins the partition against the coupled layout's
       own `unpack`, which is the one thing that would be silently wrong rather than loudly wrong — a
       partition off by one field still preconditions, it just preconditions a mislabelled operator.
-    - **It needs no JAX wrapper of its own.** `MonolithicAmgPreconditioner.matvec()` reads only
+    - **It needs no JAX wrapper of its own.** `HostPreconditioner.matvec()` (inherited via
+      `MaterializedJacobianPreconditioner`, `solve-direct-preconditioners.md`) reads only
       `factors.n_dofs` and `factors.apply(r, transpose=…)`, both of which the split has, so it rides the
       existing `pure_callback` path unchanged. Each diagonal block is an ordinary `AmgVCycle`
       (`build_amg_vcycle` on the sub-block), which equilibrates and reorders *within its own group* and
@@ -145,6 +146,22 @@ deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` fr
       `test_the_field_split_answers_the_exact_solve_question_without_raising` reads it both ways for
       this reason); and the unnamed `factors` contract the family shares is **`n_dofs` + `apply` only**,
       so anything else the base reads off `self.factors` is an inheritance leak, not a contract.
+    - **⚠️ `FieldSplitAmgPreconditioner` NO LONGER SUBCLASSES `MonolithicAmgPreconditioner` — its base is
+      the extracted `MaterializedJacobianPreconditioner` (`amg_preconditioner.py`, #287, 2026-09-11).**
+      The `has_exact_solve` fix above rescued a raise by overriding it; it did not remove the underlying
+      cause, which was inheriting the whole monolithic class — including the fixed-pattern cell-major
+      assembler and the host exact-solve jvp shell, neither of which a split builds or uses — for the sake
+      of the genuinely shared coloured-probe materialize/shift/cache/teardown. `MaterializedJacobianPreconditioner`
+      holds exactly that shared quarter; `MonolithicAmgPreconditioner` and `FieldSplitAmgPreconditioner`
+      are now siblings over it. The `has_exact_solve`/`solves_exactly_on_host` overrides on the split stay
+      (the new base declares neither, so they are no longer rescuing an inherited raise — they are simply
+      the concrete class's own answer), and `refresh_in_place`'s `smoother_fill_levels`/`smoother_sweeps`
+      parameters — declared on both classes' refresh and immediately `del`-eted on both, because the union
+      signature forced them there — are deleted from both signatures; passing either is now a `TypeError`.
+      No behaviour change on either class's `build`, which still takes them where they are real (fitting
+      the V-cycle(s)). Pinned by `test_monolithic_and_field_split_share_the_materialized_jacobian_base`
+      (`tests/unit/test_amg_preconditioner.py`) and the two dead-parameter tests in
+      `tests/unit/test_amg_preconditioner.py` / `tests/unit/test_field_split.py`.
     - **The transpose is closed-form, so the adjoint is served.** The transpose of a
       block-lower-triangular inverse is the block-upper-triangular one over the transposed blocks, so
       `apply(transpose=True)` reverses the two block solves and uses `Cᵀ` — pinned both as an exact dense

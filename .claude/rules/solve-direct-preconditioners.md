@@ -59,8 +59,15 @@ paths:
     `AmgVCycle`, `HierarchyBlockInverse` and both `BlockTriangularFieldSplit`s (two further members, the
     monolithic ILUT and the Vanka smoother, have since been deleted, both dominated on every arm
     measured) — and declared by none of them individually, so `matvec` would otherwise be written out
-    once per class and
-    `FieldSplitAmgPreconditioner` obtained it by subclassing a *concrete sibling*.
+    once per class. `FieldSplitAmgPreconditioner` used to obtain it by subclassing a *concrete sibling*,
+    `MonolithicAmgPreconditioner` — which is what let the `has_exact_solve` hazard below happen at all.
+    **⚠️ That is fixed structurally (2026-09-11, #287): `MaterializedJacobianPreconditioner`
+    (`amg_preconditioner.py`) is now the shared base both preconditioners subclass**, holding only what
+    is genuinely common to fitting *any* inverse to the coloured-probe materialized coupled Jacobian
+    (the probe itself, the shift-diagonal add, the cached-Jacobian shift-only refresh, teardown) —
+    `MonolithicAmgPreconditioner` is no longer `FieldSplitAmgPreconditioner`'s base, so it no longer
+    inherits the monolithic-only state (the fixed-pattern cell-major assembler, the host exact-solve jvp
+    shell) it never used. See `solve-amg-multigrid.md` and `solve-field-split.md`.
   - **⚠️ Anything a base reads off `self.factors` beyond that pair is a requirement on ALL of them
     (binding).** This is not hypothetical: `has_exact_solve` read `self.factors.has_exact_solve`,
     which only `AmgVCycle` has, so the property **raised** on the field split — and both call sites ask
@@ -70,7 +77,10 @@ paths:
     subclass. Pinned by an AST check on the base's own source
     (`test_the_base_asks_its_factors_for_nothing_beyond_the_declared_contract`) — read off the source
     rather than exercised, because the failure is a lookup that is *never taken* on the paths a test
-    would naturally drive, which is why the original went unseen.
+    would naturally drive, which is why the original went unseen. `FieldSplitAmgPreconditioner` still
+    answers `has_exact_solve`/`solves_exactly_on_host` explicitly rather than inheriting either — the
+    new base declares neither, so this is no longer an override rescuing a raise, it is simply the
+    concrete class stating its own answer.
   - **The pseudo-transient shift has one home: `sparse_jacobian.shifted_jacobian`.** Every host
     preconditioner adds `β d` before factoring, and two spellings once disagreed: a pattern-preserving
     `setdiag` against `a + sp.diags(shift)` — the latter is wrong, since a sparse *addition* stores only

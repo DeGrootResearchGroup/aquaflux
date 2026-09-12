@@ -88,7 +88,12 @@ from .frozen_operator import (
     decouple_dof,
     symmetrically_equilibrate,
 )
-from .amg_preconditioner import AmgVCycle, MonolithicAmgPreconditioner, build_amg_vcycle
+from .amg_preconditioner import (
+    AmgVCycle,
+    MaterializedJacobianPreconditioner,
+    MonolithicAmgPreconditioner,
+    build_amg_vcycle,
+)
 from .field_split import (
     JacobiSmoothedInverse,
     BlockTriangularFieldSplit,
@@ -226,6 +231,7 @@ __all__ = [
     "LocalCourantBasis",
     "MarchLogger",
     "MarchResult",
+    "MaterializedJacobianPreconditioner",
     "MonolithicAmgPreconditioner",
     "MonolithicLuPreconditioner",
     "MonotoneLineSearch",
