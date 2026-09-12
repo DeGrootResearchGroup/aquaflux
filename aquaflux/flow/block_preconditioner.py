@@ -23,7 +23,7 @@ from __future__ import annotations
 import abc
 import warnings
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import equinox as eqx
 import jax
@@ -901,72 +901,97 @@ def _scaled_momentum_radius(
     return magnitude
 
 
+class _StrategyInputs(NamedTuple):
+    """The build inputs the Schur and velocity-block strategies share, resolved ONCE in
+    :meth:`BlockPreconditioner.build` (issue #272).
+
+    Both `_build_schur` and `_build_velocity_block` need the same mesh connectivity, the same
+    multigrid knobs, and the same assembler + reference state a convection-aware strategy freezes
+    its linearization at — the build already resolves all eight once before fanning them out, so
+    this is that resolved value, not a second description of it. Plain host data (numpy arrays,
+    Python scalars, the assembler and an optional state), used only for the duration of one
+    `build()` call, so a `NamedTuple` is right rather than an `equinox.Module`: unlike
+    `_SchurGeometry`/`_VelocityGeometry`, nothing here is stored on a strategy or crosses `jit`.
+
+    Attributes
+    ----------
+    owner_e, nb_e, interior : np.ndarray
+        The mesh's interior-edge connectivity (`mesh.face_cells.interior_edges()` / `.interior`).
+    n_cells : int
+        Cells in the mesh.
+    v_cycles : int
+        Multigrid V-cycles per apply.
+    strength_threshold : float
+        Strength-of-connection threshold for the AMG aggregation.
+    assembler : MomentumContinuity
+        The coupled flow residual assembler.
+    reference_state : jnp.ndarray or None
+        The operating flow state a convection-aware strategy (or the LSC Schur) freezes its
+        linearization at.
+    """
+
+    owner_e: np.ndarray
+    nb_e: np.ndarray
+    interior: np.ndarray
+    n_cells: int
+    v_cycles: int
+    strength_threshold: float
+    assembler: MomentumContinuity
+    reference_state: jnp.ndarray | None
+
+
 def _build_schur(
     schur_scaling: str,
     geometry: _SchurGeometry,
-    owner_e: np.ndarray,
-    nb_e: np.ndarray,
-    interior: np.ndarray,
-    n_cells: int,
-    v_cycles: int,
-    strength_threshold: float,
-    assembler: MomentumContinuity,
-    reference_state: jnp.ndarray | None,
+    inputs: _StrategyInputs,
     mass_diagonal: jnp.ndarray,
     schur_mass_diagonal: jnp.ndarray | None,
 ) -> InnerSchurSolver:
     """The pressure-Schur strategy :meth:`BlockPreconditioner.build`'s ``schur_scaling`` selects."""
     if schur_scaling == "lsc":
-        reference_a_p = _isotropic_momentum_diagonal(assembler, reference_state)
+        reference_a_p = _isotropic_momentum_diagonal(inputs.assembler, inputs.reference_state)
         return StabilizedLscSchur.build(
             geometry,
-            owner_e,
-            nb_e,
-            interior,
-            n_cells,
-            v_cycles,
+            inputs.owner_e,
+            inputs.nb_e,
+            inputs.interior,
+            inputs.n_cells,
+            inputs.v_cycles,
             mass_diagonal,
             reference_a_p,
-            _scaled_momentum_radius(assembler, reference_state, mass_diagonal),
+            _scaled_momentum_radius(inputs.assembler, inputs.reference_state, mass_diagonal),
         )
     return SmoothedAmgSchur.build(
         geometry,
-        owner_e,
-        nb_e,
-        interior,
-        n_cells,
-        v_cycles,
+        inputs.owner_e,
+        inputs.nb_e,
+        inputs.interior,
+        inputs.n_cells,
+        inputs.v_cycles,
         reference_diagonal=schur_mass_diagonal,
-        strength_threshold=strength_threshold,
+        strength_threshold=inputs.strength_threshold,
     )
 
 
 def _build_velocity_block(
     velocity: str,
     velocity_geometry: _VelocityGeometry,
-    owner_e: np.ndarray,
-    nb_e: np.ndarray,
-    interior: np.ndarray,
-    n_cells: int,
-    v_cycles: int,
-    strength_threshold: float,
-    assembler: MomentumContinuity,
-    reference_state: jnp.ndarray | None,
+    inputs: _StrategyInputs,
 ) -> VelocityBlockSolver:
     """The velocity-block strategy :meth:`BlockPreconditioner.build`'s ``velocity`` selects."""
     if velocity not in ("convection", "convection-air"):
         return SmoothedAmgVelocity.build(
             velocity_geometry,
-            owner_e,
-            nb_e,
-            interior,
-            n_cells,
-            v_cycles,
-            strength_threshold=strength_threshold,
+            inputs.owner_e,
+            inputs.nb_e,
+            inputs.interior,
+            inputs.n_cells,
+            inputs.v_cycles,
+            strength_threshold=inputs.strength_threshold,
         )
     # The reference mass flux is assembler behaviour (the Rhie--Chow flux operator), so it is
     # computed here and handed to the strategy, keeping the velocity build assembler-free.
-    reference_mdot = jax.lax.stop_gradient(assembler.mass_flux(reference_state))
+    reference_mdot = jax.lax.stop_gradient(inputs.assembler.mass_flux(inputs.reference_state))
     if float(jnp.max(jnp.abs(reference_mdot))) == 0.0:
         # No convective scale to freeze the hierarchy at: the convection-diffusion operator
         # collapses to the viscous one, so this block silently becomes the cheaper `velocity=
@@ -987,14 +1012,14 @@ def _build_velocity_block(
         )
     return SmoothedAmgConvectionVelocity.build(
         velocity_geometry,
-        owner_e,
-        nb_e,
-        interior,
-        n_cells,
-        v_cycles,
+        inputs.owner_e,
+        inputs.nb_e,
+        inputs.interior,
+        inputs.n_cells,
+        inputs.v_cycles,
         reference_mdot,
         method="air" if velocity == "convection-air" else "twolevel",
-        strength_threshold=strength_threshold,
+        strength_threshold=inputs.strength_threshold,
     )
 
 
@@ -1340,9 +1365,7 @@ class BlockPreconditioner(eqx.Module):
         ):
             reference_state = _characteristic_reference_state(assembler)
 
-        schur = _build_schur(
-            schur_scaling,
-            geometry,
+        inputs = _StrategyInputs(
             owner_e,
             nb_e,
             interior,
@@ -1351,22 +1374,10 @@ class BlockPreconditioner(eqx.Module):
             strength_threshold,
             assembler,
             reference_state,
-            mass_diagonal,
-            schur_mass_diagonal,
         )
+        schur = _build_schur(schur_scaling, geometry, inputs, mass_diagonal, schur_mass_diagonal)
         velocity_geometry = _VelocityGeometry.of(assembler)
-        velocity_block = _build_velocity_block(
-            velocity,
-            velocity_geometry,
-            owner_e,
-            nb_e,
-            interior,
-            n_cells,
-            v_cycles,
-            strength_threshold,
-            assembler,
-            reference_state,
-        )
+        velocity_block = _build_velocity_block(velocity, velocity_geometry, inputs)
         return cls(
             assembler,
             schur,
