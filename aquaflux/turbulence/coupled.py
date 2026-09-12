@@ -1539,8 +1539,6 @@ def coupled_continuation(
     inner_steps: int = 1,
     inner_tol: float = 0.05,
     grow: int = 0,
-    descent_backoff: int = 0,
-    descent_test: bool = False,
     forward_solver: lx.AbstractLinearSolver | None = None,
     forward_rtol: float = _BLOCK_FORWARD.rtol,
     forward_restart: int = _BLOCK_FORWARD.restart,
@@ -1596,7 +1594,7 @@ def coupled_continuation(
         pseudo-timestep (smaller ``beta``, driven by a step control) can be taken stably from a cold
         start. ``1`` (default) is the ordinary single shifted step, unchanged. The inner loop replaces
         the escalation ladder, so ``max_escalations`` / ``escalation_factor`` / ``divergence_cap`` /
-        ``grow`` / ``descent_backoff`` / ``descent_test`` do not apply when it is on.
+        ``grow`` do not apply when it is on.
     inner_tol : float
         The dual-time inner loop stops once ``||G||`` has fallen to this fraction of the anchor residual
         (default ``0.05``); ignored unless ``inner_steps > 1``.
@@ -1682,18 +1680,6 @@ def coupled_continuation(
         rung is only ever reachable by **passing** the acceptance test, never by falling back onto it --
         the fallback stays capped at the full step, since its job is to avoid a null step rather than to
         license an excursion.
-    descent_backoff : int
-        Lower the shift strength up to this many times, until the shifted correction actually descends
-        in the residual measure, before the usual escalation ladder runs. Zero (the default) disables
-        it. The shifted correction is not a descent direction by construction -- ``J delta = -R -
-        beta D delta``, whose second term has no fixed sign and worsens with ``beta`` -- and past a
-        critical shift strength every step length raises the measure, so the line search can only pick
-        the least-harmful rung and the march stands still. Escalating there is the wrong direction;
-        this backs off instead. Each backoff costs one shifted solve, which is why it is opt-in.
-    descent_test : bool
-        Reject a correction that does not descend, rather than judging the candidate's norm alone. With
-        the backoff off this surfaces a non-descent direction instead of letting it pass as a step that
-        quietly went nowhere.
     inner_observer : callable or None
         A per-inner-iteration profiling hook forwarded to the built dual-time step (only used when
         ``inner_steps > 1``); see :class:`~aquaflux.solve.DualTimeStep`. ``None`` (default) leaves the
@@ -1764,8 +1750,6 @@ def coupled_continuation(
         inner_steps=inner_steps,
         inner_tol=inner_tol,
         grow=grow,
-        descent_backoff=descent_backoff,
-        descent_test=descent_test,
         forward_solver=forward_solver,
         block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
@@ -2408,8 +2392,6 @@ def _coupled_step(
     block_scaled_norm: bool,
     residual_norm: ResidualNorm | None,
     grow: int = 0,
-    descent_backoff: int = 0,
-    descent_test: bool = False,
     inner_observer: Callable[..., None] | None = None,
     refresh_on_cycles: int | None = None,
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
@@ -2454,7 +2436,7 @@ def _coupled_step(
         ``forward_solver`` is ``None``. Only the *regime* is per-family (a near-exact factorization
         needs a far smaller Arnoldi subspace than a block-diagonal preconditioner); the norm the
         tolerance is measured in is ``residual_norm``, i.e. the march's own progress measure.
-    beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap, line_search, inner_steps, inner_tol, grow, descent_backoff, descent_test
+    beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap, line_search, inner_steps, inner_tol, grow
         The globalization: the pseudo-transient schedule, the divergence guard, and the line search.
         See :class:`~aquaflux.solve.PseudoTransientStep` and :class:`~aquaflux.solve.DualTimeStep`.
     forward_solver, block_scaled_norm, residual_norm, inner_observer, refresh_on_cycles, inner_refresh, cycle_budget, step_limit, step_projection
@@ -2550,8 +2532,8 @@ def _coupled_step(
         # residual, so the measured steady residual is the honest discrete time derivative rather than
         # beta x travel, and a larger pseudo-timestep (smaller beta, driven by a step control) stays
         # stable. The inner loop replaces the escalation ladder, so the escalation/acceptance
-        # parameters do not apply -- nor do the line search's growth and descent-backoff rungs, which
-        # belong to that ladder.
+        # parameters do not apply -- nor does the line search's growth rung, which belongs to that
+        # ladder.
         return DualTimeStep(
             policy,
             relaxation_schedule=schedule,
@@ -2582,8 +2564,6 @@ def _coupled_step(
         acceptance=DivergenceGuard(divergence_cap=divergence_cap),
         line_search=line_search,
         grow=grow,
-        descent_backoff=descent_backoff,
-        descent_test=descent_test,
         forward_solver=solver,
         residual_norm=residual_norm,
         adjoint_preconditioner_factory=policy.adjoint_factory(),
@@ -2621,8 +2601,6 @@ def _monolithic_factor_step(
     jacobian_gradient_sweeps: int | None = None,
     jacobian_production_viscosity: bool = False,
     grow: int = 0,
-    descent_backoff: int = 0,
-    descent_test: bool = False,
 ) -> ForwardStep:
     """Compose a monolithic preconditioner with the block shift, then build the step.
 
@@ -2647,8 +2625,6 @@ def _monolithic_factor_step(
         inner_steps=inner_steps,
         inner_tol=inner_tol,
         grow=grow,
-        descent_backoff=descent_backoff,
-        descent_test=descent_test,
         forward_solver=forward_solver,
         block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
@@ -2697,8 +2673,6 @@ def coupled_lu_continuation(
     positivity_floor: float = 0.0,
     positivity_projection: bool = True,
     grow: int = 0,
-    descent_backoff: int = 0,
-    descent_test: bool = False,
     jacobian_gradient_sweeps: int | None = None,
     jacobian_production_viscosity: bool = False,
 ) -> ForwardStep:
@@ -2862,8 +2836,6 @@ def coupled_lu_continuation(
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
         jacobian_production_viscosity=jacobian_production_viscosity,
         grow=grow,
-        descent_backoff=descent_backoff,
-        descent_test=descent_test,
     )
 
 
@@ -2904,8 +2876,6 @@ def coupled_amg_continuation(
     positivity_floor: float = 0.0,
     positivity_projection: bool = True,
     grow: int = 0,
-    descent_backoff: int = 0,
-    descent_test: bool = False,
     field_split: bool = False,
     trailing_smoother_sweeps: int = 1,
     leading_options: dict | None = None,
@@ -3312,8 +3282,6 @@ def coupled_amg_continuation(
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
         jacobian_production_viscosity=jacobian_production_viscosity,
         grow=grow,
-        descent_backoff=descent_backoff,
-        descent_test=descent_test,
     )
 
 
@@ -4821,8 +4789,6 @@ def mass_flow_coupled_continuation(
     inner_steps: int = 1,
     inner_tol: float = 0.05,
     grow: int = 0,
-    descent_backoff: int = 0,
-    descent_test: bool = False,
     inner_observer: Callable[..., None] | None = None,
     refresh_on_cycles: int | None = None,
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
@@ -4884,8 +4850,6 @@ def mass_flow_coupled_continuation(
         inner_steps=inner_steps,
         inner_tol=inner_tol,
         grow=grow,
-        descent_backoff=descent_backoff,
-        descent_test=descent_test,
         forward_solver=forward_solver,
         block_scaled_norm=block_scaled_norm,
         # Its own, not the shared default -- see the note above.

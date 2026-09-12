@@ -241,8 +241,10 @@ Rules, with FVM-specific teeth:
   placeholder defaults for each other's parameters. The test is *same constructed class* **and** a shared
   surface that is one configuration, not one namespace.
   And check the other direction before unifying: a parameter present on only one sibling may be
-  **dominated rather than missing** (`descent_backoff` is recorded as counterproductive, `grow` is inert
-  on a non-default measure). Principle 0 says delete those, not promote them onto the shared builder.
+  **dominated rather than missing** (`descent_backoff`/`descent_test` were exactly this — recorded as
+  counterproductive and since deleted along with the `while_loop` and seeding dance they alone required;
+  `grow` is inert on a non-default measure and stays, since inert is not the same as counterproductive).
+  Principle 0 says delete those, not promote them onto the shared builder.
 - **Concrete trigger:** *If a change would require editing the same formula — or the same wiring, or the
   same default — in more than one place, it is in the wrong place: consolidate it first, then make the
   change once. "More than one place" includes two functions in the same file; a duplicated tail is not
