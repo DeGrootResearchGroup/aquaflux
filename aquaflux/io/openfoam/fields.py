@@ -30,7 +30,7 @@ import numpy as np
 from aquaflux.mesh import Mesh
 
 from .foamfile import read_foam_body
-from .grammar import BOUNDARY_FIELD_RE, list_envelope, split_boundary_blocks
+from .grammar import BOUNDARY_FIELD_RE, _check_count, list_envelope, split_boundary_blocks
 
 _UNIFORM_RE = re.compile(r"\buniform\s+(-?[\d.eE+-]+)")
 
@@ -44,8 +44,7 @@ def _values(body: str, count: int, what: str) -> np.ndarray:
     if "nonuniform" in body:
         declared, inner = list_envelope(body)
         tokens = inner.split()
-        if declared != len(tokens):
-            raise ValueError(f"{what} declares {declared} values but lists {len(tokens)}")
+        _check_count(what, declared, len(tokens))
         if declared != count:
             raise ValueError(f"{what} has {declared} values but the patch has {count} faces")
         return np.array(tokens, dtype=np.float64)
