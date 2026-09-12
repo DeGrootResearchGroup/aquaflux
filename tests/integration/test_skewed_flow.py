@@ -140,19 +140,56 @@ def test_a_zero_gradient_flow_patch_carries_its_tangential_correction() -> None:
     assert np.max(np.abs(uncorrected - exact_face)) > 1e-3
 
 
-def test_the_momentum_balance_vanishes_at_the_exact_field_through_an_outlet() -> None:
-    """With the outlet's face velocity exact, the momentum residual at the exact field is round-off.
+def test_the_flow_residual_vanishes_at_the_exact_field_through_an_outlet() -> None:
+    """With the outlet's face velocity exact, the whole coupled residual is round-off.
 
     The consequence of the boundary value for the equations that read it: the viscous flux at the
     outlet is built from that face value, so a face value carrying no tangential correction leaves a
     spurious wall-normal difference divided by ``d.n``. The exact Stokes field then fails to satisfy
-    the discrete momentum balance on a skewed mesh, which is the defect this pins.
+    the discrete momentum balance on a skewed mesh, which is the defect
+    :func:`test_a_zero_gradient_flow_patch_carries_its_tangential_correction` pins for the boundary
+    value itself.
 
-    Only the momentum block is asserted. The continuity residual does **not** vanish here, and not
-    because of any boundary value: :meth:`~aquaflux.flow.PressureOutlet.mass_flux` builds its
-    through-flow from the **owner** velocity ``u_P . n`` rather than from the face velocity, a
-    separate approximation of that closure that this test deliberately does not depend on.
+    Both blocks are asserted. :meth:`~aquaflux.flow.PressureOutlet.mass_flux` forms its through-flow
+    term from that same corrected face velocity (not the owner cell's), so the continuity residual
+    vanishes here too -- before that fix it held a residue exactly equal to the outlet's mass-flux
+    error, ``rho ((u_face - u_owner) . n) A``, which does not shrink under mesh refinement (it is a
+    zeroth-order consistency error at the outlet-owning cells, not a discretization truncation term).
     """
     _, _, assembler, exact = _open_couette()
-    momentum_residual, _ = assembler.unpack(assembler.residual(exact))
+    momentum_residual, continuity_residual = assembler.unpack(assembler.residual(exact))
     assert np.max(np.abs(np.asarray(momentum_residual))) < 1e-13
+    assert np.max(np.abs(np.asarray(continuity_residual))) < 1e-13
+
+
+def test_stokes_couette_is_exact_on_a_skewed_mesh_through_an_outlet() -> None:
+    """The open-domain (outlet) case reaches the same solver tolerance as the closed one.
+
+    The control here is :func:`test_stokes_couette_is_exact_on_a_skewed_mesh`, which is this same
+    case with every velocity boundary Dirichlet. Before the outlet's through-flow term read the
+    corrected face velocity, the zeroth-order mass-flux error at the outlet capped this solve's
+    accuracy at ``~1.2e-3`` regardless of mesh refinement (8x8 -> 32x32 gave ``4.0e-3 -> 1.2e-3``,
+    not a converging sequence) -- the outlet closure, not the interior discretization, was the
+    limit.
+    """
+    mesh = perturbed_grid_2d(8, 8, lx=1.0, ly=1.0, perturb=0.2, seed=2, named_boundaries=True)
+    geom = mesh.geometry()
+    assembler = MomentumContinuity.build(
+        mesh,
+        geom,
+        PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
+        MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None),
+        BoundaryConditions(
+            {
+                "top": MovingWall(velocity=(1.0, 0.0)),
+                "bottom": NoSlipWall(),
+                "left": VelocityInlet(velocity=_couette),
+                "right": PressureOutlet(pressure=0.0),
+            }
+        ),
+    )
+    state = eqx.filter_jit(newton_step)(assembler.residual, assembler.initial_state())
+    velocity, _ = assembler.unpack(state)
+    u_exact = np.asarray(_couette(geom.cell.centroid))
+    error = np.max(np.abs(np.asarray(velocity) - u_exact))
+    assert error < 1e-6

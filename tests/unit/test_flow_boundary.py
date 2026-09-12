@@ -6,7 +6,9 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
 from aquaflux.flow import MovingWall, NoSlipWall, PressureOutlet, VelocityInlet
 
-VEL = jnp.array([[2.0, 1.0]])  # owner velocity
+VEL = jnp.array([[2.0, 1.0]])  # owner velocity / boundary face velocity (equal on this orthogonal
+# face, which is what makes it usable for both `velocity_face`'s owner argument and `mass_flux`'s
+# boundary-velocity argument in the tests below)
 NORMAL = jnp.array([[1.0, 0.0]])
 CENTROID = jnp.array([[0.0, 0.5]])
 AREA = jnp.array([2.0])
@@ -83,13 +85,11 @@ def test_moving_wall() -> None:
 
 def test_velocity_inlet_constant() -> None:
     bc = VelocityInlet(velocity=(4.0, 0.0))
-    assert jnp.allclose(
-        bc.velocity_face(VEL, NO_GRADIENT_U, D_ORTHOGONAL, NORMAL, CENTROID),
-        jnp.array([[4.0, 0.0]]),
-    )
-    # mdot = rho (u_in . n) A = 1 * 4 * 2
+    u_face = bc.velocity_face(VEL, NO_GRADIENT_U, D_ORTHOGONAL, NORMAL, CENTROID)
+    assert jnp.allclose(u_face, jnp.array([[4.0, 0.0]]))
+    # mdot = rho (u_in . n) A = 1 * 4 * 2, from the patch's own (prescribed) boundary velocity
     assert (
-        abs(float(bc.mass_flux(VEL, P, GRADP, DCOEFF, NORMAL, AREA, DN, CENTROID, 1.0)[0]) - 8.0)
+        abs(float(bc.mass_flux(u_face, P, GRADP, DCOEFF, NORMAL, AREA, DN, CENTROID, 1.0)[0]) - 8.0)
         < 1e-12
     )
 
@@ -112,11 +112,29 @@ def test_pressure_outlet() -> None:
     assert jnp.allclose(bc.pressure_face(P, NO_GRADIENT_P, D_ORTHOGONAL, NORMAL, CENTROID), 0.0)
     assert jnp.allclose(
         bc.velocity_face(VEL, NO_GRADIENT_U, D_ORTHOGONAL, NORMAL, CENTROID), VEL
-    )  # zero-gradient velocity
-    # mdot = rho (u.n - dcoeff((p_b - p)/dn - gradp.n)) A
+    )  # zero-gradient velocity: on this orthogonal face the boundary value equals the owner's, VEL
+    # mdot = rho (u.n - dcoeff((p_b - p)/dn - gradp.n)) A, u the boundary (not owner) face velocity
     expected = 1.0 * (2.0 - 0.4 * ((0.0 - 1.5) / 0.5 - 3.0)) * 2.0
     got = float(bc.mass_flux(VEL, P, GRADP, DCOEFF, NORMAL, AREA, DN, CENTROID, 1.0)[0])
     assert abs(got - expected) < 1e-12
+
+
+def test_pressure_outlet_mass_flux_reads_the_boundary_velocity_not_the_owner() -> None:
+    """The through-flow term is ``rho (u_face . n) A``, not ``rho (u_owner . n) A``.
+
+    On a skewed face the two differ by the tangential non-orthogonal correction (see
+    :func:`test_a_gradient_type_patch_carries_the_tangential_correction_on_a_skewed_face`), so a
+    unit test passing the owner velocity where the closure expects the boundary velocity would
+    silently reintroduce the bug this pins: give ``mass_flux`` two different "boundary velocity"
+    vectors with everything else held fixed and check the flux moves by exactly the analytic
+    through-flow term, ``rho (du . n) A``.
+    """
+    bc = PressureOutlet(pressure=0.0)
+    du = jnp.array([[0.3, -0.2]])
+    base = bc.mass_flux(VEL, P, GRADP, DCOEFF, NORMAL, AREA, DN, CENTROID, 1.0)
+    shifted = bc.mass_flux(VEL + du, P, GRADP, DCOEFF, NORMAL, AREA, DN, CENTROID, 1.0)
+    expected_shift = 1.0 * float(jnp.sum(du * NORMAL)) * float(AREA[0])
+    assert abs(float(shifted[0] - base[0]) - expected_shift) < 1e-12
 
 
 def test_only_prescribing_patches_declare_a_reference_velocity() -> None:
@@ -190,17 +208,16 @@ def test_a_prescribed_patch_is_unmoved_by_the_owner_gradient() -> None:
     assert jnp.allclose(outlet.pressure_face(P, grad_p, D_SKEWED, NORMAL, CENTROID), 2.5)
 
 
-def test_an_inlet_mass_flux_reads_its_own_prescribed_velocity() -> None:
-    """``VelocityInlet.mass_flux`` is ``rho (u_in . n) A`` at the patch's own prescribed profile.
+def test_an_inlet_mass_flux_reads_the_boundary_velocity_it_is_given() -> None:
+    """``VelocityInlet.mass_flux`` is ``rho (u_face . n) A`` at the patch's own boundary velocity.
 
-    It reads the closure rather than a copy of the profile, and a prescribed value depends on
-    neither the owner state nor its gradient — so the flux is unchanged by both, on any mesh.
+    The caller (:meth:`~aquaflux.flow.MomentumContinuity._boundary_mass_flux`) is what guarantees
+    that value is the patch's own prescribed profile, evaluated once via :meth:`velocity_face` and
+    shared with every other consumer of the boundary velocity; ``mass_flux`` itself just forms the
+    flux from it rather than re-deriving a second copy of the profile.
     """
     bc = VelocityInlet(velocity=lambda x: jnp.stack([x[:, 1], jnp.zeros(x.shape[0])], axis=1))
-    # u_in = (y_face, 0) = (0.5, 0); mdot = 1 * 0.5 * 2
-    flux = bc.mass_flux(VEL, P, GRADP, DCOEFF, NORMAL, AREA, DN, CENTROID, jnp.array([1.0]))
+    # u_face = (y_face, 0) = (0.5, 0); mdot = 1 * 0.5 * 2
+    u_face = bc.velocity_face(VEL, NO_GRADIENT_U, D_ORTHOGONAL, NORMAL, CENTROID)
+    flux = bc.mass_flux(u_face, P, GRADP, DCOEFF, NORMAL, AREA, DN, CENTROID, jnp.array([1.0]))
     assert abs(float(flux[0]) - 1.0) < 1e-12
-    stirred = bc.mass_flux(
-        VEL * 3.0, P, GRADP, DCOEFF, NORMAL, AREA, DN, CENTROID, jnp.array([1.0])
-    )
-    assert abs(float(stirred[0]) - 1.0) < 1e-12

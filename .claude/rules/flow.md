@@ -273,22 +273,33 @@ Engineering Principles.
       gradient tensor and nothing else of it, which is what lets `_boundary_velocity_component` hand a
       scheme's per-scalar `boundary_values_at` one component's own `(n_cells, dim)` gradient with the
       other rows zero-filled rather than plumbed through.
-    - `VelocityInlet.mass_flux` reads `_prescribed_reference_velocity` rather than calling
-      `velocity_face` with fabricated arguments: a prescribed value depends on neither the owner state
-      nor its gradient, so the mass-flux signature does not have to grow two arguments its closure
-      would ignore.
-    - **⚠️ This changes the shipped default's answer on a non-orthogonal mesh** — the *first* pass
-      reads boundary values, so every gradient scheme is affected, not only one that differences them.
-      Any archived bit-identity comparison taken before this is void on a skewed mesh.
+    - **`mass_flux`'s through-flow term is the patch's own *boundary* velocity, for every patch
+      (binding, #319 — corrected from an earlier design where it read the owner velocity).**
+      `_boundary_mass_flux` passes each patch its own already-assembled `boundary_velocity` slice —
+      the value `_boundary_velocity` (hence `flow_fields.velocity_fields.boundary_velocity`) computed
+      immediately before it, at the reconstructed gradient — rather than the owner cell's velocity or
+      a second, patch-private re-derivation of it. `VelocityInlet.mass_flux` simply reads that
+      argument (`rho (u_face·n) A`); it no longer calls `_prescribed_reference_velocity` itself, since
+      the caller already supplies the identical Dirichlet value. `PressureOutlet.mass_flux` reads it
+      too, which is the fix: every other face in the discretization forms its flux from a face value,
+      and the outlet's own zero-gradient closure (with its tangential correction) is that face value.
+      `pressure_schur_coefficient` is unaffected — the boundary velocity does not depend on `p_owner`,
+      so `d(mdot)/d(p_owner)` is unchanged.
+    - **⚠️ This changes the shipped default's answer on a non-orthogonal mesh with an outlet.** Before
+      the fix, `PressureOutlet`'s through-flow term used the owner velocity, which is a **zeroth-order
+      consistency error** at the outlet-owning cells (it does not shrink under mesh refinement: 8×8 →
+      32×32 gave `max|div u| = 0.111 → 0.085 → 0.086` at the exact Stokes Couette field, and a
+      converged solve stalled at `‖u − u_exact‖∞ ≈ 1.2e-3` regardless of mesh). Any archived
+      bit-identity comparison on a skewed mesh with an outlet is void.
     - Pinned analytically: `tests/integration/test_skewed_flow.py` opens the Couette domain into a
       `PressureOutlet` (zero-gradient velocity, and the exact field has `grad u·n = 0` there because
       the perturbation leaves boundary nodes in place). Under `MultipleCorrectionGradient` the outlet
-      face velocity is the exact field to **0.0** and the momentum residual at the exact field is
-      **8.3e-17**; with the second pass removed those become **1.15e-2** and **2.8e-2**. Only the
-      momentum block is asserted: `PressureOutlet.mass_flux` builds its through-flow from the *owner*
-      velocity `u_P·n` rather than the face velocity, so continuity keeps a **1.4e-3** residue that
-      this change does not touch — a separate approximation of that closure, and the obvious next one.
-      (Configuration for every number here: 8×8 perturbed grid, `perturb=0.2`, `seed=2`,
+      face velocity is the exact field to **0.0** and the *whole coupled residual* (momentum and
+      continuity) at the exact field is **≤1e-16** — before this fix continuity held the **1.4e-3**
+      through-flow error above instead. The open (outlet) case now reaches the same solver tolerance
+      as the fully-Dirichlet control (`test_stokes_couette_is_exact_on_a_skewed_mesh`),
+      `‖u − u_exact‖∞ < 1e-6`, rather than stalling at `~1.2e-3`. (Configuration for every number
+      here: 8×8 perturbed grid, `perturb=0.2`, `seed=2`,
       `MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None)`, Stokes, x64.)
 - **The turbulence closure enters through `eddy_viscosity`, and `μ_eff = μ + ρν_t` is formed ONCE, in
   `MomentumContinuity.viscosity` (binding).** `ν_t` (**kinematic**, the closure's own quantity) rides
