@@ -16,6 +16,7 @@ pytest.importorskip("petsc4py")
 
 from aquaflux.solve import (
     AmgVCycle,
+    MaterializedJacobianPreconditioner,
     MonolithicAmgPreconditioner,
     build_amg_vcycle,
     equilibrate_cell_major,
@@ -202,6 +203,40 @@ def test_amg_refresh_shift_in_place_requires_a_cached_jacobian() -> None:
     pc = MonolithicAmgPreconditioner(vcycle)  # no jacobian_no_shift cached
     with pytest.raises(RuntimeError, match="cached Jacobian"):
         pc.refresh_shift_in_place(np.ones(100))
+
+
+def test_monolithic_and_field_split_share_the_materialized_jacobian_base() -> None:
+    """The seam #287 extracted: both AMG preconditioners are siblings over ONE shared base.
+
+    Written structurally, on the same reasoning as the hierarchy-inverse sibling test in
+    ``test_field_split.py``: the failure this guards against is someone re-adding a private
+    ``_materialize_jacobian``/``_shifted``/``destroy`` to one class, which would silently take it off
+    the shared path and let the two drift again. ``FieldSplitAmgPreconditioner`` is imported lazily to
+    avoid a module-level dependency on ``field_split.py`` from this file.
+    """
+    from aquaflux.solve.field_split import FieldSplitAmgPreconditioner
+
+    for cls in (MonolithicAmgPreconditioner, FieldSplitAmgPreconditioner):
+        assert issubclass(cls, MaterializedJacobianPreconditioner)
+        for shared in ("_materialize_jacobian", "_shifted", "destroy"):
+            assert shared not in vars(cls), (
+                f"{cls.__name__} overrides {shared!r}, which the shared base owns"
+            )
+    # And MonolithicAmgPreconditioner is no longer FieldSplitAmgPreconditioner's base -- the whole
+    # point of the split, since the union of the two used to force dead parameters onto the split.
+    assert not issubclass(FieldSplitAmgPreconditioner, MonolithicAmgPreconditioner)
+
+
+def test_monolithic_refresh_in_place_no_longer_takes_the_dead_smoother_parameters() -> None:
+    """``smoother_fill_levels``/``smoother_sweeps`` were declared and immediately ``del``-eted -- the
+    smoother is fixed at :meth:`MonolithicAmgPreconditioner.build`, so a refresh cannot change it. They
+    are gone from the signature rather than merely unused, so passing either is now a ``TypeError``."""
+    vcycle = build_amg_vcycle(_laplacian_2d(10), n_fields=1)
+    pc = MonolithicAmgPreconditioner(vcycle, jacobian_no_shift=_laplacian_2d(10), n_fields=1)
+    with pytest.raises(TypeError):
+        pc.refresh_in_place(
+            lambda v: v, None, np.zeros(100), smoother_fill_levels=1, smoother_sweeps=2
+        )
 
 
 def test_extra_options_reach_petsc_under_the_v_cycle_own_prefix() -> None:

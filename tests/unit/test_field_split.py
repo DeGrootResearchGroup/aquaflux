@@ -389,6 +389,28 @@ def test_the_field_split_answers_the_exact_solve_question_without_raising(groups
     assert getattr(preconditioner, "solves_exactly_on_host", False) is False
 
 
+def test_field_split_refresh_in_place_no_longer_takes_the_dead_smoother_parameters(groups) -> None:
+    """#287: the split used to declare ``smoother_fill_levels``/``smoother_sweeps`` on its refresh and
+    immediately ``del`` them, purely because it shared a base with :class:`MonolithicAmgPreconditioner`
+    (whose ``build`` genuinely reads them) and the two refresh signatures were forced to agree. Now that
+    the shared base is :class:`~aquaflux.solve.MaterializedJacobianPreconditioner`, which knows nothing
+    about a smoother, the split's own ``build`` still takes them (fitting the V-cycles) but its refresh
+    does not -- passing either is a ``TypeError`` rather than a silent no-op.
+    """
+    from aquaflux.solve.field_split import FieldSplitAmgPreconditioner
+
+    n = groups.n_dofs
+    operator = np.eye(n) * 2.0 + np.eye(n, k=1) * 0.25
+    split = split_for(operator, groups, flow_first=True)
+    preconditioner = FieldSplitAmgPreconditioner(
+        split, groups, jacobian_no_shift=operator, n_fields=1
+    )
+    with pytest.raises(TypeError):
+        preconditioner.refresh_in_place(
+            lambda v: v, None, np.zeros(n), smoother_fill_levels=0, smoother_sweeps=4
+        )
+
+
 def _two_field_transport(n_cells: int = 40, coupling: float = 30.0) -> sp.csr_matrix:
     """Field-major two-field convection-diffusion block, coupled within each cell."""
     upwind = sp.diags(
