@@ -1779,6 +1779,35 @@ def test_block_air_builds_where_the_scalar_diagonal_is_negative() -> None:
     assert hierarchy.levels[0].block_inverse is not None
 
 
+def test_block_sparse_level_stores_a_finite_inv_diagonal_on_a_zero_scalar_diagonal() -> None:
+    """#271: ``_SparseLevel`` used to lack the guard ``_AirLevel`` already carried for this.
+
+    ``_diagonal_inverse_operator`` skips ``_require_positive_diagonal`` for a nodal (``block_size > 1``)
+    level -- the weaker precondition is that each cell's own block is invertible, not that the raw
+    scalar diagonal is positive -- so a zero (or negative) scalar diagonal entry is a legal operator on
+    this path. Before this fix ``_SparseLevel.__post_init__`` computed ``1.0 / diagonal`` unconditionally
+    and would have stored an infinity there; nothing currently reads a nodal level's ``inv_diagonal``
+    (the smoothers all branch on ``block_inverse`` first), so the defect was silent, but it is exactly
+    the landmine ``_AirLevel``'s own guard exists to avoid.
+    """
+    a = _two_field_operator().tolil()
+    # This cell's own 2x2 block stays invertible (the off-diagonal coupling is 40), so it is a legal
+    # operator for a block smoother even though its own scalar diagonal entry is now zero.
+    a[3, 3] = 0.0
+    a = a.tocsr()
+    assert a.diagonal().min() == 0.0
+
+    with pytest.raises(ValueError, match="positive"):
+        build_convection_hierarchy(a, max_coarse=8)  # scalar path: correctly refuses
+
+    hierarchy = build_convection_hierarchy(a, block_size=2, max_coarse=8)  # block path: builds
+    level = hierarchy.levels[0]
+    assert level.block_inverse is not None
+    inv_diagonal = np.asarray(level.inv_diagonal)
+    assert np.all(np.isfinite(inv_diagonal)), "a nodal level's inv_diagonal stored an infinity"
+    np.testing.assert_array_equal(inv_diagonal, 0.0)
+
+
 def test_block_air_v_cycle_contracts_where_a_point_smoother_cannot() -> None:
     """The block smoother is what makes a multi-field level work, measured against the point one.
 
