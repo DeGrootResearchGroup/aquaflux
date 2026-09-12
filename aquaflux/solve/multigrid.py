@@ -626,6 +626,20 @@ class _SparseLevel(eqx.Module):
     def __post_init__(self) -> None:
         object.__setattr__(self, "inv_diagonal", 1.0 / self.diagonal)
 
+    def prolongation_scipy(self) -> sp.coo_matrix | None:
+        """This level's prolongation as a host ``scipy`` COO matrix, or ``None`` on the coarsest level.
+
+        The one place ``p_frow``/``p_ccol``/``p_val`` are read back into a host sparse matrix — a host
+        smoother needing the transfer operators, a refit re-deriving the coarse operator from a reused
+        prolongation — so every such consumer shares one reconstruction.
+        """
+        if self.p_frow is None:
+            return None
+        return sp.coo_matrix(
+            (np.asarray(self.p_val), (np.asarray(self.p_frow), np.asarray(self.p_ccol))),
+            shape=(self.n, self.n_coarse),
+        )
+
 
 class ShapeBudget(NamedTuple):
     """Per-level array sizes to coarsen *into*, so a rebuilt hierarchy keeps one compiled cycle.
@@ -780,13 +794,7 @@ class SmoothedHierarchy(eqx.Module):
             d_inv = _diagonal_inverse_operator(a, level.block_size, context)
             lam = _spectral_radius(d_inv @ a)
             if level.coarse_inv is None:
-                prolongation = sp.coo_matrix(
-                    (
-                        np.asarray(level.p_val),
-                        (np.asarray(level.p_frow), np.asarray(level.p_ccol)),
-                    ),
-                    shape=(level.n, level.n_coarse),
-                )
+                prolongation = level.prolongation_scipy()
                 levels.append(
                     _sparse_level(a, lam, None, prolongation, level.n_coarse, level.block_size)
                 )
@@ -1375,6 +1383,18 @@ class _CsrOperator(eqx.Module):
     def apply(self, x: jnp.ndarray) -> jnp.ndarray:
         """``A x``. Linear and transposable, so the adjoint's transpose solve goes through it."""
         return BCSR((self.data, self.indices, self.indptr), shape=self.shape) @ x
+
+    def to_scipy(self) -> sp.csr_matrix:
+        """The exact inverse of :meth:`from_scipy`: this operator as a host ``scipy`` CSR matrix.
+
+        The one place a traced level's operator is read back onto the host — a host-smoothed inverse
+        factorizing it, a march refresh re-deriving a hierarchy at a new operator — so every such
+        consumer shares one conversion rather than re-reading ``indptr``/``indices``/``data`` by hand.
+        """
+        return sp.csr_matrix(
+            (np.asarray(self.data), np.asarray(self.indices), np.asarray(self.indptr)),
+            shape=self.shape,
+        )
 
     @property
     def diagonal(self) -> jnp.ndarray:
@@ -1993,6 +2013,19 @@ class _AirLevel(eqx.Module):
             else 1.0 / self.diagonal,
         )
 
+    def prolongation_scipy(self) -> sp.csr_matrix | None:
+        """This level's prolongation as a host ``scipy`` CSR matrix, or ``None`` on the coarsest level.
+
+        The lAIR counterpart of :meth:`_SparseLevel.prolongation_scipy` — reused rather than re-derived
+        by a march refresh, since :func:`_one_point_interpolation`'s column choice is value-dependent.
+        """
+        if self.p_row is None:
+            return None
+        return sp.csr_matrix(
+            (np.asarray(self.p_val), (np.asarray(self.p_row), np.asarray(self.p_col))),
+            shape=(self.n, self.n_coarse),
+        )
+
 
 class AirHierarchy(eqx.Module):
     """A built lAIR hierarchy: reduction-based levels, finest to coarsest."""
@@ -2506,13 +2539,7 @@ def refresh_air_hierarchy(hierarchy: AirHierarchy, a: sp.csr_matrix) -> AirHiera
         # (whose column choice is value-dependent, so it must be carried over rather than re-derived).
         # Per CELL, from the dof mask its own level stores (field-major, so the first n_cells entries).
         split = np.asarray(level.c_mask).astype(np.int64)[: level.n // level.block_size]
-        prolongation = sp.csr_matrix(
-            (
-                np.asarray(level.p_val),
-                (np.asarray(level.p_row), np.asarray(level.p_col)),
-            ),
-            shape=(level.n, level.n_coarse),
-        )
+        prolongation = level.prolongation_scipy()
         # The frozen pattern, re-solved at `a` -- see `_frozen_neighbourhoods`. Re-walking would read
         # `a`'s values through a fresh strength graph and could move every shape below this level.
         offsets, f_points = _frozen_neighbourhoods(level)
