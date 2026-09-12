@@ -672,6 +672,7 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
         shift_diagonal: np.ndarray,
         groups: FieldGroups,
         *,
+        flow_first: bool = True,
         smoother_fill_levels: int = 0,
         smoother_sweeps: int = 4,
         trailing_smoother_sweeps: int = 1,
@@ -694,6 +695,11 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
             The pseudo-transient shift ``beta d`` added to the diagonal, shape ``(n_dofs,)``.
         groups : FieldGroups
             The partition to split on.
+        flow_first : bool
+            Forwarded to :func:`build_block_triangular_field_split` unchanged. A caller that also
+            narrows the probe pattern with :meth:`FieldGroups.active_rows` must pass the **same** value
+            to both, since the two describe one ordering choice: the triangle ``active_rows`` marks
+            unread is only correct for the split this builds if they agree.
         smoother_fill_levels, smoother_sweeps, trailing_smoother_sweeps, coarse_eq_limit
             Passed through to each block's V-cycle. ``smoother_sweeps`` is the leading (saddle) block's
             and ``trailing_smoother_sweeps`` the trailing (transported-scalar) block's; they differ by
@@ -718,6 +724,7 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
         split = build_block_triangular_field_split(
             cls._shifted(jacobian, shift_diagonal),
             groups,
+            flow_first=flow_first,
             smoother_fill_levels=smoother_fill_levels,
             smoother_sweeps=smoother_sweeps,
             trailing_smoother_sweeps=trailing_smoother_sweeps,

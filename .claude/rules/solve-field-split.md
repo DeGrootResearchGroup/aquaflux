@@ -540,8 +540,9 @@ deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` fr
     `FieldGroups.active_rows(flow_first=…)` (`solve/field_split.py`) derives the table straight from the
     partition a `BlockTriangularFieldSplit` already carries: `True` everywhere except the one triangle
     that ordering's `apply()` never reads. `CoupledJacobianProbe.build(..., active_rows=…)` and
-    `_coupled_jacobian_plan` thread it through; `coupled_amg_continuation` derives it automatically
-    (`groups.active_rows()`) whenever it builds its own probe under `field_split=True`, and
+    `_coupled_jacobian_plan` thread it through; `coupled_amg_continuation` derives it from its own
+    `flow_first` parameter (`groups.active_rows(flow_first=flow_first)`) whenever it builds its own probe
+    under `field_split=True`, and
     `validation/bfs3d_openfoam/compare.py`'s shared, once-built `probe` does the same when
     `BFS3D_FIELD_SPLIT` is set, since that probe is built externally and handed in rather than left to the
     builder's own default. `None` (the default with no `groups`/`active_rows` given) is byte-identical to
@@ -552,6 +553,20 @@ deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` fr
     `test_active_rows_composes_with_a_per_column_reach`) and `tests/unit/test_field_split.py`
     (`TestFieldGroups::test_the_dropped_block_never_reaches_the_splits_own_apply`, which zeroes the
     excluded block by hand and checks the split's own `apply()` — forward and transpose — does not move).
+
+    **⚠️ `flow_first` reached `active_rows` here but not `FieldSplitAmgPreconditioner.build` itself, which
+    had no such parameter at all — corrected 2026-09-11.** The probe's dropped triangle and the split's
+    retained one were therefore two independent `flow_first=True` defaults rather than one decision: a
+    caller changing which group leads would have had to know to change both, and a probe built for one
+    ordering fed to a split built for the other would silently materialize the wrong triangle — with no
+    error, since a probe pattern missing a block and a split that never reads that block look identical
+    right up until the split that *does* read it finds zeros there instead. `build` now takes `flow_first`
+    and forwards it to `build_block_triangular_field_split` unchanged; `coupled_amg_continuation` reads
+    its own `flow_first` parameter once and passes the same value to both call sites, so the two cannot
+    disagree. `True` (the shipped default on every path) is byte-identical.
+    Pinned by `tests/integration/test_coupled_field_split.py::test_coupled_amg_continuation_reads_one_flow_first_for_both_call_sites`,
+    which spies on both call sites through a real `coupled_amg_continuation(flow_first=False)` build and
+    asserts they received the same value.
 
     **Confirmed end to end on `bfs3d`, on the real mesh, through the real production call
     (`CoupledJacobianProbe.build` → `FieldSplitAmgPreconditioner.build`), not a standalone probe script:**
