@@ -244,13 +244,19 @@ RATIO = float(os.environ.get("PITZ_RATIO", "10.0"))
 #: a whole step, taken from the design record rather than a log; it is wrong by 3x.
 #: These values are a pitzDaily calibration; measure before carrying them anywhere else.
 RAMP = os.environ.get("PITZ_RAMP", "continuous")
-#: Which viscosity a ramp station scales (`PITZ_RAMP_SCALE`). `both` (the default) makes each station a
-#: genuine lower-Reynolds problem, the same path the rung ladder walks. `flow` scales the momentum
-#: block only and leaves the closure at the case's own viscosity, which keeps the near-wall `omega` at
-#: its target profile for the whole march instead of starting it a viscosity-ratio high and walking it
-#: back down -- at the price of stations that are not a physical Reynolds number, and of `k`/`omega`
-#: carrying their target stiffness from the first step. Which of those dominates is a property of the
-#: case; see the README.
+#: Which viscosity a ramp station scales (`PITZ_RAMP_SCALE`). `flow` (the default since 2026-09-11)
+#: scales the momentum block only and leaves the closure at the case's own viscosity, which keeps the
+#: near-wall `omega` at its target profile for the whole march instead of starting it a viscosity-ratio
+#: high and walking it back down: 264 restart cycles against 297 at `both`, everything else equal.
+#: `both` makes each station a genuine lower-Reynolds problem -- the path the rung ladder walks -- and
+#: is kept as the comparison arm.
+#:
+#: ⚠️ The price is that `k`/`omega` carry their target stiffness from the first step, and that an
+#: intermediate station is NOT a physical Reynolds number: the momentum equation sees a viscosity the
+#: closure does not, so no single `Re` describes it. Legitimate for a homotopy, whose path need only be
+#: traversable and end exactly at the target -- which it does, the target being the caller's own
+#: assembler by identity -- but a result quoted from an intermediate station is not a lower-Reynolds
+#: solution.
 #: The shift strength the control is allowed to descend to. It is the march's development scale: the
 #: control divides `beta` by `grow` per comfortable step, so a rung spends
 #: `ceil(ln(beta_start / BETA_MIN) / ln(grow))` steps reaching it -- 12 at these values -- and after
@@ -272,30 +278,30 @@ BETA_MIN = 0.005
 #: ⚠️ The step control still adapts ONE `beta` against a global line search, so it cannot see which
 #: block is asking for the caution -- which is why the ratio is a strategy the caller picks rather than
 #: something the control adapts. A per-block adaptive shift would need a per-block signal first.
-#: ⚠️⚠️ SWEPT 2026-09-10 on momentum-only scaling at 16 x 1, this file's other defaults, one run each --
-#: AND MEASURED UNDER A CONFOUND THE LIBRARY HAS SINCE REMOVED, so re-measure before quoting it.
-#: `1` is a control and reproduced the recorded 27 steps / 227 cycles exactly.
+#: ⚠️ SWEPT on momentum-only scaling at 16 x 1 -- the arm now shipped -- one run per arm, all reaching
+#: `x_r/h` 8.0686. `1` is a control and reproduced the recorded 27 steps / 227 cycles exactly.
 #:
-#:     gamma    1      2      5     10
-#:     steps   27     27     29     41
-#:     cycles 227    191    206    305
+#:     gamma    1      2      3      5     10
+#:     steps   27     29     31     33     64
+#:     cycles 227    200    196    212    329
 #:
-#: The confound: the damping was folded into the shift's base DIAGONAL, and that diagonal is also the
-#: row scale of `coupled_scaled_norm` -- the measure the march is steered by, stopped on (`atol` 1e-5)
-#: and compared across arms with. So every arm above divided its own `k`/`omega` residual rows by its
-#: own gamma, i.e. each ran to a different physical bar, with the looser bar going to the larger gamma.
-#: The bias favours large gamma throughout, which cuts both ways here: gamma=2's 16% win over the
-#: control is partly bought by it, while gamma=10's finishing WORSE than no damping at all is if
-#: anything understated. The damping now multiplies the shift STRENGTH and leaves the diagonal alone,
-#: so the measure no longer moves with the knob and the arms are comparable.
+#: ⚠️ THE TRAP THAT PRODUCED AN EARLIER, WRONG VERSION OF THAT TABLE, because it will recur for any
+#: knob that touches the shift: the damping was first folded into the shift's base DIAGONAL, and that
+#: diagonal is also the row scale of `coupled_scaled_norm` -- the measure the march is steered by,
+#: stopped on (`atol` 1e-5) and compared across arms with. Every arm then divided its own `k`/`omega`
+#: residual rows by its own gamma, so each ran to a different physical bar, the looser bar going to the
+#: larger gamma. Nothing reports that: each run's log is internally self-consistent. It read as
+#: 27/191, 29/206, 41/305 at gamma 2/5/10 -- and gamma=10 is really 64 steps with no stalls at all, so
+#: the confound had been hiding a third of that arm's length. The damping now multiplies the shift
+#: STRENGTH and leaves the diagonal alone.
 #:
-#: What the sweep established that the confound does not touch, because it is read WITHIN an arm: the
-#: two march phases want opposite ratios -- early, more damping is monotonically better (cycles to step
-#: 5: 17/12/12/11), and late it reverses (gamma 5 stalls once, gamma 10 stalls twice and moves
-#: BACKWARDS). And no arm took a retry, gamma=10 included: damping does stabilize the step, and its
-#: cost is the closure LAGGING the mean flow, which reads as a stalled residual at healthy alpha rather
-#: than as a divergence.
-TURB_DAMPING = float(os.environ.get("PITZ_TURB_DAMPING", "1.0"))
+#: What that episode established anyway, because it is read WITHIN an arm rather than across: no
+#: constant-ratio arm takes a retry, gamma=10 included. Damping does stabilize the step, and its cost
+#: is the closure LAGGING the mean flow -- a residual that will not fall at healthy alpha, never a
+#: divergence. Past the optimum it stops removing the closure's work and merely defers it: the
+#: end-of-ramp residual degrades 2.81e-3 / 5.80e-3 / 1.01e-2 at gamma 2 / 5 / 10 while the target
+#: station's cost rises 71 / 110 / 229, so a cheap ramp bought that way is borrowed, not earned.
+TURB_DAMPING = float(os.environ.get("PITZ_TURB_DAMPING", "3.0"))
 #: Taper the ratio from `TURB_DAMPING` down to 1 instead of holding it constant (`PITZ_TURB_TAPER`,
 #: the taper's exponent; `0`, the default, keeps the constant). `PITZ_TURB_TAPER_KEY` picks WHAT the
 #: release is keyed on -- `residual` (the default) or `beta`.
@@ -384,12 +390,39 @@ _TURB_DAMPING_SHAPE = (
         else " (constant)"
     )
 )
-RAMP_SCALE = os.environ.get("PITZ_RAMP_SCALE", "both")
+RAMP_SCALE = os.environ.get("PITZ_RAMP_SCALE", "flow")
 _RAMP_SCALINGS = {"both": scale_both_blocks, "flow": scale_momentum_only}
 if RAMP_SCALE not in _RAMP_SCALINGS:
     raise SystemExit(f"PITZ_RAMP_SCALE={RAMP_SCALE!r} is not one of {sorted(_RAMP_SCALINGS)}")
 RAMP_COMPANION = _RAMP_SCALINGS[RAMP_SCALE]
-RAMP_STATIONS = int(os.environ.get("PITZ_RAMP_STATIONS", "24"))
+#: How many geometric viscosity stations the ramp walks (`PITZ_RAMP_STATIONS`), one outer step each.
+#:
+#: ⚠️ 16, and it was swept JOINTLY with `TURB_DAMPING` because the two interact -- a coarser ramp is a
+#: larger disturbance per station for the closure to absorb. Momentum-only scaling throughout, one run
+#: per arm, all reaching `x_r/h` 8.0686; `march` is the march's own monotonic clock:
+#:
+#:     stations  gamma  steps  cyc  ramp  target  esc  pc(s)  march(s)
+#:           16      1     27  227    --      --    0     --        --
+#:           16      2     29  200   129      71    0     --        --
+#:           16      3     31  196   112      84    0   47.4       290
+#:           16      5     33  212   102     110    0     --        --
+#:           16     10     64  329   100     229    0     --        --
+#:           12      3     34  254    62     192    0   44.0       328
+#:
+#: ⚠️ COARSENING LOSES HERE, WHICH IS THE OPPOSITE OF THE SIBLING CASE, and the reason is the cost of a
+#: preconditioner rebuild. A station change forces a full re-materialize; that costs ~11-16 s on the
+#: three-dimensional case, where it is 24-34% of the march and buying fewer of them pays for a worse
+#: handover. Here the whole march spends 44-47 s on rebuilds -- 13% -- so there is nothing to buy, and
+#: the worse handover simply costs: 12 stations cuts the ramp 112 -> 62 and explodes the target
+#: 84 -> 192. The sibling ships 12 stations at gamma 5; this case ships 16 at gamma 3. **Neither
+#: schedule transfers.**
+#:
+#: The gain decomposes cleanly against this case's own history, each step measured:
+#:     both-blocks, 24 stations, gamma 1   297 cycles  (the default before 2026-09-11)
+#:     momentum-only, 24, gamma 1          264         -11%  scaling
+#:     momentum-only, 16, gamma 1          227         -14%  stations
+#:     momentum-only, 16, gamma 3          196         -14%  damping
+RAMP_STATIONS = int(os.environ.get("PITZ_RAMP_STATIONS", "16"))
 RAMP_STEPS_PER_STATION = int(os.environ.get("PITZ_RAMP_STEPS", "1"))
 
 #: ⚠️ RE-DAMP ON ENTERING EACH STATION, AND THIS IS LOAD-BEARING RATHER THAN A KNOB. Within a station

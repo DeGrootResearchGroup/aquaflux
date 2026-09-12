@@ -2129,8 +2129,30 @@ tuning follow-up noted above.
                 against 159).** A coarser ramp is a larger disturbance per station for the closure to
                 absorb, so the optimum ratio rises as the ramp coarsens — which means a station count
                 calibrated at `gamma = 1` does not survive the introduction of damping, and a `gamma`
-                calibrated at one station count does not transfer to another. `bfs3d` ships **12
-                stations at `gamma = 5`**; pitzDaily's optimum is **2** at 16 stations.
+                calibrated at one station count does not transfer to another.
+              - **⚠️ THE TWO CASES WANT OPPOSITE SCHEDULES, AND THE DISCRIMINATOR IS THE REBUILD COST.**
+                `bfs3d` ships **12 stations at `gamma = 5`**, pitzDaily **16 at `gamma = 3`**. Swept on
+                pitzDaily under momentum-only scaling, one run per arm, all reaching `x_r/h` 8.0686:
+
+                | stations | gamma | steps | cycles | ramp | target | pc | march |
+                |---|---|---|---|---|---|---|---|
+                | 16 | 1 | 27 | 227 | — | — | — | — |
+                | 16 | 2 | 29 | 200 | 129 | 71 | — | — |
+                | **16** | **3** | 31 | **196** | 112 | 84 | 47 s | 290 s |
+                | 16 | 5 | 33 | 212 | 102 | 110 | — | — |
+                | 16 | 10 | 64 | 329 | 100 | 229 | — | — |
+                | 12 | 3 | 34 | 254 | 62 | 192 | 44 s | 328 s |
+
+                **Coarsening loses here and wins there**, for one reason: a station change forces a full
+                preconditioner re-materialize, which costs 11–16 s on `bfs3d` (24–34 % of that march,
+                so buying fewer of them pays for a worse handover) and ~1.5 s on pitzDaily (44–47 s
+                total, 13 %, so there is nothing to buy and the worse handover simply costs — 12
+                stations cuts the ramp 112 → 62 and explodes the target 84 → 192). **Neither schedule
+                transfers; sweep the pair on any new case.**
+              - **The pitzDaily gain decomposes cleanly**, each step measured: both-blocks 24 stations
+                `gamma = 1` **297** → momentum-only 24 **264** (−11 %, scaling) → momentum-only 16
+                **227** (−14 %, stations) → `gamma = 3` **196** (−14 %, damping). 34 % in total, and
+                `bfs3d` is 349 (rung ladder) → 150 by the same three levers.
               - **⚠️⚠️ RESTART CYCLES ARE THE WRONG INSTRUMENT FOR A SCHEDULE ON THIS CASE, TWICE OVER,
                 and both ways they flatter the wrong arm.** *(a)* They cannot see preconditioner
                 rebuilds, and a station change **forces a full re-materialize** — so the station count
