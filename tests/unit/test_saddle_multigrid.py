@@ -221,6 +221,43 @@ def test_the_object_is_silent_unless_a_report_sink_is_supplied() -> None:
     assert any("SIMPLE-smoothed hierarchy" in line for line in captured)
 
 
+def test_a_frozen_coarsening_refresh_reports_its_own_last_aggregation_not_a_strangers() -> None:
+    """#287: the reported aggregate stats must be THIS inverse's own, never another block's.
+
+    A field split builds a leading and a trailing hierarchy from one `_build_aggregation_hierarchy`
+    call each; whichever one aggregates LAST used to leave every hierarchy's diagnostic pointed at a
+    single module-level accumulator. A `frozen_coarsening` refresh calls `refit`, which reuses the
+    stored prolongations and aggregates nothing new -- so on that path the accumulator held whatever
+    some *other* hierarchy's most recent build had left there, and the report attributed it to this one.
+
+    Reproduced here without any field split: build two inverses on two DIFFERENTLY-SIZED operators (so
+    their aggregate-size histograms provably differ -- a same-sized but differently-valued block turns
+    out to aggregate identically here, since the strength graph at this threshold is set by the fixture's
+    deterministic diagonal-dominance pattern, not by its small random off-diagonals), in an order that
+    makes the second the "most recent" aggregation, then refresh the FIRST one under `frozen_coarsening`.
+    Its reported stats must be unchanged from its own initial build -- not the second inverse's.
+    """
+    leading = SimpleSmoothedInverse(_saddle(n_cells=240), 4, **_SETTINGS, frozen_coarsening=True)
+    leading_stats = leading._aggregate_stats
+    assert leading_stats, "the fixture must actually aggregate at least one level"
+
+    # A different-shaped operator, built afterwards, so it is the most recently populated aggregation of
+    # any shared accumulator -- exactly the corrupting build the frozen-coarsening report used to leak.
+    trailing = SimpleSmoothedInverse(_saddle(n_cells=90), 4, **_SETTINGS)
+    assert trailing._aggregate_stats != leading_stats, (
+        "the fixture must aggregate differently, or this test cannot discriminate the two"
+    )
+
+    # Refit onto a rescaled copy of the SAME operator: same shape, same sparsity pattern, so a frozen
+    # coarsening is legal, and no new aggregation occurs.
+    leading.refactor_block((_saddle(n_cells=240) * 1.7).tocsr())
+
+    assert leading._aggregate_stats == leading_stats, (
+        "a frozen-coarsening refresh aggregates nothing new, so the stats must be unchanged"
+    )
+    assert leading._aggregate_stats != trailing._aggregate_stats
+
+
 def test_the_factory_builds_what_the_field_split_expects() -> None:
     """``simple_smoothed_inverse`` returns the ``(block, n_fields) -> inverse`` shape the split calls."""
     a = _saddle()

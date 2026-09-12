@@ -117,6 +117,10 @@ class HierarchyBlockInverse:
         # coarsens into the same ladder. `None` until then, and forever if no headroom was asked for.
         self._budget: ShapeBudget | None = None
         self._transpose_fn = None
+        # This inverse's own last aggregate-size histogram (see `_coarsen`) -- empty until the first
+        # build, and left untouched by a frozen-coarsening refresh (`refit`), which aggregates nothing
+        # new. A diagnostic only; a subclass that wants to report it reads this rather than the builder.
+        self._aggregate_stats: tuple[dict, ...] = ()
         self._rebuild(matrix)
 
     # --- the four hooks a smoother supplies -------------------------------------------------
@@ -154,8 +158,18 @@ class HierarchyBlockInverse:
         return self._n_dofs
 
     def _coarsen(self, matrix: sp.csr_matrix, budget: ShapeBudget | None) -> SmoothedHierarchy:
-        """Build the hierarchy at this inverse's settings, optionally into a fixed shape ladder."""
-        return build_convection_hierarchy(matrix, shape_budget=budget, **self._build_settings)
+        """Build the hierarchy at this inverse's settings, optionally into a fixed shape ladder.
+
+        Captures this build's own per-level aggregate-size histogram into ``self._aggregate_stats`` --
+        a plain list handed to the builder and read back here, never a shared accumulator, so nothing
+        another hierarchy aggregates can ever land on this one's report (#287).
+        """
+        stats: list[dict] = []
+        hierarchy = build_convection_hierarchy(
+            matrix, shape_budget=budget, stats=stats, **self._build_settings
+        )
+        self._aggregate_stats = tuple(stats)
+        return hierarchy
 
     def _rebuild(self, matrix: sp.csr_matrix) -> None:
         """Coarsen from scratch, then derive the smoother over the result.

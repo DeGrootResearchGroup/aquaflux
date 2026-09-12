@@ -2119,6 +2119,36 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   chosen to give a diagonally dominant M-matrix an aggregation hierarchy can coarsen. Its parameters
   are a weighted graph (`coefficient`, `flux`), not flow quantities. Keeping it in `solve/` also adds
   no new dependency edge: every consumer already imports `solve.multigrid`.
+- **Aggregate-size diagnostics are an EXPLICIT OUTPUT PARAMETER, not a module-level accumulator
+  (binding, #287, 2026-09-12) — `_AGGREGATE_STATS` is DELETED.** `_build_aggregation_hierarchy` (and
+  both public wrappers, `build_smoothed_hierarchy` / `build_convection_hierarchy`) take an optional
+  `stats: list[dict] | None`, appended to in place with this build's own per-level
+  `aggregate_size_histogram`; `None` (the default) skips it entirely. This replaces a bare module
+  global that every hierarchy in the process shared and that a caller "cleared before" and "read after"
+  by convention rather than by construction — a real bug on the one path that broke the convention:
+  `HierarchyBlockInverse.refactor_block`'s `frozen_coarsening` branch calls `SmoothedHierarchy.refit`,
+  which reuses the stored prolongations and aggregates **nothing new**, then still called
+  `_after_coarsening()` — which read the global as if this hierarchy's aggregation had just run. With a
+  leading+trailing pair (`build_block_triangular_field_split`) the trailing block generally aggregates
+  last, so the leading block's frozen-coarsening refresh reported the **trailing block's** aggregate
+  stats as its own. Diagnostic-only (never reaches the operator, the residual, or the adjoint), but
+  wrong on a shipped opt-in report path, and it was the only reason `saddle_multigrid.py` reached into
+  `multigrid.py`'s privates for *data* rather than behaviour.
+  ⚠️ **The obvious fix — carry the histograms as a field on `SmoothedHierarchy` — was considered and
+  REJECTED.** `SmoothedHierarchy` is passed as a **jit argument** in the traced consumers (see the
+  static/traced level split two bullets below), and a build-to-build-varying histogram field would
+  either have to be a *static* field — retracing the compiled cycle on every refresh purely to update a
+  diagnostic, which is exactly the per-rung-recompile hazard `turbulence.md` documents at length — or a
+  traced one, which a list of Python dicts cannot be. Keeping the histograms **off the pytree
+  entirely** avoids the question. `HierarchyBlockInverse._coarsen` (`hierarchy_inverse.py`) is the one
+  place both smoothers' hierarchies are built, so it is the one place that owns a fresh list per build
+  and stores it as `self._aggregate_stats` on the **inverse**, never on the hierarchy — a frozen-
+  coarsening refresh then reports this inverse's own last real aggregation (stale but correctly
+  attributed) rather than a stranger's most recent one. `SimpleSmoothedInverse` no longer overrides
+  `_after_coarsening` at all: capturing the stats moved to where the aggregation actually happens, so
+  there is nothing left for the override to do. Pinned by
+  `test_a_frozen_coarsening_refresh_reports_its_own_last_aggregation_not_a_strangers`
+  (`tests/unit/test_saddle_multigrid.py`), which reproduces the leading+trailing ordering directly.
 - **The V-cycle recursion AND its outer fixed-cycle driver are single-homed (binding, #52).** A
   family (`smoothed_multigrid_solve`, `convection_multigrid_solve`, `air_multigrid_solve`) contributes
   **only** its `_VCycleOps` — restriction, prolongation, smoother. The recursion is `_frozen_v_cycle`

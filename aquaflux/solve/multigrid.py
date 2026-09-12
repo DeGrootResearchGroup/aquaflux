@@ -988,11 +988,6 @@ def _aggregation_edges(a_agg: sp.csr_matrix, strength_threshold: float) -> sp.co
 _PROLONGATION_SMOOTHING = frozenset({"none", "standard", "symmetric-part"})
 
 
-#: Aggregate-size statistics from the most recent hierarchy build, newest level last. A diagnostic
-#: only -- read it after a build and clear it before the next one.
-_AGGREGATE_STATS: list[dict] = []
-
-
 #: Largest coarsest-level size, in degrees of freedom, that may be inverted densely. The coarse solve
 #: is a dense inverse: quadratic to store (8 bytes per entry, so ~512 MB here) and cubic to
 #: build. Exceeding it is never intentional -- it means the level cap stopped the coarsening before the
@@ -1032,9 +1027,15 @@ def _build_aggregation_hierarchy(
     equilibrate: bool = False,
     prolongation_smoothing: str = "symmetric-part",
     shape_budget: ShapeBudget | None = None,
+    stats: list[dict] | None = None,
 ) -> SmoothedHierarchy:
     """Coarsen ``a`` into a frozen smoothed-aggregation hierarchy — the loop shared by the symmetric
     and convection-diffusion builders.
+
+    ``stats``, when given, is APPENDED to with this build's per-level aggregate-size histogram
+    (:func:`aggregate_size_histogram`), one entry per aggregated level, coarsest-appended-last — a
+    diagnostic for a caller that wants to report it. The caller owns the list (a fresh one per build),
+    so two builds -- even concurrent ones -- never share or overwrite each other's statistics.
 
     ``aggregation_operator`` maps each level's true operator to the operator that drives aggregation
     and prolongation smoothing: identity for a symmetric graph Laplacian, and the symmetric part
@@ -1066,7 +1067,6 @@ def _build_aggregation_hierarchy(
     scale: np.ndarray | None = None
     if equilibrate:
         a, scale = symmetrically_equilibrate(a)
-    _AGGREGATE_STATS.clear()  # this build's statistics only; the consumer reads the whole list
     levels: list[_SparseLevel] = []
     live_cells = (
         a.shape[0] // block_size
@@ -1163,7 +1163,8 @@ def _build_aggregation_hierarchy(
                 graph, strength_threshold
             )  # full graph, or strong edges only
             aggregate, n_coarse_cells = _aggregate(upper.row, upper.col, graph.shape[0])
-        _AGGREGATE_STATS.append(aggregate_size_histogram(aggregate, n_coarse_cells))
+        if stats is not None:
+            stats.append(aggregate_size_histogram(aggregate, n_coarse_cells))
         # Coarsen into the BUDGETED number of aggregates rather than the number this partition
         # happened to produce. The surplus slots hold no real cells and are decoupled below -- inert,
         # so the coarse space is exactly the one the aggregation chose. Only padding is allowed: see
@@ -1260,6 +1261,7 @@ def build_smoothed_hierarchy(
     max_coarse: int = 16,
     max_levels: int = 20,
     strength_threshold: float = 0.0,
+    stats: list[dict] | None = None,
 ) -> SmoothedHierarchy:
     """Build the smoothed-aggregation hierarchy for operator ``a`` — off the jit path.
 
@@ -1291,6 +1293,10 @@ def build_smoothed_hierarchy(
         and reaches 1% in ~3 cycles, mesh-independently). **It makes the coarsening value-dependent**,
         so unlike the ``0`` path a re-derivation at a new operator changes the aggregate structure and
         shapes; use it only where the hierarchy is frozen (never refreshed), or refresh by rebuilding.
+    stats : list of dict, optional
+        Appended to with this build's per-level aggregate-size histogram
+        (:func:`aggregate_size_histogram`) — a diagnostic for a caller that wants to report it. ``None``
+        (default) skips it.
 
     Returns
     -------
@@ -1304,6 +1310,7 @@ def build_smoothed_hierarchy(
         max_coarse=max_coarse,
         max_levels=max_levels,
         strength_threshold=strength_threshold,
+        stats=stats,
     )
 
 
@@ -1699,6 +1706,7 @@ def build_convection_hierarchy(
     orthonormal_prolongation: bool = False,
     avoid_singletons: bool = False,
     shape_budget: ShapeBudget | None = None,
+    stats: list[dict] | None = None,
 ) -> SmoothedHierarchy:
     """Build the convection-diffusion hierarchy for operator ``a`` — off the jit path.
 
@@ -1766,6 +1774,10 @@ def build_convection_hierarchy(
         prolongation smoothing), so on an operator whose diagonal spans orders of magnitude they are
         calibrated against a scale with no meaning. Default ``False`` builds bit-identically to an
         unscaled build.
+    stats : list of dict, optional
+        Appended to with this build's per-level aggregate-size histogram
+        (:func:`aggregate_size_histogram`) — a diagnostic for a caller that wants to report it. ``None``
+        (default) skips it.
 
     Returns
     -------
@@ -1789,6 +1801,7 @@ def build_convection_hierarchy(
         orthonormal_prolongation=orthonormal_prolongation,
         avoid_singletons=avoid_singletons,
         shape_budget=shape_budget,
+        stats=stats,
     )
 
 
