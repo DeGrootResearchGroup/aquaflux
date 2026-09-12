@@ -253,8 +253,6 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
         "inner_steps",
         "inner_tol",
         "grow",
-        "descent_backoff",
-        "descent_test",
         # The shifted forward solve. `forward_rtol` / `forward_restart` / `forward_max_restarts` sat on
         # the multigrid builder alone, although the argument for them is about the *coupled residual*
         # (~100% omega under a plain 2-norm, so the flow block goes unresolved) and not about multigrid.
@@ -1565,14 +1563,14 @@ def test_a_supplied_step_with_no_builder_is_rejected_when_a_refresh_is_configure
 
 
 def test_globalization_knobs_still_reach_the_continuation_builder(monkeypatch) -> None:
-    """``grow`` / ``descent_backoff`` / ``descent_test`` are no longer named on ``solve_coupled``, and
-    still arrive at :func:`coupled_continuation` unchanged -- they ride ``**continuation_kwargs``.
+    """``grow`` is no longer named on ``solve_coupled``, and still arrives at
+    :func:`coupled_continuation` unchanged -- it rides ``**continuation_kwargs``.
 
-    They used to be declared on ``solve_coupled`` *and* forwarded explicitly, while the very same call
-    sites already splatted ``**continuation_kwargs`` into the same function -- so the declarations were
-    pure duplication, costing three parameters on an already-wide signature to buy nothing. Deleting
-    them is call-for-call identical, and this pins that: it is the only thing standing between the
-    deletion and a silently dropped knob.
+    It used to be declared on ``solve_coupled`` *and* forwarded explicitly, while the very same call
+    sites already splatted ``**continuation_kwargs`` into the same function -- so the declaration was
+    pure duplication, costing a parameter on an already-wide signature to buy nothing. Deleting it is
+    call-for-call identical, and this pins that: it is the only thing standing between the deletion
+    and a silently dropped knob.
     """
     from aquaflux.turbulence import coupled as coupled_module
 
@@ -1585,11 +1583,9 @@ def test_globalization_knobs_still_reach_the_continuation_builder(monkeypatch) -
 
     monkeypatch.setattr(coupled_module, "coupled_continuation", spy)
     with pytest.raises(_StopBuild):
-        solve_coupled(coupled, grow=2, descent_backoff=3, descent_test=True, beta0=1.5)
+        solve_coupled(coupled, grow=2, beta0=1.5)
 
     assert seen["grow"] == 2
-    assert seen["descent_backoff"] == 3
-    assert seen["descent_test"] is True
     # An ordinary continuation knob rides the same path, so the mechanism is not special-cased.
     assert seen["beta0"] == 1.5
 

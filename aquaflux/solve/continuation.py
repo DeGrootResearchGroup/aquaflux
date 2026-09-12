@@ -134,10 +134,9 @@ def _shifted_solve(residual_fn, phi, rhs, shift, preconditioner, solver, jacobia
 class _Attempt(NamedTuple):
     """One shifted solve, line-searched and measured — everything a step learns for one ``β``.
 
-    These five values are produced together by a single (expensive) shifted linear solve and are
+    These four values are produced together by a single (expensive) shifted linear solve and are
     consumed together by the accept/reject decision, so they travel as one record rather than as a
-    loose tuple. Carrying the record is what lets a probing loop hand its result to the escalation
-    loop instead of discarding it and paying for the same solve twice.
+    loose tuple.
 
     Attributes
     ----------
@@ -149,16 +148,12 @@ class _Attempt(NamedTuple):
         Krylov cycles the shifted solve took — a scalar, the staleness signal a refresh trigger reads.
     alpha : jnp.ndarray
         The line-search factor actually taken — a scalar.
-    directional : jnp.ndarray
-        ``d/ds measure(R(φ + s δ))`` at ``s = 0`` — a scalar. Negative means the correction descends
-        in the measure the solve is judged by.
     """
 
     candidate: jnp.ndarray
     residual_norm: jnp.ndarray
     cycles: jnp.ndarray
     alpha: jnp.ndarray
-    directional: jnp.ndarray
 
 
 class ShiftTerm(NamedTuple):
@@ -305,8 +300,8 @@ class ShiftedStep(eqx.Module):
     them, and all three answers were written out twice, identically.
 
     So the base holds the eight fields they share and the three accessors, and each subclass supplies
-    ``stepper`` plus the fields its own step shape needs -- the escalation ladder and descent tests for
-    the single-step march, the inner-loop bounds and observability hooks for the dual-time one.
+    ``stepper`` plus the fields its own step shape needs -- the escalation ladder and acceptance policy
+    for the single-step march, the inner-loop bounds and observability hooks for the dual-time one.
 
     **Why the accessors are worth sharing even though they are one line each.** They are the
     :class:`~aquaflux.solve.ForwardStep` contract's answers, so a third strategy that gets one subtly
@@ -442,18 +437,6 @@ class PseudoTransientStep(ShiftedStep):
         starting at ``1`` cannot express that — so a march reporting ``α = 1`` every step may simply
         never have been asked whether more was allowed. A growth rung is only ever reachable by
         passing the acceptance test; the no-admissible-rung fallback is capped at the full step.
-    descent_backoff : int
-        The most times ``β`` may be **divided** by :attr:`escalation_factor` until the correction
-        descends in the measure, before the escalation ladder starts from there (static). ``0`` (the
-        default) is off, because each backoff costs one shifted solve. It answers the opposite failure
-        to escalation: the shifted direction satisfies ``J δ = −R − β D δ``, whose second term has no
-        fixed sign and grows with ``β``, so where no step length along the direction can help, more
-        damping makes the direction strictly worse.
-    descent_test : bool
-        Reject a correction that does not descend in the measure, rather than judging it on the
-        candidate's norm alone (static, default ``False``). Independent of :attr:`descent_backoff`:
-        with the backoff off, this makes a non-descent direction fail visibly instead of yielding a
-        step that quietly went nowhere.
     line_search : int
         Maximum backtracking step-halvings applied to the shifted correction *before* the step is
         judged (static). ``0`` (the default) takes the full shifted step ``φ + δ``, so escalating
@@ -515,29 +498,12 @@ class PseudoTransientStep(ShiftedStep):
     # with `tree_at`, and that is only a compilation-cache hit if the measure rides as data. A plain
     # callable (the default) has no array leaves, so it is filtered to the static side anyway and the
     # default path is unchanged.
-    # Back the shift off until the correction descends in the measure the solve is judged by, then
-    # escalate from there as usual. Off by default (0), because each backoff costs one shifted solve.
-    #
-    # Why it exists: the shifted correction is not a descent direction by construction. For the exact
-    # Newton direction it would be -- with J delta = -R the derivative of the measure along delta is
-    # -norm(R) for any positive weighting -- but the shifted direction satisfies J delta = -R -
-    # beta D delta, whose second term has no fixed sign and grows with beta. Measured on a stiff
-    # coupled state, the derivative was negative at beta <= 1 and changed sign between beta = 1 and
-    # beta = 2, with the march running at about 1.9: every step length then increased the measure, the
-    # line search could only pick the least-harmful rung, and the march sat still while reporting
-    # steps. Backing the shift off restores descent; escalating -- the response to an overshoot --
-    # makes it strictly worse.
     # Rungs the line search may try ABOVE the full step (alpha = 2**grow ... 2, 1, 1/2 ...). Zero is
     # a one-sided ladder, the historical behaviour. The admissible step is often longer than the full
     # one: measured at a cold start, alpha = 2 sat inside the acceptance tolerance and travelled twice
     # as far, but a ladder starting at one could not express it -- so a march reporting alpha = 1 every
     # step may simply never have been asked whether more was allowed.
     grow: int = eqx.field(static=True, default=0)
-    descent_backoff: int = eqx.field(static=True, default=0)
-    # Reject a correction that does not descend in the measure, rather than judging it on the
-    # candidate's norm alone. Independent of the backoff: with the backoff off, this makes a
-    # non-descent direction fail so the caller sees it instead of a step that quietly went nowhere.
-    descent_test: bool = eqx.field(static=True, default=False)
 
     def stepper(self) -> StepFn:
         """The accepted shifted-Newton step and its linear solve's cycle count.
@@ -578,7 +544,6 @@ class PseudoTransientStep(ShiftedStep):
         max_escalations, escalation_factor = self.max_escalations, self.escalation_factor
         acceptance = self.acceptance
         line_search = self.line_search
-        descent_backoff, descent_test = self.descent_backoff, self.descent_test
         grow = self.grow
         norm = self.residual_norm
         step_limit, step_projection = self.step_limit, self.step_projection
@@ -645,43 +610,12 @@ class PseudoTransientStep(ShiftedStep):
                     grow=grow,
                     max_alpha=max_alpha,
                 )
-                # The directional derivative of the measure along the correction, d/ds norm(R(phi +
-                # s delta)) at s = 0. Negative means the direction descends in the measure the solve
-                # is judged by; non-negative means no step length along it can help, and the line
-                # search will be reduced to picking the least-harmful rung.
-                #
-                # This is not guaranteed by construction here. For the exact Newton direction
-                # (J delta = -R) it would be -- the derivative is then -norm(R) for any positive
-                # weighting -- but the shifted direction satisfies J delta = -R - beta D delta, and
-                # that second term carries no fixed sign. Its damage grows with beta: measured on a
-                # stiff coupled state, the derivative was negative for beta <= 1 and changed sign
-                # between beta = 1 and beta = 2, exactly where that march had been running.
-                directional = jax.jvp(lambda x: norm(residual_fn(x)), (phi,), (delta,))[1]
-                # The search's own measure at the rung it kept, not a fresh evaluation at the same
-                # point: the ladder computed exactly `norm(residual_fn(candidate))` on its way to
-                # choosing that rung, so re-forming it here cost a whole residual per ATTEMPT -- and
-                # every escalation is another attempt.
                 return _Attempt(
                     candidate=searched.phi,
                     residual_norm=searched.residual_norm,
                     cycles=cycles,
                     alpha=searched.alpha,
-                    directional=directional,
                 )
-
-            def admits(trial: _Attempt, attempts: jnp.ndarray) -> jnp.ndarray:
-                """Whether the injected acceptance policy (and the descent test) admit ``trial``."""
-                accept = acceptance.accept(
-                    trial.residual_norm, residual_norm, residual_norm_0, attempts
-                )
-                # A direction that does not descend in the measure is rejected outright, however the
-                # candidate scores. Escalating on it would be worse than useless: more shift makes
-                # the derivative *less* negative, so the loop would drive itself further from a
-                # usable direction while paying for a solve each time. Rejecting instead lets
-                # `descent_backoff` below take over, which moves β the other way.
-                if descent_test:  # a static choice, so the branch is resolved at trace time
-                    accept = accept & (trial.directional < 0.0)
-                return accept
 
             # Escalate the damping on a rejected attempt, taking the first the acceptance policy
             # admits. The loop *mechanics* — grow β, cap at max_escalations, carry the best candidate
@@ -714,79 +648,23 @@ class PseudoTransientStep(ShiftedStep):
             def body(state: tuple) -> tuple:
                 relaxation, _, _, attempts, *_ = state
                 trial = attempt(relaxation)
-                return record(state, trial, admits(trial, attempts))
-
-            def fresh(start: jnp.ndarray) -> tuple:
-                """The escalation carry for a step that has not yet solved anything."""
-                return (
-                    start,
-                    phi,
-                    # A fully-rejected step returns `phi` untouched, so its measure is `phi`'s own --
-                    # which the caller measured before the step and handed in as `residual_norm`.
-                    residual_norm,
-                    0,
-                    jnp.asarray(False),
-                    jnp.asarray(0, dtype=jnp.int32),
-                    jnp.asarray(1.0),
+                accept = acceptance.accept(
+                    trial.residual_norm, residual_norm, residual_norm_0, attempts
                 )
+                return record(state, trial, accept)
 
-            # Back the shift OFF until the direction descends, then escalate from there as usual.
-            #
-            # These two loops move beta in opposite directions on purpose, because they answer
-            # different failures. Escalation answers "this step overshot or the shifted system was
-            # ill-conditioned" -- more damping is the cure. The backoff answers "no step length along
-            # this direction can help", which more damping makes strictly worse: the shift term is what
-            # spoils descent, so the derivative only becomes less negative as beta grows. Running
-            # escalation against a non-descent direction therefore spends solves making the direction
-            # worse, which is what a march does when it sits at the shortest rung and does not move.
-            #
-            # Each backoff costs one shifted solve, so it is off by default and bounded when on. The
-            # probe that finally descends is a *complete* attempt at the relaxation the escalation
-            # loop is about to start from, so it is carried out of the loop and folded straight into
-            # the escalation carry. Re-solving it there would double the cost of every step on the
-            # common path — the one where the first probe already descends and nothing is backed off.
-            def backoff_cond(state: tuple) -> jnp.ndarray:
-                _, tries, descends, _ = state
-                return (~descends) & (tries < descent_backoff)
-
-            def backoff_body(state: tuple) -> tuple:
-                relaxation, tries, _, _ = state
-                trial = attempt(relaxation)
-                descends = trial.directional < 0.0
-                return (
-                    jnp.where(descends, relaxation, relaxation / escalation_factor),
-                    tries + 1,
-                    descends,
-                    trial,
-                )
-
-            start_relaxation = base_relaxation
-            if descent_backoff > 0:
-                start_relaxation, _, probed, trial = jax.lax.while_loop(
-                    backoff_cond,
-                    backoff_body,
-                    (
-                        base_relaxation,
-                        jnp.asarray(0, dtype=jnp.int32),
-                        jnp.asarray(False),
-                        _Attempt(
-                            candidate=phi,
-                            residual_norm=residual_norm,
-                            cycles=jnp.asarray(0, dtype=jnp.int32),
-                            alpha=jnp.ones_like(residual_norm),
-                            directional=jnp.zeros_like(residual_norm),
-                        ),
-                    ),
-                )
-                # `probed` is the loop's own descent flag, so the seeded carry is used only when the
-                # carried attempt really was taken at `start_relaxation`. When the backoff instead
-                # exhausted its tries it exits at a *lower*, unprobed relaxation, and the escalation
-                # loop starts there from scratch — the same relaxation ladder as before this fast path.
-                cold = fresh(start_relaxation)
-                seeded = record(cold, trial, probed & admits(trial, 0))
-                start = jax.tree.map(lambda s, c: jnp.where(probed, s, c), seeded, cold)
-            else:
-                start = fresh(start_relaxation)
+            # The escalation carry for a step that has not yet solved anything. A fully-rejected step
+            # returns `phi` untouched, so its measure is `phi`'s own -- which the caller measured
+            # before the step and handed in as `residual_norm`.
+            start = (
+                base_relaxation,
+                phi,
+                residual_norm,
+                0,
+                jnp.asarray(False),
+                jnp.asarray(0, dtype=jnp.int32),
+                jnp.asarray(1.0),
+            )
 
             _, phi_next, next_norm, _, _, step_cycles, step_alpha = jax.lax.while_loop(
                 cond, body, start

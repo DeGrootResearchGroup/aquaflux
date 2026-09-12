@@ -574,8 +574,13 @@ and binding defaults are in `solve-globalization.md`.
   attribution to `growth` were wrong (`admissible` is computed outside the loop and the default bound is
   a concrete, not traced, value). See `solve-globalization-log.md` § "The `growth` parameter is NOT a
   performance regression".
-- **`descent_backoff` — COUNTERPRODUCTIVE on this case; measured, do not enable it blindly.** See
-  `solve-globalization-log.md` § "`descent_backoff` IS COUNTERPRODUCTIVE ON THIS CASE".
+- **`descent_backoff` / `descent_test` — COUNTERPRODUCTIVE on this case, had no production caller
+  anywhere, and are now DELETED (2026-09-12) along with the second `while_loop` and the
+  probed/cold/seeded/`jax.tree.map` seeding dance they alone required.** Do not re-add them; if a
+  non-descent shifted direction ever needs handling again, design it fresh against the current
+  `PseudoTransientStep.stepper`, which no longer carries the machinery to hang one off of. See
+  `solve-globalization-log.md` § "`descent_backoff` IS COUNTERPRODUCTIVE ON THIS CASE" for the
+  original measurement.
 - **The convective `ShiftBasis` (`w = 0`) — DOMINATED by the default `a_P` basis; settled by a controlled
   2×2 plus a β sweep, do not re-open on a %/s sweep.** See `solve-globalization-log.md` § "The convective
   basis (`w = 0`) is DOMINATED".
