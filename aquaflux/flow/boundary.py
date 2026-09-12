@@ -10,7 +10,7 @@ condition               velocity             pressure             mass flux ``md
 ======================  ===================  ===================  ================================
 :class:`NoSlipWall`     zero                 zero-gradient        zero (no through-flow)
 :class:`VelocityInlet`  prescribed ``u_in``  zero-gradient        ``rho (u_in . n) A`` (given)
-:class:`PressureOutlet` zero-gradient        prescribed ``p_b``   Rhie--Chow from ``p_b`` + owner u
+:class:`PressureOutlet` zero-gradient        prescribed ``p_b``   Rhie--Chow from ``p_b`` + face u
 ======================  ===================  ===================  ================================
 
 Each is an ``equinox.Module`` acting on per-patch-face arrays; the coupled assembler scatters
@@ -194,7 +194,7 @@ class FlowBoundary(eqx.Module):
     @abc.abstractmethod
     def mass_flux(
         self,
-        velocity_owner: jnp.ndarray,
+        boundary_velocity: jnp.ndarray,
         pressure_owner: jnp.ndarray,
         grad_pressure_owner: jnp.ndarray,
         d_coeff_owner: jnp.ndarray,
@@ -208,8 +208,11 @@ class FlowBoundary(eqx.Module):
 
         Parameters
         ----------
-        velocity_owner : jnp.ndarray
-            Owner velocity per face, shape ``(n, dim)``.
+        boundary_velocity : jnp.ndarray
+            This patch's own boundary face velocity, shape ``(n, dim)`` — the value
+            :meth:`velocity_face` returns for these faces, already carrying the tangential
+            non-orthogonal correction. Every face in the discretization forms its through-flow
+            from a face value; this is that value for the patch's own faces, not the owner cell's.
         pressure_owner : jnp.ndarray
             Owner pressure per face, shape ``(n,)``.
         grad_pressure_owner : jnp.ndarray
@@ -337,7 +340,7 @@ class NoSlipWall(FlowBoundary):
 
     def mass_flux(
         self,
-        velocity_owner,
+        boundary_velocity,
         pressure_owner,
         grad_pressure_owner,
         d_coeff_owner,
@@ -389,7 +392,7 @@ class MovingWall(FlowBoundary):
 
     def mass_flux(
         self,
-        velocity_owner,
+        boundary_velocity,
         pressure_owner,
         grad_pressure_owner,
         d_coeff_owner,
@@ -440,7 +443,7 @@ class VelocityInlet(FlowBoundary):
 
     def mass_flux(
         self,
-        velocity_owner,
+        boundary_velocity,
         pressure_owner,
         grad_pressure_owner,
         d_coeff_owner,
@@ -450,11 +453,10 @@ class VelocityInlet(FlowBoundary):
         centroid,
         rho,
     ):
-        # The inlet velocity is prescribed, so it is the patch's own face closure read at a
-        # quiescent interior -- the same value `velocity_face` returns for any owner state, without
-        # this signature having to carry the velocity gradient a Dirichlet closure would ignore.
-        u_in = _prescribed_reference_velocity(self, normal, centroid)
-        return rho * dot(u_in, normal) * area
+        # The inlet velocity is prescribed, so the through-flow is simply this patch's own face
+        # velocity -- already the closure's value, with no owner state or gradient to re-derive it
+        # from.
+        return rho * dot(boundary_velocity, normal) * area
 
     def reference_velocity(self, normal, centroid):
         return _prescribed_reference_velocity(self, normal, centroid)
@@ -484,7 +486,7 @@ class PressureOutlet(FlowBoundary):
 
     def mass_flux(
         self,
-        velocity_owner,
+        boundary_velocity,
         pressure_owner,
         grad_pressure_owner,
         d_coeff_owner,
@@ -494,8 +496,11 @@ class PressureOutlet(FlowBoundary):
         centroid,
         rho,
     ):
-        # Owner-velocity flux plus a Rhie--Chow correction driving it toward p_b.
-        u_normal = dot(velocity_owner, normal)
+        # Boundary-face-velocity flux plus a Rhie--Chow correction driving it toward p_b. The
+        # through-flow term reads this patch's own (zero-gradient, tangentially corrected) face
+        # velocity -- the same face value every interior face and every other patch forms its flux
+        # from -- not the owner cell's velocity, which on a skewed mesh is a different quantity.
+        u_normal = dot(boundary_velocity, normal)
         compact = (self.pressure - pressure_owner) / normal_distance
         interpolated = dot(grad_pressure_owner, normal)
         d_hat = dot(normal * normal, d_coeff_owner)  # directional V/a_P projected on the normal
@@ -504,7 +509,9 @@ class PressureOutlet(FlowBoundary):
     def pressure_schur_coefficient(self, d_coeff_owner, area, normal_distance, rho_owner):
         # d(mdot)/d(p_owner) of the mass flux above: the compact term -rho d_hat (p_b - p_owner)/(d.n)
         # contributes +rho d_hat A / (d.n) to the owner's continuity--pressure coupling. The Schur uses
-        # an isotropic V/a_P, for which d_hat = V/a_P, matching the interior face coefficient.
+        # an isotropic V/a_P, for which d_hat = V/a_P, matching the interior face coefficient. The
+        # through-flow term's boundary-face velocity does not depend on p_owner, so it contributes
+        # nothing to this linearization.
         return rho_owner * d_coeff_owner * area / normal_distance
 
     def momentum_diagonal_coefficient(self, viscous_owner, convective_owner):

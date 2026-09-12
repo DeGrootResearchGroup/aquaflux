@@ -525,20 +525,28 @@ class MomentumContinuity(eqx.Module):
 
     def _boundary_mass_flux(
         self,
-        velocity: jnp.ndarray,
+        boundary_velocity: jnp.ndarray,
         pressure: jnp.ndarray,
         grad_pressure: jnp.ndarray,
         d_coeff: jnp.ndarray,
         mdot: jnp.ndarray,
     ) -> jnp.ndarray:
-        """Overwrite the boundary-face entries of ``mdot`` with each patch's mass-flux closure."""
+        """Overwrite the boundary-face entries of ``mdot`` with each patch's mass-flux closure.
+
+        Parameters
+        ----------
+        boundary_velocity : jnp.ndarray
+            Global boundary face velocity, shape ``(n_faces, dim)`` (see :meth:`_boundary_velocity`)
+            -- each patch's own through-flow term reads its own faces' entries, the same face value
+            its ``velocity_face`` closure produced, rather than re-deriving one from the owner state.
+        """
         fg = self.geometry.face
         density = self.density
         return self.boundary.apply(
             self.mesh.face_cells,
             mdot,
             lambda bc, faces, owner: bc.mass_flux(
-                velocity[owner],
+                boundary_velocity[faces],
                 pressure[owner],
                 grad_pressure[owner],
                 d_coeff[owner],
@@ -676,6 +684,7 @@ class MomentumContinuity(eqx.Module):
         self,
         velocity: jnp.ndarray,
         grad_velocity: jnp.ndarray,
+        boundary_velocity: jnp.ndarray,
         pressure: jnp.ndarray,
         grad_pressure: jnp.ndarray,
         d_coeff: jnp.ndarray,
@@ -695,7 +704,7 @@ class MomentumContinuity(eqx.Module):
             self.density,
         )
         mdot = face_cells.combine_face_values(interior_flux, 0.0)
-        return self._boundary_mass_flux(velocity, pressure, grad_pressure, d_coeff, mdot)
+        return self._boundary_mass_flux(boundary_velocity, pressure, grad_pressure, d_coeff, mdot)
 
     def boundary_momentum_diagonal(
         self, boundary_viscosity: jnp.ndarray, mdot: jnp.ndarray | None
@@ -988,7 +997,9 @@ class MomentumContinuity(eqx.Module):
             velocity, grad_velocity
         )  # (n_cells, dim), per component; differentiable (see the method docstring)
         d_coeff = self.geometry.cell.volume[:, None] / a_p  # Rhie--Chow coefficient V / a_P
-        mdot = self._mass_flux(velocity, grad_velocity, pressure, grad_pressure, d_coeff)
+        mdot = self._mass_flux(
+            velocity, grad_velocity, boundary_velocity, pressure, grad_pressure, d_coeff
+        )
         return FlowFields(
             VelocityFields(velocity, boundary_velocity, grad_velocity),
             pressure,
