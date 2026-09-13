@@ -12,7 +12,8 @@ paths:
 > own papers. **Acronyms:** spell out compressed-sparse-row (CSR) at first use per file.
 
 Reading external mesh formats into an aquaflux `Mesh`, and writing computed cell fields back out
-(mesh writing itself is still deferred). This package
+— into the case they came from, or as a self-contained file for a viewer (mesh writing itself is
+still deferred). This package
 owns **file-format concerns only**; `aquaflux/mesh/` owns mesh representation. Governed by the root
 `CLAUDE.md` Engineering Principles.
 
@@ -200,7 +201,114 @@ those still resolve, and `internalField` is the one entry this writer replaces.
 time directory instead gives the solved per-patch `value` lists. The second is the closer
 continuation; the first is the more honest statement of the case's boundary conditions and does not
 carry another solver's values into your output.
+## Structure — BUILT (VTK XML `.vtu` writer) — 2026-09-12
 
+The general-purpose output path: a mesh and its cell-centred fields, written as a VTK XML
+unstructured grid a viewer opens directly. `io/vtk/{topology,xml,writer}.py`, exported as
+`write_vtu` (one frame) and `write_pvd` (a transient collection). Three seams mirroring the reader's:
+`topology` reconstructs the connectivity (pure numpy, file-free), `xml` serializes it (pure), and
+`writer` is the only part that opens a file.
+
+**Why hand-rolled, and why VTK's polyhedron in particular.** The mesh is face-based — nodes,
+owner/neighbour, ragged CSR face rings — and cells are *implicit*: there is no cell→vertex list.
+`VTK_POLYHEDRON` (type 42) is defined *by its face-node lists*, and `VTK_POLYGON` (type 7) by a
+vertex ring that is one edge-walk away, so the connectivity is a reconstruction rather than a
+translation. Alternatives were measured out before this was built: **VTKHDF**'s polyhedron support is
+unreleased and the installed ParaView (5.10.1 / 5.12.0) could not read it anyway; **meshio** cannot
+mix polyhedra with other cell types and would still need the topology hand-built; the **`vtk` /
+`pyvista`** wheels are a ~100 MB C++ dependency for a lean JAX package; **XDMF**'s polyhedral support
+is poor. Nothing but the standard library is imported.
+
+### ⚠️ THE WINDING RULE IS NOT "KEEP THE RING AS STORED" — THE PREMISE THAT SAYS SO IS FALSE
+VTK needs each polyhedron face listed outward from the cell listing it, and the obvious rule — keep a
+ring as stored under its **owner**, reverse it under its **neighbour** — is only half of it. It
+assumes a stored ring is owner-outward, and **a `Mesh` explicitly declines to promise that**:
+`Mesh.from_faces` accepts either direction ("the winding *direction* is free") and orients the
+**normal**, in a separate array, leaving the ring untouched. Measured on the day this was written:
+`structured_grid_3d(2,2,2)` stores **20 of 36** rings owner-outward and `structured_grid_2d(3,2)`
+**9 of 17** — so a writer built on the premise emits inward faces on roughly half of every cell.
+(pitzDaily read through the OpenFOAM reader is 12448 of 24730, because the `empty`-patch collapse
+rebuilds the faces and does not preserve OpenFOAM's own convention.)
+
+So the rule is the **composition of two facts**: `topology.stored_ring_is_outward` recovers the
+ring's own direction — by running the mesh's *own* face-geometry strategy
+(`unoriented_geometry` → `orient_owner_outward`) rather than re-deriving the orientation test — and
+the entry reverses exactly when that disagrees with the side listing it. Pinned two ways:
+`test_every_emitted_polyhedron_face_winds_outward_from_its_own_cell` checks each emitted ring's own
+Newell normal against its cell centroid, and
+`test_the_output_is_invariant_to_the_direction_the_rings_are_stored_in` rebuilds the same mesh with
+**every** ring reversed and demands byte-identical output. A test comparing against a hand-written
+expected array would have pinned one generator's incidental winding instead, and passed.
+
+### The 2D ring is a permutation chase, and a fixed-length walk is not enough to validate it
+Each of a cell's edges is already directed outward-consistently by the rule above, so a cell's edges
+form one closed *directed* cycle and chaining them needs no geometric tie-break — `n` vectorized
+steps for a mesh whose largest cell has `n` edges, no Python loop over cells. ⚠️ **Checking only that
+the walk returns to its start is wrong**: a cell whose edges form two rings returns at every multiple
+of the shorter one, so a walk of `max(count)` steps lands back at the start and emits the shorter
+ring traversed twice, at exactly the right length. The check is that the *first* return is at the
+cell's own edge count. This was a live bug, found by the test written for it
+(`test_a_2d_cell_whose_edges_form_two_rings_is_refused`, concentric squares as one cell).
+
+### Binary is the default, and that was decided before shipping rather than after
+`<AppendedData encoding="raw">` with `header_type="UInt64"`; `binary=False` gives the same values to
+the last bit as decimal text, for reading a small mesh by eye. **Measured 2026-09-12** — macOS arm64,
+ParaView 5.12.0, `structured_grid_3d(60,60,60)` = 216 000 cells / 658 800 faces: raw **40.8 MiB
+written in 1.9 s and opened by ParaView in 0.2 s**, against ASCII **63.1 MiB / 6.9 s / 1.8 s** — i.e.
+**9× the load time**, which is the number that matters, because that cost is paid on every open.
+⚠️ **Size is not the argument and does not hold at small sizes**: on `structured_grid_3d(4,4,4)` the
+raw file is *larger* (15 125 B vs 10 419 B), because a toy mesh's indices are one or two characters
+against a fixed four bytes. A test asserting "binary is smaller" was written, failed, and was
+deleted rather than re-scaled — the property is load time, not bytes.
+
+**Scale it was built for** (same configuration, `structured_grid_3d(118,118,118)` = 1 643 032 cells /
+4 970 868 faces, i.e. uvreactor scale): the face stream alone is **50.9 M integers**; reconstruction
+15.5 s + write 15.2 s at **3.37 GiB peak RSS** (1.83 GiB of which is the mesh), giving a 347 MiB file
+ParaView opens in **0.7 s**. The index arrays are formed at a width chosen once per build by
+`mesh.connectivity.index_dtype` — `int32` here — which is what keeps that peak off a second gigabyte.
+
+### ⚠️ A 2D vector is padded on the LAST axis, NOT on the collapsed one — the opposite of the OpenFOAM field writer
+`infer_extruded_axis` exists and is right for writing a field back into its original 3D case, whose
+coordinates still carry the dropped axis. It is **wrong here**, and calling it would be a plausible
+bug: a `.vtu` writes the mesh's *own* two coordinates into the plane `z = 0`, so the geometry has
+already been re-planarized. Padding a vector at the original axis would put `U_y` in the `z` slot
+while the geometry's `y` sits in `y`. The point and the vector must be padded the same way, and for
+the points that way is fixed by the file format.
+
+### Refuses nothing for being non-finite — also the opposite of the OpenFOAM field writer
+That writer refuses a `NaN` because a solver reading it back fails somewhere that never names the
+file. This one is read by a viewer, and looking at where a solution went non-finite is one of the
+things it is for; a viewer draws those cells as blanks.
+
+### Verified by opening the files, not by asserting on the XML produced
+Every number below is from `pvpython` inside `/Applications/ParaView-5.12.0.app` (5.12.0),
+2026-09-12. **The load-bearing check is `IntegrateVariables` and `CellSize`**: VTK computes a
+polyhedron's volume from the face stream by the divergence theorem, so a single inward-wound face
+makes it wrong or negative — the topology cannot be confirmed by counting cells.
+
+| case | result |
+|---|---|
+| `structured_grid_3d(3,2,2)`, raw and ASCII | 12 cells, 36 points, all type 42, integrated volume **1.0000000000000002** (exact domain 1.0) |
+| `structured_grid_2d(4,3)` | 12 cells, type 7, integrated area **1.0000000000000002**; `U` third component 0 |
+| pitzDaily (2D, 12 225 cells) | integrated area **0.01451603999974618** vs aquaflux's own cell-volume sum **0.014516039999746174** — 15 significant figures |
+| bfs3d (3D OpenFOAM hex, 23 040 cells) | counts and points identical to **ParaView's own OpenFOAM reader**; per-cell volume vs aquaflux max rel dev **1.9e-15**; **zero** negative volumes; cell centres agree with aquaflux to **5.6e-17** |
+| `polyDualMesh` of bfs3d (25 891 genuinely polyhedral cells: 6/8/10 faces per cell, 4/5/6 nodes per face) | counts identical to ParaView's OpenFOAM reader; **zero** negative volumes; per-cell volume **ours vs ParaView's own OpenFOAM reader 1.08e-6** |
+| `.pvd` of three frames | opens as one dataset, three timesteps, per-step field ranges correct |
+
+⚠️ **On the dual mesh aquaflux's own cell volumes differ from VTK's by up to 4.6 %, and that is NOT a
+writer defect** — do not "fix" it. The two VTK paths into the same case (our `.vtu`, and ParaView's
+independent OpenFOAM reader) agree to **1.08e-6** per cell, while aquaflux disagrees with *both* by
+4.6e-2. A dual mesh has **non-planar faces**, on which a cell's volume is not defined until a face
+triangulation is chosen: aquaflux uses the centre-fan decomposition its `CellGeometry` is built on,
+VTK uses its own. The bfs3d hex mesh, whose faces are planar, shows 1.9e-15 — which is how the two
+questions were separated. The same applies to the 1.9e-4 centroid gap there: ParaView's `CellCenters`
+is the mean of a cell's points, not its volume centroid, and the two coincide only on a hex.
+
+### Signature asymmetry with the OpenFOAM field writer is deliberate
+`write_vtu(mesh, fields, path)` against `write_openfoam_time(case, time, fields, mesh)`. The two are
+not the same contract dressed differently — see the `FieldWriter` entry under **Deferred**, which
+also records the one thing they *do* share (`io/cell_fields.as_cell_values`) and why the two
+questions have different answers.
 
 ## Binding decisions
 - **A polyMesh is always 3D; a 2D case is one cell thick between two `empty` patches.** The reader
@@ -235,14 +343,37 @@ carry another solver's values into your output.
     fails on most of the boundary.
 
 ## Deferred (additive; no seam changes)
-Binary polyMesh; `faceZones`/`pointZones`; `.gz` compression / multi-region cases; **mesh**
-**writing** (a future `MeshWriter` counterpart to `MeshReader` — note the *field* writer above
-is a different thing and does not need one, since it writes into a case whose mesh is already
-on disk); other formats (Gmsh/VTK/CGNS) as new `MeshReader` subclasses under `io/<format>/`.
-A format-agnostic `FieldWriter` ABC is deliberately **not** extracted yet: there is one
-implementation, and the natural shape of the next one (a single file holding every field, which
-needs the mesh topology) differs enough that a contract drawn now would be drawn from one
-example. Extract it when the second writer exists.
+Binary polyMesh; `faceZones`/`pointZones`; `.gz` compression / multi-region cases; **mesh writing**
+(a future `MeshWriter` counterpart to `MeshReader` — note the *field* writers are a different thing
+and need none, since each writes a mesh it was handed or into a case whose mesh is already on disk);
+other formats (Gmsh/VTK/CGNS) as new `MeshReader` subclasses under `io/<format>/`.
+
+**A `FieldWriter` ABC was held open until the second writer existed, and the answer is NO — but the
+shared piece was real and IS extracted (`io/cell_fields.py`, 2026-09-12).** Both halves of that
+matter, and they are not the same question.
+
+*The contract does not unify.* `write_openfoam_time(case, time, fields, mesh)` writes **N files into
+a directory of an existing case**, needs a per-field template on disk for dimensions and boundary
+conditions, and uses the mesh only for a length check and the extruded-axis inference;
+`write_vtu(mesh, fields, path)` writes **one file** in which the mesh *is* the payload, and needs
+nothing but what it is handed. A common `write(mesh, fields, destination)` would make `destination`
+mean a filesystem path in one and a time *name inside a case* in the other, and every remaining
+keyword (`template_time`, `extruded_axis`, `allow_non_finite` against `binary`) belongs to exactly
+one side — the union bundle the Module Review Rubric warns about. Two writers taking a
+`{name: array}` mapping is a shared *vocabulary*, not one configuration.
+
+*The formula did.* Both opened with `np.asarray(values, dtype=float)`, a length check against
+`n_cells`, and — the tell — a **byte-identical error message**, written independently a week apart.
+That is now `io/cell_fields.as_cell_values(name, values, n_cells)`, which both call. ⚠️ **Read this
+pair as the general lesson, because it is the shape that hides**: "these two are not the same
+abstraction" is a true statement that says *nothing* about whether they share an implementation, and
+answering only the abstraction question leaves the duplicate in place looking justified. Ask both.
+The duplicate was invisible to `tools/sibling_builders.py` by construction — neither function
+constructs a class, so no pair exists for it to report, and its silence here is not evidence.
+
+**`.pvtu`** (parallel pieces, for `parallel/PartitionedMesh`) is deferred with the seam already cut:
+`xml.cell_data_arrays` yields the array names and component counts a `.pvtu` declares, with no data
+attached, so it reuses that function unchanged.
 
 ## Testability seam (satisfied)
 - **Parse** — grammar/foamfile on string snippets (`tests/unit/test_foamfile.py`), no files.
