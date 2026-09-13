@@ -91,8 +91,15 @@ variable-density Rhie–Chow physics is not yet validated.
 - **Stage 3 — `Calculated`.** A value computed from state fields via a formula (temperature-dependent
   viscosity, ...): `field_names` (static) + differentiable `params` + `formula(params, *fields)`,
   evaluated inside the residual so AD carries its state-dependence into the Jacobian (the limiter
-  `psi(phi)` pattern). Needs the assembler to expose its state as **named fields** — also the bridge
-  to the eventual DSL's named fields.
+  `psi(phi)` pattern).
+  **The plumbing prerequisite is built (issue #280 step 1):** `ResidualAssembler.residual` and
+  `.gradient` take an optional `fields: Mapping[str, jnp.ndarray]` and forward it verbatim to
+  `PropertyModel.evaluate` (`.claude/rules/discretization.md`). **The named-field map is
+  caller-supplied, not auto-populated** — the assembler does not add the equation's own `phi` under
+  a guessed name, so a caller wanting a property to see the very field it is solving passes
+  `fields={"temperature": phi}` explicitly, the same way it would pass another equation's converged
+  field. What is still missing is `Calculated` itself (no property reads `fields` yet) and the
+  convention a coupled driver uses to assemble the mapping across equations.
 
 ## Testability seam
 Each property/kind is unit-tested with a hand-built `CellZones` and no mesh geometry, no solve
