@@ -79,6 +79,21 @@ reconstruction's boundary input.
   carry `corr` as well — `velocity_face` / `pressure_face` take the owner gradient and the
   owner-centroid→face displacement, and the flow assembler runs the same two-pass fold the scalar path
   runs, so both consumers reach this formula through the identical route.
+- **`BoundaryCondition.face_value` deliberately does NOT take `aquaflux.context.FieldContext`
+  (decided, issue #280 step 4 — closed as not applicable here).** Its six loose arguments
+  (`phi_owner, grad_owner, d, normal, gamma_owner, face_centroid`) are already-gathered **per-face**
+  scalars/vectors for one patch's own boundary faces, not per-cell arrays plus connectivity — the
+  gathering happens once, centrally, in `ResidualAssembler.boundary_values`'s `closure(bc, faces,
+  owner)` fold (`face_cells.owner[faces]`, `phi[owner]`, ...), which is exactly what keeps every
+  closure here (`Dirichlet`, `ZeroGradient`, `Convective`, `Neumann`) a trivial function of scalars.
+  Handing a closure a `FieldContext` instead would mean it re-derives that gathering itself, for
+  whatever face subset `faces` names — pushing the same indexing logic into every subclass that the
+  central fold exists to avoid, and for no benefit: a closure reads no property and no other field's
+  state, so a context object would carry nothing this signature does not already have. Contrast
+  `discretization/face_flux.py`'s `FaceFluxOperator` and `schemes/limiter.py`'s `Limiter`, both of
+  which gather from the *whole* mesh themselves and so benefit from holding the context that lets
+  them; a boundary closure is handed its slice already gathered, which is a different shape by
+  design, not an oversight to fix later.
 
 ## Testability seam
 Each BC closure is unit-tested on a single boundary face with a known cell value and

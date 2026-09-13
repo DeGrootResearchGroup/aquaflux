@@ -267,6 +267,28 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   `tests/unit/test_gradient.py`: linear-exact + 2nd-order on orthogonal grids;
   **inconsistent (order ~0) on irregular grids** — the deliberately-demonstrated
   Green–Gauss deficiency. Differentiable (`jax.grad` flows).
+  - **`GradientScheme.gradients`/`_reconstruct_gradient` deliberately do NOT take
+    `aquaflux.context.MeshContext` or `FieldContext` (decided, issue #280 step 4 — closed as not
+    applicable here, unlike `schemes/limiter.py`'s `Limiter`, which does).** Two independent reasons,
+    either alone sufficient:
+    1. **It needs mesh topology `MeshContext` does not carry.** `HessianCorrectedGradient`'s face
+       warp-moment correction reads `mesh.node_coords` / `mesh.face_nodes` directly (`_HessianSystems`,
+       `face_geometry_scheme(dim).warp_first_moment(...)`) — not an edge case, but the term that
+       recovers ~13 orders of accuracy on a warped mesh (see the warp-moment entry above). `MeshContext`
+       carries `{face_cells, geometry, properties}` only; growing it to also carry node/face-node
+       connectivity for this one consumer would be exactly the "union bundle that grows with each new
+       operator" the Module Review Rubric warns against, since no other `MeshContext` consumer
+       (`DiffusionFlux`, `AdvectionFlux`, `Limiter`) touches mesh topology beyond `face_cells`.
+    2. **It is called before a `FieldContext` for this field can exist.** `gradients()` *produces* the
+       gradient that `ResidualAssembler._context` later packs into `FieldContext.gradient` — handing it
+       a `FieldContext` would be circular (the context it would read from is the one it is building).
+       Its `boundary_values` argument is also semantically the **leading-order** closures (evaluated at
+       zero gradient), not a `FieldContext`'s final ones — a second reason the shapes do not coincide,
+       independent of the first.
+    A `MeshContext`-shaped argument was considered and rejected on point 1 alone; `bind(mesh,
+    geometry)` (build-time preparation, before `PropertyModel` is even evaluated) was never a candidate
+    for either context type, for the same underlying reason: this scheme's inputs are earlier and wider
+    than what the shared context is scoped to carry.
 - **`CorrectedGreenGauss` — BUILT.** The non-orthogonal correction makes the gradient a
   *sparse coupled system* `A_g·G = B·φ` (`A_g` geometry-only, well-conditioned). **How `A_g⁻¹` is
   applied is an injected `GradientSolve` strategy** — `SweptGradientSolve` (**default**; fixed
