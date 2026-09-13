@@ -38,6 +38,21 @@ Principles.
   self-describing about its inputs (what a declarative/DSL assembler consumes). The old fixed
   `FaceState` union-of-all-operators bundle + free `gather_face_state` are **deleted** — do not
   reintroduce a god-bundle that every operator must agree on.
+  **"Self-describing" is now checked, not only asserted (issue #280 steps 2+3).**
+  `FaceFluxOperator`/`VolumeSource` carry `requires() -> tuple[str, ...]` (named properties,
+  default `()`) and `FaceFluxOperator`/`AdvectionScheme` carry `uses_gradient() -> bool` (default
+  `False`); `ResidualAssembler.build` validates both — `properties.require(*names)` over every
+  operator's `requires()`, and refuses `gradient_scheme=None` when any flux operator's
+  `uses_gradient()` is `True`. `DiffusionFlux.requires()` returns `(self.coefficient,)`;
+  `AdvectionFlux.uses_gradient()` delegates to its scheme, and `LimitedUpwind.uses_gradient()` is
+  unconditionally `True` (its 2nd-order reconstruction reads the gradient whether or not a limiter
+  is set) — the one scheme for which `gradient_scheme=None` used to silently degrade to first order
+  rather than fail. `DiffusionFlux` deliberately does **not** declare `uses_gradient()`, even though
+  it reads `context.gradient` too: its non-orthogonal correction is *exactly* zero on an orthogonal
+  grid, so a missing gradient scheme there is a graceful degradation (Gate A), not a silent one.
+  Both checks run before construction, so a mis-named coefficient or an ungradiented `LimitedUpwind`
+  is a build-time `ValueError`, never a `KeyError` (or a silently-worse answer) inside a jitted
+  residual.
 - The per-operator closures for Milestone 0: **diffusion** (the DeGroot–Straatman
   non-orthogonal-corrected flux) and the **transient** term (BDF1 at step 1, BDF2 after).
 - The `VolumeSource` seam (zero for pure diffusion, but wired) — this is where turbulence

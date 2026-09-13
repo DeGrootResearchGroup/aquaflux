@@ -95,6 +95,14 @@ class AdvectionScheme(eqx.Module):
             upwind side.
         """
 
+    def uses_gradient(self) -> bool:
+        """Whether this scheme reads a non-zero ``context.gradient`` (default: ``False``).
+
+        See :meth:`~aquaflux.discretization.face_flux.FaceFluxOperator.uses_gradient` — the same
+        distinction applies here between a graceful degradation and a silent one.
+        """
+        return False
+
 
 class FirstOrderUpwind(AdvectionScheme):
     """The upwind cell value: ``phi_f = phi_C``, ``C`` the upwind cell.
@@ -133,6 +141,12 @@ class LimitedUpwind(AdvectionScheme):
     """
 
     limiter: Limiter | None = None
+
+    def uses_gradient(self) -> bool:
+        """``True`` unconditionally -- the 2nd-order reconstruction reads the gradient whether or
+        not a limiter is set (an unlimited ``LimitedUpwind`` is still linear upwind, not upwind).
+        """
+        return True
 
     def face_value(self, field, context, mass_flux):
         fc = context.face_cells
@@ -185,3 +199,7 @@ class AdvectionFlux(FaceFluxOperator):
     def face_flux(self, field: jnp.ndarray, context: FaceContext) -> jnp.ndarray:
         phi_face = self.scheme.face_value(field, context, self.mass_flux)
         return self.mass_flux * phi_face
+
+    def uses_gradient(self) -> bool:
+        """Delegates to the injected :attr:`scheme` -- the operator itself reads no gradient."""
+        return self.scheme.uses_gradient()

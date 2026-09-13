@@ -198,3 +198,7 @@ class DiffusionFlux(FaceFluxOperator):
             gamma_face = fc.combine_face_values(gamma_owner, self.boundary_coefficient)
         # Owner-outward flux of phi is down-gradient (Fourier): -Gamma (grad phi . n) A.
         return -gamma_face * normal_grad * area
+
+    def requires(self) -> tuple[str, ...]:
+        """The one property this operator reads: :attr:`coefficient`, its diffusion ``Gamma``."""
+        return (self.coefficient,)

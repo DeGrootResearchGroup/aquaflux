@@ -74,6 +74,15 @@ class FaceFluxOperator(eqx.Module):
     neighbour ``-``), the standard finite-volume conservation statement. So an advective flux is
     ``+ mdot_f phi_f`` and a diffusive flux is ``- Gamma (grad phi . n) A`` (Fourier's law: flux is
     *down*-gradient).
+
+    **Self-describing inputs.** :meth:`requires` and :meth:`uses_gradient` let an operator declare,
+    before any residual is ever evaluated, what it reads from the context beyond the field itself —
+    which named properties, and whether it needs a reconstructed (non-zero) gradient.
+    :meth:`~aquaflux.discretization.residual.ResidualAssembler.build` validates both, so a mis-named
+    property or a scheme paired with no gradient reconstruction fails at build time rather than
+    deep inside a jitted residual. Both default to "nothing" so an operator that touches neither
+    (:class:`~aquaflux.discretization.advection.AdvectionFlux` with a first-order scheme, say) need
+    not override either.
     """
 
     @abc.abstractmethod
@@ -87,3 +96,27 @@ class FaceFluxOperator(eqx.Module):
         context : FaceContext
             The shared per-face inputs; the operator gathers its owner/neighbour fields from it.
         """
+
+    def requires(self) -> tuple[str, ...]:
+        """Names this operator reads from ``context.properties`` (default: none).
+
+        Override when the operator names a property, e.g.
+        :class:`~aquaflux.discretization.diffusion.DiffusionFlux` returns ``(self.coefficient,)``.
+        """
+        return ()
+
+    def uses_gradient(self) -> bool:
+        """Whether this operator reads a non-zero ``context.gradient`` (default: ``False``).
+
+        With no gradient scheme injected, :attr:`~ResidualAssembler.gradient_scheme` is ``None`` and
+        ``context.gradient`` is zero everywhere. For most operators that is a graceful degradation
+        (:class:`~aquaflux.discretization.diffusion.DiffusionFlux`'s non-orthogonal correction is
+        *exactly* zero on an orthogonal grid, so the flux stays correct there). An operator whose
+        entire purpose is the gradient term is different: silently reading zero does not fail, it
+        silently gives a *worse* answer than the operator claims to compute. Override to ``True`` for
+        such an operator: :class:`~aquaflux.discretization.advection.AdvectionFlux` delegates to its
+        injected scheme, and :class:`~aquaflux.discretization.advection.LimitedUpwind`'s whole
+        2nd-order reconstruction reads exactly this way, so ``build`` can refuse the combination
+        outright rather than silently falling back to 1st order.
+        """
+        return False
