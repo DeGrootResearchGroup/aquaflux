@@ -57,12 +57,16 @@ Principles.
   residual.
   **Why the context moved (binding — do not move it back into this package).** `FieldContext` lives
   below `schemes/` and `boundary/`, importing only `aquaflux.mesh`, precisely so those two packages
-  could eventually consume it too without a cycle (`discretization` already imports both) — the
-  placement defect issue #280 named ("the context lives in `discretization`, the layers below it
-  cannot take it"). `schemes/limiter.py`'s `Limiter.limit(field, context)` now takes it (see
-  `.claude/rules/schemes.md`); `schemes/gradient.py`'s `GradientScheme.gradients(...)` still takes
-  loose arrays rather than this object — unifying that signature onto it is tracked separately
-  (issue #280's remaining sequence), not done here.
+  could consume it too without a cycle (`discretization` already imports both) — the placement defect
+  issue #280 named ("the context lives in `discretization`, the layers below it cannot take it").
+  **Issue #280 is closed as of this move plus two follow-ups, not fully "all four strategy families
+  unified" as first framed.** `schemes/limiter.py`'s `Limiter.limit(field, context)` migrated onto it
+  (see `.claude/rules/schemes.md`). `schemes/gradient.py`'s `GradientScheme` and
+  `boundary/conditions.py`'s `BoundaryCondition` were evaluated and **deliberately do not** — each has
+  a genuine, documented structural reason (see `.claude/rules/schemes.md`'s `GradientScheme` entry and
+  `.claude/rules/boundary.md`'s matching one) rather than being left undone. Forcing either onto this
+  context would have recreated the union-bundle problem hoisting the context out of this package was
+  meant to avoid.
 - The per-operator closures for Milestone 0: **diffusion** (the DeGroot–Straatman
   non-orthogonal-corrected flux) and the **transient** term (BDF1 at step 1, BDF2 after).
 - The `VolumeSource` seam (zero for pure diffusion, but wired) — this is where turbulence
