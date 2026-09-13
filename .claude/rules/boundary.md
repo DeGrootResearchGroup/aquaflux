@@ -55,6 +55,37 @@ balance holds, and high-`h` convective → Dirichlet. The closures are consumed 
 reconstruction's boundary input.
 
 ## Binding decisions
+- **Every prescribed boundary number is a floating ARRAY LEAF, converted at construction (binding,
+  #363).** `Dirichlet.value`, `Neumann.flux`, `Convective.h`/`t_inf` and the flow side's
+  `PressureOutlet.pressure` pass through `conditions.as_float_leaf`
+  (`eqx.field(converter=...)`); `VelocityInlet`/`MovingWall.velocity` pass a constant vector through
+  it too. Position-dependent values (`DirichletField.field_fn`, a velocity profile) go through
+  `conditions.as_position_function`, which keeps an `equinox.Module` as it is (its array fields are
+  leaves) and wraps a plain function in the static `conditions.StaticFunction`.
+  - **Why, measured before the change.** `field_fn` and both `velocity` fields were
+    `eqx.field(static=True)`, and the four numeric fields were annotated `float`. The issue said the
+    result was a "silently zero" gradient. **That is only one of the three paths, and the others need
+    to be known:**
+    - An **eager residual** gradient worked regardless, through the value closed over at
+      construction.
+    - A gradient **through `ImplicitNewtonSolver`** (the assembler carried as `theta`) **raised**
+      `UnexpectedTracerError`, for both the inlet velocity and a `DirichletField` coefficient.
+    - `eqx.filter_grad` with respect to an assembler returned **no cotangent** for the static fields
+      *and* for a `float`-valued `PressureOutlet`. That was the genuinely silent one.
+  - **The old reason for `static=True` was false.** The comment said a `jnp` array "would not
+    concretize under jit"; a non-static array velocity worked under `filter_jit` and through the solve,
+    with the gradient matching finite differences to 4e-11.
+  - **⚠️ Do NOT simply drop `static=True` on a field that may hold a plain function.** A function
+    leaf makes even a *forward* `ImplicitNewtonSolver.solve` raise "not a valid JAX type" (its
+    `custom_vjp` flattens `theta`), and it breaks the distributed build's
+    `jax.tree.map(jnp.stack, ...)`. Plain function profiles are used widely (Poiseuille, the skewed
+    Couette, the `bfs3d_species` injector), which is what `StaticFunction` preserves. A module profile
+    gives the same behaviour **and** a reachable coefficient.
+  - **Side effect, measured:** a changed inlet value used to recompile a `filter_jit` function taking
+    the assembler (the float sat on the static side); as an array leaf it is a cache hit.
+  - Pinned by `tests/unit/test_boundary_value_leaves.py` (storage and `filter_grad` against each
+    closure's closed form) and `tests/integration/test_boundary_value_gradients.py` (gradients through
+    the solve against finite differences, a function profile's forward solve unchanged, no recompile).
 - **A boundary condition is a special face interpolator** (the C++ face-interpolator
   model): it returns a face value the flux operator consumes, imposing the BC **weakly**
   through the boundary-face flux. **Do NOT** use the Fortran strong-absorption-into-the-block

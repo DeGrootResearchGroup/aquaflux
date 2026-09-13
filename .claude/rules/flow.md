@@ -255,9 +255,13 @@ Engineering Principles.
     `_velocity_face`. Only `mass_flux` stays flow-specific (and `VelocityInlet.mass_flux` reuses the
     patch's own prescribed value through `_prescribed_reference_velocity`). This also removed
     the duplicated `MovingWall._wall` / `VelocityInlet._inlet` broadcasts. Still **no shared base
-    class** with `BoundaryCondition` — composition, not inheritance. (A constant-velocity spec is a
-    static `(dim,)` sequence, so `_prescribed_components` indexes it directly — a `jnp.asarray` +
-    `float()` there does not concretize under `jit`.)
+    class** with `BoundaryCondition` — composition, not inheritance. (A constant velocity is stored
+    as a floating `(dim,)` **array leaf** and a profile as an `equinox.Module` — a plain function held
+    in `StaticFunction` — so the velocity is differentiable; `_prescribed_components` indexes the
+    array, and reads a profile's components through the `_Component` module rather than a lambda,
+    which would capture the profile out of the pytree. The earlier "static `(dim,)` sequence, a
+    `jnp` array would not concretize under `jit`" arrangement was measured unnecessary and severed
+    the gradient; see `.claude/rules/boundary.md`, #363.)
   - **`corr` reconciliation — DONE, the flow block runs the scalar path's two passes (#313).**
     `velocity_face` / `pressure_face` take the owner's reconstructed gradient and the
     owner-centroid→face displacement `d`, so the delegated `ZeroGradient` carries its tangential

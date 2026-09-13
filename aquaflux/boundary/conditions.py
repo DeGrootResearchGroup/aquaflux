@@ -31,16 +31,91 @@ The convective closure enforces ``Gamma_P dphi/dn = h (Tinf - phi_ip)`` at the f
 Robin balance between diffusive and convective flux — and is the one that carries the Biot
 number (``h`` non-dimensionalized), so it is the differentiation target for a sensitivity
 with respect to ``Bi``.
+
+**Every prescribed number is a floating array leaf.** A closure converts its coefficients with
+:func:`as_float_leaf` when it is constructed, whatever the caller passes. Transformations that
+differentiate a pytree -- ``equinox.filter_grad``, and the implicit-function-theorem adjoint of a
+solve that carries the assembler as its parameters -- see only floating array leaves, so a
+coefficient kept as a Python float or an integer would receive no cotangent, and its sensitivity
+would be missing rather than wrong. A position-dependent value is normalized by
+:func:`as_position_function`: an ``equinox.Module`` keeps its array fields as leaves, which is how a
+profile's coefficients become differentiable, while a plain function is held static in
+:class:`StaticFunction`, since a function cannot be a leaf of an array pytree.
 """
 
 from __future__ import annotations
 
 import abc
+from collections.abc import Callable
 
 import equinox as eqx
 import jax.numpy as jnp
 
 from aquaflux.vectors import dot, scale
+
+
+def as_float_leaf(value) -> jnp.ndarray:
+    """A prescribed boundary number as a floating JAX array, the form a gradient can reach.
+
+    Parameters
+    ----------
+    value : float, int or array_like
+        The number (or a traced value) to store; a scalar for the closures here.
+
+    Returns
+    -------
+    jnp.ndarray
+        ``value`` as a floating-point array.
+    """
+    return jnp.asarray(value, dtype=float)
+
+
+class StaticFunction(eqx.Module):
+    """A plain function held as static structure, so a closure holding it stays a valid pytree.
+
+    A function is not an array, so it cannot ride as a pytree leaf: an adjoint that carries the
+    closure as its parameters, or a stack of closures across mesh partitions, would reject it. Held
+    static it is part of the tree's structure instead, compared by identity. Whatever it captures is
+    therefore invisible to a pytree gradient; to make a profile's coefficients differentiable, pass
+    an ``equinox.Module`` whose fields hold them.
+
+    Attributes
+    ----------
+    function : callable
+        The wrapped function (static).
+    """
+
+    function: Callable = eqx.field(static=True)
+
+    def __call__(self, *args):
+        """Evaluate the wrapped function."""
+        return self.function(*args)
+
+
+def as_position_function(function) -> eqx.Module:
+    """A position-dependent boundary value, normalized so a closure holding it is a valid pytree.
+
+    Parameters
+    ----------
+    function : callable
+        A function of face centroids. An ``equinox.Module`` is kept as it is, so its array fields are
+        leaves a gradient reaches; a plain function is wrapped in :class:`StaticFunction`.
+
+    Returns
+    -------
+    equinox.Module
+        A callable module evaluating ``function``.
+
+    Raises
+    ------
+    TypeError
+        If ``function`` is not callable.
+    """
+    if isinstance(function, eqx.Module):
+        return function
+    if not callable(function):
+        raise TypeError(f"expected a callable of face centroids, got {type(function).__name__}")
+    return StaticFunction(function)
 
 
 def _tangential_correction(
@@ -113,11 +188,11 @@ class Dirichlet(BoundaryCondition):
 
     Attributes
     ----------
-    value : float
-        The imposed face value.
+    value : jnp.ndarray
+        The imposed face value (any number given is stored as a floating array).
     """
 
-    value: float
+    value: jnp.ndarray = eqx.field(converter=as_float_leaf)
 
     def face_value(self, phi_owner, grad_owner, d, normal, gamma_owner, face_centroid):
         return jnp.full(phi_owner.shape, self.value)
@@ -131,12 +206,14 @@ class DirichletField(BoundaryCondition):
 
     Attributes
     ----------
-    field_fn : callable
-        Maps face centroids ``(n, dim)`` to imposed values ``(n,)``. Static (not
-        differentiated); a pure function of position.
+    field_fn : equinox.Module
+        Maps face centroids ``(n, dim)`` to imposed values ``(n,)``. Given as an
+        ``equinox.Module``, its array fields are differentiable leaves (a profile's amplitude or
+        position, say); a plain function is accepted and held static, and is then not
+        differentiable (see :func:`as_position_function`).
     """
 
-    field_fn: object = eqx.field(static=True)
+    field_fn: eqx.Module = eqx.field(converter=as_position_function)
 
     def face_value(self, phi_owner, grad_owner, d, normal, gamma_owner, face_centroid):
         return self.field_fn(face_centroid)
@@ -161,11 +238,11 @@ class Neumann(BoundaryCondition):
 
     Attributes
     ----------
-    flux : float
-        The imposed outward diffusive flux density ``q``.
+    flux : jnp.ndarray
+        The imposed outward diffusive flux density ``q`` (stored as a floating array).
     """
 
-    flux: float
+    flux: jnp.ndarray = eqx.field(converter=as_float_leaf)
 
     def face_value(self, phi_owner, grad_owner, d, normal, gamma_owner, face_centroid):
         d_normal = dot(d, normal)
@@ -185,14 +262,14 @@ class Convective(BoundaryCondition):
 
     Attributes
     ----------
-    h : float
-        Exchange coefficient (the Biot number, non-dimensionalized).
-    t_inf : float
-        Ambient value the boundary exchanges with.
+    h : jnp.ndarray
+        Exchange coefficient (the Biot number, non-dimensionalized), stored as a floating array.
+    t_inf : jnp.ndarray
+        Ambient value the boundary exchanges with, stored as a floating array.
     """
 
-    h: float
-    t_inf: float
+    h: jnp.ndarray = eqx.field(converter=as_float_leaf)
+    t_inf: jnp.ndarray = eqx.field(converter=as_float_leaf)
 
     def face_value(self, phi_owner, grad_owner, d, normal, gamma_owner, face_centroid):
         d_normal = dot(d, normal)

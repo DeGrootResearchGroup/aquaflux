@@ -60,9 +60,12 @@ contaminant does in a reactor — solved on the flow the coupled block produces.
   topology change. Splitting a patch in the mesh generator would produce a different `polyMesh` and
   invalidate every checkpoint and measurement taken on the old one — on `bfs3d` that is `state-00067`
   and effectively the whole design record.
-  - ⚠️ **`DirichletField.field_fn` is a STATIC field, so the injection geometry is not a
-    differentiable parameter.** Fine for a validation case; it blocks the obvious optimization demo
-    ("where should the injector go to maximize mixing"), which would need that position to be a leaf.
+  - ⚠️ **The injection geometry is differentiable only if the injector is an `equinox.Module`.**
+    `DirichletField.field_fn` stopped being a static field (#363): a module's array fields are leaves,
+    so an injector written as a module with its centre and width as fields gives the optimization
+    demo ("where should the injector go to maximize mixing") a gradient. `validation/bfs3d_species`'s
+    `injected_value` is still a **plain function**, which is accepted but held static, so its
+    geometry is not a parameter until it is rewritten as a module.
 
 ## Testability seam
 
