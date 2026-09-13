@@ -48,7 +48,7 @@ def _build(*, flux_operators, properties=None, gradient_scheme=None, source_oper
         mesh.geometry(),
         properties,
         flux_operators,
-        BoundaryConditions({} if flux_operators == () else {"boundary": ZeroGradient()}),
+        BoundaryConditions({"boundary": ZeroGradient()}),
         source_operators=source_operators,
         gradient_scheme=gradient_scheme,
     )

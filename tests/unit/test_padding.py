@@ -15,6 +15,7 @@ import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, Neumann, ZeroGradient
 from aquaflux.discretization import DiffusionFlux, ResidualAssembler
 from aquaflux.mesh import structured_grid_2d, structured_grid_3d
+from aquaflux.mesh.groups import PADDING_PATCH
 from aquaflux.parallel import BlockPartitioner, PaddedLayout, pad_partition, partition_mesh
 from aquaflux.properties import Constant, PropertyModel
 
@@ -241,3 +242,40 @@ def test_padding_does_not_change_the_residual(decomposition, layout):
         np.testing.assert_allclose(
             np.asarray(r_padded)[real_cells], np.asarray(r_unpadded), atol=1e-12
         )
+
+
+def test_padding_faces_need_no_boundary_condition_but_real_patches_still_do(decomposition, layout):
+    """Padding faces have no neighbour yet carry their own patch, so the coverage check skips them.
+
+    Were they in the automatic ``boundary`` patch, the per-partition assembler build would refuse a
+    map that covers every real patch. The check must still catch a real omission on the same mesh.
+    """
+    _, _, pmesh = decomposition
+    properties = PropertyModel({"diffusivity": Constant(GAMMA)})
+    missing_front = {name: bc for name, bc in BOUNDARY.items() if name != "front"}
+    for p, part in enumerate(pmesh.partitions):
+        padded_mesh, padded_geometry = _padded(decomposition, layout, p)
+        n_real_faces = int(part.mesh.n_faces)
+        padding_id = padded_mesh.face_patches.id_of(PADDING_PATCH)
+        np.testing.assert_array_equal(
+            np.asarray(padded_mesh.face_patches.label)[n_real_faces:], padding_id
+        )
+
+        ResidualAssembler.build(  # every real patch covered: builds
+            padded_mesh,
+            padded_geometry,
+            properties,
+            (DiffusionFlux(),),
+            BoundaryConditions(BOUNDARY),
+        )
+        if padded_mesh.face_patches.size("front") == 0:
+            continue  # this partition has no front faces to omit
+        with pytest.raises(ValueError, match="'front'") as excinfo:
+            ResidualAssembler.build(
+                padded_mesh,
+                padded_geometry,
+                properties,
+                (DiffusionFlux(),),
+                BoundaryConditions(missing_front),
+            )
+        assert PADDING_PATCH not in str(excinfo.value)

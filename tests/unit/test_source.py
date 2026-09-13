@@ -49,7 +49,7 @@ def _assembler(source_operators, *, flux_operators=(), properties=None):
         mesh.geometry(),
         properties,
         flux_operators,
-        BoundaryConditions({} if flux_operators == () else {"boundary": ZeroGradient()}),
+        BoundaryConditions({"boundary": ZeroGradient()}),
         source_operators=source_operators,
     )
     return mesh, asm
@@ -99,7 +99,7 @@ def test_source_is_differentiable_in_field_and_coefficient() -> None:
             geometry,
             PropertyModel({}),
             (),
-            BoundaryConditions({}),
+            BoundaryConditions({"boundary": ZeroGradient()}),
             source_operators=(_LinearSink(rate=rate),),
         )
 

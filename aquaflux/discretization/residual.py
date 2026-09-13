@@ -289,7 +289,7 @@ class ResidualAssembler(eqx.Module):
                 None if gradient_scheme is None else gradient_scheme.bind(mesh, geometry)
             ),
             coefficient=coefficient,
-            boundary=boundary.resolve(mesh.face_patches),
+            boundary=boundary.resolve(mesh.face_patches, mesh.face_cells),
             imposed_gradient=imposed_gradient,
         )
 

@@ -356,7 +356,12 @@ mesh file). Use "face geometry" / "cell geometry".
 - **Named groupings are partitions (`groups.py`) — decided.** `CellZones` (cells) and
   `FacePatches` (faces) each assign **one** label per element (each cell in one zone, each
   face in one patch) — a single `int` array, vectorizable, mirroring how the C++ groups
-  were used. Defaults: one `"default"` zone; `"interior"`+`"boundary"` patches. **Zone
+  were used. Defaults: one `"default"` zone; `"interior"`+`"boundary"` patches. `"padding"` is
+  reserved as well: only a distributed partition's padded mesh carries it, as the label of its inert
+  faces. All three live in `groups.RESERVED_PATCH_NAMES`, and the OpenFOAM reader's collision guard
+  imports that constant rather than keeping its own list. `FacePatches.uncovered_boundary_faces` is
+  what `BoundaryConditions.resolve` uses to refuse a boundary map that leaves a boundary face
+  uncovered (`.claude/rules/boundary.md`). **Zone
   interfaces are derived** (`CellZones.interface_mask` / `interface_mask_between` from the
   zone labels + owner/neighbour) **and** may be named as explicit patches — a **baffle** is
   just a named patch on interior faces. Both coexist (derive by default, name for bespoke

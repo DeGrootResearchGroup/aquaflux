@@ -8,11 +8,22 @@ specific :class:`CellZones` and :class:`FacePatches` add the type-specific helpe
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 
 from .connectivity import FaceCellConnectivity
+
+#: The automatic face patch holding interior faces no named patch claims.
+INTERIOR_PATCH = "interior"
+#: The automatic face patch holding boundary faces no named patch claims.
+BOUNDARY_PATCH = "boundary"
+#: The patch a distributed partition's inert padding faces are labelled with (never a real face).
+PADDING_PATCH = "padding"
+#: Patch names assigned by the library, which a mesh's own named patches may not reuse.
+RESERVED_PATCH_NAMES = (INTERIOR_PATCH, BOUNDARY_PATCH, PADDING_PATCH)
 
 
 class LabelledGroups(eqx.Module):
@@ -146,21 +157,24 @@ class FacePatches(LabelledGroups):
 
         Named patches move their faces off the default; two named patches may not claim the
         same face. Out-of-range indices raise ``ValueError``. The names ``"interior"`` and
-        ``"boundary"`` are reserved (assigned automatically from the boundary mask) and may not
-        be used for a named patch.
+        ``"boundary"`` are reserved (assigned automatically from the boundary mask), and so is
+        ``"padding"`` (the label a distributed partition gives its inert padding faces); none may be
+        used for a named patch.
         """
         nb = np.asarray(neighbour)
         n_faces = nb.shape[0]
-        base = ["interior", "boundary"]
-        reserved = [n for n in groups if n in base]
+        reserved = [n for n in groups if n in RESERVED_PATCH_NAMES]
         if reserved:
             raise ValueError(
                 f"patch name(s) {reserved} are reserved (interior/boundary are assigned "
-                "automatically); use a different name"
+                "automatically, and padding marks a distributed partition's inert faces); use a "
+                "different name"
             )
-        names = base + [n for n in groups if n not in base]
+        names = [INTERIOR_PATCH, BOUNDARY_PATCH, *groups]
         name_to_id = {n: i for i, n in enumerate(names)}
-        label = np.where(nb < 0, name_to_id["boundary"], name_to_id["interior"]).astype(np.int64)
+        label = np.where(nb < 0, name_to_id[BOUNDARY_PATCH], name_to_id[INTERIOR_PATCH]).astype(
+            np.int64
+        )
         assigned = np.zeros(n_faces, dtype=bool)  # tracks explicit (named) assignment only
         for name, indices in groups.items():
             idx = np.asarray(list(indices), dtype=np.int64)
@@ -195,3 +209,39 @@ class FacePatches(LabelledGroups):
         mask = self.mask(name)
         boundary = ~face_cells.interior
         return bool(jnp.any(mask)) and bool(jnp.all(boundary[mask]))
+
+    def uncovered_boundary_faces(
+        self, covered: Iterable[str], face_cells: FaceCellConnectivity
+    ) -> dict[str, int]:
+        """Count, per patch, the boundary faces in patches not named in ``covered``.
+
+        Every patch holding boundary faces that is not in ``covered`` is reported, in patch order.
+        That includes the automatic ``"boundary"`` patch, which holds the boundary faces no named
+        patch claims. The ``"padding"`` patch is never reported: its faces exist only to give a
+        distributed partition a uniform shape and carry no physics. ``"interior"``, and a baffle
+        patch on interior faces, hold no boundary faces and so never appear.
+
+        Runs on concrete labels (off the jit path).
+
+        Parameters
+        ----------
+        covered : iterable of str
+            The patch names that have a boundary condition; every name must be a patch.
+        face_cells : FaceCellConnectivity
+            The face→cell incidence (``mesh.face_cells``); a boundary face is ``~interior``.
+
+        Returns
+        -------
+        dict of {str: int}
+            The uncovered boundary-face count per patch; empty when every boundary face is covered.
+        """
+        on_boundary = np.asarray(self.label)[~np.asarray(face_cells.interior)]
+        counts = np.bincount(on_boundary, minlength=self.n_groups)
+        exempt = {self.id_of(name) for name in covered}
+        if PADDING_PATCH in self.names:
+            exempt.add(self.id_of(PADDING_PATCH))
+        return {
+            name: int(counts[i])
+            for i, name in enumerate(self.names)
+            if counts[i] and i not in exempt
+        }

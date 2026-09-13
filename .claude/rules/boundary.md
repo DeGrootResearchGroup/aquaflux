@@ -25,7 +25,7 @@ Patch-based boundary conditions as **weak face-value closures**. Governed by the
   assembler's `build` as the single `boundary` argument (the material-model analogue; **not** a bare
   dict, and **not** a `.resolve(...)` call at the site). It has a **two-state lifecycle**: constructed
   *unbound* (it holds patch names + closures, `faces is None`), then **bound to a mesh** by `build`
-  via `boundary.resolve(mesh.face_patches)` → a copy whose `faces` dict carries each patch's
+  via `boundary.resolve(mesh.face_patches, mesh.face_cells)` → a copy whose `faces` dict carries each patch's
   boundary-face indices. The name→index lookup is data-dependent (dynamic `jnp.where` shapes), so it
   **must** run off the jit path — hence resolve-once-and-store rather than the jittable
   `PropertyModel.evaluate(cell_zones)`-per-call pattern. `apply(face_cells, init, closure)` is the one
@@ -34,8 +34,9 @@ Patch-based boundary conditions as **weak face-value closures**. Governed by the
   coupled-flow `MomentumContinuity` carry a single `boundary: BoundaryConditions` field — **not** three
   parallel `names`/`conditions`/`faces` tuples — and compose `.apply` instead of re-open-coding the
   loop (the closure differs — a scalar face value vs. a flow velocity/pressure/mass-flux — the
-  iteration does not). `resolve` takes `mesh.face_patches`, `apply` takes `mesh.face_cells` (smallest
-  sufficient collaborators, not the whole `Mesh`); the held closures are opaque, so the object is
+  iteration does not). `resolve` takes `mesh.face_patches` plus `mesh.face_cells` (the latter only to
+  tell boundary faces from interior ones, for the coverage check below), `apply` takes
+  `mesh.face_cells` (smallest sufficient collaborators, not the whole `Mesh`); the held closures are opaque, so the object is
   generic over the closure type (single-field `BoundaryCondition` or the multi-field `FlowBoundary`).
   It is a leaf module (imports only `jax` + the mesh connectivity types), so `discretization` and
   `flow` both depend on `boundary` one-way.
@@ -94,6 +95,25 @@ reconstruction's boundary input.
   which gather from the *whole* mesh themselves and so benefit from holding the context that lets
   them; a boundary closure is handed its slice already gathered, which is a different shape by
   design, not an oversight to fix later.
+- **Every boundary face must be covered — `resolve` refuses a map that leaves one out (binding, #354).**
+  `apply` folds closures into a zero array, so an omitted patch was a **zero face value**: a Dirichlet
+  condition nobody chose. A case missing a patch built, converged, and was wrong, while a *typo'd*
+  patch name raised. `resolve` now asks `FacePatches.uncovered_boundary_faces(conditions, face_cells)`
+  and raises listing **every** uncovered patch with its face count (fixing one per run would be the
+  same defect one level up). Three rules that are easy to get wrong:
+  - **`"boundary"` is NOT exempt.** It holds boundary faces no named patch claims, which makes it the
+    *most common* omission. The fast-tier census taken before this change found 11 under-covered
+    builds, and 10 were exactly this: `BoundaryConditions({})` on a mesh with no named boundaries.
+    Naming `"boundary"` covers those faces.
+  - **`"interior"` is never reported, and naming it stays legal.** It holds no boundary faces, and
+    `SSTTurbulence`'s wall-distance helper names every patch including it (137 builds in that census).
+    Harmless, because `combine_face_values` ignores interior rows.
+  - **Padding faces are exempt, and that needs their own group.** A distributed partition's padding
+    faces have `neighbour = -1`, and they used to be labelled `"boundary"` "so no closure claims them".
+    The per-partition assembler builds on the padded mesh, so without the reserved `"padding"`
+    group every distributed build would raise (see `.claude/rules/parallel.md`).
+  The check needs concrete labels. It never runs under `jit`, because `resolve` returns early on an
+  already-bound collection, the same property that keeps the `nonzero` lookup off the trace.
 
 ## Testability seam
 Each BC closure is unit-tested on a single boundary face with a known cell value and

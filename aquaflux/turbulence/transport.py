@@ -384,11 +384,14 @@ class SSTTurbulence(eqx.Module):
         the jitted segregated sweep prologue), makes each rebuild's ``resolve`` an idempotent no-op.
         Idempotent itself: an already-bound assembler is returned with its boundaries unchanged.
         """
-        face_patches = self.mesh.face_patches
+        face_patches, face_cells = self.mesh.face_patches, self.mesh.face_cells
         return eqx.tree_at(
             lambda t: (t.k_boundary, t.omega_boundary),
             self,
-            (self.k_boundary.resolve(face_patches), self.omega_boundary.resolve(face_patches)),
+            (
+                self.k_boundary.resolve(face_patches, face_cells),
+                self.omega_boundary.resolve(face_patches, face_cells),
+            ),
         )
 
     def with_scaled_molecular_viscosity(self, factor: float) -> SSTTurbulence:

@@ -13,12 +13,9 @@ from __future__ import annotations
 import numpy as np
 
 from aquaflux.mesh import Mesh
+from aquaflux.mesh.groups import RESERVED_PATCH_NAMES
 
 from .records import CellZone, FoamPatch, PolyMeshData
-
-# aquaflux assigns these two face-patch names automatically from the boundary mask; an OpenFOAM
-# patch may not reuse them.
-_RESERVED_PATCH_NAMES = ("interior", "boundary")
 
 
 def assemble(data: PolyMeshData) -> Mesh:
@@ -99,11 +96,11 @@ def _patches_to_face_patches(patches: tuple[FoamPatch, ...]) -> dict[str, np.nda
     """
     if not patches:
         return None
-    collisions = [p.name for p in patches if p.name in _RESERVED_PATCH_NAMES]
+    collisions = [p.name for p in patches if p.name in RESERVED_PATCH_NAMES]
     if collisions:
         raise ValueError(
             f"boundary patch name(s) {collisions} collide with reserved aquaflux patch names "
-            f"{list(_RESERVED_PATCH_NAMES)}; rename them in the polyMesh boundary file"
+            f"{list(RESERVED_PATCH_NAMES)}; rename them in the polyMesh boundary file"
         )
     return {p.name: np.arange(p.start_face, p.start_face + p.n_faces) for p in patches}
 

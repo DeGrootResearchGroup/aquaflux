@@ -315,14 +315,17 @@ questions have different answers.
   builds the faithful 3D mesh, then `collapse_extruded_direction` reduces it to `dim == 2` (drop the
   through-axis, dedup front/back nodes, reduce each side quad to its 2D edge, carry owner/neighbour +
   zones 1:1, re-index surviving patches). No `empty` patches ⇒ return the 3D mesh.
-- **Reserved-name collision fails loud.** An OpenFOAM patch literally named `interior`/`boundary`
-  (reserved by `FacePatches.from_dict`) raises a reader-level `ValueError` naming the patch — no
+- **Reserved-name collision fails loud.** An OpenFOAM patch literally named `interior`, `boundary`
+  or `padding` (`mesh.groups.RESERVED_PATCH_NAMES`, enforced by `FacePatches.from_dict`) raises a
+  reader-level `ValueError` naming the patch — no
   silent rename (it would break the round-trip; the original name stays visible in
   `PolyMeshData.patches`).
-- **Unlisted boundary faces are legal**, not an error: they fall into aquaflux's automatic
+- **Unlisted boundary faces are legal in a MESH**, not an error: they fall into aquaflux's automatic
   `"boundary"` patch. (A valid polyMesh tiles all boundary faces with patches, so `"boundary"` is
   normally empty — this is only a leniency, not a reinterpretation.) Overlaps / out-of-range patch
-  ranges are still rejected by `FacePatches.from_dict`.
+  ranges are still rejected by `FacePatches.from_dict`. ⚠️ **Solving on such a mesh is a different
+  matter**: every assembler's `build` refuses a boundary map that leaves a boundary face uncovered,
+  so those faces need a closure under the name `"boundary"` (#354, `.claude/rules/boundary.md`).
 - **ASCII only (first cut).** `format binary;` → `NotImplementedError` (detected, never misread).
 - **A field is placed by INDEX, and the correspondence is CHECKED rather than assumed (binding).**
   OpenFOAM orders faces interior-first, then boundary faces grouped by patch in `boundary`-file

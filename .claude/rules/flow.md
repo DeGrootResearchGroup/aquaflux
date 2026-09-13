@@ -148,7 +148,8 @@ Engineering Principles.
   `"viscosity"`+`"density"`; `.viscosity`/`.density` evaluate them per-cell) — see
   `.claude/rules/properties.md`. **`boundary` is a `BoundaryConditions({name: FlowBoundary})`**
   collection (constructed like a `PropertyModel`), bound inside `build` via
-  `boundary.resolve(mesh.face_patches)` to a single `boundary` field (not three parallel
+  `boundary.resolve(mesh.face_patches, mesh.face_cells)` (which refuses a map leaving any boundary
+  face uncovered, so every patch needs a `FlowBoundary`) to a single `boundary` field (not three parallel
   `names`/`conditions`/`faces` tuples); `_apply_per_patch` now just binds `mesh.face_cells` to
   `boundary.apply` — do not reintroduce the loose-tuple form or a bare-dict arg (see
   `.claude/rules/boundary.md`). **`rho` is per-cell**, and the Rhie–Chow mass flux interpolates it

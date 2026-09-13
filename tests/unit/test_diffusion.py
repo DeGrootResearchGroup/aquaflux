@@ -195,7 +195,7 @@ def test_scatter_is_conservative_and_signed() -> None:
         geom,
         PropertyModel({"diffusivity": Constant(1.0)}),
         (_StubFlux(value=5.0),),
-        BoundaryConditions({}),
+        BoundaryConditions({"boundary": ZeroGradient()}),
     )
     residual = asm.residual(jnp.zeros(mesh.n_cells))  # steady: residual = net outward flux
     # The one interior face has owner cell 0, neighbour cell 1; +5 leaves the owner, enters nb.

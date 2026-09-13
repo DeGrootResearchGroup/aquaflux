@@ -129,7 +129,9 @@ Principles.
 - **`residual.py` — BUILT. Two objects: the CONTEXT half and the BALANCE half (binding — do not
   re-fuse them).** `ResidualAssembler` (`equinox.Module`, built via `.build()` from an
   injected `BoundaryConditions({name: closure})` collection, which it binds to the mesh
-  (`boundary.resolve(mesh.face_patches)`, off the jit path) and stores as a single `boundary` field)
+  (`boundary.resolve(mesh.face_patches, mesh.face_cells)`, off the jit path, which also refuses a map
+  leaving any boundary face uncovered — `.claude/rules/boundary.md`) and stores as a single `boundary`
+  field)
   builds the **context**: it reconstructs cell gradients once (injected `GradientScheme`, optional —
   `None` on orthogonal grids where the correction vanishes), evaluates the per-patch boundary
   closures, evaluates the `PropertyModel`, and packs a `FieldContext`. **`CellBalance`** then
