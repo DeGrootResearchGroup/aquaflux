@@ -19,7 +19,7 @@ from tests.support.fields import face_mass_flux
 class _ZeroLimiter(Limiter):
     """A stub limiter returning ``psi = 0`` (full clipping) — probes the reconstruction only."""
 
-    def limit(self, field, gradient, face_cells, geometry):
+    def limit(self, field, context):
         return jnp.zeros(field.shape[0], dtype=field.dtype)
 
 

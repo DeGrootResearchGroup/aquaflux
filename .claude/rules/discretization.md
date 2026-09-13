@@ -59,10 +59,10 @@ Principles.
   below `schemes/` and `boundary/`, importing only `aquaflux.mesh`, precisely so those two packages
   could eventually consume it too without a cycle (`discretization` already imports both) — the
   placement defect issue #280 named ("the context lives in `discretization`, the layers below it
-  cannot take it"). `schemes/limiter.py`'s `Limiter.limit(field, gradient, face_cells, geometry)` and
-  `schemes/gradient.py`'s `GradientScheme.gradients(...)` still take loose arrays rather than this
-  object as of this change — unifying those signatures onto it is tracked separately (issue #280's
-  remaining sequence), not done here.
+  cannot take it"). `schemes/limiter.py`'s `Limiter.limit(field, context)` now takes it (see
+  `.claude/rules/schemes.md`); `schemes/gradient.py`'s `GradientScheme.gradients(...)` still takes
+  loose arrays rather than this object — unifying that signature onto it is tracked separately
+  (issue #280's remaining sequence), not done here.
 - The per-operator closures for Milestone 0: **diffusion** (the DeGroot–Straatman
   non-orthogonal-corrected flux) and the **transient** term (BDF1 at step 1, BDF2 after).
 - The `VolumeSource` seam (zero for pure diffusion, but wired) — this is where turbulence

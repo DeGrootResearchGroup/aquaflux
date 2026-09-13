@@ -43,8 +43,8 @@ class _LaggedLimiter(Limiter):
 
     inner: Limiter
 
-    def limit(self, field, gradient, face_cells, geometry):
-        return jax.lax.stop_gradient(self.inner.limit(field, gradient, face_cells, geometry))
+    def limit(self, field, context):
+        return jax.lax.stop_gradient(self.inner.limit(field, context))
 
 
 def _exact(x: np.ndarray, pe: float) -> np.ndarray:

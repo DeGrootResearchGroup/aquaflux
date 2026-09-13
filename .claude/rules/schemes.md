@@ -244,8 +244,12 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   limiter — so the dependency stays one-way `discretization → schemes` (an operator/scheme injects
   a limiter; nothing in `schemes/` imports up into `discretization`).
 - **`limiter.py` — BUILT.** `Limiter` (interface) → `VenkatakrishnanLimiter(k)`: a per-cell slope
-  limiter `psi ∈ [0,1]` (smooth Venkatakrishnan 1993, `eps² = vol K³`), `limit(field, gradient,
-  face_cells, geometry)`. Physics-free (verified in `tests/unit/test_limiter.py`), injected into
+  limiter `psi ∈ [0,1]` (smooth Venkatakrishnan 1993, `eps² = vol K³`), `limit(field, context)`
+  taking the shared `aquaflux.context.FieldContext` (issue #280 step 4 — reads `context.gradient`
+  for this field's own cell gradient and `context.mesh.face_cells` / `context.mesh.geometry` for the
+  connectivity and metrics; reads no boundary value and no property, so a `MeshContext` would also
+  suffice, but it takes the full context because that is what its caller, `LimitedUpwind`, already
+  holds). Physics-free (verified in `tests/unit/test_limiter.py`), injected into
   `LimitedUpwind(limiter=…)` in `discretization/advection.py`, and evaluated only when that scheme
   runs (a diffusion-only or first-order solve never forms `psi`). See `.claude/rules/discretization.md`.
   **The per-face unlimited increment gathers its neighbour-side position through

@@ -6,8 +6,17 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
 import numpy as np
+from aquaflux.context import FieldContext, MeshContext
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.schemes import CorrectedGreenGauss, VenkatakrishnanLimiter
+
+
+def _context(mesh, geom, gradient):
+    """A field context carrying only what the limiter reads: the gradient and the mesh."""
+    mesh_context = MeshContext(face_cells=mesh.face_cells, geometry=geom, properties={})
+    return FieldContext(
+        mesh=mesh_context, boundary_values=jnp.zeros(mesh.n_faces), gradient=gradient
+    )
 
 
 def _psi(field, boundary_values):
@@ -16,9 +25,7 @@ def _psi(field, boundary_values):
     grad = CorrectedGreenGauss().gradients(
         field(geom.cell.centroid), mesh, geom, field(geom.face.centroid)
     )
-    psi = VenkatakrishnanLimiter(k=5.0).limit(
-        field(geom.cell.centroid), grad, mesh.face_cells, geom
-    )
+    psi = VenkatakrishnanLimiter(k=5.0).limit(field(geom.cell.centroid), _context(mesh, geom, grad))
     boundary_cells = set(
         np.asarray(mesh.face_cells.owner)[np.asarray(mesh.face_cells.neighbour) < 0].tolist()
     )
@@ -77,9 +84,7 @@ def test_limiter_uses_the_periodic_image_across_a_seam() -> None:
     grad = CorrectedGreenGauss().gradients(
         field(geom.cell.centroid), mesh, geom, field(geom.face.centroid)
     )
-    psi = VenkatakrishnanLimiter(k=5.0).limit(
-        field(geom.cell.centroid), grad, mesh.face_cells, geom
-    )
+    psi = VenkatakrishnanLimiter(k=5.0).limit(field(geom.cell.centroid), _context(mesh, geom, grad))
 
     fc = mesh.face_cells
     seam_faces = np.asarray(jnp.any(fc.neighbour_offset != 0.0, axis=-1))
@@ -103,7 +108,7 @@ def test_limiter_is_differentiable() -> None:
 
     def loss(field):
         grad = scheme.gradients(field, mesh, geom, jnp.zeros(mesh.n_faces))
-        return jnp.sum(limiter.limit(field, grad, mesh.face_cells, geom) ** 2)
+        return jnp.sum(limiter.limit(field, _context(mesh, geom, grad)) ** 2)
 
     sens = jax.grad(loss)(jnp.sin(geom.cell.centroid[:, 0] * 3.0))
     assert not bool(jnp.any(jnp.isnan(sens)))
