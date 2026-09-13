@@ -223,8 +223,10 @@ class ResidualAssembler(eqx.Module):
         geometry : MeshGeometry
             Geometry from ``mesh.geometry()``.
         properties : PropertyModel
-            The named per-cell physical properties; the diffusion term reads its coefficient by
-            name, and the flux-type boundary closures read ``coefficient``.
+            The named per-cell physical properties. Each operator's own
+            :meth:`~aquaflux.discretization.face_flux.FaceFluxOperator.requires` names what it reads
+            (the diffusion term its coefficient); the flux-type boundary closures read
+            ``coefficient``. Checked against the operators actually given -- see ``Raises``.
         flux_operators : tuple of FaceFluxOperator
             Face-flux operators (e.g. one :class:`DiffusionFlux`). They are summed in the order
             given, so the order is part of the arithmetic.
@@ -248,7 +250,29 @@ class ResidualAssembler(eqx.Module):
             to reconstruct -- a near-wall ``omega``, whose value is itself imposed, is the standing
             case. Given here rather than per call so that every reconstruction this assembler makes
             honours it.
+
+        Raises
+        ------
+        ValueError
+            If an operator names a property (:meth:`~aquaflux.discretization.face_flux.
+            FaceFluxOperator.requires`) that ``properties`` does not supply, or if a flux operator
+            needs a reconstructed gradient (:meth:`~aquaflux.discretization.face_flux.
+            FaceFluxOperator.uses_gradient`) but ``gradient_scheme`` is ``None`` -- both would
+            otherwise surface only inside a jitted residual evaluation, as a bare ``KeyError`` or a
+            silently degraded (1st-order) result respectively.
         """
+        needed = {name for op in (*flux_operators, *source_operators) for name in op.requires()}
+        if needed:
+            properties.require(*sorted(needed))
+        if gradient_scheme is None:
+            needing = [op for op in flux_operators if op.uses_gradient()]
+            if needing:
+                names = ", ".join(sorted({type(op).__name__ for op in needing}))
+                raise ValueError(
+                    f"flux operator(s) [{names}] need a reconstructed gradient, but no "
+                    "gradient_scheme was given -- with none, context.gradient is exactly zero "
+                    "everywhere, which silently degrades such an operator rather than failing"
+                )
         return cls(
             mesh=mesh,
             geometry=geometry,

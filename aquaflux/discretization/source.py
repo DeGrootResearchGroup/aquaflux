@@ -52,3 +52,12 @@ class VolumeSource(eqx.Module):
         jnp.ndarray
             The source integrated over each cell's volume, shape ``(n_cells,)``.
         """
+
+    def requires(self) -> tuple[str, ...]:
+        """Names this source reads from ``context.properties`` (default: none).
+
+        Override when the source names a property it reads by key, mirroring
+        :meth:`~aquaflux.discretization.face_flux.FaceFluxOperator.requires`; validated by
+        :meth:`~aquaflux.discretization.residual.ResidualAssembler.build`.
+        """
+        return ()
