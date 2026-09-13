@@ -185,8 +185,7 @@ def _turbulence(mesh, geometry, k_in, omega_in, nu=NU):
         geometry,
         CompactGreenGauss(),
         FirstOrderUpwind(),
-        density=RHO,
-        molecular_viscosity=jnp.full(mesh.n_cells, nu),
+        PropertyModel({"viscosity": Constant(RHO * nu), "density": Constant(RHO)}),
         wall_patches=["bottom", "top"],
         k_boundary=BoundaryConditions(
             {
@@ -322,10 +321,13 @@ def _periodic_channel(beta=0.0035, mu_factor=1.0):
     """A streamwise-periodic channel driven by a body force: no inlet, every patch a wall."""
     mesh = structured_grid_2d(4, 24, lx=1.0, ly=2.0, periodic=("x",), named_boundaries=True)
     geometry = mesh.geometry()
+    properties = PropertyModel(
+        {"viscosity": Constant(RHO * NU * mu_factor), "density": Constant(RHO)}
+    )
     momentum = MomentumContinuity.build(
         mesh,
         geometry,
-        PropertyModel({"viscosity": Constant(RHO * NU * mu_factor), "density": Constant(RHO)}),
+        properties,
         CompactGreenGauss(),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         advection_scheme=FirstOrderUpwind(),
@@ -338,8 +340,7 @@ def _periodic_channel(beta=0.0035, mu_factor=1.0):
         geometry,
         CompactGreenGauss(),
         FirstOrderUpwind(),
-        density=RHO,
-        molecular_viscosity=jnp.full(mesh.n_cells, NU),
+        properties,
         wall_patches=["bottom", "top"],
         k_boundary=BoundaryConditions({"bottom": Dirichlet(0.0), "top": Dirichlet(0.0)}),
         omega_boundary=BoundaryConditions({"bottom": ZeroGradient(), "top": ZeroGradient()}),

@@ -151,10 +151,11 @@ def _tiny_coupled(nx: int = 4, ny: int = 3) -> CoupledRANS:
     mesh = structured_grid_2d(nx, ny, lx=2.0, ly=1.0, named_boundaries=True)
     geometry = mesh.geometry()
     model = SSTModel()
+    properties = PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)})
     momentum = MomentumContinuity.build(
         mesh,
         geometry,
-        PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)}),
+        properties,
         CompactGreenGauss(),
         BoundaryConditions(
             {
@@ -172,8 +173,7 @@ def _tiny_coupled(nx: int = 4, ny: int = 3) -> CoupledRANS:
         geometry,
         CompactGreenGauss(),
         FirstOrderUpwind(),
-        density=RHO,
-        molecular_viscosity=jnp.full(mesh.n_cells, NU),
+        properties,
         wall_patches=["bottom", "top"],
         k_boundary=BoundaryConditions(
             {

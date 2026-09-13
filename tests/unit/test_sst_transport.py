@@ -8,12 +8,15 @@ converges), the fields are finite, and the omega wall cells are fixed to the ana
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax
 import jax.numpy as jnp
+import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import VelocityFields
-from aquaflux.mesh import structured_grid_2d
+from aquaflux.mesh import CellZones, structured_grid_2d
+from aquaflux.properties import Constant, PropertyModel, ZoneConstant
 from aquaflux.schemes import CorrectedGreenGauss, GradientScheme, ImposedGradient
 from aquaflux.solve import ImplicitNewtonSolver
 from aquaflux.turbulence import (
@@ -29,7 +32,7 @@ from aquaflux.turbulence import (
 NU = 1e-3
 
 
-def _turbulence(*, explicit_production_limiter=False, gradient_scheme=None):
+def _turbulence(*, explicit_production_limiter=False, gradient_scheme=None, properties=None):
     mesh = structured_grid_2d(6, 4, lx=3.0, ly=1.0, named_boundaries=True)
     geometry = mesh.geometry()
     turb = SSTTurbulence.build(
@@ -38,8 +41,11 @@ def _turbulence(*, explicit_production_limiter=False, gradient_scheme=None):
         geometry,
         gradient_scheme or CorrectedGreenGauss(),
         FirstOrderUpwind(),
-        density=1.0,
-        molecular_viscosity=jnp.full(mesh.n_cells, NU),
+        (
+            properties
+            if properties is not None
+            else PropertyModel({"viscosity": Constant(NU), "density": Constant(1.0)})
+        ),
         wall_patches=["bottom", "top"],
         explicit_production_limiter=explicit_production_limiter,
         k_boundary=BoundaryConditions(
@@ -357,3 +363,76 @@ def test_strain_rate_is_differentiable_in_k() -> None:
     for k in (jnp.zeros(n), jnp.full(n, 30.0)):
         g = jax.grad(lambda kk: jnp.sum(turb.strain_rate(_shear(n), kk)))(k)
         assert bool(jnp.all(jnp.isfinite(g)))
+
+
+# --- build() deriving density / molecular_viscosity from a PropertyModel (issue #353) ---------
+
+
+def test_build_derives_kinematic_viscosity_from_the_property_model() -> None:
+    """``molecular_viscosity = viscosity / density``, both read from one ``PropertyModel``."""
+    _, turb = _turbulence(
+        properties=PropertyModel({"viscosity": Constant(2.0), "density": Constant(2.0)})
+    )
+    assert jnp.allclose(turb.density, 2.0)
+    assert jnp.allclose(turb.molecular_viscosity, 1.0)
+
+
+def test_a_non_uniform_zoneconstant_density_raises_before_reaching_the_residual() -> None:
+    """A per-cell density would silently mis-scale the volume flux -- caught here instead."""
+    mesh = structured_grid_2d(6, 4, lx=3.0, ly=1.0, named_boundaries=True)
+    n = mesh.n_cells
+    zones = CellZones.from_dict(n, {"lo": [0], "hi": list(range(1, n))})
+    mesh = eqx.tree_at(lambda m: m.cell_zones, mesh, zones)
+    geometry = mesh.geometry()
+    properties = PropertyModel(
+        {
+            "viscosity": Constant(NU),
+            "density": ZoneConstant.from_dict(zones, {"lo": 1.0, "hi": 2.0}),
+        }
+    )
+    with pytest.raises(ValueError, match=r"density.*must be uniform"):
+        SSTTurbulence.build(
+            SSTModel(),
+            mesh,
+            geometry,
+            CorrectedGreenGauss(),
+            FirstOrderUpwind(),
+            properties,
+            wall_patches=["bottom", "top"],
+            k_boundary=BoundaryConditions(
+                {
+                    "left": Dirichlet(0.01),
+                    "right": ZeroGradient(),
+                    "bottom": Dirichlet(0.0),
+                    "top": Dirichlet(0.0),
+                }
+            ),
+            omega_boundary=BoundaryConditions(
+                {
+                    "left": Dirichlet(10.0),
+                    "right": ZeroGradient(),
+                    "bottom": ZeroGradient(),
+                    "top": ZeroGradient(),
+                }
+            ),
+        )
+
+
+def test_with_scaled_molecular_viscosity_is_still_a_tree_at_target_with_a_nonzero_gradient() -> (
+    None
+):
+    """``molecular_viscosity`` stays its own differentiable leaf, independent of ``properties``.
+
+    After a homotopy ramp station it deliberately no longer equals the property model's own
+    ``viscosity / density`` (see the class docstring), so the rescale must move the stored array
+    directly rather than through a live property -- and stay reachable by ``jax.grad``, not merely
+    finite.
+    """
+    _, turb = _turbulence()
+
+    def total(factor):
+        return jnp.sum(turb.with_scaled_molecular_viscosity(factor).molecular_viscosity)
+
+    grad = jax.grad(total)(1.0)
+    assert bool(jnp.isfinite(grad))
+    assert grad != 0.0

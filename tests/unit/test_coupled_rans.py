@@ -93,10 +93,11 @@ def _cavity(n=6, mesh=None, gradient=None):
     mesh = structured_grid_2d(n, n, lx=1.0, ly=1.0, named_boundaries=True) if mesh is None else mesh
     gradient = CompactGreenGauss() if gradient is None else gradient
     geometry = mesh.geometry()
+    properties = PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)})
     momentum = MomentumContinuity.build(
         mesh,
         geometry,
-        PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)}),
+        properties,
         gradient,
         BoundaryConditions(
             {
@@ -115,8 +116,7 @@ def _cavity(n=6, mesh=None, gradient=None):
         geometry,
         gradient,
         FirstOrderUpwind(),
-        density=RHO,
-        molecular_viscosity=jnp.full(mesh.n_cells, NU),
+        properties,
         wall_patches=list(WALLS),
         k_boundary=BoundaryConditions({w: Dirichlet(0.0) for w in WALLS}),
         omega_boundary=BoundaryConditions({w: ZeroGradient() for w in WALLS}),
@@ -139,9 +139,9 @@ def _healthy_state(mesh, coupled, seed=0):
 def test_coupled_build_rejects_a_turbulence_density_that_disagrees_with_the_flow_assembler() -> (
     None
 ):
-    """SSTTurbulence.density and the flow PropertyModel's density are two independent numbers.
+    """SSTTurbulence and the flow assembler take separate PropertyModels with no shared source.
 
-    Nothing else checks that a caller supplied the same value to both -- if they disagree, the
+    Nothing else checks that a caller supplied the same density to both -- if they disagree, the
     k/omega volume flux (mdot / density) is silently wrong by that ratio in every SST consumer
     while the flow block solves fine, since it never reads SSTTurbulence.density at all.
     """
@@ -170,8 +170,8 @@ def test_coupled_build_rejects_a_turbulence_density_that_disagrees_with_the_flow
         geometry,
         gradient,
         FirstOrderUpwind(),
-        density=998.0,  # deliberately different from the flow assembler's RHO = 1.0
-        molecular_viscosity=jnp.full(mesh.n_cells, NU),
+        # deliberately a different density from the flow assembler's RHO = 1.0
+        PropertyModel({"viscosity": Constant(998.0 * NU), "density": Constant(998.0)}),
         wall_patches=list(WALLS),
         k_boundary=BoundaryConditions({w: Dirichlet(0.0) for w in WALLS}),
         omega_boundary=BoundaryConditions({w: ZeroGradient() for w in WALLS}),

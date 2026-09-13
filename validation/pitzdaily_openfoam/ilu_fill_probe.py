@@ -147,10 +147,11 @@ def build_grid(perturb, dim=2, nx=24, ny=16, nz=8, seed=1, gradient="corrected",
         flow_bc[wall] = NoSlipWall()
         scalar_k_bc[wall] = Dirichlet(0.0)
         scalar_w_bc[wall] = ZeroGradient()
+    properties = PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)})
     momentum = MomentumContinuity.build(
         mesh,
         geometry,
-        PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)}),
+        properties,
         grad,
         BoundaryConditions(flow_bc),
         advection_scheme=LimitedUpwind(limiter=VenkatakrishnanLimiter()),
@@ -161,8 +162,7 @@ def build_grid(perturb, dim=2, nx=24, ny=16, nz=8, seed=1, gradient="corrected",
         geometry,
         grad,
         FirstOrderUpwind(),
-        density=RHO,
-        molecular_viscosity=jnp.full(mesh.n_cells, NU),
+        properties,
         wall_patches=walls,
         k_boundary=BoundaryConditions(scalar_k_bc),
         omega_boundary=BoundaryConditions(scalar_w_bc),

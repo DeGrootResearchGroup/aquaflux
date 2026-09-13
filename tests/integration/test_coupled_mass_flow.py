@@ -59,10 +59,11 @@ def _periodic_channel():
         4, NY, lx=1.0, ly=H, periodic=("x",), named_boundaries=True, y_nodes=y_nodes
     )
     geometry = mesh.geometry()
+    properties = PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)})
     momentum = MomentumContinuity.build(
         mesh,
         geometry,
-        PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)}),
+        properties,
         CompactGreenGauss(),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         advection_scheme=FirstOrderUpwind(),
@@ -78,8 +79,7 @@ def _periodic_channel():
         geometry,
         CompactGreenGauss(),
         FirstOrderUpwind(),
-        density=RHO,
-        molecular_viscosity=jnp.full(mesh.n_cells, NU),
+        properties,
         wall_patches=["bottom", "top"],
         k_boundary=BoundaryConditions({"bottom": Dirichlet(0.0), "top": Dirichlet(0.0)}),
         omega_boundary=BoundaryConditions({"bottom": ZeroGradient(), "top": ZeroGradient()}),

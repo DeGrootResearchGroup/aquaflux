@@ -983,10 +983,13 @@ def build_case(model=None, gradient_scheme=None):
     # closure while the residual stays finite, so the divergence guard never trips). The structural fix
     # for second-order scalars is log-variable transport (omega = e^w), which is not built here.
     scalar_upwind = FirstOrderUpwind()
+    properties = PropertyModel(
+        {"viscosity": Constant(jnp.asarray(RHO * NU)), "density": Constant(RHO)}
+    )
     momentum = MomentumContinuity.build(
         mesh,
         geom,
-        PropertyModel({"viscosity": Constant(jnp.asarray(RHO * NU)), "density": Constant(RHO)}),
+        properties,
         grad,
         BoundaryConditions(
             {
@@ -1008,8 +1011,7 @@ def build_case(model=None, gradient_scheme=None):
         geom,
         grad,
         scalar_upwind,
-        density=RHO,
-        molecular_viscosity=jnp.full(mesh.n_cells, NU),
+        properties,
         wall_patches=WALLS,
         explicit_production_limiter=True,
         k_boundary=BoundaryConditions(
