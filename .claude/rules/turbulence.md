@@ -1015,8 +1015,8 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
   traced mesh labels breaks the jit). **`CoupledRANS.build` now checks the two densities agree (issue
   #157's second finding, fixed 2026-08-18).** `SSTTurbulence.density` (a scalar, used to form the k/ω
   volume flux `mdot / density`) and `MomentumContinuity.density` (a per-cell array from the flow's
-  `PropertyModel`) are supplied to two independent builders that never see each other, so nothing
-  previously caught a caller passing a different value to each — the flow block never reads
+  `PropertyModel`) are two independent values with nothing forcing them to agree, so nothing previously
+  caught a caller passing a different value to each — the flow block never reads
   `SSTTurbulence.density`, so it solves fine either way, and the k/ω equations silently solve the wrong
   Peclet regime (a 998× density error, say, gives a 998× wrong volume flux in **both** scalar residuals,
   **both** frozen AMGs, and **both** pseudo-transient shift diagonals, with no other symptom). `build`
@@ -1028,7 +1028,17 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
   forward-march's mid-solve guards do. Pinned by
   `test_coupled_build_rejects_a_turbulence_density_that_disagrees_with_the_flow_assembler`; every
   existing case and test already passes one `RHO` literal to both builders, so this is silent-until-now,
-  not a behaviour change for any of them. **`CoupledRANS.residual` assembles the Rhie–Chow flow fields once
+  not a behaviour change for any of them.
+  ⚠️ **The two builders each take a `PropertyModel` now (issue #353) — the check above is UNCHANGED,
+  only where `SSTTurbulence.density` comes from moved.** `SSTTurbulence.build(..., density=..., molecular_viscosity=...)` took two independent
+  numbers in two unit systems (dynamic `mu` implicit in the flow's `PropertyModel`, kinematic `nu`
+  passed directly here); it now takes a `properties: PropertyModel` supplying `"viscosity"` (dynamic)
+  and `"density"`, matching `MomentumContinuity.build`'s slot, and derives `density` (asserted uniform
+  at build) and `molecular_viscosity = viscosity / density` from it. This still does **not** eliminate
+  the mismatch this guard exists for: the two `properties` arguments are still two separate models with
+  no shared source unless a caller passes the same object to both (as every case and test now does), so
+  the guard above stays in place rather than being deleted — consolidating the two builders behind one
+  is follow-on work the issue explicitly deferred. **`CoupledRANS.residual` assembles the Rhie–Chow flow fields once
   (#106):** it builds the `closure` first and takes `nu_t` from it (rather than a separate
   `eddy_viscosity` recomputing the same strain), then one `momentum.flow_fields(flow)` feeds both
   `residual_from_fields` and the `mdot` the scalars advect on — was 3× `_flow_fields` per eval, ~1.85×

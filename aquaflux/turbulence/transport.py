@@ -203,11 +203,19 @@ class SSTTurbulence(eqx.Module):
     advection_scheme : AdvectionScheme
         The k / omega convection scheme (e.g. first-order upwind).
     density : float
-        The (constant) fluid density, used to form the volume flux ``mdot / rho``. Independent of
-        the flow assembler's own (per-cell) density -- :meth:`~aquaflux.turbulence.CoupledRANS.build`
-        checks the two agree, since nothing else does and a mismatch is otherwise silent.
+        The (constant) fluid density, used to form the volume flux ``mdot / rho``. Derived at
+        :meth:`build` time from the ``properties`` argument (the same kind of ``PropertyModel``
+        the flow assembler consumes), so the fluid is stated once rather than as two independent
+        numbers in two unit systems. It is still a separate model from the flow assembler's own,
+        with nothing forcing the two to agree --
+        :meth:`~aquaflux.turbulence.CoupledRANS.build` checks that they do, since nothing else
+        does and a mismatch is otherwise silent.
     molecular_viscosity : jnp.ndarray
-        Kinematic molecular viscosity ``nu`` per cell, shape ``(n_cells,)``.
+        Kinematic molecular viscosity ``nu`` per cell, shape ``(n_cells,)`` -- derived at
+        :meth:`build` time as ``viscosity / density`` from ``properties``, then stored as its own
+        differentiable leaf: :meth:`with_scaled_molecular_viscosity` (the Reynolds-rescale
+        homotopy) moves it directly, since after the first ramp station it deliberately no longer
+        equals the property model's own ``mu / rho``.
     wall_distance : jnp.ndarray
         Distance to the nearest wall per cell, shape ``(n_cells,)``.
     wall_distance_gradient : jnp.ndarray
@@ -285,8 +293,7 @@ class SSTTurbulence(eqx.Module):
         geometry: MeshGeometry,
         gradient_scheme: GradientScheme,
         advection_scheme: AdvectionScheme,
-        density: float,
-        molecular_viscosity: jnp.ndarray,
+        properties: PropertyModel,
         wall_patches: Sequence[str],
         k_boundary: BoundaryConditions,
         omega_boundary: BoundaryConditions,
@@ -298,6 +305,14 @@ class SSTTurbulence(eqx.Module):
 
         Parameters
         ----------
+        properties : PropertyModel
+            Must supply ``"viscosity"`` (dynamic ``mu``) and ``"density"``, evaluated per cell --
+            the same kind of model :class:`~aquaflux.flow.MomentumContinuity.build` consumes, so a
+            caller states the fluid once rather than as independent dynamic and kinematic numbers.
+            :attr:`density` is taken from it (asserted uniform: a per-cell density does not
+            broadcast against the per-face volume flux, and the kinematic transport form is only
+            exact for constant density regardless) and :attr:`molecular_viscosity` as
+            ``viscosity / density``.
         wall_patches : sequence of str
             The boundary patches treated as walls; their wall distance is computed and their
             owner cells become the ``omega`` fixation set.
@@ -313,7 +328,25 @@ class SSTTurbulence(eqx.Module):
             for a **Jacobian stand-in** and never for the residual a sensitivity is taken through.
 
         The remaining arguments are stored directly (see the class attributes).
+
+        Raises
+        ------
+        ValueError
+            If ``properties`` does not supply ``"viscosity"``/``"density"``, or its density is not
+            uniform across cells (variable-density turbulent transport is not supported).
         """
+        properties.require("viscosity", "density")
+        evaluated = properties.evaluate(mesh.cell_zones)
+        density_field = evaluated["density"]
+        if not bool(jnp.all(jnp.isclose(density_field, density_field[0]))):
+            raise ValueError(
+                'SSTTurbulence.build: properties["density"] must be uniform across cells -- '
+                "the kinematic k/omega transport form is only exact for constant density, and a "
+                "per-cell density does not broadcast against the per-face volume flux -- got "
+                f"density in [{float(jnp.min(density_field))}, {float(jnp.max(density_field))}]."
+            )
+        density = density_field[0]
+        molecular_viscosity = evaluated["viscosity"] / density_field
         wall_distance = distance_to_patches(mesh, geometry, wall_patches)
         wall_faces = jnp.concatenate([mesh.face_patches.indices(p) for p in wall_patches])
         wall_cells = jnp.unique(mesh.face_cells.owner[wall_faces])

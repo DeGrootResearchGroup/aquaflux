@@ -64,10 +64,11 @@ def _channel(nx=28, ny=20, growth=1.2):
     model = SSTModel()
     k_in = float(inlet_k(jnp.array(U_IN), INTENSITY))
     omega_in = float(inlet_omega(jnp.array(k_in), LENGTH_SCALE, model))
+    properties = PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)})
     momentum = MomentumContinuity.build(
         mesh,
         geometry,
-        PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)}),
+        properties,
         CompactGreenGauss(),
         BoundaryConditions(
             {
@@ -85,8 +86,7 @@ def _channel(nx=28, ny=20, growth=1.2):
         geometry,
         CompactGreenGauss(),
         FirstOrderUpwind(),
-        density=RHO,
-        molecular_viscosity=jnp.full(mesh.n_cells, NU),
+        properties,
         wall_patches=["bottom", "top"],
         k_boundary=BoundaryConditions(
             {

@@ -130,10 +130,11 @@ def solve_aquaflux(nu_of, ny, growth):
     )
     geom = mesh.geometry()
     model = SSTModel()
+    properties = PropertyModel({"viscosity": Constant(nu), "density": Constant(1.0)})
     momentum = MomentumContinuity.build(
         mesh,
         geom,
-        PropertyModel({"viscosity": Constant(nu), "density": Constant(1.0)}),
+        properties,
         CompactGreenGauss(),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         # Momentum advection is second-order linear upwind (the upwind cell reconstructed to the face
@@ -152,8 +153,7 @@ def solve_aquaflux(nu_of, ny, growth):
         # k and omega stay first-order upwind, matching OpenFOAM's `Gauss upwind` on both
         # scalars (only its momentum divergence is second order).
         FirstOrderUpwind(),
-        density=1.0,
-        molecular_viscosity=jnp.full(mesh.n_cells, nu),
+        properties,
         wall_patches=["bottom", "top"],
         k_boundary=BoundaryConditions({"bottom": Dirichlet(0.0), "top": Dirichlet(0.0)}),
         omega_boundary=BoundaryConditions({"bottom": ZeroGradient(), "top": ZeroGradient()}),

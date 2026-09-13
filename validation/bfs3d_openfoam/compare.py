@@ -1358,15 +1358,19 @@ def build_case(model=None, momentum_advection=None, gradient=None):
         else momentum_advection
     )
     scalar_upwind = FirstOrderUpwind()
+    # `jnp.asarray`, not a bare float: the Reynolds continuation RESCALES this value per rung,
+    # and a Python float is not a JAX array, so it rides on the static side of every jitted
+    # function taking this assembler -- making each rung a fresh compilation key for the whole
+    # coupled solve. As an array the rungs differ in a leaf VALUE and share the compilation.
+    # Density is left a float: nothing rescales it, so its static value is the same every rung.
+    # Shared with the turbulence builder below, so the flow and closure state one fluid once.
+    properties = PropertyModel(
+        {"viscosity": Constant(jnp.asarray(RHO * NU)), "density": Constant(RHO)}
+    )
     momentum = MomentumContinuity.build(
         mesh,
         geom,
-        # `jnp.asarray`, not a bare float: the Reynolds continuation RESCALES this value per rung,
-        # and a Python float is not a JAX array, so it rides on the static side of every jitted
-        # function taking this assembler -- making each rung a fresh compilation key for the whole
-        # coupled solve. As an array the rungs differ in a leaf VALUE and share the compilation.
-        # Density is left a float: nothing rescales it, so its static value is the same every rung.
-        PropertyModel({"viscosity": Constant(jnp.asarray(RHO * NU)), "density": Constant(RHO)}),
+        properties,
         grad,
         BoundaryConditions(
             {
@@ -1385,8 +1389,7 @@ def build_case(model=None, momentum_advection=None, gradient=None):
         geom,
         grad,
         scalar_upwind,
-        density=RHO,
-        molecular_viscosity=jnp.full(mesh.n_cells, NU),
+        properties,
         wall_patches=WALLS,
         explicit_production_limiter=PRODUCTION_LIMITER,
         k_boundary=BoundaryConditions(

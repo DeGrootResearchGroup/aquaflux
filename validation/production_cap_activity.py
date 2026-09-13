@@ -71,10 +71,11 @@ def build_case(nu=NU, *, explicit_limiter: bool):
     model = SSTModel()
     k_in = float(inlet_k(jnp.array(U_IN), INTENSITY))
     omega_in = float(inlet_omega(jnp.array(k_in), LENGTH_SCALE, model))
+    properties = PropertyModel({"viscosity": Constant(RHO * nu), "density": Constant(RHO)})
     momentum = MomentumContinuity.build(
         mesh,
         geometry,
-        PropertyModel({"viscosity": Constant(RHO * nu), "density": Constant(RHO)}),
+        properties,
         CompactGreenGauss(),
         BoundaryConditions(
             {
@@ -92,8 +93,7 @@ def build_case(nu=NU, *, explicit_limiter: bool):
         geometry,
         CompactGreenGauss(),
         FirstOrderUpwind(),
-        density=RHO,
-        molecular_viscosity=jnp.full(mesh.n_cells, nu),
+        properties,
         wall_patches=["bottom", "top"],
         explicit_production_limiter=explicit_limiter,
         k_boundary=BoundaryConditions(

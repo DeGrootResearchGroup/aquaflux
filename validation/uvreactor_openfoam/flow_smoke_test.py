@@ -84,10 +84,13 @@ def build_case():
     momentum_upwind = LimitedUpwind(limiter=VenkatakrishnanLimiter())
     scalar_upwind = FirstOrderUpwind()
 
+    properties = PropertyModel(
+        {"viscosity": Constant(jnp.asarray(RHO * NU)), "density": Constant(RHO)}
+    )
     momentum = MomentumContinuity.build(
         mesh,
         geom,
-        PropertyModel({"viscosity": Constant(jnp.asarray(RHO * NU)), "density": Constant(RHO)}),
+        properties,
         grad,
         BoundaryConditions(
             {
@@ -105,8 +108,7 @@ def build_case():
         geom,
         grad,
         scalar_upwind,
-        density=RHO,
-        molecular_viscosity=jnp.full(mesh.n_cells, NU),
+        properties,
         wall_patches=WALLS,
         explicit_production_limiter=True,
         k_boundary=BoundaryConditions(

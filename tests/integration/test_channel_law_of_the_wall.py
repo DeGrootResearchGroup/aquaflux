@@ -52,10 +52,11 @@ def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=100):
     )
     geom = mesh.geometry()
     model = SSTModel()
+    properties = PropertyModel({"viscosity": Constant(RHO * nu), "density": Constant(RHO)})
     momentum = MomentumContinuity.build(
         mesh,
         geom,
-        PropertyModel({"viscosity": Constant(RHO * nu), "density": Constant(RHO)}),
+        properties,
         CompactGreenGauss(),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         advection_scheme=FirstOrderUpwind(),
@@ -68,8 +69,7 @@ def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=100):
         geom,
         CompactGreenGauss(),
         FirstOrderUpwind(),
-        density=RHO,
-        molecular_viscosity=jnp.full(mesh.n_cells, nu),
+        properties,
         wall_patches=["bottom", "top"],
         k_boundary=BoundaryConditions({"bottom": Dirichlet(0.0), "top": Dirichlet(0.0)}),
         omega_boundary=BoundaryConditions({"bottom": ZeroGradient(), "top": ZeroGradient()}),

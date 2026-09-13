@@ -46,10 +46,11 @@ def _solve_flow(momentum, state):
 def _cavity():
     mesh = structured_grid_2d(16, 16, lx=1.0, ly=1.0, named_boundaries=True)
     geometry = mesh.geometry()
+    properties = PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)})
     momentum = MomentumContinuity.build(
         mesh,
         geometry,
-        PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)}),
+        properties,
         CompactGreenGauss(),
         BoundaryConditions(
             {
@@ -68,8 +69,7 @@ def _cavity():
         geometry,
         CompactGreenGauss(),
         FirstOrderUpwind(),
-        density=RHO,
-        molecular_viscosity=jnp.full(mesh.n_cells, NU),
+        properties,
         wall_patches=list(WALLS),
         k_boundary=BoundaryConditions({w: Dirichlet(0.0) for w in WALLS}),
         omega_boundary=BoundaryConditions({w: ZeroGradient() for w in WALLS}),
