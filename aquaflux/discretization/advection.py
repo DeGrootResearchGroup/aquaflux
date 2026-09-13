@@ -157,7 +157,7 @@ class LimitedUpwind(AdvectionScheme):
         if self.limiter is None:
             psi = jnp.ones(field.shape[0], dtype=field.dtype)
         else:
-            psi = self.limiter.limit(field, gradient, fc, context.mesh.geometry)
+            psi = self.limiter.limit(field, context)
 
         outflow = mass_flux >= 0.0
         phi_upwind = _upwind_value(field, outflow, fc)

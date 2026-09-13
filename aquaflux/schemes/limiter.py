@@ -34,32 +34,28 @@ import jax.numpy as jnp
 from aquaflux.vectors import dot
 
 if TYPE_CHECKING:
-    from aquaflux.mesh import FaceCellConnectivity, MeshGeometry
+    from aquaflux.context import FieldContext
 
 
 class Limiter(eqx.Module):
     """Strategy interface: a per-cell slope limiter ``psi in [0, 1]``."""
 
     @abc.abstractmethod
-    def limit(
-        self,
-        field: jnp.ndarray,
-        gradient: jnp.ndarray,
-        face_cells: FaceCellConnectivity,
-        geometry: MeshGeometry,
-    ) -> jnp.ndarray:
+    def limit(self, field: jnp.ndarray, context: FieldContext) -> jnp.ndarray:
         """Per-cell limiter values, shape ``(n_cells,)``.
 
         Parameters
         ----------
         field : jnp.ndarray
             Cell values, shape ``(n_cells,)``.
-        gradient : jnp.ndarray
-            Cell gradients, shape ``(n_cells, dim)``.
-        face_cells : FaceCellConnectivity
-            Owner/neighbour incidence (``mesh.face_cells``).
-        geometry : MeshGeometry
-            Face and cell metrics (face centroids; cell centroids and volumes).
+        context : FieldContext
+            The shared per-field context this field was reconstructed into: ``context.gradient`` is
+            this field's own cell gradient, and ``context.mesh.face_cells`` / ``context.mesh.geometry``
+            supply the connectivity and the face/cell metrics (face centroids; cell centroids and
+            volumes). A limiter reads no boundary value and no property, so it is one of the
+            strategies a plain :class:`~aquaflux.context.MeshContext` would also suffice for -- it
+            takes the full :class:`~aquaflux.context.FieldContext` only because that is what its
+            caller (:class:`~aquaflux.discretization.advection.LimitedUpwind`) already holds.
         """
 
 
@@ -75,8 +71,10 @@ class VenkatakrishnanLimiter(Limiter):
 
     k: float = eqx.field(static=True, default=5.0)
 
-    def limit(self, field, gradient, face_cells, geometry):
-        face_geometry, cell_geometry = geometry.face, geometry.cell
+    def limit(self, field, context):
+        face_cells = context.mesh.face_cells
+        gradient = context.gradient
+        face_geometry, cell_geometry = context.mesh.geometry.face, context.mesh.geometry.cell
         owner = face_cells.owner
         neighbour = face_cells.safe_neighbour
         phi = field
