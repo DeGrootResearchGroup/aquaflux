@@ -46,7 +46,7 @@ to the differentiable residual.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
 import equinox as eqx
@@ -402,7 +402,9 @@ class ResidualAssembler(eqx.Module):
             (jnp.ones_like(phi),),
         )[1]
 
-    def gradient(self, phi: jnp.ndarray) -> jnp.ndarray:
+    def gradient(
+        self, phi: jnp.ndarray, *, fields: Mapping[str, jnp.ndarray] | None = None
+    ) -> jnp.ndarray:
         """Reconstructed cell gradients of ``phi``, shape ``(n_cells, dim)``.
 
         The post-processing accessor for the injected gradient scheme — e.g. to form the
@@ -415,8 +417,11 @@ class ResidualAssembler(eqx.Module):
         ----------
         phi : jnp.ndarray
             Cell field, shape ``(n_cells,)``.
+        fields : mapping of {str: jnp.ndarray}, optional
+            Named per-cell state fields for a state-dependent property (see :meth:`residual`);
+            omit when every property is state-independent.
         """
-        properties = self.properties.evaluate(self.mesh.cell_zones)
+        properties = self.properties.evaluate(self.mesh.cell_zones, fields)
         return self._gradient(phi, properties)[0]
 
     def residual(
@@ -428,6 +433,7 @@ class ResidualAssembler(eqx.Module):
         first_step: bool = False,
         *,
         gradient_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        fields: Mapping[str, jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
         """Cell residual ``R(phi)``, shape ``(n_cells,)``.
 
@@ -456,6 +462,15 @@ class ResidualAssembler(eqx.Module):
             flux consumes it. Boundary values are unaffected either way, because they read only
             owner-cell gradients (every boundary face is owned by an interior cell of its own
             partition).
+        fields : mapping of {str: jnp.ndarray}, optional
+            Named per-cell state fields a state-dependent property may read (e.g. a
+            temperature-dependent viscosity naming ``"temperature"``), forwarded verbatim to
+            :meth:`~aquaflux.properties.PropertyModel.evaluate`; omit (or leave empty) when every
+            property is state-independent, which every property in this library is today. This
+            equation's own ``phi`` is *not* added to it automatically — a caller solving, say, the
+            temperature equation itself and wanting a property to see its own field supplies
+            ``fields={"temperature": phi}`` explicitly, the same way it would supply another
+            equation's converged field; the assembler does not guess a name for the field it solves.
 
         Returns
         -------
@@ -463,7 +478,7 @@ class ResidualAssembler(eqx.Module):
             The residual ``accumulation + net outward flux - volume sources``, shape
             ``(n_cells,)``.
         """
-        properties = self.properties.evaluate(self.mesh.cell_zones)
+        properties = self.properties.evaluate(self.mesh.cell_zones, fields)
         # The hook is used at two depths of the same reconstruction: threaded *into* an iterative
         # gradient scheme's solve so it refreshes ghost rows each sweep (owned rows then converge to
         # the serial gradient), and applied *again* to the returned gradient below so the flux reads

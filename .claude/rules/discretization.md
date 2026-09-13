@@ -148,6 +148,15 @@ Principles.
     closures read only owner-cell gradients the ghost exchange leaves untouched. (`SweptGradientSolve`
     honours `operator_hook`; the reduction-forming `GmresGradientSolve` and the nested-solve
     `HessianCorrectedGradient` **raise** — see `.claude/rules/parallel.md`.)
+  - **`residual(phi, ..., *, fields=None)` and `gradient(phi, *, fields=None)` (issue #280 step 1).**
+    An optional `Mapping[str, jnp.ndarray]` forwarded verbatim to
+    `PropertyModel.evaluate(cell_zones, fields)` — see `.claude/rules/properties.md`'s `Calculated`
+    stage. **Caller-supplied, not auto-populated:** the assembler never adds its own `phi` to the
+    mapping under a guessed name, so a property reading the very field this equation solves needs
+    that field named explicitly by the caller (`fields={"temperature": phi}`), exactly as it would
+    name another equation's converged field. `None` (the default) evaluates every property against
+    `{}`, identical to every call site before this seam existed — no shipped property reads `fields`
+    yet, so this is pure plumbing until `Calculated` lands.
 - **`transient.py` — BUILT.** `TransientTerm`: BDF1 at step 1 (static `first_step`), BDF2
   after; carries no physical coefficient. Verified against the closed BDF formulae.
 - **`fixed_value.py` — BUILT (`FixedValueCells` + the injected `FixationRow`).** Replaces a chosen set
