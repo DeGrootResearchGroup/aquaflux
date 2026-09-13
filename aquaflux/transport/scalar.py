@@ -167,7 +167,7 @@ class ScalarTransport(eqx.Module):
             mesh=mesh,
             geometry=geometry,
             diffusivity=diffusivity,
-            boundary=boundary.resolve(mesh.face_patches),
+            boundary=boundary.resolve(mesh.face_patches, mesh.face_cells),
             advection_scheme=advection_scheme,
             gradient_scheme=gradient_scheme,
             sources=sources,

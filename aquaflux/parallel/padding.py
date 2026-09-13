@@ -54,6 +54,7 @@ from aquaflux.mesh import (
     MeshGeometry,
     interior_mask,
 )
+from aquaflux.mesh.groups import PADDING_PATCH
 
 from .partition import PartitionedMesh, scatter_owned_partitions
 
@@ -316,9 +317,11 @@ def pad_partition(
     face_centroid[:nf] = np.asarray(local_geometry.face.centroid)
 
     # --- groups -------------------------------------------------------------------------
-    # Padding faces take the unnamed "boundary" patch, so no named boundary closure claims them.
-    patch_names = local_mesh.face_patches.names
-    patch_label = np.full(n_faces_local, patch_names.index("boundary"), dtype=np.int64)
+    # Padding faces take their own reserved patch rather than the automatic "boundary" one: they are
+    # boundary faces by connectivity (no neighbour), but carry no physics, so a boundary-condition
+    # map must neither claim them nor be refused for leaving them uncovered.
+    patch_names = (*local_mesh.face_patches.names, PADDING_PATCH)
+    patch_label = np.full(n_faces_local, patch_names.index(PADDING_PATCH), dtype=np.int64)
     patch_label[:nf] = np.asarray(local_mesh.face_patches.label)
 
     zone_label_real = np.asarray(local_mesh.cell_zones.label)

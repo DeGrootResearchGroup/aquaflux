@@ -130,6 +130,14 @@ operator-independent:
   padding face names it as owner, so a padding face can only ever scatter into a discarded row.
 - **The null face** (`n_faces_max`) is past every partition's real faces; it is the fill value for
   padded boundary-patch index lists.
+- **Padding faces are labelled with the reserved `"padding"` patch, NOT `"boundary"` (binding, #354).**
+  They have `neighbour = -1`, so by connectivity they are boundary faces. `BoundaryConditions.resolve`
+  refuses any uncovered boundary face, except those in `"padding"`, and the injected per-partition
+  assembler is built on the padded mesh. Labelling them `"boundary"`, as this code did until the
+  coverage check landed, would make every distributed build raise, or would force callers to put a
+  closure on faces that carry no physics. `pad_partition` appends `"padding"` to the local mesh's
+  patch names; the name is reserved in `FacePatches.from_dict`, so a real patch cannot collide with
+  it. Every partition appends the same name, so the static `names` tuple stays uniform across shards.
 
 Padding is inert through **three independent mechanisms** — deliberately belt-and-braces, since the
 layout no longer knows which operator will run: (1) zero area ⇒ zero flux; (2) null-cell ownership

@@ -835,6 +835,13 @@ def test_reserved_patch_name_rejected() -> None:
         Mesh.from_faces(nodes, faces, owner, neighbour, n_cells=2, face_patches={"boundary": [3]})
 
 
+def test_padding_patch_name_is_reserved() -> None:
+    """'padding' labels a distributed partition's inert faces, so a real patch may not reuse it."""
+    nodes, faces, owner, neighbour = _square_pair_args()
+    with pytest.raises(ValueError, match="reserved"):
+        Mesh.from_faces(nodes, faces, owner, neighbour, n_cells=2, face_patches={"padding": [3]})
+
+
 def test_interface_mask_between_same_zone_raises() -> None:
     """An interface is between two *distinct* zones; equal names are a caller mistake."""
     nodes, faces, owner, neighbour = _square_pair_args()

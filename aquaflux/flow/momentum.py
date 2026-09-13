@@ -290,7 +290,7 @@ class MomentumContinuity(eqx.Module):
             # together, so the two cannot be paired with a mismatched mesh later.
             gradient_scheme=gradient_scheme.bind(mesh, geometry),
             advection_scheme=advection_scheme,
-            boundary=boundary.resolve(mesh.face_patches),
+            boundary=boundary.resolve(mesh.face_patches, mesh.face_cells),
             interp_factor=interp_factor,
             normal_distance=normal_distance,
             body_force=force,

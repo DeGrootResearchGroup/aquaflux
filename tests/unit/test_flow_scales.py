@@ -58,9 +58,17 @@ def test_hydraulic_length_is_the_channel_half_height() -> None:
 
 
 def test_hydraulic_length_is_zero_without_a_wetted_wall() -> None:
-    """An all-through-flow domain has nothing for a body force to balance against."""
+    """An all-through-flow domain has nothing for a body force to balance against.
+
+    Every side is open -- an inlet, and outlets on the other three -- so no patch shears the flow.
+    """
     channel = _build(
-        {"left": VelocityInlet(velocity=(1.0, 0.0)), "right": PressureOutlet(pressure=0.0)}
+        {
+            "left": VelocityInlet(velocity=(1.0, 0.0)),
+            "right": PressureOutlet(pressure=0.0),
+            "bottom": PressureOutlet(pressure=0.0),
+            "top": PressureOutlet(pressure=0.0),
+        }
     )
     assert hydraulic_length(channel) == 0.0
 

@@ -69,17 +69,29 @@ class BoundaryConditions(eqx.Module):
         self.conditions = dict(conditions)
         self.faces = _faces
 
-    def resolve(self, face_patches: FacePatches) -> BoundaryConditions:
-        """Bind to a mesh: look each patch name up in ``face_patches`` for its boundary-face indices.
+    def resolve(
+        self, face_patches: FacePatches, face_cells: FaceCellConnectivity
+    ) -> BoundaryConditions:
+        """Bind to a mesh: look each patch name up for its face indices, and check every boundary face is covered.
 
         The name→index lookup is data-dependent (dynamic shapes), so it runs here — once, off the jit
-        path; the resulting index arrays are constant inputs to the differentiable residual. Raises
-        ``ValueError`` (from ``face_patches``) if a patch name is absent from the mesh.
+        path; the resulting index arrays are constant inputs to the differentiable residual.
+
+        A boundary face that no closure claims is refused. Left alone it would keep the zero
+        placeholder :meth:`apply` starts from — a zero face value, which is a boundary condition
+        nobody chose — and a case missing a patch would still converge, to the wrong answer. Every
+        uncovered patch is reported at once, including the automatic ``"boundary"`` patch that holds
+        boundary faces no named patch claims (naming ``"boundary"`` covers them). Interior faces,
+        and the ``"padding"`` faces a distributed partition adds to reach a uniform shape, need no
+        closure.
 
         Parameters
         ----------
         face_patches : FacePatches
             The mesh's named face partition (``mesh.face_patches``).
+        face_cells : FaceCellConnectivity
+            The mesh's face→cell incidence (``mesh.face_cells``), which says which faces are
+            boundary faces.
 
         Returns
         -------
@@ -88,10 +100,32 @@ class BoundaryConditions(eqx.Module):
             an already-resolved collection is returned unchanged, so re-binding (e.g. a coupled
             residual that reuses a pre-resolved boundary inside its jit) does not re-run the
             dynamic-shape ``nonzero`` lookup on traced mesh labels.
+
+        Raises
+        ------
+        ValueError
+            If a closure names a patch the mesh does not have, or if any boundary face is in a patch
+            with no closure (the message lists every such patch and its face count).
         """
         if self.faces is not None:
             return self
         faces = {name: jnp.asarray(face_patches.indices(name)) for name in self.conditions}
+        uncovered = face_patches.uncovered_boundary_faces(self.conditions, face_cells)
+        if uncovered:
+            listed = ", ".join(
+                f"'{name}' ({count} face{'' if count == 1 else 's'})"
+                for name, count in uncovered.items()
+            )
+            unnamed = (
+                " ('boundary' holds the boundary faces no named patch claims; give it a closure "
+                "under that name)"
+                if "boundary" in uncovered
+                else ""
+            )
+            raise ValueError(
+                f"boundary faces with no boundary condition: {listed}{unnamed}. Every boundary "
+                "face needs a closure -- an omitted patch would silently keep a zero face value."
+            )
         return BoundaryConditions(self.conditions, _faces=faces)
 
     def apply(
@@ -104,7 +138,9 @@ class BoundaryConditions(eqx.Module):
 
         For each ``(bc, faces)`` pair the patch's owner cells are gathered and
         ``closure(bc, faces, owner)`` is evaluated for the values written at ``init[faces]``. Faces
-        in no named patch (interior faces, unlisted boundary faces) keep their ``init`` value.
+        no closure claims keep their ``init`` value: interior faces, and a distributed partition's
+        padding faces. A boundary face cannot be among them -- :meth:`resolve` refuses a collection
+        that leaves one uncovered.
 
         Parameters
         ----------
@@ -127,7 +163,8 @@ class BoundaryConditions(eqx.Module):
         """
         if self.faces is None:
             raise ValueError(
-                "BoundaryConditions must be bound to a mesh via resolve(face_patches) before apply()"
+                "BoundaryConditions must be bound to a mesh via resolve(face_patches, face_cells) "
+                "before apply()"
             )
         result = init
         for name, bc in self.conditions.items():
