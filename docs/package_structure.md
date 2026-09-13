@@ -47,6 +47,7 @@ cfd/                                  # repo root
 ├── aquaflux/                         # the package
 │   ├── __init__.py                   # enables JAX x64 (process-wide); __version__; public API
 │   ├── vectors.py                    # leaf: per-element vector algebra — dot / norm_squared / scale (buries axis/[:,None] bookkeeping; imported everywhere)
+│   ├── context.py                    # leaf: MeshContext (face_cells/geometry/properties) + FieldContext (mesh + one field's boundary_values/gradient) — below schemes/boundary so both can take it without a cycle
 │   ├── text_table.py                 # fixed-width ASCII tables for solver reports
 │   │
 │   ├── mesh/                         # Mesh container + face/cell geometry + connectivity (2D and 3D)
@@ -83,13 +84,13 @@ cfd/                                  # repo root
 │   │   └── model.py                  #   PropertyModel: named {name: Property} collection; evaluate() → {name: (n_cells,)}, require()
 │   │
 │   ├── discretization/               # the residual substrate: gather → compute → scatter assembly of R(state, params)
-│   │   ├── face_flux.py              #   the face-flux contract: FaceFluxOperator (face_flux(field, context)) + FaceContext (the lean shared per-face inputs)
+│   │   ├── face_flux.py              #   the face-flux contract: FaceFluxOperator (face_flux(field, context), requires()/uses_gradient()); FieldContext itself lives in aquaflux/context.py
 │   │   ├── diffusion.py              #   DiffusionFlux: flux-continuous non-orthogonal diffusion (correction written into the residual; AD linearizes it) + flux_continuous_conductance/_denominator
 │   │   ├── advection.py              #   AdvectionScheme → FirstOrderUpwind, LimitedUpwind; AdvectionFlux(mass_flux, scheme) — the mass flux is always injected (Rhie–Chow in flow; a prescribed field in tests)
 │   │   ├── source.py                 #   VolumeSource: the volume-integrated source contract (the reaction-coupling seam; turbulence source terms implement it)
 │   │   ├── transient.py              #   TransientTerm: BDF1 on the first step, BDF2 thereafter
 │   │   ├── fixed_value.py            #   FixedValueCells: replace a set of cells' residual rows with an algebraic constraint (FixationRow → DifferenceRow / LogRatioRow)
-│   │   └── residual.py               #   ResidualAssembler (builds the FaceContext: properties, gradients, boundary values) + CellBalance (operators → segment_sum scatter → sources → transient); R = accumulation + Σ outward flux
+│   │   └── residual.py               #   ResidualAssembler (builds the FieldContext: properties, gradients, boundary values; validates requires()/uses_gradient() at build) + CellBalance (operators → segment_sum scatter → sources → transient); R = accumulation + Σ outward flux
 │   │
 │   ├── schemes/                      # first-class swappable numerics (physics-free; one-way discretization → schemes)
 │   │   ├── gradient.py               #   GradientScheme → CompactGreenGauss, CorrectedGreenGauss (injected GradientSolve: GmresGradientSolve / SweptGradientSolve fixed-sweep; injected GradientPreconditioner: InverseVolume / CellBlockJacobi, extracted by cell_diagonal_block), HessianCorrectedGradient (separate outer + hessian_solver)

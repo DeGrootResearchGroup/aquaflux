@@ -28,9 +28,10 @@ Engineering Principles.
   — advection (`mdot·u_i`) + viscous diffusion (μ as the coefficient) + pressure force
   (`p_f n_i A`) — **and all three are `FaceFluxOperator`s composed by the shared `CellBalance`**,
   the same object that assembles every scalar transport equation (`.claude/rules/discretization.md`).
-  Per component it builds a `FaceContext` (properties `{"viscosity": μ}` via
-  `DiffusionFlux(coefficient="viscosity")`, the component gradient, the boundary velocity) and hands
-  it to `CellBalance((DiffusionFlux, PressureForce, AdvectionFlux)).residual(component, context)`.
+  It forms one shared `MeshContext` (properties `{"viscosity": μ}`, since that does not vary with the
+  component) and, per component, wraps it in a `FieldContext` (the component gradient, the boundary
+  velocity) and hands it to
+  `CellBalance((DiffusionFlux, PressureForce, AdvectionFlux)).residual(component, context)`.
   Continuity is `Σ mdot_f = 0`. The whole Jacobian comes from AD; solved by the existing
   `ImplicitNewtonSolver`.
   - **`PressureForce` (`momentum.py`, exported from `aquaflux.flow`) is the one flow-specific
@@ -57,7 +58,7 @@ Engineering Principles.
     level in `_momentum_residual`, after the per-component balances are stacked — a momentum source
     is coupled across components (a rotating-frame term is `−2ρΩ×u`), so it is not a per-component
     quantity and cannot ride in a `CellBalance`'s scalar `source_operators`.
-    - **It does NOT take a `FaceContext` (binding).** That context carries *one* scalar component's
+    - **It does NOT take a `FieldContext` (binding).** That context carries *one* scalar component's
       boundary values and reconstructed gradient; a momentum source needs the whole kinematic state
       (the velocity, and the gradient **tensor** for anything stress-like), so handing it one
       component's context would be arbitrary. It takes the `VelocityFields` bundle those quantities

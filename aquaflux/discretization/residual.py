@@ -15,7 +15,7 @@ Forming that residual is two separable jobs, and this module gives each its own 
   reconstructs the cell gradients once (the injected :class:`GradientScheme`, if any) so every
   operator shares a single gradient field, evaluates the weak boundary face values from the
   per-patch :class:`~aquaflux.boundary.conditions.BoundaryCondition` closures, and packs the
-  result into a :class:`~aquaflux.discretization.face_flux.FaceContext`.
+  result into a :class:`~aquaflux.context.FieldContext`.
 - :class:`CellBalance` assembles the **balance** from that context — it sums the injected
   :class:`~aquaflux.discretization.face_flux.FaceFluxOperator`\\ s, scatters the owner-outward
   face flux back to cells with ``segment_sum`` (owner ``+``, neighbour ``-``; boundary faces to
@@ -54,8 +54,7 @@ import jax
 import jax.numpy as jnp
 
 from aquaflux.boundary import BoundaryConditions
-
-from .face_flux import FaceContext
+from aquaflux.context import FieldContext, MeshContext
 
 if TYPE_CHECKING:
     from aquaflux.mesh import Mesh, MeshGeometry
@@ -73,7 +72,7 @@ class CellBalance(eqx.Module):
     The half of the residual that is pure operator composition: sum the face fluxes, scatter them
     to cells, subtract the volume sources, add the accumulation. It holds **only** the operators —
     the connectivity, geometry, boundary face values, reconstructed gradient, and properties all
-    arrive on the :class:`~aquaflux.discretization.face_flux.FaceContext` it is handed, which is
+    arrive on the :class:`~aquaflux.context.FieldContext` it is handed, which is
     the same context its operators gather from. So it needs no mesh to construct and none to
     exercise: a stub flux operator and a two-cell context test it on its own.
 
@@ -102,7 +101,7 @@ class CellBalance(eqx.Module):
     def residual(
         self,
         phi: jnp.ndarray,
-        context: FaceContext,
+        context: FieldContext,
         phi_old: jnp.ndarray | None = None,
         phi_older: jnp.ndarray | None = None,
         dt: float | None = None,
@@ -114,7 +113,7 @@ class CellBalance(eqx.Module):
         ----------
         phi : jnp.ndarray
             Current cell field, shape ``(n_cells,)``.
-        context : FaceContext
+        context : FieldContext
             The per-face inputs the operators gather from, and the source of the connectivity
             (``face_cells``) this scatters over and the cell volumes the transient integrates on.
         phi_old, phi_older : jnp.ndarray, optional
@@ -131,7 +130,7 @@ class CellBalance(eqx.Module):
             The balance ``accumulation + net outward flux - volume sources``, shape
             ``(n_cells,)``.
         """
-        face_cells = context.face_cells
+        face_cells = context.mesh.face_cells
         face_flux = jnp.zeros(face_cells.n_faces, dtype=phi.dtype)
         for operator in self.flux_operators:
             face_flux = face_flux + operator.face_flux(phi, context)
@@ -144,7 +143,7 @@ class CellBalance(eqx.Module):
             residual = residual - operator.source(phi, context)
         if self.transient is not None:
             residual = residual + self.transient.residual(
-                phi, phi_old, phi_older, dt, first_step, context.geometry.cell.volume
+                phi, phi_old, phi_older, dt, first_step, context.mesh.geometry.cell.volume
             )
         return residual
 
@@ -340,14 +339,17 @@ class ResidualAssembler(eqx.Module):
         gradient: jnp.ndarray,
         boundary_values: jnp.ndarray,
         properties: dict[str, jnp.ndarray],
-    ) -> FaceContext:
+    ) -> FieldContext:
         """The shared per-face inputs each flux operator gathers from."""
-        return FaceContext(
+        mesh_context = MeshContext(
             face_cells=self.mesh.face_cells,
             geometry=self.geometry,
+            properties=properties,
+        )
+        return FieldContext(
+            mesh=mesh_context,
             boundary_values=boundary_values,
             gradient=gradient,
-            properties=properties,
         )
 
     def _gradient(

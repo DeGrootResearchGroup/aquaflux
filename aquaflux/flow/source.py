@@ -12,7 +12,7 @@ momentum residual subtracts it, so
 momentum source is generally *coupled across components* -- a rotating-frame term is
 ``-2 rho Omega x u``, whose component ``i`` cannot be evaluated without the whole velocity vector --
 so it acts on the vector state and returns a ``(n_cells, dim)`` contribution. For the same reason it
-does not take a :class:`~aquaflux.discretization.FaceContext`: that context carries *one* scalar
+does not take a :class:`~aquaflux.context.FieldContext`: that context carries *one* scalar
 component's boundary values and reconstructed gradient, while a momentum source needs the whole
 kinematic state (the velocity, and the velocity-gradient **tensor** for anything stress-like). It
 therefore receives the :class:`~aquaflux.flow.VelocityFields` bundle those quantities already travel

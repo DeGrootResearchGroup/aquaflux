@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
+from aquaflux.context import FieldContext, MeshContext
 from aquaflux.discretization import (
     AdvectionFlux,
-    FaceContext,
     FirstOrderUpwind,
     LimitedUpwind,
 )
@@ -24,7 +24,7 @@ class _ZeroLimiter(Limiter):
 
 
 def _single_face(phi_owner, phi_neighbour, *, grad=(0.0, 0.0), boundary_value=0.0, interior=True):
-    """A one-face ``(field, FaceContext)``: owner centroid ``(0.5, 0)``, neighbour ``(1.5, 0)``,
+    """A one-face ``(field, FieldContext)``: owner centroid ``(0.5, 0)``, neighbour ``(1.5, 0)``,
     face centroid ``(1, 0)``, ``n = x``, area ``2``."""
     n_cells = 2 if interior else 1
     neighbour = 1 if interior else -1
@@ -41,12 +41,15 @@ def _single_face(phi_owner, phi_neighbour, *, grad=(0.0, 0.0), boundary_value=0.
             centroid=jnp.array([[0.5, 0.0], [1.5, 0.0]][:n_cells]),
         ),
     )
-    context = FaceContext(
+    mesh_context = MeshContext(
         face_cells=FaceCellConnectivity(jnp.array([0]), jnp.array([neighbour]), n_cells=n_cells),
         geometry=geometry,
+        properties={},  # the advection schemes read no property
+    )
+    context = FieldContext(
+        mesh=mesh_context,
         boundary_values=jnp.array([boundary_value]),
         gradient=gradient,
-        properties={},  # the advection schemes read no property
     )
     return field, context
 

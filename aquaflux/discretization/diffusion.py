@@ -51,9 +51,10 @@ import jax.numpy as jnp
 from aquaflux.schemes.interpolation import non_orthogonal_correction
 from aquaflux.vectors import dot
 
-from .face_flux import FaceContext, FaceFluxOperator
+from .face_flux import FaceFluxOperator
 
 if TYPE_CHECKING:
+    from aquaflux.context import FieldContext
     from aquaflux.mesh import FaceCellConnectivity, MeshGeometry
 
 
@@ -149,7 +150,7 @@ class DiffusionFlux(FaceFluxOperator):
     coefficient : str
         The name of the property this operator uses as its diffusion coefficient
         ``Gamma`` (``"diffusivity"`` for a generic scalar, ``"conductivity"`` for heat,
-        ``"viscosity"`` for momentum) — read from ``context.properties``. Static.
+        ``"viscosity"`` for momentum) — read from ``context.mesh.properties``. Static.
     boundary_coefficient : jnp.ndarray or None
         Optional per-face coefficient ``(n_faces,)`` that replaces the owner-cell ``Gamma`` **on
         boundary faces only** (interior entries are ignored). Its home is a surface whose effective
@@ -161,16 +162,16 @@ class DiffusionFlux(FaceFluxOperator):
     coefficient: str = eqx.field(static=True, default="diffusivity")
     boundary_coefficient: jnp.ndarray | None = None
 
-    def face_flux(self, field: jnp.ndarray, context: FaceContext) -> jnp.ndarray:
-        fc = context.face_cells
+    def face_flux(self, field: jnp.ndarray, context: FieldContext) -> jnp.ndarray:
+        fc = context.mesh.face_cells
         owner, neighbour = fc.owner, fc.safe_neighbour
-        fg = context.geometry.face
+        fg = context.mesh.geometry.face
         n, area, x_ip = fg.normal, fg.area, fg.centroid
-        x_cell = context.geometry.cell.centroid
+        x_cell = context.mesh.geometry.cell.centroid
 
         phi_owner, phi_neighbour = field[owner], field[neighbour]
         grad_owner, grad_neighbour = context.gradient[owner], context.gradient[neighbour]
-        gamma = context.properties[self.coefficient]
+        gamma = context.mesh.properties[self.coefficient]
         gamma_owner, gamma_neighbour = gamma[owner], gamma[neighbour]
 
         d_p = x_ip - x_cell[owner]

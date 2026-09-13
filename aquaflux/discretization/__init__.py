@@ -18,7 +18,7 @@ from .diffusion import (
     flux_continuous_conductance,
     flux_continuous_denominator,
 )
-from .face_flux import FaceContext, FaceFluxOperator
+from .face_flux import FaceFluxOperator
 from .fixed_value import DifferenceRow, FixationRow, FixedValueCells, LogRatioRow
 from .residual import CellBalance, ResidualAssembler
 from .source import VolumeSource
@@ -30,7 +30,6 @@ __all__ = [
     "CellBalance",
     "DifferenceRow",
     "DiffusionFlux",
-    "FaceContext",
     "FaceFluxOperator",
     "FirstOrderUpwind",
     "FixationRow",

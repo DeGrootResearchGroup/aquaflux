@@ -10,7 +10,7 @@ The volume is baked into the returned value: the operator owns its own volume qu
 composes integrated contributions uniformly.
 
 The per-cell state a source needs (the solved field, cell gradient, properties, cell
-volume) is gathered from the shared :class:`~aquaflux.discretization.face_flux.FaceContext`. A
+volume) is gathered from the shared :class:`~aquaflux.context.FieldContext`. A
 coefficient or field held fixed for the evaluation is carried as constructor state, as
 :class:`~aquaflux.discretization.advection.AdvectionFlux` carries its prescribed mass flux.
 """
@@ -18,11 +18,13 @@ coefficient or field held fixed for the evaluation is carried as constructor sta
 from __future__ import annotations
 
 import abc
+from typing import TYPE_CHECKING
 
 import equinox as eqx
 import jax.numpy as jnp
 
-from .face_flux import FaceContext
+if TYPE_CHECKING:
+    from aquaflux.context import FieldContext
 
 
 class VolumeSource(eqx.Module):
@@ -30,22 +32,23 @@ class VolumeSource(eqx.Module):
 
     A concrete source returns one value per cell -- the source integrated over the cell volume,
     production positive (see the module sign convention) -- given the acted-on cell field and the
-    shared :class:`~aquaflux.discretization.face_flux.FaceContext` it gathers its inputs from. It is
+    shared :class:`~aquaflux.context.FieldContext` it gathers its inputs from. It is
     an immutable ``equinox.Module``, so any coefficient or frozen field it carries is a
     differentiable leaf and gradients flow through it.
     """
 
     @abc.abstractmethod
-    def source(self, field: jnp.ndarray, context: FaceContext) -> jnp.ndarray:
+    def source(self, field: jnp.ndarray, context: FieldContext) -> jnp.ndarray:
         """Volume-integrated source per cell, shape ``(n_cells,)`` (production positive).
 
         Parameters
         ----------
         field : jnp.ndarray
             The cell field the source acts on, shape ``(n_cells,)``.
-        context : FaceContext
+        context : FieldContext
             The shared per-evaluation inputs; the source gathers the cell-oriented fields it needs
-            (``geometry.cell.volume``, the reconstructed ``gradient``, ``properties``) from it.
+            (``mesh.geometry.cell.volume``, the reconstructed ``gradient``, ``mesh.properties``) from
+            it.
 
         Returns
         -------
