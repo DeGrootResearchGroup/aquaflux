@@ -14,9 +14,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.boundary import BoundaryConditions, ZeroGradient
+from aquaflux.context import FieldContext, MeshContext
 from aquaflux.discretization import (
     DiffusionFlux,
-    FaceContext,
     FaceFluxOperator,
     ResidualAssembler,
     flux_continuous_conductance,
@@ -41,7 +41,7 @@ def _single_face(
     interior=True,
     face_centroid=(1.0, 0.0),
 ):
-    """A one-face ``(field, FaceContext)`` with unit-spacing orthogonal geometry.
+    """A one-face ``(field, FieldContext)`` with unit-spacing orthogonal geometry.
 
     Owner cell centroid ``(0.5, 0)``, neighbour ``(1.5, 0)``, face centroid ``(1, 0)``,
     ``n = x``, area ``0.5``. On a boundary face the neighbour is the sentinel ``-1`` (only the
@@ -64,12 +64,15 @@ def _single_face(
             centroid=jnp.array([[0.5, 0.0], [1.5, 0.0]][:n_cells]),
         ),
     )
-    context = FaceContext(
+    mesh_context = MeshContext(
         face_cells=FaceCellConnectivity(jnp.array([0]), jnp.array([neighbour]), n_cells=n_cells),
         geometry=geometry,
+        properties={"diffusivity": jnp.ones(n_cells)},
+    )
+    context = FieldContext(
+        mesh=mesh_context,
         boundary_values=jnp.array([boundary_value]),
         gradient=gradient,
-        properties={"diffusivity": jnp.ones(n_cells)},
     )
     return field, context
 
@@ -91,7 +94,7 @@ def test_flux_continuous_conductance_is_the_harmonic_mean_on_a_graded_face() -> 
     _, context = _single_face(0.0, 0.0)  # unit-spacing orthogonal geometry (A = 0.5, h = 1)
     g_p, g_n = 2.0, 8.0
     gamma = jnp.array([g_p, g_n])
-    cond = flux_continuous_conductance(gamma, context.geometry, context.face_cells)
+    cond = flux_continuous_conductance(gamma, context.mesh.geometry, context.mesh.face_cells)
     harmonic = 2.0 * g_p * g_n / (g_p + g_n)
     assert abs(float(cond[0]) - harmonic * 0.5 / 1.0) < 1e-13
 
@@ -106,11 +109,11 @@ def test_flux_continuous_conductance_is_the_diffusion_operator_diagonal() -> Non
 
     def owner_flux(phi_owner: float) -> jnp.ndarray:
         field, context = _single_face(phi_owner, 0.0)  # zero gradient -> no correction
-        context = eqx.tree_at(lambda c: c.properties, context, {"diffusivity": gamma})
+        context = eqx.tree_at(lambda c: c.mesh.properties, context, {"diffusivity": gamma})
         return DiffusionFlux().face_flux(field, context)[0]
 
     _, context = _single_face(0.0, 0.0)
-    cond = flux_continuous_conductance(gamma, context.geometry, context.face_cells)
+    cond = flux_continuous_conductance(gamma, context.mesh.geometry, context.mesh.face_cells)
     assert abs(float(jax.grad(owner_flux)(1.0)) - float(cond[0])) < 1e-13
 
 
@@ -180,7 +183,7 @@ class _StubFlux(FaceFluxOperator):
     value: float
 
     def face_flux(self, field, context):
-        return jnp.where(context.face_cells.interior, self.value, 0.0)
+        return jnp.where(context.mesh.face_cells.interior, self.value, 0.0)
 
 
 def test_scatter_is_conservative_and_signed() -> None:

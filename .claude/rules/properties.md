@@ -36,7 +36,9 @@ module owns them. Governed by the root `CLAUDE.md` Engineering Principles.
 - **One property per object, collected by `PropertyModel`** (decided with the author). Operators
   **name** the property they consume (`DiffusionFlux(coefficient="conductivity")` — Stage 2), so
   multi-species / multi-physics adds *entries to the model*, not *fields to a bundle* — this is what
-  retires the `FaceContext.gamma` union-bundle-regrows finding.
+  retires the `FieldContext.gamma` union-bundle-regrows finding (the context type's name has since
+  moved on too — see `aquaflux/context.py` — but the retired `gamma` field never existed under either
+  name).
 - **Values are plain scalars, not forced JAX arrays.** `Constant.value: float`; differentiate by
   passing the value as a traced argument (constructing the property inside the differentiated
   function) — the same pattern `boundary.Convective(h=…)` uses. `ZoneConstant.values` is the one
@@ -77,8 +79,9 @@ module owns them. Governed by the root `CLAUDE.md` Engineering Principles.
   Unit-tested per kind in `test_properties.py`.
 
 ## Wired in (Stage 2 — DONE)
-`FaceContext` carries the evaluated `properties: {name: (n_cells,) array}` map (not a per-coefficient
-field, so it never grows with more properties). `DiffusionFlux(coefficient=…)` names the property it
+`aquaflux.context.MeshContext` (nested inside the `FieldContext` an operator receives, as
+`context.mesh`) carries the evaluated `properties: {name: (n_cells,) array}` map (not a
+per-coefficient field, so it never grows with more properties). `DiffusionFlux(coefficient=…)` names the property it
 reads. `ResidualAssembler` takes a `PropertyModel` (+ a `coefficient` name for the Robin/Neumann BC
 `Gamma`) and evaluates it each residual. `MomentumContinuity` takes a `PropertyModel` and exposes
 `.viscosity` / `.density` (per-cell); **`rho` is now per-cell**. Retired review findings D1/F1/F5.

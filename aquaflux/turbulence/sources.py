@@ -39,7 +39,7 @@ from aquaflux.discretization import VolumeSource
 from aquaflux.vectors import dot
 
 if TYPE_CHECKING:
-    from aquaflux.discretization import FaceContext
+    from aquaflux.context import FieldContext
 
 # Runtime imports: the adaptive near-wall k treatment is evaluated inside `NearWallKClosure`, so
 # these must not be deferred into the type-checking block.
@@ -243,7 +243,7 @@ class KProduction(VolumeSource):
     explicit_limiter: bool = eqx.field(static=True, default=False)
     near_wall: NearWallKClosure | None = None
 
-    def source(self, field: jnp.ndarray, context: FaceContext) -> jnp.ndarray:
+    def source(self, field: jnp.ndarray, context: FieldContext) -> jnp.ndarray:
         cap_field = jax.lax.stop_gradient(field) if self.explicit_limiter else field
         # The Menter cap `10 β* k ω` is an upper bound on a non-negative production, so it must not be
         # allowed to go negative: at a transiently negative `k` the unclamped limit wins the `min` and
@@ -259,7 +259,7 @@ class KProduction(VolumeSource):
         limited = jnp.minimum(production, limit)
         if self.near_wall is not None:
             limited = self.near_wall.production(limited, field)
-        return limited * context.geometry.cell.volume
+        return limited * context.mesh.geometry.cell.volume
 
 
 class KDestruction(VolumeSource):
@@ -286,11 +286,11 @@ class KDestruction(VolumeSource):
     model: SSTModel
     near_wall: NearWallKClosure | None = None
 
-    def source(self, field: jnp.ndarray, context: FaceContext) -> jnp.ndarray:
+    def source(self, field: jnp.ndarray, context: FieldContext) -> jnp.ndarray:
         omega = self.omega
         if self.near_wall is not None:
             omega = self.near_wall.dissipation_rate(omega, field)
-        return -self.model.beta_star * field * omega * context.geometry.cell.volume
+        return -self.model.beta_star * field * omega * context.mesh.geometry.cell.volume
 
 
 class OmegaProduction(VolumeSource):
@@ -329,7 +329,7 @@ class OmegaProduction(VolumeSource):
     f1: jnp.ndarray
     model: SSTModel
 
-    def source(self, field: jnp.ndarray, context: FaceContext) -> jnp.ndarray:
+    def source(self, field: jnp.ndarray, context: FieldContext) -> jnp.ndarray:
         alpha = self.model.blend(self.f1, self.model.alpha_1, self.model.alpha_2)
         # α min(S², 10 β* k ω / ν_t): the cap is α/ν_t times the destruction-scale k-production cap.
         # The ν_t floor only guards the k → 0 (ν_t → 0) edge; k/ν_t stays finite there (both vanish),
@@ -352,7 +352,7 @@ class OmegaProduction(VolumeSource):
             * self.omega
             / jnp.maximum(self.nu_t, _EDDY_VISCOSITY_FLOOR)
         )
-        return alpha * jnp.minimum(self.strain_rate**2, cap) * context.geometry.cell.volume
+        return alpha * jnp.minimum(self.strain_rate**2, cap) * context.mesh.geometry.cell.volume
 
 
 class OmegaDestruction(VolumeSource):
@@ -371,9 +371,9 @@ class OmegaDestruction(VolumeSource):
     f1: jnp.ndarray
     model: SSTModel
 
-    def source(self, field: jnp.ndarray, context: FaceContext) -> jnp.ndarray:
+    def source(self, field: jnp.ndarray, context: FieldContext) -> jnp.ndarray:
         beta = self.model.blend(self.f1, self.model.beta_1, self.model.beta_2)
-        return -beta * field**2 * context.geometry.cell.volume
+        return -beta * field**2 * context.mesh.geometry.cell.volume
 
 
 class OmegaCrossDiffusion(VolumeSource):
@@ -401,7 +401,7 @@ class OmegaCrossDiffusion(VolumeSource):
     f1: jnp.ndarray
     model: SSTModel
 
-    def source(self, field: jnp.ndarray, context: FaceContext) -> jnp.ndarray:
+    def source(self, field: jnp.ndarray, context: FieldContext) -> jnp.ndarray:
         cross = (
             2.0
             * (1.0 - self.f1)
@@ -409,4 +409,4 @@ class OmegaCrossDiffusion(VolumeSource):
             * dot(self.grad_k, self.grad_omega)
             / self.omega
         )
-        return cross * context.geometry.cell.volume
+        return cross * context.mesh.geometry.cell.volume

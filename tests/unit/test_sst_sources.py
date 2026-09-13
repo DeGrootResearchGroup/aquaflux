@@ -10,7 +10,7 @@ from __future__ import annotations
 import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
-from aquaflux.discretization import FaceContext
+from aquaflux.context import FieldContext, MeshContext
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.turbulence import (
     KDestruction,
@@ -29,12 +29,11 @@ def _context_and_volume():
     """A two-cell context (only its cell volume is read by a source) and that volume."""
     mesh = structured_grid_2d(2, 1)
     geometry = mesh.geometry()
-    context = FaceContext(
-        face_cells=mesh.face_cells,
-        geometry=geometry,
+    mesh_context = MeshContext(face_cells=mesh.face_cells, geometry=geometry, properties={})
+    context = FieldContext(
+        mesh=mesh_context,
         boundary_values=jnp.zeros(mesh.n_faces),
         gradient=jnp.zeros((mesh.n_cells, mesh.dim)),
-        properties={},
     )
     return context, geometry.cell.volume
 

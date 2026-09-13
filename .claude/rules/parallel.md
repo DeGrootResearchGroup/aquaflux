@@ -94,7 +94,7 @@ Three correctness facts the builder depends on:
 ## Decided: the per-device body runs a real assembler — never a re-implementation
 
 **This is the rule to hold the line on.** An earlier version of `distributed.py` hand-built
-`FaceCellConnectivity` + `MeshGeometry` + `FaceContext` and called `DiffusionFlux` directly — a
+`FaceCellConnectivity` + `MeshGeometry` + `FieldContext` and called `DiffusionFlux` directly — a
 second implementation of `ResidualAssembler`. It drifted silently (the `MaterialModel` →
 `PropertyModel` rename broke it and no test caught it, because there was no shared code path to
 break), it hardcoded one operator, and it substituted a **pre-baked constant per-face

@@ -31,13 +31,13 @@ class _LinearSink(VolumeSource):
     """A first-order sink ``-rate * phi`` integrated over the cell volume.
 
     Exercises the two things a real source does: it depends on the solved ``field`` and it bakes
-    in its own volume quadrature by reading ``context.geometry.cell.volume``.
+    in its own volume quadrature by reading ``context.mesh.geometry.cell.volume``.
     """
 
     rate: float
 
     def source(self, field, context):
-        return -self.rate * field * context.geometry.cell.volume
+        return -self.rate * field * context.mesh.geometry.cell.volume
 
 
 def _assembler(source_operators, *, flux_operators=(), properties=None):

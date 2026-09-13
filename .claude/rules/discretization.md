@@ -26,11 +26,13 @@ Principles.
   the *physics* (the flux operators), not the `segment_sum` mechanics (the role the C++
   `FaceFluxAccumulator` plays).
 - **No monolithic gathered-state bundle.** Operators are handed a lean shared
-  `FaceContext` (`face_flux.py`) — `{face_cells, geometry, boundary_values, gradient, properties}`,
-  only the cross-operator or expensive-to-form-once inputs (the reconstructed gradient is a solve, so
-  it lives here, formed once; `properties` is the evaluated `{name: (n_cells,) array}` property map) —
-  and **each operator gathers its own owner/neighbour fields** from it. `DiffusionFlux(coefficient=…)`
-  names the property it reads (`context.properties[coefficient]`, default `"diffusivity"`;
+  `FieldContext` (`aquaflux/context.py`, issue #280 step 4 — **hoisted out of this package**, not
+  defined here) — a `MeshContext` (`{face_cells, geometry, properties}`, shared across every field
+  evaluated in one residual) wrapped with one field's own `boundary_values`/`gradient`, only the
+  cross-operator or expensive-to-form-once inputs (the reconstructed gradient is a solve, so it lives
+  here, formed once; `properties` is the evaluated `{name: (n_cells,) array}` property map) — and
+  **each operator gathers its own owner/neighbour fields** from it. `DiffusionFlux(coefficient=…)`
+  names the property it reads (`context.mesh.properties[coefficient]`, default `"diffusivity"`;
   `"viscosity"` for momentum), so adding coefficients is a `PropertyModel` entry, never a context
   field — see `.claude/rules/properties.md`. `ResidualAssembler.build` takes a `PropertyModel` (not a
   raw `gamma` array).
@@ -53,6 +55,14 @@ Principles.
   Both checks run before construction, so a mis-named coefficient or an ungradiented `LimitedUpwind`
   is a build-time `ValueError`, never a `KeyError` (or a silently-worse answer) inside a jitted
   residual.
+  **Why the context moved (binding — do not move it back into this package).** `FieldContext` lives
+  below `schemes/` and `boundary/`, importing only `aquaflux.mesh`, precisely so those two packages
+  could eventually consume it too without a cycle (`discretization` already imports both) — the
+  placement defect issue #280 named ("the context lives in `discretization`, the layers below it
+  cannot take it"). `schemes/limiter.py`'s `Limiter.limit(field, gradient, face_cells, geometry)` and
+  `schemes/gradient.py`'s `GradientScheme.gradients(...)` still take loose arrays rather than this
+  object as of this change — unifying those signatures onto it is tracked separately (issue #280's
+  remaining sequence), not done here.
 - The per-operator closures for Milestone 0: **diffusion** (the DeGroot–Straatman
   non-orthogonal-corrected flux) and the **transient** term (BDF1 at step 1, BDF2 after).
 - The `VolumeSource` seam (zero for pure diffusion, but wired) — this is where turbulence
@@ -65,13 +75,14 @@ Principles.
 ## Status — BUILT (Milestone-0 Stage A)
 - **`face_flux.py` — BUILT.** The face-flux contract, shared by every operator (so `diffusion.py`
   and `advection.py` depend on it, not on each other): `FaceFluxOperator` (the `face_flux(field,
-  context)` strategy interface) + `FaceContext` (the shared per-face inputs; see Responsibility).
-  `FaceContext.properties` is a `Mapping[str, jnp.ndarray]` carrying the assembler's whole evaluated
-  property map (density, viscosity, conductivity, …), and each operator reads the property it names.
-  That is deliberately **one** context field however many properties exist, so adding a property never
-  changes the context's shape. Keep it single-sourced on the assembler, not baked into `DiffusionFlux`
-  as operator config. (There is no `gamma` field; that is the name to look for if a stale reference
-  turns up.)
+  context)` strategy interface). `FieldContext` itself (the shared per-field inputs) is **not**
+  defined here any more — see `aquaflux/context.py` and the Responsibility section above.
+  `FieldContext.mesh.properties` is a `Mapping[str, jnp.ndarray]` carrying the assembler's whole
+  evaluated property map (density, viscosity, conductivity, …), and each operator reads the property
+  it names. That is deliberately **one** context field however many properties exist, so adding a
+  property never changes the context's shape. Keep it single-sourced on the assembler, not baked into
+  `DiffusionFlux` as operator config. (There is no `gamma` field; that is the name to look for if a
+  stale reference turns up.)
 - **`diffusion.py` — BUILT.** `DiffusionFlux` (a `FaceFluxOperator` that gathers phi/grad/gamma/x
   from the context). Its optional **`boundary_coefficient`** field (`(n_faces,)`, default `None`)
   overrides the owner-cell `Gamma` **on boundary faces only** — a surface whose effective transport
@@ -117,14 +128,14 @@ Principles.
   (`boundary.resolve(mesh.face_patches)`, off the jit path) and stores as a single `boundary` field)
   builds the **context**: it reconstructs cell gradients once (injected `GradientScheme`, optional —
   `None` on orthogonal grids where the correction vanishes), evaluates the per-patch boundary
-  closures, evaluates the `PropertyModel`, and packs a `FaceContext`. **`CellBalance`** then
+  closures, evaluates the `PropertyModel`, and packs a `FieldContext`. **`CellBalance`** then
   assembles the **balance** from that context: sum the injected `FaceFluxOperator`s,
   `segment_sum`-scatter (owner `+`, interior neighbour `−`), subtract the `VolumeSource`s, add the
   transient. `R = accumulation − transport`. The assembler holds a `CellBalance` (field `balance`)
   and delegates, so `build`/`residual` are unchanged for a scalar equation.
   - **`CellBalance` stores ONLY its operators** — `flux_operators`, `source_operators`, `transient`.
     The connectivity, geometry, boundary values, gradient and properties all arrive on the
-    `FaceContext` it is handed, exactly as its operators gather from it. So it needs no mesh to
+    `FieldContext` it is handed, exactly as its operators gather from it. So it needs no mesh to
     construct and no `BoundaryConditions` to test (`test_cell_balance.py` hands it a hand-made
     context), and it does not duplicate the geometry leaves the assembler already holds.
   - **Why split:** the coupled flow needs the balance but *cannot* share the context step.
@@ -201,7 +212,7 @@ Principles.
 - **`source.py` — BUILT.** `VolumeSource` (ABC, `source(field, context) -> (n_cells,)`): a
   volumetric term produced/consumed *in* the cell rather than across faces (reaction, turbulence
   production/dissipation). Returns the volume-integrated source (production positive; bakes in its
-  own volume). Reads cell-oriented fields from the shared `FaceContext` (volume, gradient,
+  own volume). Reads cell-oriented fields from the shared `FieldContext` (volume, gradient,
   properties) and holds any frozen coupling field as constructor state, like `AdvectionFlux.mass_flux`.
   `ResidualAssembler.build(..., source_operators=())` subtracts each; empty ⇒ unchanged. Verified
   (`test_source.py`): correct sign, summation, additive composition with the flux, volume

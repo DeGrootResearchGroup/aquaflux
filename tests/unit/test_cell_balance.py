@@ -1,7 +1,7 @@
 """Unit tests for :class:`~aquaflux.discretization.CellBalance`, the operator half of a residual.
 
 The point of the class is that it needs nothing but its operators and a
-:class:`~aquaflux.discretization.FaceContext`: no boundary conditions, no property model, no
+:class:`~aquaflux.context.FieldContext`: no boundary conditions, no property model, no
 gradient scheme, and no assembler. So every test here hands it a context built by hand -- which is
 also the seam a coupled system uses, since the momentum block forms its own context and drives a
 balance directly.
@@ -16,9 +16,9 @@ from __future__ import annotations
 import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
 import pytest
+from aquaflux.context import FieldContext, MeshContext
 from aquaflux.discretization import (
     CellBalance,
-    FaceContext,
     FaceFluxOperator,
     TransientTerm,
     VolumeSource,
@@ -32,7 +32,7 @@ class _ConstantFlux(FaceFluxOperator):
     value: float
 
     def face_flux(self, field, context):
-        return jnp.full(context.face_cells.n_faces, self.value, dtype=field.dtype)
+        return jnp.full(context.mesh.face_cells.n_faces, self.value, dtype=field.dtype)
 
 
 class _ConstantSource(VolumeSource):
@@ -49,12 +49,11 @@ def two_cells():
     """A two-cell grid and a context over it, with no boundary values and a zero gradient."""
     mesh = structured_grid_2d(2, 1)
     geometry = mesh.geometry()
-    context = FaceContext(
-        face_cells=mesh.face_cells,
-        geometry=geometry,
+    mesh_context = MeshContext(face_cells=mesh.face_cells, geometry=geometry, properties={})
+    context = FieldContext(
+        mesh=mesh_context,
         boundary_values=jnp.zeros(mesh.n_faces),
         gradient=jnp.zeros((mesh.n_cells, mesh.dim)),
-        properties={},
     )
     return mesh, context
 
@@ -110,7 +109,7 @@ def test_the_transient_reads_cell_volumes_from_the_context(two_cells) -> None:
 
     residual = balance.residual(phi, context, phi_old, phi_old, dt=0.5, first_step=True)
 
-    assert jnp.allclose(residual, context.geometry.cell.volume * (2.0 - 1.0) / 0.5)
+    assert jnp.allclose(residual, context.mesh.geometry.cell.volume * (2.0 - 1.0) / 0.5)
 
 
 def test_an_empty_balance_is_zero(two_cells) -> None:

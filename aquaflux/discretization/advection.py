@@ -31,9 +31,10 @@ import jax.numpy as jnp
 
 from aquaflux.vectors import dot
 
-from .face_flux import FaceContext, FaceFluxOperator
+from .face_flux import FaceFluxOperator
 
 if TYPE_CHECKING:
+    from aquaflux.context import FieldContext
     from aquaflux.mesh import FaceCellConnectivity
     from aquaflux.schemes import Limiter
 
@@ -70,7 +71,7 @@ class AdvectionScheme(eqx.Module):
     """Strategy interface: reconstruct the advected face value ``phi_f`` from cell state.
 
     A concrete scheme returns one value per face given the transported cell field, the shared
-    :class:`~aquaflux.discretization.face_flux.FaceContext`, and the owner-outward face mass flux
+    :class:`~aquaflux.discretization.face_flux.FieldContext`, and the owner-outward face mass flux
     (whose sign is the upwind direction). It gathers whatever owner/neighbour fields it needs from
     the context.
     """
@@ -79,7 +80,7 @@ class AdvectionScheme(eqx.Module):
     def face_value(
         self,
         field: jnp.ndarray,
-        context: FaceContext,
+        context: FieldContext,
         mass_flux: jnp.ndarray,
     ) -> jnp.ndarray:
         """Advected face values ``phi_f``, shape ``(n_faces,)``.
@@ -88,7 +89,7 @@ class AdvectionScheme(eqx.Module):
         ----------
         field : jnp.ndarray
             The transported cell field, shape ``(n_cells,)``.
-        context : FaceContext
+        context : FieldContext
             The shared per-face inputs (connectivity, geometry, gradient, boundary values).
         mass_flux : jnp.ndarray
             Owner-outward face mass flux ``mdot_f``, shape ``(n_faces,)``; its sign selects the
@@ -114,7 +115,7 @@ class FirstOrderUpwind(AdvectionScheme):
     """
 
     def face_value(self, field, context, mass_flux):
-        fc = context.face_cells
+        fc = context.mesh.face_cells
         outflow = mass_flux >= 0.0
         interior_value = _upwind_value(field, outflow, fc)
         # Boundary: outflow carries the owner value; inflow takes the weak boundary value.
@@ -149,14 +150,14 @@ class LimitedUpwind(AdvectionScheme):
         return True
 
     def face_value(self, field, context, mass_flux):
-        fc = context.face_cells
+        fc = context.mesh.face_cells
         gradient = context.gradient
-        x_cell = context.geometry.cell.centroid
+        x_cell = context.mesh.geometry.cell.centroid
 
         if self.limiter is None:
             psi = jnp.ones(field.shape[0], dtype=field.dtype)
         else:
-            psi = self.limiter.limit(field, gradient, fc, context.geometry)
+            psi = self.limiter.limit(field, gradient, fc, context.mesh.geometry)
 
         outflow = mass_flux >= 0.0
         phi_upwind = _upwind_value(field, outflow, fc)
@@ -166,7 +167,7 @@ class LimitedUpwind(AdvectionScheme):
         # image across a seam, so the reconstruction offset x_ip - x_upwind is the physical gap.
         x_upwind = jnp.where(outflow[:, None], x_cell[fc.owner], fc.neighbour_centroid(x_cell))
         reconstruction = phi_upwind + psi_upwind * dot(
-            grad_upwind, context.geometry.face.centroid - x_upwind
+            grad_upwind, context.mesh.geometry.face.centroid - x_upwind
         )
         # Interior and boundary-outflow use the upwind reconstruction; boundary-inflow the weak value.
         return jnp.where(fc.interior | outflow, reconstruction, context.boundary_values)
@@ -196,7 +197,7 @@ class AdvectionFlux(FaceFluxOperator):
     mass_flux: jnp.ndarray
     scheme: AdvectionScheme
 
-    def face_flux(self, field: jnp.ndarray, context: FaceContext) -> jnp.ndarray:
+    def face_flux(self, field: jnp.ndarray, context: FieldContext) -> jnp.ndarray:
         phi_face = self.scheme.face_value(field, context, self.mass_flux)
         return self.mass_flux * phi_face
 

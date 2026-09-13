@@ -34,11 +34,11 @@ import jax
 import jax.numpy as jnp
 
 from aquaflux.boundary import BoundaryConditions
+from aquaflux.context import FieldContext, MeshContext
 from aquaflux.discretization import (
     AdvectionFlux,
     CellBalance,
     DiffusionFlux,
-    FaceContext,
     FaceFluxOperator,
     FixedValueCells,
 )
@@ -142,7 +142,7 @@ class PressureForce(FaceFluxOperator):
     face_pressure: jnp.ndarray
     component: int = eqx.field(static=True)
 
-    def face_flux(self, field: jnp.ndarray, context: FaceContext) -> jnp.ndarray:
+    def face_flux(self, field: jnp.ndarray, context: FieldContext) -> jnp.ndarray:
         """Owner-outward pressure force per face, shape ``(n_faces,)``.
 
         Parameters
@@ -150,10 +150,10 @@ class PressureForce(FaceFluxOperator):
         field : jnp.ndarray
             The transported velocity component, shape ``(n_cells,)``. Unused -- see the class
             docstring.
-        context : FaceContext
+        context : FieldContext
             The shared per-face inputs; the face normal and area are gathered from its geometry.
         """
-        face = context.geometry.face
+        face = context.mesh.geometry.face
         return self.face_pressure * face.normal[:, self.component] * face.area
 
 
@@ -933,15 +933,20 @@ class MomentumContinuity(eqx.Module):
             if self.advection_scheme is not None
             else ()
         )
+        # One mesh context, shared by every component's view -- the connectivity, geometry and
+        # properties do not vary with i, so they are formed once rather than once per component.
+        mesh_context = MeshContext(
+            face_cells=self.mesh.face_cells,
+            geometry=self.geometry,
+            properties={"viscosity": viscosity},
+        )
         columns = []
         for i in range(self.mesh.dim):
             component = velocity[:, i]
-            context = FaceContext(
-                face_cells=self.mesh.face_cells,
-                geometry=self.geometry,
+            context = FieldContext(
+                mesh=mesh_context,
                 boundary_values=kinematic.boundary_velocity[:, i],
                 gradient=kinematic.gradient[:, i],
-                properties={"viscosity": viscosity},
             )
             # A balance sums its operators in tuple order, and floating-point addition is not
             # associative, so viscous-pressure-advective is the arithmetic, not just the reading
