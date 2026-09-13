@@ -557,6 +557,15 @@ Engineering Principles.
   handed in as a frozen array (`reference_mdot`), so the strategy `build` stays assembler-free and
   unit-testable from mesh primitives alone. When adding a strategy, extend/consume the matching bundle;
   do **not** thread the assembler into a strategy.
+- **The mesh connectivity + multigrid knobs `_build_schur`/`_build_velocity_block` share are ONE
+  resolved value, `_StrategyInputs`, not a repeated 8-value positional bundle (issue #272, fixed
+  2026-09-12).** `BlockPreconditioner.build` resolves `owner_e`/`nb_e`/`interior`/`n_cells`/`v_cycles`/
+  `strength_threshold`/`assembler`/`reference_state` once and used to fan them out positionally into
+  both helpers' ~10-12-argument calls — a `NamedTuple` (plain host data, live only for one `build()`
+  call, so it needs none of `_SchurGeometry`/`_VelocityGeometry`'s pytree machinery) now carries the
+  shared eight, cutting each call to the bundle plus its own 2-4 arguments. Pure repackaging, no
+  behaviour change — the two helpers still call the same strategy `.build()`s with the same values in
+  the same order.
 - **Outer block preconditioner — Stage 1 (SIMPLE block-diagonal) was BUILT then REMOVED as superseded.**
   The original composition was a `DampedJacobiSchur` (a fixed damped-Jacobi sweep on the compact
   Rhie–Chow **pressure Laplacian** `pressure_schur_laplacian`, coefficient `c_f = ρ(V/a_P)_f A_f/(d·n)_f`)
