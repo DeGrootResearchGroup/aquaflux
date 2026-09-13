@@ -63,8 +63,13 @@ cfd/                                  # repo root
 │   │   ├── structured.py             #   structured_grid_2d() / structured_grid_3d() / graded_nodes(): clean orthogonal quad/hex grids (interior-node skew for order studies lives in tests/support/meshes.py)
 │   │   └── collapse.py               #   collapse_extruded_direction(): one-cell-thick extruded 3D mesh → genuine 2D Mesh (used by the OpenFOAM reader for empty-patch 2D cases)
 │   │
-│   ├── io/                           # mesh import (file formats → Mesh); depends on mesh, never the reverse
+│   ├── io/                           # mesh import (file formats → Mesh) and field output; depends on mesh, never the reverse
 │   │   ├── reader.py                 #   MeshReader(eqx.Module) strategy: read() → Mesh (format-agnostic seam)
+│   │   ├── cell_fields.py            #   as_cell_values(): the conversion + per-cell length check every field writer makes
+│   │   ├── vtk/                      #   VTK XML output: write_vtu() (one frame) / write_pvd() (transient collection)
+│   │   │   ├── topology.py           #     Mesh → VtkCells: face-based storage → arbitrary polygon/polyhedron connectivity, each face wound outward from the cell listing it (pure numpy)
+│   │   │   ├── xml.py                #     VtkCells + cell fields → .vtu / .pvd document parts; raw appended binary by default, ASCII on request (pure)
+│   │   │   └── writer.py             #     write_vtu / write_pvd: the only file I/O
 │   │   └── openfoam/                 #   OpenFOAM polyMesh reader (ASCII): read_openfoam() / OpenFOAMReader
 │   │       ├── records.py            #     FoamPatch / CellZone / PolyMeshData value records
 │   │       ├── foamfile.py           #     FoamFile envelope: comment strip, header dict, ASCII/binary detection; read_foam_body() is the one file->body entry

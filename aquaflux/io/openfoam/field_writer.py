@@ -35,6 +35,8 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 
+from aquaflux.io.cell_fields import as_cell_values
+
 from .foamfile import read_foam_body, read_foam_file, resolve_polymesh_dir
 from .grammar import parse_vector_list, split_boundary_blocks
 
@@ -496,11 +498,7 @@ def write_openfoam_time(
     destination = case_dir / str(time)
     prepared = []
     for name, values in fields.items():
-        array = np.asarray(values, dtype=float)
-        if array.shape[0] != mesh.n_cells:
-            raise ValueError(
-                f"field '{name}' has {array.shape[0]} values but the mesh has {mesh.n_cells} cells"
-            )
+        array = as_cell_values(name, values, mesh.n_cells)
         template_path = template_dir / name
         if not template_path.is_file():
             raise FileNotFoundError(
