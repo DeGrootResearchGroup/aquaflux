@@ -14,7 +14,7 @@ from __future__ import annotations
 import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
 import pytest
-from aquaflux.boundary import BoundaryConditions, ZeroGradient
+from aquaflux.boundary import BoundaryConditions, Convective, Dirichlet, Neumann, ZeroGradient
 from aquaflux.discretization import (
     AdvectionFlux,
     DiffusionFlux,
@@ -40,17 +40,27 @@ class _NamedPropertySource(VolumeSource):
         return context.properties[self.name]
 
 
-def _build(*, flux_operators, properties=None, gradient_scheme=None, source_operators=()):
+def _build(
+    *,
+    flux_operators,
+    properties=None,
+    gradient_scheme=None,
+    source_operators=(),
+    boundary=None,
+    coefficient="diffusivity",
+):
     mesh = structured_grid_2d(2, 1)
     properties = PropertyModel({}) if properties is None else properties
+    boundary = BoundaryConditions({"boundary": ZeroGradient()}) if boundary is None else boundary
     return ResidualAssembler.build(
         mesh,
         mesh.geometry(),
         properties,
         flux_operators,
-        BoundaryConditions({"boundary": ZeroGradient()}),
+        boundary,
         source_operators=source_operators,
         gradient_scheme=gradient_scheme,
+        coefficient=coefficient,
     )
 
 
@@ -95,6 +105,73 @@ def test_build_lists_every_missing_property_from_every_operator() -> None:
         )
     message = str(excinfo.value)
     assert "conductivity" in message and "reaction_rate" in message
+
+
+# --- boundary-closure requires_coefficient() (#360) ------------------------------------
+
+
+def test_build_raises_when_a_neumann_closure_needs_an_unset_coefficient() -> None:
+    with pytest.raises(ValueError, match="diffusivity"):
+        _build(
+            flux_operators=(),
+            boundary=BoundaryConditions({"boundary": Neumann(flux=2.0)}),
+            properties=PropertyModel({}),
+        )
+
+
+def test_build_raises_when_a_convective_closure_needs_an_unset_coefficient() -> None:
+    with pytest.raises(ValueError, match="diffusivity"):
+        _build(
+            flux_operators=(),
+            boundary=BoundaryConditions({"boundary": Convective(h=10.0, t_inf=1.0)}),
+            properties=PropertyModel({}),
+        )
+
+
+def test_build_succeeds_when_a_flux_type_closure_has_its_coefficient() -> None:
+    _build(
+        flux_operators=(),
+        boundary=BoundaryConditions({"boundary": Neumann(flux=2.0)}),
+        properties=PropertyModel({"diffusivity": Constant(1.0)}),
+    )  # no raise
+
+
+def test_build_does_not_require_a_coefficient_for_value_or_zero_gradient_closures() -> None:
+    """The documented pure-advection case: no flux-type closure, so the fallback stays legal."""
+    _build(
+        flux_operators=(),
+        boundary=BoundaryConditions({"boundary": ZeroGradient()}),
+        properties=PropertyModel({}),
+    )  # no raise
+    _build(
+        flux_operators=(),
+        boundary=BoundaryConditions({"boundary": Dirichlet(1.0)}),
+        properties=PropertyModel({}),
+    )  # no raise
+
+
+def test_a_mistyped_coefficient_name_is_now_caught_at_build_rather_than_NaNing() -> None:
+    """Regression for #360's own reproduction: a typo'd ``coefficient=`` used to build cleanly and
+    NaN (a divide by the zero fallback) inside the residual. It must now raise at build."""
+    with pytest.raises(ValueError, match="difusivity"):
+        _build(
+            flux_operators=(DiffusionFlux(coefficient="diffusivity"),),
+            boundary=BoundaryConditions({"boundary": Convective(h=10.0, t_inf=1.0)}),
+            properties=PropertyModel({"diffusivity": Constant(5.0)}),
+            coefficient="difusivity",
+        )
+
+
+def test_the_correctly_named_case_still_evaluates_to_a_finite_residual() -> None:
+    """Same configuration as the regression above with the name fixed: the fix only adds a
+    build-time check -- the boundary Gamma lookup itself is untouched."""
+    asm = _build(
+        flux_operators=(DiffusionFlux(coefficient="diffusivity"),),
+        boundary=BoundaryConditions({"boundary": Convective(h=10.0, t_inf=1.0)}),
+        properties=PropertyModel({"diffusivity": Constant(5.0)}),
+    )
+    residual = asm.residual(jnp.array([1.0, 3.0]))
+    assert bool(jnp.all(jnp.isfinite(residual)))
 
 
 # --- uses_gradient() --------------------------------------------------------------------

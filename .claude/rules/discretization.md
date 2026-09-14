@@ -55,6 +55,14 @@ Principles.
   Both checks run before construction, so a mis-named coefficient or an ungradiented `LimitedUpwind`
   is a build-time `ValueError`, never a `KeyError` (or a silently-worse answer) inside a jitted
   residual.
+  **A third self-describing check closes the same gap for the boundary side (binding, #360):**
+  `BoundaryCondition.requires_coefficient() -> bool` (default `False`, `Neumann`/`Convective`
+  override to `True` — see `.claude/rules/boundary.md`) lets `build` union a flux-type closure's need
+  for the assembler's `coefficient` into the same `properties.require(...)` call `requires()` already
+  drives. Before this, a mistyped `coefficient=` on the assembler read a zero Gamma fallback and
+  NaN'd (a divide) inside the residual rather than failing at build — the same failure shape
+  `requires()`/`uses_gradient()` exist to prevent, just on the boundary closures rather than the
+  flux/source operators.
   **Why the context moved (binding — do not move it back into this package).** `FieldContext` lives
   below `schemes/` and `boundary/`, importing only `aquaflux.mesh`, precisely so those two packages
   could consume it too without a cycle (`discretization` already imports both) — the placement defect

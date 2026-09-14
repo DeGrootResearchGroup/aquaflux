@@ -154,6 +154,21 @@ class BoundaryCondition(eqx.Module):
     patch, rather than by a separate, parallel boundary hierarchy.
     """
 
+    def requires_coefficient(self) -> bool:
+        """Whether this closure reads the assembler's diffusion coefficient as ``gamma_owner``.
+
+        Default ``False``. A closure that needs it declares so here rather than the assembler
+        type-testing for ``Neumann``/``Convective``: the requirement is a property of the closure,
+        parameterized by a name the *assembler* owns (its ``coefficient``), not one the closure
+        holds itself -- the same shape as
+        :meth:`~aquaflux.discretization.face_flux.FaceFluxOperator.requires`.
+        :meth:`~aquaflux.discretization.residual.ResidualAssembler.build` checks this against every
+        closure in the boundary set and adds the assembler's ``coefficient`` to what it requires the
+        properties to supply, so a closure whose coefficient is unset fails at build time rather
+        than reading a zero fallback and NaN-ing (a divide by zero) inside the residual.
+        """
+        return False
+
     @abc.abstractmethod
     def face_value(
         self,
@@ -244,6 +259,9 @@ class Neumann(BoundaryCondition):
 
     flux: jnp.ndarray = eqx.field(converter=as_float_leaf)
 
+    def requires_coefficient(self) -> bool:
+        return True
+
     def face_value(self, phi_owner, grad_owner, d, normal, gamma_owner, face_centroid):
         d_normal = dot(d, normal)
         corr = _tangential_correction(grad_owner, d, normal)
@@ -270,6 +288,9 @@ class Convective(BoundaryCondition):
 
     h: jnp.ndarray = eqx.field(converter=as_float_leaf)
     t_inf: jnp.ndarray = eqx.field(converter=as_float_leaf)
+
+    def requires_coefficient(self) -> bool:
+        return True
 
     def face_value(self, phi_owner, grad_owner, d, normal, gamma_owner, face_centroid):
         d_normal = dot(d, normal)

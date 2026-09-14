@@ -224,8 +224,10 @@ class ResidualAssembler(eqx.Module):
         properties : PropertyModel
             The named per-cell physical properties. Each operator's own
             :meth:`~aquaflux.discretization.face_flux.FaceFluxOperator.requires` names what it reads
-            (the diffusion term its coefficient); the flux-type boundary closures read
-            ``coefficient``. Checked against the operators actually given -- see ``Raises``.
+            (the diffusion term its coefficient); a flux-type boundary closure in ``boundary``
+            declares it reads ``coefficient`` via :meth:`~aquaflux.boundary.conditions.
+            BoundaryCondition.requires_coefficient`. Checked against the operators and closures
+            actually given -- see ``Raises``.
         flux_operators : tuple of FaceFluxOperator
             Face-flux operators (e.g. one :class:`DiffusionFlux`). They are summed in the order
             given, so the order is part of the arithmetic.
@@ -254,13 +256,18 @@ class ResidualAssembler(eqx.Module):
         ------
         ValueError
             If an operator names a property (:meth:`~aquaflux.discretization.face_flux.
-            FaceFluxOperator.requires`) that ``properties`` does not supply, or if a flux operator
-            needs a reconstructed gradient (:meth:`~aquaflux.discretization.face_flux.
-            FaceFluxOperator.uses_gradient`) but ``gradient_scheme`` is ``None`` -- both would
-            otherwise surface only inside a jitted residual evaluation, as a bare ``KeyError`` or a
-            silently degraded (1st-order) result respectively.
+            FaceFluxOperator.requires`) that ``properties`` does not supply, if a flux-type boundary
+            closure needs ``coefficient`` (:meth:`~aquaflux.boundary.conditions.BoundaryCondition.
+            requires_coefficient`) and ``properties`` does not supply it, or if a flux operator needs
+            a reconstructed gradient (:meth:`~aquaflux.discretization.face_flux.
+            FaceFluxOperator.uses_gradient`) but ``gradient_scheme`` is ``None`` -- all three would
+            otherwise surface only inside a jitted residual evaluation, as a bare ``KeyError``, a
+            non-finite result (a divide by the coefficient's zero fallback), or a silently degraded
+            (1st-order) result respectively.
         """
         needed = {name for op in (*flux_operators, *source_operators) for name in op.requires()}
+        if any(bc.requires_coefficient() for bc in boundary.conditions.values()):
+            needed.add(coefficient)
         if needed:
             properties.require(*sorted(needed))
         if gradient_scheme is None:
@@ -312,8 +319,10 @@ class ResidualAssembler(eqx.Module):
             ``properties[self.coefficient]`` as ``Gamma``.
         """
         centroid = self.geometry.cell.centroid
-        # The diffusion coefficient for the flux-type (Robin/Neumann) closures; zeros when the model
-        # has no such property (a pure-advection problem with only value/inflow BCs ignores it).
+        # The diffusion coefficient for the flux-type (Robin/Neumann) closures. The zero fallback is
+        # only ever read by a closure that does not use it (a pure-advection problem with only
+        # value/inflow BCs): `build` requires `coefficient` from `properties` whenever any closure's
+        # `requires_coefficient()` is True, so a flux-type closure reaches this with a real Gamma.
         gamma = properties.get(self.coefficient, jnp.zeros(self.mesh.n_cells, dtype=phi.dtype))
 
         def closure(bc, faces, owner):
