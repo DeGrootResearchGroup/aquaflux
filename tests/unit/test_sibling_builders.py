@@ -208,6 +208,83 @@ class Preconditioner:
 """
 
 
+#: The drifted pair again, with one builder reaching the shared tail through a STRATEGY OBJECT it
+#: opens: ``session = open_session(...)`` then ``return session._build(...)``. ``_build`` is defined on
+#: three classes, so the name alone is ambiguous -- and one of the three, ``Unrelated``, builds a
+#: different class entirely. The two sessions then reach the tail by the two other shapes a method
+#: body takes: ``self._step(...)`` (also defined on ``Unrelated``) and a local bound to a call and
+#: returned. ``build_noise`` is the precision check: it builds only what ``Unrelated`` builds, so it
+#: pairs with ``build_one`` exactly when resolution unions every ``_build`` instead of following the
+#: receiver.
+_SESSION_RECEIVER = {
+    "steps.py": """
+class Step:
+    def __init__(self, policy, a=0, b=0, c=0, d=0, e=0, f=0, slow=None):
+        pass
+
+
+class Noise:
+    def __init__(self):
+        pass
+
+
+def _tail(policy, *, a=0, b=0, c=0, d=0, e=0, f=0, slow=None):
+    return Step(policy, a=a, b=b, c=c, d=d, e=e, f=f, slow=slow)
+""",
+    "sessions.py": """
+from .steps import Noise, _tail
+
+
+class _OneSession:
+    def _build(self, policy, fields):
+        return self._finish(self._step(policy, fields))
+
+    def _step(self, policy, fields):
+        return _tail(policy, **fields)
+
+    def _finish(self, step):
+        return step
+
+
+class _OtherSession:
+    def _build(self, policy, fields):
+        step = _tail(policy, **fields)
+        return step if fields else None
+
+
+class Unrelated:
+    def _build(self):
+        return Noise()
+
+    def _step(self):
+        return Noise()
+
+
+def open_session(kind):
+    if kind:
+        return _OneSession()
+    return _OtherSession()
+""",
+    "builders.py": """
+from .sessions import open_session
+from .steps import Noise, _tail
+
+
+def build_one(policy, *, kind=None, a=0, b=0, c=0, d=0, e=0, f=0):
+    session = open_session(kind)
+    return session._build(policy, dict(a=a, b=b, c=c, d=d, e=e, f=f))
+
+
+def build_two(policy, *, a=0, b=0, c=0, d=0, e=0, f=0, slow=None):
+    return _tail(policy, a=a, b=b, c=c, d=d, e=e, f=f, slow=slow)
+
+
+def build_noise(policy, *, a=0, b=0, c=0, d=0, e=0, f=0):
+    return Noise()
+""",
+}
+
+
 def _run(source: str, tmp_path: Path) -> str:
     package = tmp_path / "pkg"
     package.mkdir()
@@ -340,6 +417,25 @@ def test_it_reaches_a_classmethod_factory_no_naming_convention_covers(tmp_path: 
     assert "'slow'" in out, "the drifted keyword is the actionable half of the report"
 
 
+def test_it_follows_a_method_through_a_receiver_whose_class_is_knowable(tmp_path: Path) -> None:
+    """A builder that opens a strategy object and builds through it is still a builder.
+
+    ``_build`` is defined on several classes, and a name defined more than once was never followed, so
+    a builder written this way was credited with constructing nothing and left the report entirely --
+    the coupled march's one remaining builder did exactly that, reading as a clean tree. The method is
+    resolved on the classes ``open_session`` returns, and on no other class that defines ``_build``.
+    """
+    out = _run_package(_SESSION_RECEIVER, tmp_path)
+    assert "build_one" in out and "build_two" in out, (
+        f"a builder reaching its tail through an opened session dropped out of the report:\n{out}"
+    )
+    assert "'slow'" in out, "the drifted keyword is the actionable half of the report"
+    assert "build_noise" not in out, (
+        f"the receiver's method was resolved on every class defining it, not on the receiver:\n{out}"
+    )
+    assert "1 sibling-builder pair" in out, out
+
+
 @pytest.mark.skipif(not TOOL.exists(), reason="the tool is part of the repository, not the package")
 def test_the_package_report_still_reaches_the_coupled_builders(tmp_path: Path) -> None:
     """Run it where it matters, and check it has not gone blind to the family it exists for.
@@ -348,9 +444,10 @@ def test_the_package_report_still_reaches_the_coupled_builders(tmp_path: Path) -
     made a report into a gate — which is wrong twice over: whether a pair is one builder or two
     genuinely different methods is a judgement no script can make, and a green gate here was
     indistinguishable from a check that had stopped seeing anything at all. What is worth pinning is
-    that the coupled march's builders, which reach their shared step through a private tail, are still
-    *visible* to it. If they are ever genuinely unified into one builder, updating this is part of that
-    change.
+    that the coupled march's builders are still *visible* to it. There are two: ``coupled_step``, which
+    reaches its step through a preconditioner session's ``_build`` -- a method several classes define --
+    and the bordered mass-flow builder, which shares nearly all of its surface. The tool was once blind
+    to the first, and the family dropped out of the report entirely.
     """
     result = subprocess.run(
         [sys.executable, str(TOOL)],
@@ -363,15 +460,10 @@ def test_the_package_report_still_reaches_the_coupled_builders(tmp_path: Path) -
     assert "sibling-builder pair(s)" in result.stdout, (
         f"the report found no pairs at all, which is a check that has stopped seeing:\n{result.stdout}"
     )
-    # ⚠️ A KNOWN BLIND SPOT, pinned so its silence is not read as a clean tree. The coupled march's
-    # four builders were unified into `coupled_step`, which reaches its step through a preconditioner
-    # session's `_build` -- a method name defined on more than one class, which this tool never follows
-    # -- so `coupled_step` is credited with building nothing and pairs with no sibling, including the
-    # bordered mass-flow builder that shares nearly all of its surface. Those two surfaces are pinned
-    # instead by `test_coupled_rans.py::test_every_continuation_builder_installs_the_same_globalization`.
-    # If this assertion ever fails, the tool has learned to see the pair (#392): restore the stronger
-    # check.
-    assert "coupled_step" not in result.stdout, (
-        "the report now reaches coupled_step -- replace this blind-spot pin with an assertion that it "
-        f"pairs with mass_flow_coupled_continuation:\n{result.stdout}"
+    pairs = result.stdout.split("\n\n")
+    assert any(
+        " coupled_step\n" in pair and " mass_flow_coupled_continuation\n" in pair for pair in pairs
+    ), (
+        "the coupled march's two builders are not reported as a pair, so the tool has stopped seeing "
+        f"the family it exists for:\n{result.stdout}"
     )

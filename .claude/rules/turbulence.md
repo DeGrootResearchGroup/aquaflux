@@ -327,14 +327,15 @@ Many entries below are dated history written against the old API. Read them thro
       Byte-identical wherever `jacobian_production_viscosity=False`.
     - **`_BlockSession.rebind` is a no-op** — target-viscosity behaviour on the ramp stays as it was
       (Q2, #386).
-    - **⚠️ `tools/sibling_builders.py` CANNOT SEE `coupled_step` (checked 2026-09-14).** It reaches its
-      tail through `session._build(...)`, and `_build` is defined on both sessions — an ambiguous name the
-      tool never follows — so `coupled_step` is credited with building nothing and appears in no pair,
-      while the four old builders still pair with each other. Its silence about `coupled_step` is
-      blindness, not a clean report. Since the old builders were deleted the coupled family is absent
-      from the report entirely; `test_sibling_builders.py` now pins the blind spot (it fails if the tool
-      starts seeing `coupled_step`), the two surfaces are pinned by
-      `test_every_continuation_builder_installs_the_same_globalization`, and the tool fix is #392.
+    - **`tools/sibling_builders.py` reports `coupled_step` beside `mass_flow_coupled_continuation`
+      (fixed 2026-09-14, #392).** It was blind to `coupled_step` for the life of #371 — the call
+      `session._build(...)` names a method four classes define, and the tool dropped it — so the coupled
+      family was absent from the report, which reads as clean. It now resolves the method on the classes
+      `open_session` returns. 22 shared parameters; `only here` is `residual_norm` on `coupled_step`
+      (the mass-flow path supplies its own constraint-aware measure) and `flow_direction` on the
+      mass-flow builder — both deliberate. `test_sibling_builders.py` pins the pair, and
+      `test_every_continuation_builder_installs_the_same_globalization` still pins the two surfaces.
+      Mechanism and the other pairs it surfaced are in `CLAUDE.md`'s sibling-builder item.
   - **`solve_coupled(refresh=RefreshPolicy(trigger=…))` segments the march to re-freeze the preconditioner — and a refresh
     must CARRY the shift diagonals, not rebuild them (binding).** With a trigger set, the march runs as a
     sequence of *observed* segments (`aquaflux.solve.forward_march`): each steps until the trigger judges

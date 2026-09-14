@@ -1323,8 +1323,30 @@ After **every code change**, before considering the task complete, review and ac
      class" is the `BoundaryConditions` each gets from `boundary.resolve(...)` — an incidental helper, not
      the product. They are three different assemblers. `ScalarTransport.build` in fact *returns*
      `ResidualAssembler.build(...)`, a delegation the wrapper rule cannot see because `build` is defined 22
-     times in the package and an ambiguous name is never followed. So "shared constructed class" is weaker
-     evidence than it reads, and a wrapper reached through a common method name still pairs.
+     times in the package and a call on a receiver whose class the tool cannot recover is never followed
+     under an ambiguous name. So "shared constructed class" is weaker evidence than it reads, and a wrapper
+     reached through a common method name still pairs.
+     ⚠️ **A THIRD blind spot, closed 2026-09-14 (#392), and it hid the coupled family again the day #371
+     unified it.** `coupled_step` opens a preconditioner session and returns `session._build(...)`;
+     `_build` is defined on four classes, so the call was dropped and `coupled_step` was credited with
+     building nothing — the whole coupled family left the report, which read as a clean tree. The tool now
+     resolves a method through its **receiver** where the receiver's class is knowable: a local bound by
+     `x = f(...)` resolves `x.m` on the classes `f` returns, `self.m` on the owning class, and a local
+     bound to a call and then returned credits that call. Methods are keyed `Class.method`, so one class's
+     `_build` is never another's. **Unioning every definition of the name was rejected** — it would credit
+     `coupled_step` with what `AmgVCycle._build` constructs — and a receiver whose producer reaches no
+     package class **falls back to the bare name**, because the first version lost `_coupled_step`'s
+     `globalization.step(...)` (a rebound parameter) and silently re-hid the pair it was written to find.
+     Pinned by `test_it_follows_a_method_through_a_receiver_whose_class_is_knowable` (whose decoy builder
+     pairs only if resolution unions) and by the package test, which now asserts `coupled_step` pairs with
+     `mass_flow_coupled_continuation` (22 shared; only `residual_norm` / `flow_direction` differ, both
+     documented carve-outs). **It surfaced six more pairs, reviewed:** the three `SmoothedAmg*.build`
+     block strategies (Schur, velocity, convection velocity) share a vocabulary, not a surface — each
+     `only here` is its own block's input, and the two velocity strategies are the axis #390 separates; and
+     `CoupledBlockSweep.calibrated`, invisible until now, joins the `calibrated` gradient family. Several of
+     those gradient pairs are now also credited with `ContractionRate`, a measurement `NamedTuple` returned
+     by the calibration helper — incidental, the `BoundaryConditions` shape above. `CoupledBlockSweep`'s own
+     `only here` lists (`boundary_closure`, `local_schur_block`) are **not yet adjudicated**.
      ⚠️ **Still blind, and recorded so its silence is not read as clean:** a builder that returns a
      *closure* it defines rather than a call — `scalar_pseudo_transient_solve` returns `solve_scalar` — is
      credited with building nothing and never enters the report.
