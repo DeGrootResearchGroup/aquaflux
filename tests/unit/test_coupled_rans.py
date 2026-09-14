@@ -53,6 +53,7 @@ from aquaflux.turbulence.coupled import (
     CoupledJacobianProbe,
     CoupledRANS,
     LiveViscosityVelocityParts,
+    _k_positivity_guards,
     _row_jacobian_scale,
     coupled_amg_continuation,
     coupled_continuation,
@@ -1301,6 +1302,88 @@ def test_the_k_positivity_builders_address_the_k_block_and_defer_to_the_transfor
     logged = SimpleNamespace(k_transform=LogScalars(), layout=direct.layout)
     assert positive_k_limit(logged) is None
     assert positive_k_projection(logged) is None
+
+
+def test_k_positivity_guards_refuses_a_floor_the_default_projection_would_silence() -> None:
+    """``positivity_floor`` fed only to the limiter is provably inert once the projection runs first.
+
+    The projection clips every k correction to within ``tau`` of its own boundary; the limiter then
+    sees room ``>= 1/tau`` on every entry whatever floor it carries, so it always reports
+    ``alpha_max = 1``. A non-zero floor under the default ``positivity_projection=True`` therefore
+    protects nothing -- refused here rather than left as a step-length surprise (#365).
+    """
+    from types import SimpleNamespace
+
+    from aquaflux.turbulence.coupled import DirectScalars, LogScalars
+
+    direct = SimpleNamespace(
+        k_transform=DirectScalars(),
+        layout=coupled_rans_layout(flow_state_layout(dim=2, n_cells=5)),
+    )
+
+    with pytest.raises(ValueError, match=r"positivity_floor.*has no effect"):
+        _k_positivity_guards(direct, 1e-6, True)
+    with pytest.raises(ValueError, match=r"positivity_floor.*has no effect"):
+        _k_positivity_guards(direct, 1e-6, True)  # not consumed by the first call: pure function
+
+    # The floor is genuinely usable paired with the plain global cap.
+    step_limit, step_projection = _k_positivity_guards(direct, 1e-6, False)
+    assert step_limit.floor == 1e-6
+    assert step_projection is None
+
+    # A zero floor is never refused, under either setting -- it is what the projection already does.
+    for projection in (True, False):
+        step_limit, step_projection = _k_positivity_guards(direct, 0.0, projection)
+        assert step_limit.floor == 0.0
+        assert (step_projection is not None) is projection
+
+    # Inert for a different, already-documented reason (the transform, not the projection) when k is
+    # solved in log form -- no limiter is built at all, so there is nothing for the floor to feed.
+    logged = SimpleNamespace(k_transform=LogScalars(), layout=direct.layout)
+    assert _k_positivity_guards(logged, 1e-6, True) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [
+        coupled_continuation,
+        coupled_lu_continuation,
+        coupled_amg_continuation,
+        mass_flow_coupled_continuation,
+    ],
+)
+def test_every_coupled_continuation_builder_refuses_the_same_inert_combination(builder) -> None:
+    """All four builders route through :func:`_k_positivity_guards`, and it is checked first.
+
+    First specifically so a real caller's mistake -- and this test -- never pays for building the
+    preconditioner the raise makes moot. That matters beyond cost for
+    :func:`coupled_amg_continuation`: its preconditioner needs ``petsc4py`` (not installed by CI, see
+    ``tests/unit/test_optional_dependency_skips.py``), so checking the raise here would break under
+    that dependency's absence if the guard ran any later than it does.
+    """
+    mesh, coupled = _cavity(4)
+    state = _healthy_state(mesh, coupled)
+    with pytest.raises(ValueError, match=r"positivity_floor.*has no effect"):
+        builder(coupled, state, positivity_floor=1e-6)
+    with pytest.raises(ValueError, match=r"positivity_floor.*has no effect"):
+        builder(coupled, state, positivity_floor=1e-6, positivity_projection=True)
+
+
+@pytest.mark.parametrize(
+    "builder", [coupled_continuation, coupled_lu_continuation, mass_flow_coupled_continuation]
+)
+def test_the_inert_combination_is_the_only_thing_refused(builder) -> None:
+    """Every other pairing of the two settings still builds -- including a floor that now matters.
+
+    ``coupled_amg_continuation`` is excluded here (unlike the raise check above): building its real
+    preconditioner needs ``petsc4py``, which this file does not gate on, so only the checks that
+    never reach it may run unconditionally.
+    """
+    mesh, coupled = _cavity(4)
+    state = _healthy_state(mesh, coupled)
+    builder(coupled, state, positivity_floor=1e-6, positivity_projection=False)
+    builder(coupled, state, positivity_floor=0.0)
+    builder(coupled, state, positivity_floor=0.0, positivity_projection=False)
 
 
 def test_the_probe_is_the_same_for_every_reynolds_rung() -> None:

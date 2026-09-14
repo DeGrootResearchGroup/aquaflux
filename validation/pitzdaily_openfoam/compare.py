@@ -447,12 +447,6 @@ RAMP_REDAMPING = (
 #: three-dimensional case, 1e-3 bought nothing over 1e-2 while costing a third of the march.
 INNER_STEPS, INNER_TOL = 5, 1e-2
 
-#: Buys the step limiter out of a numerically dead cell instead of letting one cell ratchet the
-#: global step cap toward zero. ⚠️ Reachable only because this case uses `coupled_amg_continuation`:
-#: it is a parameter of that builder ALONE, and the default, complete-LU and threshold-ILU builders
-#: expose neither it nor the `step_limit` it would be set on.
-K_POSITIVITY_FLOOR = 1e-8
-
 #: The inexact-Newton stop per inner linear solve, in the row-scaled measure, and the Krylov restart.
 #: `FORWARD_MAX_RESTARTS` bounds a single solve: past the retry threshold the attempt is going to be
 #: discarded anyway, so running it to a stagnation is work thrown away. Strictly above the threshold,
@@ -523,6 +517,17 @@ TRAILING_SWEEPS = 1
 #: reconstructions whose costs differ sharply under the cap land within 0.5 % of each other under it.
 #: `PITZ_K_POSITIVITY_PROJECTION=0` restores the cap.
 POSITIVITY_PROJECTION = os.environ.get("PITZ_K_POSITIVITY_PROJECTION", "1") not in ("", "0")
+
+#: Buys the step limiter out of a numerically dead cell instead of letting one cell ratchet the
+#: global step cap toward zero. ⚠️ Only meaningful with the cap active (`PITZ_K_POSITIVITY_PROJECTION=0`
+#: above): with the projection on (the default here) it runs first and clips every cell to within
+#: `tau` of its own boundary, so the cap this floor feeds always reports `alpha_max = 1` regardless of
+#: its value -- a floor set alongside the default projection was always inert, and
+#: `coupled_amg_continuation` now refuses that combination rather than silently doing nothing (#365).
+#: Reachable only because this case uses `coupled_amg_continuation`: it is a parameter of that builder
+#: ALONE, and the default, complete-LU and threshold-ILU builders expose neither it nor the
+#: `step_limit` it would be set on.
+K_POSITIVITY_FLOOR = 1e-8 if not POSITIVITY_PROJECTION else 0.0
 
 #: ⚠️ THE WALL CONDITION ON `k`, AND IT IS A CHOICE OF PROBLEM RATHER THAN OF SOLVER. Turbulent
 #: fluctuations vanish at a no-slip wall, so `k -> 0` and `Dirichlet(0)` is the textbook condition --

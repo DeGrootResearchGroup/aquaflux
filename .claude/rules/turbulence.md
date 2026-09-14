@@ -1078,6 +1078,30 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     complete factorization could reach (the entry is collapsed to one line in
     `solve-globalization-log.md`). All **four** builders now route through `_coupled_step`, and
     `test_every_continuation_builder_installs_the_same_globalization` fails if one loses the guard.
+    - **⚠️ `positivity_floor` alongside the default `positivity_projection=True` is REFUSED, not
+      silently inert (binding, #365, fixed 2026-09-13).** The per-step tail applies `step_projection`
+      to `delta` **before** `step_limit` sees it (`solve/continuation.py`), and `positive_block_projection`
+      clips every entry to within `tau` of its own boundary — so the limiter it hands off to always has
+      room `>= 1/tau` on every entry and reports `alpha_max = 1`, **whatever floor `step_limit` carries**.
+      A caller who raised `positivity_floor` under the (default) projection therefore got neither an
+      error nor the protection asked for: the limiter that floor feeds never bound. This is provable
+      algebraically, not case-specific, and was already implicit in this file's own test
+      (`test_the_k_positivity_builders_address_the_k_block_and_defer_to_the_transform`'s
+      `# the cap now finds nothing binding`) — nobody had connected it to what a nonzero
+      `positivity_floor` does under the shipped default. `_k_positivity_guards` (the single tail all
+      four builders now call, checked **before** any preconditioner is built — including
+      `coupled_amg_continuation`'s, so the raise needs no `petsc4py`) raises `ValueError` naming both
+      keywords when `floor != 0` and the transform-appropriate limiter is real (i.e. `k` is
+      `DirectScalars`) and `positivity_projection` is true. `positive_k_projection`'s own `floor=0.0`
+      default is untouched and still deliberately not fed from `positivity_floor` — a projection has
+      nothing to exempt a dead cell from (see its docstring) — so this is a refusal of a caller
+      combination that was always a no-op, not a behaviour change for a combination that ever worked.
+      **`pitzdaily_openfoam/compare.py` was shipping exactly this inert combination**
+      (`K_POSITIVITY_FLOOR = 1e-8` unconditional, `POSITIVITY_PROJECTION` defaulting `True`) — fixed to
+      `K_POSITIVITY_FLOOR = 1e-8 if not POSITIVITY_PROJECTION else 0.0`, so `PITZ_K_POSITIVITY_PROJECTION=0`
+      still restores the floor exactly as its own comment already promised. `bfs3d_openfoam/compare.py`
+      needed no change: its `K_POSITIVITY_PROJECTION` defaults `False`, so the floor there was always
+      live.
   - **⚠️ THE FORWARD SOLVE'S STOPPING MEASURE IS `_coupled_step`'s, NOT A BUILDER'S (binding, #282,
     2026-08-20) — and the surfaces above `_coupled_step` had drifted TWICE MORE after the tail was
     extracted.** `_coupled_step` builds the default forward solver from `residual_norm` — the march's own
