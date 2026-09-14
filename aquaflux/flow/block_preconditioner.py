@@ -35,6 +35,7 @@ from jax.ops import segment_sum
 
 from aquaflux.discretization import flux_continuous_conductance
 from aquaflux.solve import (
+    SettingsValue,
     air_multigrid_solve,
     build_air_hierarchy,
     build_convection_hierarchy,
@@ -44,7 +45,6 @@ from aquaflux.solve import (
     decouple_dof,
     smoothed_multigrid_solve,
 )
-from aquaflux.solve.settings_value import SettingsValue
 from aquaflux.vectors import scale
 
 from .preconditioner import schur_face_coefficient
