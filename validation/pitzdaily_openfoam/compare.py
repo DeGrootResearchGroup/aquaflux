@@ -5,8 +5,10 @@ model switched from the shipped kEpsilon to kOmegaSST) is run in the openfoam13 
 ``of_case/run_of.sh``, which writes the converged fields, the mesh, and the SIMPLE residual history to
 ``runs/kwsst/``. This script then reads that **same mesh** into aquaflux via ``read_openfoam`` and
 solves the coupled RANS system on it, so the two solutions live on identical cells and are compared
-directly (no interpolation between independent meshes, unlike ``validation/turbulent_channel_openfoam``,
-whose cyclic mesh the reader cannot yet import).
+directly (no interpolation between independent meshes) -- unlike
+``validation/turbulent_channel_openfoam``, which still compares on two independently-built,
+equivalent meshes rather than importing OpenFOAM's own cyclic one (the reader now supports cyclic
+patches; that study has not been migrated to a same-mesh comparison).
 
 aquaflux setup, as requested for this study:
 
