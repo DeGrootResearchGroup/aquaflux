@@ -168,9 +168,9 @@ def main() -> None:
         materialize_block_jacobian(lambda v: C._jacobian_matvec(coupled, frozen, v), plan).tocsr(),
         np.zeros(int(state.shape[0])),
     )
-    # ⚠️ The leading inverse is named because it MOVED under this harness: the case's default flipped
-    # from `petsc` to `hostilu`, so a result recorded without it cannot be told apart from a result for
-    # the other arm. Everything the arms below depend on is printed, so a log is self-describing.
+    # ⚠️ The leading inverse is named because it MOVED under this harness (`petsc`, then `hostilu`, now
+    # `simplesmooth`), so a result recorded without it cannot be told apart from a result for another
+    # arm. Everything the arms below depend on is printed, so a log is self-describing.
     print(
         f"{a.shape[0]} dofs, uniform reach {REACH}, nnz {a.nnz / 1e6:.2f} M; zero shift; "
         f"gmres rtol {RTOL}, restart {RESTART}; "

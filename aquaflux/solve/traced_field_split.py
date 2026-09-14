@@ -25,9 +25,9 @@ a ``scipy`` matrix, and the two inverses are entered through their traced cycle 
 their host-shaped ``apply``. Nothing crosses the device boundary between the Krylov solve and the
 preconditioned vector it gets back.
 
-**Both blocks must be traced.** An :class:`~aquaflux.solve.IluSmoothedInverse` is a sequential
-triangular solve and has no traced cycle to offer; a bundle including one keeps the host split, which is
-correct rather than a limitation -- that work genuinely belongs on a CPU.
+**Both blocks must be traced.** A host factorization -- a sequential triangular solve -- has no traced
+cycle to offer; a bundle including one keeps the host split, which is correct rather than a limitation --
+that work genuinely belongs on a CPU.
 """
 
 from __future__ import annotations

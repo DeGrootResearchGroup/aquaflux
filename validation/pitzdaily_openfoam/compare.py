@@ -90,20 +90,12 @@ from aquaflux.schemes import (
     VenkatakrishnanLimiter,
 )
 from aquaflux.solve import (
-    COMPILED as ILU0_COMPILED,
-)
-from aquaflux.solve import (
-    AscendingRowLengthCells,
-    CellMajor,
     CflResidualDualTimeControl,
     MarchLogger,
-    NaturalCells,
     RefreshPolicy,
     RetryPolicy,
-    ReverseCuthillMcKeeCells,
     StateCheckpointer,
     combine_observers,
-    ilu_smoothed_inverse,
     jacobi_smoothed_inverse,
     relative_residual_gmres,
     simple_smoothed_inverse,
@@ -481,7 +473,7 @@ FORWARD_MAX_RESTARTS = 14
 #:     reverse-Cuthill-McKee or ascending-row-length CELL order contracts it and converges in ~113-140
 #:     applications. So "zero fill amplifies on this block" is true of this ordering, not of zero fill;
 #:     `FILL_LEVELS = 1` remains right for the PETSc path, whose ordering is its own separate option,
-#:     but it is no longer evidence that the block needs fill. See `PITZ_FLOW_ORDER`.
+#:     but it is no longer evidence that the block needs fill.
 #:   * `SWEEPS` 4 -- zero-fill is the weaker smoother, so extra sweeps pay more than they did for
 #:     ILU(1) (390 -> 69 iterations at beta 0.01). The library default of 2 was tuned against ILU(1)
 #:     and does not carry over.
@@ -541,10 +533,10 @@ K_WALL_BC = _K_WALL_BCS[K_WALL]
 
 #: ⚠️ WHICH INVERSE THE LEADING `[u, v, p]` BLOCK GETS. `simplesmooth` (default since 2026-08-22) is a
 #: multigrid hierarchy over the saddle relaxed by SIMPLE sweeps, matching the sibling 3D case's own
-#: default. `hostilu` is this package's own hierarchy smoothed by its own factorization -- which is
-#: ZERO-FILL by construction and has no fill parameter at all. (A `petsc` arm -- the host GAMG V-cycle
-#: smoothed by PETSc's incomplete factorization -- was removed with the library's PETSc split blocks,
-#: #371; the history below is why it had already stopped being the default.)
+#: default. It is the only arm left: `petsc` (the host GAMG V-cycle smoothed by PETSc's incomplete
+#: factorization) and `hostilu` (this package's hierarchy smoothed by its own zero-fill factorization)
+#: were removed with the library's PETSc split blocks and ILU(0) kernel (#371). The history below is why
+#: an incomplete factorization had already stopped being the default.
 #:
 #: ⚠️⚠️ **THE DEFAULT MOVED OFF `petsc` BECAUSE `petsc` STOPPED MARCHING THIS CASE, and the failure is
 #: the incomplete factorization's order-and-fill dependence rather than anything about the physics
@@ -563,28 +555,19 @@ K_WALL_BC = _K_WALL_BCS[K_WALL]
 #: elimination ORDER decides which couplings it discards, and this same case is on record going from
 #: amplifying a residual 5.5x per sweep to contracting it on nothing but a reordering. A SIMPLE-smoothed
 #: hierarchy never eliminates the matrix at all; it forms an approximate Schur complement and applies
-#: V-cycles, so it has no order or fill to be sensitive to. `hostilu` stays reachable and measured --
-#: what is no longer defensible is an incomplete factorization as the *default* here.
+#: V-cycles, so it has no order or fill to be sensitive to.
 #:
-#: ⚠️ **`hostilu` was predicted to fail here because zero fill was measured to amplify on this block,
-#: and it did -- but the diagnosis was incomplete: the amplification is a property of the ELIMINATION
-#: ORDER, not of the fill level alone.** Measured on this case's `[u, v, p]` block at the exact reach,
-#: with nothing changed but the order the same matrix is eliminated in, a zero-fill factorization goes
-#: from amplifying the residual 5.5x in one stationary sweep (and stalling the Krylov solve it
-#: preconditions) to contracting it and converging in ~113 applications. So a zero-fill smoother is not
-#: ruled out on this case; the mesh's own cell order is. See `PITZ_FLOW_ORDER`.
-FLOW_ORDER = os.environ.get("PITZ_FLOW_ORDER", "natural")
-_FLOW_ORDERS = {
-    "natural": NaturalCells,
-    "rcm": ReverseCuthillMcKeeCells,
-    "rowlength": AscendingRowLengthCells,
-}
-if FLOW_ORDER not in _FLOW_ORDERS:
-    raise SystemExit(f"PITZ_FLOW_ORDER={FLOW_ORDER!r} is not one of {sorted(_FLOW_ORDERS)}")
-_FLOW_INVERSES = ("simplesmooth", "hostilu")
+#: (The zero-fill `hostilu` arm, removed with the kernel, was measured to amplify on this block under the
+#: mesh's own cell order and to converge under a reverse-Cuthill-McKee one -- the amplification was a
+#: property of the elimination order, not of zero fill alone.)
 FLOW_INVERSE = os.environ.get("PITZ_FLOW_INVERSE", "simplesmooth")
-if FLOW_INVERSE not in _FLOW_INVERSES:
-    raise SystemExit(f"PITZ_FLOW_INVERSE={FLOW_INVERSE!r} is not one of {list(_FLOW_INVERSES)}")
+if FLOW_INVERSE != "simplesmooth":
+    raise SystemExit(
+        f"PITZ_FLOW_INVERSE={FLOW_INVERSE!r}: only 'simplesmooth' remains -- the `petsc` and `hostilu` "
+        "leading inverses were removed (#371)."
+    )
+if os.environ.get("PITZ_FLOW_ORDER"):
+    raise SystemExit("PITZ_FLOW_ORDER configured the removed `hostilu` arm (#371); unset it.")
 
 #: `simplesmooth` -- a multigrid hierarchy over the `[u, v, p]` saddle relaxed by SIMPLE sweeps rather
 #: than by an incomplete factorization, and this case's default since 2026-08-22 (see above). A SIMPLE
@@ -608,33 +591,12 @@ SIMPLE_FLOW = dict(
     block_splitting=True,
     omega=1.0,
 )
-#: Settings deliberately NOT ported from the sibling study: this case ranks a smoother knob oppositely,
-#: so its sweeps and threshold are its own question rather than a value to copy.
-HOST_FLOW = dict(
-    sweeps=int(os.environ.get("PITZ_FLOW_SWEEPS", "1")),
-    cycles=1,
-    # The order the zero-fill smoother eliminates in -- the largest single lever measured on this
-    # block, and the reason `hostilu` is worth re-running here at all (see `FLOW_ORDER`).
-    ordering=CellMajor(_FLOW_ORDERS[FLOW_ORDER]()),
-    strength_threshold=0.0,
-    avoid_singletons=True,
-    aggressive_levels=0,
-    max_levels=10,
-    max_coarse=500,
-    prolongation_smoothing="none",
-)
-LEADING_INVERSE = (
-    ilu_smoothed_inverse(**HOST_FLOW)
-    if FLOW_INVERSE == "hostilu"
-    else simple_smoothed_inverse(**SIMPLE_FLOW)
-)
+LEADING_INVERSE = simple_smoothed_inverse(**SIMPLE_FLOW)
 
 #: Whether `FILL_LEVELS` / `SWEEPS` / `COARSE_EQ_LIMIT` reach the preconditioner at all.
 #:
 #: ⚠️ They configure the monolithic V-cycle, built only with `PITZ_FIELD_SPLIT=0`. Under the field split
 #: -- the default -- both blocks are fitted by injected inverses, and these three settings are dead.
-#: Note `hostilu` does not revive them: it is `ilu_smoothed_inverse(**HOST_FLOW)`, which carries its own
-#: fill and sweeps.
 #: The banner used to print them regardless, which is how a reader (and a solver study) comes to
 #: believe a march was preconditioned by a smoother that was never constructed. A banner is the primary
 #: record of what a measurement was taken under, so it must separate a live setting from a carried one.
@@ -865,9 +827,8 @@ CHECKPOINT_KEEP = int(os.environ.get("PITZ_CHECKPOINT_KEEP", "3"))
 #: took beta 0.5 -> 1.0 -> 1.33 -> 2.67 before the step diverged. It must also stay strictly below
 #: `CYCLE_BUDGET`, which truncates a grinding solve and relies on this redo to discard the partial
 #: iterate.
-#: ⚠️ The default is UNCHANGED at 10, which suits the shipped `petsc` arm. The zero-fill `hostilu`
-#: arm wants ~25; it is set per run rather than here, because raising it for every arm would change
-#: the incumbent's behaviour on evidence that was never gathered for it.
+#: ⚠️ The default is UNCHANGED at 10, which suited the (since removed) `petsc` arm; the zero-fill
+#: `hostilu` arm wanted ~25. Neither measurement was retaken for `simplesmooth`.
 RETRY_ON_CYCLES = int(os.environ.get("PITZ_RETRY_ON_CYCLES", "10"))
 RETRY = RetryPolicy(
     solver=relative_residual_gmres(1e-4, restart=40),
@@ -1166,21 +1127,7 @@ def solve_aquaflux(
         ("field split", FIELD_SPLIT),
         (
             "flow inverse",
-            # The ordering object prints as a bare repr, which says nothing; name the order instead --
-            # a banner line that cannot be read against a recorded measurement is not worth printing.
-            f"{FLOW_INVERSE} {HOST_FLOW | {'ordering': f'cell-major/{FLOW_ORDER}'}}"
-            if FLOW_INVERSE == "hostilu"
-            else f"{FLOW_INVERSE} {SIMPLE_FLOW}",
-        ),
-        # ⚠️ WHICH incomplete-LU IMPLEMENTATION IS LIVE, because the two differ by orders of magnitude
-        # in speed and nothing recorded which one a run used. `Ilu0` ships a pure-Python reference twin
-        # of its compiled kernel and falls back to it silently when the extension is not built; the two
-        # compute the identical factorization (pinned by a unit test), so a CONVERGENCE result is the
-        # same either way, but a WALL-CLOCK one taken on the fallback is not a preconditioner
-        # measurement at all. Printing it is what makes such a number falsifiable later.
-        (
-            "host ILU kernel",
-            "compiled" if ILU0_COMPILED else "PURE PYTHON (fallback -- timings void)",
+            f"{FLOW_INVERSE} {SIMPLE_FLOW}",
         ),
         ("trailing inverse", f"jacobi_smoothed {JACOBI_TRAILING}" if FIELD_SPLIT else "n/a"),
         ("probe stencil reach", stencil_reach),

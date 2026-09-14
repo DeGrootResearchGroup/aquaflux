@@ -31,15 +31,15 @@ The family is now named by its **level smoother**, which is the only thing its m
 | `NativeHierarchyInverse` | `HierarchyBlockInverse` |
 | `NativeSimpleInverse` / `native_saddle_inverse` | `SimpleSmoothedInverse` / `simple_smoothed_inverse` |
 | `NodalNativeInverse` / `native_nodal_inverse` | `JacobiSmoothedInverse` / `jacobi_smoothed_inverse` |
-| `HostVCycleInverse` / `host_ilu_inverse` | `IluSmoothedInverse` / `ilu_smoothed_inverse` |
+| `HostVCycleInverse` / `host_ilu_inverse` | `IluSmoothedInverse` / `ilu_smoothed_inverse` — *deleted 2026-09-13 with the ILU(0) kernel, #371; neither name exists* |
 | `AmgVCycle(native=)` / `has_native_solve` / `is_exact_native` / `native_forward_solve` | *(deleted 2026-09-13, #371 — there is no host exact forward solve, and none of these four names exists)* |
-| `solve/native_inverse.py` / `solve/host_vcycle.py` | `solve/hierarchy_inverse.py` / `solve/ilu_inverse.py` |
+| `solve/native_inverse.py` / `solve/host_vcycle.py` | `solve/hierarchy_inverse.py` / `solve/ilu_inverse.py` (*the latter deleted 2026-09-13, #371*) |
 | `BFS3D_FLOW_INVERSE=native` | `BFS3D_FLOW_INVERSE=simplesmooth` |
 | `BFS3D_TURBULENCE_INVERSE=native` | `BFS3D_TURBULENCE_INVERSE=jacobi` |
 
 Recorded measurements in these files that said "the native arm" now say "the traced arm" — *traced*
 (runs inside JAX, on device) against *host* is the distinction the old word was reaching for, and it
-is the one that matters for a GPU. `hostilu` and `petsc` arm values are unchanged: both already say
+is the one that matters for a GPU. `hostilu` and `petsc` arm values were unchanged (both arms were removed 2026-09-13, #371): both already say
 what they are. See the shipped `docs/preconditioning.md` for the user-facing description.
 
 ## Responsibility
@@ -81,8 +81,8 @@ testability seam. Everything subsystem-specific moved out:
 
 | File | `paths:` | Covers |
 |---|---|---|
-| `solve-direct-preconditioners.md` | `lu_preconditioner.py`, `ilu0.py`, `_ilu0.pyx` | The monolithic complete-LU preconditioner (and the now-deleted ILUT it once shared a family with), and the shared frozen-host contract |
-| `solve-amg-multigrid.md` | `amg_preconditioner.py`, `multigrid.py`, `hierarchy_inverse.py`, `ilu_inverse.py` | The monolithic AMG coupled PC, the traced multigrid, faithful smoothed aggregation, and `multigrid.py`'s own binding decisions |
+| `solve-direct-preconditioners.md` | `lu_preconditioner.py`, `sparse_jacobian.py` | The monolithic complete-LU preconditioner (and the now-deleted ILUT it once shared a family with), and the shared frozen-host contract |
+| `solve-amg-multigrid.md` | `amg_preconditioner.py`, `multigrid.py`, `hierarchy_inverse.py` | The monolithic AMG coupled PC, the traced multigrid, faithful smoothed aggregation, and `multigrid.py`'s own binding decisions |
 | `solve-flow-block.md` | `saddle_multigrid.py`, `shift_basis.py` | Traced preconditioning of the `[u, v, w, p]` saddle — current status only |
 | `.claude/notes/solve-flow-block-log.md` | *(never auto-loads)* | The full dated investigation behind the flow block, including qualified/retracted findings |
 | `solve-field-split.md` | `field_split.py` | The block-triangular field split (saddle plus two transported scalars) |

@@ -11,7 +11,7 @@ system refuses ``petsc4py`` outright, and the package's own accessor raises befo
 
 Usage
 -----
-``BFS3D_FLOW_INVERSE=hostilu validation/run_case.sh validation/bfs3d_openfoam/petsc_free_march.py``
+``validation/run_case.sh validation/bfs3d_openfoam/petsc_free_march.py``
 
 Every ``BFS3D_*`` setting the case reads applies here unchanged; this only installs the blocks and
 then hands over to the case's own entry point.

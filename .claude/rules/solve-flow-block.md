@@ -19,7 +19,7 @@ operator (see `solve-flow-block-log.md`'s `pitzDaily` entries), and the traced h
 only one of the arms with a route to a GPU. A full-march A/B against a matched `hostilu` (PETSc) run
 reached the identical root (`x_r/h` 8.3611) at a real wall-clock cost (349 cumulative cycles / 1782 s
 against 208 / 1403 s) — this default was chosen accepting that cost, not disputing the measurement
-below. `BFS3D_FLOW_INVERSE=hostilu` / `petsc` restore the two PETSc-backed arms. The two subsections
+below. Both of those arms (`hostilu`, `petsc`) were removed 2026-09-13 (#371). The two subsections
 kept here are the durable ones: that `jax.grad` runs and is validated through this block, and the
 honest verdict on why the traced hierarchy does not win on speed end to end. The full chronological
 investigation between those two points — several rounds of "found a win", each later qualified or
@@ -94,7 +94,7 @@ entirely the *finite difference's* fault — the adjoint barely moves while the 
 - **⚠️⚠️ THE COUNT IS A PROPERTY OF THE COARSENING, NOT THE SMOOTHER — THREE DIFFERENT SMOOTHERS ON THE
   SAME HIERARCHY ALL GIVE 1696 (measured 2026-08-16).** A fourth arm — the same traced hierarchy applied
   on the host and smoothed by a **zero-fill incomplete factorization** (`solve/ilu0.py`, one sweep,
-  `BFS3D_FLOW_INVERSE=hostilu`) — returns **1696 applications, 14.0 derived cycles**, identical to the
+  `BFS3D_FLOW_INVERSE=hostilu` — both deleted 2026-09-13, #371) — returns **1696 applications, 14.0 derived cycles**, identical to the
   SIMPLE-smoothed arm at 4 sweeps and at 8. So on the adjoint's operator and right-hand side, SIMPLE ×4,
   SIMPLE ×8 and an incomplete factorization ×1 are indistinguishable, and all three sit ~8 % above
   PETSc's 1575 at the matched `rtol` 1e-4 (see the iteration-count-independence table below for that
@@ -117,7 +117,7 @@ entirely the *finite difference's* fault — the adjoint barely moves while the 
 - **✅ The gradient is IDENTICAL to every printed digit — −3.179366936e+03 from both arms**, which is the
   correctness check behaving exactly as it must: a preconditioner changes how the transpose solve reaches
   the answer, never where it lands. It is also the first end-to-end exercise of the hand-written
-  `IluSmoothedInverse` transpose and `Ilu0.solve(transpose=True)` on a real adjoint rather than on a unit
+  `IluSmoothedInverse` transpose and `Ilu0.solve(transpose=True)` (both since deleted, #371) on a real adjoint rather than on a unit
   fixture, and they reproduce PETSc's gradient exactly.
 - **⚠️ DOUBLING THE SMOOTHER SWEEPS BUYS EXACTLY NOTHING HERE — 1696 applications either way, not one
   cycle different, at 1.59× the cost per application. So 8 sweeps is STRICTLY DOMINATED by 4 on this

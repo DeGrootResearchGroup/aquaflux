@@ -126,7 +126,7 @@ def field_split_arm(coupled, state, beta):
         coarse_eq_limit=compare.COARSE_EQ_LIMIT,
         field_split=True,
         # The case's own selection, imported rather than re-branched here: a second copy of that
-        # `simplesmooth | hostilu` choice is how two files that must agree stop agreeing.
+        # leading-inverse choice is how two files that must agree stop agreeing.
         leading_inverse=compare.LEADING_INVERSE,
         trailing_inverse=jacobi_smoothed_inverse(**compare.JACOBI_TRAILING),
         inner_steps=compare.INNER_STEPS,

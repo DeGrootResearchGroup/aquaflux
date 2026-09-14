@@ -407,8 +407,8 @@ than on this failure: an incomplete factorization's behaviour on this saddle dep
 **elimination order** and the **fill**, neither predictable in advance — this same case is on record
 going from *amplifying* a residual 5.5x per stationary sweep to contracting it on nothing but a
 reordering. A SIMPLE-smoothed hierarchy never eliminates the matrix, so it has neither sensitivity.
-`petsc` and `hostilu` stay reachable and their recorded measurements stand as measurements; what is
-closed is either of them as a default, and the bisect that would say *when* the collapse entered.
+`petsc` and `hostilu` were both removed 2026-09-13 (#371); their recorded measurements stand as
+measurements. What was closed then was either of them as a default, and the bisect that would say *when* the collapse entered.
 ⚠️ **Consequence for anyone reading an old number: a `petsc`-bundle figure for this case is not
 reproducible on the current tree.** Full detail, including what was ruled out first (the day's four
 merges are inert — `|R|` identical to twelve digits at a fixed state), in `.claude/rules/validation.md`
@@ -626,6 +626,16 @@ data model. Each had nothing in `validation/` or any test selecting it.
   question was GAMG interpolation reuse across rungs), and every split arm of
   `bfs3d_openfoam/field_split_probe.py`, which keeps its monolithic arms and the state/solve machinery
   other harnesses import. Records citing those arms' numbers are cite-only.
+- **The ILU(0) kernel (`Ilu0`, `_ilu0.pyx`, `COMPILED`) and `IluSmoothedInverse` / `ilu_smoothed_inverse`
+  (the `hostilu` arm) — DELETED, and with them `setup.py`, `tools/build_ext.sh`, the Cython build
+  requirement and `run_case.sh`'s kernel warning.** The kernel's only consumer was the `hostilu` leading
+  inverse, which neither case ships. On `bfs3d` it was the *faster* arm (1403 s / 208 cycles against
+  `simplesmooth`'s 1782 s / 349, same `x_r/h` 8.3611) and was dropped as the default for its sensitivity
+  to elimination order and its lack of a route to a GPU; on pitzDaily the zero-fill smoother amplified
+  under the mesh's own cell order and marched only under a reverse-Cuthill-McKee one. Harnesses deleted
+  with it (in git history): `pitzdaily_openfoam/lu_vs_hostilu.py`, `pitzdaily_openfoam/flow_block_ordering.py`.
+  **Left in place, for a separate decision:** `solve/ordering.py`'s alternative cell orders
+  (`NaturalCells` aside), which now have no library consumer.
 
 ## Globalization (forward step, continuation, line search) — closed investigations
 

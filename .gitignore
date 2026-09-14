@@ -53,11 +53,9 @@ docs/api.md
 /reference/
 /reference_codes/
 
-# Compiled extensions and the C Cython generates from `.pyx`. Neither is committed: the generated C
-# would go stale against the `.pyx` beside it, and a checked-in binary is built for one interpreter
-# and one architecture.
+# Compiled extensions. Not committed: a checked-in binary is built for one interpreter and one
+# architecture.
 *.so
-aquaflux/solve/_ilu0.c
 
 # Case-runner logs: one per run, timestamped; artifacts of a measurement, not sources.
 validation/**/run-*.log

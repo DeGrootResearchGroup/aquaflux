@@ -308,7 +308,6 @@ block between them. Each group then gets an inverse suited to it, injected as
 | {func}`~aquaflux.solve.simple_smoothed_inverse` | {class}`~aquaflux.solve.SimpleSmoothedInverse` — a multigrid over the saddle whose *level smoother* is a SIMPLE relaxation | the leading flow group |
 | {func}`~aquaflux.solve.jacobi_smoothed_inverse` | {class}`~aquaflux.solve.JacobiSmoothedInverse` — one hierarchy over the whole group, coarsening cells | either group |
 | {func}`~aquaflux.solve.air_inverse` | a reduction-based (lAIR) hierarchy | the trailing transported group |
-| {func}`~aquaflux.solve.ilu_smoothed_inverse` | {class}`~aquaflux.solve.IluSmoothedInverse` — the same coarsening, relaxed by an incomplete factorization | either group |
 
 Note the relationship between the first of these and
 {class}`~aquaflux.flow.BlockPreconditioner`, because it is easy to misread. Both are
@@ -381,22 +380,6 @@ at a reference flux. The first-order upwinding is the *preconditioner's* choice 
 model's — whatever advection scheme the residual uses, this operator upwinds first order,
 because that is what makes it an M-matrix an aggregation hierarchy can coarsen.
 
-{class}`~aquaflux.solve.Ilu0` is a zero-fill incomplete factorization, refreshable in
-place. How it orders its elimination is an injected strategy,
-{class}`~aquaflux.solve.EliminationOrdering`, over a {class}`~aquaflux.solve.CellOrder` —
-{class}`~aquaflux.solve.NaturalCells`, {class}`~aquaflux.solve.ReverseCuthillMcKeeCells` or
-{class}`~aquaflux.solve.AscendingRowLengthCells`. That is a strategy rather than a knob
-because at zero fill the ordering decides *which* couplings the factorization discards, and
-on a coupled saddle that choice has taken a stationary sweep from amplifying the residual to
-contracting it.
-
-```{note}
-`Ilu0` has a compiled kernel that must be built once per checkout with
-`tools/build_ext.sh`. Without it the package still imports and runs, falling back to a pure
-Python implementation with identical results but very different speed — so timings taken
-in a fresh checkout are not comparable to timings taken in a built one.
-`aquaflux.solve.ilu0.COMPILED` reports which one is live.
-```
 
 ## Keeping it current
 

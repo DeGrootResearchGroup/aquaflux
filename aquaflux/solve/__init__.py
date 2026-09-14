@@ -107,8 +107,6 @@ from .field_split import (
 )
 from .host_preconditioner import HostFactors, HostPreconditioner
 from .hierarchy_inverse import HierarchyBlockInverse
-from .ilu_inverse import IluSmoothedInverse, ilu_smoothed_inverse
-from .ilu0 import COMPILED, Ilu0
 from .refresh_timing import PhaseTimer, RefreshTiming
 from .state import CellFields, FieldLayout, GlobalDofs, StateBlock, SubLayout
 from .lu_preconditioner import MonolithicLuPreconditioner
@@ -193,7 +191,6 @@ from .step_control import (
 )
 
 __all__ = [
-    "COMPILED",
     "DEFAULT_GLOBALIZATION",
     "ESCALATING_REASONS",
     "NO_REFRESH",
@@ -226,8 +223,6 @@ __all__ = [
     "HierarchyBlockInverse",
     "HostFactors",
     "HostPreconditioner",
-    "Ilu0",
-    "IluSmoothedInverse",
     "ImplicitNewtonSolver",
     "InnerIterateCheckpointer",
     "JacobiSmoothedInverse",
@@ -298,7 +293,6 @@ __all__ = [
     "equilibrate_ordered",
     "field_change_metrics",
     "forward_march",
-    "ilu_smoothed_inverse",
     "jacobi_smoothed_inverse",
     "jacobian_relative_error",
     "materialize_block_jacobian",

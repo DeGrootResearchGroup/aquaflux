@@ -16,7 +16,6 @@ import scipy.sparse as sp
 from aquaflux.solve import (
     FieldGroups,
     build_block_triangular_field_split,
-    ilu_smoothed_inverse,
     jacobi_smoothed_inverse,
     simple_smoothed_inverse,
 )
@@ -130,8 +129,18 @@ def test_the_traced_split_is_a_fixed_linear_map() -> None:
     assert np.allclose(np.asarray(combined), np.asarray(separate), rtol=1e-10, atol=1e-12)
 
 
+class _HostOnlyInverse:
+    """A block inverse with the host interface and no traced cycle -- a factorization, say."""
+
+    def __init__(self, block: sp.spmatrix, n_fields: int) -> None:
+        self.n_dofs = block.shape[0]
+
+    def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
+        return np.asarray(residual)
+
+
 def test_a_host_only_inverse_is_refused_rather_than_silently_composed_on_the_host() -> None:
-    """An incomplete factorization has no traced cycle, and falling back would hide the round trip.
+    """A host factorization has no traced cycle, and falling back would hide the round trip.
 
     A sequential triangular solve genuinely belongs on a CPU, so the refusal is the honest outcome —
     but it has to be loud, because a silent fallback to the host split would leave a caller believing
@@ -141,7 +150,7 @@ def test_a_host_only_inverse_is_refused_rather_than_silently_composed_on_the_hos
     host = build_block_triangular_field_split(
         matrix,
         groups,
-        leading_inverse=ilu_smoothed_inverse(max_levels=3, max_coarse=200),
+        leading_inverse=_HostOnlyInverse,
         trailing_inverse=jacobi_smoothed_inverse(max_coarse=150),
     )
 

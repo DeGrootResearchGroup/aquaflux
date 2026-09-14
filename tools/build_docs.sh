@@ -10,27 +10,18 @@
 # changes, rather than leaning on CI as the first line of defence -- so "cannot actually run it on this
 # machine" is not a state to be in.
 #
-# This reuses tools/build_ext.sh's fix for the same wall: a small build environment created ONCE in
-# the user cache with --system-site-packages, so it borrows the runtime interpreter's already-installed
+# The fix for that wall: a small build environment created ONCE in the user cache with
+# --system-site-packages, so it borrows the runtime interpreter's already-installed
 # numpy/jax/scipy/equinox/lineax/diffrax rather than reinstalling them -- which is exactly what autodoc
-# needs to import aquaflux and its dependency graph -- and is reused across checkouts thereafter.
-#
-# It REUSES build_ext.sh's venv (the shared `build-venv`) rather than creating a sibling one. Both
-# scripts exist to route around the identical PEP 668 wall with the identical --system-site-packages
-# trick, so keeping them in one environment means there is one build environment to create, locate, and
-# blow away when something goes wrong -- not two that can silently drift apart (different pip versions,
-# one rebuilt after a Python upgrade and the other stale). The cost is a handful of extra packages
-# living alongside the Cython/setuptools build tooling; Sphinx and setuptools do not conflict, and the
-# docs toolchain adds only about 100 MB.
+# needs to import aquaflux and its dependency graph -- and is reused across checkouts thereafter. (It is
+# still called `build-venv` because it once also held a compiled extension's build tooling.)
 #
 # aquaflux itself is deliberately NOT pip-installed into that venv. Sphinx is invoked as
 # `python -m sphinx`, which (like `python -c`) puts the current directory on sys.path -- run from the
 # repo root, that already lets autodoc import aquaflux straight out of this checkout, the same way
-# `pytest` does today (aquaflux has never been pip-installed into any interpreter on this machine; see
-# tools/build_ext.sh's own header). Installing it here too would mean running `pip install -e .` a
-# second time, through a second interpreter, which rebuilds the Cython extension again -- a
-# build_ext.sh concern, not this script's -- and could leave a `.so` in the checkout built by a
-# DIFFERENT Python than $PYTHON if the two interpreters ever diverge. `docs/conf.py` already handles
+# `pytest` does today (aquaflux has never been pip-installed into any interpreter on this machine).
+# Installing it here too would mean running `pip install -e .` a second time, through a second
+# interpreter, for nothing autodoc needs. `docs/conf.py` already handles
 # the resulting "no installed distribution" case gracefully (it falls back to a placeholder version);
 # its own comment says so.
 #
@@ -48,8 +39,7 @@ PYTHON="${PYTHON:-python3}"
 
 if [ ! -x "$VENV/bin/python" ]; then
   echo "build_docs: creating the shared build environment in $VENV"
-  # --system-site-packages: see the header. This is the same venv tools/build_ext.sh creates, so
-  # either script may be the one that creates it first.
+  # --system-site-packages: see the header.
   "$PYTHON" -m venv --system-site-packages "$VENV" || {
     echo "build_docs: could not create a build environment at $VENV" >&2
     exit 1

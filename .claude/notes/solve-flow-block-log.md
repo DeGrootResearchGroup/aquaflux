@@ -7,6 +7,10 @@
 > wrong-but-plausible finding gets re-derived if the trail that refuted it is deleted rather than
 > archived. See `solve-flow-block.md` for the current, load-bearing status (the traced path is built
 > and differentiable but is not the shipped march default).
+>
+> ⚠️ **2026-09-13 (#371):** `Ilu0`, `IluSmoothedInverse` (`hostilu`), `tools/build_ext.sh`, the PETSc
+> split blocks and the `petsc` / `hostilu` `BFS3D_FLOW_INVERSE` arms were deleted. Every entry below that
+> describes them as built, runnable or selectable is history; recover them from git history.
 
 ### FLAT block preconditioners are CLOSED on this case
 
@@ -1184,7 +1188,7 @@ sensitivity to elimination order (the same class of issue the `pitzDaily` correc
 about) has repeatedly produced arms differing by orders of magnitude on this operator — and for a route
 to a GPU, not for speed: a full-march A/B against a matched `hostilu` run reached the identical root
 (`x_r/h` 8.3611) at 349 cumulative cycles / 1782 s against 208 / 1403 s. `BFS3D_FLOW_INVERSE=hostilu` /
-`petsc` still select the two PETSc-backed arms, and both stay measured and runnable.
+`petsc` selected the two host arms until both were removed (2026-09-13, #371).
 
 ⚠️ **THE WALL-CLOCK COLUMN BELOW CANNOT BE ATTRIBUTED, because nothing recorded which `Ilu0` kernel was
 live.** `Ilu0` falls back to a pure-Python twin of its compiled kernel when the extension is not built,
@@ -1198,7 +1202,7 @@ identical factorization, pinned by `test_the_compiled_and_reference_paths_agree`
 that is skipped when the extension is absent and had therefore never run on this machine until it was
 built. Re-time the wall column before quoting it; the counts stand.
 
-**Fixed structurally rather than noted (2026-08-17):** `tools/build_ext.sh` builds the extension in a
+**Fixed structurally rather than noted (2026-08-17; the kernel and these fixes were deleted 2026-09-13, #371):** `tools/build_ext.sh` built the extension in a
 checkout in about a second (it caches one shared build environment under `~/.cache/aquaflux`, so it
 does not need Cython in the runtime interpreter — a PEP-668 system Python refuses that);
 `validation/run_case.sh` warns at launch when it is missing; and both cases' banners print the live

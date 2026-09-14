@@ -225,7 +225,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       nothing at all, with no error and no log line, so a march asked for `inner_steps=3` /
       `positivity_floor=1e-6` and silently ran the library defaults. `**kwargs` is what made it quiet:
       it accepts every keyword and checks none, and it is the main entry point's door. This had already
-      cost a study harness (`lu_vs_hostilu.py` carried a warning comment about a `precondition_step=`
+      cost a study harness (`lu_vs_hostilu.py`, since deleted, #371, carried a warning comment about a `precondition_step=`
       swallowed here instead of reaching its `RefreshPolicy`).
     - **`method` now defaults to a sentinel (`_UNSET`), resolving to `"twolevel"` when the solve builds
       the continuation.** Both a real default and an explicit `None` ("no preconditioner method") are

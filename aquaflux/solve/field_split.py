@@ -50,7 +50,6 @@ import numpy as np
 import scipy.sparse as sp
 
 from .amg_preconditioner import MaterializedJacobianPreconditioner
-from .frozen_operator import equilibrate_cell_major
 from .hierarchy_inverse import HierarchyBlockInverse
 from .multigrid import (
     SmoothedHierarchy,
@@ -388,12 +387,9 @@ class BlockTriangularFieldSplit:
         ``refactor``, so each keeps its own aggregation and re-computes only the coarse operators and the
         smoother's factor values — the economy the monolithic refresh relies on, preserved per block.
 
-        An inverse may take the new operator in either of **two forms**, and the distinction is real
-        rather than two spellings of one thing. A host solver wants it already put into the shape it
-        factors — equilibrated and reordered cell-major — so it re-fits without redoing that work, and
-        takes ``refactor(cell_major, scale, perm)``. A hierarchy built on the raw field-major block
-        cannot use that shape at all: a nodal coarsening recovers each cell as ``index % n_cells``,
-        which only holds field-major. Such an inverse takes ``refactor_block(block)`` instead.
+        Each inverse takes its new block through ``refactor_block(block)``, in the raw field-major form it
+        was built from: a nodal coarsening recovers each cell as ``index % n_cells``, which only holds
+        field-major.
 
         Parameters
         ----------
@@ -403,18 +399,13 @@ class BlockTriangularFieldSplit:
         Raises
         ------
         AttributeError
-            If a block inverse offers neither (an injected inverse need not be refreshable at all).
+            If a block inverse offers no ``refactor_block`` (an injected inverse need not be refreshable
+            at all).
         """
         blocks = self._groups.blocks(matrix)
-        leading_block, trailing_block = blocks[0], blocks[3]
-        for inverse, block, n_group_fields in (
-            (self._leading, leading_block, self._groups.n_leading_fields),
-            (self._trailing, trailing_block, self._groups.n_trailing_fields),
-        ):
+        for inverse, block in ((self._leading, blocks[0]), (self._trailing, blocks[3])):
             if (refit := getattr(inverse, "refactor_block", None)) is not None:
                 refit(block)
-            elif hasattr(inverse, "refactor"):
-                inverse.refactor(*equilibrate_cell_major(block, n_group_fields))
             else:
                 raise AttributeError(
                     f"{type(inverse).__name__} cannot refactor in place, so this split cannot be "

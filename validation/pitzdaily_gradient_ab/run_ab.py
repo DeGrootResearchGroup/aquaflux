@@ -336,7 +336,6 @@ def solve_arm(gradient_scheme, log_path, *, reach=None, points=None, max_steps=N
         ("probe gradient sweeps", PROBE_SWEEPS or "full (the scheme's own)"),
         ("leading (flow) inverse", f"simple_smoothed {SIMPLE_FLOW}"),
         ("trailing inverse", f"jacobi_smoothed {JACOBI_TRAILING}"),
-        ("host ILU kernel", "compiled" if compare.ILU0_COMPILED else "PURE PYTHON (timings void)"),
         ("Reynolds continuation points", points),
         ("frozen production viscosity (operator)", FROZEN_PRODUCTION),
         ("stop (rtol, atol)", f"{compare.RTOL}, {compare.ATOL}"),
@@ -589,11 +588,6 @@ def main() -> None:
         "gradient-scheme A/B on pitzDaily (field-split SIMPLE-smoothed preconditioner)", flush=True
     )
     print(f"  probe stencil reach (both arms): {REACH}", flush=True)
-    if not compare.ILU0_COMPILED:
-        print(
-            "  ⚠️ compiled ILU kernel missing -- run tools/build_ext.sh; timings are void",
-            flush=True,
-        )
 
     #: Run one arm rather than both, to answer a question about that arm without re-paying the other.
     #: The reach question is the one this exists for: if the Betchen arm's cycle count falls toward the

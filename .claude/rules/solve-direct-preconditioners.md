@@ -2,8 +2,6 @@
 paths:
   - "aquaflux/solve/lu_preconditioner.py"
   - "aquaflux/solve/sparse_jacobian.py"
-  - "aquaflux/solve/ilu0.py"
-  - "aquaflux/solve/_ilu0.pyx"
 ---
 
 # Rules — `aquaflux/solve/` direct preconditioners (complete-LU) and Jacobian materialization
@@ -40,7 +38,7 @@ paths:
   (`symmetrically_equilibrate`, `equilibration_scale`, `apply_symmetric_scale`, `row_chunks`) was
   already there, and every consumer applies the two together -- a factorization or a coarsening wants
   the matrix both unit-diagonal and grouped by cell. Consumed by the multigrid V-cycle
-  (`amg_preconditioner.py`, `ilu_inverse.py`) and the block field split (`field_split.py`); the complete
+  (`amg_preconditioner.py`); the complete
   LU needs neither (its own fill-reducing pivoting and ordering already handle the indefinite saddle).
   - **Both are exported from `aquaflux.solve`.** They were internal by `__all__` yet deep-imported
     by study harnesses, i.e. public in practice and unguarded in principle; the harnesses now
@@ -512,7 +510,7 @@ complete LU and the AMG's coloured probe both still depend on it.
       - **⚠️ The ILU fill ranking INVERTS between the two cases** — `bfs3d` wants zero fill (its ILU(1)
         diverges at low shift, 303 negative pivots against zero), pitzDaily wants fill 1, where **two
         independent zero-fill implementations fail identically** (PETSc ILU(0) and the traced
-        `IluSmoothedInverse`, both α → 0 by step 3–4), putting it on the fill rather than on anything
+        `IluSmoothedInverse` — deleted 2026-09-13, #371 — both α → 0 by step 3–4), putting it on the fill rather than on anything
         PETSc-specific. pitzDaily's converging arms all land `x_r/h` 8.0686, so those are cost
         comparisons, not accuracy ones. ⚠️ Both cases set `field_split=True`, so this comparison is
         between two **flow-block** factorizations — which is the one thing about it the monolithic sweeps

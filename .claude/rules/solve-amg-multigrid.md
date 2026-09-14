@@ -3,7 +3,6 @@ paths:
   - "aquaflux/solve/amg_preconditioner.py"
   - "aquaflux/solve/multigrid.py"
   - "aquaflux/solve/hierarchy_inverse.py"
-  - "aquaflux/solve/ilu_inverse.py"
 ---
 
 # Rules — `aquaflux/solve/` monolithic AMG and the traced multigrid
@@ -192,7 +191,7 @@ paths:
     |---|---|---|
     | PETSc **ILU(1)** | **fails** (300 matvecs, true 3.36) | converges — 74 steps, 321 cycles, **628 s** |
     | PETSc **ILU(0)** | fails | fails (α 0.000, NaN by step 4) |
-    | our **ILU(0)** (`hostilu`) | fails | fails (α 0.000, inf by step 3) |
+    | our **ILU(0)** (`hostilu`, deleted 2026-09-13, #371) | fails | fails (α 0.000, inf by step 3) |
     | **SIMPLE-smoothed** | **converges — 71 steps, 395 cycles, 550 s** | converges — 71, 408, 799 s |
 
     **SIMPLE is REACH-INSENSITIVE, and that is the load-bearing observation.** Between reach 3 and
@@ -217,7 +216,7 @@ paths:
     arm is not at its best here — `PITZ_FLOW_SWEEPS` and the threshold are unexplored.
 
     **✅ CONFIRMED ON A SECOND, INDEPENDENT ZERO-FILL IMPLEMENTATION (2026-08-16).**
-    `IluSmoothedInverse` is this package's own hierarchy smoothed by its own `Ilu0`: different
+    `IluSmoothedInverse` (deleted with `Ilu0` 2026-09-13, #371) was this package's own hierarchy smoothed by its own `Ilu0`: different
     coarsening, different factorization code, different language even. Run as the leading inverse on
     `pitzDaily` it fails identically to PETSc's zero-fill smoother — step 1 alpha 0.000 with the
     residual above its own starting value, step 2 at the shift ceiling, **non-finite by step 3** —
@@ -345,7 +344,7 @@ the shipped cell order*) and
 the **converged root** (`R` 5.095e-06; marched with the *SIMPLE-smoothed* leading inverse at reach 3,
 which is reach-insensitive — the state is a root of the exact residual either way, and it is re-probed
 here at reach 5 because an ILU inherits the stored pattern).
-Harness: `validation/pitzdaily_openfoam/flow_block_ordering.py`.
+Harness: `validation/pitzdaily_openfoam/flow_block_ordering.py` (deleted 2026-09-13 with `Ilu0`, #371 — in git history).
 
 ⚠️ **The converged root is a GITIGNORED run artifact, not a checked-in fixture.** It was
 `validation/pitzdaily_openfoam/checkpoints/state-00071.npz`, written by `StateCheckpointer` during a
@@ -392,7 +391,7 @@ GMRES applications; **FAIL** = stalled above 1e-6 true:
 - **⚠️ THE FIRST CENSUS WAS AN ARTIFACT — the harness read the diagonal of the equilibrated *operator*
   rather than the *factor*, and the symmetric square-root equilibration forces that to magnitude
   exactly 1.** It reported "zero negatives, min |pivot| 1.00" for all twelve orderings at all six
-  points, including arms that diverge by 1e+59. Fixed by exposing `Ilu0.pivots` (the stored diagonal
+  points, including arms that diverge by 1e+59. Fixed by exposing `Ilu0.pivots` (since deleted with `Ilu0`, #371) (the stored diagonal
   *is* the pivot there — unlike PETSc, which stores its reciprocal); re-runnable with
   `FLOW_BLOCK_CENSUS_ONLY=1`. The verdicts above never touched it.
 
@@ -439,7 +438,7 @@ application). This does **not** contradict that literature: what makes pressure-
 eliminating the velocities **fills** the pressure block with the Schur complement, and a zero-fill
 factorization discards precisely that fill, leaving the pressure block to be eliminated against its own
 bare, near-singular Rhie–Chow diagonal. Pressure-last is an ordering for a factorization that KEEPS
-fill. Do not port it to `Ilu0`; if a level-of-fill `Ilu0` is ever built, re-ask it there.
+fill. (`Ilu0` was deleted 2026-09-13, #371; if a level-of-fill factorization is ever built, re-ask it there.)
 
 **Two well-motivated leads measured out, so they need not be re-tried:**
 - **HILUCSI static deferring** (Chen, Ghai & Jiao, arXiv:1911.10139 — symmetrically permute the
@@ -2040,7 +2039,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   traced level's arrays — the host-smoothed inverse factorizing an operator, a march refresh re-deriving
   a hierarchy at a new operator, a SIMPLE-smoothed level forming its Schur pieces — needs the exact same
   `indptr`/`indices`/`data` → `scipy.sparse.csr_matrix` and `p_*` → prolongation reconstructions, and
-  four call sites (`ilu_inverse.py`, `saddle_multigrid.py`'s `derive_extras`, `SmoothedHierarchy.refit`,
+  four call sites (`ilu_inverse.py` — since deleted, #371 — `saddle_multigrid.py`'s `derive_extras`, `SmoothedHierarchy.refit`,
   `refresh_air_hierarchy`) each open-coded them. `_CsrOperator.to_scipy()` is the exact inverse of the
   existing `from_scipy`; `prolongation_scipy()` is level-kind-specific because `_SparseLevel` stores a
   COO triple (`p_frow`/`p_ccol`/`p_val`, one prolongation doubling as the transposed restriction) while
