@@ -569,11 +569,11 @@ Jacobian--vector product spends **two** operator applies per sweep — one to ca
 tangent linearizes about, one for the tangent itself — against the residual's one, and a Newton step
 evaluates the residual once while spending a matrix-vector product on every Krylov iteration.
 
-The coupled continuation builders take `jacobian_gradient_sweeps` for this. It caps the sweeps in the
-copy of the residual the Krylov operator is differentiated from and leaves the residual itself alone:
+The coupled march takes `jacobian_gradient_sweeps` for this. It caps the sweeps in the copy of the
+residual the Krylov operator is differentiated from and leaves the residual itself alone:
 
 ```python
-engine = coupled_amg_continuation(coupled, state, jacobian_gradient_sweeps=2)
+flow, k, omega = solve_coupled(coupled, preconditioner=preconditioner, jacobian_gradient_sweeps=2)
 ```
 
 On a backward-facing step at 12 000 cells, whose sweep contracts at `rho = 5.1e-03`, capping the

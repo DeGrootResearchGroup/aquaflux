@@ -60,13 +60,16 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse.linalg as spla  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
-    jacobi_smoothed_inverse,
+    JacobiSmoothed,
     materialize_block_jacobian,
     shifted_jacobian,
 )
-from aquaflux.turbulence import (  # noqa: E402
-    coupled_amg_continuation,
-    coupled_lu_continuation,
+from aquaflux.turbulence import (
+    CompleteLu,
+    FieldSplit,
+    JacobianProbeSpec,
+    MaterializedJacobian,
+    coupled_step,
     hybrid_initialize,
 )
 
@@ -116,19 +119,16 @@ def measure(label, factors, a, rhs, transpose):
 
 def field_split_arm(coupled, state, beta):
     """The preconditioner `compare.py` ships, built at `beta`."""
-    return coupled_amg_continuation(
+    return coupled_step(
         coupled,
         state,
-        amg_beta=beta,
-        stencil_reach=compare.STENCIL_REACH,
-        smoother_fill_levels=compare.FILL_LEVELS,
-        smoother_sweeps=compare.SWEEPS,
-        coarse_eq_limit=compare.COARSE_EQ_LIMIT,
-        field_split=True,
-        # The case's own selection, imported rather than re-branched here: a second copy of that
-        # leading-inverse choice is how two files that must agree stop agreeing.
-        leading_inverse=compare.LEADING_INVERSE,
-        trailing_inverse=jacobi_smoothed_inverse(**compare.JACOBI_TRAILING),
+        preconditioner=MaterializedJacobian(
+            # The case's own selection, imported rather than re-branched here: a second copy of that
+            # leading-inverse choice is how two files that must agree stop agreeing.
+            FieldSplit(compare.LEADING_INVERSE, JacobiSmoothed(**compare.JACOBI_TRAILING)),
+            probe=JacobianProbeSpec(stencil_reach=compare.STENCIL_REACH),
+            build_beta=beta,
+        ),
         inner_steps=compare.INNER_STEPS,
         inner_tol=compare.INNER_TOL,
     )
@@ -209,12 +209,14 @@ def main() -> None:
         ),
         "lu": (
             "complete LU @ beta=0",
-            lambda: coupled_lu_continuation(
+            lambda: coupled_step(
                 coupled,
                 state,
-                lu_beta=0.0,
-                stencil_reach=compare.STENCIL_REACH,
-                backend="scipy",
+                preconditioner=MaterializedJacobian(
+                    CompleteLu(backend="scipy"),
+                    probe=JacobianProbeSpec(stencil_reach=compare.STENCIL_REACH),
+                    build_beta=0.0,
+                ),
                 inner_steps=compare.INNER_STEPS,
                 inner_tol=compare.INNER_TOL,
             ),

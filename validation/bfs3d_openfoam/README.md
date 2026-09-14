@@ -32,7 +32,7 @@ collapse to the 2D problem; the viscous side walls are what make this a three-di
   with **hybrid initialization**, **second-order upwind** momentum advection (Venkatakrishnan-limited
   `LimitedUpwind`), **corrected Green-Gauss** gradients, and **log-variable ω** (`omega_transform=LogScalars()`),
   on the imported mesh at the same operating point. The coupled Jacobian is preconditioned by a
-  **field-split algebraic-multigrid V-cycle** (`coupled_amg_continuation(field_split=True)`) — see below.
+  **field-split multigrid preconditioner** (`MaterializedJacobian(FieldSplit(...))`, `compare.PRECONDITIONER`) — see below.
 
 ## The preconditioner is the point of this case
 

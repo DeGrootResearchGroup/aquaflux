@@ -52,10 +52,10 @@ from aquaflux.solve import (  # noqa: E402
     build_convection_hierarchy,
     convection_multigrid_solve,
     relative_residual_gmres,
+    restart_cycles,  # noqa: E402
     solve_linear,
     symmetrically_equilibrate,
 )
-from aquaflux.solve import restart_cycles  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _coupled_jacobian_plan,
     _coupled_shift_policy,

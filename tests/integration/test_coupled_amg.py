@@ -1,7 +1,7 @@
 """Integration: the monolithic-AMG-preconditioned coupled RANS Newton solve on a turbulent channel.
 
 The coupled continuation's block-triangular SIMPLE preconditioner is replaced by a single
-algebraic-multigrid V-cycle of the assembled coupled Jacobian (:func:`coupled_amg_continuation`) -- the
+algebraic-multigrid V-cycle of the assembled coupled Jacobian (:class:`~aquaflux.turbulence.MonolithicVCycle`) -- the
 scaling path for large three-dimensional meshes, where the complete LU's fill is out of memory. These
 check the two properties that make it a usable drop-in: handed to ``solve_coupled`` it converges the
 monolithic Newton to the **same** fixed point the block preconditioner reaches, and -- built once
@@ -20,14 +20,19 @@ import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 pytest.importorskip("petsc4py")
 
 from aquaflux.solve import DualTimeStep, PseudoTransientStep
 from aquaflux.turbulence import (
+    BlockDiagonal,
     CoupledRANS,
-    coupled_amg_continuation,
+    MaterializedJacobian,
+    MonolithicVCycle,
+    coupled_step,
+    open_session,
     solve_coupled,
 )
 
@@ -71,10 +76,18 @@ def test_amg_continuation_inner_steps_builds_a_dual_time_step(case) -> None:
     flow, k, omega = case["start"]
     reference_state = coupled.pack_state(flow, k, omega)
 
-    single = coupled_amg_continuation(coupled, reference_state)
+    single = coupled_step(
+        coupled, reference_state, preconditioner=MaterializedJacobian(MonolithicVCycle())
+    )
     assert isinstance(single, PseudoTransientStep)
 
-    dual = coupled_amg_continuation(coupled, reference_state, inner_steps=5, inner_tol=1e-3)
+    dual = coupled_step(
+        coupled,
+        reference_state,
+        preconditioner=MaterializedJacobian(MonolithicVCycle()),
+        inner_steps=5,
+        inner_tol=1e-3,
+    )
     assert isinstance(dual, DualTimeStep)
     assert dual.inner_steps == 5
 
@@ -86,7 +99,11 @@ def test_amg_solve_converges_and_matches_the_block_preconditioned_solve(case) ->
     flow_ws, k_ws, omega_ws = case["start"]
     reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
 
-    amg = coupled_amg_continuation(coupled, reference_state, smoother_fill_levels=SMOOTHER_FILL)
+    amg = coupled_step(
+        coupled,
+        reference_state,
+        preconditioner=MaterializedJacobian(MonolithicVCycle(smoother_fill_levels=SMOOTHER_FILL)),
+    )
     flow_a, k_a, omega_a = solve_coupled(
         coupled, flow_ws, k_ws, omega_ws, continuation=amg, max_steps=40
     )
@@ -100,7 +117,12 @@ def test_amg_solve_converges_and_matches_the_block_preconditioned_solve(case) ->
     assert float(jnp.max(k_a)) > 10.0 * float(jnp.min(jnp.abs(k_a)) + 1e-30)  # genuinely turbulent
 
     flow_b, k_b, omega_b = solve_coupled(
-        coupled, flow_ws, k_ws, omega_ws, method="twolevel", max_steps=40, **PRECONDITIONER
+        coupled,
+        flow_ws,
+        k_ws,
+        omega_ws,
+        max_steps=40,
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
     assert float(jnp.linalg.norm(flow_a - flow_b) / jnp.linalg.norm(flow_b)) < 1e-4
     assert float(jnp.linalg.norm(k_a - k_b) / jnp.linalg.norm(k_b)) < 1e-3
@@ -119,8 +141,10 @@ def test_amg_adjoint_matches_finite_difference(case) -> None:
     coupled = case["coupled"]
     flow_ws, k_ws, omega_ws = case["start"]
     reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
-    continuation = coupled_amg_continuation(
-        coupled, reference_state, smoother_fill_levels=SMOOTHER_FILL
+    continuation = coupled_step(
+        coupled,
+        reference_state,
+        preconditioner=MaterializedJacobian(MonolithicVCycle(smoother_fill_levels=SMOOTHER_FILL)),
     )
 
     def objective(nu_scale):
@@ -153,14 +177,14 @@ def test_amg_beta_floor_builds_the_preconditioner_above_the_marchs_own_beta(
     """
     import numpy as np
     from aquaflux.solve import DualTimeControl
-    from aquaflux.turbulence import amg_beta_tracking_refresh
 
     coupled = case["coupled"]
     flow, k, omega = case["start"]
     state = coupled.pack_state(flow, k, omega)
 
     beta, floor = 0.01, 0.05  # β well below the floor, so the clamp is active
-    dual = coupled_amg_continuation(coupled, state, inner_steps=5)
+    session = open_session(MaterializedJacobian(MonolithicVCycle(), beta_floor=floor), coupled)
+    dual = session.build(state, inner_steps=5)
     active, _ = DualTimeControl(beta_start=beta).next_step(dual, None, None)
 
     seen: dict[str, np.ndarray] = {}
@@ -171,7 +195,7 @@ def test_amg_beta_floor_builds_the_preconditioner_above_the_marchs_own_beta(
         lambda _self, _mv, _plan, shift, **_kw: seen.__setitem__("shift", np.asarray(shift)),
     )
 
-    amg_beta_tracking_refresh(coupled, beta_floor=floor)(active, state)
+    session.precondition_step(active, state)
 
     diagonal = np.asarray(active.shift_policy.base.shift_term(state).diagonal)
     assert np.allclose(seen["shift"], floor * diagonal)  # built at the FLOOR, not at β
@@ -190,12 +214,13 @@ def test_inner_refresh_rebuilds_at_the_iterate_it_is_handed(case, monkeypatch) -
     """
     import numpy as np
     from aquaflux.solve import DualTimeControl
-    from aquaflux.turbulence import amg_beta_tracking_refresh
 
     coupled = case["coupled"]
     flow, k, omega = case["start"]
     state = coupled.pack_state(flow, k, omega)
-    dual = coupled_amg_continuation(coupled, state, inner_steps=5)
+    session = open_session(MaterializedJacobian(MonolithicVCycle()), coupled)
+    # `refresh_on_cycles` is what makes a session wire its mid-step hook onto the step it builds.
+    dual = session.build(state, inner_steps=5, refresh_on_cycles=3)
     active, _ = DualTimeControl(beta_start=0.5).next_step(dual, None, None)
 
     built_at: list[np.ndarray] = []
@@ -204,12 +229,13 @@ def test_inner_refresh_rebuilds_at_the_iterate_it_is_handed(case, monkeypatch) -
         "refresh_in_place",
         lambda _self, _mv, _plan, shift, **_kw: built_at.append(np.asarray(shift)),
     )
-    refresh = amg_beta_tracking_refresh(coupled)
-    refresh(active, state)  # the march calls this before each step; it is what binds the hook
+    session.precondition_step(
+        active, state
+    )  # the march calls this before each step; it binds the hook
     built_at.clear()  # that binding call also does the step's own refresh, which is not under test
 
     iterate = state * 1.05  # somewhere the inner loop has moved to, away from the step's start
-    refresh.refresh_at(iterate)
+    dual.inner_refresh(iterate)
     assert len(built_at) == 1
     assert np.allclose(
         built_at[0], 0.5 * np.asarray(active.shift_policy.base.shift_term(iterate).diagonal)
@@ -268,13 +294,13 @@ def test_sharing_one_preconditioner_makes_a_new_rung_a_march_step_cache_hit() ->
     three rung-first steps, at cycle counts no higher than their cheap ones.
 
     Sharing the object is necessary and, on its own, **not sufficient**, which is why this test drives
-    the real builder rather than comparing two policies. Two further things had to hold, and both are
+    a real session rather than comparing two policies. Two further things had to hold, and both are
     exercised here: the shift policy must not carry a block preconditioner it never applies (its
     multigrid coarsening reads the operator's values, so its array shapes moved with the viscosity), and
     the viscosity must be an array rather than a float (see :func:`_continuation_ready`).
     """
     from aquaflux.solve.march import _march_step
-    from aquaflux.turbulence import CoupledJacobianProbe, hybrid_initialize
+    from aquaflux.turbulence import hybrid_initialize
 
     momentum, turbulence = _channel()
     momentum = _continuation_ready(momentum)
@@ -282,12 +308,10 @@ def test_sharing_one_preconditioner_makes_a_new_rung_a_march_step_cache_hit() ->
     state = coupled.pack_state(*hybrid_initialize(momentum, turbulence))
     # The next rung of a ramp: the same case at a tenth of the Reynolds number.
     companion = coupled.with_scaled_molecular_viscosity(10.0)
-    probe = CoupledJacobianProbe.build(coupled)
+    spec = MaterializedJacobian(MonolithicVCycle())
 
-    def build(assembler, preconditioner=None):
-        return coupled_amg_continuation(
-            assembler, state, inner_steps=2, probe=probe, preconditioner=preconditioner
-        )
+    def build(assembler):
+        return coupled_step(assembler, state, preconditioner=spec, inner_steps=2)
 
     def run(assembler, step) -> int:
         before = len(_RUNG_TRACES)
@@ -307,6 +331,7 @@ def test_sharing_one_preconditioner_makes_a_new_rung_a_march_step_cache_hit() ->
 
     # Now the same two rungs sharing one V-cycle. The first still compiles (a different object again
     # from the control's), and the second is the assertion this test exists for.
-    shared = build(coupled)
-    assert run(coupled, shared) > 0
-    assert run(companion, build(companion, preconditioner=shared.shift_policy.preconditioner)) == 0
+    session = open_session(spec, coupled)
+    assert run(coupled, session.build(state, inner_steps=2)) > 0
+    session.rebind(companion)
+    assert run(companion, session.build(state, inner_steps=2)) == 0

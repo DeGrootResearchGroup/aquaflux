@@ -18,9 +18,9 @@ import pytest
 import scipy.sparse as sp
 from aquaflux.solve import (
     FieldGroups,
+    JacobiSmoothed,
+    SimpleSmoothed,
     build_block_triangular_field_split,
-    jacobi_smoothed_inverse,
-    simple_smoothed_inverse,
 )
 
 
@@ -64,8 +64,8 @@ def _split(operator, groups):
     return build_block_triangular_field_split(
         operator,
         groups,
-        leading_inverse=simple_smoothed_inverse(max_coarse=200),
-        trailing_inverse=jacobi_smoothed_inverse(max_coarse=200),
+        leading_inverse=SimpleSmoothed(max_coarse=200),
+        trailing_inverse=JacobiSmoothed(max_coarse=200),
     )
 
 

@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 from aquaflux.solve import (
+    AirReduction,
     CellFields,
     FieldLayout,
     GlobalDofs,
@@ -21,7 +22,6 @@ from aquaflux.solve import (
     JacobiSmoothedInverse,
     SimpleSmoothedInverse,
     SubLayout,
-    air_inverse,
 )
 from aquaflux.solve.field_split import BlockTriangularFieldSplit, FieldGroups
 
@@ -354,7 +354,7 @@ def test_air_block_inverse_applies_transposes_and_refreshes_in_place() -> None:
     would recompile the coupled solve that holds it.
     """
     block = _two_field_transport()
-    inverse = air_inverse(max_coarse=8)(block, 2)
+    inverse = AirReduction(max_coarse=8)(block, 2)
     assert inverse.n_dofs == block.shape[0]
 
     rng = np.random.default_rng(0)

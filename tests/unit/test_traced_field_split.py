@@ -15,9 +15,9 @@ import pytest
 import scipy.sparse as sp
 from aquaflux.solve import (
     FieldGroups,
+    JacobiSmoothed,
+    SimpleSmoothed,
     build_block_triangular_field_split,
-    jacobi_smoothed_inverse,
-    simple_smoothed_inverse,
 )
 from aquaflux.solve.traced_field_split import (
     TracedFieldSplit,
@@ -49,10 +49,8 @@ def _pair():
     host = build_block_triangular_field_split(
         matrix,
         groups,
-        leading_inverse=simple_smoothed_inverse(
-            strength_threshold=0.25, max_levels=4, max_coarse=200
-        ),
-        trailing_inverse=jacobi_smoothed_inverse(max_coarse=150),
+        leading_inverse=SimpleSmoothed(strength_threshold=0.25, max_levels=4, max_coarse=200),
+        trailing_inverse=JacobiSmoothed(max_coarse=150),
     )
     traced = traced_field_split(matrix, groups, host._leading, host._trailing)
     return host, traced, groups
@@ -151,7 +149,7 @@ def test_a_host_only_inverse_is_refused_rather_than_silently_composed_on_the_hos
         matrix,
         groups,
         leading_inverse=_HostOnlyInverse,
-        trailing_inverse=jacobi_smoothed_inverse(max_coarse=150),
+        trailing_inverse=JacobiSmoothed(max_coarse=150),
     )
 
     with pytest.raises(AttributeError, match="no traced cycle"):

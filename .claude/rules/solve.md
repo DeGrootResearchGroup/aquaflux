@@ -29,8 +29,8 @@ The family is now named by its **level smoother**, which is the only thing its m
 | was | is |
 |---|---|
 | `NativeHierarchyInverse` | `HierarchyBlockInverse` |
-| `NativeSimpleInverse` / `native_saddle_inverse` | `SimpleSmoothedInverse` / `simple_smoothed_inverse` |
-| `NodalNativeInverse` / `native_nodal_inverse` | `JacobiSmoothedInverse` / `jacobi_smoothed_inverse` |
+| `NativeSimpleInverse` / `native_saddle_inverse` | `SimpleSmoothedInverse` / `simple_smoothed_inverse` — *the factory is now the value object `SimpleSmoothed` (#371)* |
+| `NodalNativeInverse` / `native_nodal_inverse` | `JacobiSmoothedInverse` / `jacobi_smoothed_inverse` — *the factory is now the value object `JacobiSmoothed` (#371); `air_inverse` is `AirReduction`* |
 | `HostVCycleInverse` / `host_ilu_inverse` | `IluSmoothedInverse` / `ilu_smoothed_inverse` — *deleted 2026-09-13 with the ILU(0) kernel, #371; neither name exists* |
 | `AmgVCycle(native=)` / `has_native_solve` / `is_exact_native` / `native_forward_solve` | *(deleted 2026-09-13, #371 — there is no host exact forward solve, and none of these four names exists)* |
 | `solve/native_inverse.py` / `solve/host_vcycle.py` | `solve/hierarchy_inverse.py` / `solve/ilu_inverse.py` (*the latter deleted 2026-09-13, #371*) |
@@ -41,6 +41,14 @@ Recorded measurements in these files that said "the native arm" now say "the tra
 (runs inside JAX, on device) against *host* is the distinction the old word was reaching for, and it
 is the one that matters for a GPU. `hostilu` and `petsc` arm values were unchanged (both arms were removed 2026-09-13, #371): both already say
 what they are. See the shipped `docs/preconditioning.md` for the user-facing description.
+
+**The three value objects share a public base, `BlockInverse` (`block_inverse.py`), which in turn
+derives from `SettingsValue` (`settings_value.py`, #371, 2026-09-14).** `SettingsValue` is the one home
+of "a frozen dataclass whose `None` fields are unset, and whose `settings()` are the set ones" — the
+coupled-preconditioner specs in `turbulence/preconditioner_spec.py` derive from it too, so the
+comprehension is written once rather than per configuration family. `BlockInverse` is public so a
+configuration can *require* a value rather than an arbitrary `(block, n_fields)` callable
+(`FieldSplit` does). There is no `_BlockInverseSpec`; that was its private name for one commit.
 
 ## Responsibility
 - A Newton driver on `R(state, params) = 0` using the AD Jacobian (JVP/VJP), and a
@@ -168,7 +176,7 @@ recorded error.** A default here that disagrees with the code is a defect — fi
 
 | | library default | validated `bfs3d` bundle | where |
 |---|---|---|---|
-| smoother fill | `smoother_fill_levels=1` (ILU(1)) | 0 (ILU(0)) — **inert**: monolithic only, and the case runs the split | `coupled_amg_continuation` / `compare.py` |
+| smoother fill | `smoother_fill_levels=1` (ILU(1)) | 0 (ILU(0)) — **inert**: monolithic only, and the case runs the split | `MonolithicVCycle` / `compare.py` |
 | smoother sweeps | `smoother_sweeps=2` | 4 — **inert**, as above | same |
 | coarse-eq limit | `coarse_eq_limit=None` (~50) | 2000 — **inert**, as above | same |
 | PC shift floor | `beta_floor=0.0` | **0.05** | same |
@@ -194,11 +202,11 @@ halves of the decision are now separated:
 * **The restart regime is per preconditioner family**, which is the part that genuinely differs, as
   `_ForwardSolveRegime` values in `turbulence/coupled.py`:
 
-| regime | builder | rtol | restart | max_restarts |
+| regime | preconditioner (`coupled_step` / a session) | rtol | restart | max_restarts |
 |---|---|---|---|---|
-| `_BLOCK_FORWARD` | `coupled_continuation` (block-SIMPLE) | 0.3 | 120 | 15 |
-| `_FACTORIZATION_FORWARD` | `coupled_lu_continuation` | 0.3 | 10 | 40 |
-| `_VCYCLE_FORWARD` | `coupled_amg_continuation` (3D `bfs3d`) | 0.3 | 15 | 60 |
+| `_BLOCK_FORWARD` | `BlockDiagonal` (block-SIMPLE) | 0.3 | 120 | 15 |
+| `_FACTORIZATION_FORWARD` | `MaterializedJacobian(CompleteLu)` | 0.3 | 10 | 40 |
+| `_VCYCLE_FORWARD` | `MaterializedJacobian(MonolithicVCycle \| FieldSplit)` (3D `bfs3d`) | 0.3 | 15 | 60 |
 | `_CONSTRAINED_FORWARD` | `mass_flow_coupled_continuation` | **1e-2, Euclidean** | 120 | 15 |
 
 All four builders take `forward_rtol` / `forward_restart` / `forward_max_restarts`. ⚠️ **Move the

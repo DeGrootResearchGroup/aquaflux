@@ -62,11 +62,18 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse.linalg as spla  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
-    jacobi_smoothed_inverse,
+    JacobiSmoothed,
     materialize_block_jacobian,
     shifted_jacobian,
 )
-from aquaflux.turbulence import coupled_amg_continuation, hybrid_initialize  # noqa: E402
+from aquaflux.turbulence import (
+    FieldSplit,
+    JacobianProbeSpec,
+    MaterializedJacobian,
+    MonolithicVCycle,
+    coupled_step,
+    hybrid_initialize,
+)
 
 #: Far past the march's inexact-Newton stop so arms separate rather than tie; modest in restarts
 #: because a failing arm is identified by its true residual long before it would converge.
@@ -180,18 +187,21 @@ def main() -> None:
     )
 
     def field_split(beta):
-        return coupled_amg_continuation(
+        return coupled_step(
             coupled,
             state,
-            amg_beta=beta,
-            stencil_reach=REACH,
-            smoother_fill_levels=compare.FILL_LEVELS,
-            smoother_sweeps=compare.SWEEPS,
-            coarse_eq_limit=compare.COARSE_EQ_LIMIT,
-            field_split=compare.FIELD_SPLIT,
-            leading_inverse=compare.LEADING_INVERSE if compare.FIELD_SPLIT else None,
-            trailing_inverse=(
-                jacobi_smoothed_inverse(**compare.JACOBI_TRAILING) if compare.FIELD_SPLIT else None
+            preconditioner=MaterializedJacobian(
+                (
+                    FieldSplit(compare.LEADING_INVERSE, JacobiSmoothed(**compare.JACOBI_TRAILING))
+                    if compare.FIELD_SPLIT
+                    else MonolithicVCycle(
+                        smoother_fill_levels=compare.FILL_LEVELS,
+                        smoother_sweeps=compare.SWEEPS,
+                        coarse_eq_limit=compare.COARSE_EQ_LIMIT,
+                    )
+                ),
+                probe=JacobianProbeSpec(stencil_reach=REACH),
+                build_beta=beta,
             ),
             inner_steps=compare.INNER_STEPS,
             inner_tol=compare.INNER_TOL,

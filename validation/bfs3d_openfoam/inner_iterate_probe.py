@@ -64,16 +64,21 @@ sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
-from aquaflux.solve import (  # noqa: E402
+from aquaflux.solve import (  # noqa: E402  # noqa: E402
     AmgVCycle,
+    Globalization,
     MonolithicAmgPreconditioner,
     block_stencil_gather_map,
     relative_residual_gmres,
+    restart_cycles,
     solve_linear,
 )
 from aquaflux.solve.amg_preconditioner import ShiftedCellMajorOperator  # noqa: E402
-from aquaflux.solve import Globalization, restart_cycles  # noqa: E402
-from aquaflux.turbulence import coupled_amg_continuation  # noqa: E402
+from aquaflux.turbulence import (
+    MaterializedJacobian,
+    MonolithicVCycle,
+    coupled_step,
+)
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _PROBE_BATCH_SIZE,
     _batched_jacobian_matvec,
@@ -112,16 +117,22 @@ def capture_inner_iterates(coupled, state, beta, seed_state):
     # Built at the RUNG SEED, then stepped from `state`: that is the arrangement the march is in, with
     # its shift policy frozen at the seed and lagging the state. Building at `state` instead gives a
     # self-consistent triple the march never occupies, and it does not fail the way the march fails.
-    engine = coupled_amg_continuation(
+    engine = coupled_step(
         coupled,
         seed_state,
+        preconditioner=MaterializedJacobian(
+            MonolithicVCycle(
+                smoother_fill_levels=compare.FILL_LEVELS,
+                smoother_sweeps=compare.SWEEPS,
+                coarse_eq_limit=compare.COARSE_EQ_LIMIT,
+            ),
+            build_beta=max(
+                beta, FLOOR
+            ),  # the march's refresh pairing; the session's own default is 2.0
+        ),
         globalization=Globalization(beta0=beta),
-        amg_beta=max(beta, FLOOR),  # the march's refresh pairing; the builder's own default is 2.0
         inner_steps=compare.INNER_STEPS,
         inner_tol=compare.INNER_TOL,
-        smoother_fill_levels=compare.FILL_LEVELS,
-        smoother_sweeps=compare.SWEEPS,
-        coarse_eq_limit=compare.COARSE_EQ_LIMIT,
         cycle_budget=compare.CYCLE_BUDGET,
         inner_observer=observer,
     )

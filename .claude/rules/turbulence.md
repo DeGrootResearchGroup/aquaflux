@@ -35,6 +35,22 @@ the AMG smoother fill (the validated `bfs3d` bundle is **ILU(0) × 4 sweeps**; t
 to ILU(1) × 2) and the aggregation (**plain**, not smoothed). Any AMG-adjacent number written before
 those moves is un-adjudicable — treat it as a lead, not a fact.
 
+## ⚠️ The coupled builders were unified (2026-09-14, #371) — these names no longer exist
+
+Many entries below are dated history written against the old API. Read them through this table:
+
+| was | is |
+|---|---|
+| `coupled_continuation(coupled, state, method=M, **flow_opts, **march)` | `coupled_step(coupled, state, preconditioner=BlockDiagonal(method=M, **flow_opts), **march)` |
+| `coupled_lu_continuation(..., lu_beta=b, backend=B, stencil_reach=r, ...)` | `coupled_step(..., preconditioner=MaterializedJacobian(CompleteLu(backend=B), build_beta=b, probe=JacobianProbeSpec(stencil_reach=r)))` |
+| `coupled_amg_continuation(..., smoother_fill_levels=…, amg_beta=b)` | `MaterializedJacobian(MonolithicVCycle(smoother_fill_levels=…), build_beta=b)` |
+| `coupled_amg_continuation(..., field_split=True, leading_inverse=L, trailing_inverse=T)` | `MaterializedJacobian(FieldSplit(L, T))` — `L`/`T` are `solve.BlockInverse` values |
+| `probe=` / `preconditioner=` shared across rungs, `amg_beta_tracking_refresh(..., beta_floor=f, observer=o)`, `lu_beta_tracking_refresh` | one session: `open_session(MaterializedJacobian(..., beta_floor=f), coupled, observer=o)`, passed as `solve_coupled(preconditioner=session)`; its `precondition_step` / `rebind` replace the hooks' |
+| `reuse=previous.shift_policy, residual_norm=m` | `session.refresh(state, previous, m, **march)` |
+| `solve_coupled(method=M, velocity=…)` | `solve_coupled(preconditioner=BlockDiagonal(method=M, velocity=…))` |
+| `mass_flow_coupled_continuation(..., method=M, **flow_opts)`, `solve_coupled_mass_flow(method=M, **flow_opts)` | the same keyword, `preconditioner=BlockDiagonal(method=M, **flow_opts)`; a `MaterializedJacobian` is refused there |
+| `point_setup` returning `continuation` + `RefreshPolicy(precondition_step=hook)`, `_rebinding` | `solve_reynolds_continuation` / `solve_reynolds_ramp` given `preconditioner=`; `point_setup` keeps only per-point march settings |
+
 ## The closure — model, strain, sources, transport, preconditioner
 
 - **`sst.py` — `SSTModel`.** Menter's SST constants and the quantities derived directly from
@@ -230,7 +246,95 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     - **`method` now defaults to a sentinel (`_UNSET`), resolving to `"twolevel"` when the solve builds
       the continuation.** Both a real default and an explicit `None` ("no preconditioner method") are
       meaningful, so neither could stand for "not given" — and without that distinction the guard could
-      not refuse an explicitly-passed `method` without refusing the default nobody asked for.
+      not refuse an explicitly-passed `method` without refusing the default nobody asked for. The
+      sentinel is defined in `preconditioner_spec.py` (moved 2026-09-14, #371), because
+      `BlockDiagonal.method` has the same two meanings; `coupled.py` imports it.
+  - **🔬 BUILT, NOT YET CONSUMED — `preconditioner_spec.py`, the preconditioner as a value (#371,
+    2026-09-14).** `BlockDiagonal` | `MaterializedJacobian(inverse=CompleteLu | MonolithicVCycle |
+    FieldSplit(leading, trailing), probe=JacobianProbeSpec, build_beta, beta_floor)`, all
+    `SettingsValue`s with `None`-unset fields. **Nothing reads them yet**: `solve_coupled`, the builders
+    and the Reynolds drivers still take `method=` / `coupled_*_continuation`, and the session that
+    replaces `_ContinuationSource` is the next slice on the #371 branch. Two design facts to hold while
+    wiring it:
+    - **The three materialized inverses are ONE family with a nested choice**, because they share the
+      probe, the build shift and the refresh floor and differ only in the inverse. That nesting is also
+      what makes defect D1 unrepresentable: a monolithic smoother setting (`smoother_fill_levels`, …)
+      has no field beside a `FieldSplit`, where the deleted `coupled_amg_continuation(field_split=True)`
+      accepted it and silently ignored it.
+    - **Each spec's field set is pinned to the constructor it feeds** (`test_preconditioner_spec.py`):
+      `BlockDiagonal` to `BlockPreconditioner.build` minus `reference_state`, `JacobianProbeSpec` to
+      `CoupledJacobianProbe.build`'s free settings (not `active_rows`, which follows from the inverse, nor
+      `production_viscosity_frozen`, which follows from the operator), `MonolithicVCycle` and `CompleteLu`
+      to their `build`. `FieldSplit` requires `solve.BlockInverse` values, never a factory closure, so a
+      build-record sink is attached where the session is opened rather than bound into the inverse.
+  - **✅ `open_session` / `PreconditionerSession` / `coupled_step` — the ONE coupled builder, and what
+    `solve_coupled`, both Reynolds drivers and both flagship cases run on (#371, 2026-09-14).**
+    `_BlockSession` and `_MaterializedSession` are `_ContinuationSource` promoted: `build(state,
+    **march)`, `refresh(state, previous, residual_norm, **march)`, `precondition_step`, `rebind`.
+    `coupled_step` is the one frozen-step builder and opens a private session. The new path was proven
+    **array-identical** to the old builders first (`test_preconditioner_session.py` for block / LU /
+    field split, `test_coupled_amg.py` for the V-cycle), then wired:
+    - **`solve_coupled(preconditioner=…)` replaced `method=`**, which no longer exists, and
+      `_DefaultContinuation` is gone: the default is a `_SessionContinuation` over a `BlockDiagonal()`
+      session. Block-preconditioner settings (`velocity=`, `schur_scaling=`, …) are **no longer march
+      keywords** — `**continuation_kwargs` binds against `coupled_step`'s signature and an unknown name
+      raises naming where it belongs. A materialized spec's session supplies `precondition_step`, which
+      makes the march observed (forward-only); a second hook on `RefreshPolicy` beside it is refused, as
+      is `jacobian_production_viscosity` beside a session object.
+    - **`solve_reynolds_continuation`** opens **one** session for a `MaterializedJacobian` spec, shares
+      it across points and `rebind`s it per point; a `BlockDiagonal` spec is built per point at its own
+      viscosity, exactly as before. `_SOLVE_ONLY` excludes `preconditioner`. **`solve_reynolds_ramp`**
+      opens a materialized session on the **anchor** and hands the homotopy its `rebind`; a block spec
+      stays target-bound (#386). A `point_setup` refresh hook beside a session is refused.
+    - **The three builders, both public β-tracking hooks and `_rebinding` are DELETED** (see the rename
+      table at the top of this file). Both flagship drivers and every harness open a session or build a
+      spec; the drivers' inert monolithic smoother settings under the field split (D1) went with them,
+      and `bfs3d` now exposes its preconditioner as `compare.PRECONDITIONER`. The array-identity tests
+      that pinned the new path to the old builders were deleted with the builders. `_CallerBuiltContinuation`
+      stays: a `RefreshPolicy(builder=...)` is still a supported way to rebuild a caller's own step.
+    - **The mass-flow sibling takes a spec too.** `mass_flow_coupled_continuation` and
+      `solve_coupled_mass_flow` take `preconditioner: BlockDiagonal | None` in place of `method` +
+      `**preconditioner_kwargs`; a `MaterializedJacobian` is refused, because the bordered policy wraps a
+      block-diagonal composition and a materialized Jacobian has no constraint row. The bordered measure
+      and `_CONSTRAINED_FORWARD` stay local. **D10 is fixed:** `solve_coupled_mass_flow` refuses
+      `preconditioner` / `reference_state` / march keywords beside a finished `continuation` (through the
+      same `_refuse` as `solve_coupled`), where `method="air"` beside a twolevel step used to run twolevel
+      in silence. `_refuse_unknown_flow_block_options` is **deleted**: every flow-block option now
+      arrives from a spec whose fields are pinned to `BlockPreconditioner.build`, so it could not fire.
+    - **Both flagship drivers were dry-run to their first step against the pre-migration drivers
+      (2026-09-14), and match line for line.** Control: this branch's own commit `4eea966` (S3b), whose
+      drivers still called the deleted builders — not an archived log, which is another branch's run.
+      Migrated: `c4d9cb1`. Each case run through `run_case.sh` on its shipped defaults, one at a time,
+      stopped at step 2. **pitzDaily** (12225 cells, ramp 16x1, momentum-only, damping 3, field split
+      `simplesmooth`/`jacobi_smoothed`): banner identical; step 1 `G` 3.596e-02 → 6.796e-03 → 1.411e-04
+      at 1+1 cycles, `alpha` 1.000, `|R0|` 2.3038e-02, `R` 3.331e-02, `pc full 1.2s` in both.
+      **bfs3d** (23040 cells, same bundle): step 1 `G` 1.911e-01 → 4.840e-02 → 9.770e-04 at 1+1 cycles,
+      `|R0|` 9.9215e-02, `R` 1.511e-01, per-field residuals and the SIMPLE-smoothed hierarchy prints
+      identical. Only wall clocks differ (35/36 s and 76/74 s). One step is what this establishes — the
+      refresh hook, the ramp's per-station `rebind` and the target station are not reached by it.
+    Facts to hold while finishing it:
+    - **March defaults live once, on `coupled_step`'s signature.** A session binds its `**march` against
+      that signature (`_march_keywords`), so an unknown keyword is a `TypeError` and no default is
+      restated. `preconditioner` and `jacobian_production_viscosity` are refused there: the session owns
+      them (user decision Q1).
+    - **A frozen `coupled_step` never wires the refresh hook; a session `build` does**, and only when
+      `refresh_on_cycles` is set and no caller `inner_refresh` was given. The hook, `precondition_step`
+      and the mid-step refresh are created once per session, so every build carries the same objects
+      (the static-field identity that keeps the coupled solve a compilation-cache hit).
+    - **Two latent defects are fixed on the session path only, until S3c removes the other:** the probe
+      follows `jacobian_production_viscosity` for every family (D2, and D7 for the complete LU, whose
+      builder materializes the un-frozen assembler), and one probe serves the build and the hook (D3/D5).
+      Byte-identical wherever `jacobian_production_viscosity=False`.
+    - **`_BlockSession.rebind` is a no-op** — target-viscosity behaviour on the ramp stays as it was
+      (Q2, #386).
+    - **⚠️ `tools/sibling_builders.py` CANNOT SEE `coupled_step` (checked 2026-09-14).** It reaches its
+      tail through `session._build(...)`, and `_build` is defined on both sessions — an ambiguous name the
+      tool never follows — so `coupled_step` is credited with building nothing and appears in no pair,
+      while the four old builders still pair with each other. Its silence about `coupled_step` is
+      blindness, not a clean report. Since the old builders were deleted the coupled family is absent
+      from the report entirely; `test_sibling_builders.py` now pins the blind spot (it fails if the tool
+      starts seeing `coupled_step`), the two surfaces are pinned by
+      `test_every_continuation_builder_installs_the_same_globalization`, and the tool fix is #392.
   - **`solve_coupled(refresh=RefreshPolicy(trigger=…))` segments the march to re-freeze the preconditioner — and a refresh
     must CARRY the shift diagonals, not rebuild them (binding).** With a trigger set, the march runs as a
     sequence of *observed* segments (`aquaflux.solve.forward_march`): each steps until the trigger judges
@@ -1199,8 +1303,8 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     see `.claude/notes/solve-globalization-log.md`). **The k/ω *scalar* AMGs are the exception: they do go
     stale, and refreshing them alone once the flow separates cuts the outer cycle count materially**
     (configuration not recorded — re-measure before relying on the size) — the one staleness lever that
-    pays; see the staleness bullet in `.claude/notes/solve-globalization-log.md`. Overridable via
-    `preconditioner_kwargs`.
+    pays; see the staleness bullet in `.claude/notes/solve-globalization-log.md`. Overridable through
+    `BlockDiagonal(velocity=…)`.
   - **⚠️ THE PRESSURE SCHUR NO LONGER HARDCODES `schur_scaling="msimple"` (fixed 2026-08-18) — it was
     never necessary at the scale this policy is actually used at, and is dominated where it matters.**
     Superseded finding, kept for the trap: this bullet used to pair `velocity="convection"` with
@@ -1618,8 +1722,8 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     `_bordered_preconditioner`, `_with_body_force` from `flow/mean_velocity.py`) reused in the coupled
     `[flow…, k, ω]` layout by `_coupled_constraint_vectors` — the same Schur elimination one careful
     place keeps consistent, not re-derived. Globalized by `mass_flow_coupled_continuation`, which
-    borders the **same** `_coupled_shift_policy` (extracted from `coupled_continuation` for exactly this
-    reuse) with a `_MassFlowBorderedPolicy`: the shift diagonal gains a **zero** for `β` (the linear
+    borders the **same** `_coupled_shift_policy` the block-diagonal session builds (from a
+    `BlockDiagonal` spec, the only family it accepts) with a `_MassFlowBorderedPolicy`: the shift diagonal gains a **zero** for `β` (the linear
     constraint row needs no pseudo-time damping) and the block preconditioner is wrapped by the
     constraint preconditioner. Because the constraint lives *inside* the coupled residual, the coupled
     IFT adjoint **carries it** — `jax.grad` through the converged constrained solve is the sensitivity

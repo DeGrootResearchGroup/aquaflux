@@ -37,13 +37,12 @@ the OpenFOAM ``x_r/h`` ~ 7.74:
 
 * **The preconditioner must be exact** -- because the aggressive control's large timestep *overshoots* into
   a stiff, near-singular low-shift coupled saddle where a block-triangular SIMPLE preconditioner loses
-  diagonal dominance and the step goes non-finite. This case therefore preconditions each Reynolds point
-  with a **monolithic complete-LU factorization** (:func:`~aquaflux.turbulence.coupled_lu_continuation`),
-  **re-factored at the current ``(state, beta)`` every step** by
-  :func:`~aquaflux.turbulence.lu_beta_tracking_refresh`, so the shifted solve is exact (a single Krylov
-  iteration) and robust through the overshoots. The per-point continuation is supplied through
-  ``solve_reynolds_continuation``'s ``point_setup`` seam, since each rung's factorization is frozen at its
-  own viscosity and seed state.
+  diagonal dominance and the step goes non-finite. This case therefore preconditions the march with a
+  **monolithic complete-LU factorization** (:class:`~aquaflux.turbulence.CompleteLu` inside a
+  :class:`~aquaflux.turbulence.MaterializedJacobian`), held in one session that
+  ``solve_reynolds_continuation`` re-points at every Reynolds point and **re-factors at the current
+  ``(state, beta)`` before every step**, so the shifted solve is exact (a single Krylov iteration) and
+  robust through the overshoots.
 
 With both, the ramp develops the recirculation to ``x_r/h`` ~ 8 -- past the OpenFOAM value (a wall-resolving
 closure on a wall-function mesh runs a little long), matching the direct target solve's root.
@@ -68,11 +67,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import aquaflux  # noqa: F401  (enables x64 at import)
 import compare
 import numpy as np
-from aquaflux.solve import DualTimeControl, RefreshPolicy
+from aquaflux.solve import DualTimeControl
 from aquaflux.turbulence import (
+    CompleteLu,
     GeometricReynoldsSchedule,
-    coupled_lu_continuation,
-    lu_beta_tracking_refresh,
+    MaterializedJacobian,
+    open_session,
     solve_reynolds_continuation,
 )
 
@@ -181,32 +181,23 @@ def solve_aquaflux_continuation(**solve_kwargs: object) -> dict:
             flush=True,
         )
 
-    # Each Reynolds point builds its OWN complete-LU continuation, frozen at that point's viscosity and
-    # seed state, plus the beta-tracking refresh that re-factors it at the current (state, beta) every
-    # step -- a per-companion, per-state preconditioner the ramp's single target-frozen ``continuation``
-    # cannot express, so it is supplied through ``point_setup``. The exact factorization is what lets the
-    # aggressive control's large-timestep overshoots stay finite (the block preconditioner cannot).
-    def point_setup(companion, state, point):
-        del point  # this case configures every Reynolds point identically
-        return dict(
-            continuation=coupled_lu_continuation(
-                companion,
-                state,
-                lu_beta=CONTROL.beta_start,
-                backend=LU_BACKEND,
-                inner_steps=INNER_STEPS,
-                inner_tol=INNER_TOL,
-            ),
-            refresh=RefreshPolicy(precondition_step=lu_beta_tracking_refresh(companion)),
-        )
+    # One complete-LU session for every Reynolds point: the continuation re-points it at each point's
+    # companion, and it re-factors the LU at the current (state, beta) before every step. The exact
+    # factorization is what lets the aggressive control's large-timestep overshoots stay finite (the
+    # block preconditioner cannot).
+    session = open_session(
+        MaterializedJacobian(CompleteLu(backend=LU_BACKEND), build_beta=CONTROL.beta_start), coupled
+    )
 
     options = (
         dict(
+            preconditioner=session,
+            inner_steps=INNER_STEPS,
+            inner_tol=INNER_TOL,
             intermediate_rtol=INTERMEDIATE_RTOL,
             max_steps=MAX_STEPS,
             rtol=RTOL,
             step_control=control,
-            point_setup=point_setup,
             scaled_norm=True,
             on_checkpoint=on_checkpoint,
         )

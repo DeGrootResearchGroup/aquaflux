@@ -6,6 +6,8 @@ paths:
 
 # Rules — `aquaflux/solve/` direct preconditioners (complete-LU) and Jacobian materialization
 
+> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | MonolithicVCycle | FieldSplit)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
+
 > Split out of `solve.md` (2026-08-18) to keep routine `aquaflux/solve/` work from loading the
 > full complete-LU and coupled-Jacobian-materialization investigation narrative. See `solve.md` for
 > the package-wide contracts, current configuration, and binding decisions this file assumes.
@@ -467,7 +469,7 @@ complete LU and the AMG's coloured probe both still depend on it.
       - **The family it is FOR is the SIMPLE-smoothed hierarchy, which takes the saving for nothing.**
         The mechanism is which preconditioners inherit the stored *sparsity*: an incomplete factorization
         takes its pattern from it, so a corrupted or narrowed pattern gives a correspondingly different
-        factor, while `simple_smoothed_inverse` relaxes through diagonal and Schur approximations and takes
+        factor, while `SimpleSmoothedInverse` relaxes through diagonal and Schur approximations and takes
         no pattern at all. Measured on pitzDaily, that arm is **reach-insensitive** — the same 71 steps at
         reach 3 and reach 5, cycles within 3 % (395 vs 408), identical final residual — while the Jacobian
         halves and the march is 31 % shorter. **The untested pairing worth running is
@@ -483,7 +485,7 @@ complete LU and the AMG's coloured probe both still depend on it.
         the split sends:
         - the **`[u, v, p]` saddle** to the PETSc AMG V-cycle — *this* is the only block `FILL_LEVELS`
           governs, and the only place an incomplete factorization happens at all;
-        - the **`[k, omega]` pair** to `jacobi_smoothed_inverse`, **which is not an ILU**.
+        - the **`[k, omega]` pair** to `JacobiSmoothedInverse`, **which is not an ILU**.
 
         Three consequences, all binding:
         1. **Every arm in the sweeps below — the fill ladder, the orderings, the shifts, the reach arms,

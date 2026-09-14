@@ -54,8 +54,13 @@ sys.path.insert(0, str(CASE.parents[1]))
 
 import compare  # noqa: E402
 from aquaflux.solve import relative_residual_gmres  # noqa: E402
-from aquaflux.turbulence import solve_coupled  # noqa: E402
-from aquaflux.turbulence.coupled import coupled_amg_continuation  # noqa: E402
+from aquaflux.turbulence import (
+    FieldSplit,
+    JacobianProbeSpec,
+    MaterializedJacobian,
+    coupled_step,
+    solve_coupled,
+)
 from field_split_probe import STATES, load_state  # noqa: E402
 
 #: Newton steps allowed per objective evaluation. ⚠️ NOT "one or two": from a converged root at beta = 0
@@ -351,14 +356,13 @@ def main() -> None:
     coupled, state, start = build()
     print("  building the preconditioner (materialize + factorize)...", flush=True)
     started = time.time()
-    continuation = coupled_amg_continuation(
+    continuation = coupled_step(
         coupled,
         state,
-        stencil_reach=3,
-        column_reach=compare.COLUMN_REACH,
-        smoother_fill_levels=0,
-        smoother_sweeps=4,
-        coarse_eq_limit=compare.COARSE_EQ_LIMIT,
+        preconditioner=MaterializedJacobian(
+            FieldSplit(compare.LEADING_INVERSE, compare.TRAILING_INVERSE),
+            probe=JacobianProbeSpec(stencil_reach=3, column_reach=compare.COLUMN_REACH),
+        ),
         forward_rtol=FORWARD_RTOL,
         # THE CASE'S positivity settings, not the library's. Every step is capped by the k-positivity
         # rule whether or not one asks for it (`step_limit` is unconditional), and unfloored that cap
@@ -368,9 +372,6 @@ def main() -> None:
         # continuation silently gets library defaults; this case's floor is load-bearing.
         positivity_floor=compare.K_POSITIVITY_FLOOR,
         positivity_projection=compare.K_POSITIVITY_PROJECTION,
-        field_split=True,
-        trailing_inverse=compare.TRAILING_INVERSE,
-        leading_inverse=compare.LEADING_INVERSE,
     )
     print(f"  preconditioner built in {time.time() - started:.0f}s", flush=True)
     counter = count_adjoint_applies(continuation, heartbeat=ADJOINT_HEARTBEAT)

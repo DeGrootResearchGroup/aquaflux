@@ -15,8 +15,8 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
 import pytest
-from aquaflux.turbulence import solve_reynolds_continuation
-from aquaflux.turbulence.coupled import CoupledRANS, coupled_continuation, solve_coupled
+from aquaflux.turbulence import BlockDiagonal, coupled_step, solve_reynolds_continuation
+from aquaflux.turbulence.coupled import CoupledRANS, solve_coupled
 
 # The 560-cell turbulent channel (Re = U H / nu = 2500) and its constants, reused verbatim so the case
 # is defined once (tests/integration is a package, so this is the package-qualified path).
@@ -35,10 +35,17 @@ def channel():
 def test_reaches_the_same_root_as_a_direct_solve(channel) -> None:
     """Two continuation points (Re 25 -> 250 -> 2500) land on the direct solve's converged fields."""
     flow_c, k_c, omega_c = solve_reynolds_continuation(
-        channel, n_points=2, method="twolevel", max_steps=MAX_STEPS, rtol=1e-10, **PRECONDITIONER
+        channel,
+        n_points=2,
+        max_steps=MAX_STEPS,
+        rtol=1e-10,
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
     flow_d, k_d, omega_d = solve_coupled(
-        channel, method="twolevel", max_steps=MAX_STEPS, rtol=1e-10, **PRECONDITIONER
+        channel,
+        max_steps=MAX_STEPS,
+        rtol=1e-10,
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
 
     # The continuation dissolves at the target, so the root is the direct solve's root. The k bound is
@@ -61,10 +68,17 @@ def test_reaches_the_same_root_as_a_direct_solve(channel) -> None:
 def test_zero_points_is_a_plain_direct_solve(channel) -> None:
     """``n_points = 0`` runs no continuation -- bit-for-bit the direct solve from the same hybrid IC."""
     flow_c, k_c, omega_c = solve_reynolds_continuation(
-        channel, n_points=0, method="twolevel", max_steps=MAX_STEPS, rtol=1e-10, **PRECONDITIONER
+        channel,
+        n_points=0,
+        max_steps=MAX_STEPS,
+        rtol=1e-10,
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
     flow_d, k_d, omega_d = solve_coupled(
-        channel, method="twolevel", max_steps=MAX_STEPS, rtol=1e-10, **PRECONDITIONER
+        channel,
+        max_steps=MAX_STEPS,
+        rtol=1e-10,
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
     assert jnp.array_equal(flow_c, flow_d)
     assert jnp.array_equal(k_c, k_d)
@@ -83,8 +97,10 @@ def test_adjoint_matches_a_direct_solve_and_is_point_count_independent(channel) 
     """
     # Build the target-viscosity continuation once, outside jax.grad (the block preconditioner must be
     # constructed on concrete parameters).
-    continuation = coupled_continuation(
-        channel, channel.pack_state(*_hybrid(channel)), method="twolevel", **PRECONDITIONER
+    continuation = coupled_step(
+        channel,
+        channel.pack_state(*_hybrid(channel)),
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
 
     def objective(nu_scale, n_points):
@@ -92,10 +108,9 @@ def test_adjoint_matches_a_direct_solve_and_is_point_count_independent(channel) 
         _, k, _ = solve_reynolds_continuation(
             scaled,
             n_points=n_points,
-            method="twolevel",
             max_steps=MAX_STEPS,
             continuation=continuation,
-            **PRECONDITIONER,
+            preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
         )
         return jnp.sum(k**2)
 

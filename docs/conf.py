@@ -59,6 +59,8 @@ SUBPACKAGE_GROUPS = {
                 "amg_preconditioner",
                 "lu_preconditioner",
                 "field_split",
+                "block_inverse",
+                "settings_value",
                 "hierarchy_inverse",
                 "saddle_multigrid",
             ],
@@ -86,7 +88,7 @@ SUBPACKAGE_GROUPS = {
         ("Wall treatment and boundary closures", ["boundary"]),
         ("The coupled flow-turbulence solve", ["coupled", "driver", "continuation"]),
         ("Reynolds-number continuation", ["reynolds"]),
-        ("Preconditioners", ["preconditioner"]),
+        ("Preconditioners", ["preconditioner_spec", "preconditioner"]),
         ("Initialization and diagnostics", ["initialization", "diagnostics"]),
     ],
 }

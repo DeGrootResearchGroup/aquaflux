@@ -21,9 +21,9 @@ defaults are pinned as **literal numbers**, so a moved default fails here instea
 every case. And one **override changes one setting** on every builder, with each refusal the object
 makes where it would otherwise drop a setting without a word.
 
-``coupled_amg_continuation`` is checked by signature only -- building it needs ``petsc4py``, which CI
-does not install. It shares ``_monolithic_factor_step`` with the complete-LU builder that *is* built
-here, so its forwarding is the same code path.
+``coupled_step`` is built here with the block-diagonal and complete-LU preconditioners. A multigrid
+V-cycle needs ``petsc4py``, which CI does not install, and it shares ``_monolithic_factor_step`` with the
+complete LU, so its forwarding is the same code path.
 """
 
 from __future__ import annotations
@@ -47,10 +47,12 @@ from aquaflux.solve import (
     SwitchedEvolutionRelaxation,
 )
 from aquaflux.turbulence import (
+    BlockDiagonal,
+    CompleteLu,
+    MaterializedJacobian,
     ScalarShiftPolicy,
-    coupled_amg_continuation,
-    coupled_continuation,
-    coupled_lu_continuation,
+    coupled_step,
+    open_session,
     scalar_pseudo_transient_solve,
 )
 from aquaflux.turbulence.coupled import mass_flow_coupled_continuation
@@ -94,9 +96,7 @@ BUILDERS = (
     momentum_continuation,
     reused_flow_solve,
     scalar_pseudo_transient_solve,
-    coupled_continuation,
-    coupled_lu_continuation,
-    coupled_amg_continuation,
+    coupled_step,
     mass_flow_coupled_continuation,
 )
 
@@ -183,9 +183,11 @@ def test_the_shipped_defaults_are_the_ones_every_case_was_measured_under(case) -
     coupled, state = case
     _assert_carries(momentum_continuation(coupled.momentum), SHIPPED)
     coupled_shipped = dataclasses.replace(SHIPPED, line_search=COUPLED_LINE_SEARCH)
-    _assert_carries(coupled_continuation(coupled, state, method=None), coupled_shipped)
     _assert_carries(
-        coupled_continuation(coupled, state, method=None, inner_steps=3),
+        coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None)), coupled_shipped
+    )
+    _assert_carries(
+        coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None), inner_steps=3),
         coupled_shipped,
         dual_time=True,
     )
@@ -206,11 +208,14 @@ def test_one_override_changes_one_setting_and_each_builder_keeps_its_own_base(ca
         dataclasses.replace(SHIPPED, beta0=1.5),
     )
     _assert_carries(
-        coupled_continuation(coupled, state, method=None, globalization=one),
+        coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None), globalization=one),
         dataclasses.replace(SHIPPED, beta0=1.5, line_search=COUPLED_LINE_SEARCH),
     )
-    opted_out = coupled_continuation(
-        coupled, state, method=None, globalization=Globalization(line_search=0)
+    opted_out = coupled_step(
+        coupled,
+        state,
+        preconditioner=BlockDiagonal(method=None),
+        globalization=Globalization(line_search=0),
     )
     assert opted_out.line_search == 0
 
@@ -277,12 +282,18 @@ def test_the_coupled_builders_forward_every_field(case, dual_time: bool) -> None
     asked = DUAL_TIME_ASKED if dual_time else ASKED
     extra = {"inner_steps": 3, "inner_tol": 1e-3} if dual_time else {}
     built = {
-        "block": coupled_continuation(coupled, state, method=None, globalization=asked, **extra),
-        "lu": coupled_lu_continuation(
-            coupled, state, backend="scipy", globalization=asked, **extra
+        "block": coupled_step(
+            coupled, state, preconditioner=BlockDiagonal(method=None), globalization=asked, **extra
+        ),
+        "lu": coupled_step(
+            coupled,
+            state,
+            preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
+            globalization=asked,
+            **extra,
         ),
         "mass flow": mass_flow_coupled_continuation(
-            coupled, state, method=None, globalization=asked, **extra
+            coupled, state, preconditioner=BlockDiagonal(method=None), globalization=asked, **extra
         ),
     }
     for name, step in built.items():
@@ -299,9 +310,15 @@ def test_a_dual_time_step_refuses_a_setting_it_has_no_field_for(case, field: str
     coupled, state = case
     one = Globalization(**{field: getattr(ASKED, field)})
     with pytest.raises(ValueError, match=field):
-        coupled_continuation(coupled, state, method=None, globalization=one, inner_steps=3)
+        coupled_step(
+            coupled,
+            state,
+            preconditioner=BlockDiagonal(method=None),
+            globalization=one,
+            inner_steps=3,
+        )
     # ...and the same object is accepted by the single-step shape, which has the ladder.
-    coupled_continuation(coupled, state, method=None, globalization=one)
+    coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None), globalization=one)
 
 
 def test_a_step_field_the_step_does_not_declare_is_refused_even_as_none() -> None:
@@ -330,17 +347,20 @@ def test_a_setting_given_both_ways_is_refused_and_an_unset_one_is_the_caller_s()
 def test_a_refresh_refuses_a_keyword_the_flow_block_does_not_take(case) -> None:
     """The regression: moving the march's settings onto ``Globalization`` made a stale ``beta0=`` silent.
 
-    ``coupled_continuation`` forwards its leftover keywords to ``BlockPreconditioner.build``, and a
-    refresh (``reuse=``) carries the flow block rather than rebuilding it, so it never read them:
-    ``beta0=1.5`` on a refresh built a march at ``beta0`` 2.0 without a word, while the same call without
-    ``reuse`` raised. Both must raise, and say where the setting belongs.
+    A refresh carries the flow block rather than rebuilding it, so when leftover keywords went to the
+    flow-block builder a ``beta0=1.5`` handed to a refresh built a march at ``beta0`` 2.0 without a word,
+    while the same call on a first build raised. A preconditioner session binds its march keywords
+    against one signature on every build and every refresh, so both raise, and say where it belongs.
     """
     coupled, state = case
-    base = coupled_continuation(coupled, state, method=None)
-    for extra in ({}, {"reuse": base.shift_policy}):
-        with pytest.raises(TypeError, match=r"beta0.*Globalization"):
-            coupled_continuation(coupled, state, method=None, beta0=1.5, **extra)
-    # The check is exact only while `build` declares every option it accepts.
+    session = open_session(BlockDiagonal(method=None), coupled)
+    base = session.build(state)
+    with pytest.raises(TypeError, match=r"beta0.*Globalization"):
+        session.build(state, beta0=1.5)
+    with pytest.raises(TypeError, match=r"beta0.*Globalization"):
+        session.refresh(state, base, base.norm(), beta0=1.5)
+    # A flow-block setting cannot be misplaced at all: the spec's fields are that builder's keywords,
+    # which is exact only while `build` declares every option it accepts.
     kinds = {
         parameter.kind
         for parameter in inspect.signature(BlockPreconditioner.build).parameters.values()

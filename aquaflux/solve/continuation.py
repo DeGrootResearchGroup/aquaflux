@@ -1231,8 +1231,8 @@ class Globalization(eqx.Module):
         A lower bound on ``β``, holding the shifted solve out of the ill-conditioned low-``β`` regime.
         It never moves the converged root -- the shift vanishes there either way -- only the path.
 
-        ⚠️ **Not the preconditioner's floor of the same name.** ``amg_beta_tracking_refresh``'s
-        ``beta_floor`` bounds the ``β`` the *V-cycle is built at* while the march keeps solving at its
+        ⚠️ **Not the preconditioner's floor of the same name.** A ``MaterializedJacobian``'s
+        ``beta_floor`` bounds the ``β`` the *inverse is re-fitted at* while the march keeps solving at its
         own; this one bounds the march's ``β`` itself. Nor is it the march step control's ``beta_min``.
         Three different floors, and reaching for the wrong one changes nothing observable.
     max_escalations : int or None
@@ -1268,9 +1268,9 @@ class Globalization(eqx.Module):
     line search::
 
         from aquaflux.solve import Globalization
-        from aquaflux.turbulence import coupled_continuation
+        from aquaflux.turbulence import coupled_step
 
-        step = coupled_continuation(coupled, state, globalization=Globalization(beta0=1.5))
+        step = coupled_step(coupled, state, globalization=Globalization(beta0=1.5))
     """
 
     # Static, matching every field these end up in (the schedule's three, the guard's cap and the

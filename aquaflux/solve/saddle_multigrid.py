@@ -44,7 +44,7 @@ from .multigrid import (
     _smoothed_ops,
 )
 
-__all__ = ["SimpleSmoothedInverse", "block_approximate_inverse", "simple_smoothed_inverse"]
+__all__ = ["SimpleSmoothedInverse", "block_approximate_inverse"]
 
 
 class _SimplePieces(eqx.Module):
@@ -634,31 +634,3 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
         )
 
         return pieces
-
-
-def simple_smoothed_inverse(**settings) -> Callable[[sp.spmatrix, int], object]:
-    """A ``leading_inverse`` factory using :class:`SimpleSmoothedInverse`.
-
-    Every keyword is forwarded, so the defaults — and the reasoning behind them — live on the class
-    rather than being restated here. The settings worth knowing about are ``strength_threshold`` (at
-    zero the aggregation reads no operator values at all and coarsens across the stiff direction, which
-    on a wall-graded mesh is the difference between a working hierarchy and one that stalls) and the
-    pair ``max_levels``/``max_coarse``, which have to move together: a strength threshold makes aggregates
-    *smaller*, so it enlarges the coarse grid, and the coarsest level is inverted densely.
-
-    Parameters
-    ----------
-    **settings
-        Forwarded to :class:`SimpleSmoothedInverse`.
-
-    Returns
-    -------
-    callable
-        ``(block, n_group_fields) -> SimpleSmoothedInverse``, the shape
-        :func:`build_block_triangular_field_split` expects.
-    """
-
-    def build(block: sp.spmatrix, n_group_fields: int) -> object:
-        return SimpleSmoothedInverse(block, n_group_fields, **settings)
-
-    return build

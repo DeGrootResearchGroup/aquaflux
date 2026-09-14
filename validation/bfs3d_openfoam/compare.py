@@ -26,7 +26,7 @@ aquaflux setup, mirroring the 2D case:
   negative once recirculation forms.
 
 **Preconditioner (the point of a 3D case):** the coupled Jacobian is preconditioned by an
-**algebraic-multigrid V-cycle** (:func:`aquaflux.turbulence.coupled_amg_continuation`), not by a
+**materialized-Jacobian preconditioner** (:class:`aquaflux.turbulence.MaterializedJacobian`), not by a
 factorization. The complete LU is exact but its fill is a memory wall in 3D (``O(n^{4/3})``), and even the
 threshold-ILU's factorization of the distance-3 3D coupled Jacobian (hundreds of nonzeros per row) is
 prohibitively slow to build; the V-cycle keeps the heavy fill on only the small coarsest grid (a direct-LU
@@ -76,31 +76,31 @@ from aquaflux.io import read_openfoam
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, VenkatakrishnanLimiter
 from aquaflux.solve import (
+    AirReduction,
     CflResidualDualTimeControl,
-    FieldGroups,
     InnerIterateCheckpointer,
+    JacobiSmoothed,
     MarchLogger,
-    RefreshPolicy,
     RetryPolicy,
+    SimpleSmoothed,
     StateCheckpointer,
-    air_inverse,
     combine_metrics,
     combine_observers,
-    jacobi_smoothed_inverse,
     relative_residual_gmres,
-    simple_smoothed_inverse,
 )
 from aquaflux.turbulence import (
-    CoupledJacobianProbe,
     CoupledRANS,
+    FieldSplit,
     GeometricReynoldsSchedule,
+    JacobianProbeSpec,
     LogScalars,
+    MaterializedJacobian,
+    MonolithicVCycle,
     SSTModel,
     SSTTurbulence,
-    amg_beta_tracking_refresh,
-    coupled_amg_continuation,
     coupled_fields,
     coupled_residuals,
+    open_session,
     scale_both_blocks,
     scale_momentum_only,
     solve_reynolds_continuation,
@@ -599,9 +599,9 @@ AIR_TRAILING = dict(
 )
 
 TRAILING_INVERSE = (
-    jacobi_smoothed_inverse(**JACOBI_TRAILING)
+    JacobiSmoothed(**JACOBI_TRAILING)
     if TURBULENCE_INVERSE == "jacobi"
-    else air_inverse(**AIR_TRAILING)
+    else AirReduction(**AIR_TRAILING)
 )
 
 
@@ -680,11 +680,7 @@ LEADING_SETTINGS = dict(
     ),
 )
 
-LEADING_INVERSE = simple_smoothed_inverse(**LEADING_SETTINGS, report=_flush_print)
-
-
-if DUMP_TRAILING_BLOCK:
-    TRAILING_INVERSE = _dumping(TRAILING_INVERSE)
+LEADING_INVERSE = SimpleSmoothed(**LEADING_SETTINGS)
 
 #: Whether `FILL_LEVELS` / `SWEEPS` / `COARSE_EQ_LIMIT` reach the preconditioner at all.
 #:
@@ -695,6 +691,34 @@ if DUMP_TRAILING_BLOCK:
 #: never constructed. A banner is the primary record of what a measurement was taken under, so it has
 #: to distinguish a live setting from a carried one.
 _ILU_SMOOTHER_LIVE = not FIELD_SPLIT
+
+#: What preconditions this case's march, as one value, which every harness in this directory reads rather
+#: than re-assembling. Under the field split -- the default -- the monolithic smoother settings above have
+#: nowhere to be written, which is what `_ILU_SMOOTHER_LIVE` reports on the banner.
+PRECONDITIONER = MaterializedJacobian(
+    (
+        FieldSplit(LEADING_INVERSE, TRAILING_INVERSE)
+        if FIELD_SPLIT
+        else MonolithicVCycle(
+            smoother_fill_levels=FILL_LEVELS,
+            smoother_sweeps=SWEEPS,
+            coarse_eq_limit=COARSE_EQ_LIMIT,
+        )
+    ),
+    probe=JacobianProbeSpec(column_reach=COLUMN_REACH),
+    beta_floor=PC_BETA_FLOOR,
+)
+
+#: Where the session sends what the split's blocks produce: the leading hierarchy's build record, and --
+#: under `BFS3D_DUMP_TRAILING_BLOCK` -- every block the trailing inverse is about to consume.
+SESSION_OPTIONS = dict(
+    reports={"leading": _flush_print} if FIELD_SPLIT else None,
+    inverse_wrapper=(
+        (lambda role, factory: _dumping(factory) if role == "trailing" else factory)
+        if FIELD_SPLIT and DUMP_TRAILING_BLOCK
+        else None
+    ),
+)
 
 
 def _jacobi_trailing_description() -> str:
@@ -1364,69 +1388,57 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
     # its Krylov cycle count is no higher than its cheap steps' -- cost with no linear algebra behind it
     # is compilation. Only the first rung's is unavoidable.
     #
-    # The probe (colouring plan + gather map) depends on the mesh alone, so a rung was additionally
-    # building the single largest allocation this case makes -- twice, once for the engine and once for
-    # the refresh hook beside it.
+    # The session holds the colouring probe (the single largest allocation this case makes, built once),
+    # the one inverse every rung glues in, and the refresh hook the march calls. The continuation
+    # re-points it at each rung's companion, which forces a full re-fit at that rung's own state and
+    # shift before its first solve -- FITTING the preconditioner per rung is real and still happens;
+    # rebuilding the *object* would only cost a compilation.
     #
-    # Under the field split, the `[u,v,w,p] <- [k,omega]` triangle is never applied (the split retains
-    # only the other one) -- so a probe built for it excludes that block from the pattern outright,
-    # rather than materializing and discarding it. Measured on this mesh: 22% of the stored pattern
-    # (10.5M of 47.2M nonzeros) is exactly this block. `FIELD_SPLIT=False` runs the monolithic V-cycle,
-    # which reads every block, so the probe there is unrestricted.
-    probe = CoupledJacobianProbe.build(
-        coupled,
-        column_reach=COLUMN_REACH,
-        active_rows=(
-            FieldGroups.split_before(coupled.layout, "k").active_rows() if FIELD_SPLIT else None
-        ),
-    )
-    # Re-fits on its first call and after each rung's `rebind`; between those the cost trigger
-    # (`refresh_on_cycles`, through `refresh.refresh_at`) is the only thing that rebuilds the V-cycle.
-    refresh = amg_beta_tracking_refresh(
-        coupled,
-        probe=probe,
-        beta_floor=PC_BETA_FLOOR,
-        observer=logger.on_refresh,
-    )
+    # Under the field split the session's probe also excludes the `[u,v,w,p] <- [k,omega]` triangle the
+    # split never applies -- 22% of the stored pattern on this mesh (10.5M of 47.2M nonzeros).
+    #
     # A fresh `combine_observers` closure per rung would be its own recompile -- it lands in the step's
     # static `inner_observer` and functions compare by identity.
     inner_observer = combine_observers(
         logger.on_inner,
         *([inner_dump.on_inner] if inner_dump is not None else []),
     )
-    #: The one V-cycle every rung shares, held here so `point_setup` can hand it back to the next rung.
-    shared_preconditioner: list = []
+    #: The rung being configured, recorded by `point_setup` so `on_build` can seed that rung's reporter.
+    rung: dict = {}
+
+    def on_build(step):
+        """Instrument every step the session builds: the rung's residual reporter, and the cap dump."""
+        # Seeded with this rung's own starting state: the march equilibrates each step at the state it
+        # begins from, so without the seed the rung's first step would be scaled at its end state and
+        # its per-equation rows would not add up to the residual reported beside them.
+        rung_residuals.append(coupled_residuals(rung["companion"], step, rung["seed_state"]))
+        if DUMP_STEP_LIMIT and step.step_limit is not None:
+            # `dataclasses.replace`, not `eqx.tree_at`: the limiter is a STATIC field, so it lives in the
+            # treedef rather than among the leaves and `tree_at` (which addresses leaves) cannot reach it.
+            step = dataclasses.replace(step, step_limit=_DumpingStepLimit(step.step_limit))
+        return step
+
+    session = open_session(
+        PRECONDITIONER,
+        coupled,
+        observer=logger.on_refresh,
+        on_build=on_build,
+        precondition_wrapper=_recording_precondition if DUMP_STEP_LIMIT else None,
+        **SESSION_OPTIONS,
+    )
 
     def point_setup(companion, seed_state, point):
-        """Configure each rung, REUSING one preconditioner and one refresh hook across the whole ramp.
-
-        Only the molecular viscosity changes between rungs, so a rung needs its own residual assembler
-        and its own row scales -- both of which ride as ordinary data and cost nothing to rebuild -- but
-        it does not need its own V-cycle. It needs that V-cycle *fitted to it*, which is a different
-        thing and is what `rebind` arranges: the shared hook is pointed at this rung's companion and
-        forced to re-materialize at this rung's own state and shift, which the march does before the
-        rung's first step. So each rung still solves with a V-cycle built for its own problem, and the
-        compiled coupled solve is a cache hit across the boundary instead of a full recompile.
-
-        The distinction to hold on to is between FITTING the preconditioner per rung, which is real and
-        still happens, and rebuilding the *object*, which only costs a compilation.
-        """
+        """Label each rung and record it for `on_build`; everything else is in the options below."""
         logger.note(f"[{point.label}]")
-        # Point the shared hook at this rung. Called for EVERY rung including the first, so the V-cycle
-        # is always re-materialized at the rung's own state and shift before its first solve -- the first
-        # rung's build freezes at `amg_beta`, and the march's own beta_start is a different value.
-        refresh.rebind(companion)
-        engine = coupled_amg_continuation(
-            companion,
-            seed_state,
+        rung.update(companion=companion, seed_state=seed_state)
+        return {}
+
+    options = (
+        dict(
+            preconditioner=session,
             turbulence_damping=TURB_DAMPING,
             inner_steps=INNER_STEPS,
             inner_tol=INNER_TOL,
-            probe=probe,
-            preconditioner=shared_preconditioner[0] if shared_preconditioner else None,
-            smoother_fill_levels=FILL_LEVELS,
-            smoother_sweeps=SWEEPS,
-            coarse_eq_limit=COARSE_EQ_LIMIT,
             cycle_budget=round(CYCLE_BUDGET * _RESTART_SCALE),
             positivity_floor=K_POSITIVITY_FLOOR,
             positivity_projection=K_POSITIVITY_PROJECTION,
@@ -1435,29 +1447,6 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             forward_max_restarts=FORWARD_MAX_RESTARTS,
             inner_observer=inner_observer,
             refresh_on_cycles=REFRESH_ON_CYCLES or None,
-            inner_refresh=refresh.refresh_at if REFRESH_ON_CYCLES else None,
-            field_split=FIELD_SPLIT,
-            leading_inverse=LEADING_INVERSE if FIELD_SPLIT else None,
-            trailing_inverse=TRAILING_INVERSE if FIELD_SPLIT else None,
-        )
-        shared_preconditioner[:] = [engine.shift_policy.preconditioner]
-        if DUMP_STEP_LIMIT and engine.step_limit is not None:
-            # `dataclasses.replace`, not `eqx.tree_at`: the limiter is a STATIC field, so it lives in the
-            # treedef rather than among the leaves and `tree_at` (which addresses leaves) cannot reach it.
-            engine = dataclasses.replace(engine, step_limit=_DumpingStepLimit(engine.step_limit))
-        # Seeded with this rung's own starting state: the march equilibrates each step at the state it
-        # begins from, so without the seed the rung's first step would be scaled at its end state and
-        # its per-equation rows would not add up to the residual reported beside them.
-        rung_residuals.append(coupled_residuals(companion, engine, seed_state))
-        return dict(
-            continuation=engine,
-            refresh=RefreshPolicy(
-                precondition_step=_recording_precondition(refresh) if DUMP_STEP_LIMIT else refresh
-            ),
-        )
-
-    options = (
-        dict(
             max_steps=MAX_STEPS,
             rtol=RTOL,
             atol=ATOL,

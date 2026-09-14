@@ -5,6 +5,8 @@ paths:
 
 # Rules — `aquaflux/schemes/` (first-class swappable numerics)
 
+> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | MonolithicVCycle | FieldSplit)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
+
 > **Provenance boundary (binding).** This file cites the C++/Fortran precursors to inform
 > *your* understanding — that is its job, and why it loads into your
 > context. Per the root `CLAUDE.md` **Comment Convention**, none of that provenance may
@@ -2771,7 +2773,7 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
       arm at reach 3 vs 5 (432 vs 439 cycles, 527 vs 711 s) and the Betchen arm (834 vs 511 cycles).
       Those are genuine, and they are what the entries below rest on. Fixed 2026-08-21.
     - **On the SIMPLE-smoothed field-split bundle the reach is inert, and the probe is 3.8× oversized.**
-      Same case, standard arm, 6 steps of one Reynolds rung, leading inverse `simple_smoothed_inverse`
+      Same case, standard arm, 6 steps of one Reynolds rung, leading inverse `SimpleSmoothedInverse`
       (sweeps 2, pressure_sweeps 2, θ=0.25, no singletons, 5 levels, max_coarse 500, block splitting,
       ω=1.0) with a nodal trailing inverse:
 

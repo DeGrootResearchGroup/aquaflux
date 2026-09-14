@@ -360,9 +360,18 @@ def test_the_package_report_still_reaches_the_coupled_builders(tmp_path: Path) -
         cwd=TOOL.parent.parent,
     )
     assert result.returncode == 0, "the report must always exit 0"
-    assert (
-        "coupled_continuation" in result.stdout and "coupled_amg_continuation" in result.stdout
-    ), (
-        "the coupled builders delegate to a shared private tail; the report must follow it, or it is "
-        f"blind to exactly the drift it was written for:\n{result.stdout}"
+    assert "sibling-builder pair(s)" in result.stdout, (
+        f"the report found no pairs at all, which is a check that has stopped seeing:\n{result.stdout}"
+    )
+    # ⚠️ A KNOWN BLIND SPOT, pinned so its silence is not read as a clean tree. The coupled march's
+    # four builders were unified into `coupled_step`, which reaches its step through a preconditioner
+    # session's `_build` -- a method name defined on more than one class, which this tool never follows
+    # -- so `coupled_step` is credited with building nothing and pairs with no sibling, including the
+    # bordered mass-flow builder that shares nearly all of its surface. Those two surfaces are pinned
+    # instead by `test_coupled_rans.py::test_every_continuation_builder_installs_the_same_globalization`.
+    # If this assertion ever fails, the tool has learned to see the pair (#392): restore the stronger
+    # check.
+    assert "coupled_step" not in result.stdout, (
+        "the report now reaches coupled_step -- replace this blind-spot pin with an assertion that it "
+        f"pairs with mass_flow_coupled_continuation:\n{result.stdout}"
     )

@@ -47,10 +47,11 @@ from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.turbulence import (
+    BlockDiagonal,
     CoupledRANS,
     SSTModel,
     SSTTurbulence,
-    coupled_continuation,
+    coupled_step,
     hybrid_initialize,
     inlet_k,
     inlet_omega,
@@ -161,7 +162,14 @@ def solve(nu, *, explicit_limiter, state=None):
     coupled = build_case(nu, explicit_limiter=explicit_limiter)
     f0, k0, o0 = hybrid_initialize(coupled.momentum, coupled.turbulence) if state is None else state
     return coupled, solve_coupled(
-        coupled, f0, k0, o0, max_steps=60, rtol=1e-10, atol=1e-12, **PRECONDITIONER
+        coupled,
+        f0,
+        k0,
+        o0,
+        max_steps=60,
+        rtol=1e-10,
+        atol=1e-12,
+        preconditioner=BlockDiagonal(**PRECONDITIONER),
     )
 
 
@@ -172,8 +180,10 @@ def objective(nu, *, explicit_limiter, seed):
     adjoint requires.
     """
     coupled0 = build_case(NU, explicit_limiter=explicit_limiter)
-    continuation = coupled_continuation(
-        coupled0, coupled0.state_from_physical(*seed), **PRECONDITIONER
+    continuation = coupled_step(
+        coupled0,
+        coupled0.state_from_physical(*seed),
+        preconditioner=BlockDiagonal(**PRECONDITIONER),
     )
 
     def scalar(viscosity):

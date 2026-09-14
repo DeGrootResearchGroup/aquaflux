@@ -96,20 +96,16 @@ from aquaflux.schemes import (  # noqa: E402
     SkewCorrectedGradient,
 )
 from aquaflux.schemes.interpolation import non_orthogonal_correction  # noqa: E402
-from aquaflux.solve import (  # noqa: E402
+from aquaflux.solve import (
     MarchLogger,
-    RefreshPolicy,
-    jacobi_smoothed_inverse,
-    simple_smoothed_inverse,
     solve_linear,
 )
 from aquaflux.solve.implicit import backtracking_line_search  # noqa: E402
-from aquaflux.turbulence import (  # noqa: E402
-    CoupledJacobianProbe,
-    amg_beta_tracking_refresh,
-    coupled_amg_continuation,
+from aquaflux.turbulence import (
     coupled_fields,
+    coupled_step,
     omega_wall,
+    open_session,
     production_and_limit,
     solve_coupled,
     solve_reynolds_continuation,
@@ -188,16 +184,9 @@ def capture() -> None:
         rtol=compare.RTOL,
         atol=compare.ATOL,
     )
-    probe = CoupledJacobianProbe.build(
-        coupled, stencil_reach=run_ab.REACH, column_reach=run_ab.COLUMN_REACH
+    session = open_session(
+        run_ab.arm_preconditioner(run_ab.REACH), coupled, observer=logger.on_refresh
     )
-    refresh = amg_beta_tracking_refresh(
-        coupled,
-        probe=probe,
-        beta_floor=compare.PC_BETA_FLOOR,
-        observer=logger.on_refresh,
-    )
-    shared: list = []
 
     def point_setup(companion, seed_state, point):
         logger.note(f"[{point.label}]")
@@ -205,36 +194,24 @@ def capture() -> None:
         if point.is_target:
             np.savez(SEED, state=np.asarray(seed_state))
             raise _Captured
-        refresh.rebind(companion)
-        engine = coupled_amg_continuation(
-            companion,
-            seed_state,
-            inner_steps=compare.INNER_STEPS,
-            inner_tol=compare.INNER_TOL,
-            probe=probe,
-            cycle_budget=compare.CYCLE_BUDGET,
-            forward_rtol=compare.FORWARD_RTOL,
-            forward_restart=compare.FORWARD_RESTART,
-            forward_max_restarts=compare.FORWARD_MAX_RESTARTS,
-            refresh_on_cycles=compare.REFRESH_ON_CYCLES or None,
-            inner_refresh=refresh.refresh_at if compare.REFRESH_ON_CYCLES else None,
-            positivity_floor=compare.K_POSITIVITY_FLOOR,
-            positivity_projection=compare.POSITIVITY_PROJECTION,
-            preconditioner=shared[0] if shared else None,
-            coarse_eq_limit=run_ab.SIMPLE_FLOW["max_coarse"],
-            field_split=True,
-            leading_inverse=simple_smoothed_inverse(**run_ab.SIMPLE_FLOW),
-            trailing_inverse=jacobi_smoothed_inverse(**run_ab.JACOBI_TRAILING),
-            inner_observer=logger.on_inner,
-        )
-        shared[:] = [engine.shift_policy.preconditioner]
-        return dict(continuation=engine, refresh=RefreshPolicy(precondition_step=refresh))
+        return {}
 
     started = time.perf_counter()
     try:
         solve_reynolds_continuation(
             coupled,
             compare.N_POINTS,
+            inner_steps=compare.INNER_STEPS,
+            inner_tol=compare.INNER_TOL,
+            cycle_budget=compare.CYCLE_BUDGET,
+            forward_rtol=compare.FORWARD_RTOL,
+            forward_restart=compare.FORWARD_RESTART,
+            forward_max_restarts=compare.FORWARD_MAX_RESTARTS,
+            positivity_floor=compare.K_POSITIVITY_FLOOR,
+            positivity_projection=compare.POSITIVITY_PROJECTION,
+            preconditioner=session,
+            refresh_on_cycles=compare.REFRESH_ON_CYCLES or None,
+            inner_observer=logger.on_inner,
             max_steps=compare.MAX_STEPS,
             rtol=compare.RTOL,
             atol=compare.ATOL,
@@ -257,29 +234,22 @@ def capture() -> None:
 def _engine_at(coupled, state):
     """The march's own shifted step at ``state``, built exactly as the case builds it.
 
-    Built through ``coupled_amg_continuation`` rather than assembled here, so the shift diagonal, the
+    Built through ``coupled_step`` and the study's own preconditioner rather than assembled here, so the shift diagonal, the
     preconditioner and the relaxation schedule are the ones the march uses rather than a second set
     that could differ from them.
     """
-    probe = CoupledJacobianProbe.build(
-        coupled, stencil_reach=run_ab.REACH, column_reach=run_ab.COLUMN_REACH
-    )
-    return coupled_amg_continuation(
+    return coupled_step(
         coupled,
         state,
+        preconditioner=run_ab.arm_preconditioner(run_ab.REACH),
         inner_steps=compare.INNER_STEPS,
         inner_tol=compare.INNER_TOL,
-        probe=probe,
         cycle_budget=compare.CYCLE_BUDGET,
         forward_rtol=compare.FORWARD_RTOL,
         forward_restart=compare.FORWARD_RESTART,
         forward_max_restarts=compare.FORWARD_MAX_RESTARTS,
         positivity_floor=compare.K_POSITIVITY_FLOOR,
         positivity_projection=compare.POSITIVITY_PROJECTION,
-        coarse_eq_limit=run_ab.SIMPLE_FLOW["max_coarse"],
-        field_split=True,
-        leading_inverse=simple_smoothed_inverse(**run_ab.SIMPLE_FLOW),
-        trailing_inverse=jacobi_smoothed_inverse(**run_ab.JACOBI_TRAILING),
     )
 
 
@@ -1070,40 +1040,22 @@ def march_from_seed() -> None:
                 flush=True,
             )
 
-        probe = CoupledJacobianProbe.build(
-            coupled, stencil_reach=run_ab.REACH, column_reach=run_ab.COLUMN_REACH
-        )
-        refresh = amg_beta_tracking_refresh(
-            coupled,
-            probe=probe,
-            beta_floor=compare.PC_BETA_FLOOR,
-        )
-        engine = coupled_amg_continuation(
-            coupled,
-            seed,
-            inner_steps=compare.INNER_STEPS,
-            inner_tol=compare.INNER_TOL,
-            probe=probe,
-            cycle_budget=compare.CYCLE_BUDGET,
-            forward_rtol=compare.FORWARD_RTOL,
-            forward_restart=compare.FORWARD_RESTART,
-            forward_max_restarts=compare.FORWARD_MAX_RESTARTS,
-            refresh_on_cycles=compare.REFRESH_ON_CYCLES or None,
-            inner_refresh=refresh.refresh_at if compare.REFRESH_ON_CYCLES else None,
-            positivity_floor=compare.K_POSITIVITY_FLOOR,
-            positivity_projection=compare.POSITIVITY_PROJECTION,
-            coarse_eq_limit=run_ab.SIMPLE_FLOW["max_coarse"],
-            field_split=True,
-            leading_inverse=simple_smoothed_inverse(**run_ab.SIMPLE_FLOW),
-            trailing_inverse=jacobi_smoothed_inverse(**run_ab.JACOBI_TRAILING),
-            inner_observer=on_inner,
-        )
         try:
             solve_coupled(
                 coupled,
                 *coupled.physical_fields(seed),
-                continuation=engine,
-                refresh=RefreshPolicy(precondition_step=refresh),
+                reference_state=seed,
+                preconditioner=run_ab.arm_preconditioner(run_ab.REACH),
+                inner_steps=compare.INNER_STEPS,
+                inner_tol=compare.INNER_TOL,
+                cycle_budget=compare.CYCLE_BUDGET,
+                forward_rtol=compare.FORWARD_RTOL,
+                forward_restart=compare.FORWARD_RESTART,
+                forward_max_restarts=compare.FORWARD_MAX_RESTARTS,
+                refresh_on_cycles=compare.REFRESH_ON_CYCLES or None,
+                positivity_floor=compare.K_POSITIVITY_FLOOR,
+                positivity_projection=compare.POSITIVITY_PROJECTION,
+                inner_observer=on_inner,
                 max_steps=MARCH_STEPS,
                 rtol=compare.RTOL,
                 atol=compare.ATOL,

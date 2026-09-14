@@ -35,15 +35,21 @@ from aquaflux.solve import (
     ShiftTerm,
 )
 from aquaflux.turbulence import (
+    BlockDiagonal,
+    CompleteLu,
     DirectScalars,
     LogScalars,
+    MaterializedJacobian,
+    MonolithicVCycle,
     SSTModel,
     SSTTurbulence,
     coupled_equation_names,
     coupled_fields,
     coupled_residuals,
+    coupled_step,
     eddy_viscosity_drift,
     hybrid_initialize,
+    open_session,
     production_and_limit,
     production_cap_active,
 )
@@ -56,14 +62,12 @@ from aquaflux.turbulence.coupled import (
     LiveViscosityVelocityParts,
     _k_positivity_guards,
     _row_jacobian_scale,
-    coupled_amg_continuation,
-    coupled_continuation,
-    coupled_lu_continuation,
     coupled_rans_layout,
     coupled_scaled_norm,
     frozen_production_viscosity,
     mass_flow_coupled_continuation,
     solve_coupled,
+    solve_coupled_mass_flow,
     wall_consistent_state,
 )
 
@@ -195,16 +199,21 @@ def test_lu_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None
 
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
-    lu_step = coupled_lu_continuation(coupled, state, backend="scipy")
-    block_step = coupled_continuation(coupled, state, method=None)
+    lu_step = coupled_step(
+        coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
+    )
+    block_step = coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None))
     # Each built step carries the solver it will run; the LU's is the small-restart one by default.
     assert lu_step.forward_solver.restart == 10
     assert block_step.forward_solver.restart == 120
     # An explicit forward_solver still overrides the LU default.
     # ...and the restart alone can be moved without also replacing the stopping measure.
     assert (
-        coupled_lu_continuation(
-            coupled, state, backend="scipy", forward_restart=120
+        coupled_step(
+            coupled,
+            state,
+            preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
+            forward_restart=120,
         ).forward_solver.restart
         == 120
     )
@@ -231,9 +240,13 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
     # escalation ladder cannot catch `k < 0` -- the divergence guard fires on a residual that is already
     # non-finite, by which point `sqrt(k)` has poisoned the closure.
     built = {
-        "block": coupled_continuation(coupled, state, method=None),
-        "lu": coupled_lu_continuation(coupled, state, backend="scipy"),
-        "block dual-time": coupled_continuation(coupled, state, method=None, inner_steps=2),
+        "block": coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None)),
+        "lu": coupled_step(
+            coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
+        ),
+        "block dual-time": coupled_step(
+            coupled, state, preconditioner=BlockDiagonal(method=None), inner_steps=2
+        ),
     }
     for name, step in built.items():
         assert step.step_limit is not None, f"{name} has no k-positivity limit"
@@ -273,12 +286,9 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
         "positivity_floor",
         "positivity_projection",
     }
-    builders = (
-        coupled_continuation,
-        coupled_lu_continuation,
-        coupled_amg_continuation,
-        mass_flow_coupled_continuation,
-    )
+    # One builder for every preconditioner family now, plus the bordered mass-flow sibling -- so the
+    # surfaces that used to drift across four builders are one signature and one sibling.
+    builders = (coupled_step, mass_flow_coupled_continuation)
     for builder in builders:
         missing = shared - set(inspect.signature(builder).parameters)
         assert not missing, f"{builder.__name__} cannot be given {sorted(missing)}"
@@ -306,8 +316,10 @@ def test_every_builder_stops_the_forward_solve_in_the_march_s_own_measure() -> N
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
     for name, step in {
-        "block": coupled_continuation(coupled, state, method=None),
-        "lu": coupled_lu_continuation(coupled, state, backend="scipy"),
+        "block": coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None)),
+        "lu": coupled_step(
+            coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
+        ),
     }.items():
         assert step.forward_solver.norm is step.residual_norm, (
             f"{name} steers on one measure and stops its linear solve on another"
@@ -318,8 +330,10 @@ def test_every_builder_stops_the_forward_solve_in_the_march_s_own_measure() -> N
     # An explicit measure is honoured all the way through, so the two cannot come apart there either --
     # which is what `solve_coupled` relies on when it re-injects the march's initial measure at every
     # refresh rather than letting a self-normalising one re-base at the developed state.
-    base = coupled_continuation(coupled, state, method=None)
-    explicit = coupled_continuation(coupled, state, method=None, residual_norm=base.residual_norm)
+    base = coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None))
+    explicit = coupled_step(
+        coupled, state, preconditioner=BlockDiagonal(method=None), residual_norm=base.residual_norm
+    )
     assert explicit.forward_solver.norm is explicit.residual_norm is base.residual_norm
 
 
@@ -333,9 +347,51 @@ def test_the_constrained_builder_keeps_a_euclidean_stop_for_a_stated_reason() ->
     """
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
-    step = mass_flow_coupled_continuation(coupled, state, method=None)
+    step = mass_flow_coupled_continuation(coupled, state, preconditioner=BlockDiagonal(method=None))
     assert step.residual_norm is jnp.linalg.norm
     assert step.forward_solver.norm is step.residual_norm
+
+
+def test_the_constrained_builder_refuses_a_materialized_preconditioner() -> None:
+    """The bordered solve eliminates ``beta`` around a block-diagonal preconditioner, and only that.
+
+    A materialized Jacobian has no constraint row, so its inverse would precondition a system other than
+    the one solved. Refused before anything is built, so this needs no factorization.
+    """
+    mesh, coupled = _cavity(4)
+    state = _healthy_state(mesh, coupled)
+    with pytest.raises(TypeError, match="must be a BlockDiagonal, not MaterializedJacobian"):
+        mass_flow_coupled_continuation(
+            coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
+        )
+
+
+@pytest.mark.parametrize(
+    "configuration",
+    [
+        {"preconditioner": BlockDiagonal(method="air")},
+        {"reference_state": "state"},
+        {"inner_steps": 3},
+    ],
+    ids=["preconditioner", "reference_state", "march setting"],
+)
+def test_the_constrained_solve_refuses_configuration_beside_a_finished_continuation(
+    configuration: dict,
+) -> None:
+    """Configuration for a step the solve is not building is refused, not dropped.
+
+    A finished ``continuation`` already carries its preconditioner, reference and march settings, so
+    passing any of them beside it used to reach nothing: ``method="air"`` beside a twolevel step ran
+    twolevel, with no error. The refusal comes before the initial condition is built.
+    """
+    mesh, coupled = _cavity(4)
+    state = _healthy_state(mesh, coupled)
+    continuation = mass_flow_coupled_continuation(
+        coupled, state, preconditioner=BlockDiagonal(method=None)
+    )
+    given = {name: state if value == "state" else value for name, value in configuration.items()}
+    with pytest.raises(TypeError, match=r"configure the continuation `solve_coupled_mass_flow`"):
+        solve_coupled_mass_flow(coupled, 1.0, continuation=continuation, **given)
 
 
 def test_a_monolithic_builder_takes_the_injected_velocity_shift_source() -> None:
@@ -352,12 +408,19 @@ def test_a_monolithic_builder_takes_the_injected_velocity_shift_source() -> None
     live = LiveViscosityVelocityParts(
         coupled.momentum, coupled.turbulence, coupled.k_transform, coupled.omega_transform
     )
-    step = coupled_lu_continuation(coupled, state, backend="scipy", velocity_shift_parts=live)
+    step = coupled_step(
+        coupled,
+        state,
+        preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
+        velocity_shift_parts=live,
+    )
     assert step.shift_policy.base.velocity_shift_parts is live
     # ...and it is genuinely live: away from the state the assembler was frozen at, the shift it
     # produces differs from the frozen one, which is the whole reason the source is injected. At the
     # freeze state the two coincide by construction, so a check there would pass on a dead wire.
-    frozen = coupled_lu_continuation(coupled, state, backend="scipy")
+    frozen = coupled_step(
+        coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
+    )
     flow_p, k_p, omega_p = coupled.layout.unpack(state)
     developed = coupled.layout.pack(flow_p, k_p * 4.0, omega_p)
     assert not np.allclose(
@@ -388,7 +451,7 @@ def test_the_live_shift_source_honours_its_protocol_arity() -> None:
 def test_continuation_settings_are_refused_where_they_would_be_dropped() -> None:
     """A setting the solve cannot forward is an error, not a silent no-op.
 
-    ``method`` / ``reference_state`` / ``**continuation_kwargs`` configure the continuation
+    ``preconditioner`` / ``reference_state`` / ``**continuation_kwargs`` configure the continuation
     ``solve_coupled`` builds. On the two paths where it builds none -- an explicit ``continuation``, or a
     ``RefreshPolicy(builder=...)`` -- they reached nothing at all: a solve asked for ``inner_steps=3``
     and ``positivity_floor=1e-6`` ran the library defaults, with no error and no log line. ``**kwargs``
@@ -400,15 +463,18 @@ def test_continuation_settings_are_refused_where_they_would_be_dropped() -> None
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
     flow, k, omega = coupled.physical_fields(state)
-    step = coupled_continuation(coupled, state, method=None)
+    step = coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None))
 
     for kwargs in (
         {"continuation": step, "inner_steps": 3},
         {"continuation": step, "positivity_floor": 1e-6},
-        {"continuation": step, "method": "twolevel"},
+        {"continuation": step, "preconditioner": BlockDiagonal()},
         {"continuation": step, "reference_state": state},
         {"refresh": RefreshPolicy(builder=lambda s: step), "inner_steps": 3},
-        {"refresh": RefreshPolicy(builder=lambda s: step), "method": None},
+        {
+            "refresh": RefreshPolicy(builder=lambda s: step),
+            "preconditioner": BlockDiagonal(method=None),
+        },
     ):
         offender = next(iter(set(kwargs) - {"continuation", "refresh"}))
         with pytest.raises(TypeError, match=offender):
@@ -429,43 +495,58 @@ def test_the_settings_are_still_accepted_where_the_solve_does_build_the_continua
             coupled=coupled,
             continuation=None,
             refresh=refresh,
-            method=None,
+            preconditioner=BlockDiagonal(method=None),
             reference_state=state,
             kwargs={"inner_steps": 2},
         )
-        assert isinstance(source, coupled_module._DefaultContinuation)
+        assert isinstance(source, coupled_module._SessionContinuation)
         # ...and it carries them, rather than accepting and then dropping them one layer down.
-        assert source.kwargs == {"inner_steps": 2}
+        assert source.march == {"inner_steps": 2}
         assert source.reference_state is state
-        assert source.method is None
+        assert source.session._spec == BlockDiagonal(method=None)
 
 
-def test_an_unnamed_method_still_defaults_to_the_two_level_scalar_amg() -> None:
-    """`method` grew a sentinel default so "not given" is distinguishable from "given as None".
+def test_an_unnamed_preconditioner_is_the_default_block_diagonal_family() -> None:
+    """With nothing named the solve builds the block-diagonal family at its defaults.
 
-    Both are meaningful — ``None`` selects no preconditioner method at all — so neither could stand for
-    the other, and without the distinction the guard above could not refuse an explicitly-passed
-    ``method`` without also refusing the default nobody asked for. The resolved default must not move.
+    The resolved scalar method must not move: ``None`` selects no scalar preconditioner at all, so the
+    unset default and an explicit ``None`` are different choices and are kept apart on the spec.
     """
-    assert inspect.signature(solve_coupled).parameters["method"].default is coupled_module._UNSET
+    assert inspect.signature(solve_coupled).parameters["preconditioner"].default is None
     source = coupled_module._continuation_source(
         coupled=None,
         continuation=None,
         refresh=NO_REFRESH,
-        method=coupled_module._UNSET,
+        preconditioner=None,
         reference_state=None,
         kwargs={},
     )
-    assert source.method == "twolevel"
-    explicit = coupled_module._continuation_source(
-        coupled=None,
-        continuation=None,
-        refresh=NO_REFRESH,
-        method=None,
-        reference_state=None,
-        kwargs={},
-    )
-    assert explicit.method is None
+    assert source.session._spec == BlockDiagonal()
+    assert source.session._spec.resolved_method() == "twolevel"
+    assert source.precondition_step is None
+
+
+def test_a_session_owned_setting_and_a_second_refresh_hook_are_refused() -> None:
+    """Each would otherwise be a silent disagreement between two owners of one decision."""
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    flow, k, omega = coupled.physical_fields(state)
+    session = open_session(MaterializedJacobian(CompleteLu(backend="scipy")), coupled)
+    with pytest.raises(TypeError, match="belongs to the preconditioner session"):
+        solve_coupled(
+            coupled, flow, k, omega, preconditioner=session, jacobian_production_viscosity=True
+        )
+    with pytest.raises(TypeError, match="already re-fits its inverse"):
+        solve_coupled(
+            coupled,
+            flow,
+            k,
+            omega,
+            preconditioner=MaterializedJacobian(CompleteLu()),
+            refresh=RefreshPolicy(precondition_step=lambda step, s: None),
+        )
+    with pytest.raises(TypeError, match="belongs on the spec"):
+        solve_coupled(coupled, flow, k, omega, max_steps=1, velocity="convection")
 
 
 def test_the_continuation_source_is_one_decision_for_the_build_and_every_refresh() -> None:
@@ -481,13 +562,13 @@ def test_the_continuation_source_is_one_decision_for_the_build_and_every_refresh
 
     def builder(s):
         built.append(s)
-        return coupled_continuation(coupled, s, method=None)
+        return coupled_step(coupled, s, preconditioner=BlockDiagonal(method=None))
 
     source = coupled_module._continuation_source(
         coupled=coupled,
         continuation=None,
         refresh=RefreshPolicy(trigger=CycleGrowthTrigger(), builder=builder),
-        method=coupled_module._UNSET,
+        preconditioner=None,
         reference_state=None,
         kwargs={},
     )
@@ -768,25 +849,24 @@ def test_refresh_carries_the_block_scaled_progress_norm_fixed_at_the_initial_sta
 
     ``BlockScaledNorm`` is self-normalising: at the state its per-block scales were built at it returns
     ``sqrt(n_blocks)``. If a refresh rebuilt it at the developed state, every ``residual_ratio`` would
-    jump back toward one and the convergence test become unreachable. ``coupled_continuation`` with an
-    explicit ``residual_norm`` (what ``solve_coupled`` passes on every refresh) uses it verbatim instead
-    of rebuilding, so the measure stays fixed at the state the global progress reference was measured at.
+    jump back toward one and the convergence test become unreachable. A session's refresh, handed the
+    march's measure (what ``solve_coupled`` passes on every refresh), uses it verbatim instead of
+    rebuilding, so the measure stays fixed at the state the global progress reference was measured at.
     """
     mesh, coupled = _cavity()
     cold = _healthy_state(mesh, coupled, seed=0)
     developed = _healthy_state(mesh, coupled, seed=1)
-    kw = dict(method=None, block_scaled_norm=True, velocity="smoothed")
+    spec = BlockDiagonal(method=None, velocity="smoothed")
+    session = open_session(spec, coupled)
 
-    base = coupled_continuation(coupled, cold, **kw)
+    base = session.build(cold, block_scaled_norm=True)
     base_norm = base.norm()
-    refreshed = coupled_continuation(
-        coupled, developed, reuse=base.shift_policy, residual_norm=base_norm, **kw
-    )
+    refreshed = session.refresh(developed, base, base_norm, block_scaled_norm=True)
     # The refreshed continuation measures progress with the *same* norm object, not a re-based one.
     assert refreshed.norm() is base_norm
     # And that carry matters: a from-scratch rebuild at the developed state re-bases the per-block
     # scales, so it scores the same residual differently (it self-normalises to sqrt(n_blocks) there).
-    rebuilt = coupled_continuation(coupled, developed, **kw)
+    rebuilt = coupled_step(coupled, developed, preconditioner=spec, block_scaled_norm=True)
     r_dev = coupled.residual(developed)
     assert not jnp.allclose(base_norm(r_dev), rebuilt.norm()(r_dev))
 
@@ -1000,7 +1080,7 @@ def test_the_per_equation_residuals_compose_into_the_march_s_own_measure() -> No
     are the very numbers that scalar is built from -- not a separately-scaled lookalike."""
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
-    engine = coupled_continuation(coupled, state, method=None)
+    engine = coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None))
 
     reported = coupled_residuals(coupled, engine)(state)
 
@@ -1020,7 +1100,7 @@ def test_the_per_equation_rows_add_up_to_the_residual_the_march_reports() -> Non
     mesh, coupled = _cavity()
     start = _healthy_state(mesh, coupled, seed=0)
     end = _healthy_state(mesh, coupled, seed=1)
-    engine = coupled_continuation(coupled, start, method=None)
+    engine = coupled_step(coupled, start, preconditioner=BlockDiagonal(method=None))
     reported_by_march = float(
         coupled_scaled_norm(coupled, engine.shift_policy, start)(coupled.residual(end))
     )
@@ -1040,7 +1120,7 @@ def test_each_step_equilibrates_at_the_state_it_started_from() -> None:
     first = _healthy_state(mesh, coupled, seed=0)
     second = _healthy_state(mesh, coupled, seed=1)
     third = _healthy_state(mesh, coupled, seed=2)
-    engine = coupled_continuation(coupled, first, method=None)
+    engine = coupled_step(coupled, first, preconditioner=BlockDiagonal(method=None))
 
     residuals = coupled_residuals(coupled, engine, first)
     residuals(second)  # step 1 consumes the seed and records `second`
@@ -1303,23 +1383,34 @@ def test_k_positivity_guards_refuses_a_floor_the_default_projection_would_silenc
     assert _k_positivity_guards(logged, 1e-6, True) == (None, None)
 
 
+def _block_step(coupled, state, **march):
+    return coupled_step(coupled, state, **march)
+
+
+def _lu_step(coupled, state, **march):
+    return coupled_step(
+        coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")), **march
+    )
+
+
+def _vcycle_step(coupled, state, **march):
+    return coupled_step(
+        coupled, state, preconditioner=MaterializedJacobian(MonolithicVCycle()), **march
+    )
+
+
 @pytest.mark.parametrize(
     "builder",
-    [
-        coupled_continuation,
-        coupled_lu_continuation,
-        coupled_amg_continuation,
-        mass_flow_coupled_continuation,
-    ],
+    [_block_step, _lu_step, _vcycle_step, mass_flow_coupled_continuation],
+    ids=["block", "lu", "vcycle", "mass flow"],
 )
 def test_every_coupled_continuation_builder_refuses_the_same_inert_combination(builder) -> None:
-    """All four builders route through :func:`_k_positivity_guards`, and it is checked first.
+    """Every preconditioner family routes through :func:`_k_positivity_guards`, and it is checked first.
 
     First specifically so a real caller's mistake -- and this test -- never pays for building the
-    preconditioner the raise makes moot. That matters beyond cost for
-    :func:`coupled_amg_continuation`: its preconditioner needs ``petsc4py`` (not installed by CI, see
-    ``tests/unit/test_optional_dependency_skips.py``), so checking the raise here would break under
-    that dependency's absence if the guard ran any later than it does.
+    preconditioner the raise makes moot. That matters beyond cost for the multigrid V-cycle: it needs
+    ``petsc4py`` (not installed by CI, see ``tests/unit/test_optional_dependency_skips.py``), so checking
+    the raise here would break under that dependency's absence if the guard ran any later than it does.
     """
     mesh, coupled = _cavity(4)
     state = _healthy_state(mesh, coupled)
@@ -1330,12 +1421,14 @@ def test_every_coupled_continuation_builder_refuses_the_same_inert_combination(b
 
 
 @pytest.mark.parametrize(
-    "builder", [coupled_continuation, coupled_lu_continuation, mass_flow_coupled_continuation]
+    "builder",
+    [_block_step, _lu_step, mass_flow_coupled_continuation],
+    ids=["block", "lu", "mass flow"],
 )
 def test_the_inert_combination_is_the_only_thing_refused(builder) -> None:
     """Every other pairing of the two settings still builds -- including a floor that now matters.
 
-    ``coupled_amg_continuation`` is excluded here (unlike the raise check above): building its real
+    The multigrid V-cycle is excluded here (unlike the raise check above): building its real
     preconditioner needs ``petsc4py``, which this file does not gate on, so only the checks that
     never reach it may run unconditionally.
     """
@@ -1540,26 +1633,27 @@ def test_a_supplied_step_with_no_builder_is_rejected_when_a_refresh_is_configure
 
 
 def test_globalization_knobs_still_reach_the_continuation_builder(monkeypatch) -> None:
-    """The globalization is not named on ``solve_coupled`` and still arrives at
-    :func:`coupled_continuation` unchanged -- it rides ``**continuation_kwargs``.
+    """The globalization is not named on ``solve_coupled`` and still arrives at the shared step tail
+    unchanged -- it rides ``**continuation_kwargs`` through the preconditioner session.
 
     ``grow`` used to be declared on ``solve_coupled`` *and* forwarded explicitly, while the very same
-    call sites already splatted ``**continuation_kwargs`` into the same function -- so the declaration
-    was pure duplication, costing a parameter on an already-wide signature to buy nothing. Deleting it
-    was call-for-call identical, and this pins that: it is the only thing standing between the
-    deletion and a silently dropped knob. The knob itself now lives on the ``Globalization``, so what
-    rides the path is one object rather than eight keywords, and the pin is the same.
+    call sites already splatted ``**continuation_kwargs`` into the builder -- so the declaration was
+    pure duplication, costing a parameter on an already-wide signature to buy nothing. Deleting it was
+    call-for-call identical, and this pins that: it is the only thing standing between the deletion
+    and a silently dropped knob. The knob itself now lives on the ``Globalization``, so what rides the
+    path is one object rather than eight keywords, and the pin is the same. It is spied on
+    ``_coupled_step`` because every family's session reaches the march through that one tail.
     """
     from aquaflux.turbulence import coupled as coupled_module
 
     _, coupled = _cavity(4)
     seen: dict = {}
 
-    def spy(assembler, reference_state, **kwargs):
+    def spy(assembler, reference_state, policy, **kwargs):
         seen.update(kwargs)
         raise _StopBuild
 
-    monkeypatch.setattr(coupled_module, "coupled_continuation", spy)
+    monkeypatch.setattr(coupled_module, "_coupled_step", spy)
     asked = Globalization(grow=2, beta0=1.5)
     with pytest.raises(_StopBuild):
         solve_coupled(coupled, globalization=asked)
@@ -1639,15 +1733,10 @@ def test_every_continuation_builder_defaults_to_the_per_entry_positivity_project
     is. Measured on a separating coupled-RANS benchmark, that loses the march outright while the
     per-entry projection completes it *and* speeds up the arm that already worked.
 
-    Pinned on all four builders together: a default that reverts on one of them reverts silently, and
+    Pinned on every builder together: a default that reverts on one of them reverts silently, and
     the failure it re-arms shows up as a step length rather than as an error.
     """
-    for builder in (
-        coupled_continuation,
-        coupled_amg_continuation,
-        coupled_lu_continuation,
-        mass_flow_coupled_continuation,
-    ):
+    for builder in (coupled_step, mass_flow_coupled_continuation):
         got = inspect.signature(builder).parameters["positivity_projection"].default
         assert got is True, f"{builder.__name__} defaults positivity_projection to {got!r}"
 

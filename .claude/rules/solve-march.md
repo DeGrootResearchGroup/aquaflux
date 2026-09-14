@@ -7,6 +7,8 @@ paths:
 
 # Rules — `aquaflux/solve/` the observed march (`forward_march`, triggers, controls, logging)
 
+> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | MonolithicVCycle | FieldSplit)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
+
 > Split out of `solve.md` (2026-08-18). See `solve.md` for the package-wide contracts, current
 > configuration, and binding decisions this file assumes.
 >
