@@ -73,20 +73,10 @@ from .continuation import (
     ShiftTerm,
     StepAcceptance,
 )
-from .ordering import (
-    AscendingRowLengthCells,
-    CellMajor,
-    CellOrder,
-    EliminationOrdering,
-    NaturalCells,
-    ReverseCuthillMcKeeCells,
-    cell_graph,
-    cell_major_permutation,
-)
 from .frozen_operator import (
+    cell_major_permutation,
     convection_diffusion_operator,
     equilibrate_cell_major,
-    equilibrate_ordered,
     decouple_dof,
     symmetrically_equilibrate,
 )
@@ -107,8 +97,6 @@ from .field_split import (
 )
 from .host_preconditioner import HostFactors, HostPreconditioner
 from .hierarchy_inverse import HierarchyBlockInverse
-from .ilu_inverse import IluSmoothedInverse, ilu_smoothed_inverse
-from .ilu0 import COMPILED, Ilu0
 from .refresh_timing import PhaseTimer, RefreshTiming
 from .state import CellFields, FieldLayout, GlobalDofs, StateBlock, SubLayout
 from .lu_preconditioner import MonolithicLuPreconditioner
@@ -193,20 +181,16 @@ from .step_control import (
 )
 
 __all__ = [
-    "COMPILED",
     "DEFAULT_GLOBALIZATION",
     "ESCALATING_REASONS",
     "NO_REFRESH",
     "NO_RETRIES",
     "AirHierarchy",
     "AmgVCycle",
-    "AscendingRowLengthCells",
     "BlockColouring",
     "BlockScaledNorm",
     "BlockTriangularFieldSplit",
     "CellFields",
-    "CellMajor",
-    "CellOrder",
     "CflResidualDualTimeControl",
     "CoefficientDriftTrigger",
     "ColumnProbePlan",
@@ -216,7 +200,6 @@ __all__ = [
     "DivergenceGuard",
     "DualTimeControl",
     "DualTimeStep",
-    "EliminationOrdering",
     "FieldGroups",
     "FieldLayout",
     "FieldSplitAmgPreconditioner",
@@ -226,8 +209,6 @@ __all__ = [
     "HierarchyBlockInverse",
     "HostFactors",
     "HostPreconditioner",
-    "Ilu0",
-    "IluSmoothedInverse",
     "ImplicitNewtonSolver",
     "InnerIterateCheckpointer",
     "JacobiSmoothedInverse",
@@ -239,7 +220,6 @@ __all__ = [
     "MonolithicAmgPreconditioner",
     "MonolithicLuPreconditioner",
     "MonotoneLineSearch",
-    "NaturalCells",
     "PhaseTimer",
     "PositiveBlockLimit",
     "PositiveBlockProjection",
@@ -254,7 +234,6 @@ __all__ = [
     "ResidualNorm",
     "ResidualRatioDualTimeControl",
     "RetryPolicy",
-    "ReverseCuthillMcKeeCells",
     "RowScaledNorm",
     "ShapeBudget",
     "ShiftBasis",
@@ -284,7 +263,6 @@ __all__ = [
     "build_block_triangular_field_split",
     "build_convection_hierarchy",
     "build_smoothed_hierarchy",
-    "cell_graph",
     "cell_major_permutation",
     "column_probe_plan",
     "combine_metrics",
@@ -295,10 +273,8 @@ __all__ = [
     "default_dual_time_control",
     "default_linear_solver",
     "equilibrate_cell_major",
-    "equilibrate_ordered",
     "field_change_metrics",
     "forward_march",
-    "ilu_smoothed_inverse",
     "jacobi_smoothed_inverse",
     "jacobian_relative_error",
     "materialize_block_jacobian",

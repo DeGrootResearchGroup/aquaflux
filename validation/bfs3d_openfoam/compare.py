@@ -76,9 +76,6 @@ from aquaflux.io import read_openfoam
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, VenkatakrishnanLimiter
 from aquaflux.solve import (
-    COMPILED as ILU0_COMPILED,
-)
-from aquaflux.solve import (
     CflResidualDualTimeControl,
     FieldGroups,
     InnerIterateCheckpointer,
@@ -89,7 +86,6 @@ from aquaflux.solve import (
     air_inverse,
     combine_metrics,
     combine_observers,
-    ilu_smoothed_inverse,
     jacobi_smoothed_inverse,
     relative_residual_gmres,
     simple_smoothed_inverse,
@@ -472,134 +468,12 @@ else:
 # solves cross the threshold against 9.0%), which hands back ~42 s of the ~980 s saved.
 # `BFS3D_FIELD_SPLIT=0` restores the monolithic V-cycle for an A/B.
 FIELD_SPLIT = os.environ.get("BFS3D_FIELD_SPLIT", "1") not in ("", "0")
-# The smoother on the TURBULENCE half of the split, which need not be the one the saddle needs. The
-# shipped four sweeps of a zero-fill incomplete LU were tuned against the six-field block; `[k, omega]`
-# is not a saddle but a two-field advection-diffusion-reaction pair with a genuine diagonal, and it is
-# both easier and cheaper to precondition. Measured across two step-initial states and the march's
-# hardest iterate, weighted by how often each class of solve occurs (139 of 194 inner solves take one
-# restart cycle), as expected seconds per solve against the shipped smoother:
-#
-#     ilu0 x1        0.89x     pbjacobi x2    0.90x     jacobi x2      0.91x
-#     ilu0 x2        0.92x     jacobi x4      0.93x     pbjacobi x4    0.94x
-#     ilu0 x4 (shipped)  --    sor x4         1.01x     jacobi x1      1.07x
-#
-# The ranking is state-dependent in a way a single probe inverts: point-block Jacobi buys an extra
-# restart cycle only where the operator is hard, so it is the WORST arm on the hardest iterate (1.15x)
-# and a win over the march's real mix (0.94x). Rank on the states a march actually repeats; screen on
-# the hard one.
-#
-# ⚠️ NO ARM HAS BEEN SETTLED ON A MARCH YET, and the first two attempts do NOT count. Both were launched
-# without `BFS3D_REFRESH_ON_CYCLES=3`, which at the time defaulted to the scheduled cadence -- a
-# configuration measured at 3632 s against 1959 s for the otherwise identical arm. So both ran a
-# different refresh trigger from the archived baseline they were compared against, and the difference
-# they showed is not attributable to the smoother. (`pbjacobix2` looked catastrophic and `ilu0x1` looked
-# 20% slow; neither reading survives.) The default is now 3 so this cannot recur silently.
-#
-# A SECOND fairness problem is live even with the trigger set correctly, and it has not been solved:
-# `refresh_on_cycles` and `cycle_budget` are denominated in CYCLES, so a preconditioner that shifts the
-# cycle distribution changes the EFFECTIVE trigger point rather than leaving it fixed. A weaker smoother
-# is then penalized twice -- more cycles, and more refreshes because those cycles cross a threshold
-# calibrated for a stronger one. This is the same argument that makes `_RESTART_SCALE` necessary above.
-# Comparing arms fairly needs the refresh COUNT reported alongside the wall, and a scaled trigger if the
-# counts diverge.
-#
-# What the screen does support, and what it does not: it ranks per-solve COST honestly, and it measures
-# each arm's STRENGTH as the cycles to a tight stop -- shipped 3/3/4 across the two step-initial states
-# and the hard iterate, `ilu0x1` 3/4/5, `jacobix4` 4/5/6, `pbjacobix2` 5/6/7, `jacobix1` 8/10/13. What
-# it cannot see is the quality of the correction an arm returns at the march's own LOOSE stop
-# (`forward_rtol = 0.3`): a strong preconditioner overshoots that target by orders of magnitude inside
-# one restart cycle, while a weak one lands near it, and both report "1 cycle". If that gap matters, a
-# weaker arm hands back a worse Newton direction, the line search clips and the step control escalates
-# -- none of which a timing screen registers. That is a live hypothesis, NOT a measured result; the
-# achieved residual at the loose stop is what would test it.
-#
-# The two knobs are separate on purpose, because they answer separate questions: HOW MANY sweeps of the
-# trailing smoother, and WHICH smoother. Sweeps is the one that paid, and it is now a first-class solver
-# parameter (`coupled_amg_continuation(trailing_smoother_sweeps=...)`) rather than a raw options string,
-# so `BFS3D_TRAILING_SWEEPS` just forwards it. The library default is 1 -- the measurement above.
-TRAILING_SWEEPS = int(os.environ.get("BFS3D_TRAILING_SWEEPS", "1"))
-# The smoother METHOD on the trailing half. Empty (default) is the zero-fill incomplete LU the saddle
-# also uses. The Jacobi-class alternatives are here because they are the ones that could run on an
-# accelerator without a host solver: a diagonal scaling (`jacobi`) or a batch of independent per-cell
-# dense inverses (`pbjacobi`) is a matrix-vector product with no factorization to store and no
-# sequential triangular solve. Neither pins a sweep count -- they inherit `TRAILING_SWEEPS`, so the two
-# knobs compose instead of one silently overriding the other.
-_TURBULENCE_SMOOTHERS = {
-    "": None,
-    "jacobi": {
-        "mg_levels_ksp_type": "richardson",
-        "mg_levels_ksp_richardson_scale": 0.7,
-        "mg_levels_pc_type": "jacobi",
-    },
-    # `pbjacobi` inverts each cell's own dense 2x2 [k, omega] block instead of just its two diagonal
-    # entries, which on this operator is the difference that should matter: the equilibrated cell blocks
-    # are lower-triangular with unit diagonal and a subdiagonal of order 100-340 (omega depends
-    # enormously on same-cell k through the production limiter and the destruction pair, while k barely
-    # depends on omega), and the coupling is ~100 % same-cell. A point method discards all of it; a block
-    # solve is a two-line forward substitution, perfectly conditioned and nearly free.
-    #
-    # Measured, it does capture that: split by field, a pbjacobi-smoothed V-cycle lands 10x closer to an
-    # incomplete-LU-smoothed one than a point-Jacobi one does in the omega rows (1.5e-04 against
-    # 1.5e-03). The end-to-end gain is nonetheless small -- the coarse correction and the outer Krylov
-    # absorb most of it -- which is why it screens as a near-tie with plain Jacobi rather than a rout.
-    #
-    # ⚠️ It needs SORTED column indices, and `equilibrate_cell_major` does not produce them. The
-    # `AmgVCycle` build path sorts before wrapping the matrix for PETSc, so this option is correct here;
-    # a probe that skips that path and hands PETSc the raw cell-major output gets NaN in most entries,
-    # while `jacobi` and `ilu` survive it (a linear diagonal scan does not care about order). If a
-    # point-block arm ever reports NaN, check the index order before concluding anything about the
-    # method.
-    "pbjacobi": {
-        "mg_levels_ksp_type": "richardson",
-        "mg_levels_ksp_richardson_scale": 0.7,
-        "mg_levels_pc_type": "pbjacobi",
-    },
-    # The SAME smoother undamped, which is PETSc's own default Richardson scale and a materially
-    # different arm -- the damped one above relaxes by 0.7 of every correction. Kept apart rather than
-    # folded together because the recorded screen of the arm above was taken at 0.7, and because the
-    # undamped form is the one the framework-native block-Jacobi hierarchy is built to reproduce: an
-    # end-to-end comparison against the damped variant would understate the host solver and would not
-    # be the like-for-like run it appeared to be.
-    "pbjacobi1": {
-        "mg_levels_ksp_type": "richardson",
-        "mg_levels_ksp_richardson_scale": 1.0,
-        "mg_levels_pc_type": "pbjacobi",
-    },
-    "sor": {"mg_levels_ksp_type": "richardson", "mg_levels_pc_type": "sor"},
-}
-_TURBULENCE_SMOOTHER = os.environ.get("BFS3D_TURBULENCE_SMOOTHER", "")
-if _TURBULENCE_SMOOTHER not in _TURBULENCE_SMOOTHERS:
-    raise SystemExit(
-        f"BFS3D_TURBULENCE_SMOOTHER={_TURBULENCE_SMOOTHER!r} is not one of "
-        f"{sorted(k for k in _TURBULENCE_SMOOTHERS if k)}"
-    )
-TRAILING_OPTIONS = _TURBULENCE_SMOOTHERS[_TURBULENCE_SMOOTHER]
-
-# Which preconditioner the trailing [k, omega] block gets. "simplesmooth" (default) is the
-# differentiable-framework nodal hierarchy; "petsc" is the host GAMG V-cycle the case originally ran.
-# Their aggregation and smoother are configured to match -- measured on the block alone they reach the
-# same 2 restart cycles on the same-sized coarse space. Beyond cycles, the native inverse is plain array
-# work rather than a host callback, so it is the half of the preconditioner that could run on an
-# accelerator.
-#
-# ⚠️ THE DEFAULT WAS "petsc", AND THE MEASUREMENT THAT MOVED IT ALSO RETIRED A LONG-STANDING CLAIM.
-# The host arm was believed faster on this case -- 58 steps against 67 -- but the two logs behind that
-# reading were not comparable: the 58-step run used the OTHER wall condition on `k` (`dirichlet`), had
-# no positivity floor, and predated both. Run as a controlled pair at the settings below, the ranking
-# REVERSES:
-#
-#                     native    petsc
-#     wall            2124 s    2893 s   (+36 % for the host arm)
-#     steps               67        72
-#     Krylov cycles      329       371
-#     escalations          4         8
-#     mid-span x_r/h    8.36      8.36   (identical -- same root, different path cost)
-#
-# So the host arm is not the faster one here; the wall condition was carrying that difference, and the
-# `dirichlet` number is not a target because it is a different problem (see `K_WALL` below). Leaving
-# "petsc" as the default would have shipped the slowest measured arm. `BFS3D_TURBULENCE_INVERSE=petsc`
-# still selects the host V-cycle for an A/B of the inverse itself.
-_TURBULENCE_INVERSES = ("petsc", "jacobi", "air")
+# Which inverse the trailing [k, omega] block gets: "jacobi" (default), the traced nodal hierarchy with a
+# Jacobi-class level smoother, or "air", the reduction-based (lAIR) hierarchy. The host GAMG V-cycle this
+# case originally ran here lost a controlled pair to "jacobi" -- 2893 s / 72 steps against 2124 s / 67, to
+# the same mid-span x_r/h 8.36, at the `zerogradient` k wall and a 1e-08 positivity floor -- and was
+# removed with the library's PETSc split blocks (#371).
+_TURBULENCE_INVERSES = ("jacobi", "air")
 TURBULENCE_INVERSE = os.environ.get("BFS3D_TURBULENCE_INVERSE", "jacobi")
 if TURBULENCE_INVERSE not in _TURBULENCE_INVERSES:
     raise SystemExit(
@@ -724,21 +598,22 @@ AIR_TRAILING = dict(
     max_coarse=int(os.environ.get("BFS3D_NATIVE_MAX_COARSE", "200")),
 )
 
-TRAILING_INVERSE = None
-if TURBULENCE_INVERSE == "jacobi":
-    TRAILING_INVERSE = jacobi_smoothed_inverse(**JACOBI_TRAILING)
-elif TURBULENCE_INVERSE == "air":
-    TRAILING_INVERSE = air_inverse(**AIR_TRAILING)
+TRAILING_INVERSE = (
+    jacobi_smoothed_inverse(**JACOBI_TRAILING)
+    if TURBULENCE_INVERSE == "jacobi"
+    else air_inverse(**AIR_TRAILING)
+)
 
 
-#: `BFS3D_FLOW_INVERSE=simplesmooth` selects the LEADING (flow saddle) block's JAX-native SIMPLE-smoothed
-#: hierarchy in place of the host V-cycle. `petsc`/`hostilu` still select the two PETSc-backed arms for
-#: comparison.
+#: The LEADING (flow saddle) block's inverse is the JAX-native SIMPLE-smoothed hierarchy. The two
+#: host arms it was compared against -- `petsc` (PETSc's GAMG V-cycle) and `hostilu` (this package's
+#: hierarchy smoothed by a zero-fill incomplete LU) -- were removed with the library's PETSc split blocks
+#: and its ILU(0) kernel (#371); `BFS3D_FLOW_INVERSE` set to anything else now refuses to start.
 #:
-#: ⚠️ `BFS3D_REFRESH_ON_CYCLES` may want raising alongside it (UNVALIDATED, flagged not fixed): the
+#: ⚠️ `BFS3D_REFRESH_ON_CYCLES` may want raising (UNVALIDATED, flagged not fixed): the
 #: refresh fires when a solve REACHES the threshold, and the shipped `3` is calibrated to an
-#: incomplete-LU that runs two cycles per solve. A full-march A/B (this default vs a matched `hostilu`
-#: run) measured the native flow arm at 349 cumulative cycles / 1782 s against 208 / 1403 s, same root
+#: incomplete-LU that runs two cycles per solve. A full-march A/B (this default vs a matched, since
+#: removed, `hostilu` run) measured the native flow arm at 349 cumulative cycles / 1782 s against 208 / 1403 s, same root
 #: (`x_r/h` 8.3611 both) -- some of that gap is plausibly the refresh threshold tripping on this
 #: hierarchy's ordinary 4-9-cycle solves rather than on genuine staleness, and some is plausibly the
 #: native hierarchy's own per-apply cost away from zero shift, which prior single-state measurements put
@@ -754,121 +629,72 @@ def _flush_print(message: str) -> None:
     print(message, flush=True)
 
 
-#: ⚠️ THE DEFAULT IS `simplesmooth`, NOT AN INCOMPLETE-LU ARM, AND THE REASON IS ROBUSTNESS RATHER
-#: THAN SPEED.
-#: An incomplete-LU factorization is sensitive to the elimination ORDER in a way that has repeatedly
-#: produced arms differing by orders of magnitude on this operator (measured: the same ILU(0) construction
-#: takes 1 cycle under one cell ordering and fails to converge in 38 under another, on the same block).
-#: The host SIMPLE-smoothed hierarchy has no ordering dependence and no sequential triangular solve
-#: (batched per-cell/per-level dense solves and sparse matvecs only), so it is also the only one of the
-#: three arms with a route to a GPU. A full-march A/B at this default against a matched `hostilu` run
-#: reached the identical root (`x_r/h` 8.3611) at a real wall-clock cost (349 cumulative cycles / 1782 s
-#: against 208 / 1403 s) -- `simplesmooth` is not the faster arm here, it is the one that does not depend
-#: on an elimination order this case has already been bitten by, and the one this project's GPU direction
-#: needs.
-#: `BFS3D_FLOW_INVERSE=hostilu` / `petsc` restore the two PETSc-backed arms, and both stay measured and
-#: runnable so the comparison can be re-adjudicated.
+#: ⚠️ `simplesmooth` WON ON ROBUSTNESS RATHER THAN SPEED. An incomplete-LU factorization is sensitive
+#: to the elimination ORDER in a way that repeatedly produced arms differing by orders of magnitude on
+#: this operator (the same ILU(0) construction took 1 cycle under one cell ordering and failed to
+#: converge in 38 under another, on the same block). The SIMPLE-smoothed hierarchy has no ordering
+#: dependence and no sequential triangular solve, so it is also the arm with a route to a GPU. A
+#: full-march A/B against a matched `hostilu` run reached the identical root (`x_r/h` 8.3611) at a real
+#: wall-clock cost (349 cumulative cycles / 1782 s against 208 / 1403 s).
 FLOW_INVERSE = os.environ.get("BFS3D_FLOW_INVERSE", "simplesmooth")
-if FLOW_INVERSE not in ("petsc", "simplesmooth", "hostilu"):
+if FLOW_INVERSE != "simplesmooth":
     raise SystemExit(
-        f"BFS3D_FLOW_INVERSE={FLOW_INVERSE!r} is not one of ['petsc', 'simplesmooth', 'hostilu']"
+        f"BFS3D_FLOW_INVERSE={FLOW_INVERSE!r}: only 'simplesmooth' remains -- the `petsc` and `hostilu` "
+        "leading inverses were removed (#371)."
     )
-LEADING_INVERSE = None
-#: The selected arm's own settings, recorded beside the object they built so the configuration banner
-#: can print them without re-deriving which arm is live. `None` for `petsc`, which builds no leading
-#: inverse of ours. Set in the SAME branch that builds the inverse: a banner that instead re-branched on
-#: `FLOW_INVERSE` to pick between two per-arm names referred, on the default arm, to a name only the
-#: other arm defines -- so the case died with a `NameError` before its first step, in the one line whose
-#: job is to say what the run is.
-LEADING_SETTINGS = None
-if FLOW_INVERSE == "hostilu":
-    #: The SAME hierarchy the `simplesmooth` arm coarsens with, applied on the host and smoothed by a
-    #: zero-fill incomplete factorization instead of SIMPLE relaxation -- so `petsc` against `hostilu`
-    #: differs in the coarsening alone, which is what makes it the arm that isolates it.
-    #:
-    #: MEASURED ON A FULL MARCH, which is the only honest measure once the preconditioner's shape
-    #: changes: against `petsc` at the same commit on the same machine, 61 steps / 208 cycles / 1246 s
-    #: against 59 / 232 / 1179, to the SAME root (mid-span x_r/h 8.361, full-span 12.53). About a tenth
-    #: fewer cycles, about a twentieth more wall -- parity. Per rung it is sharper than the totals: the
-    #: Re/100 anchor runs identical steps AND identical wall while taking 27% fewer cycles, and the
-    #: TARGET rung -- lowest beta, the hardest operator and the one that grows with the mesh -- wins
-    #: both axes (89 cycles against 105, 482 s against 527). The whole wall deficit is the middle rung,
-    #: where this arm took two extra outer steps while taking FULLER ones (alpha 1.000 where the
-    #: incumbent clipped to 0.566 and 0.803). That is unexplained.
-    #:
-    #: ⚠️ Two cautions before touching `sweeps`. The cycle count is NON-MONOTONE in it -- 4 / 6 / 4 at
-    #: 1 / 2 / 4 on the converged state at zero shift -- so a single sweep count is not a result about
-    #: this smoother. And every arm TIES at a positive shift (2 cycles apiece at beta 0.1), so it
-    #: cannot be calibrated on a step-initial state at all: the march's hard operators are its mid-step
-    #: inner iterates.
-    LEADING_SETTINGS = dict(
-        sweeps=int(os.environ.get("BFS3D_FLOW_SWEEPS", "1")),
-        cycles=1,
-        strength_threshold=0.25,
-        avoid_singletons=True,
-        aggressive_levels=0,
-        max_levels=5,
-        max_coarse=500,
-        prolongation_smoothing="none",
-    )
+#: The arm measured best on single states: strength-of-connection aggregation with no singleton
+#: aggregates, five levels, a per-cell block velocity splitting and an undamped correction.
+#:
+#: ⚠️ ``sweeps`` is **2, not the 4 the single-state probes chose**: on a MARCH fewer sweeps win, 2533 s
+#: against 3044 s (-16.8 % wall for +34.6 % cycles), because the apply cost dominates strongly enough
+#: that buying cheapness with convergence pays. Every native march on record uses 2; the default said
+#: 4 for a while, which handed the opt-in the measured-worse setting.
+#:
+#: Two settings are exposed to the environment because a march is a different operating point from
+#: the state the rest were chosen on. ``BFS3D_FLOW_SWEEPS`` -- the sweep count was calibrated at zero
+#: shift, the adjoint's operator, and every shift the march runs at makes the block easier, so the
+#: march may not need four. ``BFS3D_FLOW_FROZEN_COARSENING`` -- at this strength threshold the
+#: aggregation reads values, so each refresh re-coarsens and retraces the compiled cycle; frozen, the
+#: partition is the one derived at the first build and reused for the whole march.
+#:
+#: ⚠️ `frozen_coarsening` defaults ON, unlike the class it wraps. Without it a full march's refactor
+#: cost was measured at ~50 s per refresh (the retrace this docstring warns about, not the hierarchy's
+#: own build cost -- an isolated single build of the same recipe took ~1 s); frozen, it stayed at
+#: ~4 s across every refresh in a full 3-rung march. `BFS3D_FLOW_FROZEN_COARSENING=0` restores the
+#: class default (re-coarsen every refresh) for re-adjudicating the trade against coarse-space quality.
+LEADING_SETTINGS = dict(
+    sweeps=int(os.environ.get("BFS3D_FLOW_SWEEPS", "2")),
+    pressure_sweeps=2,
+    strength_threshold=0.25,
+    avoid_singletons=True,
+    aggressive_levels=0,
+    max_levels=5,
+    max_coarse=500,
+    block_splitting=True,
+    omega=1.0,
+    frozen_coarsening=os.environ.get("BFS3D_FLOW_FROZEN_COARSENING", "1") not in ("", "0"),
+    shape_headroom=(
+        float(os.environ["BFS3D_FLOW_SHAPE_HEADROOM"])
+        if os.environ.get("BFS3D_FLOW_SHAPE_HEADROOM")
+        else None
+    ),
+)
 
-    LEADING_INVERSE = ilu_smoothed_inverse(**LEADING_SETTINGS)
-if FLOW_INVERSE == "simplesmooth":
-    #: The arm measured best on single states: strength-of-connection aggregation with no singleton
-    #: aggregates, five levels, a per-cell block velocity splitting and an undamped correction.
-    #:
-    #: ⚠️ ``sweeps`` is **2, not the 4 the single-state probes chose**: on a MARCH fewer sweeps win, 2533 s
-    #: against 3044 s (-16.8 % wall for +34.6 % cycles), because the apply cost dominates strongly enough
-    #: that buying cheapness with convergence pays. Every native march on record uses 2; the default said
-    #: 4 for a while, which handed the opt-in the measured-worse setting.
-    #:
-    #: Two settings are exposed to the environment because a march is a different operating point from
-    #: the state the rest were chosen on. ``BFS3D_FLOW_SWEEPS`` -- the sweep count was calibrated at zero
-    #: shift, the adjoint's operator, and every shift the march runs at makes the block easier, so the
-    #: march may not need four. ``BFS3D_FLOW_FROZEN_COARSENING`` -- at this strength threshold the
-    #: aggregation reads values, so each refresh re-coarsens and retraces the compiled cycle; frozen, the
-    #: partition is the one derived at the first build and reused for the whole march.
-    #:
-    #: ⚠️ `frozen_coarsening` defaults ON, unlike the class it wraps. Without it a full march's refactor
-    #: cost was measured at ~50 s per refresh (the retrace this docstring warns about, not the hierarchy's
-    #: own build cost -- an isolated single build of the same recipe took ~1 s); frozen, it stayed at
-    #: ~4 s across every refresh in a full 3-rung march. `BFS3D_FLOW_FROZEN_COARSENING=0` restores the
-    #: class default (re-coarsen every refresh) for re-adjudicating the trade against coarse-space quality.
-    LEADING_SETTINGS = dict(
-        sweeps=int(os.environ.get("BFS3D_FLOW_SWEEPS", "2")),
-        pressure_sweeps=2,
-        strength_threshold=0.25,
-        avoid_singletons=True,
-        aggressive_levels=0,
-        max_levels=5,
-        max_coarse=500,
-        block_splitting=True,
-        omega=1.0,
-        frozen_coarsening=os.environ.get("BFS3D_FLOW_FROZEN_COARSENING", "1") not in ("", "0"),
-        shape_headroom=(
-            float(os.environ["BFS3D_FLOW_SHAPE_HEADROOM"])
-            if os.environ.get("BFS3D_FLOW_SHAPE_HEADROOM")
-            else None
-        ),
-    )
-
-    LEADING_INVERSE = simple_smoothed_inverse(**LEADING_SETTINGS, report=_flush_print)
+LEADING_INVERSE = simple_smoothed_inverse(**LEADING_SETTINGS, report=_flush_print)
 
 
-if TRAILING_INVERSE is not None and DUMP_TRAILING_BLOCK:
+if DUMP_TRAILING_BLOCK:
     TRAILING_INVERSE = _dumping(TRAILING_INVERSE)
 
 #: Whether `FILL_LEVELS` / `SWEEPS` / `COARSE_EQ_LIMIT` reach the preconditioner at all.
 #:
-#: ⚠️ They configure an incomplete-LU-smoothed hierarchy that is built ONLY for a block whose own
-#: inverse was not supplied: the field split takes `leading_inverse(...)` when one is given and falls
-#: back to building that hierarchy otherwise, and likewise for the trailing block. With both inverses
-#: set -- this file's default, a SIMPLE-smoothed flow block and a Jacobi-smoothed k/omega block --
-#: neither fallback is taken and these three settings are dead. The banner said them anyway, which is
+#: ⚠️ They configure the monolithic V-cycle, built only with `BFS3D_FIELD_SPLIT=0`. Under the field split
+#: -- this file's default, a SIMPLE-smoothed flow block and a Jacobi-smoothed k/omega block, each fitted
+#: by its injected inverse -- these three settings are dead. The banner said them anyway, which is
 #: how a reader (and a solver study) comes to believe a march was preconditioned by a smoother that was
 #: never constructed. A banner is the primary record of what a measurement was taken under, so it has
 #: to distinguish a live setting from a carried one.
-_ILU_SMOOTHER_LIVE = not FIELD_SPLIT or LEADING_INVERSE is None or TRAILING_INVERSE is None
+_ILU_SMOOTHER_LIVE = not FIELD_SPLIT
 
 
 def _jacobi_trailing_description() -> str:
@@ -886,14 +712,6 @@ def _jacobi_trailing_description() -> str:
     }
     settings.update(JACOBI_TRAILING)
     return ", ".join(f"{k}={v}" for k, v in settings.items())
-
-
-#: Suffix marking the PETSc trailing-smoother banner lines as dead. `build_block_triangular_field_split`
-#: uses `trailing_options` / `trailing_smoother_sweeps` only on the branch that builds its own V-cycle;
-#: a supplied `trailing_inverse` skips that branch entirely.
-_TRAILING_SMOOTHER_NOTE = (
-    "" if TRAILING_INVERSE is None else "  (unused: the native trailing inverse replaces it)"
-)
 
 
 # Absolute room in `k` the step limiter grants every cell, so a cell whose `k` is numerically zero
@@ -1106,8 +924,8 @@ DUMP_STEP_LIMIT_KEEP = int(os.environ.get("BFS3D_DUMP_STEP_LIMIT_KEEP", "12"))
 # as the default meant every A/B launched without the environment variable silently measured the refresh
 # TRIGGER instead of the thing under test -- which happened, to two preconditioner arms in one session,
 # despite the trap being written down. A default nobody wants is a trap, not a setting: the fix is the
-# default, not another warning. `BFS3D_REFRESH_ON_CYCLES=0` still selects the scheduled cadence for an
-# A/B of the trigger itself.
+# default, not another warning. The scheduled cadence it was measured against has since been deleted, so
+# `BFS3D_REFRESH_ON_CYCLES=0` now switches the cost trigger off and leaves only the per-rung refit.
 REFRESH_ON_CYCLES = int(os.environ.get("BFS3D_REFRESH_ON_CYCLES", "3"))
 #: Freeze the k-production cap's `k` in the Jacobian (`SSTTurbulence.explicit_production_limiter`).
 #: The library default is `True`, so this case ran with it ON until this knob existed.
@@ -1123,36 +941,6 @@ REFRESH_ON_CYCLES = int(os.environ.get("BFS3D_REFRESH_ON_CYCLES", "3"))
 #: where the cap WOULD have been frozen, so the arm can be judged rather than assumed.
 PRODUCTION_LIMITER = os.environ.get("BFS3D_PRODUCTION_LIMITER", "1") not in ("0", "false", "False")
 
-#: The β-MISMATCH refresh trigger, as a fraction of the β the V-cycle was last built at. Off by default
-#: (`inf`, a gate that can never fire), which is byte-identical to the configuration every archived
-#: measurement on this case was taken under.
-#:
-#: What it is for, and why `inf` is not obviously right. With the cost trigger above selected, the
-#: scheduled cadences are switched off by setting this gate to `inf` -- so the ONLY thing that rebuilds
-#: the V-cycle is a solve that has already cost more than `REFRESH_ON_CYCLES` cycles. That is a purely
-#: REACTIVE rule, and it has one blind spot: the β-escalation bailout. When a step is redone at
-#: `β *= RETRY_BETA_FACTOR`, the march re-invokes this same refresh hook specifically to re-match the
-#: V-cycle to the escalated β -- and with the gate at `inf` that call does nothing, so the escalated
-#: attempt is solved against a V-cycle built for a β up to 4x smaller.
-#:
-#: The escalation then cannot cure the step it was invoked for. Measured across the three converging
-#: marches that reached the target rung, the same pair repeats
-#: bit-for-bit in all three: an `e2` step at β = 0.2341 whose V-cycle was left stale returns a_min
-#: 0.000 -- a step that moves nothing and costs three solves -- and the FOLLOWING step, at β = 0.9364,
-#: takes a_min 1.000 once the cost trigger has finally forced a rebuild. Across those same runs every
-#: escalated step whose V-cycle WAS rebuilt came back with a_min >= 0.595, and not one was null.
-#:
-#: The mechanism is the one the smoother-screen note above raises as a live hypothesis: at the march's
-#: loose inner stop the accepted correction is substantially determined by the preconditioner, and the
-#: step length is a MINIMUM over cells, so a mismatched V-cycle need not cost cycles to hand back a
-#: direction whose worst cell collapses the line search. Both null steps above solved in 2 cycles.
-#:
-#: Sizing, replayed over a completed march's own β sequence: at 0.9 the gate would add 2 step-boundary
-#: rebuilds (~35 s) on top of the 23 that run already, plus one per escalation attempt. 0.9 is chosen so
-#: a DOUBLING trips it -- which every escalation is -- while the control's own /1.5 growth (a 33 % fall)
-#: does not, since re-matching a V-cycle to a β that is drifting slowly is what the cost trigger already
-#: covers more cheaply. Lower values get expensive fast: 0.5 would add 13 rebuilds (~225 s).
-REFRESH_ON_BETA = float(os.environ.get("BFS3D_REFRESH_ON_BETA", "0") or 0.0) or float("inf")
 #: The wall boundary condition on `k`, as an A/B. `Dirichlet(0)` (default) is the resolved-wall
 #: condition -- turbulent fluctuations vanish at a no-slip wall, so `k -> 0`. `BFS3D_K_WALL=zerogradient`
 #: selects the wall-function condition instead.
@@ -1485,29 +1273,10 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         # under test.
         (
             "flow inverse",
-            FLOW_INVERSE if LEADING_SETTINGS is None else f"{FLOW_INVERSE} {LEADING_SETTINGS}",
-        ),
-        # ⚠️ WHICH incomplete-LU IMPLEMENTATION IS LIVE, because the two differ by orders of magnitude
-        # in speed and nothing recorded which one a run used. `Ilu0` ships a pure-Python reference twin
-        # of its compiled kernel and falls back to it silently when the extension is not built; the two
-        # compute the identical factorization (pinned by a unit test), so a CONVERGENCE result is the
-        # same either way, but a WALL-CLOCK one taken on the fallback is not a preconditioner
-        # measurement at all. Printing it is what makes such a number falsifiable later.
-        (
-            "host ILU kernel",
-            "compiled" if ILU0_COMPILED else "PURE PYTHON (fallback -- timings void)",
+            f"{FLOW_INVERSE} {LEADING_SETTINGS}",
         ),
         ("turbulence inverse", TURBULENCE_INVERSE),
         *([("lAIR trailing settings", AIR_TRAILING)] if TURBULENCE_INVERSE == "air" else []),
-        # ...and, when a `trailing_inverse` is supplied, it REPLACES the PETSc V-cycle wholesale, so the
-        # two smoother settings below are never read. Marking them is the same rule as the note above:
-        # a banner that prints a setting the run did not use is worse than one that omits it, because a
-        # reader diffing two runs attributes a difference to a line that was dead in both.
-        (
-            "turbulence smoother",
-            f"{_TURBULENCE_SMOOTHER or 'ilu0 (shipped)'}{_TRAILING_SMOOTHER_NOTE}",
-        ),
-        ("turbulence smoother sweeps", f"{TRAILING_SWEEPS}{_TRAILING_SMOOTHER_NOTE}"),
         *(
             [("native trailing settings", _jacobi_trailing_description())]
             if TURBULENCE_INVERSE == "jacobi"
@@ -1517,10 +1286,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             "probe column reach",
             "uniform 3" if COLUMN_REACH is None else "/".join(map(str, COLUMN_REACH)),
         ),
-        ("refresh on cycles", REFRESH_ON_CYCLES or "scheduled cadence"),
-        # Beside the cost trigger, because the two together are what decides when the V-cycle is
-        # rebuilt, and a run that re-matches on a β escalation is a different arm from one that does not.
-        ("refresh on beta mismatch", "off" if REFRESH_ON_BETA == float("inf") else REFRESH_ON_BETA),
+        ("refresh on cycles", REFRESH_ON_CYCLES or "off"),
         ("Reynolds continuation points", N_POINTS),
         (
             "Reynolds span walked as",
@@ -1614,20 +1380,11 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             FieldGroups.split_before(coupled.layout, "k").active_rows() if FIELD_SPLIT else None
         ),
     )
-    # With the cycle trigger on, the scheduled cadences are switched OFF so it REPLACES them: as an
-    # addition it is break-even, as a replacement it is the largest saving measured on this march.
-    # CAREFUL: `beta_rel_change=None` does NOT switch the schedule off -- it removes the gate, and a
-    # missing gate means "refresh every step". Switching it off means a gate that exists and never
-    # fires again after its first (initialising) call, plus no materialize gates, so the refresh
-    # branch resolves to `none`.
-    scheduled = not REFRESH_ON_CYCLES
+    # Re-fits on its first call and after each rung's `rebind`; between those the cost trigger
+    # (`refresh_on_cycles`, through `refresh.refresh_at`) is the only thing that rebuilds the V-cycle.
     refresh = amg_beta_tracking_refresh(
         coupled,
         probe=probe,
-        beta_rel_change=0.25 if scheduled else REFRESH_ON_BETA,
-        refresh_every=8 if scheduled else 10**9,
-        materialize_drift=0.05 if scheduled else None,
-        materialize_every=4 if scheduled else None,
         beta_floor=PC_BETA_FLOOR,
         observer=logger.on_refresh,
     )
@@ -1680,8 +1437,6 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             refresh_on_cycles=REFRESH_ON_CYCLES or None,
             inner_refresh=refresh.refresh_at if REFRESH_ON_CYCLES else None,
             field_split=FIELD_SPLIT,
-            trailing_smoother_sweeps=TRAILING_SWEEPS,
-            trailing_options=TRAILING_OPTIONS if FIELD_SPLIT else None,
             leading_inverse=LEADING_INVERSE if FIELD_SPLIT else None,
             trailing_inverse=TRAILING_INVERSE if FIELD_SPLIT else None,
         )

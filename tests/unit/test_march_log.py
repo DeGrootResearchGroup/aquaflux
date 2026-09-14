@@ -282,10 +282,10 @@ def test_diagnostics_are_off_by_default_even_when_the_hooks_are_wired() -> None:
 def test_each_detail_switches_on_only_its_own_output() -> None:
     logger, buffer = _log(fields=lambda s: {"u": np.asarray(s)}, detail=("pc", "fields"))
     logger.on_inner(0, 4.0e-2, 1.0e-2, 5, 1.0)  # not requested -- must stay silent
-    logger.on_refresh(RefreshTiming("shift", 0.4))
+    logger.on_refresh(RefreshTiming("inner", 0.4))
     logger.on_checkpoint(_report(), [1.0, 2.0])
 
-    assert "pc shift 0.4s" in _asides(buffer)[0]
+    assert "pc inner 0.4s" in _asides(buffer)[0]
     assert "rel. change" in buffer.getvalue()
     assert "+- step" not in buffer.getvalue()
 
@@ -322,12 +322,12 @@ def test_refreshes_of_different_branches_in_one_step_are_reported_separately() -
     """Which branch ran is the diagnosis; collapsing two branches into one count would hide it."""
     logger, buffer = _log(detail=("pc",))
     logger.on_refresh(RefreshTiming("full", 20.0))
-    logger.on_refresh(RefreshTiming("shift", 0.5))
-    logger.on_refresh(RefreshTiming("shift", 0.5))
+    logger.on_refresh(RefreshTiming("inner", 0.5))
+    logger.on_refresh(RefreshTiming("inner", 0.5))
     logger.on_step(_report())
 
     line = next(line for line in _asides(buffer) if line.startswith("pc"))
-    assert line == "pc full shift 2x 21.0s"
+    assert line == "pc full inner 2x 21.0s"
 
 
 def test_a_lone_refresh_still_reads_as_a_statement_rather_than_a_count_of_one() -> None:
@@ -367,10 +367,10 @@ def test_wall_time_the_phases_do_not_account_for_is_shown() -> None:
 def test_a_refresh_reporting_no_phases_still_reports_its_total() -> None:
     """The factorization preconditioners do not instrument themselves; the branch and total still log."""
     logger, buffer = _log(detail=("pc",))
-    logger.on_refresh(RefreshTiming("shift", 8.4))
+    logger.on_refresh(RefreshTiming("full", 8.4))
     logger.on_step(_report())
 
-    assert next(line for line in _asides(buffer) if line.startswith("pc")) == "pc shift 8.4s"
+    assert next(line for line in _asides(buffer) if line.startswith("pc")) == "pc full 8.4s"
 
 
 def test_an_unknown_detail_name_raises_rather_than_being_ignored() -> None:

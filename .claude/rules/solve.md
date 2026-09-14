@@ -31,15 +31,15 @@ The family is now named by its **level smoother**, which is the only thing its m
 | `NativeHierarchyInverse` | `HierarchyBlockInverse` |
 | `NativeSimpleInverse` / `native_saddle_inverse` | `SimpleSmoothedInverse` / `simple_smoothed_inverse` |
 | `NodalNativeInverse` / `native_nodal_inverse` | `JacobiSmoothedInverse` / `jacobi_smoothed_inverse` |
-| `HostVCycleInverse` / `host_ilu_inverse` | `IluSmoothedInverse` / `ilu_smoothed_inverse` |
-| `AmgVCycle(native=)` / `has_native_solve` / `is_exact_native` / `native_forward_solve` | `host_exact_solve=` / `has_exact_solve` / `solves_exactly_on_host` / `host_exact_forward_solve` |
-| `solve/native_inverse.py` / `solve/host_vcycle.py` | `solve/hierarchy_inverse.py` / `solve/ilu_inverse.py` |
+| `HostVCycleInverse` / `host_ilu_inverse` | `IluSmoothedInverse` / `ilu_smoothed_inverse` — *deleted 2026-09-13 with the ILU(0) kernel, #371; neither name exists* |
+| `AmgVCycle(native=)` / `has_native_solve` / `is_exact_native` / `native_forward_solve` | *(deleted 2026-09-13, #371 — there is no host exact forward solve, and none of these four names exists)* |
+| `solve/native_inverse.py` / `solve/host_vcycle.py` | `solve/hierarchy_inverse.py` / `solve/ilu_inverse.py` (*the latter deleted 2026-09-13, #371*) |
 | `BFS3D_FLOW_INVERSE=native` | `BFS3D_FLOW_INVERSE=simplesmooth` |
 | `BFS3D_TURBULENCE_INVERSE=native` | `BFS3D_TURBULENCE_INVERSE=jacobi` |
 
 Recorded measurements in these files that said "the native arm" now say "the traced arm" — *traced*
 (runs inside JAX, on device) against *host* is the distinction the old word was reaching for, and it
-is the one that matters for a GPU. `hostilu` and `petsc` arm values are unchanged: both already say
+is the one that matters for a GPU. `hostilu` and `petsc` arm values were unchanged (both arms were removed 2026-09-13, #371): both already say
 what they are. See the shipped `docs/preconditioning.md` for the user-facing description.
 
 ## Responsibility
@@ -81,8 +81,8 @@ testability seam. Everything subsystem-specific moved out:
 
 | File | `paths:` | Covers |
 |---|---|---|
-| `solve-direct-preconditioners.md` | `lu_preconditioner.py`, `ilu0.py`, `_ilu0.pyx` | The monolithic complete-LU preconditioner (and the now-deleted ILUT it once shared a family with), and the shared frozen-host contract |
-| `solve-amg-multigrid.md` | `amg_preconditioner.py`, `multigrid.py`, `hierarchy_inverse.py`, `ilu_inverse.py` | The monolithic AMG coupled PC, the traced multigrid, faithful smoothed aggregation, and `multigrid.py`'s own binding decisions |
+| `solve-direct-preconditioners.md` | `lu_preconditioner.py`, `sparse_jacobian.py` | The monolithic complete-LU preconditioner (and the now-deleted ILUT it once shared a family with), and the shared frozen-host contract |
+| `solve-amg-multigrid.md` | `amg_preconditioner.py`, `multigrid.py`, `hierarchy_inverse.py` | The monolithic AMG coupled PC, the traced multigrid, faithful smoothed aggregation, and `multigrid.py`'s own binding decisions |
 | `solve-flow-block.md` | `saddle_multigrid.py`, `shift_basis.py` | Traced preconditioning of the `[u, v, w, p]` saddle — current status only |
 | `.claude/notes/solve-flow-block-log.md` | *(never auto-loads)* | The full dated investigation behind the flow block, including qualified/retracted findings |
 | `solve-field-split.md` | `field_split.py` | The block-triangular field split (saddle plus two transported scalars) |
@@ -168,16 +168,16 @@ recorded error.** A default here that disagrees with the code is a defect — fi
 
 | | library default | validated `bfs3d` bundle | where |
 |---|---|---|---|
-| smoother fill | `smoother_fill_levels=1` (ILU(1)) | **0** (ILU(0)) | `coupled_amg_continuation` / `compare.py` |
-| smoother sweeps | `smoother_sweeps=2` | **4** | same |
-| coarse-eq limit | `coarse_eq_limit=None` (~50) | **2000** | same |
+| smoother fill | `smoother_fill_levels=1` (ILU(1)) | 0 (ILU(0)) — **inert**: monolithic only, and the case runs the split | `coupled_amg_continuation` / `compare.py` |
+| smoother sweeps | `smoother_sweeps=2` | 4 — **inert**, as above | same |
+| coarse-eq limit | `coarse_eq_limit=None` (~50) | 2000 — **inert**, as above | same |
 | PC shift floor | `beta_floor=0.0` | **0.05** | same |
 | aggregation | plain (`pc_gamg_agg_nsmooths=0`) | plain | `amg_preconditioner.py` |
 | field split | `field_split=False` | **True** | `compare.py` |
 | stencil reach | `stencil_reach=3` | 3 | — |
 | probe column reach | `column_reach=None` (uniform) | **(3,3,3,3,2,2)** | `compare.py` `COLUMN_REACH` |
 | dual-time inner tol | `inner_tol=0.05` | **1e-2** | `compare.py` `INNER_TOL` |
-| flow (leading) inverse | `AmgVCycle` (PETSc) | **`SimpleSmoothedInverse`** (`FLOW_INVERSE="simplesmooth"`) | `compare.py` |
+| flow (leading) inverse | none — `field_split=True` requires `leading_inverse` and `trailing_inverse` (#371) | **`SimpleSmoothedInverse`** (`FLOW_INVERSE="simplesmooth"`) | `compare.py` |
 | trailing hierarchy depth | `HierarchyBlockInverse` class default: `max_levels=2, strength_threshold=0.0, aggressive_levels=1` | **`max_levels=20, max_coarse=200, strength_threshold=0.25, aggressive_levels=0, frozen_coarsening=True`** | `compare.py` `JACOBI_TRAILING` |
 
 **The coupled forward solve: one MEASURE, per-family RESTART REGIMES (restructured 2026-08-20, #282).**
@@ -497,8 +497,9 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   (`potential_flow` passes `preconditioner_side="left"`), never on the shifted saddle. On **`jaxamg`**: the search confirmed it is **NVIDIA/AmgX-locked and
   scalar-only** (no coupled/saddle-point, no AMD/TPU) — usable at most as a pressure-Poisson *inner*
   escape-hatch on NVIDIA hardware, **not** the coupled solver or an architectural commitment. Do not
-  adopt it on the README's word. **`LSC` original / `PCD` carry equal-order/FEM traps** (use stabilized
-  LSC for Rhie–Chow; PCD needs FEM-BC re-derivation). **The `multigrid.py`-specific binding decisions
+  adopt it on the README's word. **`LSC` original / `PCD` carry equal-order/FEM traps** (stabilized
+  LSC is the Rhie–Chow form, and was built and deleted as dominated on the coupled solve; PCD needs
+  FEM-BC re-derivation). **The `multigrid.py`-specific binding decisions
   this headline expands into — the pure operator-coarsening contract, the single-homed V-cycle
   recursion, the static/traced level split, strength-of-connection aggregation, `refresh_air_hierarchy`,
   the degenerate-mesh guard, and the two-level damped-Jacobi convection hierarchy — moved to

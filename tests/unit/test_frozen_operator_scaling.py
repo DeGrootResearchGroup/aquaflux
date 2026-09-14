@@ -18,11 +18,11 @@ import pytest
 import scipy.sparse as sp
 from aquaflux.solve.frozen_operator import (
     apply_symmetric_scale,
+    cell_major_permutation,
     equilibration_scale,
     row_chunks,
     symmetrically_equilibrate,
 )
-from aquaflux.solve.ordering import cell_major_permutation
 
 
 def _matrix_with_explicit_zeros() -> sp.csr_matrix:
@@ -133,3 +133,19 @@ def test_cell_major_permutation_is_a_valid_involution_free_permutation():
     assert sorted(perm.tolist()) == list(range(12))
     # (cell i, field f) at cell-major i*3+f maps to field-major f*4+i
     assert perm[1 * 3 + 2] == 2 * 4 + 1
+
+
+@pytest.mark.parametrize(
+    ("shape", "n_fields", "message"),
+    [((6, 5), 3, "square"), ((7, 7), 3, "not a multiple")],
+)
+def test_a_partition_that_does_not_divide_the_operator_raises(shape, n_fields, message):
+    """A mismatched partition must raise, not return a reordered matrix of the wrong layout.
+
+    Silently producing one would reorder the matrix into a different operator that coarsens perfectly
+    well and preconditions nothing.
+    """
+    from aquaflux.solve.frozen_operator import equilibrate_cell_major
+
+    with pytest.raises(ValueError, match=message):
+        equilibrate_cell_major(sp.eye(shape[0], shape[1], format="csr"), n_fields)

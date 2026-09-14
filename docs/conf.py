@@ -61,12 +61,9 @@ SUBPACKAGE_GROUPS = {
                 "field_split",
                 "hierarchy_inverse",
                 "saddle_multigrid",
-                "ilu_inverse",
-                "ilu0",
             ],
         ),
         ("Multigrid hierarchies", ["multigrid", "frozen_operator"]),
-        ("Elimination orderings", ["ordering"]),
         ("Sparse Jacobians", ["sparse_jacobian"]),
     ],
     "flow": [

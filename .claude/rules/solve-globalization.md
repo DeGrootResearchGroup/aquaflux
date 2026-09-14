@@ -116,16 +116,9 @@ What to take from it, none of which is specific to that mechanism:
     trades in: an operator error of order one is not a slower Newton, it is no Newton at all, so a
     cap's error budget is bounded well below that and not merely "small".
 
-- **`_TrailingFirstFieldSplit` supplies only what differs, and `apply` has ONE body (BUILT 2026-08-15).**
-  The two orderings were mirrored copies — 14 lines differing in 5 — and the copy had dropped the base's
-  explanation of why the transposed coupling is formed once. The class docstring justified the split as
-  avoiding "a branch on ordering inside `apply`, on a path that runs once per Krylov iteration", which is
-  a real cost and the wrong conclusion: the ordering **cannot change after construction**, so
-  `_set_order(first=…)` resolves it there and `apply` reads a pair of `(inverse, dofs)` records. The
-  remaining branch is on `transpose`, which the old body already had — transposing a block-triangular
-  inverse reverses the order and uses `Cᵀ`, and that is the whole of the difference between the four
-  cases it used to spell out. **Bit-identical** across all four (both orderings × both directions), each
-  compared as a full dense action rather than on one vector.
+- **There is no `_TrailingFirstFieldSplit` and no `_set_order` (deleted 2026-09-13, #371).** The field
+  split has one ordering, so `BlockTriangularFieldSplit.apply` has one body that branches only on
+  `transpose` (which reverses the solve order and uses `Cᵀ`).
 
 - **Forward globalization is ONE injected strategy — `forward_step: ForwardStep`.** The forward
   Newton loop has a single point of variation: `ImplicitNewtonSolver` takes one `forward_step`

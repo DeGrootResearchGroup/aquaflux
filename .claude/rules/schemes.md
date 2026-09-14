@@ -3176,8 +3176,8 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     product**, so it is inside every coupled Newton step. Bit-identical (`jnp.array_equal`), pinned two
     ways in `tests/unit/test_gradient.py` — an apply *count* per sweep count (which fails if the peel is
     reverted) and an equality against the unpeeled iteration written out (which fails if the arithmetic
-    is ever rearranged). This is the same peel `_VCycleOps.smooth_zero` and `Ilu0.sweep_from_zero`
-    already carry; the gradient solve was the one place in the tree still missing it.
+    is ever rearranged). This is the same peel `_VCycleOps.smooth_zero` already carries (as did the since-deleted
+    `Ilu0.sweep_from_zero`); the gradient solve was the one place in the tree still missing it.
     ⚠️ **It does NOT move the stencil reach**, which is what makes it safe next to the entry below: the
     peeled apply is the one against a zero vector, so it contributed no coupling. A `k`-sweep
     reconstruction still reads `k` cells out (it applies `A_g` `k-1` times on top of `B·φ`'s own ring),

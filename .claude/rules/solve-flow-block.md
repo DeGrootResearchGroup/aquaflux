@@ -19,7 +19,7 @@ operator (see `solve-flow-block-log.md`'s `pitzDaily` entries), and the traced h
 only one of the arms with a route to a GPU. A full-march A/B against a matched `hostilu` (PETSc) run
 reached the identical root (`x_r/h` 8.3611) at a real wall-clock cost (349 cumulative cycles / 1782 s
 against 208 / 1403 s) — this default was chosen accepting that cost, not disputing the measurement
-below. `BFS3D_FLOW_INVERSE=hostilu` / `petsc` restore the two PETSc-backed arms. The two subsections
+below. Both of those arms (`hostilu`, `petsc`) were removed 2026-09-13 (#371). The two subsections
 kept here are the durable ones: that `jax.grad` runs and is validated through this block, and the
 honest verdict on why the traced hierarchy does not win on speed end to end. The full chronological
 investigation between those two points — several rounds of "found a win", each later qualified or
@@ -37,7 +37,7 @@ here.** Update the current-status paragraph above only when an investigation rea
 **Read this before citing any zero-shift result in this section as an adjoint result.** The whole
 section is justified by the transpose solve behind every gradient meeting the unshifted operator — but
 every other number in it is a **linear probe**, driven by the right-hand side `-R(state)`
-(`field_split_probe.py`). The actual adjoint had never been executed. It now has been, it works, and it
+(`field_split_probe.py`'s split arms, removed 2026-09-13, #371). The actual adjoint had never been executed. It now has been, it works, and it
 agrees with a finite difference. Harness `validation/bfs3d_openfoam/adjoint_probe.py`.
 
 *Configuration, every run below:* `state-00067` started from its **physical** fields
@@ -94,7 +94,7 @@ entirely the *finite difference's* fault — the adjoint barely moves while the 
 - **⚠️⚠️ THE COUNT IS A PROPERTY OF THE COARSENING, NOT THE SMOOTHER — THREE DIFFERENT SMOOTHERS ON THE
   SAME HIERARCHY ALL GIVE 1696 (measured 2026-08-16).** A fourth arm — the same traced hierarchy applied
   on the host and smoothed by a **zero-fill incomplete factorization** (`solve/ilu0.py`, one sweep,
-  `BFS3D_FLOW_INVERSE=hostilu`) — returns **1696 applications, 14.0 derived cycles**, identical to the
+  `BFS3D_FLOW_INVERSE=hostilu` — both deleted 2026-09-13, #371) — returns **1696 applications, 14.0 derived cycles**, identical to the
   SIMPLE-smoothed arm at 4 sweeps and at 8. So on the adjoint's operator and right-hand side, SIMPLE ×4,
   SIMPLE ×8 and an incomplete factorization ×1 are indistinguishable, and all three sit ~8 % above
   PETSc's 1575 at the matched `rtol` 1e-4 (see the iteration-count-independence table below for that
@@ -107,7 +107,7 @@ entirely the *finite difference's* fault — the adjoint barely moves while the 
   marginally *cheaper* per application than the incumbent's ~195 ms and the ~8 % extra applications make
   it roughly a wash on wall clock — inside this case's noise floor either way.
 - **⚠️⚠️ AND THIS IS THE CASE THAT PROVES A LINEAR PROBE CANNOT RANK ADJOINT PRECONDITIONERS.** The same
-  two arms, at the same state and the same β = 0, measured through `field_split_probe.py` at right-hand
+  two arms, at the same state and the same β = 0, measured through `field_split_probe.py` (split arms since removed, #371) at right-hand
   side `−R`: traced **4 restart cycles against PETSc's 11**, a 2.75× win. Measured on the actual
   gradient: **1696 against 1575, a 1.08× loss.** The ranking inverts and the magnitude is out by ~3×.
   The reason is already recorded a few lines above and is now demonstrated rather than argued: **the
@@ -117,7 +117,7 @@ entirely the *finite difference's* fault — the adjoint barely moves while the 
 - **✅ The gradient is IDENTICAL to every printed digit — −3.179366936e+03 from both arms**, which is the
   correctness check behaving exactly as it must: a preconditioner changes how the transpose solve reaches
   the answer, never where it lands. It is also the first end-to-end exercise of the hand-written
-  `IluSmoothedInverse` transpose and `Ilu0.solve(transpose=True)` on a real adjoint rather than on a unit
+  `IluSmoothedInverse` transpose and `Ilu0.solve(transpose=True)` (both since deleted, #371) on a real adjoint rather than on a unit
   fixture, and they reproduce PETSc's gradient exactly.
 - **⚠️ DOUBLING THE SMOOTHER SWEEPS BUYS EXACTLY NOTHING HERE — 1696 applications either way, not one
   cycle different, at 1.59× the cost per application. So 8 sweeps is STRICTLY DOMINATED by 4 on this
@@ -198,7 +198,8 @@ iteration-count one, and it is bounded by the same ±8 % seen when the *same* st
 preconditioner both at `beta = 0`** — the operator the implicit-function-theorem adjoint solves, and the
 only state in this set that discriminates between candidates. Real right-hand side `-R(state)`, GMRES
 restart 15 judged on the **TRUE** residual, uniform stencil reach 3, field split with ILU(0) on the
-trailing half, harness `validation/bfs3d_openfoam/field_split_probe.py`.
+trailing half, harness `validation/bfs3d_openfoam/field_split_probe.py` — whose split arms were removed
+2026-09-13 (#371) and survive only in git history.
 
 ⚠️ **THE INCUMBENT IS THE FIELD SPLIT, NOT THE MONOLITHIC ARM — and calling the monolithic one "shipped"
 here cost a day of comparisons against a bar 45 % too slow.** The shipped bundle runs `field split True`

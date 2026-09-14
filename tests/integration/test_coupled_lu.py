@@ -32,7 +32,6 @@ from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
     coupled_lu_continuation,
-    coupled_lu_refreshing_continuation,
     hybrid_initialize,
     inlet_k,
     inlet_omega,
@@ -180,25 +179,6 @@ def test_lu_adjoint_matches_finite_difference(case) -> None:
     eps = 1e-4
     finite_difference = float((objective(1.0 + eps) - objective(1.0 - eps)) / (2 * eps))
     assert abs(analytic - finite_difference) / abs(finite_difference) < 1e-5
-
-
-@pytest.mark.slow
-def test_lu_refreshing_continuation_refreshes_the_same_step_in_place(case) -> None:
-    """The refreshing builder re-factors the SAME continuation in place (the cache-hit object identity)."""
-    from aquaflux.solve import DualTimeStep
-
-    coupled = case["coupled"]
-    flow, k, omega = case["start"]
-    state0 = coupled.pack_state(flow, k, omega)
-    state1 = state0 * 1.05
-
-    rb = coupled_lu_refreshing_continuation(coupled, backend=BACKEND, inner_steps=5, inner_tol=1e-3)
-    step0 = rb(state0)
-    assert isinstance(step0, DualTimeStep)
-    backend0 = step0.shift_policy.preconditioner.factors.backend
-    step1 = rb(state1)
-    assert step1 is step0  # same continuation object -> jitted march-step is a cache hit
-    assert step1.shift_policy.preconditioner.factors.backend is backend0  # refactored in place
 
 
 @pytest.mark.slow

@@ -44,7 +44,6 @@ _TESTS = Path(__file__).resolve().parents[1]
 #: check itself, which is the more surprising of the two and is where most of the hidden tests are.
 GATED_MODULES: dict[str, tuple[str, str]] = {
     "unit/test_amg_preconditioner.py": ("petsc4py", "PCGAMG V-cycle; fast tier"),
-    "unit/test_field_split_vcycle.py": ("petsc4py", "per-field GAMG blocks; fast tier"),
     "integration/test_coupled_amg.py": ("petsc4py", "AMG-preconditioned coupled solve; slow tier"),
     "integration/test_coupled_field_split.py": (
         "petsc4py",
@@ -165,7 +164,6 @@ def test_a_gate_on_a_dependency_ci_does_not_install_is_recorded_as_such(path: st
 #: reaches into the validation cases at all.
 CONDITIONALLY_SKIPPED: dict[str, str] = {
     "integration/test_bfs3d_species.py": "the whole module: the case data is not in the repository",
-    "unit/test_ilu0.py": "the compiled-vs-reference agreement, when the extension is not built",
     "unit/test_lu_preconditioner.py": "the UMFPACK backend's refactor, when PETSc is absent",
     "unit/test_openfoam_fields.py": "one ordering case, when the generated grid is already ordered",
     "unit/test_partitioner.py": "the Scotch binding and command-line partitioners",

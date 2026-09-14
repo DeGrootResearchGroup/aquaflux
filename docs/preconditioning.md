@@ -183,15 +183,11 @@ Péclet number without assuming a flow speed.
 | --- | --- |
 | `"simple"` (default) | The classical SIMPLE Schur: a pressure Laplacian scaled by the momentum diagonal, `Ŝ ~ B diag(V/a_P) Bᵀ`. Degrades as convection strengthens, because `a_P` does. |
 | `"msimple"` | The same Laplacian scaled instead by a frozen, velocity-independent mass diagonal `Q̂ = ρV/k`, giving a constant-coefficient pressure Poisson. Because it does not track the velocity, it does not degrade with convection — the variant that carries a flow-only solve past the Reynolds number at which the `a_P` Schur stalls. |
-| `"lsc"` | The algebraic, nonuniform-mesh stabilized least-squares commutator of Elman, Howle, Shadid, Silvester & Tuminaro (2007), built from the momentum operator itself rather than from a diagonal. The *stabilized* variant is the relevant one, because a Rhie–Chow collocated discretization is equal-order stabilized. |
 
 Both scaled Laplacians are near-Stokes approximations. Once a flow is strongly
 convection-dominated, what limits the block is the *approximation* rather than how
 accurately it is inverted — at which point raising `v_cycles` does not help, and on the
 Schur it can hurt, because inverting the wrong operator more exactly is not progress.
-`"lsc"` is markedly dearer per application (two multigrid solves plus three residual
-linearizations, against one solve) and is stronger on an isolated flow saddle; it is
-**not** a good choice inside a coupled flow–turbulence solve.
 
 ### `composition` — how the two solves are combined
 
@@ -312,7 +308,6 @@ block between them. Each group then gets an inverse suited to it, injected as
 | {func}`~aquaflux.solve.simple_smoothed_inverse` | {class}`~aquaflux.solve.SimpleSmoothedInverse` — a multigrid over the saddle whose *level smoother* is a SIMPLE relaxation | the leading flow group |
 | {func}`~aquaflux.solve.jacobi_smoothed_inverse` | {class}`~aquaflux.solve.JacobiSmoothedInverse` — one hierarchy over the whole group, coarsening cells | either group |
 | {func}`~aquaflux.solve.air_inverse` | a reduction-based (lAIR) hierarchy | the trailing transported group |
-| {func}`~aquaflux.solve.ilu_smoothed_inverse` | {class}`~aquaflux.solve.IluSmoothedInverse` — the same coarsening, relaxed by an incomplete factorization | either group |
 
 Note the relationship between the first of these and
 {class}`~aquaflux.flow.BlockPreconditioner`, because it is easy to misread. Both are
@@ -348,11 +343,10 @@ split = build_block_triangular_field_split(
 )
 ```
 
-`flow_first=True` (the default) solves the leading group first, which retains the
-trailing-by-leading coupling and discards the other corner. Which corner is discarded is a
-real choice rather than a symmetry: on a coupled flow–turbulence system the turbulence
-equations depend on the flow far more strongly than the reverse, so keeping that direction
-is the one to keep.
+The split solves the leading group first, which retains the trailing-by-leading coupling
+and discards the other corner. Which corner is discarded is a real choice rather than a
+symmetry: on a coupled flow–turbulence system the turbulence equations depend on the flow
+far more strongly than the reverse, so that is the direction to keep.
 
 ### A complete factorization
 
@@ -386,22 +380,6 @@ at a reference flux. The first-order upwinding is the *preconditioner's* choice 
 model's — whatever advection scheme the residual uses, this operator upwinds first order,
 because that is what makes it an M-matrix an aggregation hierarchy can coarsen.
 
-{class}`~aquaflux.solve.Ilu0` is a zero-fill incomplete factorization, refreshable in
-place. How it orders its elimination is an injected strategy,
-{class}`~aquaflux.solve.EliminationOrdering`, over a {class}`~aquaflux.solve.CellOrder` —
-{class}`~aquaflux.solve.NaturalCells`, {class}`~aquaflux.solve.ReverseCuthillMcKeeCells` or
-{class}`~aquaflux.solve.AscendingRowLengthCells`. That is a strategy rather than a knob
-because at zero fill the ordering decides *which* couplings the factorization discards, and
-on a coupled saddle that choice has taken a stationary sweep from amplifying the residual to
-contracting it.
-
-```{note}
-`Ilu0` has a compiled kernel that must be built once per checkout with
-`tools/build_ext.sh`. Without it the package still imports and runs, falling back to a pure
-Python implementation with identical results but very different speed — so timings taken
-in a fresh checkout are not comparable to timings taken in a built one.
-`aquaflux.solve.ilu0.COMPILED` reports which one is live.
-```
 
 ## Keeping it current
 
@@ -426,19 +404,21 @@ gates on the residual as well, because the cycle count also rises as the pseudo-
 shift falls, and that rise is not staleness.
 
 {func}`~aquaflux.turbulence.amg_beta_tracking_refresh` is the counterpart for the coupled
-path. It re-preconditions **in place** as the march's shift moves, so the compiled solve is
-reused rather than retraced, and it goes in as the policy's `precondition_step`:
+path. It re-preconditions **in place**, so the compiled solve is reused rather than retraced, and
+it goes in as the policy's `precondition_step`:
 
 ```python
 from aquaflux.solve import RefreshPolicy
 from aquaflux.turbulence import amg_beta_tracking_refresh
 
 refresh = RefreshPolicy(
-    precondition_step=amg_beta_tracking_refresh(coupled, refresh_every=8, beta_rel_change=0.25)
+    precondition_step=amg_beta_tracking_refresh(coupled)
 )
 ```
 
-It refreshes on a schedule, on shift drift, or when a single solve proves expensive. It reports what each rebuild cost through
+It re-fits the preconditioner on its first call and when pointed at a new case with `rebind`,
+and — through its `refresh_at` hook, handed to the step as `inner_refresh` — when a single solve
+proves expensive. It reports what each rebuild cost through
 {class}`~aquaflux.solve.RefreshTiming` — which branch ran, the total, and the parts.
 {data}`~aquaflux.solve.NO_REFRESH` is the do-nothing policy, and the default.
 

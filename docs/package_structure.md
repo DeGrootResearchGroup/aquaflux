@@ -152,10 +152,6 @@ cfd/                                  # repo root
 │   │   ├── field_split.py            #   FieldGroups (a two-group partition view over a FieldLayout) + BlockTriangularFieldSplit: block-triangular field-split preconditioning for flow-plus-transport
 │   │   ├── hierarchy_inverse.py      #   HierarchyBlockInverse: the shared body of a traced block inverse (hierarchy, in-place refresh, transpose)
 │   │   ├── saddle_multigrid.py       #   SimpleSmoothedInverse: a traced multigrid over the flow saddle, smoothed by SIMPLE relaxation
-│   │   ├── ilu_inverse.py            #   IluSmoothedInverse: the same hierarchy applied on the host, smoothed by an incomplete factorization
-│   │   ├── ilu0.py                   #   Ilu0: zero-fill incomplete LU on the operator's own pattern, refreshable without repeating the symbolic phase
-│   │   ├── ordering.py               #   CellMajor + cell-order strategies: which order an incomplete factorization eliminates in, which at zero fill decides what it discards
-│   │   ├── _ilu0.pyx                 #   the compiled elimination and triangular solves behind Ilu0 (sequential by nature, so not array operations)
 │   │   ├── sparse_jacobian.py        #   materialize_block_jacobian: the sparse Jacobian by compressed graph-coloured probing
 │   │   └── refresh_timing.py         #   RefreshTiming: what a preconditioner refresh did, and what each part cost
 │   │

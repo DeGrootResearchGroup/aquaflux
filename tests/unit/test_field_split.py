@@ -23,11 +23,7 @@ from aquaflux.solve import (
     SubLayout,
     air_inverse,
 )
-from aquaflux.solve.field_split import (
-    BlockTriangularFieldSplit,
-    FieldGroups,
-    _TrailingFirstFieldSplit,
-)
+from aquaflux.solve.field_split import BlockTriangularFieldSplit, FieldGroups
 
 
 class ExactInverse:
@@ -55,22 +51,13 @@ def operator(groups: FieldGroups) -> np.ndarray:
     return dense + np.eye(groups.n_dofs) * groups.n_dofs
 
 
-def split_for(operator: np.ndarray, groups: FieldGroups, *, flow_first: bool):
-    """The field split over ``operator`` with exact diagonal blocks, leading or trailing first."""
-    leading, leading_by_trailing, trailing_by_leading, trailing = groups.blocks(
-        sp.csr_matrix(operator)
-    )
-    if flow_first:
-        return BlockTriangularFieldSplit(
-            ExactInverse(leading.toarray()),
-            ExactInverse(trailing.toarray()),
-            trailing_by_leading,
-            groups,
-        )
-    return _TrailingFirstFieldSplit(
-        ExactInverse(trailing.toarray()),
+def split_for(operator: np.ndarray, groups: FieldGroups) -> BlockTriangularFieldSplit:
+    """The field split over ``operator`` with exact diagonal blocks."""
+    leading, _, trailing_by_leading, trailing = groups.blocks(sp.csr_matrix(operator))
+    return BlockTriangularFieldSplit(
         ExactInverse(leading.toarray()),
-        leading_by_trailing,
+        ExactInverse(trailing.toarray()),
+        trailing_by_leading,
         groups,
     )
 
@@ -130,8 +117,8 @@ class TestFieldGroups:
         with pytest.raises(ValueError, match="describes"):
             groups.blocks(sp.eye(groups.n_dofs + 1, format="csr"))
 
-    def test_active_rows_excludes_exactly_the_triangle_a_flow_first_split_drops(self, groups):
-        active = groups.active_rows(flow_first=True)
+    def test_active_rows_excludes_exactly_the_triangle_the_split_drops(self, groups):
+        active = groups.active_rows()
         assert active.shape == (groups.n_fields, groups.n_fields)
         nl = groups.n_leading_fields
         assert not active[:nl, nl:].any()  # leading rows <- trailing columns: dropped
@@ -139,25 +126,13 @@ class TestFieldGroups:
         assert active[nl:, nl:].all()  # trailing diagonal: kept
         assert active[nl:, :nl].all()  # trailing rows <- leading columns: the RETAINED coupling
 
-    def test_active_rows_excludes_the_other_triangle_when_trailing_leads(self, groups):
-        active = groups.active_rows(flow_first=False)
-        nl = groups.n_leading_fields
-        assert not active[nl:, :nl].any()  # trailing rows <- leading columns: dropped
-        assert active[:nl, nl:].all()  # the OTHER triangle is now the one retained
-
-    def test_active_rows_and_default_flow_first_agree(self, groups):
-        assert np.array_equal(groups.active_rows(), groups.active_rows(flow_first=True))
-
-    @pytest.mark.parametrize("flow_first", [True, False])
-    def test_the_dropped_block_never_reaches_the_splits_own_apply(
-        self, groups, operator, flow_first
-    ):
+    def test_the_dropped_block_never_reaches_the_splits_own_apply(self, groups, operator):
         """The whole point of ``active_rows``: zeroing the block it excludes must not move the split's
-        output at all, since :class:`BlockTriangularFieldSplit` never reads it either way."""
-        split = split_for(operator, groups, flow_first=flow_first)
+        output at all, since :class:`BlockTriangularFieldSplit` never reads it."""
+        split = split_for(operator, groups)
         baseline = as_matrix(split, groups.n_dofs)
 
-        active = groups.active_rows(flow_first=flow_first)
+        active = groups.active_rows()
         zeroed = operator.copy()
         for a in range(groups.n_fields):
             for b in range(groups.n_fields):
@@ -167,13 +142,12 @@ class TestFieldGroups:
                     zeroed[a_rows, b_cols] = 0.0
         assert not np.array_equal(zeroed, operator), "the fixture must actually populate that block"
 
-        split_on_zeroed = split_for(zeroed, groups, flow_first=flow_first)
+        split_on_zeroed = split_for(zeroed, groups)
         np.testing.assert_allclose(as_matrix(split_on_zeroed, groups.n_dofs), baseline)
 
 
 class TestBlockTriangularAlgebra:
-    @pytest.mark.parametrize("flow_first", [True, False])
-    def test_it_inverts_its_own_triangle_exactly(self, groups, operator, flow_first):
+    def test_it_inverts_its_own_triangle_exactly(self, groups, operator):
         """With exact diagonal blocks the split is the exact inverse of the triangular operator.
 
         This is the defining property, and it is what distinguishes a block-*triangular* split from a
@@ -181,65 +155,49 @@ class TestBlockTriangularAlgebra:
         inverts to machine precision, coupling and all.
         """
         triangular = operator.copy()
-        discarded = (
-            np.s_[groups.leading, groups.trailing]
-            if flow_first
-            else np.s_[groups.trailing, groups.leading]
-        )
-        triangular[discarded] = 0.0
-        split = split_for(operator, groups, flow_first=flow_first)
+        triangular[groups.leading, groups.trailing] = 0.0
+        split = split_for(operator, groups)
         applied = as_matrix(split, groups.n_dofs) @ triangular
         np.testing.assert_allclose(applied, np.eye(groups.n_dofs), atol=1e-10)
 
-    @pytest.mark.parametrize("flow_first", [True, False])
-    def test_the_retained_coupling_really_is_retained(self, groups, operator, flow_first):
+    def test_the_retained_coupling_really_is_retained(self, groups, operator):
         """The split must differ from the block-DIAGONAL preconditioner, which drops the coupling.
 
         Without this the tests would pass for an implementation that silently ignored ``C``, which is
         precisely the weaker object this preconditioner exists not to be.
         """
-        split = split_for(operator, groups, flow_first=flow_first)
+        split = split_for(operator, groups)
         diagonal_only = operator.copy()
         diagonal_only[groups.leading, groups.trailing] = 0.0
         diagonal_only[groups.trailing, groups.leading] = 0.0
-        block_diagonal = split_for(diagonal_only, groups, flow_first=flow_first)
+        block_diagonal = split_for(diagonal_only, groups)
         assert not np.allclose(
             as_matrix(split, groups.n_dofs), as_matrix(block_diagonal, groups.n_dofs)
         )
 
-    @pytest.mark.parametrize("flow_first", [True, False])
-    def test_the_transpose_apply_is_the_transpose_of_the_forward_apply(
-        self, groups, operator, flow_first
-    ):
+    def test_the_transpose_apply_is_the_transpose_of_the_forward_apply(self, groups, operator):
         """The adjoint's transpose solve uses ``M^T``, so it must BE the transpose, not merely resemble one.
 
         Formed by applying both directions to every unit vector, so nothing about the closed-form
         transpose is taken on trust.
         """
-        split = split_for(operator, groups, flow_first=flow_first)
+        split = split_for(operator, groups)
         forward = as_matrix(split, groups.n_dofs)
         transposed = as_matrix(split, groups.n_dofs, transpose=True)
         np.testing.assert_allclose(transposed, forward.T, atol=1e-12)
 
-    @pytest.mark.parametrize("flow_first", [True, False])
-    def test_it_is_a_linear_operator(self, groups, operator, flow_first):
+    def test_it_is_a_linear_operator(self, groups, operator):
         """A Krylov method may only use a preconditioner that is a fixed linear operator.
 
         An inner Krylov solve or any state dependence in a block would break this, and would force the
         outer solve to go flexible -- which the adjoint's transpose solve cannot do.
         """
-        split = split_for(operator, groups, flow_first=flow_first)
+        split = split_for(operator, groups)
         rng = np.random.default_rng(11)
         first, second = rng.standard_normal((2, groups.n_dofs))
         combined = split.apply(2.5 * first - 0.75 * second)
         separately = 2.5 * split.apply(first) - 0.75 * split.apply(second)
         np.testing.assert_allclose(combined, separately, atol=1e-12)
-
-    def test_the_two_orderings_retain_opposite_triangles(self, groups, operator):
-        """Leading-first and trailing-first are genuinely different preconditioners, not a relabelling."""
-        leading_first = as_matrix(split_for(operator, groups, flow_first=True), groups.n_dofs)
-        trailing_first = as_matrix(split_for(operator, groups, flow_first=False), groups.n_dofs)
-        assert not np.allclose(leading_first, trailing_first)
 
     def test_a_coupling_of_the_wrong_orientation_is_refused(self, groups, operator):
         """A square-ish coupling passed the wrong way round would apply silently and precondition the
@@ -356,55 +314,21 @@ def test_both_hierarchy_inverses_share_one_refresh_implementation() -> None:
             )
 
 
-def test_the_field_split_answers_the_exact_solve_question_without_raising(groups) -> None:
-    """Asked DIRECTLY, not through ``getattr`` -- which is what let this go unnoticed.
-
-    ``FieldSplitAmgPreconditioner`` inherits the monolithic V-cycle's ``has_exact_solve``, which asks
-    its frozen inverse whether it offers a native exact solve. The split's inverse is a
-    :class:`BlockTriangularFieldSplit`, which has no such attribute, so the inherited property *raised*.
-    Both production callers ask through ``getattr(pc, "solves_exactly_on_host", False)`` -- correct for the
-    factorization preconditioners, which genuinely lack the attribute -- and that default swallows an
-    ``AttributeError`` raised inside a property body exactly as it swallows a missing name. The value it
-    produced was accidentally right, so nothing failed.
-
-    So this asserts on the attribute access itself. Reading it through ``getattr`` with a default cannot
-    tell a working property from a raising one, and would pass against the defect.
-
-    The split is assembled from exact stub block inverses rather than through
-    ``build_block_triangular_field_split``, which builds real V-cycles and so needs ``petsc4py`` -- an
-    *optional* dependency the unit tier does not install. What is under test is which answer the
-    preconditioner gives for its own frozen inverse, and that does not depend on what inverts the
-    blocks.
-    """
-    from aquaflux.solve.field_split import FieldSplitAmgPreconditioner
-
-    n = groups.n_dofs
-    operator = np.eye(n) * 2.0 + np.eye(n, k=1) * 0.25
-    split = split_for(operator, groups, flow_first=True)
-    preconditioner = FieldSplitAmgPreconditioner(split, groups)
-
-    assert preconditioner.has_exact_solve is False
-    assert preconditioner.solves_exactly_on_host is False
-    # And the same answer the production call sites take, so the two spellings cannot drift apart.
-    assert getattr(preconditioner, "solves_exactly_on_host", False) is False
-
-
 def test_field_split_refresh_in_place_no_longer_takes_the_dead_smoother_parameters(groups) -> None:
     """#287: the split used to declare ``smoother_fill_levels``/``smoother_sweeps`` on its refresh and
     immediately ``del`` them, purely because it shared a base with :class:`MonolithicAmgPreconditioner`
     (whose ``build`` genuinely reads them) and the two refresh signatures were forced to agree. Now that
     the shared base is :class:`~aquaflux.solve.MaterializedJacobianPreconditioner`, which knows nothing
-    about a smoother, the split's own ``build`` still takes them (fitting the V-cycles) but its refresh
-    does not -- passing either is a ``TypeError`` rather than a silent no-op.
+    about a smoother, the split's refresh does not take them -- passing either is a ``TypeError`` rather
+    than a silent no-op. (Its ``build`` no longer takes them either: each block is fitted by an injected
+    inverse.)
     """
     from aquaflux.solve.field_split import FieldSplitAmgPreconditioner
 
     n = groups.n_dofs
     operator = np.eye(n) * 2.0 + np.eye(n, k=1) * 0.25
-    split = split_for(operator, groups, flow_first=True)
-    preconditioner = FieldSplitAmgPreconditioner(
-        split, groups, jacobian_no_shift=operator, n_fields=1
-    )
+    split = split_for(operator, groups)
+    preconditioner = FieldSplitAmgPreconditioner(split, groups)
     with pytest.raises(TypeError):
         preconditioner.refresh_in_place(
             lambda v: v, None, np.zeros(n), smoother_fill_levels=0, smoother_sweeps=4

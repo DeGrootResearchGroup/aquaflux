@@ -25,9 +25,9 @@ a ``scipy`` matrix, and the two inverses are entered through their traced cycle 
 their host-shaped ``apply``. Nothing crosses the device boundary between the Krylov solve and the
 preconditioned vector it gets back.
 
-**Both blocks must be traced.** An :class:`~aquaflux.solve.IluSmoothedInverse` is a sequential
-triangular solve and has no traced cycle to offer; a bundle including one keeps the host split, which is
-correct rather than a limitation -- that work genuinely belongs on a CPU.
+**Both blocks must be traced.** A host factorization -- a sequential triangular solve -- has no traced
+cycle to offer; a bundle including one keeps the host split, which is correct rather than a limitation --
+that work genuinely belongs on a CPU.
 """
 
 from __future__ import annotations
@@ -65,15 +65,12 @@ class TracedFieldSplit(eqx.Module):
         from the forward code, so there is nothing to keep in step with it.
     groups : FieldGroups
         The partition. Static -- it carries only sizes.
-    leading_first : bool
-        Which group is solved first. Static, so :meth:`apply` never branches on it at run time.
     """
 
     leading_cycle: object = eqx.field(static=True)
     trailing_cycle: object = eqx.field(static=True)
     coupling: _CsrOperator
     groups: FieldGroups = eqx.field(static=True)
-    leading_first: bool = eqx.field(static=True)
 
     @property
     def n_dofs(self) -> int:
@@ -109,12 +106,8 @@ class TracedFieldSplit(eqx.Module):
         """
         split = self.groups.n_leading_dofs
         lead, trail = residual[:split], residual[split:]
-        # `leading_first` is static, so only one of these bodies is ever traced.
-        if self.leading_first:
-            first = self.leading_cycle(lead)
-            return jnp.concatenate([first, self.trailing_cycle(trail - self.coupling.apply(first))])
-        first = self.trailing_cycle(trail)
-        return jnp.concatenate([self.leading_cycle(lead - self.coupling.apply(first)), first])
+        first = self.leading_cycle(lead)
+        return jnp.concatenate([first, self.trailing_cycle(trail - self.coupling.apply(first))])
 
     def matvec(self):
         """The preconditioner matvec, as the ``residual -> M residual`` callable a Krylov solve takes.
@@ -140,8 +133,6 @@ def traced_field_split(
     groups: FieldGroups,
     leading,
     trailing,
-    *,
-    flow_first: bool = True,
 ) -> TracedFieldSplit:
     """Build a :class:`TracedFieldSplit` from an assembled operator and two traced block inverses.
 
@@ -155,9 +146,8 @@ def traced_field_split(
     leading, trailing : object
         The two block inverses. Each must expose a **traced** cycle -- ``_solve(vector)`` returning a
         traced array -- which :class:`~aquaflux.solve.HierarchyBlockInverse` and
-        :class:`~aquaflux.solve.AirBlockInverse` both do.
-    flow_first : bool
-        Solve the leading group first (the default), retaining the trailing-by-leading coupling.
+        :class:`~aquaflux.solve.AirBlockInverse` both do. The leading group is solved first, retaining
+        the trailing-by-leading coupling, as in the host split.
 
     Returns
     -------
@@ -175,14 +165,12 @@ def traced_field_split(
                 f"the {name} inverse {type(inverse).__name__} offers no traced cycle, so this bundle "
                 "cannot be composed on device; use BlockTriangularFieldSplit for a host inverse."
             )
-    _, leading_trailing, trailing_leading, _ = groups.blocks(matrix)
-    retained = trailing_leading if flow_first else leading_trailing
+    _, _, trailing_leading, _ = groups.blocks(matrix)
     return TracedFieldSplit(
         leading_cycle=leading._solve,
         trailing_cycle=trailing._solve,
-        coupling=_CsrOperator.from_scipy(sp.csr_matrix(retained)),
+        coupling=_CsrOperator.from_scipy(sp.csr_matrix(trailing_leading)),
         groups=groups,
-        leading_first=flow_first,
     )
 
 

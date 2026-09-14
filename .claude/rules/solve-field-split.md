@@ -78,6 +78,16 @@ deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` fr
 
 ## The field split — a saddle plus two transported scalars
 
+⚠️ **2026-09-13 (#371): the split lost its PETSc blocks and its turbulence-first ordering.**
+`build_block_triangular_field_split`, `FieldSplitAmgPreconditioner.build` and
+`coupled_amg_continuation(field_split=True)` now REQUIRE `leading_inverse` and `trailing_inverse`, and
+always solve the leading group first. There is no `flow_first`, `_TrailingFirstFieldSplit`,
+`trailing_smoother_sweeps`, `leading_options` or `trailing_options`, and a split never calls
+`build_amg_vcycle`. Every measurement below of a PETSc/ILU(0) split block or a turbulence-first arm is
+history. Its harness arms (`field_split_probe.py`'s split arms, `turbulence_smoother_sweep.py`,
+`rung_hierarchy_reuse.py`) were deleted and survive only in git history before that change. The
+monolithic `AmgVCycle` is unchanged.
+
 - **⚠️ WE ARE NOT SOLVING A SADDLE-POINT PROBLEM — we are solving a saddle point PLUS two
   advection-dominated transported scalars, and that is probably why the saddle-point literature keeps
   not transferring.** Worth stating plainly because a long run of failures is explained by it:
@@ -127,35 +137,24 @@ deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` fr
     - **It needs no JAX wrapper of its own.** `HostPreconditioner.matvec()` (inherited via
       `MaterializedJacobianPreconditioner`, `solve-direct-preconditioners.md`) reads only
       `factors.n_dofs` and `factors.apply(r, transpose=…)`, both of which the split has, so it rides the
-      existing `pure_callback` path unchanged. Each diagonal block is an ordinary `AmgVCycle`
-      (`build_amg_vcycle` on the sub-block), which equilibrates and reorders *within its own group* and
-      aggregates at its own block size — the whole point, since a four-field saddle and a two-field
-      transport pair coarsen differently. `AmgVCycle.apply` returns the inverse in the **original**
-      (unequilibrated, field-major) space, so the retained coupling block is applied raw between the two
+      existing `pure_callback` path unchanged. Each diagonal block is fitted by its injected inverse
+      (`simple_smoothed_inverse` / `jacobi_smoothed_inverse` on both flagship cases; a PETSc `AmgVCycle`
+      by default until #371), working *within its own group* — the whole point, since a four-field saddle
+      and a two-field transport pair want different inverses. Each block's `apply` returns the inverse in
+      the **original** field-major space, so the retained coupling block is applied raw between the two
       block solves, with no scaling bookkeeping.
-      **⚠️ But `factors.n_dofs` + `factors.apply` is the WHOLE of what the split satisfies, and the base
-      asks for more elsewhere — `has_exact_solve` reads `self.factors.has_exact_solve`, which only an
-      `AmgVCycle` has, so on the split the inherited property RAISED (fixed 2026-08-14 by an explicit
-      `has_exact_solve = False` override; a split never forms the whole shifted operator, so there is no
-      traced solve to offer).** It went unseen for the reason worth carrying: **both call sites ask
-      through `getattr(pc, "solves_exactly_on_host", False)` — the right spelling for the complete LU, which
-      genuinely lacks the attribute — and a `getattr` default swallows an `AttributeError` raised *inside*
-      a property body exactly as it swallows a missing name.** The value it produced was accidentally the
-      correct `False`, so nothing failed. Two consequences: a test of such a property must read it
-      **directly**, never through `getattr` with a default (a `getattr` test passes against the defect —
-      `test_the_field_split_answers_the_exact_solve_question_without_raising` reads it both ways for
-      this reason); and the unnamed `factors` contract the family shares is **`n_dofs` + `apply` only**,
-      so anything else the base reads off `self.factors` is an inheritance leak, not a contract.
+      **⚠️ `factors.n_dofs` + `factors.apply` is the WHOLE of what the split satisfies.** A base reading
+      anything else off `self.factors` raises on the split, and a `getattr(pc, name, False)` call site
+      swallows that raise as a plausible `False` — an exact-solve capability flag did exactly this until the
+      host exact forward solve was deleted (2026-09-13, #371). A test of such a property must read it
+      **directly**, never through `getattr` with a default.
     - **⚠️ `FieldSplitAmgPreconditioner` NO LONGER SUBCLASSES `MonolithicAmgPreconditioner` — its base is
       the extracted `MaterializedJacobianPreconditioner` (`amg_preconditioner.py`, #287, 2026-09-11).**
-      The `has_exact_solve` fix above rescued a raise by overriding it; it did not remove the underlying
-      cause, which was inheriting the whole monolithic class — including the fixed-pattern cell-major
-      assembler and the host exact-solve jvp shell, neither of which a split builds or uses — for the sake
+      The underlying cause of that raise was inheriting the whole monolithic class — including the fixed-pattern cell-major
+      assembler, which a split never builds or uses — for the sake
       of the genuinely shared coloured-probe materialize/shift/cache/teardown. `MaterializedJacobianPreconditioner`
       holds exactly that shared quarter; `MonolithicAmgPreconditioner` and `FieldSplitAmgPreconditioner`
-      are now siblings over it. The `has_exact_solve`/`solves_exactly_on_host` overrides on the split stay
-      (the new base declares neither, so they are no longer rescuing an inherited raise — they are simply
-      the concrete class's own answer), and `refresh_in_place`'s `smoother_fill_levels`/`smoother_sweeps`
+      are now siblings over it. `refresh_in_place`'s `smoother_fill_levels`/`smoother_sweeps`
       parameters — declared on both classes' refresh and immediately `del`-eted on both, because the union
       signature forced them there — are deleted from both signatures; passing either is now a `TypeError`.
       No behaviour change on either class's `build`, which still takes them where they are real (fitting
@@ -209,7 +208,8 @@ deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` fr
     **Machine-load control:** the coloured jvp probe is identical work in both runs and took 11.3–14.6 s
     (monolithic) vs 11.7–15.1 s (split), so the faster run was not the quieter machine.
   - **⚠️ THE SINGLE-STATE PROBE BELOW SAID THE OPPOSITE — read it as a lesson, not as a result.** Harness
-    `validation/bfs3d_openfoam/field_split_probe.py`. **Configuration, in full:** 3-rung cold march's
+    `validation/bfs3d_openfoam/field_split_probe.py` (split arms removed 2026-09-13, #371 — in git
+    history). **Configuration, in full:** 3-rung cold march's
     own states; plain aggregation, **ILU(0) ×4** where not overridden, `coarse_eq_limit` 2000, stencil
     reach 3, block sizes 4 and 2; GMRES restart 15 to **rtol 1e-8 on the TRUE residual**; right-hand
     side the steady residual `−R(state)`; one materialization per state shared by every arm.
@@ -490,12 +490,12 @@ deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` fr
     This does not reopen gating on `binding_limit == 1` (measured and reverted, below).
 
     **⚠️ AND THE FUTILITY READING IS CONFOUNDED.** The host trio's step-51 attempts all ran with
-    `pc none 0.0s` — `REFRESH_ON_BETA` defaults to `inf`, so the `precondition_step` the march calls on
+    `pc none 0.0s` — the β-mismatch gate was off, so the `precondition_step` the march calls on
     every escalation does nothing, and every escalated attempt was solved against a V-cycle built for
     β = 0.0293. Step 52 escaped only because its inner solve happened to trip the mid-step rebuild. So
     **"the ladder is futile" and "the ladder was never given a matched preconditioner" are NOT separated
-    by this data.** `BFS3D_REFRESH_ON_BETA=0.9` is the existing knob that discriminates them, at roughly
-    +35 s of rebuild on one march.
+    by this data.** The knob that would have discriminated them (`BFS3D_REFRESH_ON_BETA`, a finite β-mismatch gate) was
+    deleted with the scheduled cadence (2026-09-13, #371) without being run, so they stay unseparated.
 
     **What survives as the lever: the asymmetric return.** β is driven up by ×2 (backoff) and up to ×4
     (ladder) but recovers at only ÷1.5 per step — ~5:1 in log space — and every walk-back step is
@@ -508,7 +508,7 @@ deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` fr
 
     **⚠️ HISTORICAL — measured 2026-08-09, void since:** taking PETSc off the trailing half is not a
     win, and the two blockers are now specific (`bfs3d`, three states, arms `jacobi`/`jacobi2` in
-    `turbulence_smoother_sweep.py`). With the per-field hierarchies above wired in as the trailing
+    `turbulence_smoother_sweep.py`, deleted 2026-09-13, #371). With the per-field hierarchies above wired in as the trailing
     inverse, against the shipped PETSc V-cycle at `ilu0` on both halves, `refresh_on_cycles` 3, plain
     aggregation, `coarse_eq_limit` 2000, reach 3, restart 15:
 
@@ -554,11 +554,10 @@ deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` fr
     filtered out of the pattern **before** `block_stencil_gather_map` builds the CSR structure
     (`aquaflux/solve/sparse_jacobian.py`), not zeroed after — so the reduction is in the assembled
     `nnz`, the retained `ProbeGather`, and the gather map's own construction cost, not only in the values.
-    `FieldGroups.active_rows(flow_first=…)` (`solve/field_split.py`) derives the table straight from the
+    `FieldGroups.active_rows()` (`solve/field_split.py`) derives the table straight from the
     partition a `BlockTriangularFieldSplit` already carries: `True` everywhere except the one triangle
-    that ordering's `apply()` never reads. `CoupledJacobianProbe.build(..., active_rows=…)` and
-    `_coupled_jacobian_plan` thread it through; `coupled_amg_continuation` derives it from its own
-    `flow_first` parameter (`groups.active_rows(flow_first=flow_first)`) whenever it builds its own probe
+    the split's `apply()` never reads. `CoupledJacobianProbe.build(..., active_rows=…)` and
+    `_coupled_jacobian_plan` thread it through; `coupled_amg_continuation` derives it (`groups.active_rows()`) whenever it builds its own probe
     under `field_split=True`, and
     `validation/bfs3d_openfoam/compare.py`'s shared, once-built `probe` does the same when
     `BFS3D_FIELD_SPLIT` is set, since that probe is built externally and handed in rather than left to the
@@ -571,19 +570,9 @@ deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` fr
     (`TestFieldGroups::test_the_dropped_block_never_reaches_the_splits_own_apply`, which zeroes the
     excluded block by hand and checks the split's own `apply()` — forward and transpose — does not move).
 
-    **⚠️ `flow_first` reached `active_rows` here but not `FieldSplitAmgPreconditioner.build` itself, which
-    had no such parameter at all — corrected 2026-09-11.** The probe's dropped triangle and the split's
-    retained one were therefore two independent `flow_first=True` defaults rather than one decision: a
-    caller changing which group leads would have had to know to change both, and a probe built for one
-    ordering fed to a split built for the other would silently materialize the wrong triangle — with no
-    error, since a probe pattern missing a block and a split that never reads that block look identical
-    right up until the split that *does* read it finds zeros there instead. `build` now takes `flow_first`
-    and forwards it to `build_block_triangular_field_split` unchanged; `coupled_amg_continuation` reads
-    its own `flow_first` parameter once and passes the same value to both call sites, so the two cannot
-    disagree. `True` (the shipped default on every path) is byte-identical.
-    Pinned by `tests/integration/test_coupled_field_split.py::test_coupled_amg_continuation_reads_one_flow_first_for_both_call_sites`,
-    which spies on both call sites through a real `coupled_amg_continuation(flow_first=False)` build and
-    asserts they received the same value.
+    **There is no `flow_first` (deleted 2026-09-13, #371).** It once reached the probe's `active_rows` and
+    the split as two independent defaults, so a caller changing one could have materialized the wrong
+    triangle silently. With one ordering left, the dropped triangle and the retained one are one fact.
 
     **Confirmed end to end on `bfs3d`, on the real mesh, through the real production call
     (`CoupledJacobianProbe.build` → `FieldSplitAmgPreconditioner.build`), not a standalone probe script:**
@@ -613,54 +602,24 @@ deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` fr
     block that no longer has to be built would have been on the order of 450M stored entries and, at the
     per-entry transient costs measured for this same gather-map machinery elsewhere in this file
     (65.7–100 B/entry), on the order of 10–30 GB of a single materialize's peak.
-  - **⚠️⚠️ `trailing_smoother_sweeps` DOES NOT REACH AN INJECTED TRAILING INVERSE, SO THE TRACED ARM
-    SHIPS AT FOUR SWEEPS, NOT ONE (verified in source, 2026-08-14).** In
-    `build_block_triangular_field_split` the injected inverse is called as
-    `trailing_inverse(trailing_block, groups.n_trailing_fields)` — two arguments — while
-    `smoother_sweeps=trailing_smoother_sweeps` is passed **only on the `else` branch** that builds its own
-    `build_amg_vcycle`. `jacobi_smoothed_inverse`'s own default is `sweeps=4`, and the case's
-    `JACOBI_TRAILING` sets only `max_coarse` and `equilibrate`. **So the entry below, and its measured
-    16.5 % wall saving, describe the PETSc trailing V-cycle — which this case no longer uses.** Cutting
-    the TRACED trailing sweeps is therefore an untaken lever, not a shipped setting: measured on a
-    same-shape synthetic, its apply runs 10.7 / 6.9 / 5.3 ms at 4 / 2 / 1 sweeps.
-    ⚠️ **Two more shipped-vs-record mismatches found in the same pass:** the case runs
+  - **There is no `trailing_smoother_sweeps`, `leading_options` or `trailing_options` (deleted 2026-09-13,
+    #371) — they tuned the PETSc V-cycle a split block no longer gets.** Two things outlive them. *(a)*
+    Measured while they shipped, on the full 3-rung `bfs3d` march (field split, PETSc ILU(0) trailing
+    V-cycle, `retry.on_alpha` 0.01, `refresh_on_cycles` 3, plain aggregation, `coarse_eq_limit` 2000,
+    reach 3, restart 15): one trailing sweep against four was 1636 s against 1959 s on a step-for-step
+    identical trajectory to the same `x_r/h` 8.361 — while cycles ROSE, 282 against 277. A cycle count is
+    not a cost proxy once the smoother changes. *(b)* The knob never reached an injected trailing
+    inverse, so the traced trailing arm has always run at `jacobi_smoothed_inverse`'s own `sweeps=4`;
+    cutting those sweeps is an untaken lever (apply 10.7 / 6.9 / 5.3 ms at 4 / 2 / 1 sweeps on a
+    same-shape synthetic).
+    ⚠️ **Two more shipped-vs-record mismatches found in the same pass (2026-08-14):** the case runs
     `equilibrate=False` (the class default is `True`), so every statement here about the *equilibrated*
     `[k, ω]` cell block — unit diagonal, determinant exactly 1, subdiagonal 100–340 — describes an
-    operator the shipped configuration does not build; and `JACOBI_TRAILING`'s `max_coarse=2000` is
-    **inert**, because at `max_levels = _CONVECTION_LEVELS = 2` the level cap fires first regardless
-    (`max_coarse=16` builds a bit-identical hierarchy).
-
-  - **✅ THE TWO HALVES ARE NOW SMOOTHED APART, AND THE TRAILING DEFAULT IS ONE SWEEP —
-    `trailing_smoother_sweeps=1` (BUILT, SHIPPED, 2026-08-09).** Splitting the hierarchies is only half
-    the value; the other half is that they can then be *tuned* apart, which the shipped bundle was not
-    doing — both halves inherited the four incomplete-LU sweeps tuned against the **six-field**
-    monolithic block. The saddle needs them (Jacobi-class smoothers do not converge on it at all); the
-    transported-scalar pair does not. `build_block_triangular_field_split` /
-    `FieldSplitAmgPreconditioner.build` / `coupled_amg_continuation` all carry
-    `smoother_sweeps` (leading) and `trailing_smoother_sweeps` (trailing, default **1**) as separate
-    parameters, plus `leading_options` / `trailing_options` as the raw-PETSc escape hatch. Measured on
-    the full 3-point `bfs3d` Reynolds-continuation march (field split, `retry.on_alpha` 0.01,
-    `refresh_on_cycles` 3, ILU(0), plain aggregation, `coarse_eq_limit` 2000, reach 3, restart 15):
-
-    | | 4 sweeps | 1 sweep |
-    |---|---|---|
-    | wall | 1959 s | **1636 s (−16.5 %)** |
-    | steps | 58 | 58 |
-    | refresh | 21 events / 318 s | 19 / 286 s |
-    | Krylov cycles | 277 | **282 (+1.8 %)** |
-    | final ‖R‖ | 9.589e-06 | 9.588e-06 |
-    | mid-span `x_r/h` | 8.361 | 8.361 |
-
-    **The two marches follow the same trajectory step for step** — identical β, identical per-step
-    cycle counts, identical residuals to four figures, and the single α-collapse escalation fires at
-    the same step for the same reason to the same β. So this is the *same* path at a lower price per
-    matrix-vector product, which is a far stronger single-run result than a 16.5 % margin would
-    normally be. (An earlier version justified that with a "~2 %" run-to-run noise figure for this case;
-    it was a remembered number with no configuration behind it and is deleted — the strength of the result
-    rests on the step-for-step identity, not on a noise floor.) Note again that **cycles rose while wall
-    fell**.
+    operator the shipped configuration does not build; and `JACOBI_TRAILING`'s `max_coarse` was then
+    **inert**, because at the two-level cap the level count fired first.
   - **⚠️ HOW THAT SMOOTHER WAS CHOSEN, AND THE TWO WAYS THE SCREEN NEARLY GOT IT WRONG
-    (`validation/bfs3d_openfoam/turbulence_smoother_sweep.py`).** The screen holds the leading half at
+    (`validation/bfs3d_openfoam/turbulence_smoother_sweep.py`, deleted 2026-09-13 with the PETSc split
+    blocks, #371 — recover it from git history).** The screen holds the leading half at
     ILU(0) and varies only the trailing one, ranking on **wall time** at real march states rather than
     on cycles. Two failures are worth carrying, because both produced a wrong answer first:
     - **A HARD state cannot rank candidates — it can only screen them.** The standing caution is about
@@ -730,7 +689,8 @@ deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` fr
       recovering what the coarse grid gave for free.
       **This does NOT refute block Jacobi as a SMOOTHER inside a traced hierarchy**, which is the
       actual route for taking PETSc off this block and is untested. The implementation
-      (`BlockJacobiInverse` in `validation/bfs3d_openfoam/field_split_probe.py`) is verified exact on a
+      (`BlockJacobiInverse`, removed from `validation/bfs3d_openfoam/field_split_probe.py` with its split arms
+      2026-09-13, #371 — in git history) is verified exact on a
       block-diagonal operator in one sweep, transposable in closed form (⟨y,Mx⟩ = ⟨Mᵀy,x⟩ to 1e-15, so
       adjoint-legal) and a fixed **linear** operator (1e-16, so the non-flexible outer Krylov is
       legal) — it is the smoother such a hierarchy would need.

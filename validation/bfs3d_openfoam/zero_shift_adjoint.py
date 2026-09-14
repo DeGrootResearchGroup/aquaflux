@@ -32,9 +32,10 @@ uniformly is what makes them comparable.
 ⚠️ **The recorded result below was taken with the `petsc` leading inverse**, which was this case's
 default when it was measured: the field split converged at zero shift in 116 applications forward
 (`6.07e-09`) and 117 transposed (`2.67e-09`), and at its shipped floor in 105 / 104. The default has
-since moved to `hostilu`, so a fresh run measures a **different arm** unless `BFS3D_FLOW_INVERSE=petsc`
-is set. Whether the host V-cycle preconditions the zero-shift operator as well is UNMEASURED, and it is
-the first thing to re-run here.
+since moved on, and the `petsc` arm itself was removed with the library's PETSc split blocks (#371), so a
+fresh run measures a **different arm** and that result cannot be reproduced from this tree. Whether the
+shipped leading inverse preconditions the zero-shift operator as well is UNMEASURED, and it is the first
+thing to re-run here.
 
 Usage -- the checkpoint arrives as ENVIRONMENT, because the blessed launcher runs a script with no
 arguments and forwards none; argv works for a direct invocation::
@@ -61,8 +62,8 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse.linalg as spla  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
-    materialize_block_jacobian,
     jacobi_smoothed_inverse,
+    materialize_block_jacobian,
     shifted_jacobian,
 )
 from aquaflux.turbulence import coupled_amg_continuation, hybrid_initialize  # noqa: E402
@@ -167,9 +168,9 @@ def main() -> None:
         materialize_block_jacobian(lambda v: C._jacobian_matvec(coupled, frozen, v), plan).tocsr(),
         np.zeros(int(state.shape[0])),
     )
-    # ⚠️ The leading inverse is named because it MOVED under this harness: the case's default flipped
-    # from `petsc` to `hostilu`, so a result recorded without it cannot be told apart from a result for
-    # the other arm. Everything the arms below depend on is printed, so a log is self-describing.
+    # ⚠️ The leading inverse is named because it MOVED under this harness (`petsc`, then `hostilu`, now
+    # `simplesmooth`), so a result recorded without it cannot be told apart from a result for another
+    # arm. Everything the arms below depend on is printed, so a log is self-describing.
     print(
         f"{a.shape[0]} dofs, uniform reach {REACH}, nnz {a.nnz / 1e6:.2f} M; zero shift; "
         f"gmres rtol {RTOL}, restart {RESTART}; "
@@ -188,9 +189,10 @@ def main() -> None:
             smoother_sweeps=compare.SWEEPS,
             coarse_eq_limit=compare.COARSE_EQ_LIMIT,
             field_split=compare.FIELD_SPLIT,
-            trailing_smoother_sweeps=compare.TRAILING_SWEEPS,
-            leading_inverse=compare.LEADING_INVERSE,
-            trailing_inverse=jacobi_smoothed_inverse(**compare.JACOBI_TRAILING),
+            leading_inverse=compare.LEADING_INVERSE if compare.FIELD_SPLIT else None,
+            trailing_inverse=(
+                jacobi_smoothed_inverse(**compare.JACOBI_TRAILING) if compare.FIELD_SPLIT else None
+            ),
             inner_steps=compare.INNER_STEPS,
             inner_tol=compare.INNER_TOL,
         )

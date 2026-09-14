@@ -7,6 +7,10 @@
 > wrong-but-plausible finding gets re-derived if the trail that refuted it is deleted rather than
 > archived. See `solve-flow-block.md` for the current, load-bearing status (the traced path is built
 > and differentiable but is not the shipped march default).
+>
+> ⚠️ **2026-09-13 (#371):** `Ilu0`, `IluSmoothedInverse` (`hostilu`), `tools/build_ext.sh`, the PETSc
+> split blocks and the `petsc` / `hostilu` `BFS3D_FLOW_INVERSE` arms were deleted. Every entry below that
+> describes them as built, runnable or selectable is history; recover them from git history.
 
 ### FLAT block preconditioners are CLOSED on this case
 
@@ -59,7 +63,7 @@ swapped:
   `BFS3D_FLOW_INVERSE=hostilu`).
 - **msimple** — `BlockPreconditioner.build(momentum, velocity="convection",
   schur_scaling="msimple", strength_threshold=0.25)`, built from the real assembler + eddy viscosity
-  at the probed state, exactly as `field_split_probe.block_simple_arms` constructs its `msimple` arm.
+  at the probed state, exactly as `field_split_probe.block_simple_arms` constructed its `msimple` arm (removed 2026-09-13, #371).
 
 Both paired with the SAME trailing inverse, `compare.TRAILING_INVERSE` (`JacobiSmoothedInverse` at
 `compare.JACOBI_TRAILING`: `max_coarse=COARSE_EQ_LIMIT, equilibrate=False`).
@@ -84,7 +88,7 @@ mismatched `ilu0` trailing) — matching MSIMPLE with the trailing inverse the c
 enough for it to reach a real, if far looser, tolerance. But swapped in for the shipped leading inverse
 with every other setting held fixed, it costs **8.8x the cycles at the adjoint operator and 8x at the
 march's own shift**. This is the controlled, single-variable-changed version of the question
-`field_split_probe.py`'s own `block_simple_arms` docstring poses ("is a block-SIMPLE preconditioner worth
+`field_split_probe.py`'s since-removed `block_simple_arms` docstring posed ("is a block-SIMPLE preconditioner worth
 pursuing on the flow block at all") and it answers it: no — not against the current field-split architecture, at the shipped
 trailing inverse, at the case's own hard state. Do not re-propose `schur_scaling="msimple"` as the
 `bfs3d` leading inverse without a new measurement that changes one of these conditions. **Consequence
@@ -811,7 +815,7 @@ blunt for a 12.5 % effect, so reaching for it again on a sub-15 % question is wa
 ### Over-relaxing the SIMPLE correction — real, small, and one step from a cliff (2026-08-14)
 
 **The grammar capped `omega` at 1.0, so no arm in this campaign had ever tested over-relaxation.**
-`_leading_inverse` read `omega = 1.0 if "-o10" in rest else 0.7` — a binary token — while the class always
+`_leading_inverse` (the probe's arm parser, removed 2026-09-13 with the split arms, #371) read `omega = 1.0 if "-o10" in rest else 0.7` — a binary token — while the class always
 took a float. So the recorded "omega 1.0 is worth a cycle" was measuring the **top of the grid**, not an
 optimum. `-oNN` (NN/10) now spans it.
 
@@ -1166,7 +1170,7 @@ single solve.** Two full 3-rung cold marches differing in **one** environment va
 **⚠️ `hostilu` IS NOW `bfs3d`'s DEFAULT LEADING INVERSE (2026-08-16), so "the incumbent" changed meaning
 on that date.** Every measurement in this file that says "the incumbent" of the `bfs3d` **leading** block
 without naming an arm was taken against **PETSc ILU(0)** and should be read that way; `BFS3D_FLOW_INVERSE=petsc`
-still selects it. The flip was made on the **dependency**, not on the numbers — the table immediately below
+selected it until that arm was removed (2026-09-13, #371). The flip was made on the **dependency**, not on the numbers — the table immediately below
 is parity, and nothing here claims the host V-cycle is the better preconditioner. It carries the same
 coarsening without an optional PETSc build, and the leading block was the last part of this case needing one.
 ⚠️ **CORRECTED 2026-08-17 — the reason given here was wrong.** This said `hostilu` fails on `pitzDaily`
@@ -1184,7 +1188,7 @@ sensitivity to elimination order (the same class of issue the `pitzDaily` correc
 about) has repeatedly produced arms differing by orders of magnitude on this operator — and for a route
 to a GPU, not for speed: a full-march A/B against a matched `hostilu` run reached the identical root
 (`x_r/h` 8.3611) at 349 cumulative cycles / 1782 s against 208 / 1403 s. `BFS3D_FLOW_INVERSE=hostilu` /
-`petsc` still select the two PETSc-backed arms, and both stay measured and runnable.
+`petsc` selected the two host arms until both were removed (2026-09-13, #371).
 
 ⚠️ **THE WALL-CLOCK COLUMN BELOW CANNOT BE ATTRIBUTED, because nothing recorded which `Ilu0` kernel was
 live.** `Ilu0` falls back to a pure-Python twin of its compiled kernel when the extension is not built,
@@ -1198,7 +1202,7 @@ identical factorization, pinned by `test_the_compiled_and_reference_paths_agree`
 that is skipped when the extension is absent and had therefore never run on this machine until it was
 built. Re-time the wall column before quoting it; the counts stand.
 
-**Fixed structurally rather than noted (2026-08-17):** `tools/build_ext.sh` builds the extension in a
+**Fixed structurally rather than noted (2026-08-17; the kernel and these fixes were deleted 2026-09-13, #371):** `tools/build_ext.sh` built the extension in a
 checkout in about a second (it caches one shared build environment under `~/.cache/aquaflux`, so it
 does not need Cython in the runtime interpreter — a PEP-668 system Python refuses that);
 `validation/run_case.sh` warns at launch when it is missing; and both cases' banners print the live
@@ -1278,7 +1282,7 @@ equilibrate-and-cell-major preprocessing in place.
 restart 15 to rtol 1e-8 on the **TRUE** residual, 60-restart cap, field split flow-first with PETSc ILU(0)
 on the trailing half in every arm. Traced arms: `max_coarse` 500, 5 levels, `strength_threshold` 0.25, no
 singleton aggregates, plain aggregation, unsmoothed prolongation. Harness
-`validation/bfs3d_openfoam/field_split_probe.py`, arms `split flow/hostilu{1,2,4}`.
+`validation/bfs3d_openfoam/field_split_probe.py`, arms `split flow/hostilu{1,2,4}` (removed 2026-09-13, #371 — in git history).
 
 | arm | build | cycles | TRUE rel | solve |
 |---|---|---|---|---|
@@ -1546,8 +1550,8 @@ there is no outer control, and a velocity coefficient ten times larger pushes th
 sweep (3.435e-01), one block over. Note this is consistent with SIMPLEC converging perfectly well as a
 solver without relaxation; the two claims do not conflict.
 
-**To settle it, measure `||I - F~^-1 F||` under the SIMPLEC diagonal** (`_splitting_balance` already
-computes this quantity for the other splittings — but ⚠️ it currently has no caller, so wiring it back to a
+**To settle it, measure `||I - F~^-1 F||` under the SIMPLEC diagonal** (`_splitting_balance`, removed from the probe 2026-09-13 with the split arms, #371 — recover from git history, once
+computed this quantity for the other splittings — but ⚠️ it currently has no caller, so wiring it back to a
 switch comes first) with the fallback threshold dropped far below `beta` so
 SIMPLEC is genuinely in force. Above the Frobenius diagonal's 1.449 means it amplifies and the direction
 closes for that reason; comparable or lower means something else killed the arm and it deserves another
@@ -1669,7 +1673,7 @@ already smaller cannot move the bound, so that effort is wasted.
 Both have closed forms for this smoother rather than needing an estimate. The splitting is `F ~ diag`, so
 `S = I - F_diag^-1 F`. The Schur inverse is `n` damped-Jacobi sweeps, whose recurrence telescopes to
 `M_S S = I - G^n` with `G = I - omega D_S^-1 S`, so `E = -G^n` exactly. `_splitting_balance` in the probe
-takes both as largest singular values by sparse iteration.
+took both as largest singular values by sparse iteration (removed 2026-09-13, #371 — in git history).
 
 ⚠️ **THE DIAGNOSTIC IS PRESENT BUT UNREACHABLE — it has NO caller, and there is no `BFS3D_PROBE_BALANCE`
 switch (checked 2026-08-14; the record claimed one).** So the numbers below cannot currently be re-taken,

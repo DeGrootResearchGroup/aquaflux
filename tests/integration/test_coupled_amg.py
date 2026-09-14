@@ -167,11 +167,6 @@ def test_amg_beta_floor_builds_the_preconditioner_above_the_marchs_own_beta(
     pc_type = type(active.shift_policy.preconditioner)
     monkeypatch.setattr(
         pc_type,
-        "refresh_shift_in_place",
-        lambda _self, shift: seen.__setitem__("shift", np.asarray(shift)),
-    )
-    monkeypatch.setattr(
-        pc_type,
         "refresh_in_place",
         lambda _self, _mv, _plan, shift, **_kw: seen.__setitem__("shift", np.asarray(shift)),
     )

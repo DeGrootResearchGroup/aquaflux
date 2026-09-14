@@ -418,7 +418,7 @@ class MarchLogger:
         """``observer`` callback for a β-tracking preconditioner refresh: record what it did.
 
         Matches the hook :func:`~aquaflux.turbulence.amg_beta_tracking_refresh` calls
-        (``observer=logger.on_refresh``). The record names the branch — ``"full"``, ``"shift"`` or
+        (``observer=logger.on_refresh``). The record names the branch — ``"full"``, ``"inner"`` or
         ``"none"`` — its total, and each part's own cost; it rides on the *next* step row, since that is
         the step it was built for.
 

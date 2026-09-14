@@ -180,7 +180,6 @@ def main():
     # State what every number below was taken under, in the run's own output, before any result: a
     # measurement whose configuration is not written beside it cannot be re-adjudicated later.
     print(f"[configuration] {stamp}", flush=True)
-    print(f"  host ILU kernel: {'compiled' if compare.ILU0_COMPILED else 'PURE PYTHON (void)'}")
     # ⚠️ NOT the case's shipped `petsc` default, and that is deliberate rather than a preference: on
     # this tree the shipped bundle collapses at the first step of the second Reynolds rung (alpha 0,
     # beta escalating to the ladder's top, residual to `inf`), reproducibly and independently of

@@ -49,8 +49,7 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from .amg_preconditioner import MaterializedJacobianPreconditioner, build_amg_vcycle
-from .frozen_operator import equilibrate_cell_major
+from .amg_preconditioner import MaterializedJacobianPreconditioner
 from .hierarchy_inverse import HierarchyBlockInverse
 from .multigrid import (
     SmoothedHierarchy,
@@ -240,36 +239,25 @@ class FieldGroups:
             matrix[trail, :][:, trail],
         )
 
-    def active_rows(self, *, flow_first: bool = True) -> np.ndarray:
+    def active_rows(self) -> np.ndarray:
         """Which field-pair blocks a block-triangular split over this partition ever applies.
 
-        A block-triangular inverse (:class:`BlockTriangularFieldSplit`) forms one diagonal V-cycle per
-        group plus **one** off-diagonal triangle -- the other is never read, whatever the operator or the
+        A block-triangular inverse (:class:`BlockTriangularFieldSplit`) fits one inverse per diagonal
+        block plus **one** off-diagonal triangle -- the other is never read, whatever the operator or the
         state. This is that fact as the ``(n_fields, n_fields)`` boolean table
         :class:`~aquaflux.solve.sparse_jacobian.ColumnProbePlan`'s ``active_rows`` wants, so a caller
         materializing a Jacobian specifically to feed a split can drop the unread triangle from the
         pattern before it is ever built rather than slicing it away afterward.
 
-        Parameters
-        ----------
-        flow_first : bool
-            Which group :func:`build_block_triangular_field_split` solves first -- must match that call's
-            own ``flow_first``, since the two describe the SAME ordering choice and a mismatch would
-            exclude the triangle the split actually keeps rather than the one it drops. ``True``
-            (default) matches that function's own default: solve the leading group first, retain
-            trailing-by-leading, drop leading-by-trailing.
-
         Returns
         -------
         np.ndarray
-            ``[row_field, column_field]``, ``True`` everywhere except the dropped off-diagonal triangle.
+            ``[row_field, column_field]``, ``True`` everywhere except the leading-by-trailing block. The
+            split solves the leading group first and retains only the trailing-by-leading coupling.
         """
         active = np.ones((self.n_fields, self.n_fields), dtype=bool)
         nl = self.n_leading_fields
-        if flow_first:
-            active[:nl, nl:] = False  # leading rows <- trailing columns: never applied
-        else:
-            active[nl:, :nl] = False  # trailing rows <- leading columns: never applied
+        active[:nl, nl:] = False  # leading rows <- trailing columns: never applied
         return active
 
 
@@ -292,16 +280,14 @@ class BlockTriangularFieldSplit:
         y_t = M_t^T r_t
         y_l = M_l^T (r_l - C^T y_t)
 
-    Which group leads is the caller's choice and it is a real one: leading with the flow retains
-    ``d R_turbulence / d flow`` (the production terms' dependence on the velocity gradient), leading with
-    the turbulence retains ``d R_flow / d turbulence`` (the momentum equations' dependence on the eddy
-    viscosity). :func:`build_block_triangular_field_split` names both.
+    The leading group is always solved first. On a coupled Reynolds-averaged state, with the flow leading,
+    that retains ``d R_turbulence / d flow`` -- the production terms' dependence on the velocity gradient.
 
     Parameters
     ----------
     leading, trailing : object
         The two block inverses, each exposing ``apply(residual, *, transpose=False) -> np.ndarray`` over
-        its own group's degrees of freedom. :class:`~aquaflux.solve.AmgVCycle` satisfies this.
+        its own group's degrees of freedom. :class:`~aquaflux.solve.HierarchyBlockInverse` satisfies this.
     coupling : scipy.sparse matrix
         The retained off-diagonal block, mapping the **leading** group's degrees of freedom to the
         **trailing** group's equations, shape ``(n_trailing_dofs, n_leading_dofs)``. Taken from the
@@ -333,20 +319,6 @@ class BlockTriangularFieldSplit:
         self._trailing = trailing
         self._set_coupling(coupling)
         self._groups = groups
-        self._set_order(first="leading")
-
-    def _set_order(self, *, first: str) -> None:
-        """Fix which group is solved first, once, so ``apply`` never branches on the ordering.
-
-        The two orderings are the same algebra with the groups exchanged, and which one an instance is
-        cannot change after construction -- so resolving it here leaves ``apply`` a single body reading
-        a pair of ``(inverse, degrees-of-freedom)`` records. That answers the objection the two-class
-        split was originally made to avoid -- a branch on ordering on a path that runs once per Krylov
-        iteration -- without paying for the body twice in source.
-        """
-        lead = (self._leading, self._groups.leading)
-        trail = (self._trailing, self._groups.trailing)
-        self._order = (lead, trail) if first == "leading" else (trail, lead)
 
     def _set_coupling(self, coupling: sp.spmatrix) -> None:
         """Store the retained coupling block, discarding any transpose cached for the previous one."""
@@ -394,12 +366,10 @@ class BlockTriangularFieldSplit:
             The preconditioned vector, shape ``(n_dofs,)``.
         """
         residual = np.asarray(residual, dtype=np.float64)
-        # One body for both orderings and both directions. The solve order is fixed at construction
-        # (`_set_order`); transposing a block-triangular inverse reverses it and uses the transposed
-        # coupling, which is the whole of the difference between the four cases this used to spell out.
-        (first, first_dofs), (second, second_dofs) = (
-            reversed(self._order) if transpose else self._order
-        )
+        # One body for both directions: transposing a block-lower-triangular inverse reverses the solve
+        # order and uses the transposed coupling, which is the whole of the difference between them.
+        order = ((self._leading, self._groups.leading), (self._trailing, self._groups.trailing))
+        (first, first_dofs), (second, second_dofs) = reversed(order) if transpose else order
         coupling = self._transposed_coupling if transpose else self._coupling
         out = np.empty_like(residual)
         y_first = first.apply(residual[first_dofs], transpose=transpose)
@@ -407,16 +377,6 @@ class BlockTriangularFieldSplit:
         out[first_dofs] = y_first
         out[second_dofs] = y_second
         return out
-
-    def _select_coupling(
-        self, blocks: tuple[sp.csr_matrix, sp.csr_matrix, sp.csr_matrix, sp.csr_matrix]
-    ) -> sp.csr_matrix:
-        """Which off-diagonal block this ordering retains, given :meth:`FieldGroups.blocks`' four.
-
-        Solving the leading group first means correcting the trailing equations, so the retained block is
-        trailing-by-leading. The other ordering overrides this rather than branching in :meth:`refactor`.
-        """
-        return blocks[2]
 
     def refactor(self, matrix: sp.spmatrix) -> None:
         """Re-fit both blocks and the retained coupling to a new operator, IN PLACE.
@@ -427,12 +387,9 @@ class BlockTriangularFieldSplit:
         ``refactor``, so each keeps its own aggregation and re-computes only the coarse operators and the
         smoother's factor values — the economy the monolithic refresh relies on, preserved per block.
 
-        An inverse may take the new operator in either of **two forms**, and the distinction is real
-        rather than two spellings of one thing. A host solver wants it already put into the shape it
-        factors — equilibrated and reordered cell-major — so it re-fits without redoing that work, and
-        takes ``refactor(cell_major, scale, perm)``. A hierarchy built on the raw field-major block
-        cannot use that shape at all: a nodal coarsening recovers each cell as ``index % n_cells``,
-        which only holds field-major. Such an inverse takes ``refactor_block(block)`` instead.
+        Each inverse takes its new block through ``refactor_block(block)``, in the raw field-major form it
+        was built from: a nodal coarsening recovers each cell as ``index % n_cells``, which only holds
+        field-major.
 
         Parameters
         ----------
@@ -442,24 +399,21 @@ class BlockTriangularFieldSplit:
         Raises
         ------
         AttributeError
-            If a block inverse offers neither (an injected inverse need not be refreshable at all).
+            If a block inverse offers no ``refactor_block`` (an injected inverse need not be refreshable
+            at all).
         """
         blocks = self._groups.blocks(matrix)
-        leading_block, trailing_block = blocks[0], blocks[3]
-        for inverse, block, n_group_fields in (
-            (self._leading, leading_block, self._groups.n_leading_fields),
-            (self._trailing, trailing_block, self._groups.n_trailing_fields),
-        ):
+        for inverse, block in ((self._leading, blocks[0]), (self._trailing, blocks[3])):
             if (refit := getattr(inverse, "refactor_block", None)) is not None:
                 refit(block)
-            elif hasattr(inverse, "refactor"):
-                inverse.refactor(*equilibrate_cell_major(block, n_group_fields))
             else:
                 raise AttributeError(
                     f"{type(inverse).__name__} cannot refactor in place, so this split cannot be "
                     "refreshed mid-march; rebuild it instead, or inject an inverse that can."
                 )
-        self._set_coupling(self._select_coupling(blocks))
+        # Solving the leading group first corrects the trailing equations: the block retained is
+        # trailing-by-leading.
+        self._set_coupling(blocks[2])
 
     def destroy(self) -> None:
         """Release both block inverses' resources, if they hold any."""
@@ -473,28 +427,15 @@ def build_block_triangular_field_split(
     matrix: sp.spmatrix,
     groups: FieldGroups,
     *,
-    flow_first: bool = True,
-    smoother_fill_levels: int = 0,
-    smoother_sweeps: int = 4,
-    trailing_smoother_sweeps: int = 1,
-    coarse_eq_limit: int | None = 2000,
-    leading_options: dict | None = None,
-    trailing_options: dict | None = None,
-    leading_inverse: Callable[[sp.csr_matrix, int], object] | None = None,
-    trailing_inverse: Callable[[sp.csr_matrix, int], object] | None = None,
+    leading_inverse: Callable[[sp.csr_matrix, int], object],
+    trailing_inverse: Callable[[sp.csr_matrix, int], object],
 ) -> BlockTriangularFieldSplit:
-    """Build a block-triangular field split with a multigrid V-cycle on each diagonal block.
+    """Build a block-triangular field split, fitting each diagonal block with its own injected inverse.
 
-    Each diagonal block gets its own :class:`~aquaflux.solve.AmgVCycle`, so each is equilibrated and
-    reordered cell-major within its own group and aggregated at its own block size — the point of the
-    exercise, since a four-field saddle and a two-field transport pair coarsen differently. The retained
-    off-diagonal block is taken from ``matrix`` unmodified.
-
-    Either block's inverse can be replaced wholesale by ``leading_inverse`` / ``trailing_inverse``, which
-    is the seam for giving a group something other than a multigrid V-cycle over its sub-matrix — a
-    reduction-based hierarchy for the transported scalars, say, or an inverse written in a framework that
-    can run on an accelerator. Whatever is supplied need only expose the same ``n_dofs`` and
-    ``apply(residual, *, transpose=...)`` an :class:`~aquaflux.solve.AmgVCycle` does.
+    Each factory is handed its own group's diagonal block and field count, so each block is fitted within
+    its own group -- the point of the exercise, since a four-field saddle and a two-field transport pair
+    want different inverses. The retained off-diagonal block, trailing-by-leading, is taken from
+    ``matrix`` unmodified.
 
     Parameters
     ----------
@@ -502,114 +443,26 @@ def build_block_triangular_field_split(
         The assembled field-major operator, already shifted for the pseudo-transient step, shape
         ``(n_dofs, n_dofs)``.
     groups : FieldGroups
-        The partition. Its leading group is the one listed first in the field order.
-    flow_first : bool
-        Solve the leading group first and correct the trailing group (retaining the trailing-by-leading
-        coupling). ``False`` reverses both, retaining the leading-by-trailing coupling instead. The name
-        reflects the usual field order, in which the flow fields lead.
-    smoother_fill_levels, coarse_eq_limit
-        Passed to both blocks' V-cycles. The defaults are the bundle measured for the monolithic V-cycle:
-        a zero-fill incomplete-LU smoother (fill produces negative pivots as the pseudo-transient shift
-        falls) and a coarse grid large enough that its direct solve captures the global coupling.
-    smoother_sweeps : int
-        Level-smoother sweeps on the **leading** block. Four is the measured default for a
-        pressure-velocity saddle, where the sweeps are load-bearing: Jacobi-class smoothers do not
-        converge on that block at all, so it is the half that needs the incomplete-LU work. Ignored
-        when ``leading_inverse`` supplies that block's inverse directly.
-    trailing_smoother_sweeps : int
-        Level-smoother sweeps on the **trailing** block, defaulting to **one** rather than four, and
-        ignored when ``trailing_inverse`` supplies that block's inverse directly. The two
-        halves are not the same kind of equation and do not want the same amount of smoothing: the
-        trailing group is a transported-scalar pair with a genuine diagonal, a far easier operator than
-        the saddle, and the extra sweeps buy nothing on it. Measured on a three-dimensional
-        backward-facing step at ``Re_h = 10000``, four sweeps against one over a whole
-        Reynolds-continuation march: **1959 s against 1636 s (−16.5 %)**, with the two marches following
-        the same trajectory step for step — same shift, same per-step restart-cycle counts, same
-        residuals to four figures, same single line-search escalation — and reaching the same
-        reattachment length. So the sweeps were pure cost there rather than a quality/cost trade. Raise
-        it if a case shows the trailing block genuinely needing more; the knob is here because that is a
-        per-case question, not a universal constant.
-
-        Note the *cycle* count rose slightly (277 → 282) while the wall fell 16.5 %: a restart-cycle
-        count is only a cost proxy between candidates that share a per-application price, and changing
-        the smoother is exactly what breaks that.
-    leading_options, trailing_options
-        Extra multigrid options for one block only, so the two can be tuned apart. Ignored for a block
-        whose inverse is supplied directly.
-    leading_inverse, trailing_inverse
-        ``(sub_matrix, n_fields_in_group) -> inverse`` replacing that block's V-cycle entirely. The
-        returned object must expose ``n_dofs`` and ``apply(residual, *, transpose=...)``.
+        The partition. Its leading group is the one listed first in the field order, and is solved first.
+    leading_inverse, trailing_inverse : callable
+        ``(sub_matrix, n_fields_in_group) -> inverse`` for that block -- for example
+        :func:`~aquaflux.solve.simple_smoothed_inverse` on a pressure-velocity saddle and
+        :func:`~aquaflux.solve.jacobi_smoothed_inverse` on a pair of transported scalars. The returned
+        object must expose ``n_dofs`` and ``apply(residual, *, transpose=...)``, be a fixed linear map
+        (the outer Krylov solve is not flexible) and transpose exactly (the adjoint's solve uses it).
 
     Returns
     -------
     BlockTriangularFieldSplit
         The frozen preconditioner.
     """
-    leading_block, leading_by_trailing, trailing_by_leading, trailing_block = groups.blocks(matrix)
-    common = {
-        "smoother_fill_levels": smoother_fill_levels,
-        "coarse_eq_limit": coarse_eq_limit,
-    }
-    leading = (
-        leading_inverse(leading_block, groups.n_leading_fields)
-        if leading_inverse is not None
-        else build_amg_vcycle(
-            leading_block,
-            groups.n_leading_fields,
-            smoother_sweeps=smoother_sweeps,
-            extra_options=leading_options,
-            **common,
-        )
+    leading_block, _, trailing_by_leading, trailing_block = groups.blocks(matrix)
+    return BlockTriangularFieldSplit(
+        leading_inverse(leading_block, groups.n_leading_fields),
+        trailing_inverse(trailing_block, groups.n_trailing_fields),
+        trailing_by_leading,
+        groups,
     )
-    trailing = (
-        trailing_inverse(trailing_block, groups.n_trailing_fields)
-        if trailing_inverse is not None
-        else build_amg_vcycle(
-            trailing_block,
-            groups.n_trailing_fields,
-            smoother_sweeps=trailing_smoother_sweeps,
-            extra_options=trailing_options,
-            **common,
-        )
-    )
-    if flow_first:
-        return BlockTriangularFieldSplit(leading, trailing, trailing_by_leading, groups)
-    # Trailing first: the roles swap, and so does the partition the split reports, since the group it
-    # solves first is now the trailing one. The coupling is then leading-equations by trailing-unknowns.
-    return _TrailingFirstFieldSplit(trailing, leading, leading_by_trailing, groups)
-
-
-class _TrailingFirstFieldSplit(BlockTriangularFieldSplit):
-    """The block-UPPER-triangular sibling: solve the trailing group first, correct the leading one.
-
-    Same algebra with the two groups' roles exchanged, so it supplies only what genuinely differs --
-    which triangle of the operator it retains, and which group it solves first. ``apply`` is the base's,
-    reading the order this constructor fixes -- the ordering cannot change after construction, so
-    resolving it here keeps a single ``apply`` body rather than two mirrored ones.
-    """
-
-    def __init__(
-        self,
-        trailing: object,
-        leading: object,
-        coupling: sp.spmatrix,
-        groups: FieldGroups,
-    ) -> None:
-        expected = (groups.n_leading_dofs, groups.n_dofs - groups.n_leading_dofs)
-        if coupling.shape != expected:
-            raise ValueError(
-                f"coupling is {coupling.shape}, expected {expected} (leading equations by trailing "
-                "unknowns)."
-            )
-        self._leading = leading
-        self._trailing = trailing
-        self._set_coupling(coupling)
-        self._groups = groups
-        self._set_order(first="trailing")
-
-    def _select_coupling(self, blocks):
-        """The leading-by-trailing block: this ordering retains the OTHER triangle."""
-        return blocks[1]
 
 
 class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
@@ -621,13 +474,13 @@ class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
     Jacobian, the shift-diagonal add, the ``jax.pure_callback`` matvec (which reads ``self.factors`` at
     call time, so an in-place refresh re-preconditions the same compiled solve) and the teardown are
     genuinely shared — those live on the base. Everything the monolithic class builds *from* one
-    :class:`~aquaflux.solve.AmgVCycle` (the fixed-pattern cell-major assembler, the host exact-solve jvp
-    shell) is monolithic-only, and inheriting it forced this class to override a raising ``has_exact_solve``
-    and to declare two smoother parameters on its own refresh that a split's construction never reads.
+    :class:`~aquaflux.solve.AmgVCycle` (the fixed-pattern cell-major assembler) is monolithic-only, and
+    inheriting it forced this class to declare two smoother parameters on its own refresh that a split's
+    construction never reads.
 
     The monolithic path equilibrates and reorders the **whole** matrix to cell-major before handing it to
-    one V-cycle; a split does that **per block**, inside each block's own ``build_amg_vcycle``, because the
-    two groups have different field counts and different scales. That is why the shift/equilibrate/reorder
+    one V-cycle; a split leaves any such preparation to each block's own injected inverse, because the two
+    groups have different field counts and different scales. That is why the shift/equilibrate/reorder
     assembler the monolithic refresh precomputes has no counterpart here.
 
     .. warning::
@@ -640,35 +493,14 @@ class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
         self,
         split: BlockTriangularFieldSplit,
         groups: FieldGroups,
-        jacobian_no_shift: sp.csr_matrix | None = None,
-        n_fields: int | None = None,
     ) -> None:
-        super().__init__(split, jacobian_no_shift=jacobian_no_shift, n_fields=n_fields)
+        super().__init__(split)
         self._groups = groups
 
     @property
     def groups(self) -> FieldGroups:
         """The field partition the preconditioner is built over."""
         return self._groups
-
-    @property
-    def has_exact_solve(self) -> bool:
-        """Always ``False``: a block-triangular split offers no host exact solve.
-
-        The split's frozen inverse is a :class:`BlockTriangularFieldSplit`, which has no such solve to
-        offer, because a host exact solve inverts the whole shifted operator in one host call and a split
-        deliberately never forms it. Answered here explicitly rather than by asking ``self.factors`` for
-        it (see the base's :class:`~aquaflux.solve.host_preconditioner.HostFactors` docstring on why a
-        capability not in that contract belongs on the concrete class) — both production callers ask
-        through ``getattr(pc, "solves_exactly_on_host", False)``, so a missing or a raising attribute would
-        read identically as ``False`` and hide a real defect just as easily as the correct answer.
-        """
-        return False
-
-    @property
-    def solves_exactly_on_host(self) -> bool:
-        """Always ``False``, for the same reason as :attr:`has_exact_solve`."""
-        return False
 
     @classmethod
     def build(
@@ -678,15 +510,8 @@ class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
         shift_diagonal: np.ndarray,
         groups: FieldGroups,
         *,
-        flow_first: bool = True,
-        smoother_fill_levels: int = 0,
-        smoother_sweeps: int = 4,
-        trailing_smoother_sweeps: int = 1,
-        coarse_eq_limit: int | None = 2000,
-        leading_options: dict | None = None,
-        trailing_options: dict | None = None,
-        leading_inverse: Callable[[sp.csr_matrix, int], object] | None = None,
-        trailing_inverse: Callable[[sp.csr_matrix, int], object] | None = None,
+        leading_inverse: Callable[[sp.csr_matrix, int], object],
+        trailing_inverse: Callable[[sp.csr_matrix, int], object],
         batched_matvec: Callable | None = None,
         probe_batch_size: int | None = None,
         structure: ProbeGather | None = None,
@@ -701,23 +526,10 @@ class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
             The pseudo-transient shift ``beta d`` added to the diagonal, shape ``(n_dofs,)``.
         groups : FieldGroups
             The partition to split on.
-        flow_first : bool
-            Forwarded to :func:`build_block_triangular_field_split` unchanged. A caller that also
-            narrows the probe pattern with :meth:`FieldGroups.active_rows` must pass the **same** value
-            to both, since the two describe one ordering choice: the triangle ``active_rows`` marks
-            unread is only correct for the split this builds if they agree.
-        smoother_fill_levels, smoother_sweeps, trailing_smoother_sweeps, coarse_eq_limit
-            Passed through to each block's V-cycle. ``smoother_sweeps`` is the leading (saddle) block's
-            and ``trailing_smoother_sweeps`` the trailing (transported-scalar) block's; they differ by
-            default because the two halves want different amounts of smoothing.
-        leading_options, trailing_options
-            Extra multigrid options for one block only, so the two can be tuned apart. Ignored for a
-            block whose inverse is supplied directly.
-        leading_inverse, trailing_inverse : callable or None
-            ``(sub_matrix, n_fields_in_group) -> inverse`` replacing that block's V-cycle entirely — the
-            seam for preconditioning a block with something that is not a host solver's V-cycle. When
-            set, the corresponding smoother settings above do not apply to it. An injected inverse must
-            offer ``refactor_block`` or ``refactor`` to survive a mid-march refresh.
+        leading_inverse, trailing_inverse : callable
+            ``(sub_matrix, n_fields_in_group) -> inverse`` for that block, exactly as
+            :func:`build_block_triangular_field_split` takes them. An injected inverse must offer
+            ``refactor_block`` or ``refactor`` to survive a mid-march refresh.
 
         Returns
         -------
@@ -730,17 +542,10 @@ class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
         split = build_block_triangular_field_split(
             cls._shifted(jacobian, shift_diagonal),
             groups,
-            flow_first=flow_first,
-            smoother_fill_levels=smoother_fill_levels,
-            smoother_sweeps=smoother_sweeps,
-            trailing_smoother_sweeps=trailing_smoother_sweeps,
-            coarse_eq_limit=coarse_eq_limit,
-            leading_options=leading_options,
-            trailing_options=trailing_options,
             leading_inverse=leading_inverse,
             trailing_inverse=trailing_inverse,
         )
-        return cls(split, groups, jacobian_no_shift=jacobian, n_fields=plan.n_fields)
+        return cls(split, groups)
 
     def refresh_in_place(
         self,
@@ -760,29 +565,11 @@ class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
         diagonal shift — the per-block equilibration is inside the refactor.
         """
         timer = PhaseTimer()
-        self._jacobian_no_shift = self._materialize_jacobian(
+        jacobian = self._materialize_jacobian(
             matvec, plan, batched_matvec, probe_batch_size, structure
         )
         timer.lap("probe")
-        self._n_fields = plan.n_fields
-        shifted = self._shifted(self._jacobian_no_shift, shift_diagonal)
-        timer.lap("assemble")
-        self.factors.refactor(shifted)
-        timer.lap("refactor")
-        return timer.phases()
-
-    def refresh_shift_in_place(self, shift_diagonal: np.ndarray) -> tuple[tuple[str, float], ...]:
-        """Re-fit at a new shift REUSING the cached Jacobian — no re-materialization.
-
-        The cheap branch of the refresh, for when only ``beta`` has moved. Raises if no Jacobian was
-        cached, rather than silently rebuilding from nothing.
-        """
-        if self._jacobian_no_shift is None:
-            raise RuntimeError(
-                "refresh_shift_in_place needs the Jacobian cached by build/refresh_in_place."
-            )
-        timer = PhaseTimer()
-        shifted = self._shifted(self._jacobian_no_shift, shift_diagonal)
+        shifted = self._shifted(jacobian, shift_diagonal)
         timer.lap("assemble")
         self.factors.refactor(shifted)
         timer.lap("refactor")

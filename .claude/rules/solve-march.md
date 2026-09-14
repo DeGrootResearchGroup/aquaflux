@@ -210,16 +210,14 @@ paths:
   - **NOTHING in the refresh machinery reads the line-search α, and on `bfs3d` almost nothing reads
     anything else either (source-verified against the current defaults).** Two independent refresh paths
     exist and they key on different things: the post-step `RefreshTrigger`s (`CycleGrowthTrigger` →
-    `cycles` + `residual_ratio`; `CoefficientDriftTrigger` → `ν_t` drift) and the per-attempt
-    `precondition_step` hook (`amg_beta_tracking_refresh` → `beta_rel_change` / `materialize_drift` /
-    `materialize_every` / `refresh_every`). **Neither reads `alpha` or `binding_limit`**, so a collapsed
-    line search can only ever escalate β — it can never buy a rebuild. And in the shipped `bfs3d` bundle
-    the proactive arms are switched off by construction: with the default `BFS3D_REFRESH_ON_CYCLES=3`,
-    `compare.py` passes `beta_rel_change=inf`, `refresh_every=10**9`, `materialize_drift=None`,
-    `materialize_every=None`, so the **only** live trigger is the reactive mid-step "one solve reached 3
-    restart cycles". Two consequences worth holding: (a) an α-triggered refresh needs **no new trigger** —
-    `precondition_step` is already called once per *attempt*, after the control has set β, so a finite
-    `beta_rel_change` makes a β escalation pull a matched rebuild for free; (b) that would **not** address
+    `cycles` + `residual_ratio`; `CoefficientDriftTrigger` → `ν_t` drift) and the per-attempt `precondition_step` hook (`amg_beta_tracking_refresh`, which since 2026-09-13
+    (#371) re-fits only on its first call and after `rebind` — its scheduled gates were deleted).
+    **Neither reads `alpha` or `binding_limit`**, so a collapsed line search can only ever escalate β — it
+    can never buy a rebuild — and the **only** live cost trigger is the reactive mid-step "one solve
+    reached `refresh_on_cycles` restart cycles". Two consequences worth holding: (a) an α-triggered
+    refresh needs **no new trigger** — `precondition_step` is already called once per *attempt*, after the
+    control has set β, so a rebuild on escalation would be a condition inside that hook (the deleted
+    `beta_rel_change` gate was one, never measured in that role); (b) that would **not** address
     the lock-ups this case actually hits, which run at `binding_limit < 1` (the positivity ratchet) where
     the direction is measured accurate and the solve already over-delivers against its tolerance. Where α
     *is* the right refresh signal is the **constraint-free** collapse (`binding_limit == 1`, direction
@@ -364,10 +362,9 @@ paths:
       step escalation could *not* fix — the genuine inexact-preconditioner case (loose Krylov → non-finite δ
       that a tighter Krylov, not more damping, cures), where the cost threshold is typically `None` anyway so
       escalation is absent and the divergence retry is the sole, original mechanism.
-    - **This is the PROACTIVE β-mismatch refresh's reactive twin** — the refresh
-      (`amg_beta_tracking_refresh(beta_rel_change=…)`, `.claude/rules/turbulence.md`) re-freezes the PC
-      *before* a solve when β has drifted (the stale-PC cause of a spike); the bailout escalates β *after* a
-      solve reveals a hard operator. **The bailout is REACTIVE by necessity: a Step-0 diagnostic on `bfs3d`
+    - **The proactive β-mismatch refresh this was once paired with
+      (`amg_beta_tracking_refresh(beta_rel_change=…)`) is DELETED (2026-09-13, #371)**; the bailout
+      escalates β *after* a solve reveals a hard operator. **The bailout is REACTIVE by necessity: a Step-0 diagnostic on `bfs3d`
       (42-step instrumented capture) showed no cheap STATIC operator property predicts a bad step** — the
       diagonal-dominance defect of the frozen shifted operator does not separate bad from good (the rung-1
       trio 10/11/12 have near-identical DD but 302 vs 12 matvecs; the hardness is non-monotone in β and

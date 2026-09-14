@@ -731,8 +731,6 @@ def test_an_explicit_re_damping_still_overrides_the_derived_one() -> None:
 class _StubHostPreconditioner:
     """The narrowest stand-in ``MonolithicFactorShiftPolicy`` accepts: it only asks for a matvec."""
 
-    solves_exactly_on_host = False
-
     def matvec(self):
         return lambda x: x
 

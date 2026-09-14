@@ -64,9 +64,6 @@ findable in one place rather than reconstructed from three sections hundreds of 
 **Before the first branch or the first test run**
 1. `git fetch origin`, and check `git log --oneline HEAD..origin/main` is empty — branching from a
    stale base is the failure this prevents (*Start from an up-to-date main*).
-1b. `tools/build_ext.sh` — the compiled incomplete factorization is a gitignored artifact, so a fresh
-   worktree starts without it and silently falls back to a pure-Python twin. Costs a second; without it
-   every timing you take is incomparable to every other (*Use the blessed command*).
 
 **While working**
 2. Run long solves with `validation/run_case.sh <script.py>`; run tests with `tools/fastgate.sh`
@@ -396,7 +393,6 @@ backward compatibility becomes a real constraint and the calculus reverses.
 | Linear solves | lineax (fallback `jax.scipy.sparse.linalg`) | traced, implicit differentiation of the solve |
 | Adjoint of the coupled solve | `custom_vjp` around the linear solve | exact, memory-flat gradient independent of iteration count |
 | Transient integration | Diffrax | traced, shared with aquakin |
-| CPU multigrid smoother | **Cython** (`aquaflux/solve/_ilu0.pyx`, built by `tools/build_ext.sh`) | a zero-fill incomplete factorization eliminates a row against every row above it, so it is sequential by nature and cannot be array operations. The package imports without it (a pure-Python twin defines the behaviour and `ilu0.COMPILED` says which is live), so this is a performance dependency, not a hard one. **⚠️ But the fallback is SILENT and the artifact is gitignored, so every fresh worktree starts on the Python twin** — which is why timings must never be compared across checkouts without checking. Run `tools/build_ext.sh` once per checkout (idempotent; it caches one shared build environment under `~/.cache/aquaflux`, so it does not need Cython in the runtime interpreter — a PEP-668 system Python refuses that). `validation/run_case.sh` warns when it is missing, and both cases' banners print the live kernel. |
 | Mesh | static connectivity arrays + `segment_sum` scatter | XLA-friendly graph/message-passing layout |
 | Eventual model format | YAML → AST (deferred) | the DSL is the **last** layer; not a dependency yet |
 | Bounded compilation cache | **filelock** (`aquaflux/__init__.py`) | `import aquaflux` points JAX's persistent on-disk compilation cache at `~/.cache/aquaflux/jax` and **bounds it**. JAX's default `jax_compilation_cache_max_size` is `-1`, which its LRU implementation reads as *no eviction* — an unbounded cache never prunes and only grows (one checkout reached 88 GiB across 2128 entries, 95% of it more than a week old, 42 of them ~1 GiB coupled-solve programs). Setting a byte bound turns real eviction on, and JAX takes an inter-process lock through `filelock` to do it. **⚠️ A BOUND WITHOUT `filelock` DISABLES THE CACHE ENTIRELY** — every read and write fails with a `UserWarning` and it stores nothing, which is worse than no bound, so the package checks and degrades to merely unbounded rather than silently dead. Override the size with `AQUAFLUX_COMPILATION_CACHE_MAX_GIB` (negative for no bound), the location with `AQUAFLUX_COMPILATION_CACHE_DIR`, or switch it off with `AQUAFLUX_DISABLE_COMPILATION_CACHE=1`. |
@@ -498,15 +494,6 @@ knows nothing about meshes or fluxes. The first-order-upwind stencil is the **pr
 choice, not the model's — whatever scheme the residual uses for advection, the frozen operator always
 upwinds first-order, because that is what makes it an M-matrix an aggregation hierarchy can coarsen —
 which is why it is a solver concern and holds no mesh, field, or `jax` import.
-
-**How an incomplete factorization orders its elimination is an injected strategy, `aquaflux/solve/ordering.py`.**
-`EliminationOrdering` (`CellMajor`, over a `CellOrder` — `NaturalCells` / `ReverseCuthillMcKeeCells` /
-`AscendingRowLengthCells`) is consumed through `equilibrate_ordered`, and `cell_major_permutation` lives
-here rather than beside the equilibration it used to share a file with. This is a strategy family and not
-a knob because **at zero fill the ordering decides which couplings the factorization discards**: measured
-on a coupled velocity–pressure saddle, changing only the cell order took a stationary sweep from
-amplifying the residual to contracting it, and the Krylov solve it preconditions from stalling to
-converging. The default is the mesh's own cell order — the cheapest, and measurably not the best.
 
 ```
 Mesh (SoA topology) + FaceGeometry/CellGeometry            (classes)
@@ -664,7 +651,7 @@ not one to arrive at by importing something.
 
 Two consequences worth having in mind rather than rediscovering:
 
-- **`petsc4py` is not installed in CI**, so the four modules gated on it — two of them in the *fast*
+- **`petsc4py` is not installed in CI**, so the three modules gated on it — two of them in the *fast*
   tier, i.e. inside the required check — have never run there. It has no wheels (it builds PETSc from
   source), which is why the `petsc` extra is kept out of `test`; that is a cost decision, and the
   census is where its price is written down.
@@ -855,7 +842,6 @@ Four operations have one correct invocation. Use it.
 | run a validation case or any long solve | `validation/run_case.sh <script.py> [--wait]` |
 | see what a long run is doing | `validation/run_case.sh --status` · `tail -f <its log>` |
 | run a test tier | `tools/fastgate.sh [fast \| slow \| validation \| all]` |
-| make a checkout fast (once per checkout, before timing anything) | `tools/build_ext.sh` |
 | build the Sphinx docs locally, the same strict way CI does | `tools/build_docs.sh` |
 
 Each exists because the hand-rolled version fails *silently* — it produces a plausible answer that is
@@ -1054,8 +1040,8 @@ cross-reference must resolve and every page must sit in a toctree. **Build local
 `docs/generated`/`docs/api.md`/`docs/_build` first so a stale run cannot pass by describing the
 previous set of pages. It exists because a plain `pip install -e ".[docs]"` cannot be relied on here:
 the docs toolchain is not a runtime dependency, and a PEP-668-managed system Python refuses to
-install it, the identical wall `tools/build_ext.sh` routes around. It reuses that script's cached
-build environment (`~/.cache/aquaflux/build-venv`) rather than pip-installing aquaflux itself; where a
+install it. It keeps one cached build environment (`~/.cache/aquaflux/build-venv`, created with
+`--system-site-packages`) rather than pip-installing aquaflux itself; where a
 normal editable install is available, `pip install -e ".[docs]"` then `cd docs && make html` works
 too. **CI builds the docs on every PR** — the `docs` job runs the same `-W` build Read the Docs runs,
 and the required `fast gate` depends on it, so a broken cross-reference or a page missing from a

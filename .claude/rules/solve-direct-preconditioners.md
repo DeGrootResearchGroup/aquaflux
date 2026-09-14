@@ -2,8 +2,6 @@
 paths:
   - "aquaflux/solve/lu_preconditioner.py"
   - "aquaflux/solve/sparse_jacobian.py"
-  - "aquaflux/solve/ilu0.py"
-  - "aquaflux/solve/_ilu0.pyx"
 ---
 
 # Rules — `aquaflux/solve/` direct preconditioners (complete-LU) and Jacobian materialization
@@ -31,16 +29,16 @@ paths:
 
 ## Preconditioner — the frozen host family (shared contract)
 
-- **`equilibrate_cell_major` / `equilibrate_ordered` live in `frozen_operator.py` (binding, moved
-  2026-08-15). ⚠️ `cell_major_permutation` moved AGAIN on 2026-08-17, to the new
-  `solve/ordering.py`** — it is one elimination ordering among several now, and sat in `frozen_operator`
-  only because that is where it was first written. `frozen_operator` imports it (one direction, no
-  cycle); nothing re-exports it from its old home, so a stale import fails loudly.
+- **`equilibrate_cell_major` and `cell_major_permutation` live in `frozen_operator.py` (binding).**
+  ⚠️ There is no `solve/ordering.py`, no `equilibrate_ordered` and no elimination-ordering strategy
+  family (`EliminationOrdering` / `CellMajor` / `CellOrder` / `NaturalCells` /
+  `ReverseCuthillMcKeeCells` / `AscendingRowLengthCells`): they existed for the zero-fill ILU(0) kernel
+  and were deleted with it (2026-09-13, #371); the one ordering left is the natural cell-major one.
   They are the reorder half of one transform whose rescale half
   (`symmetrically_equilibrate`, `equilibration_scale`, `apply_symmetric_scale`, `row_chunks`) was
   already there, and every consumer applies the two together -- a factorization or a coarsening wants
   the matrix both unit-diagonal and grouped by cell. Consumed by the multigrid V-cycle
-  (`amg_preconditioner.py`, `ilu_inverse.py`) and the block field split (`field_split.py`); the complete
+  (`amg_preconditioner.py`); the complete
   LU needs neither (its own fill-reducing pivoting and ordering already handle the indefinite saddle).
   - **Both are exported from `aquaflux.solve`.** They were internal by `__all__` yet deep-imported
     by study harnesses, i.e. public in practice and unguarded in principle; the harnesses now
@@ -64,23 +62,19 @@ paths:
     **⚠️ That is fixed structurally (2026-09-11, #287): `MaterializedJacobianPreconditioner`
     (`amg_preconditioner.py`) is now the shared base both preconditioners subclass**, holding only what
     is genuinely common to fitting *any* inverse to the coloured-probe materialized coupled Jacobian
-    (the probe itself, the shift-diagonal add, the cached-Jacobian shift-only refresh, teardown) —
+    (the probe itself, the shift-diagonal add, teardown) —
     `MonolithicAmgPreconditioner` is no longer `FieldSplitAmgPreconditioner`'s base, so it no longer
-    inherits the monolithic-only state (the fixed-pattern cell-major assembler, the host exact-solve jvp
-    shell) it never used. See `solve-amg-multigrid.md` and `solve-field-split.md`.
+    inherits the monolithic-only state (the fixed-pattern cell-major assembler) it never used. See `solve-amg-multigrid.md` and `solve-field-split.md`.
   - **⚠️ Anything a base reads off `self.factors` beyond that pair is a requirement on ALL of them
-    (binding).** This is not hypothetical: `has_exact_solve` read `self.factors.has_exact_solve`,
-    which only `AmgVCycle` has, so the property **raised** on the field split — and both call sites ask
-    through `getattr(pc, "solves_exactly_on_host", False)`, whose default swallows an `AttributeError` raised
-    inside a property body exactly as it swallows a missing name. The answer it produced was
-    accidentally the correct `False`. If a capability is not in `HostFactors`, answer it on the
+    (binding).** This is not hypothetical: an exact-solve capability flag (`has_exact_solve`, deleted with
+    the host exact forward solve on 2026-09-13, #371) read `self.factors.has_exact_solve`, which only
+    `AmgVCycle` had, so the property **raised** on the field split — and the call sites asked through
+    `getattr(pc, ..., False)`, whose default swallows an `AttributeError` raised inside a property body
+    exactly as it swallows a missing name. If a capability is not in `HostFactors`, answer it on the
     subclass. Pinned by an AST check on the base's own source
     (`test_the_base_asks_its_factors_for_nothing_beyond_the_declared_contract`) — read off the source
     rather than exercised, because the failure is a lookup that is *never taken* on the paths a test
-    would naturally drive, which is why the original went unseen. `FieldSplitAmgPreconditioner` still
-    answers `has_exact_solve`/`solves_exactly_on_host` explicitly rather than inheriting either — the
-    new base declares neither, so this is no longer an override rescuing a raise, it is simply the
-    concrete class stating its own answer.
+    would naturally drive, which is why the original went unseen.
   - **The pseudo-transient shift has one home: `sparse_jacobian.shifted_jacobian`.** Every host
     preconditioner adds `β d` before factoring, and two spellings once disagreed: a pattern-preserving
     `setdiag` against `a + sp.diags(shift)` — the latter is wrong, since a sparse *addition* stores only
@@ -516,7 +510,7 @@ complete LU and the AMG's coloured probe both still depend on it.
       - **⚠️ The ILU fill ranking INVERTS between the two cases** — `bfs3d` wants zero fill (its ILU(1)
         diverges at low shift, 303 negative pivots against zero), pitzDaily wants fill 1, where **two
         independent zero-fill implementations fail identically** (PETSc ILU(0) and the traced
-        `IluSmoothedInverse`, both α → 0 by step 3–4), putting it on the fill rather than on anything
+        `IluSmoothedInverse` — deleted 2026-09-13, #371 — both α → 0 by step 3–4), putting it on the fill rather than on anything
         PETSc-specific. pitzDaily's converging arms all land `x_r/h` 8.0686, so those are cost
         comparisons, not accuracy ones. ⚠️ Both cases set `field_split=True`, so this comparison is
         between two **flow-block** factorizations — which is the one thing about it the monolithic sweeps
@@ -1302,7 +1296,7 @@ complete LU and the AMG's coloured probe both still depend on it.
     `lu_beta_tracking_refresh`, `.claude/rules/turbulence.md`): exact each step (1 Krylov iter), and robust
     through overshoots (measured: completes the cold ramp where the frozen LU failed, cyc ≤ 18). The
     finishing solve and adjoint keep the last frozen factorization (exact enough at the converged β → 0).
-  - **Coupled builders (`coupled_lu_continuation` / `coupled_lu_refreshing_continuation`, and the
+  - **Coupled builders (`coupled_lu_continuation`, and the
     β-tracking `lu_beta_tracking_refresh`) live in `.claude/rules/turbulence.md`;** they share the
     `MonolithicFactorShiftPolicy` and the `_monolithic_factor_step` builder tail with the algebraic
     multigrid (one implementation, parameterized by the factorization).

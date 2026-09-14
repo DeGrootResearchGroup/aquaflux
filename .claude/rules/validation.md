@@ -45,7 +45,7 @@ it was left, and any timing taken from it measured the globalization rather than
 
 ## ⚠️ pitzDaily's SHIPPED PRECONDITIONER STOPPED MARCHING IT — the default moved to `simplesmooth` (2026-08-22)
 
-Under `PITZ_FLOW_INVERSE=petsc` (the case's default until this date) `pitzdaily_openfoam/compare.py`
+Under `PITZ_FLOW_INVERSE=petsc` (the case's default until this date; the arm was removed 2026-09-13, #371) `pitzdaily_openfoam/compare.py`
 collapses at the **first step of the second Reynolds rung**: `alpha` 0, `beta` escalating 0.5 → 2 → 16
 through the whole ladder, the residual rising 1.674e-01 → 5.754e-01 → `inf`. Reproduced three times,
 including on a tree carrying **no local change at all**, with the step tables bit-identical.
@@ -55,8 +55,8 @@ the same reason: an incomplete factorization's behaviour on this saddle depends 
 **order** and the **fill**, neither of which is predictable in advance, while a SIMPLE-smoothed
 hierarchy never eliminates the matrix at all. This case's own record already carries the extreme
 version of that sensitivity — a zero-fill factorization going from *amplifying* a residual 5.5× per
-sweep to contracting it, on nothing but a reordering. `petsc` and `hostilu` both remain reachable and
-both remain measured; what is no longer defensible is either as the default.
+sweep to contracting it, on nothing but a reordering. `petsc` and `hostilu` were both
+removed 2026-09-13 (#371); their recorded measurements stand as history.
 
 **What was ruled out before reaching for a preconditioner swap**, because "the case broke" invites
 blaming whatever merged most recently:
@@ -206,8 +206,8 @@ cannot be written. The guard is what catches the next module that does branch.
   1.00" for every arm at every shift, including arms whose sweep diverges by 1e+59. It looks like a
   finding ("the pivots are all healthy, so it is not a pivot problem") and it is a measurement of the
   conditioning transform. This shipped in a sweep on 2026-08-17 and a conclusion was drawn from it
-  before being retracted. Use `Ilu0.pivots`, which exists for this; and note it stores the pivot
-  itself where PETSc stores its **reciprocal**, so a census ported between the two reports the inverse
+  before being retracted. Use the factorization's own stored pivots (`Ilu0.pivots` did this until it was deleted, #371); and note
+  a host factorization may store the pivot itself where PETSc stores its **reciprocal**, so a census ported between the two reports the inverse
   of what it claims.
 - **Print one line per outer step, flushed.** A harness that collects reports and prints at the end is
   indistinguishable from a hung one, and cost thirty minutes of a run that could not have converged.
@@ -351,11 +351,9 @@ briefing already records both of the others; what follows is only the connection
 a reader chasing an unexplained wall-clock difference checks all three rather than the one they happened
 to read about.
 
-- **The compiled ILU(0) kernel is a gitignored artifact.** A fresh worktree silently runs the pure-Python
-  twin, and its timings are incomparable to any other checkout's until `tools/build_ext.sh` has been run
-  there. `ilu0.COMPILED` says which is live and both cases' banners print it — check it, because nothing
-  else will. (This is not hypothetical housekeeping: the worktree this entry was written in reported
-  `COMPILED = False` while it was being written.)
+- **The compiled ILU(0) kernel was a gitignored artifact** (deleted with it 2026-09-13, #371). A fresh
+  worktree silently ran the pure-Python twin, so a `hostilu` timing from before then is only comparable
+  if its run log's `host ILU kernel` banner line says `compiled`.
 - **The JAX compilation cache is shared but keyed on the compiled program.** A branch carrying different
   solver code takes misses in a warm checkout, so the first run on a new branch is partly measuring
   compilation. Nothing in the log distinguishes that from the case being slower.

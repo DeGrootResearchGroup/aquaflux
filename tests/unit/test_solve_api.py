@@ -112,10 +112,6 @@ VALIDATION_INTERNAL_REACHES = {
     # substitute -- which is itself a finding about `_aggregate`, and one only the real one can give.)
     "_strength_classical",
     "_aggregate",
-    # The level operator and the SIMPLE splitting, reached by the field-split probe to build candidate
-    # block inverses out of the same pieces the shipped V-cycle uses.
-    "_CsrOperator",
-    "_diagonal_approximate_inverse",
     # The step ladder itself, reached by the closure probe so that "which step length is admissible
     # here" is answered by the search a march actually walks rather than by a second one written
     # beside it. That question is the whole of that harness, and a re-implementation would answer it

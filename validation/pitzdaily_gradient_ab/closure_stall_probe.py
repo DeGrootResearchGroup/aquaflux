@@ -194,10 +194,6 @@ def capture() -> None:
     refresh = amg_beta_tracking_refresh(
         coupled,
         probe=probe,
-        beta_rel_change=float("inf"),
-        refresh_every=10**9,
-        materialize_drift=None,
-        materialize_every=None,
         beta_floor=compare.PC_BETA_FLOOR,
         observer=logger.on_refresh,
     )
@@ -1080,10 +1076,6 @@ def march_from_seed() -> None:
         refresh = amg_beta_tracking_refresh(
             coupled,
             probe=probe,
-            beta_rel_change=float("inf"),
-            refresh_every=10**9,
-            materialize_drift=None,
-            materialize_every=None,
             beta_floor=compare.PC_BETA_FLOOR,
         )
         engine = coupled_amg_continuation(

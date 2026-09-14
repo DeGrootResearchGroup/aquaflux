@@ -1054,42 +1054,6 @@ def test_each_step_equilibrates_at_the_state_it_started_from() -> None:
     )
 
 
-def test_state_drift_forces_a_full_refresh_whatever_the_beta_gate_says() -> None:
-    """The two staleness gates are combined, NOT nested -- the regression this function was extracted for.
-
-    Below the preconditioner's shift floor the clamped β never moves, so the β gate answers "no change"
-    on every step forever. When the state gate was asked only *after* the β gate had already said yes,
-    that made eddy-viscosity drift unable to trigger anything at all in exactly the low-shift tail where
-    the flow develops fastest.
-    """
-    from aquaflux.turbulence.coupled import _refresh_branch
-
-    assert _refresh_branch(stale_state=True, moved_beta=False, split=True) == "full"
-    assert _refresh_branch(stale_state=True, moved_beta=True, split=True) == "full"
-
-
-def test_a_moved_beta_alone_takes_the_cheap_shift_branch() -> None:
-    """A matching Jacobian with a mismatched shift needs only the diagonal re-added, not a re-probe."""
-    from aquaflux.turbulence.coupled import _refresh_branch
-
-    assert _refresh_branch(stale_state=False, moved_beta=True, split=True) == "shift"
-
-
-def test_without_the_split_any_trigger_is_a_full_refresh() -> None:
-    """A preconditioner with no shift-only path (the factorization ones) has a single branch."""
-    from aquaflux.turbulence.coupled import _refresh_branch
-
-    assert _refresh_branch(stale_state=False, moved_beta=True, split=False) == "full"
-    assert _refresh_branch(stale_state=False, moved_beta=False, split=False) == "none"
-
-
-def test_neither_gate_firing_reuses_the_standing_factorization() -> None:
-    """The gates exist to skip work; both quiet must still mean no refresh."""
-    from aquaflux.turbulence.coupled import _refresh_branch
-
-    assert _refresh_branch(stale_state=False, moved_beta=False, split=True) == "none"
-
-
 _DRIFT_TRACES: list[int] = []
 
 
@@ -1110,8 +1074,7 @@ class _CountingEddyViscosity(eqx.Module):
 def test_rebasing_the_drift_measure_is_a_compilation_cache_hit() -> None:
     """Re-basing the staleness reference must change a VALUE, not build a new compiled function.
 
-    ``_materialize_gate`` re-bases this measure at every materialize, so a per-reference compilation is
-    paid on every full preconditioner refresh. Measured on a three-dimensional coupled march before the
+    ``solve_coupled`` re-bases this measure at every refresh segment, so a per-reference compilation is paid on every one. Measured on a three-dimensional coupled march before the
     fix: ~3.8 s each time, ~21 % of the refresh, for a number that is one norm of an already-computed
     field. The reference therefore rides as an argument to a module-level jitted function rather than as
     a captured constant of a locally-defined one, which ``filter_jit`` caches per closure.
@@ -1404,87 +1367,6 @@ def test_the_probe_is_the_same_for_every_reynolds_rung() -> None:
     assert np.array_equal(probe.structure.indices, scaled.structure.indices)
 
 
-def test_staleness_beta_gate_fires_on_first_call_beta_move_and_staleness_cap() -> None:
-    """The β-tracking gate re-factors on the first step, on a β move past the threshold, or at the
-    staleness cap -- and skips otherwise, so an expensive re-factor is paid only when it pays off.
-
-    Pure logic, no solver: the gate is the whole novelty of a gated β-tracking refresh (the refactor
-    mechanism itself is shared machinery), so it earns a fast, isolated test.
-    """
-    from aquaflux.turbulence.coupled import _staleness_beta_gate
-
-    gate = _staleness_beta_gate(refresh_every=3, beta_rel_change=0.25)
-    assert gate(1.0) is True  # first call always fires (nothing factored yet)
-    assert gate(1.1) is False  # +10% < 25%, 1 step since -> reuse
-    assert gate(1.2) is False  # +20% < 25% (vs last-refresh 1.0), 2 steps since -> reuse
-    assert gate(1.0) is True  # 3 steps since -> staleness cap fires (state-development bound)
-    assert (
-        gate(1.4) is True
-    )  # +40% > 25% vs last-refresh 1.0 -> β-move fires (the anti-stall trigger)
-    assert gate(1.4) is False  # unchanged, 1 step since -> reuse
-
-
-def test_materialize_gate_fires_on_drift_and_the_step_cap() -> None:
-    """The β-diagonal split's materialize gate re-materializes the Jacobian only when the coefficient has
-    drifted past the threshold since the last materialize, or at the step cap -- so the expensive full
-    re-probe is reserved for a genuinely stale Jacobian and the cheap shift-only refresh carries the rest.
-
-    Pure logic with an injected synthetic drift measure (``drift = |state - reference|``): the gate's
-    decision -- first-call seeding without a redundant materialize, drift-move, step-cap, and re-basing the
-    reference at every materialize -- is the whole novelty; the materialize itself is shared machinery.
-    """
-    from aquaflux.turbulence.coupled import _materialize_gate
-
-    def drift_factory(reference):
-        ref = float(reference)
-        return lambda state: abs(float(state) - ref)
-
-    # Drift only: seed at the first state (no redundant materialize), then fire on a >0.5 move, re-basing.
-    gate = _materialize_gate(drift_factory, materialize_drift=0.5, materialize_every=None)
-    assert (
-        gate(jnp.asarray(0.0)) is False
-    )  # first call seeds the reference; Jacobian is fresh from build
-    assert gate(jnp.asarray(0.3)) is False  # drift 0.3 < 0.5 -> shift-only
-    assert (
-        gate(jnp.asarray(0.6)) is True
-    )  # drift 0.6 > 0.5 -> materialize, re-base reference to 0.6
-    assert gate(jnp.asarray(0.7)) is False  # drift 0.1 vs 0.6 -> shift-only (re-based, not vs 0.0)
-    assert gate(jnp.asarray(1.2)) is True  # drift 0.6 vs 0.6 -> materialize again
-
-    # Step cap only (no drift trigger): fire every 3rd refresh regardless of state.
-    cap = _materialize_gate(drift_factory, materialize_drift=None, materialize_every=3)
-    assert [cap(jnp.asarray(0.0)) for _ in range(6)] == [False, False, True, False, False, True]
-
-
-def test_the_materialize_gate_forgets_its_reference_on_reset() -> None:
-    """``reset`` discards the drift reference, so a rebound hook cannot compare across two problems.
-
-    The gate measures how far the eddy viscosity has moved since the Jacobian was last probed. Point the
-    hook at the next Reynolds rung's companion and that reference belongs to a different Reynolds
-    number, so the drift it reports is a viscosity difference rather than flow development. Resetting
-    makes the next call re-seed against the state it is actually handed.
-    """
-    from aquaflux.turbulence.coupled import _materialize_gate
-
-    seen: list[float] = []
-
-    def drift_factory(reference):
-        seen.append(float(reference))
-        return lambda state: jnp.abs(state - reference)
-
-    gate = _materialize_gate(drift_factory, materialize_drift=0.5, materialize_every=None)
-
-    assert gate(jnp.asarray(1.0)) is False  # seeds at 1.0; zero drift against its own reference
-    assert seen == [1.0]
-    assert gate(jnp.asarray(1.2)) is False  # still inside the threshold, reference unchanged
-    assert seen == [1.0]
-
-    gate.reset()
-    assert gate(jnp.asarray(1.2)) is False  # re-seeded at 1.2 rather than fired against the old 1.0
-    assert seen == [1.0, 1.2]
-    assert gate(jnp.asarray(2.0)) is True  # ...and it still fires on a genuine move from there
-
-
 class _ScalarRans(eqx.Module):
     """A one-line stand-in assembler whose Jacobian is a scalar, so a rebind is visible in one apply."""
 
@@ -1497,8 +1379,7 @@ class _ScalarRans(eqx.Module):
 class _RecordingPreconditioner:
     """A frozen inverse that records what each refresh was asked to build, and builds nothing.
 
-    Deliberately does NOT expose ``refresh_shift_in_place``: without a cheap branch every refresh is a
-    full re-materialize, which is the decision under test here.
+    It builds nothing, so what is under test is only when the hook asks for a rebuild, and of what.
     """
 
     def __init__(self) -> None:
@@ -1529,15 +1410,14 @@ def _stub_step(preconditioner, beta, diagonal):
 def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> None:
     """One refresh hook can serve a whole Reynolds ramp, which is what lets the ramp share one V-cycle.
 
-    A rung boundary is invisible to both gates -- one watches the shift strength, the other the eddy
-    viscosity's drift *within* one case -- so a hook whose gate had gone quiet would leave the next rung
+    Nothing else in the hook watches for a rung boundary, so a hook that had stopped rebuilding would leave the next rung
     solving against a V-cycle fitted to the previous rung's viscosity. ``rebind`` therefore does two
     things, and both are asserted: the Jacobian probe starts reporting the NEW companion's derivative,
-    and the next refresh is a full re-materialize whatever the gates make of it.
+    and the next refresh is a full re-materialize.
     """
 
     import numpy as np
-    from aquaflux.turbulence.coupled import _beta_tracking_refresh, _staleness_beta_gate
+    from aquaflux.turbulence.coupled import _beta_tracking_refresh
 
     state = jnp.linspace(1.0, 2.0, 5)
     diagonal = jnp.full(5, 2.0)
@@ -1548,13 +1428,10 @@ def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> Non
 
     pc = _RecordingPreconditioner()
     step = _stub_step(pc, beta=0.5, diagonal=diagonal)
-    # A gate that fires once (its initializing call) and then never again, which is the shipped bfs3d
-    # configuration: the cost trigger replaces the schedule, so nothing else may rebuild the V-cycle.
+    # The multigrid cadence: a full rebuild on the first call and after a rebind, none otherwise --
+    # between those only the dual-time loop's cost trigger rebuilds the V-cycle.
     refresh = _beta_tracking_refresh(
-        _ScalarRans(gain=jnp.asarray(3.0)),
-        stencil_reach=2,
-        probe=probe,
-        gate=_staleness_beta_gate(refresh_every=10**9, beta_rel_change=float("inf")),
+        _ScalarRans(gain=jnp.asarray(3.0)), stencil_reach=2, probe=probe, every_step=False
     )
 
     refresh(step, state)  # the initializing call
@@ -1562,16 +1439,36 @@ def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> Non
     assert np.allclose(pc.calls[0]["shift"], 0.5 * np.asarray(diagonal))
     assert np.allclose(pc.calls[0]["matvec"](tangent), 3.0 * tangent)
 
-    refresh(step, state)  # the gate has gone quiet, as it does for the rest of a rung
+    refresh(step, state)  # no rebuild between rebinds, as for the rest of a rung
     assert len(pc.calls) == 1
 
     refresh.rebind(_ScalarRans(gain=jnp.asarray(7.0)))
     refresh(step, state)
-    assert len(pc.calls) == 2  # forced, though the gate is still quiet
+    assert len(pc.calls) == 2  # forced by the rebind
     assert np.allclose(pc.calls[1]["matvec"](tangent), 7.0 * tangent)  # ...at the new companion
 
     refresh(step, state)  # and the force is spent: one rebuild per rebind, not a stuck flag
     assert len(pc.calls) == 2
+
+
+def test_the_factorization_cadence_rebuilds_on_every_step() -> None:
+    """``every_step=True`` is the complete-LU cadence: an exact factorization is cheap, and exact only
+    at the shift it was built at, so it is re-factored before every step rather than on a rebind."""
+    from aquaflux.turbulence.coupled import _beta_tracking_refresh
+
+    state = jnp.linspace(1.0, 2.0, 5)
+    diagonal = jnp.full(5, 2.0)
+    pc = _RecordingPreconditioner()
+    refresh = _beta_tracking_refresh(
+        _ScalarRans(gain=jnp.asarray(3.0)),
+        stencil_reach=2,
+        probe=CoupledJacobianProbe(plan=object(), structure=object()),
+        every_step=True,
+    )
+
+    for beta in (0.5, 0.25, 0.125):
+        refresh(_stub_step(pc, beta=beta, diagonal=diagonal), state)
+    assert [float(call["shift"][0]) for call in pc.calls] == [1.0, 0.5, 0.25]
 
 
 def test_the_default_refresh_policy_is_the_inert_one() -> None:

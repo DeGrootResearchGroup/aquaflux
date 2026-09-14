@@ -3,7 +3,6 @@ paths:
   - "aquaflux/solve/amg_preconditioner.py"
   - "aquaflux/solve/multigrid.py"
   - "aquaflux/solve/hierarchy_inverse.py"
-  - "aquaflux/solve/ilu_inverse.py"
 ---
 
 # Rules — `aquaflux/solve/` monolithic AMG and the traced multigrid
@@ -35,10 +34,9 @@ paths:
     `MaterializedJacobianPreconditioner` (binding, #287, 2026-09-11).** `FieldSplitAmgPreconditioner`
     (`solve-field-split.md`) needed the same coloured-probe-materialize + shift-diagonal + cached-Jacobian
     machinery without the monolithic-only state built around one `AmgVCycle` — the fixed-pattern
-    cell-major assembler (`_assembler_for`/`_cell_major`) and the host exact-solve jvp shell
-    (`residual_fn`/`_jvp`/`exact_solve`/`has_exact_solve`/`solves_exactly_on_host`), none of which a split
-    ever forms. Those stay on `MonolithicAmgPreconditioner`; `_materialize_jacobian`, `_shifted` and
-    `destroy` (and the `_jacobian_no_shift`/`_n_fields` cache) moved to the new base, which both classes
+    cell-major assembler (`_assembler_for`/`_cell_major`), which a split never forms. Those stay on `MonolithicAmgPreconditioner`; `_materialize_jacobian`, `_shifted` and
+    `destroy` moved to the new base (the cached unshifted Jacobian that went with them was deleted with the
+    shift-only refresh, #371), which both classes
     now subclass directly — see `solve-direct-preconditioners.md`'s `HostFactors` entry for why this
     matters (a base reading anything off `self.factors` beyond `n_dofs`+`apply` is a requirement on every
     subclass, and the pre-extraction shape of this exact pair is the worked example).
@@ -94,15 +92,10 @@ paths:
     coarsening choice (selective vs smoothed-aggregation) is a minor knob by comparison — but do not read that
     as covering `pc_gamg_agg_nsmooths`: plain-vs-smoothed *prolongator* smoothing is measured below as the
     largest preconditioner win found on this case. (The whole-march wall figure that used to sit here
-    predated several march-wide wins and is deleted.) An **experimental, opt-in host-exact-solve forward path**
-    (`coupled_amg_continuation(host_exact_forward_solve=True)`) is a far larger per-step lever — a traced KSP
-    whose shell matvec calls the eager JAX jvp (true Newton), 1 traced GMRES iteration vs the JAX-side
-    lineax path's ~90 on the identical system — but it currently under-converges the *march* (the lineax
-    path over-solves each step to ~machine zero and the pseudo-transient globalization leans on those
-    near-exact steps; the traced honest-tolerance step descends slower and overruns the step budget), so it
-    stays off by default. The follow-up to make it the default is a **β-tracking GAMG refresh** (the AMG
-    analogue of `lu_beta_tracking_refresh`), so the frozen V-cycle matches the ramping β and the traced
-    solve stays accurate at low β.
+    predated several march-wide wins and is deleted.) A host-exact-solve forward path (`host_exact_forward_solve`: PETSc GMRES driving the V-cycle over a
+    shell of the exact Jacobian-vector product) was built, never selected by any case or test, and
+    **DELETED 2026-09-13 (#371)**. The reason once recorded for its slower march — the default path
+    over-solving each step to machine zero — was itself stale: that over-solve was removed 2026-07-28.
   - **`coarse_eq_limit` — grow the coarsest-grid direct LU (BUILT).** GAMG's default coarsens to a tiny
     (~50-equation) coarse grid, whose direct LU captures only the crudest global mode; the indefinite
     saddle's wall is exactly that global pressure coupling. `build_amg_vcycle(coarse_eq_limit=K)` /
@@ -198,7 +191,7 @@ paths:
     |---|---|---|
     | PETSc **ILU(1)** | **fails** (300 matvecs, true 3.36) | converges — 74 steps, 321 cycles, **628 s** |
     | PETSc **ILU(0)** | fails | fails (α 0.000, NaN by step 4) |
-    | our **ILU(0)** (`hostilu`) | fails | fails (α 0.000, inf by step 3) |
+    | our **ILU(0)** (`hostilu`, deleted 2026-09-13, #371) | fails | fails (α 0.000, inf by step 3) |
     | **SIMPLE-smoothed** | **converges — 71 steps, 395 cycles, 550 s** | converges — 71, 408, 799 s |
 
     **SIMPLE is REACH-INSENSITIVE, and that is the load-bearing observation.** Between reach 3 and
@@ -223,7 +216,7 @@ paths:
     arm is not at its best here — `PITZ_FLOW_SWEEPS` and the threshold are unexplored.
 
     **✅ CONFIRMED ON A SECOND, INDEPENDENT ZERO-FILL IMPLEMENTATION (2026-08-16).**
-    `IluSmoothedInverse` is this package's own hierarchy smoothed by its own `Ilu0`: different
+    `IluSmoothedInverse` (deleted with `Ilu0` 2026-09-13, #371) was this package's own hierarchy smoothed by its own `Ilu0`: different
     coarsening, different factorization code, different language even. Run as the leading inverse on
     `pitzDaily` it fails identically to PETSc's zero-fill smoother — step 1 alpha 0.000 with the
     residual above its own starting value, step 2 at the shift ceiling, **non-finite by step 3** —
@@ -232,9 +225,8 @@ paths:
     **🛑 BUT ITS CONCLUSION — "the mechanism is the FILL" — WAS WRONG, AND THE ERROR IS INSTRUCTIVE
     (corrected 2026-08-17).** The two implementations were NOT "differing only in fill". They also
     **shared the elimination ordering**: at the time both took it from `equilibrate_cell_major` --
-    cell-major over the mesh's own cell order. (The host V-cycle now takes an injected ordering through
-    `equilibrate_ordered` and defaults to that same one, so the confound is a choice rather than a
-    given.) Fill and order were confounded, and the confound is the one that
+    cell-major over the mesh's own cell order. (The host V-cycle later took an injected ordering; it and the
+    ordering strategies were deleted 2026-09-13, #371.) Fill and order were confounded, and the confound is the one that
     mattered — **on this block the ordering is the larger lever, and the shipped cell order is the
     thing that fails.** Two independent implementations agreeing is evidence about a *shared* cause;
     it does not identify which shared thing is the cause, and here the argument named the wrong one.
@@ -243,8 +235,8 @@ paths:
     **⚠️ THEREFORE THE CONSEQUENCE DRAWN FROM IT IS ALSO WITHDRAWN.** It said `Ilu0` is zero-fill by
     construction with no fill parameter, so `IluSmoothedInverse` "cannot serve a case that needs one" —
     and offered a level-of-fill factorization as the specifiable gap. `pitzDaily` is not shown to need
-    fill. It is shown to need a different cell order, which the host V-cycle now takes
-    (`aquaflux/solve/ordering.py`). A level-of-fill `Ilu0` may still be wanted some day; this case is
+    fill. It is shown to need a different cell order, which the host V-cycle then took
+    (through `aquaflux/solve/ordering.py`, since deleted with it, #371). A level-of-fill `Ilu0` may still be wanted some day; this case is
     no longer the evidence for it.
 
     **⚠️ Three mechanisms were refuted on the way, each of which had a plausible story:**
@@ -351,7 +343,7 @@ the shipped cell order*) and
 the **converged root** (`R` 5.095e-06; marched with the *SIMPLE-smoothed* leading inverse at reach 3,
 which is reach-insensitive — the state is a root of the exact residual either way, and it is re-probed
 here at reach 5 because an ILU inherits the stored pattern).
-Harness: `validation/pitzdaily_openfoam/flow_block_ordering.py`.
+Harness: `validation/pitzdaily_openfoam/flow_block_ordering.py` (deleted 2026-09-13 with `Ilu0`, #371 — in git history).
 
 ⚠️ **The converged root is a GITIGNORED run artifact, not a checked-in fixture.** It was
 `validation/pitzdaily_openfoam/checkpoints/state-00071.npz`, written by `StateCheckpointer` during a
@@ -398,7 +390,7 @@ GMRES applications; **FAIL** = stalled above 1e-6 true:
 - **⚠️ THE FIRST CENSUS WAS AN ARTIFACT — the harness read the diagonal of the equilibrated *operator*
   rather than the *factor*, and the symmetric square-root equilibration forces that to magnitude
   exactly 1.** It reported "zero negatives, min |pivot| 1.00" for all twelve orderings at all six
-  points, including arms that diverge by 1e+59. Fixed by exposing `Ilu0.pivots` (the stored diagonal
+  points, including arms that diverge by 1e+59. Fixed by exposing `Ilu0.pivots` (since deleted with `Ilu0`, #371) (the stored diagonal
   *is* the pivot there — unlike PETSc, which stores its reciprocal); re-runnable with
   `FLOW_BLOCK_CENSUS_ONLY=1`. The verdicts above never touched it.
 
@@ -445,7 +437,7 @@ application). This does **not** contradict that literature: what makes pressure-
 eliminating the velocities **fills** the pressure block with the Schur complement, and a zero-fill
 factorization discards precisely that fill, leaving the pressure block to be eliminated against its own
 bare, near-singular Rhie–Chow diagonal. Pressure-last is an ordering for a factorization that KEEPS
-fill. Do not port it to `Ilu0`; if a level-of-fill `Ilu0` is ever built, re-ask it there.
+fill. (`Ilu0` was deleted 2026-09-13, #371; if a level-of-fill factorization is ever built, re-ask it there.)
 
 **Two well-motivated leads measured out, so they need not be re-tried:**
 - **HILUCSI static deferring** (Chen, Ghai & Jiao, arXiv:1911.10139 — symmetrically permute the
@@ -683,65 +675,17 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     cycles** and elsewhere as **883 "raw" cycles**, with "raw" nowhere defined. Neither is recoverable from
     source. Treat the *ratios* as the finding and the absolute total as unestablished — re-measure with the
     counter's definition stated in the same breath if a cycle total ever becomes decisive.
-  - **β-diagonal split — track β without re-materializing the Jacobian (BUILT).** The operator is
-    `J(φ) + β d`, and the shift `β d` touches only the **diagonal**, so a β-tracking refresh does **not**
-    need the coloured-probe materialization of `J` (the dominant refresh cost — hundreds of jvps).
-    `MonolithicAmgPreconditioner.refresh_shift_in_place(shift)` reuses the **cached** Jacobian (stored at
-    the last `build` / `refresh_in_place`), re-adds the new `β d` diagonal (`O(nnz)` numpy) and re-factors.
-    Measured on the `bfs3d` hard state: **full `refresh_in_place` 36 s vs shift-only 18 s (2×)** — the 18 s
-    saved is the materialize, the remaining 18 s the equilibrate + GAMG refactor. The frozen `J` does not
-    track *state* drift, so the full materialize is **gated** (`_materialize_gate`, mirroring
-    `_staleness_beta_gate`): `amg_beta_tracking_refresh(materialize_drift=τ, materialize_every=K)` does the
-    cheap shift-only refresh in between and a full materialize when the ν_t drift since the last one exceeds
-    `τ` OR after `K` steps (both `None` = full every refresh, unchanged). Prefer `materialize_drift` (the
-    honest state-staleness signal via `eddy_viscosity_drift`) with a large `K` as the safety cap — the fixed
-    step count was the "fixed cadence" antipattern. **Measured caveat: a *fresh* Jacobian is worth its cost
-    on a fast-developing flow** — driving the materialize *more* often (via a tight `τ`) cut the march's
-    Krylov cycles ~23 % (fewer/cheaper steps) despite more refresh, so under-materializing was costing more
-    in solve than the materialize saves; the lever is a *cheaper* materialize (batched probe + gather
-    de-compression above), not a rarer one. Forward-march only. Pinned by `test_amg_refresh_shift_in_place_*`
-    (`test_amg_preconditioner.py`) and `test_materialize_gate_*` / `test_batched_probing_*` /
-    `test_gather_de_compression_*`.
-    - **⚠️ THE TWO GATES ARE COMBINED, NOT NESTED — the β floor used to make the drift trigger UNREACHABLE
-      (fixed; `_refresh_branch`).** `_beta_tracking_refresh` asked the β gate first and the materialize gate
-      only *inside* it. With a PC-only `beta_floor` the gate's input is `max(β, floor)`, so once the march
-      drops below the floor that input is **pinned** and the β gate answers "no change" on every step
-      forever — taking the drift gate down with it. That is exactly the low-shift tail where the flow
-      develops fastest. Measured on the 3-rung `bfs3d` cold march (56 steps, `beta_floor = 0.05`):
-
-      | | steps | refresh declined | mean cycles |
-      |---|---|---|---|
-      | β ≥ floor | 34 | 12 % | 6.9 |
-      | β < floor | 22 | **91 %** | 7.5 |
-
-      13 steps had >5 % ν_t drift *and* no refresh, and they carried **189 of the march's 399 Krylov
-      cycles (47 %)** — steps 29–31 ran 24/23/34 cycles on a V-cycle nothing was allowed to refresh, and
-      the step after them blew up into a 3-attempt β-escalation retry costing 380 s. The decision is now
-      the total function `_refresh_branch(stale_state, moved_beta, split)`: **state drift ⇒ `full`**
-      whatever β says, β move alone ⇒ `shift`, neither ⇒ `none`. Note the shift branch is real work below
-      the floor too — the shift is `pc_beta · d(state)` and the per-cell `d` tracks the state even where
-      `pc_beta` is clamped, so the old comment's "would rebuild an identical V-cycle" was only true of the
-      β factor. **Consequence to know:** the materialize gate is now consulted every step rather than only
-      on refresh steps, so its `materialize_every` cap counts **steps**, not refreshes.
-      **MEASURED END-TO-END on the 3-rung `bfs3d` cold march, and the trade is strongly favourable:**
-
-      | | before | after |
-      |---|---|---|
-      | outer steps | 69 | **61** |
-      | **Krylov cycles** | **480** | **348 (−27 %)** |
-      | starved steps (>5 % drift, no refresh) | 15, holding 201 cycles (42 %) | **0** |
-      | sub-floor steps declining a refresh | 89 % | **19 %** |
-      | full refreshes | 32 @ 23.1 s | 48 @ **17.3 s** |
-      | refresh total | 803 s (15.7 % of wall) | 865 s (19.1 %) |
-      | β-escalation retry steps | 5, **1745 s** | 2, **655 s** |
-      | final ‖R‖ / mid-span `x_r/h` | 2.65e-6 / 8.36 | 2.42e-6 / **8.36** |
-
-      Read the refresh row correctly: the preconditioner now costs **more** in absolute terms (865 s vs
-      803 s) because it refreshes 50 % more often — that is the trade working, not a regression. It buys
-      132 fewer Krylov cycles and, far larger, removes three of the five retry cascades (−1090 s), which
-      were the single biggest line item in the march. The converged answer is **unchanged** (`x_r/h` 8.36
-      mid-span against OpenFOAM's 7.24, exactly as before), which is the constraint that matters: this is
-      a path change, not a solution change.
+  - **β-diagonal split (`refresh_shift_in_place`, gated by `_materialize_gate`) — DELETED 2026-09-13
+    (#371)** with the scheduled refresh cadence; both validation cases already ran the cost-triggered rule
+    with it switched off. It re-added `β d` to a cached Jacobian at half a full refresh's cost (36 s vs
+    18 s on the `bfs3d` hard state). **The measured lesson survives it: don't under-materialize** — a
+    fresher Jacobian cut a march's Krylov cycles ~23 % despite more refresh work, so the lever is a
+    *cheaper* materialize (batched probe, gather de-compression), not a rarer one.
+    - **Trap the deleted gates taught, kept because it applies to any future refresh condition:** a
+      preconditioner-only `beta_floor` pins a β gate's input below the floor, so a condition nested
+      inside a β gate is unreachable in exactly the low-shift tail. Measured on the 3-rung `bfs3d` cold
+      march: 91 % of sub-floor steps refreshed nothing while ν_t drifted ~20 % per step, those steps
+      carried 47 % of the Krylov cycles, and un-nesting the gates cut the march 480 → 348 cycles.
     - **Where a refresh's time now goes (whole-run aggregate, same march): probe 632 s, refactor 195 s,
       assemble 28 s, other 12 s — the probe is 73 %.** The non-probe tail is close to floor, so any
       further work on refresh cost has to attack the coloured probe itself (amortizing colours across
@@ -1093,8 +1037,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     57, 60, 61, **including α 0.000 at step 61**) and recovers from every one, α returning to 1.000.
   - **A constraint-free α collapse appeared, and nothing reacts to it.** Step 68: α 0.031 with **no `L`
     flag** and 15 cycles (the run's highest) — a poor *direction*, not a clipped step. α 0.031 is above
-    `retry.on_alpha` 0.01, no `RefreshTrigger` reads α or `binding_limit`, and this bundle sets
-    `beta_rel_change=inf`, so no refresh fires. It cost a few steps here, not the run, but it is the
+    `retry.on_alpha` 0.01, no `RefreshTrigger` reads α or `binding_limit`, and the β-tracking hook re-fits only on a rebind, so no refresh fires. It cost a few steps here, not the run, but it is the
     first live evidence that the refresh gap is a real cost.
   - **⚠️ ONE RUN EACH, and one instrumentation difference:** the archived equilibrated arm ran with
     `BFS3D_DUMP_STEP_LIMIT=0.05/12`, the converged arm with the dumps off. The dump wrapper returns the
@@ -1388,7 +1331,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   opened with `march_beta, _, description = STATES[name]` — a **positional** unpack of a record that has
   since grown to five fields — so every one of them raised `ValueError: too many values to unpack` before
   reaching its first line of work: `trailing_hierarchy_sweep.py`, `cell_block_scaling.py`,
-  `trailing_block_conditioning.py`, `turbulence_smoother_sweep.py`, `zero_pattern_pivots.py` and
+  `trailing_block_conditioning.py`, `turbulence_smoother_sweep.py` (since deleted, #371), `zero_pattern_pivots.py` and
   `field_coupling.py`. All six now read the fields **by name**, which is what makes them survive the next
   field. **The lesson is about the keep-the-harness rule rather than about these six**: a harness kept in
   the repository is only re-adjudicable if it still *runs*, and nothing in the test suite exercises these,
@@ -1952,7 +1895,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     re-committed two costs the shared base was written to remove (eager per-field transposes; a fresh
     closure per apply). Its measurements never transferred to the nodal inverse in any case — a
     per-field pair is a weaker object than one block-aware hierarchy — so the `nativeN` arm in
-    `turbulence_smoother_sweep.py` went with it, leaving `nodal[N][cM]`.
+    `turbulence_smoother_sweep.py` went with it, leaving `nodal[N][cM]` (the whole harness was deleted
+    2026-09-13, #371).
   - `JacobiSmoothedInverse` (`solve/field_split.py`, over the shared
     `solve/hierarchy_inverse.HierarchyBlockInverse` base), both transposable in
     closed form and fixed linear operators, so adjoint-legal. **⚠️ "Neither is wired into production" was
@@ -2094,7 +2038,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   traced level's arrays — the host-smoothed inverse factorizing an operator, a march refresh re-deriving
   a hierarchy at a new operator, a SIMPLE-smoothed level forming its Schur pieces — needs the exact same
   `indptr`/`indices`/`data` → `scipy.sparse.csr_matrix` and `p_*` → prolongation reconstructions, and
-  four call sites (`ilu_inverse.py`, `saddle_multigrid.py`'s `derive_extras`, `SmoothedHierarchy.refit`,
+  four call sites (`ilu_inverse.py` — since deleted, #371 — `saddle_multigrid.py`'s `derive_extras`, `SmoothedHierarchy.refit`,
   `refresh_air_hierarchy`) each open-coded them. `_CsrOperator.to_scipy()` is the exact inverse of the
   existing `from_scipy`; `prolongation_scipy()` is level-kind-specific because `_SparseLevel` stores a
   COO triple (`p_frow`/`p_ccol`/`p_val`, one prolongation doubling as the transposed restriction) while
@@ -2203,7 +2147,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     for the coupled flow block** (`_coupled_shift_policy`: the convection velocity AMG), which is frozen
     at the reference state so the value-dependence costs no refresh; it is a **no-op on
     the low-aspect-ratio pitzDaily case**, and the payoff is the future wall-resolved / skewed regime.
-    It does **not** apply to the reduction-based `air`/`lsc` blocks (already strength-based), and the
+    It does **not** apply to the reduction-based `air` block (already strength-based), and the
     refreshed scalar k/ω AMGs stay `θ=0` to keep their refresh cache-hit — a value-refresh (à la
     `refresh_air_hierarchy`) to let them use SoC too is the tracked follow-up.
 - **⚠️⚠️ THE lAIR RESTRICTION WALKED THE OPERATOR'S FULL SPARSITY PATTERN, NOT THE STRENGTH GRAPH —

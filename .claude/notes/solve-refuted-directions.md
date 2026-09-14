@@ -282,7 +282,7 @@
       **refresh cadence** (`refresh_every=8`, `materialize_every=4`, `beta_rel_change=0.25` are lax
       around the hard steps), consistent with the earlier gate fix, which bought 132 fewer cycles and
       removed three of five retry cascades by refreshing ~50 % more often — the same mechanism found
-      from the other end.
+      from the other end. (Those scheduled knobs are deleted, #371.)
       **✅ THE COST TRIGGER IS BUILT — `amg_beta_tracking_refresh(refresh_on_cycles=N)`.** A solve that
       reaches `N` restart cycles refreshes the preconditioner **at the iterate it was handed** and the
       inner loop carries on, rather than aborting the step and escalating β (which discards both the
@@ -358,7 +358,7 @@
       See *"per-column probing reach"* under `sparse_jacobian.py` above before reaching for it. So this
       arm's "there is no cheap way to shrink the probe" stands for the *pattern*, and the column
       variant that looked like the exception has not yet been shown safe on this case.
-      **A trap: the cheap `refresh_shift_in_place` branch does NOT help within a step.** The shift is
+      **A trap (the branch is deleted, #371): the cheap `refresh_shift_in_place` branch did NOT help within a step.** The shift is
       formed once per step at the reference state and held fixed across the inner loop, so what drifts
       inside a step is `J(p)`. The shift-only branch only helps *across* steps, where β moves.
       **Untested but cheap and worth doing: whether staleness also drives the GLOBALIZATION cost.** A
@@ -394,7 +394,8 @@
 
 ## Incomplete-LU preconditioning of the pitzDaily flow block — CLOSED as a direction (2026-08-22)
 
-`PITZ_FLOW_INVERSE=petsc` (host GAMG smoothed by PETSc's incomplete factorization) was
+`PITZ_FLOW_INVERSE=petsc` (host GAMG smoothed by PETSc's incomplete factorization; the arm was removed
+2026-09-13, #371) was
 `pitzdaily_openfoam`'s shipped leading inverse until this date, and it stopped marching the case:
 collapse at the first step of the second Reynolds rung, `alpha` 0, `beta` escalating through the whole
 ladder, residual to `inf`. Reproduced three times including on a tree with no local change. The
@@ -406,8 +407,8 @@ than on this failure: an incomplete factorization's behaviour on this saddle dep
 **elimination order** and the **fill**, neither predictable in advance — this same case is on record
 going from *amplifying* a residual 5.5x per stationary sweep to contracting it on nothing but a
 reordering. A SIMPLE-smoothed hierarchy never eliminates the matrix, so it has neither sensitivity.
-`petsc` and `hostilu` stay reachable and their recorded measurements stand as measurements; what is
-closed is either of them as a default, and the bisect that would say *when* the collapse entered.
+`petsc` and `hostilu` were both removed 2026-09-13 (#371); their recorded measurements stand as
+measurements. What was closed then was either of them as a default, and the bisect that would say *when* the collapse entered.
 ⚠️ **Consequence for anyone reading an old number: a `petsc`-bundle figure for this case is not
 reproducible on the current tree.** Full detail, including what was ruled out first (the day's four
 merges are inert — `|R|` identical to twelve digits at a fixed state), in `.claude/rules/validation.md`
@@ -494,7 +495,7 @@ load-bearing status of the flow block itself is in `solve-flow-block.md`.
   Krylov cycles (6→53 at the adjoint operator, 5→40 at the march's own shift) at the case's real
   converged root. This is also the reachability-scale answer to the "is a block-SIMPLE
   preconditioner worth pursuing on the flow block at all" question `field_split_probe.py`'s
-  `block_simple_arms` docstring poses: no. See
+  since-removed `block_simple_arms` docstring posed: no. See
   `solve-flow-block-log.md` § "MSIMPLE swapped in for the SHIPPED leading inverse, trailing held fixed".
   ⚠️ **RE-ADJUDICATED 2026-08-20 after a conformance fix, and the verdict SURVIVES — narrowed, not
   overturned.** The arm above was not MSIMPLER: `schur_scaling="msimpler"` implemented MSIMPLE, with the
@@ -563,6 +564,80 @@ load-bearing status of the flow block itself is in `solve-flow-block.md`.
   a reversal of this measurement. The full current verdict is in `solve-flow-block.md` itself, not
   archived here, because it is the live default, not a dead idea. Read it before re-proposing the traced
   block as a *speed* win — that specific claim is still refuted.
+
+- **The stabilized least-squares-commutator Schur (`schur_scaling="lsc"`, `StabilizedLscSchur`) — DELETED
+  2026-09-13 (#371), dominated.** The algebraic, nonuniform-mesh stabilized form of Elman, Howle, Shadid,
+  Silvester & Tuminaro (2007), the right variant for a Rhie–Chow collocated discretization, with the
+  viscosity cancelled. On the coupled solve it lost to msimple 96 vs 13 cycles / 526 vs 38.9 s on one
+  shifted solve at a developed pitzDaily state (block-diagonal `coupled_continuation`, `v_cycles=4`; no
+  shift recorded) and ~2.9x on the coupled channel, at identical residual trajectories. Its one claimed
+  win, 9 vs 15 GMRES on an *isolated* flow block at Re=1e4, named no mesh or configuration, and nothing
+  in validation or any test selected it. The trap it taught survives: under a block-diagonal coupled
+  preconditioner plus a pseudo-transient shift, a better flow Schur buys no coupled cycles. Full
+  numbers: `solve-globalization-log.md`, the MSIMPLE root-cause entry.
+
+## Coupled preconditioner options deleted as dominated (#371, 2026-09-13)
+
+Deleted in the audit ahead of the preconditioner spec, so the spec would not write them into a case
+data model. Each had nothing in `validation/` or any test selecting it.
+
+- **`coupled_lu_refreshing_continuation` — DELETED, dominated by `lu_beta_tracking_refresh`.** A
+  `RefreshPolicy(builder=...)` that re-factored the complete LU in place at a FIXED `lu_beta`. On a
+  dual-time march that is exactly the shift mismatch the tracking hook removes: an LU frozen at
+  β = 0.05 needs 25 / 111 / 217 / 474 GMRES iterations at β = 0.1 / 0.5 / 1 / 2 against 1 matched, and
+  NaN'd on a cold pitzDaily ramp (`solve-direct-preconditioners.md`). Its only remaining regime — a
+  single-step SER march with an LU and a drift trigger — was never selected or measured.
+- **`host_exact_forward_solve` — DELETED, never selected.** PETSc GMRES driving the monolithic V-cycle
+  over a shell of the exact Jacobian-vector product, instead of the JAX-side Krylov with the V-cycle as
+  a per-matvec callback: 1 host iteration against ~90 on the identical system (no configuration
+  recorded), but it marched slower per step and refused `field_split`, which both flagship cases run.
+  The reason recorded for the slower march (the default path over-solving to machine zero) was stale.
+  With it went `AmgVCycle.solve_exact`, `MonolithicAmgPreconditioner.exact_solve`, and every
+  `has_exact_solve` / `solves_exactly_on_host` branch.
+
+- **The scheduled refresh cadence on `amg_beta_tracking_refresh` — DELETED, dominated by the cost
+  trigger.** `beta_rel_change` / `refresh_every` (a β-mismatch gate with a step-count cap) and
+  `materialize_drift` / `materialize_every` (an eddy-viscosity-drift gate choosing between a full
+  re-materialize and a shift-only refit, `refresh_shift_in_place`). Measured on the 3D backward-facing
+  step, monolithic V-cycle: scheduled 3632 s against 3140 s for the cost-triggered rule (−14 %) at
+  unchanged Krylov cycles (290 vs 293), refresh time 758 s against 310 s; never measured under the field
+  split. Both validation cases ran with every gate switched off. The hook now re-fits on its first call,
+  after `rebind`, and mid-step through `refresh_at`; the complete-LU hook still re-factors every step.
+  **An observation the deleted `BFS3D_REFRESH_ON_BETA` comment carried, kept here because it outlives
+  the knob:** with the β gate off, a β escalation's redo is solved against a V-cycle fitted for a β up to
+  4x smaller. On three converging `bfs3d` marches an escalated step at β = 0.2341 on a stale V-cycle
+  returned α = 0 at 2 cycles, and the next step, after the cost trigger forced a rebuild, took α = 1 at
+  β = 0.9364; every escalated step whose V-cycle *was* rebuilt came back with α ≥ 0.595. So "the retry
+  ladder is futile" and "the ladder was never given a matched preconditioner" were never separated.
+- **The field split's PETSc blocks — DELETED, and with them `leading_options` / `trailing_options` /
+  `trailing_smoother_sweeps` and the `build_amg_vcycle` fallback.** A split now requires both
+  `leading_inverse` and `trailing_inverse`. Neither flagship case selected a PETSc split block. On the
+  trailing half the traced `jacobi` inverse beat the host GAMG V-cycle in a controlled `bfs3d` pair,
+  2124 s / 67 steps against 2893 s / 72 to the same `x_r/h` 8.36 (`zerogradient` k wall, 1e-08
+  positivity floor; `solve-field-split.md`). On the leading half `petsc` stopped marching pitzDaily
+  (§ "Incomplete-LU preconditioning of the pitzDaily flow block") and sat at parity with `hostilu` on
+  `bfs3d`; both cases ship `simplesmooth`. The monolithic `AmgVCycle` is unaffected.
+- **`flow_first=False` (the turbulence-first split, `_TrailingFirstFieldSplit`) — DELETED, never
+  selected.** It tied flow-first on the forward operator (4 cycles each) and lost at the converged
+  zero-shift operator, 13 against 11 (PETSc ILU(0) blocks on both halves, `bfs3d`;
+  `solve-field-split.md`).
+- **Harnesses deleted with them** (recover from git history): `bfs3d_openfoam/turbulence_smoother_sweep.py`
+  (every arm a PETSc leading block), `bfs3d_openfoam/rung_hierarchy_reuse.py` (a PETSc leading block; its
+  question was GAMG interpolation reuse across rungs), and every split arm of
+  `bfs3d_openfoam/field_split_probe.py`, which keeps its monolithic arms and the state/solve machinery
+  other harnesses import. Records citing those arms' numbers are cite-only.
+- **The ILU(0) kernel (`Ilu0`, `_ilu0.pyx`, `COMPILED`) and `IluSmoothedInverse` / `ilu_smoothed_inverse`
+  (the `hostilu` arm) — DELETED, and with them `setup.py`, `tools/build_ext.sh`, the Cython build
+  requirement and `run_case.sh`'s kernel warning.** The kernel's only consumer was the `hostilu` leading
+  inverse, which neither case ships. On `bfs3d` it was the *faster* arm (1403 s / 208 cycles against
+  `simplesmooth`'s 1782 s / 349, same `x_r/h` 8.3611) and was dropped as the default for its sensitivity
+  to elimination order and its lack of a route to a GPU; on pitzDaily the zero-fill smoother amplified
+  under the mesh's own cell order and marched only under a reverse-Cuthill-McKee one. Harnesses deleted
+  with it (in git history): `pitzdaily_openfoam/lu_vs_hostilu.py`, `pitzdaily_openfoam/flow_block_ordering.py`.
+  The elimination-ordering strategies in `solve/ordering.py` (`CellMajor` over `NaturalCells` /
+  `ReverseCuthillMcKeeCells` / `AscendingRowLengthCells`, via `equilibrate_ordered`) served only the
+  zero-fill factorization and went in a follow-up commit; `cell_major_permutation` moved back into
+  `frozen_operator.py`.
 
 ## Globalization (forward step, continuation, line search) — closed investigations
 
