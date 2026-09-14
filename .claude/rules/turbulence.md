@@ -301,8 +301,17 @@ Many entries below are dated history written against the old API. Read them thro
       same `_refuse` as `solve_coupled`), where `method="air"` beside a twolevel step used to run twolevel
       in silence. `_refuse_unknown_flow_block_options` is **deleted**: every flow-block option now
       arrives from a spec whose fields are pinned to `BlockPreconditioner.build`, so it could not fire.
-    - **Not yet run:** a dry run of either flagship case to its first step, to compare the banners line
-      for line against the pre-migration drivers. Nothing in any test tier reaches those drivers.
+    - **Both flagship drivers were dry-run to their first step against the pre-migration drivers
+      (2026-09-14), and match line for line.** Control: this branch's own commit `4eea966` (S3b), whose
+      drivers still called the deleted builders — not an archived log, which is another branch's run.
+      Migrated: `c4d9cb1`. Each case run through `run_case.sh` on its shipped defaults, one at a time,
+      stopped at step 2. **pitzDaily** (12225 cells, ramp 16x1, momentum-only, damping 3, field split
+      `simplesmooth`/`jacobi_smoothed`): banner identical; step 1 `G` 3.596e-02 → 6.796e-03 → 1.411e-04
+      at 1+1 cycles, `alpha` 1.000, `|R0|` 2.3038e-02, `R` 3.331e-02, `pc full 1.2s` in both.
+      **bfs3d** (23040 cells, same bundle): step 1 `G` 1.911e-01 → 4.840e-02 → 9.770e-04 at 1+1 cycles,
+      `|R0|` 9.9215e-02, `R` 1.511e-01, per-field residuals and the SIMPLE-smoothed hierarchy prints
+      identical. Only wall clocks differ (35/36 s and 76/74 s). One step is what this establishes — the
+      refresh hook, the ramp's per-station `rebind` and the target station are not reached by it.
     Facts to hold while finishing it:
     - **March defaults live once, on `coupled_step`'s signature.** A session binds its `**march` against
       that signature (`_march_keywords`), so an unknown keyword is a `TypeError` and no default is
