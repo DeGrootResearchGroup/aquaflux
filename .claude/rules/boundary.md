@@ -55,6 +55,19 @@ balance holds, and high-`h` convective → Dirichlet. The closures are consumed 
 `ResidualAssembler` both as the flux's boundary value and (leading-order) as the gradient
 reconstruction's boundary input.
 
+- **`BoundaryCondition.requires_coefficient() -> bool` (binding, #360), the same self-describing
+  shape as `FaceFluxOperator.requires()`.** Default `False`; `Neumann` and `Convective` override to
+  `True` because they read the assembler's diffusion coefficient as `gamma_owner` in their closed
+  forms (`Dirichlet`/`DirichletField`/`ZeroGradient` never touch it). `ResidualAssembler.build`
+  checks this over every closure in the `boundary` set and, if any is `True`, adds the assembler's
+  `coefficient` to what it requires the `PropertyModel` to supply — the same build-time
+  `properties.require(...)` path `requires()` already drives for flux/source operators. Before this,
+  a mistyped `coefficient=` on the assembler built cleanly and read `Gamma = 0` from the fallback,
+  which is a divide inside both closures' closed forms: the residual came back NaN/inf with no
+  message naming the cause, discoverable only by evaluating it. The fallback itself is unchanged and
+  stays legal — a pure-advection problem with only `Dirichlet`/`ZeroGradient` closures still reads
+  the zero it always did, since neither declares `requires_coefficient()`.
+
 ## Binding decisions
 - **Every prescribed boundary number is a floating ARRAY LEAF, converted at construction (binding,
   #363).** `Dirichlet.value`, `Neumann.flux`, `Convective.h`/`t_inf` and the flow side's

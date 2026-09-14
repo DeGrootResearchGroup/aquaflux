@@ -76,3 +76,13 @@ def test_convective_high_biot_approaches_dirichlet() -> None:
     """As h -> infinity the convective closure drives the face value to the ambient value."""
     phi_ip = float(Convective(h=1e6, t_inf=0.25).face_value(PHI, GRAD, D_ORTHO, N, GAMMA, FC)[0])
     assert abs(phi_ip - 0.25) < 1e-4
+
+
+def test_only_the_two_flux_type_closures_require_the_coefficient() -> None:
+    """`ResidualAssembler.build` (#360) asks every closure this to decide whether it must require
+    `coefficient` from the property model -- only Neumann and Convective read Gamma at all."""
+    assert not Dirichlet(value=1.0).requires_coefficient()
+    assert not DirichletField(field_fn=lambda x: x[..., 0]).requires_coefficient()
+    assert not ZeroGradient().requires_coefficient()
+    assert Neumann(flux=1.0).requires_coefficient()
+    assert Convective(h=1.0, t_inf=1.0).requires_coefficient()
