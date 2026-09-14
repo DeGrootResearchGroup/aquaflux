@@ -245,11 +245,11 @@ above is settable where you already are:
 
 ```python
 from aquaflux.flow import momentum_continuation
-from aquaflux.solve import ImplicitNewtonSolver
+from aquaflux.solve import Globalization, ImplicitNewtonSolver
 
 continuation = momentum_continuation(
     assembler,
-    beta0=2.0,                  # continuation's own argument
+    globalization=Globalization(beta0=2.0),  # continuation's own argument
     velocity="convection",      # from here on, the preconditioner's
     schur_scaling="msimple",
     composition="simpler",

@@ -961,7 +961,7 @@
     and it does make each late solve cheaper, but end-to-end the cheaper late solves were reported to
     cancel the extra Newton steps. *(configuration not recorded — case, state, preconditioner and norm
     all unnamed — so treat "wash" as the reason it is off by default, not as a measured fact.)* Wired
-    through `coupled_continuation(beta_floor=…)` for further evaluation.
+    through the shared `Globalization` for further evaluation (it was `coupled_continuation(beta_floor=…)` when this was written; there is no such keyword now — see `solve-globalization.md`).
     - **The default coupled residual measure is the row-equilibrated `RowScaledNorm`
       (`coupled_scaled_norm`), NOT the Euclidean ‖R‖.** The Euclidean coupled residual is `ω`-dominated
       and *mis-ranks* states (a converged field scores worse than a badly wrong one — the warning above);

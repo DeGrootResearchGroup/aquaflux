@@ -60,13 +60,13 @@ import jax
 import jax.numpy as jnp
 
 from aquaflux.solve import (
-    DivergenceGuard,
+    DEFAULT_GLOBALIZATION,
+    Globalization,
     ImplicitNewtonSolver,
     LocalCourantBasis,
     PseudoTransientStep,
     ShiftBasis,
     ShiftTerm,
-    SwitchedEvolutionRelaxation,
     VelocityShiftParts,
 )
 
@@ -192,11 +192,7 @@ class MomentumShiftPolicy(eqx.Module):
 def momentum_continuation(
     assembler: MomentumContinuity,
     *,
-    beta0: float = 2.0,
-    exponent: float = 1.0,
-    max_escalations: int = 6,
-    escalation_factor: float = 2.0,
-    divergence_cap: float = 10.0,
+    globalization: Globalization = DEFAULT_GLOBALIZATION,
     shift_basis: ShiftBasis | None = None,
     **preconditioner_kwargs: object,
 ) -> PseudoTransientStep:
@@ -215,25 +211,15 @@ def momentum_continuation(
     ----------
     assembler : MomentumContinuity
         The coupled flow residual assembler.
-    beta0 : float
-        *Initial* under-relaxation strength ``β₀`` — the damping the first attempt of each step tries,
-        ``β = β₀ (‖R‖/‖R₀‖)^p``. With the step-acceptance escalation it is a starting guess rather than
-        a per-case knob: too small is recovered by escalation, too large only costs a slower march. The
-        effective SIMPLE velocity relaxation is ``1/(1+β)``.
-    exponent : float
-        Switched-evolution-relaxation exponent ``p`` in ``β = β₀ (‖R‖/‖R₀‖)^p``. ``1`` ramps the shift
-        linearly with the residual norm.
-    max_escalations : int
-        Maximum per-step damping escalations. A step whose shifted solve fails to descend is re-damped
-        (``β *= escalation_factor``) and retried, up to this many times; a well-behaved step is
-        accepted on the first attempt. ``0`` disables escalation. The default makes the solve robust to
-        ``β₀`` across Reynolds numbers.
-    escalation_factor : float
-        Factor ``> 1`` by which ``β`` grows on each rejected attempt.
-    divergence_cap : float
-        The :class:`~aquaflux.solve.DivergenceGuard` threshold: an attempt is rejected (and the damping
-        escalated) if its residual is non-finite or exceeds ``divergence_cap × ‖R₀‖`` — measured
-        against the *initial* residual, since the non-monotone march oscillates around and below it.
+    globalization : Globalization
+        How hard the march damps and what it does when a step misbehaves — the schedule
+        ``β = β₀(‖R‖/‖R₀‖)^p`` (whose ``β a_P`` shift is SIMPLE velocity under-relaxation at
+        ``1/(1+β)``), the escalation ladder, the divergence guard and the backtracking ladder. Only
+        the fields it sets are applied. Left unset, this march **takes the full shifted step**: on this
+        residual the shift is the globalization, and the escalation ladder alone carries the convective
+        regime from a cold start (it is what lifts the Reynolds floor this module exists for). That is
+        a default, not a restriction — the coupled RANS residual, whose full step overshoots by orders
+        of magnitude, line-searches instead, and this path can be given the same.
     shift_basis : ShiftBasis, optional
         How the velocity shift diagonal is built from the momentum diagonal's convective/dissipative
         parts (see :class:`MomentumShiftPolicy`). Defaults to
@@ -255,14 +241,7 @@ def momentum_continuation(
         if shift_basis is None
         else MomentumShiftPolicy(preconditioner, shift_basis)
     )
-    return PseudoTransientStep(
-        policy,
-        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent),
-        max_escalations=max_escalations,
-        escalation_factor=escalation_factor,
-        acceptance=DivergenceGuard(divergence_cap=divergence_cap),
-        adjoint_preconditioner_factory=preconditioner.factory(),
-    )
+    return globalization.step(policy, adjoint_preconditioner_factory=preconditioner.factory())
 
 
 def reused_flow_solve(
@@ -299,7 +278,7 @@ def reused_flow_solve(
         Maximum Newton/continuation iterations per solve.
     **build_kwargs
         Forwarded to :func:`momentum_continuation` (e.g. ``schur_scaling="msimple"``,
-        ``velocity="convection"``, ``beta0``).
+        ``velocity="convection"``, ``globalization``).
 
     Returns
     -------

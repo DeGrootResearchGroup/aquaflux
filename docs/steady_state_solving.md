@@ -142,16 +142,20 @@ of two of the walls (and no pressure pin — the outlet sets the datum):
 
 ```python
 from aquaflux.flow import momentum_continuation
+from aquaflux.solve import Globalization
 
-continuation = momentum_continuation(channel, beta0=2.0)
+continuation = momentum_continuation(channel, globalization=Globalization(beta0=2.0))
 solver = ImplicitNewtonSolver(max_steps=120, forward_step=continuation)
 state = solver.solve(lambda s, a: a.residual(s), channel.initial_state(), channel)
 ```
 
-`beta0` sets the initial damping — larger is more conservative and slower. It is a starting
-guess rather than a value that has to be tuned per case: a step that fails to make progress is
-automatically re-damped and retried, so choosing `beta0` too small is recovered rather than
-fatal.
+{class}`~aquaflux.solve.Globalization` carries how hard the march damps and what it does when a
+step misbehaves — the same object every continuation builder takes, so a setting learned on one
+solve transfers to the others. `beta0` sets the initial damping: larger is more conservative and
+slower. It is a starting guess rather than a value that has to be tuned per case, since a step
+that fails to make progress is automatically re-damped and retried, so choosing `beta0` too small
+is recovered rather than fatal. Only the settings you give are changed: a field left out keeps the
+builder's own default, so one object means the same override wherever it is passed.
 
 A good starting field helps both strategies. {func}`~aquaflux.flow.potential_flow` builds one
 by solving a cheap potential problem for a divergence-free velocity that already respects the

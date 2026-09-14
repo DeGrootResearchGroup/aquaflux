@@ -205,7 +205,7 @@ Rules, with FVM-specific teeth:
   The surfaces drift because nothing compares them, and **no single commit looks wrong**: each adds one
   keyword to one builder, so every after-the-fact check scoped to "your change" — including this file's
   own Post-Change Checklist and Stale-Record Check — is blind to it by construction.
-  *This has now happened five times, and the first three were each fixed and written up subsystem-locally
+  *This has now happened six times, and the first three were each fixed and written up subsystem-locally
   rather than promoted here, which is why the fourth happened a few hundred lines from the third.*
   `distributed.py` hand-built a second `ResidualAssembler` and a rename broke it with no test failing;
   every march driver wrote its own `on_step` formatter, so "a gap fixed in one persisted in the others";
@@ -222,10 +222,10 @@ Rules, with FVM-specific teeth:
   while `tools/sibling_builders.py` reported *clean*, because the builders no longer constructed a common
   class directly and so no longer looked like siblings to it. **A green report from a check that cannot
   see the case is worse than no check**: it is read as evidence. Two consequences, both binding.
-  *(a)* The tool now follows private delegation transitively and compares public surfaces above a shared
-  tail, so this shape is visible again — but treat any check's silence as informative only once you have
-  confirmed it can see the thing you are asking about (the same reasoning as `tools/check_hooks.sh` and
-  its own unit test). *(b)* **When you extract a shared tail, audit the surfaces above it in the same
+  *(a)* The tool now follows delegation transitively — through a private tail, across a module boundary,
+  and onto a method — and compares public surfaces above it, so this shape is visible again; but treat
+  any check's silence as informative only once you have confirmed it can see the thing you are asking
+  about (the same reasoning as `tools/check_hooks.sh` and its own unit test). *(b)* **When you extract a shared tail, audit the surfaces above it in the same
   change**, and keep doing so afterwards: consolidating the bodies is only half the repair, and the half
   that remains is now invisible to code review, because the duplication a reader would notice is gone.
   **The discriminator for "does this keyword belong on all of them" is whose property it is.** Both #282
@@ -235,6 +235,24 @@ Rules, with FVM-specific teeth:
   tail, not on that builder. Where a sibling genuinely must differ, say so *at the difference*: the
   mass-flow builder's Euclidean forward tolerance carries the reason (its bordered measure has no
   row-scaled form) at the constant itself, so the next reader sees a decision rather than an omission.
+  **⚠️ AND A SHARED TAIL IS NOT THE ONLY REPAIR — for a shared *surface*, the durable one is a shared
+  OBJECT, and it is the sixth instance (#372, 2026-09-13).** Six builders configured one shifted-march
+  engine, and each listed its share of that engine's settings as its own keywords: eight apiece on the
+  four coupled ones, **two** on the flow-only and scalar ones written first, so four capabilities were
+  unreachable from those two paths and one was unreachable from all six. Extracting a tail would not
+  have helped — the bodies were already one, `_coupled_step`; it was the *keyword lists above* that had
+  drifted, which is precisely the half that survives a tail extraction. Making the settings one value
+  object (`Globalization`) removes the drift by construction rather than by vigilance: there is nothing
+  left to copy, and a setting added to it reaches every builder the day it is added. Reach for this
+  whenever several builders' keywords are the same *configuration* rather than the same *namespace*.
+  **Give such an object unset (`None`) fields, not defaults of its own:** unset falls through to each
+  builder's base and then to the step class's default. The first version carried a full default set and
+  two presets, so a one-field override on a coupled builder silently reset its line search to zero, and
+  every default was written down a second time. ⚠️ `tools/sibling_builders.py` was silent on this family,
+  and the reason first recorded here — a shared-parameter threshold — was **wrong, taken from the issue
+  text without being measured**: the flow-only and coupled builders shared six parameters against a
+  threshold of five, and a **same-directory** rule discarded the pair before a parameter was compared.
+  Measure a check's silence before explaining it.
   This does **not** ban siblings that merely share a vocabulary. Three multigrid solvers taking
   `hierarchy, b, cycles, omega` are three different methods with different smoother families; forcing
   them behind one builder would create the union bundle the Module Review Rubric warns about, needing
@@ -1246,7 +1264,7 @@ After **every code change**, before considering the task complete, review and ac
      builder constructs, it is the shared tail's and belongs on every sibling.
      It is package-wide rather than diff-scoped — that is why it lives here and not in the Stale-Record
      Check, which reads `git diff` and cannot see a parameter that was only ever added.
-     ⚠️ **It follows private delegation, so a shared tail no longer hides the surfaces above it** — it
+     ⚠️ **It follows delegation, so a shared tail no longer hides the surfaces above it** — it
      did not until 2026-08-20, and in that window it reported `no sibling-builder pairs` while two
      parameters drifted across four builders that all route through one private step. Its own coverage
      is pinned by `tests/unit/test_sibling_builders.py`, for the same reason `tools/check_hooks.sh` is:
@@ -1266,6 +1284,31 @@ After **every code change**, before considering the task complete, review and ac
      tool is blind to. **The standing lesson survives the fix: a pair this tool cannot see reports as a
      clean tree, so check that it names both sides of your pair before reading its silence as a clean
      report.**
+     ⚠️ **Two more blind spots were closed 2026-09-13 (#372), and both hid one family.** *(i)* Resolution
+     stopped at private functions defined in the file being read, so a shared tail extracted into
+     **another module**, or onto a **method** of a configuration object (`Globalization.step()`), credited
+     its callers with building nothing and they dropped out of the report — not a quiet pair but no pair.
+     It now resolves a callee against the module's own functions first and then against every name
+     defined **exactly once in the package**, dropping duplicated names rather than unioning them; pinned
+     by `test_it_sees_through_a_tail_that_is_a_METHOD_IN_ANOTHER_MODULE`. *(ii)* Pairs were compared only
+     within **one directory**, so the flow-only builder and the four coupled builders of one march — six
+     shared parameters, threshold five — were thrown away as namesakes. Without the rule a pair needs a shared
+     constructed class and a shared surface, and a public builder is not paired with a builder it calls —
+     pinned by
+     `test_it_pairs_siblings_that_live_in_different_subpackages` and
+     `test_it_does_not_pair_a_public_builder_with_the_builder_it_delegates_to`. The same resolution change
+     made `solve_reynolds_continuation` / `solve_reynolds_ramp` visible (both `return solve_coupled(...)`);
+     they share two parameters and are correctly not paired.
+     ⚠️ **Dropping the rule surfaced three assembler pairs, reviewed and left in the report:**
+     `ResidualAssembler.build`, `MomentumContinuity.build` and `ScalarTransport.build`, whose only "common
+     class" is the `BoundaryConditions` each gets from `boundary.resolve(...)` — an incidental helper, not
+     the product. They are three different assemblers. `ScalarTransport.build` in fact *returns*
+     `ResidualAssembler.build(...)`, a delegation the wrapper rule cannot see because `build` is defined 22
+     times in the package and an ambiguous name is never followed. So "shared constructed class" is weaker
+     evidence than it reads, and a wrapper reached through a common method name still pairs.
+     ⚠️ **Still blind, and recorded so its silence is not read as clean:** a builder that returns a
+     *closure* it defines rather than a call — `scalar_pseudo_transient_solve` returns `solve_scalar` — is
+     credited with building nothing and never enters the report.
 
    Ruff is pinned via the `lint` extra (`pip install -e ".[lint]"`). Not needed for
    docs/config-only changes touching no `.py` files.

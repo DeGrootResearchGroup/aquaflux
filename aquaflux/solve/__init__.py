@@ -64,8 +64,10 @@ unit tests. The surface is five groups:
 from __future__ import annotations
 
 from .continuation import (
+    DEFAULT_GLOBALIZATION,
     DivergenceGuard,
     DualTimeStep,
+    Globalization,
     PseudoTransientStep,
     ShiftPolicy,
     ShiftTerm,
@@ -192,6 +194,7 @@ from .step_control import (
 
 __all__ = [
     "COMPILED",
+    "DEFAULT_GLOBALIZATION",
     "ESCALATING_REASONS",
     "NO_REFRESH",
     "NO_RETRIES",
@@ -219,6 +222,7 @@ __all__ = [
     "FieldSplitAmgPreconditioner",
     "ForwardStep",
     "GlobalDofs",
+    "Globalization",
     "HierarchyBlockInverse",
     "HostFactors",
     "HostPreconditioner",

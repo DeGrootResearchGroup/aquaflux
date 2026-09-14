@@ -72,7 +72,7 @@ from aquaflux.solve import (  # noqa: E402
     solve_linear,
 )
 from aquaflux.solve.amg_preconditioner import ShiftedCellMajorOperator  # noqa: E402
-from aquaflux.solve import restart_cycles  # noqa: E402
+from aquaflux.solve import Globalization, restart_cycles  # noqa: E402
 from aquaflux.turbulence import coupled_amg_continuation  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _PROBE_BATCH_SIZE,
@@ -115,7 +115,7 @@ def capture_inner_iterates(coupled, state, beta, seed_state):
     engine = coupled_amg_continuation(
         coupled,
         seed_state,
-        beta0=beta,
+        globalization=Globalization(beta0=beta),
         amg_beta=max(beta, FLOOR),  # the march's refresh pairing; the builder's own default is 2.0
         inner_steps=compare.INNER_STEPS,
         inner_tol=compare.INNER_TOL,

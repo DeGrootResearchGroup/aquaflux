@@ -1138,7 +1138,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     used to be escalating β — a *full re-solve* — and escalating β (16/64) still did **not** descend
     (rel ≈ 1.0 → the full-mesh march *stalled*, which had been misread as "slow, compute-heavy"). A
     **backtracking line search** on the one β₀ solve finds α≈¼ → rel≈0.48 (residual halved), so
-    `coupled_continuation` sets `line_search=_COUPLED_LINE_SEARCH` (see `.claude/rules/solve-globalization.md`); β
+    an unset `Globalization.line_search` takes `_COUPLED_LINE_SEARCH` on every coupled builder (see `.claude/rules/solve-globalization.md`); β
     escalation stays the fallback for a bad *direction*, not an overshoot. With it the full-mesh solve
     **descends** (rel 1.0 → 0.48 → 0.44 → 0.31 → 0.20 → ~0.18 over ~6 steps) instead of *stalling at
     rel 1.0* — the case is now solvable at all, a correctness fix, not just speed. **(2) The shifted
@@ -1174,11 +1174,14 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     refresh rather than rebuilding it at the developed state, or the self-normalising scales would re-base and
     the convergence test become unreachable (#156 seam 4; see `.claude/notes/solve-globalization-log.md`). `scaled_norm=True`
     opts the *observed* march into rebuilding the row scales per outer step (finer, more expensive).
-  - **`beta_floor` (SER lower bound) is available but off by default (a measured wash).** Bounding
+  - **`beta_floor` (SER lower bound) is available but off by default (a measured wash).** ⚠️ It is a
+    field of the shared `Globalization` now, not a builder keyword —
+    `coupled_continuation(globalization=Globalization(beta_floor=…))`, which keeps the coupled line
+    search — and it reaches the flow-only and scalar marches too. Bounding
     `β = max(beta_floor, β₀(‖R‖/‖R₀‖)^p)` keeps each late shifted solve out of the ill-conditioned low-`β`
     regime (correctness-safe — the floor scales the correction `δ`, which vanishes at the root, so it never
     moves the converged state). But end-to-end it is a **net wash** (cheaper late solves cancel the extra
-    Newton steps), so it defaults to `0`; wired through `coupled_continuation` for further evaluation. The
+    Newton steps), so it defaults to `0`; reachable from every march for further evaluation. The
     settled coupled-solve cost is the diagonal-block-preconditioner weakness at high Reynolds number, **not**
     the residual measure, `β` floor, or missing cross-coupling (a block-triangular preconditioner was worse
     — non-convergent on recirculating pitzDaily). See `.claude/notes/solve-globalization-log.md`.
@@ -1878,13 +1881,10 @@ tuning follow-up noted above.
         `test_the_ramp_arm_seeds_the_hybrid_start_from_the_anchor_not_from_the_target`; the pre-existing
         ramp tests stub `hybrid_initialize` **without inspecting its arguments**, which is how this
         shipped and why the new test records what it was handed.
-      - ⚠️ **`tools/sibling_builders.py` cannot see this pair, and that is a THIRD blind spot of the
-        same family** as the private-delegation and `@classmethod` ones. `solve_reynolds_continuation`
-        and `solve_reynolds_ramp` are two public builders of one thing from one options dict — the exact
-        shape the checklist item exists to catch — but both `return solve_coupled(...)`, a **function**,
-        and the tool credits construction only to a capitalized callee or `cls(...)`. Neither is
-        credited with building anything, so the pair never enters the report at all: **no pair reported
-        is indistinguishable from a clean tree.**
+      - `tools/sibling_builders.py` could not see this pair until 2026-09-13: both builders
+        `return solve_coupled(...)`, a lowercase function it did not follow. It follows unambiguous
+        functions and methods now, so both are visible; they share two parameters (`coupled`,
+        `point_setup`) and are correctly not reported. See the tool's entry in `CLAUDE.md`.
       - ⚠️ **RE-MEASURED ON pitzDaily (2026-09-10), AND THE FIX COSTS THAT CASE 55 % MORE CYCLES.** All
         four numbers below are from this tree (commit `a403752` + the fix), `PITZ_RAMP_STATIONS=24`,
         `PITZ_RAMP_STEPS=1`, `N_POINTS=2` ratio 10 (anchor Re/100), `BETA_START=0.5`, `beta_min=0.005`,

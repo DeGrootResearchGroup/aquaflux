@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import abc
 import dataclasses
+import inspect
 import math
 import time
 from collections.abc import Callable, Sequence
@@ -56,18 +57,18 @@ from aquaflux.flow.mean_velocity import (
 )
 from aquaflux.schemes import narrow_gradient_sweeps
 from aquaflux.solve import (
+    DEFAULT_GLOBALIZATION,
     NO_REFRESH,
     NO_RETRIES,
     BlockScaledNorm,
     CellFields,
     ColumnProbePlan,
-    DivergenceGuard,
-    DualTimeStep,
     FieldGroups,
     FieldLayout,
     FieldSplitAmgPreconditioner,
     ForwardStep,
     GlobalDofs,
+    Globalization,
     ImplicitNewtonSolver,
     LocalCourantBasis,
     MonolithicAmgPreconditioner,
@@ -86,7 +87,6 @@ from aquaflux.solve import (
     StepControl,
     StepReport,
     SubLayout,
-    SwitchedEvolutionRelaxation,
     TransposedPreconditioner,
     VelocityShiftParts,
     block_stencil_colouring,
@@ -1301,7 +1301,9 @@ _PROBE_BATCH_SIZE = 8
 # is scaled back along {1, 1/2, ..., 1/2**N} until it descends -- recovering a residual-reducing step
 # from the one expensive shifted solve, instead of escalating beta (a full re-solve, which changes the
 # direction and, measured, does not descend on this case). Ten rungs reach 1/1024, well past the
-# ~1/4 the stiff first steps need.
+# ~1/4 the stiff first steps need. It is every coupled builder's base for an unset
+# `Globalization.line_search` (see `_coupled_step`), so a caller who sets one -- including 0 -- keeps it.
+# It is the one setting on which the coupled march differs from the flow-only and scalar ones.
 _COUPLED_LINE_SEARCH = 10
 
 
@@ -1589,16 +1591,9 @@ def coupled_continuation(
     reference_state: jnp.ndarray,
     *,
     method: str | None = "twolevel",
-    beta0: float = 2.0,
-    exponent: float = 1.0,
-    beta_floor: float = 0.0,
-    max_escalations: int = 6,
-    escalation_factor: float = 2.0,
-    divergence_cap: float = 10.0,
-    line_search: int = _COUPLED_LINE_SEARCH,
+    globalization: Globalization = DEFAULT_GLOBALIZATION,
     inner_steps: int = 1,
     inner_tol: float = 0.05,
-    grow: int = 0,
     forward_solver: lx.AbstractLinearSolver | None = None,
     forward_rtol: float = _BLOCK_FORWARD.rtol,
     forward_restart: int = _BLOCK_FORWARD.restart,
@@ -1635,16 +1630,15 @@ def coupled_continuation(
         The coupled state the preconditioner and shift diagonals are frozen at.
     method : {"twolevel", "air"} or None
         The AMG method for the k and omega blocks (``None`` leaves those blocks unpreconditioned).
-    beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap
-        The pseudo-transient schedule and divergence-guard parameters (see
-        :class:`~aquaflux.solve.PseudoTransientStep`). ``beta_floor`` (default ``0`` = off) bounds the
-        switched-evolution-relaxation ``β`` below to keep the shifted solve out of the ill-conditioned
-        low-``β`` regime; it never moves the converged root, only damps the path.
-    line_search : int
-        Backtracking step-halvings applied to the shifted step before it is judged (default
-        :data:`_COUPLED_LINE_SEARCH`); scales an accurate-but-overshooting direction back to a descent
-        from the one shifted solve rather than re-solving at larger ``beta``. See
-        :class:`~aquaflux.solve.PseudoTransientStep`.
+    globalization : Globalization
+        How hard the march damps and what it does when a step misbehaves: the
+        switched-evolution-relaxation schedule, the escalation ladder, the divergence guard and the
+        backtracking ladder, in the one object every builder in the library takes. Only the fields
+        it sets are applied: an unset ``line_search`` takes this march's ten rungs, because the coupled
+        residual's full step overshoots by orders of magnitude from the hybrid start, and every other
+        unset field the step's own default -- so ``Globalization(beta0=1.5)`` changes ``beta0`` and
+        nothing else. With ``inner_steps > 1`` the escalation-ladder fields are refused, since a
+        dual-time step has no ladder for them to reach.
     inner_steps : int
         ``> 1`` selects a **dual-time** (backward-Euler) march (:class:`~aquaflux.solve.DualTimeStep`)
         instead of the default single-step pseudo-transient continuation: each outer timestep holds a
@@ -1653,8 +1647,9 @@ def coupled_continuation(
         residual is the honest discrete time derivative (not ``beta x travel``) and a larger
         pseudo-timestep (smaller ``beta``, driven by a step control) can be taken stably from a cold
         start. ``1`` (default) is the ordinary single shifted step, unchanged. The inner loop replaces
-        the escalation ladder, so ``max_escalations`` / ``escalation_factor`` / ``divergence_cap`` /
-        ``grow`` do not apply when it is on.
+        the escalation ladder, so the ``globalization``'s ``max_escalations`` / ``escalation_factor`` /
+        ``divergence_cap`` / ``grow`` / ``line_search_growth`` are refused when it is on (its schedule
+        and line search apply).
     inner_tol : float
         The dual-time inner loop stops once ``||G||`` has fallen to this fraction of the anchor residual
         (default ``0.05``); ignored unless ``inner_steps > 1``.
@@ -1735,13 +1730,6 @@ def coupled_continuation(
         global progress reference was measured against, rather than re-basing toward one at each
         developed refresh state (seam 4). ``None`` (a fresh, non-refresh build) constructs the default
         row-scaled measure (or the block-scaled one when ``block_scaled_norm``).
-    grow : int
-        Extra line-search rungs **above** the full step, each a doubling, so the search may accept
-        ``alpha > 1``. Zero (the default) caps it at the full step. The admissible step is often longer
-        than the full one on a developed field, and a ladder starting at one cannot reach it. A growth
-        rung is only ever reachable by **passing** the acceptance test, never by falling back onto it --
-        the fallback stays capped at the full step, since its job is to avoid a null step rather than to
-        license an excursion.
     inner_observer : callable or None
         A per-inner-iteration profiling hook forwarded to the built dual-time step (only used when
         ``inner_steps > 1``); see :class:`~aquaflux.solve.DualTimeStep`. ``None`` (default) leaves the
@@ -1807,16 +1795,9 @@ def coupled_continuation(
         reference_state,
         policy,
         regime=_ForwardSolveRegime(forward_rtol, forward_restart, forward_max_restarts),
-        beta0=beta0,
-        exponent=exponent,
-        beta_floor=beta_floor,
-        max_escalations=max_escalations,
-        escalation_factor=escalation_factor,
-        divergence_cap=divergence_cap,
-        line_search=line_search,
+        globalization=globalization,
         inner_steps=inner_steps,
         inner_tol=inner_tol,
-        grow=grow,
         forward_solver=forward_solver,
         block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
@@ -1829,6 +1810,40 @@ def coupled_continuation(
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
         jacobian_production_viscosity=jacobian_production_viscosity,
     )
+
+
+def _refuse_unknown_flow_block_options(options: dict[str, object]) -> None:
+    """Raise if ``options`` names anything ``BlockPreconditioner.build`` does not take.
+
+    The coupled builders forward their remaining keywords to it as ``**preconditioner_kwargs``, but
+    only a first build reads them: a refresh (``reuse=``) carries the flow block over rather than
+    rebuilding it. So an option ``build`` does not have raised on a first build and was dropped without
+    a word on every refresh -- and since the march's own settings moved onto
+    :class:`~aquaflux.solve.Globalization`, a stale ``beta0=`` or ``line_search=`` is exactly such an
+    option. Checking the names against the signature is exact because ``build`` takes no ``**kwargs``.
+
+    Parameters
+    ----------
+    options : dict
+        The keywords bound for ``BlockPreconditioner.build``.
+
+    Raises
+    ------
+    TypeError
+        Naming each unknown option and the options ``build`` does take.
+    """
+    accepted = {
+        name
+        for name, parameter in inspect.signature(BlockPreconditioner.build).parameters.items()
+        if parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    }
+    unknown = sorted(set(options) - accepted)
+    if unknown:
+        raise TypeError(
+            f"{', '.join(unknown)} {'is not an option' if len(unknown) == 1 else 'are not options'} "
+            f"of BlockPreconditioner.build, which takes {', '.join(sorted(accepted))}. A setting of the "
+            "march itself, such as beta0 or line_search, belongs on globalization=Globalization(...)."
+        )
 
 
 def _coupled_shift_policy(
@@ -1923,6 +1938,10 @@ def _coupled_shift_policy(
     # preconditioner_kwargs, or directly through `BlockPreconditioner`) for the one regime it is not
     # dominated in: a standalone, flow-only, convection-dominated solve, where the plain SIMPLE Schur's
     # inner solve can stall outright.
+    # Checked here, before the branch, because only one side of it reads these: a refresh carries the
+    # flow block over from `reuse` and never calls `BlockPreconditioner.build`, so an option it does not
+    # take would raise on a first build and vanish on every refresh.
+    _refuse_unknown_flow_block_options(preconditioner_kwargs)
     block = (
         None
         if not build_flow_block
@@ -2446,19 +2465,12 @@ def _coupled_step(
     policy: ShiftPolicy,
     *,
     regime: _ForwardSolveRegime,
-    beta0: float,
-    exponent: float,
-    beta_floor: float,
-    max_escalations: int,
-    escalation_factor: float,
-    divergence_cap: float,
-    line_search: int,
+    globalization: Globalization,
     inner_steps: int,
     inner_tol: float,
     forward_solver: lx.AbstractLinearSolver | None,
     block_scaled_norm: bool,
     residual_norm: ResidualNorm | None,
-    grow: int = 0,
     inner_observer: Callable[..., None] | None = None,
     refresh_on_cycles: int | None = None,
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
@@ -2503,9 +2515,17 @@ def _coupled_step(
         ``forward_solver`` is ``None``. Only the *regime* is per-family (a near-exact factorization
         needs a far smaller Arnoldi subspace than a block-diagonal preconditioner); the norm the
         tolerance is measured in is ``residual_norm``, i.e. the march's own progress measure.
-    beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap, line_search, inner_steps, inner_tol, grow
-        The globalization: the pseudo-transient schedule, the divergence guard, and the line search.
-        See :class:`~aquaflux.solve.PseudoTransientStep` and :class:`~aquaflux.solve.DualTimeStep`.
+    globalization : Globalization
+        How hard the march damps and what it does when a step misbehaves: the pseudo-transient
+        schedule, the escalation ladder, the divergence guard and the line search, in one object all
+        six of the library's builders take. Nothing in it names a preconditioner, which is why it is
+        here rather than on any of them. An unset ``line_search`` takes :data:`_COUPLED_LINE_SEARCH`
+        rungs and every other unset field the step class's own default
+        (:meth:`~aquaflux.solve.Globalization.with_defaults`).
+    inner_steps, inner_tol : int, float
+        The dual-time inner loop's bounds. Unlike the settings above these are not shared: the
+        flow-only and scalar marches have no dual-time form, so ``inner_steps > 1`` is a coupled
+        choice and stays on the coupled builders.
     forward_solver, block_scaled_norm, residual_norm, inner_observer, refresh_on_cycles, inner_refresh, cycle_budget, step_limit, step_projection
         The linear solve, the progress measure and the per-step guards. See the two step classes.
     jacobian_production_viscosity : bool
@@ -2579,7 +2599,6 @@ def _coupled_step(
         if jacobian_gradient_sweeps is None and not jacobian_production_viscosity
         else jacobian_operator.residual
     )
-    schedule = SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent, beta_floor=beta_floor)
     # The forward solve stops in the SAME measure object the march reports and accepts steps in, so a
     # solve cannot converge in a quantity the march does not read. That is the shared half of the
     # decision; only the restart regime differs per preconditioner family (see `_ForwardSolveRegime`).
@@ -2594,19 +2613,21 @@ def _coupled_step(
             max_restarts=regime.max_restarts,
         )
     )
+    # The coupled march line-searches unless its caller said otherwise: an unset `line_search` takes
+    # this residual's base, an explicit one -- including 0 -- is kept, and everything else the
+    # globalization leaves unset falls through to the step class's own default.
+    globalization = globalization.with_defaults(line_search=_COUPLED_LINE_SEARCH)
     if inner_steps > 1:
         # Dual-time (backward-Euler) march: an inner Newton loop per outer timestep on the transient
         # residual, so the measured steady residual is the honest discrete time derivative rather than
         # beta x travel, and a larger pseudo-timestep (smaller beta, driven by a step control) stays
-        # stable. The inner loop replaces the escalation ladder, so the escalation/acceptance
-        # parameters do not apply -- nor does the line search's growth rung, which belongs to that
-        # ladder.
-        return DualTimeStep(
+        # stable. The inner loop replaces the escalation ladder, so `dual_time_step` refuses the
+        # escalation/acceptance settings and the line search's growth rung and rule rather than
+        # dropping them.
+        return globalization.dual_time_step(
             policy,
-            relaxation_schedule=schedule,
             inner_steps=inner_steps,
             inner_tol=inner_tol,
-            line_search=line_search,
             forward_solver=solver,
             residual_norm=residual_norm,
             adjoint_preconditioner_factory=policy.adjoint_factory(),
@@ -2623,14 +2644,8 @@ def _coupled_step(
     # which is already the poisoned state -- one cell's `k` through zero has by then NaN'd `sqrt(k)` and
     # the whole eddy viscosity with it. Historically only the monolithic path's dual-time branch carried
     # it, which is drift rather than design.
-    return PseudoTransientStep(
+    return globalization.step(
         policy,
-        relaxation_schedule=schedule,
-        max_escalations=max_escalations,
-        escalation_factor=escalation_factor,
-        acceptance=DivergenceGuard(divergence_cap=divergence_cap),
-        line_search=line_search,
-        grow=grow,
         forward_solver=solver,
         residual_norm=residual_norm,
         adjoint_preconditioner_factory=policy.adjoint_factory(),
@@ -2646,13 +2661,7 @@ def _monolithic_factor_step(
     base: CoupledShiftPolicy,
     preconditioner: MonolithicLuPreconditioner | MonolithicAmgPreconditioner,
     *,
-    beta0: float,
-    exponent: float,
-    beta_floor: float,
-    max_escalations: int,
-    escalation_factor: float,
-    divergence_cap: float,
-    line_search: int,
+    globalization: Globalization,
     inner_steps: int,
     inner_tol: float,
     forward_solver: lx.AbstractLinearSolver | None,
@@ -2667,7 +2676,6 @@ def _monolithic_factor_step(
     step_projection: Callable[..., jnp.ndarray] | None = None,
     jacobian_gradient_sweeps: int | None = None,
     jacobian_production_viscosity: bool = False,
-    grow: int = 0,
 ) -> ForwardStep:
     """Compose a monolithic preconditioner with the block shift, then build the step.
 
@@ -2682,16 +2690,9 @@ def _monolithic_factor_step(
         reference_state,
         MonolithicFactorShiftPolicy(base, preconditioner),
         regime=regime,
-        beta0=beta0,
-        exponent=exponent,
-        beta_floor=beta_floor,
-        max_escalations=max_escalations,
-        escalation_factor=escalation_factor,
-        divergence_cap=divergence_cap,
-        line_search=line_search,
+        globalization=globalization,
         inner_steps=inner_steps,
         inner_tol=inner_tol,
-        grow=grow,
         forward_solver=forward_solver,
         block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
@@ -2715,13 +2716,7 @@ def coupled_lu_continuation(
     column_reach: Sequence[int] | None = None,
     probe_gradient_sweeps: int | None = None,
     backend: str = "auto",
-    beta0: float = 2.0,
-    exponent: float = 1.0,
-    beta_floor: float = 0.0,
-    max_escalations: int = 6,
-    escalation_factor: float = 2.0,
-    divergence_cap: float = 10.0,
-    line_search: int = _COUPLED_LINE_SEARCH,
+    globalization: Globalization = DEFAULT_GLOBALIZATION,
     inner_steps: int = 1,
     inner_tol: float = 0.05,
     forward_solver: lx.AbstractLinearSolver | None = None,
@@ -2739,7 +2734,6 @@ def coupled_lu_continuation(
     cycle_budget: int | None = None,
     positivity_floor: float = 0.0,
     positivity_projection: bool = True,
-    grow: int = 0,
     jacobian_gradient_sweeps: int | None = None,
     jacobian_production_viscosity: bool = False,
 ) -> ForwardStep:
@@ -2793,8 +2787,10 @@ def coupled_lu_continuation(
         The complete-LU backend (see :func:`~aquaflux.solve.lu_preconditioner.factorize_lu`). ``'auto'``
         uses UMFPACK (the fast path, via the optional ``petsc`` dependency) when available, else SciPy
         SuperLU.
-    beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap, line_search
-        The pseudo-transient schedule and guard parameters, exactly as in :func:`coupled_continuation`.
+    globalization : Globalization
+        The schedule, ladders and guard, exactly as in :func:`coupled_continuation` -- including its
+        line-search base -- because how a march damps is a property of the coupled residual and not of
+        which matrix its preconditioner was built from.
     inner_steps : int
         ``> 1`` builds a :class:`~aquaflux.solve.DualTimeStep` (an inner Newton loop per outer
         pseudo-timestep on the transient residual) instead of the default single-step
@@ -2886,13 +2882,7 @@ def coupled_lu_continuation(
         reference_state,
         base,
         preconditioner,
-        beta0=beta0,
-        exponent=exponent,
-        beta_floor=beta_floor,
-        max_escalations=max_escalations,
-        escalation_factor=escalation_factor,
-        divergence_cap=divergence_cap,
-        line_search=line_search,
+        globalization=globalization,
         inner_steps=inner_steps,
         inner_tol=inner_tol,
         forward_solver=forward_solver,
@@ -2907,7 +2897,6 @@ def coupled_lu_continuation(
         step_projection=step_projection,
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
         jacobian_production_viscosity=jacobian_production_viscosity,
-        grow=grow,
     )
 
 
@@ -2923,13 +2912,7 @@ def coupled_amg_continuation(
     smoother_sweeps: int = 2,
     coarse_eq_limit: int | None = None,
     host_exact_forward_solve: bool = False,
-    beta0: float = 2.0,
-    exponent: float = 1.0,
-    beta_floor: float = 0.0,
-    max_escalations: int = 6,
-    escalation_factor: float = 2.0,
-    divergence_cap: float = 10.0,
-    line_search: int = _COUPLED_LINE_SEARCH,
+    globalization: Globalization = DEFAULT_GLOBALIZATION,
     inner_steps: int = 1,
     inner_tol: float = 0.05,
     forward_solver: lx.AbstractLinearSolver | None = None,
@@ -2947,7 +2930,6 @@ def coupled_amg_continuation(
     cycle_budget: int | None = None,
     positivity_floor: float = 0.0,
     positivity_projection: bool = True,
-    grow: int = 0,
     field_split: bool = False,
     flow_first: bool = True,
     trailing_smoother_sweeps: int = 1,
@@ -3028,9 +3010,10 @@ def coupled_amg_continuation(
         Newton), but the march currently converges more slowly per step than the default path, whose
         near-exact steps the pseudo-transient globalization implicitly leans on. ``False`` (default) is
         the JAX-side path. Incompatible with ``field_split``.
-    beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap, line_search
-        The pseudo-transient schedule and guard parameters, exactly as in
-        :func:`coupled_lu_continuation`.
+    globalization : Globalization
+        The schedule, ladders and guard, exactly as in :func:`coupled_continuation` -- including its
+        line-search base -- because how a march damps is a property of the coupled residual and not of
+        which matrix its preconditioner was built from.
     inner_steps, inner_tol, block_scaled_norm, shift_basis, residual_norm
         The dual-time and measure parameters, exactly as in :func:`coupled_lu_continuation`.
     forward_solver, forward_rtol, forward_restart, forward_max_restarts
@@ -3354,13 +3337,7 @@ def coupled_amg_continuation(
         reference_state,
         base,
         preconditioner,
-        beta0=beta0,
-        exponent=exponent,
-        beta_floor=beta_floor,
-        max_escalations=max_escalations,
-        escalation_factor=escalation_factor,
-        divergence_cap=divergence_cap,
-        line_search=line_search,
+        globalization=globalization,
         inner_steps=inner_steps,
         inner_tol=inner_tol,
         forward_solver=forward_solver,
@@ -3375,7 +3352,6 @@ def coupled_amg_continuation(
         step_projection=step_projection,
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
         jacobian_production_viscosity=jacobian_production_viscosity,
-        grow=grow,
     )
 
 
@@ -4865,13 +4841,7 @@ def mass_flow_coupled_continuation(
     *,
     flow_direction: int = 0,
     method: str | None = "twolevel",
-    beta0: float = 2.0,
-    exponent: float = 1.0,
-    beta_floor: float = 0.0,
-    max_escalations: int = 6,
-    escalation_factor: float = 2.0,
-    divergence_cap: float = 10.0,
-    line_search: int = _COUPLED_LINE_SEARCH,
+    globalization: Globalization = DEFAULT_GLOBALIZATION,
     forward_solver: lx.AbstractLinearSolver | None = None,
     forward_rtol: float = _CONSTRAINED_FORWARD.rtol,
     forward_restart: int = _CONSTRAINED_FORWARD.restart,
@@ -4882,7 +4852,6 @@ def mass_flow_coupled_continuation(
     turbulence_damping: TurbulenceDamping | float = 1.0,
     inner_steps: int = 1,
     inner_tol: float = 0.05,
-    grow: int = 0,
     inner_observer: Callable[..., None] | None = None,
     refresh_on_cycles: int | None = None,
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
@@ -4898,7 +4867,7 @@ def mass_flow_coupled_continuation(
     The globalization of :func:`coupled_continuation`, with its :class:`CoupledShiftPolicy` bordered by
     the mass-flow constraint (:class:`_MassFlowBorderedPolicy`), so it drives the augmented
     ``[flow..., k, omega, beta]`` system where ``beta`` is a Lagrange multiplier for ``<U_dir> =
-    target``. Parameters are :func:`coupled_continuation`'s (including ``beta_floor`` / ``line_search`` /
+    target``. Parameters are :func:`coupled_continuation`'s (including ``globalization`` /
     ``forward_solver`` / ``block_scaled_norm`` / ``shift_basis`` / ``velocity_shift_parts``);
     ``flow_direction`` selects the constrained velocity component. ``block_scaled_norm`` here extends the
     same block-scaled measure with the constraint dof. The ``forward_*`` parameters are
@@ -4939,16 +4908,9 @@ def mass_flow_coupled_continuation(
         reference_state,
         bordered,
         regime=_ForwardSolveRegime(forward_rtol, forward_restart, forward_max_restarts),
-        beta0=beta0,
-        exponent=exponent,
-        beta_floor=beta_floor,
-        max_escalations=max_escalations,
-        escalation_factor=escalation_factor,
-        divergence_cap=divergence_cap,
-        line_search=line_search,
+        globalization=globalization,
         inner_steps=inner_steps,
         inner_tol=inner_tol,
-        grow=grow,
         forward_solver=forward_solver,
         block_scaled_norm=block_scaled_norm,
         # Its own, not the shared default -- see the note above.
