@@ -40,7 +40,12 @@ from aquaflux.flow import (
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver, solve_linear
+from aquaflux.solve import (
+    DampedNewtonStep,
+    Globalization,
+    ImplicitNewtonSolver,
+    solve_linear,
+)
 
 H, L, U_IN, RHO = 1.0, 4.0, 1.0, 1.0
 
@@ -260,7 +265,9 @@ def test_escalation_recovers_an_underdamped_step() -> None:
 
     def solve_with(max_escalations):
         continuation = momentum_continuation(
-            assembler, schur_scaling="msimple", beta0=0.2, max_escalations=max_escalations
+            assembler,
+            schur_scaling="msimple",
+            globalization=Globalization(beta0=0.2, max_escalations=max_escalations),
         )
         return _solve(assembler, continuation=continuation, max_steps=max_steps)
 

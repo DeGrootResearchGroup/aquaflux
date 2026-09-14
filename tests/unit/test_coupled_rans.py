@@ -28,6 +28,7 @@ from aquaflux.schemes import CompactGreenGauss, CorrectedGreenGauss, SweptGradie
 from aquaflux.solve import (
     NO_REFRESH,
     CycleGrowthTrigger,
+    Globalization,
     PseudoTransientStep,
     RefreshPolicy,
     RowScaledNorm,
@@ -243,17 +244,13 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
     # time are exactly how this went wrong before -- twice with the tail already extracted, so nothing
     # in the bodies looked duplicated and no single commit looked wrong.
     shared = {
-        # The pseudo-transient schedule, the divergence guard and the line search.
-        "beta0",
-        "exponent",
-        "beta_floor",
-        "max_escalations",
-        "escalation_factor",
-        "divergence_cap",
-        "line_search",
+        # The pseudo-transient schedule, the divergence guard and the line search -- eight keywords
+        # apiece until 2026-09-13, now one `Globalization` shared with the flow-only and scalar
+        # builders as well (issue #372); `test_globalization_reach.py` is where that wider claim is
+        # pinned, and this entry keeps the four coupled builders inside it.
+        "globalization",
         "inner_steps",
         "inner_tol",
-        "grow",
         # The shifted forward solve. `forward_rtol` / `forward_restart` / `forward_max_restarts` sat on
         # the multigrid builder alone, although the argument for them is about the *coupled residual*
         # (~100% omega under a plain 2-norm, so the flow block goes unresolved) and not about multigrid.
@@ -1646,14 +1643,15 @@ def test_a_supplied_step_with_no_builder_is_rejected_when_a_refresh_is_configure
 
 
 def test_globalization_knobs_still_reach_the_continuation_builder(monkeypatch) -> None:
-    """``grow`` is no longer named on ``solve_coupled``, and still arrives at
+    """The globalization is not named on ``solve_coupled`` and still arrives at
     :func:`coupled_continuation` unchanged -- it rides ``**continuation_kwargs``.
 
-    It used to be declared on ``solve_coupled`` *and* forwarded explicitly, while the very same call
-    sites already splatted ``**continuation_kwargs`` into the same function -- so the declaration was
-    pure duplication, costing a parameter on an already-wide signature to buy nothing. Deleting it is
-    call-for-call identical, and this pins that: it is the only thing standing between the deletion
-    and a silently dropped knob.
+    ``grow`` used to be declared on ``solve_coupled`` *and* forwarded explicitly, while the very same
+    call sites already splatted ``**continuation_kwargs`` into the same function -- so the declaration
+    was pure duplication, costing a parameter on an already-wide signature to buy nothing. Deleting it
+    was call-for-call identical, and this pins that: it is the only thing standing between the
+    deletion and a silently dropped knob. The knob itself now lives on the ``Globalization``, so what
+    rides the path is one object rather than eight keywords, and the pin is the same.
     """
     from aquaflux.turbulence import coupled as coupled_module
 
@@ -1665,12 +1663,11 @@ def test_globalization_knobs_still_reach_the_continuation_builder(monkeypatch) -
         raise _StopBuild
 
     monkeypatch.setattr(coupled_module, "coupled_continuation", spy)
+    asked = Globalization(grow=2, beta0=1.5)
     with pytest.raises(_StopBuild):
-        solve_coupled(coupled, grow=2, beta0=1.5)
+        solve_coupled(coupled, globalization=asked)
 
-    assert seen["grow"] == 2
-    # An ordinary continuation knob rides the same path, so the mechanism is not special-cased.
-    assert seen["beta0"] == 1.5
+    assert seen["globalization"] is asked
 
 
 class _StopBuild(Exception):

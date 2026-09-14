@@ -30,6 +30,7 @@ any nonlinear residual, not only the flow.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable
 from typing import NamedTuple, Protocol
 
@@ -416,8 +417,8 @@ class PseudoTransientStep(ShiftedStep):
         How far the residual may rise and still be accepted by the backtracking ladder
         (:class:`~aquaflux.solve.LineSearchGrowth`). Defaults to strict descent
         (:class:`~aquaflux.solve.MonotoneLineSearch`); a pseudo-time march far from the root may want
-        :class:`~aquaflux.solve.RelaxedFarFromRoot`. **Not exposed by any builder** -- set it by
-        constructing this class directly.
+        :class:`~aquaflux.solve.RelaxedFarFromRoot`. Reached from every builder through
+        :class:`Globalization`; it was exposed by none of them until that object existed.
     max_escalations : int
         Maximum damping escalations per step (static). If a step's shifted solve fails to descend (an
         ill-conditioned shifted system, or an overshoot), ``β`` is multiplied by
@@ -1109,3 +1110,319 @@ class DualTimeStep(ShiftedStep):
             )
 
         return step
+
+
+def _supplied(target: type, fields: dict[str, object]) -> dict[str, object]:
+    """The entries of ``fields`` that are set, after checking that ``target`` declares every one.
+
+    ``None`` means *not set here*, and an unset entry is dropped so that ``target`` applies its own
+    default -- including the ones that are not ``None``: ``residual_norm=None`` gives the Euclidean
+    norm and ``inner_steps=None`` gives :class:`DualTimeStep`'s own count. Each default is therefore
+    declared once, on the class that uses it, and no caller restates one.
+
+    The names are checked **before** anything is dropped. Filtering first makes a misplaced setting
+    vanish exactly when its value is ``None`` -- a field only :class:`PseudoTransientStep` declares,
+    handed to :class:`DualTimeStep` as ``None``, would disappear without a word -- and a setting that
+    reaches no field is the failure :class:`Globalization` exists to remove.
+
+    Parameters
+    ----------
+    target : type
+        The dataclass the entries are constructor arguments for.
+    fields : dict
+        Field name -> value, with ``None`` meaning *not set here*.
+
+    Returns
+    -------
+    dict
+        The entries whose value is not ``None``.
+
+    Raises
+    ------
+    TypeError
+        If ``fields`` names something ``target`` does not declare.
+    """
+    unknown = sorted(set(fields) - {field.name for field in dataclasses.fields(target)})
+    if unknown:
+        raise TypeError(f"{target.__name__} declares no field named {', '.join(unknown)}")
+    return {name: value for name, value in fields.items() if value is not None}
+
+
+def _merged(
+    target: type, settings: dict[str, object], fields: dict[str, object]
+) -> dict[str, object]:
+    """A globalization's own settings and a caller's step fields, as one set of arguments for ``target``.
+
+    A name in both is refused. A dict merge would let one of them win silently, and which one won would
+    be decided by the order the merge was written in rather than by anything the caller meant.
+
+    Parameters
+    ----------
+    target : type
+        The step class being constructed.
+    settings : dict
+        What the :class:`Globalization` sets, already translated into ``target``'s fields.
+    fields : dict
+        The caller's remaining step fields, with ``None`` meaning *not set here*.
+
+    Returns
+    -------
+    dict
+        The union, with unset entries dropped.
+
+    Raises
+    ------
+    TypeError
+        If a field is one ``target`` does not declare, or is set both ways.
+    """
+    given = _supplied(target, fields)
+    clash = sorted(settings.keys() & given.keys())
+    if clash:
+        raise TypeError(
+            f"{', '.join(clash)} set both on the Globalization and as a step field; set it in one place"
+        )
+    return {**given, **settings}
+
+
+#: The settings a dual-time step has no field for. Its inner Newton loop replaces the escalation ladder
+#: and runs a plain descent line search, so the ladder's two counts, its acceptance guard, and the line
+#: search's growth rungs and growth rule belong to the single-step shape alone.
+_ESCALATION_LADDER = (
+    "max_escalations",
+    "escalation_factor",
+    "divergence_cap",
+    "grow",
+    "line_search_growth",
+)
+
+
+class Globalization(eqx.Module):
+    """How hard a shifted march damps, and what it does when a step misbehaves.
+
+    The configuration every pseudo-transient march shares, whatever it is solving: the
+    switched-evolution-relaxation schedule (:attr:`beta0`, :attr:`exponent`, :attr:`beta_floor`), the
+    backtracking ladder (:attr:`line_search`, :attr:`grow`, :attr:`line_search_growth`), the
+    escalation ladder (:attr:`max_escalations`, :attr:`escalation_factor`) and the guard that judges
+    each attempt (:attr:`divergence_cap`). **The membership test is whether a setting's reason can be
+    stated without naming a residual or a preconditioner.** It can for all of these -- they describe
+    the march, not the problem -- so they belong together and reach every march. It cannot for the
+    k-positivity limit, whose value is a function of the state layout, nor for the progress measure's
+    per-family default, so those stay with the builder that knows them and arrive through
+    :meth:`step` as ordinary fields.
+
+    **Every field defaults to** ``None``, **meaning "not set here".** A field this object leaves unset
+    is decided by whatever it is handed to: first by the builder's own base (:meth:`with_defaults` --
+    the coupled march line-searches unless told otherwise), then by the step class's own default. So
+    ``Globalization(beta0=1.5)`` changes one setting and nothing else, on every builder, and no default
+    is declared here to drift from the one the step class uses. It is also the only reading a
+    declarative case file can express: ``globalization: {beta0: 1.5}`` names one override, and a
+    builder whose default differs from another's keeps its own.
+
+    Six public builders configure this one engine (the flow block's, the scalar transport's, and the
+    four coupled ones), and until this object existed each spelled the surface out for itself: the
+    coupled four carried eight keywords apiece while the two written first carried two, so the shift
+    floor, the line search, the growth rungs and the growth rule were unreachable from the flow-only
+    and scalar paths -- not because those marches cannot use them, but because the keyword was added
+    to whichever builder was being worked on (issue #372). One object means a setting added here
+    reaches all six, and none of them can grow a private copy of it.
+
+    Attributes
+    ----------
+    beta0 : float or None
+        *Initial* shift strength ``β₀`` in ``β = β₀(‖R‖/‖R₀‖)^p`` -- the damping the first attempt of
+        each step tries. With the escalation ladder it is a starting guess rather than a per-case knob:
+        too small is recovered by escalation, too large only costs a slower march. On the momentum
+        rows the shift ``β a_P`` is implicit velocity under-relaxation at ``1/(1+β)``. Unset:
+        :class:`SwitchedEvolutionRelaxation`'s default.
+    exponent : float or None
+        The ramp exponent ``p``. ``1`` ramps the shift linearly with the residual norm.
+    beta_floor : float or None
+        A lower bound on ``β``, holding the shifted solve out of the ill-conditioned low-``β`` regime.
+        It never moves the converged root -- the shift vanishes there either way -- only the path.
+
+        ⚠️ **Not the preconditioner's floor of the same name.** ``amg_beta_tracking_refresh``'s
+        ``beta_floor`` bounds the ``β`` the *V-cycle is built at* while the march keeps solving at its
+        own; this one bounds the march's ``β`` itself. Nor is it the march step control's ``beta_min``.
+        Three different floors, and reaching for the wrong one changes nothing observable.
+    max_escalations : int or None
+        Maximum damping escalations per step. A step whose shifted solve fails the acceptance test is
+        re-damped (``β *= escalation_factor``) and retried, up to this many times; a well-behaved step
+        is accepted on the first attempt at no extra cost. ``0`` disables escalation.
+    escalation_factor : float or None
+        Factor ``> 1`` by which ``β`` grows on each rejected attempt.
+    divergence_cap : float or None
+        The :class:`DivergenceGuard` threshold: an attempt is rejected (and the damping escalated) if
+        its residual is non-finite or exceeds ``divergence_cap × ‖R₀‖`` -- measured against the
+        *initial* residual, since the march is non-monotone and oscillates around and below it.
+    line_search : int or None
+        Backtracking step-halvings applied to the shifted correction before the step is judged. ``0``
+        takes the full shifted step, leaving a full re-solve at larger ``β`` as the only recourse to
+        an overshoot; a positive value first scales ``δ`` back along ``{1, 1/2, …}`` in cheap residual
+        evaluations. Unset, it is the one setting the builders genuinely disagree on: the four coupled
+        builders take ten rungs, because the coupled residual's full step overshoots by orders of
+        magnitude from the hybrid start, while the flow-only and scalar builders take the step's own
+        ``0``.
+    grow : int or None
+        Rungs the ladder may try **above** the full step (``α = 2**grow, …, 2, 1, 1/2, …``). ``0`` is
+        the one-sided ladder starting at the full step, which cannot express an admissible step longer
+        than the full one. Inert when the ladder has no rungs (a ``line_search`` of ``0``).
+    line_search_growth : LineSearchGrowth or None
+        How far the residual may rise and still be accepted by the ladder:
+        :class:`~aquaflux.solve.MonotoneLineSearch` (strict descent) or
+        :class:`~aquaflux.solve.RelaxedFarFromRoot`. Inert when the ladder has no rungs.
+
+    Examples
+    --------
+    One override, and each builder's own defaults for everything else -- the coupled march keeps its
+    line search::
+
+        from aquaflux.solve import Globalization
+        from aquaflux.turbulence import coupled_continuation
+
+        step = coupled_continuation(coupled, state, globalization=Globalization(beta0=1.5))
+    """
+
+    # Static, matching every field these end up in (the schedule's three, the guard's cap and the
+    # step's four ladder counts are all static there); the growth rule is data on the step and so here.
+    # The object is built off the jit path and read once.
+    beta0: float | None = eqx.field(static=True, default=None)
+    exponent: float | None = eqx.field(static=True, default=None)
+    beta_floor: float | None = eqx.field(static=True, default=None)
+    max_escalations: int | None = eqx.field(static=True, default=None)
+    escalation_factor: float | None = eqx.field(static=True, default=None)
+    divergence_cap: float | None = eqx.field(static=True, default=None)
+    line_search: int | None = eqx.field(static=True, default=None)
+    grow: int | None = eqx.field(static=True, default=None)
+    line_search_growth: LineSearchGrowth | None = None
+
+    def with_defaults(self, **base: object) -> Globalization:
+        """This configuration, with each field it leaves unset taken from ``base``.
+
+        How a builder supplies a default that differs from the step class's own without overriding a
+        caller who set that field: the coupled march calls ``with_defaults(line_search=10)``, and an
+        explicit ``line_search=0`` from its caller survives it.
+
+        Parameters
+        ----------
+        **base
+            Field name -> the builder's default for it.
+
+        Returns
+        -------
+        Globalization
+            A copy with the unset fields filled; the fields this object sets are unchanged.
+
+        Raises
+        ------
+        TypeError
+            If ``base`` names a field this class does not have.
+        """
+        filled = {
+            name: value
+            for name, value in _supplied(type(self), base).items()
+            if getattr(self, name) is None
+        }
+        return dataclasses.replace(self, **filled)
+
+    def _schedule(self) -> dict[str, object]:
+        """``relaxation_schedule``, if this object sets any of the three fields that describe one."""
+        schedule = _supplied(
+            SwitchedEvolutionRelaxation,
+            {"beta0": self.beta0, "exponent": self.exponent, "beta_floor": self.beta_floor},
+        )
+        return {"relaxation_schedule": SwitchedEvolutionRelaxation(**schedule)} if schedule else {}
+
+    def step(self, shift_policy: ShiftPolicy, **fields: object) -> PseudoTransientStep:
+        """This globalization applied to ``shift_policy`` as a single shifted step per outer iteration.
+
+        Parameters
+        ----------
+        shift_policy : ShiftPolicy
+            The problem's shift diagonal and shifted-operator preconditioner.
+        **fields
+            The step's remaining, problem-specific fields, passed straight through:
+            ``adjoint_preconditioner_factory``, ``forward_solver``, ``residual_norm``, ``step_limit``,
+            ``step_projection``, ``jacobian_residual``. A field left out, or passed as ``None``, keeps
+            :class:`PseudoTransientStep`'s own default. A step field this object leaves unset may be
+            supplied here instead -- a non-default ``acceptance`` rule, say, with
+            :attr:`divergence_cap` unset.
+
+        Returns
+        -------
+        PseudoTransientStep
+            The forward step to hand :class:`~aquaflux.solve.ImplicitNewtonSolver`.
+
+        Raises
+        ------
+        TypeError
+            If a field is one the step does not declare, or one this object also sets.
+        """
+        acceptance = (
+            {}
+            if self.divergence_cap is None
+            else {"acceptance": DivergenceGuard(divergence_cap=self.divergence_cap)}
+        )
+        ladder = _supplied(
+            PseudoTransientStep,
+            {
+                "max_escalations": self.max_escalations,
+                "escalation_factor": self.escalation_factor,
+                "line_search": self.line_search,
+                "grow": self.grow,
+                "line_search_growth": self.line_search_growth,
+            },
+        )
+        settings = {**self._schedule(), **acceptance, **ladder}
+        return PseudoTransientStep(shift_policy, **_merged(PseudoTransientStep, settings, fields))
+
+    def dual_time_step(self, shift_policy: ShiftPolicy, **fields: object) -> DualTimeStep:
+        """This globalization applied to ``shift_policy`` as a backward-Euler inner loop per timestep.
+
+        The two step shapes are built side by side so that a setting added to this object cannot reach
+        one and miss the other -- which is the failure the object exists to prevent, and the shapes are
+        far enough apart in the tree that a reader of either builder would not see the omission.
+
+        The inner Newton loop replaces the escalation ladder, so a dual-time step has no field for
+        :attr:`max_escalations`, :attr:`escalation_factor`, :attr:`divergence_cap`, :attr:`grow` or
+        :attr:`line_search_growth`. Setting one is refused rather than dropped: it would reach
+        nothing, and a march configured with a setting that does nothing looks exactly like one
+        configured without it.
+
+        Parameters
+        ----------
+        shift_policy : ShiftPolicy
+            The problem's shift diagonal and shifted-operator preconditioner.
+        **fields
+            The step's remaining fields, passed straight through -- ``inner_steps`` and ``inner_tol``
+            (the inner loop's bounds), the observability hooks, and the same problem-specific fields
+            :meth:`step` takes. Omitted or ``None`` keeps :class:`DualTimeStep`'s own default.
+
+        Returns
+        -------
+        DualTimeStep
+            The forward step to hand :class:`~aquaflux.solve.ImplicitNewtonSolver`.
+
+        Raises
+        ------
+        ValueError
+            If this object sets any of the escalation ladder's fields.
+        TypeError
+            If a field is one the step does not declare, or one this object also sets.
+        """
+        ignored = [name for name in _ESCALATION_LADDER if getattr(self, name) is not None]
+        if ignored:
+            raise ValueError(
+                f"{', '.join(ignored)} configure the escalation ladder, which a dual-time step does "
+                "not have -- its inner Newton loop replaces it -- so they would reach nothing. Leave "
+                "them unset, or take single shifted steps (inner_steps=1 on the coupled builders)."
+            )
+        settings = {
+            **self._schedule(),
+            **_supplied(DualTimeStep, {"line_search": self.line_search}),
+        }
+        return DualTimeStep(shift_policy, **_merged(DualTimeStep, settings, fields))
+
+
+#: Nothing overridden: every builder that takes a :class:`Globalization` applies its own defaults.
+#: Named because a function default must be one object rather than a call.
+DEFAULT_GLOBALIZATION = Globalization()

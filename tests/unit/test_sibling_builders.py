@@ -126,10 +126,107 @@ class SchemeTwo:
 """
 
 
+#: The same drifted pair again, with the shared tail extracted **onto another object in another
+#: module** -- a configuration value object whose method builds the step. Nothing here is spelled like
+#: a construction from the builders' side: the call is ``settings.step(...)``, lowercase and reached
+#: through an attribute, and it crosses a file. Resolution that stopped at same-module private
+#: functions saw neither, so both builders dropped out of the report entirely while `slow` still sat
+#: on one of them -- a whole family reported as a clean tree.
+_METHOD_TAIL_IN_ANOTHER_MODULE = {
+    "config.py": """
+class Step:
+    def __init__(self, policy, a=0, b=0, c=0, d=0, e=0, f=0, slow=None):
+        pass
+
+
+class Settings:
+    def step(self, policy, **fields):
+        return Step(policy, **fields)
+""",
+    "builders.py": """
+from .config import Settings
+
+
+def build_one(policy, *, settings=Settings(), a=0, b=0, c=0, d=0, e=0, f=0):
+    return settings.step(policy, a=a, b=b, c=c, d=d, e=e, f=f)
+
+
+def build_two(policy, *, settings=Settings(), a=0, b=0, c=0, d=0, e=0, f=0, slow=None):
+    return settings.step(policy, a=a, b=b, c=c, d=d, e=e, f=f, slow=slow)
+""",
+}
+
+
+#: The drifted pair split across two SUBPACKAGES of one tree -- a flow-only builder and a coupled one,
+#: which is where six builders of one march actually lived. A same-directory rule treated them as
+#: unrelated namesakes and discarded the pair before comparing a single parameter, which is how that
+#: family went unreported with six shared parameters against a threshold of five.
+_SIBLINGS_IN_TWO_SUBPACKAGES = {
+    "solve.py": """
+class Step:
+    def __init__(self, policy, a=0, b=0, c=0, d=0, e=0, f=0, slow=None):
+        pass
+""",
+    "flow/__init__.py": "",
+    "flow/continuation.py": """
+from ..solve import Step
+
+
+def build_one(policy, *, a=0, b=0, c=0, d=0, e=0, f=0):
+    return Step(policy, a=a, b=b, c=c, d=d, e=e, f=f)
+""",
+    "turbulence/__init__.py": "",
+    "turbulence/coupled.py": """
+from ..solve import Step
+
+
+def build_two(policy, *, a=0, b=0, c=0, d=0, e=0, f=0, slow=None):
+    return Step(policy, a=a, b=b, c=c, d=d, e=e, f=f, slow=slow)
+""",
+}
+
+#: A public builder that delegates to another public builder, forwarding the options it was given. The two
+#: share that surface by construction -- the delegation working, not two copies drifting -- so pairing
+#: them reports every wrapper beside its callee and buries the pairs a reader has to judge.
+_PUBLIC_WRAPPER = """
+class VCycle:
+    def __init__(self, matrix, a=0, b=0, c=0, d=0, e=0):
+        pass
+
+
+def build_vcycle(matrix, *, a=0, b=0, c=0, d=0, e=0):
+    return VCycle(matrix, a=a, b=b, c=c, d=d, e=e)
+
+
+class Preconditioner:
+    def __init__(self, cycle):
+        pass
+
+    @classmethod
+    def build(cls, matvec, *, a=0, b=0, c=0, d=0, e=0, probe=None):
+        return cls(build_vcycle(matvec, a=a, b=b, c=c, d=d, e=e))
+"""
+
+
 def _run(source: str, tmp_path: Path) -> str:
     package = tmp_path / "pkg"
     package.mkdir()
     (package / "mod.py").write_text(source)
+    result = subprocess.run(
+        [sys.executable, str(TOOL), str(package)], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, f"the report must always exit 0, got {result.returncode}"
+    return result.stdout
+
+
+def _run_package(sources: dict[str, str], tmp_path: Path) -> str:
+    """Run the report over a multi-module package, for the delegations that cross a file."""
+    package = tmp_path / "pkg"
+    package.mkdir()
+    for name, source in sources.items():
+        path = package / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source)
     result = subprocess.run(
         [sys.executable, str(TOOL), str(package)], capture_output=True, text=True, check=False
     )
@@ -163,6 +260,46 @@ def test_it_sees_through_a_shared_private_tail(tmp_path: Path) -> None:
     assert "build_one" in out and "build_two" in out
     assert "Step" in out, "the tail's constructed class must be credited to its callers"
     assert "'slow'" in out, "the drifted keyword is the actionable half of the report"
+
+
+def test_it_sees_through_a_tail_that_is_a_METHOD_IN_ANOTHER_MODULE(tmp_path: Path) -> None:
+    """The shared tail need not be a private function, and need not be in the same file.
+
+    A configuration object whose method builds the step is the natural place for a surface several
+    builders share -- it is one object rather than one keyword list copied N times, so the settings
+    *cannot* drift. What can still drift is everything above it, and that is what this report is for.
+    Both spellings the extraction introduces defeat a same-module private-function rule: the callee is
+    an attribute, so its owning class is not in the syntax tree, and it lives in another module.
+    """
+    out = _run_package(_METHOD_TAIL_IN_ANOTHER_MODULE, tmp_path)
+    assert "build_one" in out and "build_two" in out, (
+        f"a tail on another object in another module hid the pair entirely:\n{out}"
+    )
+    assert "'slow'" in out, "the drifted keyword is the actionable half of the report"
+
+
+def test_it_pairs_siblings_that_live_in_different_subpackages(tmp_path: Path) -> None:
+    """A directory boundary is not evidence that two builders are unrelated.
+
+    The builders of one engine naturally live beside the physics they configure, which is several
+    subpackages. What separates siblings from namesakes is a shared constructed class and a shared
+    surface -- both already required -- not where the files sit.
+    """
+    out = _run_package(_SIBLINGS_IN_TWO_SUBPACKAGES, tmp_path)
+    assert "build_one" in out and "build_two" in out, (
+        f"a pair split across two subpackages was discarded as namesakes:\n{out}"
+    )
+    assert "'slow'" in out, "the drifted keyword is the actionable half of the report"
+
+
+def test_it_does_not_pair_a_public_builder_with_the_builder_it_delegates_to(tmp_path: Path) -> None:
+    """A wrapper shares its callee's surface by construction, exactly as a private tail does.
+
+    Following delegation into public functions and methods -- which a tail extracted onto a
+    configuration object needs -- would otherwise report every wrapper beside the builder it calls.
+    """
+    out = _run(_PUBLIC_WRAPPER, tmp_path)
+    assert "no sibling-builder pairs" in out, out
 
 
 def test_it_does_not_pair_a_private_tail_with_its_own_callers(tmp_path: Path) -> None:

@@ -30,11 +30,10 @@ import jax.numpy as jnp
 import lineax as lx
 
 from aquaflux.solve import (
-    DivergenceGuard,
+    DEFAULT_GLOBALIZATION,
+    Globalization,
     ImplicitNewtonSolver,
-    PseudoTransientStep,
     ShiftTerm,
-    SwitchedEvolutionRelaxation,
 )
 
 from .preconditioner import ScalarTransportPreconditioner
@@ -90,11 +89,7 @@ class ScalarShiftPolicy(eqx.Module):
 
 def scalar_pseudo_transient_solve(
     *,
-    beta0: float = 2.0,
-    exponent: float = 1.0,
-    max_escalations: int = 6,
-    escalation_factor: float = 2.0,
-    divergence_cap: float = 10.0,
+    globalization: Globalization = DEFAULT_GLOBALIZATION,
     max_steps: int = 40,
     rtol: float = 1e-10,
     atol: float = 1e-12,
@@ -120,10 +115,13 @@ def scalar_pseudo_transient_solve(
 
     Parameters
     ----------
-    beta0, exponent, max_escalations, escalation_factor, divergence_cap
-        The pseudo-transient schedule and accept/escalate parameters (see
-        :class:`~aquaflux.solve.PseudoTransientStep`). ``beta0`` is a starting guess, not a per-case
-        knob — escalation recovers a too-small value.
+    globalization : Globalization
+        How hard the march damps and what it does when a step misbehaves -- the schedule, the
+        accept/escalate ladder, the divergence guard and the backtracking ladder, shared with the flow
+        and coupled marches. ``beta0`` is a starting guess, not a per-case knob: escalation recovers a
+        too-small value. Only the fields it sets are applied; left unset, the march takes the full
+        shifted step and leaves escalation as the only recourse to an overshoot, and a stiffer scalar
+        can be given a ``line_search`` or a ``beta_floor`` here without constructing the step by hand.
     max_steps : int
         Maximum Newton/continuation iterations per scalar solve.
     rtol, atol : float
@@ -147,23 +145,12 @@ def scalar_pseudo_transient_solve(
         state: jnp.ndarray,
         policy: ScalarShiftPolicy | None,
     ) -> jnp.ndarray:
-        if policy is None:
-            forward = PseudoTransientStep(
-                ScalarShiftPolicy(jnp.zeros_like(state)),
-                relaxation_schedule=SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent),
-                max_escalations=max_escalations,
-                escalation_factor=escalation_factor,
-                acceptance=DivergenceGuard(divergence_cap=divergence_cap),
-            )
-        else:
-            forward = PseudoTransientStep(
-                policy,
-                relaxation_schedule=SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent),
-                max_escalations=max_escalations,
-                escalation_factor=escalation_factor,
-                acceptance=DivergenceGuard(divergence_cap=divergence_cap),
-                adjoint_preconditioner_factory=policy.preconditioner,
-            )
+        # A `None` policy is the unpreconditioned, unshifted fallback: a zero shift diagonal and no
+        # adjoint factory. Same construction either way, so the two cannot be configured differently.
+        forward = globalization.step(
+            ScalarShiftPolicy(jnp.zeros_like(state)) if policy is None else policy,
+            adjoint_preconditioner_factory=None if policy is None else policy.preconditioner,
+        )
         newton = ImplicitNewtonSolver(
             rtol=rtol, atol=atol, max_steps=max_steps, solver=solver, forward_step=forward
         )

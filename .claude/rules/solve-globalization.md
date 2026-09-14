@@ -204,11 +204,62 @@ What to take from it, none of which is specific to that mechanism:
     (`solve/norm.py`). A `RelaxationSchedule` is **memoryless** (β from the two residual norms only), which
     is what keeps it on the differentiable traced path. `ConstantRelaxation(β)` carries β as a **dynamic
     0-d leaf** so an external control can vary it per step as a `filter_jit` cache hit (the `lam_max`
-    precedent). The five builder factories (`momentum_continuation`, `coupled_continuation`,
-    `mass_flow_coupled_continuation`, the two scalar builders) keep their public `beta0=/exponent=` knobs
-    and translate them into `SwitchedEvolutionRelaxation(...)` at the one construction line — a factory
-    building the real object, not a shim. A *stateful* or α-driven damping rule is **not** a schedule; it
+    precedent). `beta0`/`exponent`/`beta_floor` are the public spelling still, but they are now fields of
+    the shared `Globalization` (below) rather than keywords on each builder, and
+    `Globalization`'s step construction translates them — only when one is set; unset, the step's own
+    default schedule applies — a factory building the real object, not a shim. A *stateful* or α-driven damping rule is **not** a schedule; it
     is a `StepControl` on the eager march (see `march.py`).
+
+  - **⚠️ ONE `Globalization` FOR ALL SIX BUILDERS — the engine's own settings are not per-builder
+    keywords (binding, BUILT 2026-09-13, #372).** `Globalization` (`solve/continuation.py`, exported)
+    carries every setting that describes *how a march damps* rather than *what it is solving*: the SER
+    schedule (`beta0`, `exponent`, `beta_floor`), the escalation ladder (`max_escalations`,
+    `escalation_factor`), the divergence guard's `divergence_cap`, and the backtracking ladder
+    (`line_search`, `grow`, `line_search_growth`). Its two methods, `step(policy, **fields)` and
+    `dual_time_step(policy, **fields)`, are the **only** places a globalization becomes a step; the
+    per-problem fields (`adjoint_preconditioner_factory`, `forward_solver`, `residual_norm`,
+    `step_limit`, `step_projection`, `jacobian_residual`) ride through as passthroughs.
+    - **Every field is UNSET by default (`None`), and unset falls through — first to the builder's base,
+      then to the step class's own default (binding).** `_coupled_step` calls
+      `globalization.with_defaults(line_search=_COUPLED_LINE_SEARCH)`, so `Globalization(beta0=1.5)`
+      changes one setting on every builder while the coupled march keeps its ten rungs, and an explicit
+      `line_search=0` survives. No default is declared on `Globalization` itself, so none is restated.
+      ⚠️ **The first version carried a full default set and two presets** (`DEFAULT_GLOBALIZATION` and a
+      `COUPLED_GLOBALIZATION` differing in `line_search`) with a prose rule to start from the right one. A
+      bare `Globalization(beta0=1.5)` on a coupled builder then silently reset the line search to zero, and
+      a declarative case file's `globalization: {beta0: 1.5}` had no way to say which preset it meant.
+      There is no `COUPLED_GLOBALIZATION` now; `DEFAULT_GLOBALIZATION` is the empty override.
+    - **What it refuses rather than drops.** `dual_time_step` raises on any escalation-ladder field that is
+      set (`max_escalations`, `escalation_factor`, `divergence_cap`, `grow`, `line_search_growth`): the
+      dual-time inner loop has no ladder, so they would reach nothing. A step field the target class does
+      not declare raises **even when passed as `None`** — `_supplied` checks names before dropping unset
+      values, because filtering first made a misplaced `acceptance=None` vanish — and a setting given both
+      on the object and as a step field raises rather than one silently winning.
+    - **The membership test is whether a setting's reason can be stated without naming a residual or a
+      preconditioner.** It can for all of the above. It cannot for the k-positivity guard, whose value is a
+      function of the state layout — so `positivity_floor`/`positivity_projection` stay on the coupled
+      builders, which hold the `CoupledRANS` that can construct one, and arrive at `step()` as ordinary
+      fields. Nor can it for the per-family Krylov restart regime or the progress measure's default.
+      **Open, found by review and not decided:** `shift_basis` and the non-layout `turbulence_damping`
+      strategies pass the test and are *off* the object; `divergence_cap` and `line_search_growth.basin`
+      are residual ratios read in a measure the object excludes (#370); and `acceptance` and the schedule
+      are flattened to scalars, so a non-`DivergenceGuard` rule or a non-SER schedule reaches a step only
+      through `step(**fields)` with those fields unset.
+    - **What it replaced, and the reach it still does not give.** The four coupled builders carried eight
+      of these keywords apiece; `momentum_continuation` and `scalar_pseudo_transient_solve` carried **two**,
+      so `beta_floor`, `line_search`, `grow` and the growth rule were unreachable from the flow-only and
+      scalar paths, and `line_search_growth` from all six. The problem-specific step fields (`step_limit`,
+      `step_projection`, `forward_solver`, `residual_norm`, `jacobian_residual`) are **still** unreachable
+      from those two builders — outside #372's settings, not closed by it. The segregated flow solve
+      `bulk_velocity_flow_solve` is a `DampedNewtonStep`, a different engine that takes no `Globalization`.
+    - **⚠️ Moving keywords off a builder that keeps `**kwargs` turns a retired name into a silent one.**
+      `coupled_continuation` forwards leftovers to `BlockPreconditioner.build`, which only a first build
+      reads — a refresh (`reuse=`) carries the flow block — so `beta0=` on a refresh was silently dropped.
+      `_refuse_unknown_flow_block_options` checks the names against `build`'s signature before the branch;
+      exact because `build` takes no `**kwargs`, which a test pins.
+    - Pinned by `tests/unit/test_globalization_reach.py`: every builder takes the object; a non-default one
+      arrives on the built step **field for field**; the shipped defaults as **literal numbers**; one
+      override leaves every other setting alone; and each refusal above.
   - **Three boundary responses on `ShiftStrengthControl`, and what each keeps is the whole design
     (`carry_beta` long-standing; `rebase` and `redamp` BUILT 2026-09-09).** The carried state is
     `(beta, memo)`; each of these is an *outside event changed the situation, keep what still applies*
@@ -397,7 +448,9 @@ What to take from it, none of which is specific to that mechanism:
     coupled path sets `line_search>0` (`coupled_continuation`, `_COUPLED_LINE_SEARCH=10`); β escalation
     stays the fallback for a genuinely bad *direction* (an ill-conditioned shifted solve), not an
     overshoot. Like the shift, the search only reshapes the forward path — converged state and IFT
-    adjoint unchanged. The flow path leaves `line_search=0`, so it is bit-identical.
+    adjoint unchanged. The flow and scalar paths leave `line_search` unset, so they take the step's own
+    `0` and are bit-identical — a default now, not a limit: since #372 either can be handed
+    `Globalization(line_search=…)` without constructing the step by hand.
   - **`forward_solver` overrides the shared `_INEXACT_CONTINUATION_SOLVER`; the coupled default stops on a
     relative residual in an INJECTED norm (`relative_residual_gmres`, `solve/linear.py`).**
     `default_solver()` returns the injected `forward_solver` when set, else the shared restart-40 GMRES.
