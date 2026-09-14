@@ -1106,8 +1106,8 @@ DUMP_STEP_LIMIT_KEEP = int(os.environ.get("BFS3D_DUMP_STEP_LIMIT_KEEP", "12"))
 # as the default meant every A/B launched without the environment variable silently measured the refresh
 # TRIGGER instead of the thing under test -- which happened, to two preconditioner arms in one session,
 # despite the trap being written down. A default nobody wants is a trap, not a setting: the fix is the
-# default, not another warning. `BFS3D_REFRESH_ON_CYCLES=0` still selects the scheduled cadence for an
-# A/B of the trigger itself.
+# default, not another warning. The scheduled cadence it was measured against has since been deleted, so
+# `BFS3D_REFRESH_ON_CYCLES=0` now switches the cost trigger off and leaves only the per-rung refit.
 REFRESH_ON_CYCLES = int(os.environ.get("BFS3D_REFRESH_ON_CYCLES", "3"))
 #: Freeze the k-production cap's `k` in the Jacobian (`SSTTurbulence.explicit_production_limiter`).
 #: The library default is `True`, so this case ran with it ON until this knob existed.
@@ -1123,36 +1123,6 @@ REFRESH_ON_CYCLES = int(os.environ.get("BFS3D_REFRESH_ON_CYCLES", "3"))
 #: where the cap WOULD have been frozen, so the arm can be judged rather than assumed.
 PRODUCTION_LIMITER = os.environ.get("BFS3D_PRODUCTION_LIMITER", "1") not in ("0", "false", "False")
 
-#: The β-MISMATCH refresh trigger, as a fraction of the β the V-cycle was last built at. Off by default
-#: (`inf`, a gate that can never fire), which is byte-identical to the configuration every archived
-#: measurement on this case was taken under.
-#:
-#: What it is for, and why `inf` is not obviously right. With the cost trigger above selected, the
-#: scheduled cadences are switched off by setting this gate to `inf` -- so the ONLY thing that rebuilds
-#: the V-cycle is a solve that has already cost more than `REFRESH_ON_CYCLES` cycles. That is a purely
-#: REACTIVE rule, and it has one blind spot: the β-escalation bailout. When a step is redone at
-#: `β *= RETRY_BETA_FACTOR`, the march re-invokes this same refresh hook specifically to re-match the
-#: V-cycle to the escalated β -- and with the gate at `inf` that call does nothing, so the escalated
-#: attempt is solved against a V-cycle built for a β up to 4x smaller.
-#:
-#: The escalation then cannot cure the step it was invoked for. Measured across the three converging
-#: marches that reached the target rung, the same pair repeats
-#: bit-for-bit in all three: an `e2` step at β = 0.2341 whose V-cycle was left stale returns a_min
-#: 0.000 -- a step that moves nothing and costs three solves -- and the FOLLOWING step, at β = 0.9364,
-#: takes a_min 1.000 once the cost trigger has finally forced a rebuild. Across those same runs every
-#: escalated step whose V-cycle WAS rebuilt came back with a_min >= 0.595, and not one was null.
-#:
-#: The mechanism is the one the smoother-screen note above raises as a live hypothesis: at the march's
-#: loose inner stop the accepted correction is substantially determined by the preconditioner, and the
-#: step length is a MINIMUM over cells, so a mismatched V-cycle need not cost cycles to hand back a
-#: direction whose worst cell collapses the line search. Both null steps above solved in 2 cycles.
-#:
-#: Sizing, replayed over a completed march's own β sequence: at 0.9 the gate would add 2 step-boundary
-#: rebuilds (~35 s) on top of the 23 that run already, plus one per escalation attempt. 0.9 is chosen so
-#: a DOUBLING trips it -- which every escalation is -- while the control's own /1.5 growth (a 33 % fall)
-#: does not, since re-matching a V-cycle to a β that is drifting slowly is what the cost trigger already
-#: covers more cheaply. Lower values get expensive fast: 0.5 would add 13 rebuilds (~225 s).
-REFRESH_ON_BETA = float(os.environ.get("BFS3D_REFRESH_ON_BETA", "0") or 0.0) or float("inf")
 #: The wall boundary condition on `k`, as an A/B. `Dirichlet(0)` (default) is the resolved-wall
 #: condition -- turbulent fluctuations vanish at a no-slip wall, so `k -> 0`. `BFS3D_K_WALL=zerogradient`
 #: selects the wall-function condition instead.
@@ -1517,10 +1487,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             "probe column reach",
             "uniform 3" if COLUMN_REACH is None else "/".join(map(str, COLUMN_REACH)),
         ),
-        ("refresh on cycles", REFRESH_ON_CYCLES or "scheduled cadence"),
-        # Beside the cost trigger, because the two together are what decides when the V-cycle is
-        # rebuilt, and a run that re-matches on a β escalation is a different arm from one that does not.
-        ("refresh on beta mismatch", "off" if REFRESH_ON_BETA == float("inf") else REFRESH_ON_BETA),
+        ("refresh on cycles", REFRESH_ON_CYCLES or "off"),
         ("Reynolds continuation points", N_POINTS),
         (
             "Reynolds span walked as",
@@ -1614,20 +1581,11 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             FieldGroups.split_before(coupled.layout, "k").active_rows() if FIELD_SPLIT else None
         ),
     )
-    # With the cycle trigger on, the scheduled cadences are switched OFF so it REPLACES them: as an
-    # addition it is break-even, as a replacement it is the largest saving measured on this march.
-    # CAREFUL: `beta_rel_change=None` does NOT switch the schedule off -- it removes the gate, and a
-    # missing gate means "refresh every step". Switching it off means a gate that exists and never
-    # fires again after its first (initialising) call, plus no materialize gates, so the refresh
-    # branch resolves to `none`.
-    scheduled = not REFRESH_ON_CYCLES
+    # Re-fits on its first call and after each rung's `rebind`; between those the cost trigger
+    # (`refresh_on_cycles`, through `refresh.refresh_at`) is the only thing that rebuilds the V-cycle.
     refresh = amg_beta_tracking_refresh(
         coupled,
         probe=probe,
-        beta_rel_change=0.25 if scheduled else REFRESH_ON_BETA,
-        refresh_every=8 if scheduled else 10**9,
-        materialize_drift=0.05 if scheduled else None,
-        materialize_every=4 if scheduled else None,
         beta_floor=PC_BETA_FLOOR,
         observer=logger.on_refresh,
     )

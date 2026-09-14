@@ -64,7 +64,7 @@ paths:
     **⚠️ That is fixed structurally (2026-09-11, #287): `MaterializedJacobianPreconditioner`
     (`amg_preconditioner.py`) is now the shared base both preconditioners subclass**, holding only what
     is genuinely common to fitting *any* inverse to the coloured-probe materialized coupled Jacobian
-    (the probe itself, the shift-diagonal add, the cached-Jacobian shift-only refresh, teardown) —
+    (the probe itself, the shift-diagonal add, teardown) —
     `MonolithicAmgPreconditioner` is no longer `FieldSplitAmgPreconditioner`'s base, so it no longer
     inherits the monolithic-only state (the fixed-pattern cell-major assembler) it never used. See `solve-amg-multigrid.md` and `solve-field-split.md`.
   - **⚠️ Anything a base reads off `self.factors` beyond that pair is a requirement on ALL of them

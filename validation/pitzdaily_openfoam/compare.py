@@ -1205,11 +1205,8 @@ def solve_aquaflux(
     ):
         logger.note(f"  {_name}: {_value}")
 
-    # The refresh hook, built ONCE and pointed at each rung in turn. Its scheduled cadences are
-    # switched OFF so the cycle trigger REPLACES them rather than adding to them: as an addition the
-    # trigger was measured break-even on the sibling case, as a replacement it was the largest saving
-    # on that march. ⚠️ `beta_rel_change=None` does NOT switch the schedule off -- it removes the gate,
-    # and a missing gate means "refresh every step". Off means a gate that exists and never fires.
+    # The refresh hook, built ONCE and pointed at each rung in turn. It re-fits on its first call and
+    # after each `rebind`; between those the cycle trigger is the only thing that rebuilds.
     # Built once and shared by the engine and the refresh hook: the coloured-probe plan is the single
     # largest allocation this case makes, and building it twice doubles that for nothing.
     probe = CoupledJacobianProbe.build(
@@ -1221,10 +1218,6 @@ def solve_aquaflux(
     refresh = amg_beta_tracking_refresh(
         coupled,
         probe=probe,
-        beta_rel_change=float("inf"),
-        refresh_every=10**9,
-        materialize_drift=None,
-        materialize_every=None,
         beta_floor=PC_BETA_FLOOR,
         observer=logger.on_refresh,
     )

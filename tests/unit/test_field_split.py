@@ -369,9 +369,7 @@ def test_field_split_refresh_in_place_no_longer_takes_the_dead_smoother_paramete
     n = groups.n_dofs
     operator = np.eye(n) * 2.0 + np.eye(n, k=1) * 0.25
     split = split_for(operator, groups, flow_first=True)
-    preconditioner = FieldSplitAmgPreconditioner(
-        split, groups, jacobian_no_shift=operator, n_fields=1
-    )
+    preconditioner = FieldSplitAmgPreconditioner(split, groups)
     with pytest.raises(TypeError):
         preconditioner.refresh_in_place(
             lambda v: v, None, np.zeros(n), smoother_fill_levels=0, smoother_sweeps=4

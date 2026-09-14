@@ -277,26 +277,6 @@ def test_the_split_refreshes_in_place_onto_the_same_object(case):
     pc.destroy()
 
 
-def test_the_split_shift_refresh_reuses_the_cached_jacobian(case):
-    """The cheap branch: re-fit at a new shift without re-running the coloured probe."""
-    from aquaflux.solve import FieldSplitAmgPreconditioner
-
-    groups = case["groups"]
-    coupled, state = case["coupled"], case["state"]
-    plan = _coupled_jacobian_plan(coupled, 3)
-
-    def matvec(v):
-        return _jacobian_matvec(coupled, state, v)
-
-    pc = FieldSplitAmgPreconditioner.build(
-        matvec, plan, np.full(groups.n_dofs, 0.5), groups, coarse_eq_limit=200
-    )
-    phases = pc.refresh_shift_in_place(np.full(groups.n_dofs, 2.0))
-    # No probe phase at all -- that absence IS the saving this branch exists for.
-    assert [name for name, _ in phases] == ["assemble", "refactor"]
-    pc.destroy()
-
-
 def test_per_block_smoother_options_reach_the_trailing_hierarchy(case):
     """The two halves must be tunable APART, and the setting must survive a refresh.
 

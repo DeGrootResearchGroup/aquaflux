@@ -560,22 +560,10 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
     :class:`~aquaflux.solve.field_split.FieldSplitAmgPreconditioner` — needed the materialize/shift/cache
     machinery without the monolithic-only state built around one :class:`AmgVCycle` (the fixed-pattern
     cell-major assembler). Holding both classes' *union* on one base was what forced the split to inherit
-    attributes it cannot honour and re-implement its refresh bodies with parameters that do nothing on that path. What is here is exactly
-    what both need: probing the Jacobian, adding the pseudo-transient shift, and caching the unshifted
-    Jacobian so a shift-only refresh need not re-probe.
+    attributes it cannot honour and re-implement its refresh bodies with parameters that do nothing on
+    that path. What is here is exactly what both need: probing the Jacobian and adding the
+    pseudo-transient shift.
     """
-
-    def __init__(
-        self,
-        factors,
-        jacobian_no_shift: sp.csr_matrix | None = None,
-        n_fields: int | None = None,
-    ) -> None:
-        super().__init__(factors)
-        # The materialized jvp Jacobian *without* the pseudo-transient shift, cached so a β-only refresh
-        # (``refresh_shift_in_place``) can re-add a new ``β d`` diagonal without re-running the coloured jvp probe.
-        self._jacobian_no_shift = jacobian_no_shift
-        self._n_fields = n_fields
 
     @staticmethod
     def _materialize_jacobian(
@@ -616,9 +604,7 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
         return shifted_jacobian(jacobian_no_shift, shift_diagonal)
 
     def destroy(self) -> None:
-        """Release the frozen inverse's own resources and the cached Jacobian."""
-        self.factors.destroy()
-        self._jacobian_no_shift = None
+        """Release the frozen inverse's own resources."""
 
 
 class MonolithicAmgPreconditioner(MaterializedJacobianPreconditioner):
@@ -638,11 +624,9 @@ class MonolithicAmgPreconditioner(MaterializedJacobianPreconditioner):
     def __init__(
         self,
         vcycle: AmgVCycle,
-        jacobian_no_shift: sp.csr_matrix | None = None,
-        n_fields: int | None = None,
         assembler: ShiftedCellMajorOperator | None = None,
     ) -> None:
-        super().__init__(vcycle, jacobian_no_shift=jacobian_no_shift, n_fields=n_fields)
+        super().__init__(vcycle)
         # The fixed-pattern shift/equilibrate/reorder assembler, present exactly when the materialize ran
         # on a precomputed ``structure`` (which is what guarantees the pattern is the same every refresh).
         # ``None`` falls back to the generic sparse path, which works for any pattern.
@@ -744,8 +728,6 @@ class MonolithicAmgPreconditioner(MaterializedJacobianPreconditioner):
                 coarse_eq_limit=coarse_eq_limit,
                 extra_options=extra_options,
             ),
-            jacobian_no_shift=jacobian,
-            n_fields=plan.n_fields,
             assembler=assembler,
         )
 
@@ -781,57 +763,13 @@ class MonolithicAmgPreconditioner(MaterializedJacobianPreconditioner):
             indistinguishable in an aggregate.
         """
         timer = PhaseTimer()
-        self._jacobian_no_shift = self._materialize_jacobian(
+        jacobian = self._materialize_jacobian(
             matvec, plan, batched_matvec, probe_batch_size, structure
         )
         timer.lap("probe")
-        self._n_fields = plan.n_fields
         if self._assembler is None:
             self._assembler = self._assembler_for(structure, plan.n_fields)
-        cell_major, scale, perm = self._cell_major(
-            self._jacobian_no_shift, shift_diagonal, plan.n_fields
-        )
-        timer.lap("assemble")
-        self.factors.refactor(cell_major, scale, perm)
-        timer.lap("refactor")
-        return timer.phases()
-
-    def refresh_shift_in_place(self, shift_diagonal: np.ndarray) -> tuple[tuple[str, float], ...]:
-        """Re-preconditioner at a new shift ``β d`` REUSING the frozen Jacobian — no re-materialization.
-
-        The operator is ``J(φ) + β d``, and the pseudo-transient shift ``β d`` touches only the **diagonal**.
-        So tracking a moving ``β`` (and the cheap per-cell shift ``d``) needs only to re-add the new diagonal
-        to the **cached** Jacobian and re-factor — it does **not** need the coloured-probe materialization of ``J``
-        that :meth:`refresh_in_place` pays. The probe is the dominant refresh cost — measured on a
-        three-dimensional coupled march the two branches differ by roughly a factor of three, and that
-        difference *is* the probe — so a shift-only refresh is several times cheaper. The Jacobian is held frozen at the last full
-        :meth:`build` / :meth:`refresh_in_place`, so ``J``'s *state* drift is not tracked here — pair frequent
-        shift-only refreshes with an occasional full refresh (a state-staleness trigger) to catch that.
-
-        **Forward-march use ONLY**, exactly as :meth:`refresh_in_place`: the mutation is impure and must never
-        touch a differentiated path. Raises if no Jacobian has been materialized yet (call :meth:`build` or
-        :meth:`refresh_in_place` first).
-
-        Parameters
-        ----------
-        shift_diagonal : np.ndarray
-            The new pseudo-transient shift ``β d``, shape ``(n_fields * n,)`` — added to the cached Jacobian's
-            diagonal.
-
-        Returns
-        -------
-        tuple of (str, float)
-            ``("assemble", s), ("refactor", s)`` — this branch runs no probe, which is exactly what makes
-            it the cheap one.
-        """
-        if self._jacobian_no_shift is None or self._n_fields is None:
-            raise RuntimeError(
-                "refresh_shift_in_place needs a cached Jacobian; call build() or refresh_in_place() first."
-            )
-        timer = PhaseTimer()
-        cell_major, scale, perm = self._cell_major(
-            self._jacobian_no_shift, shift_diagonal, self._n_fields
-        )
+        cell_major, scale, perm = self._cell_major(jacobian, shift_diagonal, plan.n_fields)
         timer.lap("assemble")
         self.factors.refactor(cell_major, scale, perm)
         timer.lap("refactor")

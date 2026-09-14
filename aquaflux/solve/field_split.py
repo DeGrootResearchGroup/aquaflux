@@ -640,10 +640,8 @@ class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
         self,
         split: BlockTriangularFieldSplit,
         groups: FieldGroups,
-        jacobian_no_shift: sp.csr_matrix | None = None,
-        n_fields: int | None = None,
     ) -> None:
-        super().__init__(split, jacobian_no_shift=jacobian_no_shift, n_fields=n_fields)
+        super().__init__(split)
         self._groups = groups
 
     @property
@@ -721,7 +719,7 @@ class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
             leading_inverse=leading_inverse,
             trailing_inverse=trailing_inverse,
         )
-        return cls(split, groups, jacobian_no_shift=jacobian, n_fields=plan.n_fields)
+        return cls(split, groups)
 
     def refresh_in_place(
         self,
@@ -741,29 +739,11 @@ class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
         diagonal shift — the per-block equilibration is inside the refactor.
         """
         timer = PhaseTimer()
-        self._jacobian_no_shift = self._materialize_jacobian(
+        jacobian = self._materialize_jacobian(
             matvec, plan, batched_matvec, probe_batch_size, structure
         )
         timer.lap("probe")
-        self._n_fields = plan.n_fields
-        shifted = self._shifted(self._jacobian_no_shift, shift_diagonal)
-        timer.lap("assemble")
-        self.factors.refactor(shifted)
-        timer.lap("refactor")
-        return timer.phases()
-
-    def refresh_shift_in_place(self, shift_diagonal: np.ndarray) -> tuple[tuple[str, float], ...]:
-        """Re-fit at a new shift REUSING the cached Jacobian — no re-materialization.
-
-        The cheap branch of the refresh, for when only ``beta`` has moved. Raises if no Jacobian was
-        cached, rather than silently rebuilding from nothing.
-        """
-        if self._jacobian_no_shift is None:
-            raise RuntimeError(
-                "refresh_shift_in_place needs the Jacobian cached by build/refresh_in_place."
-            )
-        timer = PhaseTimer()
-        shifted = self._shifted(self._jacobian_no_shift, shift_diagonal)
+        shifted = self._shifted(jacobian, shift_diagonal)
         timer.lap("assemble")
         self.factors.refactor(shifted)
         timer.lap("refactor")

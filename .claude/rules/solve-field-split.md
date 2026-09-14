@@ -479,12 +479,12 @@ deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` fr
     This does not reopen gating on `binding_limit == 1` (measured and reverted, below).
 
     **⚠️ AND THE FUTILITY READING IS CONFOUNDED.** The host trio's step-51 attempts all ran with
-    `pc none 0.0s` — `REFRESH_ON_BETA` defaults to `inf`, so the `precondition_step` the march calls on
+    `pc none 0.0s` — the β-mismatch gate was off, so the `precondition_step` the march calls on
     every escalation does nothing, and every escalated attempt was solved against a V-cycle built for
     β = 0.0293. Step 52 escaped only because its inner solve happened to trip the mid-step rebuild. So
     **"the ladder is futile" and "the ladder was never given a matched preconditioner" are NOT separated
-    by this data.** `BFS3D_REFRESH_ON_BETA=0.9` is the existing knob that discriminates them, at roughly
-    +35 s of rebuild on one march.
+    by this data.** The knob that would have discriminated them (`BFS3D_REFRESH_ON_BETA`, a finite β-mismatch gate) was
+    deleted with the scheduled cadence (2026-09-13, #371) without being run, so they stay unseparated.
 
     **What survives as the lever: the asymmetric return.** β is driven up by ×2 (backoff) and up to ×4
     (ladder) but recovers at only ÷1.5 per step — ~5:1 in log space — and every walk-back step is

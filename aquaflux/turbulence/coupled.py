@@ -71,6 +71,7 @@ from aquaflux.solve import (
     Globalization,
     ImplicitNewtonSolver,
     LocalCourantBasis,
+    MaterializedJacobianPreconditioner,
     MonolithicAmgPreconditioner,
     MonolithicLuPreconditioner,
     ProbeGather,
@@ -3321,174 +3322,13 @@ def coupled_amg_continuation(
     )
 
 
-def _staleness_beta_gate(*, refresh_every: int, beta_rel_change: float) -> Callable[[float], bool]:
-    """A stateful predicate for the β-tracking refresh: *when* is a re-factor worth its cost?
-
-    Returns ``should_refresh(beta) -> bool``. It fires on the first call, whenever ``β`` has moved by
-    more than ``beta_rel_change`` (relative to the ``β`` of the last refresh), or after ``refresh_every``
-    steps have passed with no refresh -- otherwise it returns ``False`` and the step reuses the standing
-    factorization.
-
-    The β-move trigger is what catches a shift-strength spike -- a dual-time overshoot (``β`` driven low,
-    the operator stiff) or a rung restart (``β`` jumped back to ``beta_start``). A step-count cap alone
-    would miss it for up to ``refresh_every`` steps, and a *drift* trigger (fired by coefficient change)
-    would miss it entirely in the worst case: a badly mismatched factor stalls the line search (α→0), so
-    the state stops moving, its coefficients stop drifting, and the drift trigger never fires. Keying the
-    refresh on ``β`` itself removes that stall mode. The step-count cap is the complementary staleness
-    bound for *state* development at a near-constant ``β`` (the flow developing during a cruise).
-
-    Parameters
-    ----------
-    refresh_every : int
-        Force a refresh after this many steps without one (the staleness cap for state development).
-    beta_rel_change : float
-        Refresh when ``|β - β_last| > beta_rel_change * |β_last|`` (the shift-mismatch trigger).
-
-    Returns
-    -------
-    callable
-        ``should_refresh(beta: float) -> bool``, carrying its own ``(β_last, steps_since)`` state.
-    """
-    last: dict[str, float | int] = {}
-
-    def should_refresh(beta: float) -> bool:
-        if "beta" not in last:
-            last["beta"], last["since"] = beta, 0
-            return True
-        last["since"] += 1
-        moved = abs(beta - last["beta"]) > beta_rel_change * max(abs(last["beta"]), 1e-30)
-        if moved or last["since"] >= refresh_every:
-            last["beta"], last["since"] = beta, 0
-            return True
-        return False
-
-    return should_refresh
-
-
-def _materialize_gate(
-    drift_factory: Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]],
-    *,
-    materialize_drift: float | None,
-    materialize_every: int | None,
-) -> Callable[[jnp.ndarray], bool]:
-    """A stateful predicate for the β-diagonal split: should this refresh RE-MATERIALIZE the Jacobian
-    (full, the coloured jvp probe) or only re-add the shift diagonal to the standing one (cheap)?
-
-    Returns ``should_materialize(state) -> bool``. Re-materializing is the dominant refresh cost, so it is
-    reserved for when the frozen Jacobian has actually gone stale -- i.e. when the state it was probed at
-    has moved. The staleness signal is a **coefficient drift** since the last materialize, supplied by
-    ``drift_factory`` (in the coupled march, :func:`eddy_viscosity_drift`: ``ν_t`` is what the operators are
-    assembled from, so its movement is the Jacobian's staleness, and it is cheap -- one jitted evaluation).
-    Fires when that drift exceeds ``materialize_drift``, OR after ``materialize_every`` steps without a
-    materialize (a state-development cap for a near-constant coefficient) -- the drift-move / step-cap pair
-    that mirrors :func:`_staleness_beta_gate`. The reference is re-based at every materialize (so the drift
-    measures movement the last materialize did not absorb) and seeded on the first call from the freshly-built
-    operator (so the first call needs only a shift, not a redundant materialize).
-
-    Parameters
-    ----------
-    drift_factory : callable
-        ``reference_state -> (state -> drift)`` -- builds a drift measure against a reference (a non-negative
-        scalar, zero at the reference). Injected so the gate's decision logic is testable with a synthetic
-        drift; the coupled march passes ``lambda ref: eddy_viscosity_drift(coupled, ref)``.
-    materialize_drift : float or None
-        Re-materialize when the drift since the last materialize exceeds this. ``None`` disables the drift
-        trigger (then only the step cap fires).
-    materialize_every : int or None
-        Force a materialize after this many **steps** without one (the staleness cap) -- steps, not
-        refreshes, because this gate is consulted once per step whatever branch the refresh then takes.
-        ``None`` disables the cap (then only the drift trigger fires).
-
-    Returns
-    -------
-    callable
-        ``should_materialize(state) -> bool``, carrying its own ``(drift reference, steps_since)`` state,
-        with a ``reset()`` that discards both. Reset it when the *problem* changes under the gate -- a
-        Reynolds-continuation rung hands the refresh a companion at a different viscosity, and a drift
-        reference built against the previous one would be comparing two different eddy viscosities.
-    """
-    st: dict[str, object] = {"since": 0, "drift_fn": None}
-
-    def reset() -> None:
-        """Forget the reference and the count: they describe a problem this gate no longer watches."""
-        st["since"], st["drift_fn"] = 0, None
-
-    def should_materialize(state: jnp.ndarray) -> bool:
-        st["since"] = int(st["since"]) + 1  # type: ignore[arg-type]
-        if materialize_drift is not None and st["drift_fn"] is None:
-            # Seed the drift reference at the freshly-built state; the Jacobian is already current here, so
-            # this first refresh needs only a shift (drift is zero against its own reference).
-            st["drift_fn"] = drift_factory(jax.lax.stop_gradient(state))
-        drift_hit = (
-            materialize_drift is not None
-            and st["drift_fn"] is not None
-            and float(st["drift_fn"](state)) > materialize_drift  # type: ignore[operator]
-        )
-        cap_hit = materialize_every is not None and int(st["since"]) >= materialize_every
-        if drift_hit or cap_hit:
-            st["since"] = 0
-            if materialize_drift is not None:
-                st["drift_fn"] = drift_factory(jax.lax.stop_gradient(state))
-            return True
-        return False
-
-    should_materialize.reset = reset  # type: ignore[attr-defined]
-    return should_materialize
-
-
-def _refresh_branch(*, stale_state: bool, moved_beta: bool, split: bool) -> str:
-    """Which branch a β-tracking refresh should take: ``"full"``, ``"shift"`` or ``"none"``.
-
-    The two staleness signals are **independent questions about different things**, and the whole point
-    of this function is that they are combined rather than nested:
-
-    * ``stale_state`` — the frozen Jacobian no longer matches the flow (the eddy viscosity has drifted).
-      Only a re-probe fixes that, so it forces a ``"full"``.
-    * ``moved_beta`` — the shift the V-cycle was built at no longer matches the one being solved. Only
-      the diagonal is wrong, so a ``"shift"`` fixes it where that cheap branch exists.
-
-    ``split`` says whether the cheap branch exists at all (an algebraic-multigrid preconditioner with a
-    materialize gate configured). Without it there is one branch, and any trigger means ``"full"``.
-
-    **Why this is a function and not three nested ``if``s at the call site.** Nesting them — asking the
-    state question *only* when the β question has already said yes — leaves state drift unable to trigger
-    anything at all below the preconditioner's shift floor, where the clamped β never moves so the β
-    question answers "no" forever. That is precisely the low-shift tail where the flow
-    develops fastest. Measured on a three-dimensional cold march: below the floor 91 % of steps refreshed
-    nothing while the eddy viscosity drifted ~20 % per step, and those steps carried ~47 % of the whole
-    march's Krylov cost. The decision is small, total, and worth being able to read and test on its own.
-
-    Parameters
-    ----------
-    stale_state : bool
-        The state-drift gate fired (the Jacobian needs re-probing).
-    moved_beta : bool
-        The β-mismatch gate fired (the shift needs re-adding).
-    split : bool
-        Whether the cheap shift-only branch is available.
-
-    Returns
-    -------
-    str
-        ``"full"``, ``"shift"`` or ``"none"``.
-    """
-    if stale_state:
-        return "full"
-    if not moved_beta:
-        return "none"
-    return "shift" if split else "full"
-
-
 def _beta_tracking_refresh(
     coupled: CoupledRANS,
     stencil_reach: int,
     column_reach: Sequence[int] | None = None,
     probe_gradient_sweeps: int | None = None,
     *,
-    gate: Callable[[float], bool] | None = None,
-    refresh_kwargs: dict[str, object] | None = None,
-    materialize_every: int | None = None,
-    materialize_drift: float | None = None,
+    every_step: bool,
     beta_floor: float = 0.0,
     observer: Callable[[RefreshTiming], None] | None = None,
     probe: CoupledJacobianProbe | None = None,
@@ -3496,11 +3336,11 @@ def _beta_tracking_refresh(
     """Shared skeleton for the β-tracking ``precondition_step`` hooks (complete-LU and algebraic multigrid).
 
     Returns a ``precondition_step(active_step, state)`` that reads ``β`` from the step's
-    :class:`~aquaflux.solve.ConstantRelaxation` schedule and, when ``gate(β)`` allows, re-factors the
-    step's :class:`MonolithicFactorShiftPolicy` preconditioner in place at ``J(state) + β·d(state)`` via
-    ``refresh_in_place(**refresh_kwargs)``. ``gate=None`` refreshes **every** step (the cheap exact-LU
-    cadence); a gate returning ``False`` reuses the standing factorization (the gated multigrid cadence,
-    whose re-materialize is too expensive to pay every step).
+    :class:`~aquaflux.solve.ConstantRelaxation` schedule and re-factors the step's
+    :class:`MonolithicFactorShiftPolicy` preconditioner in place at ``J(state) + β·d(state)``. With
+    ``every_step`` it does so on every step (the cheap exact-LU cadence); without, only on its first call
+    and after each ``rebind`` -- a multigrid re-materialize is too expensive to pay every step, so between
+    those the rebuild is left to the dual-time loop's cost trigger, through ``refresh_at``.
 
     Parameters
     ----------
@@ -3525,18 +3365,9 @@ def _beta_tracking_refresh(
         colouring recovers -- see :meth:`CoupledJacobianProbe.narrow`. The solve's own operator is
         unchanged, so the converged state and its adjoint are too. ``None`` (default) probes the
         residual as it stands.
-    gate : callable, optional
-        ``should_refresh(beta: float) -> bool``. ``None`` means always refresh.
-    refresh_kwargs : dict, optional
-        Extra keyword arguments forwarded to the preconditioner's ``refresh_in_place``. ``None`` forwards
-        none (the complete LU takes no extra options).
-    materialize_every : int or None
-        Force a full re-materialize after this many steps without one -- the step-count arm of the
-        materialize gate (:func:`_materialize_gate`). ``None`` (default) disables that arm.
-    materialize_drift : float or None
-        Re-materialize once the eddy viscosity has drifted by more than this fraction since the last one
-        -- the state-staleness arm of the same gate. ``None`` (default) disables it. With **both** arms
-        ``None`` there is no gate, so every refresh is a full re-materialize.
+    every_step : bool
+        Re-factor on every step (``True``), or only on the first call and after each ``rebind``
+        (``False``).
     beta_floor : float
         A lower bound on the shift strength the **preconditioner** is refreshed at: it is built at
         ``max(beta, beta_floor)`` while the march keeps solving at its own ``beta``. ``0.0`` (default)
@@ -3555,7 +3386,6 @@ def _beta_tracking_refresh(
         ``precondition_step(active_step, state) -> None``, carrying ``refresh_at`` (the inner-loop hook)
         and ``rebind`` (point it at another companion of the same case -- see below).
     """
-    refresh_kwargs = {} if refresh_kwargs is None else refresh_kwargs
     if probe is None:
         probe = CoupledJacobianProbe.build(
             coupled, stencil_reach, column_reach, probe_gradient_sweeps
@@ -3587,21 +3417,9 @@ def _beta_tracking_refresh(
     def batched_matvec_at(frozen, seeds):
         return _batched_jacobian_matvec(bound["probed"], frozen, seeds)
 
-    # The β-diagonal split's materialize gate (built once): decides per refresh whether to re-materialize
-    # the Jacobian or only re-add the shift. `None` when neither trigger is set (then every refresh is a
-    # full materialize, the original behaviour).
-    materialize_gate = (
-        _materialize_gate(
-            lambda ref: eddy_viscosity_drift(bound["coupled"], ref),
-            materialize_drift=materialize_drift,
-            materialize_every=materialize_every,
-        )
-        if (materialize_drift is not None or materialize_every is not None)
-        else None
-    )
-    # Set by `rebind`: the standing preconditioner describes the PREVIOUS companion, so whatever the
-    # gates make of the next step, it has to be a full re-materialize.
-    forced_full = {"pending": False}
+    # Pending on the first call -- the build froze the preconditioner at its own shift, not the march's --
+    # and again after `rebind`, since the standing preconditioner then describes the PREVIOUS companion.
+    forced_full = {"pending": True}
 
     def _report_refresh(
         kind: str, started: float, phases: tuple[tuple[str, float], ...] | None = None
@@ -3642,38 +3460,15 @@ def _beta_tracking_refresh(
         pc_beta = max(beta, beta_floor)
         policy = active_step.shift_policy
         pc = policy.preconditioner
-        # β-diagonal split: β and the per-cell shift ``d`` touch only the diagonal, so between full
-        # (re-materialized) refreshes the shift is tracked by re-adding the new ``β d`` diagonal to the
-        # frozen Jacobian -- skipping the coloured-probe materialize (the dominant refresh cost). Only the
-        # AMG preconditioner exposes that shift-only path; without it (the complete LU) every refresh is
-        # full.
-        is_amg = hasattr(pc, "refresh_shift_in_place")
-        split = materialize_gate is not None and is_amg
-        # Both gates are stateful, so each must be called EXACTLY ONCE per step -- no short-circuiting,
-        # and that holds after a `rebind` too: the forced branch overrides their VERDICT, never their
-        # bookkeeping, so each still sees every step and stays in step with the march.
-        stale_state = bool(split and materialize_gate(state))
-        moved_beta = gate is None or bool(gate(pc_beta))
-        branch = _refresh_branch(stale_state=stale_state, moved_beta=moved_beta, split=split)
-        if forced_full["pending"]:
-            # `rebind` has pointed this hook at a different companion since the last refresh, so the
-            # standing preconditioner was fitted to another problem. Neither gate can see that -- one
-            # watches the shift strength, the other the eddy viscosity's drift within one case.
-            forced_full["pending"], branch = False, "full"
-        if branch == "none":
+        if not (every_step or forced_full["pending"]):
             _report_refresh("none", started)
             return
+        forced_full["pending"] = False
         frozen = jax.lax.stop_gradient(state)
         shift = np.asarray(jax.lax.stop_gradient(policy.base.shift_term(state).shift(pc_beta)))
-        if branch == "shift":
-            # The Jacobian still matches the flow, so only the shift needs re-adding. Note the shift is
-            # `pc_beta * d(state)` and the per-cell `d` tracks the state even where `pc_beta` is pinned,
-            # so this is real work below the floor, not a rebuild of an identical operator.
-            _report_refresh("shift", started, pc.refresh_shift_in_place(shift))
-            return
-        _report_refresh("full", started, _materialize_at(pc, is_amg, frozen, shift))
+        _report_refresh("full", started, _materialize_at(pc, frozen, shift))
 
-    def _materialize_at(pc, is_amg, frozen, shift) -> tuple[tuple[str, float], ...]:
+    def _materialize_at(pc, frozen, shift) -> tuple[tuple[str, float], ...]:
         """Re-materialize the preconditioner at ``frozen`` with shift diagonal ``shift``.
 
         The AMG preconditioner materializes via the coloured probe and takes the batched form; the
@@ -3685,19 +3480,10 @@ def _beta_tracking_refresh(
                 "probe_batch_size": _PROBE_BATCH_SIZE,
                 "structure": structure,
             }
-            if is_amg
+            if isinstance(pc, MaterializedJacobianPreconditioner)
             else {}
         )
-        return (
-            pc.refresh_in_place(
-                lambda v: matvec_at(frozen, v),
-                plan,
-                shift,
-                **extra,
-                **refresh_kwargs,
-            )
-            or ()
-        )
+        return pc.refresh_in_place(lambda v: matvec_at(frozen, v), plan, shift, **extra) or ()
 
     def refresh_at(iterate) -> None:
         """``inner_refresh`` hook: rebuild the preconditioner at this mid-step iterate.
@@ -3732,7 +3518,7 @@ def _beta_tracking_refresh(
         _report_refresh(
             "inner",
             started,
-            _materialize_at(pc, hasattr(pc, "refresh_shift_in_place"), frozen, shift),
+            _materialize_at(pc, frozen, shift),
         )
 
     def rebind(companion: CoupledRANS) -> None:
@@ -3746,10 +3532,7 @@ def _beta_tracking_refresh(
         boundary -- while each segment's V-cycle is still fitted to its own problem, at its own state and
         shift, by the refresh the march runs before that segment's first step.
 
-        Two pieces of standing state describe the previous companion and are therefore discarded: the
-        next refresh is forced to a **full** re-materialize (a shift-only refresh would re-use a Jacobian
-        probed at a different viscosity), and the materialize gate's drift reference is reset (it would
-        otherwise measure an eddy viscosity against another Reynolds number's).
+        The standing preconditioner describes the previous companion, so the next refresh is forced to a **full** re-materialize at the new one.
 
         Forward-only, like everything else on this hook. The companion must be the same case -- same
         mesh, same layout, same schemes -- since the colouring plan and the gather map are not rebuilt.
@@ -3762,8 +3545,6 @@ def _beta_tracking_refresh(
         bound["coupled"] = companion
         bound["probed"] = probe.narrow(companion)
         forced_full["pending"] = True
-        if materialize_gate is not None:
-            materialize_gate.reset()
 
     precondition_step.refresh_at = refresh_at
     precondition_step.rebind = rebind
@@ -3828,7 +3609,9 @@ def lu_beta_tracking_refresh(
     callable
         ``precondition_step(active_step, state) -> None``.
     """
-    return _beta_tracking_refresh(coupled, stencil_reach, column_reach, probe_gradient_sweeps)
+    return _beta_tracking_refresh(
+        coupled, stencil_reach, column_reach, probe_gradient_sweeps, every_step=True
+    )
 
 
 def amg_beta_tracking_refresh(
@@ -3837,40 +3620,43 @@ def amg_beta_tracking_refresh(
     stencil_reach: int = 3,
     column_reach: Sequence[int] | None = None,
     probe_gradient_sweeps: int | None = None,
-    materialize_every: int | None = None,
-    materialize_drift: float | None = None,
-    beta_rel_change: float | None = None,
-    refresh_every: int = 8,
     beta_floor: float = 0.0,
     observer: Callable[[RefreshTiming], None] | None = None,
     probe: CoupledJacobianProbe | None = None,
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
-    """A ``precondition_step`` that rebuilds the AMG V-cycle at the current β, every step.
+    """A ``precondition_step`` that re-fits the AMG V-cycle to the march's own shift when it goes stale.
 
     The algebraic-multigrid counterpart of :func:`lu_beta_tracking_refresh`, and the preconditioner that
     makes a **dual-time march tractable in three dimensions**, where the complete LU's fill is out of
     memory.
 
-    A dual-time march ramps the pseudo-transient shift ``β`` down to develop the recirculation (e.g.
-    0.5 → 0.02), and a V-cycle frozen at ``amg_beta`` degrades sharply as ``β`` leaves that value: the
-    coarse operators and level smoother approximate ``J + amg_beta·d``, not the ``J + β·d`` actually solved,
-    so the outer Krylov count climbs by an order of magnitude over such a ramp, and the per-step wall with
-    it. Rebuilding the V-cycle at the step's ``(state, β)`` restores the matched cheap solve. The rebuild
-    (a graph-coloured Jacobian probe plus the aggregation setup) is far cheaper than the extra matvecs a
-    stale V-cycle costs at low ``β``, each of which is a full Jacobian-vector product — so it re-factors
-    **every step** (like the cheap complete-LU hook, not the gated incomplete-LU one).
+    A dual-time march ramps the pseudo-transient shift ``β`` down to develop the recirculation, and a
+    V-cycle fitted at one ``β`` and state degrades as the march leaves them. Unlike the complete LU, a
+    multigrid re-fit (a graph-coloured Jacobian probe plus the aggregation setup) is too expensive to pay
+    every step, so it runs at three moments only:
+
+    * on the **first** call, since the build froze the V-cycle at ``amg_beta`` rather than at the shift
+      the march actually starts from;
+    * after **rebind** to another companion of the case, since the standing V-cycle then describes a
+      different viscosity;
+    * **mid-step**, through ``refresh_at``, when the dual-time loop's ``refresh_on_cycles`` finds an inner
+      solve has grown expensive -- the rule that decides, on the solve's own cost, when the V-cycle has
+      gone stale.
+
+    Every other step reuses the standing V-cycle. A scheduled cadence -- a shift-mismatch gate, a
+    step-count cap and an eddy-viscosity-drift gate on the re-materialize -- was measured slower than this
+    cost-triggered rule on a three-dimensional backward-facing step, and was deleted.
 
     Reads ``β`` from the step's shift schedule (a :class:`~aquaflux.solve.ConstantRelaxation` set by a
-    :class:`~aquaflux.solve.DualTimeControl`) and rebuilds the step's :class:`MonolithicFactorShiftPolicy`
+    :class:`~aquaflux.solve.DualTimeControl`) and re-fits the step's :class:`MonolithicFactorShiftPolicy`
     V-cycle in place at ``J(state) + β·d(state)``. Pass it as
-    ``solve_coupled(refresh=RefreshPolicy(precondition_step=…))`` (or
-    :func:`solve_reynolds_continuation`'s ``point_setup``) with a :func:`coupled_amg_continuation` step and a
-    ``DualTimeControl``.
+    ``solve_coupled(refresh=RefreshPolicy(precondition_step=…))`` with a :func:`coupled_amg_continuation`
+    step whose ``inner_refresh`` is this hook's ``refresh_at``, and a ``DualTimeControl``.
 
-    **Forward-march use ONLY** -- the rebuild is an impure host mutation and must never be on a differentiated
-    path (``solve_coupled`` guards this, raising under ``jax.grad``). The finishing solve and the adjoint keep
-    the last V-cycle, applied as the differentiable single-cycle transpose, exact at the converged ``β → 0``
-    root; for a differentiated solve use the plain :func:`coupled_amg_continuation` with no ``precondition_step``.
+    **Forward-march use ONLY** -- the re-fit is an impure host mutation and must never be on a
+    differentiated path (``solve_coupled`` guards this, raising under ``jax.grad``). The finishing solve and
+    the adjoint keep the last V-cycle, applied as the differentiable single-cycle transpose; for a
+    differentiated solve use the plain :func:`coupled_amg_continuation` with no ``precondition_step``.
 
     Parameters
     ----------
@@ -3895,41 +3681,10 @@ def amg_beta_tracking_refresh(
         colouring recovers -- see :meth:`CoupledJacobianProbe.narrow`. The solve's own operator is
         unchanged, so the converged state and its adjoint are too. ``None`` (default) probes the
         residual as it stands.
-    materialize_every : int or None
-        Enables the **β-diagonal split**. ``None`` (default) re-materializes the Jacobian on every refresh
-        (the original behaviour). A value ``K > 1`` re-materializes only every ``K`` steps and, in between,
-        tracks the moving shift with a cheap diagonal-only refresh
-        (:meth:`~aquaflux.solve.MonolithicAmgPreconditioner.refresh_shift_in_place`) that reuses the frozen
-        Jacobian -- since ``β`` and the per-cell shift ``d`` touch only the diagonal, this skips the
-        coloured-probe materialization (the dominant refresh cost) while keeping the shift matched. It is the
-        step-count arm of the materialize gate (:func:`_materialize_gate`): a full re-materialize is forced
-        after ``K`` steps without one as a staleness cap. Prefer ``materialize_drift`` (a state-staleness
-        trigger) as the primary control and keep ``materialize_every`` as a large safety cap.
-    materialize_drift : float or None
-        The **state-staleness** trigger for the full re-materialize (the drift arm of the materialize gate).
-        Re-materializing the Jacobian is the dominant refresh cost, so — rather than a fixed step interval —
-        it fires only when the frozen Jacobian has actually gone stale: when the eddy viscosity ``ν_t``
-        (:func:`eddy_viscosity_drift`, what the operators are assembled from) has drifted by more than this
-        fraction since the last materialize. In between, the shift is tracked by the cheap diagonal-only
-        refresh. Reserve the expensive materialize for when it is needed; pair it with a large
-        ``materialize_every`` as a backstop. ``None`` (default) disables the drift trigger.
-    beta_rel_change : float or None
-        The **β-mismatch** refresh trigger. ``None`` (default) refreshes every step. When set, the refresh
-        is gated (:func:`_staleness_beta_gate`): it fires only when ``β`` has moved by more than this
-        fraction of the ``β`` of the *last refresh* -- keying on the mismatch from the built ``β`` rather
-        than the step-to-step change, so an oscillating control (``β`` swinging up and down around one
-        value) does not trigger a refresh every step. It is the proactive complement to a reactive
-        cycle-count retry: it re-matches the frozen V-cycle *before* a drifted ``β`` inflates the Krylov
-        cost, and it composes with ``materialize_every`` (the gate decides *whether* to refresh; the split
-        decides shift-only vs full).
-    refresh_every : int
-        The staleness-cap backstop when ``beta_rel_change`` is set: force a refresh after this many gated
-        steps with no β-move (state development at a near-constant ``β``). Ignored when ``beta_rel_change``
-        is ``None``.
     observer : callable, optional
         ``(timing: RefreshTiming) -> None``, called on each refresh with what this hook actually did --
-        ``"full"`` (re-materialized the Jacobian and re-factored), ``"shift"`` (cheap shift-only
-        refresh), ``"none"`` (the gate declined; the standing factorization was reused) or ``"inner"``
+        ``"full"`` (re-materialized the Jacobian and re-fitted), ``"none"`` (reused the standing V-cycle)
+        or ``"inner"``
         (the mid-step ``refresh_at`` rebuild) -- together with how long it took and what each phase of
         it cost. Forward-only instrumentation for a march being profiled: without it, which branch ran
         is invisible, and a study is left inferring preconditioner behaviour from wall-clock, which is
@@ -3958,19 +3713,12 @@ def amg_beta_tracking_refresh(
         hook) and ``rebind(companion)`` (re-point it at the next Reynolds-continuation rung's companion,
         so a whole ramp can share one preconditioner and stop recompiling per rung) attached.
     """
-    gate = (
-        None
-        if beta_rel_change is None
-        else _staleness_beta_gate(refresh_every=refresh_every, beta_rel_change=beta_rel_change)
-    )
     return _beta_tracking_refresh(
         coupled,
         stencil_reach,
         column_reach,
         probe_gradient_sweeps,
-        gate=gate,
-        materialize_every=materialize_every,
-        materialize_drift=materialize_drift,
+        every_step=False,
         beta_floor=beta_floor,
         observer=observer,
         probe=probe,

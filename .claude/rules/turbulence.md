@@ -1324,30 +1324,17 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     hook (raises under `jax.grad`); pass it to
     `solve_coupled(refresh=RefreshPolicy(precondition_step=…))` (or a `solve_reynolds_continuation` `point_setup`) with a
     `coupled_amg_continuation` step and a `DualTimeControl`.
-    - **The refresh cadence is GATED, not every-step (measured on the developed-low-β tail).** Refreshing
-      unconditionally every step is wasteful once the march has developed and β is nearly constant, and — the
-      failure that motivated the gate — a *fixed step-count* cadence (`refresh_every`) fails at the tail: a
-      long low-β cruise between refreshes lets the V-cycle go stale mid-interval and the cycle count explodes
-      before the next scheduled refresh (same unrecorded bundle as the bullet above). The honest staleness
-      signal for this hook is
-      **β itself** (a V-cycle's degradation is a function of the β-mismatch, above), so with
-      `beta_rel_change` set the refresh fires when `|β − β_last|/β_last` exceeds it (`_staleness_beta_gate`,
-      shared with the shift-tracking mechanism above), OR after `refresh_every` steps as a development
-      backstop, and the β-move prong is what catches an overshoot / rung
-      restart before the solve stalls. **Why a β-move trigger, not a drift trigger, for this job:** a
-      badly mismatched frozen factorization collapses the line search (α→0), which freezes the state and
-      hence every drift measure taken on it — so a drift trigger cannot fire on exactly the failure mode
-      a β-move trigger is watching for. Default (`beta_rel_change=None`) keeps the every-step behaviour.
-    - **Cheaper refresh — the β-diagonal split, drift-gated (`materialize_drift` / `materialize_every`).** The
-      shifted operator is `J(state) + β·d(state)`; between two refreshes at the same developed state only β (and
-      the shift diagonal) has moved, and re-materializing `J` by graph-coloured probing is ~half the refresh
-      cost (~18–40 s of the ~36–62 s total; the GAMG refactor is the other ~18 s). `MonolithicAmgPreconditioner`
-      therefore caches the un-shifted Jacobian (`_materialize_jacobian` / `_shifted` split) and exposes
-      `refresh_shift_in_place(shift_diagonal)`, which re-forms only `J + β·d` on the cached `J` and re-sets-up
-      the GAMG. The full re-materialize is **gated** (`_materialize_gate`, the drift/step-cap analogue of
-      `_staleness_beta_gate`): `materialize_drift=τ` fires it when the ν_t drift since the last one exceeds `τ`
-      (`eddy_viscosity_drift`, the honest staleness signal — prefer this), `materialize_every=K` is the
-      step-count safety cap; both `None` (default) re-materialize every refresh. Since gradients are never
+    - **The refresh cadence is COST-TRIGGERED; the scheduled gates are DELETED (2026-09-13, #371).** The
+      hook re-fits on its first call, after `rebind`, and mid-step through `refresh_at` when an inner
+      solve reaches `refresh_on_cycles`. A fixed step-count cadence failed at the low-β tail (stale
+      mid-interval); the β-mismatch and drift gates that replaced it measured 14 % slower than the cost
+      trigger on `bfs3d` (3632 s against 3140 s at unchanged cycles, monolithic; see
+      `.claude/notes/solve-refuted-directions.md`) and were switched off by both cases before being
+      deleted. **Trap worth keeping:** a badly mismatched factorization collapses α, which freezes the
+      state and every drift measure on it, so a drift trigger cannot fire on that failure mode.
+    - **The β-diagonal split (`refresh_shift_in_place`, drift-gated) is DELETED with the gates (#371).**
+      Re-materializing `J` by graph-coloured probing is ~half a refresh on `bfs3d` (~18–40 s of ~36–62 s);
+      the split re-added `β d` to a cached `J` instead. Since gradients are never
       taken through the forward march, the in-place mutation is safe. **⚠️ Measured: DON'T under-materialize.**
       On a fast-developing flow a *fresh* `J` cuts the Krylov cycle count on `bfs3d` (fewer/cheaper steps) by
       more than the materialize costs, so a stale frozen `J` is a net loss (the reduction was recorded with no
@@ -1389,14 +1376,10 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       `.claude/rules/solve-direct-preconditioners.md`; do not describe this knob as free. Reach/accuracy tables and the refuted "use GMRES instead" alternative are in
       `.claude/rules/schemes.md` and `.claude/rules/solve-direct-preconditioners.md`; harness
       `validation/gradient_stencil_reach.py`.
-      **⚠️ THE DRIFT GATE MUST NOT BE NESTED INSIDE THE β GATE — it was, and a PC-only `beta_floor` then
-      made it unreachable.** The β gate sees `max(β, beta_floor)`, so below the floor its input is pinned
-      and it answers "no change" forever; asking the drift gate only inside it therefore froze the
-      Jacobian through the entire low-shift tail — 91 % of sub-floor steps refreshed nothing while ν_t
-      drifted ~20 % per step, and those steps carried 47 % of the march's Krylov cost. The decision is now
-      the pure `_refresh_branch(stale_state, moved_beta, split)`: drift ⇒ `full` regardless of β, β move
-      alone ⇒ `shift`, neither ⇒ `none`. Because the materialize gate is now consulted **every step**,
-      `materialize_every` counts steps rather than refreshes. Full data in `.claude/rules/solve-amg-multigrid.md`.
+      **Trap (from the deleted gates, #371): a refresh condition nested inside a β gate is unreachable
+      below a preconditioner-only `beta_floor`**, where the gate's clamped input never moves — 91 % of
+      sub-floor steps once refreshed nothing while ν_t drifted ~20 % per step. Full data in
+      `.claude/rules/solve-amg-multigrid.md`.
       The `assemble` half of the refresh is also precomputed now (`ShiftedCellMajorOperator`), and the
       observer receives a `RefreshTiming` with per-phase costs instead of one aggregate — so "the
       materialize is ~half the refresh" is measured per run rather than inferred.
@@ -1830,10 +1813,8 @@ tuning follow-up noted above.
     `PITZ_REFRESH_ON_CYCLES=1` (a rebuild essentially every step) costs 253 cycles against 261 — so
     preconditioner freshness is worth ~3 % and the remaining ~27 % of the fine ramp's win is the
     viscosity/β path, not the refresh.
-    - **The shift-only refresh branch cannot substitute.** It re-adds `β d` to the *diagonal* of a frozen
-      Jacobian, while viscosity enters every viscous *edge* coefficient — `rebind`'s own docstring says a
-      shift-only refresh would reuse a Jacobian probed at a different viscosity. On this arm the cheap
-      branch does not exist at all (`materialize_drift=None` ⇒ no gate ⇒ every refresh is full or none).
+    - **A shift-only refresh could not have substituted** — it re-added `β d` to a frozen Jacobian, while
+      viscosity enters every viscous edge coefficient — and it no longer exists (#371).
     - **`refresh_on_cycles` needs no reset at a station change** — its state lives in the dual-time step's
       `while_loop` carry and never crosses a step.
     - **Drift within a station is nil on the ramp and heavy on the target**: all 16 cost-triggered inner
@@ -2248,12 +2229,6 @@ tuning follow-up noted above.
       quantity to a cell.** That indicts the ladder's 8.361 exactly as much as the ramp's 8.966 — the
       ladder's number is not more trustworthy, it is luckier. Anything comparing `x_r/h` across arms
       must converge tighter or report the metric with the residual it was measured at.
-  - **⚠️ Latent defect, unfixed: `rebind` does not reset `_staleness_beta_gate`'s bookkeeping**, and nor
-    does the mid-step `refresh_at`. Both rebuild the standing factorization at a β the gate never sees,
-    so `last["beta"]`/`last["since"]` go stale and the gate can fire spuriously *or* decline when the
-    factorization really is mismatched. Inert on pitzDaily (`beta_rel_change=inf`, `refresh_every=1e9`),
-    but live for any finite `beta_rel_change` — including the example published in
-    `docs/preconditioning.md`.
   - **⚠️ IT IS THE DEFAULT ON BOTH CASES** — `validation/pitzdaily_openfoam/compare.py` since 2026-09-10
     (`PITZ_RAMP`) and `validation/bfs3d_openfoam/compare.py` since 2026-09-11 (`BFS3D_RAMP`), with `off`
     returning to `solve_reynolds_continuation` as the comparison arm rather than as a supported path.

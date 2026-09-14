@@ -36,7 +36,8 @@ paths:
     (`solve-field-split.md`) needed the same coloured-probe-materialize + shift-diagonal + cached-Jacobian
     machinery without the monolithic-only state built around one `AmgVCycle` — the fixed-pattern
     cell-major assembler (`_assembler_for`/`_cell_major`), which a split never forms. Those stay on `MonolithicAmgPreconditioner`; `_materialize_jacobian`, `_shifted` and
-    `destroy` (and the `_jacobian_no_shift`/`_n_fields` cache) moved to the new base, which both classes
+    `destroy` moved to the new base (the cached unshifted Jacobian that went with them was deleted with the
+    shift-only refresh, #371), which both classes
     now subclass directly — see `solve-direct-preconditioners.md`'s `HostFactors` entry for why this
     matters (a base reading anything off `self.factors` beyond `n_dofs`+`apply` is a requirement on every
     subclass, and the pre-extraction shape of this exact pair is the worked example).
@@ -676,65 +677,17 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     cycles** and elsewhere as **883 "raw" cycles**, with "raw" nowhere defined. Neither is recoverable from
     source. Treat the *ratios* as the finding and the absolute total as unestablished — re-measure with the
     counter's definition stated in the same breath if a cycle total ever becomes decisive.
-  - **β-diagonal split — track β without re-materializing the Jacobian (BUILT).** The operator is
-    `J(φ) + β d`, and the shift `β d` touches only the **diagonal**, so a β-tracking refresh does **not**
-    need the coloured-probe materialization of `J` (the dominant refresh cost — hundreds of jvps).
-    `MonolithicAmgPreconditioner.refresh_shift_in_place(shift)` reuses the **cached** Jacobian (stored at
-    the last `build` / `refresh_in_place`), re-adds the new `β d` diagonal (`O(nnz)` numpy) and re-factors.
-    Measured on the `bfs3d` hard state: **full `refresh_in_place` 36 s vs shift-only 18 s (2×)** — the 18 s
-    saved is the materialize, the remaining 18 s the equilibrate + GAMG refactor. The frozen `J` does not
-    track *state* drift, so the full materialize is **gated** (`_materialize_gate`, mirroring
-    `_staleness_beta_gate`): `amg_beta_tracking_refresh(materialize_drift=τ, materialize_every=K)` does the
-    cheap shift-only refresh in between and a full materialize when the ν_t drift since the last one exceeds
-    `τ` OR after `K` steps (both `None` = full every refresh, unchanged). Prefer `materialize_drift` (the
-    honest state-staleness signal via `eddy_viscosity_drift`) with a large `K` as the safety cap — the fixed
-    step count was the "fixed cadence" antipattern. **Measured caveat: a *fresh* Jacobian is worth its cost
-    on a fast-developing flow** — driving the materialize *more* often (via a tight `τ`) cut the march's
-    Krylov cycles ~23 % (fewer/cheaper steps) despite more refresh, so under-materializing was costing more
-    in solve than the materialize saves; the lever is a *cheaper* materialize (batched probe + gather
-    de-compression above), not a rarer one. Forward-march only. Pinned by `test_amg_refresh_shift_in_place_*`
-    (`test_amg_preconditioner.py`) and `test_materialize_gate_*` / `test_batched_probing_*` /
-    `test_gather_de_compression_*`.
-    - **⚠️ THE TWO GATES ARE COMBINED, NOT NESTED — the β floor used to make the drift trigger UNREACHABLE
-      (fixed; `_refresh_branch`).** `_beta_tracking_refresh` asked the β gate first and the materialize gate
-      only *inside* it. With a PC-only `beta_floor` the gate's input is `max(β, floor)`, so once the march
-      drops below the floor that input is **pinned** and the β gate answers "no change" on every step
-      forever — taking the drift gate down with it. That is exactly the low-shift tail where the flow
-      develops fastest. Measured on the 3-rung `bfs3d` cold march (56 steps, `beta_floor = 0.05`):
-
-      | | steps | refresh declined | mean cycles |
-      |---|---|---|---|
-      | β ≥ floor | 34 | 12 % | 6.9 |
-      | β < floor | 22 | **91 %** | 7.5 |
-
-      13 steps had >5 % ν_t drift *and* no refresh, and they carried **189 of the march's 399 Krylov
-      cycles (47 %)** — steps 29–31 ran 24/23/34 cycles on a V-cycle nothing was allowed to refresh, and
-      the step after them blew up into a 3-attempt β-escalation retry costing 380 s. The decision is now
-      the total function `_refresh_branch(stale_state, moved_beta, split)`: **state drift ⇒ `full`**
-      whatever β says, β move alone ⇒ `shift`, neither ⇒ `none`. Note the shift branch is real work below
-      the floor too — the shift is `pc_beta · d(state)` and the per-cell `d` tracks the state even where
-      `pc_beta` is clamped, so the old comment's "would rebuild an identical V-cycle" was only true of the
-      β factor. **Consequence to know:** the materialize gate is now consulted every step rather than only
-      on refresh steps, so its `materialize_every` cap counts **steps**, not refreshes.
-      **MEASURED END-TO-END on the 3-rung `bfs3d` cold march, and the trade is strongly favourable:**
-
-      | | before | after |
-      |---|---|---|
-      | outer steps | 69 | **61** |
-      | **Krylov cycles** | **480** | **348 (−27 %)** |
-      | starved steps (>5 % drift, no refresh) | 15, holding 201 cycles (42 %) | **0** |
-      | sub-floor steps declining a refresh | 89 % | **19 %** |
-      | full refreshes | 32 @ 23.1 s | 48 @ **17.3 s** |
-      | refresh total | 803 s (15.7 % of wall) | 865 s (19.1 %) |
-      | β-escalation retry steps | 5, **1745 s** | 2, **655 s** |
-      | final ‖R‖ / mid-span `x_r/h` | 2.65e-6 / 8.36 | 2.42e-6 / **8.36** |
-
-      Read the refresh row correctly: the preconditioner now costs **more** in absolute terms (865 s vs
-      803 s) because it refreshes 50 % more often — that is the trade working, not a regression. It buys
-      132 fewer Krylov cycles and, far larger, removes three of the five retry cascades (−1090 s), which
-      were the single biggest line item in the march. The converged answer is **unchanged** (`x_r/h` 8.36
-      mid-span against OpenFOAM's 7.24, exactly as before), which is the constraint that matters: this is
-      a path change, not a solution change.
+  - **β-diagonal split (`refresh_shift_in_place`, gated by `_materialize_gate`) — DELETED 2026-09-13
+    (#371)** with the scheduled refresh cadence; both validation cases already ran the cost-triggered rule
+    with it switched off. It re-added `β d` to a cached Jacobian at half a full refresh's cost (36 s vs
+    18 s on the `bfs3d` hard state). **The measured lesson survives it: don't under-materialize** — a
+    fresher Jacobian cut a march's Krylov cycles ~23 % despite more refresh work, so the lever is a
+    *cheaper* materialize (batched probe, gather de-compression), not a rarer one.
+    - **Trap the deleted gates taught, kept because it applies to any future refresh condition:** a
+      preconditioner-only `beta_floor` pins a β gate's input below the floor, so a condition nested
+      inside a β gate is unreachable in exactly the low-shift tail. Measured on the 3-rung `bfs3d` cold
+      march: 91 % of sub-floor steps refreshed nothing while ν_t drifted ~20 % per step, those steps
+      carried 47 % of the Krylov cycles, and un-nesting the gates cut the march 480 → 348 cycles.
     - **Where a refresh's time now goes (whole-run aggregate, same march): probe 632 s, refactor 195 s,
       assemble 28 s, other 12 s — the probe is 73 %.** The non-probe tail is close to floor, so any
       further work on refresh cost has to attack the coloured probe itself (amortizing colours across
@@ -1086,8 +1039,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     57, 60, 61, **including α 0.000 at step 61**) and recovers from every one, α returning to 1.000.
   - **A constraint-free α collapse appeared, and nothing reacts to it.** Step 68: α 0.031 with **no `L`
     flag** and 15 cycles (the run's highest) — a poor *direction*, not a clipped step. α 0.031 is above
-    `retry.on_alpha` 0.01, no `RefreshTrigger` reads α or `binding_limit`, and this bundle sets
-    `beta_rel_change=inf`, so no refresh fires. It cost a few steps here, not the run, but it is the
+    `retry.on_alpha` 0.01, no `RefreshTrigger` reads α or `binding_limit`, and the β-tracking hook re-fits only on a rebind, so no refresh fires. It cost a few steps here, not the run, but it is the
     first live evidence that the refresh gap is a real cost.
   - **⚠️ ONE RUN EACH, and one instrumentation difference:** the archived equilibrated arm ran with
     `BFS3D_DUMP_STEP_LIMIT=0.05/12`, the converged arm with the dumps off. The dump wrapper returns the

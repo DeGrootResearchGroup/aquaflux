@@ -422,19 +422,21 @@ gates on the residual as well, because the cycle count also rises as the pseudo-
 shift falls, and that rise is not staleness.
 
 {func}`~aquaflux.turbulence.amg_beta_tracking_refresh` is the counterpart for the coupled
-path. It re-preconditions **in place** as the march's shift moves, so the compiled solve is
-reused rather than retraced, and it goes in as the policy's `precondition_step`:
+path. It re-preconditions **in place**, so the compiled solve is reused rather than retraced, and
+it goes in as the policy's `precondition_step`:
 
 ```python
 from aquaflux.solve import RefreshPolicy
 from aquaflux.turbulence import amg_beta_tracking_refresh
 
 refresh = RefreshPolicy(
-    precondition_step=amg_beta_tracking_refresh(coupled, refresh_every=8, beta_rel_change=0.25)
+    precondition_step=amg_beta_tracking_refresh(coupled)
 )
 ```
 
-It refreshes on a schedule, on shift drift, or when a single solve proves expensive. It reports what each rebuild cost through
+It re-fits the preconditioner on its first call and when pointed at a new case with `rebind`,
+and — through its `refresh_at` hook, handed to the step as `inner_refresh` — when a single solve
+proves expensive. It reports what each rebuild cost through
 {class}`~aquaflux.solve.RefreshTiming` — which branch ran, the total, and the parts.
 {data}`~aquaflux.solve.NO_REFRESH` is the do-nothing policy, and the default.
 

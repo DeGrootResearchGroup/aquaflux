@@ -282,7 +282,7 @@
       **refresh cadence** (`refresh_every=8`, `materialize_every=4`, `beta_rel_change=0.25` are lax
       around the hard steps), consistent with the earlier gate fix, which bought 132 fewer cycles and
       removed three of five retry cascades by refreshing ~50 % more often — the same mechanism found
-      from the other end.
+      from the other end. (Those scheduled knobs are deleted, #371.)
       **✅ THE COST TRIGGER IS BUILT — `amg_beta_tracking_refresh(refresh_on_cycles=N)`.** A solve that
       reaches `N` restart cycles refreshes the preconditioner **at the iterate it was handed** and the
       inner loop carries on, rather than aborting the step and escalating β (which discards both the
@@ -358,7 +358,7 @@
       See *"per-column probing reach"* under `sparse_jacobian.py` above before reaching for it. So this
       arm's "there is no cheap way to shrink the probe" stands for the *pattern*, and the column
       variant that looked like the exception has not yet been shown safe on this case.
-      **A trap: the cheap `refresh_shift_in_place` branch does NOT help within a step.** The shift is
+      **A trap (the branch is deleted, #371): the cheap `refresh_shift_in_place` branch did NOT help within a step.** The shift is
       formed once per step at the reference state and held fixed across the inner loop, so what drifts
       inside a step is `J(p)`. The shift-only branch only helps *across* steps, where β moves.
       **Untested but cheap and worth doing: whether staleness also drives the GLOBALIZATION cost.** A
@@ -593,6 +593,21 @@ data model. Each had nothing in `validation/` or any test selecting it.
   The reason recorded for the slower march (the default path over-solving to machine zero) was stale.
   With it went `AmgVCycle.solve_exact`, `MonolithicAmgPreconditioner.exact_solve`, and every
   `has_exact_solve` / `solves_exactly_on_host` branch.
+
+- **The scheduled refresh cadence on `amg_beta_tracking_refresh` — DELETED, dominated by the cost
+  trigger.** `beta_rel_change` / `refresh_every` (a β-mismatch gate with a step-count cap) and
+  `materialize_drift` / `materialize_every` (an eddy-viscosity-drift gate choosing between a full
+  re-materialize and a shift-only refit, `refresh_shift_in_place`). Measured on the 3D backward-facing
+  step, monolithic V-cycle: scheduled 3632 s against 3140 s for the cost-triggered rule (−14 %) at
+  unchanged Krylov cycles (290 vs 293), refresh time 758 s against 310 s; never measured under the field
+  split. Both validation cases ran with every gate switched off. The hook now re-fits on its first call,
+  after `rebind`, and mid-step through `refresh_at`; the complete-LU hook still re-factors every step.
+  **An observation the deleted `BFS3D_REFRESH_ON_BETA` comment carried, kept here because it outlives
+  the knob:** with the β gate off, a β escalation's redo is solved against a V-cycle fitted for a β up to
+  4x smaller. On three converging `bfs3d` marches an escalated step at β = 0.2341 on a stale V-cycle
+  returned α = 0 at 2 cycles, and the next step, after the cost trigger forced a rebuild, took α = 1 at
+  β = 0.9364; every escalated step whose V-cycle *was* rebuilt came back with α ≥ 0.595. So "the retry
+  ladder is futile" and "the ladder was never given a matched preconditioner" were never separated.
 
 ## Globalization (forward step, continuation, line search) — closed investigations
 

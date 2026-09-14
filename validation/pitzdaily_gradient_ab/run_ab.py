@@ -361,10 +361,6 @@ def solve_arm(gradient_scheme, log_path, *, reach=None, points=None, max_steps=N
     refresh = amg_beta_tracking_refresh(
         coupled,
         probe=probe,
-        beta_rel_change=float("inf"),
-        refresh_every=10**9,
-        materialize_drift=None,
-        materialize_every=None,
         beta_floor=compare.PC_BETA_FLOOR,
         observer=logger.on_refresh,
     )
