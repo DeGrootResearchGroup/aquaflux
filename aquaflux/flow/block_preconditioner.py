@@ -21,6 +21,7 @@ inner solver, velocity block or composition plugs into.
 from __future__ import annotations
 
 import abc
+import dataclasses
 import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, NamedTuple
@@ -42,6 +43,7 @@ from aquaflux.solve import (
     decouple_dof,
     smoothed_multigrid_solve,
 )
+from aquaflux.solve.settings_value import SettingsValue
 from aquaflux.vectors import scale
 
 from .preconditioner import schur_face_coefficient
@@ -506,6 +508,222 @@ class SmoothedAmgConvectionVelocity(_RescaledAmgVelocity):
         return convection_multigrid_solve(
             self.hierarchy, b, cycles=self.v_cycles, sweeps=self.sweeps, omega=self.omega
         )
+
+
+def _convection_operator(
+    geometry: _VelocityGeometry,
+    owner_e: np.ndarray,
+    nb_e: np.ndarray,
+    interior: np.ndarray,
+    n_cells: int,
+    reference_mdot: jnp.ndarray,
+):
+    """The frozen ``viscous + first-order-upwind`` momentum operator at ``reference_mdot``, as CSR.
+
+    Shared by both convection-aware velocity blocks, which differ only in the hierarchy that coarsens
+    it. The viscous coupling is the flux-continuous conductance at the actual (possibly graded)
+    viscosity, and the boundary diagonal is the boundary-face owner coefficient built from the same
+    viscous term and reference flux, so the assembled operator's diagonal is exactly the frozen momentum
+    diagonal ``a_P`` at the reference -- which is what makes the per-iterate rescaling diagonal-exact.
+    """
+    face_cells = geometry.face_cells
+    viscous = flux_continuous_conductance(
+        jax.lax.stop_gradient(geometry.viscosity), geometry.mesh_geometry, face_cells
+    )
+    boundary_owner = jnp.where(face_cells.interior, 0.0, viscous + jnp.maximum(reference_mdot, 0.0))
+    boundary_diagonal = face_cells.scatter(boundary_owner, jnp.zeros_like(boundary_owner))
+    return convection_diffusion_operator(
+        owner_e,
+        nb_e,
+        np.asarray(viscous)[interior],
+        n_cells,
+        flux=np.asarray(reference_mdot)[interior],
+        boundary_diagonal=np.asarray(boundary_diagonal),
+    )
+
+
+class TwoLevelConvectionVelocity(_RescaledAmgVelocity):
+    """A two-level aggregation hierarchy on the frozen convection-diffusion momentum operator.
+
+    The fine cells are aggregated once, with symmetric-part prolongation smoothing, and the coarse
+    operator is solved directly; the fine level is smoothed by damped Jacobi. That coarse space stays a
+    stable correction at high cell Peclet, where a deeper Galerkin recursion does not -- but the direct
+    coarse solve does not scale to large meshes (see :class:`AirConvectionVelocity` for that).
+    ``strength_threshold > 0`` aggregates along strong connections only, which keeps it contracting on a
+    high-aspect-ratio near-wall operator.
+    """
+
+    sweeps: int = eqx.field(static=True)
+    omega: float = eqx.field(static=True)
+
+    @classmethod
+    def build(
+        cls,
+        geometry: _VelocityGeometry,
+        owner_e: np.ndarray,
+        nb_e: np.ndarray,
+        interior: np.ndarray,
+        n_cells: int,
+        v_cycles: int,
+        reference_mdot: jnp.ndarray,
+        *,
+        sweeps: int = 2,
+        omega: float = 0.8,
+        strength_threshold: float = 0.0,
+    ) -> TwoLevelConvectionVelocity:
+        a = _convection_operator(geometry, owner_e, nb_e, interior, n_cells, reference_mdot)
+        hierarchy = build_convection_hierarchy(a, strength_threshold=strength_threshold)
+        return cls(hierarchy, geometry.dim, v_cycles, sweeps, omega)
+
+    def _inner_solve(self, b: jnp.ndarray) -> jnp.ndarray:
+        """One momentum-component inner solve: the two-level V-cycle."""
+        return convection_multigrid_solve(
+            self.hierarchy, b, cycles=self.v_cycles, sweeps=self.sweeps, omega=self.omega
+        )
+
+
+class AirConvectionVelocity(_RescaledAmgVelocity):
+    """A reduction-based (lAIR) hierarchy on the frozen convection-diffusion momentum operator.
+
+    Local approximate ideal restriction coarsens all the way down and stays Peclet-robust and
+    mesh-independent, inverted by an FC-Jacobi V-cycle. Its C/F split is already strength-based, so it
+    takes no aggregation ``strength_threshold``.
+    """
+
+    @classmethod
+    def build(
+        cls,
+        geometry: _VelocityGeometry,
+        owner_e: np.ndarray,
+        nb_e: np.ndarray,
+        interior: np.ndarray,
+        n_cells: int,
+        v_cycles: int,
+        reference_mdot: jnp.ndarray,
+    ) -> AirConvectionVelocity:
+        a = _convection_operator(geometry, owner_e, nb_e, interior, n_cells, reference_mdot)
+        return cls(build_air_hierarchy(a), geometry.dim, v_cycles)
+
+    def _inner_solve(self, b: jnp.ndarray) -> jnp.ndarray:
+        """One momentum-component inner solve: the lAIR V-cycle."""
+        return air_multigrid_solve(self.hierarchy, b, cycles=self.v_cycles)
+
+
+@dataclasses.dataclass(frozen=True)
+class VelocityBlock(SettingsValue):
+    """Which velocity block :meth:`BlockPreconditioner.build` fits, and its settings, as a value.
+
+    The velocity block is fitted to a frozen momentum operator and coarsened by a multigrid hierarchy.
+    Those two choices do not vary independently -- the multilevel Chebyshev hierarchy needs a symmetric
+    operator, so it cannot coarsen the convection-diffusion one -- so each value names one exercised
+    pairing, and carries only the settings that apply to it. Every field defaults to ``None``, meaning
+    "not set here": only set fields reach the strategy, whose own defaults stay the only defaults.
+    """
+
+    def _build(self, geometry: _VelocityGeometry, inputs: _StrategyInputs) -> VelocityBlockSolver:
+        raise NotImplementedError
+
+
+@dataclasses.dataclass(frozen=True)
+class ViscousMultilevel(VelocityBlock):
+    """A multilevel smoothed-aggregation hierarchy on the viscous momentum operator, Chebyshev-smoothed.
+
+    Fitted at unit viscosity and rescaled to the current momentum diagonal each apply. Mesh-independent
+    but blind to convection, so it bounds the reachable Reynolds number; the default for a flow-only
+    solve. Builds :class:`SmoothedAmgVelocity`.
+    """
+
+    def _build(self, geometry: _VelocityGeometry, inputs: _StrategyInputs) -> VelocityBlockSolver:
+        return SmoothedAmgVelocity.build(
+            geometry,
+            inputs.owner_e,
+            inputs.nb_e,
+            inputs.interior,
+            inputs.n_cells,
+            inputs.v_cycles,
+            strength_threshold=inputs.strength_threshold,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class _ConvectionVelocityBlock(VelocityBlock):
+    """A velocity block fitted to the convection-diffusion operator frozen at a reference mass flux.
+
+    Owns what every such block shares: computing that flux from the reference state, and saying so when
+    it is zero, so a subclass names only its strategy and the settings it forwards.
+    """
+
+    def _strategy_class(self) -> type:
+        raise NotImplementedError
+
+    def _strategy_settings(self, inputs: _StrategyInputs) -> dict[str, object]:
+        return self.settings()
+
+    def _build(self, geometry: _VelocityGeometry, inputs: _StrategyInputs) -> VelocityBlockSolver:
+        # The reference mass flux is assembler behaviour (the Rhie--Chow flux operator), so it is
+        # computed here and handed to the strategy, keeping the strategy build assembler-free.
+        reference_mdot = jax.lax.stop_gradient(inputs.assembler.mass_flux(inputs.reference_state))
+        if float(jnp.max(jnp.abs(reference_mdot))) == 0.0:
+            # No convective scale to freeze the operator at: it collapses to the viscous one, so the
+            # block is not the convection-aware accelerator that was asked for. Warn rather than fail
+            # -- the build is still valid.
+            warnings.warn(
+                f"velocity block {type(self).__name__}() was requested but the reference state "
+                "carries no mass flux, so its convective linearization is zero and the block is fitted "
+                "to the viscous operator alone. The domain neither prescribes a velocity at any patch "
+                "nor carries a body force to size one from. Pass an explicit reference_state (e.g. a "
+                "uniform flow at the bulk velocity a mass-flow controller targets) to restore the "
+                "convection-aware block.",
+                RuntimeWarning,
+                # Called from `BlockPreconditioner.build`, so this attributes to *its* caller.
+                stacklevel=3,
+            )
+        return self._strategy_class().build(
+            geometry,
+            inputs.owner_e,
+            inputs.nb_e,
+            inputs.interior,
+            inputs.n_cells,
+            inputs.v_cycles,
+            reference_mdot,
+            **self._strategy_settings(inputs),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class ConvectionTwoLevel(_ConvectionVelocityBlock):
+    """A two-level aggregation hierarchy on the frozen convection-diffusion operator.
+
+    Stable across cell Peclet, but its direct coarse solve does not scale to large meshes. Builds
+    :class:`TwoLevelConvectionVelocity`.
+
+    Attributes
+    ----------
+    sweeps, omega : int, float or None
+        The damped-Jacobi smoother's sweeps per level and damping factor (see
+        :func:`~aquaflux.solve.convection_multigrid_solve`).
+    """
+
+    sweeps: int | None = None
+    omega: float | None = None
+
+    def _strategy_class(self) -> type:
+        return TwoLevelConvectionVelocity
+
+    def _strategy_settings(self, inputs: _StrategyInputs) -> dict[str, object]:
+        return {**self.settings(), "strength_threshold": inputs.strength_threshold}
+
+
+@dataclasses.dataclass(frozen=True)
+class ConvectionAir(_ConvectionVelocityBlock):
+    """A reduction-based (lAIR) hierarchy on the frozen convection-diffusion operator.
+
+    Peclet-robust and mesh-independent, so it scales where :class:`ConvectionTwoLevel` cannot. Builds
+    :class:`AirConvectionVelocity`.
+    """
+
+    def _strategy_class(self) -> type:
+        return AirConvectionVelocity
 
 
 def _characteristic_reference_state(assembler: MomentumContinuity) -> jnp.ndarray:
@@ -1043,7 +1261,11 @@ class BlockPreconditioner(eqx.Module):
             **value-dependent**, so use it where the hierarchy is frozen (as the coupled flow block is)
             rather than refreshed — see :func:`~aquaflux.solve.build_smoothed_hierarchy`.
         """
-        if velocity not in ("smoothed", "convection", "convection-air"):
+        if not isinstance(velocity, VelocityBlock) and velocity not in (
+            "smoothed",
+            "convection",
+            "convection-air",
+        ):
             raise ValueError(
                 f"unknown velocity block {velocity!r}; use 'smoothed', 'convection' or 'convection-air'"
             )
@@ -1070,7 +1292,12 @@ class BlockPreconditioner(eqx.Module):
 
         # A convection-aware velocity block freezes its linearization at a representative flow state;
         # derive one from the boundary conditions when none was given.
-        if reference_state is None and velocity in ("convection", "convection-air"):
+        freezes_convection = (
+            isinstance(velocity, _ConvectionVelocityBlock)
+            if isinstance(velocity, VelocityBlock)
+            else velocity in ("convection", "convection-air")
+        )
+        if reference_state is None and freezes_convection:
             reference_state = _characteristic_reference_state(assembler)
 
         inputs = _StrategyInputs(
@@ -1085,7 +1312,11 @@ class BlockPreconditioner(eqx.Module):
         )
         schur = _build_schur(geometry, inputs, schur_mass_diagonal)
         velocity_geometry = _VelocityGeometry.of(assembler)
-        velocity_block = _build_velocity_block(velocity, velocity_geometry, inputs)
+        velocity_block = (
+            velocity._build(velocity_geometry, inputs)
+            if isinstance(velocity, VelocityBlock)
+            else _build_velocity_block(velocity, velocity_geometry, inputs)
+        )
         return cls(
             assembler,
             schur,
