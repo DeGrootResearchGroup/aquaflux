@@ -133,29 +133,18 @@ deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` fr
       transport pair coarsen differently. `AmgVCycle.apply` returns the inverse in the **original**
       (unequilibrated, field-major) space, so the retained coupling block is applied raw between the two
       block solves, with no scaling bookkeeping.
-      **⚠️ But `factors.n_dofs` + `factors.apply` is the WHOLE of what the split satisfies, and the base
-      asks for more elsewhere — `has_exact_solve` reads `self.factors.has_exact_solve`, which only an
-      `AmgVCycle` has, so on the split the inherited property RAISED (fixed 2026-08-14 by an explicit
-      `has_exact_solve = False` override; a split never forms the whole shifted operator, so there is no
-      traced solve to offer).** It went unseen for the reason worth carrying: **both call sites ask
-      through `getattr(pc, "solves_exactly_on_host", False)` — the right spelling for the complete LU, which
-      genuinely lacks the attribute — and a `getattr` default swallows an `AttributeError` raised *inside*
-      a property body exactly as it swallows a missing name.** The value it produced was accidentally the
-      correct `False`, so nothing failed. Two consequences: a test of such a property must read it
-      **directly**, never through `getattr` with a default (a `getattr` test passes against the defect —
-      `test_the_field_split_answers_the_exact_solve_question_without_raising` reads it both ways for
-      this reason); and the unnamed `factors` contract the family shares is **`n_dofs` + `apply` only**,
-      so anything else the base reads off `self.factors` is an inheritance leak, not a contract.
+      **⚠️ `factors.n_dofs` + `factors.apply` is the WHOLE of what the split satisfies.** A base reading
+      anything else off `self.factors` raises on the split, and a `getattr(pc, name, False)` call site
+      swallows that raise as a plausible `False` — an exact-solve capability flag did exactly this until the
+      host exact forward solve was deleted (2026-09-13, #371). A test of such a property must read it
+      **directly**, never through `getattr` with a default.
     - **⚠️ `FieldSplitAmgPreconditioner` NO LONGER SUBCLASSES `MonolithicAmgPreconditioner` — its base is
       the extracted `MaterializedJacobianPreconditioner` (`amg_preconditioner.py`, #287, 2026-09-11).**
-      The `has_exact_solve` fix above rescued a raise by overriding it; it did not remove the underlying
-      cause, which was inheriting the whole monolithic class — including the fixed-pattern cell-major
-      assembler and the host exact-solve jvp shell, neither of which a split builds or uses — for the sake
+      The underlying cause of that raise was inheriting the whole monolithic class — including the fixed-pattern cell-major
+      assembler, which a split never builds or uses — for the sake
       of the genuinely shared coloured-probe materialize/shift/cache/teardown. `MaterializedJacobianPreconditioner`
       holds exactly that shared quarter; `MonolithicAmgPreconditioner` and `FieldSplitAmgPreconditioner`
-      are now siblings over it. The `has_exact_solve`/`solves_exactly_on_host` overrides on the split stay
-      (the new base declares neither, so they are no longer rescuing an inherited raise — they are simply
-      the concrete class's own answer), and `refresh_in_place`'s `smoother_fill_levels`/`smoother_sweeps`
+      are now siblings over it. `refresh_in_place`'s `smoother_fill_levels`/`smoother_sweeps`
       parameters — declared on both classes' refresh and immediately `del`-eted on both, because the union
       signature forced them there — are deleted from both signatures; passing either is now a `TypeError`.
       No behaviour change on either class's `build`, which still takes them where they are real (fitting

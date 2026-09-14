@@ -356,39 +356,6 @@ def test_both_hierarchy_inverses_share_one_refresh_implementation() -> None:
             )
 
 
-def test_the_field_split_answers_the_exact_solve_question_without_raising(groups) -> None:
-    """Asked DIRECTLY, not through ``getattr`` -- which is what let this go unnoticed.
-
-    ``FieldSplitAmgPreconditioner`` inherits the monolithic V-cycle's ``has_exact_solve``, which asks
-    its frozen inverse whether it offers a native exact solve. The split's inverse is a
-    :class:`BlockTriangularFieldSplit`, which has no such attribute, so the inherited property *raised*.
-    Both production callers ask through ``getattr(pc, "solves_exactly_on_host", False)`` -- correct for the
-    factorization preconditioners, which genuinely lack the attribute -- and that default swallows an
-    ``AttributeError`` raised inside a property body exactly as it swallows a missing name. The value it
-    produced was accidentally right, so nothing failed.
-
-    So this asserts on the attribute access itself. Reading it through ``getattr`` with a default cannot
-    tell a working property from a raising one, and would pass against the defect.
-
-    The split is assembled from exact stub block inverses rather than through
-    ``build_block_triangular_field_split``, which builds real V-cycles and so needs ``petsc4py`` -- an
-    *optional* dependency the unit tier does not install. What is under test is which answer the
-    preconditioner gives for its own frozen inverse, and that does not depend on what inverts the
-    blocks.
-    """
-    from aquaflux.solve.field_split import FieldSplitAmgPreconditioner
-
-    n = groups.n_dofs
-    operator = np.eye(n) * 2.0 + np.eye(n, k=1) * 0.25
-    split = split_for(operator, groups, flow_first=True)
-    preconditioner = FieldSplitAmgPreconditioner(split, groups)
-
-    assert preconditioner.has_exact_solve is False
-    assert preconditioner.solves_exactly_on_host is False
-    # And the same answer the production call sites take, so the two spellings cannot drift apart.
-    assert getattr(preconditioner, "solves_exactly_on_host", False) is False
-
-
 def test_field_split_refresh_in_place_no_longer_takes_the_dead_smoother_parameters(groups) -> None:
     """#287: the split used to declare ``smoother_fill_levels``/``smoother_sweeps`` on its refresh and
     immediately ``del`` them, purely because it shared a base with :class:`MonolithicAmgPreconditioner`

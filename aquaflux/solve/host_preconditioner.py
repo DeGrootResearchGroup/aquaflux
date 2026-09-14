@@ -15,9 +15,8 @@ field splits. :class:`HostFactors` is that pair, written down, rather than each 
 ``matvec`` on its own.
 
 **Naming it also closes a class of silent failure.** A base that reads anything off ``self.factors``
-beyond this pair is making an assumption only some factorizations satisfy -- which is how a
-``has_exact_solve`` lookup came to raise on the field split while a ``getattr`` default at the call
-site quietly turned the exception into ``False``. If a capability is not in :class:`HostFactors`, do
+beyond this pair is making an assumption only some factorizations satisfy, and on the others the
+lookup raises -- which a ``getattr`` default at the call site quietly turns into a plausible value. If a capability is not in :class:`HostFactors`, do
 not reach for it through ``self.factors``; give the subclass an explicit answer instead.
 """
 

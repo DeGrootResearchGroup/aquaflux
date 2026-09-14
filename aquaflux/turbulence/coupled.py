@@ -2113,14 +2113,8 @@ class MonolithicFactorShiftPolicy(eqx.Module):
     def shift_term(self, phi: jnp.ndarray, residual: jnp.ndarray | None = None) -> ShiftTerm:
         """The block policy's shift diagonal, glued to the frozen factorization preconditioner.
 
-        For the complete LU the preconditioner is a single frozen apply and the step solves the
-        shifted system with the JAX-side Krylov. A preconditioner exposing a host exact solve (the AMG
-        V-cycle) instead returns a **tagged full-solve** the step applies directly on the host -- the
-        multigrid V-cycle is only a *moderate* inverse, so the JAX-side Krylov with it as a per-matvec
-        callback needs tens of iterations, where PETSc's own GMRES driving the same V-cycle on the host
-        reaches the 1% stop in far fewer -- each JAX-side matvec pays a host round-trip that the host
-        path does not, so the cost gap is wider than the iteration gap. The forward-only host exact solve
-        does not touch the differentiable path: the adjoint uses the single-V-cycle transpose below.
+        The preconditioner is a single frozen apply, and the step solves the shifted system with the
+        JAX-side Krylov.
 
         Parameters
         ----------
@@ -2133,10 +2127,6 @@ class MonolithicFactorShiftPolicy(eqx.Module):
         # an earlier per-block damping measured as a no-op on this path.
         base = self.base.shift_term(phi, residual)
         diagonal = base.diagonal
-        if getattr(self.preconditioner, "solves_exactly_on_host", False):
-            # The step applies the host exact-Jacobian full solve directly (see `_shifted_solve`):
-            # `preconditioner.exact_solve(phi, -rhs, shift)`. The shift already carries the relaxation.
-            return ShiftTerm(diagonal, lambda relaxation: self.preconditioner, base.row_relaxation)
         apply = self.preconditioner.matvec()
         # The factorization is frozen, so the preconditioner does not depend on the shift strength.
         return ShiftTerm(diagonal, lambda relaxation: apply, base.row_relaxation)
@@ -2911,7 +2901,6 @@ def coupled_amg_continuation(
     smoother_fill_levels: int = 1,
     smoother_sweeps: int = 2,
     coarse_eq_limit: int | None = None,
-    host_exact_forward_solve: bool = False,
     globalization: Globalization = DEFAULT_GLOBALIZATION,
     inner_steps: int = 1,
     inner_tol: float = 0.05,
@@ -3003,13 +2992,6 @@ def coupled_amg_continuation(
         (default) keeps PETSc's default (~50); a larger value grows the coarse-level direct solve so it
         inverts more of the saddle's global pressure coupling exactly — a stronger V-cycle (and stronger
         transpose V-cycle, so it helps the adjoint too) at a bounded, sub-linearly-growing coarse-solve cost.
-    host_exact_forward_solve : bool
-        EXPERIMENTAL. Run the forward Krylov in the host multigrid library, its operator a shell
-        over the exact Jacobian-vector product, instead of applying the frozen V-cycle per matvec through
-        the JAX-side Krylov. The mechanism is validated (host speed, correct step direction, exact
-        Newton), but the march currently converges more slowly per step than the default path, whose
-        near-exact steps the pseudo-transient globalization implicitly leans on. ``False`` (default) is
-        the JAX-side path. Incompatible with ``field_split``.
     globalization : Globalization
         The schedule, ladders and guard, exactly as in :func:`coupled_continuation` -- including its
         line-search base -- because how a march damps is a property of the coupled residual and not of
@@ -3102,7 +3084,7 @@ def coupled_amg_continuation(
         ``[u, v, w, p]`` saddle and the ``[k, ω]`` transported scalars, retaining one triangle of the
         coupling between them exactly — instead of one hierarchy over all six fields. Only which frozen
         inverse is fitted changes; the operator stays monolithic, so the differentiated Jacobian and the
-        coupled adjoint are untouched. Incompatible with ``host_exact_forward_solve``.
+        coupled adjoint are untouched.
     flow_first : bool
         Solve the ``[u, v, w, p]`` group first and retain the ``[k, ω]``-by-flow coupling — the ordering
         :func:`~aquaflux.solve.build_block_triangular_field_split` calls ``flow_first`` and its own
@@ -3204,11 +3186,6 @@ def coupled_amg_continuation(
     # Validate the preconditioner arrangement BEFORE anything expensive. Everything below materializes a
     # coupled Jacobian by coloured probing, which is hundreds of matrix-vector products; a configuration
     # that cannot be honoured should say so immediately rather than after that.
-    if field_split and host_exact_forward_solve:
-        raise ValueError(
-            "host_exact_forward_solve builds a PETSc KSP around a single monolithic V-cycle and has no "
-            "field-split counterpart; use one or the other."
-        )
     if not field_split and leading_inverse is not None:
         raise ValueError(
             "leading_inverse replaces the leading block's inverse, and there is no leading block "
@@ -3275,15 +3252,6 @@ def coupled_amg_continuation(
     def batched_matvec(seeds):
         return _batched_jacobian_matvec(probed, frozen, seeds)
 
-    # `host_exact_forward_solve` (EXPERIMENTAL, opt-in) runs the forward Krylov in PETSc, its operator
-    # a shell over the exact jvp (true Newton, not a frozen Jacobian) -- PETSc's own GMRES + GAMG reaches its
-    # stop in ~1 iteration where the JAX-side Krylov with the V-cycle as a per-matvec callback needs ~90
-    # (the JAX-side GMRES is far slower on a well-preconditioned system; measured). The mechanism is
-    # validated (host speed, correct step direction, exact-Newton), but the march currently converges
-    # SLOWER than the default path per step: the default's JAX-side solver over-solves each step to
-    # ~machine zero, and the pseudo-transient globalization implicitly leans on those near-exact steps,
-    # which the host (honest-tolerance) step does not yet match -- a convergence-tuning follow-up. Default
-    # off; the default path applies the frozen V-cycle per-matvec through the JAX-side Krylov.
     # `field_split` swaps ONLY which frozen inverse is fitted to the same materialized Jacobian: the flow
     # saddle and the two transported scalars get separate hierarchies, with one triangle of the coupling
     # between them retained exactly. Everything downstream -- the shift policy, the forward solver, the
@@ -3321,8 +3289,6 @@ def coupled_amg_continuation(
                 matvec,
                 plan,
                 shift,
-                host_exact_solve=host_exact_forward_solve,
-                residual_fn=coupled.residual if host_exact_forward_solve else None,
                 **common,
             )
         )

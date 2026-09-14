@@ -66,21 +66,17 @@ paths:
     is genuinely common to fitting *any* inverse to the coloured-probe materialized coupled Jacobian
     (the probe itself, the shift-diagonal add, the cached-Jacobian shift-only refresh, teardown) —
     `MonolithicAmgPreconditioner` is no longer `FieldSplitAmgPreconditioner`'s base, so it no longer
-    inherits the monolithic-only state (the fixed-pattern cell-major assembler, the host exact-solve jvp
-    shell) it never used. See `solve-amg-multigrid.md` and `solve-field-split.md`.
+    inherits the monolithic-only state (the fixed-pattern cell-major assembler) it never used. See `solve-amg-multigrid.md` and `solve-field-split.md`.
   - **⚠️ Anything a base reads off `self.factors` beyond that pair is a requirement on ALL of them
-    (binding).** This is not hypothetical: `has_exact_solve` read `self.factors.has_exact_solve`,
-    which only `AmgVCycle` has, so the property **raised** on the field split — and both call sites ask
-    through `getattr(pc, "solves_exactly_on_host", False)`, whose default swallows an `AttributeError` raised
-    inside a property body exactly as it swallows a missing name. The answer it produced was
-    accidentally the correct `False`. If a capability is not in `HostFactors`, answer it on the
+    (binding).** This is not hypothetical: an exact-solve capability flag (`has_exact_solve`, deleted with
+    the host exact forward solve on 2026-09-13, #371) read `self.factors.has_exact_solve`, which only
+    `AmgVCycle` had, so the property **raised** on the field split — and the call sites asked through
+    `getattr(pc, ..., False)`, whose default swallows an `AttributeError` raised inside a property body
+    exactly as it swallows a missing name. If a capability is not in `HostFactors`, answer it on the
     subclass. Pinned by an AST check on the base's own source
     (`test_the_base_asks_its_factors_for_nothing_beyond_the_declared_contract`) — read off the source
     rather than exercised, because the failure is a lookup that is *never taken* on the paths a test
-    would naturally drive, which is why the original went unseen. `FieldSplitAmgPreconditioner` still
-    answers `has_exact_solve`/`solves_exactly_on_host` explicitly rather than inheriting either — the
-    new base declares neither, so this is no longer an override rescuing a raise, it is simply the
-    concrete class stating its own answer.
+    would naturally drive, which is why the original went unseen.
   - **The pseudo-transient shift has one home: `sparse_jacobian.shifted_jacobian`.** Every host
     preconditioner adds `β d` before factoring, and two spellings once disagreed: a pattern-preserving
     `setdiag` against `a + sp.diags(shift)` — the latter is wrong, since a sparse *addition* stores only

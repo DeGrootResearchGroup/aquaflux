@@ -575,6 +575,25 @@ load-bearing status of the flow block itself is in `solve-flow-block.md`.
   preconditioner plus a pseudo-transient shift, a better flow Schur buys no coupled cycles. Full
   numbers: `solve-globalization-log.md`, the MSIMPLE root-cause entry.
 
+## Coupled preconditioner options deleted as dominated (#371, 2026-09-13)
+
+Deleted in the audit ahead of the preconditioner spec, so the spec would not write them into a case
+data model. Each had nothing in `validation/` or any test selecting it.
+
+- **`coupled_lu_refreshing_continuation` — DELETED, dominated by `lu_beta_tracking_refresh`.** A
+  `RefreshPolicy(builder=...)` that re-factored the complete LU in place at a FIXED `lu_beta`. On a
+  dual-time march that is exactly the shift mismatch the tracking hook removes: an LU frozen at
+  β = 0.05 needs 25 / 111 / 217 / 474 GMRES iterations at β = 0.1 / 0.5 / 1 / 2 against 1 matched, and
+  NaN'd on a cold pitzDaily ramp (`solve-direct-preconditioners.md`). Its only remaining regime — a
+  single-step SER march with an LU and a drift trigger — was never selected or measured.
+- **`host_exact_forward_solve` — DELETED, never selected.** PETSc GMRES driving the monolithic V-cycle
+  over a shell of the exact Jacobian-vector product, instead of the JAX-side Krylov with the V-cycle as
+  a per-matvec callback: 1 host iteration against ~90 on the identical system (no configuration
+  recorded), but it marched slower per step and refused `field_split`, which both flagship cases run.
+  The reason recorded for the slower march (the default path over-solving to machine zero) was stale.
+  With it went `AmgVCycle.solve_exact`, `MonolithicAmgPreconditioner.exact_solve`, and every
+  `has_exact_solve` / `solves_exactly_on_host` branch.
+
 ## Globalization (forward step, continuation, line search) — closed investigations
 
 Full detail is in `solve-globalization-log.md` (no `paths:`, reference-only); the current architecture

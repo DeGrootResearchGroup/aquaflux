@@ -3,8 +3,8 @@
 Structural rather than numerical: what each concrete preconditioner *computes* is pinned by its own
 test module, and what is pinned here is that the two share one application path and one declared
 contract. The failure these guard against is a future divergence -- someone re-adding a private
-``matvec``, or a base reaching for a capability only some factorizations have, which is exactly how a
-``has_exact_solve`` lookup came to raise on the field split while a ``getattr`` default hid it.
+``matvec``, or a base reaching for a capability only some factorizations have, where the lookup raises on
+the others and a ``getattr`` default at the call site hides it.
 """
 
 from __future__ import annotations
@@ -124,10 +124,10 @@ def test_the_base_asks_its_factors_for_nothing_beyond_the_declared_contract() ->
 
     The base is what every family member inherits, so a capability it reaches for becomes a requirement
     on *all* of them -- including the block-triangular splits and the patch smoother, which are not
-    factorizations and cannot answer factorization questions. That is not hypothetical: the AMG's
-    ``has_exact_solve`` read ``self.factors.has_exact_solve``, which only its own V-cycle has, so the
-    property raised on the field split and a ``getattr`` default at the call site turned the exception
-    into a plausible ``False``.
+    factorizations and cannot answer factorization questions. That is not hypothetical: an exact-solve
+    capability flag once read through ``self.factors`` existed only on the monolithic V-cycle, so it
+    raised on the field split and a ``getattr`` default at the call site turned the exception into a
+    plausible ``False``.
 
     Read off the source rather than exercised, because the failure is a *lookup that is never taken* on
     the paths a test would naturally drive -- which is precisely why the original went unnoticed.

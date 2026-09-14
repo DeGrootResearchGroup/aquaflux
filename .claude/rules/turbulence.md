@@ -1547,8 +1547,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     the `coupled_amg_continuation` builder) sets the direct-LU coarse-grid size; raising it to 2000 is a
     large cut in the outer cycle count on the hard `bfs3d` state — for the figure with its β and bundle
     use the `coarse_eq_limit` bullet in `.claude/rules/solve-amg-multigrid.md` rather than repeating an unanchored
-    number here. The experimental host-exact-solve forward path and the FGMRES-forward
-      optimization remain follow-ups (`.claude/rules/solve-amg-multigrid.md`).
+    number here. The FGMRES-forward optimization remains a follow-up (`.claude/rules/solve-amg-multigrid.md`).
   - **`lu_beta_tracking_refresh` — re-factor the LU at the current β EVERY step (the correct LU treatment
     for a dual-time march; BUILT).** A frozen LU is exact only for the β it was factored at; a dual-time
     march's β ramps (0.5 → 0.005), so a factorization frozen at `lu_beta` mis-preconditions the operator

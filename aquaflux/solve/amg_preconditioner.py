@@ -40,7 +40,6 @@ if TYPE_CHECKING:
 import itertools
 from collections.abc import Callable
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
@@ -57,17 +56,6 @@ from .refresh_timing import PhaseTimer
 
 # A process-unique options prefix per V-cycle, so several preconditioners' PETSc options never collide.
 _prefix_counter = itertools.count()
-
-
-class _ShellContext:
-    """PETSc Python-matrix context delegating the shell matvec to an :class:`AmgVCycle` (see
-    :meth:`AmgVCycle._shell_mult`) -- a thin object because petsc4py looks up ``mult`` on the context."""
-
-    def __init__(self, vcycle: AmgVCycle) -> None:
-        self._vcycle = vcycle
-
-    def mult(self, mat, x, y) -> None:
-        self._vcycle._shell_mult(mat, x, y)
 
 
 def _petsc():
@@ -110,9 +98,6 @@ class AmgVCycle:
         smoother_fill_levels: int,
         smoother_sweeps: int,
         coarse_eq_limit: int | None = None,
-        host_exact_solve: bool = False,
-        solve_rtol: float = 1e-8,
-        solve_restart: int = 30,
         extra_options: dict | None = None,
     ) -> None:
         self._PETSc = _petsc()
@@ -123,15 +108,6 @@ class AmgVCycle:
         self._smoother_fill_levels = smoother_fill_levels
         self._smoother_sweeps = smoother_sweeps
         self._coarse_eq_limit = coarse_eq_limit
-        # When ``host_exact_solve``, an extra PETSc KSP drives the same GAMG V-cycle as a full host solve whose
-        # operator is a *shell* over the EXACT Jacobian (:meth:`solve_exact`) -- true Newton at host
-        # speed, no per-matvec JAX round-trip. The GAMG hierarchy is still coarsened from the frozen
-        # materialized matrix (the preconditioner matrix), which a strong preconditioner tolerates.
-        self._host_exact_solve = host_exact_solve
-        self._solve_rtol = solve_rtol
-        self._solve_restart = solve_restart
-        self._cur_matvec = None  # set per solve: the field-major linearized operator ``v -> J v``
-        self._cur_shift = None  # set per solve: the field-major pseudo-time shift ``beta d``
         self._prefix = f"aqamg{next(_prefix_counter)}_"
         self._build(cell_major)
 
@@ -139,11 +115,6 @@ class AmgVCycle:
     def n_dofs(self) -> int:
         """Number of degrees of freedom the V-cycle acts on."""
         return self.scale.shape[0]
-
-    @property
-    def has_exact_solve(self) -> bool:
-        """Whether the host exact-Jacobian forward solve (:meth:`solve_exact`) is available."""
-        return self._host_exact_solve
 
     @property
     def levels(self) -> int:
@@ -171,9 +142,6 @@ class AmgVCycle:
         a workstation. Calling this makes the release the caller's decision rather than the
         collector's. The object must not be used afterwards.
         """
-        if self._host_exact_solve:
-            self._ksp.destroy()
-            self._shell.destroy()
         self._pc.destroy()
         self._mat.destroy()
 
@@ -245,37 +213,6 @@ class AmgVCycle:
         self._configure()
         self._x = self._mat.createVecRight()
         self._b = self._mat.createVecLeft()
-        # A KSP driving the same GAMG V-cycle as a full host solve (GMRES, stopping at
-        # `solve_rtol`): the whole Krylov
-        # loop and the V-cycle applies run on the host, so a march step pays one JAX round-trip rather than
-        # one per matvec (JAX-side GMRES with the V-cycle as a per-matvec callback is far slower). The
-        # operator is a *shell* over the EXACT Jacobian-vector product (:meth:`_shell_mult`, calling the
-        # current linearized ``matvec`` set by :meth:`solve_exact`), so the solve stays true-Newton; the
-        # GAMG preconditioner is built from the frozen materialized matrix ``self._mat`` (the Pmat).
-        if self._host_exact_solve:
-            shell = PETSc.Mat().createPython(self._mat.getSizes(), comm=self._mat.getComm())
-            shell.setPythonContext(_ShellContext(self))
-            shell.setUp()
-            self._shell = shell
-            ksp = PETSc.KSP().create()
-            ksp.setOptionsPrefix(self._prefix)
-            ksp.setOperators(shell, self._mat)  # operator = exact-jvp shell; PC coarsened from Pmat
-            ksp.setType("gmres")
-            ksp.setNormType(PETSc.KSP.NormType.UNPRECONDITIONED)
-            ksp.setGMRESRestart(self._solve_restart)
-            ksp.setTolerances(rtol=self._solve_rtol, atol=1e-50, max_it=self._solve_restart * 20)
-            ksp.setPC(self._pc)
-            ksp.setUp()
-            self._ksp = ksp
-
-    def _shell_mult(self, mat, x, y) -> None:
-        """The exact-Jacobian matvec for the host exact solve's shell operator, in equilibrated cell-major
-        coordinates: ``y_cm = D P (J + beta d) P^T D x_cm``, with ``J`` the exact jvp set per solve."""
-        xc = np.array(x.array_r)  # the input Vec is locked read-only during MatMult
-        w = np.empty(self.n_dofs)
-        w[self.perm] = self.scale[self.perm] * xc  # P^T D x -> field-major
-        jw = np.asarray(self._cur_matvec(w)) + self._cur_shift * w  # (J + beta d) w, field-major
-        y.setArray(self.scale[self.perm] * jw[self.perm])  # D P (J + beta d) w -> cell-major
 
     def _configure(self) -> None:
         """A plain-aggregation V-cycle: direct-LU coarse solve, stationary ILU level smoother."""
@@ -366,49 +303,6 @@ class AmgVCycle:
         out[self.perm] = self._x.getArray()
         return self.scale * out
 
-    def solve_exact(
-        self, matvec: Callable[[np.ndarray], np.ndarray], rhs: np.ndarray, shift: np.ndarray
-    ) -> np.ndarray:
-        """Host forward solve ``(J + beta d) delta = rhs`` with the EXACT ``J``.
-
-        Runs PETSc's own GMRES + GAMG entirely on the host, its operator a shell over the exact
-        Jacobian-vector product ``matvec`` (the jvp at the current iterate) plus the pseudo-time shift --
-        so the solve is true-Newton -- without the per-matvec JAX round-trip a JAX-side Krylov with the
-        V-cycle as a callback would pay. It stops on the KSP's relative tolerance, ``solve_rtol``.
-        The GAMG hierarchy is coarsened from the frozen materialized matrix (a strong preconditioner
-        tolerates the state/shift drift). Impure (drives host PETSc state), so it is a **forward-only**
-        path -- never on a differentiated solve; the adjoint uses the differentiable single-V-cycle
-        :meth:`apply`.
-
-        Parameters
-        ----------
-        matvec : callable
-            The field-major exact linearized operator ``v -> J v`` at the current iterate (a jvp), taking
-            and returning length-``n_dofs`` arrays.
-        rhs : np.ndarray
-            The field-major right-hand side (the step solves ``(J + beta d) delta = rhs``), shape ``(n_dofs,)``.
-        shift : np.ndarray
-            The field-major pseudo-time shift ``beta d``, shape ``(n_dofs,)``.
-
-        Returns
-        -------
-        np.ndarray
-            The correction ``delta``, shape ``(n_dofs,)``.
-        """
-        if not self._host_exact_solve:
-            raise RuntimeError(
-                "AmgVCycle.solve_exact needs the host KSP (build with host_exact_solve=True)."
-            )
-        self._cur_matvec = matvec
-        self._cur_shift = np.asarray(shift, dtype=np.float64)
-        rhs = np.asarray(rhs, dtype=np.float64)
-        self._b.setArray((self.scale * rhs)[self.perm])  # D P rhs -> equilibrated cell-major
-        self._x.set(0.0)
-        self._ksp.solve(self._b, self._x)
-        out = np.empty_like(rhs)
-        out[self.perm] = self._x.getArray()
-        return self.scale * out  # P^T D solution -> field-major delta
-
     def refactor(self, cell_major: sp.csr_matrix, scale: np.ndarray, perm: np.ndarray) -> None:
         """Refresh the V-cycle at a new (developed-state, new-shift) matrix, reusing the coarse space.
 
@@ -424,9 +318,7 @@ class AmgVCycle:
         **The live graph is what is compared, because the factorization is built on it** (:meth:`_live`),
         and unlike the assembled graph it is not fixed by construction: an entry that was exactly zero at
         the reference state may carry a coupling at a developed one. Such a refresh falls back to a full
-        rebuild, which is correct but forfeits the interpolation reuse for that refresh. The host
-        exact-solve KSP (:attr:`_native`) also takes the full rebuild -- it is the deferred experimental
-        path and shares the ``Mat`` with its shell operator.
+        rebuild, which is correct but forfeits the interpolation reuse for that refresh.
         """
         self.scale = scale
         self.perm = perm
@@ -459,8 +351,6 @@ class AmgVCycle:
         measured in tens, and it is not optional: the live pattern genuinely can move between states, which
         is the case this has to detect rather than assume away.
         """
-        if self._host_exact_solve:
-            return False
         if (
             self._pattern_seen is not None
             and cell_major.indptr is self._pattern_seen[0]
@@ -484,7 +374,6 @@ def build_amg_vcycle(
     smoother_fill_levels: int = 1,
     smoother_sweeps: int = 2,
     coarse_eq_limit: int | None = None,
-    host_exact_solve: bool = False,
     extra_options: dict | None = None,
 ) -> AmgVCycle:
     """Equilibrate + reorder a coupled block matrix and build a multigrid V-cycle preconditioner for it.
@@ -515,10 +404,6 @@ def build_amg_vcycle(
         (default) keeps PETSc's default (~50), a tiny coarse grid whose direct LU captures only the crudest
         global mode; a larger value grows the coarse-level LU so it inverts more of the saddle's global
         pressure coupling exactly — a stronger V-cycle at a bounded coarse-solve cost.
-    host_exact_solve : bool
-        Also assemble the host exact-Jacobian forward solve (:meth:`AmgVCycle.solve_exact`), whose
-        operator is a shell over the exact jvp supplied per solve. ``False`` builds the single-V-cycle
-        apply only (the frozen preconditioner and adjoint path).
     extra_options : dict, optional
         PETSc options applied to the V-cycle **after** the defaults above, so a study can vary an
         aggregation or smoother setting without editing them. ``None`` keeps the defaults as they are.
@@ -537,7 +422,6 @@ def build_amg_vcycle(
         smoother_fill_levels=smoother_fill_levels,
         smoother_sweeps=smoother_sweeps,
         coarse_eq_limit=coarse_eq_limit,
-        host_exact_solve=host_exact_solve,
         extra_options=extra_options,
     )
 
@@ -674,10 +558,9 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
 
     Extracted from :class:`MonolithicAmgPreconditioner` (#287) once a sibling —
     :class:`~aquaflux.solve.field_split.FieldSplitAmgPreconditioner` — needed the materialize/shift/cache
-    machinery without the monolithic-only state built around one :class:`AmgVCycle` (the host exact solve,
-    its jvp shell, the fixed-pattern cell-major assembler). Holding both classes' *union* on one base was
-    what forced the split to inherit attributes it cannot honour (a raising ``has_exact_solve``) and
-    re-implement its refresh bodies with parameters that do nothing on that path. What is here is exactly
+    machinery without the monolithic-only state built around one :class:`AmgVCycle` (the fixed-pattern
+    cell-major assembler). Holding both classes' *union* on one base was what forced the split to inherit
+    attributes it cannot honour and re-implement its refresh bodies with parameters that do nothing on that path. What is here is exactly
     what both need: probing the Jacobian, adding the pseudo-transient shift, and caching the unshifted
     Jacobian so a shift-only refresh need not re-probe.
     """
@@ -755,24 +638,15 @@ class MonolithicAmgPreconditioner(MaterializedJacobianPreconditioner):
     def __init__(
         self,
         vcycle: AmgVCycle,
-        residual_fn: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         jacobian_no_shift: sp.csr_matrix | None = None,
         n_fields: int | None = None,
         assembler: ShiftedCellMajorOperator | None = None,
     ) -> None:
         super().__init__(vcycle, jacobian_no_shift=jacobian_no_shift, n_fields=n_fields)
-        self._residual_fn = residual_fn
         # The fixed-pattern shift/equilibrate/reorder assembler, present exactly when the materialize ran
         # on a precomputed ``structure`` (which is what guarantees the pattern is the same every refresh).
         # ``None`` falls back to the generic sparse path, which works for any pattern.
         self._assembler = assembler
-        # A jitted jvp ``(phi, w) -> J(phi) w`` for the host exact solve's shell operator, called eagerly
-        # on the host inside the solve's pure_callback (linearizing at the current iterate ``phi``).
-        self._jvp = (
-            jax.jit(lambda phi, w: jax.jvp(residual_fn, (phi,), (w,))[1])
-            if residual_fn is not None
-            else None
-        )
 
     @staticmethod
     def _assembler_for(
@@ -811,8 +685,6 @@ class MonolithicAmgPreconditioner(MaterializedJacobianPreconditioner):
         plan,
         shift_diagonal: np.ndarray,
         *,
-        host_exact_solve: bool = False,
-        residual_fn: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         smoother_fill_levels: int = 1,
         smoother_sweeps: int = 2,
         coarse_eq_limit: int | None = None,
@@ -833,11 +705,6 @@ class MonolithicAmgPreconditioner(MaterializedJacobianPreconditioner):
         shift_diagonal : np.ndarray
             The pseudo-transient shift added to the Jacobian's diagonal, shape ``(n_fields * n,)`` — the
             same block-diagonal shift the step solves against (velocity/scalar shifts, pressure zero).
-        host_exact_solve : bool
-            Enable the host exact-Jacobian forward solve (:meth:`exact_solve`); ``residual_fn`` is
-            then required (the shell operator linearizes it at each iterate).
-        residual_fn : callable, optional
-            The steady residual ``phi -> R(phi)`` the host exact solve linearizes for its exact-Jacobian shell.
         smoother_fill_levels, smoother_sweeps : int
             The level-smoother controls (see :func:`build_amg_vcycle`).
         coarse_eq_limit : int or None
@@ -875,10 +742,8 @@ class MonolithicAmgPreconditioner(MaterializedJacobianPreconditioner):
                 smoother_fill_levels=smoother_fill_levels,
                 smoother_sweeps=smoother_sweeps,
                 coarse_eq_limit=coarse_eq_limit,
-                host_exact_solve=host_exact_solve,
                 extra_options=extra_options,
             ),
-            residual_fn=residual_fn,
             jacobian_no_shift=jacobian,
             n_fields=plan.n_fields,
             assembler=assembler,
@@ -971,33 +836,3 @@ class MonolithicAmgPreconditioner(MaterializedJacobianPreconditioner):
         self.factors.refactor(cell_major, scale, perm)
         timer.lap("refactor")
         return timer.phases()
-
-    @property
-    def has_exact_solve(self) -> bool:
-        """Whether the host exact-Jacobian forward solve is available (built with ``host_exact_solve=True``)."""
-        return self.factors.has_exact_solve and self._jvp is not None
-
-    @property
-    def solves_exactly_on_host(self) -> bool:
-        """Marks this preconditioner so the pseudo-transient step applies the host exact solve directly
-        (see :func:`aquaflux.solve.continuation._shifted_solve`) instead of a JAX-side Krylov iteration."""
-        return self.has_exact_solve
-
-    def exact_solve(self, phi: jnp.ndarray, rhs: jnp.ndarray, shift: jnp.ndarray) -> jnp.ndarray:
-        """The full inexact-Newton correction ``delta`` solving ``(J(phi) + shift) delta = rhs``.
-
-        Runs PETSc's GMRES + PETSc GAMG V-cycle entirely on the host, its operator a shell over the EXACT
-        jvp linearized at ``phi`` (so the solve is true-Newton), stopping on the KSP's relative tolerance
-        (``solve_rtol``) without the per-matvec JAX round-trip a JAX-side Krylov with the V-cycle as a
-        callback would pay. One JAX ``pure_callback`` per step, carrying ``phi``/``rhs``/``shift`` in and
-        ``delta`` out; the exact jvp is evaluated eagerly inside the callback. Forward-only (drives host PETSc state);
-        the adjoint uses the differentiable single-V-cycle :meth:`matvec` transpose.
-        """
-        shape = jax.ShapeDtypeStruct((self.factors.n_dofs,), jnp.float64)
-
-        def host(rhs_np, phi_np, shift_np):
-            phi_j = jnp.asarray(phi_np)
-            matvec = lambda w: np.asarray(self._jvp(phi_j, jnp.asarray(w)))  # noqa: E731
-            return self.factors.solve_exact(matvec, rhs_np, shift_np)
-
-        return jax.pure_callback(host, shape, rhs, phi, shift)

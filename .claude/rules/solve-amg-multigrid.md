@@ -35,9 +35,7 @@ paths:
     `MaterializedJacobianPreconditioner` (binding, #287, 2026-09-11).** `FieldSplitAmgPreconditioner`
     (`solve-field-split.md`) needed the same coloured-probe-materialize + shift-diagonal + cached-Jacobian
     machinery without the monolithic-only state built around one `AmgVCycle` — the fixed-pattern
-    cell-major assembler (`_assembler_for`/`_cell_major`) and the host exact-solve jvp shell
-    (`residual_fn`/`_jvp`/`exact_solve`/`has_exact_solve`/`solves_exactly_on_host`), none of which a split
-    ever forms. Those stay on `MonolithicAmgPreconditioner`; `_materialize_jacobian`, `_shifted` and
+    cell-major assembler (`_assembler_for`/`_cell_major`), which a split never forms. Those stay on `MonolithicAmgPreconditioner`; `_materialize_jacobian`, `_shifted` and
     `destroy` (and the `_jacobian_no_shift`/`_n_fields` cache) moved to the new base, which both classes
     now subclass directly — see `solve-direct-preconditioners.md`'s `HostFactors` entry for why this
     matters (a base reading anything off `self.factors` beyond `n_dofs`+`apply` is a requirement on every
@@ -94,15 +92,10 @@ paths:
     coarsening choice (selective vs smoothed-aggregation) is a minor knob by comparison — but do not read that
     as covering `pc_gamg_agg_nsmooths`: plain-vs-smoothed *prolongator* smoothing is measured below as the
     largest preconditioner win found on this case. (The whole-march wall figure that used to sit here
-    predated several march-wide wins and is deleted.) An **experimental, opt-in host-exact-solve forward path**
-    (`coupled_amg_continuation(host_exact_forward_solve=True)`) is a far larger per-step lever — a traced KSP
-    whose shell matvec calls the eager JAX jvp (true Newton), 1 traced GMRES iteration vs the JAX-side
-    lineax path's ~90 on the identical system — but it currently under-converges the *march* (the lineax
-    path over-solves each step to ~machine zero and the pseudo-transient globalization leans on those
-    near-exact steps; the traced honest-tolerance step descends slower and overruns the step budget), so it
-    stays off by default. The follow-up to make it the default is a **β-tracking GAMG refresh** (the AMG
-    analogue of `lu_beta_tracking_refresh`), so the frozen V-cycle matches the ramping β and the traced
-    solve stays accurate at low β.
+    predated several march-wide wins and is deleted.) A host-exact-solve forward path (`host_exact_forward_solve`: PETSc GMRES driving the V-cycle over a
+    shell of the exact Jacobian-vector product) was built, never selected by any case or test, and
+    **DELETED 2026-09-13 (#371)**. The reason once recorded for its slower march — the default path
+    over-solving each step to machine zero — was itself stale: that over-solve was removed 2026-07-28.
   - **`coarse_eq_limit` — grow the coarsest-grid direct LU (BUILT).** GAMG's default coarsens to a tiny
     (~50-equation) coarse grid, whose direct LU captures only the crudest global mode; the indefinite
     saddle's wall is exactly that global pressure coupling. `build_amg_vcycle(coarse_eq_limit=K)` /

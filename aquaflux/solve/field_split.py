@@ -621,9 +621,9 @@ class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
     Jacobian, the shift-diagonal add, the ``jax.pure_callback`` matvec (which reads ``self.factors`` at
     call time, so an in-place refresh re-preconditions the same compiled solve) and the teardown are
     genuinely shared — those live on the base. Everything the monolithic class builds *from* one
-    :class:`~aquaflux.solve.AmgVCycle` (the fixed-pattern cell-major assembler, the host exact-solve jvp
-    shell) is monolithic-only, and inheriting it forced this class to override a raising ``has_exact_solve``
-    and to declare two smoother parameters on its own refresh that a split's construction never reads.
+    :class:`~aquaflux.solve.AmgVCycle` (the fixed-pattern cell-major assembler) is monolithic-only, and
+    inheriting it forced this class to declare two smoother parameters on its own refresh that a split's
+    construction never reads.
 
     The monolithic path equilibrates and reorders the **whole** matrix to cell-major before handing it to
     one V-cycle; a split does that **per block**, inside each block's own ``build_amg_vcycle``, because the
@@ -650,25 +650,6 @@ class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
     def groups(self) -> FieldGroups:
         """The field partition the preconditioner is built over."""
         return self._groups
-
-    @property
-    def has_exact_solve(self) -> bool:
-        """Always ``False``: a block-triangular split offers no host exact solve.
-
-        The split's frozen inverse is a :class:`BlockTriangularFieldSplit`, which has no such solve to
-        offer, because a host exact solve inverts the whole shifted operator in one host call and a split
-        deliberately never forms it. Answered here explicitly rather than by asking ``self.factors`` for
-        it (see the base's :class:`~aquaflux.solve.host_preconditioner.HostFactors` docstring on why a
-        capability not in that contract belongs on the concrete class) — both production callers ask
-        through ``getattr(pc, "solves_exactly_on_host", False)``, so a missing or a raising attribute would
-        read identically as ``False`` and hide a real defect just as easily as the correct answer.
-        """
-        return False
-
-    @property
-    def solves_exactly_on_host(self) -> bool:
-        """Always ``False``, for the same reason as :attr:`has_exact_solve`."""
-        return False
 
     @classmethod
     def build(
