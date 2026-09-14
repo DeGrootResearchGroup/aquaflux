@@ -243,66 +243,167 @@ def test_collapse_leaves_a_non_periodic_slab_offset_free():
     assert collapse_extruded_direction(slab, ["back", "front"]).face_cells.neighbour_offset is None
 
 
-def _extruded_triangle_pair(lz: float = 0.5) -> Mesh:
-    """A unit square split into two triangles by its diagonal, extruded in z by ``lz``.
+def _extruded_triangle_and_quad(lz: float = 0.5) -> Mesh:
+    """Two right triangles (a unit square split by its diagonal) beside a unit-square quad cell,
+    extruded in z by ``lz``.
 
-    Every structured-grid fixture in this file caps an extrusion with quads (4-node faces), which
-    the collapse's per-face reductions never have to treat as ragged. This mesh's caps are
-    **triangles** (3 nodes) instead, so a vectorized reduction that quietly assumed a fixed node
-    count per cap face would misbehave here even though it passes on every quad-capped fixture.
+    Every structured-grid fixture in this file caps an extrusion with quads (4-node faces) and
+    keeps every cap face at the same node count, so the collapse's per-face reductions never have
+    to treat a subset of faces as genuinely ragged. This mesh's caps mix **triangles** (3 nodes,
+    cells A and B) with a **quad** (4 nodes, cell C) *within the same removed patch*, which a
+    vectorization that silently assumed a uniform node count across a whole subset — reshaping to
+    ``(n, k)`` for a fixed ``k``, or reusing one face's row length for another's — would get wrong
+    here while still passing on any single-shape mesh.
+
+    2D layout (before extrusion, y up, x right)::
+
+        3 --- 2 --- 5
+        | B  /|  C  |
+        |  /  |     |
+        |/  A |     |
+        0 --- 1 --- 4
+
+    Triangle A = (0,1,2), triangle B = (0,2,3), quad C = (1,4,5,2); A and B share the diagonal
+    (0,2), A and C share the edge (1,2) — the two surviving interior faces after collapse.
     """
-    nodes = np.array(
-        [
-            [0.0, 0.0, 0.0],  # 0
-            [1.0, 0.0, 0.0],  # 1
-            [1.0, 1.0, 0.0],  # 2
-            [0.0, 1.0, 0.0],  # 3
-            [0.0, 0.0, lz],  # 4
-            [1.0, 0.0, lz],  # 5
-            [1.0, 1.0, lz],  # 6
-            [0.0, 1.0, lz],  # 7
-        ]
-    )
+    nodes_2d = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [2.0, 0.0], [2.0, 1.0]])
+    front = np.hstack([nodes_2d, np.zeros((6, 1))])
+    back = np.hstack([nodes_2d, np.full((6, 1), lz)])
+    nodes = np.vstack([front, back])  # indices 0-5 front, 6-11 back (+6 offset)
+
     faces = [
-        [0, 1, 2],  # front cap, cell 0 (triangle 0-1-2)
-        [0, 2, 3],  # front cap, cell 1 (triangle 0-2-3)
-        [4, 5, 6],  # back cap, cell 0
-        [4, 6, 7],  # back cap, cell 1
-        [0, 1, 5, 4],  # bottom edge (0-1), boundary
-        [1, 2, 6, 5],  # right edge (1-2), boundary
-        [0, 2, 6, 4],  # diagonal edge (0-2), interior seam between the two triangles
-        [2, 3, 7, 6],  # top edge (2-3), boundary
-        [3, 0, 4, 7],  # left edge (3-0), boundary
+        [0, 1, 2],  # cap front A (triangle)
+        [0, 2, 3],  # cap front B (triangle)
+        [1, 4, 5, 2],  # cap front C (quad)
+        [6, 7, 8],  # cap back A
+        [6, 8, 9],  # cap back B
+        [7, 10, 11, 8],  # cap back C
+        [0, 1, 7, 6],  # side: bottom of A, boundary
+        [1, 2, 8, 7],  # side: A/C shared edge, interior
+        [0, 2, 8, 6],  # side: A/B shared diagonal, interior
+        [2, 3, 9, 8],  # side: top of B, boundary
+        [3, 0, 6, 9],  # side: left of B, boundary
+        [1, 4, 10, 7],  # side: bottom of C, boundary
+        [4, 5, 11, 10],  # side: right of C, boundary
+        [5, 2, 8, 11],  # side: top of C, boundary
     ]
-    owner = [0, 1, 0, 1, 0, 0, 0, 1, 1]
-    neighbour = [-1, -1, -1, -1, -1, -1, 1, -1, -1]
+    owner = [0, 1, 2, 0, 1, 2, 0, 0, 0, 1, 1, 2, 2, 2]
+    neighbour = [-1, -1, -1, -1, -1, -1, -1, 2, 1, -1, -1, -1, -1, -1]
     return Mesh.from_faces(
         nodes,
         faces,
         owner,
         neighbour,
-        n_cells=2,
-        face_patches={"front": np.array([0, 1]), "back": np.array([2, 3])},
+        n_cells=3,
+        face_patches={"front": np.array([0, 1, 2]), "back": np.array([3, 4, 5])},
     )
 
 
-def test_collapse_reduces_triangular_cap_faces_correctly():
-    """The cap-axis inference and side-quad reduction both handle ragged (non-quad) faces.
+def test_collapse_reduces_mixed_polygon_cap_faces_correctly():
+    """The cap-axis inference and side-quad reduction both handle a genuinely ragged subset.
 
-    Collapsing must find z as the extruded axis from two **triangular** caps (not the quads every
-    other fixture in this file uses) and reduce the five side quads to the diagonal square's five
-    edges, reproducing the two right triangles' combined area exactly.
+    Collapsing must find z as the extruded axis from cap faces that mix a 3-node and a 4-node
+    polygon *in one removed patch*, and correctly reduce all eight side quads to 2D edges,
+    reproducing the two right triangles' and the unit square's combined areas exactly. A
+    vectorization that assumes one node count per subset (reshape-to-fixed-width, or that reuses
+    one face's row length for another's) would corrupt this even though it can pass on a
+    same-shape-only fixture.
     """
-    mesh = _extruded_triangle_pair()
+    mesh = _extruded_triangle_and_quad()
     collapsed = collapse_extruded_direction(mesh, ["front", "back"])
 
     assert collapsed.dim == 2
-    assert collapsed.n_cells == 2
-    assert collapsed.n_faces == 5
-    assert int(np.sum(np.asarray(collapsed.face_cells.interior))) == 1  # only the diagonal
+    assert collapsed.n_cells == 3
+    assert collapsed.n_faces == 8
+    assert int(np.sum(np.asarray(collapsed.face_cells.interior))) == 2  # the two shared edges
     volumes = np.sort(np.asarray(collapsed.geometry().cell.volume))
-    np.testing.assert_allclose(volumes, [0.5, 0.5])
+    np.testing.assert_allclose(volumes, [0.5, 0.5, 1.0])
     assert float(np.max(np.abs(np.asarray(closed_cell_residual(collapsed))))) < 1e-10
+
+
+def test_collapse_rejects_a_non_planar_capping_face():
+    """A cap face that is warped out of every coordinate plane is refused, not silently accepted.
+
+    One node of the z = 0 cap is pulled out of plane, so that face's nodes are no longer constant
+    along *any* single axis (its spread exceeds tolerance on x, y, *and* z) -- the "capping face is
+    not planar" branch, distinct from the "two caps normal to different axes" case covered by
+    ``test_caps_on_different_axes_rejected``.
+    """
+    nodes = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.3],  # pulled out of the z = 0 plane
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ]
+    )
+    faces = [
+        [0, 1, 2, 3],  # cap front -- warped
+        [4, 5, 6, 7],  # cap back -- planar
+        [0, 1, 5, 4],
+        [1, 2, 6, 5],
+        [2, 3, 7, 6],
+        [3, 0, 4, 7],
+    ]
+    owner = [0, 0, 0, 0, 0, 0]
+    neighbour = [-1, -1, -1, -1, -1, -1]
+    mesh = Mesh.from_faces(
+        nodes,
+        faces,
+        owner,
+        neighbour,
+        n_cells=1,
+        face_patches={"front": np.array([0]), "back": np.array([1])},
+    )
+
+    with pytest.raises(ValueError, match="not planar and normal to a single axis"):
+        collapse_extruded_direction(mesh, ["front", "back"])
+
+
+def test_collapse_rejects_a_degenerate_side_edge():
+    """A side face that reduces to a single in-plane node (not two) is refused.
+
+    Node 1 sits on top of node 0's ``(x, y)`` position, so the bottom side face's edge degenerates
+    to a point once z is dropped -- one *fewer* distinct node than the ``4``-distinct case
+    ``test_non_extrusion_rejected`` covers, exercising the other side of the "not 2" check.
+    """
+    nodes = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],  # collapsed onto node 0's (x, y)
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ]
+    )
+    faces = [
+        [0, 1, 2, 3],  # cap front
+        [4, 5, 6, 7],  # cap back
+        [0, 1, 5, 4],  # bottom side -- degenerate: 0 and 1 coincide in-plane
+        [1, 2, 6, 5],
+        [2, 3, 7, 6],
+        [3, 0, 4, 7],
+    ]
+    owner = [0, 0, 0, 0, 0, 0]
+    neighbour = [-1, -1, -1, -1, -1, -1]
+    mesh = Mesh.from_faces(
+        nodes,
+        faces,
+        owner,
+        neighbour,
+        n_cells=1,
+        face_patches={"front": np.array([0]), "back": np.array([1])},
+    )
+
+    with pytest.raises(ValueError, match="reduces to 1 distinct"):
+        collapse_extruded_direction(mesh, ["front", "back"])
 
 
 def test_requires_at_least_one_patch():
