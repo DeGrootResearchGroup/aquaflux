@@ -1423,6 +1423,64 @@ def positive_k_projection(coupled: CoupledRANS, tau: float = 0.99, floor: float 
     return positive_block_projection(k_block.start, k_block.stop, tau, floor)
 
 
+def _k_positivity_guards(
+    coupled: CoupledRANS, positivity_floor: float, positivity_projection: bool
+) -> tuple[Callable[..., jnp.ndarray] | None, Callable[..., jnp.ndarray] | None]:
+    """The ``(step_limit, step_projection)`` pair every coupled continuation builder installs.
+
+    One tail for the four builders (#365): each independently built :func:`positive_k_limit` and
+    :func:`positive_k_projection` from the same two arguments -- the drifting-sibling shape the
+    shared-tail rule warns about, and here it was hiding a real trap rather than just duplication.
+
+    **``positivity_floor`` is provably inert whenever ``positivity_projection`` is true (the
+    default).** The forward step applies ``step_projection`` to ``delta`` first, then hands the
+    result to ``step_limit`` (:func:`_coupled_step`). The projection clips every cell to within
+    ``tau`` of its own boundary, so after it runs, the limiter's room is `>= 1/tau` for every entry
+    and it reports ``alpha_max = 1`` regardless of what floor it was built with. So a caller who
+    raises ``positivity_floor`` under the default projection gets neither an error nor the
+    protection they asked for -- the limiter that floor feeds never binds. Raised here instead of
+    silently doing nothing, the same choice already made for ``method`` / ``reference_state`` /
+    ``**continuation_kwargs`` in :func:`_continuation_source`.
+
+    A non-zero floor is not refused when ``k`` is solved in log form (:func:`positive_k_limit`
+    returns ``None`` there): that inertness is a different, already-documented story (the transform
+    already keeps ``k`` positive by construction), not the projection masking a real guard.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The assembled case, forwarded to :func:`positive_k_limit` / :func:`positive_k_projection`.
+    positivity_floor : float
+        Forwarded to the limiter only. See :func:`positive_k_projection`'s own docstring for why
+        the projection does not want a floor: a dead cell decays alone under it, so there is nothing
+        to exempt it from.
+    positivity_projection : bool
+        Whether the per-cell projection replaces the global cap as the active guard.
+
+    Returns
+    -------
+    tuple of (callable or None, callable or None)
+        ``(step_limit, step_projection)``, ready for ``_coupled_step`` / ``_monolithic_factor_step``.
+
+    Raises
+    ------
+    ValueError
+        If ``positivity_floor`` is non-zero, ``k`` is solved directly (so the limiter it feeds is a
+        real guard, not ``None``), and ``positivity_projection`` is true.
+    """
+    step_limit = positive_k_limit(coupled, floor=positivity_floor)
+    if positivity_floor and positivity_projection and step_limit is not None:
+        raise ValueError(
+            f"positivity_floor={positivity_floor!r} has no effect here: positivity_projection=True "
+            "(the default) clips every k correction to within `tau` of its own boundary before the "
+            "limiter runs, so the limiter always reports alpha_max=1 regardless of its floor. Pass "
+            "positivity_projection=False to make the floor take effect, or leave positivity_floor=0.0 "
+            "to keep the (per-cell) projection."
+        )
+    step_projection = positive_k_projection(coupled) if positivity_projection else None
+    return step_limit, step_projection
+
+
 def coupled_scaled_norm(
     coupled: CoupledRANS,
     shift_policy: CoupledShiftPolicy,
@@ -1662,7 +1720,9 @@ def coupled_continuation(
         through zero makes ``sqrt(k)`` — and so the eddy viscosity — non-finite. That guard shipped on
         the monolithic path only, which is worth knowing when reading any recorded comparison between
         the two: a low-shift failure attributed to this preconditioner was measured against a march that
-        had no positivity limit at all.
+        had no positivity limit at all. A non-zero ``positivity_floor`` alongside the default
+        ``positivity_projection=True`` raises rather than silently doing nothing — see
+        :func:`_k_positivity_guards`, #365.
     reuse : CoupledShiftPolicy, optional
         An existing policy to **refresh** at ``reference_state`` instead of building one from scratch:
         the k/omega AMGs are re-derived on their reused coarsening while the flow block is carried over
@@ -1727,6 +1787,11 @@ def coupled_continuation(
         :class:`~aquaflux.solve.PseudoTransientStep` by default, or a
         :class:`~aquaflux.solve.DualTimeStep` when ``inner_steps > 1``.
     """
+    # Checked before any preconditioner is fitted: a misconfigured floor is a caller mistake, not a
+    # reason to pay for a build that the raise below would then discard.
+    step_limit, step_projection = _k_positivity_guards(
+        coupled, positivity_floor, positivity_projection
+    )
     policy = _coupled_shift_policy(
         coupled,
         reference_state,
@@ -1759,8 +1824,8 @@ def coupled_continuation(
         refresh_on_cycles=refresh_on_cycles,
         inner_refresh=inner_refresh,
         cycle_budget=cycle_budget,
-        step_limit=positive_k_limit(coupled, floor=positivity_floor),
-        step_projection=(positive_k_projection(coupled) if positivity_projection else None),
+        step_limit=step_limit,
+        step_projection=step_projection,
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
         jacobian_production_viscosity=jacobian_production_viscosity,
     )
@@ -2793,6 +2858,11 @@ def coupled_lu_continuation(
         :class:`~aquaflux.solve.PseudoTransientStep`, or a :class:`~aquaflux.solve.DualTimeStep` when
         ``inner_steps > 1``.
     """
+    # Checked before the LU is factored: a misconfigured floor is a caller mistake, not a reason to
+    # pay for a factorization the raise below would then discard.
+    step_limit, step_projection = _k_positivity_guards(
+        coupled, positivity_floor, positivity_projection
+    )
     base = _monolithic_shift_source(
         coupled, reference_state, shift_basis, velocity_shift_parts, turbulence_damping
     )
@@ -2833,8 +2903,8 @@ def coupled_lu_continuation(
         refresh_on_cycles=refresh_on_cycles,
         inner_refresh=inner_refresh,
         cycle_budget=cycle_budget,
-        step_limit=positive_k_limit(coupled, floor=positivity_floor),
-        step_projection=(positive_k_projection(coupled) if positivity_projection else None),
+        step_limit=step_limit,
+        step_projection=step_projection,
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
         jacobian_production_viscosity=jacobian_production_viscosity,
         grow=grow,
@@ -3001,6 +3071,13 @@ def coupled_amg_continuation(
         for the case rather than as a bare constant. ``0.0`` (default) is the plain
         fraction-to-the-boundary rule and is byte-identical to it. It does not move the converged root
         or the adjoint -- at a root the correction vanishes and the limiter is inactive for any floor.
+
+        ⚠️ **Non-zero only where it can act: a non-zero floor alongside the default
+        ``positivity_projection=True`` raises (#365), rather than doing nothing.** The projection
+        runs *before* the limiter and clips every cell to within ``tau`` of its own boundary, so the
+        limiter it feeds always reports ``alpha_max = 1`` regardless of its floor -- a non-zero floor
+        there was never protecting anything, silently. See :func:`_k_positivity_guards`. Pass
+        ``positivity_projection=False`` to make the floor the active guard.
     positivity_projection : bool
         Clip each cell's OWN ``k`` correction, so a cell that would cross zero is held back alone
         instead of shortening the step for every cell (see
@@ -3165,6 +3242,9 @@ def coupled_amg_continuation(
             "is only one hierarchy without field_split=True. Passing them here would silently do "
             "nothing."
         )
+    step_limit, step_projection = _k_positivity_guards(
+        coupled, positivity_floor, positivity_projection
+    )
     base = _monolithic_shift_source(
         coupled, reference_state, shift_basis, velocity_shift_parts, turbulence_damping
     )
@@ -3263,6 +3343,12 @@ def coupled_amg_continuation(
                 **common,
             )
         )
+    # Keep `k` off zero: it is solved directly, and one negative cell reaches the closure's sqrt(k)
+    # and NaNs the whole residual. `None` when the transform already guarantees it. The projection,
+    # when asked for, holds each cell off zero SEPARATELY (applied before the cap, which then finds
+    # nothing binding), so the dead corner cell on this case cannot set the step length for the other
+    # 23039 -- see `_k_positivity_guards` (checked above, before this) for why that also makes
+    # `positivity_floor` a no-op here.
     return _monolithic_factor_step(
         coupled,
         reference_state,
@@ -3285,15 +3371,8 @@ def coupled_amg_continuation(
         refresh_on_cycles=refresh_on_cycles,
         inner_refresh=inner_refresh,
         cycle_budget=cycle_budget,
-        # Keep `k` off zero: it is solved directly, and one negative cell reaches the closure's
-        # sqrt(k) and NaNs the whole residual. `None` when the transform already guarantees it.
-        # `positivity_floor` stops a cell whose `k` is numerically zero from setting the cap for all
-        # of them; `0` (default) is the plain rule.
-        step_limit=positive_k_limit(coupled, floor=positivity_floor),
-        # ...and, when asked for, hold each cell off zero SEPARATELY, so the dead cell above cannot
-        # set the step length for the other 23039 at all. Applied before the cap, which then finds
-        # nothing binding. `None` (default) leaves the cap the only constraint, byte-identically.
-        step_projection=(positive_k_projection(coupled) if positivity_projection else None),
+        step_limit=step_limit,
+        step_projection=step_projection,
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
         jacobian_production_viscosity=jacobian_production_viscosity,
         grow=grow,
@@ -4835,6 +4914,11 @@ def mass_flow_coupled_continuation(
     has no constraint-aware form yet, and applying it here would scale the border row by a diagonal it
     does not have.
     """
+    # Checked before any preconditioner is fitted: a misconfigured floor is a caller mistake, not a
+    # reason to pay for a build that the raise below would then discard.
+    step_limit, step_projection = _k_positivity_guards(
+        coupled, positivity_floor, positivity_projection
+    )
     # No `reuse` here: the mass-flow-constrained path has no staged-refresh driver (there is no
     # a refresh on `solve_coupled_mass_flow`), so a policy is always built from scratch. Thread
     # `reuse` through if that driver is ever added -- the bordered policy wraps this one unchanged.
@@ -4877,8 +4961,8 @@ def mass_flow_coupled_continuation(
         refresh_on_cycles=refresh_on_cycles,
         inner_refresh=inner_refresh,
         cycle_budget=cycle_budget,
-        step_limit=positive_k_limit(coupled, floor=positivity_floor),
-        step_projection=(positive_k_projection(coupled) if positivity_projection else None),
+        step_limit=step_limit,
+        step_projection=step_projection,
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
         jacobian_production_viscosity=jacobian_production_viscosity,
     )
