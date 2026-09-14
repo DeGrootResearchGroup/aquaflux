@@ -89,6 +89,23 @@ def test_parse_boundary_missing_entry_raises():
         parse_boundary("1\n(\n  inlet { type patch; nFaces 1; }\n)\n")
 
 
+def test_parse_boundary_reads_neighbour_patch_of_a_cyclic_patch():
+    patches = parse_boundary(
+        "2\n(\n"
+        "  left\n  {\n    type cyclic;\n    nFaces 4;\n    startFace 20;\n"
+        "    matchTolerance 0.0001;\n    transform translational;\n    neighbourPatch right;\n  }\n"
+        "  right\n  {\n    type cyclic;\n    nFaces 4;\n    startFace 24;\n    neighbourPatch left;\n  }\n"
+        ")\n"
+    )
+    assert patches[0].neighbour_patch == "right"
+    assert patches[1].neighbour_patch == "left"
+
+
+def test_parse_boundary_neighbour_patch_defaults_to_empty():
+    patches = parse_boundary("1\n(\n  inlet { type patch; nFaces 1; startFace 10; }\n)\n")
+    assert patches[0].neighbour_patch == ""
+
+
 def test_parse_cell_zones():
     zones = parse_cell_zones(
         "1\n(\n  fluid\n  {\n    type cellZone;\n    cellLabels List<label> 3 ( 0 1 2 );\n  }\n)\n"

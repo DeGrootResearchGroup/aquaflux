@@ -170,6 +170,7 @@ def parse_boundary(body: str) -> tuple[FoamPatch, ...]:
                     type_=entries.get("type", ""),
                     start_face=int(entries["startFace"]),
                     n_faces=int(entries["nFaces"]),
+                    neighbour_patch=entries.get("neighbourPatch", ""),
                 )
             )
         except KeyError as missing:

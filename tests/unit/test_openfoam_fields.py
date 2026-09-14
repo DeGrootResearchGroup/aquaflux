@@ -134,6 +134,21 @@ def test_a_mesh_that_is_not_in_openfoam_order_is_refused(tmp_path) -> None:
         read_surface_scalar_field(path, mesh)
 
 
+def test_a_periodic_mesh_is_refused(tmp_path) -> None:
+    """A periodic seam (a fused ``cyclic`` patch pair, or a generator's ``periodic=``) is refused.
+
+    Its seam face is interior but sat in whichever boundary patch declared it in the original
+    file, which can coincidentally still pass the leading-block check above -- so this is a direct
+    check on ``neighbour_offset`` instead of relying on that one to catch every case.
+    """
+    mesh = structured_grid_2d(3, 3, periodic=("x",))
+    path = tmp_path / "phi"
+    path.write_text(_field_text("uniform 0", {}))
+
+    with pytest.raises(ValueError, match="periodic seam"):
+        read_surface_scalar_field(path, mesh)
+
+
 def test_a_volume_field_reads_its_internal_block_onto_cells(tmp_path) -> None:
     """A ``volScalarField`` places by CELL, so it needs no ordering guard and reads no patches.
 

@@ -21,6 +21,24 @@ import numpy as np
 from aquaflux.mesh import Mesh, structured_grid_2d, structured_grid_3d
 
 
+def geometry_invariants(mesh: Mesh) -> dict:
+    """Order-independent geometry summary: dims, counts, and sorted volume/area multisets.
+
+    Two meshes with the same connectivity up to face/cell renumbering (e.g. a structured grid and
+    the same domain read back through a different path) produce the same summary, so comparing it
+    is a renumbering-robust equality check.
+    """
+    geometry = mesh.geometry()
+    return {
+        "dim": mesh.dim,
+        "n_cells": mesh.n_cells,
+        "n_faces": mesh.n_faces,
+        "n_interior": int(np.sum(np.asarray(mesh.face_cells.interior))),
+        "volumes": np.sort(np.asarray(geometry.cell.volume)),
+        "areas": np.sort(np.asarray(geometry.face.area)),
+    }
+
+
 def _displace_interior(mesh: Mesh, n_per_axis, extent_per_axis, perturb: float, seed: int) -> Mesh:
     """Return ``mesh`` with its interior structured-lattice nodes displaced; boundary nodes fixed.
 
