@@ -60,6 +60,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse.linalg as spla  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
+    DualTimeLoop,
     JacobiSmoothed,
     materialize_block_jacobian,
     shifted_jacobian,
@@ -129,8 +130,7 @@ def field_split_arm(coupled, state, beta):
             probe=JacobianProbeSpec(stencil_reach=compare.STENCIL_REACH),
             build_beta=beta,
         ),
-        inner_steps=compare.INNER_STEPS,
-        inner_tol=compare.INNER_TOL,
+        dual_time=DualTimeLoop(inner_steps=compare.INNER_STEPS, inner_tol=compare.INNER_TOL),
     )
 
 
@@ -217,8 +217,9 @@ def main() -> None:
                     probe=JacobianProbeSpec(stencil_reach=compare.STENCIL_REACH),
                     build_beta=0.0,
                 ),
-                inner_steps=compare.INNER_STEPS,
-                inner_tol=compare.INNER_TOL,
+                dual_time=DualTimeLoop(
+                    inner_steps=compare.INNER_STEPS, inner_tol=compare.INNER_TOL
+                ),
             ),
         ),
     }

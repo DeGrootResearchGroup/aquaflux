@@ -66,6 +66,7 @@ import compare  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 from aquaflux.solve import (  # noqa: E402  # noqa: E402
     AmgVCycle,
+    DualTimeLoop,
     Globalization,
     MonolithicAmgPreconditioner,
     block_stencil_gather_map,
@@ -131,9 +132,11 @@ def capture_inner_iterates(coupled, state, beta, seed_state):
             ),  # the march's refresh pairing; the session's own default is 2.0
         ),
         globalization=Globalization(beta0=beta),
-        inner_steps=compare.INNER_STEPS,
-        inner_tol=compare.INNER_TOL,
-        cycle_budget=compare.CYCLE_BUDGET,
+        dual_time=DualTimeLoop(
+            inner_steps=compare.INNER_STEPS,
+            inner_tol=compare.INNER_TOL,
+            cycle_budget=compare.CYCLE_BUDGET,
+        ),
         inner_observer=observer,
     )
     reference_norm = engine.norm()(coupled.residual(state))

@@ -1406,7 +1406,7 @@ class Globalization(eqx.Module):
             raise ValueError(
                 f"{', '.join(ignored)} configure the escalation ladder, which a dual-time step does "
                 "not have -- its inner Newton loop replaces it -- so they would reach nothing. Leave "
-                "them unset, or take single shifted steps (inner_steps=1 on the coupled builders)."
+                "them unset, or take single shifted steps (leave dual_time unset on the coupled builders)."
             )
         settings = {
             **self._schedule(),
@@ -1433,7 +1433,8 @@ class DualTimeLoop(SettingsValue):
         The inner loop stops once the transient residual has fallen to this fraction of its anchor.
     cycle_budget : int or None
         A cap on the loop's accumulated restart cycles, so a grinding solve is cut off after about
-        that many. Forward-only.
+        that many. Pair it with ``retry.abort_above_cycles`` below it, so a capped step is redone
+        rather than accepted. Forward-only.
     refresh_on_cycles : int or None
         Fire the march's mid-step refresh once an inner solve has cost this many restart cycles. It
         needs a refresh to fire: a preconditioner session supplies one, or the builder's

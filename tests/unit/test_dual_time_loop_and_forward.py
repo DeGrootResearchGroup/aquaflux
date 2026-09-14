@@ -1,15 +1,16 @@
-"""The dual-time loop and the forward-solve regime as values: they resolve and build as the keywords did.
+"""The dual-time loop and the forward-solve regime as values, and the combinations they refuse.
 
 The coupled march's inner loop (``inner_steps``, ``inner_tol``, ``cycle_budget``, ``refresh_on_cycles``)
-and its Krylov regime (``forward_solver`` and the ``forward_*`` trio) were loose keywords, several of
-them inert without another. The two values that replace them must change nothing numerically, must be
-refused beside the keywords they replace, and must merge field by field where a continuation combines
-shared options with one point's own.
+and its Krylov regime (``forward_solver`` and a ``forward_*`` trio) were loose keywords, several of them
+inert without another: loop settings on a single shifted step, a regime beside an explicit solver, a
+refresh count with nothing to fire. Each was accepted and reached nothing. As values the first two
+cannot be written at all, and the third is refused where the march knows whether a refresh exists.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import inspect
 
 import aquaflux  # noqa: F401  (enables x64)
 import pytest
@@ -25,41 +26,45 @@ from aquaflux.turbulence import (
 from aquaflux.turbulence.coupled import (
     _BLOCK_FORWARD,
     _CONSTRAINED_FORWARD,
-    _resolved_march,
+    _resolved_forward,
     mass_flow_coupled_continuation,
 )
 from aquaflux.turbulence.march_settings import merged_march_options
 
 from tests.unit.test_coupled_rans import _cavity, _healthy_state
 
-_LOOP_KEYWORDS = ("inner_steps", "inner_tol", "cycle_budget", "refresh_on_cycles")
-_TRIO = {
-    "rtol": "forward_rtol",
-    "restart": "forward_restart",
-    "max_restarts": "forward_max_restarts",
-}
+_LOOP_FIELDS = ("inner_steps", "inner_tol", "cycle_budget", "refresh_on_cycles")
+#: The loose keywords the two values replaced -- none may reappear on a builder beside them.
+_RETIRED = (
+    *_LOOP_FIELDS,
+    "forward_solver",
+    "forward_rtol",
+    "forward_restart",
+    "forward_max_restarts",
+)
 
 
-def _keywords(**given):
-    return {
-        "dual_time": None,
-        "forward": None,
-        "forward_solver": None,
-        **{name: None for name in _LOOP_KEYWORDS},
-        **{name: None for name in _TRIO.values()},
-        **given,
-    }
+@pytest.fixture(scope="module")
+def case():
+    mesh, coupled = _cavity(4)
+    return coupled, _healthy_state(mesh, coupled)
+
+
+def test_every_coupled_builder_takes_the_values_and_none_of_the_keywords_they_replaced() -> None:
+    for builder in (coupled_step, mass_flow_coupled_continuation):
+        parameters = set(inspect.signature(builder).parameters)
+        assert {"dual_time", "forward"} <= parameters, builder.__name__
+        assert not parameters & set(_RETIRED), builder.__name__
 
 
 def test_the_loop_value_names_exactly_its_dual_time_step_fields() -> None:
     fields = {field.name for field in dataclasses.fields(DualTimeLoop)}
-    assert fields == set(_LOOP_KEYWORDS)
+    assert fields == set(_LOOP_FIELDS)
     assert fields <= {field.name for field in dataclasses.fields(DualTimeStep)}
 
 
 def test_the_forward_value_names_exactly_the_regime_s_fields() -> None:
-    assert {field.name for field in dataclasses.fields(ForwardSolve)} == set(_TRIO)
-    assert set(_BLOCK_FORWARD._fields) == set(_TRIO)
+    assert {field.name for field in dataclasses.fields(ForwardSolve)} == set(_BLOCK_FORWARD._fields)
 
 
 def test_a_loop_of_fewer_than_two_inner_steps_is_refused_and_points_at_the_single_step() -> None:
@@ -68,116 +73,72 @@ def test_a_loop_of_fewer_than_two_inner_steps_is_refused_and_points_at_the_singl
 
 
 @pytest.mark.parametrize(
-    "loop",
-    [
-        {"inner_steps": 3},
-        {"inner_steps": 3, "inner_tol": 1e-3, "cycle_budget": 40, "refresh_on_cycles": 3},
-    ],
-    ids=["steps", "every-field"],
-)
-def test_a_loop_value_resolves_to_the_loop_its_keywords_resolved_to(loop) -> None:
-    _, _, from_keywords = _resolved_march(_keywords(**loop), _BLOCK_FORWARD)
-    _, _, from_value = _resolved_march(_keywords(dual_time=DualTimeLoop(**loop)), _BLOCK_FORWARD)
-    assert from_keywords == from_value == DualTimeLoop(**loop)
-
-
-@pytest.mark.parametrize("inner_steps", [None, 1])
-def test_one_inner_step_or_none_is_the_single_shifted_step_as_before(inner_steps) -> None:
-    _, _, loop = _resolved_march(
-        _keywords(inner_steps=inner_steps, cycle_budget=40), _BLOCK_FORWARD
-    )
-    assert loop is None
-
-
-@pytest.mark.parametrize(
     "base", [_BLOCK_FORWARD, _CONSTRAINED_FORWARD], ids=["block", "constrained"]
 )
 @pytest.mark.parametrize(
-    "trio", [{}, {"restart": 15}, {"rtol": 0.1, "restart": 30, "max_restarts": 9}], ids=str
+    "fields", [{}, {"restart": 15}, {"rtol": 0.1, "restart": 30, "max_restarts": 9}], ids=str
 )
-def test_a_forward_value_resolves_to_the_regime_its_keywords_resolved_to(base, trio) -> None:
-    from_keywords = _resolved_march(
-        _keywords(**{_TRIO[name]: value for name, value in trio.items()}), base
-    )
-    from_value = _resolved_march(_keywords(forward=ForwardSolve(**trio)), base)
-    assert from_keywords[:2] == from_value[:2]
-    assert from_value[0] == base._replace(**trio)
+def test_a_forward_value_resolves_each_unset_field_to_the_family_s_regime(base, fields) -> None:
+    regime, solver = _resolved_forward(ForwardSolve(**fields), base)
+    assert regime == base._replace(**fields)
+    assert solver is None
+    assert _resolved_forward(None, base) == (base, None)
 
 
-def test_a_solver_given_as_the_forward_value_replaces_the_regime_as_forward_solver_did() -> None:
+def test_a_solver_given_as_the_forward_value_replaces_the_regime() -> None:
     solver = relative_residual_gmres(1e-4)
-    from_keywords = _resolved_march(_keywords(forward_solver=solver), _BLOCK_FORWARD)
-    from_value = _resolved_march(_keywords(forward=solver), _BLOCK_FORWARD)
-    assert from_keywords[0] == from_value[0] == _BLOCK_FORWARD
-    assert from_keywords[1] is from_value[1] is solver
+    assert _resolved_forward(solver, _BLOCK_FORWARD) == (_BLOCK_FORWARD, solver)
 
 
-def test_resolving_consumes_exactly_the_loop_and_forward_names() -> None:
-    keywords = {**_keywords(), "globalization": object()}
-    _resolved_march(keywords, _BLOCK_FORWARD)
-    assert set(keywords) == {"globalization"}
-
-
-@pytest.mark.parametrize(
-    ("value", "keyword"),
-    [
-        ({"dual_time": DualTimeLoop(inner_steps=3)}, {"inner_tol": 1e-3}),
-        ({"forward": ForwardSolve(restart=15)}, {"forward_rtol": 0.1}),
-        ({"forward": relative_residual_gmres(1e-4)}, {"forward_max_restarts": 9}),
-    ],
-    ids=["loop", "regime", "solver"],
-)
-def test_a_value_beside_a_keyword_it_replaces_is_refused(value, keyword) -> None:
-    (name,) = keyword
-    with pytest.raises(TypeError, match=name):
-        _resolved_march(_keywords(**value, **keyword), _BLOCK_FORWARD)
-
-
-def _loop_fields(step) -> tuple:
-    return tuple(getattr(step, name) for name in _LOOP_KEYWORDS)
-
-
-def test_a_block_step_built_from_the_values_matches_the_keywords() -> None:
-    mesh, coupled = _cavity(4)
-    state = _healthy_state(mesh, coupled)
+def test_the_loop_selects_the_step_shape_and_reaches_its_fields(case) -> None:
+    coupled, state = case
     spec = BlockDiagonal(method=None)
-    loose = coupled_step(
-        coupled, state, preconditioner=spec, inner_steps=3, inner_tol=1e-3, forward_restart=30
+    loop = DualTimeLoop(inner_steps=3, inner_tol=1e-3, cycle_budget=40)
+    dual = coupled_step(
+        coupled, state, preconditioner=spec, dual_time=loop, forward=ForwardSolve(restart=30)
     )
-    valued = coupled_step(
+    assert type(dual) is DualTimeStep
+    assert (dual.inner_steps, dual.inner_tol, dual.cycle_budget) == (3, 1e-3, 40)
+    assert dual.forward_solver.restart == 30
+    assert type(coupled_step(coupled, state, preconditioner=spec)) is PseudoTransientStep
+    mass_flow = mass_flow_coupled_continuation(coupled, state, preconditioner=spec, dual_time=loop)
+    assert type(mass_flow) is DualTimeStep
+    assert mass_flow.inner_steps == 3
+
+
+@pytest.mark.parametrize("hook", ["inner_observer", "inner_refresh"])
+def test_a_loop_hook_without_a_loop_is_refused(case, hook) -> None:
+    coupled, state = case
+    with pytest.raises(TypeError, match=hook):
+        coupled_step(
+            coupled, state, preconditioner=BlockDiagonal(method=None), **{hook: lambda *a: None}
+        )
+
+
+def test_a_refresh_count_with_nothing_to_fire_is_refused_but_a_materialized_session_fires_it(
+    case,
+) -> None:
+    coupled, state = case
+    loop = DualTimeLoop(inner_steps=3, refresh_on_cycles=3)
+    with pytest.raises(
+        TypeError, match="refresh_on_cycles"
+    ):  # a block-diagonal session has no refresh
+        open_session(BlockDiagonal(method=None), coupled).build(state, dual_time=loop)
+    spec = MaterializedJacobian(CompleteLu(backend="scipy"))
+    with pytest.raises(TypeError, match="refresh_on_cycles"):  # nor does a frozen step
+        coupled_step(coupled, state, preconditioner=spec, dual_time=loop)
+    session = open_session(spec, coupled)
+    first, second = session.build(state, dual_time=loop), session.build(state, dual_time=loop)
+    assert first.inner_refresh is not None
+    assert first.inner_refresh is second.inner_refresh
+    # ...and a caller's own refresh is enough on its own.
+    coupled_step(
         coupled,
         state,
-        preconditioner=spec,
-        dual_time=DualTimeLoop(inner_steps=3, inner_tol=1e-3),
-        forward=ForwardSolve(restart=30),
+        preconditioner=BlockDiagonal(method=None),
+        dual_time=loop,
+        inner_refresh=lambda iterate: None,
     )
-    assert type(loose) is type(valued) is DualTimeStep
-    assert _loop_fields(loose) == _loop_fields(valued)
-    single = coupled_step(coupled, state, preconditioner=spec)
-    assert type(single) is PseudoTransientStep
-
-
-def test_a_materialized_session_wires_its_refresh_from_either_form() -> None:
-    mesh, coupled = _cavity(4)
-    state = _healthy_state(mesh, coupled)
-    session = open_session(MaterializedJacobian(CompleteLu(backend="scipy")), coupled)
-    loose = session.build(state, inner_steps=3, refresh_on_cycles=3)
-    valued = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
-    assert _loop_fields(loose) == _loop_fields(valued)
-    assert loose.inner_refresh is not None
-    assert loose.inner_refresh is valued.inner_refresh
-
-
-def test_the_mass_flow_builder_resolves_the_values_as_its_keywords() -> None:
-    mesh, coupled = _cavity(4)
-    state = _healthy_state(mesh, coupled)
-    spec = BlockDiagonal(method=None)
-    loose = mass_flow_coupled_continuation(coupled, state, preconditioner=spec, inner_steps=3)
-    valued = mass_flow_coupled_continuation(
-        coupled, state, preconditioner=spec, dual_time=DualTimeLoop(inner_steps=3)
-    )
-    assert type(loose) is type(valued) is DualTimeStep
-    assert _loop_fields(loose) == _loop_fields(valued)
 
 
 def test_a_point_s_loop_and_forward_values_merge_field_by_field_over_the_shared_ones() -> None:

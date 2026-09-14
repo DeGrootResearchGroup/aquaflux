@@ -22,6 +22,7 @@ from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, Veloci
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
+from aquaflux.solve import DualTimeLoop
 from aquaflux.turbulence import (
     AdaptiveReynoldsSchedule,
     CoupledRANS,
@@ -316,17 +317,17 @@ def test_the_ramp_and_the_target_get_opposite_halves_of_the_continuation_setting
         rtol=1e-10,
         continuation=step,
         preconditioner=spec,
-        inner_steps=3,
+        dual_time=DualTimeLoop(inner_steps=3),
     )
     ramp, target = calls
     # The ramp builds its own at its own viscosity, so it takes the settings and not the frozen step.
     assert "continuation" not in ramp["kwargs"]
     assert ramp["kwargs"]["preconditioner"] == spec
-    assert ramp["kwargs"]["inner_steps"] == 3
+    assert ramp["kwargs"]["dual_time"] == DualTimeLoop(inner_steps=3)
     # The target takes the frozen step and none of the settings, which describe a build it will not do.
     assert target["kwargs"]["continuation"] is step
     assert "preconditioner" not in target["kwargs"]
-    assert "inner_steps" not in target["kwargs"]
+    assert "dual_time" not in target["kwargs"]
     # ...but the keywords that drive the *solve* rather than a build still reach it.
     assert target["kwargs"]["rtol"] == 1e-10
 
@@ -342,11 +343,15 @@ def test_without_a_continuation_the_target_keeps_every_setting(monkeypatch) -> N
     calls = _record_solves(monkeypatch)
     spec = BlockDiagonal(method="twolevel", schur_scaling="msimple")
     solve_reynolds_continuation(
-        _tiny_coupled(), n_points=1, rtol=1e-10, preconditioner=spec, inner_steps=3
+        _tiny_coupled(),
+        n_points=1,
+        rtol=1e-10,
+        preconditioner=spec,
+        dual_time=DualTimeLoop(inner_steps=3),
     )
     target = calls[-1]
     assert target["kwargs"]["preconditioner"] == spec
-    assert target["kwargs"]["inner_steps"] == 3
+    assert target["kwargs"]["dual_time"] == DualTimeLoop(inner_steps=3)
 
 
 def test_a_materialized_preconditioner_is_one_session_shared_by_every_point(monkeypatch) -> None:

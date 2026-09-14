@@ -306,7 +306,7 @@ def solve_reynolds_continuation(
 
     The whole thing is an outer wrapper around :func:`~aquaflux.turbulence.solve_coupled` and is
     agnostic to the per-Re globalization: every keyword in ``solve_kwargs`` is forwarded to each per-Re
-    solve, so the pseudo-transient march, the dual-time march (``inner_steps > 1``, whose observed rungs
+    solve, so the pseudo-transient march, the dual-time march (``dual_time=DualTimeLoop(...)``, whose observed rungs
     default to the :class:`~aquaflux.solve.DualTimeControl` Courant ramp), the preconditioner options and
     the observers all compose here unchanged.
 

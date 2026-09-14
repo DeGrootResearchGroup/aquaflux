@@ -67,7 +67,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import aquaflux  # noqa: F401  (enables x64 at import)
 import compare
 import numpy as np
-from aquaflux.solve import DualTimeControl
+from aquaflux.solve import DualTimeControl, DualTimeLoop
 from aquaflux.turbulence import (
     CompleteLu,
     GeometricReynoldsSchedule,
@@ -192,8 +192,7 @@ def solve_aquaflux_continuation(**solve_kwargs: object) -> dict:
     options = (
         dict(
             preconditioner=session,
-            inner_steps=INNER_STEPS,
-            inner_tol=INNER_TOL,
+            dual_time=DualTimeLoop(inner_steps=INNER_STEPS, inner_tol=INNER_TOL),
             intermediate_rtol=INTERMEDIATE_RTOL,
             max_steps=MAX_STEPS,
             rtol=RTOL,

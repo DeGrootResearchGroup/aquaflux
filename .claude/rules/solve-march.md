@@ -386,8 +386,8 @@ paths:
       `retry.abort_above_cycles < cycle_budget`** so a capped primary's reported count trips the redo (else the
       partial non-converged step would be accepted). Good steps converge well under the budget, so they are
       byte-identical; only a grinding primary hits it. `cycle_budget=None` (default) is unbounded and
-      byte-identical. Threaded through `coupled_amg_continuation(cycle_budget=…)` (and the shared
-      `_monolithic_factor_step`, so the LU steps can take it too); forward-only, like the escalation it
+      byte-identical. Reached through `dual_time=DualTimeLoop(cycle_budget=…)` on every coupled builder
+      (since #388; it was a loose keyword before); forward-only, like the escalation it
       feeds. This is Agent C's "small-budget primary + inner abort" realized as an inner-loop cost cap rather
       than a non-attainment flag threaded through every solve layer — same effect (a doomed primary costs
       ~`cycle_budget` matvecs, not `inner_steps ×` a stagnation), far smaller blast radius. Pinned by

@@ -85,7 +85,8 @@ What to take from it, none of which is specific to that mechanism:
   **The asymmetry it exists to express: `R` decides the answer, `J` decides only the rate.** The
   residual defines *which discrete equations are being solved*, so an approximation there moves the
   root; the Jacobian only decides how fast an inexact-Newton iteration reaches whichever root `R`
-  defines, which is the same latitude `forward_rtol = 0.3` already takes on the linear solve. Holding
+  defines, which is the same latitude the forward regime's `rtol = 0.3` (`ForwardSolve`) already takes
+  on the linear solve. Holding
   both to one accuracy because one function serves both is a coincidence of implementation, not a
   requirement. The concrete consumer is the gradient reconstruction's sweep count — see
   `.claude/rules/schemes.md` for what it is worth and where the knee is.
@@ -235,8 +236,10 @@ What to take from it, none of which is specific to that mechanism:
       function of the state layout — so `positivity_floor`/`positivity_projection` stay on the coupled
       builders, which hold the `CoupledRANS` that can construct one, and arrive at `step()` as ordinary
       fields. Nor can it for the per-family Krylov restart regime or the progress measure's default.
-      **Open, found by review and not decided:** `shift_basis` and the non-layout `turbulence_damping`
-      strategies pass the test and are *off* the object; `divergence_cap` and `line_search_growth.basin`
+      **Decided (#387, 2026-09-14):** `shift_basis`, the velocity shift parts and `turbulence_damping`
+      pass the test but describe how the *shift* is formed rather than how the march damps, so they are
+      their own value, `turbulence.ShiftSettings`, on the coupled builders — kept off this object also
+      because the damping strategies and the live velocity parts carry state. **Still open:** `divergence_cap` and `line_search_growth.basin`
       are residual ratios read in a measure the object excludes (#370); and `acceptance` and the schedule
       are flattened to scalars, so a non-`DivergenceGuard` rule or a non-SER schedule reaches a step only
       through `step(**fields)` with those fields unset.
@@ -307,7 +310,8 @@ What to take from it, none of which is specific to that mechanism:
     diagonal to rounding. **Consequence for the preconditioner (binding):** with a non-`a_P` basis the
     shifted diagonal is `a_P + β d`, *not* `a_P(1+β)`, so `make_preconditioner` must invert `a_P + β d` —
     the velocity block's `apply_at` is fed exactly that (was `a_P(1+β)`; identical when `w=1`). Threaded
-    through `momentum_continuation`/`coupled_continuation`/`solve_coupled(shift_basis=…)` and the k/ω
+    through `momentum_continuation`/`coupled_continuation`/`solve_coupled(shift=ShiftSettings(basis=…))`
+    (the coupled builders' loose `shift_basis=` keyword is gone, #387) and the k/ω
     shift policies; **pressure keeps zero shift regardless** (elliptic), which is why a *local* basis is
     defensible on this coupled solver where Fluent uses a global time scale for its coupled path.
     - **The velocity buckets' SOURCE is injected (`VelocityShiftParts`), because the shift and the
@@ -455,7 +459,8 @@ What to take from it, none of which is specific to that mechanism:
     40-vector subspace discards too much Arnoldi history). ⚠️ **The norm it stops in has MOVED since this
     was written — the "global 2-norm" below describes the arrangement these measurements were taken
     under, not the current default.** Since #282 every coupled family stops in the march's own row-scaled
-    measure at `forward_rtol = 0.3`, built by `_coupled_step` rather than by any builder; see
+    measure at the forward regime's `rtol = 0.3` (`ForwardSolve`, #388), built by `_coupled_step` rather
+    than by any builder; see
     `solve.md`'s regime table. The mechanism below is unaffected and is why the componentwise stock stop
     was abandoned in the first place. **The dominant waste was the TERMINATION, not the restart.** The
     old `GMRES(rtol=1e-3, atol=1e-10)` reached true_rel ~4e-12 in ~15 restart cycles / 1800 matvecs on the

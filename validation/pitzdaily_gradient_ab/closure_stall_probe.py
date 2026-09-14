@@ -97,11 +97,13 @@ from aquaflux.schemes import (  # noqa: E402
 )
 from aquaflux.schemes.interpolation import non_orthogonal_correction  # noqa: E402
 from aquaflux.solve import (
+    DualTimeLoop,
     MarchLogger,
     solve_linear,
 )
 from aquaflux.solve.implicit import backtracking_line_search  # noqa: E402
 from aquaflux.turbulence import (
+    ForwardSolve,
     coupled_fields,
     coupled_step,
     omega_wall,
@@ -201,16 +203,20 @@ def capture() -> None:
         solve_reynolds_continuation(
             coupled,
             compare.N_POINTS,
-            inner_steps=compare.INNER_STEPS,
-            inner_tol=compare.INNER_TOL,
-            cycle_budget=compare.CYCLE_BUDGET,
-            forward_rtol=compare.FORWARD_RTOL,
-            forward_restart=compare.FORWARD_RESTART,
-            forward_max_restarts=compare.FORWARD_MAX_RESTARTS,
+            dual_time=DualTimeLoop(
+                inner_steps=compare.INNER_STEPS,
+                inner_tol=compare.INNER_TOL,
+                cycle_budget=compare.CYCLE_BUDGET,
+                refresh_on_cycles=compare.REFRESH_ON_CYCLES or None,
+            ),
+            forward=ForwardSolve(
+                rtol=compare.FORWARD_RTOL,
+                restart=compare.FORWARD_RESTART,
+                max_restarts=compare.FORWARD_MAX_RESTARTS,
+            ),
             positivity_floor=compare.K_POSITIVITY_FLOOR,
             positivity_projection=compare.POSITIVITY_PROJECTION,
             preconditioner=session,
-            refresh_on_cycles=compare.REFRESH_ON_CYCLES or None,
             inner_observer=logger.on_inner,
             max_steps=compare.MAX_STEPS,
             rtol=compare.RTOL,
@@ -242,12 +248,16 @@ def _engine_at(coupled, state):
         coupled,
         state,
         preconditioner=run_ab.arm_preconditioner(run_ab.REACH),
-        inner_steps=compare.INNER_STEPS,
-        inner_tol=compare.INNER_TOL,
-        cycle_budget=compare.CYCLE_BUDGET,
-        forward_rtol=compare.FORWARD_RTOL,
-        forward_restart=compare.FORWARD_RESTART,
-        forward_max_restarts=compare.FORWARD_MAX_RESTARTS,
+        dual_time=DualTimeLoop(
+            inner_steps=compare.INNER_STEPS,
+            inner_tol=compare.INNER_TOL,
+            cycle_budget=compare.CYCLE_BUDGET,
+        ),
+        forward=ForwardSolve(
+            rtol=compare.FORWARD_RTOL,
+            restart=compare.FORWARD_RESTART,
+            max_restarts=compare.FORWARD_MAX_RESTARTS,
+        ),
         positivity_floor=compare.K_POSITIVITY_FLOOR,
         positivity_projection=compare.POSITIVITY_PROJECTION,
     )
@@ -1046,13 +1056,17 @@ def march_from_seed() -> None:
                 *coupled.physical_fields(seed),
                 reference_state=seed,
                 preconditioner=run_ab.arm_preconditioner(run_ab.REACH),
-                inner_steps=compare.INNER_STEPS,
-                inner_tol=compare.INNER_TOL,
-                cycle_budget=compare.CYCLE_BUDGET,
-                forward_rtol=compare.FORWARD_RTOL,
-                forward_restart=compare.FORWARD_RESTART,
-                forward_max_restarts=compare.FORWARD_MAX_RESTARTS,
-                refresh_on_cycles=compare.REFRESH_ON_CYCLES or None,
+                dual_time=DualTimeLoop(
+                    inner_steps=compare.INNER_STEPS,
+                    inner_tol=compare.INNER_TOL,
+                    cycle_budget=compare.CYCLE_BUDGET,
+                    refresh_on_cycles=compare.REFRESH_ON_CYCLES or None,
+                ),
+                forward=ForwardSolve(
+                    rtol=compare.FORWARD_RTOL,
+                    restart=compare.FORWARD_RESTART,
+                    max_restarts=compare.FORWARD_MAX_RESTARTS,
+                ),
                 positivity_floor=compare.K_POSITIVITY_FLOOR,
                 positivity_projection=compare.POSITIVITY_PROJECTION,
                 inner_observer=on_inner,

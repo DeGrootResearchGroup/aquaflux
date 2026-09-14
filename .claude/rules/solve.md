@@ -217,9 +217,10 @@ halves of the decision are now separated:
 | `_VCYCLE_FORWARD` | `MaterializedJacobian(MonolithicVCycle \| FieldSplit)` (3D `bfs3d`) | 0.3 | 15 | 60 |
 | `_CONSTRAINED_FORWARD` | `mass_flow_coupled_continuation` | **1e-2, Euclidean** | 120 | 15 |
 
-All four builders take `forward_rtol` / `forward_restart` / `forward_max_restarts`. ⚠️ **Move the
-tolerance or the restart with those, never by passing a whole `forward_solver`** — building one also
-replaces the stopping measure, which is a far larger change than the one intended.
+Both coupled builders take the regime as one value, `forward=ForwardSolve(rtol=…, restart=…,
+max_restarts=…)` (#388 — there are no `forward_*` keywords any more). ⚠️ **Move the tolerance or the
+restart with that value, never by passing a whole solver as `forward`** — a solver also replaces the
+stopping measure, which is a far larger change than the one intended.
 
 ⚠️ **`0.3` on the block and complete-LU families is the multigrid family's CALIBRATION, carried across
 because it is a property of the measure, not of multigrid — it has not been re-measured there.** Those
@@ -467,11 +468,12 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
      here — reaching for the complete-LU path's plain-2-norm solver while believing it was the AMG
      builder's row-scaled one, done twice in one session, once where it would have replaced a loose
      row-scaled stop with a tight Euclidean one and reported the difference as a restart-length effect.
-     The general form still bites: **a hand-built `forward_solver` replaces the stopping MEASURE, not
+     The general form still bites: **a hand-built forward solver replaces the stopping MEASURE, not
      just the tolerance**, and **it does not announce itself** — at a state where both converge in one
      cycle a self-check still passes and reports a validation it never performed. Take the restart or
-     the tolerance through `forward_restart=` / `forward_rtol=`, never by supplying a whole solver.
-     Note also what `forward_rtol = 0.3` *is*: an inexact-Newton forcing term on the **linear** residual
+     the tolerance through `forward=ForwardSolve(restart=…, rtol=…)`, never by passing a whole solver
+     in that same `forward` slot (#388).
+     Note also what the regime's `rtol = 0.3` *is*: an inexact-Newton forcing term on the **linear** residual
      per inner solve, not a solution tolerance — accuracy comes from the inner loop iterating. And the
      **achieved** reduction is routinely tighter than the requested one, because a restarted GMRES tests
      the stop only at restart boundaries, so a solve that would cross 30 % after three matrix-vector

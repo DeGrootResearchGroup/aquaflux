@@ -32,6 +32,7 @@ from aquaflux.flow import (
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
+from aquaflux.solve import DualTimeLoop
 from aquaflux.turbulence import (
     BlockDiagonal,
     CompleteLu,
@@ -116,7 +117,7 @@ def case():
 
 @pytest.mark.slow
 def test_lu_continuation_builds_the_right_step_types(case) -> None:
-    """``inner_steps > 1`` builds a complete-LU-preconditioned dual-time step; ``1`` a single-step."""
+    """A dual-time loop builds a complete-LU-preconditioned dual-time step; none, a single step."""
     from aquaflux.solve import DualTimeStep, PseudoTransientStep
 
     coupled = case["coupled"]
@@ -131,8 +132,7 @@ def test_lu_continuation_builds_the_right_step_types(case) -> None:
         coupled,
         reference_state,
         preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND)),
-        inner_steps=5,
-        inner_tol=1e-3,
+        dual_time=DualTimeLoop(inner_steps=5, inner_tol=1e-3),
     )
     assert isinstance(dual, DualTimeStep)
     assert dual.inner_steps == 5
@@ -229,7 +229,7 @@ def test_a_complete_lu_session_makes_the_lu_exact_at_the_current_beta(case) -> N
     session = open_session(
         MaterializedJacobian(CompleteLu(backend=BACKEND), build_beta=0.05), coupled
     )
-    dual = session.build(state, inner_steps=5)
+    dual = session.build(state, dual_time=DualTimeLoop(inner_steps=5))
     # the control sets a ConstantRelaxation(beta) on the step, at a beta DIFFERENT from the build beta
     active, _ = DualTimeControl(beta_start=0.7).next_step(dual, None, None)
     session.precondition_step(active, state)  # re-factor at (state, beta=0.7)
@@ -269,8 +269,7 @@ def test_lu_beta_tracking_forward_march_converges_to_the_same_fixed_point(case) 
         k_ws,
         omega_ws,
         preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND)),
-        inner_steps=5,
-        inner_tol=1e-3,
+        dual_time=DualTimeLoop(inner_steps=5, inner_tol=1e-3),
         step_control=DualTimeControl(beta_start=0.5, beta_min=0.02),
         scaled_norm=True,
         max_steps=60,

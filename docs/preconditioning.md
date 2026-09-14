@@ -273,14 +273,16 @@ The preconditioner is described by a value and handed to the solve, which builds
 with the pseudo-transient march that uses it and keeps it current as the march moves:
 
 ```python
-from aquaflux.solve import JacobiSmoothed, SimpleSmoothed
+from aquaflux.solve import DualTimeLoop, JacobiSmoothed, SimpleSmoothed
 from aquaflux.turbulence import FieldSplit, JacobianProbeSpec, MaterializedJacobian, solve_coupled
 
 preconditioner = MaterializedJacobian(
     FieldSplit(SimpleSmoothed(), JacobiSmoothed()),
     probe=JacobianProbeSpec(stencil_reach=3),
 )
-flow, k, omega = solve_coupled(coupled, preconditioner=preconditioner, inner_steps=5)
+flow, k, omega = solve_coupled(
+    coupled, preconditioner=preconditioner, dual_time=DualTimeLoop(inner_steps=5)
+)
 ```
 
 A {class}`~aquaflux.turbulence.MaterializedJacobian` settles everything the inverses share:
@@ -426,11 +428,14 @@ restart cycles — mid-step. Open the session yourself to hear what each rebuild
 {class}`~aquaflux.solve.RefreshTiming` — which branch ran, the total, and the parts:
 
 ```python
+from aquaflux.solve import DualTimeLoop
 from aquaflux.turbulence import open_session, solve_coupled
 
 session = open_session(preconditioner, coupled, observer=print)
 flow, k, omega = solve_coupled(
-    coupled, preconditioner=session, inner_steps=5, refresh_on_cycles=3
+    coupled,
+    preconditioner=session,
+    dual_time=DualTimeLoop(inner_steps=5, refresh_on_cycles=3),
 )
 ```
 

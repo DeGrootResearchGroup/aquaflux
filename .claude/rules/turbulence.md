@@ -50,6 +50,9 @@ Many entries below are dated history written against the old API. Read them thro
 | `solve_coupled(method=M, velocity=…)` | `solve_coupled(preconditioner=BlockDiagonal(method=M, velocity=…))` |
 | `mass_flow_coupled_continuation(..., method=M, **flow_opts)`, `solve_coupled_mass_flow(method=M, **flow_opts)` | the same keyword, `preconditioner=BlockDiagonal(method=M, **flow_opts)`; a `MaterializedJacobian` is refused there |
 | `BlockDiagonal(velocity="convection")`, `"smoothed"`, `"convection-air"` (and the same strings on `BlockPreconditioner.build`, `momentum_continuation`, `reused_flow_solve`) | `ConvectionTwoLevel()`, `ViscousMultilevel()`, `ConvectionAir()` from `aquaflux.flow` (#390); a string is refused |
+| `shift_basis=…`, `velocity_shift_parts=…`, `turbulence_damping=…` on `coupled_step` / the mass-flow builder / `solve_coupled` | `shift=ShiftSettings(basis=…, velocity_parts=…, turbulence_damping=…)` (#387); a Reynolds `point_setup` value merges field by field over the shared one |
+| `inner_steps=N` (N > 1), `inner_tol=…`, `cycle_budget=…`, `refresh_on_cycles=…` | `dual_time=DualTimeLoop(inner_steps=N, …)` (#388); unset is the single shifted step. `inner_observer` / `inner_refresh` without a loop, and a `refresh_on_cycles` with no refresh to fire (a frozen step or a block-diagonal session), are refused where they used to be dropped |
+| `forward_solver=S`, `forward_rtol=…` / `forward_restart=…` / `forward_max_restarts=…` | `forward=S` or `forward=ForwardSolve(rtol=…, restart=…, max_restarts=…)` (#388) — one slot, so a solver beside a regime setting cannot be written |
 | `point_setup` returning `continuation` + `RefreshPolicy(precondition_step=hook)`, `_rebinding` | `solve_reynolds_continuation` / `solve_reynolds_ramp` given `preconditioner=`; `point_setup` keeps only per-point march settings |
 
 ## The closure — model, strain, sources, transport, preconditioner
@@ -1213,9 +1216,9 @@ Many entries below are dated history written against the old API. Read them thro
     2026-08-20) — and the surfaces above `_coupled_step` had drifted TWICE MORE after the tail was
     extracted.** `_coupled_step` builds the default forward solver from `residual_norm` — the march's own
     progress measure — so the solve is steered by and judged by one definition. What is per-family is a
-    `_ForwardSolveRegime` (rtol, restart, cap), and all four builders take `forward_rtol` /
-    `forward_restart` / `forward_max_restarts`. **Move either through those, never by passing a whole
-    `forward_solver`, which replaces the measure too.**
+    `_ForwardSolveRegime` (rtol, restart, cap), and the coupled builders take it as one value,
+    `forward=ForwardSolve(...)` (#388 — the `forward_*` keywords are gone). **Move it through that value,
+    never by passing a whole solver as `forward`, which replaces the measure too.**
     Two things this changed that a reader of an older measurement needs:
     - **`coupled_continuation` and `coupled_lu_continuation` previously stopped on a plain 2-norm at
       `1e-2`.** They now stop on the row-scaled measure at `0.3`. The 2-norm of the coupled residual is

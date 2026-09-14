@@ -93,6 +93,7 @@ from aquaflux.schemes import (
 )
 from aquaflux.solve import (
     CflResidualDualTimeControl,
+    DualTimeLoop,
     JacobiSmoothed,
     MarchLogger,
     RetryPolicy,
@@ -106,12 +107,14 @@ from aquaflux.turbulence import (
     ConstantDamping,
     CoupledRANS,
     FieldSplit,
+    ForwardSolve,
     GeometricReynoldsSchedule,
     JacobianProbeSpec,
     LogScalars,
     MaterializedJacobian,
     MonolithicVCycle,
     ResidualTaperedDamping,
+    ShiftSettings,
     SSTModel,
     SSTTurbulence,
     coupled_fields,
@@ -1210,7 +1213,7 @@ def solve_aquaflux(
         # for that reason -- see `BETA_START_WARM`. With the environment unset the two are equal and
         # this is the same control the solve would have used anyway.
         return dict(
-            turbulence_damping=_damping(companion, seed_state, beta_start),
+            shift=ShiftSettings(turbulence_damping=_damping(companion, seed_state, beta_start)),
             step_control=dual_time_control(beta_start),
         )
 
@@ -1240,14 +1243,16 @@ def solve_aquaflux(
     solve_options = (
         dict(
             preconditioner=session,
-            inner_steps=INNER_STEPS,
-            inner_tol=INNER_TOL,
+            dual_time=DualTimeLoop(
+                inner_steps=INNER_STEPS,
+                inner_tol=INNER_TOL,
+                cycle_budget=CYCLE_BUDGET,
+                refresh_on_cycles=REFRESH_ON_CYCLES or None,
+            ),
+            forward=ForwardSolve(
+                rtol=FORWARD_RTOL, restart=FORWARD_RESTART, max_restarts=FORWARD_MAX_RESTARTS
+            ),
             jacobian_gradient_sweeps=jacobian_gradient_sweeps,
-            cycle_budget=CYCLE_BUDGET,
-            forward_rtol=FORWARD_RTOL,
-            forward_restart=FORWARD_RESTART,
-            forward_max_restarts=FORWARD_MAX_RESTARTS,
-            refresh_on_cycles=REFRESH_ON_CYCLES or None,
             positivity_floor=K_POSITIVITY_FLOOR,
             positivity_projection=POSITIVITY_PROJECTION,
             inner_observer=logger.on_inner,
