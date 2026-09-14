@@ -27,6 +27,7 @@ pytest.importorskip("petsc4py")
 
 from aquaflux.solve import DualTimeStep, PseudoTransientStep
 from aquaflux.turbulence import (
+    BlockDiagonal,
     CoupledRANS,
     MaterializedJacobian,
     MonolithicVCycle,
@@ -135,7 +136,12 @@ def test_amg_solve_converges_and_matches_the_block_preconditioned_solve(case) ->
     assert float(jnp.max(k_a)) > 10.0 * float(jnp.min(jnp.abs(k_a)) + 1e-30)  # genuinely turbulent
 
     flow_b, k_b, omega_b = solve_coupled(
-        coupled, flow_ws, k_ws, omega_ws, method="twolevel", max_steps=40, **PRECONDITIONER
+        coupled,
+        flow_ws,
+        k_ws,
+        omega_ws,
+        max_steps=40,
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
     assert float(jnp.linalg.norm(flow_a - flow_b) / jnp.linalg.norm(flow_b)) < 1e-4
     assert float(jnp.linalg.norm(k_a - k_b) / jnp.linalg.norm(k_b)) < 1e-3

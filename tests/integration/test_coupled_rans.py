@@ -33,6 +33,7 @@ from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.solve import RefreshPolicy
 from aquaflux.turbulence import (
+    BlockDiagonal,
     LogScalars,
     SSTModel,
     SSTTurbulence,
@@ -159,7 +160,12 @@ def test_coupled_newton_converges_and_matches_the_segregated_solution(case) -> N
     flow_ws, k_ws, omega_ws = case["coupled_start"]
 
     flow, k, omega = solve_coupled(
-        coupled, flow_ws, k_ws, omega_ws, method="twolevel", max_steps=40, **PRECONDITIONER
+        coupled,
+        flow_ws,
+        k_ws,
+        omega_ws,
+        max_steps=40,
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
 
     # Converged to machine precision, with a healthy, strictly-positive turbulence field.
@@ -350,7 +356,12 @@ def test_coupled_log_omega_converges_to_the_same_positive_fixed_point(case) -> N
     log_omega = CoupledRANS.build(momentum, turbulence, omega_transform=LogScalars())
 
     flow_l, k_l, omega_l = solve_coupled(
-        log_omega, flow_ws, k_ws, omega_ws, method="twolevel", max_steps=40, **PRECONDITIONER
+        log_omega,
+        flow_ws,
+        k_ws,
+        omega_ws,
+        max_steps=40,
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
     residual_norm = float(
         jnp.linalg.norm(log_omega.residual(log_omega.state_from_physical(flow_l, k_l, omega_l)))
@@ -359,7 +370,12 @@ def test_coupled_log_omega_converges_to_the_same_positive_fixed_point(case) -> N
     assert float(jnp.min(omega_l)) > 0.0  # structural: e^w > 0 for every w
 
     flow_d, k_d, omega_d = solve_coupled(
-        coupled, flow_ws, k_ws, omega_ws, method="twolevel", max_steps=40, **PRECONDITIONER
+        coupled,
+        flow_ws,
+        k_ws,
+        omega_ws,
+        max_steps=40,
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
     assert float(jnp.linalg.norm(flow_l - flow_d) / jnp.linalg.norm(flow_d)) < 1e-4
     assert float(jnp.linalg.norm(k_l - k_d) / jnp.linalg.norm(k_d)) < 1e-3
@@ -409,7 +425,9 @@ def test_coupled_solve_self_starts_from_a_cold_hybrid_initial_condition() -> Non
     _, momentum, turbulence, _, _ = _channel()
     coupled = CoupledRANS.build(momentum, turbulence)
 
-    flow, k, omega = solve_coupled(coupled, method="twolevel", max_steps=40, **PRECONDITIONER)
+    flow, k, omega = solve_coupled(
+        coupled, max_steps=40, preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER)
+    )
 
     residual_norm = float(jnp.linalg.norm(coupled.residual(coupled.pack_state(flow, k, omega))))
     assert residual_norm < 1e-8
@@ -449,19 +467,23 @@ def test_staged_preconditioner_refresh_reaches_the_same_fixed_point(case) -> Non
     flow_ws, k_ws, omega_ws = case["coupled_start"]
 
     single = solve_coupled(
-        coupled, flow_ws, k_ws, omega_ws, method="twolevel", max_steps=40, **PRECONDITIONER
+        coupled,
+        flow_ws,
+        k_ws,
+        omega_ws,
+        max_steps=40,
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
     staged = solve_coupled(
         coupled,
         flow_ws,
         k_ws,
         omega_ws,
-        method="twolevel",
         max_steps=40,
         refresh=RefreshPolicy(
             trigger=_RefreshAfter(steps=3)
         ),  # march a little, re-freeze, then finish
-        **PRECONDITIONER,
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
 
     for name, one, two in zip(("flow", "k", "omega"), single, staged, strict=True):
@@ -487,7 +509,9 @@ def test_staged_refresh_stops_at_the_same_tolerance(case) -> None:
     reference_norm = float(jnp.linalg.norm(coupled.residual(start)))
     rtol = 1e-3
 
-    common = dict(method="twolevel", max_steps=40, rtol=rtol, **PRECONDITIONER)
+    common = dict(
+        max_steps=40, rtol=rtol, preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER)
+    )
     single = solve_coupled(coupled, flow_ws, k_ws, omega_ws, **common)
     staged = solve_coupled(
         coupled,
@@ -535,12 +559,11 @@ def test_the_march_reports_progress_without_a_refresh_trigger(case) -> None:
         flow_ws,
         k_ws,
         omega_ws,
-        method="twolevel",
         max_steps=40,  # must actually converge: the finishing solve raises on a non-root
         rtol=1e-2,  # loose -- this test is about reporting, not about how deep it gets
         on_step=seen.append,
         on_checkpoint=lambda report, state: saved.append((report.step, state)),
-        **PRECONDITIONER,
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
 
     assert seen, "an instrumented solve produced no step reports"
@@ -575,11 +598,10 @@ def test_a_refresh_is_observed_as_two_reported_segments(case) -> None:
         flow_ws,
         k_ws,
         omega_ws,
-        method="twolevel",
         max_steps=40,
         refresh=RefreshPolicy(trigger=_RefreshAfter(steps=refresh_after)),
         on_step=reports.append,
-        **PRECONDITIONER,
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
 
     # Each segment numbers its own steps from 0, so the refresh boundary is where the index resets.
@@ -621,11 +643,10 @@ def test_the_drift_measure_is_rebased_at_every_refresh(case) -> None:
         flow_ws,
         k_ws,
         omega_ws,
-        method="twolevel",
         max_steps=40,
         refresh=RefreshPolicy(trigger=_RefreshAfter(steps=4)),
         on_step=reports.append,
-        **PRECONDITIONER,
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
 
     boundaries = [i for i, r in enumerate(reports) if r.step == 0 and i > 0]

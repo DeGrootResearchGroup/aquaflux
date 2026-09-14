@@ -106,7 +106,6 @@ from .preconditioner import ScalarTransportPreconditioner, ScaledScalarPrecondit
 # `_UNSET` is "not given" for `solve_coupled`'s `method`, whose `None` already means something; it is
 # shared with the block-diagonal spec, whose `method` has the same two meanings.
 from .preconditioner_spec import (
-    _UNSET,
     BlockDiagonal,
     CompleteLu,
     FieldSplit,
@@ -3772,7 +3771,16 @@ def _march_keywords(march: dict) -> dict:
             "the session was opened with, and the operator stand-in must match the probe it built. "
             "Pass them to open_session instead."
         )
-    bound = inspect.signature(coupled_step).bind(None, None, **march)
+    signature = inspect.signature(coupled_step)
+    unknown = sorted(set(march) - set(signature.parameters))
+    if unknown:
+        raise TypeError(
+            f"{unknown} {'is not a march setting' if len(unknown) == 1 else 'are not march settings'} "
+            "of coupled_step. A preconditioner setting belongs on the spec (BlockDiagonal(...), "
+            "MaterializedJacobian(...)); a setting of how the march damps, such as beta0 or "
+            "line_search, belongs on globalization=Globalization(...)."
+        )
+    bound = signature.bind(None, None, **march)
     bound.apply_defaults()
     arguments = dict(bound.arguments)
     for name in ("coupled", "reference_state", *_SESSION_OWNED):
@@ -4342,14 +4350,21 @@ class _ContinuationSource(Protocol):
     loop. That is the shape that drifts: a change to how the continuation is built has to be made in two
     places and, when it is made in one, nothing fails. Behind this interface it is made once.
 
-    Two implementations, and the difference between them is the whole of it: either the caller supplies
-    the builder (:class:`_CallerBuiltContinuation`) or ``solve_coupled`` builds the default
-    block-diagonal one (:class:`_DefaultContinuation`); :class:`_FinishedContinuation` stands for the
-    third case, a step the caller finished and nothing will rebuild.
+    Three implementations: the caller supplies the builder (:class:`_CallerBuiltContinuation`); a
+    preconditioner session builds it (:class:`_SessionContinuation`, including the default
+    block-diagonal one when nothing is named); or the caller finished the step and nothing will rebuild
+    it (:class:`_FinishedContinuation`).
 
-    Private because it is a decomposition, not an extension point: nothing injects one, and a caller
-    who wants a different continuation passes the step or a builder. Promote it if that changes.
+    Private because it is a decomposition, not an extension point: a caller who wants a different
+    continuation passes a preconditioner, a session, the step, or a builder.
+
+    Attributes
+    ----------
+    precondition_step : callable or None
+        The per-step refresh hook this source brings with it -- a materialized session's -- or ``None``.
     """
+
+    precondition_step: Callable[[ForwardStep, jnp.ndarray], None] | None
 
     def build(self, state: jnp.ndarray) -> ForwardStep:
         """The continuation to start the march with, frozen at ``state``."""
@@ -4380,6 +4395,8 @@ class _CallerBuiltContinuation:
     """
 
     builder: Callable[[jnp.ndarray], ForwardStep]
+    #: A caller-built step brings its own refresh hook, if any, on its ``RefreshPolicy``.
+    precondition_step = None
 
     def build(self, state: jnp.ndarray) -> ForwardStep:
         return self.builder(state)
@@ -4402,6 +4419,8 @@ class _FinishedContinuation:
     rather than raising ``AttributeError`` on ``None``.
     """
 
+    precondition_step = None
+
     def build(self, state: jnp.ndarray) -> ForwardStep:
         raise TypeError(
             "no continuation to build: `solve_coupled` was given a finished `continuation`. This is a "
@@ -4418,63 +4437,58 @@ class _FinishedContinuation:
 
 
 @dataclasses.dataclass(frozen=True)
-class _DefaultContinuation:
-    """The block-diagonal :func:`coupled_continuation`, built and re-frozen by ``solve_coupled`` itself.
+class _SessionContinuation:
+    """A continuation a preconditioner session builds and re-freezes -- the source that has configuration.
 
-    This is the one source that has configuration to receive, so it is the one ``solve_coupled``'s
-    ``method`` / ``reference_state`` / ``**continuation_kwargs`` describe.
-
-    A refresh here re-derives the k/omega multigrid hierarchies on their *reused* coarsening and rebuilds
-    the shift's transport time scale, while carrying the flow block and the shift's coordinate factor
-    over untouched -- which is what ``reuse=`` means and why the previous step is needed rather than
-    discarded.
+    It is the one source ``solve_coupled``'s ``preconditioner`` / ``reference_state`` /
+    ``**continuation_kwargs`` describe: the preconditioner chose the session, and the march keywords are
+    handed to every build and refresh the session makes.
     """
 
-    coupled: CoupledRANS
-    method: str | None
+    session: PreconditionerSession
     reference_state: jnp.ndarray | None
-    kwargs: dict
+    march: dict
+
+    @property
+    def precondition_step(self) -> Callable[[ForwardStep, jnp.ndarray], None] | None:
+        return self.session.precondition_step
 
     def build(self, state: jnp.ndarray) -> ForwardStep:
         reference = state if self.reference_state is None else self.reference_state
-        return coupled_continuation(self.coupled, reference, method=self.method, **self.kwargs)
+        return self.session.build(reference, **self.march)
 
     def refresh(
         self, state: jnp.ndarray, previous: ForwardStep, residual_norm: ResidualNorm
     ) -> ForwardStep:
-        return coupled_continuation(
-            self.coupled,
-            state,
-            method=self.method,
-            reuse=previous.shift_policy,
-            residual_norm=residual_norm,
-            **self.kwargs,
-        )
+        return self.session.refresh(state, previous, residual_norm, **self.march)
 
 
 def _continuation_source(
     coupled: CoupledRANS,
     continuation: ForwardStep | None,
     refresh: RefreshPolicy,
-    method: object,
+    preconditioner: BlockDiagonal | MaterializedJacobian | PreconditionerSession | None,
     reference_state: jnp.ndarray | None,
     kwargs: dict,
 ) -> _ContinuationSource:
     """Pick the source, after refusing configuration whichever one is chosen cannot receive.
 
-    **Why this refuses rather than ignores.** ``method`` / ``reference_state`` /
+    **Why this refuses rather than ignores.** ``preconditioner`` / ``reference_state`` /
     ``**continuation_kwargs`` configure the continuation ``solve_coupled`` builds. On the two paths where
     it does not build one -- an explicit ``continuation``, or a ``RefreshPolicy(builder=...)`` -- they
     reached nothing at all, with no error and no log line: a caller asking for ``inner_steps=3`` or
     ``positivity_floor=1e-6`` got the library defaults and a march that looked like the one they
     configured. ``**kwargs`` is what made it silent, since it accepts every keyword and checks none, and
-    that door is the main entry point's. It has already cost a real study harness, which carries a
-    warning comment about a ``precondition_step=`` swallowed here instead of reaching its
-    ``RefreshPolicy``.
+    that door is the main entry point's.
+
+    A session owns ``jacobian_production_viscosity``, so it is accepted beside a spec (and passed to the
+    session opened for it) and refused beside a session object. A materialized session brings its own
+    per-step refresh hook, so a second one on the ``RefreshPolicy`` is refused rather than letting two
+    hooks re-fit one inverse.
     """
     given = dict(kwargs)
-    if method is not _UNSET:
-        given["method"] = method
+    if preconditioner is not None:
+        given["preconditioner"] = preconditioner
     if reference_state is not None:
         given["reference_state"] = reference_state
     if continuation is not None:
@@ -4485,9 +4499,27 @@ def _continuation_source(
     if refresh.builder is not None:
         _refuse(given, "`RefreshPolicy(builder=...)`", "the builder owns its own configuration")
         return _CallerBuiltContinuation(refresh.builder)
-    return _DefaultContinuation(
-        coupled, "twolevel" if method is _UNSET else method, reference_state, kwargs
-    )
+    march = dict(kwargs)
+    production = march.pop("jacobian_production_viscosity", None)
+    if preconditioner is None or isinstance(preconditioner, BlockDiagonal | MaterializedJacobian):
+        session = open_session(
+            preconditioner,
+            coupled,
+            **({} if production is None else {"jacobian_production_viscosity": production}),
+        )
+    elif production is not None:
+        raise TypeError(
+            "jacobian_production_viscosity belongs to the preconditioner session, which built its probe "
+            "from it: pass it to open_session, not beside the session."
+        )
+    else:
+        session = preconditioner
+    if refresh.precondition_step is not None and session.precondition_step is not None:
+        raise TypeError(
+            "RefreshPolicy(precondition_step=...) was given beside a materialized-Jacobian "
+            "preconditioner, whose session already re-fits its inverse before every step. Drop one."
+        )
+    return _SessionContinuation(session, reference_state, march)
 
 
 def _refuse(given: dict, owner: str, why: str) -> None:
@@ -4509,7 +4541,7 @@ def solve_coupled(
     *,
     continuation: ForwardStep | None = None,
     reference_state: jnp.ndarray | None = None,
-    method: str | None = _UNSET,  # type: ignore[assignment]
+    preconditioner: BlockDiagonal | MaterializedJacobian | PreconditionerSession | None = None,
     max_steps: int = 60,
     rtol: float = 1e-10,
     atol: float = 1e-12,
@@ -4565,8 +4597,14 @@ def solve_coupled(
         The coupled state to freeze the internally-built preconditioner at; defaults to the initial
         state. ⚠️ **Rejected**, not ignored, when the continuation is not built here -- see
         ``**continuation_kwargs``.
-    method : {"twolevel", "air"} or None
-        The scalar-block AMG method for the internally-built continuation. Rejected on the same terms.
+    preconditioner : BlockDiagonal, MaterializedJacobian, PreconditionerSession or None
+        What preconditions the internally-built continuation. A spec opens a session private to this
+        solve; ``None`` is :class:`~aquaflux.turbulence.BlockDiagonal` with every setting unset. Pass a
+        session (:func:`open_session`) to share one inverse and its refresh hook across several solves
+        -- the rungs of a Reynolds continuation, say. A materialized-Jacobian preconditioner re-fits its
+        inverse before every step, which makes the march observed and therefore forward-only; to
+        differentiate, build a frozen step with :func:`coupled_step` and pass it as ``continuation``.
+        Rejected on the same terms as ``reference_state``.
     max_steps : int
         Newton iteration cap for the continuation march.
     rtol, atol : float
@@ -4750,13 +4788,17 @@ def solve_coupled(
         :func:`~aquaflux.solve.forward_march`: called before a step is redone, with why. Forward-only
         reporting; a log without it shows a step's work twice and never says what triggered the redo.
     **continuation_kwargs
-        Forwarded to :func:`coupled_continuation` when building internally (schedule + preconditioner
-        options). Notably ``inner_steps > 1`` selects the **dual-time** (backward-Euler) march
+        The march settings of :func:`coupled_step` (``inner_steps``, ``positivity_floor``, the forward
+        solve, ...), handed to every build and refresh of the internally-built continuation; an unknown
+        keyword raises. A preconditioner setting belongs on the ``preconditioner`` spec instead.
+        Notably ``inner_steps > 1`` selects the **dual-time** (backward-Euler) march
         (:class:`~aquaflux.solve.DualTimeStep`) — an inner Newton loop per outer timestep whose measured
         steady residual is the honest discrete time derivative rather than ``beta x travel``.
         ``inner_steps = 1`` (default) is the unchanged single-step continuation.
+        ``jacobian_production_viscosity`` is accepted here only beside a spec, whose session is built
+        from it.
 
-        ⚠️ **These, ``method`` and ``reference_state`` configure the continuation this function builds,
+        ⚠️ **These, ``preconditioner`` and ``reference_state`` configure the continuation this function builds,
         so they are only accepted when it builds one.** Supply a ``continuation`` or a
         ``RefreshPolicy(builder=...)`` and that object owns its whole configuration; passing any of them
         alongside raises :exc:`TypeError` naming which ones. They used to be **dropped in silence** on
@@ -4770,12 +4812,21 @@ def solve_coupled(
     tuple of jnp.ndarray
         The converged ``(flow, k, omega)``.
     """
+    # One decision -- which continuation this solve runs -- made once, for the initial build and every
+    # refresh alike, and refusing any setting the chosen source cannot receive rather than dropping it.
+    # Made before anything else, so a misconfiguration raises before any work is done.
+    source = _continuation_source(
+        coupled, continuation, refresh, preconditioner, reference_state, continuation_kwargs
+    )
+    # A materialized session re-fits its inverse before every step; a caller-built step brings its own.
+    precondition_step = refresh.precondition_step or source.precondition_step
     # The observed pre-march also runs when the caller only wants to *watch* the solve. Observability
     # must not require enabling a refresh: the reference march a refresh is calibrated against is by
     # definition unrefreshed, and it is the longest-running one, so it is the one that most needs to
     # report progress rather than sit silent for hours.
     observing = (
         refresh.observes
+        or precondition_step is not None
         or step_control is not None
         or on_step is not None
         or on_checkpoint is not None
@@ -4805,11 +4856,6 @@ def solve_coupled(
     # A refresh rebuilds the step; a caller-supplied step with no builder leaves it nothing to rebuild
     # WITH, so the refresh would silently never happen. The policy owns that check.
     refresh.require_rebuildable(continuation)
-    # One decision -- which continuation this solve runs -- made once, for the initial build and every
-    # refresh alike, and refusing any setting the chosen source cannot receive rather than dropping it.
-    source = _continuation_source(
-        coupled, continuation, refresh, method, reference_state, continuation_kwargs
-    )
     if continuation is None:
         continuation = source.build(state)
 
@@ -4873,7 +4919,7 @@ def solve_coupled(
                 # drift a refresh had just absorbed, and re-fire immediately.
                 drift_measure=eddy_viscosity_drift(coupled, jax.lax.stop_gradient(state)),
                 norm_builder=norm_builder,
-                precondition_step=refresh.precondition_step,
+                precondition_step=precondition_step,
                 retry=retry,
                 on_retry=on_retry,
                 homotopy=homotopy,

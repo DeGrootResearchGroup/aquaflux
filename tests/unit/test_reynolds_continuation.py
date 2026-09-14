@@ -300,30 +300,33 @@ def test_the_ramp_and_the_target_get_opposite_halves_of_the_continuation_setting
     """A pre-built continuation goes to the target; the settings that build one go to the ramp.
 
     Passing both at once is the ordinary case rather than a mistake: the pre-built step is frozen at the
-    *target* viscosity, so each lower-Re point has to build its own, from ``method`` and whatever else
-    the caller passes for ``coupled_continuation``. The split therefore runs both ways, and only the
-    ramp half existed — so the target solve was handed a continuation *and* the settings for one, which
+    *target* viscosity, so each lower-Re point has to build its own, from the ``preconditioner`` and the
+    march settings the caller passes. The split therefore runs both ways, and only the ramp half
+    existed — so the target solve was handed a continuation *and* the settings for one, which
     ``solve_coupled`` used to ignore in silence and now rejects outright.
     """
+    from aquaflux.turbulence import BlockDiagonal
+
     calls = _record_solves(monkeypatch)
     step = object()  # `solve_coupled` is patched out, so its type does not matter here
+    spec = BlockDiagonal(method="twolevel", schur_scaling="msimple")
     solve_reynolds_continuation(
         _tiny_coupled(),
         n_points=1,
         rtol=1e-10,
         continuation=step,
-        method="twolevel",
-        schur_scaling="msimple",
+        preconditioner=spec,
+        inner_steps=3,
     )
     ramp, target = calls
     # The ramp builds its own at its own viscosity, so it takes the settings and not the frozen step.
     assert "continuation" not in ramp["kwargs"]
-    assert ramp["kwargs"]["method"] == "twolevel"
-    assert ramp["kwargs"]["schur_scaling"] == "msimple"
+    assert ramp["kwargs"]["preconditioner"] == spec
+    assert ramp["kwargs"]["inner_steps"] == 3
     # The target takes the frozen step and none of the settings, which describe a build it will not do.
     assert target["kwargs"]["continuation"] is step
-    assert "method" not in target["kwargs"]
-    assert "schur_scaling" not in target["kwargs"]
+    assert "preconditioner" not in target["kwargs"]
+    assert "inner_steps" not in target["kwargs"]
     # ...but the keywords that drive the *solve* rather than a build still reach it.
     assert target["kwargs"]["rtol"] == 1e-10
 
@@ -334,13 +337,41 @@ def test_without_a_continuation_the_target_keeps_every_setting(monkeypatch) -> N
     Stripping unconditionally would silently drop the target's configuration, which is the same defect
     one layer down and the reason this is pinned rather than assumed.
     """
+    from aquaflux.turbulence import BlockDiagonal
+
     calls = _record_solves(monkeypatch)
+    spec = BlockDiagonal(method="twolevel", schur_scaling="msimple")
     solve_reynolds_continuation(
-        _tiny_coupled(), n_points=1, rtol=1e-10, method="twolevel", schur_scaling="msimple"
+        _tiny_coupled(), n_points=1, rtol=1e-10, preconditioner=spec, inner_steps=3
     )
     target = calls[-1]
-    assert target["kwargs"]["method"] == "twolevel"
-    assert target["kwargs"]["schur_scaling"] == "msimple"
+    assert target["kwargs"]["preconditioner"] == spec
+    assert target["kwargs"]["inner_steps"] == 3
+
+
+def test_a_materialized_preconditioner_is_one_session_shared_by_every_point(monkeypatch) -> None:
+    """Every rung must glue in the same inverse and hooks, or each one recompiles the coupled solve.
+
+    The spec is opened once, with the options' own ``jacobian_production_viscosity`` -- which the session
+    now owns, so it no longer travels beside it -- and each point is handed that session, re-pointed at
+    its own companion.
+    """
+    from aquaflux.turbulence import CompleteLu, MaterializedJacobian
+
+    calls = _record_solves(monkeypatch)
+    solve_reynolds_continuation(
+        _tiny_coupled(),
+        n_points=1,
+        rtol=1e-10,
+        preconditioner=MaterializedJacobian(CompleteLu()),
+        jacobian_production_viscosity=True,
+    )
+    ramp, target = calls
+    session = ramp["kwargs"]["preconditioner"]
+    assert target["kwargs"]["preconditioner"] is session
+    assert "jacobian_production_viscosity" not in ramp["kwargs"]
+    assert "jacobian_production_viscosity" not in target["kwargs"]
+    assert session._production_viscosity is True
 
 
 def test_point_setup_builds_per_point_kwargs_and_materializes_the_first_seed(monkeypatch) -> None:
@@ -1455,6 +1486,52 @@ def test_a_refresh_that_cannot_be_repointed_is_refused_rather_than_ignored(monke
             point_setup=lambda companion, state, point: {
                 "refresh": RefreshPolicy(precondition_step=lambda step, state: None)
             },
+        )
+
+
+def test_the_ramp_opens_a_materialized_session_on_the_anchor_and_re_points_it(monkeypatch) -> None:
+    """The first step is fitted to the anchor it solves, and every station change re-points the session."""
+    from aquaflux.turbulence import CompleteLu, MaterializedJacobian, solve_reynolds_ramp
+
+    coupled, calls, _ = _ramp_arm_fixtures(monkeypatch)
+    solve_reynolds_ramp(
+        coupled,
+        anchor=100.0,
+        stations=2,
+        steps_per_station=1,
+        point_setup=lambda companion, state, point: {},
+        preconditioner=MaterializedJacobian(CompleteLu()),
+    )
+    session = calls[0]["kwargs"]["preconditioner"]
+    homotopy = calls[0]["kwargs"]["homotopy"]
+    assert homotopy.rebind == session.rebind
+    bound = session._coupled.momentum.properties.properties["viscosity"].value
+    assert float(bound / (RHO * NU)) == pytest.approx(100.0)
+    homotopy.enter(2)  # the target station
+    assert session._coupled is coupled
+
+
+def test_a_session_beside_a_point_setup_refresh_hook_is_refused(monkeypatch) -> None:
+    """Two things re-pointing one march at each station is a misconfiguration, not a choice to guess at."""
+    from aquaflux.solve import RefreshPolicy
+    from aquaflux.turbulence import CompleteLu, MaterializedJacobian, solve_reynolds_ramp
+
+    coupled, _, _ = _ramp_arm_fixtures(monkeypatch)
+
+    def precondition_step(active_step, state):  # pragma: no cover - never called here
+        raise AssertionError("the stub march does not step")
+
+    precondition_step.rebind = lambda companion: None
+    with pytest.raises(TypeError, match="re-points itself at every station"):
+        solve_reynolds_ramp(
+            coupled,
+            anchor=100.0,
+            stations=2,
+            steps_per_station=1,
+            point_setup=lambda companion, state, point: {
+                "refresh": RefreshPolicy(precondition_step=precondition_step)
+            },
+            preconditioner=MaterializedJacobian(CompleteLu()),
         )
 
 

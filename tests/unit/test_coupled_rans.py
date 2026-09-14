@@ -35,8 +35,11 @@ from aquaflux.solve import (
     ShiftTerm,
 )
 from aquaflux.turbulence import (
+    BlockDiagonal,
+    CompleteLu,
     DirectScalars,
     LogScalars,
+    MaterializedJacobian,
     SSTModel,
     SSTTurbulence,
     coupled_equation_names,
@@ -44,6 +47,7 @@ from aquaflux.turbulence import (
     coupled_residuals,
     eddy_viscosity_drift,
     hybrid_initialize,
+    open_session,
     production_and_limit,
     production_cap_active,
 )
@@ -388,7 +392,7 @@ def test_the_live_shift_source_honours_its_protocol_arity() -> None:
 def test_continuation_settings_are_refused_where_they_would_be_dropped() -> None:
     """A setting the solve cannot forward is an error, not a silent no-op.
 
-    ``method`` / ``reference_state`` / ``**continuation_kwargs`` configure the continuation
+    ``preconditioner`` / ``reference_state`` / ``**continuation_kwargs`` configure the continuation
     ``solve_coupled`` builds. On the two paths where it builds none -- an explicit ``continuation``, or a
     ``RefreshPolicy(builder=...)`` -- they reached nothing at all: a solve asked for ``inner_steps=3``
     and ``positivity_floor=1e-6`` ran the library defaults, with no error and no log line. ``**kwargs``
@@ -405,10 +409,13 @@ def test_continuation_settings_are_refused_where_they_would_be_dropped() -> None
     for kwargs in (
         {"continuation": step, "inner_steps": 3},
         {"continuation": step, "positivity_floor": 1e-6},
-        {"continuation": step, "method": "twolevel"},
+        {"continuation": step, "preconditioner": BlockDiagonal()},
         {"continuation": step, "reference_state": state},
         {"refresh": RefreshPolicy(builder=lambda s: step), "inner_steps": 3},
-        {"refresh": RefreshPolicy(builder=lambda s: step), "method": None},
+        {
+            "refresh": RefreshPolicy(builder=lambda s: step),
+            "preconditioner": BlockDiagonal(method=None),
+        },
     ):
         offender = next(iter(set(kwargs) - {"continuation", "refresh"}))
         with pytest.raises(TypeError, match=offender):
@@ -429,43 +436,58 @@ def test_the_settings_are_still_accepted_where_the_solve_does_build_the_continua
             coupled=coupled,
             continuation=None,
             refresh=refresh,
-            method=None,
+            preconditioner=BlockDiagonal(method=None),
             reference_state=state,
             kwargs={"inner_steps": 2},
         )
-        assert isinstance(source, coupled_module._DefaultContinuation)
+        assert isinstance(source, coupled_module._SessionContinuation)
         # ...and it carries them, rather than accepting and then dropping them one layer down.
-        assert source.kwargs == {"inner_steps": 2}
+        assert source.march == {"inner_steps": 2}
         assert source.reference_state is state
-        assert source.method is None
+        assert source.session._spec == BlockDiagonal(method=None)
 
 
-def test_an_unnamed_method_still_defaults_to_the_two_level_scalar_amg() -> None:
-    """`method` grew a sentinel default so "not given" is distinguishable from "given as None".
+def test_an_unnamed_preconditioner_is_the_default_block_diagonal_family() -> None:
+    """With nothing named the solve builds the block-diagonal family at its defaults.
 
-    Both are meaningful — ``None`` selects no preconditioner method at all — so neither could stand for
-    the other, and without the distinction the guard above could not refuse an explicitly-passed
-    ``method`` without also refusing the default nobody asked for. The resolved default must not move.
+    The resolved scalar method must not move: ``None`` selects no scalar preconditioner at all, so the
+    unset default and an explicit ``None`` are different choices and are kept apart on the spec.
     """
-    assert inspect.signature(solve_coupled).parameters["method"].default is coupled_module._UNSET
+    assert inspect.signature(solve_coupled).parameters["preconditioner"].default is None
     source = coupled_module._continuation_source(
         coupled=None,
         continuation=None,
         refresh=NO_REFRESH,
-        method=coupled_module._UNSET,
+        preconditioner=None,
         reference_state=None,
         kwargs={},
     )
-    assert source.method == "twolevel"
-    explicit = coupled_module._continuation_source(
-        coupled=None,
-        continuation=None,
-        refresh=NO_REFRESH,
-        method=None,
-        reference_state=None,
-        kwargs={},
-    )
-    assert explicit.method is None
+    assert source.session._spec == BlockDiagonal()
+    assert source.session._spec.resolved_method() == "twolevel"
+    assert source.precondition_step is None
+
+
+def test_a_session_owned_setting_and_a_second_refresh_hook_are_refused() -> None:
+    """Each would otherwise be a silent disagreement between two owners of one decision."""
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    flow, k, omega = coupled.physical_fields(state)
+    session = open_session(MaterializedJacobian(CompleteLu(backend="scipy")), coupled)
+    with pytest.raises(TypeError, match="belongs to the preconditioner session"):
+        solve_coupled(
+            coupled, flow, k, omega, preconditioner=session, jacobian_production_viscosity=True
+        )
+    with pytest.raises(TypeError, match="already re-fits its inverse"):
+        solve_coupled(
+            coupled,
+            flow,
+            k,
+            omega,
+            preconditioner=MaterializedJacobian(CompleteLu()),
+            refresh=RefreshPolicy(precondition_step=lambda step, s: None),
+        )
+    with pytest.raises(TypeError, match="belongs on the spec"):
+        solve_coupled(coupled, flow, k, omega, max_steps=1, velocity="convection")
 
 
 def test_the_continuation_source_is_one_decision_for_the_build_and_every_refresh() -> None:
@@ -487,7 +509,7 @@ def test_the_continuation_source_is_one_decision_for_the_build_and_every_refresh
         coupled=coupled,
         continuation=None,
         refresh=RefreshPolicy(trigger=CycleGrowthTrigger(), builder=builder),
-        method=coupled_module._UNSET,
+        preconditioner=None,
         reference_state=None,
         kwargs={},
     )
@@ -1540,26 +1562,27 @@ def test_a_supplied_step_with_no_builder_is_rejected_when_a_refresh_is_configure
 
 
 def test_globalization_knobs_still_reach_the_continuation_builder(monkeypatch) -> None:
-    """The globalization is not named on ``solve_coupled`` and still arrives at
-    :func:`coupled_continuation` unchanged -- it rides ``**continuation_kwargs``.
+    """The globalization is not named on ``solve_coupled`` and still arrives at the shared step tail
+    unchanged -- it rides ``**continuation_kwargs`` through the preconditioner session.
 
     ``grow`` used to be declared on ``solve_coupled`` *and* forwarded explicitly, while the very same
-    call sites already splatted ``**continuation_kwargs`` into the same function -- so the declaration
-    was pure duplication, costing a parameter on an already-wide signature to buy nothing. Deleting it
-    was call-for-call identical, and this pins that: it is the only thing standing between the
-    deletion and a silently dropped knob. The knob itself now lives on the ``Globalization``, so what
-    rides the path is one object rather than eight keywords, and the pin is the same.
+    call sites already splatted ``**continuation_kwargs`` into the builder -- so the declaration was
+    pure duplication, costing a parameter on an already-wide signature to buy nothing. Deleting it was
+    call-for-call identical, and this pins that: it is the only thing standing between the deletion
+    and a silently dropped knob. The knob itself now lives on the ``Globalization``, so what rides the
+    path is one object rather than eight keywords, and the pin is the same. It is spied on
+    ``_coupled_step`` because every family's session reaches the march through that one tail.
     """
     from aquaflux.turbulence import coupled as coupled_module
 
     _, coupled = _cavity(4)
     seen: dict = {}
 
-    def spy(assembler, reference_state, **kwargs):
+    def spy(assembler, reference_state, policy, **kwargs):
         seen.update(kwargs)
         raise _StopBuild
 
-    monkeypatch.setattr(coupled_module, "coupled_continuation", spy)
+    monkeypatch.setattr(coupled_module, "_coupled_step", spy)
     asked = Globalization(grow=2, beta0=1.5)
     with pytest.raises(_StopBuild):
         solve_coupled(coupled, globalization=asked)

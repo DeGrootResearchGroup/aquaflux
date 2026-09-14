@@ -47,6 +47,7 @@ from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.turbulence import (
+    BlockDiagonal,
     CoupledRANS,
     SSTModel,
     SSTTurbulence,
@@ -161,7 +162,14 @@ def solve(nu, *, explicit_limiter, state=None):
     coupled = build_case(nu, explicit_limiter=explicit_limiter)
     f0, k0, o0 = hybrid_initialize(coupled.momentum, coupled.turbulence) if state is None else state
     return coupled, solve_coupled(
-        coupled, f0, k0, o0, max_steps=60, rtol=1e-10, atol=1e-12, **PRECONDITIONER
+        coupled,
+        f0,
+        k0,
+        o0,
+        max_steps=60,
+        rtol=1e-10,
+        atol=1e-12,
+        preconditioner=BlockDiagonal(**PRECONDITIONER),
     )
 
 

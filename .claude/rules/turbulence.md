@@ -251,16 +251,29 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       `production_viscosity_frozen`, which follows from the operator), `MonolithicVCycle` and `CompleteLu`
       to their `build`. `FieldSplit` requires `solve.BlockInverse` values, never a factory closure, so a
       build-record sink is attached where the session is opened rather than bound into the inverse.
-  - **🔬 BUILT BESIDE THE OLD BUILDERS, NOT YET WIRED — `open_session` / `PreconditionerSession` /
-    `coupled_step` (#371, 2026-09-14, slice S3a).** `_BlockSession` and `_MaterializedSession` are
-    `_ContinuationSource` promoted: `build(state, **march)`, `refresh(state, previous, residual_norm,
-    **march)`, `precondition_step`, `rebind`. `coupled_step` is the one frozen-step builder and opens a
-    private session. **The intermediate state is deliberate and temporary:** `coupled_continuation` /
-    `coupled_lu_continuation` / `coupled_amg_continuation` and the public β-tracking hooks still exist
-    and `solve_coupled` still uses `_ContinuationSource`, so the new path could be proven
-    **array-identical** to them first (`test_preconditioner_session.py` for block / LU / field split,
-    `test_coupled_amg.py` for the V-cycle). S3b moves `solve_coupled` and the Reynolds drivers onto
-    sessions and migrates callers; S3c deletes the old builders (Principle 4 — no adapters survive).
+  - **🔬 `open_session` / `PreconditionerSession` / `coupled_step` — `solve_coupled` and the Reynolds
+    drivers RUN ON THEM; the old builders are not yet deleted (#371, 2026-09-14, slices S3a–S3b).**
+    `_BlockSession` and `_MaterializedSession` are `_ContinuationSource` promoted: `build(state,
+    **march)`, `refresh(state, previous, residual_norm, **march)`, `precondition_step`, `rebind`.
+    `coupled_step` is the one frozen-step builder and opens a private session. The new path was proven
+    **array-identical** to the old builders first (`test_preconditioner_session.py` for block / LU /
+    field split, `test_coupled_amg.py` for the V-cycle), then wired:
+    - **`solve_coupled(preconditioner=…)` replaced `method=`**, which no longer exists, and
+      `_DefaultContinuation` is gone: the default is a `_SessionContinuation` over a `BlockDiagonal()`
+      session. Block-preconditioner settings (`velocity=`, `schur_scaling=`, …) are **no longer march
+      keywords** — `**continuation_kwargs` binds against `coupled_step`'s signature and an unknown name
+      raises naming where it belongs. A materialized spec's session supplies `precondition_step`, which
+      makes the march observed (forward-only); a second hook on `RefreshPolicy` beside it is refused, as
+      is `jacobian_production_viscosity` beside a session object.
+    - **`solve_reynolds_continuation`** opens **one** session for a `MaterializedJacobian` spec, shares
+      it across points and `rebind`s it per point; a `BlockDiagonal` spec is built per point at its own
+      viscosity, exactly as before. `_SOLVE_ONLY` excludes `preconditioner`. **`solve_reynolds_ramp`**
+      opens a materialized session on the **anchor** and hands the homotopy its `rebind`; a block spec
+      stays target-bound (#386). A `point_setup` refresh hook beside a session is refused.
+    - **Still to do (S3c):** migrate the flagship drivers off `coupled_amg_continuation` +
+      `amg_beta_tracking_refresh` + `point_setup` onto sessions, then delete the three builders, the
+      public hooks, `_rebinding` and `_CallerBuiltContinuation`'s last users (Principle 4 — no adapters
+      survive); move the builders' parameter prose onto `coupled_step`; update `docs/preconditioning.md`.
     Facts to hold while finishing it:
     - **March defaults live once, on `coupled_step`'s signature.** A session binds its `**march` against
       that signature (`_march_keywords`), so an unknown keyword is a `TypeError` and no default is

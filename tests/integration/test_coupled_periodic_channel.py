@@ -38,7 +38,7 @@ from aquaflux.flow import MomentumContinuity, NoSlipWall
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.turbulence import SSTModel, SSTTurbulence, hybrid_initialize
+from aquaflux.turbulence import BlockDiagonal, SSTModel, SSTTurbulence, hybrid_initialize
 from aquaflux.turbulence.coupled import CoupledRANS, solve_coupled
 
 RHO, U_B, H = 1.0, 1.0, 2.0
@@ -90,7 +90,12 @@ def case():
     # so this exercises the guarded-sqrt strain fix directly.
     flow0, k0, omega0 = hybrid_initialize(momentum, turbulence)
     flow, k, omega = solve_coupled(
-        coupled, flow0, k0, omega0, method="air", max_steps=MAX_STEPS, **PRECONDITIONER
+        coupled,
+        flow0,
+        k0,
+        omega0,
+        max_steps=MAX_STEPS,
+        preconditioner=BlockDiagonal(method="air", **PRECONDITIONER),
     )
     return {
         "mesh": mesh,
@@ -152,7 +157,12 @@ def test_coupled_fixed_point_is_amg_method_independent(case) -> None:
     flow_air, k_air, omega_air = case["solution"]
 
     flow_tl, k_tl, omega_tl = solve_coupled(
-        coupled, flow0, k0, omega0, method="twolevel", max_steps=400, **PRECONDITIONER
+        coupled,
+        flow0,
+        k0,
+        omega0,
+        max_steps=400,
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
 
     assert float(jnp.linalg.norm(flow_tl - flow_air) / jnp.linalg.norm(flow_air)) < 1e-6

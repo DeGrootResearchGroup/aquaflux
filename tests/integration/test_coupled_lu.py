@@ -28,6 +28,7 @@ from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.solve import RefreshPolicy
 from aquaflux.turbulence import (
+    BlockDiagonal,
     CoupledRANS,
     SSTModel,
     SSTTurbulence,
@@ -144,7 +145,12 @@ def test_lu_solve_converges_and_matches_the_block_preconditioned_solve(case) -> 
 
     # Same fixed point as the block-triangular preconditioner reaches.
     flow_b, k_b, omega_b = solve_coupled(
-        coupled, flow_ws, k_ws, omega_ws, method="twolevel", max_steps=40, **PRECONDITIONER
+        coupled,
+        flow_ws,
+        k_ws,
+        omega_ws,
+        max_steps=40,
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
     assert float(jnp.linalg.norm(flow_l - flow_b) / jnp.linalg.norm(flow_b)) < 1e-4
     assert float(jnp.linalg.norm(k_l - k_b) / jnp.linalg.norm(k_b)) < 1e-3
@@ -250,7 +256,12 @@ def test_lu_beta_tracking_forward_march_converges_to_the_same_fixed_point(case) 
         max_steps=60,
     )
     flow_b, k_b, _ = solve_coupled(
-        coupled, flow_ws, k_ws, omega_ws, method="twolevel", max_steps=40, **PRECONDITIONER
+        coupled,
+        flow_ws,
+        k_ws,
+        omega_ws,
+        max_steps=40,
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
     assert float(jnp.linalg.norm(flow_l - flow_b) / jnp.linalg.norm(flow_b)) < 1e-4
     assert float(jnp.linalg.norm(k_l - k_b) / jnp.linalg.norm(k_b)) < 1e-3

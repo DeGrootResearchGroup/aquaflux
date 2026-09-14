@@ -25,8 +25,9 @@ from typing import TYPE_CHECKING, Protocol
 import equinox as eqx
 import jax
 
-from .coupled import solve_coupled
+from .coupled import open_session, solve_coupled
 from .initialization import hybrid_initialize
+from .preconditioner_spec import BlockDiagonal, MaterializedJacobian
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -268,15 +269,15 @@ def _step_down(scale: float, factor: float) -> float:
 
 #: The keywords that drive the *solve* rather than configure a continuation, derived from
 #: :func:`~aquaflux.turbulence.solve_coupled`'s own signature so the two cannot drift apart. Everything
-#: else a caller passes -- ``method``, ``reference_state``, and every keyword bound for
-#: ``coupled_continuation`` behind ``**continuation_kwargs`` -- describes a continuation, and reaches the
-#: target solve only when that solve is the one building it.
+#: else a caller passes -- ``preconditioner``, ``reference_state``, and every march keyword bound for
+#: :func:`~aquaflux.turbulence.coupled_step` behind ``**continuation_kwargs`` -- describes a
+#: continuation, and reaches the target solve only when that solve is the one building it.
 _SOLVE_ONLY = frozenset(inspect.signature(solve_coupled).parameters) - {
     "coupled",
     "flow",
     "k",
     "omega",
-    "method",
+    "preconditioner",
     "reference_state",
     # `inspect.signature` names the `**kwargs` parameter itself; it is not a keyword anyone passes.
     "continuation_kwargs",
@@ -395,10 +396,13 @@ def solve_reynolds_continuation(
         Forwarded to every per-Re :func:`~aquaflux.turbulence.solve_coupled`. ``continuation`` and
         ``reference_state`` are **target-specific** (a preconditioner frozen at the target viscosity),
         so they are applied to the final solve only; each lower-Re point builds its own continuation at
-        its own viscosity. The split runs the other way too: ``method`` and every keyword bound for
-        :func:`~aquaflux.turbulence.coupled_continuation` describe a continuation *this function builds*,
-        so when ``continuation`` is supplied they reach the **ramp** only — the target is not building
-        one. ⚠️ A ``point_setup`` that returns a ``continuation`` supplies one to **every** point, which
+        its own viscosity. The split runs the other way too: ``preconditioner`` and every march keyword
+        bound for :func:`~aquaflux.turbulence.coupled_step` describe a continuation *this function
+        builds*, so when ``continuation`` is supplied they reach the **ramp** only — the target is not
+        building one. A :class:`~aquaflux.turbulence.MaterializedJacobian` ``preconditioner`` is opened
+        as **one** session shared by every point and re-pointed at each point's companion, so every
+        rung glues in the same inverse and refresh hook rather than recompiling the coupled solve; a
+        :class:`~aquaflux.turbulence.BlockDiagonal` one is built per point at its own viscosity. ⚠️ A ``point_setup`` that returns a ``continuation`` supplies one to **every** point, which
         leaves such settings dead everywhere; ``solve_coupled`` then rejects them rather than dropping
         them, so pass them to the builder inside ``point_setup`` instead.
 
@@ -437,7 +441,7 @@ def solve_reynolds_continuation(
     # The split runs BOTH ways, and this is the whole of it. `continuation` / `reference_state` freeze a
     # preconditioner at the TARGET viscosity, so they belong to the final solve only and each lower-Re
     # point builds its own at its own viscosity. The mirror image is that everything which *configures*
-    # a continuation this function builds -- `method`, and every keyword bound for `coupled_continuation`
+    # a continuation this function builds -- `preconditioner`, and every march keyword of `coupled_step`
     # -- belongs to the RAMP only, because the final solve is not building one when the caller supplied
     # it. Passing both at once is the ordinary case, not a mistake: the ramp needs the settings and the
     # target needs the pre-built step. Only the ramp strip existed, so a caller who did that reached
@@ -466,6 +470,14 @@ def solve_reynolds_continuation(
     # earlier one already reached.
     if intermediate_atol is not None:
         ramp_kwargs["atol"] = intermediate_atol
+    # One session for every point, for a materialized preconditioner: the inverse and its hooks ride in
+    # static fields of the step, so a point building its own would recompile the whole coupled solve.
+    # Opened on the stopped copy; each point re-points it at its own companion before solving.
+    shared = _shared_session(solve_kwargs, frozen)
+    if shared is not None:
+        ramp_kwargs = _with_session(ramp_kwargs, shared)
+        if "preconditioner" in target_kwargs:
+            target_kwargs = _with_session(target_kwargs, shared)
 
     def _point_solve(assembler, seed_fields, base_kwargs, point):
         # One Reynolds point. Without `point_setup` this is the plain solve (byte-identical to before,
@@ -511,10 +523,12 @@ def solve_reynolds_continuation(
         is_target = attempt <= 1.0 + _TARGET_TOLERANCE
         assembler = coupled if is_target else frozen.with_scaled_molecular_viscosity(attempt)
         point = ReynoldsPoint(len(converged) + 1, total, 1.0 if is_target else float(attempt))
+        point_kwargs = target_kwargs if is_target else ramp_kwargs
+        session = point_kwargs.get("preconditioner")
+        if session is not None and not isinstance(session, BlockDiagonal | MaterializedJacobian):
+            session.rebind(assembler)
         try:
-            flow, k, omega = _point_solve(
-                assembler, seed, target_kwargs if is_target else ramp_kwargs, point
-            )
+            flow, k, omega = _point_solve(assembler, seed, point_kwargs, point)
         except eqx.EquinoxRuntimeError as exc:
             retreat = schedule.next_scale(tuple(converged), float(attempt))
             if retreat is None:
@@ -963,17 +977,65 @@ def solve_reynolds_ramp(
     seed_fields = hybrid_initialize(first.momentum, first.turbulence)
     state = first.state_from_physical(*seed_fields)
     extra = point_setup(first, state, ReynoldsPoint(1, 1, float(anchor)))
+    passed = {key: value for key, value in solve_kwargs.items() if key not in _LADDER_ONLY}
+    rebind = _rebinding(extra)
+    # A materialized preconditioner is opened as one session on the ANCHOR, so the first step is fitted
+    # to the problem it solves, and the homotopy re-points it at every station change. A block-diagonal
+    # spec is left to the solve, which builds it on the target as it always has (#386).
+    shared = _shared_session(passed, first)
+    if shared is not None:
+        passed = _with_session(passed, shared)
+        shared.rebind(first)
+        if rebind is not None:
+            raise TypeError(
+                "point_setup returned a refresh with its own re-pointable hook beside a "
+                "preconditioner session, which re-points itself at every station. Return no refresh "
+                "hook, or pass no preconditioner."
+            )
+        rebind = shared.rebind
     homotopy = ViscosityRampHomotopy(
         coupled,
         anchor=anchor,
         stations=stations,
         steps_per_station=steps_per_station,
         redamping=redamping,
-        rebind=_rebinding(extra),
+        rebind=rebind,
         companion=companion,
     )
-    passed = {key: value for key, value in solve_kwargs.items() if key not in _LADDER_ONLY}
     return solve_coupled(coupled, *seed_fields, homotopy=homotopy, **{**passed, **extra})
+
+
+def _shared_session(kwargs: dict, assembler: CoupledRANS) -> object | None:
+    """The session several solves should share, or ``None`` when each builds its own.
+
+    A :class:`MaterializedJacobian` spec is opened here -- with the options' own
+    ``jacobian_production_viscosity``, which the session owns -- and a session the caller opened is used
+    as given. A :class:`BlockDiagonal` spec, or none, is left for each solve to build.
+    """
+    preconditioner = kwargs.get("preconditioner")
+    if preconditioner is None or isinstance(preconditioner, BlockDiagonal):
+        return None
+    if not isinstance(preconditioner, MaterializedJacobian):
+        return preconditioner
+    production = kwargs.get("jacobian_production_viscosity")
+    return open_session(
+        preconditioner,
+        assembler,
+        **({} if production is None else {"jacobian_production_viscosity": production}),
+    )
+
+
+def _with_session(kwargs: dict, session: object) -> dict:
+    """``kwargs`` with ``session`` as the preconditioner, and the setting the session now owns removed."""
+    preconditioner = kwargs.get("preconditioner")
+    owned = (
+        ()
+        if not isinstance(preconditioner, MaterializedJacobian)
+        else ("jacobian_production_viscosity",)
+    )
+    return {key: value for key, value in kwargs.items() if key not in owned} | {
+        "preconditioner": session
+    }
 
 
 def _rebinding(extra: dict) -> Callable[[CoupledRANS], None] | None:
