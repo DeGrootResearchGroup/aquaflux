@@ -597,8 +597,16 @@ order; and it pins **one BLAS/XLA thread per worker**, because otherwise every w
 core and N workers × M cores thrashes instead of scaling. `FASTGATE_JOBS=<n>` sets the worker count
 and `FASTGATE_JOBS=0` (or your own `-n`) opts out — do that when bisecting a failure, since worker
 output is interleaved. Measured 2026-08-23 on an 11-core, 19 GB machine with the compiled ILU(0)
-kernel live: **26:13 serial → 8:53** at ~6.4 GB peak, and **6:34** once the handful of heaviest
-tests were cut back — see the cost rule immediately below.
+kernel live: **26:13 serial → 8:53**, and **6:34** once the handful of heaviest
+tests were cut back — see the cost rule immediately below. ⚠️ **Its accompanying memory figure,
+"~6.4 GB peak", was RSS and is deleted rather than corrected in place** (Stale-Record Check): RSS
+excludes compressed pages, and a footprint re-measurement on the same class of machine
+(`top -l 1 -o mem -stats pid,ppid,mem,cmprs,command`, 2026-09-13, 11 xdist workers, jax 0.10.2)
+found the workers holding **2.5–5.9 GB each, ~49.5 GB combined**, against a summed RSS at the same
+instant of **4.45 GB** — an order of magnitude apart. Judge how many of these a machine can run
+from the footprint number, never from RSS. `tools/fastgate.sh` now enforces "one tier at a time"
+machine-wide because of exactly this gap; see the tier lock in the Development-workflow section
+below.
 
 ### What a fast-tier test may spend (binding)
 
@@ -876,6 +884,31 @@ landed on ran **3.2×** slow over the overlap; run end to end they are about 8 a
 lost. The gate asks `validation/run_case.sh --running` rather than reading the run-file itself, so the
 file's format and the `kill -0` liveness rule keep one home — a second copy of either is the duplication
 that made this class of collision possible to begin with.
+
+**⚠️ That guard was over tier-vs-case, and the same gap existed one level over: TIER-VS-TIER.** On
+2026-09-13 two fast tiers started five minutes apart, from two different worktrees, neither touching a
+validation case, and the machine (11 cores, 19 GB) had to be hard-reset. A single fast tier's real
+memory footprint — its mostly-**compressed** working set, not its RSS, which undercounts it by roughly
+an order of magnitude here (see the correction above) — runs to ~50 GB across its 11 workers; two at
+once is ~100 GB of that on a machine with 19 GB of RAM and no reserve of swap left to absorb it.
+`tools/fastgate.sh` now also holds a machine-wide lock (a lockfile under `~/.cache/aquaflux/`,
+released on exit) while any tier runs, refusing a second one from **any** worktree or session with the
+same `FASTGATE_FORCE=1` override and the same CI exemption — exit `4`, distinct from the case guard's
+exit `3`, so the two refusals are distinguishable from a calling script. `FASTGATE_LOCK_DIR` overrides
+the lock's location, the way `FASTGATE_JOBS` overrides the worker count.
+
+**A second, complementary fix cuts a single tier's own footprint, rather than only fencing it off
+from a second one.** An xdist worker keeps every compiled XLA executable it has ever built for the
+process's lifetime, across however many modules `--dist loadfile` hands it — so the footprint above
+only grows over a run and never comes back down. `tests/conftest.py` now calls `jax.clear_caches()`
+in a module-scoped autouse fixture, at the end of every module. Measured the same way as the
+correction above (`top -l 1 -o mem -stats pid,ppid,mem,cmprs`, same 11-core/19 GB machine, jax
+0.10.2, 2026-09-14): peak combined footprint **54.3 GB → 22.7 GB**, wall clock **467 s → 412 s** —
+both improve, because the unfixed run was also paying to keep over 30 GB of that footprint
+compressed, and the recompiles this costs are cheaper than that. This is most of the reason the
+default worker count was **not** also cut to fit a single tier inside physical RAM (a harsher,
+slower fix considered and deferred to a follow-up issue): with this fix in place, one tier's peak
+footprint sits close to this machine's 19 GB of RAM rather than 2.8× over it.
 
 ### What no runner can enforce (binding)
 

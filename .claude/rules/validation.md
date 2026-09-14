@@ -234,16 +234,31 @@ cannot be written. The guard is what catches the next module that does branch.
   it folds far couplings onto near entries. Probe every arm at a uniform reach whenever a monolithic arm
   is in the comparison, or the arms are not being compared on the same matrix.
 
-## ⚠️ `run_case.sh` GUARDS AGAINST A SECOND CASE AND NOT AGAINST A TEST TIER (measured 2026-09-09)
+## A validation case can collide with a test tier, or a test tier with another tier (both now closed)
 
-**The runner's mutual exclusion is over *cases*. `tools/fastgate.sh` is not a case, so nothing stops it
-starting on top of a running one — and the fast tier is unambiguously a heavy job on this machine.** It
-runs `pytest -n auto --dist loadfile`, which on the 11-core, 19 GB machine these cases are measured on
-peaks around **6.4 GB** and, launched beside a live pitzDaily march, drove the load average past **22**
-with free memory at **0.73 GB**. It happened **twice in one evening**, from two different worktrees, one
+**The runner's mutual exclusion was originally over *cases* only. `tools/fastgate.sh` is not a case, so
+nothing stopped it starting on top of a running one** — and the fast tier is unambiguously a heavy job
+on this machine. On 2026-09-09 that happened **twice in one evening**, from two different worktrees, one
 minute and four minutes into someone else's case — and the two gates took **17:25** and **13:00** against
 a documented 6:34-8:53 for that tier. Every wall-clock number in a case log overlapping such a window is
-contaminated, and so is the gate's own.
+contaminated, and so was the gate's own. **`tools/fastgate.sh` now refuses to start while
+`validation/run_case.sh --running` reports a live case** (exit `3`, `FASTGATE_FORCE=1` to override), so
+this specific collision cannot recur — the numbers above stand as evidence for the cost of contention
+and for why the guard exists, not as an open gap.
+
+**⚠️ The "peaks around 6.4 GB" figure this incident was originally recorded with was RSS, and RSS is
+not what a machine runs out of.** It excludes compressed pages, which is most of a JAX worker's real
+footprint. A footprint re-measurement on the same class of machine (`top -l 1 -o mem -stats
+pid,ppid,mem,cmprs,command`, 2026-09-13, `-n auto` = 11 xdist workers, jax 0.10.2) found the workers
+holding **2.5–5.9 GB each, ~49.5 GB combined**, against a summed RSS at the same instant of only
+**4.45 GB** — an order of magnitude apart, and the reason nothing caught the next collision: on
+2026-09-13 **two fast tiers** started five minutes apart, from two different worktrees, neither
+touching a case, and drove the machine to a hard reset (~100 GB of combined footprint on a 19 GB
+machine). `tools/fastgate.sh` now also holds a machine-wide lock (`~/.cache/aquaflux/fastgate.lock`)
+while any tier runs anywhere on the machine, refusing a second one — from any worktree, any session —
+with the same `FASTGATE_FORCE=1` override and the same CI exemption (exit `4`, distinct from the case
+guard's exit `3`). The case guard above and this lock are two different mutual exclusions: a tier can
+collide with either a case or another tier, and closing one said nothing about the other.
 
 **What contention does and does not move — and this is the useful half, because it needs no clock.** The
 cleanest instance is a matched pair in ONE worktree at ONE commit, differing only in machine load, whose

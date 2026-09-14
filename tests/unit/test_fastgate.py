@@ -114,8 +114,19 @@ def _run(cwd: Path, *args: str, **overrides: str) -> subprocess.CompletedProcess
 
     Built by unpacking rather than ``dict(os.environ, CI=..., **overrides)`` so a caller may override
     ``CI`` itself -- the case-collision guard keys on it, and that form raises on the duplicate.
+
+    ``FASTGATE_LOCK_DIR`` defaults to a directory beside ``cwd`` rather than the real
+    ``~/.cache/aquaflux``: the tier lock is machine-global by design (that is the point of it), so
+    every test here would otherwise contend for the SAME lock file this test process's own enclosing
+    fastgate invocation may be holding, and tests running under xdist would contend with each other
+    too. A test exercising the lock itself overrides this to point two invocations at one directory.
     """
-    environment = {**os.environ, "CI": "1", **overrides}
+    environment = {
+        **os.environ,
+        "CI": "1",
+        "FASTGATE_LOCK_DIR": str(cwd.parent / "fastgate-lock"),
+        **overrides,
+    }
     for marker in _XDIST_MARKERS:
         environment.pop(marker, None)
     return subprocess.run(
@@ -356,3 +367,112 @@ def test_the_guard_is_skipped_under_CI(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert "1 passed" in result.stdout
+
+
+# --- the tier-vs-tier lock (#379) --------------------------------------------------------------
+#
+# A SEPARATE mutual exclusion from the case guard above: that one stops a tier landing on a running
+# validation case, this one stops a tier landing on ANOTHER running tier -- possibly from a different
+# worktree or a different session, which is exactly what happened on 2026-09-13 (two fast tiers five
+# minutes apart, neither touching a case, hard-reset the machine). Every test below points
+# ``FASTGATE_LOCK_DIR`` at a throwaway directory, so none of them can read -- or contend for -- the
+# real machine-wide lock at ``~/.cache/aquaflux``.
+
+
+def _lock_held_by(lock_dir: Path, pid: int) -> dict[str, str]:
+    """Overrides that make the gate believe another tier, run by ``pid``, holds the lock.
+
+    Mirrors ``_case_running``'s shape: a hand-written record in the place the gate reads it, rather
+    than an actual second fastgate invocation, and ``CI`` cleared since the guard treats CI as "no
+    concurrent tiers here" the same way the case guard treats it as "no cases here".
+    """
+    lock_dir.mkdir(exist_ok=True)
+    (lock_dir / "fastgate.lock").write_text(
+        f"pid={pid}\ncheckout=other\ntier=fast\nstarted=2026-09-13 20:37:03\n"
+    )
+    return {"FASTGATE_LOCK_DIR": str(lock_dir), "CI": ""}
+
+
+def test_it_refuses_to_start_beside_ANOTHER_running_tier(tmp_path: Path) -> None:
+    """The guard this lock exists for: a second tier must not start while one is already running,
+    anywhere on the machine -- not only beside a validation case."""
+    tree = _tree(tmp_path, test_ok=_CHATTER)
+    lock_dir = tmp_path / "lock"
+    with subprocess.Popen(["sleep", "60"]) as other_tier:
+        try:
+            result = _run(tree, "fast", str(tree), **_lock_held_by(lock_dir, other_tier.pid))
+        finally:
+            other_tier.terminate()
+
+    assert result.returncode == 4, result.stdout + result.stderr
+    assert "another test tier is already running" in result.stderr
+    assert str(other_tier.pid) in result.stderr  # it names what it is waiting for
+    assert "1 passed" not in result.stdout  # and pytest never ran
+
+
+def test_the_tier_lock_refusal_can_be_overridden_deliberately(tmp_path: Path) -> None:
+    """`FASTGATE_FORCE=1` runs anyway, the same escape hatch the case guard offers."""
+    tree = _tree(tmp_path, test_ok=_CHATTER)
+    lock_dir = tmp_path / "lock"
+    with subprocess.Popen(["sleep", "60"]) as other_tier:
+        try:
+            overrides = _lock_held_by(lock_dir, other_tier.pid)
+            overrides["FASTGATE_FORCE"] = "1"
+            result = _run(tree, "fast", str(tree), **overrides)
+        finally:
+            other_tier.terminate()
+
+    assert result.returncode == 0
+    assert "1 passed" in result.stdout
+
+
+def test_a_tier_lock_from_a_DEAD_pid_does_not_wedge_the_gate(tmp_path: Path) -> None:
+    """A lock left behind by a crashed or killed tier must not block every future run forever.
+
+    Liveness is `kill -0` on the recorded pid, exactly as `run_case.sh` treats its own run-file --
+    the file outliving its writer is expected, not a special case to detect separately.
+    """
+    tree = _tree(tmp_path, test_ok=_CHATTER)
+    lock_dir = tmp_path / "lock"
+    dead = subprocess.Popen(["sleep", "60"])
+    dead.terminate()
+    dead.wait()
+
+    result = _run(tree, "fast", str(tree), **_lock_held_by(lock_dir, dead.pid))
+
+    assert result.returncode == 0
+    assert "1 passed" in result.stdout
+
+
+def test_the_tier_lock_is_skipped_under_CI(tmp_path: Path) -> None:
+    """CI shards the heavy tiers across separate jobs rather than running them concurrently in one,
+    so a stray lock file in a shared runner cache must not be able to fail a required check."""
+    tree = _tree(tmp_path, test_ok=_CHATTER)
+    lock_dir = tmp_path / "lock"
+    with subprocess.Popen(["sleep", "60"]) as other_tier:
+        try:
+            overrides = _lock_held_by(lock_dir, other_tier.pid)
+            overrides["CI"] = "1"
+            result = _run(tree, "fast", str(tree), **overrides)
+        finally:
+            other_tier.terminate()
+
+    assert result.returncode == 0
+    assert "1 passed" in result.stdout
+
+
+def test_a_tier_releases_its_own_lock_when_it_finishes(tmp_path: Path) -> None:
+    """A completed run must not leave the NEXT one refusing to start.
+
+    Runs the gate twice in a row against the same lock directory with nothing else holding it --
+    the only way the second run can succeed is if the first cleaned up after itself.
+    """
+    tree = _tree(tmp_path, test_ok=_CHATTER)
+    lock_dir = tmp_path / "lock"
+
+    first = _run(tree, "fast", str(tree), FASTGATE_LOCK_DIR=str(lock_dir))
+    second = _run(tree, "fast", str(tree), FASTGATE_LOCK_DIR=str(lock_dir))
+
+    assert first.returncode == 0 and "1 passed" in first.stdout
+    assert second.returncode == 0 and "1 passed" in second.stdout
+    assert not (lock_dir / "fastgate.lock").exists()
