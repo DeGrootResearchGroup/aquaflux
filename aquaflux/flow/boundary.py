@@ -45,6 +45,7 @@ import equinox as eqx
 import jax.numpy as jnp
 
 from aquaflux.boundary import Dirichlet, DirichletField, ZeroGradient
+from aquaflux.boundary.conditions import as_float_leaf, as_position_function
 from aquaflux.vectors import dot
 
 
@@ -118,9 +119,30 @@ def _prescribed_reference_velocity(bc, normal: jnp.ndarray, centroid: jnp.ndarra
     return bc.velocity_face(quiescent, zero_gradient, quiescent, normal, centroid)
 
 
-def _component(profile, i: int):
-    """The ``i``-th scalar component of a vector-valued velocity profile ``x -> (n, dim)``."""
-    return lambda face_centroid: profile(face_centroid)[:, i]
+def _as_prescribed_velocity(velocity):
+    """Normalize a prescribed velocity so its numbers are pytree leaves a gradient reaches.
+
+    A callable is a profile of face centroids (see
+    :func:`~aquaflux.boundary.conditions.as_position_function`); anything else is a constant
+    ``(dim,)`` vector, stored as a floating array.
+    """
+    if callable(velocity):
+        return as_position_function(velocity)
+    return as_float_leaf(velocity)
+
+
+class _Component(eqx.Module):
+    """The ``index``-th scalar component of a vector-valued velocity profile ``x -> (n, dim)``.
+
+    A module rather than a closure, so the profile it reads -- and any coefficients the profile
+    holds as leaves -- stays part of the pytree rather than being captured out of reach.
+    """
+
+    profile: eqx.Module
+    index: int = eqx.field(static=True)
+
+    def __call__(self, face_centroid):
+        return self.profile(face_centroid)[:, self.index]
 
 
 def _prescribed_components(velocity, dim: int):
@@ -131,9 +153,7 @@ def _prescribed_components(velocity, dim: int):
     becomes one :class:`~aquaflux.boundary.Dirichlet` per component.
     """
     if callable(velocity):
-        return [DirichletField(field_fn=_component(velocity, i)) for i in range(dim)]
-    # velocity is a static (dim,) sequence — index it directly, keeping each component a concrete
-    # scalar (a jnp array here would not concretize under jit).
+        return [DirichletField(field_fn=_Component(velocity, i)) for i in range(dim)]
     return [Dirichlet(value=velocity[i]) for i in range(dim)]
 
 
@@ -370,11 +390,13 @@ class MovingWall(FlowBoundary):
 
     Attributes
     ----------
-    velocity : tuple of float or callable
-        The wall velocity: a constant ``(dim,)`` vector, or a callable of face centroids. Static.
+    velocity : jnp.ndarray or equinox.Module
+        The wall velocity: a constant ``(dim,)`` vector (stored as a floating array), or a callable
+        of face centroids. A profile given as an ``equinox.Module`` keeps its coefficients as
+        differentiable leaves; a plain function is held static and is not differentiable.
     """
 
-    velocity: object = eqx.field(static=True)
+    velocity: object = eqx.field(converter=_as_prescribed_velocity)
 
     def velocity_face(self, velocity_owner, grad_velocity_owner, d, normal, centroid):
         dim = velocity_owner.shape[1]
@@ -420,12 +442,14 @@ class VelocityInlet(FlowBoundary):
 
     Attributes
     ----------
-    velocity : tuple of float or callable
-        The inlet velocity: a constant ``(dim,)`` vector, or a callable mapping face centroids
-        ``(n, dim)`` to velocity vectors ``(n, dim)`` for a profile (e.g. a parabola). Static.
+    velocity : jnp.ndarray or equinox.Module
+        The inlet velocity: a constant ``(dim,)`` vector (stored as a floating array), or a callable
+        mapping face centroids ``(n, dim)`` to velocity vectors ``(n, dim)`` for a profile (e.g. a
+        parabola). A profile given as an ``equinox.Module`` keeps its coefficients (a peak speed,
+        say) as differentiable leaves; a plain function is held static and is not differentiable.
     """
 
-    velocity: object = eqx.field(static=True)
+    velocity: object = eqx.field(converter=_as_prescribed_velocity)
 
     def velocity_face(self, velocity_owner, grad_velocity_owner, d, normal, centroid):
         dim = velocity_owner.shape[1]
@@ -467,11 +491,11 @@ class PressureOutlet(FlowBoundary):
 
     Attributes
     ----------
-    pressure : float
-        The imposed boundary pressure ``p_b``.
+    pressure : jnp.ndarray
+        The imposed boundary pressure ``p_b`` (stored as a floating array).
     """
 
-    pressure: float
+    pressure: jnp.ndarray = eqx.field(converter=as_float_leaf)
 
     def velocity_face(self, velocity_owner, grad_velocity_owner, d, normal, centroid):
         dim = velocity_owner.shape[1]
