@@ -335,7 +335,8 @@ Many entries below are dated history written against the old API. Read them thro
       (the mass-flow path supplies its own constraint-aware measure) and `flow_direction` on the
       mass-flow builder — both deliberate. `test_sibling_builders.py` pins the pair, and
       `test_every_continuation_builder_installs_the_same_globalization` still pins the two surfaces.
-      Mechanism and the other pairs it surfaced are in `CLAUDE.md`'s sibling-builder item.
+      It is the only pair the fix added; the mechanism, and the six invented pairs its first version
+      reported before review, are in `CLAUDE.md`'s sibling-builder item.
   - **`solve_coupled(refresh=RefreshPolicy(trigger=…))` segments the march to re-freeze the preconditioner — and a refresh
     must CARRY the shift diagonals, not rebuild them (binding).** With a trigger set, the march runs as a
     sequence of *observed* segments (`aquaflux.solve.forward_march`): each steps until the trigger judges

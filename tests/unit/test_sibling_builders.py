@@ -436,6 +436,255 @@ def test_it_follows_a_method_through_a_receiver_whose_class_is_knowable(tmp_path
     assert "1 sibling-builder pair" in out, out
 
 
+#: A shared step class and a decoy, used by the receiver fixtures below. Each builder pair in them
+#: shares six parameters with ``build_two``, which reaches ``Step`` directly, and ``slow`` is the drift.
+_STEPS = """
+class Step:
+    def __init__(self, policy, a=0, b=0, c=0, d=0, e=0, f=0, slow=None):
+        pass
+
+
+class Noise:
+    def __init__(self):
+        pass
+
+
+def _tail(policy, *, a=0, b=0, c=0, d=0, e=0, f=0, slow=None):
+    return Step(policy, a=a, b=b, c=c, d=d, e=e, f=f, slow=slow)
+
+
+def build_two(policy, *, a=0, b=0, c=0, d=0, e=0, f=0, slow=None):
+    return _tail(policy, a=a, b=b, c=c, d=d, e=e, f=f, slow=slow)
+
+
+def build_noise(policy, *, a=0, b=0, c=0, d=0, e=0, f=0):
+    return Noise()
+"""
+
+_BUILD_ONE_THROUGH_A_SESSION = """
+from .sessions import open_session
+
+
+def build_one(policy, *, a=0, b=0, c=0, d=0, e=0, f=0):
+    session = open_session()
+    return session._build(policy, dict(a=a, b=b, c=c, d=d, e=e, f=f))
+"""
+
+#: The session reaches the tail ONLY through ``self._step``, and ``_step`` is defined on two classes --
+#: one of which builds the decoy. The pair is reported only if ``self.m`` resolves on the owning class.
+_SELF_METHOD = {
+    "steps.py": _STEPS,
+    "builders.py": _BUILD_ONE_THROUGH_A_SESSION,
+    "sessions.py": """
+from .steps import Noise, _tail
+
+
+class Session:
+    def _build(self, policy, fields):
+        return self._step(policy, fields)
+
+    def _step(self, policy, fields):
+        return _tail(policy, **fields)
+
+
+class Unrelated:
+    def _step(self):
+        return Noise()
+
+
+def open_session():
+    return Session()
+""",
+}
+
+#: The session reaches the tail ONLY through a local bound to a call and returned as one arm of a
+#: conditional expression.
+_RETURNED_LOCAL = {
+    "steps.py": _STEPS,
+    "builders.py": _BUILD_ONE_THROUGH_A_SESSION,
+    "sessions.py": """
+from .steps import _tail
+
+
+class Session:
+    def _build(self, policy, fields):
+        step = _tail(policy, **fields)
+        return step if fields else None
+
+
+def open_session():
+    return Session()
+""",
+}
+
+#: The session reaches the tail ONLY through ``self._step``, and ``_step`` is INHERITED -- defined on a
+#: base class, not on ``Session`` -- and defined exactly once in the package.
+_INHERITED_SELF_METHOD = {
+    "steps.py": _STEPS,
+    "builders.py": _BUILD_ONE_THROUGH_A_SESSION,
+    "sessions.py": """
+from .steps import _tail
+
+
+class Base:
+    def _step(self, policy, fields):
+        return _tail(policy, **fields)
+
+
+class Session(Base):
+    def _build(self, policy, fields):
+        return self._step(policy, fields)
+
+
+def open_session():
+    return Session()
+""",
+}
+
+#: A receiver whose producer builds a SECOND class as an argument: ``Session(Helper())``. ``Helper``
+#: also defines ``_build``, returning the decoy. A receiver typed by everything the producer's return
+#: mentions resolves ``session._build`` on ``Helper`` as well, and pairs ``build_one`` with the decoy.
+_PRODUCER_ARGUMENT = {
+    "steps.py": _STEPS,
+    "builders.py": _BUILD_ONE_THROUGH_A_SESSION,
+    "sessions.py": """
+from .steps import Noise, _tail
+
+
+class Session:
+    def __init__(self, helper):
+        pass
+
+    def _build(self, policy, fields):
+        return _tail(policy, **fields)
+
+
+class Helper:
+    def _build(self):
+        return Noise()
+
+
+def open_session():
+    return Session(Helper())
+""",
+}
+
+#: Locals a return READS but does not return: ``m.value``, and ``m`` as a call's argument. Neither
+#: builder builds a ``Measurement``, so neither may pair with the decoy that does.
+_READ_BUT_NOT_RETURNED = """
+class Measurement:
+    pass
+
+
+class Result:
+    pass
+
+
+def measure(a):
+    return Measurement()
+
+
+def build_from_attribute(p, *, a=0, b=0, c=0, d=0, e=0, f=0):
+    m = measure(a)
+    return Result(m.value, p)
+
+
+def build_from_argument(p, *, a=0, b=0, c=0, d=0, e=0, f=0):
+    m = measure(a)
+    return Result(m, p)
+
+
+def build_measurement(p, *, a=0, b=0, c=0, d=0, e=0, f=0):
+    return Measurement()
+"""
+
+#: A public builder that reaches a public factory through a TYPED RECEIVER, so the delegation is
+#: recorded as ``Preconditioner.build`` rather than as the bare ``build``. The two share the factory's
+#: surface by construction and must not pair.
+_WRAPPER_THROUGH_A_RECEIVER = {
+    "pc.py": """
+class VCycle:
+    def __init__(self, matrix, a=0, b=0, c=0, d=0, e=0):
+        pass
+
+
+class Preconditioner:
+    def __init__(self, cycle):
+        pass
+
+    def build(self, matrix, *, a=0, b=0, c=0, d=0, e=0):
+        return Preconditioner(VCycle(matrix, a=a, b=b, c=c, d=d, e=e))
+
+
+class Other:
+    def build(self):
+        return VCycle(None)
+
+
+def open_preconditioner():
+    return Preconditioner(None)
+""",
+    "builders.py": """
+from .pc import open_preconditioner
+
+
+def build_preconditioner(matrix, *, a=0, b=0, c=0, d=0, e=0):
+    pc = open_preconditioner()
+    return pc.build(matrix, a=a, b=b, c=c, d=d, e=e)
+""",
+}
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [_SELF_METHOD, _RETURNED_LOCAL, _INHERITED_SELF_METHOD],
+    ids=["self-method-on-its-own-class", "returned-local", "inherited-self-method"],
+)
+def test_each_way_a_session_method_reaches_its_tail_is_followed(sources, tmp_path: Path) -> None:
+    """Each fixture reaches the shared tail by exactly ONE resolution rule, so each rule is pinned alone.
+
+    A single fixture exercising all three at once let any one of them be deleted with the tests still
+    green, because the others still carried the builder into the report.
+    """
+    out = _run_package(sources, tmp_path)
+    assert "build_one" in out and "build_two" in out, (
+        f"a builder reaching its tail through this route dropped out of the report:\n{out}"
+    )
+    assert "'slow'" in out, "the drifted keyword is the actionable half of the report"
+    assert "build_noise" not in out, f"a method was resolved on a class it is not called on:\n{out}"
+
+
+def test_a_receiver_is_typed_by_what_its_producer_returns_not_by_its_arguments(
+    tmp_path: Path,
+) -> None:
+    """``return Session(Helper())`` returns a ``Session``; the ``Helper`` is only an argument."""
+    out = _run_package(_PRODUCER_ARGUMENT, tmp_path)
+    assert "build_noise" not in out, (
+        f"a receiver's method was resolved on a class its producer only passes as an argument:\n{out}"
+    )
+    assert "build_one" in out and "'slow'" in out, out
+
+
+def test_a_local_the_return_only_reads_is_not_credited(tmp_path: Path) -> None:
+    """``rate = measure(...)`` then ``return cls(sweeps=rate.value)`` does not build what ``measure`` built.
+
+    Crediting every mention of a bound local put six invented pairs into the package report, all of
+    them sharing nothing but a measurement a calibration helper returns.
+    """
+    out = _run(_READ_BUT_NOT_RETURNED, tmp_path)
+    assert "build_measurement" not in out, (
+        f"a builder was credited with a class its return only reads from:\n{out}"
+    )
+
+
+def test_a_wrapper_reached_through_a_typed_receiver_is_not_paired_with_its_callee(
+    tmp_path: Path,
+) -> None:
+    """The delegation is recorded as ``Class.method``, so the exclusion must compare the qualified label."""
+    out = _run_package(_WRAPPER_THROUGH_A_RECEIVER, tmp_path)
+    assert "no sibling-builder pairs" in out, out
+
+
 @pytest.mark.skipif(not TOOL.exists(), reason="the tool is part of the repository, not the package")
 def test_the_package_report_still_reaches_the_coupled_builders(tmp_path: Path) -> None:
     """Run it where it matters, and check it has not gone blind to the family it exists for.
