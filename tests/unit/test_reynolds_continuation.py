@@ -1432,63 +1432,6 @@ def test_the_ladder_only_keywords_are_derived_from_the_two_signatures() -> None:
     assert "point_setup" in _LADDER_ONLY
 
 
-def test_the_ramp_arm_hands_the_homotopy_the_refreshs_own_rebind(monkeypatch) -> None:
-    """A station change must re-point the frozen preconditioner at the station's own assembler.
-
-    Without it every station after the first solves against a V-cycle built for the anchor's
-    viscosity -- a march that still converges, only slowly, which is why it is wired rather than left
-    to a case to remember.
-    """
-    from aquaflux.solve import RefreshPolicy
-    from aquaflux.turbulence import solve_reynolds_ramp
-
-    coupled, calls, _ = _ramp_arm_fixtures(monkeypatch)
-    rebound: list[float] = []
-
-    def precondition_step(active_step, state):  # pragma: no cover - never called here
-        raise AssertionError("the stub march does not step")
-
-    precondition_step.rebind = lambda companion: rebound.append(
-        float(companion.momentum.properties.properties["viscosity"].value / (RHO * NU))
-    )
-
-    solve_reynolds_ramp(
-        coupled,
-        anchor=100.0,
-        stations=2,
-        steps_per_station=1,
-        point_setup=lambda companion, state, point: {
-            "refresh": RefreshPolicy(precondition_step=precondition_step)
-        },
-    )
-
-    homotopy = calls[0]["kwargs"]["homotopy"]
-    # Driving the homotopy's own stations is what proves the wiring: each entry re-points the hook at
-    # that station's viscosity, ending at the target's own 1.0.
-    for step in range(3):
-        homotopy.enter(step)
-    assert rebound == pytest.approx([100.0, 10.0, 1.0])
-
-
-def test_a_refresh_that_cannot_be_repointed_is_refused_rather_than_ignored(monkeypatch) -> None:
-    """Its only symptom would be a slower march, so it must raise instead of quietly passing ``None``."""
-    from aquaflux.solve import RefreshPolicy
-    from aquaflux.turbulence import solve_reynolds_ramp
-
-    coupled, _, _ = _ramp_arm_fixtures(monkeypatch)
-
-    with pytest.raises(ValueError, match="cannot be re-pointed"):
-        solve_reynolds_ramp(
-            coupled,
-            anchor=100.0,
-            stations=2,
-            steps_per_station=1,
-            point_setup=lambda companion, state, point: {
-                "refresh": RefreshPolicy(precondition_step=lambda step, state: None)
-            },
-        )
-
-
 def test_the_ramp_opens_a_materialized_session_on_the_anchor_and_re_points_it(monkeypatch) -> None:
     """The first step is fitted to the anchor it solves, and every station change re-points the session."""
     from aquaflux.turbulence import CompleteLu, MaterializedJacobian, solve_reynolds_ramp
@@ -1509,30 +1452,6 @@ def test_the_ramp_opens_a_materialized_session_on_the_anchor_and_re_points_it(mo
     assert float(bound / (RHO * NU)) == pytest.approx(100.0)
     homotopy.enter(2)  # the target station
     assert session._coupled is coupled
-
-
-def test_a_session_beside_a_point_setup_refresh_hook_is_refused(monkeypatch) -> None:
-    """Two things re-pointing one march at each station is a misconfiguration, not a choice to guess at."""
-    from aquaflux.solve import RefreshPolicy
-    from aquaflux.turbulence import CompleteLu, MaterializedJacobian, solve_reynolds_ramp
-
-    coupled, _, _ = _ramp_arm_fixtures(monkeypatch)
-
-    def precondition_step(active_step, state):  # pragma: no cover - never called here
-        raise AssertionError("the stub march does not step")
-
-    precondition_step.rebind = lambda companion: None
-    with pytest.raises(TypeError, match="re-points itself at every station"):
-        solve_reynolds_ramp(
-            coupled,
-            anchor=100.0,
-            stations=2,
-            steps_per_station=1,
-            point_setup=lambda companion, state, point: {
-                "refresh": RefreshPolicy(precondition_step=precondition_step)
-            },
-            preconditioner=MaterializedJacobian(CompleteLu()),
-        )
 
 
 def test_no_refresh_at_all_is_not_an_error(monkeypatch) -> None:

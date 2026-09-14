@@ -38,8 +38,10 @@ CASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
-from aquaflux.solve import block_stencil_gather_map  # noqa: E402
-from aquaflux.solve import MonolithicAmgPreconditioner  # noqa: E402
+from aquaflux.solve import (
+    MonolithicAmgPreconditioner,  # noqa: E402
+    block_stencil_gather_map,  # noqa: E402
+)
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _batched_jacobian_matvec,
     _coupled_jacobian_plan,

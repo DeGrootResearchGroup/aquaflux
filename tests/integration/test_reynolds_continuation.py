@@ -15,8 +15,8 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
 import pytest
-from aquaflux.turbulence import BlockDiagonal, solve_reynolds_continuation
-from aquaflux.turbulence.coupled import CoupledRANS, coupled_continuation, solve_coupled
+from aquaflux.turbulence import BlockDiagonal, coupled_step, solve_reynolds_continuation
+from aquaflux.turbulence.coupled import CoupledRANS, solve_coupled
 
 # The 560-cell turbulent channel (Re = U H / nu = 2500) and its constants, reused verbatim so the case
 # is defined once (tests/integration is a package, so this is the package-qualified path).
@@ -97,8 +97,10 @@ def test_adjoint_matches_a_direct_solve_and_is_point_count_independent(channel) 
     """
     # Build the target-viscosity continuation once, outside jax.grad (the block preconditioner must be
     # constructed on concrete parameters).
-    continuation = coupled_continuation(
-        channel, channel.pack_state(*_hybrid(channel)), method="twolevel", **PRECONDITIONER
+    continuation = coupled_step(
+        channel,
+        channel.pack_state(*_hybrid(channel)),
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
 
     def objective(nu_scale, n_points):

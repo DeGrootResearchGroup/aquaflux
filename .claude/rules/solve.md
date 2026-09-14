@@ -176,7 +176,7 @@ recorded error.** A default here that disagrees with the code is a defect — fi
 
 | | library default | validated `bfs3d` bundle | where |
 |---|---|---|---|
-| smoother fill | `smoother_fill_levels=1` (ILU(1)) | 0 (ILU(0)) — **inert**: monolithic only, and the case runs the split | `coupled_amg_continuation` / `compare.py` |
+| smoother fill | `smoother_fill_levels=1` (ILU(1)) | 0 (ILU(0)) — **inert**: monolithic only, and the case runs the split | `MonolithicVCycle` / `compare.py` |
 | smoother sweeps | `smoother_sweeps=2` | 4 — **inert**, as above | same |
 | coarse-eq limit | `coarse_eq_limit=None` (~50) | 2000 — **inert**, as above | same |
 | PC shift floor | `beta_floor=0.0` | **0.05** | same |
@@ -202,11 +202,11 @@ halves of the decision are now separated:
 * **The restart regime is per preconditioner family**, which is the part that genuinely differs, as
   `_ForwardSolveRegime` values in `turbulence/coupled.py`:
 
-| regime | builder | rtol | restart | max_restarts |
+| regime | preconditioner (`coupled_step` / a session) | rtol | restart | max_restarts |
 |---|---|---|---|---|
-| `_BLOCK_FORWARD` | `coupled_continuation` (block-SIMPLE) | 0.3 | 120 | 15 |
-| `_FACTORIZATION_FORWARD` | `coupled_lu_continuation` | 0.3 | 10 | 40 |
-| `_VCYCLE_FORWARD` | `coupled_amg_continuation` (3D `bfs3d`) | 0.3 | 15 | 60 |
+| `_BLOCK_FORWARD` | `BlockDiagonal` (block-SIMPLE) | 0.3 | 120 | 15 |
+| `_FACTORIZATION_FORWARD` | `MaterializedJacobian(CompleteLu)` | 0.3 | 10 | 40 |
+| `_VCYCLE_FORWARD` | `MaterializedJacobian(MonolithicVCycle \| FieldSplit)` (3D `bfs3d`) | 0.3 | 15 | 60 |
 | `_CONSTRAINED_FORWARD` | `mass_flow_coupled_continuation` | **1e-2, Euclidean** | 120 | 15 |
 
 All four builders take `forward_rtol` / `forward_restart` / `forward_max_restarts`. ⚠️ **Move the

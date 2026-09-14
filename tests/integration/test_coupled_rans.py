@@ -37,13 +37,14 @@ from aquaflux.turbulence import (
     LogScalars,
     SSTModel,
     SSTTurbulence,
+    coupled_step,
     hybrid_initialize,
     inlet_k,
     inlet_omega,
     scalar_pseudo_transient_solve,
     solve_segregated,
 )
-from aquaflux.turbulence.coupled import CoupledRANS, coupled_continuation, solve_coupled
+from aquaflux.turbulence.coupled import CoupledRANS, solve_coupled
 
 # Step caps are backstops, not costs: the solvers' while_loop exits on tolerance, so a generous cap
 # is free (measured identical wall time and physics at 200 vs 500). These are sized to clear the
@@ -204,8 +205,8 @@ def test_coupled_adjoint_matches_finite_difference(case) -> None:
     # Build the continuation once, outside jax.grad, on concrete parameters (the block preconditioner
     # must not be traced); differentiate only the converged solve through the coupled IFT adjoint.
     reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
-    continuation = coupled_continuation(
-        coupled, reference_state, method="twolevel", **PRECONDITIONER
+    continuation = coupled_step(
+        coupled, reference_state, preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER)
     )
 
     def objective(nu_scale):
@@ -250,12 +251,11 @@ def test_the_coupled_adjoint_is_independent_of_the_forward_iteration_count(case)
     reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
 
     def continuation(inner_steps):
-        return coupled_continuation(
+        return coupled_step(
             coupled,
             reference_state,
-            method="twolevel",
+            preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
             inner_steps=inner_steps,
-            **PRECONDITIONER,
         )
 
     def objective(nu_scale, step):
@@ -311,8 +311,8 @@ def test_the_injected_adjoint_solver_reaches_the_transpose_solve_and_only_it(cas
     flow_ws, k_ws, omega_ws = case["coupled_start"]
 
     reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
-    continuation = coupled_continuation(
-        coupled, reference_state, method="twolevel", **PRECONDITIONER
+    continuation = coupled_step(
+        coupled, reference_state, preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER)
     )
     strangled = lx.GMRES(rtol=1e-12, atol=1e-12, restart=1, max_steps=1)
 
@@ -393,11 +393,10 @@ def test_coupled_log_omega_adjoint_matches_finite_difference(case) -> None:
     momentum, turbulence = case["momentum"], case["turbulence"]
     flow_ws, k_ws, omega_ws = case["coupled_start"]
     log_omega = CoupledRANS.build(momentum, turbulence, omega_transform=LogScalars())
-    continuation = coupled_continuation(
+    continuation = coupled_step(
         log_omega,
         log_omega.state_from_physical(flow_ws, k_ws, omega_ws),
-        method="twolevel",
-        **PRECONDITIONER,
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
     )
 
     def objective(nu_scale):

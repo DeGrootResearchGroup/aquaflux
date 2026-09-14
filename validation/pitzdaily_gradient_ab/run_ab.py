@@ -70,17 +70,18 @@ from aquaflux.schemes import (  # noqa: E402
     SkewCorrectedGradient,
     SweptGradientSolve,
 )
-from aquaflux.solve import (  # noqa: E402
+from aquaflux.solve import (
     JacobiSmoothed,
     MarchLogger,
-    RefreshPolicy,
     SimpleSmoothed,
 )
-from aquaflux.turbulence import (  # noqa: E402
+from aquaflux.turbulence import (
     CoupledJacobianProbe,
-    amg_beta_tracking_refresh,
-    coupled_amg_continuation,
+    FieldSplit,
+    JacobianProbeSpec,
+    MaterializedJacobian,
     coupled_fields,
+    open_session,
     solve_reynolds_continuation,
 )
 
@@ -150,6 +151,22 @@ SIMPLE_FLOW = dict(
     frozen_coarsening=True,
 )
 JACOBI_TRAILING = dict(max_coarse=500, equilibrate=False)
+
+
+def arm_preconditioner(reach: int, gradient_sweeps: int | None = None) -> MaterializedJacobian:
+    """This study's preconditioner: the field split every arm shares, probed at ``reach``.
+
+    One definition, read by this study's march and by the closure-stall probe beside it, so the two
+    cannot build different preconditioners and report them as the same arm.
+    """
+    return MaterializedJacobian(
+        FieldSplit(SimpleSmoothed(**SIMPLE_FLOW), JacobiSmoothed(**JACOBI_TRAILING)),
+        probe=JacobianProbeSpec(
+            stencil_reach=reach, column_reach=COLUMN_REACH, gradient_sweeps=gradient_sweeps
+        ),
+        beta_floor=compare.PC_BETA_FLOOR,
+    )
+
 
 #: The Betchen arm's two sweep counts. **Fixed sweeps on BOTH systems, not the class's Krylov default**,
 #: and the reason is cost on the path a march actually pays. Profiled on this mesh (jitted, warm, min of
@@ -350,54 +367,33 @@ def solve_arm(gradient_scheme, log_path, *, reach=None, points=None, max_steps=N
     # build, the refresh hook and every rebind across a Reynolds rung. Passing the frozen assembler
     # here instead would change only the colouring PLAN, which is structural and identical either way
     # -- a fix that measurably does nothing, which is how this was got wrong the first time.
-    probe = CoupledJacobianProbe.build(
+    session = open_session(
+        arm_preconditioner(reach, PROBE_SWEEPS),
         coupled,
-        stencil_reach=reach,
-        column_reach=COLUMN_REACH,
-        gradient_sweeps=PROBE_SWEEPS,
-        production_viscosity_frozen=FROZEN_PRODUCTION,
-    )
-    refresh = amg_beta_tracking_refresh(
-        coupled,
-        probe=probe,
-        beta_floor=compare.PC_BETA_FLOOR,
+        jacobian_production_viscosity=FROZEN_PRODUCTION,
         observer=logger.on_refresh,
     )
-    shared: list = []
 
     def point_setup(companion, seed_state, point):
         logger.note(f"[{point.label}]")
-        refresh.rebind(companion)
-        engine = coupled_amg_continuation(
-            companion,
-            seed_state,
-            inner_steps=compare.INNER_STEPS,
-            inner_tol=compare.INNER_TOL,
-            probe=probe,
-            cycle_budget=compare.CYCLE_BUDGET,
-            forward_rtol=compare.FORWARD_RTOL,
-            forward_restart=compare.FORWARD_RESTART,
-            forward_max_restarts=compare.FORWARD_MAX_RESTARTS,
-            refresh_on_cycles=compare.REFRESH_ON_CYCLES or None,
-            inner_refresh=refresh.refresh_at if compare.REFRESH_ON_CYCLES else None,
-            positivity_floor=compare.K_POSITIVITY_FLOOR,
-            positivity_projection=compare.POSITIVITY_PROJECTION,
-            preconditioner=shared[0] if shared else None,
-            coarse_eq_limit=SIMPLE_FLOW["max_coarse"],
-            field_split=True,
-            leading_inverse=SimpleSmoothed(**SIMPLE_FLOW),
-            trailing_inverse=JacobiSmoothed(**JACOBI_TRAILING),
-            jacobian_production_viscosity=FROZEN_PRODUCTION,
-            inner_observer=logger.on_inner,
-        )
-        shared[:] = [engine.shift_policy.preconditioner]
-        return dict(continuation=engine, refresh=RefreshPolicy(precondition_step=refresh))
+        return {}
 
     started = time.perf_counter()
     try:
         flow, k, omega = solve_reynolds_continuation(
             coupled,
             points,
+            preconditioner=session,
+            inner_steps=compare.INNER_STEPS,
+            inner_tol=compare.INNER_TOL,
+            cycle_budget=compare.CYCLE_BUDGET,
+            forward_rtol=compare.FORWARD_RTOL,
+            forward_restart=compare.FORWARD_RESTART,
+            forward_max_restarts=compare.FORWARD_MAX_RESTARTS,
+            refresh_on_cycles=compare.REFRESH_ON_CYCLES or None,
+            positivity_floor=compare.K_POSITIVITY_FLOOR,
+            positivity_projection=compare.POSITIVITY_PROJECTION,
+            inner_observer=logger.on_inner,
             max_steps=max_steps,
             rtol=compare.RTOL,
             atol=compare.ATOL,

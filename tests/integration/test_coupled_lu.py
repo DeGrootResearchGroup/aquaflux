@@ -1,7 +1,7 @@
 """Integration: the monolithic complete-LU-preconditioned coupled RANS Newton solve on a turbulent channel.
 
 The coupled continuation's block-triangular SIMPLE preconditioner is replaced by a single *complete* LU
-factorization of the assembled coupled Jacobian (:func:`~aquaflux.turbulence.coupled_lu_continuation`).
+factorization of the assembled coupled Jacobian (:class:`~aquaflux.turbulence.CompleteLu`).
 These check the two properties that make it a usable drop-in: handed to ``solve_coupled`` it converges
 the monolithic Newton to the **same** fixed point the block preconditioner reaches, and -- built once
 outside ``jax.grad`` on concrete parameters -- it yields the exact coupled adjoint matching finite
@@ -26,17 +26,18 @@ from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, Veloci
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import RefreshPolicy
 from aquaflux.turbulence import (
     BlockDiagonal,
+    CompleteLu,
     CoupledRANS,
+    MaterializedJacobian,
     SSTModel,
     SSTTurbulence,
-    coupled_lu_continuation,
+    coupled_step,
     hybrid_initialize,
     inlet_k,
     inlet_omega,
-    lu_beta_tracking_refresh,
+    open_session,
     solve_coupled,
 )
 
@@ -116,10 +117,16 @@ def test_lu_continuation_builds_the_right_step_types(case) -> None:
     flow, k, omega = case["start"]
     reference_state = coupled.pack_state(flow, k, omega)
 
-    single = coupled_lu_continuation(coupled, reference_state, backend=BACKEND)
+    single = coupled_step(
+        coupled, reference_state, preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND))
+    )
     assert isinstance(single, PseudoTransientStep)
-    dual = coupled_lu_continuation(
-        coupled, reference_state, backend=BACKEND, inner_steps=5, inner_tol=1e-3
+    dual = coupled_step(
+        coupled,
+        reference_state,
+        preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND)),
+        inner_steps=5,
+        inner_tol=1e-3,
     )
     assert isinstance(dual, DualTimeStep)
     assert dual.inner_steps == 5
@@ -131,7 +138,9 @@ def test_lu_solve_converges_and_matches_the_block_preconditioned_solve(case) -> 
     flow_ws, k_ws, omega_ws = case["start"]
     reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
 
-    lu = coupled_lu_continuation(coupled, reference_state, backend=BACKEND)
+    lu = coupled_step(
+        coupled, reference_state, preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND))
+    )
     flow_l, k_l, omega_l = solve_coupled(
         coupled, flow_ws, k_ws, omega_ws, continuation=lu, max_steps=40
     )
@@ -168,7 +177,9 @@ def test_lu_adjoint_matches_finite_difference(case) -> None:
     coupled = case["coupled"]
     flow_ws, k_ws, omega_ws = case["start"]
     reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
-    continuation = coupled_lu_continuation(coupled, reference_state, backend=BACKEND)
+    continuation = coupled_step(
+        coupled, reference_state, preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND))
+    )
 
     def objective(nu_scale):
         scaled = eqx.tree_at(
@@ -188,10 +199,10 @@ def test_lu_adjoint_matches_finite_difference(case) -> None:
 
 
 @pytest.mark.slow
-def test_lu_beta_tracking_refresh_makes_the_lu_exact_at_the_current_beta(case) -> None:
-    """The precondition_step re-factors the LU at the step's current beta, so it inverts J + beta*d exactly.
+def test_a_complete_lu_session_makes_the_lu_exact_at_the_current_beta(case) -> None:
+    """A complete-LU session's precondition_step re-factors at the step's current beta, inverting J + beta*d.
 
-    A frozen LU is exact only for the beta it was built at; lu_beta_tracking_refresh re-factors at the
+    A frozen LU is exact only for the beta it was built at; the session's per-step hook re-factors at the
     beta the DualTimeControl set on the step, so after it the factorization inverts the *current* shifted
     operator to machine precision.
     """
@@ -209,10 +220,13 @@ def test_lu_beta_tracking_refresh_makes_the_lu_exact_at_the_current_beta(case) -
     flow, k, omega = case["start"]
     state = coupled.pack_state(flow, k, omega)
 
-    dual = coupled_lu_continuation(coupled, state, backend=BACKEND, lu_beta=0.05, inner_steps=5)
-    # the control sets a ConstantRelaxation(beta) on the step, at a beta DIFFERENT from the build lu_beta
+    session = open_session(
+        MaterializedJacobian(CompleteLu(backend=BACKEND), build_beta=0.05), coupled
+    )
+    dual = session.build(state, inner_steps=5)
+    # the control sets a ConstantRelaxation(beta) on the step, at a beta DIFFERENT from the build beta
     active, _ = DualTimeControl(beta_start=0.7).next_step(dual, None, None)
-    lu_beta_tracking_refresh(coupled)(active, state)  # re-factor at (state, beta=0.7)
+    session.precondition_step(active, state)  # re-factor at (state, beta=0.7)
 
     # the shifted operator the step actually solves at this beta
     n_cells = coupled.momentum.mesh.n_cells
@@ -234,24 +248,24 @@ def test_lu_beta_tracking_refresh_makes_the_lu_exact_at_the_current_beta(case) -
 
 @pytest.mark.slow
 def test_lu_beta_tracking_forward_march_converges_to_the_same_fixed_point(case) -> None:
-    """solve_coupled with precondition_step + DualTimeControl (dual-time LU) reaches the block PC's root."""
+    """solve_coupled with a complete-LU preconditioner and a DualTimeControl reaches the block PC's root.
+
+    The spec opens a session whose per-step hook re-factors the LU at each step's own shift.
+    """
     from aquaflux.solve import DualTimeControl
 
     coupled = case["coupled"]
     flow_ws, k_ws, omega_ws = case["start"]
-    reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
 
-    lu = coupled_lu_continuation(
-        coupled, reference_state, backend=BACKEND, inner_steps=5, inner_tol=1e-3
-    )
     flow_l, k_l, _ = solve_coupled(
         coupled,
         flow_ws,
         k_ws,
         omega_ws,
-        continuation=lu,
+        preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND)),
+        inner_steps=5,
+        inner_tol=1e-3,
         step_control=DualTimeControl(beta_start=0.5, beta_min=0.02),
-        refresh=RefreshPolicy(precondition_step=lu_beta_tracking_refresh(coupled)),
         scaled_norm=True,
         max_steps=60,
     )
@@ -268,15 +282,15 @@ def test_lu_beta_tracking_forward_march_converges_to_the_same_fixed_point(case) 
 
 
 def test_precondition_step_raises_under_jax_grad(case) -> None:
-    """precondition_step is forward-only: differentiating a solve that uses it raises (no silent leak)."""
+    """A materialized preconditioner re-fits before every step, which is forward-only.
+
+    Differentiating a solve given one raises rather than letting a mid-march re-fit capture the tracer.
+    """
     import equinox as eqx
     from aquaflux.solve import DualTimeControl
 
     coupled = case["coupled"]
     flow_ws, k_ws, omega_ws = case["start"]
-    lu = coupled_lu_continuation(
-        coupled, coupled.pack_state(flow_ws, k_ws, omega_ws), backend=BACKEND
-    )
 
     def objective(nu_scale):
         scaled = eqx.tree_at(
@@ -289,9 +303,8 @@ def test_precondition_step_raises_under_jax_grad(case) -> None:
             flow_ws,
             k_ws,
             omega_ws,
-            continuation=lu,
+            preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND)),
             step_control=DualTimeControl(),
-            refresh=RefreshPolicy(precondition_step=lu_beta_tracking_refresh(coupled)),
             max_steps=5,
         )
         return jnp.sum(k**2)

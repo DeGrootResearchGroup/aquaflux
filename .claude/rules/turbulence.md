@@ -35,6 +35,21 @@ the AMG smoother fill (the validated `bfs3d` bundle is **ILU(0) × 4 sweeps**; t
 to ILU(1) × 2) and the aggregation (**plain**, not smoothed). Any AMG-adjacent number written before
 those moves is un-adjudicable — treat it as a lead, not a fact.
 
+## ⚠️ The coupled builders were unified (2026-09-14, #371) — these names no longer exist
+
+Many entries below are dated history written against the old API. Read them through this table:
+
+| was | is |
+|---|---|
+| `coupled_continuation(coupled, state, method=M, **flow_opts, **march)` | `coupled_step(coupled, state, preconditioner=BlockDiagonal(method=M, **flow_opts), **march)` |
+| `coupled_lu_continuation(..., lu_beta=b, backend=B, stencil_reach=r, ...)` | `coupled_step(..., preconditioner=MaterializedJacobian(CompleteLu(backend=B), build_beta=b, probe=JacobianProbeSpec(stencil_reach=r)))` |
+| `coupled_amg_continuation(..., smoother_fill_levels=…, amg_beta=b)` | `MaterializedJacobian(MonolithicVCycle(smoother_fill_levels=…), build_beta=b)` |
+| `coupled_amg_continuation(..., field_split=True, leading_inverse=L, trailing_inverse=T)` | `MaterializedJacobian(FieldSplit(L, T))` — `L`/`T` are `solve.BlockInverse` values |
+| `probe=` / `preconditioner=` shared across rungs, `amg_beta_tracking_refresh(..., beta_floor=f, observer=o)`, `lu_beta_tracking_refresh` | one session: `open_session(MaterializedJacobian(..., beta_floor=f), coupled, observer=o)`, passed as `solve_coupled(preconditioner=session)`; its `precondition_step` / `rebind` replace the hooks' |
+| `reuse=previous.shift_policy, residual_norm=m` | `session.refresh(state, previous, m, **march)` |
+| `solve_coupled(method=M, velocity=…)` | `solve_coupled(preconditioner=BlockDiagonal(method=M, velocity=…))` |
+| `point_setup` returning `continuation` + `RefreshPolicy(precondition_step=hook)`, `_rebinding` | `solve_reynolds_continuation` / `solve_reynolds_ramp` given `preconditioner=`; `point_setup` keeps only per-point march settings |
+
 ## The closure — model, strain, sources, transport, preconditioner
 
 - **`sst.py` — `SSTModel`.** Menter's SST constants and the quantities derived directly from
@@ -243,16 +258,16 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     - **The three materialized inverses are ONE family with a nested choice**, because they share the
       probe, the build shift and the refresh floor and differ only in the inverse. That nesting is also
       what makes defect D1 unrepresentable: a monolithic smoother setting (`smoother_fill_levels`, …)
-      has no field beside a `FieldSplit`, where `coupled_amg_continuation(field_split=True)` accepts and
-      silently ignores it.
+      has no field beside a `FieldSplit`, where the deleted `coupled_amg_continuation(field_split=True)`
+      accepted it and silently ignored it.
     - **Each spec's field set is pinned to the constructor it feeds** (`test_preconditioner_spec.py`):
       `BlockDiagonal` to `BlockPreconditioner.build` minus `reference_state`, `JacobianProbeSpec` to
       `CoupledJacobianProbe.build`'s free settings (not `active_rows`, which follows from the inverse, nor
       `production_viscosity_frozen`, which follows from the operator), `MonolithicVCycle` and `CompleteLu`
       to their `build`. `FieldSplit` requires `solve.BlockInverse` values, never a factory closure, so a
       build-record sink is attached where the session is opened rather than bound into the inverse.
-  - **🔬 `open_session` / `PreconditionerSession` / `coupled_step` — `solve_coupled` and the Reynolds
-    drivers RUN ON THEM; the old builders are not yet deleted (#371, 2026-09-14, slices S3a–S3b).**
+  - **✅ `open_session` / `PreconditionerSession` / `coupled_step` — the ONE coupled builder, and what
+    `solve_coupled`, both Reynolds drivers and both flagship cases run on (#371, 2026-09-14).**
     `_BlockSession` and `_MaterializedSession` are `_ContinuationSource` promoted: `build(state,
     **march)`, `refresh(state, previous, residual_norm, **march)`, `precondition_step`, `rebind`.
     `coupled_step` is the one frozen-step builder and opens a private session. The new path was proven
@@ -270,10 +285,14 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       viscosity, exactly as before. `_SOLVE_ONLY` excludes `preconditioner`. **`solve_reynolds_ramp`**
       opens a materialized session on the **anchor** and hands the homotopy its `rebind`; a block spec
       stays target-bound (#386). A `point_setup` refresh hook beside a session is refused.
-    - **Still to do (S3c):** migrate the flagship drivers off `coupled_amg_continuation` +
-      `amg_beta_tracking_refresh` + `point_setup` onto sessions, then delete the three builders, the
-      public hooks, `_rebinding` and `_CallerBuiltContinuation`'s last users (Principle 4 — no adapters
-      survive); move the builders' parameter prose onto `coupled_step`; update `docs/preconditioning.md`.
+    - **The three builders, both public β-tracking hooks and `_rebinding` are DELETED** (see the rename
+      table at the top of this file). Both flagship drivers and every harness open a session or build a
+      spec; the drivers' inert monolithic smoother settings under the field split (D1) went with them,
+      and `bfs3d` now exposes its preconditioner as `compare.PRECONDITIONER`. The array-identity tests
+      that pinned the new path to the old builders were deleted with the builders. `_CallerBuiltContinuation`
+      stays: a `RefreshPolicy(builder=...)` is still a supported way to rebuild a caller's own step.
+    - **Not yet run:** a dry run of either flagship case to its first step, to compare the banners line
+      for line against the pre-migration drivers. Nothing in any test tier reaches those drivers.
     Facts to hold while finishing it:
     - **March defaults live once, on `coupled_step`'s signature.** A session binds its `**march` against
       that signature (`_march_keywords`), so an unknown keyword is a `TypeError` and no default is
@@ -293,9 +312,10 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       tail through `session._build(...)`, and `_build` is defined on both sessions — an ambiguous name the
       tool never follows — so `coupled_step` is credited with building nothing and appears in no pair,
       while the four old builders still pair with each other. Its silence about `coupled_step` is
-      blindness, not a clean report. S3c must deal with this before deleting the old builders, since
-      `test_sibling_builders.py::test_the_package_report_still_reaches_the_coupled_builders` asserts on
-      their names and `coupled_step` against `mass_flow_coupled_continuation` is the pair that remains.
+      blindness, not a clean report. Since the old builders were deleted the coupled family is absent
+      from the report entirely; `test_sibling_builders.py` now pins the blind spot (it fails if the tool
+      starts seeing `coupled_step`), the two surfaces are pinned by
+      `test_every_continuation_builder_installs_the_same_globalization`, and the tool fix is #392.
   - **`solve_coupled(refresh=RefreshPolicy(trigger=…))` segments the march to re-freeze the preconditioner — and a refresh
     must CARRY the shift diagonals, not rebuild them (binding).** With a trigger set, the march runs as a
     sequence of *observed* segments (`aquaflux.solve.forward_march`): each steps until the trigger judges

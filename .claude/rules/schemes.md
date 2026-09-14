@@ -5,6 +5,8 @@ paths:
 
 # Rules — `aquaflux/schemes/` (first-class swappable numerics)
 
+> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | MonolithicVCycle | FieldSplit)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
+
 > **Provenance boundary (binding).** This file cites the C++/Fortran precursors to inform
 > *your* understanding — that is its job, and why it loads into your
 > context. Per the root `CLAUDE.md` **Comment Convention**, none of that provenance may

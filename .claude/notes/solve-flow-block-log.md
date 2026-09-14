@@ -1,5 +1,7 @@
 # Investigation log — `aquaflux/solve/` the flow block
 
+> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | MonolithicVCycle | FieldSplit)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
+
 > Split out of `solve.md` / `solve-flow-block.md` (2026-08-18). **Lives in `.claude/notes/`, outside
 > the auto-loaded `.claude/rules/` tree, so it never auto-loads.** It holds the full chronological
 > investigation behind the traced `[u, v, w, p]` flow-block preconditioner, including several rounds

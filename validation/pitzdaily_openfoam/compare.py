@@ -93,7 +93,6 @@ from aquaflux.solve import (
     CflResidualDualTimeControl,
     JacobiSmoothed,
     MarchLogger,
-    RefreshPolicy,
     RetryPolicy,
     SimpleSmoothed,
     StateCheckpointer,
@@ -103,16 +102,18 @@ from aquaflux.solve import (
 from aquaflux.turbulence import (
     BetaTaperedDamping,
     ConstantDamping,
-    CoupledJacobianProbe,
     CoupledRANS,
+    FieldSplit,
     GeometricReynoldsSchedule,
+    JacobianProbeSpec,
     LogScalars,
+    MaterializedJacobian,
+    MonolithicVCycle,
     ResidualTaperedDamping,
     SSTModel,
     SSTTurbulence,
-    amg_beta_tracking_refresh,
-    coupled_amg_continuation,
     coupled_fields,
+    open_session,
     scale_both_blocks,
     scale_momentum_only,
     solve_reynolds_continuation,
@@ -512,11 +513,9 @@ POSITIVITY_PROJECTION = os.environ.get("PITZ_K_POSITIVITY_PROJECTION", "1") not 
 #: global step cap toward zero. ⚠️ Only meaningful with the cap active (`PITZ_K_POSITIVITY_PROJECTION=0`
 #: above): with the projection on (the default here) it runs first and clips every cell to within
 #: `tau` of its own boundary, so the cap this floor feeds always reports `alpha_max = 1` regardless of
-#: its value -- a floor set alongside the default projection was always inert, and
-#: `coupled_amg_continuation` now refuses that combination rather than silently doing nothing (#365).
-#: Reachable only because this case uses `coupled_amg_continuation`: it is a parameter of that builder
-#: ALONE, and the default, complete-LU and threshold-ILU builders expose neither it nor the
-#: `step_limit` it would be set on.
+#: its value -- a floor set alongside the default projection was always inert, and the coupled march now
+#: refuses that combination rather than silently doing nothing (#365). It is a march setting of
+#: `coupled_step`, so it applies whichever preconditioner the march runs.
 K_POSITIVITY_FLOOR = 1e-8 if not POSITIVITY_PROJECTION else 0.0
 
 #: ⚠️ THE WALL CONDITION ON `k`, AND IT IS A CHOICE OF PROBLEM RATHER THAN OF SOLVER. Turbulent
@@ -1148,21 +1147,26 @@ def solve_aquaflux(
     # after each `rebind`; between those the cycle trigger is the only thing that rebuilds.
     # Built once and shared by the engine and the refresh hook: the coloured-probe plan is the single
     # largest allocation this case makes, and building it twice doubles that for nothing.
-    probe = CoupledJacobianProbe.build(
-        coupled,
-        stencil_reach=stencil_reach,
-        column_reach=COLUMN_REACH,
-        gradient_sweeps=PROBE_GRADIENT_SWEEPS,
-    )
-    refresh = amg_beta_tracking_refresh(
-        coupled,
-        probe=probe,
+    # One session for the whole march: it builds the probe once, and every rung glues in the same inverse
+    # and refresh hook, re-pointed at the rung's own companion -- FITTED per rung, not a fresh object.
+    preconditioner = MaterializedJacobian(
+        (
+            FieldSplit(LEADING_INVERSE, JacobiSmoothed(**JACOBI_TRAILING))
+            if FIELD_SPLIT
+            else MonolithicVCycle(
+                smoother_fill_levels=FILL_LEVELS,
+                smoother_sweeps=SWEEPS,
+                coarse_eq_limit=COARSE_EQ_LIMIT,
+            )
+        ),
+        probe=JacobianProbeSpec(
+            stencil_reach=stencil_reach,
+            column_reach=COLUMN_REACH,
+            gradient_sweeps=PROBE_GRADIENT_SWEEPS,
+        ),
         beta_floor=PC_BETA_FLOOR,
-        observer=logger.on_refresh,
     )
-    #: One preconditioner shared across rungs, handed back for the next: only the viscosity changes
-    #: between them, so a rung needs the V-cycle FITTED to it, not a fresh object.
-    shared_preconditioner: list = []
+    session = open_session(preconditioner, coupled, observer=logger.on_refresh)
 
     def _damping(companion, seed_state, beta_start):
         """Constant, or tapered from `TURB_DAMPING` down to 1 on the chosen key.
@@ -1191,50 +1195,20 @@ def solve_aquaflux(
         )
 
     def point_setup(companion, seed_state, point):
-        """Configure each Reynolds rung, re-fitting the one preconditioner to it.
+        """Configure what varies between Reynolds rungs: the closure damping and the starting shift.
 
-        Only the molecular viscosity changes between rungs, so a rung needs its own residual assembler
-        and its own row scales -- both ordinary data -- but not its own V-cycle. It needs that V-cycle
-        *fitted to it*, which is what `rebind` arranges, and which is a different thing from rebuilding
-        the object (that would only cost a compilation).
+        The preconditioner is not among them -- the continuation re-points the shared session at each
+        rung's companion -- and every other march setting is the same on every rung, so it is in the
+        options below.
         """
         logger.note(f"[{point.label}]")
-        refresh.rebind(companion)
         beta_start = BETA_START if point.index == 1 else BETA_START_WARM
-        engine = coupled_amg_continuation(
-            companion,
-            seed_state,
-            turbulence_damping=_damping(companion, seed_state, beta_start),
-            inner_steps=INNER_STEPS,
-            inner_tol=INNER_TOL,
-            probe=probe,
-            probe_gradient_sweeps=PROBE_GRADIENT_SWEEPS,
-            jacobian_gradient_sweeps=jacobian_gradient_sweeps,
-            cycle_budget=CYCLE_BUDGET,
-            forward_rtol=FORWARD_RTOL,
-            forward_restart=FORWARD_RESTART,
-            forward_max_restarts=FORWARD_MAX_RESTARTS,
-            refresh_on_cycles=REFRESH_ON_CYCLES or None,
-            inner_refresh=refresh.refresh_at if REFRESH_ON_CYCLES else None,
-            positivity_floor=K_POSITIVITY_FLOOR,
-            positivity_projection=POSITIVITY_PROJECTION,
-            preconditioner=shared_preconditioner[0] if shared_preconditioner else None,
-            smoother_fill_levels=FILL_LEVELS,
-            smoother_sweeps=SWEEPS,
-            coarse_eq_limit=COARSE_EQ_LIMIT,
-            field_split=FIELD_SPLIT,
-            leading_inverse=LEADING_INVERSE if FIELD_SPLIT else None,
-            trailing_inverse=JacobiSmoothed(**JACOBI_TRAILING) if FIELD_SPLIT else None,
-            inner_observer=logger.on_inner,
-        )
-        shared_preconditioner[:] = [engine.shift_policy.preconditioner]
         # The lowest rung (`index == 1`) is the one that self-starts from the hybrid initialization;
         # every rung above it is handed the converged root below it. They get their own starting shift
         # for that reason -- see `BETA_START_WARM`. With the environment unset the two are equal and
         # this is the same control the solve would have used anyway.
         return dict(
-            continuation=engine,
-            refresh=RefreshPolicy(precondition_step=refresh),
+            turbulence_damping=_damping(companion, seed_state, beta_start),
             step_control=dual_time_control(beta_start),
         )
 
@@ -1263,6 +1237,18 @@ def solve_aquaflux(
 
     solve_options = (
         dict(
+            preconditioner=session,
+            inner_steps=INNER_STEPS,
+            inner_tol=INNER_TOL,
+            jacobian_gradient_sweeps=jacobian_gradient_sweeps,
+            cycle_budget=CYCLE_BUDGET,
+            forward_rtol=FORWARD_RTOL,
+            forward_restart=FORWARD_RESTART,
+            forward_max_restarts=FORWARD_MAX_RESTARTS,
+            refresh_on_cycles=REFRESH_ON_CYCLES or None,
+            positivity_floor=K_POSITIVITY_FLOOR,
+            positivity_projection=POSITIVITY_PROJECTION,
+            inner_observer=logger.on_inner,
             max_steps=MAX_STEPS,
             # `None` unless a target ratio was asked for, which keeps a single-ratio march unchanged.
             station_step=station_damping if TURB_DAMPING_TARGET else None,

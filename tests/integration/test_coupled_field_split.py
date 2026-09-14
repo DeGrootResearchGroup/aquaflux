@@ -35,7 +35,14 @@ from aquaflux.solve import (
     restart_cycles,
     solve_linear,
 )
-from aquaflux.turbulence import CoupledRANS, hybrid_initialize
+from aquaflux.turbulence import (
+    CoupledRANS,
+    FieldSplit,
+    MaterializedJacobian,
+    MonolithicVCycle,
+    coupled_step,
+    hybrid_initialize,
+)
 from aquaflux.turbulence.coupled import (
     _coupled_jacobian_plan,
     _jacobian_matvec,
@@ -169,11 +176,11 @@ def test_it_drops_into_the_jax_callback_wrapper_unchanged(case):
 def test_the_split_continuation_converges_to_the_monolithic_fixed_point():
     """`field_split=True` is a drop-in: same solver, same root, only the frozen inverse differs.
 
-    The point of routing it through `coupled_amg_continuation` rather than a parallel builder is that the
+    The point of routing it through `coupled_step` rather than a parallel builder is that the
     shift policy, forward solver, step tail and refresh hooks stay shared -- so this asserts the thing that
     would break if they had quietly diverged: both reach the same converged state.
     """
-    from aquaflux.turbulence import coupled_amg_continuation, solve_coupled
+    from aquaflux.turbulence import solve_coupled
 
     from tests.integration.test_coupled_amg import SMOOTHER_FILL
     from tests.integration.test_coupled_lu import _channel
@@ -187,37 +194,23 @@ def test_the_split_continuation_converges_to_the_monolithic_fixed_point():
     # `SMOOTHER_FILL`: at this initial condition the operator's degenerate couplings are exactly zero,
     # so the pruned ILU(1) pattern loses the fill the V-cycle depends on. The split's blocks are fitted
     # by their own injected inverses, which read no smoother fill.
-    split = coupled_amg_continuation(
+    split = coupled_step(
         coupled,
         reference,
-        field_split=True,
-        leading_inverse=SimpleSmoothed(),
-        trailing_inverse=JacobiSmoothed(),
+        preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed())),
     )
     flow_s, k_s, omega_s = solve_coupled(coupled, flow, k, omega, continuation=split, max_steps=40)
     assert float(jnp.linalg.norm(coupled.residual(coupled.pack_state(flow_s, k_s, omega_s)))) < 1e-8
 
-    mono = coupled_amg_continuation(coupled, reference, smoother_fill_levels=SMOOTHER_FILL)
+    mono = coupled_step(
+        coupled,
+        reference,
+        preconditioner=MaterializedJacobian(MonolithicVCycle(smoother_fill_levels=SMOOTHER_FILL)),
+    )
     flow_m, k_m, omega_m = solve_coupled(coupled, flow, k, omega, continuation=mono, max_steps=40)
     assert float(jnp.linalg.norm(flow_s - flow_m) / jnp.linalg.norm(flow_m)) < 1e-4
     assert float(jnp.linalg.norm(k_s - k_m) / jnp.linalg.norm(k_m)) < 1e-3
     assert float(jnp.linalg.norm(omega_s - omega_m) / jnp.linalg.norm(omega_m)) < 1e-4
-
-
-def test_the_field_split_refuses_a_missing_or_unused_block_inverse(case):
-    """Both refusals raise before the coloured probe, so a misconfiguration costs nothing to find.
-
-    A split without both inverses has nothing to fit a block with. An inverse passed without a split
-    would silently do nothing -- the worse failure, since the run would then be reported as a
-    measurement of an inverse it never applied.
-    """
-    from aquaflux.turbulence import coupled_amg_continuation
-
-    coupled, state = case["coupled"], case["state"]
-    with pytest.raises(ValueError, match="needs both"):
-        coupled_amg_continuation(coupled, state, field_split=True, leading_inverse=SimpleSmoothed())
-    with pytest.raises(ValueError, match="only one block"):
-        coupled_amg_continuation(coupled, state, trailing_inverse=JacobiSmoothed())
 
 
 def test_the_split_refreshes_in_place_onto_the_same_object(case):

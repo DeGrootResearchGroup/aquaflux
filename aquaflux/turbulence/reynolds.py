@@ -343,30 +343,23 @@ def solve_reynolds_continuation(
         untouched.
     point_setup : callable, optional
         ``(companion, seed_state, point) -> dict``, a **per-Reynolds-point** builder of extra ``solve_coupled``
-        keyword arguments (merged over ``solve_kwargs`` for that point). It exists for a preconditioner that
-        is both **per-companion and per-state** — chiefly the complete-LU β-tracking hook, whose
-        ``continuation`` is frozen at the point's own viscosity *and* seed state and whose
-        ``precondition_step`` closes over the point's own residual — which the single target-specific
-        ``continuation`` cannot express across the whole ramp. It is called for **every** point (lower-Re
-        and target) with that point's companion assembler and its **packed seed coupled state**
-        (:meth:`~aquaflux.turbulence.CoupledRANS.state_from_physical` of the seed fields; the lowest point's
-        seed is materialized from :func:`~aquaflux.turbulence.hybrid_initialize` here, so the built
-        continuation freezes at the same state the solve starts from). Typical use::
+        keyword arguments (merged over ``solve_kwargs`` for that point). It exists for settings that vary
+        **per point** -- a starting shift that differs between the self-started anchor and the warm rungs
+        above it, a damping taper read from the point's own seed residual -- which one options dict cannot
+        express. The preconditioner is not among them: pass a ``preconditioner`` in ``solve_kwargs`` and
+        the continuation shares and re-points it itself. It is called for **every** point (lower-Re and
+        target) with that point's companion assembler and its **packed seed coupled state**
+        (:meth:`~aquaflux.turbulence.CoupledRANS.state_from_physical` of the seed fields; the lowest
+        point's seed is materialized from :func:`~aquaflux.turbulence.hybrid_initialize` here, so anything
+        built from it starts where the solve starts). Typical use::
 
             point_setup=lambda comp, state, point: {
-                "continuation": coupled_lu_continuation(comp, state, inner_steps=..., inner_tol=...),
-                "refresh": RefreshPolicy(precondition_step=lu_beta_tracking_refresh(comp)),
+                "step_control": DualTimeControl(beta_start=0.5 if point.index == 1 else 0.1),
             }
 
-        ⚠️ ``precondition_step`` lives on :class:`~aquaflux.solve.RefreshPolicy`, not on
-        ``solve_coupled``. This example passed it bare until 2026-08-20, where it was absorbed by
-        ``**continuation_kwargs`` and the hook simply never ran; ``solve_coupled`` now rejects it
-        instead. **A key here that is neither a ``solve_coupled`` parameter nor a setting for a
-        continuation it builds is an error, not a no-op.**
-
-        **Forward-only** (the ``precondition_step`` it returns raises under ``jax.grad``, like the other
-        observed-march hooks), so leave it ``None`` when differentiating and use the ``continuation`` path
-        instead. ``None`` (default) leaves the ramp byte-identical: each point builds its own continuation
+        **A key here that is neither a ``solve_coupled`` parameter nor a march setting is an error, not a
+        no-op.** An observed-march setting such as ``step_control`` makes the point forward-only, so
+        leave ``point_setup`` ``None`` when differentiating. ``None`` (default) leaves the ramp byte-identical: each point builds its own continuation
         from :func:`~aquaflux.turbulence.solve_coupled`'s defaults, and the seed is passed through as-is
         (the lowest point self-starts inside ``solve_coupled``). When set, its keys **override** any
         ``continuation`` / ``reference_state`` in ``solve_kwargs`` (they are mutually exclusive uses).
@@ -953,13 +946,6 @@ def solve_reynolds_ramp(
     tuple of jnp.ndarray
         The converged target ``(flow, k, omega)``, as :func:`solve_coupled` returns.
 
-    Raises
-    ------
-    ValueError
-        If ``point_setup`` returns a ``refresh`` whose ``precondition_step`` cannot be re-pointed. Such
-        a hook stays bound to the anchor's assembler, so every station after the first would be solved
-        against a preconditioner built for a different viscosity -- a silently worse march rather than
-        an error, which is why it is rejected here.
     """
     # Materialize the seed rather than letting `solve_coupled` self-start, because the anchor station's
     # preconditioner must be frozen at the state the march actually begins from -- the same reason the
@@ -978,20 +964,14 @@ def solve_reynolds_ramp(
     state = first.state_from_physical(*seed_fields)
     extra = point_setup(first, state, ReynoldsPoint(1, 1, float(anchor)))
     passed = {key: value for key, value in solve_kwargs.items() if key not in _LADDER_ONLY}
-    rebind = _rebinding(extra)
     # A materialized preconditioner is opened as one session on the ANCHOR, so the first step is fitted
     # to the problem it solves, and the homotopy re-points it at every station change. A block-diagonal
     # spec is left to the solve, which builds it on the target as it always has (#386).
+    rebind = None
     shared = _shared_session(passed, first)
     if shared is not None:
         passed = _with_session(passed, shared)
         shared.rebind(first)
-        if rebind is not None:
-            raise TypeError(
-                "point_setup returned a refresh with its own re-pointable hook beside a "
-                "preconditioner session, which re-points itself at every station. Return no refresh "
-                "hook, or pass no preconditioner."
-            )
         rebind = shared.rebind
     homotopy = ViscosityRampHomotopy(
         coupled,
@@ -1036,26 +1016,3 @@ def _with_session(kwargs: dict, session: object) -> dict:
     return {key: value for key, value in kwargs.items() if key not in owned} | {
         "preconditioner": session
     }
-
-
-def _rebinding(extra: dict) -> Callable[[CoupledRANS], None] | None:
-    """The station-change hook hidden in a ``point_setup``'s returned ``refresh``, or ``None``.
-
-    A case whose ``point_setup`` returns no refresh policy has no frozen preconditioner to re-point, and
-    ``None`` is then the honest answer. A case that returns one whose hook cannot be re-pointed is a
-    different thing entirely -- a misconfiguration whose only symptom would be a slow march -- so the
-    two are distinguished rather than both answered with ``None``.
-    """
-    refresh = extra.get("refresh")
-    if refresh is None:
-        return None
-    hook = getattr(refresh, "precondition_step", None)
-    rebind = getattr(hook, "rebind", None)
-    if rebind is None:
-        raise ValueError(
-            "point_setup returned a refresh whose precondition_step cannot be re-pointed at another "
-            f"companion ({type(hook).__name__} has no `rebind`). Every station after the first would "
-            "then solve against a preconditioner built for the anchor's viscosity. Build the hook with "
-            "a refresh that exposes `rebind` (e.g. `amg_beta_tracking_refresh`), or return no refresh."
-        )
-    return rebind

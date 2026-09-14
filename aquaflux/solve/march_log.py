@@ -417,8 +417,8 @@ class MarchLogger:
     def on_refresh(self, timing: RefreshTiming) -> None:
         """``observer`` callback for a β-tracking preconditioner refresh: record what it did.
 
-        Matches the hook :func:`~aquaflux.turbulence.amg_beta_tracking_refresh` calls
-        (``observer=logger.on_refresh``). The record names the branch — ``"full"``, ``"inner"`` or
+        Matches what a materialized-Jacobian preconditioner session calls on each refresh
+        (``open_session(..., observer=logger.on_refresh)``). The record names the branch — ``"full"``, ``"inner"`` or
         ``"none"`` — its total, and each part's own cost; it rides on the *next* step row, since that is
         the step it was built for.
 

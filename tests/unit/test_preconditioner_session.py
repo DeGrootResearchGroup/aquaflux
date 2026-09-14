@@ -1,18 +1,16 @@
-"""The preconditioner session and ``coupled_step``: the same steps as the builders, built once and shared.
+"""The preconditioner session and ``coupled_step``: built once, shared, and refusing what they cannot use.
 
-Every family is checked against the builder it replaces, on the same case and state, by comparing the
-built step's array leaves and one application of its preconditioner. Nothing here needs ``petsc4py``:
-the monolithic V-cycle is the one family that does, and its comparison lives with the other
-PETSc-gated coupled tests.
+When the session replaced the three preconditioner-specific builders, its steps were first pinned
+array-identical to theirs for every family; those comparisons went with the builders. What stays is
+what a session adds: one inverse and one set of hooks per session, the probe following the operator,
+the driver seams, and the refusals. Nothing here needs ``petsc4py``.
 """
 
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
-import equinox as eqx
 import jax
 import jax.numpy as jnp
-import numpy as np
 import pytest
 from aquaflux.solve import AirReduction, JacobiSmoothed, SimpleSmoothed
 from aquaflux.turbulence import (
@@ -21,9 +19,6 @@ from aquaflux.turbulence import (
     FieldSplit,
     JacobianProbeSpec,
     MaterializedJacobian,
-    coupled_amg_continuation,
-    coupled_continuation,
-    coupled_lu_continuation,
     coupled_step,
     open_session,
 )
@@ -39,103 +34,15 @@ def case():
     return coupled, _healthy_state(mesh, coupled)
 
 
-def _assert_same_step(built, reference, apply_vector) -> None:
-    assert type(built) is type(reference)
-    built_leaves = jax.tree_util.tree_leaves(eqx.filter(built, eqx.is_array))
-    reference_leaves = jax.tree_util.tree_leaves(eqx.filter(reference, eqx.is_array))
-    assert len(built_leaves) == len(reference_leaves)
-    for mine, theirs in zip(built_leaves, reference_leaves, strict=True):
-        np.testing.assert_array_equal(np.asarray(mine), np.asarray(theirs))
-    np.testing.assert_array_equal(
-        np.asarray(apply_vector(built)), np.asarray(apply_vector(reference))
-    )
-
-
-def _vector(coupled) -> jnp.ndarray:
-    return jnp.asarray(np.random.default_rng(0).normal(size=coupled.layout.size))
-
-
-def _block_apply(coupled, state):
-    v = _vector(coupled)
-    return lambda step: step.shift_policy.shift_term(state).make_preconditioner(jnp.asarray(1.0))(v)
-
-
-def _frozen_apply(coupled):
-    v = _vector(coupled)
-    return lambda step: step.shift_policy.preconditioner.matvec()(v)
-
-
-@pytest.mark.parametrize("inner_steps", [1, 3])
-def test_the_block_diagonal_step_is_the_block_builders_step(case, inner_steps) -> None:
-    coupled, state = case
-    _assert_same_step(
-        coupled_step(
-            coupled,
-            state,
-            preconditioner=BlockDiagonal(method="air", v_cycles=2),
-            inner_steps=inner_steps,
-        ),
-        coupled_continuation(coupled, state, method="air", v_cycles=2, inner_steps=inner_steps),
-        _block_apply(coupled, state),
-    )
-
-
-def test_a_block_session_refresh_is_the_builders_reuse_refresh(case) -> None:
+def test_a_block_session_refresh_carries_the_measure_and_the_flow_block(case) -> None:
+    """A refresh re-derives the scalar blocks on the reused coarsening and carries the rest over."""
     coupled, state = case
     session = open_session(BlockDiagonal(), coupled)
     first = session.build(state, inner_steps=3)
-    reference_first = coupled_continuation(coupled, state, inner_steps=3)
     measure = first.norm()
-    moved = state * 1.01
-    _assert_same_step(
-        session.refresh(moved, first, measure, inner_steps=3),
-        coupled_continuation(
-            coupled,
-            moved,
-            inner_steps=3,
-            reuse=reference_first.shift_policy,
-            residual_norm=measure,
-        ),
-        _block_apply(coupled, moved),
-    )
-
-
-def test_the_complete_lu_step_is_the_lu_builders_step(case) -> None:
-    coupled, state = case
-    _assert_same_step(
-        coupled_step(
-            coupled,
-            state,
-            preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
-            inner_steps=3,
-        ),
-        coupled_lu_continuation(coupled, state, backend="scipy", inner_steps=3),
-        _frozen_apply(coupled),
-    )
-
-
-def test_the_field_split_step_is_the_split_builders_step(case) -> None:
-    coupled, state = case
-    _assert_same_step(
-        coupled_step(
-            coupled,
-            state,
-            preconditioner=MaterializedJacobian(_SPLIT, build_beta=1.5),
-            inner_steps=3,
-            refresh_on_cycles=3,
-        ),
-        coupled_amg_continuation(
-            coupled,
-            state,
-            amg_beta=1.5,
-            field_split=True,
-            leading_inverse=SimpleSmoothed(),
-            trailing_inverse=JacobiSmoothed(),
-            inner_steps=3,
-            refresh_on_cycles=3,
-        ),
-        _frozen_apply(coupled),
-    )
+    refreshed = session.refresh(state * 1.01, first, measure, inner_steps=3)
+    assert refreshed.residual_norm is measure
+    assert refreshed.shift_policy.flow_preconditioner is first.shift_policy.flow_preconditioner
 
 
 def test_a_frozen_step_wires_no_refresh_but_a_session_build_does(case) -> None:

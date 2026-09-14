@@ -5,9 +5,9 @@ flow simulation's time goes. This page covers what `aquaflux` offers to make tha
 converge, how to choose between the options, and how to keep one healthy over a long run.
 
 If you only want the short answer: build
-{class}`~aquaflux.flow.BlockPreconditioner` for a pressure–velocity solve, use
-{func}`~aquaflux.turbulence.coupled_amg_continuation` for a coupled flow-plus-turbulence
-solve, and read the rest of this page when one of them stops converging.
+{class}`~aquaflux.flow.BlockPreconditioner` for a pressure–velocity solve, pass
+{class}`~aquaflux.turbulence.MaterializedJacobian` as the `preconditioner` of a coupled
+flow-plus-turbulence solve, and read the rest of this page when one of them stops converging.
 
 ```{note}
 The flow examples below continue from `cavity`, the lid-driven-cavity assembler built in
@@ -84,8 +84,8 @@ inside.
 | --- | --- | --- |
 | A scalar transport or diffusion equation | {func}`~aquaflux.turbulence.scalar_transport_preconditioner` | [Scalar transport](#scalar-transport) |
 | Pressure–velocity flow, on its own | {class}`~aquaflux.flow.BlockPreconditioner` | [Pressure–velocity flow](#pressurevelocity-flow) |
-| Coupled flow and turbulence (`u, v, w, p, k, ω`) | {func}`~aquaflux.turbulence.coupled_amg_continuation` | [Coupled flow and turbulence](#coupled-flow-and-turbulence) |
-| The same coupled system, on a moderate 2D mesh | {func}`~aquaflux.turbulence.coupled_lu_continuation` | [A complete factorization](#a-complete-factorization) |
+| Coupled flow and turbulence (`u, v, w, p, k, ω`) | {class}`~aquaflux.turbulence.MaterializedJacobian` with a {class}`~aquaflux.turbulence.FieldSplit` | [Coupled flow and turbulence](#coupled-flow-and-turbulence) |
+| The same coupled system, on a moderate 2D mesh | {class}`~aquaflux.turbulence.MaterializedJacobian` with a {class}`~aquaflux.turbulence.CompleteLu` | [A complete factorization](#a-complete-factorization) |
 | Your own linear system | {func}`~aquaflux.solve.solve_linear` | [Using one directly](#using-one-directly) |
 
 ## Scalar transport
@@ -265,43 +265,54 @@ preconditioners for this system work from a **materialized** Jacobian: the coupl
 is recovered by coloured probing into a sparse matrix, off the traced path, and a frozen
 inverse of that matrix is applied as the preconditioner.
 
-The entry point is a continuation builder rather than a bare preconditioner, because the
-preconditioner and the pseudo-transient march that uses it are built together:
+The preconditioner is described by a value and handed to the solve, which builds it together
+with the pseudo-transient march that uses it and keeps it current as the march moves:
 
 ```python
-from aquaflux.turbulence import coupled_amg_continuation, solve_coupled
+from aquaflux.solve import JacobiSmoothed, SimpleSmoothed
+from aquaflux.turbulence import FieldSplit, JacobianProbeSpec, MaterializedJacobian, solve_coupled
 
-continuation = coupled_amg_continuation(coupled, reference_state)
-flow, k, omega = solve_coupled(coupled, continuation=continuation)
+preconditioner = MaterializedJacobian(
+    FieldSplit(SimpleSmoothed(), JacobiSmoothed()),
+    probe=JacobianProbeSpec(stencil_reach=3),
+)
+flow, k, omega = solve_coupled(coupled, preconditioner=preconditioner, inner_steps=5)
 ```
 
-{func}`~aquaflux.turbulence.coupled_amg_continuation` builds a
-{class}`~aquaflux.solve.MonolithicAmgPreconditioner`: a single algebraic-multigrid V-cycle
-over the whole six-field matrix, equilibrated and reordered cell-major so that each cell's
-six unknowns are adjacent. The arguments worth knowing:
+A {class}`~aquaflux.turbulence.MaterializedJacobian` settles everything the inverses share:
 
-- `amg_beta` — the pseudo-transient shift the preconditioner is built at. A shifted
-  operator is easier to precondition, and a preconditioner built at a shift close to the
-  march's own is the one that helps it.
-- `stencil_reach` / `column_reach` — how far the probing recovers the Jacobian across the
-  cell graph. The coupled flow Jacobian is intrinsically distance-2, because Rhie–Chow
-  damping couples pressure to the neighbour-of-a-neighbour ring, so a reach of 3 is the
-  working value. Shortening it does not merely drop small terms: a colouring is
-  collision-free only for the pattern it was built at, so an under-reaching probe folds far
-  couplings onto near entries instead.
-- `smoother_fill_levels` / `smoother_sweeps` — the incomplete factorization used as the
-  level smoother, and how many sweeps of it.
-- `field_split` — see below.
+- `probe` — how far the probing recovers the Jacobian across the cell graph
+  ({class}`~aquaflux.turbulence.JacobianProbeSpec`). The coupled flow Jacobian is intrinsically
+  distance-2, because Rhie–Chow damping couples pressure to the neighbour-of-a-neighbour
+  ring, so a reach of 3 is the working value. Shortening it does not merely drop small terms: a
+  colouring is collision-free only for the pattern it was built at, so an under-reaching probe
+  folds far couplings onto near entries instead.
+- `build_beta` — the pseudo-transient shift the first build is fitted at. A shifted operator
+  is easier to precondition, and an inverse that freezes its coarse space at that build keeps
+  it for the whole march.
+- `beta_floor` — a lower bound on the shift the inverse is re-fitted at while the march keeps
+  solving at its own.
+
+and its `inverse` chooses how the materialized matrix is inverted: a single
+{class}`~aquaflux.turbulence.MonolithicVCycle` over all six fields
+({class}`~aquaflux.solve.MonolithicAmgPreconditioner`, equilibrated and reordered cell-major
+so each cell's six unknowns are adjacent, and taking the incomplete-factorization smoother's
+fill and sweeps), a {class}`~aquaflux.turbulence.FieldSplit`, or a
+{class}`~aquaflux.turbulence.CompleteLu`. To share one preconditioner across several solves —
+the rungs of a Reynolds continuation, say — open a session with
+{func}`~aquaflux.turbulence.open_session` and pass that instead; for a differentiated solve,
+build a frozen step with {func}`~aquaflux.turbulence.coupled_step` and pass it as
+`continuation`.
 
 ### Splitting the fields
 
 The flow saddle and the transported turbulence pair are different kinds of operator, and a
-single hierarchy over both has to compromise. `field_split=True` instead builds a
-{class}`~aquaflux.solve.FieldSplitAmgPreconditioner`, wrapping a
+single hierarchy over both has to compromise. A {class}`~aquaflux.turbulence.FieldSplit`
+inverse instead builds a {class}`~aquaflux.solve.FieldSplitAmgPreconditioner`, wrapping a
 {class}`~aquaflux.solve.BlockTriangularFieldSplit`: one inverse for the leading
 `[u, v, w, p]` group, another for the trailing `[k, ω]` group, and one retained coupling
-block between them. Each group then gets an inverse suited to it, injected as
-`leading_inverse` and `trailing_inverse`:
+block between them. Each group then gets an inverse suited to it, given as the split's
+`leading` and `trailing` values:
 
 | Factory | Builds | Suited to |
 | --- | --- | --- |
@@ -350,7 +361,7 @@ far more strongly than the reverse, so that is the direction to keep.
 
 ### A complete factorization
 
-{func}`~aquaflux.turbulence.coupled_lu_continuation` builds a
+A {class}`~aquaflux.turbulence.CompleteLu` inverse builds a
 {class}`~aquaflux.solve.MonolithicLuPreconditioner` instead — a **complete** sparse LU of
 the coupled matrix. On a moderate 2D mesh this is the strongest option available and often
 the fastest overall, because it converges the linear solve in very few iterations. It does
@@ -403,23 +414,23 @@ past a multiple of its early baseline — the direct symptom of a stale precondi
 gates on the residual as well, because the cycle count also rises as the pseudo-transient
 shift falls, and that rise is not staleness.
 
-{func}`~aquaflux.turbulence.amg_beta_tracking_refresh` is the counterpart for the coupled
-path. It re-preconditions **in place**, so the compiled solve is reused rather than retraced, and
-it goes in as the policy's `precondition_step`:
+A {class}`~aquaflux.turbulence.MaterializedJacobian` preconditioner keeps itself current
+without a policy. Its session re-preconditions **in place**, so the compiled solve is reused
+rather than retraced: before the first step, after being pointed at a new case with `rebind`,
+before every step for a complete LU, and — once a single inner solve costs `refresh_on_cycles`
+restart cycles — mid-step. Open the session yourself to hear what each rebuild cost, through
+{class}`~aquaflux.solve.RefreshTiming` — which branch ran, the total, and the parts:
 
 ```python
-from aquaflux.solve import RefreshPolicy
-from aquaflux.turbulence import amg_beta_tracking_refresh
+from aquaflux.turbulence import open_session, solve_coupled
 
-refresh = RefreshPolicy(
-    precondition_step=amg_beta_tracking_refresh(coupled)
+session = open_session(preconditioner, coupled, observer=print)
+flow, k, omega = solve_coupled(
+    coupled, preconditioner=session, inner_steps=5, refresh_on_cycles=3
 )
 ```
 
-It re-fits the preconditioner on its first call and when pointed at a new case with `rebind`,
-and — through its `refresh_at` hook, handed to the step as `inner_refresh` — when a single solve
-proves expensive. It reports what each rebuild cost through
-{class}`~aquaflux.solve.RefreshTiming` — which branch ran, the total, and the parts.
+
 {data}`~aquaflux.solve.NO_REFRESH` is the do-nothing policy, and the default.
 
 Refreshing is safe for the same reason freezing is: the preconditioner is

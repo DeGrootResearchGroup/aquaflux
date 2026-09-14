@@ -51,7 +51,7 @@ from aquaflux.turbulence import (
     CoupledRANS,
     SSTModel,
     SSTTurbulence,
-    coupled_continuation,
+    coupled_step,
     hybrid_initialize,
     inlet_k,
     inlet_omega,
@@ -180,8 +180,10 @@ def objective(nu, *, explicit_limiter, seed):
     adjoint requires.
     """
     coupled0 = build_case(NU, explicit_limiter=explicit_limiter)
-    continuation = coupled_continuation(
-        coupled0, coupled0.state_from_physical(*seed), **PRECONDITIONER
+    continuation = coupled_step(
+        coupled0,
+        coupled0.state_from_physical(*seed),
+        preconditioner=BlockDiagonal(**PRECONDITIONER),
     )
 
     def scalar(viscosity):
