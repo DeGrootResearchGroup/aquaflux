@@ -44,33 +44,29 @@ def _groups() -> FieldGroups:
     )
 
 
-def _pair(flow_first: bool = True):
+def _pair():
     """A host split and a traced split over the SAME two inverse objects."""
     matrix, groups = _operator(), _groups()
     host = build_block_triangular_field_split(
         matrix,
         groups,
-        flow_first=flow_first,
         leading_inverse=simple_smoothed_inverse(
             strength_threshold=0.25, max_levels=4, max_coarse=200
         ),
         trailing_inverse=jacobi_smoothed_inverse(max_coarse=150),
     )
-    traced = traced_field_split(
-        matrix, groups, host._leading, host._trailing, flow_first=flow_first
-    )
+    traced = traced_field_split(matrix, groups, host._leading, host._trailing)
     return host, traced, groups
 
 
-@pytest.mark.parametrize("flow_first", [True, False])
-def test_the_traced_split_reproduces_the_host_split(flow_first) -> None:
+def test_the_traced_split_reproduces_the_host_split() -> None:
     """Same algebra, same inverses, same answer — to machine precision, not merely closely.
 
     Sharing the inverse *objects* is what makes this a test of the composition alone: any difference
     is the numpy-versus-traced arrangement of the slices, the coupling product and the concatenation,
     since both sides run the identical multigrid cycles underneath.
     """
-    host, traced, groups = _pair(flow_first)
+    host, traced, groups = _pair()
     r = np.random.default_rng(7).normal(size=groups.n_dofs)
 
     expected = np.asarray(host.apply(r))
@@ -79,8 +75,7 @@ def test_the_traced_split_reproduces_the_host_split(flow_first) -> None:
     assert np.linalg.norm(got - expected) / np.linalg.norm(expected) < 1e-13
 
 
-@pytest.mark.parametrize("flow_first", [True, False])
-def test_the_transpose_comes_from_jax_and_matches_the_host_arrangement(flow_first) -> None:
+def test_the_transpose_comes_from_jax_and_matches_the_host_arrangement() -> None:
     """``M^T`` is derived, not written — and it agrees with the transpose the host arranges by hand.
 
     The host split has to arrange its transpose itself: reverse the solve order, transpose the
@@ -88,7 +83,7 @@ def test_the_transpose_comes_from_jax_and_matches_the_host_arrangement(flow_firs
     :func:`jax.linear_transpose` gives ``M^T`` from the forward code. That is one implementation
     instead of two, and this asserts the two agree rather than assuming they must.
     """
-    host, traced, groups = _pair(flow_first)
+    host, traced, groups = _pair()
     r = np.random.default_rng(11).normal(size=groups.n_dofs)
 
     expected = np.asarray(host.apply(r, transpose=True))
@@ -176,7 +171,6 @@ def test_the_split_rides_into_a_jit_as_an_argument_without_retracing() -> None:
         trailing_cycle=traced.trailing_cycle,
         coupling=jax.tree.map(lambda a: a, traced.coupling),
         groups=traced.groups,
-        leading_first=traced.leading_first,
     )
     apply(moved, r).block_until_ready()
 

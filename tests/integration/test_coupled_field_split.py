@@ -10,8 +10,9 @@ So the first test here compares the partition against the coupled layout's own `
 drive the split against the assembled coupled Jacobian on a small turbulent channel: preconditioned GMRES
 converges it on the true residual, its transpose satisfies the adjoint identity that the
 implicitly-differentiated gradient depends on, and it reaches a solve through the existing callback
-wrapper without one of its own. The V-cycles need PETSc, so the module is skipped where ``petsc4py`` is
-unavailable.
+wrapper without one of its own. The split's blocks are fitted by the traced inverses the flagship cases
+ship; the monolithic V-cycle it is compared against needs PETSc, so the module is skipped where
+``petsc4py`` is unavailable.
 """
 
 from __future__ import annotations
@@ -28,8 +29,10 @@ from aquaflux.solve import (
     MonolithicAmgPreconditioner,
     build_amg_vcycle,
     build_block_triangular_field_split,
+    jacobi_smoothed_inverse,
     relative_residual_gmres,
     restart_cycles,
+    simple_smoothed_inverse,
     solve_linear,
 )
 from aquaflux.turbulence import CoupledRANS, hybrid_initialize
@@ -80,6 +83,16 @@ def test_the_partition_matches_the_coupled_layout(case):
     )
 
 
+def _split(shifted, groups):
+    """The split with the traced inverses both flagship cases ship."""
+    return build_block_triangular_field_split(
+        shifted,
+        groups,
+        leading_inverse=simple_smoothed_inverse(),
+        trailing_inverse=jacobi_smoothed_inverse(),
+    )
+
+
 def _gmres_matvecs(shifted, preconditioner, b, *, rtol=1e-8):
     """Restart cycles and the TRUE relative residual of a preconditioned GMRES on the real operator.
 
@@ -103,25 +116,15 @@ def _gmres_matvecs(shifted, preconditioner, b, *, rtol=1e-8):
     return restart_cycles(int(raw)), true
 
 
-@pytest.mark.parametrize("flow_first", [True, False])
-def test_the_split_preconditions_the_real_coupled_saddle(case, flow_first):
-    """Both orderings converge the assembled coupled system through GMRES, on the true residual.
+def test_the_split_preconditions_the_real_coupled_saddle(case):
+    """The split converges the assembled coupled system through GMRES, on the true residual.
 
-    Worth recording why this is *not* asserted as a difference between the two orderings. One application
-    of the turbulence-first split leaves a residual some three times the input where flow-first leaves a
-    third of it, which reads as one ordering being far weaker -- and through GMRES on this operator the two
-    are indistinguishable, both reaching machine precision inside a single restart cycle. A one-application
-    contraction is not a convergence criterion for a Krylov-accelerated preconditioner, and this is that
-    trap in miniature.
-
-    Which also means this state cannot rank the orderings at all: an operator every candidate solves in one
-    cycle discriminates between none of them. That comparison needs a state where the operator is hard, and
-    belongs to the case study rather than to a fast test.
+    A convergence check, not a ranking: an operator every candidate solves in a cycle or two
+    discriminates between none of them. Comparing preconditioners needs a state where the operator is
+    hard, and belongs to the case study rather than to a fast test.
     """
     groups, shifted = case["groups"], case["shifted"]
-    split = build_block_triangular_field_split(
-        shifted, groups, flow_first=flow_first, coarse_eq_limit=200
-    )
+    split = _split(shifted, groups)
     rng = np.random.default_rng(1)
     b = rng.standard_normal(groups.n_dofs)
     cycles, true = _gmres_matvecs(shifted, split, b)
@@ -136,7 +139,7 @@ def test_the_transpose_serves_the_adjoint_on_the_real_operator(case):
     what makes the split legal on a differentiated solve at all.
     """
     groups, shifted = case["groups"], case["shifted"]
-    split = build_block_triangular_field_split(shifted, groups, coarse_eq_limit=200)
+    split = _split(shifted, groups)
     rng = np.random.default_rng(2)
     x, y = rng.standard_normal((2, groups.n_dofs))
     np.testing.assert_allclose(y @ split.apply(x), split.apply(y, transpose=True) @ x, rtol=1e-10)
@@ -150,7 +153,7 @@ def test_it_drops_into_the_jax_callback_wrapper_unchanged(case):
     needs no wrapper of its own -- which is what lets it reach a solve through the existing callback path.
     """
     groups, shifted, n_fields = case["groups"], case["shifted"], case["n_fields"]
-    split = build_block_triangular_field_split(shifted, groups, coarse_eq_limit=200)
+    split = _split(shifted, groups)
     monolithic = build_amg_vcycle(shifted, n_fields, coarse_eq_limit=200)
     rng = np.random.default_rng(3)
     b = jnp.asarray(rng.standard_normal(groups.n_dofs))
@@ -180,12 +183,16 @@ def test_the_split_continuation_converges_to_the_monolithic_fixed_point():
     flow, k, omega = hybrid_initialize(momentum, turbulence)
     reference = coupled.pack_state(flow, k, omega)
 
-    # Both arms take the fixture's extra level of smoother fill, for the reason recorded at
+    # The monolithic arm takes the fixture's extra level of smoother fill, for the reason recorded at
     # `SMOOTHER_FILL`: at this initial condition the operator's degenerate couplings are exactly zero,
-    # so the pruned ILU(1) pattern loses the fill the V-cycle depends on. It is the same operator in
-    # both arms, so the setting cannot be what makes them agree -- only what makes either converge.
+    # so the pruned ILU(1) pattern loses the fill the V-cycle depends on. The split's blocks are fitted
+    # by their own injected inverses, which read no smoother fill.
     split = coupled_amg_continuation(
-        coupled, reference, field_split=True, smoother_fill_levels=SMOOTHER_FILL
+        coupled,
+        reference,
+        field_split=True,
+        leading_inverse=simple_smoothed_inverse(),
+        trailing_inverse=jacobi_smoothed_inverse(),
     )
     flow_s, k_s, omega_s = solve_coupled(coupled, flow, k, omega, continuation=split, max_steps=40)
     assert float(jnp.linalg.norm(coupled.residual(coupled.pack_state(flow_s, k_s, omega_s)))) < 1e-8
@@ -197,51 +204,22 @@ def test_the_split_continuation_converges_to_the_monolithic_fixed_point():
     assert float(jnp.linalg.norm(omega_s - omega_m) / jnp.linalg.norm(omega_m)) < 1e-4
 
 
-def test_coupled_amg_continuation_reads_one_flow_first_for_both_call_sites(case, monkeypatch):
-    """The probe's dropped-triangle pattern and the split's own ordering must agree.
+def test_the_field_split_refuses_a_missing_or_unused_block_inverse(case):
+    """Both refusals raise before the coloured probe, so a misconfiguration costs nothing to find.
 
-    ``coupled_amg_continuation`` decides which triangle to drop from the materialized pattern
-    (``FieldGroups.active_rows``) and which triangle the split itself retains
-    (``FieldSplitAmgPreconditioner.build``) at two separate call sites. Before this test both read
-    independent ``flow_first`` defaults that happened to agree; a caller changing one without the
-    other would silently precondition the wrong triangle -- the probe would still drop it for
-    whichever ordering *it* was told, and a split built under a *different* ordering would then read
-    a zero where the real coupling block belongs, with no error raised.
+    A split without both inverses has nothing to fit a block with. An inverse passed without a split
+    would silently do nothing -- the worse failure, since the run would then be reported as a
+    measurement of an inverse it never applied.
     """
-    from aquaflux.solve import FieldGroups, FieldSplitAmgPreconditioner
     from aquaflux.turbulence import coupled_amg_continuation
 
-    from tests.integration.test_coupled_amg import SMOOTHER_FILL
-
     coupled, state = case["coupled"], case["state"]
-    seen = {}
-
-    real_active_rows = FieldGroups.active_rows
-
-    def spy_active_rows(self, *, flow_first=True):
-        seen["active_rows"] = flow_first
-        return real_active_rows(self, flow_first=flow_first)
-
-    monkeypatch.setattr(FieldGroups, "active_rows", spy_active_rows)
-
-    real_build = FieldSplitAmgPreconditioner.build.__func__
-
-    def spy_build(cls, *args, flow_first=True, **kwargs):
-        seen["split_build"] = flow_first
-        return real_build(cls, *args, flow_first=flow_first, **kwargs)
-
-    monkeypatch.setattr(FieldSplitAmgPreconditioner, "build", classmethod(spy_build))
-
-    coupled_amg_continuation(
-        coupled,
-        state,
-        field_split=True,
-        flow_first=False,
-        smoother_fill_levels=SMOOTHER_FILL,
-        coarse_eq_limit=200,
-    )
-
-    assert seen == {"active_rows": False, "split_build": False}
+    with pytest.raises(ValueError, match="needs both"):
+        coupled_amg_continuation(
+            coupled, state, field_split=True, leading_inverse=simple_smoothed_inverse()
+        )
+    with pytest.raises(ValueError, match="only one block"):
+        coupled_amg_continuation(coupled, state, trailing_inverse=jacobi_smoothed_inverse())
 
 
 def test_the_split_refreshes_in_place_onto_the_same_object(case):
@@ -261,7 +239,14 @@ def test_the_split_refreshes_in_place_onto_the_same_object(case):
         return _jacobian_matvec(coupled, state, v)
 
     shift = np.full(groups.n_dofs, 0.5)
-    pc = FieldSplitAmgPreconditioner.build(matvec, plan, shift, groups, coarse_eq_limit=200)
+    pc = FieldSplitAmgPreconditioner.build(
+        matvec,
+        plan,
+        shift,
+        groups,
+        leading_inverse=simple_smoothed_inverse(),
+        trailing_inverse=jacobi_smoothed_inverse(),
+    )
     split_before = pc.factors
     rng = np.random.default_rng(4)
     b = rng.standard_normal(groups.n_dofs)
@@ -275,92 +260,6 @@ def test_the_split_refreshes_in_place_onto_the_same_object(case):
         "a 4x shift change left the inverse unchanged"
     )
     pc.destroy()
-
-
-def test_per_block_smoother_options_reach_the_trailing_hierarchy(case):
-    """The two halves must be tunable APART, and the setting must survive a refresh.
-
-    The saddle needs its incomplete-LU sweep; the transported scalars are a much easier operator and are
-    served by cheaper relaxations, so a split that could not smooth them differently would be giving up
-    most of what splitting is for. The refresh half matters just as much: the march re-fits the
-    preconditioner repeatedly, and a per-block option honoured only at build would silently revert to
-    the default part-way through a run -- a bug that shows up as an unexplained slowdown, not a failure.
-    """
-    groups, shifted = case["groups"], case["shifted"]
-    # A single Jacobi sweep against the shipped four sweeps of incomplete LU: different enough that a
-    # hierarchy built with it cannot coincidentally match one built without.
-    cheap = {
-        "mg_levels_ksp_type": "richardson",
-        "mg_levels_ksp_richardson_scale": 0.7,
-        "mg_levels_pc_type": "jacobi",
-        "mg_levels_ksp_max_it": 1,
-    }
-    shipped = build_block_triangular_field_split(shifted, groups)
-    tuned = build_block_triangular_field_split(shifted, groups, trailing_options=cheap)
-    rng = np.random.default_rng(11)
-    b = rng.standard_normal(groups.n_dofs)
-    baseline, altered = shipped.apply(b), tuned.apply(b)
-    assert np.all(np.isfinite(altered))
-    # The LEADING half is untouched, so its part of the answer must be identical; only the trailing
-    # half may move. Checking both halves is what distinguishes "the option was applied to the right
-    # block" from "the option was applied somewhere".
-    assert np.allclose(baseline[groups.leading], altered[groups.leading], rtol=0, atol=0)
-    assert not np.allclose(baseline[groups.trailing], altered[groups.trailing])
-
-    # ... and it must still be the cheap smoother after a refresh re-fits the same objects in place.
-    refitted = tuned.apply(b)
-    tuned.refactor(shifted)
-    assert np.allclose(refitted, tuned.apply(b), rtol=1e-10, atol=0)
-    shipped.destroy()
-    tuned.destroy()
-
-
-def test_per_block_options_are_rejected_without_a_field_split(case):
-    """Passing them to the monolithic path would silently do nothing, so it raises instead.
-
-    There is one hierarchy without a split, so there is no "trailing half" to tune. Failing loudly is
-    the difference between a typo that costs a run and a typo that costs a run AND is reported as a
-    measurement of the smoother it never applied. It raises before the coloured probe, so the cost of
-    finding out is nothing.
-    """
-    from aquaflux.turbulence import coupled_amg_continuation
-
-    with pytest.raises(ValueError, match="field_split=True"):
-        coupled_amg_continuation(
-            case["coupled"], case["state"], trailing_options={"mg_levels_ksp_max_it": 1}
-        )
-
-
-def test_the_trailing_block_defaults_to_fewer_sweeps_and_the_count_is_tunable(case):
-    """The two halves default to DIFFERENT smoothing, and the trailing count is a real parameter.
-
-    The saddle needs its four incomplete-LU sweeps -- Jacobi-class smoothers do not converge on it at
-    all -- while the transported-scalar pair does not, and on a three-dimensional march three of those
-    four sweeps were pure cost (1959 s -> 1636 s on a step-for-step identical trajectory). That makes
-    the asymmetry a default worth pinning: a refactor that quietly re-unified the two counts would give
-    back the saving with nothing failing.
-
-    The count is asserted through BEHAVIOUR rather than by reading the options dict back, because what
-    matters is that the number reaches the hierarchy PETSc actually builds.
-    """
-    groups, shifted = case["groups"], case["shifted"]
-    rng = np.random.default_rng(17)
-    b = rng.standard_normal(groups.n_dofs)
-
-    default = build_block_triangular_field_split(shifted, groups)
-    matched = build_block_triangular_field_split(shifted, groups, trailing_smoother_sweeps=4)
-    # Same sweeps on both halves is a different preconditioner from the shipped asymmetric default...
-    assert not np.allclose(default.apply(b)[groups.trailing], matched.apply(b)[groups.trailing])
-    # ...and the LEADING half is untouched by the trailing count, which is what makes it a per-block
-    # knob rather than a global one.
-    assert np.allclose(
-        default.apply(b)[groups.leading], matched.apply(b)[groups.leading], rtol=0, atol=0
-    )
-    # Asking for the default explicitly must reproduce it exactly.
-    explicit = build_block_triangular_field_split(shifted, groups, trailing_smoother_sweeps=1)
-    assert np.allclose(default.apply(b), explicit.apply(b), rtol=0, atol=0)
-    for pc in (default, matched, explicit):
-        pc.destroy()
 
 
 def test_the_jacobi_smoothed_inverse_is_a_fixed_linear_map_that_transposes(case):

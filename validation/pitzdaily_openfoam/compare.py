@@ -457,12 +457,11 @@ FORWARD_MAX_RESTARTS = 14
 
 #: ⚠️ **THIS WHOLE BUNDLE IS UNREACHABLE AT THE CURRENT DEFAULTS — see `_ILU_SMOOTHER_LIVE` below.**
 #: Every measurement in it was taken when the leading `[u, v, p]` block was inverted by the incomplete-LU
-#: -smoothed hierarchy these settings configure. `FLOW_INVERSE` now defaults to `simplesmooth`, which
-#: supplies that block's inverse directly, and the trailing block's is supplied too, so nothing here is
-#: constructed on the default path. The bullets below are kept because they are the record of a real
-#: measurement and because the settings revive the moment a block's inverse is `None` -- but they are
-#: **not** a description of how a march at the defaults is preconditioned, and a run banner quoting them
-#: is not evidence about that march. Read them as history for the ILU path, not as live configuration.
+#: -smoothed hierarchy these settings configure. Under the field split (the default) both blocks are
+#: fitted by injected inverses, so nothing here is constructed; the settings configure only the
+#: monolithic V-cycle, `PITZ_FIELD_SPLIT=0`. The bullets below are kept because they are the record of a
+#: real measurement -- but they are **not** a description of how a march at the defaults is
+#: preconditioned, and a run banner quoting them is not evidence about that march.
 #:
 #: ⚠️ THE VALIDATED SMOOTHER BUNDLE, AND NONE OF IT IS OPTIONAL. These are the library defaults'
 #: opposites, and each was measured on the sibling case at adjoint-grade tolerance:
@@ -499,7 +498,6 @@ FILL_LEVELS, SWEEPS, COARSE_EQ_LIMIT, PC_BETA_FLOOR = 1, 4, 2000, 0.05
 #: 31% faster end to end on the sibling case -- while taking MORE Krylov cycles, because two smaller
 #: V-cycles plus one sparse coupling product apply far more cheaply than one six-field V-cycle.
 FIELD_SPLIT = os.environ.get("PITZ_FIELD_SPLIT", "1") not in ("", "0")
-TRAILING_SWEEPS = 1
 
 #: Clip each cell's own correction rather than scaling the whole step by the worst cell. **ON since
 #: 2026-08-25**, because on this case the plain global cap was measured losing a march outright.
@@ -543,9 +541,10 @@ K_WALL_BC = _K_WALL_BCS[K_WALL]
 
 #: ⚠️ WHICH INVERSE THE LEADING `[u, v, p]` BLOCK GETS. `simplesmooth` (default since 2026-08-22) is a
 #: multigrid hierarchy over the saddle relaxed by SIMPLE sweeps, matching the sibling 3D case's own
-#: default. `petsc` is the host GAMG V-cycle smoothed by PETSc's incomplete factorization, at the
-#: `FILL_LEVELS` above. `hostilu` is this package's own hierarchy smoothed by its own factorization --
-#: which is ZERO-FILL by construction and has no fill parameter at all.
+#: default. `hostilu` is this package's own hierarchy smoothed by its own factorization -- which is
+#: ZERO-FILL by construction and has no fill parameter at all. (A `petsc` arm -- the host GAMG V-cycle
+#: smoothed by PETSc's incomplete factorization -- was removed with the library's PETSc split blocks,
+#: #371; the history below is why it had already stopped being the default.)
 #:
 #: ⚠️⚠️ **THE DEFAULT MOVED OFF `petsc` BECAUSE `petsc` STOPPED MARCHING THIS CASE, and the failure is
 #: the incomplete factorization's order-and-fill dependence rather than anything about the physics
@@ -564,8 +563,8 @@ K_WALL_BC = _K_WALL_BCS[K_WALL]
 #: elimination ORDER decides which couplings it discards, and this same case is on record going from
 #: amplifying a residual 5.5x per sweep to contracting it on nothing but a reordering. A SIMPLE-smoothed
 #: hierarchy never eliminates the matrix at all; it forms an approximate Schur complement and applies
-#: V-cycles, so it has no order or fill to be sensitive to. `petsc` and `hostilu` both stay reachable
-#: and both stay measured -- what is no longer defensible is either of them as the *default* here.
+#: V-cycles, so it has no order or fill to be sensitive to. `hostilu` stays reachable and measured --
+#: what is no longer defensible is an incomplete factorization as the *default* here.
 #:
 #: ⚠️ **`hostilu` was predicted to fail here because zero fill was measured to amplify on this block,
 #: and it did -- but the diagnosis was incomplete: the amplification is a property of the ELIMINATION
@@ -582,7 +581,7 @@ _FLOW_ORDERS = {
 }
 if FLOW_ORDER not in _FLOW_ORDERS:
     raise SystemExit(f"PITZ_FLOW_ORDER={FLOW_ORDER!r} is not one of {sorted(_FLOW_ORDERS)}")
-_FLOW_INVERSES = ("simplesmooth", "petsc", "hostilu")
+_FLOW_INVERSES = ("simplesmooth", "hostilu")
 FLOW_INVERSE = os.environ.get("PITZ_FLOW_INVERSE", "simplesmooth")
 if FLOW_INVERSE not in _FLOW_INVERSES:
     raise SystemExit(f"PITZ_FLOW_INVERSE={FLOW_INVERSE!r} is not one of {list(_FLOW_INVERSES)}")
@@ -628,23 +627,18 @@ LEADING_INVERSE = (
     ilu_smoothed_inverse(**HOST_FLOW)
     if FLOW_INVERSE == "hostilu"
     else simple_smoothed_inverse(**SIMPLE_FLOW)
-    if FLOW_INVERSE == "simplesmooth"
-    else None
 )
 
 #: Whether `FILL_LEVELS` / `SWEEPS` / `COARSE_EQ_LIMIT` reach the preconditioner at all.
 #:
-#: ⚠️ They configure an incomplete-LU-smoothed hierarchy built ONLY for a block whose own inverse was
-#: not supplied: the field split takes `leading_inverse(...)` when one is given and falls back to
-#: building that hierarchy otherwise, and likewise for the trailing block. Under the field split this
-#: file always supplies the trailing (Jacobi-smoothed) inverse, and `FLOW_INVERSE` supplies the leading
-#: one unless it names neither strategy -- so at the defaults BOTH are given, neither fallback is taken,
-#: and these three settings are dead. Note `hostilu` does not revive them either: it is
-#: `ilu_smoothed_inverse(**HOST_FLOW)`, which carries its own fill and sweeps.
+#: ⚠️ They configure the monolithic V-cycle, built only with `PITZ_FIELD_SPLIT=0`. Under the field split
+#: -- the default -- both blocks are fitted by injected inverses, and these three settings are dead.
+#: Note `hostilu` does not revive them: it is `ilu_smoothed_inverse(**HOST_FLOW)`, which carries its own
+#: fill and sweeps.
 #: The banner used to print them regardless, which is how a reader (and a solver study) comes to
 #: believe a march was preconditioned by a smoother that was never constructed. A banner is the primary
 #: record of what a measurement was taken under, so it must separate a live setting from a carried one.
-_ILU_SMOOTHER_LIVE = not FIELD_SPLIT or LEADING_INVERSE is None
+_ILU_SMOOTHER_LIVE = not FIELD_SPLIT
 
 #: The trailing `[k, omega]` block's inverse: the differentiable-framework nodal hierarchy, which the
 #: sibling case defaults to after a controlled pair measured it ahead of the host V-cycle (67 steps and
@@ -1169,14 +1163,12 @@ def solve_aquaflux(
             + ("" if _ILU_SMOOTHER_LIVE else "  (INERT: both blocks supply their own inverse)"),
         ),
         ("preconditioner beta floor", PC_BETA_FLOOR),
-        ("field split / trailing sweeps", f"{FIELD_SPLIT} / {TRAILING_SWEEPS}"),
+        ("field split", FIELD_SPLIT),
         (
             "flow inverse",
-            FLOW_INVERSE
-            if LEADING_INVERSE is None
             # The ordering object prints as a bare repr, which says nothing; name the order instead --
             # a banner line that cannot be read against a recorded measurement is not worth printing.
-            else f"{FLOW_INVERSE} {HOST_FLOW | {'ordering': f'cell-major/{FLOW_ORDER}'}}"
+            f"{FLOW_INVERSE} {HOST_FLOW | {'ordering': f'cell-major/{FLOW_ORDER}'}}"
             if FLOW_INVERSE == "hostilu"
             else f"{FLOW_INVERSE} {SIMPLE_FLOW}",
         ),
@@ -1284,7 +1276,6 @@ def solve_aquaflux(
             smoother_sweeps=SWEEPS,
             coarse_eq_limit=COARSE_EQ_LIMIT,
             field_split=FIELD_SPLIT,
-            trailing_smoother_sweeps=TRAILING_SWEEPS,
             leading_inverse=LEADING_INVERSE if FIELD_SPLIT else None,
             trailing_inverse=jacobi_smoothed_inverse(**JACOBI_TRAILING) if FIELD_SPLIT else None,
             inner_observer=logger.on_inner,

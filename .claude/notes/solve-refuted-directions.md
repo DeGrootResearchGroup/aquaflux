@@ -394,7 +394,8 @@
 
 ## Incomplete-LU preconditioning of the pitzDaily flow block — CLOSED as a direction (2026-08-22)
 
-`PITZ_FLOW_INVERSE=petsc` (host GAMG smoothed by PETSc's incomplete factorization) was
+`PITZ_FLOW_INVERSE=petsc` (host GAMG smoothed by PETSc's incomplete factorization; the arm was removed
+2026-09-13, #371) was
 `pitzdaily_openfoam`'s shipped leading inverse until this date, and it stopped marching the case:
 collapse at the first step of the second Reynolds rung, `alpha` 0, `beta` escalating through the whole
 ladder, residual to `inf`. Reproduced three times including on a tree with no local change. The
@@ -494,7 +495,7 @@ load-bearing status of the flow block itself is in `solve-flow-block.md`.
   Krylov cycles (6→53 at the adjoint operator, 5→40 at the march's own shift) at the case's real
   converged root. This is also the reachability-scale answer to the "is a block-SIMPLE
   preconditioner worth pursuing on the flow block at all" question `field_split_probe.py`'s
-  `block_simple_arms` docstring poses: no. See
+  since-removed `block_simple_arms` docstring posed: no. See
   `solve-flow-block-log.md` § "MSIMPLE swapped in for the SHIPPED leading inverse, trailing held fixed".
   ⚠️ **RE-ADJUDICATED 2026-08-20 after a conformance fix, and the verdict SURVIVES — narrowed, not
   overturned.** The arm above was not MSIMPLER: `schur_scaling="msimpler"` implemented MSIMPLE, with the
@@ -608,6 +609,23 @@ data model. Each had nothing in `validation/` or any test selecting it.
   returned α = 0 at 2 cycles, and the next step, after the cost trigger forced a rebuild, took α = 1 at
   β = 0.9364; every escalated step whose V-cycle *was* rebuilt came back with α ≥ 0.595. So "the retry
   ladder is futile" and "the ladder was never given a matched preconditioner" were never separated.
+- **The field split's PETSc blocks — DELETED, and with them `leading_options` / `trailing_options` /
+  `trailing_smoother_sweeps` and the `build_amg_vcycle` fallback.** A split now requires both
+  `leading_inverse` and `trailing_inverse`. Neither flagship case selected a PETSc split block. On the
+  trailing half the traced `jacobi` inverse beat the host GAMG V-cycle in a controlled `bfs3d` pair,
+  2124 s / 67 steps against 2893 s / 72 to the same `x_r/h` 8.36 (`zerogradient` k wall, 1e-08
+  positivity floor; `solve-field-split.md`). On the leading half `petsc` stopped marching pitzDaily
+  (§ "Incomplete-LU preconditioning of the pitzDaily flow block") and sat at parity with `hostilu` on
+  `bfs3d`; both cases ship `simplesmooth`. The monolithic `AmgVCycle` is unaffected.
+- **`flow_first=False` (the turbulence-first split, `_TrailingFirstFieldSplit`) — DELETED, never
+  selected.** It tied flow-first on the forward operator (4 cycles each) and lost at the converged
+  zero-shift operator, 13 against 11 (PETSc ILU(0) blocks on both halves, `bfs3d`;
+  `solve-field-split.md`).
+- **Harnesses deleted with them** (recover from git history): `bfs3d_openfoam/turbulence_smoother_sweep.py`
+  (every arm a PETSc leading block), `bfs3d_openfoam/rung_hierarchy_reuse.py` (a PETSc leading block; its
+  question was GAMG interpolation reuse across rungs), and every split arm of
+  `bfs3d_openfoam/field_split_probe.py`, which keeps its monolithic arms and the state/solve machinery
+  other harnesses import. Records citing those arms' numbers are cite-only.
 
 ## Globalization (forward step, continuation, line search) — closed investigations
 

@@ -82,9 +82,10 @@ easier operator, and it does not. Dropping the trailing half from four sweeps to
 The two marches follow the **same trajectory step for step** — same shift, same per-step cycle counts,
 same residuals to four figures, and the single line-search escalation fires at the same step to the same
 shift — so the 323 s is the identical path at a lower price per matrix-vector product, not a different
-path taken faster. That makes it a much stronger single-run result than a bare 16.5% would be. One sweep
-is now the library default (`coupled_amg_continuation(trailing_smoother_sweeps=…)`); vary it here with
-`BFS3D_TRAILING_SWEEPS`, and the smoother *method* with `BFS3D_TURBULENCE_SMOOTHER`.
+path taken faster. That makes it a much stronger single-run result than a bare 16.5% would be. Both
+of those numbers are for the PETSc trailing V-cycle, which has since been removed along with its
+`trailing_smoother_sweeps` / `BFS3D_TRAILING_SWEEPS` / `BFS3D_TURBULENCE_SMOOTHER` knobs (#371): each
+half of the split is now fitted by an injected inverse, which carries its own settings.
 
 Two cautions carried from the screening that chose it. The cycle count rose while the wall fell, again.
 And a candidate needs three things, not two — cheap per application, convergent on a hard operator, and
@@ -112,8 +113,9 @@ else at the settings above — the ranking reverses:
 | mid-span `x_r/h` | 8.36 | 8.36 |
 
 Same root by either route; the difference is entirely path cost. The in-framework hierarchy is now the
-default (`BFS3D_TURBULENCE_INVERSE=petsc` selects the host arm), which also takes the host callback off
-the trailing half and leaves it as plain array work. The flow half still runs on the host V-cycle.
+default, which also takes the host callback off the trailing half and leaves it as plain array work. The
+host arm has since been removed (#371), and the flow half has moved to the traced SIMPLE-smoothed
+hierarchy as well.
 
 **And the whole difference is one event, not a diffuse quality gap.** The two arms are identical for
 **49 steps** — same shift, same residual to four figures (8.810e-03, then 7.274e-03), same full step

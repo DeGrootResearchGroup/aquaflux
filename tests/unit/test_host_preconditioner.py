@@ -93,9 +93,8 @@ def test_the_real_factor_types_satisfy_the_declared_contract() -> None:
     verified against is a comment.
 
     The split is assembled from stub block inverses rather than through
-    ``build_block_triangular_field_split``, which would build real V-cycles and so need ``petsc4py`` --
-    an *optional* dependency the unit tier does not install. What is under test is the split's own
-    contract, and that does not depend on what inverts its blocks.
+    ``build_block_triangular_field_split``, which would build real hierarchies. What is under test is the
+    split's own contract, and that does not depend on what inverts its blocks.
     """
     from aquaflux.solve.field_split import BlockTriangularFieldSplit, FieldGroups
     from aquaflux.solve.lu_preconditioner import factorize_lu

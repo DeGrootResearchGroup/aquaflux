@@ -2921,10 +2921,6 @@ def coupled_amg_continuation(
     positivity_floor: float = 0.0,
     positivity_projection: bool = True,
     field_split: bool = False,
-    flow_first: bool = True,
-    trailing_smoother_sweeps: int = 1,
-    leading_options: dict | None = None,
-    trailing_options: dict | None = None,
     leading_inverse: Callable | None = None,
     trailing_inverse: Callable | None = None,
     probe: CoupledJacobianProbe | None = None,
@@ -2980,6 +2976,8 @@ def coupled_amg_continuation(
         unchanged, so the converged state and its adjoint are too. ``None`` (default) probes the
         residual as it stands.
     smoother_fill_levels : int
+        Monolithic V-cycle only, like ``smoother_sweeps`` and ``coarse_eq_limit``: a field split's blocks
+        are configured by the inverses injected for them.
         Incomplete-LU fill levels of the stationary level smoother (``1`` = ILU(1), ``0`` = ILU(0)). The
         smoother must stay **stationary** -- a Krylov-accelerated one makes the V-cycle nonlinear, so it
         would need flexible GMRES and has no clean transpose for the adjoint. **On the fill level the two
@@ -3081,49 +3079,24 @@ def coupled_amg_continuation(
         is not losing marches to the cap, measure before assuming the projection is an improvement to
         it.
     field_split : bool
-        Precondition with a **block-triangular field split** — separate multigrid hierarchies for the
-        ``[u, v, w, p]`` saddle and the ``[k, ω]`` transported scalars, retaining one triangle of the
-        coupling between them exactly — instead of one hierarchy over all six fields. Only which frozen
-        inverse is fitted changes; the operator stays monolithic, so the differentiated Jacobian and the
-        coupled adjoint are untouched.
-    flow_first : bool
-        Solve the ``[u, v, w, p]`` group first and retain the ``[k, ω]``-by-flow coupling — the ordering
-        :func:`~aquaflux.solve.build_block_triangular_field_split` calls ``flow_first`` and its own
-        default. Ignored without ``field_split=True``. This one value governs both the split this
-        builder fits *and* the pattern its own probe materializes (:meth:`~aquaflux.solve.FieldGroups.active_rows`,
-        which the probe consults to skip storing the triangle a split with this ordering never reads) —
-        threaded to a single argument here rather than left as two independent defaults that happen to
-        agree, since a caller changing one without the other would silently precondition the wrong
-        triangle: the probe would still drop the triangle for the *old* ordering, and the split built
-        under the *new* one would find it missing.
-    trailing_smoother_sweeps : int
-        Level-smoother sweeps on the ``[k, omega]`` half of the split, **one** by default against
-        ``smoother_sweeps``' two on the saddle. The transported scalars are a much easier operator than
-        the pressure-velocity block and do not need the same smoothing: measured over a whole
-        Reynolds-continuation march on a three-dimensional backward-facing step running the saddle at
-        four sweeps, dropping the scalars from four to one cut ~17 % of the wall on an otherwise
-        step-for-step identical trajectory, to the same reattachment length. Requires
-        ``field_split=True``.
-    leading_options, trailing_options : dict or None
-        Extra multigrid options for one half of the split only, so the saddle and the scalars can be
-        smoothed differently. The two halves are not the same kind of equation, and the shipped defaults
-        were tuned against the six-field block: the saddle needs the incomplete-LU sweep (Jacobi-class
-        smoothers do not converge on it), while the transported scalars have a genuine diagonal and are
-        served by much cheaper relaxations. Keys are PETSc options without the instance prefix, e.g.
-        ``{"mg_levels_ksp_max_it": 1}`` for a single smoother sweep. Both require ``field_split=True``;
-        passing either without it raises, since there would be only one hierarchy to apply them to.
+        Precondition with a **block-triangular field split** — a separate inverse for the
+        ``[u, v, w, p]`` saddle and for the ``[k, ω]`` transported scalars, solving the saddle first and
+        retaining the ``[k, ω]``-by-flow coupling exactly — instead of one V-cycle over all six fields.
+        Only which frozen inverse is fitted changes; the operator stays monolithic, so the differentiated
+        Jacobian and the coupled adjoint are untouched. Requires both ``leading_inverse`` and
+        ``trailing_inverse``. The probe built here then skips the flow-by-``[k, ω]`` block the split never
+        reads (:meth:`~aquaflux.solve.FieldGroups.active_rows`).
     leading_inverse : callable or None
-        ``(sub_matrix, n_fields_in_group) -> inverse`` replacing the LEADING (flow saddle) block's
-        V-cycle entirely, the counterpart of ``trailing_inverse``. An injected inverse must offer
-        ``refactor_block`` or ``refactor``, or the mid-march refresh cannot re-fit it.
+        ``(sub_matrix, n_fields_in_group) -> inverse`` for the LEADING (flow saddle) block —
+        :func:`~aquaflux.solve.simple_smoothed_inverse`, for example. Required with ``field_split=True``
+        and refused without it. An injected inverse must offer ``refactor_block`` or ``refactor``, or the
+        mid-march refresh cannot re-fit it.
     trailing_inverse : callable or None
-        ``(sub_matrix, n_fields_in_group) -> inverse`` replacing the trailing block's V-cycle outright,
-        so the transported scalars can be preconditioned by something that is not a host solver's
-        V-cycle — :func:`~aquaflux.solve.jacobi_smoothed_inverse` supplies the differentiable-framework
-        one. Whatever is passed must expose ``n_dofs`` and ``apply(residual, transpose=...)``, be a
-        fixed *linear* map (the outer Krylov is not flexible) and transpose exactly (the adjoint's
-        solve uses it). The trailing smoother settings above then do not apply. Requires
-        ``field_split=True``.
+        ``(sub_matrix, n_fields_in_group) -> inverse`` for the trailing ``[k, ω]`` block —
+        :func:`~aquaflux.solve.jacobi_smoothed_inverse`, for example. Whatever is passed must expose
+        ``n_dofs`` and ``apply(residual, transpose=...)``, be a fixed *linear* map (the outer Krylov is
+        not flexible) and transpose exactly (the adjoint's solve uses it). Required with
+        ``field_split=True`` and refused without it.
     probe : CoupledJacobianProbe or None
         The colouring plan and de-compression map to materialize with, when a caller already has one.
         They depend on the mesh and the reaches alone, so a driver building several steps over one case
@@ -3187,21 +3160,15 @@ def coupled_amg_continuation(
     # Validate the preconditioner arrangement BEFORE anything expensive. Everything below materializes a
     # coupled Jacobian by coloured probing, which is hundreds of matrix-vector products; a configuration
     # that cannot be honoured should say so immediately rather than after that.
-    if not field_split and leading_inverse is not None:
+    if field_split and (leading_inverse is None or trailing_inverse is None):
         raise ValueError(
-            "leading_inverse replaces the leading block's inverse, and there is no leading block "
-            "without field_split."
+            "field_split=True fits a separate inverse to each block, so it needs both leading_inverse "
+            "and trailing_inverse (for example simple_smoothed_inverse() and jacobi_smoothed_inverse())."
         )
-    if not field_split and trailing_inverse is not None:
+    if not field_split and (leading_inverse is not None or trailing_inverse is not None):
         raise ValueError(
-            "trailing_inverse replaces the trailing block's inverse, and there is no trailing block "
-            "without field_split=True."
-        )
-    if not field_split and (leading_options is not None or trailing_options is not None):
-        raise ValueError(
-            "leading_options / trailing_options tune the two halves of a field split apart, and there "
-            "is only one hierarchy without field_split=True. Passing them here would silently do "
-            "nothing."
+            "leading_inverse / trailing_inverse fit one block of a field split, and there is only one "
+            "block without field_split=True. Passing either here would silently do nothing."
         )
     step_limit, step_projection = _k_positivity_guards(
         coupled, positivity_floor, positivity_projection
@@ -3227,12 +3194,9 @@ def coupled_amg_continuation(
             # built here specifically for one need not materialize that block at all -- it is a
             # fifth or more of the pattern on a coupled RANS mesh (measured on a three-dimensional
             # backward-facing step) and pure waste otherwise: computed, stored, and thrown away by
-            # `FieldGroups.blocks` the moment the split is fitted. `flow_first` is this function's own
-            # parameter, read here and passed to `FieldSplitAmgPreconditioner.build` below -- the same
-            # value reaches both, so the triangle this drops from the pattern cannot disagree with the
-            # triangle the split it is a pattern for actually keeps. `None` when not splitting, so a
+            # `FieldGroups.blocks` the moment the split is fitted. `None` when not splitting, so a
             # monolithic build (which DOES read every block) is unaffected.
-            active_rows=groups.active_rows(flow_first=flow_first) if field_split else None,
+            active_rows=groups.active_rows() if field_split else None,
             # A preconditioner must be assembled from the operator the Krylov iteration APPLIES. When
             # the step differentiates a stand-in, so must the probe -- otherwise the two differ by a
             # term the size of the k row's own diagonal, which is a preconditioner for a matrix nobody
@@ -3263,10 +3227,7 @@ def coupled_amg_continuation(
     # both a wasted coloured probe and a wasted multigrid setup.
     if preconditioner is None:
         shift = _frozen_shift_diagonal(base, amg_beta, reference_state)
-        common = {
-            "smoother_fill_levels": smoother_fill_levels,
-            "smoother_sweeps": smoother_sweeps,
-            "coarse_eq_limit": coarse_eq_limit,
+        probing = {
             "batched_matvec": batched_matvec,
             "probe_batch_size": _PROBE_BATCH_SIZE,
             "structure": structure,
@@ -3277,20 +3238,19 @@ def coupled_amg_continuation(
                 plan,
                 shift,
                 groups,
-                flow_first=flow_first,
-                trailing_smoother_sweeps=trailing_smoother_sweeps,
-                leading_options=leading_options,
-                trailing_options=trailing_options,
                 leading_inverse=leading_inverse,
                 trailing_inverse=trailing_inverse,
-                **common,
+                **probing,
             )
             if field_split
             else MonolithicAmgPreconditioner.build(
                 matvec,
                 plan,
                 shift,
-                **common,
+                smoother_fill_levels=smoother_fill_levels,
+                smoother_sweeps=smoother_sweeps,
+                coarse_eq_limit=coarse_eq_limit,
+                **probing,
             )
         )
     # Keep `k` off zero: it is solved directly, and one negative cell reaches the closure's sqrt(k)

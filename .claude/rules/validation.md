@@ -45,7 +45,7 @@ it was left, and any timing taken from it measured the globalization rather than
 
 ## ⚠️ pitzDaily's SHIPPED PRECONDITIONER STOPPED MARCHING IT — the default moved to `simplesmooth` (2026-08-22)
 
-Under `PITZ_FLOW_INVERSE=petsc` (the case's default until this date) `pitzdaily_openfoam/compare.py`
+Under `PITZ_FLOW_INVERSE=petsc` (the case's default until this date; the arm was removed 2026-09-13, #371) `pitzdaily_openfoam/compare.py`
 collapses at the **first step of the second Reynolds rung**: `alpha` 0, `beta` escalating 0.5 → 2 → 16
 through the whole ladder, the residual rising 1.674e-01 → 5.754e-01 → `inf`. Reproduced three times,
 including on a tree carrying **no local change at all**, with the step tables bit-identical.

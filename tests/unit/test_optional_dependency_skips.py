@@ -44,7 +44,6 @@ _TESTS = Path(__file__).resolve().parents[1]
 #: check itself, which is the more surprising of the two and is where most of the hidden tests are.
 GATED_MODULES: dict[str, tuple[str, str]] = {
     "unit/test_amg_preconditioner.py": ("petsc4py", "PCGAMG V-cycle; fast tier"),
-    "unit/test_field_split_vcycle.py": ("petsc4py", "per-field GAMG blocks; fast tier"),
     "integration/test_coupled_amg.py": ("petsc4py", "AMG-preconditioned coupled solve; slow tier"),
     "integration/test_coupled_field_split.py": (
         "petsc4py",

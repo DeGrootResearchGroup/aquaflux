@@ -1,7 +1,8 @@
 """Does a SIMPLE-type block preconditioner win as a drop-in for bfs3d's shipped leading inverse?
 
 Every prior measurement of the mass-scaled Schur on this case's real operator
-(``field_split_probe.py``'s ``split msimple/ilu0`` family, and the first version of this probe)
+(``field_split_probe.py``'s ``split msimple/ilu0`` family, since removed from that harness, and the
+first version of this probe)
 tested the **lower block-triangular** composition -- one velocity solve, one Schur solve. That is
 Klaij & Vuik (2013)'s MSIMPLE minus its closing velocity update, not their MSIMPLER: the pressure
 prediction that distinguishes the ``R`` variants was not implemented at the time, and it is the axis
@@ -51,6 +52,10 @@ import field_split_probe as fsp  # noqa: E402
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 from aquaflux.flow.block_preconditioner import BlockPreconditioner  # noqa: E402
+from aquaflux.solve import (  # noqa: E402
+    FieldSplitAmgPreconditioner,
+    build_block_triangular_field_split,
+)
 
 compare = fsp.compare
 
@@ -99,33 +104,49 @@ def _block_simple_build(coupled, pc_state, pc_beta, trailing_inverse, compositio
     a_p = jax.lax.stop_gradient(block.frozen_momentum_diagonal(flow) * (1.0 + pc_beta))
     matvec = jax.jit(block.apply_at(flow, a_p))
 
-    def build(shifted, groups, n_fields):
-        return fsp.field_split(
-            shifted,
-            groups,
-            n_fields,
-            "ilu0",  # unused: leading_inverse below replaces the V-cycle wholesale
-            "ilu0",  # unused: trailing_inverse below replaces it too
-            flow_first=True,
-            leading_inverse=lambda sub, n_sub: fsp.TracedBlockInverse(matvec, n_flow),
-            trailing_inverse=trailing_inverse,
-        )
-
-    return build
+    return _split(lambda sub, n_sub: TracedBlockInverse(matvec, n_flow), trailing_inverse)
 
 
 def _shipped_build(trailing_inverse):
+    return _split(compare.LEADING_INVERSE, trailing_inverse)
+
+
+class TracedBlockInverse:
+    """A traced block preconditioner wearing the host ``apply(residual, transpose=...)`` interface.
+
+    The block-SIMPLE preconditioner applies a fixed number of multigrid cycles with fixed smoothing, so
+    ``b -> x`` is a constant linear map -- which is what lets the transpose come from
+    :func:`jax.linear_transpose` rather than a hand-written transposed cycle, and what makes it legal for
+    the adjoint at all. The conversion at each boundary is real work, so this is a study adapter.
+    """
+
+    def __init__(self, cycle, n_dofs: int) -> None:
+        self._cycle = cycle
+        self._n_dofs = n_dofs
+        self._transpose = jax.linear_transpose(cycle, jnp.zeros(n_dofs, dtype=jnp.float64))
+
+    @property
+    def n_dofs(self) -> int:
+        return self._n_dofs
+
+    def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
+        vector = jnp.asarray(residual, dtype=jnp.float64)
+        out = self._transpose(vector)[0] if transpose else self._cycle(vector)
+        return np.asarray(out, dtype=np.float64)
+
+    def destroy(self) -> None:
+        """Nothing to release -- the hierarchy is plain arrays, not a host solver's handles."""
+
+
+def _split(leading_inverse, trailing_inverse):
+    """An arm builder: the library's field split over the shared shifted Jacobian, both inverses given."""
+
     def build(shifted, groups, n_fields):
-        return fsp.field_split(
-            shifted,
-            groups,
-            n_fields,
-            "ilu0",  # unused: leading_inverse below (compare.LEADING_INVERSE) replaces it
-            "ilu0",  # unused: trailing_inverse below replaces it too
-            flow_first=True,
-            leading_inverse=compare.LEADING_INVERSE,
-            trailing_inverse=trailing_inverse,
+        del n_fields  # each injected inverse is handed its own group's field count
+        split = build_block_triangular_field_split(
+            shifted, groups, leading_inverse=leading_inverse, trailing_inverse=trailing_inverse
         )
+        return FieldSplitAmgPreconditioner(split, groups)
 
     return build
 

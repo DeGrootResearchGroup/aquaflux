@@ -1,10 +1,10 @@
-"""The field split driving REAL multigrid V-cycles, rather than the exact stand-in blocks.
+"""The field split driving REAL multigrid hierarchies, rather than the exact stand-in blocks.
 
 ``test_field_split.py`` pins the split's algebra with exact block inverses, which is the right way to test
-the algebra but cannot catch a wiring fault against the actual V-cycle builder -- a sub-block handed the
-wrong block size, an aggregation that will not coarsen a two-field operator, a permutation applied on the
+the algebra but cannot catch a wiring fault against the actual inverse builders -- a sub-block handed the
+wrong field count, an aggregation that will not coarsen a two-field operator, a permutation applied on the
 wrong side of a group boundary. Those only appear once real hierarchies are built over the sub-blocks, and
-they are expensive to discover in a case study rather than here. Skipped where ``petsc4py`` is unavailable.
+they are expensive to discover in a case study rather than here.
 
 The model operator is a two-group block system on a five-point Laplacian graph -- not the coupled saddle,
 whose behaviour is the case study's subject. What is under test is that the pieces fit together and that
@@ -16,10 +16,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import scipy.sparse as sp
-
-pytest.importorskip("petsc4py")
-
-from aquaflux.solve import FieldGroups, build_block_triangular_field_split
+from aquaflux.solve import (
+    FieldGroups,
+    build_block_triangular_field_split,
+    jacobi_smoothed_inverse,
+    simple_smoothed_inverse,
+)
 
 
 def _laplacian_2d(n: int) -> sp.csr_matrix:
@@ -57,16 +59,23 @@ def operator(groups: FieldGroups) -> sp.csr_matrix:
     return sp.bmat(blocks, format="csr")
 
 
-@pytest.mark.parametrize("flow_first", [True, False])
-def test_the_split_contracts_the_residual(groups, operator, flow_first):
+def _split(operator, groups):
+    """The split with the traced inverses both flagship cases ship, at small-mesh coarse sizes."""
+    return build_block_triangular_field_split(
+        operator,
+        groups,
+        leading_inverse=simple_smoothed_inverse(max_coarse=200),
+        trailing_inverse=jacobi_smoothed_inverse(max_coarse=200),
+    )
+
+
+def test_the_split_contracts_the_residual(groups, operator):
     """One application is a genuine approximate inverse of the FULL coupled operator.
 
     Not of its own triangle -- of the whole thing, coupling included, which is what an outer Krylov
     method is handed.
     """
-    split = build_block_triangular_field_split(
-        operator, groups, flow_first=flow_first, coarse_eq_limit=200
-    )
+    split = _split(operator, groups)
     rng = np.random.default_rng(0)
     b = rng.standard_normal(groups.n_dofs)
     x = split.apply(b)
@@ -74,30 +83,27 @@ def test_the_split_contracts_the_residual(groups, operator, flow_first):
     split.destroy()
 
 
-@pytest.mark.parametrize("flow_first", [True, False])
-def test_the_transpose_is_the_adjoint_of_the_forward_apply(groups, operator, flow_first):
-    """``<y, M x> == <M^T y, x>`` with real V-cycles, so the adjoint's transpose solve is sound.
+def test_the_transpose_is_the_adjoint_of_the_forward_apply(groups, operator):
+    """``<y, M x> == <M^T y, x>`` with real hierarchies, so the adjoint's transpose solve is sound.
 
     The inner-product form rather than a dense build: at this size forming the matrix column by column
     would mean thousands of multigrid applications, and the identity is what the adjoint actually relies
     on.
     """
-    split = build_block_triangular_field_split(
-        operator, groups, flow_first=flow_first, coarse_eq_limit=200
-    )
+    split = _split(operator, groups)
     rng = np.random.default_rng(1)
     x, y = rng.standard_normal((2, groups.n_dofs))
     np.testing.assert_allclose(y @ split.apply(x), split.apply(y, transpose=True) @ x, rtol=1e-10)
     split.destroy()
 
 
-def test_each_group_is_aggregated_at_its_own_block_size(groups, operator):
-    """The point of splitting: the two groups get separate hierarchies, not one shared coarse space.
+def test_each_group_is_fitted_at_its_own_size(groups, operator):
+    """The point of splitting: the two groups get separate inverses, not one shared hierarchy.
 
-    Read off the built V-cycles rather than inferred -- a builder that quietly passed the full field
-    count to both blocks would still produce a working preconditioner, just not a split one.
+    Read off the built inverses rather than inferred -- a builder that quietly handed the full operator
+    to both blocks would still produce a working preconditioner, just not a split one.
     """
-    split = build_block_triangular_field_split(operator, groups, coarse_eq_limit=200)
+    split = _split(operator, groups)
     assert split._leading.n_dofs == groups.n_leading_dofs
     assert split._trailing.n_dofs == groups.n_dofs - groups.n_leading_dofs
     split.destroy()

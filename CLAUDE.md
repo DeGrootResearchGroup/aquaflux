@@ -664,7 +664,7 @@ not one to arrive at by importing something.
 
 Two consequences worth having in mind rather than rediscovering:
 
-- **`petsc4py` is not installed in CI**, so the four modules gated on it — two of them in the *fast*
+- **`petsc4py` is not installed in CI**, so the three modules gated on it — two of them in the *fast*
   tier, i.e. inside the required check — have never run there. It has no wheels (it builds PETSc from
   source), which is why the `petsc` extra is kept out of `test`; that is a cost decision, and the
   census is where its price is written down.

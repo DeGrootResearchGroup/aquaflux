@@ -344,11 +344,10 @@ split = build_block_triangular_field_split(
 )
 ```
 
-`flow_first=True` (the default) solves the leading group first, which retains the
-trailing-by-leading coupling and discards the other corner. Which corner is discarded is a
-real choice rather than a symmetry: on a coupled flow–turbulence system the turbulence
-equations depend on the flow far more strongly than the reverse, so keeping that direction
-is the one to keep.
+The split solves the leading group first, which retains the trailing-by-leading coupling
+and discards the other corner. Which corner is discarded is a real choice rather than a
+symmetry: on a coupled flow–turbulence system the turbulence equations depend on the flow
+far more strongly than the reverse, so that is the direction to keep.
 
 ### A complete factorization
 

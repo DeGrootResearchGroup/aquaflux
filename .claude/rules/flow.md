@@ -687,7 +687,7 @@ Engineering Principles.
   `BlockPreconditioner`, hence no `schur_scaling`, regardless of `FIELD_SPLIT`/`FLOW_INVERSE`). And where
   MSIMPLE was tested directly against a flagship-scale operator, in the field-split leading-inverse role
   the current architecture actually uses, it was dominated: `validation/bfs3d_openfoam/field_split_probe.py`'s
-  `split msimple/ilu0` arm is part of the "FLAT block preconditioners are CLOSED on this case" family in
+  `split msimple/ilu0` arm (removed 2026-09-13, #371 — in git history) is part of the "FLAT block preconditioners are CLOSED on this case" family in
   `.claude/notes/solve-flow-block-log.md` (2.554e-06 TRUE relative residual at the 58-restart-cycle cap,
   where the shipped hierarchical leading inverses converge in ~10 cycles), and a tighter,
   single-variable-changed measurement (`simple_type_swap_probe.py`, same file, "MSIMPLE swapped in for the

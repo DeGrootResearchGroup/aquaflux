@@ -1485,7 +1485,8 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       (`3.896e-02, 4.115e-03, 5.275e-04, 2.851e-05` at 1/1/1/0 cycles). A march log from another branch
       is not a control, and `validation/bfs3d_openfoam/march_log_compare.py` exists to say so.
     - **✅ CARRYING THE COARSE SPACE ACROSS A REYNOLDS RUNG IS INERT — measured, and structurally so
-      (2026-08-12, `validation/bfs3d_openfoam/rung_hierarchy_reuse.py`).** Reusing one preconditioner
+      (2026-08-12, `validation/bfs3d_openfoam/rung_hierarchy_reuse.py` — deleted 2026-09-13 because it
+      built the split's leading block on the PETSc V-cycle, #371; in git history).** Reusing one preconditioner
       object across the ramp means its GAMG coarse space is built at the *anchor* and carried down two
       decades of viscosity by `refactor`'s `pc_gamg_reuse_interpolation`, which was the standing reason
       to re-test rather than assume the reuse was safe. *Configuration:* `bfs3d`, field split, ILU(0)×4,

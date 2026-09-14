@@ -1333,7 +1333,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   opened with `march_beta, _, description = STATES[name]` — a **positional** unpack of a record that has
   since grown to five fields — so every one of them raised `ValueError: too many values to unpack` before
   reaching its first line of work: `trailing_hierarchy_sweep.py`, `cell_block_scaling.py`,
-  `trailing_block_conditioning.py`, `turbulence_smoother_sweep.py`, `zero_pattern_pivots.py` and
+  `trailing_block_conditioning.py`, `turbulence_smoother_sweep.py` (since deleted, #371), `zero_pattern_pivots.py` and
   `field_coupling.py`. All six now read the fields **by name**, which is what makes them survive the next
   field. **The lesson is about the keep-the-harness rule rather than about these six**: a harness kept in
   the repository is only re-adjudicable if it still *runs*, and nothing in the test suite exercises these,
@@ -1897,7 +1897,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     re-committed two costs the shared base was written to remove (eager per-field transposes; a fresh
     closure per apply). Its measurements never transferred to the nodal inverse in any case — a
     per-field pair is a weaker object than one block-aware hierarchy — so the `nativeN` arm in
-    `turbulence_smoother_sweep.py` went with it, leaving `nodal[N][cM]`.
+    `turbulence_smoother_sweep.py` went with it, leaving `nodal[N][cM]` (the whole harness was deleted
+    2026-09-13, #371).
   - `JacobiSmoothedInverse` (`solve/field_split.py`, over the shared
     `solve/hierarchy_inverse.HierarchyBlockInverse` base), both transposable in
     closed form and fixed linear operators, so adjoint-legal. **⚠️ "Neither is wired into production" was

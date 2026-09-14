@@ -168,16 +168,16 @@ recorded error.** A default here that disagrees with the code is a defect — fi
 
 | | library default | validated `bfs3d` bundle | where |
 |---|---|---|---|
-| smoother fill | `smoother_fill_levels=1` (ILU(1)) | **0** (ILU(0)) | `coupled_amg_continuation` / `compare.py` |
-| smoother sweeps | `smoother_sweeps=2` | **4** | same |
-| coarse-eq limit | `coarse_eq_limit=None` (~50) | **2000** | same |
+| smoother fill | `smoother_fill_levels=1` (ILU(1)) | 0 (ILU(0)) — **inert**: monolithic only, and the case runs the split | `coupled_amg_continuation` / `compare.py` |
+| smoother sweeps | `smoother_sweeps=2` | 4 — **inert**, as above | same |
+| coarse-eq limit | `coarse_eq_limit=None` (~50) | 2000 — **inert**, as above | same |
 | PC shift floor | `beta_floor=0.0` | **0.05** | same |
 | aggregation | plain (`pc_gamg_agg_nsmooths=0`) | plain | `amg_preconditioner.py` |
 | field split | `field_split=False` | **True** | `compare.py` |
 | stencil reach | `stencil_reach=3` | 3 | — |
 | probe column reach | `column_reach=None` (uniform) | **(3,3,3,3,2,2)** | `compare.py` `COLUMN_REACH` |
 | dual-time inner tol | `inner_tol=0.05` | **1e-2** | `compare.py` `INNER_TOL` |
-| flow (leading) inverse | `AmgVCycle` (PETSc) | **`SimpleSmoothedInverse`** (`FLOW_INVERSE="simplesmooth"`) | `compare.py` |
+| flow (leading) inverse | none — `field_split=True` requires `leading_inverse` and `trailing_inverse` (#371) | **`SimpleSmoothedInverse`** (`FLOW_INVERSE="simplesmooth"`) | `compare.py` |
 | trailing hierarchy depth | `HierarchyBlockInverse` class default: `max_levels=2, strength_threshold=0.0, aggressive_levels=1` | **`max_levels=20, max_coarse=200, strength_threshold=0.25, aggressive_levels=0, frozen_coarsening=True`** | `compare.py` `JACOBI_TRAILING` |
 
 **The coupled forward solve: one MEASURE, per-family RESTART REGIMES (restructured 2026-08-20, #282).**

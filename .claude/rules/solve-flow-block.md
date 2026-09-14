@@ -37,7 +37,7 @@ here.** Update the current-status paragraph above only when an investigation rea
 **Read this before citing any zero-shift result in this section as an adjoint result.** The whole
 section is justified by the transpose solve behind every gradient meeting the unshifted operator — but
 every other number in it is a **linear probe**, driven by the right-hand side `-R(state)`
-(`field_split_probe.py`). The actual adjoint had never been executed. It now has been, it works, and it
+(`field_split_probe.py`'s split arms, removed 2026-09-13, #371). The actual adjoint had never been executed. It now has been, it works, and it
 agrees with a finite difference. Harness `validation/bfs3d_openfoam/adjoint_probe.py`.
 
 *Configuration, every run below:* `state-00067` started from its **physical** fields
@@ -107,7 +107,7 @@ entirely the *finite difference's* fault — the adjoint barely moves while the 
   marginally *cheaper* per application than the incumbent's ~195 ms and the ~8 % extra applications make
   it roughly a wash on wall clock — inside this case's noise floor either way.
 - **⚠️⚠️ AND THIS IS THE CASE THAT PROVES A LINEAR PROBE CANNOT RANK ADJOINT PRECONDITIONERS.** The same
-  two arms, at the same state and the same β = 0, measured through `field_split_probe.py` at right-hand
+  two arms, at the same state and the same β = 0, measured through `field_split_probe.py` (split arms since removed, #371) at right-hand
   side `−R`: traced **4 restart cycles against PETSc's 11**, a 2.75× win. Measured on the actual
   gradient: **1696 against 1575, a 1.08× loss.** The ranking inverts and the magnitude is out by ~3×.
   The reason is already recorded a few lines above and is now demonstrated rather than argued: **the
@@ -198,7 +198,8 @@ iteration-count one, and it is bounded by the same ±8 % seen when the *same* st
 preconditioner both at `beta = 0`** — the operator the implicit-function-theorem adjoint solves, and the
 only state in this set that discriminates between candidates. Real right-hand side `-R(state)`, GMRES
 restart 15 judged on the **TRUE** residual, uniform stencil reach 3, field split with ILU(0) on the
-trailing half, harness `validation/bfs3d_openfoam/field_split_probe.py`.
+trailing half, harness `validation/bfs3d_openfoam/field_split_probe.py` — whose split arms were removed
+2026-09-13 (#371) and survive only in git history.
 
 ⚠️ **THE INCUMBENT IS THE FIELD SPLIT, NOT THE MONOLITHIC ARM — and calling the monolithic one "shipped"
 here cost a day of comparisons against a bar 45 % too slow.** The shipped bundle runs `field split True`
