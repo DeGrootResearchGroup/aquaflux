@@ -879,6 +879,19 @@ same `FASTGATE_FORCE=1` override and the same CI exemption — exit `4`, distinc
 exit `3`, so the two refusals are distinguishable from a calling script. `FASTGATE_LOCK_DIR` overrides
 the lock's location, the way `FASTGATE_JOBS` overrides the worker count.
 
+**A second, complementary fix cuts a single tier's own footprint, rather than only fencing it off
+from a second one.** An xdist worker keeps every compiled XLA executable it has ever built for the
+process's lifetime, across however many modules `--dist loadfile` hands it — so the footprint above
+only grows over a run and never comes back down. `tests/conftest.py` now calls `jax.clear_caches()`
+in a module-scoped autouse fixture, at the end of every module. Measured the same way as the
+correction above (`top -l 1 -o mem -stats pid,ppid,mem,cmprs`, same 11-core/19 GB machine, jax
+0.10.2, 2026-09-14): peak combined footprint **54.3 GB → 22.7 GB**, wall clock **467 s → 412 s** —
+both improve, because the unfixed run was also paying to keep over 30 GB of that footprint
+compressed, and the recompiles this costs are cheaper than that. This is most of the reason the
+default worker count was **not** also cut to fit a single tier inside physical RAM (a harsher,
+slower fix considered and deferred to a follow-up issue): with this fix in place, one tier's peak
+footprint sits close to this machine's 19 GB of RAM rather than 2.8× over it.
+
 ### What no runner can enforce (binding)
 
 - **Print one line per outer step, `flush=True`.** The runner keeps the log unbuffered; only the script
