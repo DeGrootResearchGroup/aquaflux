@@ -2203,7 +2203,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     for the coupled flow block** (`_coupled_shift_policy`: the convection velocity AMG), which is frozen
     at the reference state so the value-dependence costs no refresh; it is a **no-op on
     the low-aspect-ratio pitzDaily case**, and the payoff is the future wall-resolved / skewed regime.
-    It does **not** apply to the reduction-based `air`/`lsc` blocks (already strength-based), and the
+    It does **not** apply to the reduction-based `air` block (already strength-based), and the
     refreshed scalar k/ω AMGs stay `θ=0` to keep their refresh cache-hit — a value-refresh (à la
     `refresh_air_hierarchy`) to let them use SoC too is the tracked follow-up.
 - **⚠️⚠️ THE lAIR RESTRICTION WALKED THE OPERATOR'S FULL SPARSITY PATTERN, NOT THE STRENGTH GRAPH —

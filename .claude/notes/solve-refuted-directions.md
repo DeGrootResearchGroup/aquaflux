@@ -564,6 +564,17 @@ load-bearing status of the flow block itself is in `solve-flow-block.md`.
   archived here, because it is the live default, not a dead idea. Read it before re-proposing the traced
   block as a *speed* win — that specific claim is still refuted.
 
+- **The stabilized least-squares-commutator Schur (`schur_scaling="lsc"`, `StabilizedLscSchur`) — DELETED
+  2026-09-13 (#371), dominated.** The algebraic, nonuniform-mesh stabilized form of Elman, Howle, Shadid,
+  Silvester & Tuminaro (2007), the right variant for a Rhie–Chow collocated discretization, with the
+  viscosity cancelled. On the coupled solve it lost to msimple 96 vs 13 cycles / 526 vs 38.9 s on one
+  shifted solve at a developed pitzDaily state (block-diagonal `coupled_continuation`, `v_cycles=4`; no
+  shift recorded) and ~2.9x on the coupled channel, at identical residual trajectories. Its one claimed
+  win, 9 vs 15 GMRES on an *isolated* flow block at Re=1e4, named no mesh or configuration, and nothing
+  in validation or any test selected it. The trap it taught survives: under a block-diagonal coupled
+  preconditioner plus a pseudo-transient shift, a better flow Schur buys no coupled cycles. Full
+  numbers: `solve-globalization-log.md`, the MSIMPLE root-cause entry.
+
 ## Globalization (forward step, continuation, line search) — closed investigations
 
 Full detail is in `solve-globalization-log.md` (no `paths:`, reference-only); the current architecture

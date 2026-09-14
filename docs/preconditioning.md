@@ -183,15 +183,11 @@ Péclet number without assuming a flow speed.
 | --- | --- |
 | `"simple"` (default) | The classical SIMPLE Schur: a pressure Laplacian scaled by the momentum diagonal, `Ŝ ~ B diag(V/a_P) Bᵀ`. Degrades as convection strengthens, because `a_P` does. |
 | `"msimple"` | The same Laplacian scaled instead by a frozen, velocity-independent mass diagonal `Q̂ = ρV/k`, giving a constant-coefficient pressure Poisson. Because it does not track the velocity, it does not degrade with convection — the variant that carries a flow-only solve past the Reynolds number at which the `a_P` Schur stalls. |
-| `"lsc"` | The algebraic, nonuniform-mesh stabilized least-squares commutator of Elman, Howle, Shadid, Silvester & Tuminaro (2007), built from the momentum operator itself rather than from a diagonal. The *stabilized* variant is the relevant one, because a Rhie–Chow collocated discretization is equal-order stabilized. |
 
 Both scaled Laplacians are near-Stokes approximations. Once a flow is strongly
 convection-dominated, what limits the block is the *approximation* rather than how
 accurately it is inverted — at which point raising `v_cycles` does not help, and on the
 Schur it can hurt, because inverting the wrong operator more exactly is not progress.
-`"lsc"` is markedly dearer per application (two multigrid solves plus three residual
-linearizations, against one solve) and is stronger on an isolated flow saddle; it is
-**not** a good choice inside a coupled flow–turbulence solve.
 
 ### `composition` — how the two solves are combined
 

@@ -1083,13 +1083,11 @@
       **Root cause:** the MSIMPLE Schur is a *constant-coefficient* (scaled pressure-mass-matrix) Poisson,
       which is a near-Stokes/low-Re approximation and degrades as convection strengthens — exactly the
       high-Re/recirculating regime here.
-      - **⚠️ The "obvious" fix — a better Schur (stabilized LSC) — WAS BUILT AND LOSES BADLY on the
-        coupled solve. Do not re-derive it (binding).** `schur_scaling="lsc"`
-        (`flow/block_preconditioner.py`) implements the algebraic, nonuniform-mesh stabilized
-        least-squares commutator of Elman, Howle, Shadid, Silvester & Tuminaro (2007) — the *right*
-        variant for a Rhie–Chow collocated (equal-order stabilized) discretization, with the viscosity
-        cancelled so it serves a variable-viscosity closure. Measured on one shifted solve at a
-        developed/separated pitzDaily state:
+      - **⚠️ The "obvious" fix — a better Schur (stabilized LSC) — WAS BUILT, LOST BADLY on the
+        coupled solve, and was DELETED 2026-09-13 (#371).** It was the algebraic, nonuniform-mesh
+        stabilized least-squares commutator of Elman, Howle, Shadid, Silvester & Tuminaro (2007), with
+        the viscosity cancelled so it served a variable-viscosity closure. Measured on one shifted solve
+        at a developed/separated pitzDaily state (no shift recorded):
 
         | Schur | cycles | wall |
         |---|---|---|
@@ -1102,9 +1100,8 @@
         **Why the flow-only win does not transfer:** LSC *does* beat MSIMPLE on the isolated flow block
         (9 vs 15 GMRES at Re=1e4), but on the coupled block-*diagonal* preconditioner under the
         pseudo-transient shift, a better isolated flow-Schur does not reduce *coupled* cycles — the
-        coupled iteration is not limited by the flow block's Schur quality. Keep the strategy (it is a
-        legitimate option for a flow-only solve); do **not** make it the coupled default, and do not
-        propose it again as the cure for coupled cost.
+        coupled iteration is not limited by the flow block's Schur quality. The isolated flow-only win
+        named no mesh or configuration and nothing selected the strategy, which is why it was deleted.
       - PCD remains deprioritized regardless: its auxiliary pressure convection–diffusion operator
         carries finite-element boundary recipes that do not transfer cleanly to cell-centred FVM.
       - **What a preconditioner can and cannot change — state this precisely, both halves are measured.**

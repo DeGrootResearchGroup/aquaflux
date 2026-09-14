@@ -497,8 +497,9 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   (`potential_flow` passes `preconditioner_side="left"`), never on the shifted saddle. On **`jaxamg`**: the search confirmed it is **NVIDIA/AmgX-locked and
   scalar-only** (no coupled/saddle-point, no AMD/TPU) — usable at most as a pressure-Poisson *inner*
   escape-hatch on NVIDIA hardware, **not** the coupled solver or an architectural commitment. Do not
-  adopt it on the README's word. **`LSC` original / `PCD` carry equal-order/FEM traps** (use stabilized
-  LSC for Rhie–Chow; PCD needs FEM-BC re-derivation). **The `multigrid.py`-specific binding decisions
+  adopt it on the README's word. **`LSC` original / `PCD` carry equal-order/FEM traps** (stabilized
+  LSC is the Rhie–Chow form, and was built and deleted as dominated on the coupled solve; PCD needs
+  FEM-BC re-derivation). **The `multigrid.py`-specific binding decisions
   this headline expands into — the pure operator-coarsening contract, the single-homed V-cycle
   recursion, the static/traced level split, strength-of-connection aggregation, `refresh_air_hierarchy`,
   the degenerate-mesh guard, and the two-level damped-Jacobi convection hierarchy — moved to

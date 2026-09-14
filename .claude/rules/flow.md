@@ -672,20 +672,13 @@ Engineering Principles.
   near-optimal, and **preconditioner changes must be validated on the real march, not on ρ** (ρ here is
   dominated by isolated outlier eigenvalues GMRES kills anyway). **Root cause:** the MSIMPLE Schur is a
   constant-coefficient (scaled pressure-mass-matrix) Poisson — a near-Stokes/low-Re approximation that
-  degrades as convection strengthens. **A better Schur was the obvious next move — it is BUILT
-  (`schur_scaling="lsc"`, the algebraic nonuniform-mesh stabilized least-squares commutator of Elman,
-  Howle, Shadid, Silvester & Tuminaro 2007) and it LOSES BADLY on the coupled solve. Do not re-derive
-  it.** At a developed/separated pitzDaily state, one shifted solve: msimple **13 cycles / 38.9 s** vs
-  lsc **96 cycles / 526 s** (`v_cycles=4`) and **82 / 662 s** (`v_cycles=8`) — 6–7× the cycles, 13–17×
-  the wall time, both genuinely converged (`lin_rel ~2e-9`); and ~2.9× slower on the coupled channel at
-  an identical residual trajectory. **The flow-only win does not transfer:** LSC beats MSIMPLE on the
-  *isolated* flow block (9 vs 15 GMRES at Re=1e4), but under the coupled block-**diagonal**
-  preconditioner plus the pseudo-transient shift, the coupled iteration is not limited by the flow
-  Schur's quality, so improving it buys nothing. The strategy stays available for a flow-only solve;
-  it is not the coupled default and is not the cure for coupled cost. PCD remains deprioritized
+  degrades as convection strengthens. **A better Schur (the stabilized least-squares commutator) was
+  built, lost 6–7× on cycles on the coupled solve, and was DELETED 2026-09-13 (#371) — there is no
+  `schur_scaling="lsc"` and no `StabilizedLscSchur`.** See `.claude/notes/solve-refuted-directions.md`.
+  PCD remains deprioritized
   independently (finite-element boundary recipes that do not transfer to FVM). Full numbers and the
   matching "what a preconditioner can and cannot change" rule are in `.claude/notes/solve-globalization-log.md`.
-- **⚠️ SCOPE (binding, corrected 2026-08-18): "msimple beats lsc/SIMPLE" above described
+- **⚠️ SCOPE (binding, corrected 2026-08-18): "msimple beats SIMPLE" above described
   `coupled_continuation`'s block-diagonal preconditioner, which neither flagship validation case runs and
   which no longer defaults to MSIMPLE — do not cite it as current evidence for either architecture.**
   Neither `validation/bfs3d_openfoam/compare.py` nor `validation/pitzdaily_openfoam/compare.py` reaches
@@ -721,7 +714,7 @@ Engineering Principles.
   than plain SIMPLE when it "should" be better — was measuring the axis that trades convergence for setup
   cost, with the axis that buys convergence missing. **There is no `"msimpler"` string any more.**
   - **The two axes are now separate parameters, because they are separate things.**
-    `schur_scaling` ∈ `{"simple", "msimple", "lsc"}` picks the `InnerSchurSolver`; the new
+    `schur_scaling` ∈ `{"simple", "msimple"}` picks the `InnerSchurSolver`; the new
     `composition` ∈ `{"triangular", "simple", "simpler"}` picks a `SaddleComposition`, i.e. how many
     times and in what order the velocity and Schur solves are applied. The paper's **MSIMPLER** is
     `schur_scaling="msimple", composition="simpler"`; its **SIMPLER** is `schur_scaling="simple",
