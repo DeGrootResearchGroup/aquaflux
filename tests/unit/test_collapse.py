@@ -243,6 +243,68 @@ def test_collapse_leaves_a_non_periodic_slab_offset_free():
     assert collapse_extruded_direction(slab, ["back", "front"]).face_cells.neighbour_offset is None
 
 
+def _extruded_triangle_pair(lz: float = 0.5) -> Mesh:
+    """A unit square split into two triangles by its diagonal, extruded in z by ``lz``.
+
+    Every structured-grid fixture in this file caps an extrusion with quads (4-node faces), which
+    the collapse's per-face reductions never have to treat as ragged. This mesh's caps are
+    **triangles** (3 nodes) instead, so a vectorized reduction that quietly assumed a fixed node
+    count per cap face would misbehave here even though it passes on every quad-capped fixture.
+    """
+    nodes = np.array(
+        [
+            [0.0, 0.0, 0.0],  # 0
+            [1.0, 0.0, 0.0],  # 1
+            [1.0, 1.0, 0.0],  # 2
+            [0.0, 1.0, 0.0],  # 3
+            [0.0, 0.0, lz],  # 4
+            [1.0, 0.0, lz],  # 5
+            [1.0, 1.0, lz],  # 6
+            [0.0, 1.0, lz],  # 7
+        ]
+    )
+    faces = [
+        [0, 1, 2],  # front cap, cell 0 (triangle 0-1-2)
+        [0, 2, 3],  # front cap, cell 1 (triangle 0-2-3)
+        [4, 5, 6],  # back cap, cell 0
+        [4, 6, 7],  # back cap, cell 1
+        [0, 1, 5, 4],  # bottom edge (0-1), boundary
+        [1, 2, 6, 5],  # right edge (1-2), boundary
+        [0, 2, 6, 4],  # diagonal edge (0-2), interior seam between the two triangles
+        [2, 3, 7, 6],  # top edge (2-3), boundary
+        [3, 0, 4, 7],  # left edge (3-0), boundary
+    ]
+    owner = [0, 1, 0, 1, 0, 0, 0, 1, 1]
+    neighbour = [-1, -1, -1, -1, -1, -1, 1, -1, -1]
+    return Mesh.from_faces(
+        nodes,
+        faces,
+        owner,
+        neighbour,
+        n_cells=2,
+        face_patches={"front": np.array([0, 1]), "back": np.array([2, 3])},
+    )
+
+
+def test_collapse_reduces_triangular_cap_faces_correctly():
+    """The cap-axis inference and side-quad reduction both handle ragged (non-quad) faces.
+
+    Collapsing must find z as the extruded axis from two **triangular** caps (not the quads every
+    other fixture in this file uses) and reduce the five side quads to the diagonal square's five
+    edges, reproducing the two right triangles' combined area exactly.
+    """
+    mesh = _extruded_triangle_pair()
+    collapsed = collapse_extruded_direction(mesh, ["front", "back"])
+
+    assert collapsed.dim == 2
+    assert collapsed.n_cells == 2
+    assert collapsed.n_faces == 5
+    assert int(np.sum(np.asarray(collapsed.face_cells.interior))) == 1  # only the diagonal
+    volumes = np.sort(np.asarray(collapsed.geometry().cell.volume))
+    np.testing.assert_allclose(volumes, [0.5, 0.5])
+    assert float(np.max(np.abs(np.asarray(closed_cell_residual(collapsed))))) < 1e-10
+
+
 def test_requires_at_least_one_patch():
     slab = structured_grid_3d(2, 1, 1, named_boundaries=True)
     with pytest.raises(ValueError, match="at least one"):

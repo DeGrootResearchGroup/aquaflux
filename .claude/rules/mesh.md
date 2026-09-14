@@ -122,6 +122,22 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
   patches and calls it, so the collapse is reusable and unit-tested file-free (collapse
   `structured_grid_3d(nx, ny, 1)` → matches `structured_grid_2d(nx, ny)`). Build-time only (eager
   numpy), like `reorder.py`/`graph.py`.
+  - **Both internal per-face Python loops (axis inference, side-quad→edge reduction) are vectorized
+    (issue #112, fixed 2026-09-14) — no per-face loop remains in this module.** Both used to iterate
+    `cap_faces`/`kept_faces` in Python, each doing several numpy calls per face. A shared
+    `_ragged_subset` helper flattens an arbitrary (non-contiguous) subset of CSR rows the same way
+    `FaceNodeConnectivity.from_csr` flattens every row, so both loops reduce to one vectorized pass:
+    axis inference becomes an unbuffered per-face min/max (`np.minimum.at`/`np.maximum.at`, the same
+    idiom `aquaflux/io/openfoam/cyclic.py::_face_centroids` uses for its per-face vertex-mean sum) and
+    a distinct-axis check; the side-quad reduction becomes a `(row, value)` lexsort whose block
+    boundaries give each face's distinct in-plane node count and values, with no need to preserve
+    perimeter order (an edge is undirected, so which of the two endpoints comes first does not
+    matter). **Measured on a synthetic one-cell-thick structured slab (`structured_grid_3d(n, n, 1)`),
+    same process before/after, macOS/arm64, Python 3.13.4, numpy 2.4.4, one run per size:** end-to-end
+    `collapse_extruded_direction` (not just the two loops — node dedup, `Mesh.from_csr`, and
+    validation are included) went **0.917 s → 0.123 s** at 160,400 3D faces and **3.470 s → 0.509 s**
+    at 640,800 3D faces, a 7–7.5× cut; the acceptance test (`tests/unit/test_collapse.py`) still
+    reproduces `structured_grid_2d` exactly.
 - `face.py` — `FaceGeometry` (result) + the **strategy hierarchy** `FaceGeometryScheme`
   → `EdgeFaceGeometry` (2D) / `PolygonFaceGeometry` (3D), mirroring the C++ `Face<T,2>` /
   `Face<T,3>` specialization; selected by `face_geometry_scheme(dim)`.

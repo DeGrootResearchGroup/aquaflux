@@ -122,6 +122,24 @@ def collapse_extruded_direction(mesh: Mesh, removed_patch_names: Sequence[str]) 
     )
 
 
+def _ragged_subset(
+    offsets: np.ndarray, indices: np.ndarray, faces: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Gather a subset of CSR rows without a per-row Python loop.
+
+    ``faces`` need not be contiguous or sorted. Returns the selected rows' node indices
+    concatenated in ``faces`` order, the output row each one belongs to (``0`` to
+    ``faces.size - 1``, the position within ``faces`` rather than the original face index), and
+    each row's length.
+    """
+    counts = offsets[faces + 1] - offsets[faces]
+    starts = offsets[faces]
+    total = int(counts.sum())
+    row = np.repeat(np.arange(faces.size), counts)
+    position = np.arange(total) - np.repeat(np.cumsum(counts) - counts, counts)
+    return indices[np.repeat(starts, counts) + position], row, counts
+
+
 def _extruded_axis(
     removed: list[str],
     cap_faces: np.ndarray,
@@ -137,27 +155,44 @@ def _extruded_axis(
     named patches beforehand, so it makes no difference whether the caps arrive as two separate
     patches or as one patch spanning both planes.
     """
-    axis: int | None = None
-    constants = []
-    for face in cap_faces:
-        nodes = indices[offsets[face] : offsets[face + 1]]
-        spread = np.ptp(node_coords[nodes], axis=0)
-        flat = np.nonzero(spread <= tolerance)[0]
-        if flat.size != 1:
-            raise ValueError(
-                f"capping face {int(face)} is not planar and normal to a single axis "
-                f"(constant along {flat.size} axes); patches {removed} are not extrusion caps"
-            )
-        face_axis = int(flat[0])
-        if axis is None:
-            axis = face_axis
-        elif face_axis != axis:
-            raise ValueError(
-                f"capping faces are normal to different axes ({axis} and {face_axis}); "
-                f"patches {removed} must be the two ends of one extrusion"
-            )
-        constants.append(float(node_coords[nodes, axis].mean()))
-    planes = _distinct_values(np.asarray(constants), tolerance)
+    node_ids, row, counts = _ragged_subset(offsets, indices, cap_faces)
+    coords = node_coords[node_ids]
+    dim = node_coords.shape[1]
+
+    # Per-face min/max, unbuffered so a repeated row index (every node beyond a face's first)
+    # keeps reducing against the running extremum rather than overwriting it.
+    lo = np.full((cap_faces.size, dim), np.inf, dtype=node_coords.dtype)
+    hi = np.full((cap_faces.size, dim), -np.inf, dtype=node_coords.dtype)
+    np.minimum.at(lo, row, coords)
+    np.maximum.at(hi, row, coords)
+    spread = hi - lo
+
+    flat = spread <= tolerance
+    flat_counts = flat.sum(axis=1)
+    bad = np.nonzero(flat_counts != 1)[0]
+    if bad.size:
+        face = int(cap_faces[bad[0]])
+        raise ValueError(
+            f"capping face {face} is not planar and normal to a single axis "
+            f"(constant along {int(flat_counts[bad[0]])} axes); patches {removed} are not "
+            "extrusion caps"
+        )
+
+    face_axis = np.argmax(flat, axis=1)  # the one True column, per face
+    axis = int(face_axis[0])
+    mismatched = np.nonzero(face_axis != axis)[0]
+    if mismatched.size:
+        other = int(face_axis[mismatched[0]])
+        raise ValueError(
+            f"capping faces are normal to different axes ({axis} and {other}); "
+            f"patches {removed} must be the two ends of one extrusion"
+        )
+
+    sums = np.zeros((cap_faces.size, dim), dtype=node_coords.dtype)
+    np.add.at(sums, row, coords)
+    constants = sums[:, axis] / counts
+
+    planes = _distinct_values(constants, tolerance)
     if planes.size != 2:
         raise ValueError(
             f"capping patches {removed} must lie on exactly two parallel planes normal to one axis "
@@ -193,19 +228,37 @@ def _side_faces_to_edges(
     """Reduce each extruded side face to the 2D edge of its two distinct in-plane endpoints.
 
     Every kept face is a quad whose four nodes project onto two in-plane positions; the edge joins
-    those two. The endpoints are read in perimeter order (the first node, then the first that maps
-    to a different node); their order does not affect the 2D edge geometry.
+    those two. Which of the two endpoints is written first does not affect the 2D edge geometry, so
+    rather than reading them out in perimeter order this sorts each face's mapped nodes (a
+    vectorized per-face distinct-value count with no per-face Python loop) and takes the first
+    value of each of the (required) two distinct runs.
     """
-    edges = np.empty((kept_faces.size, 2), dtype=np.int64)
-    for row, face in enumerate(kept_faces):
-        mapped = node_map[indices[offsets[face] : offsets[face + 1]]]
-        distinct = mapped[np.sort(np.unique(mapped, return_index=True)[1])]
-        if distinct.size != 2:
-            raise ValueError(
-                f"face {int(face)} reduces to {distinct.size} distinct in-plane node(s), not 2; "
-                "the mesh is not a one-cell-thick extrusion of the removed patches"
-            )
-        edges[row] = distinct
+    node_ids, row, _counts = _ragged_subset(offsets, indices, kept_faces)
+    mapped = node_map[node_ids]
+
+    # Sort by (row, value) so each face's nodes are contiguous and its distinct values run in
+    # ascending blocks; a block starts wherever the row changes or the value changes from the
+    # previous entry.
+    order = np.lexsort((mapped, row))
+    sorted_rows = row[order]
+    sorted_values = mapped[order]
+    starts = np.empty(sorted_values.size, dtype=bool)
+    starts[0] = True
+    starts[1:] = (sorted_rows[1:] != sorted_rows[:-1]) | (sorted_values[1:] != sorted_values[:-1])
+
+    distinct_per_face = np.bincount(sorted_rows[starts], minlength=kept_faces.size)
+    bad = np.nonzero(distinct_per_face != 2)[0]
+    if bad.size:
+        face = int(kept_faces[bad[0]])
+        raise ValueError(
+            f"face {face} reduces to {int(distinct_per_face[bad[0]])} distinct in-plane node(s), "
+            "not 2; the mesh is not a one-cell-thick extrusion of the removed patches"
+        )
+
+    # Every face now contributes exactly two distinct values, in ascending face order, so the
+    # i-th face's pair sits at positions 2i and 2i+1.
+    distinct_values = sorted_values[starts]
+    edges = distinct_values.reshape(kept_faces.size, 2).astype(np.int64)
     return edges
 
 
