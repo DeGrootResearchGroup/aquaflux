@@ -305,9 +305,9 @@ block between them. Each group then gets an inverse suited to it, injected as
 
 | Factory | Builds | Suited to |
 | --- | --- | --- |
-| {func}`~aquaflux.solve.simple_smoothed_inverse` | {class}`~aquaflux.solve.SimpleSmoothedInverse` — a multigrid over the saddle whose *level smoother* is a SIMPLE relaxation | the leading flow group |
-| {func}`~aquaflux.solve.jacobi_smoothed_inverse` | {class}`~aquaflux.solve.JacobiSmoothedInverse` — one hierarchy over the whole group, coarsening cells | either group |
-| {func}`~aquaflux.solve.air_inverse` | a reduction-based (lAIR) hierarchy | the trailing transported group |
+| {class}`~aquaflux.solve.SimpleSmoothed` | {class}`~aquaflux.solve.SimpleSmoothedInverse` — a multigrid over the saddle whose *level smoother* is a SIMPLE relaxation | the leading flow group |
+| {class}`~aquaflux.solve.JacobiSmoothed` | {class}`~aquaflux.solve.JacobiSmoothedInverse` — one hierarchy over the whole group, coarsening cells | either group |
+| {class}`~aquaflux.solve.AirReduction` | a reduction-based (lAIR) hierarchy | the trailing transported group |
 
 Note the relationship between the first of these and
 {class}`~aquaflux.flow.BlockPreconditioner`, because it is easy to misread. Both are
@@ -330,16 +330,16 @@ raw field-major matrix, give the counts:
 from aquaflux.solve import (
     FieldGroups,
     build_block_triangular_field_split,
-    jacobi_smoothed_inverse,
-    simple_smoothed_inverse,
+    JacobiSmoothed,
+    SimpleSmoothed,
 )
 
 groups = FieldGroups.by_counts(n_cells=mesh.n_cells, n_leading_fields=4, n_trailing_fields=2)
 split = build_block_triangular_field_split(
     matrix,          # the assembled six-field Jacobian, as a scipy sparse matrix
     groups,
-    leading_inverse=simple_smoothed_inverse(strength_threshold=0.25, max_levels=5),
-    trailing_inverse=jacobi_smoothed_inverse(max_coarse=200),
+    leading_inverse=SimpleSmoothed(strength_threshold=0.25, max_levels=5),
+    trailing_inverse=JacobiSmoothed(max_coarse=200),
 )
 ```
 

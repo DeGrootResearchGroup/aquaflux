@@ -67,7 +67,6 @@ __all__ = [
     "FieldSplitAmgPreconditioner",
     "JacobiSmoothedInverse",
     "build_block_triangular_field_split",
-    "jacobi_smoothed_inverse",
 ]
 
 
@@ -446,8 +445,8 @@ def build_block_triangular_field_split(
         The partition. Its leading group is the one listed first in the field order, and is solved first.
     leading_inverse, trailing_inverse : callable
         ``(sub_matrix, n_fields_in_group) -> inverse`` for that block -- for example
-        :func:`~aquaflux.solve.simple_smoothed_inverse` on a pressure-velocity saddle and
-        :func:`~aquaflux.solve.jacobi_smoothed_inverse` on a pair of transported scalars. The returned
+        :class:`~aquaflux.solve.SimpleSmoothed` on a pressure-velocity saddle and
+        :class:`~aquaflux.solve.JacobiSmoothed` on a pair of transported scalars. The returned
         object must expose ``n_dofs`` and ``apply(residual, *, transpose=...)``, be a fixed linear map
         (the outer Krylov solve is not flexible) and transpose exactly (the adjoint's solve uses it).
 
@@ -833,33 +832,3 @@ class AirBlockInverse:
 
     def destroy(self) -> None:
         """Nothing to release -- plain arrays, not a host solver's handles."""
-
-
-def air_inverse(**settings) -> Callable[[sp.spmatrix, int], object]:
-    """A ``trailing_inverse`` factory using :class:`AirBlockInverse`.
-
-    Every keyword is forwarded, so the defaults live on the class and on
-    :func:`~aquaflux.solve.multigrid.build_air_hierarchy` rather than being restated here.
-    ``restriction_theta`` is the one worth knowing about: it trades the restriction's accuracy against
-    how dense the coarse operators become, and the density compounds down the hierarchy.
-    """
-
-    def build(block: sp.spmatrix, n_group_fields: int) -> object:
-        return AirBlockInverse(block, n_group_fields, **settings)
-
-    return build
-
-
-def jacobi_smoothed_inverse(**settings) -> Callable[[sp.spmatrix, int], object]:
-    """A ``leading_inverse``/``trailing_inverse`` factory using :class:`JacobiSmoothedInverse`.
-
-    Every keyword is forwarded, so the defaults — and the reasoning behind them — live on the class
-    rather than being restated here. ``max_coarse`` is worth knowing about: it is the coarse-grid size
-    the hierarchy stops at and solves directly, and a coarse grid large enough to invert the global
-    coupling exactly is measured to be worth a great deal on this operator.
-    """
-
-    def build(block: sp.spmatrix, n_group_fields: int) -> object:
-        return JacobiSmoothedInverse(block, n_group_fields, **settings)
-
-    return build

@@ -467,7 +467,7 @@ complete LU and the AMG's coloured probe both still depend on it.
       - **The family it is FOR is the SIMPLE-smoothed hierarchy, which takes the saving for nothing.**
         The mechanism is which preconditioners inherit the stored *sparsity*: an incomplete factorization
         takes its pattern from it, so a corrupted or narrowed pattern gives a correspondingly different
-        factor, while `simple_smoothed_inverse` relaxes through diagonal and Schur approximations and takes
+        factor, while `SimpleSmoothedInverse` relaxes through diagonal and Schur approximations and takes
         no pattern at all. Measured on pitzDaily, that arm is **reach-insensitive** — the same 71 steps at
         reach 3 and reach 5, cycles within 3 % (395 vs 408), identical final residual — while the Jacobian
         halves and the march is 31 % shorter. **The untested pairing worth running is
@@ -483,7 +483,7 @@ complete LU and the AMG's coloured probe both still depend on it.
         the split sends:
         - the **`[u, v, p]` saddle** to the PETSc AMG V-cycle — *this* is the only block `FILL_LEVELS`
           governs, and the only place an incomplete factorization happens at all;
-        - the **`[k, omega]` pair** to `jacobi_smoothed_inverse`, **which is not an ILU**.
+        - the **`[k, omega]` pair** to `JacobiSmoothedInverse`, **which is not an ILU**.
 
         Three consequences, all binding:
         1. **Every arm in the sweeps below — the fill ladder, the orderings, the shifts, the reach arms,

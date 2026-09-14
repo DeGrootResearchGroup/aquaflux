@@ -76,19 +76,19 @@ from aquaflux.io import read_openfoam
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, VenkatakrishnanLimiter
 from aquaflux.solve import (
+    AirReduction,
     CflResidualDualTimeControl,
     FieldGroups,
     InnerIterateCheckpointer,
+    JacobiSmoothed,
     MarchLogger,
     RefreshPolicy,
     RetryPolicy,
+    SimpleSmoothed,
     StateCheckpointer,
-    air_inverse,
     combine_metrics,
     combine_observers,
-    jacobi_smoothed_inverse,
     relative_residual_gmres,
-    simple_smoothed_inverse,
 )
 from aquaflux.turbulence import (
     CoupledJacobianProbe,
@@ -599,9 +599,9 @@ AIR_TRAILING = dict(
 )
 
 TRAILING_INVERSE = (
-    jacobi_smoothed_inverse(**JACOBI_TRAILING)
+    JacobiSmoothed(**JACOBI_TRAILING)
     if TURBULENCE_INVERSE == "jacobi"
-    else air_inverse(**AIR_TRAILING)
+    else AirReduction(**AIR_TRAILING)
 )
 
 
@@ -680,7 +680,7 @@ LEADING_SETTINGS = dict(
     ),
 )
 
-LEADING_INVERSE = simple_smoothed_inverse(**LEADING_SETTINGS, report=_flush_print)
+LEADING_INVERSE = SimpleSmoothed(**LEADING_SETTINGS).bound(report=_flush_print)
 
 
 if DUMP_TRAILING_BLOCK:

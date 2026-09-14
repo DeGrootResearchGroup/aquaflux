@@ -60,7 +60,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse.linalg as spla  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
-    jacobi_smoothed_inverse,
+    JacobiSmoothed,
     materialize_block_jacobian,
     shifted_jacobian,
 )
@@ -128,7 +128,7 @@ def field_split_arm(coupled, state, beta):
         # The case's own selection, imported rather than re-branched here: a second copy of that
         # leading-inverse choice is how two files that must agree stop agreeing.
         leading_inverse=compare.LEADING_INVERSE,
-        trailing_inverse=jacobi_smoothed_inverse(**compare.JACOBI_TRAILING),
+        trailing_inverse=JacobiSmoothed(**compare.JACOBI_TRAILING),
         inner_steps=compare.INNER_STEPS,
         inner_tol=compare.INNER_TOL,
     )

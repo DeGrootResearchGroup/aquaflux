@@ -62,7 +62,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse.linalg as spla  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
-    jacobi_smoothed_inverse,
+    JacobiSmoothed,
     materialize_block_jacobian,
     shifted_jacobian,
 )
@@ -191,7 +191,7 @@ def main() -> None:
             field_split=compare.FIELD_SPLIT,
             leading_inverse=compare.LEADING_INVERSE if compare.FIELD_SPLIT else None,
             trailing_inverse=(
-                jacobi_smoothed_inverse(**compare.JACOBI_TRAILING) if compare.FIELD_SPLIT else None
+                JacobiSmoothed(**compare.JACOBI_TRAILING) if compare.FIELD_SPLIT else None
             ),
             inner_steps=compare.INNER_STEPS,
             inner_tol=compare.INNER_TOL,

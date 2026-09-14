@@ -3088,12 +3088,12 @@ def coupled_amg_continuation(
         reads (:meth:`~aquaflux.solve.FieldGroups.active_rows`).
     leading_inverse : callable or None
         ``(sub_matrix, n_fields_in_group) -> inverse`` for the LEADING (flow saddle) block —
-        :func:`~aquaflux.solve.simple_smoothed_inverse`, for example. Required with ``field_split=True``
+        :class:`~aquaflux.solve.SimpleSmoothed`, for example. Required with ``field_split=True``
         and refused without it. An injected inverse must offer ``refactor_block`` or ``refactor``, or the
         mid-march refresh cannot re-fit it.
     trailing_inverse : callable or None
         ``(sub_matrix, n_fields_in_group) -> inverse`` for the trailing ``[k, ω]`` block —
-        :func:`~aquaflux.solve.jacobi_smoothed_inverse`, for example. Whatever is passed must expose
+        :class:`~aquaflux.solve.JacobiSmoothed`, for example. Whatever is passed must expose
         ``n_dofs`` and ``apply(residual, transpose=...)``, be a fixed *linear* map (the outer Krylov is
         not flexible) and transpose exactly (the adjoint's solve uses it). Required with
         ``field_split=True`` and refused without it.
@@ -3163,7 +3163,7 @@ def coupled_amg_continuation(
     if field_split and (leading_inverse is None or trailing_inverse is None):
         raise ValueError(
             "field_split=True fits a separate inverse to each block, so it needs both leading_inverse "
-            "and trailing_inverse (for example simple_smoothed_inverse() and jacobi_smoothed_inverse())."
+            "and trailing_inverse (for example SimpleSmoothed() and JacobiSmoothed())."
         )
     if not field_split and (leading_inverse is not None or trailing_inverse is not None):
         raise ValueError(

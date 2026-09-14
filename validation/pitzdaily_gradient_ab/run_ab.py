@@ -71,10 +71,10 @@ from aquaflux.schemes import (  # noqa: E402
     SweptGradientSolve,
 )
 from aquaflux.solve import (  # noqa: E402
+    JacobiSmoothed,
     MarchLogger,
     RefreshPolicy,
-    jacobi_smoothed_inverse,
-    simple_smoothed_inverse,
+    SimpleSmoothed,
 )
 from aquaflux.turbulence import (  # noqa: E402
     CoupledJacobianProbe,
@@ -385,8 +385,8 @@ def solve_arm(gradient_scheme, log_path, *, reach=None, points=None, max_steps=N
             preconditioner=shared[0] if shared else None,
             coarse_eq_limit=SIMPLE_FLOW["max_coarse"],
             field_split=True,
-            leading_inverse=simple_smoothed_inverse(**SIMPLE_FLOW),
-            trailing_inverse=jacobi_smoothed_inverse(**JACOBI_TRAILING),
+            leading_inverse=SimpleSmoothed(**SIMPLE_FLOW),
+            trailing_inverse=JacobiSmoothed(**JACOBI_TRAILING),
             jacobian_production_viscosity=FROZEN_PRODUCTION,
             inner_observer=logger.on_inner,
         )

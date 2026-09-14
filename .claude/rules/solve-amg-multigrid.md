@@ -323,7 +323,7 @@ paths:
 **The correctly-scoped question.** Everything above was measured MONOLITHICALLY — one V-cycle over all
 five fields — and the case is FIELD SPLIT. The split sends `[u, v, p]` to the V-cycle whose level
 smoother is the incomplete factorization (the only block a fill level governs) and `[k, omega]` to
-`jacobi_smoothed_inverse`, which is not a factorization at all, **so no `k` or `omega` row is ever
+`JacobiSmoothedInverse`, which is not a factorization at all, **so no `k` or `omega` row is ever
 eliminated by an ILU in the shipped solver.** Everything in this section is on `[u, v, p]` alone, taken
 from the assembled operator by the same `FieldGroups` the split uses.
 
@@ -1042,7 +1042,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   - **⚠️ ONE RUN EACH, and one instrumentation difference:** the archived equilibrated arm ran with
     `BFS3D_DUMP_STEP_LIMIT=0.05/12`, the converged arm with the dumps off. The dump wrapper returns the
     real cap unchanged by construction, so it *should* be neutral, but it is not a matched pair.
-  - **The stated reason for the `equilibrate=True` default no longer exists.** `jacobi_smoothed_inverse`
+  - **The stated reason for the `equilibrate=True` default no longer exists.** `JacobiSmoothedInverse`
     defaults it on because "the per-cell block solve is not otherwise safe" — raw, 4 of 23040 cell blocks
     were flagged singular. That count came from the **Frobenius** guard (`|det| < 1e-12·‖B‖_F`), which is
     not invariant under row scaling and is **the guard that was found wrong and replaced** by the
@@ -1831,7 +1831,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
 
   **What equilibration IS worth (keep it). ⚠️ "Default off" was a scope error — settled from source
   2026-08-10:** `build_convection_hierarchy` and `_build_aggregation_hierarchy` default `equilibrate=False`,
-  so "default off" is true of the **traced builder only**; `jacobi_smoothed_inverse` overrides it to `True`
+  so "default off" is true of the **traced builder only**; `JacobiSmoothedInverse` overrides it to `True`
   (its per-cell block solve is not otherwise safe); and the PETSc `AmgVCycle` path equilibrates
   **unconditionally** via `equilibrate_cell_major`. Three different objects, no contradiction.
 
@@ -1901,7 +1901,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     `solve/hierarchy_inverse.HierarchyBlockInverse` base), both transposable in
     closed form and fixed linear operators, so adjoint-legal. **⚠️ "Neither is wired into production" was
     wrong — settled from source 2026-08-10.** The nodal inverse is reachable through
-    `jacobi_smoothed_inverse` and is the `BFS3D_TURBULENCE_INVERSE=jacobi` arm; what is true is that it is not a
+    `JacobiSmoothedInverse` and is the `BFS3D_TURBULENCE_INVERSE=jacobi` arm; what is true is that it is not a
     *default*.
 
   - **`prolongation_smoothing` is its own parameter, no longer welded to `mis_aggregation`.** The old
@@ -1976,7 +1976,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
 
   **NEXT STEPS, in order:**
   1. **Decide whether the matched configuration becomes the DEFAULT, and for which consumers.**
-     ⚠️ **This shipped: `jacobi_smoothed_inverse` now defaults to the whole matched bundle**
+     ⚠️ **This shipped: `JacobiSmoothedInverse` now defaults to the whole matched bundle**
      (`aggressive_levels=1`, `prolongation_smoothing="none"`, `spectral_damping=False`,
      `equilibrate=True`) and is the `BFS3D_TURBULENCE_INVERSE=jacobi` arm. The open part is whether it
      transfers to other consumers; the library `build_amg_vcycle` defaults are untouched. The measurement says the matched
@@ -1989,7 +1989,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   3. **✅ SCALABILITY — BUILT AND SHIPPED as `bfs3d`'s trailing-block default (2026-08-18).** The
      convection hierarchy was capped at 2 levels (`_CONVECTION_LEVELS`) with a **dense inverse** coarse
      solve — at a 77× ratio that is ~26k coarse dofs and 5.4 GB to store at 1M cells, infeasible.
-     `compare.py`'s `JACOBI_TRAILING` now defaults `jacobi_smoothed_inverse` to `max_levels=20,
+     `compare.py`'s `JACOBI_TRAILING` now defaults `JacobiSmoothedInverse` to `max_levels=20,
      max_coarse=200, strength_threshold=0.25, aggressive_levels=0, frozen_coarsening=True`. Depth or
      the threshold *alone* did nothing on a block-alone probe of the converged root's zero-shift
      operator (every arm at the old 2-level default shows no real residual reduction after 50+ restart
@@ -2263,7 +2263,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     - **The contraction test carries its own non-vacuity check**, comparing against the *same hierarchy
       with its block inverse stripped out*. Without that a fixture whose within-cell coupling is weak
       would pass for the wrong reason and read as evidence for the block smoother.
-    - **Wired for a march as `air_inverse(...)` / `AirBlockInverse` (`solve/field_split.py`)**, a
+    - **Wired for a march as `AirBlockInverse(...)` / `AirBlockInverse` (`solve/field_split.py`)**, a
       `trailing_inverse` factory satisfying the split's three-method contract (`n_dofs`, `apply`,
       `refactor_block`). It does **not** subclass `HierarchyBlockInverse`: that base owns a
       `SmoothedHierarchy` and refreshes by re-fitting the aggregation, this owns an `AirHierarchy` and

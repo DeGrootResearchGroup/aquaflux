@@ -138,7 +138,7 @@ monolithic `AmgVCycle` is unchanged.
       `MaterializedJacobianPreconditioner`, `solve-direct-preconditioners.md`) reads only
       `factors.n_dofs` and `factors.apply(r, transpose=…)`, both of which the split has, so it rides the
       existing `pure_callback` path unchanged. Each diagonal block is fitted by its injected inverse
-      (`simple_smoothed_inverse` / `jacobi_smoothed_inverse` on both flagship cases; a PETSc `AmgVCycle`
+      (`SimpleSmoothedInverse` / `JacobiSmoothedInverse` on both flagship cases; a PETSc `AmgVCycle`
       by default until #371), working *within its own group* — the whole point, since a four-field saddle
       and a two-field transport pair want different inverses. Each block's `apply` returns the inverse in
       the **original** field-major space, so the retained coupling block is applied raw between the two
@@ -609,7 +609,7 @@ monolithic `AmgVCycle` is unchanged.
     reach 3, restart 15): one trailing sweep against four was 1636 s against 1959 s on a step-for-step
     identical trajectory to the same `x_r/h` 8.361 — while cycles ROSE, 282 against 277. A cycle count is
     not a cost proxy once the smoother changes. *(b)* The knob never reached an injected trailing
-    inverse, so the traced trailing arm has always run at `jacobi_smoothed_inverse`'s own `sweeps=4`;
+    inverse, so the traced trailing arm has always run at `JacobiSmoothedInverse`'s own `sweeps=4`;
     cutting those sweeps is an untaken lever (apply 10.7 / 6.9 / 5.3 ms at 4 / 2 / 1 sweeps on a
     same-shape synthetic).
     ⚠️ **Two more shipped-vs-record mismatches found in the same pass (2026-08-14):** the case runs

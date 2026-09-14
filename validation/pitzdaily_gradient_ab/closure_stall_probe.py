@@ -97,10 +97,10 @@ from aquaflux.schemes import (  # noqa: E402
 )
 from aquaflux.schemes.interpolation import non_orthogonal_correction  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
+    JacobiSmoothed,
     MarchLogger,
     RefreshPolicy,
-    jacobi_smoothed_inverse,
-    simple_smoothed_inverse,
+    SimpleSmoothed,
     solve_linear,
 )
 from aquaflux.solve.implicit import backtracking_line_search  # noqa: E402
@@ -223,8 +223,8 @@ def capture() -> None:
             preconditioner=shared[0] if shared else None,
             coarse_eq_limit=run_ab.SIMPLE_FLOW["max_coarse"],
             field_split=True,
-            leading_inverse=simple_smoothed_inverse(**run_ab.SIMPLE_FLOW),
-            trailing_inverse=jacobi_smoothed_inverse(**run_ab.JACOBI_TRAILING),
+            leading_inverse=SimpleSmoothed(**run_ab.SIMPLE_FLOW),
+            trailing_inverse=JacobiSmoothed(**run_ab.JACOBI_TRAILING),
             inner_observer=logger.on_inner,
         )
         shared[:] = [engine.shift_policy.preconditioner]
@@ -278,8 +278,8 @@ def _engine_at(coupled, state):
         positivity_projection=compare.POSITIVITY_PROJECTION,
         coarse_eq_limit=run_ab.SIMPLE_FLOW["max_coarse"],
         field_split=True,
-        leading_inverse=simple_smoothed_inverse(**run_ab.SIMPLE_FLOW),
-        trailing_inverse=jacobi_smoothed_inverse(**run_ab.JACOBI_TRAILING),
+        leading_inverse=SimpleSmoothed(**run_ab.SIMPLE_FLOW),
+        trailing_inverse=JacobiSmoothed(**run_ab.JACOBI_TRAILING),
     )
 
 
@@ -1094,8 +1094,8 @@ def march_from_seed() -> None:
             positivity_projection=compare.POSITIVITY_PROJECTION,
             coarse_eq_limit=run_ab.SIMPLE_FLOW["max_coarse"],
             field_split=True,
-            leading_inverse=simple_smoothed_inverse(**run_ab.SIMPLE_FLOW),
-            trailing_inverse=jacobi_smoothed_inverse(**run_ab.JACOBI_TRAILING),
+            leading_inverse=SimpleSmoothed(**run_ab.SIMPLE_FLOW),
+            trailing_inverse=JacobiSmoothed(**run_ab.JACOBI_TRAILING),
             inner_observer=on_inner,
         )
         try:

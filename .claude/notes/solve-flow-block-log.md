@@ -51,7 +51,7 @@ therefore *flattered* relative to the shipped object, and still failed.
 > shift. Read both before quoting either.**
 
 **The table above pairs MSIMPLE with an `ilu0` trailing inverse, which `bfs3d` does not ship — its
-`TURBULENCE_INVERSE` default is `"jacobi"` (`compare.TRAILING_INVERSE = jacobi_smoothed_inverse(
+`TURBULENCE_INVERSE` default is `"jacobi"` (`compare.TRAILING_INVERSE = JacobiSmoothedInverse(
 **compare.JACOBI_TRAILING)`), so that comparison changed two things relative to the shipped bundle at
 once. This measurement changes exactly one.** Two arms, same materialized Jacobian, same field-split
 wiring, same trailing inverse, same column reach, same state — only the leading (flow-saddle) inverse

@@ -92,9 +92,8 @@ from .field_split import (
     FieldGroups,
     FieldSplitAmgPreconditioner,
     build_block_triangular_field_split,
-    air_inverse,
-    jacobi_smoothed_inverse,
 )
+from .block_inverse import AirReduction, JacobiSmoothed, SimpleSmoothed
 from .host_preconditioner import HostFactors, HostPreconditioner
 from .hierarchy_inverse import HierarchyBlockInverse
 from .refresh_timing import PhaseTimer, RefreshTiming
@@ -141,7 +140,6 @@ from .march_log import MarchLogger, combine_metrics, field_change_metrics
 from .saddle_multigrid import (
     SimpleSmoothedInverse,
     block_approximate_inverse,
-    simple_smoothed_inverse,
 )
 from .multigrid import (
     AirHierarchy,
@@ -186,6 +184,7 @@ __all__ = [
     "NO_REFRESH",
     "NO_RETRIES",
     "AirHierarchy",
+    "AirReduction",
     "AmgVCycle",
     "BlockColouring",
     "BlockScaledNorm",
@@ -211,6 +210,7 @@ __all__ = [
     "HostPreconditioner",
     "ImplicitNewtonSolver",
     "InnerIterateCheckpointer",
+    "JacobiSmoothed",
     "JacobiSmoothedInverse",
     "LineSearchGrowth",
     "LocalCourantBasis",
@@ -241,6 +241,7 @@ __all__ = [
     "ShiftStrengthControl",
     "ShiftTerm",
     "ShiftedForwardStep",
+    "SimpleSmoothed",
     "SimpleSmoothedInverse",
     "SmoothedHierarchy",
     "StateBlock",
@@ -253,7 +254,6 @@ __all__ = [
     "SwitchedEvolutionRelaxation",
     "TransposedPreconditioner",
     "VelocityShiftParts",
-    "air_inverse",
     "air_multigrid_solve",
     "block_approximate_inverse",
     "block_stencil_colouring",
@@ -275,7 +275,6 @@ __all__ = [
     "equilibrate_cell_major",
     "field_change_metrics",
     "forward_march",
-    "jacobi_smoothed_inverse",
     "jacobian_relative_error",
     "materialize_block_jacobian",
     "newton_step",
@@ -285,7 +284,6 @@ __all__ = [
     "relative_residual_gmres",
     "restart_cycles",
     "shifted_jacobian",
-    "simple_smoothed_inverse",
     "smoothed_multigrid_solve",
     "solve_linear",
     "symmetrically_equilibrate",

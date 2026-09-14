@@ -59,6 +59,7 @@ SUBPACKAGE_GROUPS = {
                 "amg_preconditioner",
                 "lu_preconditioner",
                 "field_split",
+                "block_inverse",
                 "hierarchy_inverse",
                 "saddle_multigrid",
             ],

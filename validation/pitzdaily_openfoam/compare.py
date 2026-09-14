@@ -91,14 +91,14 @@ from aquaflux.schemes import (
 )
 from aquaflux.solve import (
     CflResidualDualTimeControl,
+    JacobiSmoothed,
     MarchLogger,
     RefreshPolicy,
     RetryPolicy,
+    SimpleSmoothed,
     StateCheckpointer,
     combine_observers,
-    jacobi_smoothed_inverse,
     relative_residual_gmres,
-    simple_smoothed_inverse,
 )
 from aquaflux.turbulence import (
     BetaTaperedDamping,
@@ -591,7 +591,7 @@ SIMPLE_FLOW = dict(
     block_splitting=True,
     omega=1.0,
 )
-LEADING_INVERSE = simple_smoothed_inverse(**SIMPLE_FLOW)
+LEADING_INVERSE = SimpleSmoothed(**SIMPLE_FLOW)
 
 #: Whether `FILL_LEVELS` / `SWEEPS` / `COARSE_EQ_LIMIT` reach the preconditioner at all.
 #:
@@ -1224,7 +1224,7 @@ def solve_aquaflux(
             coarse_eq_limit=COARSE_EQ_LIMIT,
             field_split=FIELD_SPLIT,
             leading_inverse=LEADING_INVERSE if FIELD_SPLIT else None,
-            trailing_inverse=jacobi_smoothed_inverse(**JACOBI_TRAILING) if FIELD_SPLIT else None,
+            trailing_inverse=JacobiSmoothed(**JACOBI_TRAILING) if FIELD_SPLIT else None,
             inner_observer=logger.on_inner,
         )
         shared_preconditioner[:] = [engine.shift_policy.preconditioner]

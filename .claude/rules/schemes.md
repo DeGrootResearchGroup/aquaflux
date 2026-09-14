@@ -2771,7 +2771,7 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
       arm at reach 3 vs 5 (432 vs 439 cycles, 527 vs 711 s) and the Betchen arm (834 vs 511 cycles).
       Those are genuine, and they are what the entries below rest on. Fixed 2026-08-21.
     - **On the SIMPLE-smoothed field-split bundle the reach is inert, and the probe is 3.8× oversized.**
-      Same case, standard arm, 6 steps of one Reynolds rung, leading inverse `simple_smoothed_inverse`
+      Same case, standard arm, 6 steps of one Reynolds rung, leading inverse `SimpleSmoothedInverse`
       (sweeps 2, pressure_sweeps 2, θ=0.25, no singletons, 5 levels, max_coarse 500, block splitting,
       ω=1.0) with a nodal trailing inverse:
 

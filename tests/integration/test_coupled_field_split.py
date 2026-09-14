@@ -26,13 +26,13 @@ pytest.importorskip("petsc4py")
 
 from aquaflux.solve import (
     FieldGroups,
+    JacobiSmoothed,
     MonolithicAmgPreconditioner,
+    SimpleSmoothed,
     build_amg_vcycle,
     build_block_triangular_field_split,
-    jacobi_smoothed_inverse,
     relative_residual_gmres,
     restart_cycles,
-    simple_smoothed_inverse,
     solve_linear,
 )
 from aquaflux.turbulence import CoupledRANS, hybrid_initialize
@@ -88,8 +88,8 @@ def _split(shifted, groups):
     return build_block_triangular_field_split(
         shifted,
         groups,
-        leading_inverse=simple_smoothed_inverse(),
-        trailing_inverse=jacobi_smoothed_inverse(),
+        leading_inverse=SimpleSmoothed(),
+        trailing_inverse=JacobiSmoothed(),
     )
 
 
@@ -191,8 +191,8 @@ def test_the_split_continuation_converges_to_the_monolithic_fixed_point():
         coupled,
         reference,
         field_split=True,
-        leading_inverse=simple_smoothed_inverse(),
-        trailing_inverse=jacobi_smoothed_inverse(),
+        leading_inverse=SimpleSmoothed(),
+        trailing_inverse=JacobiSmoothed(),
     )
     flow_s, k_s, omega_s = solve_coupled(coupled, flow, k, omega, continuation=split, max_steps=40)
     assert float(jnp.linalg.norm(coupled.residual(coupled.pack_state(flow_s, k_s, omega_s)))) < 1e-8
@@ -215,11 +215,9 @@ def test_the_field_split_refuses_a_missing_or_unused_block_inverse(case):
 
     coupled, state = case["coupled"], case["state"]
     with pytest.raises(ValueError, match="needs both"):
-        coupled_amg_continuation(
-            coupled, state, field_split=True, leading_inverse=simple_smoothed_inverse()
-        )
+        coupled_amg_continuation(coupled, state, field_split=True, leading_inverse=SimpleSmoothed())
     with pytest.raises(ValueError, match="only one block"):
-        coupled_amg_continuation(coupled, state, trailing_inverse=jacobi_smoothed_inverse())
+        coupled_amg_continuation(coupled, state, trailing_inverse=JacobiSmoothed())
 
 
 def test_the_split_refreshes_in_place_onto_the_same_object(case):
@@ -244,8 +242,8 @@ def test_the_split_refreshes_in_place_onto_the_same_object(case):
         plan,
         shift,
         groups,
-        leading_inverse=simple_smoothed_inverse(),
-        trailing_inverse=jacobi_smoothed_inverse(),
+        leading_inverse=SimpleSmoothed(),
+        trailing_inverse=JacobiSmoothed(),
     )
     split_before = pc.factors
     rng = np.random.default_rng(4)

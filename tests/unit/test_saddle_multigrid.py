@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from aquaflux.solve import SimpleSmoothedInverse, block_approximate_inverse, simple_smoothed_inverse
+from aquaflux.solve import SimpleSmoothed, SimpleSmoothedInverse, block_approximate_inverse
 from aquaflux.solve.saddle_multigrid import _simple_pieces, _simple_smoothed_cycle
 
 
@@ -259,10 +259,10 @@ def test_a_frozen_coarsening_refresh_reports_its_own_last_aggregation_not_a_stra
 
 
 def test_the_factory_builds_what_the_field_split_expects() -> None:
-    """``simple_smoothed_inverse`` returns the ``(block, n_fields) -> inverse`` shape the split calls."""
+    """``SimpleSmoothed`` returns the ``(block, n_fields) -> inverse`` shape the split calls."""
     a = _saddle()
 
-    inverse = simple_smoothed_inverse(**_SETTINGS)(a, 4)
+    inverse = SimpleSmoothed(**_SETTINGS)(a, 4)
 
     assert inverse.n_dofs == a.shape[0]
 
