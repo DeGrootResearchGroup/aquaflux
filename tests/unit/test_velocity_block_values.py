@@ -1,11 +1,10 @@
-"""The velocity-block values: each names one strategy's own settings, and builds what its string built.
+"""The velocity-block values: each names one strategy's own settings, and a string is refused.
 
 ``BlockPreconditioner.build``'s ``velocity`` was a string fusing which frozen momentum operator the block
-is fitted to with which hierarchy coarsens it. The values replace it one-for-one, so the first obligation
-is that they change nothing numerically: every array the preconditioner holds, and what it returns when
-applied, must be bitwise equal to the string path's -- on a graded viscosity, where the viscous and
-convection operators differ, on a closed domain with no reference flux, and at non-default multigrid
-settings. The string path compared against is the original, untouched implementation.
+is fitted to with which hierarchy coarsens it. The values that replaced it were proven to build bitwise
+what each string built before the strings were removed; what is pinned here is what has to stay true
+now -- that every value carries exactly its strategy's settings, that the settings the string could not
+express reach the strategy, and that a string is refused rather than silently misread.
 """
 
 from __future__ import annotations
@@ -30,7 +29,6 @@ from aquaflux.flow import (
 )
 from aquaflux.flow.block_preconditioner import (
     AirConvectionVelocity,
-    SmoothedAmgConvectionVelocity,
     SmoothedAmgVelocity,
     TwoLevelConvectionVelocity,
     _characteristic_reference_state,
@@ -39,23 +37,11 @@ from aquaflux.flow.block_preconditioner import (
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
+from aquaflux.turbulence import BlockDiagonal
 from aquaflux.turbulence.coupled import _coupled_shift_policy
 
 from tests.unit.test_coupled_rans import _cavity, _healthy_state
 from tests.unit.test_preconditioner import _channel
-
-#: Each retired string beside the value that replaces it.
-PAIRS = [
-    ("smoothed", ViscousMultilevel()),
-    ("convection", ConvectionTwoLevel()),
-    ("convection-air", ConvectionAir()),
-]
-_IDS = [string for string, _ in PAIRS]
-
-
-def _graded(assembler: MomentumContinuity) -> MomentumContinuity:
-    """The same channel with an eddy viscosity rising across the cells, so the viscosity is graded."""
-    return assembler.with_eddy_viscosity(jnp.linspace(0.0, 0.2, assembler.mesh.n_cells))
 
 
 def _closed() -> MomentumContinuity:
@@ -67,103 +53,6 @@ def _closed() -> MomentumContinuity:
         PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
         CompactGreenGauss(),
         BoundaryConditions({side: NoSlipWall() for side in ("top", "bottom", "left", "right")}),
-    )
-
-
-def _assert_bitwise_equal(old: BlockPreconditioner, new: BlockPreconditioner, state) -> None:
-    old_leaves, new_leaves = jax.tree.leaves(old), jax.tree.leaves(new)
-    assert len(old_leaves) == len(new_leaves)
-    for a, b in zip(old_leaves, new_leaves, strict=True):
-        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
-    a_p = old.frozen_momentum_diagonal(state)
-    v = jnp.asarray(np.random.default_rng(0).standard_normal(state.shape))
-    np.testing.assert_array_equal(
-        np.asarray(old.apply_at(state, a_p)(v)), np.asarray(new.apply_at(state, a_p)(v))
-    )
-
-
-@pytest.mark.parametrize(("string", "value"), PAIRS, ids=_IDS)
-@pytest.mark.parametrize(
-    "options",
-    [{}, {"strength_threshold": 0.25}, {"v_cycles": 2}],
-    ids=["defaults", "strength", "two-cycles"],
-)
-@pytest.mark.parametrize("graded", [False, True], ids=["uniform-viscosity", "graded-viscosity"])
-def test_a_value_builds_bitwise_what_its_string_built(string, value, options, graded) -> None:
-    assembler = _channel(2.0)
-    if graded:
-        assembler = _graded(assembler)
-    state = _characteristic_reference_state(assembler)
-    old = BlockPreconditioner.build(assembler, velocity=string, **options)
-    new = BlockPreconditioner.build(assembler, velocity=value, **options)
-    _assert_bitwise_equal(old, new, state)
-
-
-@pytest.mark.parametrize(("string", "value"), PAIRS, ids=_IDS)
-def test_a_value_freezes_at_an_explicit_reference_state_as_its_string_did(string, value) -> None:
-    assembler = _channel(2.0)
-    base = _characteristic_reference_state(assembler)
-    reference = base * (1.0 + 0.1 * jnp.sin(jnp.arange(base.size)))
-    old = BlockPreconditioner.build(assembler, velocity=string, reference_state=reference)
-    new = BlockPreconditioner.build(assembler, velocity=value, reference_state=reference)
-    _assert_bitwise_equal(old, new, reference)
-
-
-@pytest.mark.parametrize(("string", "value"), PAIRS[1:], ids=_IDS[1:])
-def test_a_convection_value_warns_on_zero_flux_and_still_builds_what_its_string_did(
-    string, value
-) -> None:
-    assembler = _closed()
-    with pytest.warns(RuntimeWarning, match="no mass flux"):
-        old = BlockPreconditioner.build(assembler, velocity=string)
-    with pytest.warns(RuntimeWarning, match=type(value).__name__):
-        new = BlockPreconditioner.build(assembler, velocity=value)
-    _assert_bitwise_equal(old, new, _characteristic_reference_state(assembler))
-
-
-def test_the_viscous_value_says_nothing_on_a_closed_domain() -> None:
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        BlockPreconditioner.build(_closed(), velocity=ViscousMultilevel())
-
-
-def test_the_coupled_default_flow_block_is_the_two_level_convection_value() -> None:
-    """The coupled march's unset velocity block is ``ConvectionTwoLevel()``, bitwise."""
-    mesh, coupled = _cavity(4)
-    state = _healthy_state(mesh, coupled)
-    default = _coupled_shift_policy(coupled, state, None).flow_preconditioner
-    valued = _coupled_shift_policy(
-        coupled, state, None, velocity=ConvectionTwoLevel()
-    ).flow_preconditioner
-    flow, _, _ = coupled.physical_fields(state)
-    _assert_bitwise_equal(default, valued, flow)
-
-
-def test_the_two_level_smoother_settings_are_reachable_and_reach_the_strategy() -> None:
-    """``sweeps`` and ``omega`` existed only on the strategy; the value is now the way to set them."""
-    assembler = _channel(2.0)
-    state = _characteristic_reference_state(assembler)
-    new = BlockPreconditioner.build(assembler, velocity=ConvectionTwoLevel(sweeps=3, omega=0.7))
-    assert (new.velocity.sweeps, new.velocity.omega) == (3, 0.7)
-
-    owner_e, nb_e, _ = assembler.mesh.face_cells.interior_edges()
-    reference_mdot = jax.lax.stop_gradient(assembler.mass_flux(state))
-    old = SmoothedAmgConvectionVelocity.build(
-        _VelocityGeometry.of(assembler),
-        owner_e,
-        nb_e,
-        np.asarray(assembler.mesh.face_cells.interior),
-        assembler.mesh.n_cells,
-        1,
-        reference_mdot,
-        method="twolevel",
-        sweeps=3,
-        omega=0.7,
-    )
-    a_p = new.frozen_momentum_diagonal(state)
-    ru = jnp.asarray(np.random.default_rng(1).standard_normal((assembler.mesh.n_cells, 2)))
-    np.testing.assert_array_equal(
-        np.asarray(old.apply(a_p)(ru)), np.asarray(new.velocity.apply(a_p)(ru))
     )
 
 
@@ -180,7 +69,9 @@ def test_each_value_names_exactly_its_strategy_s_own_settings(value, strategy) -
     """A value's fields are its strategy's keyword-only settings, less what the builder supplies.
 
     ``strength_threshold`` is shared with the pressure Schur, so it is set once on
-    :meth:`BlockPreconditioner.build` rather than on the velocity value.
+    :meth:`BlockPreconditioner.build` rather than on the velocity value. A setting added to a strategy
+    and not to its value -- or the reverse -- fails here rather than becoming unreachable, which is how
+    the two-level smoother's ``sweeps`` and ``omega`` sat unreachable behind the string.
     """
     keyword_only = {
         name
@@ -190,3 +81,68 @@ def test_each_value_names_exactly_its_strategy_s_own_settings(value, strategy) -
     assert {field.name for field in dataclasses.fields(value)} == keyword_only - {
         "strength_threshold"
     }
+
+
+def test_the_two_level_smoother_settings_reach_the_strategy() -> None:
+    """``ConvectionTwoLevel(sweeps, omega)`` builds what the strategy builds when handed them directly."""
+    assembler = _channel(2.0)
+    state = _characteristic_reference_state(assembler)
+    built = BlockPreconditioner.build(assembler, velocity=ConvectionTwoLevel(sweeps=3, omega=0.7))
+    assert (built.velocity.sweeps, built.velocity.omega) == (3, 0.7)
+
+    owner_e, nb_e, _ = assembler.mesh.face_cells.interior_edges()
+    direct = TwoLevelConvectionVelocity.build(
+        _VelocityGeometry.of(assembler),
+        owner_e,
+        nb_e,
+        np.asarray(assembler.mesh.face_cells.interior),
+        assembler.mesh.n_cells,
+        1,
+        jax.lax.stop_gradient(assembler.mass_flux(state)),
+        sweeps=3,
+        omega=0.7,
+    )
+    a_p = built.frozen_momentum_diagonal(state)
+    ru = jnp.asarray(np.random.default_rng(1).standard_normal((assembler.mesh.n_cells, 2)))
+    np.testing.assert_array_equal(
+        np.asarray(direct.apply(a_p)(ru)), np.asarray(built.velocity.apply(a_p)(ru))
+    )
+
+
+@pytest.mark.parametrize("value", [ConvectionTwoLevel(), ConvectionAir()], ids=["two-level", "air"])
+def test_a_convection_value_with_no_reference_flux_says_so_and_names_itself(value) -> None:
+    with pytest.warns(
+        RuntimeWarning, match=rf"{type(value).__name__}\(\) was requested.*no mass flux"
+    ):
+        BlockPreconditioner.build(_closed(), velocity=value)
+
+
+def test_the_viscous_value_is_the_default_and_says_nothing_on_a_closed_domain() -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        default = BlockPreconditioner.build(_closed())
+        explicit = BlockPreconditioner.build(_closed(), velocity=ViscousMultilevel())
+    assert isinstance(default.velocity, SmoothedAmgVelocity)
+    for a, b in zip(jax.tree.leaves(default), jax.tree.leaves(explicit), strict=True):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+def test_the_coupled_default_flow_block_is_the_two_level_convection_value() -> None:
+    mesh, coupled = _cavity(4)
+    state = _healthy_state(mesh, coupled)
+    default = _coupled_shift_policy(coupled, state, None).flow_preconditioner
+    explicit = _coupled_shift_policy(
+        coupled, state, None, velocity=ConvectionTwoLevel()
+    ).flow_preconditioner
+    assert isinstance(default.velocity, TwoLevelConvectionVelocity)
+    for a, b in zip(jax.tree.leaves(default), jax.tree.leaves(explicit), strict=True):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+@pytest.mark.parametrize("string", ["smoothed", "convection", "convection-air"])
+def test_a_velocity_string_is_refused_by_the_builder_and_by_the_spec(string) -> None:
+    """Refused, not aliased: a string that still type-checks as "some velocity" would be read by no one."""
+    with pytest.raises(TypeError, match="velocity-block value"):
+        BlockPreconditioner.build(_channel(2.0), velocity=string)
+    with pytest.raises(TypeError, match="velocity-block value"):
+        BlockDiagonal(velocity=string)

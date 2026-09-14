@@ -44,7 +44,7 @@ import lineax as lx
 import numpy as np
 
 from aquaflux.discretization import DifferenceRow, FixationRow, LogRatioRow
-from aquaflux.flow import BlockPreconditioner, frozen_momentum_diagonal_parts
+from aquaflux.flow import BlockPreconditioner, ConvectionTwoLevel, frozen_momentum_diagonal_parts
 
 # The mass-flow-constraint primitives (a body force that is a solve unknown enforcing a bulk velocity)
 # are shared with the flow-block solve `aquaflux.flow.bulk_velocity_flow_solve`: the border column/row,
@@ -1668,8 +1668,8 @@ def _coupled_shift_policy(
     # against: nothing checks that, and the leaf also reaches the velocity block's operator. Settle it
     # by measuring, not by pattern-matching the helper.
     momentum = coupled.momentum.with_eddy_viscosity(closure.nu_t)
-    # The coupled flow block uses the convection-aware velocity AMG, not the viscous-smoothed default:
-    # a RANS case is high-Reynolds, and the Peclet-blind smoothed velocity block produces a poor
+    # The coupled flow block uses the convection-aware velocity AMG, not the viscous multilevel default:
+    # a RANS case is high-Reynolds, and the Peclet-blind viscous block produces a poor
     # momentum-block direction once the flow separates (the shifted Newton direction it returns drifts
     # away from the true one on a developed separated field, and the march stalls). The convection
     # block's convective linearization stays valid frozen at the cold initial state (the reference), so
@@ -1699,7 +1699,7 @@ def _coupled_shift_policy(
         else BlockPreconditioner.build(
             momentum,
             **{
-                "velocity": "convection",
+                "velocity": ConvectionTwoLevel(),
                 # Aggregate the velocity/Schur AMGs along strong connections. A no-op on a low-aspect-
                 # ratio mesh (this pitzDaily case), but the fix that keeps the V-cycle contracting once
                 # the near-wall cells are strongly stretched (wall-resolved / skewed meshes), where

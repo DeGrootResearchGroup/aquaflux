@@ -168,9 +168,11 @@ forward step expects. Three arguments matter, and they are independent of one an
 
 | Value | What it builds |
 | --- | --- |
-| `"smoothed"` (default) | Smoothed-aggregation AMG on the **viscous** momentum operator. Mesh-independent, but blind to the cell Péclet number, so it bounds the Reynolds number the solve reaches. |
-| `"convection"` | A two-level hierarchy on the frozen `viscous + first-order-upwind` operator, so it stays a good approximation as convection strengthens. |
-| `"convection-air"` | The same convective linearization under an lAIR hierarchy — Péclet-robust *and* mesh-independent. |
+| `ViscousMultilevel()` (default) | A multilevel smoothed-aggregation AMG on the **viscous** momentum operator. Mesh-independent, but blind to the cell Péclet number, so it bounds the Reynolds number the solve reaches. |
+| `ConvectionTwoLevel(sweeps=..., omega=...)` | A two-level hierarchy on the frozen `viscous + first-order-upwind` operator, so it stays a good approximation as convection strengthens. Its direct coarse solve does not scale to large meshes. `sweeps` and `omega` set its damped-Jacobi smoother. |
+| `ConvectionAir()` | The same convective linearization under an lAIR hierarchy — Péclet-robust *and* mesh-independent. |
+
+Each value names the operator and the hierarchy together, because the two do not vary independently: the multilevel hierarchy's Chebyshev smoother needs a symmetric operator, so it cannot coarsen the convection-diffusion one. All three are importable from `aquaflux.flow`.
 
 Both convection-aware blocks freeze their linearization at a `reference_state`. Pass one
 if you have a representative flow; otherwise the boundary conditions supply a uniform flow
@@ -206,9 +208,11 @@ The paper's named methods are the two axes together: **SIMPLER** is
 `schur_scaling="msimple", composition="simpler"`.
 
 ```python
+from aquaflux.flow import ConvectionTwoLevel
+
 precond = BlockPreconditioner.build(
     assembler,
-    velocity="convection",
+    velocity=ConvectionTwoLevel(),
     schur_scaling="msimple",
     composition="simpler",     # MSIMPLER
 ).factory()
@@ -240,13 +244,13 @@ You rarely build the preconditioner by hand. {func}`~aquaflux.flow.momentum_cont
 above is settable where you already are:
 
 ```python
-from aquaflux.flow import momentum_continuation
+from aquaflux.flow import ConvectionTwoLevel, momentum_continuation
 from aquaflux.solve import Globalization, ImplicitNewtonSolver
 
 continuation = momentum_continuation(
     assembler,
     globalization=Globalization(beta0=2.0),  # continuation's own argument
-    velocity="convection",      # from here on, the preconditioner's
+    velocity=ConvectionTwoLevel(),  # from here on, the preconditioner's
     schur_scaling="msimple",
     composition="simpler",
     strength_threshold=0.25,
@@ -501,7 +505,7 @@ From there:
   {class}`~aquaflux.solve.RefreshPolicy`, or refresh more often.
 - **The count is high from the first step.** The preconditioner is mismatched rather than
   stale. On a high-aspect-ratio mesh try `strength_threshold=0.25`; on a
-  convection-dominated flow move the velocity block to `"convection"` and the Schur to
+  convection-dominated flow move the velocity block to `ConvectionTwoLevel()` and the Schur to
   `"msimple"`.
 - **More inner cycles do not help, or make it worse.** The Schur *approximation* is the
   limit, not its inversion. Change the approximation, not its accuracy.

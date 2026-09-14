@@ -21,7 +21,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions
-from aquaflux.flow import MomentumContinuity, NoSlipWall, reused_flow_solve
+from aquaflux.flow import ConvectionTwoLevel, MomentumContinuity, NoSlipWall, reused_flow_solve
 from aquaflux.flow.initialization import potential_flow
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
@@ -107,7 +107,7 @@ def test_block_preconditioned_solve_converges_on_the_periodic_mesh() -> None:
     has no residual decay to relax its damping against and marches the full viscous transient instead.
     """
     _, geometry, assembler, _ = _solve(6, 32)
-    solve_flow = reused_flow_solve(assembler, velocity="convection")
+    solve_flow = reused_flow_solve(assembler, velocity=ConvectionTwoLevel())
     state = solve_flow(assembler, potential_flow(assembler))
 
     assert float(jnp.linalg.norm(assembler.residual(state))) < 1e-10

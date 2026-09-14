@@ -15,6 +15,7 @@ from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import (
     BlockPreconditioner,
+    ConvectionTwoLevel,
     FrozenViscosityVelocityParts,
     MomentumContinuity,
     MomentumShiftPolicy,
@@ -27,8 +28,8 @@ from aquaflux.flow import (
 )
 from aquaflux.flow.block_preconditioner import (
     FlowBlocks,
-    SmoothedAmgConvectionVelocity,
     SmoothedAmgVelocity,
+    TwoLevelConvectionVelocity,
     _build_composition,
     _characteristic_reference_state,
     _per_component,
@@ -225,7 +226,7 @@ def test_reference_state_is_driven_by_a_moving_wall_too() -> None:
 def test_a_convection_block_with_no_reference_flux_says_so_instead_of_degrading_in_silence() -> (
     None
 ):
-    """A closed domain drives no flow, so ``velocity="convection"`` quietly becomes ``"smoothed"``.
+    """A closed domain drives no flow, so a convection velocity block silently loses its convection.
 
     The build stays valid -- a zero convective linearization is still a usable viscous operator -- so
     this is a warning rather than a refusal. But it is the *only* signal that the Peclet-aware block
@@ -248,7 +249,7 @@ def test_a_convection_block_with_no_reference_flux_says_so_instead_of_degrading_
             CompactGreenGauss(),
             BoundaryConditions(conditions),
         )
-        return BlockPreconditioner.build(assembler, velocity="convection")
+        return BlockPreconditioner.build(assembler, velocity=ConvectionTwoLevel())
 
     with pytest.warns(RuntimeWarning, match="no mass flux"):
         _built(walls)  # every patch a stationary wall: nothing prescribes a velocity anywhere
@@ -274,7 +275,7 @@ def test_convection_velocity_operator_diagonal_is_the_momentum_diagonal() -> Non
     owner_e, nb_e, _ = asm.mesh.face_cells.interior_edges()
     interior = np.asarray(asm.mesh.face_cells.interior)
     reference_mdot = jax.lax.stop_gradient(asm.mass_flux(_characteristic_reference_state(asm)))
-    block = SmoothedAmgConvectionVelocity.build(
+    block = TwoLevelConvectionVelocity.build(
         _VelocityGeometry.of(asm),
         owner_e,
         nb_e,
@@ -282,7 +283,6 @@ def test_convection_velocity_operator_diagonal_is_the_momentum_diagonal() -> Non
         n_cells,
         1,
         reference_mdot,
-        method="twolevel",
     )
     reference_a_p = jnp.mean(
         momentum_diagonal(

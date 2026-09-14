@@ -278,7 +278,7 @@ def reused_flow_solve(
         Maximum Newton/continuation iterations per solve.
     **build_kwargs
         Forwarded to :func:`momentum_continuation` (e.g. ``schur_scaling="msimple"``,
-        ``velocity="convection"``, ``globalization``).
+        ``velocity=ConvectionTwoLevel()``, ``globalization``).
 
     Returns
     -------

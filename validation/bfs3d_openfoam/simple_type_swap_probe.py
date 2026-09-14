@@ -15,7 +15,7 @@ i.e. ``JacobiSmoothedInverse`` at the case's own settings) -- so only the leadin
 differs:
 
 * **shipped** -- ``compare.LEADING_INVERSE``, whatever the case ships as of this run.
-* **msimple/<composition>** -- ``BlockPreconditioner.build(momentum, velocity="convection",
+* **msimple/<composition>** -- ``BlockPreconditioner.build(momentum, velocity=ConvectionTwoLevel(),
   schur_scaling="msimple", composition=..., strength_threshold=0.25)``, built from the real assembler
   and eddy viscosity at the probed state exactly as the shipped coupled shift policy does it, over
   every composition in ``COMPOSITIONS``. ``composition="simpler"`` is the paper's **MSIMPLER**;
@@ -51,7 +51,10 @@ sys.path.insert(0, str(CASE))
 import field_split_probe as fsp  # noqa: E402
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
-from aquaflux.flow.block_preconditioner import BlockPreconditioner  # noqa: E402
+from aquaflux.flow.block_preconditioner import (  # noqa: E402
+    BlockPreconditioner,
+    ConvectionTwoLevel,
+)
 from aquaflux.solve import (  # noqa: E402
     FieldSplitAmgPreconditioner,
     build_block_triangular_field_split,
@@ -95,7 +98,7 @@ def _block_simple_build(coupled, pc_state, pc_beta, trailing_inverse, compositio
 
     block = BlockPreconditioner.build(
         momentum,
-        velocity="convection",
+        velocity=ConvectionTwoLevel(),
         reference_state=flow,
         schur_scaling="msimple",
         composition=composition,

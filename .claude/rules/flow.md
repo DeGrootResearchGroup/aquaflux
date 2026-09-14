@@ -7,6 +7,8 @@ paths:
 
 > ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | MonolithicVCycle | FieldSplit)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
 
+> ⚠️ **`BlockPreconditioner.build(velocity=…)` takes a value, not a string (2026-09-14, #390).** `"smoothed"` → `ViscousMultilevel()`, `"convection"` → `ConvectionTwoLevel()`, `"convection-air"` → `ConvectionAir()`; a string is refused. `SmoothedAmgConvectionVelocity` is split into `TwoLevelConvectionVelocity` / `AirConvectionVelocity`, and `_build_velocity_block` is gone (each value has a private `_build`). Entries below quoting the strings are dated history.
+
 > **Provenance boundary (binding).** This file cites the C++/Fortran precursors to inform
 > *your* understanding — that is its job, and why it loads into your
 > context. Per the root `CLAUDE.md` **Comment Convention**, none of that provenance may
@@ -487,7 +489,7 @@ Engineering Principles.
   it (see `.claude/rules/turbulence.md`). `min` not `max` here: the laminar branch is an extrapolation that
   diverges as `μ→0`, unlike the prescribed-velocity rule where every candidate is genuinely imposed.
   **Why it exists:** a streamwise-periodic channel prescribes velocity *nowhere*, so the old
-  boundary-only estimate returned exactly zero and silently degraded `velocity="convection"` to the
+  boundary-only estimate returned exactly zero and silently degraded the convection velocity block to the
   viscous block. `BlockPreconditioner.build` now warns (`RuntimeWarning`) when the convection block is
   asked for but the reference mass flux is zero. A caller that *knows* the speed (a bulk-velocity
   constraint targets `U_bar`) should pass `reference_state=` explicitly instead.
@@ -501,7 +503,7 @@ Engineering Principles.
 - **Structure (post-encapsulation-refactor):** the preconditioner is `block_preconditioner.py`'s
   `BlockPreconditioner` — a builder composing two **injected strategy families**: an `InnerSchurSolver`
   (`SmoothedAmgSchur`, the mesh-independent smoothed-aggregation multigrid) for the pressure block and a
-  `VelocityBlockSolver` (`SmoothedAmgVelocity` on the viscous operator / `SmoothedAmgConvectionVelocity`
+  `VelocityBlockSolver` (`SmoothedAmgVelocity` on the viscous operator / `TwoLevelConvectionVelocity` and `AirConvectionVelocity`
   on the convection-diffusion operator) for the momentum block, plus — since 2026-08-20 — a third,
   `SaddleComposition`, saying how those two solves compose (default `BlockTriangularComposition`, the
   `D·δu` coupling this was hardcoded to). Build it with `BlockPreconditioner.build(assembler, velocity=…).factory()` (the factory is
@@ -565,7 +567,7 @@ Engineering Principles.
   handed in as a frozen array (`reference_mdot`), so the strategy `build` stays assembler-free and
   unit-testable from mesh primitives alone. When adding a strategy, extend/consume the matching bundle;
   do **not** thread the assembler into a strategy.
-- **The mesh connectivity + multigrid knobs `_build_schur`/`_build_velocity_block` share are ONE
+- **The mesh connectivity + multigrid knobs `_build_schur`/a velocity-block value's `_build` share are ONE
   resolved value, `_StrategyInputs`, not a repeated 8-value positional bundle (issue #272, fixed
   2026-09-12).** `BlockPreconditioner.build` resolves `owner_e`/`nb_e`/`interior`/`n_cells`/`v_cycles`/
   `strength_threshold`/`assembler`/`reference_state` once and used to fan them out positionally into
