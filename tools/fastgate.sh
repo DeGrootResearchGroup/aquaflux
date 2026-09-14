@@ -18,9 +18,10 @@
 #   tools/fastgate.sh all             everything
 #   tools/fastgate.sh <tier> -k name  remaining arguments are passed through to pytest
 #
-# Exits with pytest's status, so it composes in a shell `&&` chain and in a hook. Two statuses are the
-# script's own rather than pytest's: 2 for a tier it does not recognize, and 3 for refusing to start
-# beside a running validation case (see below).
+# Exits with pytest's status, so it composes in a shell `&&` chain and in a hook. Three statuses are
+# the script's own rather than pytest's: 2 for a tier it does not recognize, 3 for refusing to start
+# beside a running validation case, and 4 for refusing to start beside another running tier (both
+# below).
 #
 # It REFUSES TO START WHILE A VALIDATION CASE IS RUNNING, because the mutual exclusion those cases rely
 # on is over *cases* and a test tier is not one -- so nothing stopped a gate landing on top of a march,
@@ -33,8 +34,17 @@
 # 6:34-8:53 while the case it landed on ran 3.2x slow over the overlap. Both jobs lost; run end to end
 # they are about 8 and 9 minutes.
 #
-# Override with FASTGATE_FORCE=1 when you mean it (a quick `-k` on one test beside a long march is
-# usually harmless). The check is skipped under CI, which runs no cases.
+# It also REFUSES TO START BESIDE ANOTHER RUNNING TIER, anywhere on the machine -- a separate mutual
+# exclusion from the case guard above, because a tier can collide with either. On 2026-09-13 two fast
+# tiers started five minutes apart, from two different worktrees, neither touching a case, and the
+# machine had to be hard-reset: a fast tier's real memory footprint (mostly compressed pages, which
+# RSS does not count) runs to tens of GB across its worker pool, so two at once is roughly double that
+# on a machine that does not have it. A machine-wide lock file makes this the same kind of ENFORCED
+# rule the case guard is, rather than a second thing to merely remember.
+#
+# Override with FASTGATE_FORCE=1 when you mean it (a quick `-k` on one test beside a long march, or
+# beside another quick run, is usually harmless). Both checks are skipped under CI, which runs neither
+# cases nor concurrent tiers.
 #
 # The FAST tier runs across worker processes (pytest-xdist), because it is the tier that runs on
 # every change and its wall clock is what makes or breaks the edit-test loop. Three details are
@@ -103,6 +113,65 @@ esac
 # about someone else's tree. This is the question `validation/run_case.sh` answers with a run-file --
 # "is this run mine, and what is it testing?" -- asked of the test tiers instead.
 CHECKOUT=$(basename "$(cd "$(dirname "$0")/.." && pwd -P)")
+
+# --- refuse to start beside ANOTHER running tier, from any worktree or session -------------------
+# A different mutual exclusion from the case guard above (that one is tier-vs-case; this one is
+# tier-vs-tier), because #379 was two fast tiers colliding with each other, not with a case. The lock
+# lives under a fixed, machine-global directory rather than $TMPDIR -- $TMPDIR's visibility across
+# worktrees and sessions is exactly the ambiguity the CHECKOUT-qualified log name below routes around,
+# and a lock a competing shell could miss is worse than no lock. `~/.cache/aquaflux` is already
+# machine-global (it holds the compiled ILU(0) kernel and the JAX compilation cache), so every
+# invocation of this script looks in the same place regardless of which worktree started it.
+LOCK_DIR="${FASTGATE_LOCK_DIR:-$HOME/.cache/aquaflux}"
+LOCK_FILE="$LOCK_DIR/fastgate.lock"
+mkdir -p "$LOCK_DIR" 2>/dev/null || true
+
+# A lock held by a pid that no longer exists is a crashed run's leftovers, not a live claim -- the
+# same liveness rule `run_case.sh` uses for its own run-file (`kill -0`, never "the file exists").
+tier_lock_holder() {
+  [ -f "$LOCK_FILE" ] || return 0
+  local pid
+  pid=$(sed -n 's/^pid=//p' "$LOCK_FILE")
+  [ -n "$pid" ] || return 0
+  if kill -0 "$pid" 2>/dev/null; then printf '%s' "$pid"; else rm -f "$LOCK_FILE"; fi
+}
+
+if [ -z "${CI:-}" ] && [ -z "${FASTGATE_FORCE:-}" ]; then
+  HOLDER=$(tier_lock_holder)
+  if [ -n "$HOLDER" ]; then
+    printf 'fastgate: another test tier is already running (pid %s) -- refusing to start a second.\n' \
+      "$HOLDER" >&2
+    printf '\n' >&2
+    sed 's/^/  /' "$LOCK_FILE" >&2
+    printf '\n' >&2
+    printf '  Two tiers at once is how this machine got hard-reset (#379): one alone already holds\n' >&2
+    printf '  tens of GB of real, mostly-compressed footprint that a quick RSS check does not show.\n' >&2
+    printf '  Wait for it, or FASTGATE_FORCE=1 to run anyway.\n' >&2
+    exit 4
+  fi
+  # Atomic create (bash's noclobber refuses an existing target the same way O_EXCL does): a competing
+  # fastgate racing to this exact line loses HERE, not later -- there is no window where both believe
+  # they hold the lock, except the one closed by the recheck immediately below.
+  if ( set -o noclobber
+       { printf 'pid=%s\ncheckout=%s\ntier=%s\nstarted=%s\n' \
+           "$$" "$CHECKOUT" "$TIER" "$(date '+%Y-%m-%d %H:%M:%S')" > "$LOCK_FILE"
+       } ) 2>/dev/null; then
+    trap 'rm -f "$LOCK_FILE"' EXIT
+  else
+    # The create failed either because a concurrent fastgate won the race between our check and our
+    # attempt (recheck and refuse), or because the lock file/directory is not writable for some other
+    # reason -- in which case there is no lock to enforce, and this degrades to running rather than
+    # blocking every tier on a broken cache directory, the same choice the case guard makes when
+    # run_case.sh itself is missing.
+    HOLDER=$(tier_lock_holder)
+    if [ -n "$HOLDER" ]; then
+      printf 'fastgate: another test tier just started (pid %s) -- refusing to start a second.\n' \
+        "$HOLDER" >&2
+      exit 4
+    fi
+  fi
+fi
+
 STAMP=$(date +%Y%m%d-%H%M%S)
 LOG="${TMPDIR:-/tmp}/aquaflux-tests-${CHECKOUT}-${TIER}-${STAMP}.log"
 
