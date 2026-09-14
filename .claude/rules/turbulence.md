@@ -1235,7 +1235,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     `tests/integration/test_channel_high_reynolds.py::test_mass_scaled_schur_reaches_beyond_the_a_p_schur`,
     where plain SIMPLE's inner GMRES genuinely stalls and MSIMPLE converges — just not for a coupled RANS
     solve at any scale this project has measured.
-  - **`coupled_lu_continuation` / `coupled_lu_refreshing_continuation` — the COMPLETE-LU coupled PC, the
+  - **`coupled_lu_continuation` — the COMPLETE-LU coupled PC, the
     preferred coupled PC on 2D/moderate meshes (BUILT).** A drop-in for `solve_coupled(continuation=…)`
     that preconditions the whole `[flow, k, ω]` saddle by factoring the assembled coupled Jacobian
     *completely* (`MonolithicLuPreconditioner`, `.claude/rules/solve-direct-preconditioners.md`), instead of
@@ -1269,16 +1269,12 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     the complete factorization is exact regardless of backend). With the UMFPACK backend
     (optional `petsc4py` dep, `backend="auto"|"umfpack"|"scipy"`) it factors the developed pitzDaily
     coupled Jacobian quickly, exact (1 GMRES iter), verified on the real forward operator
-    and the β=0 adjoint. **Cheap in-place mid-march refresh —
-    `coupled_lu_refreshing_continuation` (BUILT, forward-march only).** For a differentiable solve the
-    factorization is frozen at the reference state (state drift costs only a few cycles, and freezing
-    keeps the adjoint valid). For a long developing march it instead goes stale — on a low-shift dual-time
-    path it can NaN — so `coupled_lu_refreshing_continuation(coupled, …)` returns a `refresh.builder`
-    for `solve_coupled` that re-factors the LU **in place in the SAME continuation object**
-    (`MonolithicLuPreconditioner.refresh_in_place`), so the jitted march-step is a compilation cache hit
-    (no recompile) — pair it with a `CoefficientDriftTrigger` so the re-factor leads the staleness. This
-    is impure and **forward-march only** (never differentiate through it); see `.claude/rules/solve-direct-preconditioners.md`
-    for the mechanism (static preconditioner field + callback reads `self.factors` at call time). It is a
+    and the β=0 adjoint. For a differentiable solve the factorization is frozen at the reference state
+    (state drift costs only a few cycles, and freezing keeps the adjoint valid). **A long developing march
+    refreshes it with `lu_beta_tracking_refresh` (below)**, which re-factors in place at the step's own
+    `(state, β)`. ⚠️ There is no `coupled_lu_refreshing_continuation` — that `RefreshPolicy(builder=...)`
+    re-factored at a FIXED `lu_beta`, which is exactly the shift mismatch the tracking hook exists to
+    remove on a dual-time march, and nothing selected it; deleted 2026-09-13 (#371). It is a
     reasonable default for a *differentiable* coupled solve on a 2D/moderate mesh — but it is
     **NOT** the only PC with a working β=0 coupled adjoint: `coupled_amg_continuation`
     also passes the coupled-adjoint finite-difference gate with a shipped test

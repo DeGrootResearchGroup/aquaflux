@@ -1302,7 +1302,7 @@ complete LU and the AMG's coloured probe both still depend on it.
     `lu_beta_tracking_refresh`, `.claude/rules/turbulence.md`): exact each step (1 Krylov iter), and robust
     through overshoots (measured: completes the cold ramp where the frozen LU failed, cyc ≤ 18). The
     finishing solve and adjoint keep the last frozen factorization (exact enough at the converged β → 0).
-  - **Coupled builders (`coupled_lu_continuation` / `coupled_lu_refreshing_continuation`, and the
+  - **Coupled builders (`coupled_lu_continuation`, and the
     β-tracking `lu_beta_tracking_refresh`) live in `.claude/rules/turbulence.md`;** they share the
     `MonolithicFactorShiftPolicy` and the `_monolithic_factor_step` builder tail with the algebraic
     multigrid (one implementation, parameterized by the factorization).
