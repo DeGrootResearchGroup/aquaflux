@@ -63,6 +63,7 @@ from aquaflux.solve import (
     BlockScaledNorm,
     CellFields,
     ColumnProbePlan,
+    DualTimeLoop,
     FieldGroups,
     FieldLayout,
     FieldSplitAmgPreconditioner,
@@ -101,7 +102,7 @@ from aquaflux.solve import (
 )
 
 from .initialization import hybrid_initialize, wall_consistent_omega
-from .march_settings import ShiftSettings
+from .march_settings import ForwardSolve, ShiftSettings
 from .preconditioner import ScalarTransportPreconditioner, ScaledScalarPreconditioner
 
 # `_UNSET` is "not given" for `solve_coupled`'s `method`, whose `None` already means something; it is
@@ -2205,15 +2206,12 @@ def _coupled_step(
     *,
     regime: _ForwardSolveRegime,
     globalization: Globalization,
-    inner_steps: int,
-    inner_tol: float,
+    dual_time: DualTimeLoop | None,
     forward_solver: lx.AbstractLinearSolver | None,
     block_scaled_norm: bool,
     residual_norm: ResidualNorm | None,
     inner_observer: Callable[..., None] | None = None,
-    refresh_on_cycles: int | None = None,
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
-    cycle_budget: int | None = None,
     step_limit: Callable[..., jnp.ndarray] | None = None,
     step_projection: Callable[..., jnp.ndarray] | None = None,
     jacobian_gradient_sweeps: int | None = None,
@@ -2261,11 +2259,11 @@ def _coupled_step(
         here rather than on any of them. An unset ``line_search`` takes :data:`_COUPLED_LINE_SEARCH`
         rungs and every other unset field the step class's own default
         (:meth:`~aquaflux.solve.Globalization.with_defaults`).
-    inner_steps, inner_tol : int, float
-        The dual-time inner loop's bounds. Unlike the settings above these are not shared: the
-        flow-only and scalar marches have no dual-time form, so ``inner_steps > 1`` is a coupled
-        choice and stays on the coupled builders.
-    forward_solver, block_scaled_norm, residual_norm, inner_observer, refresh_on_cycles, inner_refresh, cycle_budget, step_limit, step_projection
+    dual_time : DualTimeLoop or None
+        The dual-time inner loop, or ``None`` for the single shifted step. Unlike the settings above
+        this is not shared: the flow-only and scalar marches have no dual-time form, so the loop is a
+        coupled choice and stays on the coupled builders.
+    forward_solver, block_scaled_norm, residual_norm, inner_observer, inner_refresh, step_limit, step_projection
         The linear solve, the progress measure and the per-step guards. See the two step classes.
     jacobian_production_viscosity : bool
         Freeze ``k`` inside the k-production's eddy viscosity in the **operator** the shifted solve
@@ -2356,7 +2354,7 @@ def _coupled_step(
     # this residual's base, an explicit one -- including 0 -- is kept, and everything else the
     # globalization leaves unset falls through to the step class's own default.
     globalization = globalization.with_defaults(line_search=_COUPLED_LINE_SEARCH)
-    if inner_steps > 1:
+    if dual_time is not None:
         # Dual-time (backward-Euler) march: an inner Newton loop per outer timestep on the transient
         # residual, so the measured steady residual is the honest discrete time derivative rather than
         # beta x travel, and a larger pseudo-timestep (smaller beta, driven by a step control) stays
@@ -2365,15 +2363,12 @@ def _coupled_step(
         # dropping them.
         return globalization.dual_time_step(
             policy,
-            inner_steps=inner_steps,
-            inner_tol=inner_tol,
+            **dual_time.settings(),
             forward_solver=solver,
             residual_norm=residual_norm,
             adjoint_preconditioner_factory=policy.adjoint_factory(),
             inner_observer=inner_observer,
-            refresh_on_cycles=refresh_on_cycles,
             inner_refresh=inner_refresh,
-            cycle_budget=cycle_budget,
             step_limit=step_limit,
             step_projection=step_projection,
             jacobian_residual=jacobian_residual,
@@ -2401,16 +2396,13 @@ def _monolithic_factor_step(
     preconditioner: MonolithicLuPreconditioner | MonolithicAmgPreconditioner,
     *,
     globalization: Globalization,
-    inner_steps: int,
-    inner_tol: float,
+    dual_time: DualTimeLoop | None,
     forward_solver: lx.AbstractLinearSolver | None,
     regime: _ForwardSolveRegime,
     block_scaled_norm: bool,
     residual_norm: ResidualNorm | None,
     inner_observer: Callable[..., None] | None = None,
-    refresh_on_cycles: int | None = None,
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
-    cycle_budget: int | None = None,
     step_limit: Callable[..., jnp.ndarray] | None = None,
     step_projection: Callable[..., jnp.ndarray] | None = None,
     jacobian_gradient_sweeps: int | None = None,
@@ -2430,15 +2422,12 @@ def _monolithic_factor_step(
         MonolithicFactorShiftPolicy(base, preconditioner),
         regime=regime,
         globalization=globalization,
-        inner_steps=inner_steps,
-        inner_tol=inner_tol,
+        dual_time=dual_time,
         forward_solver=forward_solver,
         block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
         inner_observer=inner_observer,
-        refresh_on_cycles=refresh_on_cycles,
         inner_refresh=inner_refresh,
-        cycle_budget=cycle_budget,
         step_limit=step_limit,
         step_projection=step_projection,
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
@@ -2787,6 +2776,69 @@ def _resolved_shift(
     )
 
 
+def _resolved_march(
+    keywords: dict, base: _ForwardSolveRegime
+) -> tuple[_ForwardSolveRegime, lx.AbstractLinearSolver | None, DualTimeLoop | None]:
+    """The forward solve and the dual-time loop, from their values or their keywords.
+
+    Pops ``dual_time``, ``forward`` and the keywords each replaces from ``keywords``, and refuses a
+    value given beside any of them. ``forward`` is either a :class:`ForwardSolve`, whose unset fields
+    take ``base``, or a whole ``lineax`` solver, which replaces the regime.
+
+    Parameters
+    ----------
+    keywords : dict
+        A builder's march keywords; the loop and forward names are removed from it.
+    base : _ForwardSolveRegime
+        The chosen preconditioner family's own regime.
+
+    Returns
+    -------
+    tuple
+        ``(regime, forward_solver, dual_time)``: the resolved regime, an explicit solver or ``None``, and
+        the dual-time loop or ``None`` for the single shifted step.
+
+    Raises
+    ------
+    TypeError
+        If ``dual_time`` or ``forward`` is given together with a keyword it replaces.
+    """
+    dual_time = keywords.pop("dual_time")
+    forward = keywords.pop("forward")
+    loop = {
+        name: keywords.pop(name)
+        for name in ("inner_steps", "inner_tol", "cycle_budget", "refresh_on_cycles")
+    }
+    trio = {
+        name: keywords.pop(name)
+        for name in ("forward_solver", "forward_rtol", "forward_restart", "forward_max_restarts")
+    }
+    for value, loose, label in (
+        (dual_time, loop, "dual_time=DualTimeLoop(...)"),
+        (forward, trio, "forward=ForwardSolve(...) or a solver"),
+    ):
+        given = sorted(name for name, setting in loose.items() if setting is not None)
+        if value is not None and given:
+            raise TypeError(
+                f"{label} was given together with {given}, which it replaces; set them on the value "
+                "instead."
+            )
+    if dual_time is None and loop["inner_steps"] is not None and loop["inner_steps"] > 1:
+        dual_time = DualTimeLoop(**loop)
+    if isinstance(forward, ForwardSolve):
+        return (
+            _resolved_regime(base, forward.rtol, forward.restart, forward.max_restarts),
+            None,
+            dual_time,
+        )
+    if forward is not None:
+        return base, forward, dual_time
+    regime = _resolved_regime(
+        base, trio["forward_rtol"], trio["forward_restart"], trio["forward_max_restarts"]
+    )
+    return regime, trio["forward_solver"], dual_time
+
+
 def _march_keywords(march: dict) -> dict:
     """``march`` bound against :func:`coupled_step`'s signature, with its defaults filled in.
 
@@ -2882,17 +2934,14 @@ class _BlockSession:
             *_resolved_shift(keywords),
             **self._spec.flow_block_options(),
         )
-        regime = _resolved_regime(
-            _BLOCK_FORWARD,
-            keywords.pop("forward_rtol"),
-            keywords.pop("forward_restart"),
-            keywords.pop("forward_max_restarts"),
-        )
+        regime, forward_solver, dual_time = _resolved_march(keywords, _BLOCK_FORWARD)
         return _coupled_step(
             coupled,
             state,
             policy,
             regime=regime,
+            forward_solver=forward_solver,
+            dual_time=dual_time,
             step_limit=step_limit,
             step_projection=step_projection,
             jacobian_production_viscosity=self._production_viscosity,
@@ -3001,17 +3050,16 @@ class _MaterializedSession:
         base = _monolithic_shift_source(coupled, state, *_resolved_shift(keywords))
         if self._preconditioner is None:
             self._preconditioner = self._fit(coupled, state, base)
-        regime = _resolved_regime(
+        regime, forward_solver, dual_time = _resolved_march(
+            keywords,
             _FACTORIZATION_FORWARD
             if isinstance(self._spec.inverse, CompleteLu)
             else _VCYCLE_FORWARD,
-            keywords.pop("forward_rtol"),
-            keywords.pop("forward_restart"),
-            keywords.pop("forward_max_restarts"),
         )
         if (
             track
-            and keywords["refresh_on_cycles"] is not None
+            and dual_time is not None
+            and dual_time.refresh_on_cycles is not None
             and keywords["inner_refresh"] is None
         ):
             keywords["inner_refresh"] = self._refresh_at
@@ -3021,6 +3069,8 @@ class _MaterializedSession:
             base,
             self._preconditioner,
             regime=regime,
+            forward_solver=forward_solver,
+            dual_time=dual_time,
             step_limit=step_limit,
             step_projection=step_projection,
             jacobian_production_viscosity=self._production_viscosity,
@@ -3211,8 +3261,10 @@ def coupled_step(
     preconditioner: BlockDiagonal | MaterializedJacobian | None = None,
     jacobian_production_viscosity: bool = False,
     globalization: Globalization = DEFAULT_GLOBALIZATION,
-    inner_steps: int = 1,
-    inner_tol: float = 0.05,
+    dual_time: DualTimeLoop | None = None,
+    forward: ForwardSolve | lx.AbstractLinearSolver | None = None,
+    inner_steps: int | None = None,
+    inner_tol: float | None = None,
     forward_solver: lx.AbstractLinearSolver | None = None,
     forward_rtol: float | None = None,
     forward_restart: int | None = None,
@@ -3340,6 +3392,8 @@ def coupled_step(
         reference_state,
         {
             "globalization": globalization,
+            "dual_time": dual_time,
+            "forward": forward,
             "inner_steps": inner_steps,
             "inner_tol": inner_tol,
             "forward_solver": forward_solver,
@@ -4135,17 +4189,19 @@ def mass_flow_coupled_continuation(
     flow_direction: int = 0,
     preconditioner: BlockDiagonal | None = None,
     globalization: Globalization = DEFAULT_GLOBALIZATION,
+    dual_time: DualTimeLoop | None = None,
+    forward: ForwardSolve | lx.AbstractLinearSolver | None = None,
     forward_solver: lx.AbstractLinearSolver | None = None,
-    forward_rtol: float = _CONSTRAINED_FORWARD.rtol,
-    forward_restart: int = _CONSTRAINED_FORWARD.restart,
-    forward_max_restarts: int = _CONSTRAINED_FORWARD.max_restarts,
+    forward_rtol: float | None = None,
+    forward_restart: int | None = None,
+    forward_max_restarts: int | None = None,
     block_scaled_norm: bool = False,
     shift: ShiftSettings | None = None,
     shift_basis: ShiftBasis | None = None,
     velocity_shift_parts: VelocityShiftParts | None = None,
     turbulence_damping: TurbulenceDamping | float | None = None,
-    inner_steps: int = 1,
-    inner_tol: float = 0.05,
+    inner_steps: int | None = None,
+    inner_tol: float | None = None,
     inner_observer: Callable[..., None] | None = None,
     refresh_on_cycles: int | None = None,
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
@@ -4219,14 +4275,28 @@ def mass_flow_coupled_continuation(
     )
     force, average = _coupled_constraint_vectors(coupled, flow_direction)
     bordered = _MassFlowBorderedPolicy(policy, force, average)
+    regime, forward_solver, dual_time = _resolved_march(
+        {
+            "dual_time": dual_time,
+            "forward": forward,
+            "inner_steps": inner_steps,
+            "inner_tol": inner_tol,
+            "cycle_budget": cycle_budget,
+            "refresh_on_cycles": refresh_on_cycles,
+            "forward_solver": forward_solver,
+            "forward_rtol": forward_rtol,
+            "forward_restart": forward_restart,
+            "forward_max_restarts": forward_max_restarts,
+        },
+        _CONSTRAINED_FORWARD,
+    )
     return _coupled_step(
         coupled,
         reference_state,
         bordered,
-        regime=_ForwardSolveRegime(forward_rtol, forward_restart, forward_max_restarts),
+        regime=regime,
         globalization=globalization,
-        inner_steps=inner_steps,
-        inner_tol=inner_tol,
+        dual_time=dual_time,
         forward_solver=forward_solver,
         block_scaled_norm=block_scaled_norm,
         # Its own, not the shared default -- see the note above.
@@ -4236,9 +4306,7 @@ def mass_flow_coupled_continuation(
             else jnp.linalg.norm
         ),
         inner_observer=inner_observer,
-        refresh_on_cycles=refresh_on_cycles,
         inner_refresh=inner_refresh,
-        cycle_budget=cycle_budget,
         step_limit=step_limit,
         step_projection=step_projection,
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,

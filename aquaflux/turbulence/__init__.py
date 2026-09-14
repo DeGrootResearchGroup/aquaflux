@@ -58,7 +58,7 @@ from .coupled import (
 )
 from .driver import bulk_velocity, solve_segregated
 from .initialization import hybrid_initialize, wall_consistent_omega
-from .march_settings import ShiftSettings
+from .march_settings import ForwardSolve, ShiftSettings
 from .preconditioner import (
     AirAmgPreconditioner,
     ConvectionAmgPreconditioner,
@@ -112,6 +112,7 @@ __all__ = [
     "CoupledShiftPolicy",
     "DirectScalars",
     "FieldSplit",
+    "ForwardSolve",
     "GeometricReynoldsSchedule",
     "JacobianProbeSpec",
     "KDestruction",

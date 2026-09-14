@@ -45,6 +45,7 @@ from .line_search_growth import LineSearchGrowth, MonotoneLineSearch
 from .linear import corrected_cycles, solve_linear
 from .norm import ResidualNorm
 from .relaxation import RelaxationSchedule, SwitchedEvolutionRelaxation
+from .settings_value import SettingsValue
 
 # Inexact-Newton forward solver for the pseudo-transient march: a loose *relative* tolerance (each
 # shifted step need only make Newton progress; the next step corrects the leftover) but a *tight*
@@ -1412,6 +1413,73 @@ class Globalization(eqx.Module):
             **_supplied(DualTimeStep, {"line_search": self.line_search}),
         }
         return DualTimeStep(shift_policy, **_merged(DualTimeStep, settings, fields))
+
+
+@dataclasses.dataclass(frozen=True)
+class DualTimeLoop(SettingsValue):
+    """The backward-Euler inner loop a dual-time march runs each outer step, as one value.
+
+    Giving a builder this value is what selects the dual-time march; leaving it out selects the single
+    shifted step. That makes the loop's settings impossible to set on a march that has no loop, where
+    as loose keywords they were accepted and reached nothing. Every field defaults to ``None``, meaning
+    "not set here": an unset field keeps :class:`DualTimeStep`'s own default.
+
+    Attributes
+    ----------
+    inner_steps : int or None
+        The most inner Newton iterations per outer timestep, at least ``2``. Unset,
+        :class:`DualTimeStep`'s default.
+    inner_tol : float or None
+        The inner loop stops once the transient residual has fallen to this fraction of its anchor.
+    cycle_budget : int or None
+        A cap on the loop's accumulated restart cycles, so a grinding solve is cut off after about
+        that many. Forward-only.
+    refresh_on_cycles : int or None
+        Fire the march's mid-step refresh once an inner solve has cost this many restart cycles. It
+        needs a refresh to fire: a preconditioner session supplies one, or the builder's
+        ``inner_refresh``. Forward-only.
+
+    Raises
+    ------
+    ValueError
+        If ``inner_steps`` is below ``2``.
+    """
+
+    inner_steps: int | None = None
+    inner_tol: float | None = None
+    cycle_budget: int | None = None
+    refresh_on_cycles: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.inner_steps is not None and self.inner_steps < 2:
+            raise ValueError(
+                f"DualTimeLoop(inner_steps={self.inner_steps}) is below 2. One inner iteration is not the "
+                "single shifted step with a loop around it: the single step is a different step, with an "
+                "escalation ladder and its own line search. For it, leave the dual-time loop out "
+                "(dual_time=None)."
+            )
+
+    def filled_from(self, base: DualTimeLoop) -> DualTimeLoop:
+        """This value, with each field it leaves unset taken from ``base``.
+
+        Parameters
+        ----------
+        base : DualTimeLoop
+            The settings to fall back on.
+
+        Returns
+        -------
+        DualTimeLoop
+            A copy whose set fields are this value's and whose unset fields are ``base``'s.
+        """
+        return dataclasses.replace(
+            self,
+            **{
+                field.name: getattr(base, field.name)
+                for field in dataclasses.fields(self)
+                if getattr(self, field.name) is None
+            },
+        )
 
 
 #: Nothing overridden: every builder that takes a :class:`Globalization` applies its own defaults.

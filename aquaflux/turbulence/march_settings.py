@@ -17,12 +17,14 @@ from typing import TYPE_CHECKING
 
 import equinox as eqx
 
+from aquaflux.solve.settings_value import SettingsValue
+
 if TYPE_CHECKING:
     from aquaflux.solve import ShiftBasis, VelocityShiftParts
 
     from .coupled import TurbulenceDamping
 
-__all__ = ["ShiftSettings", "merged_march_options"]
+__all__ = ["ForwardSolve", "ShiftSettings", "merged_march_options"]
 
 
 class ShiftSettings(eqx.Module):
@@ -69,6 +71,58 @@ class ShiftSettings(eqx.Module):
         Returns
         -------
         ShiftSettings
+            A copy whose set fields are this value's and whose unset fields are ``base``'s.
+        """
+        return dataclasses.replace(
+            self,
+            **{
+                field.name: getattr(base, field.name)
+                for field in dataclasses.fields(self)
+                if getattr(self, field.name) is None
+            },
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class ForwardSolve(SettingsValue):
+    """The shifted forward solve's Krylov regime, as one value.
+
+    Each field is resolved against the chosen preconditioner family's own regime when unset: restart
+    ``120`` for the block-diagonal family, ``10`` for a complete LU, ``15`` for a multigrid V-cycle or a
+    field split, each at a relative tolerance of ``0.3``, and ``1e-2`` with restart ``120`` for the
+    mass-flow-constrained march. A builder takes this value or a whole ``lineax`` solver in the same
+    parameter, never both, because a solver replaces the regime -- and the stopping measure with it.
+
+    ⚠️ **``rtol`` is measured in the march's own progress measure**, not the Euclidean norm, except on
+    the mass-flow-constrained march, whose measure is Euclidean. The coupled residual's 2-norm is almost
+    entirely ``omega``, so a Euclidean stop halts while the flow-dominated part of the step is still
+    coarse. The same number is therefore not the same tightness under a different measure.
+
+    Attributes
+    ----------
+    rtol : float or None
+        The relative tolerance each shifted solve stops at, in the progress measure.
+    restart : int or None
+        The Arnoldi restart length.
+    max_restarts : int or None
+        The restart-cycle cap, in raw ``lineax`` restarts -- the only bound on a single running solve.
+    """
+
+    rtol: float | None = None
+    restart: int | None = None
+    max_restarts: int | None = None
+
+    def filled_from(self, base: ForwardSolve) -> ForwardSolve:
+        """This value, with each field it leaves unset taken from ``base``.
+
+        Parameters
+        ----------
+        base : ForwardSolve
+            The settings to fall back on.
+
+        Returns
+        -------
+        ForwardSolve
             A copy whose set fields are this value's and whose unset fields are ``base``'s.
         """
         return dataclasses.replace(

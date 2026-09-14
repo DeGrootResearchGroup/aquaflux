@@ -66,6 +66,7 @@ from __future__ import annotations
 from .continuation import (
     DEFAULT_GLOBALIZATION,
     DivergenceGuard,
+    DualTimeLoop,
     DualTimeStep,
     Globalization,
     PseudoTransientStep,
@@ -200,6 +201,7 @@ __all__ = [
     "DampedNewtonStep",
     "DivergenceGuard",
     "DualTimeControl",
+    "DualTimeLoop",
     "DualTimeStep",
     "FieldGroups",
     "FieldLayout",
