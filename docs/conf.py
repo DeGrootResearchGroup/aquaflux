@@ -61,6 +61,7 @@ SUBPACKAGE_GROUPS = {
                 "field_split",
                 "block_inverse",
                 "settings_value",
+                "settings_mapping",
                 "hierarchy_inverse",
                 "saddle_multigrid",
             ],

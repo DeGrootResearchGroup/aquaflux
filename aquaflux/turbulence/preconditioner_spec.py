@@ -20,14 +20,28 @@ setting cannot be written beside a field split, because there is nowhere to writ
 Every field defaults to ``None``, meaning "not set here" (see :class:`~aquaflux.solve.SettingsValue`),
 so a spec changes the settings it names and leaves every other one at the default of the class that
 consumes it.
+
+A spec can also be written in a case file: :func:`preconditioner_spec_from_mapping` reads one from the
+nested mapping a YAML or JSON document parses to, and :func:`preconditioner_spec_to_mapping` writes one
+back. What they produce is the spec, not a preconditioner -- a preconditioner is fitted to a state, and
+the march re-fits it from states a case file never sees, so the spec is handed to the solve (or to
+:func:`~aquaflux.turbulence.open_session`) exactly as one written in code would be.
 """
 
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 
-from aquaflux.flow import VelocityBlock
-from aquaflux.solve import BlockInverse, SettingsValue
+from aquaflux.flow import ConvectionAir, ConvectionTwoLevel, VelocityBlock, ViscousMultilevel
+from aquaflux.solve import (
+    AirReduction,
+    BlockInverse,
+    JacobiSmoothed,
+    SettingsMapping,
+    SettingsValue,
+    SimpleSmoothed,
+)
 
 __all__ = [
     "BlockDiagonal",
@@ -36,6 +50,8 @@ __all__ = [
     "JacobianProbeSpec",
     "MaterializedJacobian",
     "MonolithicVCycle",
+    "preconditioner_spec_from_mapping",
+    "preconditioner_spec_to_mapping",
 ]
 
 
@@ -262,3 +278,105 @@ class MaterializedJacobian:
             raise TypeError(
                 f"MaterializedJacobian.probe must be a JacobianProbeSpec, got {type(self.probe).__name__}."
             )
+
+
+#: The two families a coupled march can be preconditioned by -- the values a spec file describes.
+_SPEC_FAMILIES = (BlockDiagonal, MaterializedJacobian)
+
+#: Every value a spec file may name, at any level: the two families, the materialized inverses and the
+#: probe, and the block inverses and velocity blocks nested inside them.
+_SPEC_MAPPING = SettingsMapping(
+    [
+        *_SPEC_FAMILIES,
+        CompleteLu,
+        MonolithicVCycle,
+        FieldSplit,
+        JacobianProbeSpec,
+        SimpleSmoothed,
+        JacobiSmoothed,
+        AirReduction,
+        ViscousMultilevel,
+        ConvectionTwoLevel,
+        ConvectionAir,
+    ]
+)
+
+
+def _refuse_non_spec(value: object, verb: str) -> None:
+    if not isinstance(value, _SPEC_FAMILIES):
+        raise TypeError(
+            f"{verb} a coupled preconditioner spec, which is BlockDiagonal or MaterializedJacobian, got "
+            f"{type(value).__name__}. An inverse on its own is the `inverse` of a MaterializedJacobian."
+        )
+
+
+def preconditioner_spec_from_mapping(
+    mapping: Mapping[str, object],
+) -> BlockDiagonal | MaterializedJacobian:
+    """Read a coupled preconditioner spec from the nested mapping a case file parses to.
+
+    Each level is a mapping whose ``kind`` names the value's class and whose other keys are the fields it
+    sets; a key left out leaves that field at its default. A list is read as a tuple. For example, a
+    field split over a probe with a per-column reach::
+
+        kind: MaterializedJacobian
+        inverse:
+          kind: FieldSplit
+          leading: {kind: SimpleSmoothed, sweeps: 2}
+          trailing: {kind: JacobiSmoothed, max_coarse: 200}
+        probe: {kind: JacobianProbeSpec, column_reach: [3, 3, 3, 3, 2, 2]}
+        beta_floor: 0.05
+
+    A ``BlockDiagonal``'s ``method`` is the one field where an explicit ``null`` differs from leaving the
+    key out: ``null`` leaves the scalar blocks unpreconditioned, while an absent key takes the default
+    multigrid.
+
+    Parameters
+    ----------
+    mapping : mapping
+        The spec, as parsed from a case file.
+
+    Returns
+    -------
+    BlockDiagonal or MaterializedJacobian
+        The spec, ready to pass as a solve's ``preconditioner`` or to
+        :func:`~aquaflux.turbulence.open_session`.
+
+    Raises
+    ------
+    ValueError
+        If a level names no kind, an unknown kind, or a field its kind does not have; the message gives
+        the path to the entry.
+    TypeError
+        If the outermost kind is not one of the two families, or a nested value is of the wrong kind for
+        its field.
+    """
+    spec = _SPEC_MAPPING.from_mapping(mapping)
+    _refuse_non_spec(spec, "a spec file describes")
+    return spec
+
+
+def preconditioner_spec_to_mapping(spec: BlockDiagonal | MaterializedJacobian) -> dict[str, object]:
+    """Write a coupled preconditioner spec as the nested mapping a case file stores.
+
+    The inverse of :func:`preconditioner_spec_from_mapping`: every field left at its default is omitted,
+    and reading the mapping back gives an equal spec.
+
+    Parameters
+    ----------
+    spec : BlockDiagonal or MaterializedJacobian
+        The spec to write.
+
+    Returns
+    -------
+    dict
+        Plain data -- mappings, lists, strings, numbers, booleans and ``None`` -- ready for a YAML or
+        JSON writer.
+
+    Raises
+    ------
+    TypeError
+        If ``spec`` is not one of the two families.
+    """
+    _refuse_non_spec(spec, "only")
+    return _SPEC_MAPPING.to_mapping(spec)

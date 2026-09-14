@@ -67,6 +67,15 @@ still replaced whole per point. ⚠️ **`None` cannot reset a shared field to i
 the base's"; write a numeric default out, and keep a setting whose default is `None` itself
 (`ShiftSettings.velocity_parts`) out of the shared options if a point needs it back.
 
+**`SettingsMapping` (`settings_mapping.py`, #391) writes and reads any family of such values as a nested
+plain mapping** — `kind` = class name, a field equal to its dataclass default omitted, nested values as
+nested mappings, tuples as lists — and refuses an unknown kind or field with the path to it. It is
+generic and parses nothing (no YAML dependency, per `pyproject.toml`'s note); the coupled-preconditioner
+wrappers live in `turbulence/preconditioner_spec.py` (see `turbulence.md`). Omission is decided by
+**equality with the default, not by `None`**, so a field whose default is a sentinel (`BlockDiagonal.method`)
+round-trips, and a required field is always written. ⚠️ A value whose default is compared by `!=`
+must compare by value — an array-valued field would need its own rule; none exists today.
+
 ## Responsibility
 - A Newton driver on `R(state, params) = 0` using the AD Jacobian (JVP/VJP), and a
   linear solve wrapped so its gradient comes from **implicit differentiation**, not by
