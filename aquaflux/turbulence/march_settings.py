@@ -1,0 +1,111 @@
+"""The coupled march's settings, grouped into values by what each group configures.
+
+A coupled march is configured by many settings that only mean something together. Written as loose
+keywords they are copied into every builder's signature and every forwarding wrapper, and a setting
+added for one builder has to be threaded by hand through the rest -- which drifts. Grouping each
+set into one value removes that: there is nothing left to copy, and a field added to the value
+reaches every builder that takes it.
+
+**Every field defaults to** ``None``, **meaning "not set here".** An unset field is resolved by the
+builder the value is handed to, so each default is written once, beside the code that applies it.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from typing import TYPE_CHECKING
+
+import equinox as eqx
+
+if TYPE_CHECKING:
+    from aquaflux.solve import ShiftBasis, VelocityShiftParts
+
+    from .coupled import TurbulenceDamping
+
+__all__ = ["ShiftSettings", "merged_march_options"]
+
+
+class ShiftSettings(eqx.Module):
+    """How the pseudo-time shift diagonal is formed, for every coupled builder.
+
+    The three settings describe the *shift* -- how much each row is damped per unit of the shift
+    strength ``beta`` -- and nothing about the preconditioner or the march's schedule, which is why
+    they are a value of their own rather than fields of either. Unset, the shift is the full operator
+    diagonal on every row with the flow and closure damped alike.
+
+    ⚠️ **Two of the fields may be bound to a state, so this is not plain configuration.** A
+    :class:`~aquaflux.turbulence.LiveViscosityVelocityParts` holds the assemblers it reads the viscosity
+    from, and a :class:`~aquaflux.turbulence.ResidualTaperedDamping` holds a reference residual taken at
+    one state. A value carrying either and shared across the points of a Reynolds continuation carries
+    that state to every point -- exactly as the same objects passed as separate keywords would. Only
+    ``basis`` is a plain setting.
+
+    Attributes
+    ----------
+    basis : ShiftBasis or None
+        How each block's shift diagonal is combined from its convective and dissipative parts. Unset,
+        :class:`~aquaflux.solve.LocalCourantBasis` with its defaults: the full operator diagonal.
+    velocity_parts : VelocityShiftParts or None
+        Where the velocity shift's two diagonal buckets come from. Unset, the flow assembler's frozen
+        momentum diagonal at the reference state.
+    turbulence_damping : TurbulenceDamping, float or None
+        A multiplier on the shift strength of the ``k`` and ``omega`` rows only. A plain number is a
+        constant ratio. Unset, ``1``: the closure damped like the flow. It changes only the path -- the
+        shift vanishes at the root.
+    """
+
+    basis: ShiftBasis | None = None
+    velocity_parts: VelocityShiftParts | None = None
+    turbulence_damping: TurbulenceDamping | float | None = None
+
+    def filled_from(self, base: ShiftSettings) -> ShiftSettings:
+        """This value, with each field it leaves unset taken from ``base``.
+
+        Parameters
+        ----------
+        base : ShiftSettings
+            The settings to fall back on.
+
+        Returns
+        -------
+        ShiftSettings
+            A copy whose set fields are this value's and whose unset fields are ``base``'s.
+        """
+        return dataclasses.replace(
+            self,
+            **{
+                field.name: getattr(base, field.name)
+                for field in dataclasses.fields(self)
+                if getattr(self, field.name) is None
+            },
+        )
+
+
+def merged_march_options(base: dict[str, object], override: dict[str, object]) -> dict[str, object]:
+    """Two sets of march options as one, with a settings value merged field by field.
+
+    A continuation merges its shared options with each point's own. For a loose keyword the point's
+    value simply wins, as a dictionary merge gives. For a settings value that would be wrong: shared
+    options carrying ``ShiftSettings(basis=...)`` and a point returning
+    ``ShiftSettings(turbulence_damping=...)`` would lose the basis without a word, where the same two
+    settings as separate keywords combine. So when both sides give the same key a value of the same
+    settings type, the point's value keeps the fields it sets and takes the rest from the shared one.
+
+    Parameters
+    ----------
+    base : dict
+        The shared options.
+    override : dict
+        The options that take precedence, such as one continuation point's.
+
+    Returns
+    -------
+    dict
+        The merged options.
+    """
+    merged = {**base, **override}
+    for name, value in override.items():
+        prior = base.get(name)
+        if type(prior) is type(value) and hasattr(value, "filled_from"):
+            merged[name] = value.filled_from(prior)
+    return merged

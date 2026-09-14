@@ -27,6 +27,7 @@ import jax
 
 from .coupled import open_session, solve_coupled
 from .initialization import hybrid_initialize
+from .march_settings import merged_march_options
 from .preconditioner_spec import BlockDiagonal, MaterializedJacobian
 
 if TYPE_CHECKING:
@@ -500,7 +501,7 @@ def solve_reynolds_continuation(
                 packed = projected
                 seed_fields = assembler.physical_fields(packed)
         extra = {} if point_setup is None else point_setup(assembler, packed, point)
-        return solve_coupled(assembler, *seed_fields, **{**base_kwargs, **extra})
+        return solve_coupled(assembler, *seed_fields, **merged_march_options(base_kwargs, extra))
 
     seed: tuple[jnp.ndarray | None, jnp.ndarray | None, jnp.ndarray | None] = (None, None, None)
     converged: list[float] = []
@@ -982,7 +983,9 @@ def solve_reynolds_ramp(
         rebind=rebind,
         companion=companion,
     )
-    return solve_coupled(coupled, *seed_fields, homotopy=homotopy, **{**passed, **extra})
+    return solve_coupled(
+        coupled, *seed_fields, homotopy=homotopy, **merged_march_options(passed, extra)
+    )
 
 
 def _shared_session(kwargs: dict, assembler: CoupledRANS) -> object | None:

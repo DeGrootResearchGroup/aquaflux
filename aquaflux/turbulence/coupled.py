@@ -101,6 +101,7 @@ from aquaflux.solve import (
 )
 
 from .initialization import hybrid_initialize, wall_consistent_omega
+from .march_settings import ShiftSettings
 from .preconditioner import ScalarTransportPreconditioner, ScaledScalarPreconditioner
 
 # `_UNSET` is "not given" for `solve_coupled`'s `method`, whose `None` already means something; it is
@@ -2737,6 +2738,55 @@ def _resolved_regime(
     )
 
 
+def _resolved_shift(
+    keywords: dict,
+) -> tuple[ShiftBasis, VelocityShiftParts | None, TurbulenceDamping | float]:
+    """The shift's basis, velocity parts and damping, from a :class:`ShiftSettings` or its keywords.
+
+    Pops ``shift`` and the three loose keywords from ``keywords``, refuses a value beside any of
+    them, and resolves what is unset to the builder's defaults -- the full-diagonal basis, the frozen
+    velocity parts, and a damping ratio of one -- which are written here once.
+
+    Parameters
+    ----------
+    keywords : dict
+        A builder's march keywords; the four shift names are removed from it.
+
+    Returns
+    -------
+    tuple
+        ``(basis, velocity_parts, turbulence_damping)``.
+
+    Raises
+    ------
+    TypeError
+        If ``shift`` is given together with any of ``shift_basis``, ``velocity_shift_parts`` or
+        ``turbulence_damping``.
+    """
+    shift = keywords.pop("shift")
+    loose = {
+        name: keywords.pop(name)
+        for name in ("shift_basis", "velocity_shift_parts", "turbulence_damping")
+    }
+    given = sorted(name for name, value in loose.items() if value is not None)
+    if shift is not None and given:
+        raise TypeError(
+            f"shift=ShiftSettings(...) was given together with {given}, which it replaces; set them on "
+            "the ShiftSettings value instead."
+        )
+    if shift is None:
+        shift = ShiftSettings(
+            basis=loose["shift_basis"],
+            velocity_parts=loose["velocity_shift_parts"],
+            turbulence_damping=loose["turbulence_damping"],
+        )
+    return (
+        _DEFAULT_SHIFT_BASIS if shift.basis is None else shift.basis,
+        shift.velocity_parts,
+        1.0 if shift.turbulence_damping is None else shift.turbulence_damping,
+    )
+
+
 def _march_keywords(march: dict) -> dict:
     """``march`` bound against :func:`coupled_step`'s signature, with its defaults filled in.
 
@@ -2829,9 +2879,7 @@ class _BlockSession:
             state,
             self._spec.resolved_method(),
             reuse,
-            keywords.pop("shift_basis"),
-            keywords.pop("velocity_shift_parts"),
-            keywords.pop("turbulence_damping"),
+            *_resolved_shift(keywords),
             **self._spec.flow_block_options(),
         )
         regime = _resolved_regime(
@@ -2950,13 +2998,7 @@ class _MaterializedSession:
         step_limit, step_projection = _k_positivity_guards(
             coupled, keywords.pop("positivity_floor"), keywords.pop("positivity_projection")
         )
-        base = _monolithic_shift_source(
-            coupled,
-            state,
-            keywords.pop("shift_basis"),
-            keywords.pop("velocity_shift_parts"),
-            keywords.pop("turbulence_damping"),
-        )
+        base = _monolithic_shift_source(coupled, state, *_resolved_shift(keywords))
         if self._preconditioner is None:
             self._preconditioner = self._fit(coupled, state, base)
         regime = _resolved_regime(
@@ -3176,9 +3218,10 @@ def coupled_step(
     forward_restart: int | None = None,
     forward_max_restarts: int | None = None,
     block_scaled_norm: bool = False,
-    shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
+    shift: ShiftSettings | None = None,
+    shift_basis: ShiftBasis | None = None,
     velocity_shift_parts: VelocityShiftParts | None = None,
-    turbulence_damping: TurbulenceDamping | float = 1.0,
+    turbulence_damping: TurbulenceDamping | float | None = None,
     residual_norm: ResidualNorm | None = None,
     inner_observer: Callable[..., None] | None = None,
     refresh_on_cycles: int | None = None,
@@ -3240,9 +3283,12 @@ def coupled_step(
     block_scaled_norm : bool
         Measure progress in the coarser per-block :class:`~aquaflux.solve.BlockScaledNorm` rather than
         the default row-equilibrated :class:`~aquaflux.solve.RowScaledNorm`.
-    shift_basis : ShiftBasis
+    shift : ShiftSettings or None
+        The three shift settings below as one value (see :class:`ShiftSettings`). Giving it together
+        with any of them is refused.
+    shift_basis : ShiftBasis or None
         How the pseudo-time shift diagonal is built from each block's convective and dissipative parts.
-        The default :class:`~aquaflux.solve.LocalCourantBasis` is the full operator diagonal.
+        Unset, :class:`~aquaflux.solve.LocalCourantBasis`: the full operator diagonal.
     velocity_shift_parts : VelocityShiftParts or None
         Where the velocity shift's two diagonal buckets come from. ``None`` (default) takes them from the
         flow assembler's frozen momentum diagonal; :class:`LiveViscosityVelocityParts` forms them at the
@@ -3301,6 +3347,7 @@ def coupled_step(
             "forward_restart": forward_restart,
             "forward_max_restarts": forward_max_restarts,
             "block_scaled_norm": block_scaled_norm,
+            "shift": shift,
             "shift_basis": shift_basis,
             "velocity_shift_parts": velocity_shift_parts,
             "turbulence_damping": turbulence_damping,
@@ -4093,9 +4140,10 @@ def mass_flow_coupled_continuation(
     forward_restart: int = _CONSTRAINED_FORWARD.restart,
     forward_max_restarts: int = _CONSTRAINED_FORWARD.max_restarts,
     block_scaled_norm: bool = False,
-    shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
+    shift: ShiftSettings | None = None,
+    shift_basis: ShiftBasis | None = None,
     velocity_shift_parts: VelocityShiftParts | None = None,
-    turbulence_damping: TurbulenceDamping | float = 1.0,
+    turbulence_damping: TurbulenceDamping | float | None = None,
     inner_steps: int = 1,
     inner_tol: float = 0.05,
     inner_observer: Callable[..., None] | None = None,
@@ -4159,9 +4207,14 @@ def mass_flow_coupled_continuation(
         reference_state,
         preconditioner.resolved_method(),
         None,
-        shift_basis,
-        velocity_shift_parts,
-        turbulence_damping,
+        *_resolved_shift(
+            {
+                "shift": shift,
+                "shift_basis": shift_basis,
+                "velocity_shift_parts": velocity_shift_parts,
+                "turbulence_damping": turbulence_damping,
+            }
+        ),
         **preconditioner.flow_block_options(),
     )
     force, average = _coupled_constraint_vectors(coupled, flow_direction)
