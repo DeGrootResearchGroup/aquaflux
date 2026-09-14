@@ -42,6 +42,14 @@ Recorded measurements in these files that said "the native arm" now say "the tra
 is the one that matters for a GPU. `hostilu` and `petsc` arm values were unchanged (both arms were removed 2026-09-13, #371): both already say
 what they are. See the shipped `docs/preconditioning.md` for the user-facing description.
 
+**The three value objects share a public base, `BlockInverse` (`block_inverse.py`), which in turn
+derives from `SettingsValue` (`settings_value.py`, #371, 2026-09-14).** `SettingsValue` is the one home
+of "a frozen dataclass whose `None` fields are unset, and whose `settings()` are the set ones" — the
+coupled-preconditioner specs in `turbulence/preconditioner_spec.py` derive from it too, so the
+comprehension is written once rather than per configuration family. `BlockInverse` is public so a
+configuration can *require* a value rather than an arbitrary `(block, n_fields)` callable
+(`FieldSplit` does). There is no `_BlockInverseSpec`; that was its private name for one commit.
+
 ## Responsibility
 - A Newton driver on `R(state, params) = 0` using the AD Jacobian (JVP/VJP), and a
   linear solve wrapped so its gradient comes from **implicit differentiation**, not by

@@ -230,7 +230,27 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     - **`method` now defaults to a sentinel (`_UNSET`), resolving to `"twolevel"` when the solve builds
       the continuation.** Both a real default and an explicit `None` ("no preconditioner method") are
       meaningful, so neither could stand for "not given" — and without that distinction the guard could
-      not refuse an explicitly-passed `method` without refusing the default nobody asked for.
+      not refuse an explicitly-passed `method` without refusing the default nobody asked for. The
+      sentinel is defined in `preconditioner_spec.py` (moved 2026-09-14, #371), because
+      `BlockDiagonal.method` has the same two meanings; `coupled.py` imports it.
+  - **🔬 BUILT, NOT YET CONSUMED — `preconditioner_spec.py`, the preconditioner as a value (#371,
+    2026-09-14).** `BlockDiagonal` | `MaterializedJacobian(inverse=CompleteLu | MonolithicVCycle |
+    FieldSplit(leading, trailing), probe=JacobianProbeSpec, build_beta, beta_floor)`, all
+    `SettingsValue`s with `None`-unset fields. **Nothing reads them yet**: `solve_coupled`, the builders
+    and the Reynolds drivers still take `method=` / `coupled_*_continuation`, and the session that
+    replaces `_ContinuationSource` is the next slice on the #371 branch. Two design facts to hold while
+    wiring it:
+    - **The three materialized inverses are ONE family with a nested choice**, because they share the
+      probe, the build shift and the refresh floor and differ only in the inverse. That nesting is also
+      what makes defect D1 unrepresentable: a monolithic smoother setting (`smoother_fill_levels`, …)
+      has no field beside a `FieldSplit`, where `coupled_amg_continuation(field_split=True)` accepts and
+      silently ignores it.
+    - **Each spec's field set is pinned to the constructor it feeds** (`test_preconditioner_spec.py`):
+      `BlockDiagonal` to `BlockPreconditioner.build` minus `reference_state`, `JacobianProbeSpec` to
+      `CoupledJacobianProbe.build`'s free settings (not `active_rows`, which follows from the inverse, nor
+      `production_viscosity_frozen`, which follows from the operator), `MonolithicVCycle` and `CompleteLu`
+      to their `build`. `FieldSplit` requires `solve.BlockInverse` values, never a factory closure, so a
+      build-record sink is attached where the session is opened rather than bound into the inverse.
   - **`solve_coupled(refresh=RefreshPolicy(trigger=…))` segments the march to re-freeze the preconditioner — and a refresh
     must CARRY the shift diagonals, not rebuild them (binding).** With a trigger set, the march runs as a
     sequence of *observed* segments (`aquaflux.solve.forward_march`): each steps until the trigger judges

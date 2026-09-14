@@ -102,6 +102,10 @@ from aquaflux.solve import (
 
 from .initialization import hybrid_initialize, wall_consistent_omega
 from .preconditioner import ScalarTransportPreconditioner, ScaledScalarPreconditioner
+
+# "Not given" for `solve_coupled`'s `method`, whose `None` already means something; shared with the
+# block-diagonal spec, whose `method` has the same two meanings.
+from .preconditioner_spec import _UNSET
 from .sources import production_and_limit
 
 # The default pseudo-time shift basis (full operator diagonal = uniform under-relaxation), held as a
@@ -3753,24 +3757,6 @@ def _reject_a_root_the_frozen_cap_invalidates(
         "stabilization is genuinely needed for this forward solve, take no gradient through the "
         "result. `aquaflux.turbulence.production_cap_active` reports which cells bind.",
     )
-
-
-class _Unset:
-    """The type of :data:`_UNSET`, so a published signature reads ``method=<default>``.
-
-    A bare ``object()`` would render in the API reference as ``<object object at 0x...>``, which tells a
-    reader nothing and changes on every build.
-    """
-
-    def __repr__(self) -> str:
-        return "<default>"
-
-
-#: Sentinel for "the caller did not name this". ``method`` has a meaningful default *and* a meaningful
-#: ``None`` ("no preconditioner method"), so neither can stand for "not given" -- and telling the two
-#: apart is what lets :func:`_continuation_source` refuse a setting that would be silently dropped,
-#: rather than quietly honouring a default the caller never asked for.
-_UNSET = _Unset()
 
 
 class _ContinuationSource(Protocol):

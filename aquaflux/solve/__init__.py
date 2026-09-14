@@ -93,7 +93,8 @@ from .field_split import (
     FieldSplitAmgPreconditioner,
     build_block_triangular_field_split,
 )
-from .block_inverse import AirReduction, JacobiSmoothed, SimpleSmoothed
+from .block_inverse import AirReduction, BlockInverse, JacobiSmoothed, SimpleSmoothed
+from .settings_value import SettingsValue
 from .host_preconditioner import HostFactors, HostPreconditioner
 from .hierarchy_inverse import HierarchyBlockInverse
 from .refresh_timing import PhaseTimer, RefreshTiming
@@ -187,6 +188,7 @@ __all__ = [
     "AirReduction",
     "AmgVCycle",
     "BlockColouring",
+    "BlockInverse",
     "BlockScaledNorm",
     "BlockTriangularFieldSplit",
     "CellFields",
@@ -235,6 +237,7 @@ __all__ = [
     "ResidualRatioDualTimeControl",
     "RetryPolicy",
     "RowScaledNorm",
+    "SettingsValue",
     "ShapeBudget",
     "ShiftBasis",
     "ShiftPolicy",

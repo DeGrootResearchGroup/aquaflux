@@ -25,27 +25,25 @@ import scipy.sparse as sp
 
 from .field_split import AirBlockInverse, JacobiSmoothedInverse
 from .saddle_multigrid import SimpleSmoothedInverse
+from .settings_value import SettingsValue
 
-__all__ = ["AirReduction", "JacobiSmoothed", "SimpleSmoothed"]
+__all__ = ["AirReduction", "BlockInverse", "JacobiSmoothed", "SimpleSmoothed"]
 
 
 @dataclasses.dataclass(frozen=True)
-class _BlockInverseSpec:
-    """The shared half of every block-inverse value object: forward the set fields, bind a sink."""
+class BlockInverse(SettingsValue):
+    """The settings of one field-split block inverse, and the factory that builds it.
+
+    The base of :class:`SimpleSmoothed`, :class:`JacobiSmoothed` and :class:`AirReduction`. Its role is
+    to be the type a configuration can require: a split described by values holds one of these for each
+    of its blocks, not an arbitrary callable.
+    """
 
     #: Whether the inverse class accepts a ``report`` sink for its build record.
     _reports = True
 
     def _inverse_class(self) -> type:
         raise NotImplementedError
-
-    def settings(self) -> dict[str, object]:
-        """The settings this value sets, as keyword arguments — unset (``None``) fields omitted."""
-        return {
-            field.name: value
-            for field in dataclasses.fields(self)
-            if (value := getattr(self, field.name)) is not None
-        }
 
     def _build(
         self, block: sp.spmatrix, n_fields: int, report: Callable[[str], None] | None
@@ -104,7 +102,7 @@ class _BlockInverseSpec:
 
 
 @dataclasses.dataclass(frozen=True)
-class SimpleSmoothed(_BlockInverseSpec):
+class SimpleSmoothed(BlockInverse):
     """A :class:`~aquaflux.solve.SimpleSmoothedInverse`: a hierarchy over a pressure-velocity saddle.
 
     Each field is the class keyword of the same name (see the class for its meaning and default); the
@@ -138,7 +136,7 @@ class SimpleSmoothed(_BlockInverseSpec):
 
 
 @dataclasses.dataclass(frozen=True)
-class JacobiSmoothed(_BlockInverseSpec):
+class JacobiSmoothed(BlockInverse):
     """A :class:`~aquaflux.solve.JacobiSmoothedInverse`: one cell-coarsening hierarchy over the group.
 
     Each field is the class keyword of the same name (see the class for its meaning and default); the
@@ -163,7 +161,7 @@ class JacobiSmoothed(_BlockInverseSpec):
 
 
 @dataclasses.dataclass(frozen=True)
-class AirReduction(_BlockInverseSpec):
+class AirReduction(BlockInverse):
     """An :class:`~aquaflux.solve.field_split.AirBlockInverse`: a reduction-based (lAIR) hierarchy.
 
     ``cycles``, ``f_iters``, ``c_iters`` and ``omega`` are the class's own keywords; the rest are the
