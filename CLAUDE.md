@@ -536,6 +536,75 @@ tools/fastgate.sh slow         # the slow tier
 tools/fastgate.sh all          # everything
 ```
 
+### A test that cannot fail is not a test (binding)
+
+**Before a new test is considered done, name the specific wrong answer it would catch.** A test that
+would pass against a broken implementation is not incomplete coverage — it is a false signal, read by
+every future reader (including a reviewing agent, and including *you* on a later task) as evidence the
+code works. This applies with equal force to a test you write yourself and one an agent hands back after
+being asked for coverage: a subagent asked to "add a test" tends to return something that runs green
+against the code as it stands, without ever checking whether it would *also* run green against a
+plausible wrong version of that code. That gap is what this section exists to close.
+
+**Measured, 2026-09-14** (the vectorized `aquaflux/mesh/collapse.py` rewrite and its test suite, #396):
+a 16-mutation pass — introduce one targeted single-line bug, run the suite, confirm it goes red, revert,
+repeat — found that **6 of the 16 mutations passed the existing test suite (15 tests at the time)
+completely undetected.** Three were genuine coverage gaps, fixed with new tests: disabling the check
+that a capping face is planar and normal to a single axis; a bug that could confuse one face's node
+count for another's (invisible because every fixture happened to give every face in a subset the *same*
+node count, so nothing distinguished a row belonging to face *i* from one belonging to face *j*); and
+disabling the low side of a "must reduce to exactly 2 distinct nodes" check (every existing fixture that
+reached that branch overshot to *more* than 2, never undershot to fewer). None of the three was a subtle
+defect requiring imagination to construct — each was a one-line change that silently produced a wrong
+mesh, on a module whose tests were read, before this check, as good coverage. **The other three were
+reviewed and confirmed to be non-issues, not gaps** — one mutated an inequality boundary (`<=` vs `<`)
+that no realistic input lands on exactly, one hardcoded a value a caller's precondition already makes
+the only reachable one, one re-passed a value through explicitly that a sibling function treats as
+provably identical to leaving it implicit — and no test was added for any of the three. **Both halves of
+this matter equally: chasing every undetected mutation as if it were a bug is the same failure mode as
+never checking at all, just spent in the other direction.** Judge each on whether the code path is
+actually reachable and whether the two behaviours are actually distinguishable, and record which
+mutations were dismissed and why, not only the ones that were fixed.
+
+**How to check a test can fail, concretely:** comment out, invert, or disable the specific line of
+production code the test is meant to pin, rerun *only* that test (or the small file it lives in), confirm
+it goes red, then restore the line exactly. This costs seconds per check and is the only reliable way to
+know a test is not vacuous — reading a test is not enough, because a plausible wrong implementation is
+exactly the thing a reader's own mental model tends not to simulate (that is precisely why the bug was
+possible to write in the first place). Do this for a new test before calling coverage complete, and
+especially before reporting a coverage number ("N passed", "all tests green") as evidence that a change
+is correct — a passing count is evidence the code satisfies the tests, never evidence the tests would
+catch a wrong version of the code, unless that has actually been checked.
+
+**Concrete smells — reject each on sight, in your own tests and in an agent's:**
+- **The assertion is satisfied by many wrong answers.** `assert result is not None`, `assert result.shape
+  == expected_shape`, `assert not np.any(np.isnan(result))` (see this file's own "'without NaNs' is the
+  floor, not the test", under Canonical tests below) all pass across a wide range of incorrect outputs.
+  Assert the *value* against an independent reference — an analytic solution, a hand-computed number, a
+  differently-derived path, a property the *specific* correct answer has and a wrong one plausibly would
+  not — wherever one is obtainable.
+- **Every fixture exercises the same code path.** If several tests all build the mesh/state/config the
+  same way modulo one changed number, a branch that only a genuinely *different shape* of input would
+  reach is untested however many of those tests pass. (The collapse.py gap above: every fixture gave a
+  whole face-subset a uniform node count, so a bug that mixed up rows across differently-sized faces had
+  nothing in the suite that could catch it.)
+- **The mock or stub replaces the exact thing under test.** A test that replaces the function whose
+  behaviour is in question, then asserts the replacement was called, tests the wiring around the
+  function, not the function.
+- **`pytest.raises(..., match=...)` only checks that *some* error was raised, not *which* one.** A regex
+  broad enough to match several distinct failure branches (or matched against a generic outer message)
+  cannot tell you the specific branch that should have fired is the one that did — construct the input so
+  only the branch under test can plausibly raise, or match a substring unique to it.
+- **A "regression" test pins today's output with no independent way to know it is right.** Useful for
+  catching *drift* from this point forward, useless for telling you whether the pinned number was already
+  wrong on the day the test was written. Prefer a value checkable against something other than "what the
+  code currently returns" whenever the cost of doing so is reasonable.
+
+**When reviewing test coverage — your own or an agent's — ask, per new test: what specific wrong answer
+does this catch, and did I verify that it would?** A green suite answers "does the code behave as
+written"; it does not answer "can these tests tell a correct implementation from a broken one" unless
+that has been checked by actually breaking something and watching the suite react.
+
 **⚠️ CI IS NOT A SUPERSET OF A LOCAL RUN, AND `importorskip` IS WHY.** CI installs `.[test]`, which does
 **not** include the optional `petsc` extra, so every module guarded by `pytest.importorskip("petsc4py")`
 — `tests/integration/test_coupled_amg.py` and `test_coupled_field_split.py` — is **skipped there and runs
@@ -1115,7 +1184,9 @@ the structure, which needs **fresh eyes** (see "How to run it").
 ### Pass 1 — Local smells (per file)
 The Engineering Principles as a checklist, plus correctness and user-facing clarity:
 - **Testability (Principle 1):** can each unit be tested in isolation with small inputs, no global
-  state? Is there an operator-level test (order-of-accuracy on an analytic field)?
+  state? Is there an operator-level test (order-of-accuracy on an analytic field)? And can each
+  test actually fail — has it been checked against a broken version of the code, not just read
+  (Testing Architecture → "A test that cannot fail is not a test")?
 - **Duplication (Principle 2):** logic implemented more than once; copy-paste-modify; a formula
   that should be imported from its one home.
 - **Encapsulation (Principle 3):** passing an object's raw arrays instead of the object; taking a
@@ -1337,6 +1408,10 @@ After **every code change**, before considering the task complete, review and ac
    - New public API → integration test against an analytical solution.
    - New analytical/published benchmark → validation test.
    - Bug fix → regression test.
+   - **Every new test: verify it can fail before counting it, per Testing Architecture → "A test
+     that cannot fail is not a test."** Break the line of code it is meant to pin, confirm the test
+     goes red, restore the line. A test you have not done this to is unverified, whatever it reads
+     like.
 
    **Run the tier your change can reach — the fast gate is not the whole suite.** The `slow` and
    `validation` tiers run on **merge to main**, and on a PR only when it carries the `full-ci`
