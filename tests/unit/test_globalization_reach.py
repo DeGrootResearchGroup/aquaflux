@@ -293,7 +293,7 @@ def test_the_coupled_builders_forward_every_field(case, dual_time: bool) -> None
             **extra,
         ),
         "mass flow": mass_flow_coupled_continuation(
-            coupled, state, method=None, globalization=asked, **extra
+            coupled, state, preconditioner=BlockDiagonal(method=None), globalization=asked, **extra
         ),
     }
     for name, step in built.items():

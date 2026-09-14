@@ -48,6 +48,7 @@ Many entries below are dated history written against the old API. Read them thro
 | `probe=` / `preconditioner=` shared across rungs, `amg_beta_tracking_refresh(..., beta_floor=f, observer=o)`, `lu_beta_tracking_refresh` | one session: `open_session(MaterializedJacobian(..., beta_floor=f), coupled, observer=o)`, passed as `solve_coupled(preconditioner=session)`; its `precondition_step` / `rebind` replace the hooks' |
 | `reuse=previous.shift_policy, residual_norm=m` | `session.refresh(state, previous, m, **march)` |
 | `solve_coupled(method=M, velocity=…)` | `solve_coupled(preconditioner=BlockDiagonal(method=M, velocity=…))` |
+| `mass_flow_coupled_continuation(..., method=M, **flow_opts)`, `solve_coupled_mass_flow(method=M, **flow_opts)` | the same keyword, `preconditioner=BlockDiagonal(method=M, **flow_opts)`; a `MaterializedJacobian` is refused there |
 | `point_setup` returning `continuation` + `RefreshPolicy(precondition_step=hook)`, `_rebinding` | `solve_reynolds_continuation` / `solve_reynolds_ramp` given `preconditioner=`; `point_setup` keeps only per-point march settings |
 
 ## The closure — model, strain, sources, transport, preconditioner
@@ -291,6 +292,15 @@ Many entries below are dated history written against the old API. Read them thro
       and `bfs3d` now exposes its preconditioner as `compare.PRECONDITIONER`. The array-identity tests
       that pinned the new path to the old builders were deleted with the builders. `_CallerBuiltContinuation`
       stays: a `RefreshPolicy(builder=...)` is still a supported way to rebuild a caller's own step.
+    - **The mass-flow sibling takes a spec too.** `mass_flow_coupled_continuation` and
+      `solve_coupled_mass_flow` take `preconditioner: BlockDiagonal | None` in place of `method` +
+      `**preconditioner_kwargs`; a `MaterializedJacobian` is refused, because the bordered policy wraps a
+      block-diagonal composition and a materialized Jacobian has no constraint row. The bordered measure
+      and `_CONSTRAINED_FORWARD` stay local. **D10 is fixed:** `solve_coupled_mass_flow` refuses
+      `preconditioner` / `reference_state` / march keywords beside a finished `continuation` (through the
+      same `_refuse` as `solve_coupled`), where `method="air"` beside a twolevel step used to run twolevel
+      in silence. `_refuse_unknown_flow_block_options` is **deleted**: every flow-block option now
+      arrives from a spec whose fields are pinned to `BlockPreconditioner.build`, so it could not fire.
     - **Not yet run:** a dry run of either flagship case to its first step, to compare the banners line
       for line against the pre-migration drivers. Nothing in any test tier reaches those drivers.
     Facts to hold while finishing it:
@@ -1284,8 +1294,8 @@ Many entries below are dated history written against the old API. Read them thro
     see `.claude/notes/solve-globalization-log.md`). **The k/ω *scalar* AMGs are the exception: they do go
     stale, and refreshing them alone once the flow separates cuts the outer cycle count materially**
     (configuration not recorded — re-measure before relying on the size) — the one staleness lever that
-    pays; see the staleness bullet in `.claude/notes/solve-globalization-log.md`. Overridable via
-    `preconditioner_kwargs`.
+    pays; see the staleness bullet in `.claude/notes/solve-globalization-log.md`. Overridable through
+    `BlockDiagonal(velocity=…)`.
   - **⚠️ THE PRESSURE SCHUR NO LONGER HARDCODES `schur_scaling="msimple"` (fixed 2026-08-18) — it was
     never necessary at the scale this policy is actually used at, and is dominated where it matters.**
     Superseded finding, kept for the trap: this bullet used to pair `velocity="convection"` with
@@ -1703,8 +1713,8 @@ Many entries below are dated history written against the old API. Read them thro
     `_bordered_preconditioner`, `_with_body_force` from `flow/mean_velocity.py`) reused in the coupled
     `[flow…, k, ω]` layout by `_coupled_constraint_vectors` — the same Schur elimination one careful
     place keeps consistent, not re-derived. Globalized by `mass_flow_coupled_continuation`, which
-    borders the **same** `_coupled_shift_policy` (extracted from `coupled_continuation` for exactly this
-    reuse) with a `_MassFlowBorderedPolicy`: the shift diagonal gains a **zero** for `β` (the linear
+    borders the **same** `_coupled_shift_policy` the block-diagonal session builds (from a
+    `BlockDiagonal` spec, the only family it accepts) with a `_MassFlowBorderedPolicy`: the shift diagonal gains a **zero** for `β` (the linear
     constraint row needs no pseudo-time damping) and the block preconditioner is wrapped by the
     constraint preconditioner. Because the constraint lives *inside* the coupled residual, the coupled
     IFT adjoint **carries it** — `jax.grad` through the converged constrained solve is the sensitivity

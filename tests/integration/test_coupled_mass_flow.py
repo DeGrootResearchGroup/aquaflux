@@ -36,7 +36,7 @@ from aquaflux.flow.mean_velocity import _with_body_force
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.turbulence import SSTModel, SSTTurbulence
+from aquaflux.turbulence import BlockDiagonal, SSTModel, SSTTurbulence
 from aquaflux.turbulence.coupled import (
     CoupledRANS,
     mass_flow_coupled_continuation,
@@ -48,7 +48,7 @@ RHO, U_B, H = 1.0, 1.0, 2.0  # target bulk velocity U_B along x
 RE_B, NY, GROWTH, BETA0 = 20000, 48, 1.13, 0.004
 NU = U_B * H / RE_B  # 1e-4
 K_FLOOR = 1e-8  # the hybrid IC's floor; asserted strictly inactive at the converged state
-PRECONDITIONER = {"velocity": "convection"}
+FLOW_BLOCK = {"velocity": "convection"}
 MAX_STEPS = 300
 
 
@@ -101,7 +101,11 @@ def case():
     # No initial state: the constrained solve self-starts from the exactly-symmetric uniform plug
     # (u_y == 0), so this exercises the guarded-sqrt strain fix directly.
     flow, k, omega, beta = solve_coupled_mass_flow(
-        coupled, target=U_B, flow_direction=0, method="air", max_steps=MAX_STEPS, **PRECONDITIONER
+        coupled,
+        target=U_B,
+        flow_direction=0,
+        preconditioner=BlockDiagonal(method="air", **FLOW_BLOCK),
+        max_steps=MAX_STEPS,
     )
     return {
         "mesh": mesh,
@@ -154,7 +158,11 @@ def test_constrained_fixed_point_is_amg_method_independent(case) -> None:
     flow_air, k_air, omega_air, beta_air = case["solution"]
 
     flow_tl, k_tl, omega_tl, beta_tl = solve_coupled_mass_flow(
-        coupled, target=U_B, flow_direction=0, method="twolevel", max_steps=400, **PRECONDITIONER
+        coupled,
+        target=U_B,
+        flow_direction=0,
+        preconditioner=BlockDiagonal(method="twolevel", **FLOW_BLOCK),
+        max_steps=400,
     )
 
     assert float(jnp.linalg.norm(flow_tl - flow_air) / jnp.linalg.norm(flow_air)) < 1e-6
@@ -189,7 +197,10 @@ def test_constrained_coupled_adjoint_matches_finite_difference(case) -> None:
     # and the constraint border must not be traced); differentiate only the converged solve.
     reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
     continuation = mass_flow_coupled_continuation(
-        coupled, reference_state, flow_direction=0, method="twolevel", **PRECONDITIONER
+        coupled,
+        reference_state,
+        flow_direction=0,
+        preconditioner=BlockDiagonal(method="twolevel", **FLOW_BLOCK),
     )
 
     def objective(nu_scale):

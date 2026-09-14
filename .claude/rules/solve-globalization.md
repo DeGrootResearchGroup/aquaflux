@@ -248,10 +248,12 @@ What to take from it, none of which is specific to that mechanism:
       from those two builders — outside #372's settings, not closed by it. The segregated flow solve
       `bulk_velocity_flow_solve` is a `DampedNewtonStep`, a different engine that takes no `Globalization`.
     - **⚠️ Moving keywords off a builder that keeps `**kwargs` turns a retired name into a silent one.**
-      `coupled_continuation` forwards leftovers to `BlockPreconditioner.build`, which only a first build
-      reads — a refresh (`reuse=`) carries the flow block — so `beta0=` on a refresh was silently dropped.
-      `_refuse_unknown_flow_block_options` checks the names against `build`'s signature before the branch;
-      exact because `build` takes no `**kwargs`, which a test pins.
+      The deleted `coupled_continuation` forwarded leftovers to `BlockPreconditioner.build`, which only a
+      first build reads — a refresh (`reuse=`) carries the flow block — so `beta0=` on a refresh was
+      silently dropped. Closed structurally since #371: flow-block settings travel only as a
+      `BlockDiagonal` spec, whose fields are pinned to `build`'s keywords, and march keywords are bound
+      against `coupled_step`'s signature (`_march_keywords`), so an unknown name is a `TypeError` at
+      construction. There is no `_refuse_unknown_flow_block_options` any more; nothing could reach it.
     - Pinned by `tests/unit/test_globalization_reach.py`: every builder takes the object; a non-default one
       arrives on the built step **field for field**; the shipped defaults as **literal numbers**; one
       override leaves every other setting alone; and each refusal above.

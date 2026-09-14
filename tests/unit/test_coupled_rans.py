@@ -67,6 +67,7 @@ from aquaflux.turbulence.coupled import (
     frozen_production_viscosity,
     mass_flow_coupled_continuation,
     solve_coupled,
+    solve_coupled_mass_flow,
     wall_consistent_state,
 )
 
@@ -346,9 +347,51 @@ def test_the_constrained_builder_keeps_a_euclidean_stop_for_a_stated_reason() ->
     """
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
-    step = mass_flow_coupled_continuation(coupled, state, method=None)
+    step = mass_flow_coupled_continuation(coupled, state, preconditioner=BlockDiagonal(method=None))
     assert step.residual_norm is jnp.linalg.norm
     assert step.forward_solver.norm is step.residual_norm
+
+
+def test_the_constrained_builder_refuses_a_materialized_preconditioner() -> None:
+    """The bordered solve eliminates ``beta`` around a block-diagonal preconditioner, and only that.
+
+    A materialized Jacobian has no constraint row, so its inverse would precondition a system other than
+    the one solved. Refused before anything is built, so this needs no factorization.
+    """
+    mesh, coupled = _cavity(4)
+    state = _healthy_state(mesh, coupled)
+    with pytest.raises(TypeError, match="must be a BlockDiagonal, not MaterializedJacobian"):
+        mass_flow_coupled_continuation(
+            coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
+        )
+
+
+@pytest.mark.parametrize(
+    "configuration",
+    [
+        {"preconditioner": BlockDiagonal(method="air")},
+        {"reference_state": "state"},
+        {"inner_steps": 3},
+    ],
+    ids=["preconditioner", "reference_state", "march setting"],
+)
+def test_the_constrained_solve_refuses_configuration_beside_a_finished_continuation(
+    configuration: dict,
+) -> None:
+    """Configuration for a step the solve is not building is refused, not dropped.
+
+    A finished ``continuation`` already carries its preconditioner, reference and march settings, so
+    passing any of them beside it used to reach nothing: ``method="air"`` beside a twolevel step ran
+    twolevel, with no error. The refusal comes before the initial condition is built.
+    """
+    mesh, coupled = _cavity(4)
+    state = _healthy_state(mesh, coupled)
+    continuation = mass_flow_coupled_continuation(
+        coupled, state, preconditioner=BlockDiagonal(method=None)
+    )
+    given = {name: state if value == "state" else value for name, value in configuration.items()}
+    with pytest.raises(TypeError, match=r"configure the continuation `solve_coupled_mass_flow`"):
+        solve_coupled_mass_flow(coupled, 1.0, continuation=continuation, **given)
 
 
 def test_a_monolithic_builder_takes_the_injected_velocity_shift_source() -> None:

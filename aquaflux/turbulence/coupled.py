@@ -1597,40 +1597,6 @@ def coupled_scaled_norm(
     )
 
 
-def _refuse_unknown_flow_block_options(options: dict[str, object]) -> None:
-    """Raise if ``options`` names anything ``BlockPreconditioner.build`` does not take.
-
-    The coupled builders forward their remaining keywords to it as ``**preconditioner_kwargs``, but
-    only a first build reads them: a refresh (``reuse=``) carries the flow block over rather than
-    rebuilding it. So an option ``build`` does not have raised on a first build and was dropped without
-    a word on every refresh -- and since the march's own settings moved onto
-    :class:`~aquaflux.solve.Globalization`, a stale ``beta0=`` or ``line_search=`` is exactly such an
-    option. Checking the names against the signature is exact because ``build`` takes no ``**kwargs``.
-
-    Parameters
-    ----------
-    options : dict
-        The keywords bound for ``BlockPreconditioner.build``.
-
-    Raises
-    ------
-    TypeError
-        Naming each unknown option and the options ``build`` does take.
-    """
-    accepted = {
-        name
-        for name, parameter in inspect.signature(BlockPreconditioner.build).parameters.items()
-        if parameter.kind is inspect.Parameter.KEYWORD_ONLY
-    }
-    unknown = sorted(set(options) - accepted)
-    if unknown:
-        raise TypeError(
-            f"{', '.join(unknown)} {'is not an option' if len(unknown) == 1 else 'are not options'} "
-            f"of BlockPreconditioner.build, which takes {', '.join(sorted(accepted))}. A setting of the "
-            "march itself, such as beta0 or line_search, belongs on globalization=Globalization(...)."
-        )
-
-
 def _coupled_shift_policy(
     coupled: CoupledRANS,
     reference_state: jnp.ndarray,
@@ -1640,7 +1606,7 @@ def _coupled_shift_policy(
     velocity_shift_parts: VelocityShiftParts | None = None,
     turbulence_damping: TurbulenceDamping | float = 1.0,
     build_flow_block: bool = True,
-    **preconditioner_kwargs: object,
+    **flow_block_options: object,
 ) -> CoupledShiftPolicy:
     """Build the block-diagonal :class:`CoupledShiftPolicy` frozen at ``reference_state``.
 
@@ -1707,7 +1673,9 @@ def _coupled_shift_policy(
     # momentum-block direction once the flow separates (the shifted Newton direction it returns drifts
     # away from the true one on a developed separated field, and the march stalls). The convection
     # block's convective linearization stays valid frozen at the cold initial state (the reference), so
-    # no per-sweep refresh is needed. Overridable via preconditioner_kwargs. `build_flow_block=False`
+    # no per-sweep refresh is needed. Overridable through a `BlockDiagonal` spec's fields, which arrive
+    # here as `flow_block_options` and are pinned to `BlockPreconditioner.build`'s keywords, so no name
+    # it does not take can reach it. `build_flow_block=False`
     # leaves it out entirely: a monolithically preconditioned step reads this policy for its shift
     # diagonal and supplies its own inverse, so the block built here would never be applied.
     #
@@ -1723,10 +1691,6 @@ def _coupled_shift_policy(
     # directly through `BlockPreconditioner`) for the one regime it is not
     # dominated in: a standalone, flow-only, convection-dominated solve, where the plain SIMPLE Schur's
     # inner solve can stall outright.
-    # Checked here, before the branch, because only one side of it reads these: a refresh carries the
-    # flow block over from `reuse` and never calls `BlockPreconditioner.build`, so an option it does not
-    # take would raise on a first build and vanish on every refresh.
-    _refuse_unknown_flow_block_options(preconditioner_kwargs)
     block = (
         None
         if not build_flow_block
@@ -1743,7 +1707,7 @@ def _coupled_shift_policy(
                 # flow block is frozen at the reference state (never refreshed), so the value-dependent
                 # coarsening this turns on carries no refresh cost.
                 "strength_threshold": 0.25,
-                **preconditioner_kwargs,
+                **flow_block_options,
             },
         )
     )
@@ -3604,12 +3568,12 @@ def _continuation_source(
     return _SessionContinuation(session, reference_state, march)
 
 
-def _refuse(given: dict, owner: str, why: str) -> None:
+def _refuse(given: dict, owner: str, why: str, solver: str = "solve_coupled") -> None:
     """Raise if any continuation setting was passed to a solve that cannot forward it."""
     if not given:
         return
     raise TypeError(
-        f"{sorted(given)} configure the continuation `solve_coupled` builds, and {owner} was given, so "
+        f"{sorted(given)} configure the continuation `{solver}` builds, and {owner} was given, so "
         f"{why}. These would have been dropped silently. Pass them where the continuation is built "
         f"instead, or drop {owner}."
     )
@@ -4122,7 +4086,7 @@ def mass_flow_coupled_continuation(
     reference_state: jnp.ndarray,
     *,
     flow_direction: int = 0,
-    method: str | None = "twolevel",
+    preconditioner: BlockDiagonal | None = None,
     globalization: Globalization = DEFAULT_GLOBALIZATION,
     forward_solver: lx.AbstractLinearSolver | None = None,
     forward_rtol: float = _CONSTRAINED_FORWARD.rtol,
@@ -4142,7 +4106,6 @@ def mass_flow_coupled_continuation(
     positivity_projection: bool = True,
     jacobian_gradient_sweeps: int | None = None,
     jacobian_production_viscosity: bool = False,
-    **preconditioner_kwargs: object,
 ) -> ForwardStep:
     """The pseudo-transient continuation step for the **mass-flow-constrained** coupled Newton solve.
 
@@ -4164,7 +4127,25 @@ def mass_flow_coupled_continuation(
     Euclidean norm unless ``block_scaled_norm`` — the row-equilibrated default the other builders take
     has no constraint-aware form yet, and applying it here would scale the border row by a diagonal it
     does not have.
+
+    ``preconditioner`` must be a :class:`~aquaflux.turbulence.BlockDiagonal` (``None`` takes
+    ``BlockDiagonal()``). The constraint borders a block-diagonal policy, whose composed preconditioner
+    the Schur elimination of ``beta`` wraps; a :class:`~aquaflux.turbulence.MaterializedJacobian` inverts
+    a Jacobian that has no border row, so it is refused rather than applied to the wrong system.
+
+    Raises
+    ------
+    TypeError
+        If ``preconditioner`` is neither ``None`` nor a ``BlockDiagonal``.
     """
+    if preconditioner is None:
+        preconditioner = BlockDiagonal()
+    if not isinstance(preconditioner, BlockDiagonal):
+        raise TypeError(
+            f"the mass-flow-constrained step borders a block-diagonal preconditioner, so preconditioner "
+            f"must be a BlockDiagonal, not {type(preconditioner).__name__}: a materialized Jacobian "
+            "has no constraint row for the bordered solve to eliminate."
+        )
     # Checked before any preconditioner is fitted: a misconfigured floor is a caller mistake, not a
     # reason to pay for a build that the raise below would then discard.
     step_limit, step_projection = _k_positivity_guards(
@@ -4176,12 +4157,12 @@ def mass_flow_coupled_continuation(
     policy = _coupled_shift_policy(
         coupled,
         reference_state,
-        method,
+        preconditioner.resolved_method(),
         None,
         shift_basis,
         velocity_shift_parts,
         turbulence_damping,
-        **preconditioner_kwargs,
+        **preconditioner.flow_block_options(),
     )
     force, average = _coupled_constraint_vectors(coupled, flow_direction)
     bordered = _MassFlowBorderedPolicy(policy, force, average)
@@ -4222,7 +4203,7 @@ def solve_coupled_mass_flow(
     omega: jnp.ndarray | None = None,
     continuation: PseudoTransientStep | None = None,
     reference_state: jnp.ndarray | None = None,
-    method: str | None = "twolevel",
+    preconditioner: BlockDiagonal | None = None,
     max_steps: int = 60,
     rtol: float = 1e-10,
     atol: float = 1e-12,
@@ -4253,12 +4234,34 @@ def solve_coupled_mass_flow(
         The bulk (volume-averaged) velocity component to hold along ``flow_direction``.
     flow_direction : int
         The streamwise axis the bulk velocity is measured and the body force applied along.
+    preconditioner : BlockDiagonal or None
+        The block-diagonal preconditioner the constrained step is built with; ``None`` takes
+        ``BlockDiagonal()``. See :func:`mass_flow_coupled_continuation` for why no other family applies.
 
     Returns
     -------
     tuple of jnp.ndarray
         The converged ``(flow, k, omega, beta)`` -- the fields and the multiplier that hits ``target``.
+
+    Raises
+    ------
+    TypeError
+        If ``preconditioner``, ``reference_state`` or a march setting is given beside a finished
+        ``continuation``, which already carries its configuration -- they would otherwise be dropped
+        without a word.
     """
+    given = dict(continuation_kwargs)
+    if preconditioner is not None:
+        given["preconditioner"] = preconditioner
+    if reference_state is not None:
+        given["reference_state"] = reference_state
+    if continuation is not None:
+        _refuse(
+            given,
+            "`continuation`",
+            "the step you passed already carries them",
+            solver="solve_coupled_mass_flow",
+        )
     if flow is None or k is None or omega is None:
         flow, k, omega = hybrid_initialize(coupled.momentum, coupled.turbulence)
     # Map the physical initial condition into the solved-variable space (identity for DirectScalars,
@@ -4269,7 +4272,11 @@ def solve_coupled_mass_flow(
     if continuation is None:
         reference = state if reference_state is None else reference_state
         continuation = mass_flow_coupled_continuation(
-            coupled, reference, flow_direction=flow_direction, method=method, **continuation_kwargs
+            coupled,
+            reference,
+            flow_direction=flow_direction,
+            preconditioner=preconditioner,
+            **continuation_kwargs,
         )
     solver = ImplicitNewtonSolver(
         max_steps=max_steps,
