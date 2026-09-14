@@ -225,9 +225,8 @@ paths:
     **🛑 BUT ITS CONCLUSION — "the mechanism is the FILL" — WAS WRONG, AND THE ERROR IS INSTRUCTIVE
     (corrected 2026-08-17).** The two implementations were NOT "differing only in fill". They also
     **shared the elimination ordering**: at the time both took it from `equilibrate_cell_major` --
-    cell-major over the mesh's own cell order. (The host V-cycle now takes an injected ordering through
-    `equilibrate_ordered` and defaults to that same one, so the confound is a choice rather than a
-    given.) Fill and order were confounded, and the confound is the one that
+    cell-major over the mesh's own cell order. (The host V-cycle later took an injected ordering; it and the
+    ordering strategies were deleted 2026-09-13, #371.) Fill and order were confounded, and the confound is the one that
     mattered — **on this block the ordering is the larger lever, and the shipped cell order is the
     thing that fails.** Two independent implementations agreeing is evidence about a *shared* cause;
     it does not identify which shared thing is the cause, and here the argument named the wrong one.
@@ -236,8 +235,8 @@ paths:
     **⚠️ THEREFORE THE CONSEQUENCE DRAWN FROM IT IS ALSO WITHDRAWN.** It said `Ilu0` is zero-fill by
     construction with no fill parameter, so `IluSmoothedInverse` "cannot serve a case that needs one" —
     and offered a level-of-fill factorization as the specifiable gap. `pitzDaily` is not shown to need
-    fill. It is shown to need a different cell order, which the host V-cycle now takes
-    (`aquaflux/solve/ordering.py`). A level-of-fill `Ilu0` may still be wanted some day; this case is
+    fill. It is shown to need a different cell order, which the host V-cycle then took
+    (through `aquaflux/solve/ordering.py`, since deleted with it, #371). A level-of-fill `Ilu0` may still be wanted some day; this case is
     no longer the evidence for it.
 
     **⚠️ Three mechanisms were refuted on the way, each of which had a plausible story:**

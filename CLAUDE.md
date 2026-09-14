@@ -495,17 +495,6 @@ choice, not the model's — whatever scheme the residual uses for advection, the
 upwinds first-order, because that is what makes it an M-matrix an aggregation hierarchy can coarsen —
 which is why it is a solver concern and holds no mesh, field, or `jax` import.
 
-**How an elimination is ordered is an injected strategy, `aquaflux/solve/ordering.py`.**
-`EliminationOrdering` (`CellMajor`, over a `CellOrder` — `NaturalCells` / `ReverseCuthillMcKeeCells` /
-`AscendingRowLengthCells`) is consumed through `equilibrate_ordered`, and `cell_major_permutation` lives
-here rather than beside the equilibration it used to share a file with. It was a strategy family and not
-a knob because **at zero fill the ordering decides which couplings the factorization discards**: measured
-on a coupled velocity–pressure saddle, changing only the cell order took a stationary sweep from
-amplifying the residual to contracting it. ⚠️ Its zero-fill consumer — the host ILU(0) kernel and the
-`IluSmoothedInverse` smoothed by it — was deleted 2026-09-13 (#371), so today only the default
-`CellMajor()` is used (by the monolithic V-cycle's equilibration); the alternative cell orders have no
-library consumer.
-
 ```
 Mesh (SoA topology) + FaceGeometry/CellGeometry            (classes)
    → operator strategies (DiffusionFlux, ...) consuming injected scheme strategies

@@ -634,8 +634,10 @@ data model. Each had nothing in `validation/` or any test selecting it.
   to elimination order and its lack of a route to a GPU; on pitzDaily the zero-fill smoother amplified
   under the mesh's own cell order and marched only under a reverse-Cuthill-McKee one. Harnesses deleted
   with it (in git history): `pitzdaily_openfoam/lu_vs_hostilu.py`, `pitzdaily_openfoam/flow_block_ordering.py`.
-  **Left in place, for a separate decision:** `solve/ordering.py`'s alternative cell orders
-  (`NaturalCells` aside), which now have no library consumer.
+  The elimination-ordering strategies in `solve/ordering.py` (`CellMajor` over `NaturalCells` /
+  `ReverseCuthillMcKeeCells` / `AscendingRowLengthCells`, via `equilibrate_ordered`) served only the
+  zero-fill factorization and went in a follow-up commit; `cell_major_permutation` moved back into
+  `frozen_operator.py`.
 
 ## Globalization (forward step, continuation, line search) — closed investigations
 

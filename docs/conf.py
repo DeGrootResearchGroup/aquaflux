@@ -64,7 +64,6 @@ SUBPACKAGE_GROUPS = {
             ],
         ),
         ("Multigrid hierarchies", ["multigrid", "frozen_operator"]),
-        ("Elimination orderings", ["ordering"]),
         ("Sparse Jacobians", ["sparse_jacobian"]),
     ],
     "flow": [

@@ -29,11 +29,11 @@ paths:
 
 ## Preconditioner — the frozen host family (shared contract)
 
-- **`equilibrate_cell_major` / `equilibrate_ordered` live in `frozen_operator.py` (binding, moved
-  2026-08-15). ⚠️ `cell_major_permutation` moved AGAIN on 2026-08-17, to the new
-  `solve/ordering.py`** — it is one elimination ordering among several now, and sat in `frozen_operator`
-  only because that is where it was first written. `frozen_operator` imports it (one direction, no
-  cycle); nothing re-exports it from its old home, so a stale import fails loudly.
+- **`equilibrate_cell_major` and `cell_major_permutation` live in `frozen_operator.py` (binding).**
+  ⚠️ There is no `solve/ordering.py`, no `equilibrate_ordered` and no elimination-ordering strategy
+  family (`EliminationOrdering` / `CellMajor` / `CellOrder` / `NaturalCells` /
+  `ReverseCuthillMcKeeCells` / `AscendingRowLengthCells`): they existed for the zero-fill ILU(0) kernel
+  and were deleted with it (2026-09-13, #371); the one ordering left is the natural cell-major one.
   They are the reorder half of one transform whose rescale half
   (`symmetrically_equilibrate`, `equilibration_scale`, `apply_symmetric_scale`, `row_chunks`) was
   already there, and every consumer applies the two together -- a factorization or a coarsening wants
