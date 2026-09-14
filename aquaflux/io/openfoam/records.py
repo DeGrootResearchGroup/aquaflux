@@ -21,20 +21,44 @@ class FoamPatch(NamedTuple):
     name : str
         Patch name (becomes an aquaflux face-patch name).
     type_ : str
-        Patch type as declared in the file (``wall`` / ``patch`` / ``empty`` / ``symmetry`` / …).
-        Carried through, not interpreted, except that ``empty`` marks a face plane to collapse away
-        for a two-dimensional case.
+        Patch type as declared in the file (``wall`` / ``patch`` / ``empty`` / ``symmetry`` /
+        ``cyclic`` / …). Carried through, not interpreted, except that ``empty`` marks a face plane
+        to collapse away for a two-dimensional case, and ``cyclic`` marks a pair of patches to fuse
+        into interior periodic seam faces (see :mod:`.cyclic`).
     start_face : int
         Index of the patch's first face. OpenFOAM orders faces so a patch owns the contiguous block
         ``[start_face, start_face + n_faces)``.
     n_faces : int
         Number of faces in the patch.
+    neighbour_patch : str
+        For a ``cyclic`` patch, the name of the patch it is paired with. Empty for every other
+        patch type, and for a ``cyclic`` patch whose ``boundary`` entry omits ``neighbourPatch``
+        (which :func:`.cyclic.fuse_cyclic_patches` rejects).
     """
 
     name: str
     type_: str
     start_face: int
     n_faces: int
+    neighbour_patch: str = ""
+
+
+def patch_face_range(patch: FoamPatch) -> np.ndarray:
+    """Global face indices covered by one patch's contiguous face block.
+
+    A boundary patch owns ``[start_face, start_face + n_faces)`` — the one arange this shape
+    implies, shared by the assembler's patch-naming step and the cyclic-patch fusion, which both
+    need "the face indices this patch owns" as a plain array.
+
+    Parameters
+    ----------
+    patch : FoamPatch
+
+    Returns
+    -------
+    np.ndarray of int, shape ``(patch.n_faces,)``
+    """
+    return np.arange(patch.start_face, patch.start_face + patch.n_faces)
 
 
 class CellZone(NamedTuple):

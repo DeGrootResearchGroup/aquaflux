@@ -9,16 +9,19 @@ discrete continuity.
 **Why the face indices line up.** OpenFOAM orders faces interior-first (the upper-triangular
 ordering), then boundary faces grouped by patch in ``boundary``-file order, and each patch occupies
 a contiguous range. The aquaflux reader carries ``owner`` through unchanged and pads the
-interior-only ``neighbour`` list to full length, so it never renumbers a face: aquaflux face ``i``
-*is* OpenFOAM face ``i``. A patch's aquaflux indices come back ascending from ``face_patches``,
-which for a contiguous range is exactly the order the patch's values are written in.
+interior-only ``neighbour`` list to full length, so an ordinary read never renumbers a face:
+aquaflux face ``i`` *is* OpenFOAM face ``i``. A patch's aquaflux indices come back ascending from
+``face_patches``, which for a contiguous range is exactly the order the patch's values are written
+in.
 
 That correspondence is an inherited convention rather than something this module can enforce, so it
 is **checked rather than assumed**: :func:`read_surface_scalar_field` verifies that the mesh's
 interior faces really are the leading ``n`` and that each patch's length matches, and raises
-naming the mismatch instead of silently placing values on the wrong faces. A two-dimensional case is
-the known exception -- the ``empty``-patch collapse rebuilds the mesh and does renumber -- so this
-refuses to run on one.
+naming the mismatch instead of silently placing values on the wrong faces. Two cases are known to
+break it, and both refuse to run: a two-dimensional case, whose ``empty``-patch collapse rebuilds
+the mesh and renumbers; and a mesh with a fused ``cyclic`` patch pair, whose periodic seam face sits
+in the file's boundary block, not its internal one -- refused directly (a ``neighbour_offset`` check)
+rather than relying on the leading-block check, which a fused seam can coincidentally still pass.
 """
 
 from __future__ import annotations
@@ -156,8 +159,20 @@ def read_surface_scalar_field(path, mesh: Mesh) -> np.ndarray:
     interior = np.asarray(face_cells.interior)
     n_internal = int(interior.sum())
 
-    # The correspondence this module depends on, checked rather than assumed. It fails on a
-    # collapsed 2D mesh, which is rebuilt by the empty-patch transform and renumbered.
+    # A periodic seam is a fused cyclic patch pair (or a generator's own periodic=...): the seam
+    # face is interior now but sat in a boundary patch's block in the original OpenFOAM file, so
+    # index correspondence is gone even where the leading-block check below would not catch it --
+    # a seam face can land immediately after the true interior block by coincidence of patch
+    # declaration order, passing that check while still reading the wrong file entries.
+    if face_cells.neighbour_offset is not None:
+        raise ValueError(
+            "mesh has a periodic seam (neighbour_offset is set), so its face indices do not "
+            "correspond to an OpenFOAM file's ordering; reading a surface field on a periodic or "
+            "cyclic-fused mesh is not supported"
+        )
+
+    # The correspondence this module depends on otherwise, checked rather than assumed. It fails
+    # on a collapsed 2D mesh, which is rebuilt by the empty-patch transform and renumbered.
     if not interior[:n_internal].all() or interior[n_internal:].any():
         raise ValueError(
             "mesh face ordering is not OpenFOAM's (interior faces are not the leading block), so "

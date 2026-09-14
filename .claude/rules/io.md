@@ -36,7 +36,10 @@ Three pure seams so ~80% of the logic tests with no filesystem (separate I/O fro
     not JAX pytrees). `PolyMeshData` is the cohesive record handed to the assembler (pass the
     record, not a fistful of loose arrays). Faces are stored **CSR already**; `neighbour_internal`
     is the raw interior-only `neighbour` file (padding to full length is a *semantic* step, done in
-    the assembler, not the parser).
+    the assembler, not the parser). `FoamPatch.neighbour_patch` carries a `cyclic` patch's
+    `neighbourPatch` entry (empty for every other patch type). `patch_face_range(patch)` is the one
+    place `[start_face, start_face + n_faces)` becomes an index array — shared by the assembler's
+    patch-naming step and `cyclic.py`'s fusion, so both read "this patch's faces" the same way.
   - `foamfile.py` — the shared file envelope: strip `/* */` + `//` comments, split the
     `FoamFile { … }` header dict from the body, and `is_binary` (gates ASCII vs binary in **one**
     place).
@@ -44,14 +47,22 @@ Three pure seams so ~80% of the logic tests with no filesystem (separate I/O fro
     `parse_face_list` / `parse_boundary` / `parse_cell_zones`), sharing one `list_envelope` for the
     `N ( … )` frame + count-check. **Deliberately not a Strategy hierarchy** — the file kind is
     known statically at every call site, so parser-polymorphism would vary over nothing.
+  - `cyclic.py` — `fuse_cyclic_patches(...)` (pure, file-free): turns a matched `cyclic` patch pair
+    into interior periodic seam faces before the assembler ever calls `Mesh.from_csr`, so a
+    streamwise-periodic OpenFOAM mesh imports with its periodicity intact instead of as two
+    disjoint open boundaries. See **Cyclic-patch fusion** below.
   - `assembler.py` — `assemble(PolyMeshData) -> Mesh` (pure, file-free): pad the interior-only
     neighbour with the `-1` sentinel (relies on OpenFOAM's upper-triangular ordering — interior
-    faces first), derive `n_cells = max(owner, neighbour) + 1`, map boundary patches →
-    `face_patches` and cellZones → `cell_zones`, then `Mesh.from_csr`.
+    faces first), derive `n_cells = max(owner, neighbour) + 1`, fuse `cyclic` patch pairs
+    (`cyclic.fuse_cyclic_patches`), map the surviving boundary patches → `face_patches` and
+    cellZones → `cell_zones`, then `Mesh.from_csr`.
   - `reader.py` — `OpenFOAMReader(MeshReader)` + `read_openfoam(path)`. `read()` = assemble the
-    faithful 3D mesh, then collapse when `empty` patches are present. Accepts a case dir (resolves
-    `constant/polyMesh`) or the polyMesh dir directly. `_read_field` handles the *optional*-file
-    case and delegates the rest to `foamfile.read_foam_body`.
+    faithful 3D mesh (cyclic patches already fused), then collapse when `empty` patches are
+    present. Accepts a case dir (resolves `constant/polyMesh`) or the polyMesh dir directly.
+    `cyclic_match_tolerance` (constructor / function keyword, default
+    `cyclic.DEFAULT_MATCH_TOLERANCE`) passes through to `assemble` for a mesh whose cyclic faces
+    do not match to the default tolerance. `_read_field` handles the *optional*-file case and
+    delegates the rest to `foamfile.read_foam_body`.
   - **`foamfile.read_foam_file(path)` is the one place a file on disk becomes a parsed OpenFOAM
     file**, so the ASCII-only limitation is enforced once. It lives beside the `is_binary` predicate
     it uses, and `read_foam_body(path)` is its body half (`read_foam_file(path).body`) for the
@@ -71,6 +82,56 @@ Three pure seams so ~80% of the logic tests with no filesystem (separate I/O fro
     also returns the internal block *only*: a `volScalarField`'s `boundaryField` holds **face**
     values, a different quantity on a different index space, so concatenating them as the surface
     reader does would produce something no consumer wants.
+    **`read_surface_scalar_field` refuses a periodic mesh outright** (`face_cells.neighbour_offset
+    is not None`) rather than relying only on the leading-interior-block check below: a fused
+    `cyclic` seam face is interior but sat in whichever boundary patch declared it in the original
+    file, and — since a patch can be declared immediately after the true interior block — can
+    coincidentally still *pass* that positional check while reading the wrong file entries. The
+    direct check catches every periodic mesh regardless of where its seam patch happened to sit.
+
+## Structure — BUILT (cyclic-patch fusion) — 2026-09-14
+
+A `cyclic` patch pair (`neighbourPatch` entries naming each other) describes one periodic seam
+split across two boundary patches, not two ordinary open boundaries. Left unfused, `assemble`
+would give both patches `neighbour = -1` and the mesh would lose its periodicity entirely — this
+is what blocked importing an OpenFOAM periodic channel/duct mesh before this was built. `cyclic.py`
+fixes it ahead of `Mesh.from_csr`: it turns the matched pair into interior faces carrying the
+`neighbour_offset` periodic-image mechanism `structured_grid_2d(periodic=...)` already uses (see
+`.claude/rules/mesh.md`), so the two mechanisms converge on one representation regardless of
+whether the periodic mesh came from a generator or a file.
+
+**The match is geometric, not declared.** Rather than parse and trust OpenFOAM's `transform`
+keyword (`translational` / `rotational` / `noOrdering`), `fuse_cyclic_patches` always attempts a
+translational match: estimate the seam's translation from the two patches' centroid means, shift
+one side by it, and nearest-neighbour-match centroids (`scipy.spatial.cKDTree`, robust to face
+ordering — OpenFOAM does not guarantee the two patches list corresponding faces in the same
+order). This one mechanism both performs the fusion and verifies the pair genuinely *is* a pure
+translation: a rotational or mismatched pair simply fails to match within tolerance
+(`DEFAULT_MATCH_TOLERANCE`, a fraction of the kept patch's bounding extent, overridable via
+`cyclic_match_tolerance` on `assemble` / `OpenFOAMReader` / `read_openfoam`), so no separate
+`transform`-type check is needed to reach the same guarantee. **Rotational cyclic patches are
+therefore not supported** (`neighbour_offset` is a translation only) — they read in as an error
+naming the pair, not silently wrong geometry.
+
+**The patch declared earlier in the boundary file is the "kept" side**; its faces stay in place
+(now interior) and the other's faces are dropped as duplicates — the offset derivation
+(`kept_centroid - donor_centroid`, added to the donor cell's own centroid to give its periodic
+image) is symmetric under this choice, so declaration order is only a deterministic tie-break, not
+a physical distinction. Both patches — kept and donor — are removed from `face_patches`: a fused
+seam is interior, not a named boundary.
+
+**Fusion pre-empts, rather than interacts with, the 2D collapse.** A cyclic pair is fused inside
+`assemble` before `Mesh.from_csr` is ever called, so
+by the time `reader.py` detects `empty` patches and calls `collapse_extruded_direction`, the
+periodic seam is already an ordinary interior face carrying `neighbour_offset` — the collapse's
+existing `gather_neighbour_offset` carry-through (`.claude/rules/mesh.md`) needs no cyclic-specific
+handling. A cyclic axis and the collapsed (extruded) axis are necessarily different axes — an
+extruded axis's caps are the very `empty` patches the collapse removes, and a periodic axis has no
+such caps.
+
+**Deferred, additively:** `cyclicAMI` (a different patch type, for a non-matching interface — not
+`cyclic`) and rotational `cyclic` patches; both are simply left as ordinary (disconnected) boundary
+patches today, since `fuse_cyclic_patches` only ever acts on a `type_ == "cyclic"` pair.
 
 ## Structure — BUILT (OpenFOAM field writer, ASCII) — 2026-09-12
 
@@ -329,13 +390,19 @@ questions have different answers.
 - **ASCII only (first cut).** `format binary;` → `NotImplementedError` (detected, never misread).
 - **A field is placed by INDEX, and the correspondence is CHECKED rather than assumed (binding).**
   OpenFOAM orders faces interior-first, then boundary faces grouped by patch in `boundary`-file
-  order, each patch contiguous; `assemble` carries `owner` through unchanged and never renumbers, so
-  aquaflux face `i` *is* OpenFOAM face `i`. That is an inherited convention this package cannot
-  enforce, and getting it wrong yields a **plausible field rather than an error** — so
-  `read_surface_scalar_field` verifies the interior faces really are the leading block and each
-  named patch is a contiguous ascending range, and raises naming the mismatch.
+  order, each patch contiguous; on an ordinary (non-periodic) mesh `assemble` carries `owner`
+  through unchanged and never renumbers, so aquaflux face `i` *is* OpenFOAM face `i`. That is an
+  inherited convention this package cannot enforce, and getting it wrong yields a **plausible field
+  rather than an error** — so `read_surface_scalar_field` verifies the interior faces really are
+  the leading block and each named patch is a contiguous ascending range, and raises naming the
+  mismatch.
   - **A collapsed 2D case cannot be read this way** and is refused by that same guard: the
     `empty`-patch collapse rebuilds the mesh through `from_csr` and renumbers.
+  - **Neither can a periodic mesh** — a fused `cyclic` patch pair does renumber (the donor side's
+    faces are dropped), and its seam face sat in a boundary patch's block in the original file. This
+    is refused by a direct `neighbour_offset is not None` check rather than the leading-block guard
+    above, because a seam face declared immediately after the true interior block can coincidentally
+    still pass that one.
   - ⚠️ **`face_patches` carries the automatic `interior` and `boundary` patches, which no field file
     writes.** `interior` holds the interior faces (already the internal block) and must be skipped;
     a non-empty `boundary` means boundary faces no named patch claimed, so there is nowhere to read
@@ -379,13 +446,22 @@ constructs a class, so no pair exists for it to report, and its silence here is 
 attached, so it reuses that function unchanged.
 
 ## Testability seam (satisfied)
-- **Parse** — grammar/foamfile on string snippets (`tests/unit/test_foamfile.py`), no files.
+- **Parse** — grammar/foamfile on string snippets (`tests/unit/test_foamfile.py`), no files;
+  including `parse_boundary` reading a `cyclic` patch's `neighbourPatch` entry.
 - **Assemble** — `assemble` on a hand-built `PolyMeshData` (`tests/support/polymesh.py`
   `two_cube_polymesh_data`; `tests/unit/test_openfoam_assemble.py`), no files.
+- **Cyclic fusion** — `tests/unit/test_openfoam_cyclic.py`, file-free on hand-built cyclic-patch
+  fixtures (`tests/support/polymesh.py` `cyclic_two_cube_polymesh_data` /
+  `cyclic_slab_polymesh_data`): the fused seam's owner/neighbour/`neighbour_offset`, every
+  pairing error path (missing/unknown/self-referencing/asymmetric `neighbourPatch`, a partner that
+  is not itself `cyclic`, a face-count mismatch, a non-translational pair), and a fused-then-
+  collapsed slab cross-checked against `structured_grid_2d(periodic=("x",))` — the independent
+  oracle for the periodic connectivity a real OpenFOAM cyclic mesh should read in as.
 - **Collapse** — file-free: collapse `structured_grid_3d(nx, ny, 1)` and match
   `structured_grid_2d(nx, ny)` up to renumbering (`tests/unit/test_collapse.py`), plus a hand-built
-  periodic slab pinning that the seam's `neighbour_offset` survives the face renumbering (the reader
-  emits no offsets, so that path is unreachable from io today).
+  periodic slab pinning that the seam's `neighbour_offset` survives the face renumbering. (The
+  cyclic-fusion + collapse cross-check above is the reader-reachable version of this same property;
+  this one stays as the collapse transform's own file-free regression test.)
 - **Orchestrate** — end-to-end on committed ASCII fixtures (`tests/fixtures/polymesh_3d_two_cubes`,
   `tests/fixtures/polymesh_2d_slab`), cross-checked against the structured generators
   (`tests/unit/test_openfoam_reader.py`).
@@ -393,7 +469,9 @@ attached, so it reuses that function unchanged.
   end on the two-cube fixture with a field whose **each value encodes its own face index**, so any
   permutation shows up as a mismatch rather than as a plausible field. The ordering guard is tested
   by feeding it a *generated* grid, which genuinely is not interior-first (its `left` patch occupies
-  faces 0–2 while the interior starts at 3) — a standing counter-example, not a contrived one.
+  faces 0–2 while the interior starts at 3) — a standing counter-example, not a contrived one. A
+  separate test pins that a periodic mesh (`structured_grid_2d(periodic=("x",))`, standing in for a
+  fused cyclic mesh) is refused directly, not by that same positional check.
 
 ## The interior placement is MEASURED, not only argued (bfs3d, 2026-08-17)
 

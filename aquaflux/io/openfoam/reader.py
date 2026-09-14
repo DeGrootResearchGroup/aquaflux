@@ -20,6 +20,7 @@ from aquaflux.io.reader import MeshReader
 from aquaflux.mesh import Mesh, collapse_extruded_direction
 
 from .assembler import assemble
+from .cyclic import DEFAULT_MATCH_TOLERANCE
 from .foamfile import read_foam_body, resolve_polymesh_dir
 from .grammar import (
     parse_boundary,
@@ -38,11 +39,15 @@ class OpenFOAMReader(MeshReader):
     ----------
     directory : str
         The resolved polyMesh directory (the one holding ``points`` / ``faces`` / ``owner`` / …).
+    cyclic_match_tolerance : float
+        Passed to :func:`~aquaflux.io.openfoam.cyclic.fuse_cyclic_patches` for matching a
+        ``cyclic`` patch pair's faces.
     """
 
     directory: str = eqx.field(static=True)
+    cyclic_match_tolerance: float = eqx.field(static=True, default=DEFAULT_MATCH_TOLERANCE)
 
-    def __init__(self, directory):
+    def __init__(self, directory, *, cyclic_match_tolerance: float = DEFAULT_MATCH_TOLERANCE):
         """Construct a reader for a polyMesh or case directory.
 
         Parameters
@@ -50,8 +55,11 @@ class OpenFOAMReader(MeshReader):
         directory : str or path-like
             Either the polyMesh directory itself or an OpenFOAM case directory containing
             ``constant/polyMesh``.
+        cyclic_match_tolerance : float
+            See :data:`~aquaflux.io.openfoam.cyclic.DEFAULT_MATCH_TOLERANCE`.
         """
         self.directory = str(resolve_polymesh_dir(directory))
+        self.cyclic_match_tolerance = cyclic_match_tolerance
 
     def _read_field(self, filename: str, parser: Callable, *, required: bool = True):
         """Read and parse one polyMesh file's body; ``None`` if optional and absent.
@@ -106,24 +114,28 @@ class OpenFOAMReader(MeshReader):
             or a single ``frontAndBack`` patch).
         """
         data = self.read_polymesh()
-        mesh = assemble(data)
+        mesh = assemble(data, cyclic_match_tolerance=self.cyclic_match_tolerance)
         empty_patches = [patch.name for patch in data.patches if patch.type_ == "empty"]
         if empty_patches:
             mesh = collapse_extruded_direction(mesh, empty_patches)
         return mesh
 
 
-def read_openfoam(directory) -> Mesh:
+def read_openfoam(directory, *, cyclic_match_tolerance: float = DEFAULT_MATCH_TOLERANCE) -> Mesh:
     """Read an OpenFOAM polyMesh (or case) directory into a :class:`~aquaflux.mesh.Mesh`.
 
     Parameters
     ----------
     directory : str or path-like
         Either a polyMesh directory or an OpenFOAM case directory containing ``constant/polyMesh``.
+    cyclic_match_tolerance : float
+        See :data:`~aquaflux.io.openfoam.cyclic.DEFAULT_MATCH_TOLERANCE`.
 
     Returns
     -------
     Mesh
-        The assembled mesh (2D when the case is a one-cell-thick ``empty``-capped extrusion, else 3D).
+        The assembled mesh (2D when the case is a one-cell-thick ``empty``-capped extrusion, else
+        3D). A matched ``cyclic`` patch pair reads in as an interior periodic seam rather than as
+        ordinary boundary faces.
     """
-    return OpenFOAMReader(directory).read()
+    return OpenFOAMReader(directory, cyclic_match_tolerance=cyclic_match_tolerance).read()

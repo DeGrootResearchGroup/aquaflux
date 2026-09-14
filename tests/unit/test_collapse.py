@@ -22,6 +22,8 @@ from aquaflux.mesh import (
     structured_grid_3d,
 )
 
+from tests.support.meshes import geometry_invariants
+
 
 def _periodic_extruded_slab(nx: int, ny: int, lx: float = 2.0, ly: float = 1.0, lz: float = 0.4):
     """A one-cell-thick 3D slab, periodic along x, capped by a ``"frontAndBack"`` patch in z.
@@ -103,27 +105,14 @@ def _periodic_extruded_slab(nx: int, ny: int, lx: float = 2.0, ly: float = 1.0, 
     )
 
 
-def _geometry_invariants(mesh):
-    """Order-independent geometry summary: dims, counts, and sorted volume/area multisets."""
-    geometry = mesh.geometry()
-    return {
-        "dim": mesh.dim,
-        "n_cells": mesh.n_cells,
-        "n_faces": mesh.n_faces,
-        "n_interior": int(np.sum(np.asarray(mesh.face_cells.interior))),
-        "volumes": np.sort(np.asarray(geometry.cell.volume)),
-        "areas": np.sort(np.asarray(geometry.face.area)),
-    }
-
-
 @pytest.mark.parametrize(("nx", "ny"), [(2, 1), (3, 2), (4, 4)])
 def test_collapsed_slab_matches_structured_grid_2d(nx, ny):
     slab = structured_grid_3d(nx, ny, 1, lx=2.0, ly=3.0, lz=0.5, named_boundaries=True)
     collapsed = collapse_extruded_direction(slab, ["back", "front"])
     reference = structured_grid_2d(nx, ny, lx=2.0, ly=3.0)
 
-    got = _geometry_invariants(collapsed)
-    want = _geometry_invariants(reference)
+    got = geometry_invariants(collapsed)
+    want = geometry_invariants(reference)
     assert got["dim"] == want["dim"] == 2
     assert got["n_cells"] == want["n_cells"]
     assert got["n_faces"] == want["n_faces"]
@@ -161,8 +150,8 @@ def test_collapse_single_frontandback_patch(nx, ny):
     collapsed = collapse_extruded_direction(merged, ["frontAndBack"])
     reference = structured_grid_2d(nx, ny, lx=2.0, ly=3.0)
 
-    got = _geometry_invariants(collapsed)
-    want = _geometry_invariants(reference)
+    got = geometry_invariants(collapsed)
+    want = geometry_invariants(reference)
     assert got["dim"] == want["dim"] == 2
     assert got["n_cells"] == want["n_cells"]
     assert got["n_faces"] == want["n_faces"]
