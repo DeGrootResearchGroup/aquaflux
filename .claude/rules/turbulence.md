@@ -251,6 +251,38 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       `production_viscosity_frozen`, which follows from the operator), `MonolithicVCycle` and `CompleteLu`
       to their `build`. `FieldSplit` requires `solve.BlockInverse` values, never a factory closure, so a
       build-record sink is attached where the session is opened rather than bound into the inverse.
+  - **🔬 BUILT BESIDE THE OLD BUILDERS, NOT YET WIRED — `open_session` / `PreconditionerSession` /
+    `coupled_step` (#371, 2026-09-14, slice S3a).** `_BlockSession` and `_MaterializedSession` are
+    `_ContinuationSource` promoted: `build(state, **march)`, `refresh(state, previous, residual_norm,
+    **march)`, `precondition_step`, `rebind`. `coupled_step` is the one frozen-step builder and opens a
+    private session. **The intermediate state is deliberate and temporary:** `coupled_continuation` /
+    `coupled_lu_continuation` / `coupled_amg_continuation` and the public β-tracking hooks still exist
+    and `solve_coupled` still uses `_ContinuationSource`, so the new path could be proven
+    **array-identical** to them first (`test_preconditioner_session.py` for block / LU / field split,
+    `test_coupled_amg.py` for the V-cycle). S3b moves `solve_coupled` and the Reynolds drivers onto
+    sessions and migrates callers; S3c deletes the old builders (Principle 4 — no adapters survive).
+    Facts to hold while finishing it:
+    - **March defaults live once, on `coupled_step`'s signature.** A session binds its `**march` against
+      that signature (`_march_keywords`), so an unknown keyword is a `TypeError` and no default is
+      restated. `preconditioner` and `jacobian_production_viscosity` are refused there: the session owns
+      them (user decision Q1).
+    - **A frozen `coupled_step` never wires the refresh hook; a session `build` does**, and only when
+      `refresh_on_cycles` is set and no caller `inner_refresh` was given. The hook, `precondition_step`
+      and the mid-step refresh are created once per session, so every build carries the same objects
+      (the static-field identity that keeps the coupled solve a compilation-cache hit).
+    - **Two latent defects are fixed on the session path only, until S3c removes the other:** the probe
+      follows `jacobian_production_viscosity` for every family (D2, and D7 for the complete LU, whose
+      builder materializes the un-frozen assembler), and one probe serves the build and the hook (D3/D5).
+      Byte-identical wherever `jacobian_production_viscosity=False`.
+    - **`_BlockSession.rebind` is a no-op** — target-viscosity behaviour on the ramp stays as it was
+      (Q2, #386).
+    - **⚠️ `tools/sibling_builders.py` CANNOT SEE `coupled_step` (checked 2026-09-14).** It reaches its
+      tail through `session._build(...)`, and `_build` is defined on both sessions — an ambiguous name the
+      tool never follows — so `coupled_step` is credited with building nothing and appears in no pair,
+      while the four old builders still pair with each other. Its silence about `coupled_step` is
+      blindness, not a clean report. S3c must deal with this before deleting the old builders, since
+      `test_sibling_builders.py::test_the_package_report_still_reaches_the_coupled_builders` asserts on
+      their names and `coupled_step` against `mass_flow_coupled_continuation` is the pair that remains.
   - **`solve_coupled(refresh=RefreshPolicy(trigger=…))` segments the march to re-freeze the preconditioner — and a refresh
     must CARRY the shift diagonals, not rebuild them (binding).** With a trigger set, the march runs as a
     sequence of *observed* segments (`aquaflux.solve.forward_march`): each steps until the trigger judges

@@ -103,9 +103,16 @@ from aquaflux.solve import (
 from .initialization import hybrid_initialize, wall_consistent_omega
 from .preconditioner import ScalarTransportPreconditioner, ScaledScalarPreconditioner
 
-# "Not given" for `solve_coupled`'s `method`, whose `None` already means something; shared with the
-# block-diagonal spec, whose `method` has the same two meanings.
-from .preconditioner_spec import _UNSET
+# `_UNSET` is "not given" for `solve_coupled`'s `method`, whose `None` already means something; it is
+# shared with the block-diagonal spec, whose `method` has the same two meanings.
+from .preconditioner_spec import (
+    _UNSET,
+    BlockDiagonal,
+    CompleteLu,
+    FieldSplit,
+    MaterializedJacobian,
+    MonolithicVCycle,
+)
 from .sources import production_and_limit
 
 # The default pseudo-time shift basis (full operator diagonal = uniform under-relaxation), held as a
@@ -3686,6 +3693,573 @@ def amg_beta_tracking_refresh(
         beta_floor=beta_floor,
         observer=observer,
         probe=probe,
+    )
+
+
+#: The shift strength a materialized preconditioner's first build is fitted at when its spec leaves
+#: ``build_beta`` unset. A frozen coarse space is chosen at that build and reused by every later refit, so
+#: this is not only the first step's operator.
+_BUILD_BETA = 2.0
+
+#: The march keywords a session owns rather than receives per build: the preconditioner is what the
+#: session was opened with, and the operator stand-in must match the probe the session built for it.
+_SESSION_OWNED = frozenset({"preconditioner", "jacobian_production_viscosity"})
+
+
+class PreconditionerSession(Protocol):
+    """One coupled preconditioner, kept current across every step it serves.
+
+    A session is what a march holds on to between its steps: the frozen inverse, the colouring probe it
+    was materialized with, and the per-step refresh hook. Those must outlive a single forward step -- a
+    Reynolds continuation builds a step per rung, a refresh builds one per segment -- and must be the
+    *same objects* each time, because the inverse and the hooks ride in static fields of the step and a
+    new object recompiles the whole coupled solve.
+
+    Open one with :func:`open_session`.
+
+    Attributes
+    ----------
+    precondition_step : callable or None
+        ``(step, state) -> None``, called by the march before every step to re-fit the inverse at that
+        step's shift; ``None`` for a family with nothing to re-fit.
+    """
+
+    precondition_step: Callable[[ForwardStep, jnp.ndarray], None] | None
+
+    def build(self, state: jnp.ndarray, **march: object) -> ForwardStep:
+        """The forward step at ``state``, configured by the march keywords of :func:`coupled_step`."""
+        ...
+
+    def refresh(
+        self,
+        state: jnp.ndarray,
+        previous: ForwardStep,
+        residual_norm: ResidualNorm,
+        **march: object,
+    ) -> ForwardStep:
+        """Re-freeze at the developed ``state``, keeping ``residual_norm`` as the progress measure."""
+        ...
+
+    def rebind(self, coupled: CoupledRANS) -> None:
+        """Point the session at another companion of the same case, such as the next Reynolds rung."""
+        ...
+
+
+def _resolved_regime(
+    base: _ForwardSolveRegime,
+    rtol: float | None,
+    restart: int | None,
+    max_restarts: int | None,
+) -> _ForwardSolveRegime:
+    """A family's forward-solve regime with any explicitly given setting in place of its default."""
+    return _ForwardSolveRegime(
+        base.rtol if rtol is None else rtol,
+        base.restart if restart is None else restart,
+        base.max_restarts if max_restarts is None else max_restarts,
+    )
+
+
+def _march_keywords(march: dict) -> dict:
+    """``march`` bound against :func:`coupled_step`'s signature, with its defaults filled in.
+
+    Binding against the signature, rather than restating each default here, keeps those defaults in one
+    place -- the public signature -- and makes an unknown keyword a :exc:`TypeError` at the call.
+    """
+    owned = sorted(_SESSION_OWNED & set(march))
+    if owned:
+        raise TypeError(
+            f"{owned} belong to the session, not to one of its builds: the preconditioner is the one "
+            "the session was opened with, and the operator stand-in must match the probe it built. "
+            "Pass them to open_session instead."
+        )
+    bound = inspect.signature(coupled_step).bind(None, None, **march)
+    bound.apply_defaults()
+    arguments = dict(bound.arguments)
+    for name in ("coupled", "reference_state", *_SESSION_OWNED):
+        arguments.pop(name)
+    return arguments
+
+
+class _BlockSession:
+    """The block-diagonal family's session: rebuilt from the transport operators, no Jacobian probe.
+
+    It has no per-step hook, and :meth:`rebind` leaves it on the assembler it was opened with -- the
+    behaviour of the block-diagonal continuation before sessions existed, kept deliberately (a ramp that
+    re-points it at each station is a separate change, #386).
+    """
+
+    precondition_step = None
+
+    def __init__(
+        self,
+        spec: BlockDiagonal,
+        coupled: CoupledRANS,
+        *,
+        jacobian_production_viscosity: bool,
+        on_build: Callable[[ForwardStep], ForwardStep] | None,
+    ) -> None:
+        self._spec = spec
+        self._coupled = coupled
+        self._production_viscosity = jacobian_production_viscosity
+        self._on_build = on_build
+
+    def build(self, state: jnp.ndarray, **march: object) -> ForwardStep:
+        return self._build(state, march, track=True)
+
+    def refresh(
+        self,
+        state: jnp.ndarray,
+        previous: ForwardStep,
+        residual_norm: ResidualNorm,
+        **march: object,
+    ) -> ForwardStep:
+        # Re-derives the k/omega hierarchies on their reused coarsening and rebuilds the shift's
+        # transport time scale, carrying the flow block and the shift's coordinate factor over.
+        return self._finish(
+            self._step(
+                state,
+                {**_march_keywords(march), "residual_norm": residual_norm},
+                reuse=previous.shift_policy,
+            )
+        )
+
+    def rebind(self, coupled: CoupledRANS) -> None:
+        del coupled
+
+    def _build(self, state: jnp.ndarray, march: dict, *, track: bool) -> ForwardStep:
+        del track  # there is no hook to wire
+        return self._finish(self._step(state, _march_keywords(march), reuse=None))
+
+    def _step(
+        self, state: jnp.ndarray, keywords: dict, *, reuse: CoupledShiftPolicy | None
+    ) -> ForwardStep:
+        coupled = self._coupled
+        step_limit, step_projection = _k_positivity_guards(
+            coupled, keywords.pop("positivity_floor"), keywords.pop("positivity_projection")
+        )
+        policy = _coupled_shift_policy(
+            coupled,
+            state,
+            self._spec.resolved_method(),
+            reuse,
+            keywords.pop("shift_basis"),
+            keywords.pop("velocity_shift_parts"),
+            keywords.pop("turbulence_damping"),
+            **self._spec.flow_block_options(),
+        )
+        regime = _resolved_regime(
+            _BLOCK_FORWARD,
+            keywords.pop("forward_rtol"),
+            keywords.pop("forward_restart"),
+            keywords.pop("forward_max_restarts"),
+        )
+        return _coupled_step(
+            coupled,
+            state,
+            policy,
+            regime=regime,
+            step_limit=step_limit,
+            step_projection=step_projection,
+            jacobian_production_viscosity=self._production_viscosity,
+            **keywords,
+        )
+
+    def _finish(self, step: ForwardStep) -> ForwardStep:
+        return step if self._on_build is None else self._on_build(step)
+
+
+class _MaterializedSession:
+    """The materialized-Jacobian family's session: one probe, one inverse and one refresh hook.
+
+    Everything expensive or identity-bearing is created at most once. The probe (a colouring plan and
+    its de-compression map, the largest allocation a three-dimensional case makes) and the refresh hook
+    are created on first use; the inverse is fitted on the first :meth:`build`, at that build's
+    assembler, state and ``build_beta``, and every later build glues that same object in. The two
+    callables handed to the march -- :attr:`precondition_step` and the mid-step refresh -- are created
+    when the session is opened, so every step built from it carries the identical objects.
+    """
+
+    def __init__(
+        self,
+        spec: MaterializedJacobian,
+        coupled: CoupledRANS,
+        *,
+        jacobian_production_viscosity: bool,
+        observer: Callable[[RefreshTiming], None] | None,
+        reports: dict[str, Callable[[str], None]],
+        on_build: Callable[[ForwardStep], ForwardStep] | None,
+        precondition_wrapper: Callable[[Callable], Callable] | None,
+        inverse_wrapper: Callable[[str, Callable], Callable] | None,
+    ) -> None:
+        self._spec = spec
+        self._coupled = coupled
+        self._production_viscosity = jacobian_production_viscosity
+        self._observer = observer
+        self._reports = reports
+        self._on_build = on_build
+        self._inverse_wrapper = inverse_wrapper
+        self._probe: CoupledJacobianProbe | None = None
+        self._hook: Callable | None = None
+        self._preconditioner: object | None = None
+
+        def precondition_step(active_step: ForwardStep, state: jnp.ndarray) -> None:
+            self._refresh_hook()(active_step, state)
+
+        def refresh_at(iterate: jnp.ndarray) -> None:
+            self._refresh_hook().refresh_at(iterate)
+
+        self._refresh_at = refresh_at
+        self.precondition_step = (
+            precondition_step
+            if precondition_wrapper is None
+            else precondition_wrapper(precondition_step)
+        )
+
+    def build(self, state: jnp.ndarray, **march: object) -> ForwardStep:
+        return self._build(state, march, track=True)
+
+    def refresh(
+        self,
+        state: jnp.ndarray,
+        previous: ForwardStep,
+        residual_norm: ResidualNorm,
+        **march: object,
+    ) -> ForwardStep:
+        del previous  # the shared inverse is re-fitted in place, not re-derived from the old step
+        step = self._build(state, march, track=True)
+        if self._hook is not None:
+            # The standing inverse was fitted before the march moved; force the next refresh to be full.
+            self._hook.rebind(self._coupled)
+        return eqx.tree_at(lambda c: c.residual_norm, step, residual_norm)
+
+    def rebind(self, coupled: CoupledRANS) -> None:
+        current = self._coupled
+        if (
+            coupled.layout.size != current.layout.size
+            or coupled.layout.n_fields != current.layout.n_fields
+        ):
+            raise ValueError(
+                "a session can only be re-pointed at another companion of the SAME case: its colouring "
+                f"probe was built for a {current.layout.n_fields}-field state of size "
+                f"{current.layout.size}, and this assembler has {coupled.layout.n_fields} fields and "
+                f"size {coupled.layout.size}."
+            )
+        self._coupled = coupled
+        if self._hook is not None:
+            self._hook.rebind(coupled)
+
+    def _build(self, state: jnp.ndarray, march: dict, *, track: bool) -> ForwardStep:
+        keywords = _march_keywords(march)
+        if _is_traced((self._coupled, state)):
+            raise ValueError(
+                "a materialized-Jacobian preconditioner is assembled off the jit path from concrete "
+                "arrays, so it cannot be built under jax.grad (or any JAX transform). Build the step "
+                "with concrete parameters outside the transform and pass it as `continuation`; the "
+                "adjoint reuses the same frozen inverse, so the gradient is unchanged."
+            )
+        coupled = self._coupled
+        # Before any inverse is fitted: a misconfigured floor is a caller mistake, and the multigrid
+        # families import an optional dependency the check must not wait on.
+        step_limit, step_projection = _k_positivity_guards(
+            coupled, keywords.pop("positivity_floor"), keywords.pop("positivity_projection")
+        )
+        base = _monolithic_shift_source(
+            coupled,
+            state,
+            keywords.pop("shift_basis"),
+            keywords.pop("velocity_shift_parts"),
+            keywords.pop("turbulence_damping"),
+        )
+        if self._preconditioner is None:
+            self._preconditioner = self._fit(coupled, state, base)
+        regime = _resolved_regime(
+            _FACTORIZATION_FORWARD
+            if isinstance(self._spec.inverse, CompleteLu)
+            else _VCYCLE_FORWARD,
+            keywords.pop("forward_rtol"),
+            keywords.pop("forward_restart"),
+            keywords.pop("forward_max_restarts"),
+        )
+        if (
+            track
+            and keywords["refresh_on_cycles"] is not None
+            and keywords["inner_refresh"] is None
+        ):
+            keywords["inner_refresh"] = self._refresh_at
+        step = _monolithic_factor_step(
+            coupled,
+            state,
+            base,
+            self._preconditioner,
+            regime=regime,
+            step_limit=step_limit,
+            step_projection=step_projection,
+            jacobian_production_viscosity=self._production_viscosity,
+            **keywords,
+        )
+        return step if self._on_build is None else self._on_build(step)
+
+    def _groups(self) -> FieldGroups:
+        # `[u, v, w, p]` (the saddle) leads, `[k, omega]` (the transported scalars) trail.
+        return FieldGroups.split_before(self._coupled.layout, "k")
+
+    def _probe_for(self) -> CoupledJacobianProbe:
+        if self._probe is None:
+            self._probe = CoupledJacobianProbe.build(
+                self._coupled,
+                **self._spec.probe.settings(),
+                # A split never reads the flow-by-[k, omega] triangle, so its probe need not store it.
+                active_rows=(
+                    self._groups().active_rows()
+                    if isinstance(self._spec.inverse, FieldSplit)
+                    else None
+                ),
+                # The preconditioner must be assembled from the operator the Krylov solve applies.
+                production_viscosity_frozen=self._production_viscosity,
+            )
+        return self._probe
+
+    def _refresh_hook(self) -> Callable:
+        if self._hook is None:
+            beta_floor = self._spec.beta_floor
+            self._hook = _beta_tracking_refresh(
+                self._coupled,
+                # The reach settings are read from the probe passed below; these are not consulted.
+                stencil_reach=3,
+                every_step=isinstance(self._spec.inverse, CompleteLu),
+                observer=self._observer,
+                probe=self._probe_for(),
+                **({} if beta_floor is None else {"beta_floor": beta_floor}),
+            )
+        return self._hook
+
+    def _fit(self, coupled: CoupledRANS, state: jnp.ndarray, base: CoupledShiftPolicy) -> object:
+        probe = self._probe_for()
+        probed = probe.narrow(coupled)
+        frozen = jax.lax.stop_gradient(state)
+
+        def matvec(v):
+            return _jacobian_matvec(probed, frozen, v)
+
+        build_beta = _BUILD_BETA if self._spec.build_beta is None else self._spec.build_beta
+        shift = _frozen_shift_diagonal(base, build_beta, state)
+        inverse = self._spec.inverse
+        if isinstance(inverse, CompleteLu):
+            return MonolithicLuPreconditioner.build(matvec, probe.plan, shift, **inverse.settings())
+
+        def batched_matvec(seeds):
+            return _batched_jacobian_matvec(probed, frozen, seeds)
+
+        probing = {
+            "batched_matvec": batched_matvec,
+            "probe_batch_size": _PROBE_BATCH_SIZE,
+            "structure": probe.structure,
+        }
+        if isinstance(inverse, MonolithicVCycle):
+            return MonolithicAmgPreconditioner.build(
+                matvec, probe.plan, shift, **inverse.settings(), **probing
+            )
+        return FieldSplitAmgPreconditioner.build(
+            matvec,
+            probe.plan,
+            shift,
+            self._groups(),
+            leading_inverse=self._block_inverse("leading"),
+            trailing_inverse=self._block_inverse("trailing"),
+            **probing,
+        )
+
+    def _block_inverse(self, role: str) -> Callable:
+        spec = getattr(self._spec.inverse, role)
+        factory = spec.bound(report=self._reports[role]) if role in self._reports else spec
+        return factory if self._inverse_wrapper is None else self._inverse_wrapper(role, factory)
+
+
+def open_session(
+    preconditioner: BlockDiagonal | MaterializedJacobian | None,
+    coupled: CoupledRANS,
+    *,
+    jacobian_production_viscosity: bool = False,
+    observer: Callable[[RefreshTiming], None] | None = None,
+    reports: dict[str, Callable[[str], None]] | None = None,
+    on_build: Callable[[ForwardStep], ForwardStep] | None = None,
+    precondition_wrapper: Callable[[Callable], Callable] | None = None,
+    inverse_wrapper: Callable[[str, Callable], Callable] | None = None,
+) -> PreconditionerSession:
+    """Open a session for ``preconditioner`` on ``coupled``, doing no array work until it builds.
+
+    Parameters
+    ----------
+    preconditioner : BlockDiagonal, MaterializedJacobian or None
+        What preconditions the march. ``None`` is :class:`BlockDiagonal` with every setting unset.
+    coupled : CoupledRANS
+        The assembler the session builds on until it is re-pointed with ``rebind``.
+    jacobian_production_viscosity : bool
+        Whether the steps this session builds differentiate the frozen-production stand-in of the
+        residual (see :func:`frozen_production_viscosity`). The session's probe is built from the same
+        stand-in, which is why it is fixed here rather than chosen per build: a preconditioner assembled
+        from a different matrix than the one the Krylov solve applies preconditions the wrong problem.
+    observer : callable, optional
+        ``(timing: RefreshTiming) -> None``, told what each refresh of a materialized inverse did and
+        what it cost.
+    reports : dict, optional
+        Where each field-split block inverse sends its build record, keyed ``"leading"`` /
+        ``"trailing"``. Only for a :class:`FieldSplit` whose inverse keeps a record.
+    on_build : callable, optional
+        ``step -> step``, applied to every step the session builds, for instrumenting a driver.
+    precondition_wrapper : callable, optional
+        ``hook -> hook``, wrapping the per-step :attr:`~PreconditionerSession.precondition_step` once, so
+        a driver can observe each call. The session's ``rebind`` is unaffected by it.
+    inverse_wrapper : callable, optional
+        ``(role, factory) -> factory``, wrapping a field-split block-inverse factory before it is used,
+        for a driver that must see the block an inverse is fitted to.
+
+    Returns
+    -------
+    PreconditionerSession
+        The session.
+
+    Raises
+    ------
+    TypeError
+        If ``preconditioner`` is not a spec, or a setting is given that the chosen family cannot use.
+    """
+    spec = BlockDiagonal() if preconditioner is None else preconditioner
+    if isinstance(spec, BlockDiagonal):
+        given = [
+            name
+            for name, value in (
+                ("observer", observer),
+                ("reports", reports),
+                ("precondition_wrapper", precondition_wrapper),
+                ("inverse_wrapper", inverse_wrapper),
+            )
+            if value is not None
+        ]
+        if given:
+            raise TypeError(
+                f"{given} have nothing to act on in the block-diagonal family: it has no per-step "
+                "refresh hook and no field-split block inverses."
+            )
+        return _BlockSession(
+            spec,
+            coupled,
+            jacobian_production_viscosity=jacobian_production_viscosity,
+            on_build=on_build,
+        )
+    if not isinstance(spec, MaterializedJacobian):
+        raise TypeError(
+            "preconditioner must be BlockDiagonal(...) or MaterializedJacobian(...), got "
+            f"{type(spec).__name__}."
+        )
+    reports = dict(reports or {})
+    if (reports or inverse_wrapper is not None) and not isinstance(spec.inverse, FieldSplit):
+        raise TypeError(
+            "reports and inverse_wrapper address field-split block inverses, and "
+            f"{type(spec.inverse).__name__} has none."
+        )
+    unknown = sorted(set(reports) - {"leading", "trailing"})
+    if unknown:
+        raise TypeError(f"reports are keyed 'leading' / 'trailing', got {unknown}.")
+    for role, sink in reports.items():
+        getattr(spec.inverse, role).bound(report=sink)  # refuse a family with no record now
+    return _MaterializedSession(
+        spec,
+        coupled,
+        jacobian_production_viscosity=jacobian_production_viscosity,
+        observer=observer,
+        reports=reports,
+        on_build=on_build,
+        precondition_wrapper=precondition_wrapper,
+        inverse_wrapper=inverse_wrapper,
+    )
+
+
+def coupled_step(
+    coupled: CoupledRANS,
+    reference_state: jnp.ndarray,
+    *,
+    preconditioner: BlockDiagonal | MaterializedJacobian | None = None,
+    jacobian_production_viscosity: bool = False,
+    globalization: Globalization = DEFAULT_GLOBALIZATION,
+    inner_steps: int = 1,
+    inner_tol: float = 0.05,
+    forward_solver: lx.AbstractLinearSolver | None = None,
+    forward_rtol: float | None = None,
+    forward_restart: int | None = None,
+    forward_max_restarts: int | None = None,
+    block_scaled_norm: bool = False,
+    shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
+    velocity_shift_parts: VelocityShiftParts | None = None,
+    turbulence_damping: TurbulenceDamping | float = 1.0,
+    residual_norm: ResidualNorm | None = None,
+    inner_observer: Callable[..., None] | None = None,
+    refresh_on_cycles: int | None = None,
+    inner_refresh: Callable[[jnp.ndarray], None] | None = None,
+    cycle_budget: int | None = None,
+    positivity_floor: float = 0.0,
+    positivity_projection: bool = True,
+    jacobian_gradient_sweeps: int | None = None,
+) -> ForwardStep:
+    """Build the coupled march's forward step with its preconditioner **frozen** at ``reference_state``.
+
+    The one builder for every preconditioner family: which family, and its settings, is the
+    ``preconditioner`` value; everything else configures the march and means the same thing whichever
+    preconditioner is chosen. The step is frozen -- nothing re-fits the inverse as the march moves -- which
+    is what a differentiated solve and a fixed-point test want. A march that should keep its
+    preconditioner current opens a session instead (:func:`open_session`).
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The coupled residual assembler.
+    reference_state : jnp.ndarray
+        The coupled state the preconditioner and the shift diagonal are frozen at.
+    preconditioner : BlockDiagonal or MaterializedJacobian, optional
+        What preconditions the shifted solve. ``None`` is :class:`BlockDiagonal` with every setting unset.
+    jacobian_production_viscosity : bool
+        Differentiate the frozen-production stand-in of the residual in the Krylov operator, and
+        materialize the preconditioner from the same stand-in.
+    forward_rtol, forward_restart, forward_max_restarts : optional
+        The default forward solve's regime. Unset, each takes the chosen family's own: restart ``120``
+        for the block-diagonal family, ``10`` for a complete LU and ``15`` for a multigrid V-cycle or a
+        field split, each at a relative tolerance of ``0.3`` in the march's own progress measure.
+    globalization, inner_steps, inner_tol, forward_solver, block_scaled_norm, shift_basis, velocity_shift_parts, turbulence_damping, residual_norm, inner_observer, refresh_on_cycles, inner_refresh, cycle_budget, positivity_floor, positivity_projection, jacobian_gradient_sweeps
+        The march's settings, each as described on :func:`coupled_continuation`.
+
+    Returns
+    -------
+    ForwardStep
+        A :class:`~aquaflux.solve.PseudoTransientStep`, or a :class:`~aquaflux.solve.DualTimeStep` when
+        ``inner_steps > 1``.
+    """
+    session = open_session(
+        preconditioner, coupled, jacobian_production_viscosity=jacobian_production_viscosity
+    )
+    return session._build(
+        reference_state,
+        {
+            "globalization": globalization,
+            "inner_steps": inner_steps,
+            "inner_tol": inner_tol,
+            "forward_solver": forward_solver,
+            "forward_rtol": forward_rtol,
+            "forward_restart": forward_restart,
+            "forward_max_restarts": forward_max_restarts,
+            "block_scaled_norm": block_scaled_norm,
+            "shift_basis": shift_basis,
+            "velocity_shift_parts": velocity_shift_parts,
+            "turbulence_damping": turbulence_damping,
+            "residual_norm": residual_norm,
+            "inner_observer": inner_observer,
+            "refresh_on_cycles": refresh_on_cycles,
+            "inner_refresh": inner_refresh,
+            "cycle_budget": cycle_budget,
+            "positivity_floor": positivity_floor,
+            "positivity_projection": positivity_projection,
+            "jacobian_gradient_sweeps": jacobian_gradient_sweeps,
+        },
+        track=False,
     )
 
 

@@ -20,6 +20,7 @@ import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 pytest.importorskip("petsc4py")
@@ -27,7 +28,10 @@ pytest.importorskip("petsc4py")
 from aquaflux.solve import DualTimeStep, PseudoTransientStep
 from aquaflux.turbulence import (
     CoupledRANS,
+    MaterializedJacobian,
+    MonolithicVCycle,
     coupled_amg_continuation,
+    coupled_step,
     solve_coupled,
 )
 
@@ -62,6 +66,37 @@ def case():
 
     start = hybrid_initialize(momentum, turbulence)
     return {"coupled": coupled, "start": start}
+
+
+@pytest.mark.slow
+def test_the_monolithic_vcycle_step_is_the_amg_builders_step(case) -> None:
+    """``coupled_step`` with a monolithic V-cycle builds exactly the step the AMG builder builds.
+
+    The sibling comparisons for the other families need no PETSc and live in the unit tier; this one
+    cannot, since PETSc supplies the V-cycle.
+    """
+    coupled = case["coupled"]
+    state = coupled.pack_state(*case["start"])
+    built = coupled_step(
+        coupled,
+        state,
+        preconditioner=MaterializedJacobian(MonolithicVCycle(smoother_fill_levels=SMOOTHER_FILL)),
+        inner_steps=3,
+    )
+    reference = coupled_amg_continuation(
+        coupled, state, smoother_fill_levels=SMOOTHER_FILL, inner_steps=3
+    )
+    assert type(built) is type(reference)
+    built_leaves = jax.tree_util.tree_leaves(eqx.filter(built, eqx.is_array))
+    reference_leaves = jax.tree_util.tree_leaves(eqx.filter(reference, eqx.is_array))
+    assert len(built_leaves) == len(reference_leaves)
+    for mine, theirs in zip(built_leaves, reference_leaves, strict=True):
+        np.testing.assert_array_equal(np.asarray(mine), np.asarray(theirs))
+    v = jnp.asarray(np.random.default_rng(0).normal(size=coupled.layout.size))
+    np.testing.assert_array_equal(
+        np.asarray(built.shift_policy.preconditioner.matvec()(v)),
+        np.asarray(reference.shift_policy.preconditioner.matvec()(v)),
+    )
 
 
 @pytest.mark.slow
