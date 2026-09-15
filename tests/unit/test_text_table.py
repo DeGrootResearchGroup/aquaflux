@@ -43,6 +43,13 @@ def test_an_over_wide_value_widens_its_row_rather_than_being_truncated() -> None
     assert narrow.row((12345.6,)) == "| 12345.6 |"
 
 
+def test_spanning_pads_free_text_to_the_full_width_inside_the_borders(table: TextTable) -> None:
+    """A spanning note is not per-column, so it must fill the table's width edge to edge -- the same
+    width every rule/heading/row line does -- rather than lining up with the column boundaries."""
+    assert table.spanning("cum 42") == "| cum 42                     |"
+    assert len(table.spanning("cum 42")) == table.width
+
+
 def test_a_row_that_does_not_match_the_columns_raises(table: TextTable) -> None:
     """Silently padding or dropping a value would render a table whose columns lie about the data."""
     with pytest.raises(ValueError, match="expected 3 values"):
