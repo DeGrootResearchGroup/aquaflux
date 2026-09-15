@@ -46,6 +46,50 @@ def air_solve(hierarchy, b, *, cycles=1, f_iters=2, c_iters=1):
     return Result(hierarchy, b, cycles)
 """
 
+#: Two builders sharing every parameter -- well above the default `--shared` threshold -- but
+#: constructing two DIFFERENT classes. This is what pins the `or not common` half of the report
+#: condition: a parameter-overlap threshold alone cannot tell "one builder written twice" apart from
+#: "two unrelated builders that happen to take the same options", and dropping the class-match
+#: requirement would report this pair on overlap alone.
+_HIGH_OVERLAP_DIFFERENT_CLASSES = """
+class Alpha:
+    def __init__(self, policy, a=0, b=0, c=0, d=0, e=0, f=0):
+        pass
+
+
+class Beta:
+    def __init__(self, policy, a=0, b=0, c=0, d=0, e=0, f=0):
+        pass
+
+
+def build_alpha(policy, *, a=0, b=0, c=0, d=0, e=0, f=0):
+    return Alpha(policy, a=a, b=b, c=c, d=d, e=e, f=f)
+
+
+def build_beta(policy, *, a=0, b=0, c=0, d=0, e=0, f=0):
+    return Beta(policy, a=a, b=b, c=c, d=d, e=e, f=f)
+"""
+
+#: Two builders of ONE class sharing exactly five parameters -- the default `--shared` threshold
+#: itself, not comfortably above it. This is what pins the boundary comparison: `len(shared) <
+#: args.shared` must report a pair sharing *exactly* the threshold, so a change to `<=` (excluding the
+#: boundary) would silently stop reporting it.
+#: ``policy`` is a positional parameter shared by both signatures too, so it counts toward the shared
+#: set alongside the four keyword-only ones -- five in total, exactly the default threshold.
+_SHARED_AT_DEFAULT_THRESHOLD = """
+class Step:
+    def __init__(self, policy, a=0, b=0, c=0, d=0, slow=None):
+        pass
+
+
+def build_one(policy, *, a=0, b=0, c=0, d=0):
+    return Step(policy, a=a, b=b, c=c, d=d)
+
+
+def build_two(policy, *, a=0, b=0, c=0, d=0, slow=None):
+    return Step(policy, a=a, b=b, c=c, d=d, slow=slow)
+"""
+
 #: The same drifted pair, after the duplicated *body* has been extracted into a shared private tail —
 #: which is the right repair for the body and, on its own, hides the surfaces above it. Neither builder
 #: constructs `Step` any more, so a check that looks only at direct construction reports nothing here
@@ -323,6 +367,33 @@ def test_it_reports_a_duplicated_builder_pair_and_names_the_drift(tmp_path: Path
 def test_it_stays_quiet_for_siblings_that_only_share_a_vocabulary(tmp_path: Path) -> None:
     """Different methods taking similarly-named arguments are not one builder written twice."""
     assert "no sibling-builder pairs" in _run(_DIFFERENT_METHODS, tmp_path)
+
+
+def test_it_stays_quiet_for_high_overlap_builders_that_construct_DIFFERENT_classes(
+    tmp_path: Path,
+) -> None:
+    """Sharing every parameter is not enough on its own -- the two must also build a common class.
+
+    Without the ``or not common`` half of the report condition, a parameter-count threshold alone
+    would flag any two builders that happen to take the same options, however unrelated the objects
+    they build. ``build_alpha``/``build_beta`` share all six parameters (above the default threshold
+    of 5) and construct two different classes, so this pair must stay unreported.
+    """
+    assert "no sibling-builder pairs" in _run(_HIGH_OVERLAP_DIFFERENT_CLASSES, tmp_path)
+
+
+def test_the_shared_parameter_threshold_is_inclusive_of_its_boundary(tmp_path: Path) -> None:
+    """A pair sharing EXACTLY the default ``--shared`` threshold (5) must still be reported.
+
+    ``len(shared) < args.shared`` is a strict comparison, so a pair at the boundary is not one
+    parameter short of being reported -- it is reported. Silently changing the comparison to ``<=``
+    would exclude exactly this boundary case while every fixture elsewhere in this file (each sharing
+    7 parameters) stays unaffected, which is why the boundary needs its own pinned case.
+    """
+    out = _run(_SHARED_AT_DEFAULT_THRESHOLD, tmp_path)
+    assert "1 sibling-builder pair" in out
+    assert "5 shared parameters" in out
+    assert "'slow'" in out
 
 
 def test_it_sees_through_a_shared_private_tail(tmp_path: Path) -> None:

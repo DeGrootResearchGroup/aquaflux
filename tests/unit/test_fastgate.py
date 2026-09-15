@@ -73,6 +73,17 @@ def test_fails():
     assert 1 == 2, "a deliberate failure"
 """
 
+#: A single test marked `slow`, and nothing else in its module -- so the `fast` tier's own marker
+#: expression must deselect it entirely, and only a tier whose expression does NOT exclude `slow`
+#: (`all`) can select and run it.
+_SLOW_MARKED_ONLY = """
+import pytest
+
+@pytest.mark.slow
+def test_a_slow_marked_test():
+    assert True
+"""
+
 
 def _tree(tmp_path: Path, **modules: str) -> Path:
     """A directory holding the given test modules and nothing else."""
@@ -240,6 +251,26 @@ def test_every_tier_name_is_accepted_and_reaches_pytest(tmp_path: Path, tier: st
 
     assert "unknown tier" not in result.stderr
     assert result.returncode == (0 if tier in ("fast", "all") else 5)
+
+
+def test_the_ALL_tier_actually_reaches_SLOW_AND_VALIDATION_marked_tests(tmp_path: Path) -> None:
+    """`all` must run what `slow`/`validation` mark, not merely tolerate an unmarked test passing.
+
+    The tier check above only ever runs an unmarked test, so it cannot tell `all) MARK=''` apart from
+    a silent `all) MARK='not slow and not validation'` -- the latter makes `all` identical to `fast`
+    and every existing assertion in this file still holds. A tree holding exactly one test, marked
+    `slow`, tells them apart: `fast`'s own marker expression must deselect it (pytest's "no tests
+    selected" exit code, 5, exactly as the parametrized case above treats a marker tier over an
+    unmarked tree), while `all` must select and run it.
+    """
+    tree = _tree(tmp_path, test_slow=_SLOW_MARKED_ONLY)
+
+    fast_result = _run(tree, "fast", str(tree))
+    all_result = _run(tree, "all", str(tree))
+
+    assert fast_result.returncode == 5, fast_result.stdout + fast_result.stderr
+    assert all_result.returncode == 0, all_result.stdout + all_result.stderr
+    assert "1 passed" in all_result.stdout
 
 
 def _worker_of(tmp_path: Path, tier: str, source: str, *args: str, **overrides: str) -> str:

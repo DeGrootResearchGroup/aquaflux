@@ -181,6 +181,48 @@ def test_fragile_worktree_is_told_to_drop_the_override_not_to_set_the_repository
     assert "point it at this checkout" not in result.stderr
 
 
+def test_remedy_ALSO_fixes_the_repository_level_when_it_is_wrong_too(tmp_path: Path) -> None:
+    """`_remedy()`'s inner branch: the worktree override is bad AND the repository-level setting is
+    simultaneously wrong -- here, never configured at all.
+
+    The fixture directly above only ever exercises the OUTER half of `_remedy()`: it configures the
+    repository level correctly (`.githooks`) before creating the worktree, so the inner `if` --
+    whether the repository level ALSO needs fixing -- is always false there and that branch never
+    fires. This is the shape a worktree is actually created in more often: hooks were never enabled on
+    the parent checkout at all, and the worktree tooling then writes its own absolute, fragile
+    override on top of that. Dropping the override alone would leave the worktree with nothing
+    configured, so the remedy must name BOTH fixes.
+    """
+    root = _repo(tmp_path)
+    _add_hooks(root)
+    # Deliberately do NOT configure core.hooksPath on the repository -- it stays unset, which is the
+    # second, simultaneous half of the combined failure this branch exists for.
+    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "base"], cwd=root, check=True)
+
+    tree = tmp_path / "tree"
+    subprocess.run(["git", "worktree", "add", "-q", "--detach", str(tree)], cwd=root, check=True)
+    _add_hooks(tree)
+    subprocess.run(["git", "config", "extensions.worktreeConfig", "true"], cwd=tree, check=True)
+    # The worktree override itself is bad -- it points outside this checkout, at the parent
+    # repository's hooks -- which is what reaches `_remedy()` via the "fragile" branch.
+    subprocess.run(
+        ["git", "config", "--worktree", "core.hooksPath", str(root / ".githooks")],
+        cwd=tree,
+        check=True,
+    )
+
+    result = _run(tree)
+
+    assert result.returncode == 0
+    assert "fragile" in result.stderr
+    assert "--worktree --unset core.hooksPath" in result.stderr
+    # The combined-failure message: since the repository level is ALSO wrong (unset, not
+    # ".githooks"), the remedy must additionally tell the contributor to fix it -- dropping only the
+    # override would leave the worktree with core.hooksPath unset, which is no better than before.
+    assert "then point the repository at each checkout" in result.stderr
+    assert "git config core.hooksPath .githooks" in result.stderr
+
+
 def test_silent_when_absolute_path_is_this_checkout(tmp_path: Path) -> None:
     """An absolute path naming this checkout's own .githooks is not fragile."""
     root = _repo(tmp_path)
