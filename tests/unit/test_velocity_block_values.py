@@ -25,6 +25,7 @@ from aquaflux.flow import (
     ConvectionTwoLevel,
     MomentumContinuity,
     NoSlipWall,
+    VelocityBlock,
     ViscousMultilevel,
 )
 from aquaflux.flow.block_preconditioner import (
@@ -32,6 +33,7 @@ from aquaflux.flow.block_preconditioner import (
     SmoothedAmgVelocity,
     TwoLevelConvectionVelocity,
     _characteristic_reference_state,
+    _ConvectionVelocityBlock,
     _VelocityGeometry,
 )
 from aquaflux.mesh import structured_grid_2d
@@ -111,10 +113,20 @@ def test_the_two_level_smoother_settings_reach_the_strategy() -> None:
 
 @pytest.mark.parametrize("value", [ConvectionTwoLevel(), ConvectionAir()], ids=["two-level", "air"])
 def test_a_convection_value_with_no_reference_flux_says_so_and_names_itself(value) -> None:
+    """The warning names the value asked for, and is attributed to the line that called the builder.
+
+    It is raised two frames below that call, inside the value's own build, so a wrong ``stacklevel``
+    points a reader at library internals instead of at the code that asked for a convection block.
+    """
     with pytest.warns(
         RuntimeWarning, match=rf"{type(value).__name__}\(\) was requested.*no mass flux"
-    ):
+    ) as record:
         BlockPreconditioner.build(_closed(), velocity=value)
+    flux_warnings = [w for w in record if "no mass flux" in str(w.message)]
+    assert [w.filename for w in flux_warnings] == [__file__], (
+        "the zero-flux warning is not attributed to the caller of BlockPreconditioner.build: "
+        f"{[w.filename for w in flux_warnings]}"
+    )
 
 
 def test_the_viscous_value_is_the_default_and_says_nothing_on_a_closed_domain() -> None:
@@ -146,3 +158,14 @@ def test_a_velocity_string_is_refused_by_the_builder_and_by_the_spec(string) -> 
         BlockPreconditioner.build(_channel(2.0), velocity=string)
     with pytest.raises(TypeError, match="velocity-block value"):
         BlockDiagonal(velocity=string)
+
+
+@pytest.mark.parametrize("base", [VelocityBlock, _ConvectionVelocityBlock])
+def test_an_abstract_velocity_block_is_refused_where_it_is_written(base) -> None:
+    """An abstract block passes an ``isinstance`` check and has nothing to build.
+
+    Accepted, it reached :meth:`BlockPreconditioner.build`, which built the pressure Schur and then
+    failed on an empty ``NotImplementedError``. Construction is where it is refused, naming the values.
+    """
+    with pytest.raises(TypeError, match=r"abstract velocity block.*ConvectionTwoLevel\(\)"):
+        base()

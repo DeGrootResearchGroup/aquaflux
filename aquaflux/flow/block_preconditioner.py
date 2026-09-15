@@ -516,7 +516,7 @@ class AirConvectionVelocity(_RescaledAmgVelocity):
 
 
 @dataclasses.dataclass(frozen=True)
-class VelocityBlock(SettingsValue):
+class VelocityBlock(SettingsValue, abc.ABC):
     """Which velocity block :meth:`BlockPreconditioner.build` fits, and its settings, as a value.
 
     The velocity block is fitted to a frozen momentum operator and coarsened by a multigrid hierarchy.
@@ -524,10 +524,29 @@ class VelocityBlock(SettingsValue):
     operator, so it cannot coarsen the convection-diffusion one -- so each value names one exercised
     pairing, and carries only the settings that apply to it. Every field defaults to ``None``, meaning
     "not set here": only set fields reach the strategy, whose own defaults stay the only defaults.
+
+    This class is abstract: construct :class:`ViscousMultilevel`, :class:`ConvectionTwoLevel` or
+    :class:`ConvectionAir`.
+
+    Raises
+    ------
+    TypeError
+        If an abstract velocity block is constructed. Refused here, where it is written, rather than
+        once :meth:`BlockPreconditioner.build` reaches the block -- by which point the pressure Schur
+        has already been built, and an abstract block has nothing to build.
     """
 
+    def __new__(cls, *args: object, **kwargs: object) -> VelocityBlock:
+        if cls.__abstractmethods__:
+            raise TypeError(
+                f"{cls.__name__} is an abstract velocity block; construct ViscousMultilevel(), "
+                "ConvectionTwoLevel() or ConvectionAir()."
+            )
+        return super().__new__(cls)
+
+    @abc.abstractmethod
     def _build(self, geometry: _VelocityGeometry, inputs: _StrategyInputs) -> VelocityBlockSolver:
-        raise NotImplementedError
+        """Build the strategy this value names, from the builder's resolved inputs."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -559,8 +578,9 @@ class _ConvectionVelocityBlock(VelocityBlock):
     it is zero, so a subclass names only its strategy and the settings it forwards.
     """
 
+    @abc.abstractmethod
     def _strategy_class(self) -> type:
-        raise NotImplementedError
+        """The velocity-block strategy this value builds."""
 
     def _strategy_settings(self, inputs: _StrategyInputs) -> dict[str, object]:
         return self.settings()
