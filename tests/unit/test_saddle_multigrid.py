@@ -15,14 +15,32 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 from aquaflux.solve import SimpleSmoothed, SimpleSmoothedInverse, block_approximate_inverse
-from aquaflux.solve.saddle_multigrid import _simple_pieces, _simple_smoothed_cycle
+from aquaflux.solve.saddle_multigrid import (
+    _simple_correction,
+    _simple_pieces,
+    _simple_smoothed_cycle,
+)
 
 
-def _saddle(n_cells: int = 240, dim: int = 3, seed: int = 0) -> sp.csr_matrix:
+def _saddle(
+    n_cells: int = 240,
+    dim: int = 3,
+    seed: int = 0,
+    *,
+    velocity_pressure_coupling: float = 0.12,
+) -> sp.csr_matrix:
     """A field-major generalized saddle block on a chain graph, diagonally dominant in velocity.
 
     ``D != G^T`` and the (2,2) block is nonzero, so this is the operator class the smoother targets
     rather than a classical Stokes saddle.
+
+    ``velocity_pressure_coupling`` scales only the velocity-pressure cross terms (the entries feeding
+    ``D`` and ``G``); the intra-velocity off-diagonal stays at the same ``0.12`` scale the default also
+    uses, so the velocity block itself stays strongly diagonally dominant however this is set. At the
+    default it reproduces the original single-scale fixture exactly (same value, same draw order from
+    ``rng``, so the matrix is bit-identical). Raised well above the default, the velocity-block Jacobi
+    predictor alone is no longer enough to reduce the residual — see
+    ``test_the_schur_correction_sign_is_load_bearing``, which needs exactly that.
     """
     rng = np.random.default_rng(seed)
     n_fields = dim + 1
@@ -39,8 +57,10 @@ def _saddle(n_cells: int = 240, dim: int = 3, seed: int = 0) -> sp.csr_matrix:
                         value = 9.0  # velocity: strongly diagonally dominant
                     elif diagonal:
                         value = 0.35  # pressure: small but nonzero, the Rhie--Chow damping
+                    elif row_field < dim and col_field < dim:
+                        value = rng.normal() * 0.12  # intra-velocity: kept weak
                     else:
-                        value = rng.normal() * 0.12
+                        value = rng.normal() * velocity_pressure_coupling
                     rows.append(row_field * n_cells + cell)
                     cols.append(col_field * n_cells + other)
                     vals.append(value)
@@ -66,6 +86,46 @@ def test_the_inverse_reduces_the_true_residual() -> None:
 
     assert np.all(np.isfinite(x))
     assert np.linalg.norm(a @ x - b) / np.linalg.norm(b) < 0.75
+
+
+def test_the_schur_correction_sign_is_load_bearing() -> None:
+    """Isolates ``_simple_correction`` itself, where the full-hierarchy test above cannot.
+
+    On the default fixture (velocity-pressure coupling 0.12) the velocity block is so diagonally
+    dominant that the predictor alone -- ignoring the pressure correction entirely -- already clears
+    the full-hierarchy test's bound, so a sign error in the Schur right-hand side
+    (``rhs = pressure_residual - pieces.divergence.apply(predictor)`` becoming ``+``, #409) moves the
+    residual-reduction ratio from 0.031 to 0.034: real, but far too small a gap for any bound on the
+    full multigrid V-cycle to separate from ordinary seed-to-seed noise.
+
+    Two changes make the sign load-bearing here, and both are needed. First, this calls
+    ``_simple_correction`` directly -- ONE relaxation sweep on the fine level, no hierarchy, no coarse
+    grid -- so nothing outside the function under test can compensate for its sign. Second, the fixture
+    raises ``velocity_pressure_coupling`` to 2.0 (vs. the default 0.12), which is far stronger than this
+    discretization's own Rhie--Chow coupling but is exactly what the issue's acceptance criteria call
+    for: coupling strong enough that the Schur correction, not the velocity predictor alone, decides
+    whether the sweep contracts the residual at all. (Raising the coupling this much in the OTHER
+    tests' fixture breaks the multigrid hierarchy itself -- coarsening and smoothing this saddle no
+    longer converges in one V-cycle regardless of the Schur sign -- which is why this is a narrowly
+    scoped companion test rather than a change to the shared fixture's default.)
+
+    Measured under: ``n_cells=240, dim=3`` (the module default), ``pressure_sweeps=4,
+    pressure_omega=1.0`` (``SimpleSmoothedInverse``'s defaults), ``frobenius=True,
+    schur_frobenius=True`` (also its defaults), fixture seed 0, right-hand side
+    ``np.random.default_rng(1)``. At those settings one correct sweep measures a true-residual ratio of
+    0.873; the sign-flipped RHS measures 1.020 -- the correction stops even contracting the residual.
+    The 0.95 bound sits with real margin on both sides of that gap.
+    """
+    a = _saddle(velocity_pressure_coupling=2.0)
+    pieces, _ = _simple_pieces(a, block_size=4, frobenius=True, schur_frobenius=True)
+    b = np.asarray(np.random.default_rng(1).normal(size=a.shape[0]))
+
+    x = np.asarray(
+        _simple_correction(pieces, jnp.asarray(b), pressure_sweeps=4, pressure_omega=1.0)
+    )
+
+    assert np.all(np.isfinite(x))
+    assert np.linalg.norm(a @ x - b) / np.linalg.norm(b) < 0.95
 
 
 def test_the_cycle_is_a_fixed_linear_operator() -> None:

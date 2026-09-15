@@ -59,6 +59,35 @@ def test_amg_vcycle_reduces_the_residual() -> None:
     assert ratio < 0.7  # a single multigrid cycle removes most of the residual
 
 
+def test_smoother_sweeps_is_forwarded_to_the_level_smoother() -> None:
+    """``smoother_sweeps`` must actually reach ``mg_levels_ksp_max_it``, not just build something finite.
+
+    More stationary Richardson-ILU sweeps per level visit contract the residual further, so on the same
+    2D model Poisson (``n=40``, all other options at their defaults: ILU(1) fill, plain aggregation, no
+    coarse-equation limit), one sweep measures 0.0507 against four sweeps' 0.0196 -- comfortably
+    separated. Hardcoding ``mg_levels_ksp_max_it`` to a fixed value inside :meth:`AmgVCycle._configure`
+    (ignoring ``self._smoother_sweeps``) would build the identical V-cycle at both settings and this
+    ratio would not move, which is what the assertion below actually checks -- not just that each build
+    is finite.
+    """
+    a = _laplacian_2d(40)
+    b = np.random.default_rng(0).standard_normal(a.shape[0])
+
+    def ratio_at(smoother_sweeps: int) -> float:
+        vcycle = build_amg_vcycle(a, n_fields=1, smoother_sweeps=smoother_sweeps)
+        x = vcycle.apply(b)
+        return np.linalg.norm(a @ x - b) / np.linalg.norm(b)
+
+    ratio_one_sweep = ratio_at(1)
+    ratio_four_sweeps = ratio_at(4)
+    # A comfortable margin below the measured ~2.6x gap (0.0507 / 0.0196): a forwarded knob should not
+    # need to be this close to a coincidence to be caught.
+    assert ratio_four_sweeps < 0.7 * ratio_one_sweep, (
+        "more smoother sweeps did not contract the residual further -- smoother_sweeps may not be "
+        "reaching the level smoother"
+    )
+
+
 def _with_stored_zeros(a: sp.csr_matrix, per_row: int = 3) -> sp.csr_matrix:
     """``a`` padded with exactly-zero entries at positions it does not already store.
 
