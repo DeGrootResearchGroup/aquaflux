@@ -471,7 +471,13 @@ attached, so it reuses that function unchanged.
   by feeding it a *generated* grid, which genuinely is not interior-first (its `left` patch occupies
   faces 0–2 while the interior starts at 3) — a standing counter-example, not a contrived one. A
   separate test pins that a periodic mesh (`structured_grid_2d(periodic=("x",))`, standing in for a
-  fused cyclic mesh) is refused directly, not by that same positional check.
+  fused cyclic mesh) is refused directly, not by that same positional check. The committed two-cube
+  fixture's `boundary` file happens to declare its patches in the same order their faces occupy, so
+  a further hand-built case (`two_cube_polymesh_data()._replace(patches=...)`, reordering the
+  declared patches without moving their face ranges) declares them out of ascending-startFace order
+  and checks the same encode-your-own-face-index placement on it — the case that distinguishes
+  "laid out by startFace" from "laid out in file/declaration order," which the committed fixture
+  alone cannot.
 
 ## The interior placement is MEASURED, not only argued (bfs3d, 2026-08-17)
 
