@@ -150,3 +150,22 @@ def test_a_point_s_loop_and_forward_values_merge_field_by_field_over_the_shared_
     merged = merged_march_options(base, override)
     assert merged["dual_time"] == DualTimeLoop(inner_steps=5, cycle_budget=20)
     assert merged["forward"] == ForwardSolve(rtol=0.1, restart=15)
+
+
+def test_a_point_s_globalization_merges_field_by_field_too() -> None:
+    """The oldest march value merges like the three newer ones, rather than being replaced whole."""
+    from aquaflux.solve import Globalization
+
+    merged = merged_march_options(
+        {"globalization": Globalization(beta0=2.0, line_search=10)},
+        {"globalization": Globalization(line_search=3)},
+    )["globalization"]
+    assert (merged.beta0, merged.line_search) == (2.0, 3)
+
+
+def test_an_unset_field_takes_the_shared_setting_rather_than_the_family_default() -> None:
+    """The documented limit of the merge: ``None`` cannot ask for the default back over a shared setting."""
+    merged = merged_march_options(
+        {"forward": ForwardSolve(rtol=1e-2)}, {"forward": ForwardSolve(restart=30)}
+    )["forward"]
+    assert merged == ForwardSolve(rtol=1e-2, restart=30)

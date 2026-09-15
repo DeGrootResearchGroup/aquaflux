@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 import equinox as eqx
 
-from aquaflux.solve.settings_value import SettingsValue
+from aquaflux.solve import SettingsValue, filled_from
 
 if TYPE_CHECKING:
     from aquaflux.solve import ShiftBasis, VelocityShiftParts
@@ -61,26 +61,8 @@ class ShiftSettings(eqx.Module):
     turbulence_damping: TurbulenceDamping | float | None = None
 
     def filled_from(self, base: ShiftSettings) -> ShiftSettings:
-        """This value, with each field it leaves unset taken from ``base``.
-
-        Parameters
-        ----------
-        base : ShiftSettings
-            The settings to fall back on.
-
-        Returns
-        -------
-        ShiftSettings
-            A copy whose set fields are this value's and whose unset fields are ``base``'s.
-        """
-        return dataclasses.replace(
-            self,
-            **{
-                field.name: getattr(base, field.name)
-                for field in dataclasses.fields(self)
-                if getattr(self, field.name) is None
-            },
-        )
+        """These settings, with each field left unset taken from ``base`` (see :func:`~aquaflux.solve.filled_from`)."""
+        return filled_from(self, base)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -112,28 +94,6 @@ class ForwardSolve(SettingsValue):
     restart: int | None = None
     max_restarts: int | None = None
 
-    def filled_from(self, base: ForwardSolve) -> ForwardSolve:
-        """This value, with each field it leaves unset taken from ``base``.
-
-        Parameters
-        ----------
-        base : ForwardSolve
-            The settings to fall back on.
-
-        Returns
-        -------
-        ForwardSolve
-            A copy whose set fields are this value's and whose unset fields are ``base``'s.
-        """
-        return dataclasses.replace(
-            self,
-            **{
-                field.name: getattr(base, field.name)
-                for field in dataclasses.fields(self)
-                if getattr(self, field.name) is None
-            },
-        )
-
 
 def merged_march_options(base: dict[str, object], override: dict[str, object]) -> dict[str, object]:
     """Two sets of march options as one, with a settings value merged field by field.
@@ -143,7 +103,14 @@ def merged_march_options(base: dict[str, object], override: dict[str, object]) -
     options carrying ``ShiftSettings(basis=...)`` and a point returning
     ``ShiftSettings(turbulence_damping=...)`` would lose the basis without a word, where the same two
     settings as separate keywords combine. So when both sides give the same key a value of the same
-    settings type, the point's value keeps the fields it sets and takes the rest from the shared one.
+    settings type -- a :class:`ShiftSettings`, :class:`ForwardSolve`,
+    :class:`~aquaflux.solve.DualTimeLoop` or :class:`~aquaflux.solve.Globalization` -- the point's value
+    keeps the fields it sets and takes the rest from the shared one (:func:`~aquaflux.solve.filled_from`).
+
+    ⚠️ **A point cannot reset a shared field to its default through a value.** Leaving the field unset
+    takes the shared setting. Write the default out where it is a number; where the default is ``None``
+    itself -- ``ShiftSettings.velocity_parts``, say -- keep that setting out of the shared options and set
+    it per point instead.
 
     Parameters
     ----------

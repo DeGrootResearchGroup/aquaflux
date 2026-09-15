@@ -45,7 +45,7 @@ from .line_search_growth import LineSearchGrowth, MonotoneLineSearch
 from .linear import corrected_cycles, solve_linear
 from .norm import ResidualNorm
 from .relaxation import RelaxationSchedule, SwitchedEvolutionRelaxation
-from .settings_value import SettingsValue
+from .settings_value import SettingsValue, filled_from
 
 # Inexact-Newton forward solver for the pseudo-transient march: a loose *relative* tolerance (each
 # shifted step need only make Newton progress; the next step corrects the leftover) but a *tight*
@@ -1309,12 +1309,25 @@ class Globalization(eqx.Module):
         TypeError
             If ``base`` names a field this class does not have.
         """
-        filled = {
-            name: value
-            for name, value in _supplied(type(self), base).items()
-            if getattr(self, name) is None
-        }
-        return dataclasses.replace(self, **filled)
+        return filled_from(self, type(self)(**_supplied(type(self), base)))
+
+    def filled_from(self, base: Globalization) -> Globalization:
+        """This configuration, with each field it leaves unset taken from another's.
+
+        How a Reynolds continuation combines one point's ``Globalization`` with the shared one, field by
+        field (see :func:`~aquaflux.solve.filled_from`).
+
+        Parameters
+        ----------
+        base : Globalization
+            The configuration to fall back on.
+
+        Returns
+        -------
+        Globalization
+            A copy whose set fields are this object's and whose unset fields are ``base``'s.
+        """
+        return filled_from(self, base)
 
     def _schedule(self) -> dict[str, object]:
         """``relaxation_schedule``, if this object sets any of the three fields that describe one."""
@@ -1459,28 +1472,6 @@ class DualTimeLoop(SettingsValue):
                 "escalation ladder and its own line search. For it, leave the dual-time loop out "
                 "(dual_time=None)."
             )
-
-    def filled_from(self, base: DualTimeLoop) -> DualTimeLoop:
-        """This value, with each field it leaves unset taken from ``base``.
-
-        Parameters
-        ----------
-        base : DualTimeLoop
-            The settings to fall back on.
-
-        Returns
-        -------
-        DualTimeLoop
-            A copy whose set fields are this value's and whose unset fields are ``base``'s.
-        """
-        return dataclasses.replace(
-            self,
-            **{
-                field.name: getattr(base, field.name)
-                for field in dataclasses.fields(self)
-                if getattr(self, field.name) is None
-            },
-        )
 
 
 #: Nothing overridden: every builder that takes a :class:`Globalization` applies its own defaults.
