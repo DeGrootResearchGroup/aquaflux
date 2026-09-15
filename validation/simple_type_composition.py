@@ -53,9 +53,11 @@ from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import (
     BlockPreconditioner,
+    ConvectionTwoLevel,
     MomentumContinuity,
     NoSlipWall,
     PressureOutlet,
+    VelocityBlock,
     VelocityInlet,
     momentum_continuation,
 )
@@ -96,7 +98,9 @@ def channel(nx: int, ny: int, mu: float, u_in: float = 1.0) -> MomentumContinuit
 
 def developing(assembler: MomentumContinuity, rtol: float) -> jnp.ndarray:
     """March to a developed but deliberately *unconverged* state -- see the module docstring."""
-    continuation = momentum_continuation(assembler, schur_scaling="msimple", velocity="convection")
+    continuation = momentum_continuation(
+        assembler, schur_scaling="msimple", velocity=ConvectionTwoLevel()
+    )
     return ImplicitNewtonSolver(
         max_steps=200, rtol=rtol, atol=0.0, forward_step=continuation
     ).solve(lambda state, asm: asm.residual(state), assembler.initial_state(), assembler)
@@ -107,7 +111,7 @@ def probe(
     state: jnp.ndarray,
     scaling: str,
     composition: str,
-    velocity: str = "convection",
+    velocity: VelocityBlock | None = None,
 ) -> tuple[int, float, float]:
     """Solve the real Newton system with one arm; return (restart cycles, TRUE rel, wall)."""
     residual = assembler.residual(state)
@@ -116,7 +120,10 @@ def probe(
         return jax.jvp(assembler.residual, (state,), (v,))[1]
 
     m = BlockPreconditioner.build(
-        assembler, schur_scaling=scaling, composition=composition, velocity=velocity
+        assembler,
+        schur_scaling=scaling,
+        composition=composition,
+        velocity=ConvectionTwoLevel() if velocity is None else velocity,
     ).factory()(state)
     operator = lx.FunctionLinearOperator(
         lambda y: jvp(m(y)), jax.ShapeDtypeStruct(residual.shape, residual.dtype)

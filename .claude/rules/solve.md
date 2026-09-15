@@ -49,6 +49,14 @@ coupled-preconditioner specs in `turbulence/preconditioner_spec.py` derive from 
 comprehension is written once rather than per configuration family. `BlockInverse` is public so a
 configuration can *require* a value rather than an arbitrary `(block, n_fields)` callable
 (`FieldSplit` does). There is no `_BlockInverseSpec`; that was its private name for one commit.
+**An abstract family base is refused at construction, in one place: `SettingsValue.__new__` (#398
+review).** `BlockInverse` and `flow.VelocityBlock` (and the private `_ConvectionVelocityBlock`) derive from
+`abc.ABC` with an abstract method, and constructing any such base raises `TypeError` naming the family's
+public concrete members (found from `__subclasses__`, private and abstract ones omitted). Before, a bare
+`BlockInverse()` or `VelocityBlock()` passed the `isinstance` refusals on `FieldSplit` / `BlockDiagonal` /
+`BlockPreconditioner.build` and failed only at build, on an empty `NotImplementedError` — for the velocity
+block after the pressure Schur was already built. A new family base gets this by deriving from `abc.ABC`
+and marking its build hook abstract; do not add a per-family `__new__`.
 
 ## Responsibility
 - A Newton driver on `R(state, params) = 0` using the AD Jacobian (JVP/VJP), and a

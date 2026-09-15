@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import dataclasses
 
+from aquaflux.flow import VelocityBlock
 from aquaflux.solve import BlockInverse, SettingsValue
 
 __all__ = [
@@ -94,8 +95,8 @@ class BlockDiagonal(SettingsValue):
 
     Assembled from the transport operators at a reference state, with no Jacobian materialized. Every
     field but ``method`` is the keyword of the same name on
-    :meth:`~aquaflux.flow.BlockPreconditioner.build`; unset, the coupled march takes the convection-aware
-    velocity block and a strength threshold of ``0.25``, and every other setting takes that builder's own
+    :meth:`~aquaflux.flow.BlockPreconditioner.build`; unset, the coupled march takes
+    :class:`~aquaflux.flow.ConvectionTwoLevel` as the velocity block and a strength threshold of ``0.25``, and every other setting takes that builder's own
     default. That builder's ``reference_state`` is not a setting: the coupled march supplies it.
 
     Attributes
@@ -109,12 +110,19 @@ class BlockDiagonal(SettingsValue):
     """
 
     method: str | None | _Unset = _UNSET
-    velocity: str | None = None
+    velocity: VelocityBlock | None = None
     schur_scaling: str | None = None
     composition: str | None = None
     mass_scale: float | None = None
     v_cycles: int | None = None
     strength_threshold: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.velocity is not None and not isinstance(self.velocity, VelocityBlock):
+            raise TypeError(
+                "BlockDiagonal.velocity must be a velocity-block value such as ConvectionTwoLevel(), "
+                f"ViscousMultilevel() or ConvectionAir(), got {self.velocity!r}."
+            )
 
     def resolved_method(self) -> str | None:
         """The scalar multigrid this spec selects, with an unset ``method`` resolved to its default.

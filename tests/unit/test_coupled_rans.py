@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import DifferenceRow, FirstOrderUpwind, LogRatioRow
-from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall
+from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall, ViscousMultilevel
 from aquaflux.flow.state import flow_state_layout
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
@@ -826,7 +826,7 @@ def test_refreshing_the_policy_rebuilds_transport_and_carries_the_coordinate_fac
     cold = _healthy_state(mesh, coupled, seed=0)
     developed = _healthy_state(mesh, coupled, seed=1)  # a *different*, more-developed reference
 
-    kw = dict(velocity="smoothed")
+    kw = dict(velocity=ViscousMultilevel())
     base = _coupled_shift_policy(coupled, cold, None, **kw)
     refreshed = _coupled_shift_policy(coupled, developed, None, base, **kw)
     rebuilt = _coupled_shift_policy(coupled, developed, None, **kw)
@@ -856,7 +856,7 @@ def test_refresh_carries_the_block_scaled_progress_norm_fixed_at_the_initial_sta
     mesh, coupled = _cavity()
     cold = _healthy_state(mesh, coupled, seed=0)
     developed = _healthy_state(mesh, coupled, seed=1)
-    spec = BlockDiagonal(method=None, velocity="smoothed")
+    spec = BlockDiagonal(method=None, velocity=ViscousMultilevel())
     session = open_session(spec, coupled)
 
     base = session.build(cold, block_scaled_norm=True)

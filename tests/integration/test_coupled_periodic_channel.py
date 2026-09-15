@@ -34,7 +34,7 @@ import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
-from aquaflux.flow import MomentumContinuity, NoSlipWall
+from aquaflux.flow import ConvectionTwoLevel, MomentumContinuity, NoSlipWall
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
@@ -45,7 +45,7 @@ RHO, U_B, H = 1.0, 1.0, 2.0
 RE_B, NY, GROWTH, BETA0 = 20000, 48, 1.13, 0.004
 NU = U_B * H / RE_B  # 1e-4
 K_FLOOR = 1e-8  # the hybrid IC's floor; asserted strictly inactive at the converged state
-PRECONDITIONER = {"velocity": "convection"}
+PRECONDITIONER = {"velocity": ConvectionTwoLevel()}
 MAX_STEPS = 300
 
 

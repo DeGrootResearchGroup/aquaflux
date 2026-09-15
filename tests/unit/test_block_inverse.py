@@ -10,6 +10,7 @@ import pytest
 import scipy.sparse as sp
 from aquaflux.solve import (
     AirReduction,
+    BlockInverse,
     HierarchyBlockInverse,
     JacobiSmoothed,
     JacobiSmoothedInverse,
@@ -103,3 +104,12 @@ def _saddle_block(n_cells: int = 36) -> sp.csr_matrix:
     a = sp.random(n, n, density=0.05, random_state=1, format="lil")
     a.setdiag(np.abs(rng.normal(size=n)) + 6.0)
     return sp.csr_matrix(a)
+
+
+def test_the_abstract_base_is_refused_naming_the_block_inverse_values() -> None:
+    """A bare ``BlockInverse()`` passed ``FieldSplit``'s ``isinstance`` refusal with nothing to build."""
+    with pytest.raises(
+        TypeError,
+        match=r"BlockInverse is abstract; construct AirReduction\(\), JacobiSmoothed\(\) or SimpleSmoothed\(\)\.",
+    ):
+        BlockInverse()

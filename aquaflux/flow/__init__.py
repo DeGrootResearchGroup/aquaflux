@@ -8,7 +8,14 @@ flux to couple pressure implicitly. See :class:`MomentumContinuity`.
 
 from __future__ import annotations
 
-from .block_preconditioner import BlockPreconditioner, frozen_momentum_diagonal_parts
+from .block_preconditioner import (
+    BlockPreconditioner,
+    ConvectionAir,
+    ConvectionTwoLevel,
+    VelocityBlock,
+    ViscousMultilevel,
+    frozen_momentum_diagonal_parts,
+)
 from .boundary import FlowBoundary, MovingWall, NoSlipWall, PressureOutlet, VelocityInlet
 from .continuation import (
     FrozenViscosityVelocityParts,
@@ -26,6 +33,8 @@ from .rhie_chow import interior_mass_flux, momentum_diagonal, volume_flux
 
 __all__ = [
     "BlockPreconditioner",
+    "ConvectionAir",
+    "ConvectionTwoLevel",
     "FlowBoundary",
     "FlowFields",
     "FrozenViscosityVelocityParts",
@@ -37,8 +46,10 @@ __all__ = [
     "PressureForce",
     "PressureOutlet",
     "UniformBodyForce",
+    "VelocityBlock",
     "VelocityFields",
     "VelocityInlet",
+    "ViscousMultilevel",
     "bernoulli_pressure",
     "body_force_velocity",
     "bulk_velocity_flow_solve",

@@ -30,6 +30,8 @@ from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import (
     BlockPreconditioner,
+    ConvectionAir,
+    ConvectionTwoLevel,
     MomentumContinuity,
     NoSlipWall,
     PressureOutlet,
@@ -141,7 +143,7 @@ def test_inner_gmres_does_not_stall_at_high_reynolds() -> None:
     state = assembler.initial_state()
     residual = assembler.residual(state)
     apply_m = BlockPreconditioner.build(
-        assembler, schur_scaling="msimple", velocity="convection"
+        assembler, schur_scaling="msimple", velocity=ConvectionTwoLevel()
     ).factory()(state)
 
     def preconditioned_jacobian(v):  # M ∘ J at the cold start
@@ -172,7 +174,7 @@ def test_line_search_fails_in_the_convective_regime_even_with_best_preconditione
     """
     assembler = _channel(24, 16, 2e-3)  # Re = 500
     best = BlockPreconditioner.build(
-        assembler, schur_scaling="msimple", velocity="convection"
+        assembler, schur_scaling="msimple", velocity=ConvectionTwoLevel()
     ).factory()
     line_searched = ImplicitNewtonSolver(
         max_steps=60, forward_step=DampedNewtonStep(preconditioner=best)
@@ -370,7 +372,7 @@ def test_convection_velocity_block_converges_at_high_reynolds() -> None:
     """The convection-aware velocity block converges the wall-graded high-Reynolds channel deeply.
 
     The default velocity block builds its AMG on the viscous (symmetric) momentum operator, so it is
-    Peclet-blind; ``velocity="convection"`` instead builds it on the frozen ``viscous + first-order-
+    Peclet-blind; ``velocity=ConvectionTwoLevel()`` instead builds it on the frozen ``viscous + first-order-
     upwind`` operator, staying a good momentum-block approximation as convection strengthens. Its
     reference flux comes from the inlet, with no reference state passed. Paired with the mass-scaled
     Schur it drives the coupled steady residual well below the tolerance a segregated under-relaxed
@@ -381,7 +383,7 @@ def test_convection_velocity_block_converges_at_high_reynolds() -> None:
     continuation = momentum_continuation(
         assembler,
         schur_scaling="msimple",
-        velocity="convection",
+        velocity=ConvectionTwoLevel(),
     )
     converged = _solve(assembler, continuation=continuation, max_steps=150)
     assert float(jnp.linalg.norm(assembler.residual(converged))) < 1e-8
@@ -396,7 +398,7 @@ def test_convection_velocity_block_is_differentiable() -> None:
     continuation = momentum_continuation(
         _channel(32, 24, 2e-3, wall_growth=1.15),  # Re = 500, wall-graded
         schur_scaling="msimple",
-        velocity="convection",
+        velocity=ConvectionTwoLevel(),
     )
 
     def mean_speed(mu):
@@ -420,16 +422,16 @@ def test_air_velocity_block_converges_and_is_differentiable() -> None:
     """The reduction-based (lAIR) velocity block converges the wall-graded channel and stays
     reverse-differentiable.
 
-    ``velocity="convection-air"`` coarsens the frozen convection-diffusion momentum operator by local
+    ``velocity=ConvectionAir()`` coarsens the frozen convection-diffusion momentum operator by local
     approximate ideal restriction — Peclet-robust *and* mesh-independent (so it scales where the
-    two-level ``"convection"`` block's direct coarse solve cannot). Its restriction and prolongation
+    two-level ``ConvectionTwoLevel()`` block's direct coarse solve cannot). Its restriction and prolongation
     differ (``R != Pᵀ``) but the frozen apply still transposes cleanly, so the implicit-function-theorem
     adjoint is untouched and the gradient matches finite differences.
     """
     continuation = momentum_continuation(
         _channel(32, 24, 2e-3, wall_growth=1.15),  # Re = 500, wall-graded
         schur_scaling="msimple",
-        velocity="convection-air",
+        velocity=ConvectionAir(),
     )
 
     def mean_speed(mu):
@@ -465,7 +467,9 @@ def test_reused_flow_solve_converges_across_viscosities() -> None:
     viscosity sweep, each solve converging, confirms the reuse holds.
     """
     reference = _channel(32, 24, 1e-3, wall_growth=1.15)  # a mid-sweep reference viscosity
-    solve_flow = reused_flow_solve(reference, schur_scaling="msimple", velocity="convection")
+    solve_flow = reused_flow_solve(
+        reference, schur_scaling="msimple", velocity=ConvectionTwoLevel()
+    )
     for mu in (2e-3, 1e-3, 5e-4):  # Re = 500, 1000, 2000 — a viscosity sweep on the frozen build
         assembler = _channel(32, 24, mu, wall_growth=1.15)
         state = solve_flow(assembler, assembler.initial_state())
@@ -479,7 +483,9 @@ def test_reused_flow_solve_is_differentiable() -> None:
     unchanged and the ``jit`` wrapper is transparent to it.
     """
     reference = _channel(32, 24, 2e-3, wall_growth=1.15)
-    solve_flow = reused_flow_solve(reference, schur_scaling="msimple", velocity="convection")
+    solve_flow = reused_flow_solve(
+        reference, schur_scaling="msimple", velocity=ConvectionTwoLevel()
+    )
 
     def mean_speed(mu):
         assembler = _channel(32, 24, mu, wall_growth=1.15)

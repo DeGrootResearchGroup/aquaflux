@@ -2127,7 +2127,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   gave **identical L0–L2 but divergent L3–L5** (`n_coarse` 37→38, then `n` 37→38 / `nnz` 109→112,
   18→19 / 52→55), i.e. a different jit signature and therefore a recompile anyway. The aggregation
   path was invariant at *every* level in the same comparison. **Consequence:** for `method="air"` (and
-  `velocity="convection-air"`) a cheap refresh requires **reusing the reference's frozen C/F split and
+  `velocity=ConvectionAir()`) a cheap refresh requires **reusing the reference's frozen C/F split and
   prolongation and recomputing only the values on it** — legitimate, since any valid split gives a
   valid preconditioner. That is **`refresh_air_hierarchy(hierarchy, a_new)`** (below),
   whereas the aggregation path gets it for free by rebuilding. (No `degree=` — that argument was
@@ -2274,7 +2274,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
       Selected on `bfs3d` by `BFS3D_TURBULENCE_INVERSE=air`.
   - **What is NOT yet re-measured: whether lAIR is any good on `bfs3d`.** Everything above is setup
     cost and a 2D contraction fixture. `method="air"` is opt-in in both consumers
-    (`scalar_transport_preconditioner`, `BlockPreconditioner` via `velocity="convection-air"`) and both
+    (`scalar_transport_preconditioner`, `BlockPreconditioner` via `velocity=ConvectionAir()`) and both
     default to `twolevel`, so no shipped default moved.
 - **`refresh_air_hierarchy` — the lAIR refresh that keeps the compilation signature (BUILT).** It
   re-derives an lAIR hierarchy's **values** at a new operator while holding the coarsening fixed: each
@@ -2384,7 +2384,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   such levels), so the coarse level must be an exact solve there. Deep, mesh-independent convection
   coarsening is the job of the reduction-based lAIR hierarchy (`build_air_hierarchy` + `_fc_jacobi`)
   where a strength threshold is not wanted. Library defaults are unchanged and both original production
-  callers (the flow `SmoothedAmgConvectionVelocity` two-level path and the segregated turbulence
+  callers (the flow `TwoLevelConvectionVelocity` path and the segregated turbulence
   preconditioner) still use two levels; the deep-and-untresholded damped-Jacobi build that motivated this
   bullet was dominated on both ends (worse than two-level shallow, worse than lAIR deep) and was the sole
   source of the non-contractive-smoother defect.

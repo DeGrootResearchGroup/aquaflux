@@ -42,7 +42,13 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
-from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, VelocityInlet
+from aquaflux.flow import (
+    ConvectionTwoLevel,
+    MomentumContinuity,
+    NoSlipWall,
+    PressureOutlet,
+    VelocityInlet,
+)
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
@@ -61,7 +67,7 @@ from aquaflux.turbulence import (
 RHO, U_IN, H, L = 1.0, 1.0, 1.0, 4.0
 NU = 4e-4  # Re = U H / nu = 2500 -- genuinely turbulent, so k stays clear of its floor
 INTENSITY, LENGTH_SCALE = 0.05, 0.07 * H
-PRECONDITIONER = {"velocity": "convection"}
+PRECONDITIONER = {"velocity": ConvectionTwoLevel()}
 
 
 def build_case(nu=NU, *, explicit_limiter: bool):

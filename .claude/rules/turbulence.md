@@ -49,6 +49,7 @@ Many entries below are dated history written against the old API. Read them thro
 | `reuse=previous.shift_policy, residual_norm=m` | `session.refresh(state, previous, m, **march)` |
 | `solve_coupled(method=M, velocity=…)` | `solve_coupled(preconditioner=BlockDiagonal(method=M, velocity=…))` |
 | `mass_flow_coupled_continuation(..., method=M, **flow_opts)`, `solve_coupled_mass_flow(method=M, **flow_opts)` | the same keyword, `preconditioner=BlockDiagonal(method=M, **flow_opts)`; a `MaterializedJacobian` is refused there |
+| `BlockDiagonal(velocity="convection")`, `"smoothed"`, `"convection-air"` (and the same strings on `BlockPreconditioner.build`, `momentum_continuation`, `reused_flow_solve`) | `ConvectionTwoLevel()`, `ViscousMultilevel()`, `ConvectionAir()` from `aquaflux.flow` (#390); a string is refused |
 | `point_setup` returning `continuation` + `RefreshPolicy(precondition_step=hook)`, `_rebinding` | `solve_reynolds_continuation` / `solve_reynolds_ramp` given `preconditioner=`; `point_setup` keeps only per-point march settings |
 
 ## The closure — model, strain, sources, transport, preconditioner
