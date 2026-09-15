@@ -74,6 +74,8 @@ from .preconditioner_spec import (
     JacobianProbeSpec,
     MaterializedJacobian,
     MonolithicVCycle,
+    preconditioner_spec_from_mapping,
+    preconditioner_spec_to_mapping,
 )
 from .reynolds import (
     AdaptiveReynoldsSchedule,
@@ -161,6 +163,8 @@ __all__ = [
     "open_session",
     "positive_k_limit",
     "positive_k_projection",
+    "preconditioner_spec_from_mapping",
+    "preconditioner_spec_to_mapping",
     "production_and_limit",
     "production_cap_active",
     "scalar_pseudo_transient_solve",

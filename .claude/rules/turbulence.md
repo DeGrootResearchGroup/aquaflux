@@ -253,13 +253,43 @@ Many entries below are dated history written against the old API. Read them thro
       not refuse an explicitly-passed `method` without refusing the default nobody asked for. The
       sentinel is defined in `preconditioner_spec.py` (moved 2026-09-14, #371), because
       `BlockDiagonal.method` has the same two meanings; `coupled.py` imports it.
-  - **🔬 BUILT, NOT YET CONSUMED — `preconditioner_spec.py`, the preconditioner as a value (#371,
-    2026-09-14).** `BlockDiagonal` | `MaterializedJacobian(inverse=CompleteLu | MonolithicVCycle |
-    FieldSplit(leading, trailing), probe=JacobianProbeSpec, build_beta, beta_floor)`, all
-    `SettingsValue`s with `None`-unset fields. **Nothing reads them yet**: `solve_coupled`, the builders
-    and the Reynolds drivers still take `method=` / `coupled_*_continuation`, and the session that
-    replaces `_ContinuationSource` is the next slice on the #371 branch. Two design facts to hold while
-    wiring it:
+  - **✅ `preconditioner_spec.py`, the preconditioner as a value (#371, 2026-09-14) — consumed by every
+    session, and readable from a case file (#391).** `BlockDiagonal` | `MaterializedJacobian(inverse=
+    CompleteLu | MonolithicVCycle | FieldSplit(leading, trailing), probe=JacobianProbeSpec, build_beta,
+    beta_floor)`. `BlockDiagonal`, `CompleteLu`, `MonolithicVCycle` and `JacobianProbeSpec` are
+    `SettingsValue`s with `None`-unset fields; **`FieldSplit` and `MaterializedJacobian` are not** — both
+    have required fields (`leading`/`trailing`, `inverse`) and `probe` defaults to `JacobianProbeSpec()`.
+    `solve_coupled`, `coupled_step`, `open_session` and both Reynolds drivers take them.
+    - **`preconditioner_spec_from_mapping` / `preconditioner_spec_to_mapping` read and write one as a
+      nested plain mapping** (`kind` = class name at every level, a field at its default omitted, a list
+      read as a tuple), over the generic `solve.SettingsMapping`. **The kind vocabulary is the class
+      names, deliberately** — a second, snake_case naming would be a second spelling of every value to
+      keep in step. Unknown kinds and fields raise `ValueError` with the path (`inverse.leading`,
+      `probe.column_reach[0]`); a nested value of the wrong kind reaches that value's own constructor
+      refusal (`TypeError`); the outermost kind must be one of the two families. The writer checks a value
+      is the registered class itself (not merely one of the same name) and refuses anything that is not
+      plain data — a numpy scalar, a callable — naming its path, so its output always survives a JSON or
+      YAML writer. `test_preconditioner_spec_mapping.py` finds every public `VelocityBlock` /
+      `BlockInverse` subclass from the exports of **every** `aquaflux` subpackage and fails if the mapping
+      does not accept it, so a new value class cannot be silently unwritable.
+    - ⚠️ **Only field NAMES and kinds are checked on reading, not field VALUES** — `backend: umfpak`,
+      `backend: {kind: CompleteLu}` and `smoother_sweeps: true` all load and fail (or are ignored) at
+      build. Per-position validation is #424 (and #375's discriminated unions).
+    - **"Default omitted" is judged by EQUALITY WITH THE FIELD'S DEFAULT, not by `None`** — which is what
+      makes `BlockDiagonal.method` round-trip: its default is the `_UNSET` sentinel, so an absent key is
+      the default multigrid while an explicit `null` is "no scalar preconditioner". Two fields break the
+      issue's "`None` for unset" wording: that one, and `MaterializedJacobian.probe`, where an absent key
+      is the default probe and `probe: null` is refused. `_UNSET` pickles and copies by reference to the
+      module-level singleton (`_Unset.__reduce__`); before, a copied `BlockDiagonal()` held a new
+      sentinel, compared unequal to the original and resolved its method to `<default>`.
+    - `JacobianProbeSpec.column_reach` is stored as a tuple of `int`s **however it arrives** — a
+      tuple of floats from a parser included; it used to convert only non-tuples, and the loader hands
+      over tuples.
+    - **It yields a spec, never a preconditioner (#374):** the march re-fits from states no file names.
+      Session destinations (`observer`, `reports`, `on_build`) are not spec fields, so they cannot be
+      written. **No flagship driver reads a case file yet** — both still assemble their spec from
+      environment variables in Python.
+    Two design facts about the values themselves:
     - **The three materialized inverses are ONE family with a nested choice**, because they share the
       probe, the build shift and the refresh floor and differ only in the inverse. That nesting is also
       what makes defect D1 unrepresentable: a monolithic smoother setting (`smoother_fill_levels`, …)

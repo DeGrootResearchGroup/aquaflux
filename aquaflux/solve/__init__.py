@@ -95,6 +95,7 @@ from .field_split import (
     build_block_triangular_field_split,
 )
 from .block_inverse import AirReduction, BlockInverse, JacobiSmoothed, SimpleSmoothed
+from .settings_mapping import SettingsMapping
 from .settings_value import SettingsValue, filled_from
 from .host_preconditioner import HostFactors, HostPreconditioner
 from .hierarchy_inverse import HierarchyBlockInverse
@@ -239,6 +240,7 @@ __all__ = [
     "ResidualRatioDualTimeControl",
     "RetryPolicy",
     "RowScaledNorm",
+    "SettingsMapping",
     "SettingsValue",
     "ShapeBudget",
     "ShiftBasis",

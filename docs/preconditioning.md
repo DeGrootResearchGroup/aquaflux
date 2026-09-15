@@ -310,6 +310,51 @@ the rungs of a Reynolds continuation, say — open a session with
 build a frozen step with {func}`~aquaflux.turbulence.coupled_step` and pass it as
 `continuation`.
 
+### Writing it in a case file
+
+Because the spec is a value, it can be stored in a case description instead of assembled in
+code. {func}`~aquaflux.turbulence.preconditioner_spec_from_mapping` reads it from the nested
+mapping a YAML or JSON document parses to: each level names its class under `kind`, and its
+other keys are the fields it sets. The spec above is
+
+```yaml
+kind: MaterializedJacobian
+inverse:
+  kind: FieldSplit
+  leading: {kind: SimpleSmoothed}
+  trailing: {kind: JacobiSmoothed}
+probe: {kind: JacobianProbeSpec, stencil_reach: 3}
+```
+
+and, once parsed:
+
+```python
+from aquaflux.solve import DualTimeLoop
+from aquaflux.turbulence import preconditioner_spec_from_mapping, solve_coupled
+
+preconditioner = preconditioner_spec_from_mapping(parsed["preconditioner"])
+flow, k, omega = solve_coupled(
+    coupled, preconditioner=preconditioner, dual_time=DualTimeLoop(inner_steps=5)
+)
+```
+
+A field left out takes its class's default, so a file names only what it changes, and a list
+is read as a tuple. An unknown `kind`, or a field its class does not have, is refused with the
+path to the entry — a misspelt field name is an error rather than a default in disguise. The
+*values* of plain settings are not checked when the file is read: a misspelt `backend`, say,
+is refused only when the preconditioner is built. One
+field behaves differently: on a {class}`~aquaflux.turbulence.BlockDiagonal`, an explicit
+`method: null` leaves the scalar blocks unpreconditioned, while leaving `method` out takes
+the default multigrid.
+{func}`~aquaflux.turbulence.preconditioner_spec_to_mapping` writes a spec back in the same
+form, leaving out every field at its default.
+
+What is read is the spec, not a preconditioner. A preconditioner is fitted to a state, and a
+march re-fits it at states no file can name — each refresh, each rung of a continuation — so
+the file describes *what* to build and the solve decides *when*.
+{class}`~aquaflux.solve.SettingsMapping` is the general form, for any family of frozen
+configuration values.
+
 ### Splitting the fields
 
 The flow saddle and the transported turbulence pair are different kinds of operator, and a
