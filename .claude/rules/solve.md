@@ -371,7 +371,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   misses every time.
 - **`implicit.py` — BUILT (`ImplicitNewtonSolver`).** The nonlinear counterpart: Newton to
   convergence (`_forward`, a `lax.while_loop` with a data-dependent stop), run on `stop_gradient`
-  copies of `phi0` and `theta` (`_stopped`, which passes non-array leaves through), with the
+  copies of `phi0` and `theta` (`stop_array_gradients`, which passes non-array leaves through), with the
   reverse-mode **IFT adjoint** attached afterwards at the root it reaches by `root_adjoint` — one
   transpose linear solve, `dphi*/dtheta = -(dR/dphi)^{-1}(dR/dtheta)`, no Newton loop taped.
   `solve(residual_fn, phi0, theta)` takes the differentiable params `theta` explicit so the adjoint
@@ -399,7 +399,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   one helper both loops use to stop a pytree's array leaves.
   ⚠️ A `theta` holding a **callable leaf** was already refused before this change (the `custom_vjp`
   rejects non-JAX-type arguments) and still is; `jax.lax.stop_gradient` on such a tree also raises,
-  which is why `_stopped` filters by `eqx.is_array`.
+  which is why `stop_array_gradients` filters by `eqx.is_array`.
   - **Convergence guard (binding — the IFT adjoint is only valid at a root).** `_forward` carries the
     terminal residual norm out of the `while_loop` and wraps the returned field in `eqx.error_if`: if
     the residual is non-finite or above `atol + rtol·‖R₀‖` (exhausted `max_steps`, or a `NaN`/`Inf`
