@@ -794,6 +794,61 @@ def test_rejects_unreferenced_cell() -> None:
         Mesh.from_faces(nodes, faces, owner, neighbour, n_cells=2)  # cell 1 unreferenced
 
 
+def _two_unit_squares_second_cell_never_an_owner():
+    """(nodes, faces, owner, neighbour) for the two-unit-square pair, but with every face --
+    including the three that bound cell 1 -- owned by cell 0.
+
+    Which side of an interior face is labelled "owner" is a free choice at build time, so a
+    cell that owns none of the faces touching it and is referenced only through the
+    `neighbour` array of one interior face is a legitimate topology, not a malformed one.
+    """
+    nodes = jnp.array(
+        [
+            [0.0, 0.0],  # 0
+            [1.0, 0.0],  # 1
+            [2.0, 0.0],  # 2
+            [0.0, 1.0],  # 3
+            [1.0, 1.0],  # 4
+            [2.0, 1.0],  # 5
+        ]
+    )
+    faces = [
+        [1, 4],  # shared, x=1 (interior)
+        [0, 1],  # cell0 bottom
+        [4, 3],  # cell0 top
+        [3, 0],  # cell0 left
+        [1, 2],  # cell1 bottom
+        [2, 5],  # cell1 right
+        [5, 4],  # cell1 top
+    ]
+    owner = [0, 0, 0, 0, 0, 0, 0]  # cell 1 never appears here
+    neighbour = [1, -1, -1, -1, -1, -1, -1]  # cell 1 appears only as the interior neighbour
+    return nodes, faces, owner, neighbour
+
+
+def test_validate_accepts_a_cell_referenced_only_as_interior_neighbour() -> None:
+    """A cell that owns no face but is the neighbour of one interior face must still validate.
+
+    Every face is owned by cell 0; cell 1 is referenced solely via `neighbour[0] == 1`, so
+    this exercises `referenced[neighbour[interior]] = True` on its own -- commenting that
+    line out (leaving only the owner-side marking) would wrongly reject cell 1 here.
+    """
+    nodes, faces, owner, neighbour = _two_unit_squares_second_cell_never_an_owner()
+    mesh = Mesh.from_faces(nodes, faces, owner, neighbour, n_cells=2)
+    assert mesh.validate() is mesh
+
+
+def test_validate_rejects_a_true_orphan_alongside_a_neighbour_only_cell() -> None:
+    """A third cell referenced by neither `owner` nor `neighbour` must still be rejected,
+    even in this owner/neighbour layout where a *different* cell (1) is only ever a
+    neighbour. This is a distinct orphan from `test_rejects_unreferenced_cell`'s, which
+    never exercises the neighbour-side marking at all.
+    """
+    nodes, faces, owner, neighbour = _two_unit_squares_second_cell_never_an_owner()
+    with pytest.raises(ValueError, match="not referenced"):
+        Mesh.from_faces(nodes, faces, owner, neighbour, n_cells=3)  # cell 2 is a true orphan
+
+
 def test_rejects_neighbour_below_minus_one() -> None:
     """-1 is the only accepted boundary sentinel (docs and validation now agree)."""
     nodes, faces, owner, _ = _unit_square_2d()
