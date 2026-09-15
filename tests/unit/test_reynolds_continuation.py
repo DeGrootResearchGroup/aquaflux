@@ -882,21 +882,22 @@ def test_a_damping_of_one_is_bit_identical_to_no_damping_at_all() -> None:
     assert jnp.array_equal(_shift(coupled, state, 1.0, 0.5), beta * term.diagonal)
 
 
-def test_the_shift_still_vanishes_at_the_root_under_damping() -> None:
-    """Why this cannot move the answer: the shift TERM is ``beta * d * (phi - phi_n)``.
+def test_the_shift_diagonal_stays_finite_across_damping_magnitudes() -> None:
+    """The additive term the march forms is ``beta * d * (phi - phi_n)``, not ``d`` alone.
 
-    Whatever the per-block multiplier, a state that solves the steady residual has ``phi == phi_n``
-    and the whole term is zero -- so damping changes the path a march takes and neither the converged
-    root nor its adjoint. That is the same property that licenses ``beta`` itself, and it is the reason
-    this is a globalization knob rather than a model change.
+    Whatever finite ``d`` this diagonal is, it vanishes at the anchor (``phi == phi_n``) purely by the
+    algebra of multiplying by a zero displacement -- that holds for any per-block multiplier, correct
+    or not, so it is not something a test of ``d`` itself can distinguish. What a broken damping factor
+    CAN do is corrupt ``d``'s magnitude away from the anchor, and
+    ``test_turbulence_damping_scales_the_closures_rows_and_leaves_the_flow_rows_alone`` above already
+    checks that directly. This test only guards the range: the diagonal must stay finite as damping
+    grows, across the values a march actually uses.
     """
     coupled = _tiny_coupled()
     state = _seeded_state(coupled)
     for damping in (1.0, 3.0, 25.0):
         term = _shift(coupled, state, damping)
         assert jnp.all(jnp.isfinite(term))
-        # `d * (phi - phi_n)` at `phi == phi_n`, which is what the march adds to the residual.
-        assert jnp.allclose(term * (state - state), 0.0)
 
 
 def test_a_refresh_CARRIES_the_damping_rather_than_dropping_it_to_one() -> None:

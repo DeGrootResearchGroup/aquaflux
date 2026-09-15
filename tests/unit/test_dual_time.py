@@ -25,6 +25,7 @@ from aquaflux.solve import (
     RetryPolicy,
     ShiftTerm,
     SwitchedEvolutionRelaxation,
+    forward_march,
     positive_block_limit,
     positive_block_projection,
 )
@@ -131,27 +132,60 @@ def test_dual_time_is_differentiable() -> None:
 def test_dual_time_gradient_is_iteration_count_independent() -> None:
     """The adjoint is the transpose solve at the root, so it does not depend on how the march got there.
 
-    Varying the outer step cap and the inner-loop depth changes the forward path but not the converged
-    root, so the gradient must be identical -- the signature of an implicit-function-theorem adjoint
-    rather than an unrolled iteration.
+    ``inner_steps`` is the lever: ``1`` reduces a step to the single shifted Newton step
+    :class:`PseudoTransientStep` forms (no inner refinement of the backward-Euler equation), while
+    ``2`` runs a genuine inner loop that converges each step's implicit equation further before the
+    outer march re-solves at the next anchor. That changes the outer trajectory -- fewer, cruder outer
+    steps against more, better-converged ones -- but not the root both reach, so the gradient must
+    still agree: the signature of an implicit-function-theorem adjoint rather than an unrolled
+    iteration.
+
+    Raising the outer step **cap** (``max_steps``) does not exercise this at all when the march never
+    reaches it -- the trajectory is then bit-identical and the gradients agree for a reason that has
+    nothing to do with the adjoint. The step counts below are measured directly, in a separate
+    undifferentiated `forward_march` run (the observed march cannot run under a tracer), and asserted
+    to differ, so the comparison that follows is not a configuration compared against itself.
     """
     theta = jnp.array([8.0, 27.0])
 
-    def grad_with(inner_steps: int, max_steps: int) -> jnp.ndarray:
-        step = DualTimeStep(
+    def _step(inner_steps: int) -> DualTimeStep:
+        return DualTimeStep(
             UniformShiftPolicy(strength=1.0),
             relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
             inner_steps=inner_steps,
         )
 
+    def residual_theta(phi: jnp.ndarray) -> jnp.ndarray:
+        return _residual(phi, theta)
+
+    def outer_steps(inner_steps: int) -> int:
+        seen: list = []
+        forward_march(
+            _step(inner_steps),
+            residual_theta,
+            jnp.ones_like(theta),
+            max_steps=200,
+            rtol=1e-10,
+            atol=1e-10,
+            observer=lambda report: seen.append(report),
+        )
+        return len(seen)
+
+    steps_one, steps_two = outer_steps(1), outer_steps(2)
+    assert steps_one != steps_two, (
+        f"both inner_steps settings marched in {steps_one} outer steps, so this test compares one "
+        "path against itself and cannot detect a taped adjoint"
+    )
+
+    def grad_with(inner_steps: int) -> jnp.ndarray:
+        step = _step(inner_steps)
+
         def solved_sum(t: jnp.ndarray) -> jnp.ndarray:
-            return jnp.sum(_solver(step, max_steps=max_steps).solve(_residual, jnp.ones_like(t), t))
+            return jnp.sum(_solver(step).solve(_residual, jnp.ones_like(t), t))
 
         return jax.grad(solved_sum)(theta)
 
-    reference = grad_with(inner_steps=2, max_steps=200)
-    assert jnp.allclose(grad_with(inner_steps=5, max_steps=200), reference, atol=1e-8)
-    assert jnp.allclose(grad_with(inner_steps=2, max_steps=500), reference, atol=1e-8)
+    assert jnp.allclose(grad_with(1), grad_with(2), atol=1e-8)
 
 
 def test_dual_time_inner_loop_iterates_and_sums_cost() -> None:
