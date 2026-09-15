@@ -92,8 +92,8 @@ What to take from it, none of which is specific to that mechanism:
   `.claude/rules/schemes.md` for what it is worth and where the knee is.
 
   - **The adjoint is exact BY CONSTRUCTION, not by care, and this is the load-bearing property.**
-    `_implicit_solve_bwd` forms `jax.vjp(residual_fn, …)` at the converged state directly and never
-    consults the forward step, so nothing set here can reach a gradient. That is what makes a cheaper
+    `root_adjoint`'s backward rule forms `jax.vjp(residual_fn, …)` at the converged state directly and
+    never consults the forward step, so nothing set here can reach a gradient. That is what makes a cheaper
     forward operator legitimate at all: the sensitivity a user asks for stays exact however loosely the
     march got to the root. Pinned by
     `test_a_stand_in_jacobian_leaves_the_adjoint_exact`.
@@ -422,12 +422,12 @@ What to take from it, none of which is specific to that mechanism:
     (`best_cycles` is only written on acceptance): a consumer must treat `0` as *no measurement*, not
     as *free*, or a rejected step reads as the cheapest in the march. Consumed by `forward_march`
     (`solve-march.md`); dropped by `_forward`.
-  - **The count is NOT carried out of `_forward`'s `while_loop` (binding).** Two reasons, both concrete:
-    it would put an `int32` in the primal output of `_implicit_solve`'s `custom_vjp`, so the reverse rule
-    would have to handle a `float0` cotangent leaf in the most correctness-critical function in the
-    package, for a number the differentiated path can never use; and it would force the *generic* Newton
-    loop to pick which step's count survives (last / max / sum), which is a reporting policy the solver
-    has no business owning. Per-step cost is observed eagerly instead, by `forward_march`.
+  - **The count is NOT carried out of `_forward`'s `while_loop` (binding).** It would force the
+    *generic* Newton loop to pick which step's count survives (last / max / sum), which is a reporting
+    policy the solver has no business owning. Per-step cost is observed eagerly instead, by
+    `forward_march`. (A second reason, that an `int32` would land in the primal output of the solve's
+    `custom_vjp`, lapsed on 2026-09-15: the loop now runs outside it, and the adjoint is attached
+    afterwards by `root_adjoint`.)
 
   - **`line_search` — backtrack the shifted step before escalating β (binding, the coupled-RANS fix).**
     The step optionally scales the shifted correction `δ` back along `{1, 1/2, …, 1/2**line_search}`
@@ -437,9 +437,9 @@ What to take from it, none of which is specific to that mechanism:
     rung** — a full step that already descends (the common case near the root) costs one residual
     evaluation, not `line_search+1`, and the loop body compiles once instead of unrolling `line_search+1`
     residual copies into the graph. It is safe as a non-differentiable `while_loop` because the search is
-    **forward-only**: it runs inside `ImplicitNewtonSolver`'s `custom_vjp` forward pass, whose reverse
-    rule is the IFT transpose solve at the root and never differentiates the iteration (every caller is a
-    `ForwardStep`; nothing differentiates through it — audited). Do **not** call it on a differentiated
+    **forward-only**: it runs inside a Newton iteration on `stop_gradient` inputs, whose derivative is
+    attached afterwards at the root by `root_adjoint` and never differentiates the iteration (every
+    caller is a `ForwardStep`; nothing differentiates through it — audited). Do **not** call it on a differentiated
     path. `line_search=0` (default) is the old behaviour: take the full step `φ+δ`, and
     the **only** recourse to an overshoot is escalating β — a *full re-solve*. This was measured to be
     the dominant coupled-RANS cost: from the hybrid IC the full coupled Newton step overshoots by
@@ -478,7 +478,7 @@ What to take from it, none of which is specific to that mechanism:
 
   - **The residual measure is an injected `ResidualNorm`, owned by the `ForwardStep` (`solve/norm.py`).**
     Every `ForwardStep` exposes `norm()`; `ImplicitNewtonSolver` reads it for the outer stopping test
-    (threaded through `_forward`/`_implicit_solve` as the extra nondiff arg `norm_fn`) and the strategy
+    (threaded into `_forward` as its argument `norm_fn`) and the strategy
     uses the *same* measure for its own globalization — so the convergence test, the SER ramp
     `β = β₀(‖R‖/‖R₀‖)^p`, `backtracking_line_search` (which now takes a `norm=` kwarg), and the
     `DivergenceGuard` all agree on one scale. Default is `jnp.linalg.norm` (`DampedNewtonStep.norm()` and
@@ -493,14 +493,12 @@ What to take from it, none of which is specific to that mechanism:
     builds a `BlockScaledNorm` over `[flow, k, ω]` (and `[…, β]` for the mass-flow bordered march) with
     per-field scales `‖R0_field‖` at the reference state, so the whole system is judged. The adjoint never
     forms a residual norm, so `norm_fn` is a **forward-only** device — the converged state and IFT
-    gradient are norm-independent (the bwd pass takes it as a `del`-ed nondiff arg). Since it is a static
-    field holding an `eqx.Module` with static tuple fields, it stays hashable for the `custom_vjp` nondiff
-    slot (like the `lineax` solver already carried there).
+    gradient are norm-independent, and `root_adjoint` does not take it at all.
   - **A `ShiftPolicy`'s preconditioner must stay a non-pytree (binding, #105).** `ScalarTransportPreconditioner`
     (`turbulence/preconditioner.py`) is a plain `dataclasses.dataclass(frozen=True, eq=False)` ABC with
     `ConvectionAmgPreconditioner` / `AirAmgPreconditioner` concrete strategies — deliberately **not** an
     `equinox.Module`. Two things break if it is made a pytree: (i) a solve taking it as an argument traces
-    its hierarchy arrays, which then reach `_implicit_solve`'s `custom_vjp` as tracers in a
+    its hierarchy arrays, which then reach `root_adjoint`'s `custom_vjp` as tracers in a
     `nondiff_argnums` slot and JAX raises `UnexpectedTracerError`; (ii) it is *because* the object is opaque
     to JAX that carrying one instance across outer sweeps is a `filter_jit` cache **hit** (non-array
     arguments go to the static side, hashed by identity). Both were hit and fixed while building #105 —

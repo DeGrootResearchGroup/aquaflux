@@ -1,21 +1,13 @@
-"""Nonlinear Newton solve with an implicit-function-theorem (IFT) adjoint.
+"""Nonlinear Newton solve to convergence, differentiable through its root.
 
 For a genuinely nonlinear residual (e.g. a flux-limited advection scheme) Newton takes many
-iterations, and differentiating through the unrolled iterations would tape every step. Instead
-the converged state ``phi*(theta)`` — defined implicitly by ``R(phi*, theta) = 0`` — is
-differentiated by the **implicit function theorem**:
+iterations, and differentiating through the unrolled iterations would tape every step. Instead the
+iteration runs on ``stop_gradient`` copies of its inputs, stops on a data-dependent test
+(``lax.while_loop``), and the root it reaches is handed to
+:func:`~aquaflux.solve.root_adjoint`, which attaches the implicit-function-theorem derivative: one
+transpose linear solve at the root, independent of the iteration count.
 
-    dphi*/dtheta = -(dR/dphi)^{-1} (dR/dtheta),
-
-so the reverse-mode gradient of a loss ``L(phi*)`` with cotangent ``v = dL/dphi*`` is
-
-    dL/dtheta = -(dR/dtheta)^T lambda,   where   (dR/dphi)^T lambda = v.
-
-This is **one transpose linear solve**, independent of the iteration count — no Newton loop is
-placed on the tape. The forward iteration may therefore use a data-dependent stopping criterion
-(``lax.while_loop``); the custom VJP supplies the derivative in its place.
-
-The adjoint is defined only for reverse mode (``jax.grad`` / ``jax.vjp``), which is what a
+The derivative is defined only for reverse mode (``jax.grad`` / ``jax.vjp``), which is what a
 scalar objective through the solver needs.
 """
 
@@ -23,8 +15,6 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable
-from functools import partial
-from typing import Any
 
 import equinox as eqx
 import jax
@@ -33,9 +23,9 @@ import lineax as lx
 
 from .forward_step import ForwardStep, LineSearchStep, StepFn, StepOutcome, within_tolerance
 from .linear import corrected_cycles as _corrected
-from .linear import default_linear_solver, solve_linear
 from .newton import newton_correction
 from .norm import ResidualNorm
+from .root_adjoint import root_adjoint
 
 # What a forward step returns, and what each value is for, is documented on `StepOutcome` and the
 # `StepFn` alias in `forward_step.py`, which is where both are defined.
@@ -289,10 +279,10 @@ def backtracking_line_search(
     so a step whose full length already descends (the common case near the root) costs a single
     residual evaluation rather than ``steps + 1``. The loop compiles its body once, which keeps this
     off the compile-time cost of an unrolled ladder. It is a **forward-only** device — the search
-    lives inside :class:`ImplicitNewtonSolver`'s ``custom_vjp`` forward pass, whose reverse rule is
-    the implicit-function-theorem transpose solve at the converged root and never differentiates the
-    iteration — so the non-differentiability of ``lax.while_loop`` is not a constraint here. Do not
-    call it on a path that is itself differentiated. ``steps == 0`` returns the undamped full step
+    runs inside a Newton iteration that is never differentiated (the gradient is attached afterwards,
+    at the converged root, by :func:`~aquaflux.solve.root_adjoint`) — so the non-differentiability
+    of ``lax.while_loop`` is not a constraint here. Do not call it on a path that is itself
+    differentiated. ``steps == 0`` returns the undamped full step
     ``phi + delta`` unchanged, so a well-behaved iterate (near the root, or a linear residual) is
     unaffected. The search only reshapes the forward path — the converged state, and hence the IFT
     adjoint, is unchanged. Shared by the line-searched Newton step and the pseudo-transient march, so
@@ -664,13 +654,11 @@ def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_st
         def residual_theta(p):
             return residual_fn(p, theta)
 
-        # The step's cycle count and line-search factor are dropped here, deliberately. Carrying
-        # either out of this loop would put a forward-only scalar in the primal output of the
-        # surrounding `custom_vjp`, so the reverse rule would have to handle a float0 cotangent leaf
-        # for a number the differentiated path can never use; and it would force this generic loop to
-        # choose which step's value survives (last / max / sum), which is a reporting/control policy
-        # the Newton solver has no business owning. A march that wants per-step cost or the line-search
-        # factor observes them eagerly instead (`forward_march`).
+        # The step's cycle count and line-search factor are dropped here, deliberately: carrying
+        # either out of this loop would force it to choose which step's value survives (last / max /
+        # sum), which is a reporting/control policy the Newton solver has no business owning. A march
+        # that wants per-step cost or the line-search factor observes them eagerly instead
+        # (`forward_march`).
         #
         # The residual norm is the one member that IS kept, because the loop's own stopping test needs
         # it and it is already in the carry -- there is no float0 question, only which value goes in.
@@ -698,133 +686,16 @@ def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_st
     )
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(0, 3, 4, 5, 6, 7, 8, 9, 10))
-def _implicit_solve(
-    residual_fn,
-    phi0,
-    theta,
-    rtol,
-    atol,
-    max_steps,
-    solver,
-    adjoint_solver,
-    adjoint_preconditioner,
-    forward_step_fn,
-    norm_fn,
-):
-    return _forward(
-        residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_step_fn, norm_fn
-    )
+def _stopped(tree: object) -> object:
+    """``tree`` with every array leaf behind ``stop_gradient``; any other leaf is passed through.
 
-
-def _implicit_solve_fwd(
-    residual_fn,
-    phi0,
-    theta,
-    rtol,
-    atol,
-    max_steps,
-    solver,
-    adjoint_solver,
-    adjoint_preconditioner,
-    forward_step_fn,
-    norm_fn,
-):
-    phi_star = _forward(
-        residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_step_fn, norm_fn
-    )
-    return phi_star, (phi_star, theta)
-
-
-@dataclasses.dataclass(frozen=True)
-class TransposedPreconditioner:
-    """An adjoint-preconditioner factory whose output is **already** the transpose ``M^T``.
-
-    The generic adjoint machinery derives the transpose preconditioner from the forward one with
-    :func:`jax.linear_transpose`, which works only when the forward preconditioner is a traceable
-    JAX operation (an algebraic-multigrid V-cycle is). A preconditioner applied through a host
-    callback -- the monolithic incomplete-LU factorization, whose triangular solve runs in ``scipy``
-    via :func:`jax.pure_callback` -- cannot be transposed that way; instead it supplies its own
-    transpose directly (the same factorization applied with a transposed triangular solve). Wrapping
-    the factory in this marker tells :func:`_adjoint_preconditioner` to apply its output as-is rather
-    than transpose it.
-
-    Parameters
-    ----------
-    factory : callable
-        The ``state -> M^T`` factory, returning the transpose preconditioner matvec directly.
-
-    Notes
-    -----
-    A **frozen dataclass**, so two wrappers around the same factory compare equal. This rides in a
-    forward step's ``adjoint_preconditioner_factory``, a *static* field and therefore part of the
-    compiled step's cache key; identity comparison there means every rebuild recompiles the whole
-    coupled solve. Equality is only as good as the wrapped factory's -- pass a value object, not a
-    lambda (see :class:`~aquaflux.turbulence.coupled.FrozenTransposeFactory`).
+    The Newton iteration runs on these copies, so nothing it does is recorded for differentiation --
+    which is what lets it stop on a data-dependent test. ``jax.lax.stop_gradient`` applied to the tree
+    directly would reject a non-array leaf.
     """
-
-    factory: Callable[[Any], Callable[[Any], Any]]
-
-    def __call__(self, state: Any) -> Callable[[Any], Any]:
-        return self.factory(state)
-
-
-def _adjoint_preconditioner(preconditioner, phi_star, example):
-    """Transpose ``M^T`` of the forward preconditioner, for the adjoint's transpose solve.
-
-    The forward ``M = preconditioner(phi*)`` approximates ``J^{-1}``; the adjoint solves the
-    transpose system ``J^T lambda = v``, for which ``M^T ~ J^{-T}`` is the consistent
-    preconditioner, obtained by transposing the (linear) preconditioner matvec with
-    :func:`jax.linear_transpose`. It is applied on whichever side
-    :func:`~aquaflux.solve.linear.solve_linear` defaults to (the right), which is a different
-    bracketing from transposing the forward *preconditioned operator* — the two have the same
-    spectrum, so this changes the Krylov residual measured, not the converged gradient.
-    It is mesh-independent wherever ``M`` is -- the adjoint GMRES iteration count stays flat under
-    refinement instead of growing with the system size. ``None`` in, ``None`` out. A
-    :class:`TransposedPreconditioner` factory already returns ``M^T`` (a callback preconditioner that
-    :func:`jax.linear_transpose` cannot handle), so it is applied directly.
-    """
-    if preconditioner is None:
-        return None
-    if isinstance(preconditioner, TransposedPreconditioner):
-        return preconditioner(phi_star)
-    m = preconditioner(phi_star)
-    transpose = jax.linear_transpose(m, example)
-    return lambda u: transpose(u)[0]
-
-
-def _implicit_solve_bwd(
-    residual_fn,
-    rtol,
-    atol,
-    max_steps,
-    solver,
-    adjoint_solver,
-    adjoint_preconditioner,
-    forward_step_fn,
-    norm_fn,
-    residuals,
-    cotangent,
-):
-    # norm_fn is a forward-only measure (stopping test + globalization); the adjoint never forms a
-    # residual norm, so it is unused here.
-    del norm_fn
-    phi_star, theta = residuals
-    # Transpose Jacobian solve: (dR/dphi)^T lambda = cotangent, preconditioned by M^T so the
-    # adjoint solve is mesh-independent (unpreconditioned it grows with the system size). This solve
-    # sets the gradient accuracy, so it uses the (tight) adjoint solver, not the inexact forward one.
-    _, vjp_phi = jax.vjp(lambda p: residual_fn(p, theta), phi_star)
-    adjoint_precond = _adjoint_preconditioner(adjoint_preconditioner, phi_star, cotangent)
-    lam, _ = solve_linear(
-        lambda u: vjp_phi(u)[0], cotangent, solver=adjoint_solver, preconditioner=adjoint_precond
+    return jax.tree.map(
+        lambda leaf: jax.lax.stop_gradient(leaf) if eqx.is_array(leaf) else leaf, tree
     )
-    # Parameter cotangent -(dR/dtheta)^T lambda: negate lambda so no pytree (float0) negation.
-    _, vjp_theta = jax.vjp(lambda th: residual_fn(phi_star, th), theta)
-    (theta_cotangent,) = vjp_theta(-lam)
-    return jnp.zeros_like(phi_star), theta_cotangent
-
-
-_implicit_solve.defvjp(_implicit_solve_fwd, _implicit_solve_bwd)
 
 
 class ImplicitNewtonSolver(eqx.Module):
@@ -906,22 +777,26 @@ class ImplicitNewtonSolver(eqx.Module):
         """
         forward = self.forward_step
         solver = self.solver if self.solver is not None else forward.default_solver()
-        adjoint_solver = (
-            self.adjoint_solver if self.adjoint_solver is not None else default_linear_solver()
-        )
-        # The strategy owns both the forward step and the adjoint preconditioner (the same
-        # preconditioner it applies forward, transposed at the converged state), so a high-Re solve
-        # needs a single strategy for both the forward globalization and the mesh-independent adjoint.
-        return _implicit_solve(
+        # The iteration runs on stopped copies and is never differentiated; the convergence guard
+        # inside it raises before a non-root can reach the adjoint, on the gradient path as well.
+        root = _forward(
             residual_fn,
-            phi0,
-            theta,
+            _stopped(phi0),
+            _stopped(theta),
             self.rtol,
             self.atol,
             self.max_steps,
             solver,
-            adjoint_solver,
-            forward.adjoint_preconditioner(),
             forward.stepper(),
             forward.norm(),
+        )
+        # The strategy owns both the forward step and the adjoint preconditioner (the same
+        # preconditioner it applies forward, transposed at the converged state), so a high-Re solve
+        # needs a single strategy for both the forward globalization and the mesh-independent adjoint.
+        return root_adjoint(
+            residual_fn,
+            root,
+            theta,
+            adjoint_solver=self.adjoint_solver,
+            adjoint_preconditioner=forward.adjoint_preconditioner(),
         )

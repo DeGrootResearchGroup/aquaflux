@@ -203,11 +203,12 @@ paths:
 - **`march.py` — BUILT (`forward_march`, `StepReport`/`MarchResult`, `RefreshTrigger`/`CycleGrowthTrigger`):
   the observed, forward-only march that drives a mid-march preconditioner refresh.**
   - **Two marches, ONE decision layer (binding — this is the shape to hold).** `_forward` (traced,
-    inside `custom_vjp`, has the root guard, cannot stop early, cannot be observed) and `forward_march`
+    on stopped inputs with the adjoint attached after it by `root_adjoint`, has the root guard, cannot
+    stop early, cannot be observed) and `forward_march`
     (eager Python loop, forward-only, **no guard by design**, stops on an injected trigger, reports every
     step). They are not duplicates: `forward_march` calls the **same** `forward_step.stepper()`, the same
     `forward_step.norm()` (for its segment reference — the per-step norm now rides out of the step on
-    `StepOutcome.residual_norm`), and the same `_within_tolerance`. The only residue is a ~6-line loop shell,
+    `StepOutcome.residual_norm`), and the same `within_tolerance`. The only residue is a ~6-line loop shell,
     pinned against drift by a test that both marches reach the same state on the same residual.
   - **NOTHING in the refresh machinery reads the line-search α, and on `bfs3d` almost nothing reads
     anything else either (source-verified against the current defaults).** Two independent refresh paths

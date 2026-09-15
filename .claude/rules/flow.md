@@ -411,7 +411,7 @@ Engineering Principles.
     analytic `dβ/dμ = 12U_b/H²` on the laminar channel). A captured assembler instead raises a `custom_vjp`
     closed-over-value error — the reason `theta` threading is load-bearing, not cosmetic. The **adjoint**
     transpose solve is preconditioned by the *same* bordered preconditioner **transposed**, which the
-    generic adjoint machinery (`solve/implicit.py::_adjoint_preconditioner`) forms with `jax.linear_transpose`
+    generic adjoint machinery (`solve/root_adjoint.py::_transposed_preconditioner`) forms with `jax.linear_transpose`
     (`M_aug` is linear ⇒ `M_augᵀ ≈ J_augᵀ⁻¹` exactly) — no hand-written transpose needed. Pinned: the
     preconditioned gradient equals the unpreconditioned (direct) one to ~1e-9 (a preconditioner never
     changes the sensitivity, only the adjoint Krylov iteration count).

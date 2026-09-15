@@ -1091,8 +1091,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   them. `floor=0` (the library default) is bit-identical to the plain rule, and the limiter is inactive
   at a root for **any** floor (there `delta = 0`), which is what keeps it out of the converged state and
   therefore out of the implicit-function-theorem adjoint — the adjoint never sees it in any case, since
-  `_implicit_solve_bwd` reads only `jax.vjp(residual_fn, phi_star)` and a transpose solve, never
-  `forward_step_fn`.
+  `root_adjoint`'s backward rule reads only `jax.vjp(residual_fn, root)` and a transpose solve, never
+  the forward step.
 
   *Configuration, both arms:* `bfs3d`, traced trailing inverse with **`equilibrate=False`**, `k` wall BC
   `zerogradient`, 3-rung Reynolds continuation (`N_POINTS=2`), ILU(0) ×4, `coarse_eq_limit` 2000, plain

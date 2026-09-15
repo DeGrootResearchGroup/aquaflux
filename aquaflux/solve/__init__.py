@@ -11,7 +11,9 @@ submodules.** A name absent from `__all__` is internal — reach for it only fro
 unit tests. The surface is five groups:
 
 * **The Newton driver, the single step, and the linear solve** — `ImplicitNewtonSolver` (the
-  driver: converges, globalizes, and carries the implicit-function-theorem adjoint), `newton_step`
+  driver: converges, globalizes, and carries the implicit-function-theorem adjoint), `root_adjoint`
+  (that adjoint on its own: attaches the derivative of a root to a root found by any means),
+  `newton_step`
   (one matrix-free correction — exact in one call for a linear residual, and differentiable in both
   modes), `solve_linear` (returns the solution together with the solve's restart-cycle count —
   the staleness signal a mid-march preconditioner refresh triggers on), `default_linear_solver`, and
@@ -109,10 +111,10 @@ from .forward_step import (
     StepOutcome,
     StepReport,
 )
+from .root_adjoint import TransposedPreconditioner, root_adjoint
 from .implicit import (
     DampedNewtonStep,
     ImplicitNewtonSolver,
-    TransposedPreconditioner,
     PositiveBlockLimit,
     PositiveBlockProjection,
     positive_block_limit,
@@ -291,6 +293,7 @@ __all__ = [
     "refresh_air_hierarchy",
     "relative_residual_gmres",
     "restart_cycles",
+    "root_adjoint",
     "shifted_jacobian",
     "smoothed_multigrid_solve",
     "solve_linear",

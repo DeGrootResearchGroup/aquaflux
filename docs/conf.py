@@ -45,7 +45,7 @@ SUBPACKAGE_GROUPS = {
     ],
     "solve": [
         ("The coupled state's layout", ["state"]),
-        ("Nonlinear solve", ["implicit", "newton"]),
+        ("Nonlinear solve", ["implicit", "root_adjoint", "newton"]),
         (
             "The pseudo-transient march",
             ["continuation", "march", "step_control", "relaxation", "line_search_growth"],

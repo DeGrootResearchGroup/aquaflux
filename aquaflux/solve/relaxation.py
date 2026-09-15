@@ -8,8 +8,8 @@ first-class, swappable strategy -- the analogue of the injected :class:`~aquaflu
 
 The default is switched-evolution-relaxation (SER): ``beta = beta0 (||R||/||R0||)^p``, strong damping
 while the residual is large and none as it vanishes. SER is **memoryless** -- beta depends only on the
-current residual norm and the reference norm -- which is what lets it live on the differentiable Newton
-path (inside the traced loop and the ``custom_vjp``). A schedule that needs history or step feedback
+current residual norm and the reference norm -- which is what lets it run inside the traced Newton loop
+(a ``lax.while_loop``) of the differentiable solve. A schedule that needs history or step feedback
 (e.g. the line-search factor) is a *forward-only* concern and belongs on the eager march instead (see
 :class:`~aquaflux.solve.StepControl`), not here.
 """
@@ -28,7 +28,7 @@ class RelaxationSchedule(Protocol):
     Structural interface only (a ``Protocol``). A schedule is **memoryless**: it maps the current
     residual norm and the march's reference norm to a shift strength, with no state carried across
     steps. That is what keeps it usable on the differentiable path -- it is a pure function of two
-    in-scope scalars, so it traces inside the Newton loop and never reaches the ``custom_vjp`` primal.
+    in-scope scalars, so it traces inside the Newton loop and nothing it computes has to leave the loop.
     A stateful or feedback-driven damping rule is not a ``RelaxationSchedule``; it is a
     :class:`~aquaflux.solve.StepControl` on the eager march.
     """
