@@ -17,6 +17,7 @@ from __future__ import annotations
 import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
+import pytest
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, VelocityInlet
 from aquaflux.mesh import structured_grid_2d
@@ -83,7 +84,7 @@ def test_mass_flux_is_the_continuity_mdot() -> None:
 
 
 def test_velocity_fields_shape_and_differentiable() -> None:
-    """The bundle's arrays have the documented shapes, are finite, and grad flows through them."""
+    """The bundle's arrays have the documented shapes and are finite."""
     mesh, asm = _assembler()
     state = _arbitrary_state(mesh)
     fields = asm.velocity_fields(state)
@@ -91,8 +92,31 @@ def test_velocity_fields_shape_and_differentiable() -> None:
     assert fields.velocity.shape == (mesh.n_cells, mesh.dim)
     assert fields.boundary_velocity.shape == (mesh.n_faces, mesh.dim)
     assert not bool(jnp.any(jnp.isnan(fields.gradient)))
-    g = jax.grad(lambda s: jnp.sum(asm.velocity_fields(s).gradient ** 2))(state)
-    assert not bool(jnp.any(jnp.isnan(g)))
+
+
+def test_velocity_gradient_matches_a_finite_difference() -> None:
+    """``jax.grad`` of the reconstructed velocity gradient matches a central finite difference.
+
+    A severed adjoint on the gradient tensor -- e.g. a ``stop_gradient`` wrapped around it inside
+    ``_velocity_gradient`` -- reports a finite (indeed exactly zero) gradient, which a check that
+    only asserts ``not isnan`` would pass. Comparing one component of ``jax.grad`` of a scalar built
+    from the gradient tensor against a central finite difference at the same fixture point, and
+    requiring it be non-zero, is what actually pins the reconstruction to the state it is a
+    derivative of.
+    """
+    mesh, asm = _assembler()
+    state = _arbitrary_state(mesh)
+
+    def loss(s):
+        return jnp.sum(asm.velocity_fields(s).gradient ** 2)
+
+    index, step = 5, 1e-6
+    analytic = float(jax.grad(loss)(state)[index])
+    difference = float(
+        (loss(state.at[index].add(step)) - loss(state.at[index].add(-step))) / (2.0 * step)
+    )
+    assert abs(analytic) > 1e-6, "a severed adjoint would report zero and pass a finiteness check"
+    assert analytic == pytest.approx(difference, rel=1e-6)
 
 
 def test_flow_fields_accessors_agree_with_the_bundle() -> None:
