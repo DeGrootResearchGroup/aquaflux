@@ -357,15 +357,29 @@ def test_wall_k_diffusivity_fades_from_the_full_value_to_zero() -> None:
 
 
 def test_wall_k_diffusivity_is_differentiable_in_k() -> None:
-    """The fade is live in the coupled residual, so its k-derivative must be finite everywhere."""
+    """The fade is live in the k residual's boundary coefficient, so its k-derivative must be the
+    RIGHT number, not merely a finite one.
+
+    A gradient severed inside the ``wall_function_weight`` call reports a finite ``0.0`` everywhere,
+    which the prior isfinite-only check cannot tell apart from the true, nonzero sensitivity in the
+    crossover swept by this fixture -- checked here against a central finite difference.
+    """
     nu = 1e-5
     gamma = jnp.full((200,), 2e-4)
     d = jnp.full((200,), 5e-4)
     k = jnp.linspace(0.0, 2.0, 200)
-    grad = jax.grad(
-        lambda kk: jnp.sum(wall_k_diffusivity(gamma, jnp.full_like(d, nu), d, kk, MODEL))
-    )(k)
+
+    def total(kk):
+        return jnp.sum(wall_k_diffusivity(gamma, jnp.full_like(d, nu), d, kk, MODEL))
+
+    def central_difference(k_point, step):
+        return (total(k_point + step) - total(k_point - step)) / (2.0 * step)
+
+    grad = jax.grad(total)(k)
     assert bool(jnp.all(jnp.isfinite(grad)))
+    assert float(jnp.sum(grad)) != 0.0  # a severed gradient reports 0.0, which is finite too
+    eps = 1e-6
+    assert float(jnp.sum(grad)) == pytest.approx(float(central_difference(k, eps)), rel=1e-6)
 
 
 def test_inlet_k_from_intensity() -> None:
