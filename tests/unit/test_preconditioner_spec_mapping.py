@@ -7,13 +7,15 @@ preconditioner.
 
 from __future__ import annotations
 
+import copy
+import importlib
 import inspect
 import json
+import pickle
+import pkgutil
 
-import aquaflux  # noqa: F401  (enables x64)
-import aquaflux.flow as flow
-import aquaflux.solve as solve
-import aquaflux.turbulence as turbulence
+import aquaflux
+import numpy as np
 import pytest
 from aquaflux.flow import ConvectionAir, ConvectionTwoLevel, VelocityBlock, ViscousMultilevel
 from aquaflux.solve import AirReduction, BlockInverse, JacobiSmoothed, SimpleSmoothed
@@ -71,25 +73,47 @@ def _held_classes(value: object, into: set[type]) -> set[type]:
     return into
 
 
+def _exported_classes() -> set[type]:
+    """Every class exported by any subpackage of ``aquaflux``, not only the ones a spec imports today."""
+    exported: set[type] = set()
+    for info in pkgutil.iter_modules(aquaflux.__path__):
+        if info.ispkg:
+            module = importlib.import_module(f"aquaflux.{info.name}")
+            exported |= {
+                member
+                for name in getattr(module, "__all__", ())
+                if inspect.isclass(member := getattr(module, name))
+            }
+    return exported
+
+
 def _public_value_classes() -> set[type]:
-    """Every concrete public value a spec can hold, found from the exports rather than listed by hand."""
-    exported = {
-        getattr(module, name) for module in (flow, solve, turbulence) for name in module.__all__
-    }
+    """Every concrete public value a spec can hold.
+
+    The nested families -- velocity blocks and block inverses, which grow as methods are added -- are
+    found from every subpackage's exports, so a new member exported anywhere is caught. The spec's own
+    classes, which do not form an open family, are named here.
+    """
     nested = {
         cls
-        for cls in exported
-        if inspect.isclass(cls)
-        and issubclass(cls, VelocityBlock | BlockInverse)
+        for cls in _exported_classes()
+        if issubclass(cls, VelocityBlock | BlockInverse)
         and cls not in (VelocityBlock, BlockInverse)
+        and not inspect.isabstract(cls)
     }
-    families = {BlockDiagonal, MaterializedJacobian, CompleteLu, MonolithicVCycle, FieldSplit}
-    return nested | families | {JacobianProbeSpec}
+    spec_classes = {BlockDiagonal, MaterializedJacobian, CompleteLu, MonolithicVCycle, FieldSplit}
+    return nested | spec_classes | {JacobianProbeSpec}
 
 
 def test_the_mapping_accepts_every_public_value_a_spec_can_hold() -> None:
     """A value class added to a family but not to the mapping would be unwritable in a case file."""
     assert set(_SPEC_MAPPING.kinds) == _public_value_classes()
+
+
+def test_the_census_scans_every_subpackage_not_only_the_ones_a_spec_imports() -> None:
+    names = {info.name for info in pkgutil.iter_modules(aquaflux.__path__) if info.ispkg}
+    assert {"flow", "solve", "turbulence", "transport"} <= names
+    assert _exported_classes() >= {BlockDiagonal, SimpleSmoothed, ConvectionAir}
 
 
 def test_the_round_trip_specs_hold_every_accepted_class() -> None:
@@ -103,6 +127,37 @@ def test_the_round_trip_specs_hold_every_accepted_class() -> None:
 def test_every_spec_round_trips_through_plain_json_data(spec) -> None:
     mapping = preconditioner_spec_to_mapping(spec)
     assert preconditioner_spec_from_mapping(json.loads(json.dumps(mapping))) == spec
+
+
+def test_a_column_reach_read_from_a_file_is_the_same_value_as_one_given_in_code() -> None:
+    """A parser hands over a list of whatever numbers the file held; the spec stores integers either way."""
+    read = preconditioner_spec_from_mapping(
+        {
+            "kind": "MaterializedJacobian",
+            "inverse": {"kind": "CompleteLu"},
+            "probe": {"kind": "JacobianProbeSpec", "column_reach": [3.0, 3.0, 2.0]},
+        }
+    )
+    assert read.probe == JacobianProbeSpec(column_reach=(3, 3, 2))
+    assert all(type(r) is int for r in read.probe.column_reach)
+
+
+@pytest.mark.parametrize(
+    "duplicate", [copy.copy, copy.deepcopy, lambda s: pickle.loads(pickle.dumps(s))]
+)
+def test_an_unset_scalar_method_survives_copying_and_pickling(duplicate) -> None:
+    """The sentinel is compared by identity, so a copy that made a new one changed the spec's meaning."""
+    duplicated = duplicate(BlockDiagonal())
+    assert duplicated == BlockDiagonal()
+    assert duplicated.resolved_method() == "twolevel"
+    assert preconditioner_spec_to_mapping(duplicated) == {"kind": "BlockDiagonal"}
+
+
+def test_a_numpy_scalar_setting_is_refused_on_writing_naming_the_setting() -> None:
+    with pytest.raises(TypeError, match="float32 at 'build_beta' is not plain data"):
+        preconditioner_spec_to_mapping(
+            MaterializedJacobian(CompleteLu(), build_beta=np.float32(0.5))
+        )
 
 
 def test_the_file_form_of_a_field_split_spec() -> None:

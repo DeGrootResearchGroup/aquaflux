@@ -5,7 +5,8 @@ can be described in a case file rather than assembled in code. The file's form i
 the kind a YAML or JSON document parses to: each value is a mapping whose ``kind`` key names its class,
 and whose other keys are the fields it sets. A field left at its default is left out, so reading a
 mapping back reproduces the value exactly, and a mapping that omits a field leaves that field to the
-default of the class that consumes it.
+default of the class that consumes it. Everything else in it is plain data -- strings, numbers,
+booleans, ``None`` and lists of them -- so any YAML or JSON writer can store it.
 
 Nothing here parses a file. It works on the mapping a parser produces, so it adds no parsing dependency
 and does not care which format the mapping came from.
@@ -27,7 +28,8 @@ class SettingsMapping:
 
     Each accepted class is named in a mapping by its class name, under the ``kind`` key. A field holding
     another accepted value is written as a nested mapping; a tuple is written as a list and read back as
-    a tuple; anything else is written as it is.
+    a tuple; a string, number, boolean or ``None`` is written as it is. Nothing else is written, so the
+    mapping is always plain data.
 
     Parameters
     ----------
@@ -81,26 +83,17 @@ class SettingsMapping:
         -------
         dict
             ``{"kind": <class name>, <field>: <value>, ...}``, with nested values as nested mappings and
-            tuples as lists.
+            tuples as lists: plain data, ready for a YAML or JSON writer.
 
         Raises
         ------
         TypeError
-            If ``value``, or a value nested in it, is not one of the accepted kinds.
+            If ``value``, or a value nested in it, is not one of the accepted classes -- the class
+            itself, not merely one of the same name -- or if a setting is not plain data (a string,
+            number, boolean or ``None``, or a list or tuple of those or of accepted values). A numpy
+            scalar is refused, for example. The message gives the path to the offending setting.
         """
-        if self._by_name.get(type(value).__name__) is not type(value):
-            raise TypeError(
-                f"{type(value).__name__} is not a kind this mapping accepts; accepted kinds are "
-                f"{sorted(self._by_name)}."
-            )
-        mapping: dict[str, object] = {KIND: type(value).__name__}
-        for field in dataclasses.fields(value):
-            if not field.init:
-                continue
-            setting = getattr(value, field.name)
-            if setting != _default(field):
-                mapping[field.name] = self._encode(setting)
-        return mapping
+        return self._to_mapping(value, path="")
 
     def from_mapping(self, mapping: Mapping[str, object]) -> object:
         """The value a mapping describes, with every omitted field at its class default.
@@ -125,12 +118,32 @@ class SettingsMapping:
         """
         return self._decode_value(mapping, path="")
 
-    def _encode(self, setting: object) -> object:
+    def _to_mapping(self, value: object, path: str) -> dict[str, object]:
+        if self._by_name.get(type(value).__name__) is not type(value):
+            raise TypeError(
+                f"{type(value).__name__}{_where(path)} is not a kind this mapping accepts; accepted "
+                f"kinds are {sorted(self._by_name)}."
+            )
+        mapping: dict[str, object] = {KIND: type(value).__name__}
+        for field in dataclasses.fields(value):
+            if not field.init:
+                continue
+            setting = getattr(value, field.name)
+            if setting != _default(field):
+                mapping[field.name] = self._encode(setting, _join(path, field.name))
+        return mapping
+
+    def _encode(self, setting: object, path: str) -> object:
         if dataclasses.is_dataclass(setting) and not isinstance(setting, type):
-            return self.to_mapping(setting)
-        if isinstance(setting, tuple):
-            return [self._encode(item) for item in setting]
-        return setting
+            return self._to_mapping(setting, path)
+        if isinstance(setting, list | tuple):
+            return [self._encode(item, f"{path}[{i}]") for i, item in enumerate(setting)]
+        if setting is None or isinstance(setting, str | bool | int | float):
+            return setting
+        raise TypeError(
+            f"{type(setting).__name__}{_where(path)} is not plain data: a setting is written as a string, "
+            "number, boolean or None, a list of those, or a nested value of an accepted kind."
+        )
 
     def _decode(self, setting: object, path: str) -> object:
         if isinstance(setting, Mapping):
@@ -140,7 +153,7 @@ class SettingsMapping:
         return setting
 
     def _decode_value(self, mapping: object, path: str) -> object:
-        where = f" at {path!r}" if path else ""
+        where = _where(path)
         if not isinstance(mapping, Mapping):
             raise ValueError(f"expected a mapping with a {KIND!r}{where}, got {mapping!r}.")
         if KIND not in mapping:
@@ -161,11 +174,19 @@ class SettingsMapping:
                 f"{sorted(fields)}."
             )
         settings = {
-            key: self._decode(setting, f"{path}.{key}" if path else key)
+            key: self._decode(setting, _join(path, key))
             for key, setting in mapping.items()
             if key != KIND
         }
         return kind(**settings)
+
+
+def _join(path: str, key: str) -> str:
+    return f"{path}.{key}" if path else key
+
+
+def _where(path: str) -> str:
+    return f" at {path!r}" if path else ""
 
 
 def _default(field: dataclasses.Field) -> object:

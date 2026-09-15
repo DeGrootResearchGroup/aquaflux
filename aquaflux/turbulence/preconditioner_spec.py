@@ -65,6 +65,11 @@ class _Unset:
     def __repr__(self) -> str:
         return "<default>"
 
+    def __reduce__(self) -> str:
+        # Copied or pickled by reference to the one module-level sentinel, so ``method is _UNSET`` -- and
+        # with it a spec's equality and its default -- survives ``copy.deepcopy`` and ``pickle``.
+        return "_UNSET"
+
 
 #: Sentinel for "the caller did not name this", for a setting whose ``None`` already means something.
 #: The block-diagonal family's scalar ``method`` has a meaningful default *and* a meaningful ``None``
@@ -90,8 +95,9 @@ class JacobianProbeSpec(SettingsValue):
     stencil_reach : int or None
         The cell-graph distance the assembled sparsity covers.
     column_reach : tuple of int or None
-        A shorter reach per column field, in the flat layout's order ``[u, ..., p, k, omega]``. A list
-        is accepted and stored as a tuple, so the spec stays hashable.
+        A shorter reach per column field, in the flat layout's order ``[u, ..., p, k, omega]``. Any
+        sequence is stored as a tuple of integers, so the spec stays hashable and a reach read from a
+        case file is the same value as one given in code.
     gradient_sweeps : int or None
         Probe a copy of the residual whose corrected-gradient solve is capped at this many sweeps.
     """
@@ -101,7 +107,7 @@ class JacobianProbeSpec(SettingsValue):
     gradient_sweeps: int | None = None
 
     def __post_init__(self) -> None:
-        if self.column_reach is not None and not isinstance(self.column_reach, tuple):
+        if self.column_reach is not None:
             object.__setattr__(self, "column_reach", tuple(int(r) for r in self.column_reach))
 
 

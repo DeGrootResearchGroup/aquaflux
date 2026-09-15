@@ -256,21 +256,35 @@ Many entries below are dated history written against the old API. Read them thro
   - **✅ `preconditioner_spec.py`, the preconditioner as a value (#371, 2026-09-14) — consumed by every
     session, and readable from a case file (#391).** `BlockDiagonal` | `MaterializedJacobian(inverse=
     CompleteLu | MonolithicVCycle | FieldSplit(leading, trailing), probe=JacobianProbeSpec, build_beta,
-    beta_floor)`, all `SettingsValue`s with `None`-unset fields; `solve_coupled`, `coupled_step`,
-    `open_session` and both Reynolds drivers take them.
+    beta_floor)`. `BlockDiagonal`, `CompleteLu`, `MonolithicVCycle` and `JacobianProbeSpec` are
+    `SettingsValue`s with `None`-unset fields; **`FieldSplit` and `MaterializedJacobian` are not** — both
+    have required fields (`leading`/`trailing`, `inverse`) and `probe` defaults to `JacobianProbeSpec()`.
+    `solve_coupled`, `coupled_step`, `open_session` and both Reynolds drivers take them.
     - **`preconditioner_spec_from_mapping` / `preconditioner_spec_to_mapping` read and write one as a
       nested plain mapping** (`kind` = class name at every level, a field at its default omitted, a list
       read as a tuple), over the generic `solve.SettingsMapping`. **The kind vocabulary is the class
       names, deliberately** — a second, snake_case naming would be a second spelling of every value to
-      keep in step. Unknown kinds and fields raise `ValueError` with the path (`inverse.leading`); a
-      nested value of the wrong kind reaches that value's own constructor refusal (`TypeError`); the
-      outermost kind must be one of the two families. `test_preconditioner_spec_mapping.py` finds every
-      public `VelocityBlock` / `BlockInverse` subclass from the exports and fails if the mapping does not
-      accept it, so a new value class cannot be silently unwritable.
+      keep in step. Unknown kinds and fields raise `ValueError` with the path (`inverse.leading`,
+      `probe.column_reach[0]`); a nested value of the wrong kind reaches that value's own constructor
+      refusal (`TypeError`); the outermost kind must be one of the two families. The writer checks a value
+      is the registered class itself (not merely one of the same name) and refuses anything that is not
+      plain data — a numpy scalar, a callable — naming its path, so its output always survives a JSON or
+      YAML writer. `test_preconditioner_spec_mapping.py` finds every public `VelocityBlock` /
+      `BlockInverse` subclass from the exports of **every** `aquaflux` subpackage and fails if the mapping
+      does not accept it, so a new value class cannot be silently unwritable.
+    - ⚠️ **Only field NAMES and kinds are checked on reading, not field VALUES** — `backend: umfpak`,
+      `backend: {kind: CompleteLu}` and `smoother_sweeps: true` all load and fail (or are ignored) at
+      build. Per-position validation is #424 (and #375's discriminated unions).
     - **"Default omitted" is judged by EQUALITY WITH THE FIELD'S DEFAULT, not by `None`** — which is what
       makes `BlockDiagonal.method` round-trip: its default is the `_UNSET` sentinel, so an absent key is
-      the default multigrid while an explicit `null` is "no scalar preconditioner". The issue's "`None`
-      for unset" wording is true of every other field and false of this one.
+      the default multigrid while an explicit `null` is "no scalar preconditioner". Two fields break the
+      issue's "`None` for unset" wording: that one, and `MaterializedJacobian.probe`, where an absent key
+      is the default probe and `probe: null` is refused. `_UNSET` pickles and copies by reference to the
+      module-level singleton (`_Unset.__reduce__`); before, a copied `BlockDiagonal()` held a new
+      sentinel, compared unequal to the original and resolved its method to `<default>`.
+    - `JacobianProbeSpec.column_reach` is stored as a tuple of `int`s **however it arrives** — a
+      tuple of floats from a parser included; it used to convert only non-tuples, and the loader hands
+      over tuples.
     - **It yields a spec, never a preconditioner (#374):** the march re-fits from states no file names.
       Session destinations (`observer`, `reports`, `on_build`) are not spec fields, so they cannot be
       written. **No flagship driver reads a case file yet** — both still assemble their spec from

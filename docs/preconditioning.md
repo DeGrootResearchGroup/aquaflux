@@ -329,15 +329,20 @@ probe: {kind: JacobianProbeSpec, stencil_reach: 3}
 and, once parsed:
 
 ```python
+from aquaflux.solve import DualTimeLoop
 from aquaflux.turbulence import preconditioner_spec_from_mapping, solve_coupled
 
 preconditioner = preconditioner_spec_from_mapping(parsed["preconditioner"])
-flow, k, omega = solve_coupled(coupled, preconditioner=preconditioner, inner_steps=5)
+flow, k, omega = solve_coupled(
+    coupled, preconditioner=preconditioner, dual_time=DualTimeLoop(inner_steps=5)
+)
 ```
 
 A field left out takes its class's default, so a file names only what it changes, and a list
 is read as a tuple. An unknown `kind`, or a field its class does not have, is refused with the
-path to the entry — a misspelt setting is an error rather than a default in disguise. One
+path to the entry — a misspelt field name is an error rather than a default in disguise. The
+*values* of plain settings are not checked when the file is read: a misspelt `backend`, say,
+is refused only when the preconditioner is built. One
 field behaves differently: on a {class}`~aquaflux.turbulence.BlockDiagonal`, an explicit
 `method: null` leaves the scalar blocks unpreconditioned, while leaving `method` out takes
 the default multigrid.
