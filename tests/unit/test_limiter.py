@@ -6,6 +6,7 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from aquaflux.context import FieldContext, MeshContext
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.schemes import CorrectedGreenGauss, VenkatakrishnanLimiter
@@ -100,15 +101,33 @@ def test_limiter_uses_the_periodic_image_across_a_seam() -> None:
 
 
 def test_limiter_is_differentiable() -> None:
-    """jax.grad flows through the limiter (min/max and the smooth ratio) without NaNs."""
+    """``jax.grad`` through the limiter (the stencil min/max and the smooth ratio) matches a
+    central finite difference at several interior cells -- not merely finite. A ``stop_gradient``
+    around the stencil ``phi_max``/``phi_min`` extrema passes a bare NaN check (headroom is still a
+    function of ``field`` through its own cell's value) while moving several of these values well
+    outside a finite-difference tolerance.
+    """
     mesh = structured_grid_2d(8, 8)
     geom = mesh.geometry()
     scheme = CorrectedGreenGauss()
     limiter = VenkatakrishnanLimiter(k=5.0)
+    field0 = jnp.sin(geom.cell.centroid[:, 0] * 3.0)
 
     def loss(field):
         grad = scheme.gradients(field, mesh, geom, jnp.zeros(mesh.n_faces))
         return jnp.sum(limiter.limit(field, _context(mesh, geom, grad)) ** 2)
 
-    sens = jax.grad(loss)(jnp.sin(geom.cell.centroid[:, 0] * 3.0))
+    sens = jax.grad(loss)(field0)
     assert not bool(jnp.any(jnp.isnan(sens)))
+
+    step = 1e-6
+    # Cells away from a stencil-min/max kink (crossing one under the central difference's +-step
+    # would spuriously fail); chosen by inspection of this fixture's smooth interior.
+    for index in (2, 5, 10, 30):
+        finite_difference = float(
+            (loss(field0.at[index].add(step)) - loss(field0.at[index].add(-step))) / (2.0 * step)
+        )
+        assert float(sens[index]) == pytest.approx(finite_difference, rel=1e-4, abs=1e-8)
+    assert float(jnp.abs(sens).max()) > 1e-6, (
+        "a severed adjoint would report zero and pass a finiteness check"
+    )

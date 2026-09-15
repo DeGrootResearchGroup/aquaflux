@@ -12,10 +12,13 @@ from __future__ import annotations
 import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
+import pytest
 from aquaflux.boundary import BoundaryConditions, ZeroGradient
 from aquaflux.discretization import DiffusionFlux, ResidualAssembler, VolumeSource
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
+
+STEP = 1e-6
 
 
 class _ConstantSource(VolumeSource):
@@ -89,7 +92,9 @@ def test_field_dependent_sink_integrates_over_volume() -> None:
 
 
 def test_source_is_differentiable_in_field_and_coefficient() -> None:
-    """``jax.grad`` flows through a source's solved field and its own coefficient, no NaNs."""
+    """``jax.grad`` through a source's solved field and its own coefficient matches a central
+    finite difference -- not merely finite (a ``stop_gradient`` around the source term returns
+    an exact zero here, which is finite and would pass a bare NaN check)."""
     mesh = structured_grid_2d(2, 1)
     geometry = mesh.geometry()
 
@@ -104,7 +109,26 @@ def test_source_is_differentiable_in_field_and_coefficient() -> None:
         )
 
     phi = jnp.array([1.0, 3.0])
-    grad_field = jax.grad(lambda p: jnp.sum(build(2.0).residual(p) ** 2))(phi)
-    grad_rate = jax.grad(lambda r: jnp.sum(build(r).residual(phi) ** 2))(2.0)
+
+    def loss_field(p):
+        return jnp.sum(build(2.0).residual(p) ** 2)
+
+    def loss_rate(r):
+        return jnp.sum(build(r).residual(phi) ** 2)
+
+    grad_field = jax.grad(loss_field)(phi)
+    for index in range(phi.shape[0]):
+        finite_difference = float(
+            (loss_field(phi.at[index].add(STEP)) - loss_field(phi.at[index].add(-STEP)))
+            / (2.0 * STEP)
+        )
+        assert float(grad_field[index]) == pytest.approx(finite_difference, rel=1e-6)
     assert not bool(jnp.any(jnp.isnan(grad_field)))
-    assert not bool(jnp.isnan(grad_rate))
+    assert float(jnp.abs(grad_field).max()) > 1e-6, (
+        "a severed adjoint would report zero and pass a finiteness check"
+    )
+
+    grad_rate = jax.grad(loss_rate)(2.0)
+    finite_difference_rate = float((loss_rate(2.0 + STEP) - loss_rate(2.0 - STEP)) / (2.0 * STEP))
+    assert grad_rate == pytest.approx(finite_difference_rate, rel=1e-6)
+    assert abs(grad_rate) > 1e-6, "a severed adjoint would report zero and pass a finiteness check"
