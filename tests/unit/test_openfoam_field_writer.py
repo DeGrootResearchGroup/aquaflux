@@ -138,6 +138,28 @@ boundaryField
 }
 """
 
+# A patch dictionary whose first entry sits on the same line as the opening brace, so that entry
+# carries no indent of its own to measure.
+_SAME_LINE_AS_BRACE_TEMPLATE = """
+dimensions      [0 0 -1 0 0 0 0];
+
+boundaryField
+{
+    upperWall
+    { beta1           0.075;
+        type            omegaWallFunction;
+        value           nonuniform List<scalar>
+3
+(
+18117.5
+23573.4
+25568.8
+)
+;
+    }
+}
+"""
+
 
 class TestFormatVolumeField:
     def test_a_scalar_field_reads_back_through_the_field_parser(self):
@@ -271,6 +293,24 @@ class TestCopiedPatchDictionaries:
         indents = {len(line) - len(line.lstrip()) for line in body}
         assert indents == {8}, indents
         assert "18117.5" in text and "25568.8" in text
+
+    def test_a_block_starting_on_the_opening_brace_line_is_indented_with_its_own_entry(self):
+        # Every other fixture's patch block opens with a newline right after `{`, so the block text
+        # `_reindent_block` receives always starts with a blank line and its own first REAL line
+        # already carries the block's normal indent. Here `beta1` sits on the same line as `{`, so
+        # it carries no indent of its own to measure -- the case the reference line is deliberately
+        # taken from the SECOND line to handle.
+        text = format_volume_field(
+            np.arange(5.0),
+            _template(_SAME_LINE_AS_BRACE_TEMPLATE),
+            object_name="omega",
+            location="7",
+        )
+        block = text.split("upperWall", 1)[1].split("\n    }", 1)[0]
+        body = [line for line in block.splitlines() if line.strip() and line.strip() != "{"]
+        indents = {len(line) - len(line.lstrip()) for line in body}
+        assert indents == {8}, indents
+        assert "beta1" in text and "18117.5" in text and "25568.8" in text
 
 
 def _polymesh_with_extents(root: Path, extents) -> Path:

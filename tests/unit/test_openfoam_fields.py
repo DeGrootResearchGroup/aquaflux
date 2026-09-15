@@ -22,8 +22,11 @@ from aquaflux.io.openfoam import (
     read_surface_scalar_field,
     read_volume_scalar_field,
 )
+from aquaflux.io.openfoam.assembler import assemble
 from aquaflux.io.openfoam.reader import read_openfoam
 from aquaflux.mesh import structured_grid_2d
+
+from tests.support.polymesh import two_cube_polymesh_data
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "polymesh_3d_two_cubes"
 
@@ -97,6 +100,44 @@ def test_values_land_on_the_faces_they_were_written_for(tmp_path) -> None:
     plausible-looking field.
     """
     mesh = read_openfoam(FIXTURE)
+    interior = np.asarray(mesh.face_cells.interior)
+    n_internal = int(interior.sum())
+
+    patches = {}
+    for name in mesh.face_patches.names:
+        indices = np.asarray(mesh.face_patches.indices(name))
+        if indices.size:
+            patches[name] = _nonuniform([float(i) for i in indices])
+    text = _field_text(_nonuniform([float(i) for i in range(n_internal)]), patches)
+    path = tmp_path / "phi"
+    path.write_text(text)
+
+    values = read_surface_scalar_field(path, mesh)
+
+    assert values.shape == (mesh.n_faces,)
+    assert np.array_equal(values, np.arange(mesh.n_faces, dtype=np.float64))
+
+
+def test_a_patch_declared_out_of_ascending_start_face_order_still_lands_correctly(
+    tmp_path,
+) -> None:
+    """A ``boundary`` file need not declare its patches in ascending-startFace order.
+
+    The two-cube fixture on disk happens to declare ``inlet`` (startFace 1) before ``outlet``
+    (startFace 2), which is also their ascending face order -- so nothing distinguishes "laid out
+    by startFace" from "laid out in file/declaration order." Here ``outlet`` is declared before
+    ``inlet`` while both keep their real face ranges (a legal, if less common, OpenFOAM layout), so
+    ``mesh.face_patches.names`` yields them in that same non-ascending order. The reader must still
+    place each patch's values on its own face range, keyed on face index rather than on declaration
+    order -- exactly the property the ascending-order sort exists to guarantee.
+    """
+    original = two_cube_polymesh_data()
+    inlet, outlet, walls = original.patches
+    assert inlet.start_face < outlet.start_face
+    mesh = assemble(original._replace(patches=(outlet, inlet, walls)))
+    declared = [name for name in mesh.face_patches.names if name not in ("interior", "boundary")]
+    assert declared == ["outlet", "inlet", "walls"]
+
     interior = np.asarray(mesh.face_cells.interior)
     n_internal = int(interior.sum())
 
