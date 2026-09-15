@@ -13,13 +13,12 @@ Python loop, :func:`forward_march` — that steps the **same** injected
 :class:`~aquaflux.solve.ForwardStep`, judges convergence with the **same** tolerance test, and
 measures progress with the **same** residual norm, but observes every step and may stop early.
 
-**The eager march's state is an answer only when it reports ``converged``.** Short of that it is a
-pure accelerator: a driver uses it to reach a better-preconditioned state, and then finishes with a
-real ``ImplicitNewtonSolver.solve()``, which owns the convergence guard, the implicit-function-theorem
-adjoint, and the returned field. That is why :func:`forward_march` deliberately has **no** non-convergence guard of
-its own — stopping short is its purpose, and a state it hands back carries no guarantee beyond what
-:attr:`MarchResult.converged` states. Keeping the guard in one place means a march that ends short of
-a root can never be mistaken for a converged one.
+**The eager march's state is an answer only when it reports ``converged``.** :func:`forward_march`
+deliberately has **no** non-convergence guard of its own — stopping short, on a trigger or out of
+steps, is part of its purpose — so the driver that calls it owns that test, and refuses a state that is
+not a root before attaching the implicit-function-theorem adjoint to it with
+:func:`~aquaflux.solve.root_adjoint`. A state the march hands back carries no guarantee beyond what
+:attr:`MarchResult.converged` states.
 
 **Two reference residual norms, and conflating them breaks the march.** Each call to
 :func:`forward_march` computes its own ``residual_norm_0`` from the state it is handed, and passes
@@ -502,9 +501,9 @@ def forward_march(
 
     **This function may return a state that does not solve the residual, without raising** — that is
     the point of a march that can stop early. It carries no convergence guard, so a caller must read
-    :attr:`MarchResult.converged` before treating the state as a result; a march that stopped short
-    must be finished with an ``ImplicitNewtonSolver.solve()``, which does carry the guard, and which
-    produces the result and its adjoint. Do not differentiate through this march.
+    :attr:`MarchResult.converged` before treating the state as a result. Do not differentiate through
+    this march: run it on ``stop_gradient`` inputs and hand a converged state to
+    :func:`~aquaflux.solve.root_adjoint`, which attaches the derivative at the root.
 
     Parameters
     ----------
@@ -634,7 +633,7 @@ def forward_march(
         fraction-to-the-boundary lock-up, and it does not recover on its own: the cap shrinks by a fixed
         factor per step for as long as the march is allowed to run, so without this the segment spends
         its entire ``max_steps`` budget taking arithmetically null steps. Ending it hands the caller a
-        state that is honestly unconverged instead, which the finishing solve reports. ``None`` disables
+        state that is honestly unconverged instead, which the caller's convergence test reports. ``None`` disables
         the test. The count is deliberately not ``1``: an isolated capped step is an ordinary short step,
         and a pseudo-transient path is allowed to be non-monotone.
     on_retry : callable, optional
@@ -922,8 +921,8 @@ def forward_march(
         if checkpoint is not None:
             checkpoint(report, state)
         # A non-finite residual can never satisfy the tolerance test, so without this the march
-        # would spend its whole budget stepping a poisoned state. Stop and let the finishing solve
-        # report the failure, which is where non-convergence is diagnosed.
+        # would spend its whole budget stepping a poisoned state. Stop and let the caller's
+        # convergence test report the failure, which is where non-convergence is diagnosed.
         if not jnp.isfinite(residual_norm):
             break
         # The same argument for a step that is finite but null: a collapsing constraint cap can never

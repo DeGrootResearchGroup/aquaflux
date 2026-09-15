@@ -11,7 +11,7 @@ step's outcome. All three members here drive the pseudo-transient shift strength
   pitzDaily Reynolds-continuation ramp it reaches the developed recirculation in ~4× fewer outer steps
   than the residual-keyed alternative, and it converges standalone (to the requested tolerance, not a
   short plateau) — the pseudo-timestep is bounded by its ``beta_min`` floor, and the shift vanishes at
-  the root, so the finishing solve owns the converged root and the adjoint regardless.
+  the root, so the control changes the path and never the root or its adjoint.
 * :class:`ResidualRatioDualTimeControl` ramps the same pseudo-timestep by the *steady-residual* reduction
   ratio instead of α (switched evolution relaxation). Opt-in: it is the safer rule when the steady
   residual is a reliable progress signal, but on the pitzDaily ramp the row-scaled residual is nearly
@@ -24,8 +24,10 @@ step's outcome. All three members here drive the pseudo-transient shift strength
   comfortable. It reduces exactly to :class:`DualTimeControl` at infinite ratio thresholds, which is
   pinned by a test rather than left as a claim.
 
-All three are forward-only accelerators on the eager march — they read the previous step's report and may
-raise under ``jax.grad`` — so they live here rather than on the differentiable Newton path.
+All three are accelerators on the eager march — they read the previous step's concrete report between
+steps, which a traced loop cannot do — so they live here rather than on the traced Newton path. They
+never reach a gradient: the march runs on ``stop_gradient`` inputs, and the adjoint is attached at the
+root it reaches.
 """
 
 from __future__ import annotations
@@ -297,8 +299,7 @@ class DualTimeControl(ShiftStrengthControl):
     **~4× fewer outer steps** than the residual-keyed :class:`ResidualRatioDualTimeControl`, which pins β
     near its start because the (row-scaled) steady residual is nearly flat while the transient develops.
     :attr:`ShiftStrengthControl.beta_min` bounds the pseudo-timestep, so the ramp does not run away; the
-    shift still vanishes at the root, so the finishing solve owns the converged root and the adjoint
-    either way.
+    shift still vanishes at the root, so the ramp changes the path and never the root or its adjoint.
 
     This control is **memoryless** — its memo is always ``None``, since α alone drives it.
 
@@ -364,8 +365,8 @@ class ResidualRatioDualTimeControl(ShiftStrengthControl):
     default row-equilibrated norm that is a fractional change per equation, so the ratio is a meaningful
     reduction factor across steps. Its memo is that residual.
 
-    **Opt-in alternative to the default :class:`DualTimeControl`.** The finishing solve, running the
-    default schedule, still owns the converged root and the adjoint.
+    **Opt-in alternative to the default :class:`DualTimeControl`.** Like it, it changes the path and
+    never the root or its adjoint.
 
     Attributes
     ----------
@@ -467,10 +468,10 @@ class CflResidualDualTimeControl(ShiftStrengthControl):
 
 
 def default_dual_time_control(
-    step_control: StepControl | None, observing: bool, continuation: ForwardStep
+    step_control: StepControl | None, continuation: ForwardStep
 ) -> StepControl | None:
-    """The step control for an observed march: the caller's, or the default Courant ramp for a dual-time
-    march that was given none.
+    """The step control for a march: the caller's, or the default Courant ramp for a dual-time march
+    that was given none.
 
     It lives here, beside the controls it chooses between, rather than in the turbulence driver that
     calls it. That is where it was: `StepControl` was declared in `march.py` with no implementations
@@ -479,22 +480,17 @@ def default_dual_time_control(
     :mod:`~aquaflux.solve.forward_step` that constraint is gone and the rule comes home.
 
     A **dual-time** march (a :class:`~aquaflux.solve.DualTimeStep`, whose reported ``alpha`` is the
-    backward-Euler inner-loop comfort a Courant ramp reads) that is **already observing** (a
-    a refresh or an observer set ``observing``) but was handed **no** ``step_control`` defaults to
+    backward-Euler inner-loop comfort a Courant ramp reads) handed **no** ``step_control`` defaults to
     :class:`~aquaflux.solve.DualTimeControl`. That ramp grows the pseudo-timestep while the inner loop
     stays comfortable, reaching a developed recirculation in far fewer outer steps than the residual-keyed
     schedule (which pins ``beta`` because the row-scaled steady residual is nearly flat while the flow
-    develops). ``step_control`` is returned **unchanged** for a single-step march, a caller-supplied
-    control, or a march that is not observing — so the default is injected only where a control actually
-    runs, and injecting it never turns observation on (which would wrongly make the differentiable
-    single-stage solve raise the forward-only guard).
+    develops). ``step_control`` is returned **unchanged** for a single-step march or a caller-supplied
+    control.
 
     Parameters
     ----------
     step_control : StepControl or None
         The caller-supplied control (``None`` if none was given).
-    observing : bool
-        Whether the march runs the observed eager path (a refresh or observer is active).
     continuation : ForwardStep
         The globalization step the march applies.
 
@@ -503,6 +499,6 @@ def default_dual_time_control(
     StepControl or None
         ``DualTimeControl()`` when defaulting applies; ``step_control`` otherwise.
     """
-    if step_control is None and observing and isinstance(continuation, DualTimeStep):
+    if step_control is None and isinstance(continuation, DualTimeStep):
         return DualTimeControl()
     return step_control

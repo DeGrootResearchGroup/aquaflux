@@ -763,9 +763,10 @@ cleanly and does **nothing**, which is the same silent-no-op shape the setting e
   adjoint. Vary something that moves the path — `inner_steps` is the lever both
   `test_dual_time_gradient_is_iteration_count_independent` and
   `test_the_coupled_adjoint_is_independent_of_the_forward_iteration_count` use — and **assert the
-  step counts differ**, measured in separate undifferentiated runs since the observed march cannot
-  run under a tracer. On the coupled RANS channel that is 17 outer steps against 20, with gradients
-  agreeing to eleven significant figures.
+  step counts differ**, measured in separate runs with an observer (which changes nothing about the
+  march). On the coupled RANS channel that was 17 outer steps against 20, with gradients agreeing to
+  eleven significant figures — measured before 2026-09-15, when the unobserved solve still ran a
+  different (traced) march; the counts will have moved.
 - **x64:** `assert jax.config.x64_enabled`.
 
 ---

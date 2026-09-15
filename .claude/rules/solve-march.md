@@ -270,10 +270,8 @@ paths:
       cannot act on — the "smallest sufficient collaborator" rule, and the reason this differs from
       `RetryPolicy`, which the march consumes whole.
     - **`NO_REFRESH` is the shared default instance**, byte-identical to the old all-`None` defaults.
-    - **`builder` alone does NOT make a march observed**, and that is deliberate: without a trigger it
-      is called once, for the initial build, which the single-stage solve does just as well. Getting
-      this wrong forces the observed path — with its doubled `max_steps` budget and its ban under
-      `jax.grad` — on a solve that only wanted a custom way to construct its step.
+    - **There is no `RefreshPolicy.observes` (deleted 2026-09-15).** It decided whether `solve_coupled`
+      ran an observed pre-march; that solve now has one march, so nothing selects between marches.
   - **The six retry settings are ONE injected object — `RetryPolicy` (`solve/retry.py`), exported from
     `aquaflux.solve` (BUILT).** `solver` / `divergence_cap` / `on_cycles` / `on_alpha` / `beta_factor` /
     `cycles_limit` used to be six parallel keyword arguments on **both** `forward_march` and
@@ -610,15 +608,16 @@ paths:
     **calibrated offline**: log one march with no refresh trigger and an `on_step` observer, then
     replay candidate parameters against the log. No numeric default here is calibrated — they are chosen
     conservative (late rather than early) and must be set from an instrumented full-mesh run.
-  - **Observation does NOT require a refresh (binding — this was a real bug).** `solve_coupled` runs the
-    observed pre-march when the caller wants a refresh **or** merely wants to watch
-    (`observing = refreshing or on_step or on_checkpoint`). Gating it on the trigger alone makes an
-    *instrumented reference march* — no refresh trigger plus an observer, which is exactly the run a
-    trigger is calibrated against, and the longest-running one — produce **no output at all** and sit
-    silent for hours. Consequence to keep in mind: an observed solve spends `max_steps` on the pre-march
-    and `max_steps` again on the finishing solve, so the budget is larger but *split*; instrumenting a
-    solve already near its limit can turn a pass into a convergence-guard raise. Pinned by
-    `test_the_march_reports_progress_without_a_refresh.trigger`.
+  - **Observation changes nothing about a coupled solve (binding, 2026-09-15, #369).** `solve_coupled`
+    has one march: observers, refreshes, controls and retries all run in it, on `stop_gradient` copies,
+    and `root_adjoint` attaches the adjoint at the root. `on_step` / `on_checkpoint` therefore report
+    without selecting anything — pinned by `test_observing_a_solve_changes_nothing_about_it` (bit-identical
+    fields with and without an observer) and `test_the_march_reports_progress_without_a_refresh_trigger`.
+    **History worth keeping:** observation used to select an eager pre-march followed by a traced
+    finishing solve. Gating that on the trigger alone once made an instrumented reference march sit
+    silent for hours; the switch itself then added a step control a dual-time march had not asked for,
+    gave an observed solve a second `max_steps` budget, and dropped a `homotopy` unless something else
+    forced observation — so an instrumented run was not the run under investigation.
   - **`checkpoint` is a SECOND seam, separate from `observer` (binding).** `checkpoint(report, state)`
     carries the state; `observer(report)` carries only numbers. Keeping the state off the report history
     is what keeps a `RefreshTrigger` a pure function that can be replayed offline against a logged march
@@ -959,7 +958,7 @@ paths:
     control's (dead α/state args for SER), drag α onto the differentiable core where the line search
     cannot even produce it before the step, and risk the byte-identity of the default path. Four concrete
     `StepControl`s live in `solve/step_control.py`, all three sharing one body: **`DualTimeControl`** (the
-    Courant β-ramp, the **default** for a dual-time observed march — carries β across refreshes, see the
+    Courant β-ramp, the **default** for a dual-time march — carries β across refreshes, see the
     DualTimeStep bullet above), **`ResidualRatioDualTimeControl`** (the opt-in residual-keyed
     alternative), and **`CflResidualDualTimeControl`** (see the bullet below). There is **no
     `AlphaTargetingControl`** — deleted 2026-08-14, see the "SER β schedule runs backwards" bullet.

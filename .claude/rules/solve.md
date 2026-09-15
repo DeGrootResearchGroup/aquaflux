@@ -393,7 +393,10 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   `PseudoTransientStep`, `DualTimeStep`, module-valued `theta`, `jit(grad)`, `vmap(grad)` and the
   `phi0` gradient — all identical. Why the extraction: a throwaway toy spike showed the gradient does not
   depend on the loop, so the eager march can gain the adjoint and the traced/eager split in
-  `solve_coupled` (the `observing` switch behind #369) can be removed — that is phase 2.
+  `solve_coupled` (the `observing` switch behind #369) can be removed. **Phase 2 did that
+  (2026-09-15):** `solve_coupled` marches once with `forward_march` on `stop_array_gradients` copies and
+  attaches `root_adjoint`; see `turbulence.md`. `stop_array_gradients` (also in `root_adjoint.py`) is the
+  one helper both loops use to stop a pytree's array leaves.
   ⚠️ A `theta` holding a **callable leaf** was already refused before this change (the `custom_vjp`
   rejects non-JAX-type arguments) and still is; `jax.lax.stop_gradient` on such a tree also raises,
   which is why `_stopped` filters by `eqx.is_array`.

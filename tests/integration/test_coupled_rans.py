@@ -32,7 +32,7 @@ from aquaflux.flow import (
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import DualTimeLoop, RefreshPolicy
+from aquaflux.solve import NO_REFRESH, DualTimeLoop, RefreshPolicy
 from aquaflux.turbulence import (
     BlockDiagonal,
     LogScalars,
@@ -243,10 +243,9 @@ def test_the_coupled_adjoint_is_independent_of_the_forward_iteration_count(case)
     marches take materially different numbers of outer steps through materially different
     intermediate states, and stop at the same converged residual.
 
-    The step counts are measured -- in separate, undifferentiated runs, since the observed march
-    cannot run under a tracer -- and asserted to differ. Without that, a test that varied only a cap
-    the solve never reaches would compare a configuration against itself and pass no matter what the
-    adjoint did.
+    The step counts are measured -- in separate runs with an observer, which changes nothing about the
+    march -- and asserted to differ. Without that, a test that varied only a cap the solve never reaches
+    would compare a configuration against itself and pass no matter what the adjoint did.
     """
     coupled = case["coupled"]
     flow_ws, k_ws, omega_ws = case["coupled_start"]
@@ -496,11 +495,11 @@ def test_staged_preconditioner_refresh_reaches_the_same_fixed_point(case) -> Non
 def test_staged_refresh_stops_at_the_same_tolerance(case) -> None:
     """``rtol`` must mean the same thing with and without a refresh.
 
-    The finishing solve is handed the *absolute* target measured at the initial state, so a refreshed
-    solve stops where an unrefreshed one does however many segments it took. A relative tolerance
-    would instead be measured against whatever residual the pre-march reached, silently tightening
-    the solve by that factor (and compounding with each further refresh) -- which turns a converging
-    solve into far more work or a ``max_steps`` failure. Both paths are driven to a loose ``rtol``
+    The stopping target is measured once, at the initial state, and held across every segment, so a
+    refreshed solve stops where an unrefreshed one does however many segments it took. A target
+    re-measured per segment would instead be relative to whatever residual the previous segment
+    reached, silently tightening the solve by that factor (and compounding with each further refresh)
+    -- which turns a converging solve into far more work or a ``max_steps`` failure. Both paths are driven to a loose ``rtol``
     here so each stops *on tolerance* rather than overshooting to machine zero, which is what makes
     the comparison able to detect the difference.
     """
@@ -537,8 +536,68 @@ def test_staged_refresh_stops_at_the_same_tolerance(case) -> None:
     # finishing tolerance against the pre-march's residual would produce.
     assert staged_residual > target * 1e-2, (
         f"staged solve stopped at {staged_residual:.3e} against a target of {target:.3e} -- far "
-        "tighter than requested, so the finishing solve is not using the absolute target"
+        "tighter than requested, so the stopping target is being re-measured after a refresh"
     )
+
+
+@pytest.mark.slow
+def test_observing_a_solve_changes_nothing_about_it(case) -> None:
+    """``on_step`` only observes: the same solve with and without one reaches bit-identical fields.
+
+    An observer used to switch the solve onto a different march, which added a step control a
+    dual-time march had not asked for and gave it a second step budget -- so a run instrumented to
+    find out why it behaved a certain way was not the run being investigated. A dual-time loop is used
+    because the added control is where the two marches differed most.
+    """
+    coupled = case["coupled"]
+    flow_ws, k_ws, omega_ws = case["coupled_start"]
+    common = dict(
+        max_steps=60,
+        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        dual_time=DualTimeLoop(inner_steps=3),
+    )
+
+    plain = solve_coupled(coupled, flow_ws, k_ws, omega_ws, **common)
+    seen = []
+    observed = solve_coupled(coupled, flow_ws, k_ws, omega_ws, on_step=seen.append, **common)
+
+    assert seen, "the observer was never called, so this compared a solve against itself"
+    for name, one, two in zip(("flow", "k", "omega"), plain, observed, strict=True):
+        assert jnp.array_equal(one, two), f"observing the solve changed {name}"
+
+
+@pytest.mark.slow
+def test_a_refreshed_solve_is_differentiable_and_gives_the_unrefreshed_gradient(case) -> None:
+    """A mid-march preconditioner refresh used to be refused under ``jax.grad``; it now runs.
+
+    The refresh re-derives the preconditioner from a concrete copy of the mid-march state, so it never
+    sees a tracer, and the adjoint is attached at the root. A preconditioner changes only the Krylov
+    iteration, so the refreshed gradient must equal the unrefreshed one -- and the default
+    preconditioner is built inside ``jax.grad`` here, which is itself new.
+    """
+    coupled = case["coupled"]
+    flow_ws, k_ws, omega_ws = case["coupled_start"]
+
+    def objective(nu_scale, refresh):
+        scaled = eqx.tree_at(
+            lambda c: c.turbulence.molecular_viscosity,
+            coupled,
+            coupled.turbulence.molecular_viscosity * nu_scale,
+        )
+        _, k, _ = solve_coupled(
+            scaled,
+            flow_ws,
+            k_ws,
+            omega_ws,
+            max_steps=40,
+            refresh=refresh,
+            preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        )
+        return jnp.sum(k**2)
+
+    unrefreshed = float(jax.grad(objective)(1.0, NO_REFRESH))
+    refreshed = float(jax.grad(objective)(1.0, RefreshPolicy(trigger=_RefreshAfter(steps=3))))
+    assert refreshed == pytest.approx(unrefreshed, rel=1e-6)
 
 
 @pytest.mark.slow

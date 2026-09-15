@@ -166,7 +166,7 @@ What to take from it, none of which is specific to that mechanism:
     because a gate can be "fixed" by deleting it and only the second test notices.
     ⚠️ **This was found by RUNNING a march, not by the suite, and it was the second such break in one
     sitting** (the other: `compare.py` handed `solve_coupled` a bare `precondition_step` callable where
-    a `RefreshPolicy` was expected, so `refresh.observes` raised before step 1). **No test tier drives
+    a `RefreshPolicy` was expected, so reading the policy raised before step 1). **No test tier drives
     this case's own driver**, so a refactor can tighten a seam, take the case out entirely, and leave
     every gate green. Treat "the fast gate passes" as saying nothing about whether `bfs3d` can march.
     - **Gate only what is genuinely silent (binding).** The escalation is gated. The divergence retry
@@ -515,8 +515,9 @@ What to take from it, none of which is specific to that mechanism:
     with the measure carrying its scales as traced leaves over a fixed block structure
     (`RowScaledNorm`), the swap is a cache hit. A plain callable (the default) has no array leaves and
     is filtered to the static side regardless, so the default path is byte-identical.
-  - **⚠️ `RowScaledNorm` is MARCH-ONLY today.** `ImplicitNewtonSolver` passes `forward.norm()` into
-    `custom_vjp`'s `nondiff_argnums`, which requires a hashable object, and a pytree holding arrays is
-    not hashable there. So the finishing solve keeps whatever measure it was constructed with. Letting
-    the traced solver use it requires reworking that slot — not done.
+  - **`RowScaledNorm` was march-only because `ImplicitNewtonSolver` passed its measure through a
+    `custom_vjp` non-differentiable (hashable) slot.** That slot is gone (2026-09-15: the loop runs
+    outside the `custom_vjp`, and `root_adjoint` takes no measure), and `solve_coupled` no longer ends
+    in a traced finishing solve. Whether `ImplicitNewtonSolver` now accepts a rebuilt `RowScaledNorm` is
+    untested.
 

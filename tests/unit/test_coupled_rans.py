@@ -746,33 +746,148 @@ if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
 
-def test_refresh_trigger_is_rejected_under_differentiation() -> None:
-    """``refresh_trigger`` is a forward-only accelerator: it raises under ``jax.grad``, not leaks.
+@pytest.mark.parametrize("transform", ["jit", "vmap"])
+def test_the_coupled_solve_refuses_jit_and_vmap_before_any_work(transform) -> None:
+    """The march steps in Python on concrete values, which ``jit`` and ``vmap`` never provide.
 
-    The refresh re-derives the preconditioner from the mid-march state, which is a tracer when
-    differentiating; the refreshed preconditioner would then capture that tracer and escape the
-    converged solve's ``custom_vjp`` as an opaque ``UnexpectedTracerError``. A refresh also forbids an
-    explicit (concrete) ``continuation``, so there is no way to build the preconditioner outside the
-    trace -- the only honest behaviour is a clear up-front error. The guard fires before any solve, so
-    this stays a fast test. Differentiating the single-stage solve (no trigger) remains the supported
-    path and is exercised by the integration adjoint gate.
+    Without the up-front check the solve would get part way -- building a preconditioner, say -- and
+    fail on a tracer conversion that names neither the transform nor what to do instead. ``jax.grad``
+    is not refused: a stopped copy of its inputs is concrete, and the integration tests differentiate
+    through the solve.
     """
     mesh, coupled = _cavity()
     flow, k, omega = coupled.physical_fields(_healthy_state(mesh, coupled))
 
-    def objective(nu_scale):
-        scaled = eqx.tree_at(
-            lambda c: c.turbulence.molecular_viscosity,
-            coupled,
-            coupled.turbulence.molecular_viscosity * nu_scale,
-        )
-        f, _, _ = solve_coupled(
-            scaled, flow, k, omega, rtol=1e-2, refresh=RefreshPolicy(trigger=CycleGrowthTrigger())
-        )
-        return jnp.sum(f**2)
+    with pytest.raises(ValueError, match=r"cannot run under jax\.jit or jax\.vmap"):
+        if transform == "jit":
+            eqx.filter_jit(lambda c: solve_coupled(c, flow, k, omega, rtol=1e-2))(coupled)
+        else:
+            jax.vmap(lambda f: solve_coupled(coupled, f, k, omega, rtol=1e-2))(
+                jnp.stack([flow, flow])
+            )
 
-    with pytest.raises(ValueError, match="forward-only eager march"):
-        jax.grad(objective)(1.0)
+
+def test_the_march_is_handed_the_homotopy_and_the_same_arguments_whether_or_not_it_is_observed(
+    monkeypatch,
+) -> None:
+    """Observing a solve must not change what is solved, and a homotopy must always reach the march.
+
+    Before the solve had one march, ``on_step`` decided which of two it ran, and a ``homotopy`` was
+    handed only to the observed one -- so a ramp with nothing else forcing observation silently skipped
+    its ramp. Recording what the march receives pins both: the arguments with and without an observer
+    differ in the observer alone, and the homotopy arrives with no observer at all.
+    """
+    from aquaflux.solve import MarchResult
+
+    mesh, coupled = _cavity()
+    flow, k, omega = coupled.physical_fields(_healthy_state(mesh, coupled))
+    calls: list[dict] = []
+
+    def recording_march(step, residual_fn, state, **kwargs):
+        calls.append(kwargs)
+        return MarchResult(state, (), True, False, None)
+
+    monkeypatch.setattr(coupled_module, "forward_march", recording_march)
+    homotopy = object()
+    # A target no state can miss, so the recorded march's untouched state is accepted as the root; a
+    # pre-built step with a plain Euclidean measure keeps the test to the wiring.
+    loose = dict(rtol=1.0, atol=1e30, continuation=_single_step())
+
+    solve_coupled(coupled, flow, k, omega, homotopy=homotopy, **loose)
+    solve_coupled(coupled, flow, k, omega, homotopy=homotopy, on_step=print, **loose)
+
+    unobserved, observed = calls
+    assert unobserved["homotopy"] is homotopy
+    assert unobserved["observer"] is None and observed["observer"] is print
+    differing = {
+        key
+        for key in unobserved
+        if key not in ("observer", "drift_measure", "norm_builder")
+        and not _same_argument(unobserved[key], observed[key])
+    }
+    assert differing == set()
+
+
+@pytest.mark.parametrize(
+    ("converged", "homotopy", "atol", "match"),
+    [
+        (True, None, 0.0, "did not converge: the march ended at residual"),
+        (False, object(), 1e30, "homotopy never reached the target problem"),
+    ],
+    ids=["above-target", "homotopy-not-arrived"],
+)
+def test_a_march_that_ends_short_of_a_root_is_refused_rather_than_returned(
+    monkeypatch, converged, homotopy, atol, match
+) -> None:
+    """The adjoint is only valid at a root, so a state that is not one must raise, not be returned.
+
+    Two ways to end short: a residual above the target (here the untouched starting state against a
+    zero tolerance), and a homotopy that never reached its target, where a small residual belongs to an
+    intermediate problem and says nothing about this one.
+    """
+    from aquaflux.solve import MarchResult
+
+    mesh, coupled = _cavity()
+    flow, k, omega = coupled.physical_fields(_healthy_state(mesh, coupled))
+    monkeypatch.setattr(
+        coupled_module,
+        "forward_march",
+        lambda step, residual_fn, state, **kwargs: MarchResult(state, (), converged, False, None),
+    )
+
+    with pytest.raises(eqx.EquinoxRuntimeError, match=match):
+        solve_coupled(
+            coupled,
+            flow,
+            k,
+            omega,
+            rtol=0.0,
+            atol=atol,
+            homotopy=homotopy,
+            continuation=_single_step(),
+        )
+
+
+def test_the_last_refresh_segment_marches_without_the_trigger(monkeypatch) -> None:
+    """With no refresh left to spend, the last segment must not stop where the trigger fires.
+
+    There is no second solve after the march, so a last segment stopped by its trigger would end the
+    whole solve short of the root. Every earlier segment still gets the trigger, which is how a refresh
+    happens at all. The recorded march fires its trigger whenever it is given one, and the refresh is
+    stubbed to hand the same step back.
+    """
+    from aquaflux.solve import MarchResult
+
+    mesh, coupled = _cavity()
+    flow, k, omega = coupled.physical_fields(_healthy_state(mesh, coupled))
+    triggers: list[object] = []
+
+    def recording_march(step, residual_fn, state, **kwargs):
+        triggers.append(kwargs["trigger"])
+        return MarchResult(state, (), True, kwargs["trigger"] is not None, None)
+
+    monkeypatch.setattr(coupled_module, "forward_march", recording_march)
+    trigger = object()
+    step = _single_step()
+    solve_coupled(
+        coupled,
+        flow,
+        k,
+        omega,
+        rtol=1.0,
+        atol=1e30,
+        continuation=step,
+        refresh=RefreshPolicy(trigger=trigger, limit=2, builder=lambda state: step),
+    )
+
+    assert triggers == [trigger, trigger, None]
+
+
+def _same_argument(one, two) -> bool:
+    """Equality for a recorded march argument, treating equal arrays as equal."""
+    if isinstance(one, jnp.ndarray) or isinstance(two, jnp.ndarray):
+        return bool(jnp.array_equal(one, two))
+    return one is two or one == two
 
 
 class _TrivialShiftPolicy(eqx.Module):
@@ -1019,38 +1134,27 @@ def _single_step():
     )
 
 
-def test_dual_time_observed_march_defaults_to_the_courant_step_control() -> None:
-    """A dual-time march that is observing but was given no control defaults to ``DualTimeControl``."""
+def test_a_dual_time_march_given_no_control_defaults_to_the_courant_step_control() -> None:
+    """A dual-time march given no control defaults to ``DualTimeControl``, observed or not."""
     from aquaflux.solve import DualTimeControl, default_dual_time_control
 
-    control = default_dual_time_control(None, observing=True, continuation=_dual_time_step())
+    control = default_dual_time_control(None, continuation=_dual_time_step())
     assert isinstance(control, DualTimeControl)
 
 
-def test_single_step_observed_march_gets_no_default_control() -> None:
+def test_a_single_step_march_gets_no_default_control() -> None:
     """A single-step (pseudo-transient) march is not a dual-time step, so no control is injected."""
     from aquaflux.solve import default_dual_time_control
 
-    assert default_dual_time_control(None, observing=True, continuation=_single_step()) is None
+    assert default_dual_time_control(None, continuation=_single_step()) is None
 
 
 def test_a_caller_supplied_control_is_never_overridden() -> None:
-    """An explicit control on a dual-time observed march is returned unchanged (the override path)."""
+    """An explicit control on a dual-time march is returned unchanged (the override path)."""
     from aquaflux.solve import ResidualRatioDualTimeControl, default_dual_time_control
 
     explicit = ResidualRatioDualTimeControl(beta_start=0.5)
-    assert (
-        default_dual_time_control(explicit, observing=True, continuation=_dual_time_step())
-        is explicit
-    )
-
-
-def test_a_non_observing_dual_time_march_gets_no_default_control() -> None:
-    """Not observing (the differentiable single-stage path) => no control injected, so no forward-only
-    control can make the grad path raise the observe-under-trace guard."""
-    from aquaflux.solve import default_dual_time_control
-
-    assert default_dual_time_control(None, observing=False, continuation=_dual_time_step()) is None
+    assert default_dual_time_control(explicit, continuation=_dual_time_step()) is explicit
 
 
 def test_the_equation_names_follow_the_flat_state_layout() -> None:
@@ -1577,9 +1681,8 @@ def test_the_default_refresh_policy_is_the_inert_one() -> None:
     assert NO_REFRESH.limit == 1
     assert NO_REFRESH.builder is None
     assert NO_REFRESH.precondition_step is None
-    # The default must not refresh and must not force the observed march.
+    # The default must not refresh.
     assert not NO_REFRESH.refreshes
-    assert not NO_REFRESH.observes
 
 
 def test_a_refresh_needs_both_a_trigger_and_a_budget() -> None:
@@ -1591,17 +1694,6 @@ def test_a_refresh_needs_both_a_trigger_and_a_budget() -> None:
     assert RefreshPolicy(trigger=object()).refreshes
     assert not RefreshPolicy(trigger=object(), limit=0).refreshes
     assert not RefreshPolicy(limit=5).refreshes
-
-
-def test_a_builder_alone_does_not_make_a_march_observed() -> None:
-    """A builder with no trigger is called once, for the initial build -- which needs no eager march.
-
-    Getting this wrong would silently force the observed path (and its doubled ``max_steps`` budget,
-    and its ban under ``jax.grad``) on a solve that only wanted a custom way to construct its step.
-    """
-    assert not RefreshPolicy(builder=lambda state: state).observes
-    assert RefreshPolicy(trigger=object()).observes
-    assert RefreshPolicy(precondition_step=lambda step, state: None).observes
 
 
 def test_segments_is_one_more_than_the_refresh_budget() -> None:

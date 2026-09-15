@@ -1645,10 +1645,9 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   - **✅ `stop_on_limit_stall` works, on two independent arms.** The control's rung 2 ends at **15 steps
     instead of the recorded 108**; the zero-gradient arm's at 24. ~90 dead steps saved each time, and the
     run now fails with a `RuntimeError` naming the rung instead of grinding out `MAX_STEPS`.
-  - **⚠️ THE DEAD GRIND MOVED RATHER THAN VANISHED — a real coverage gap.** Once the guard ends the
-    segment, `solve_coupled` falls through to the finishing solve (`ImplicitNewtonSolver`), which has **no
-    equivalent guard**, and that grinds at α 0.000 / 0 cycles with the residual frozen until `max_steps`.
-    `stop_on_limit_stall` covers `forward_march` only. Fixing that is the next march-level item.
+  - **The dead grind that then moved into `solve_coupled`'s traced finishing solve is CLOSED (2026-09-15):**
+    there is no finishing solve any more, so a segment the stall guard ends is judged unconverged and
+    raises at once.
   - The step-limit dumps now carry **β and the anchor** (`cap 2.2923e-06 beta 1.754 anchor yes`), so the
     falsifier named against the earlier diagnosis is closed: these dumps can be paired with the linear
     system that produced them.
