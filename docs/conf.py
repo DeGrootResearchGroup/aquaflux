@@ -86,7 +86,10 @@ SUBPACKAGE_GROUPS = {
     "turbulence": [
         ("The k-ω SST model", ["sst", "transport", "sources", "strain"]),
         ("Wall treatment and boundary closures", ["boundary"]),
-        ("The coupled flow-turbulence solve", ["coupled", "driver", "continuation"]),
+        (
+            "The coupled flow-turbulence solve",
+            ["coupled", "march_settings", "driver", "continuation"],
+        ),
         ("Reynolds-number continuation", ["reynolds"]),
         ("Preconditioners", ["preconditioner_spec", "preconditioner"]),
         ("Initialization and diagnostics", ["initialization", "diagnostics"]),

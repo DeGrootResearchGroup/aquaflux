@@ -62,6 +62,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse.linalg as spla  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
+    DualTimeLoop,
     JacobiSmoothed,
     materialize_block_jacobian,
     shifted_jacobian,
@@ -203,8 +204,7 @@ def main() -> None:
                 probe=JacobianProbeSpec(stencil_reach=REACH),
                 build_beta=beta,
             ),
-            inner_steps=compare.INNER_STEPS,
-            inner_tol=compare.INNER_TOL,
+            dual_time=DualTimeLoop(inner_steps=compare.INNER_STEPS, inner_tol=compare.INNER_TOL),
         )
 
     # Built at zero shift, and at the shipped floor against the same zero-shift operator: the second

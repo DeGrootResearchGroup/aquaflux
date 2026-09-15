@@ -45,6 +45,7 @@ from .line_search_growth import LineSearchGrowth, MonotoneLineSearch
 from .linear import corrected_cycles, solve_linear
 from .norm import ResidualNorm
 from .relaxation import RelaxationSchedule, SwitchedEvolutionRelaxation
+from .settings_value import SettingsValue, filled_from
 
 # Inexact-Newton forward solver for the pseudo-transient march: a loose *relative* tolerance (each
 # shifted step need only make Newton progress; the next step corrects the leftover) but a *tight*
@@ -1308,12 +1309,25 @@ class Globalization(eqx.Module):
         TypeError
             If ``base`` names a field this class does not have.
         """
-        filled = {
-            name: value
-            for name, value in _supplied(type(self), base).items()
-            if getattr(self, name) is None
-        }
-        return dataclasses.replace(self, **filled)
+        return filled_from(self, type(self)(**_supplied(type(self), base)))
+
+    def filled_from(self, base: Globalization) -> Globalization:
+        """This configuration, with each field it leaves unset taken from another's.
+
+        How a Reynolds continuation combines one point's ``Globalization`` with the shared one, field by
+        field (see :func:`~aquaflux.solve.filled_from`).
+
+        Parameters
+        ----------
+        base : Globalization
+            The configuration to fall back on.
+
+        Returns
+        -------
+        Globalization
+            A copy whose set fields are this object's and whose unset fields are ``base``'s.
+        """
+        return filled_from(self, base)
 
     def _schedule(self) -> dict[str, object]:
         """``relaxation_schedule``, if this object sets any of the three fields that describe one."""
@@ -1405,13 +1419,59 @@ class Globalization(eqx.Module):
             raise ValueError(
                 f"{', '.join(ignored)} configure the escalation ladder, which a dual-time step does "
                 "not have -- its inner Newton loop replaces it -- so they would reach nothing. Leave "
-                "them unset, or take single shifted steps (inner_steps=1 on the coupled builders)."
+                "them unset, or take single shifted steps (leave dual_time unset on the coupled builders)."
             )
         settings = {
             **self._schedule(),
             **_supplied(DualTimeStep, {"line_search": self.line_search}),
         }
         return DualTimeStep(shift_policy, **_merged(DualTimeStep, settings, fields))
+
+
+@dataclasses.dataclass(frozen=True)
+class DualTimeLoop(SettingsValue):
+    """The backward-Euler inner loop a dual-time march runs each outer step, as one value.
+
+    Giving a builder this value is what selects the dual-time march; leaving it out selects the single
+    shifted step. That makes the loop's settings impossible to set on a march that has no loop, where
+    as loose keywords they were accepted and reached nothing. Every field defaults to ``None``, meaning
+    "not set here": an unset field keeps :class:`DualTimeStep`'s own default.
+
+    Attributes
+    ----------
+    inner_steps : int or None
+        The most inner Newton iterations per outer timestep, at least ``2``. Unset,
+        :class:`DualTimeStep`'s default.
+    inner_tol : float or None
+        The inner loop stops once the transient residual has fallen to this fraction of its anchor.
+    cycle_budget : int or None
+        A cap on the loop's accumulated restart cycles, so a grinding solve is cut off after about
+        that many. Pair it with ``retry.abort_above_cycles`` below it, so a capped step is redone
+        rather than accepted. Forward-only.
+    refresh_on_cycles : int or None
+        Fire the march's mid-step refresh once an inner solve has cost this many restart cycles. It
+        needs a refresh to fire: a preconditioner session supplies one, or the builder's
+        ``inner_refresh``. Forward-only.
+
+    Raises
+    ------
+    ValueError
+        If ``inner_steps`` is below ``2``.
+    """
+
+    inner_steps: int | None = None
+    inner_tol: float | None = None
+    cycle_budget: int | None = None
+    refresh_on_cycles: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.inner_steps is not None and self.inner_steps < 2:
+            raise ValueError(
+                f"DualTimeLoop(inner_steps={self.inner_steps}) is below 2. One inner iteration is not the "
+                "single shifted step with a loop around it: the single step is a different step, with an "
+                "escalation ladder and its own line search. For it, leave the dual-time loop out "
+                "(dual_time=None)."
+            )
 
 
 #: Nothing overridden: every builder that takes a :class:`Globalization` applies its own defaults.

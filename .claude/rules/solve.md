@@ -57,6 +57,15 @@ public concrete members (found from `__subclasses__`, private and abstract ones 
 `BlockPreconditioner.build` and failed only at build, on an empty `NotImplementedError` — for the velocity
 block after the pressure Schur was already built. A new family base gets this by deriving from `abc.ABC`
 and marking its build hook abstract; do not add a per-family `__new__`.
+**How two partial settings values combine is written once too: `solve.filled_from(value, base)` (#399
+review).** Each `None` field of `value` takes `base`'s. `SettingsValue.filled_from` delegates to it, and
+so do the settings objects that are `equinox` modules (`Globalization.filled_from` and `with_defaults`,
+`turbulence.ShiftSettings.filled_from`); before, `ShiftSettings`, `ForwardSolve` and `DualTimeLoop` each
+carried an identical body and `Globalization.with_defaults` a fourth, and because the Reynolds merge
+(`merged_march_options`) recognizes a mergeable value by its `filled_from`, `Globalization` alone was
+still replaced whole per point. ⚠️ **`None` cannot reset a shared field to its default** — it means "take
+the base's"; write a numeric default out, and keep a setting whose default is `None` itself
+(`ShiftSettings.velocity_parts`) out of the shared options if a point needs it back.
 
 ## Responsibility
 - A Newton driver on `R(state, params) = 0` using the AD Jacobian (JVP/VJP), and a
@@ -217,9 +226,10 @@ halves of the decision are now separated:
 | `_VCYCLE_FORWARD` | `MaterializedJacobian(MonolithicVCycle \| FieldSplit)` (3D `bfs3d`) | 0.3 | 15 | 60 |
 | `_CONSTRAINED_FORWARD` | `mass_flow_coupled_continuation` | **1e-2, Euclidean** | 120 | 15 |
 
-All four builders take `forward_rtol` / `forward_restart` / `forward_max_restarts`. ⚠️ **Move the
-tolerance or the restart with those, never by passing a whole `forward_solver`** — building one also
-replaces the stopping measure, which is a far larger change than the one intended.
+Both coupled builders take the regime as one value, `forward=ForwardSolve(rtol=…, restart=…,
+max_restarts=…)` (#388 — there are no `forward_*` keywords any more). ⚠️ **Move the tolerance or the
+restart with that value, never by passing a whole solver as `forward`** — a solver also replaces the
+stopping measure, which is a far larger change than the one intended.
 
 ⚠️ **`0.3` on the block and complete-LU families is the multigrid family's CALIBRATION, carried across
 because it is a property of the measure, not of multigrid — it has not been re-measured there.** Those
@@ -467,11 +477,12 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
      here — reaching for the complete-LU path's plain-2-norm solver while believing it was the AMG
      builder's row-scaled one, done twice in one session, once where it would have replaced a loose
      row-scaled stop with a tight Euclidean one and reported the difference as a restart-length effect.
-     The general form still bites: **a hand-built `forward_solver` replaces the stopping MEASURE, not
+     The general form still bites: **a hand-built forward solver replaces the stopping MEASURE, not
      just the tolerance**, and **it does not announce itself** — at a state where both converge in one
      cycle a self-check still passes and reports a validation it never performed. Take the restart or
-     the tolerance through `forward_restart=` / `forward_rtol=`, never by supplying a whole solver.
-     Note also what `forward_rtol = 0.3` *is*: an inexact-Newton forcing term on the **linear** residual
+     the tolerance through `forward=ForwardSolve(restart=…, rtol=…)`, never by passing a whole solver
+     in that same `forward` slot (#388).
+     Note also what the regime's `rtol = 0.3` *is*: an inexact-Newton forcing term on the **linear** residual
      per inner solve, not a solution tolerance — accuracy comes from the inner loop iterating. And the
      **achieved** reduction is routinely tighter than the requested one, because a restarted GMRES tests
      the stop only at restart boundaries, so a solve that would cross 30 % after three matrix-vector

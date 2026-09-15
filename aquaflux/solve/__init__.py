@@ -66,6 +66,7 @@ from __future__ import annotations
 from .continuation import (
     DEFAULT_GLOBALIZATION,
     DivergenceGuard,
+    DualTimeLoop,
     DualTimeStep,
     Globalization,
     PseudoTransientStep,
@@ -94,7 +95,7 @@ from .field_split import (
     build_block_triangular_field_split,
 )
 from .block_inverse import AirReduction, BlockInverse, JacobiSmoothed, SimpleSmoothed
-from .settings_value import SettingsValue
+from .settings_value import SettingsValue, filled_from
 from .host_preconditioner import HostFactors, HostPreconditioner
 from .hierarchy_inverse import HierarchyBlockInverse
 from .refresh_timing import PhaseTimer, RefreshTiming
@@ -200,6 +201,7 @@ __all__ = [
     "DampedNewtonStep",
     "DivergenceGuard",
     "DualTimeControl",
+    "DualTimeLoop",
     "DualTimeStep",
     "FieldGroups",
     "FieldLayout",
@@ -277,6 +279,7 @@ __all__ = [
     "default_linear_solver",
     "equilibrate_cell_major",
     "field_change_metrics",
+    "filled_from",
     "forward_march",
     "jacobian_relative_error",
     "materialize_block_jacobian",

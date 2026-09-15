@@ -39,6 +39,7 @@ from aquaflux.flow.block_preconditioner import BlockPreconditioner
 from aquaflux.solve import (
     DEFAULT_GLOBALIZATION,
     DivergenceGuard,
+    DualTimeLoop,
     DualTimeStep,
     Globalization,
     MonotoneLineSearch,
@@ -187,7 +188,12 @@ def test_the_shipped_defaults_are_the_ones_every_case_was_measured_under(case) -
         coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None)), coupled_shipped
     )
     _assert_carries(
-        coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None), inner_steps=3),
+        coupled_step(
+            coupled,
+            state,
+            preconditioner=BlockDiagonal(method=None),
+            dual_time=DualTimeLoop(inner_steps=3),
+        ),
         coupled_shipped,
         dual_time=True,
     )
@@ -280,7 +286,7 @@ def test_the_coupled_builders_forward_every_field(case, dual_time: bool) -> None
     """
     coupled, state = case
     asked = DUAL_TIME_ASKED if dual_time else ASKED
-    extra = {"inner_steps": 3, "inner_tol": 1e-3} if dual_time else {}
+    extra = {"dual_time": DualTimeLoop(inner_steps=3, inner_tol=1e-3)} if dual_time else {}
     built = {
         "block": coupled_step(
             coupled, state, preconditioner=BlockDiagonal(method=None), globalization=asked, **extra
@@ -315,7 +321,7 @@ def test_a_dual_time_step_refuses_a_setting_it_has_no_field_for(case, field: str
             state,
             preconditioner=BlockDiagonal(method=None),
             globalization=one,
-            inner_steps=3,
+            dual_time=DualTimeLoop(inner_steps=3),
         )
     # ...and the same object is accepted by the single-step shape, which has the ladder.
     coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None), globalization=one)

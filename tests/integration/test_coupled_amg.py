@@ -25,7 +25,7 @@ import pytest
 
 pytest.importorskip("petsc4py")
 
-from aquaflux.solve import DualTimeStep, PseudoTransientStep
+from aquaflux.solve import DualTimeLoop, DualTimeStep, PseudoTransientStep
 from aquaflux.turbulence import (
     BlockDiagonal,
     CoupledRANS,
@@ -71,7 +71,7 @@ def case():
 
 @pytest.mark.slow
 def test_amg_continuation_inner_steps_builds_a_dual_time_step(case) -> None:
-    """``inner_steps`` selects a dual-time step, like the factorization builders -- a fast structural check."""
+    """``dual_time`` selects a dual-time step, like the factorization builders -- a fast structural check."""
     coupled = case["coupled"]
     flow, k, omega = case["start"]
     reference_state = coupled.pack_state(flow, k, omega)
@@ -85,8 +85,7 @@ def test_amg_continuation_inner_steps_builds_a_dual_time_step(case) -> None:
         coupled,
         reference_state,
         preconditioner=MaterializedJacobian(MonolithicVCycle()),
-        inner_steps=5,
-        inner_tol=1e-3,
+        dual_time=DualTimeLoop(inner_steps=5, inner_tol=1e-3),
     )
     assert isinstance(dual, DualTimeStep)
     assert dual.inner_steps == 5
@@ -184,7 +183,7 @@ def test_amg_beta_floor_builds_the_preconditioner_above_the_marchs_own_beta(
 
     beta, floor = 0.01, 0.05  # β well below the floor, so the clamp is active
     session = open_session(MaterializedJacobian(MonolithicVCycle(), beta_floor=floor), coupled)
-    dual = session.build(state, inner_steps=5)
+    dual = session.build(state, dual_time=DualTimeLoop(inner_steps=5))
     active, _ = DualTimeControl(beta_start=beta).next_step(dual, None, None)
 
     seen: dict[str, np.ndarray] = {}
@@ -220,7 +219,7 @@ def test_inner_refresh_rebuilds_at_the_iterate_it_is_handed(case, monkeypatch) -
     state = coupled.pack_state(flow, k, omega)
     session = open_session(MaterializedJacobian(MonolithicVCycle()), coupled)
     # `refresh_on_cycles` is what makes a session wire its mid-step hook onto the step it builds.
-    dual = session.build(state, inner_steps=5, refresh_on_cycles=3)
+    dual = session.build(state, dual_time=DualTimeLoop(inner_steps=5, refresh_on_cycles=3))
     active, _ = DualTimeControl(beta_start=0.5).next_step(dual, None, None)
 
     built_at: list[np.ndarray] = []
@@ -311,7 +310,9 @@ def test_sharing_one_preconditioner_makes_a_new_rung_a_march_step_cache_hit() ->
     spec = MaterializedJacobian(MonolithicVCycle())
 
     def build(assembler):
-        return coupled_step(assembler, state, preconditioner=spec, inner_steps=2)
+        return coupled_step(
+            assembler, state, preconditioner=spec, dual_time=DualTimeLoop(inner_steps=2)
+        )
 
     def run(assembler, step) -> int:
         before = len(_RUNG_TRACES)
@@ -332,6 +333,6 @@ def test_sharing_one_preconditioner_makes_a_new_rung_a_march_step_cache_hit() ->
     # Now the same two rungs sharing one V-cycle. The first still compiles (a different object again
     # from the control's), and the second is the assertion this test exists for.
     session = open_session(spec, coupled)
-    assert run(coupled, session.build(state, inner_steps=2)) > 0
+    assert run(coupled, session.build(state, dual_time=DualTimeLoop(inner_steps=2))) > 0
     session.rebind(companion)
-    assert run(companion, session.build(state, inner_steps=2)) == 0
+    assert run(companion, session.build(state, dual_time=DualTimeLoop(inner_steps=2))) == 0

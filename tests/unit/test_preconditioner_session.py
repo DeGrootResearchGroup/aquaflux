@@ -12,7 +12,7 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
 import pytest
-from aquaflux.solve import AirReduction, JacobiSmoothed, SimpleSmoothed
+from aquaflux.solve import AirReduction, DualTimeLoop, JacobiSmoothed, SimpleSmoothed
 from aquaflux.turbulence import (
     BlockDiagonal,
     CompleteLu,
@@ -38,25 +38,23 @@ def test_a_block_session_refresh_carries_the_measure_and_the_flow_block(case) ->
     """A refresh re-derives the scalar blocks on the reused coarsening and carries the rest over."""
     coupled, state = case
     session = open_session(BlockDiagonal(), coupled)
-    first = session.build(state, inner_steps=3)
+    first = session.build(state, dual_time=DualTimeLoop(inner_steps=3))
     measure = first.norm()
-    refreshed = session.refresh(state * 1.01, first, measure, inner_steps=3)
+    refreshed = session.refresh(state * 1.01, first, measure, dual_time=DualTimeLoop(inner_steps=3))
     assert refreshed.residual_norm is measure
     assert refreshed.shift_policy.flow_preconditioner is first.shift_policy.flow_preconditioner
 
 
-def test_a_frozen_step_wires_no_refresh_but_a_session_build_does(case) -> None:
+def test_a_frozen_step_refuses_a_refresh_count_but_a_session_build_wires_one(case) -> None:
+    """A refresh count with nothing to fire is refused; as a loose keyword it was accepted and ignored."""
     coupled, state = case
     spec = MaterializedJacobian(CompleteLu(backend="scipy"))
-    assert (
-        coupled_step(
-            coupled, state, preconditioner=spec, inner_steps=3, refresh_on_cycles=3
-        ).inner_refresh
-        is None
-    )
+    loop = DualTimeLoop(inner_steps=3, refresh_on_cycles=3)
+    with pytest.raises(TypeError, match="refresh_on_cycles"):
+        coupled_step(coupled, state, preconditioner=spec, dual_time=loop)
     session = open_session(spec, coupled)
-    assert session.build(state, inner_steps=3).inner_refresh is None
-    assert session.build(state, inner_steps=3, refresh_on_cycles=3).inner_refresh is not None
+    assert session.build(state, dual_time=DualTimeLoop(inner_steps=3)).inner_refresh is None
+    assert session.build(state, dual_time=loop).inner_refresh is not None
 
 
 def test_every_build_of_a_session_shares_one_inverse_and_one_set_of_hooks(case) -> None:
@@ -64,8 +62,8 @@ def test_every_build_of_a_session_shares_one_inverse_and_one_set_of_hooks(case) 
     coupled, state = case
     session = open_session(MaterializedJacobian(CompleteLu(backend="scipy")), coupled)
     hook = session.precondition_step
-    first = session.build(state, inner_steps=3, refresh_on_cycles=3)
-    second = session.build(state * 1.01, inner_steps=3, refresh_on_cycles=3)
+    first = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
+    second = session.build(state * 1.01, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
     assert first.shift_policy.preconditioner is second.shift_policy.preconditioner
     assert first.inner_refresh is second.inner_refresh
     assert session.precondition_step is hook
@@ -76,7 +74,7 @@ def test_the_session_probe_follows_the_operator_stand_in(case) -> None:
     session = open_session(
         MaterializedJacobian(_SPLIT), coupled, jacobian_production_viscosity=True
     )
-    session.build(state, inner_steps=3)
+    session.build(state, dual_time=DualTimeLoop(inner_steps=3))
     probe = session._probe_for()
     assert probe.production_viscosity_frozen
 
@@ -104,7 +102,7 @@ def test_reports_and_the_inverse_wrapper_reach_the_field_split_blocks(case) -> N
         reports={"leading": messages.append},
         inverse_wrapper=wrapper,
     )
-    session.build(state, inner_steps=3)
+    session.build(state, dual_time=DualTimeLoop(inner_steps=3))
     assert messages, "the leading inverse's build record did not reach its sink"
     assert sorted(wrapped) == ["leading", "trailing"]
 

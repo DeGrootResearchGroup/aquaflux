@@ -32,7 +32,7 @@ from aquaflux.flow import (
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import RefreshPolicy
+from aquaflux.solve import DualTimeLoop, RefreshPolicy
 from aquaflux.turbulence import (
     BlockDiagonal,
     LogScalars,
@@ -237,8 +237,9 @@ def test_the_coupled_adjoint_is_independent_of_the_forward_iteration_count(case)
     gradient that depends on how it got there. The distinguishing experiment is to change the path
     and leave the destination alone.
 
-    ``inner_steps`` is the lever, as it is for the same property at unit level: ``1`` is a single
-    pseudo-transient step per outer iteration and ``3`` runs a dual-time inner Newton loop, so the two
+    The dual-time loop is the lever, as it is for the same property at unit level: none is a single
+    pseudo-transient step per outer iteration and ``DualTimeLoop(inner_steps=3)`` runs an inner Newton
+    loop, so the two
     marches take materially different numbers of outer steps through materially different
     intermediate states, and stop at the same converged residual.
 
@@ -251,12 +252,12 @@ def test_the_coupled_adjoint_is_independent_of_the_forward_iteration_count(case)
     flow_ws, k_ws, omega_ws = case["coupled_start"]
     reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
 
-    def continuation(inner_steps):
+    def continuation(dual_time):
         return coupled_step(
             coupled,
             reference_state,
             preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
-            inner_steps=inner_steps,
+            dual_time=dual_time,
         )
 
     def objective(nu_scale, step):
@@ -268,7 +269,7 @@ def test_the_coupled_adjoint_is_independent_of_the_forward_iteration_count(case)
         _, k, _ = solve_coupled(scaled, flow_ws, k_ws, omega_ws, continuation=step, max_steps=60)
         return jnp.sum(k**2)
 
-    single, dual = continuation(1), continuation(3)
+    single, dual = continuation(None), continuation(DualTimeLoop(inner_steps=3))
 
     # The paths genuinely differ, so the comparison below is not a configuration against itself.
     def outer_steps(step):

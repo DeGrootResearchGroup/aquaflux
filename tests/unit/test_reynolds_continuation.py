@@ -22,6 +22,7 @@ from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, Veloci
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
+from aquaflux.solve import DualTimeLoop
 from aquaflux.turbulence import (
     AdaptiveReynoldsSchedule,
     CoupledRANS,
@@ -316,17 +317,17 @@ def test_the_ramp_and_the_target_get_opposite_halves_of_the_continuation_setting
         rtol=1e-10,
         continuation=step,
         preconditioner=spec,
-        inner_steps=3,
+        dual_time=DualTimeLoop(inner_steps=3),
     )
     ramp, target = calls
     # The ramp builds its own at its own viscosity, so it takes the settings and not the frozen step.
     assert "continuation" not in ramp["kwargs"]
     assert ramp["kwargs"]["preconditioner"] == spec
-    assert ramp["kwargs"]["inner_steps"] == 3
+    assert ramp["kwargs"]["dual_time"] == DualTimeLoop(inner_steps=3)
     # The target takes the frozen step and none of the settings, which describe a build it will not do.
     assert target["kwargs"]["continuation"] is step
     assert "preconditioner" not in target["kwargs"]
-    assert "inner_steps" not in target["kwargs"]
+    assert "dual_time" not in target["kwargs"]
     # ...but the keywords that drive the *solve* rather than a build still reach it.
     assert target["kwargs"]["rtol"] == 1e-10
 
@@ -342,11 +343,15 @@ def test_without_a_continuation_the_target_keeps_every_setting(monkeypatch) -> N
     calls = _record_solves(monkeypatch)
     spec = BlockDiagonal(method="twolevel", schur_scaling="msimple")
     solve_reynolds_continuation(
-        _tiny_coupled(), n_points=1, rtol=1e-10, preconditioner=spec, inner_steps=3
+        _tiny_coupled(),
+        n_points=1,
+        rtol=1e-10,
+        preconditioner=spec,
+        dual_time=DualTimeLoop(inner_steps=3),
     )
     target = calls[-1]
     assert target["kwargs"]["preconditioner"] == spec
-    assert target["kwargs"]["inner_steps"] == 3
+    assert target["kwargs"]["dual_time"] == DualTimeLoop(inner_steps=3)
 
 
 def test_a_materialized_preconditioner_is_one_session_shared_by_every_point(monkeypatch) -> None:
@@ -1318,6 +1323,42 @@ def test_the_ramp_arm_is_one_warm_started_solve_on_the_target_carrying_the_homot
     assert isinstance(homotopy, ViscosityRampHomotopy)
     assert (homotopy.anchor, homotopy.stations, homotopy.steps_per_station) == (100.0, 24, 1)
     assert calls[0]["kwargs"]["rtol"] == 1e-10
+
+
+def test_the_ramp_arm_merges_a_point_s_settings_value_field_by_field_over_the_shared_one(
+    monkeypatch,
+) -> None:
+    """The anchor's ``point_setup`` value keeps the shared fields it leaves unset, as on the ladder.
+
+    A plain dictionary merge would replace the shared ``ShiftSettings`` whole and drop its basis, with
+    nothing to say so -- and a flagship case passes a per-point ``ShiftSettings`` through this arm.
+    """
+    from aquaflux.solve import Globalization, LocalCourantBasis
+    from aquaflux.turbulence import ShiftSettings, solve_reynolds_ramp
+
+    coupled, calls, _ = _ramp_arm_fixtures(monkeypatch)
+    basis = LocalCourantBasis(dissipative_weight=0.0)
+
+    solve_reynolds_ramp(
+        coupled,
+        anchor=100.0,
+        stations=4,
+        steps_per_station=1,
+        shift=ShiftSettings(basis=basis),
+        globalization=Globalization(beta0=2.0),
+        point_setup=lambda companion, state, point: {
+            "shift": ShiftSettings(turbulence_damping=2.0),
+            "globalization": Globalization(line_search=3),
+        },
+    )
+
+    (call,) = calls
+    assert call["kwargs"]["shift"].basis is basis
+    assert call["kwargs"]["shift"].turbulence_damping == 2.0
+    assert (call["kwargs"]["globalization"].beta0, call["kwargs"]["globalization"].line_search) == (
+        2.0,
+        3,
+    )
 
 
 def test_the_ramp_arm_seeds_the_hybrid_start_from_the_anchor_not_from_the_target(

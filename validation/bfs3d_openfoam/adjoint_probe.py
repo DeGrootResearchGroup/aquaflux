@@ -56,6 +56,7 @@ import compare  # noqa: E402
 from aquaflux.solve import relative_residual_gmres  # noqa: E402
 from aquaflux.turbulence import (
     FieldSplit,
+    ForwardSolve,
     JacobianProbeSpec,
     MaterializedJacobian,
     coupled_step,
@@ -363,7 +364,7 @@ def main() -> None:
             FieldSplit(compare.LEADING_INVERSE, compare.TRAILING_INVERSE),
             probe=JacobianProbeSpec(stencil_reach=3, column_reach=compare.COLUMN_REACH),
         ),
-        forward_rtol=FORWARD_RTOL,
+        forward=ForwardSolve(rtol=FORWARD_RTOL),
         # THE CASE'S positivity settings, not the library's. Every step is capped by the k-positivity
         # rule whether or not one asks for it (`step_limit` is unconditional), and unfloored that cap
         # ratchets toward zero on this case -- observed here as a solve that decays geometrically at

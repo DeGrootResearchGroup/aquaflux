@@ -184,7 +184,8 @@ cannot be written. The guard is what catches the next module that does branch.
   solve cannot converge in a quantity the march does not read. ⚠️ The advice recorded here — that
   `forward_rtol`/`restart`/`max_restarts` were "reachable via `forward_solver=`" — was true and a trap:
   building a solver to move the tolerance silently replaced the *stopping measure* too, a far larger
-  change. Pass the parameter.
+  change. Pass the parameter — since #388 that is `forward=ForwardSolve(...)`, and a whole solver goes
+  in the same `forward` slot, so the two cannot be given together.
 - **`_mis_aggregate`'s return annotation is stale** — it says `tuple[np.ndarray, int]` and returns
   three values (labels, roots, count). Cost one debugging cycle.
 

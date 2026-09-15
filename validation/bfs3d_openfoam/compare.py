@@ -78,6 +78,7 @@ from aquaflux.schemes import CorrectedGreenGauss, VenkatakrishnanLimiter
 from aquaflux.solve import (
     AirReduction,
     CflResidualDualTimeControl,
+    DualTimeLoop,
     InnerIterateCheckpointer,
     JacobiSmoothed,
     MarchLogger,
@@ -91,11 +92,13 @@ from aquaflux.solve import (
 from aquaflux.turbulence import (
     CoupledRANS,
     FieldSplit,
+    ForwardSolve,
     GeometricReynoldsSchedule,
     JacobianProbeSpec,
     LogScalars,
     MaterializedJacobian,
     MonolithicVCycle,
+    ShiftSettings,
     SSTModel,
     SSTTurbulence,
     coupled_fields,
@@ -356,6 +359,9 @@ RAMP_REDAMPING = (
 # Each point is ONE march and this case has no measured march-level noise floor, so the 1e-2/5e-2 gap
 # (4%) rests on the step and cycle counts, which are contention-immune, rather than on the wall clock.
 INNER_STEPS = int(os.environ.get("BFS3D_INNER_STEPS", "5"))
+# `1` (or less) selects the single shifted step rather than a one-iteration loop: `DualTimeLoop` refuses
+# fewer than two inner steps, because the single step is a different step, with its own escalation ladder.
+DUAL_TIME = INNER_STEPS > 1
 INNER_TOL = float(os.environ.get("BFS3D_INNER_TOL", "1e-2"))
 # Preconditioner bundle. ILU(1) DIVERGES at the low shifts this march's tail runs at (ground truth: 303
 # negative pivots at beta = 0.02, zero for ILU(0)); zero fill converges at every shift tested and builds
@@ -885,8 +891,8 @@ RETRY_ON_ALPHA = float(os.environ.get("BFS3D_RETRY_ON_ALPHA", "0.01")) or None
 # experiment changes the march's control behaviour rather than just its cost: at a restart of 5 an
 # unscaled `retry.on_cycles = 10` would fire after 50 matrix-vector products where it used to take 150.
 # Scaling by the ratio keeps every bailout at the same matvec count, so the only variable is how much
-# over-solving happens inside a cycle. Vary the restart through the builder's own `forward_restart`, NOT
-# by passing a whole `forward_solver`: the builder's default also carries a loose row-scaled stop that a
+# over-solving happens inside a cycle. Vary the restart through `forward=ForwardSolve(restart=...)`, NOT
+# by passing a whole solver as `forward`: the builder's default also carries a loose row-scaled stop that a
 # hand-built solver would silently replace, which measures something else entirely.
 BASELINE_RESTART = 15  # the coupled AMG builder's own default
 FORWARD_RESTART = int(os.environ.get("BFS3D_FORWARD_RESTART", str(BASELINE_RESTART)))
@@ -1436,17 +1442,21 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
     options = (
         dict(
             preconditioner=session,
-            turbulence_damping=TURB_DAMPING,
-            inner_steps=INNER_STEPS,
-            inner_tol=INNER_TOL,
-            cycle_budget=round(CYCLE_BUDGET * _RESTART_SCALE),
+            shift=ShiftSettings(turbulence_damping=TURB_DAMPING),
+            dual_time=DualTimeLoop(
+                inner_steps=INNER_STEPS,
+                inner_tol=INNER_TOL,
+                cycle_budget=round(CYCLE_BUDGET * _RESTART_SCALE),
+                refresh_on_cycles=REFRESH_ON_CYCLES or None,
+            )
+            if DUAL_TIME
+            else None,
+            forward=ForwardSolve(
+                rtol=FORWARD_RTOL, restart=FORWARD_RESTART, max_restarts=FORWARD_MAX_RESTARTS
+            ),
             positivity_floor=K_POSITIVITY_FLOOR,
             positivity_projection=K_POSITIVITY_PROJECTION,
-            forward_rtol=FORWARD_RTOL,
-            forward_restart=FORWARD_RESTART,
-            forward_max_restarts=FORWARD_MAX_RESTARTS,
-            inner_observer=inner_observer,
-            refresh_on_cycles=REFRESH_ON_CYCLES or None,
+            inner_observer=inner_observer if DUAL_TIME else None,
             max_steps=MAX_STEPS,
             rtol=RTOL,
             atol=ATOL,

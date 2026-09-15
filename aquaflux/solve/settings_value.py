@@ -11,8 +11,11 @@ configuration object that can reach it.
 from __future__ import annotations
 
 import dataclasses
+from typing import TypeVar
 
-__all__ = ["SettingsValue"]
+__all__ = ["SettingsValue", "filled_from"]
+
+_Value = TypeVar("_Value")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -51,6 +54,52 @@ class SettingsValue:
             for field in dataclasses.fields(self)
             if (value := getattr(self, field.name)) is not None
         }
+
+    def filled_from(self, base: _Value) -> _Value:
+        """This value, with each field it leaves unset taken from ``base`` (see :func:`filled_from`)."""
+        return filled_from(self, base)
+
+
+def filled_from(value: _Value, base: _Value) -> _Value:
+    """``value``, with each field it leaves unset (``None``) taken from ``base``.
+
+    How two partial configurations of one kind combine: a builder's own default beneath a caller's
+    setting, or a continuation's shared settings beneath one point's own. It is written once for every
+    such value -- a :class:`SettingsValue` and the settings objects that are ``equinox`` modules alike,
+    since both are dataclasses.
+
+    ⚠️ **``None`` means "take ``base``'s", so it cannot ask for the class default back.** Over a ``base``
+    that sets a field, a value leaving that field unset gets ``base``'s setting, not the default of the
+    class the value configures. Where that default is a number it can be written out; a field whose
+    default is ``None`` itself cannot be restored this way.
+
+    Parameters
+    ----------
+    value, base : dataclass instance
+        Two instances of the same class; ``value`` takes precedence.
+
+    Returns
+    -------
+    same type as ``value``
+        A copy whose set fields are ``value``'s and whose unset fields are ``base``'s.
+
+    Raises
+    ------
+    TypeError
+        If ``base`` is not an instance of exactly ``value``'s class.
+    """
+    if type(base) is not type(value):
+        raise TypeError(
+            f"cannot fill a {type(value).__name__} from a {type(base).__name__}: the two must be one class."
+        )
+    return dataclasses.replace(
+        value,
+        **{
+            field.name: getattr(base, field.name)
+            for field in dataclasses.fields(value)
+            if field.init and getattr(value, field.name) is None
+        },
+    )
 
 
 def _concrete_members(base: type) -> str:

@@ -8,7 +8,7 @@ import dataclasses
 import pickle
 
 import pytest
-from aquaflux.solve import SettingsValue
+from aquaflux.solve import SettingsValue, filled_from
 
 
 @dataclasses.dataclass(frozen=True)
@@ -47,6 +47,18 @@ class _PrivateLeaf(_Family):
 def test_only_the_fields_that_are_set_are_settings() -> None:
     assert Alpha().settings() == {}
     assert Alpha(sweeps=2).settings() == {"sweeps": 2}
+
+
+def test_a_value_is_filled_from_another_only_where_it_is_unset() -> None:
+    """``0`` is a setting, not an absence; only ``None`` falls through to the base."""
+    assert Alpha().filled_from(Alpha(sweeps=3)) == Alpha(sweeps=3)
+    assert Alpha(sweeps=0).filled_from(Alpha(sweeps=3)) == Alpha(sweeps=0)
+    assert filled_from(Beta(), Beta(omega=0.5)) == Beta(omega=0.5)
+
+
+def test_filling_from_another_class_is_refused() -> None:
+    with pytest.raises(TypeError, match="cannot fill a Alpha from a Beta"):
+        filled_from(Alpha(), Beta())
 
 
 @pytest.mark.parametrize("base", [_Family, _PrivateBranch], ids=["family", "intermediate"])

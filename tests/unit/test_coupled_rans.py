@@ -28,6 +28,7 @@ from aquaflux.schemes import CompactGreenGauss, CorrectedGreenGauss, SweptGradie
 from aquaflux.solve import (
     NO_REFRESH,
     CycleGrowthTrigger,
+    DualTimeLoop,
     Globalization,
     PseudoTransientStep,
     RefreshPolicy,
@@ -38,9 +39,11 @@ from aquaflux.turbulence import (
     BlockDiagonal,
     CompleteLu,
     DirectScalars,
+    ForwardSolve,
     LogScalars,
     MaterializedJacobian,
     MonolithicVCycle,
+    ShiftSettings,
     SSTModel,
     SSTTurbulence,
     coupled_equation_names,
@@ -213,7 +216,7 @@ def test_lu_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None
             coupled,
             state,
             preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
-            forward_restart=120,
+            forward=ForwardSolve(restart=120),
         ).forward_solver.restart
         == 120
     )
@@ -245,7 +248,10 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
             coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
         ),
         "block dual-time": coupled_step(
-            coupled, state, preconditioner=BlockDiagonal(method=None), inner_steps=2
+            coupled,
+            state,
+            preconditioner=BlockDiagonal(method=None),
+            dual_time=DualTimeLoop(inner_steps=2),
         ),
     }
     for name, step in built.items():
@@ -262,26 +268,18 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
         # builders as well (issue #372); `test_globalization_reach.py` is where that wider claim is
         # pinned, and this entry keeps the four coupled builders inside it.
         "globalization",
-        "inner_steps",
-        "inner_tol",
+        "dual_time",
         # The shifted forward solve. `forward_rtol` / `forward_restart` / `forward_max_restarts` sat on
         # the multigrid builder alone, although the argument for them is about the *coupled residual*
         # (~100% omega under a plain 2-norm, so the flow block goes unresolved) and not about multigrid.
-        "forward_solver",
-        "forward_rtol",
-        "forward_restart",
-        "forward_max_restarts",
+        "forward",
         # The progress measure and the shift.
         "block_scaled_norm",
-        "shift_basis",
-        # ...and this one was on two of the four, absent from both monolithic builders although the
-        # configuration it was built for -- a dual-time low-shift march whose shift must track the
-        # developing eddy viscosity -- is a monolithic one.
-        "velocity_shift_parts",
+        # ...one value since #387, so the velocity parts -- once on two builders of four -- cannot fall
+        # off one again.
+        "shift",
         # The per-step guards.
         "inner_observer",
-        "cycle_budget",
-        "refresh_on_cycles",
         "inner_refresh",
         "positivity_floor",
         "positivity_projection",
@@ -371,7 +369,7 @@ def test_the_constrained_builder_refuses_a_materialized_preconditioner() -> None
     [
         {"preconditioner": BlockDiagonal(method="air")},
         {"reference_state": "state"},
-        {"inner_steps": 3},
+        {"dual_time": DualTimeLoop(inner_steps=3)},
     ],
     ids=["preconditioner", "reference_state", "march setting"],
 )
@@ -412,7 +410,7 @@ def test_a_monolithic_builder_takes_the_injected_velocity_shift_source() -> None
         coupled,
         state,
         preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
-        velocity_shift_parts=live,
+        shift=ShiftSettings(velocity_parts=live),
     )
     assert step.shift_policy.base.velocity_shift_parts is live
     # ...and it is genuinely live: away from the state the assembler was frozen at, the shift it
@@ -453,7 +451,7 @@ def test_continuation_settings_are_refused_where_they_would_be_dropped() -> None
 
     ``preconditioner`` / ``reference_state`` / ``**continuation_kwargs`` configure the continuation
     ``solve_coupled`` builds. On the two paths where it builds none -- an explicit ``continuation``, or a
-    ``RefreshPolicy(builder=...)`` -- they reached nothing at all: a solve asked for ``inner_steps=3``
+    ``RefreshPolicy(builder=...)`` -- they reached nothing at all: a solve asked for a dual-time loop
     and ``positivity_floor=1e-6`` ran the library defaults, with no error and no log line. ``**kwargs``
     is what made it quiet, since it accepts every keyword and checks none, and that door is the main
     entry point's.
@@ -466,11 +464,14 @@ def test_continuation_settings_are_refused_where_they_would_be_dropped() -> None
     step = coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None))
 
     for kwargs in (
-        {"continuation": step, "inner_steps": 3},
+        {"continuation": step, "dual_time": DualTimeLoop(inner_steps=3)},
         {"continuation": step, "positivity_floor": 1e-6},
         {"continuation": step, "preconditioner": BlockDiagonal()},
         {"continuation": step, "reference_state": state},
-        {"refresh": RefreshPolicy(builder=lambda s: step), "inner_steps": 3},
+        {
+            "refresh": RefreshPolicy(builder=lambda s: step),
+            "dual_time": DualTimeLoop(inner_steps=3),
+        },
         {
             "refresh": RefreshPolicy(builder=lambda s: step),
             "preconditioner": BlockDiagonal(method=None),
@@ -497,11 +498,11 @@ def test_the_settings_are_still_accepted_where_the_solve_does_build_the_continua
             refresh=refresh,
             preconditioner=BlockDiagonal(method=None),
             reference_state=state,
-            kwargs={"inner_steps": 2},
+            kwargs={"dual_time": DualTimeLoop(inner_steps=2)},
         )
         assert isinstance(source, coupled_module._SessionContinuation)
         # ...and it carries them, rather than accepting and then dropping them one layer down.
-        assert source.march == {"inner_steps": 2}
+        assert source.march == {"dual_time": DualTimeLoop(inner_steps=2)}
         assert source.reference_state is state
         assert source.session._spec == BlockDiagonal(method=None)
 
