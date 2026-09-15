@@ -267,11 +267,29 @@ def test_the_trailing_inverse_takes_the_hierarchy_knobs_its_sibling_had() -> Non
     deeper = JacobiSmoothedInverse(a, 2, max_levels=4, max_coarse=40)
     assert len(deeper._hierarchy.levels) == 4, "max_levels did not reach the coarsening"
 
+    # `strength_threshold` must actually reach the coarsening, not just build something finite: at 0
+    # (isotropic) the aggregation reads only the sparsity pattern, and above 0 it reads `|A_ij|`
+    # (`_aggregation_edges`) and keeps only the strong connections, which changes which cells aggregate
+    # together and therefore the coarse level sizes. On this fixture (400 cells, 2 fields, chain graph
+    # with weak `N(0, 0.2)` off-diagonal coupling against a diagonal of 6.0), threshold 0.0 vs 0.6 at
+    # `max_levels=4, max_coarse=40` coarsens to (124, 52, 22) vs (154, 68, 32) equations on levels 1-3 —
+    # a hardcoded `strength_threshold = 0.0` inside `HierarchyBlockInverse.__init__` would build the
+    # isotropic shapes regardless of what is passed here, so comparing the shapes catches it where
+    # `isfinite` cannot.
+    isotropic = JacobiSmoothedInverse(a, 2, max_levels=4, max_coarse=40, strength_threshold=0.0)
+    thresholded = JacobiSmoothedInverse(a, 2, max_levels=4, max_coarse=40, strength_threshold=0.6)
+    isotropic_shapes = [level.operator.shape for level in isotropic._hierarchy.levels]
+    thresholded_shapes = [level.operator.shape for level in thresholded._hierarchy.levels]
+    assert thresholded_shapes != isotropic_shapes, (
+        "strength_threshold did not change the coarsening -- it may be discarded before it reaches "
+        "the hierarchy builder"
+    )
+
     # And the value-dependent knobs build, which is what a sweep needs; a single-state probe never
     # refreshes, so the structure-invariance they cost does not arise there.
     for extra in (
-        {"strength_threshold": 0.25},
-        {"strength_threshold": 0.25, "shape_headroom": 1.3},
+        {"strength_threshold": 0.6},
+        {"strength_threshold": 0.6, "shape_headroom": 1.3},
     ):
         inverse = JacobiSmoothedInverse(a, 2, max_levels=4, max_coarse=40, **extra)
         x = np.asarray(inverse.apply(np.random.default_rng(1).normal(size=a.shape[0])))
