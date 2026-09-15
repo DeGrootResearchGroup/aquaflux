@@ -281,11 +281,29 @@ def test_the_imposed_wall_gradient_is_handed_to_the_scheme_not_applied_to_its_re
 
 
 def test_eddy_viscosity_is_differentiable_in_k() -> None:
+    """The k-derivative must be the RIGHT number, not merely a finite one.
+
+    ``eddy_viscosity`` is used by the segregated driver's eddy-viscosity sweep, with no other
+    gradient check anywhere -- a severed derivative along this path (the frozen strain-rate blend,
+    the SST limiter) reports a finite ``0.0``, which an isfinite-only check cannot tell apart from
+    the true, nonzero sensitivity checked here against a central finite difference.
+    """
     mesh, turb = _turbulence()
     n = mesh.n_cells
     omega = jnp.full(n, 10.0)
-    g = jax.grad(lambda k: jnp.sum(turb.eddy_viscosity(_shear(n), k, omega)))(jnp.full(n, 0.01))
-    assert not bool(jnp.any(jnp.isnan(g)))
+    k0 = jnp.full(n, 0.01)
+
+    def total(k):
+        return jnp.sum(turb.eddy_viscosity(_shear(n), k, omega))
+
+    def central_difference(k_point, step):
+        return (total(k_point + step) - total(k_point - step)) / (2.0 * step)
+
+    grad = jax.grad(total)(k0)
+    assert bool(jnp.all(jnp.isfinite(grad)))
+    assert float(jnp.sum(grad)) != 0.0  # a severed gradient reports 0.0, which is finite too
+    eps = 1e-6
+    assert float(jnp.sum(grad)) == pytest.approx(float(central_difference(k0, eps)), rel=1e-6)
 
 
 # --- the adaptive near-wall seams the closure fields carry --------------------------------------
