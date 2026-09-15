@@ -531,18 +531,11 @@ class VelocityBlock(SettingsValue, abc.ABC):
     Raises
     ------
     TypeError
-        If an abstract velocity block is constructed. Refused here, where it is written, rather than
-        once :meth:`BlockPreconditioner.build` reaches the block -- by which point the pressure Schur
-        has already been built, and an abstract block has nothing to build.
+        If an abstract velocity block is constructed (see :class:`~aquaflux.solve.SettingsValue`).
+        Refused where it is written, rather than once :meth:`BlockPreconditioner.build` reaches the
+        block -- by which point the pressure Schur has already been built, and an abstract block has
+        nothing to build.
     """
-
-    def __new__(cls, *args: object, **kwargs: object) -> VelocityBlock:
-        if cls.__abstractmethods__:
-            raise TypeError(
-                f"{cls.__name__} is an abstract velocity block; construct ViscousMultilevel(), "
-                "ConvectionTwoLevel() or ConvectionAir()."
-            )
-        return super().__new__(cls)
 
     @abc.abstractmethod
     def _build(self, geometry: _VelocityGeometry, inputs: _StrategyInputs) -> VelocityBlockSolver:

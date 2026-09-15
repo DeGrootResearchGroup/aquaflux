@@ -18,6 +18,7 @@ The build record sink (``report``) is not a setting but a destination; it is bou
 
 from __future__ import annotations
 
+import abc
 import dataclasses
 from collections.abc import Callable
 
@@ -31,19 +32,21 @@ __all__ = ["AirReduction", "BlockInverse", "JacobiSmoothed", "SimpleSmoothed"]
 
 
 @dataclasses.dataclass(frozen=True)
-class BlockInverse(SettingsValue):
+class BlockInverse(SettingsValue, abc.ABC):
     """The settings of one field-split block inverse, and the factory that builds it.
 
     The base of :class:`SimpleSmoothed`, :class:`JacobiSmoothed` and :class:`AirReduction`. Its role is
     to be the type a configuration can require: a split described by values holds one of these for each
-    of its blocks, not an arbitrary callable.
+    of its blocks, not an arbitrary callable. It is abstract, so constructing it raises rather than
+    passing that requirement with no inverse to build.
     """
 
     #: Whether the inverse class accepts a ``report`` sink for its build record.
     _reports = True
 
+    @abc.abstractmethod
     def _inverse_class(self) -> type:
-        raise NotImplementedError
+        """The inverse class this value builds."""
 
     def _build(
         self, block: sp.spmatrix, n_fields: int, report: Callable[[str], None] | None

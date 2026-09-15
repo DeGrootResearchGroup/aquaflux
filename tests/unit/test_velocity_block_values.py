@@ -167,5 +167,7 @@ def test_an_abstract_velocity_block_is_refused_where_it_is_written(base) -> None
     Accepted, it reached :meth:`BlockPreconditioner.build`, which built the pressure Schur and then
     failed on an empty ``NotImplementedError``. Construction is where it is refused, naming the values.
     """
-    with pytest.raises(TypeError, match=r"abstract velocity block.*ConvectionTwoLevel\(\)"):
+    with pytest.raises(
+        TypeError, match=rf"{base.__name__} is abstract; construct .*ConvectionTwoLevel\(\)"
+    ):
         base()
