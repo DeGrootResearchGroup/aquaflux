@@ -13,6 +13,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from aquaflux.boundary import BoundaryConditions, ZeroGradient
 from aquaflux.context import FieldContext, MeshContext
 from aquaflux.discretization import (
@@ -141,14 +142,23 @@ def test_boundary_coefficient_leaves_interior_faces_unchanged() -> None:
 
 
 def test_boundary_coefficient_is_differentiable() -> None:
-    """Gradients flow through the boundary coefficient (state-dependent in a wall-function residual)."""
+    """Gradients through the boundary coefficient (state-dependent in a wall-function residual)
+    match a central finite difference -- not merely finite (a ``stop_gradient`` around
+    ``boundary_coefficient`` returns an exact zero here, which is finite)."""
 
     def loss(gamma_b):
         field, context = _single_face(1.0, 0.0, boundary_value=2.0, interior=False)
         return jnp.sum(DiffusionFlux(boundary_coefficient=gamma_b).face_flux(field, context) ** 2)
 
-    g = jax.grad(loss)(jnp.array([3.0]))
+    gamma_b = jnp.array([3.0])
+    g = jax.grad(loss)(gamma_b)
+    step = 1e-6
+    finite_difference = float((loss(gamma_b + step) - loss(gamma_b - step)) / (2.0 * step))
+    assert float(g[0]) == pytest.approx(finite_difference, rel=1e-6)
     assert bool(jnp.all(jnp.isfinite(g)))
+    assert abs(float(g[0])) > 1e-6, (
+        "a severed adjoint would report zero and pass a finiteness check"
+    )
 
 
 def test_non_orthogonal_correction_enters_flux() -> None:
@@ -167,14 +177,21 @@ def test_non_orthogonal_correction_enters_flux() -> None:
 
 
 def test_flux_is_differentiable() -> None:
-    """jax.grad flows through the operator without NaNs."""
+    """``jax.grad`` w.r.t. the neighbour value matches a central finite difference -- not merely
+    finite (a ``stop_gradient`` around the neighbour field value returns an exact zero here, which
+    is finite and would pass a bare NaN check)."""
 
     def loss(phi_n):
         field, context = _single_face(1.0, phi_n)
         return jnp.sum(DiffusionFlux().face_flux(field, context) ** 2)
 
-    g = jax.grad(loss)(3.0)
+    phi_n = 3.0
+    g = jax.grad(loss)(phi_n)
+    step = 1e-6
+    finite_difference = float((loss(phi_n + step) - loss(phi_n - step)) / (2.0 * step))
+    assert g == pytest.approx(finite_difference, rel=1e-6)
     assert not bool(jnp.isnan(g))
+    assert abs(g) > 1e-6, "a severed adjoint would report zero and pass a finiteness check"
 
 
 class _StubFlux(FaceFluxOperator):

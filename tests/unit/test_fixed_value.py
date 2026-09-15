@@ -5,7 +5,10 @@ from __future__ import annotations
 import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
+import pytest
 from aquaflux.discretization import DifferenceRow, FixedValueCells, LogRatioRow
+
+STEP = 1e-6
 
 
 def test_replaces_only_the_fixed_rows() -> None:
@@ -27,14 +30,25 @@ def test_constraint_residual_vanishes_at_the_target() -> None:
 
 
 def test_is_differentiable_in_the_target() -> None:
+    """``jax.grad`` w.r.t. the constraint target matches a central finite difference -- not merely
+    finite (a ``stop_gradient`` around ``self.values`` severs this and still passes a NaN check)."""
     field = jnp.array([1.0, 2.0, 3.0])
 
     def loss(values):
         fix = FixedValueCells(indices=jnp.array([0, 1]), values=values)
         return jnp.sum(fix.apply(jnp.zeros(3), field) ** 2)
 
-    g = jax.grad(loss)(jnp.array([0.5, 0.5]))
+    values = jnp.array([0.5, 0.5])
+    g = jax.grad(loss)(values)
+    for index in range(values.shape[0]):
+        finite_difference = float(
+            (loss(values.at[index].add(STEP)) - loss(values.at[index].add(-STEP))) / (2.0 * STEP)
+        )
+        assert float(g[index]) == pytest.approx(finite_difference, rel=1e-6)
     assert not bool(jnp.any(jnp.isnan(g)))
+    assert float(jnp.abs(g).max()) > 1e-6, (
+        "a severed adjoint would report zero and pass a finiteness check"
+    )
 
 
 def test_difference_row_jacobian_scale_matches_ad_through_the_parametrization() -> None:

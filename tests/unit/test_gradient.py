@@ -144,19 +144,28 @@ def test_compact_gg_is_inconsistent_on_irregular_grids() -> None:
 
 
 def test_compact_gg_is_differentiable() -> None:
-    """`jax.grad` flows through the reconstruction without NaNs."""
+    """`jax.grad` matches a central finite difference -- not merely finite (a ``stop_gradient``
+    around the interpolated interior face value returns an exact zero here, which is finite)."""
     mesh = perturbed_grid_2d(8, 8, perturb=0.2)
     geom = mesh.geometry()
     scheme = CompactGreenGauss()
     bvals = _trig(geom.face.centroid)
+    field = _trig(geom.cell.centroid)
 
-    def loss(field):
-        grad = scheme.gradients(field, mesh, geom, bvals)
-        return jnp.sum(grad**2)
+    def loss(f):
+        return jnp.sum(scheme.gradients(f, mesh, geom, bvals) ** 2)
 
-    sens = jax.grad(loss)(_trig(geom.cell.centroid))
+    sens = jax.grad(loss)(field)
     assert sens.shape == (mesh.n_cells,)
     assert not bool(jnp.any(jnp.isnan(sens)))
+
+    index, step = 11, 1e-6
+    analytic = float(sens[index])
+    difference = float(
+        (loss(field.at[index].add(step)) - loss(field.at[index].add(-step))) / (2 * step)
+    )
+    assert analytic == pytest.approx(difference, rel=1e-6)
+    assert abs(analytic) > 1e-6, "a severed adjoint would report zero and pass a finiteness check"
 
 
 @pytest.mark.parametrize("func,grad_func", [(_linear, _linear_grad), (_quadratic, _quadratic_grad)])
@@ -205,18 +214,29 @@ def test_corrected_gg_is_consistent_on_irregular() -> None:
 
 
 def test_corrected_gg_is_differentiable() -> None:
-    """`jax.grad` flows through the implicit (lineax) solve without NaNs."""
+    """`jax.grad` through the implicit (lineax) solve matches a central finite difference -- not
+    merely finite (a ``stop_gradient`` around the field-dependent right-hand side returns an exact
+    zero here, which is finite and would pass a bare NaN check)."""
     mesh = perturbed_grid_2d(8, 8, perturb=0.2)
     geom = mesh.geometry()
     scheme = CorrectedGreenGauss()
     bvals = _trig(geom.face.centroid)
+    field = _trig(geom.cell.centroid)
 
-    def loss(field):
-        return jnp.sum(scheme.gradients(field, mesh, geom, bvals) ** 2)
+    def loss(f):
+        return jnp.sum(scheme.gradients(f, mesh, geom, bvals) ** 2)
 
-    sens = jax.grad(loss)(_trig(geom.cell.centroid))
+    sens = jax.grad(loss)(field)
     assert sens.shape == (mesh.n_cells,)
     assert not bool(jnp.any(jnp.isnan(sens)))
+
+    index, step = 11, 1e-6
+    analytic = float(sens[index])
+    difference = float(
+        (loss(field.at[index].add(step)) - loss(field.at[index].add(-step))) / (2 * step)
+    )
+    assert analytic == pytest.approx(difference, rel=1e-6)
+    assert abs(analytic) > 1e-6, "a severed adjoint would report zero and pass a finiteness check"
 
 
 # --- swept corrected Green–Gauss (fixed matrix-free Richardson sweeps) ------------------
@@ -259,18 +279,29 @@ def test_swept_convergence_is_mesh_independent() -> None:
 
 
 def test_swept_is_differentiable() -> None:
-    """`jax.grad` flows through the unrolled sweeps (no implicit-diff solve) without NaNs."""
+    """`jax.grad` through the unrolled sweeps (no implicit-diff solve) matches a central finite
+    difference -- not merely finite (the same field-dependent right-hand side as the exact solve
+    feeds every sweep, so severing it collapses this gradient to an exact zero too)."""
     mesh = perturbed_grid_2d(8, 8, perturb=0.2)
     geom = mesh.geometry()
     scheme = CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=12))
     bvals = _trig(geom.face.centroid)
+    field = _trig(geom.cell.centroid)
 
-    def loss(field):
-        return jnp.sum(scheme.gradients(field, mesh, geom, bvals) ** 2)
+    def loss(f):
+        return jnp.sum(scheme.gradients(f, mesh, geom, bvals) ** 2)
 
-    sens = jax.grad(loss)(_trig(geom.cell.centroid))
+    sens = jax.grad(loss)(field)
     assert sens.shape == (mesh.n_cells,)
     assert not bool(jnp.any(jnp.isnan(sens)))
+
+    index, step = 11, 1e-6
+    analytic = float(sens[index])
+    difference = float(
+        (loss(field.at[index].add(step)) - loss(field.at[index].add(-step))) / (2 * step)
+    )
+    assert analytic == pytest.approx(difference, rel=1e-6)
+    assert abs(analytic) > 1e-6, "a severed adjoint would report zero and pass a finiteness check"
 
 
 def test_swept_default_sweeps_is_four() -> None:
@@ -435,18 +466,29 @@ def test_hessian_beats_compact_and_corrected_on_irregular() -> None:
 
 
 def test_hessian_is_differentiable() -> None:
-    """`jax.grad` flows through the nested Schur solve without NaNs."""
+    """`jax.grad` through the coupled sweep matches a central finite difference -- not merely
+    finite (a ``stop_gradient`` around the field-dependent right-hand side returns an exact zero
+    here, which is finite and would pass a bare NaN check)."""
     mesh = perturbed_grid_2d(8, 8, perturb=0.2)
     geom = mesh.geometry()
     scheme = HessianCorrectedGradient()
     bvals = _trig(geom.face.centroid)
+    field = _trig(geom.cell.centroid)
 
-    def loss(field):
-        return jnp.sum(scheme.gradients(field, mesh, geom, bvals) ** 2)
+    def loss(f):
+        return jnp.sum(scheme.gradients(f, mesh, geom, bvals) ** 2)
 
-    sens = jax.grad(loss)(_trig(geom.cell.centroid))
+    sens = jax.grad(loss)(field)
     assert sens.shape == (mesh.n_cells,)
     assert not bool(jnp.any(jnp.isnan(sens)))
+
+    index, step = 11, 1e-6
+    analytic = float(sens[index])
+    difference = float(
+        (loss(field.at[index].add(step)) - loss(field.at[index].add(-step))) / (2 * step)
+    )
+    assert analytic == pytest.approx(difference, rel=1e-6)
+    assert abs(analytic) > 1e-6, "a severed adjoint would report zero and pass a finiteness check"
 
 
 # --- Hessian-corrected gradient in 3D (planar-faced skewed hex mesh) --------------------
@@ -494,18 +536,29 @@ def test_hessian_reconstructs_quadratic_exactly_in_3d() -> None:
 
 
 def test_hessian_3d_is_differentiable() -> None:
-    """`jax.grad` flows through the 3D nested Schur solve without NaNs."""
+    """`jax.grad` through the 3D coupled sweep matches a central finite difference -- not merely
+    finite (the same field-dependent right-hand side severed in 2D collapses this gradient to an
+    exact zero too)."""
     mesh = columnwise_perturbed_grid_3d(4, 4, 4, perturb=0.2, seed=2)
     geom = mesh.geometry()
     scheme = HessianCorrectedGradient()
     bvals = _quad_3d(geom.face.centroid)
+    field = _quad_3d(geom.cell.centroid)
 
-    def loss(field):
-        return jnp.sum(scheme.gradients(field, mesh, geom, bvals) ** 2)
+    def loss(f):
+        return jnp.sum(scheme.gradients(f, mesh, geom, bvals) ** 2)
 
-    sens = jax.grad(loss)(_quad_3d(geom.cell.centroid))
+    sens = jax.grad(loss)(field)
     assert sens.shape == (mesh.n_cells,)
     assert not bool(jnp.any(jnp.isnan(sens)))
+
+    index, step = 11, 1e-6
+    analytic = float(sens[index])
+    difference = float(
+        (loss(field.at[index].add(step)) - loss(field.at[index].add(-step))) / (2 * step)
+    )
+    assert analytic == pytest.approx(difference, rel=1e-6)
+    assert abs(analytic) > 1e-6, "a severed adjoint would report zero and pass a finiteness check"
 
 
 # --- narrowing the sweep count, and what it does to the Jacobian's reach ----------------
