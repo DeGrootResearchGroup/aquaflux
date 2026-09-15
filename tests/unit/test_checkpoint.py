@@ -61,10 +61,11 @@ def test_a_checkpoint_carries_the_step_that_produced_it(tmp_path) -> None:
     Without the metadata a directory of checkpoints is unusable unless the log survived alongside it.
     """
     checkpoints = StateCheckpointer(tmp_path)
-    checkpoints.on_checkpoint(_report(residual_norm=3.5e-4, shift=0.078), np.arange(4.0))
+    checkpoints.on_checkpoint(_report(step=42, residual_norm=3.5e-4, shift=0.078), np.arange(4.0))
 
     saved = np.load(checkpoints.latest)
     assert np.array_equal(saved["state"], np.arange(4.0))
+    assert saved["step"] == 42
     assert saved["residual_norm"] == pytest.approx(3.5e-4)
     assert saved["shift"] == pytest.approx(0.078)
 
@@ -91,11 +92,17 @@ def test_a_custom_serializer_handles_a_state_that_is_not_one_array(tmp_path) -> 
     assert checkpoints.latest.exists()
 
 
-@pytest.mark.parametrize("kwargs", [{"every": 0}, {"keep": 0}])
-def test_a_meaningless_cadence_raises(tmp_path, kwargs) -> None:
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"every": 0}, "every must be at least 1"),
+        ({"keep": 0}, "keep must be at least 1"),
+    ],
+)
+def test_a_meaningless_cadence_raises(tmp_path, kwargs, match) -> None:
     """``every=0`` would never checkpoint and ``keep=0`` would delete every write immediately -- both
     silently defeat the feature, so they fail at construction rather than at the end of a long run."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=match):
         StateCheckpointer(tmp_path, **kwargs)
 
 
