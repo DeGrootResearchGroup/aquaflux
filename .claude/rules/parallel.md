@@ -196,6 +196,13 @@ identically zero, so the exchange is skipped rather than moving zeros. Boundary 
 correction — every boundary face is owned by an interior cell of its own partition, so they read only
 owner-cell gradients, which the ghost exchange never touches.
 
+⚠️ **THE LIBRARY DEFAULT DOES NOT RUN HERE, so a partitioned build must name a scheme (#361,
+2026-09-16).** `MomentumContinuity.build`/`SSTTurbulence.build` default to
+`schemes.DEFAULT_GRADIENT_SCHEME`, a `MultipleCorrectionGradient`, which raises on `operator_hook`
+rather than returning a wrong owned gradient — its two passes need the intermediate gradient
+halo-exchanged once between them, which no seam here supplies (#134). That is loud, not silent, but it
+means the shortest way to write a distributed case is the one that fails.
+
 A **single-pass** gradient scheme (`CompactGreenGauss`) is correct under this one-exchange scheme
 with no extra work: an owned cell's one-shot Green–Gauss gradient is exact once its `phi` halo is
 filled. An **iterative** scheme (`CorrectedGreenGauss`) instead solves a partition-coupled linear

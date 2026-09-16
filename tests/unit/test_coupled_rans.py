@@ -107,7 +107,6 @@ def _cavity(n=6, mesh=None, gradient=None):
         mesh,
         geometry,
         properties,
-        gradient,
         BoundaryConditions(
             {
                 "top": MovingWall(velocity=(U_LID, 0.0)),
@@ -116,6 +115,7 @@ def _cavity(n=6, mesh=None, gradient=None):
                 "right": NoSlipWall(),
             }
         ),
+        gradient_scheme=gradient,
         advection_scheme=FirstOrderUpwind(),
         pressure_pin=0,
     )
@@ -123,9 +123,9 @@ def _cavity(n=6, mesh=None, gradient=None):
         SSTModel(),
         mesh,
         geometry,
-        gradient,
         FirstOrderUpwind(),
         properties,
+        gradient_scheme=gradient,
         wall_patches=list(WALLS),
         k_boundary=BoundaryConditions({w: Dirichlet(0.0) for w in WALLS}),
         omega_boundary=BoundaryConditions({w: ZeroGradient() for w in WALLS}),
@@ -161,7 +161,6 @@ def test_coupled_build_rejects_a_turbulence_density_that_disagrees_with_the_flow
         mesh,
         geometry,
         PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)}),
-        gradient,
         BoundaryConditions(
             {
                 "top": MovingWall(velocity=(U_LID, 0.0)),
@@ -170,6 +169,7 @@ def test_coupled_build_rejects_a_turbulence_density_that_disagrees_with_the_flow
                 "right": NoSlipWall(),
             }
         ),
+        gradient_scheme=gradient,
         advection_scheme=FirstOrderUpwind(),
         pressure_pin=0,
     )
@@ -177,10 +177,10 @@ def test_coupled_build_rejects_a_turbulence_density_that_disagrees_with_the_flow
         SSTModel(),
         mesh,
         geometry,
-        gradient,
         FirstOrderUpwind(),
         # deliberately a different density from the flow assembler's RHO = 1.0
         PropertyModel({"viscosity": Constant(998.0 * NU), "density": Constant(998.0)}),
+        gradient_scheme=gradient,
         wall_patches=list(WALLS),
         k_boundary=BoundaryConditions({w: Dirichlet(0.0) for w in WALLS}),
         omega_boundary=BoundaryConditions({w: ZeroGradient() for w in WALLS}),

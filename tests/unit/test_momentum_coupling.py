@@ -55,7 +55,6 @@ def _assembler():
         mesh,
         geom,
         PropertyModel({"viscosity": Constant(0.1), "density": Constant(1.0)}),
-        CorrectedGreenGauss(),
         BoundaryConditions(
             {
                 "left": VelocityInlet(velocity=_uniform_inlet),
@@ -64,6 +63,7 @@ def _assembler():
                 "top": NoSlipWall(),
             }
         ),
+        gradient_scheme=CorrectedGreenGauss(),
     )
     return mesh, asm
 
@@ -164,8 +164,8 @@ def test_body_force_is_a_uniform_volume_source() -> None:
         mesh,
         geom,
         PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
-        CorrectedGreenGauss(),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
+        gradient_scheme=CorrectedGreenGauss(),
         pressure_pin=0,
         body_force=(beta, 0.0),
     )
@@ -180,8 +180,8 @@ def test_body_force_is_a_uniform_volume_source() -> None:
             mesh,
             geom,
             PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
-            CorrectedGreenGauss(),
             BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
+            gradient_scheme=CorrectedGreenGauss(),
             pressure_pin=0,
             body_force=jnp.array([b, 0.0]),
         )
@@ -203,8 +203,8 @@ def _turbulent_assembler():
         mesh,
         mesh.geometry(),
         PropertyModel({"viscosity": Constant(MU_T), "density": Constant(RHO_T)}),
-        CorrectedGreenGauss(),
         BoundaryConditions({n: NoSlipWall() for n in ("left", "right", "bottom", "top")}),
+        gradient_scheme=CorrectedGreenGauss(),
     )
     return mesh, asm
 

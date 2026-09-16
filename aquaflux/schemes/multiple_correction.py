@@ -621,6 +621,33 @@ class MultipleCorrectionGradient(GradientScheme):
         return (gradient if imposed is None else imposed.impose(gradient)), hessian
 
 
+#: The reconstruction a solve uses when its caller names none -- stated here, once, so the several
+#: builders that need one cannot express three different policies between them (which they did, and
+#: which put one gradient scheme in a case's initial condition and another in its residual).
+#:
+#: It is this scheme because of three properties a default is judged on, all of them re-measurable
+#: with ``validation/gradient_stencil_reach.py``. Its residual carries **exactly zero** Jacobian mass
+#: beyond distance 3 at every skewness tested, where a swept reconstruction reaches ``sweeps + 1`` --
+#: so a preconditioner that probes the residual over a bounded stencil needs no more reach on a
+#: skewed mesh than on a Cartesian one, which is worth more than the reconstruction itself costs. Its
+#: error against an analytic gradient is several times smaller at high skew and near skew-independent
+#: across the range probed, where the swept scheme's grows with skew. And it has no sweep count to
+#: calibrate per mesh -- a default that needs calibrating is not one.
+#:
+#: Two limits a caller may have to name a different scheme for, neither silent:
+#:
+#: * It cannot yet run domain-decomposed -- the reconstruction needs its intermediate gradient
+#:   halo-exchanged once between its two passes -- and raises rather than returning a wrong answer.
+#: * On a mesh with **corner tetrahedra** (a cell owning two or more boundary faces) the default
+#:   :class:`OwnerGradient` closure leaves the Hessian underdetermined there; ``bind`` measures that
+#:   and warns, naming the cells.
+#:
+#: A module-level singleton rather than a fresh instance per signature default: the class is
+#: immutable and :meth:`MultipleCorrectionGradient.bind` returns a new object rather than mutating
+#: this one, so one shared instance is safe, and naming it is what keeps the default in one place.
+DEFAULT_GRADIENT_SCHEME = MultipleCorrectionGradient()
+
+
 def _extrapolated_first_pass(
     m1: jnp.ndarray,
     boundary_chain: jnp.ndarray,

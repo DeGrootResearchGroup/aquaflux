@@ -39,13 +39,13 @@ def _turbulence(*, explicit_production_limiter=False, gradient_scheme=None, prop
         SSTModel(),
         mesh,
         geometry,
-        gradient_scheme or CorrectedGreenGauss(),
         FirstOrderUpwind(),
         (
             properties
             if properties is not None
             else PropertyModel({"viscosity": Constant(NU), "density": Constant(1.0)})
         ),
+        gradient_scheme=gradient_scheme or CorrectedGreenGauss(),
         wall_patches=["bottom", "top"],
         explicit_production_limiter=explicit_production_limiter,
         k_boundary=BoundaryConditions(
@@ -413,9 +413,9 @@ def test_a_non_uniform_zoneconstant_density_raises_before_reaching_the_residual(
             SSTModel(),
             mesh,
             geometry,
-            CorrectedGreenGauss(),
             FirstOrderUpwind(),
             properties,
+            gradient_scheme=CorrectedGreenGauss(),
             wall_patches=["bottom", "top"],
             k_boundary=BoundaryConditions(
                 {

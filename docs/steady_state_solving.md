@@ -19,8 +19,8 @@ unknown fields, flattened into one vector) and returns how badly each cell's con
 equation is violated. A steady solution is a state where that residual is zero.
 
 For the coupled pressure–velocity system the residual is assembled by a
-{class}`~aquaflux.flow.MomentumContinuity`, built over a mesh from the fluid properties, a
-gradient scheme, and the boundary conditions:
+{class}`~aquaflux.flow.MomentumContinuity`, built over a mesh from the fluid properties and the
+boundary conditions:
 
 ```python
 import aquaflux  # noqa: F401  (enables 64-bit mode)
@@ -29,7 +29,6 @@ from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
-from aquaflux.schemes import CompactGreenGauss
 
 mesh = structured_grid_2d(32, 32, lx=1.0, ly=1.0, named_boundaries=True)
 geometry = mesh.geometry()
@@ -47,7 +46,6 @@ cavity = MomentumContinuity.build(
     mesh,
     geometry,
     PropertyModel({"viscosity": Constant(0.01), "density": Constant(1.0)}),
-    CompactGreenGauss(),
     boundary,
     advection_scheme=FirstOrderUpwind(),
     pressure_pin=0,        # a closed domain fixes the pressure datum at one cell
@@ -56,6 +54,11 @@ cavity = MomentumContinuity.build(
 state = cavity.initial_state()          # the flat [velocity..., pressure] vector
 residual = cavity.residual(state)       # zero at the steady solution
 ```
+
+Nothing named a gradient reconstruction, so the build took
+{data}`~aquaflux.schemes.DEFAULT_GRADIENT_SCHEME`. Pass `gradient_scheme=` to choose another one
+(see {doc}`gradient_reconstruction`); whichever is used, the assembler carries it, and the
+initializers below read it from there rather than picking their own.
 
 This is the lid-driven cavity: a square of fluid with three stationary walls and a lid sliding
 across the top. Because momentum is advected, the residual is **nonlinear** — the mass flux
@@ -234,7 +237,6 @@ def cavity_at(viscosity):
         mesh,
         geometry,
         PropertyModel({"viscosity": Constant(viscosity), "density": Constant(1.0)}),
-        CompactGreenGauss(),
         boundary,                      # the BoundaryConditions built above
         advection_scheme=FirstOrderUpwind(),
         pressure_pin=0,

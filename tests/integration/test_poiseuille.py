@@ -45,7 +45,6 @@ def _solve(nx, ny, mu=MU):
         mesh,
         geom,
         PropertyModel({"viscosity": Constant(mu), "density": Constant(RHO)}),
-        CorrectedGreenGauss(),
         BoundaryConditions(
             {
                 "left": VelocityInlet(velocity=_parabola),
@@ -54,6 +53,7 @@ def _solve(nx, ny, mu=MU):
                 "top": NoSlipWall(),
             }
         ),
+        gradient_scheme=CorrectedGreenGauss(),
     )
     state = eqx.filter_jit(newton_step)(assembler.residual, assembler.initial_state())
     return mesh, cell_geometry, assembler, state

@@ -135,12 +135,12 @@ def solve_aquaflux(nu_of, ny, growth):
         mesh,
         geom,
         properties,
-        CompactGreenGauss(),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         # Momentum advection is second-order linear upwind (the upwind cell reconstructed to the face
         # with its own gradient, unlimited), matching OpenFOAM's `Gauss linearUpwind grad(U)`.
         # First-order upwind here adds a numerical viscosity that thickens the profile and depresses
         # the realized kappa, which is a discretization difference rather than a model one.
+        gradient_scheme=CompactGreenGauss(),
         advection_scheme=LimitedUpwind(),
         pressure_pin=0,
         body_force=(0.004, 0.0),
@@ -149,11 +149,11 @@ def solve_aquaflux(nu_of, ny, growth):
         model,
         mesh,
         geom,
-        CompactGreenGauss(),
         # k and omega stay first-order upwind, matching OpenFOAM's `Gauss upwind` on both
         # scalars (only its momentum divergence is second order).
         FirstOrderUpwind(),
         properties,
+        gradient_scheme=CompactGreenGauss(),
         wall_patches=["bottom", "top"],
         k_boundary=BoundaryConditions({"bottom": Dirichlet(0.0), "top": Dirichlet(0.0)}),
         omega_boundary=BoundaryConditions({"bottom": ZeroGradient(), "top": ZeroGradient()}),

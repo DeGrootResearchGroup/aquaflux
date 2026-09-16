@@ -832,6 +832,22 @@ constraint on that system.
 | {class}`~aquaflux.schemes.HessianCorrectedGradient` | skewed, where the gradient leads | linear and quadratic | an inner and an outer solve |
 | {class}`~aquaflux.schemes.MultipleCorrectionGradient` | skewed, including tetrahedra | linear and quadratic | **no system: two face passes** |
 
+**The last row is the default.** {data}`~aquaflux.schemes.DEFAULT_GRADIENT_SCHEME` is a
+{class}`~aquaflux.schemes.MultipleCorrectionGradient`, and a build that names no scheme
+— {meth}`~aquaflux.flow.MomentumContinuity.build`,
+{meth}`~aquaflux.turbulence.SSTTurbulence.build` — takes it. On a skewed benchmark it reaches the
+same converged flow as the corrected gradient for about a third less wall clock, is several times
+closer to the analytic gradient at high skew, and is the only scheme here whose reconstruction stops
+at a fixed three rings regardless of the mesh — which is where most of that time comes from, since a
+preconditioner that probes the residual over a bounded stencil then needs no more reach on a skewed
+mesh than on a Cartesian one. It also has no sweep count to calibrate per mesh.
+
+The two reasons to name a different one are the practical points below: it does not yet run under
+domain decomposition, and on a mesh with **corner tetrahedra** (a cell owning two or more boundary
+faces) its default boundary closure leaves the Hessian underdetermined there. Neither is silent —
+the first raises, and {meth}`~aquaflux.schemes.GradientScheme.bind` measures the second and warns,
+naming the cells.
+
 Two practical points beyond accuracy.
 
 **The Hessian-corrected scheme has a much longer stencil.** Its gradient couples to the
@@ -846,8 +862,9 @@ the gradient's coupling in the first place.
 
 **Only the corrected gradient runs under domain decomposition.** Its Richardson sweeps form no
 global inner product, so a partitioned solve can refresh ghost values once per sweep and get
-owned gradients identical to a serial run. The Krylov solve and the Hessian-corrected scheme
-raise rather than return a quietly wrong answer.
+owned gradients identical to a serial run. The Krylov solve, the Hessian-corrected scheme and the
+multiple-correction scheme raise rather than return a quietly wrong answer — so a partitioned run
+is one of the few that has to name a scheme instead of taking the default.
 
 ## A reference
 

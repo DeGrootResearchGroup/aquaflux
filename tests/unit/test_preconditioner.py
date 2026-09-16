@@ -55,8 +55,8 @@ def _geometry(n, perturb=0.0):
         mesh,
         geom,
         PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
-        CompactGreenGauss(),
         BoundaryConditions(walls),
+        gradient_scheme=CompactGreenGauss(),
     )
 
 
@@ -67,7 +67,6 @@ def _channel(u_in, rho=1.0):
         mesh,
         mesh.geometry(),
         PropertyModel({"viscosity": Constant(1e-2), "density": Constant(rho)}),
-        CompactGreenGauss(),
         BoundaryConditions(
             {
                 "left": VelocityInlet(velocity=(u_in, 0.0)),
@@ -76,6 +75,7 @@ def _channel(u_in, rho=1.0):
                 "top": NoSlipWall(),
             }
         ),
+        gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
     )
 
@@ -210,8 +210,8 @@ def test_reference_state_is_driven_by_a_moving_wall_too() -> None:
             mesh,
             mesh.geometry(),
             PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
-            CompactGreenGauss(),
             BoundaryConditions(conditions),
+            gradient_scheme=CompactGreenGauss(),
         )
 
     lid = _cavity({**walls, "top": MovingWall(velocity=(2.5, 0.0))})
@@ -246,8 +246,8 @@ def test_a_convection_block_with_no_reference_flux_says_so_instead_of_degrading_
             mesh,
             mesh.geometry(),
             PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
-            CompactGreenGauss(),
             BoundaryConditions(conditions),
+            gradient_scheme=CompactGreenGauss(),
         )
         return BlockPreconditioner.build(assembler, velocity=ConvectionTwoLevel())
 
@@ -313,8 +313,8 @@ def test_momentum_diagonal_is_the_residual_operator_diagonal_under_graded_viscos
         mesh,
         geom,
         PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
-        CompactGreenGauss(),
         BoundaryConditions({side: NoSlipWall() for side in ("top", "bottom", "left", "right")}),
+        gradient_scheme=CompactGreenGauss(),
         pressure_pin=0,  # closed domain
     )  # no advection_scheme -> Stokes: a_P is purely viscous, the residual is linear
     x = geom.cell.centroid[:, 0]
@@ -345,8 +345,8 @@ def test_momentum_diagonal_matches_the_operator_at_active_wall_faces() -> None:
         mesh,
         geom,
         PropertyModel({"viscosity": Constant(1e-3), "density": Constant(1.0)}),
-        CompactGreenGauss(),
         BoundaryConditions({side: NoSlipWall() for side in ("top", "bottom", "left", "right")}),
+        gradient_scheme=CompactGreenGauss(),
         pressure_pin=0,
     )  # Stokes closed cavity: a_P is purely viscous, the residual is linear
     # A large log-layer cell eddy viscosity with a much smaller wall-model value on the wall faces —
@@ -621,7 +621,6 @@ def _small_channel():
         mesh,
         mesh.geometry(),
         PropertyModel({"viscosity": Constant(1e-2), "density": Constant(1.0)}),
-        CompactGreenGauss(),
         BoundaryConditions(
             {
                 "left": VelocityInlet(velocity=(1.0, 0.0)),
@@ -630,6 +629,7 @@ def _small_channel():
                 "top": NoSlipWall(),
             }
         ),
+        gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
     )
 

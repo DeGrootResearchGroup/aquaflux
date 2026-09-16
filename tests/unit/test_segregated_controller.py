@@ -35,8 +35,8 @@ def test_bulk_velocity_is_the_volume_weighted_mean() -> None:
         mesh,
         geometry,
         PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
-        CompactGreenGauss(),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
+        gradient_scheme=CompactGreenGauss(),
         pressure_pin=0,
     )
     # A non-uniform streamwise field on a graded mesh: the volume weighting matters.

@@ -46,8 +46,8 @@ def _channel(beta_initial: float) -> MomentumContinuity:
         mesh,
         mesh.geometry(),
         PropertyModel({"viscosity": Constant(RHO * MU), "density": Constant(RHO)}),
-        CompactGreenGauss(),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
+        gradient_scheme=CompactGreenGauss(),
         pressure_pin=0,
         body_force=(beta_initial, 0.0),
     )
@@ -149,8 +149,8 @@ def test_preconditioned_iterative_solve_matches_the_direct_solve() -> None:
         mesh,
         mesh.geometry(),
         PropertyModel({"viscosity": Constant(RHO * MU), "density": Constant(RHO)}),
-        CompactGreenGauss(),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
+        gradient_scheme=CompactGreenGauss(),
         pressure_pin=0,
         body_force=(0.05, 0.0),
     )
@@ -187,8 +187,8 @@ def _laminar_body_force(mu: float, solve) -> float:
         mesh,
         mesh.geometry(),
         PropertyModel({"viscosity": Constant(RHO * mu), "density": Constant(RHO)}),
-        CompactGreenGauss(),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
+        gradient_scheme=CompactGreenGauss(),
         pressure_pin=0,
         body_force=(0.05, 0.0),
     )
@@ -225,8 +225,8 @@ def test_preconditioned_adjoint_matches_the_unpreconditioned_adjoint() -> None:
         mesh,
         mesh.geometry(),
         PropertyModel({"viscosity": Constant(RHO * MU), "density": Constant(RHO)}),
-        CompactGreenGauss(),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
+        gradient_scheme=CompactGreenGauss(),
         pressure_pin=0,
         body_force=(0.05, 0.0),
     )

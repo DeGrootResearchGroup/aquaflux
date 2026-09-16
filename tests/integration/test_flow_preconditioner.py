@@ -40,7 +40,6 @@ def _build(mesh, mu=MU, pin=0):
         mesh,
         geom,
         PropertyModel({"viscosity": Constant(mu), "density": Constant(RHO)}),
-        CompactGreenGauss(),
         BoundaryConditions(
             {
                 "top": MovingWall(velocity=(1.0, 0.0)),
@@ -49,6 +48,7 @@ def _build(mesh, mu=MU, pin=0):
                 "right": NoSlipWall(),
             }
         ),
+        gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
         pressure_pin=pin,
     )

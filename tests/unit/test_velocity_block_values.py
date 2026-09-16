@@ -53,8 +53,8 @@ def _closed() -> MomentumContinuity:
         mesh,
         mesh.geometry(),
         PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
-        CompactGreenGauss(),
         BoundaryConditions({side: NoSlipWall() for side in ("top", "bottom", "left", "right")}),
+        gradient_scheme=CompactGreenGauss(),
     )
 
 

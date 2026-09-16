@@ -52,7 +52,6 @@ def _solve_couette(n: int = 8, perturb: float = 0.2, seed: int = 2):
         mesh,
         geom,
         PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
-        CorrectedGreenGauss(),
         BoundaryConditions(
             {
                 "top": MovingWall(velocity=(1.0, 0.0)),  # u = (1, 0) at y = 1
@@ -61,6 +60,7 @@ def _solve_couette(n: int = 8, perturb: float = 0.2, seed: int = 2):
                 "right": VelocityInlet(velocity=_couette),  # u = (y, 0)
             }
         ),
+        gradient_scheme=CorrectedGreenGauss(),
         pressure_pin=0,  # closed domain (all velocity Dirichlet): fix the pressure level
     )
     # Stokes (no advection) so the residual is affine: one Newton step is exact.
@@ -101,7 +101,6 @@ def _open_couette(n: int = 8, perturb: float = 0.2, seed: int = 2):
         mesh,
         geom,
         PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
-        MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None),
         BoundaryConditions(
             {
                 "top": MovingWall(velocity=(1.0, 0.0)),  # u = (1, 0) at y = 1
@@ -110,6 +109,7 @@ def _open_couette(n: int = 8, perturb: float = 0.2, seed: int = 2):
                 "right": PressureOutlet(pressure=0.0),  # zero-gradient velocity, p = 0
             }
         ),
+        gradient_scheme=MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None),
     )
     exact = assembler.pack(_couette(geom.cell.centroid), jnp.zeros(mesh.n_cells))
     return mesh, geom, assembler, exact
@@ -178,7 +178,6 @@ def test_stokes_couette_is_exact_on_a_skewed_mesh_through_an_outlet() -> None:
         mesh,
         geom,
         PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
-        MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None),
         BoundaryConditions(
             {
                 "top": MovingWall(velocity=(1.0, 0.0)),
@@ -187,6 +186,7 @@ def test_stokes_couette_is_exact_on_a_skewed_mesh_through_an_outlet() -> None:
                 "right": PressureOutlet(pressure=0.0),
             }
         ),
+        gradient_scheme=MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None),
     )
     state = eqx.filter_jit(newton_step)(assembler.residual, assembler.initial_state())
     velocity, _ = assembler.unpack(state)

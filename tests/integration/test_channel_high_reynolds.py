@@ -67,7 +67,6 @@ def _channel(nx, ny, mu, *, wall_growth=1.0, u_in=U_IN):
         mesh,
         mesh.geometry(),
         PropertyModel({"viscosity": Constant(mu), "density": Constant(RHO)}),
-        CompactGreenGauss(),
         BoundaryConditions(
             {
                 "left": VelocityInlet(velocity=(u_in, 0.0)),
@@ -76,6 +75,7 @@ def _channel(nx, ny, mu, *, wall_growth=1.0, u_in=U_IN):
                 "top": NoSlipWall(),
             }
         ),
+        gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
     )
 

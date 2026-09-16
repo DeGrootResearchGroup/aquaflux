@@ -38,7 +38,7 @@ from aquaflux.discretization import (
 from aquaflux.flow import volume_flux
 from aquaflux.mesh import distance_to_patches
 from aquaflux.properties import FieldProperty, PropertyModel
-from aquaflux.schemes import ImposedGradient
+from aquaflux.schemes import DEFAULT_GRADIENT_SCHEME, ImposedGradient
 from aquaflux.solve import LocalCourantBasis, ShiftBasis
 from aquaflux.vectors import norm_squared
 
@@ -291,13 +291,13 @@ class SSTTurbulence(eqx.Module):
         model: SSTModel,
         mesh: Mesh,
         geometry: MeshGeometry,
-        gradient_scheme: GradientScheme,
         advection_scheme: AdvectionScheme,
         properties: PropertyModel,
         wall_patches: Sequence[str],
         k_boundary: BoundaryConditions,
         omega_boundary: BoundaryConditions,
         *,
+        gradient_scheme: GradientScheme = DEFAULT_GRADIENT_SCHEME,
         explicit_production_limiter: bool = False,
         explicit_production_viscosity: bool = False,
     ) -> SSTTurbulence:
@@ -316,6 +316,12 @@ class SSTTurbulence(eqx.Module):
         wall_patches : sequence of str
             The boundary patches treated as walls; their wall distance is computed and their
             owner cells become the ``omega`` fixation set.
+        gradient_scheme : GradientScheme
+            Reconstructs the ``k``/``omega`` gradients and the wall-distance gradient; omitting it
+            takes :data:`~aquaflux.schemes.DEFAULT_GRADIENT_SCHEME`, which is where that choice is
+            written down. It is carried on the built assembler, so an initializer for these fields
+            reads it from there rather than choosing again
+            (:func:`~aquaflux.turbulence.hybrid_initialize`).
         explicit_production_limiter : bool
             Linearization of the k-production limiter for the forward solve (see the class
             attribute); ``False`` (default) is the exact operator. ``True`` is the robust choice for a

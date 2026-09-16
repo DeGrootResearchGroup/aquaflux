@@ -26,7 +26,6 @@ import numpy as np
 from aquaflux.boundary import BoundaryConditions, Dirichlet, Neumann, ZeroGradient
 from aquaflux.discretization import DiffusionFlux, FixedValueCells, ResidualAssembler
 from aquaflux.properties import Constant, PropertyModel
-from aquaflux.schemes import CompactGreenGauss
 from aquaflux.solve import (
     build_smoothed_hierarchy,
     convection_diffusion_operator,
@@ -125,7 +124,9 @@ def laplace_field(
         or ``fixed_cells`` -- or the all-Neumann Laplacian is singular).
     gradient_scheme : GradientScheme or None
         Injected so the returned assembler can reconstruct the cell gradient; ``None`` disables the
-        non-orthogonal correction in the operator (fine for the initializer).
+        non-orthogonal correction in the operator. Pass the scheme the field's own residual uses --
+        :func:`potential_flow` and :func:`~aquaflux.turbulence.hybrid_initialize` both read it off
+        the assembler they are initializing for exactly that reason.
     fixed_cells, fixed_values : jnp.ndarray or None
         Optional cell-value fixation (e.g. a datum cell when there is no Dirichlet patch, or near-wall
         values), applied as a :class:`~aquaflux.discretization.FixedValueCells` row replacement.
@@ -219,9 +220,7 @@ def _pressure_outlet_cells(momentum: MomentumContinuity) -> jnp.ndarray:
     return jnp.unique(mesh.face_cells.owner[jnp.concatenate(outlet_faces)])
 
 
-def potential_flow(
-    momentum: MomentumContinuity, *, gradient_scheme: GradientScheme | None = None
-) -> jnp.ndarray:
+def potential_flow(momentum: MomentumContinuity) -> jnp.ndarray:
     """Potential-flow velocity initializer: ``u = grad phi`` with the flow's normal-velocity BCs.
 
     Solves ``div(grad phi) = 0`` with a boundary condition per patch derived from the flow closures --
@@ -244,9 +243,11 @@ def potential_flow(
     Parameters
     ----------
     momentum : MomentumContinuity
-        The flow assembler; its boundary closures and mesh drive the potential solve.
-    gradient_scheme : GradientScheme or None
-        The scheme reconstructing ``grad phi`` (defaults to :class:`~aquaflux.schemes.CompactGreenGauss`).
+        The flow assembler; its boundary closures, mesh **and gradient scheme** drive the potential
+        solve. Taking the scheme from it rather than accepting one is what keeps the initial
+        condition and the residual on a single reconstruction: a caller who names one here could
+        name a different one there, and the run would carry two discretizations with nothing
+        reporting it.
 
     Returns
     -------
@@ -254,7 +255,7 @@ def potential_flow(
         The flat flow state ``[vel..., pressure]``, shape ``((dim + 1) n_cells,)``.
     """
     mesh, geometry = momentum.mesh, momentum.geometry
-    gradient_scheme = gradient_scheme or CompactGreenGauss()
+    gradient_scheme = momentum.gradient_scheme
 
     conditions: dict[str, object] = {}
     has_reference = False

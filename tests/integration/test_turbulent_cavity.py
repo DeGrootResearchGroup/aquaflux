@@ -49,7 +49,6 @@ def _cavity():
         mesh,
         geometry,
         properties,
-        CompactGreenGauss(),
         BoundaryConditions(
             {
                 "top": MovingWall(velocity=(U_LID, 0.0)),
@@ -58,6 +57,7 @@ def _cavity():
                 "right": NoSlipWall(),
             }
         ),
+        gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
         pressure_pin=0,
     )
@@ -65,9 +65,9 @@ def _cavity():
         SSTModel(),
         mesh,
         geometry,
-        CompactGreenGauss(),
         FirstOrderUpwind(),
         properties,
+        gradient_scheme=CompactGreenGauss(),
         wall_patches=list(WALLS),
         k_boundary=BoundaryConditions({w: Dirichlet(0.0) for w in WALLS}),
         omega_boundary=BoundaryConditions({w: ZeroGradient() for w in WALLS}),

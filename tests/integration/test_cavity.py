@@ -49,7 +49,6 @@ def _cavity(n, mu=MU, scheme=None):
         mesh,
         geom,
         PropertyModel({"viscosity": Constant(mu), "density": Constant(RHO)}),
-        CompactGreenGauss(),
         BoundaryConditions(
             {
                 "top": MovingWall(velocity=(U_LID, 0.0)),
@@ -58,6 +57,7 @@ def _cavity(n, mu=MU, scheme=None):
                 "right": NoSlipWall(),
             }
         ),
+        gradient_scheme=CompactGreenGauss(),
         advection_scheme=scheme if scheme is not None else FirstOrderUpwind(),
         pressure_pin=0,
     )

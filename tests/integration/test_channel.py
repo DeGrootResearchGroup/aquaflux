@@ -47,7 +47,6 @@ def _channel(nx=16, ny=8, mu=MU):
         mesh,
         geom,
         PropertyModel({"viscosity": Constant(mu), "density": Constant(RHO)}),
-        CompactGreenGauss(),
         BoundaryConditions(
             {
                 "left": VelocityInlet(velocity=(U_IN, 0.0)),
@@ -56,6 +55,7 @@ def _channel(nx=16, ny=8, mu=MU):
                 "top": NoSlipWall(),
             }
         ),
+        gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
     )
 

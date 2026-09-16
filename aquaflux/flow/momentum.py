@@ -43,6 +43,7 @@ from aquaflux.discretization import (
     FixedValueCells,
 )
 from aquaflux.properties import PropertyModel
+from aquaflux.schemes import DEFAULT_GRADIENT_SCHEME
 from aquaflux.schemes.interpolation import (
     interpolate_to_face,
     interpolation_factor,
@@ -185,7 +186,8 @@ class MomentumContinuity(eqx.Module):
         :meth:`with_eddy_viscosity`; it overrides the momentum wall-face diffusion coefficient with
         ``mu + rho nu_t,wall`` (see :meth:`_wall_boundary_viscosity`).
     gradient_scheme : GradientScheme
-        Reconstruction for the velocity and pressure gradients.
+        Reconstruction for the velocity and pressure gradients, bound to this geometry by
+        :meth:`build`.
     advection_scheme : AdvectionScheme or None
         Momentum convection scheme; ``None`` gives Stokes flow (no convection). A limited scheme
         (``LimitedUpwind``) carries its own slope limiter.
@@ -237,9 +239,9 @@ class MomentumContinuity(eqx.Module):
         mesh: Mesh,
         geometry: MeshGeometry,
         properties: PropertyModel,
-        gradient_scheme: GradientScheme,
         boundary: BoundaryConditions,
         *,
+        gradient_scheme: GradientScheme = DEFAULT_GRADIENT_SCHEME,
         advection_scheme: AdvectionScheme | None = None,
         pressure_pin: int | None = None,
         pressure_pin_value: float = 0.0,
@@ -250,8 +252,14 @@ class MomentumContinuity(eqx.Module):
 
         ``boundary`` is a :class:`~aquaflux.boundary.BoundaryConditions` collection of per-patch
         flow closures (``BoundaryConditions({name: FlowBoundary})``), bound to ``mesh.face_patches``
-        internally. ``properties`` must supply ``"viscosity"`` and ``"density"``. ``pressure_pin``
-        fixes the pressure at one cell (its continuity equation is replaced by
+        internally. ``properties`` must supply ``"viscosity"`` and ``"density"``.
+        ``gradient_scheme`` reconstructs the velocity and pressure gradients this residual cannot do
+        without; omitting it takes :data:`~aquaflux.schemes.DEFAULT_GRADIENT_SCHEME`, which is where
+        that choice is written down. Whatever it ends up being is carried on the built assembler, so
+        an initializer for this flow reads it from there rather than choosing again
+        (:func:`~aquaflux.flow.potential_flow`).
+
+        ``pressure_pin`` fixes the pressure at one cell (its continuity equation is replaced by
         ``p = pressure_pin_value``) — required for a closed domain (all-wall, no pressure outlet, e.g.
         a streamwise-periodic channel), where pressure is otherwise defined only up to a constant.
         ``body_force`` is a uniform force per unit volume ``(dim,)`` added to the momentum equation

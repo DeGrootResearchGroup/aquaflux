@@ -58,7 +58,6 @@ def _channel(inlet, *, top=None, outlet_pressure=0.0):
         PropertyModel(
             {"viscosity": Constant(jnp.asarray(0.1)), "density": Constant(jnp.asarray(1.0))}
         ),
-        CompactGreenGauss(),
         BoundaryConditions(
             {
                 "left": inlet,
@@ -67,6 +66,7 @@ def _channel(inlet, *, top=None, outlet_pressure=0.0):
                 "top": NoSlipWall() if top is None else top,
             }
         ),
+        gradient_scheme=CompactGreenGauss(),
     )
 
 

@@ -1798,8 +1798,69 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   no `stencil_reach` at all. What this changes is the standing warning that "`stencil_reach = 3` IS A
   PROPERTY OF SKEW-FREE MESHES, NOT OF THE DISCRETIZATION … the sibling gets 3 for free and that is luck,
   not physics": with a two-pass reconstruction, reach 3 becomes a property of the **scheme**, so a case on
-  a genuinely skewed mesh gets it too. **Neither case has adopted it as a default** — both still build
-  `CorrectedGreenGauss`; `PITZ_GRADIENT=multcorr` selects it on pitzDaily.
+  a genuinely skewed mesh gets it too. pitzDaily has since adopted it (`PITZ_GRADIENT` defaults to
+  `multcorr`, `STENCIL_REACH` to 3); `bfs3d` still builds `CorrectedGreenGauss` in its own
+  `build_case`, where the choice is inert — see the library-default entry below.
+
+  **✅✅ AND IT IS NOW THE LIBRARY DEFAULT — `schemes.DEFAULT_GRADIENT_SCHEME`, 2026-09-16 (#361).**
+  `MultipleCorrectionGradient()` with its own defaults (`OwnerGradient`, no fallback), as a
+  module-level singleton in `multiple_correction.py`. `MomentumContinuity.build` and
+  `SSTTurbulence.build` take it when told nothing; both moved `gradient_scheme` from a **positional**
+  parameter to a keyword-only one to have somewhere to put a default, which broke all 77 call sites
+  at once and was mechanically converted. The evidence is the two tables above and nothing new was
+  measured to justify the flip.
+
+  **What the same change fixed is worth more than the flip: ONE RUN CAN NO LONGER USE TWO
+  RECONSTRUCTIONS.** `hybrid_initialize` and `potential_flow` each substituted `CompactGreenGauss()`
+  when handed nothing, and **every caller in the repository handed them nothing** — so every case
+  built its initial condition on one discretization and solved on another, an omission behaving as a
+  physics choice. They now read the scheme off the assembler they are initializing (`potential_flow`
+  from `momentum.gradient_scheme`; `hybrid_initialize` from `turbulence.gradient_scheme` for k/omega
+  and through `potential_flow` for the flow) and **take no `gradient_scheme` argument at all**, so
+  there is nothing left to disagree with.
+
+  **Measured on pitzDaily, and it is a perturbation of the start, not of the root** (A/B against a
+  control worktree at `6df9944`, the branch point; case defaults: `multcorr`, reach 3,
+  `CflResidualDualTimeControl`, compiled ILU(0) live). Only pitzDaily's and bfs3d's initial conditions
+  move at all — every test that names `CompactGreenGauss` was already initializing with it. Both arms:
+  **31 steps, 194 cumulative cycles, identical beta and inner-iteration columns on every step**; cycles
+  differ at two steps (step 14: 11 → 12, step 18: 13 → 12, where the control also carried a
+  line-search flag the arm did not); residuals agree to 3–4 significant figures throughout; `x_r/h`
+  8.0686 in both, `nut` peak 417.9254 → 417.9255, and the generated `report.md` byte-identical.
+  ⚠️ **The arm's wall clock (658 s against 306 s) is VOID**: a virtual machine started at 11:10:44,
+  between the two runs, and held ~400 % CPU through the whole arm — its slowdown is a uniform ~2.2x
+  on every step including step 1, which is contention, not the change (the change touches only the
+  initial condition, never the per-step residual or Jacobian). bfs3d was not run.
+
+  Pinned by four tests in `tests/unit/test_initialization.py`,
+  each mutation-checked, and by a signature census
+  (`test_no_initializer_names_a_gradient_scheme_of_its_own`) — which is the one that matches the
+  defect's shape, since the drift was across call sites that each looked reasonable alone.
+
+  ⚠️ **One sentinel, one meaning: `gradient_scheme=None` means NO reconstruction, everywhere.** It
+  stays that on `ResidualAssembler.build` and `ScalarTransport.build`, where it is a checked state
+  (refused the moment a flux operator reports `uses_gradient()`) and genuinely right for pure
+  diffusion on an orthogonal mesh. Defaulting *those* to the multiple-correction scheme would build
+  correction matrices — `(n, n_sym, n_sym)`, 440 MB at 1.6M cells — for a reconstruction nothing
+  reads. The default therefore lives only on the two builders where a gradient is mandatory.
+
+  ⚠️ **The default cannot run domain-decomposed, and that is now a property of the DEFAULT rather
+  than of an opt-in** — it raises (see #134, which carries the halo-exchange gap). A partitioned run
+  has to name `CorrectedGreenGauss` explicitly.
+
+  ⚠️ **Nor is it right on a mesh with CORNER TETRAHEDRA, and neither is its documented escape
+  hatch — #432 carries that.** `OwnerGradient` leaves such a cell's Hessian underdetermined (`bind`
+  warns, naming the cells) and `SkewCorrectedGradient`, which supplies the missing direction, stalls
+  pitzDaily dead — the whole chain is measured below. Every measurement here is on quadrilateral or
+  hexahedral meshes, so the regime the default is *least* defensible in is the one with no case.
+
+  **The re-bind an initializer now pays is negligible, measured rather than assumed.** `potential_flow`
+  hands its already-bound scheme to `laplace_field`, whose `ResidualAssembler.build` binds again, so
+  `hybrid_initialize` rebuilds the correction matrices three times. Measured on perturbed 2D quad
+  meshes (jax 0.10.2, CPU, x64): **1.06 s** for the first bind in a process and **0.014 s** for every
+  one after it, at both 1600 and 10000 cells — the first is XLA compiling the monomial probe, which
+  is cached. No bind-avoidance mechanism was built, and one would need a geometry identity the
+  `bind` contract deliberately does not carry.
   **⚠️⚠️ `SkewCorrectedGradient` STALLS THIS CASE DEAD, and the reason is about what a boundary value
   MEANS — not about the closure's accuracy.** It converges the first two Reynolds rungs to the
   standard arm's residual to three significant figures (7.277e-06 against 7.255e-06 at step 28, and a
