@@ -180,7 +180,10 @@ def read_surface_scalar_field(path, mesh: Mesh) -> np.ndarray:
             "polyMesh is renumbered and cannot be used here"
         )
 
-    patch_sizes: dict[str, int] = {}
+    # name -> (start_face, n_faces); the start is kept alongside the size so laying the patches
+    # out in file order below never has to call `.indices()` a second time -- it is an uncached
+    # O(n_faces) boolean-compare-plus-compaction on `LabelledGroups`, paid once per patch here.
+    patch_ranges: dict[str, tuple[int, int]] = {}
     for name in mesh.face_patches.names:
         # "interior" and "boundary" are assigned automatically from the boundary mask rather than
         # read from the polyMesh, so neither names a patch the field file writes. "interior" holds
@@ -196,20 +199,19 @@ def read_surface_scalar_field(path, mesh: Mesh) -> np.ndarray:
                 f"{indices.size} boundary faces are not in a named patch, so the field has no "
                 "values for them; the polyMesh must tile its boundary with named patches"
             )
-        if indices[0] < n_internal:
+        start = int(indices[0])
+        if start < n_internal:
             raise ValueError(
                 f"patch '{name}' includes an interior face; ordering is not OpenFOAM's"
             )
-        if not np.array_equal(indices, np.arange(indices[0], indices[0] + indices.size)):
+        if not np.array_equal(indices, np.arange(start, start + indices.size)):
             raise ValueError(f"patch '{name}' is not a contiguous block of faces")
-        patch_sizes[name] = int(indices.size)
+        patch_ranges[name] = (start, int(indices.size))
 
     # Lay the patches out in ascending face order, which is how the file writes them.
-    ordered = dict(
-        sorted(
-            patch_sizes.items(), key=lambda kv: int(np.asarray(mesh.face_patches.indices(kv[0]))[0])
-        )
-    )
+    ordered = {
+        name: size for name, (_start, size) in sorted(patch_ranges.items(), key=lambda kv: kv[1][0])
+    }
     values = parse_scalar_field(read_foam_body(path), n_internal, ordered)
     if values.shape[0] != mesh.n_faces:
         raise ValueError(
