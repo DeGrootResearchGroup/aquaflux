@@ -220,8 +220,10 @@ PID=$!
   # itself, it just silently drops the one line that says what the run was testing. UV_ was missing
   # until 2026-08-22, and UV_MESH is the path to a gitignored 1.6M-cell mesh that lives outside the
   # worktree -- so its run-files recorded a case whose input could no longer be identified, and the
-  # mesh had to be hunted for across checkouts before the run could be repeated.
-  env | grep -E '^(BFS3D|PITZ|UV|AQUAFLUX|ILU0_SWEEP|PROBE)_' | sort | sed 's/^/env: /' || true
+  # mesh had to be hunted for across checkouts before the run could be repeated. PROFILE_, CONSISTENCY_,
+  # FLOW_ and TAPER_ were missing the same way until 2026-09-15 -- tools/check_env_prefixes.py now
+  # gates on this list falling behind the prefixes actually read under validation/ again.
+  env | grep -E '^(BFS3D|PITZ|UV|AQUAFLUX|ILU0_SWEEP|PROBE|PROFILE|CONSISTENCY|FLOW|TAPER)_' | sort | sed 's/^/env: /' || true
 } > "$RUN_FILE"
 
 # Appended to the run's OWN log, not only printed, so the warning travels with the artifact it
