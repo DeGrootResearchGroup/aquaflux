@@ -24,8 +24,8 @@ import dataclasses
 from collections.abc import Callable
 from typing import Any
 
-from .forward_step import ForwardStep
 from .march import RefreshTrigger
+from .strategy import NewtonStrategy
 
 
 @dataclasses.dataclass(frozen=True)
@@ -53,12 +53,12 @@ class RefreshPolicy:
         and a recompilation of the shifted solve, so this bounds that expense independently of how
         eager the trigger is. ``0`` disables refreshing entirely, whatever the trigger says.
     builder : callable or None
-        ``state -> ForwardStep``, rebuilding the whole forward step at a given state. Supplying it
+        ``state -> NewtonStrategy``, rebuilding the whole strategy at a given state. Supplying it
         replaces the driver's own rebuild on **both** the initial build and every refresh, which is
         what lets a preconditioner the driver does not know how to construct -- a host factorization
         materialized off the jit path -- refresh at all. It is also what lifts the restriction that a
         caller-supplied step cannot be refreshed: the builder is *how* the refresh rebuilds.
-    precondition_step : callable or None
+    refresh_preconditioner : callable or None
         ``(active_step, state) -> None``, called before **each** march step to re-derive that
         step's frozen host preconditioner from the state and shift strength the step is about to run
         at. It mutates in place, so the compiled step stays a cache hit.
@@ -73,15 +73,15 @@ class RefreshPolicy:
     Notes
     -----
     **A driver unpacks this; it is not passed on wholesale.** The eager march needs only
-    :attr:`trigger` and :attr:`precondition_step` -- :attr:`limit` and :attr:`builder` govern the
+    :attr:`trigger` and :attr:`refresh_preconditioner` -- :attr:`limit` and :attr:`builder` govern the
     *sequence* of segments, which is the driver's loop and not the march's business. Handing the
     march the whole object would give it two fields it cannot use and could not act on correctly.
     """
 
     trigger: RefreshTrigger | None = None
     limit: int = 1
-    builder: Callable[[Any], ForwardStep] | None = None
-    precondition_step: Callable[[ForwardStep, Any], None] | None = None
+    builder: Callable[[Any], NewtonStrategy] | None = None
+    refresh_preconditioner: Callable[[NewtonStrategy, Any], None] | None = None
 
     @property
     def refreshes(self) -> bool:
@@ -101,30 +101,30 @@ class RefreshPolicy:
         """Whether ``segment`` (0-based) is the final one, so a fired trigger must not refresh again."""
         return segment >= self.limit
 
-    def require_rebuildable(self, continuation: ForwardStep | None) -> None:
+    def require_rebuildable(self, strategy: NewtonStrategy | None) -> None:
         """Raise if this policy would refresh a step it has no way to rebuild.
 
-        A between-segment refresh works by *reconstructing* the forward step at the developed state.
+        A between-segment refresh works by *reconstructing* the strategy at the developed state.
         When the caller supplies its own step and no :attr:`builder`, there is nothing to reconstruct
         it with -- so the refresh would silently never happen, and a solve asking for one would
         quietly not get it. Fail with the three ways out named instead.
 
         Parameters
         ----------
-        continuation : ForwardStep or None
-            The caller-supplied forward step, or ``None`` to let the driver build its own.
+        strategy : NewtonStrategy or None
+            The caller-supplied Newton step, or ``None`` to let the driver build its own.
 
         Raises
         ------
         ValueError
             If a refresh is configured, a step was supplied, and no builder was.
         """
-        if continuation is not None and self.refreshes and self.builder is None:
+        if strategy is not None and self.refreshes and self.builder is None:
             raise ValueError(
-                "a refresh trigger needs the solve to (re)build the forward step, but an explicit "
-                "`continuation` was supplied with no `RefreshPolicy(builder=...)`. Pass a builder "
-                "(state -> ForwardStep) that rebuilds it at each developed state, drop the explicit "
-                "`continuation` so the solve builds it, or stage the refresh yourself."
+                "a refresh trigger needs the solve to (re)build the strategy, but an explicit "
+                "`strategy` was supplied with no `RefreshPolicy(builder=...)`. Pass a builder "
+                "(state -> NewtonStrategy) that rebuilds it at each developed state, drop the explicit "
+                "`strategy` so the solve builds it, or stage the refresh yourself."
             )
 
 

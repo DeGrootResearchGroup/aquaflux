@@ -15,7 +15,7 @@ reasons:
 3. **Was it obtained the right way?** A gradient matching a finite difference shows the derivative is
    *right*, not that it came from the implicit-function-theorem solve rather than from taping the forward
    march -- and the two are told apart only by showing the adjoint's cost does not scale with how many
-   forward steps the solve happened to take. There is no flag for this: run the SAME gradient from a
+   Newton steps the solve happened to take. There is no flag for this: run the SAME gradient from a
    different ``BFS3D_PROBE_STATE`` (a checkpoint one step further out on the same trajectory), which
    lengthens the forward path while leaving the root -- and therefore the gradient -- alone, then compare
    the two ``ADJOINT COST`` lines. Measured on this case: starting a step earlier took the forward path
@@ -56,7 +56,7 @@ import compare  # noqa: E402
 from aquaflux.solve import relative_residual_gmres  # noqa: E402
 from aquaflux.turbulence import (
     FieldSplit,
-    ForwardSolve,
+    LinearSolveSettings,
     JacobianProbeSpec,
     MaterializedJacobian,
     coupled_step,
@@ -245,7 +245,7 @@ def _adjoint_cost(counter: TransposeApplyCounter, forward_before: int) -> str:
 
 
 def count_adjoint_applies(continuation, heartbeat: int = 0) -> TransposeApplyCounter:
-    """Install a :class:`TransposeApplyCounter` on ``continuation``'s adjoint preconditioner.
+    """Install a :class:`TransposeApplyCounter` on ``strategy``'s adjoint preconditioner.
 
     The adjoint factory is a ``TransposedPreconditioner`` wrapping a frozen-transpose factory that holds
     the host preconditioner, so the path to it is explicit rather than guessed. Mutating the host
@@ -342,7 +342,7 @@ def make_objective(coupled, start, continuation, *, observe: bool = True):
             flow,
             k,
             omega,
-            continuation=continuation,
+            strategy=continuation,
             max_steps=MAX_STEPS,
             rtol=RTOL,
             adjoint_solver=adjoint_solver(),
@@ -364,7 +364,7 @@ def main() -> None:
             FieldSplit(compare.LEADING_INVERSE, compare.TRAILING_INVERSE),
             probe=JacobianProbeSpec(stencil_reach=3, column_reach=compare.COLUMN_REACH),
         ),
-        forward=ForwardSolve(rtol=FORWARD_RTOL),
+        linear_solve=LinearSolveSettings(rtol=FORWARD_RTOL),
         # THE CASE'S positivity settings, not the library's. Every step is capped by the k-positivity
         # rule whether or not one asks for it (`step_limit` is unconditional), and unfloored that cap
         # ratchets toward zero on this case -- observed here as a solve that decays geometrically at

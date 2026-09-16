@@ -302,7 +302,7 @@ def test_step_report_restart_cycles_corrects_the_num_steps_offset() -> None:
 
 def test_carry_beta_seeds_the_carried_state() -> None:
     """`carry_beta` replaces the control's carried β with an externally-chosen (escalated) value, keeping
-    any carried residual so the ratio signal is unbroken -- the hook `forward_march` uses to carry an
+    any carried residual so the ratio signal is unbroken -- the hook `newton_march` uses to carry an
     escalated β forward so a persistently hard region is not re-escalated every step."""
     from aquaflux.solve import (
         CflResidualDualTimeControl,
@@ -311,7 +311,7 @@ def test_carry_beta_seeds_the_carried_state() -> None:
     )
 
     # One implementation on the shared base serves all three, so none can be missing it -- which is
-    # exactly what went wrong before: one control had no `carry_beta` at all, and `forward_march`
+    # exactly what went wrong before: one control had no `carry_beta` at all, and `newton_march`
     # probes for it with `hasattr`, so its escalation feedback was dropped in silence.
     for ctrl in (DualTimeControl(), CflResidualDualTimeControl(), ResidualRatioDualTimeControl()):
         assert ctrl.carry_beta((0.02, 3.5), 0.16) == (0.16, 3.5)  # β replaced, memo preserved

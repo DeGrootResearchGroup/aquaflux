@@ -82,7 +82,7 @@ reconstruction's boundary input.
     to be known:**
     - An **eager residual** gradient worked regardless, through the value closed over at
       construction.
-    - A gradient **through `ImplicitNewtonSolver`** (the assembler carried as `theta`) **raised**
+    - A gradient **through `RootSolver`** (the assembler carried as `theta`) **raised**
       `UnexpectedTracerError`, for both the inlet velocity and a `DirichletField` coefficient.
     - `eqx.filter_grad` with respect to an assembler returned **no cotangent** for the static fields
       *and* for a `float`-valued `PressureOutlet`. That was the genuinely silent one.
@@ -90,7 +90,7 @@ reconstruction's boundary input.
     concretize under jit"; a non-static array velocity worked under `filter_jit` and through the solve,
     with the gradient matching finite differences to 4e-11.
   - **⚠️ Do NOT simply drop `static=True` on a field that may hold a plain function.** A function
-    leaf makes even a *forward* `ImplicitNewtonSolver.solve` raise "not a valid JAX type" (its
+    leaf makes even a *forward* `RootSolver.solve` raise "not a valid JAX type" (its
     `custom_vjp` flattens `theta`), and it breaks the distributed build's
     `jax.tree.map(jnp.stack, ...)`. Plain function profiles are used widely (Poiseuille, the skewed
     Couette, the `bfs3d_species` injector), which is what `StaticFunction` preserves. A module profile

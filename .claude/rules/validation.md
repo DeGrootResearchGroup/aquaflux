@@ -29,7 +29,7 @@ file exists to address.
 Found 2026-08-16, all in `validation/pitzdaily_openfoam/compare.py`, none detected by anything:
 
 1. **A settings object was introduced and the case was not updated.** `RefreshPolicy` replaced four
-   loose keyword arguments; the case still passed a bare `precondition_step` callable, so
+   loose keyword arguments; the case still passed a bare `refresh_preconditioner` callable, so
    `solve_coupled` asked a function for `observes` and raised **before the first step**, under every
    configuration and every preconditioner.
 2. **A guard was tightened onto an object the case does not hand it.** The escalation gate began
@@ -118,12 +118,12 @@ a mesh. **A green run there does not mean the cases work.** It is blind to:
 - **Semantic breaks.** A parameter that still exists and now means something different, a default that
   moved, a type that changed under an unchanged name. Break 1 above is exactly this, and the guard
   would **not** have caught it.
-- **Anything behind `**kwargs`.** `solve_coupled` takes `**continuation_kwargs` and forwards them to
+- **Anything behind `**kwargs`.** `solve_coupled` takes `**strategy_kwargs` and forwards them to
   whichever builder it is given, so every keyword is "accepted" *statically* and none is checked here —
   and this is the main entry point. ✅ **Narrowed 2026-08-20 (#278): the case where there is no builder
-  to forward to is now a `TypeError` at the call rather than silence.** Given an explicit `continuation`
-  or a `RefreshPolicy(builder=...)`, `method` / `reference_state` / `**continuation_kwargs` are refused
-  by name instead of dropped — which is how `precondition_step=` used to vanish on its way to a
+  to forward to is now a `TypeError` at the call rather than silence.** Given an explicit `strategy`
+  or a `RefreshPolicy(builder=...)`, `method` / `reference_state` / `**strategy_kwargs` are refused
+  by name instead of dropped — which is how `refresh_preconditioner=` used to vanish on its way to a
   `RefreshPolicy`. What is still unchecked is a keyword that *does* reach the default builder and is
   wrong there; that raises at run time, in the builder, not here.
 - **A call on an object the case built itself.** `Class.method(kw=...)` on an *imported* name is
@@ -182,10 +182,10 @@ cannot be written. The guard is what catches the next module that does branch.
   exactly the monolithic path it was written for. Both are now on all four, and the stopping *measure*
   belongs to `_coupled_step` rather than to any builder: it is the march's own progress measure, so a
   solve cannot converge in a quantity the march does not read. ⚠️ The advice recorded here — that
-  `forward_rtol`/`restart`/`max_restarts` were "reachable via `forward_solver=`" — was true and a trap:
+  `forward_rtol`/`restart`/`max_restarts` were "reachable via `krylov_solver=`" — was true and a trap:
   building a solver to move the tolerance silently replaced the *stopping measure* too, a far larger
-  change. Pass the parameter — since #388 that is `forward=ForwardSolve(...)`, and a whole solver goes
-  in the same `forward` slot, so the two cannot be given together.
+  change. Pass the parameter — since #388 that is `linear_solve=LinearSolveSettings(...)`, and a whole solver goes
+  in the same `linear_solve` slot, so the two cannot be given together.
 - **`_mis_aggregate`'s return annotation is stale** — it says `tuple[np.ndarray, int]` and returns
   three values (labels, roots, count). Cost one debugging cycle.
 
@@ -469,7 +469,7 @@ re-march to ask. The `zero_shift_arms.py` / `zero_shift_adjoint.py` harnesses ar
 
 ## ⚠️ THE SLOW TIER FAILS LOCALLY BUT NOT ON CI — an ENVIRONMENT difference (observed 2026-08-19)
 
-Three tests fail here with `ImplicitNewtonSolver did not converge`, **at `dd1ea73` itself** (verified by
+Three tests fail here with `RootSolver did not converge`, **at `dd1ea73` itself** (verified by
 stashing all local work and re-running each one, not inferred) — while `main` is **green on GitHub**:
 
 - `tests/integration/test_coupled_amg.py::test_amg_solve_converges_and_matches_the_block_preconditioned_solve`

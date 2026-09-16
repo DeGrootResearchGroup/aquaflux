@@ -36,7 +36,7 @@ physics, preconditioner and stopping tolerances it imports rather than restates:
     having if the iteration count holds.
 
 The adjoint is untouched by either. The implicit-function-theorem reverse rule differentiates the
-residual it was handed at the converged state, without consulting the forward step, so a sensitivity
+residual it was handed at the converged state, without consulting the Newton step, so a sensitivity
 stays exact however approximate the operator that marched to that state.
 
 Usage

@@ -40,7 +40,7 @@ from aquaflux.flow import (
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver, assembler_residual
+from aquaflux.solve import DampedNewtonStep, RootSolver, assembler_residual
 from aquaflux.transport import ScalarTransport, effective_diffusivity
 
 # Water, not a unit density. With rho = 1 the mass flux and the volumetric flux are numerically
@@ -70,16 +70,16 @@ def _flow(nx=16, ny=8):
     )
     # The block preconditioner plus a backtracking line search, as the channel flow tests use: the
     # full Newton step from a zero state overshoots and an unpreconditioned solve stalls.
-    forward_step = DampedNewtonStep(
+    strategy = DampedNewtonStep(
         preconditioner=BlockPreconditioner.build(momentum).factory(), line_search=10
     )
-    solver = ImplicitNewtonSolver(max_steps=40, forward_step=forward_step)
+    solver = RootSolver(max_steps=40, strategy=strategy)
     state = solver.solve(assembler_residual, momentum.initial_state(), momentum)
     return mesh, geometry, momentum, state, volume_flux(momentum.mass_flux(state), RHO)
 
 
 def _solve_scalar(transport, flux, n_cells):
-    solver = ImplicitNewtonSolver(max_steps=40, forward_step=DampedNewtonStep())
+    solver = RootSolver(max_steps=40, strategy=DampedNewtonStep())
     residual = transport.residual(flux)
     return solver.solve(lambda c, _: residual(c), jnp.zeros(n_cells), None)
 

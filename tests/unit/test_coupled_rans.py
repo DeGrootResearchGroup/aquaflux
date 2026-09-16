@@ -39,7 +39,7 @@ from aquaflux.turbulence import (
     BlockDiagonal,
     CompleteLu,
     DirectScalars,
-    ForwardSolve,
+    LinearSolveSettings,
     LogScalars,
     MaterializedJacobian,
     MonolithicVCycle,
@@ -58,8 +58,8 @@ from aquaflux.turbulence import (
 )
 from aquaflux.turbulence import coupled as coupled_module
 from aquaflux.turbulence.coupled import (
-    _BLOCK_FORWARD,
-    _FACTORIZATION_FORWARD,
+    _BLOCK_LINEAR_SOLVE,
+    _FACTORIZATION_LINEAR_SOLVE,
     CoupledJacobianProbe,
     CoupledRANS,
     LiveViscosityVelocityParts,
@@ -197,8 +197,8 @@ def test_lu_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None
     inverse, so the 1% stop is reached within a handful of vectors and it uses a small restart; the
     block-triangular preconditioner needs a large subspace per cycle. The two must not share a default.
     """
-    assert _FACTORIZATION_FORWARD.restart == 10
-    assert _BLOCK_FORWARD.restart == 120
+    assert _FACTORIZATION_LINEAR_SOLVE.restart == 10
+    assert _BLOCK_LINEAR_SOLVE.restart == 120
 
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
@@ -207,17 +207,17 @@ def test_lu_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None
     )
     block_step = coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None))
     # Each built step carries the solver it will run; the LU's is the small-restart one by default.
-    assert lu_step.forward_solver.restart == 10
-    assert block_step.forward_solver.restart == 120
-    # An explicit forward_solver still overrides the LU default.
+    assert lu_step.krylov_solver.restart == 10
+    assert block_step.krylov_solver.restart == 120
+    # An explicit krylov_solver still overrides the LU default.
     # ...and the restart alone can be moved without also replacing the stopping measure.
     assert (
         coupled_step(
             coupled,
             state,
             preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
-            forward=ForwardSolve(restart=120),
-        ).forward_solver.restart
+            linear_solve=LinearSolveSettings(restart=120),
+        ).krylov_solver.restart
         == 120
     )
 
@@ -272,7 +272,7 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
         # The shifted forward solve. `forward_rtol` / `forward_restart` / `forward_max_restarts` sat on
         # the multigrid builder alone, although the argument for them is about the *coupled residual*
         # (~100% omega under a plain 2-norm, so the flow block goes unresolved) and not about multigrid.
-        "forward",
+        "linear_solve",
         # The progress measure and the shift.
         "block_scaled_norm",
         # ...one value since #387, so the velocity parts -- once on two builders of four -- cannot fall
@@ -319,7 +319,7 @@ def test_every_builder_stops_the_forward_solve_in_the_march_s_own_measure() -> N
             coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
         ),
     }.items():
-        assert step.forward_solver.norm is step.residual_norm, (
+        assert step.krylov_solver.norm is step.residual_norm, (
             f"{name} steers on one measure and stops its linear solve on another"
         )
         # ...and that measure is the row-equilibrated one, not the Euclidean norm it used to be.
@@ -332,7 +332,7 @@ def test_every_builder_stops_the_forward_solve_in_the_march_s_own_measure() -> N
     explicit = coupled_step(
         coupled, state, preconditioner=BlockDiagonal(method=None), residual_norm=base.residual_norm
     )
-    assert explicit.forward_solver.norm is explicit.residual_norm is base.residual_norm
+    assert explicit.krylov_solver.norm is explicit.residual_norm is base.residual_norm
 
 
 def test_the_constrained_builder_keeps_a_euclidean_stop_for_a_stated_reason() -> None:
@@ -347,7 +347,7 @@ def test_the_constrained_builder_keeps_a_euclidean_stop_for_a_stated_reason() ->
     state = _healthy_state(mesh, coupled)
     step = mass_flow_coupled_continuation(coupled, state, preconditioner=BlockDiagonal(method=None))
     assert step.residual_norm is jnp.linalg.norm
-    assert step.forward_solver.norm is step.residual_norm
+    assert step.krylov_solver.norm is step.residual_norm
 
 
 def test_the_constrained_builder_refuses_a_materialized_preconditioner() -> None:
@@ -378,7 +378,7 @@ def test_the_constrained_solve_refuses_configuration_beside_a_finished_continuat
 ) -> None:
     """Configuration for a step the solve is not building is refused, not dropped.
 
-    A finished ``continuation`` already carries its preconditioner, reference and march settings, so
+    A finished ``strategy`` already carries its preconditioner, reference and march settings, so
     passing any of them beside it used to reach nothing: ``method="air"`` beside a twolevel step ran
     twolevel, with no error. The refusal comes before the initial condition is built.
     """
@@ -389,7 +389,7 @@ def test_the_constrained_solve_refuses_configuration_beside_a_finished_continuat
     )
     given = {name: state if value == "state" else value for name, value in configuration.items()}
     with pytest.raises(TypeError, match=r"configure the continuation `solve_coupled_mass_flow`"):
-        solve_coupled_mass_flow(coupled, 1.0, continuation=continuation, **given)
+        solve_coupled_mass_flow(coupled, 1.0, strategy=continuation, **given)
 
 
 def test_a_monolithic_builder_takes_the_injected_velocity_shift_source() -> None:
@@ -449,8 +449,8 @@ def test_the_live_shift_source_honours_its_protocol_arity() -> None:
 def test_continuation_settings_are_refused_where_they_would_be_dropped() -> None:
     """A setting the solve cannot forward is an error, not a silent no-op.
 
-    ``preconditioner`` / ``reference_state`` / ``**continuation_kwargs`` configure the continuation
-    ``solve_coupled`` builds. On the two paths where it builds none -- an explicit ``continuation``, or a
+    ``preconditioner`` / ``reference_state`` / ``**strategy_kwargs`` configure the continuation
+    ``solve_coupled`` builds. On the two paths where it builds none -- an explicit ``strategy``, or a
     ``RefreshPolicy(builder=...)`` -- they reached nothing at all: a solve asked for a dual-time loop
     and ``positivity_floor=1e-6`` ran the library defaults, with no error and no log line. ``**kwargs``
     is what made it quiet, since it accepts every keyword and checks none, and that door is the main
@@ -464,10 +464,10 @@ def test_continuation_settings_are_refused_where_they_would_be_dropped() -> None
     step = coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None))
 
     for kwargs in (
-        {"continuation": step, "dual_time": DualTimeLoop(inner_steps=3)},
-        {"continuation": step, "positivity_floor": 1e-6},
-        {"continuation": step, "preconditioner": BlockDiagonal()},
-        {"continuation": step, "reference_state": state},
+        {"strategy": step, "dual_time": DualTimeLoop(inner_steps=3)},
+        {"strategy": step, "positivity_floor": 1e-6},
+        {"strategy": step, "preconditioner": BlockDiagonal()},
+        {"strategy": step, "reference_state": state},
         {
             "refresh": RefreshPolicy(builder=lambda s: step),
             "dual_time": DualTimeLoop(inner_steps=3),
@@ -477,7 +477,7 @@ def test_continuation_settings_are_refused_where_they_would_be_dropped() -> None
             "preconditioner": BlockDiagonal(method=None),
         },
     ):
-        offender = next(iter(set(kwargs) - {"continuation", "refresh"}))
+        offender = next(iter(set(kwargs) - {"strategy", "refresh"}))
         with pytest.raises(TypeError, match=offender):
             solve_coupled(coupled, flow, k, omega, max_steps=1, **kwargs)
 
@@ -494,7 +494,7 @@ def test_the_settings_are_still_accepted_where_the_solve_does_build_the_continua
     for refresh in (NO_REFRESH, RefreshPolicy(trigger=CycleGrowthTrigger())):
         source = coupled_module._continuation_source(
             coupled=coupled,
-            continuation=None,
+            strategy=None,
             refresh=refresh,
             preconditioner=BlockDiagonal(method=None),
             reference_state=state,
@@ -516,7 +516,7 @@ def test_an_unnamed_preconditioner_is_the_default_block_diagonal_family() -> Non
     assert inspect.signature(solve_coupled).parameters["preconditioner"].default is None
     source = coupled_module._continuation_source(
         coupled=None,
-        continuation=None,
+        strategy=None,
         refresh=NO_REFRESH,
         preconditioner=None,
         reference_state=None,
@@ -524,7 +524,7 @@ def test_an_unnamed_preconditioner_is_the_default_block_diagonal_family() -> Non
     )
     assert source.session._spec == BlockDiagonal()
     assert source.session._spec.resolved_method() == "twolevel"
-    assert source.precondition_step is None
+    assert source.refresh_preconditioner is None
 
 
 def test_a_session_owned_setting_and_a_second_refresh_hook_are_refused() -> None:
@@ -544,7 +544,7 @@ def test_a_session_owned_setting_and_a_second_refresh_hook_are_refused() -> None
             k,
             omega,
             preconditioner=MaterializedJacobian(CompleteLu()),
-            refresh=RefreshPolicy(precondition_step=lambda step, s: None),
+            refresh=RefreshPolicy(refresh_preconditioner=lambda step, s: None),
         )
     with pytest.raises(TypeError, match="belongs on the spec"):
         solve_coupled(coupled, flow, k, omega, max_steps=1, velocity="convection")
@@ -567,7 +567,7 @@ def test_the_continuation_source_is_one_decision_for_the_build_and_every_refresh
 
     source = coupled_module._continuation_source(
         coupled=coupled,
-        continuation=None,
+        strategy=None,
         refresh=RefreshPolicy(trigger=CycleGrowthTrigger(), builder=builder),
         preconditioner=None,
         reference_state=None,
@@ -787,11 +787,11 @@ def test_the_march_is_handed_the_homotopy_and_the_same_arguments_whether_or_not_
         calls.append(kwargs)
         return MarchResult(state, (), True, False, None)
 
-    monkeypatch.setattr(coupled_module, "forward_march", recording_march)
+    monkeypatch.setattr(coupled_module, "newton_march", recording_march)
     homotopy = object()
     # A target no state can miss, so the recorded march's untouched state is accepted as the root; a
     # pre-built step with a plain Euclidean measure keeps the test to the wiring.
-    loose = dict(rtol=1.0, atol=1e30, continuation=_single_step())
+    loose = dict(rtol=1.0, atol=1e30, strategy=_single_step())
 
     solve_coupled(coupled, flow, k, omega, homotopy=homotopy, **loose)
     solve_coupled(coupled, flow, k, omega, homotopy=homotopy, on_step=print, **loose)
@@ -831,7 +831,7 @@ def test_a_march_that_ends_short_of_a_root_is_refused_rather_than_returned(
     flow, k, omega = coupled.physical_fields(_healthy_state(mesh, coupled))
     monkeypatch.setattr(
         coupled_module,
-        "forward_march",
+        "newton_march",
         lambda step, residual_fn, state, **kwargs: MarchResult(state, (), converged, False, None),
     )
 
@@ -844,7 +844,7 @@ def test_a_march_that_ends_short_of_a_root_is_refused_rather_than_returned(
             rtol=0.0,
             atol=atol,
             homotopy=homotopy,
-            continuation=_single_step(),
+            strategy=_single_step(),
         )
 
 
@@ -866,7 +866,7 @@ def test_the_last_refresh_segment_marches_without_the_trigger(monkeypatch) -> No
         triggers.append(kwargs["trigger"])
         return MarchResult(state, (), True, kwargs["trigger"] is not None, None)
 
-    monkeypatch.setattr(coupled_module, "forward_march", recording_march)
+    monkeypatch.setattr(coupled_module, "newton_march", recording_march)
     trigger = object()
     step = _single_step()
     solve_coupled(
@@ -876,7 +876,7 @@ def test_the_last_refresh_segment_marches_without_the_trigger(monkeypatch) -> No
         omega,
         rtol=1.0,
         atol=1e30,
-        continuation=step,
+        strategy=step,
         refresh=RefreshPolicy(trigger=trigger, limit=2, builder=lambda state: step),
     )
 
@@ -915,7 +915,7 @@ def test_refresh_trigger_with_an_explicit_continuation_and_no_builder_is_rejecte
             k,
             omega,
             rtol=1e-2,
-            continuation=PseudoTransientStep(_TrivialShiftPolicy()),
+            strategy=PseudoTransientStep(_TrivialShiftPolicy()),
             refresh=RefreshPolicy(trigger=CycleGrowthTrigger()),
         )
 
@@ -1138,7 +1138,7 @@ def test_a_dual_time_march_given_no_control_defaults_to_the_courant_step_control
     """A dual-time march given no control defaults to ``DualTimeControl``, observed or not."""
     from aquaflux.solve import DualTimeControl, default_dual_time_control
 
-    control = default_dual_time_control(None, continuation=_dual_time_step())
+    control = default_dual_time_control(None, strategy=_dual_time_step())
     assert isinstance(control, DualTimeControl)
 
 
@@ -1146,7 +1146,7 @@ def test_a_single_step_march_gets_no_default_control() -> None:
     """A single-step (pseudo-transient) march is not a dual-time step, so no control is injected."""
     from aquaflux.solve import default_dual_time_control
 
-    assert default_dual_time_control(None, continuation=_single_step()) is None
+    assert default_dual_time_control(None, strategy=_single_step()) is None
 
 
 def test_a_caller_supplied_control_is_never_overridden() -> None:
@@ -1154,7 +1154,7 @@ def test_a_caller_supplied_control_is_never_overridden() -> None:
     from aquaflux.solve import ResidualRatioDualTimeControl, default_dual_time_control
 
     explicit = ResidualRatioDualTimeControl(beta_start=0.5)
-    assert default_dual_time_control(explicit, continuation=_dual_time_step()) is explicit
+    assert default_dual_time_control(explicit, strategy=_dual_time_step()) is explicit
 
 
 def test_the_equation_names_follow_the_flat_state_layout() -> None:
@@ -1197,7 +1197,7 @@ def test_the_per_equation_residuals_compose_into_the_march_s_own_measure() -> No
 
 
 def test_the_per_equation_rows_add_up_to_the_residual_the_march_reports() -> None:
-    """`forward_march` equilibrates at the state each outer iteration STARTS from and holds that
+    """`newton_march` equilibrates at the state each outer iteration STARTS from and holds that
     measure for the whole iteration -- so the step it reports is ``norm_at_start(R(state_at_end))``.
     Scaling at the end state instead would measure the right residual in the wrong scales, and the
     rows would not add up to the number printed above them.
@@ -1361,7 +1361,7 @@ def test_the_jacobian_probe_is_a_cache_hit_across_reynolds_rungs() -> None:
 def test_the_adjoint_transpose_factory_compares_by_the_preconditioner_it_wraps() -> None:
     """Two engines sharing one preconditioner must produce EQUAL adjoint factories.
 
-    The factory rides in the forward step's ``adjoint_preconditioner_factory``, a static field and so
+    The factory rides in the strategy's ``adjoint_preconditioner_factory``, a static field and so
     part of the compiled step's cache key. As a lambda it compared by identity, which meant a rung that
     rebuilt its engine recompiled the whole coupled solve even when it was reusing the very same
     preconditioner -- defeating the point of reusing it.
@@ -1589,7 +1589,7 @@ class _RecordingPreconditioner:
 
 
 def _stub_step(preconditioner, beta, diagonal):
-    """The smallest forward step the refresh hook reads: a shift strength, a policy and its diagonal."""
+    """The smallest Newton step the refresh hook reads: a shift strength, a policy and its diagonal."""
     from types import SimpleNamespace
 
     from aquaflux.solve import ShiftTerm
@@ -1680,7 +1680,7 @@ def test_the_default_refresh_policy_is_the_inert_one() -> None:
     assert NO_REFRESH.trigger is None
     assert NO_REFRESH.limit == 1
     assert NO_REFRESH.builder is None
-    assert NO_REFRESH.precondition_step is None
+    assert NO_REFRESH.refresh_preconditioner is None
     # The default must not refresh.
     assert not NO_REFRESH.refreshes
 
@@ -1727,10 +1727,10 @@ def test_a_supplied_step_with_no_builder_is_rejected_when_a_refresh_is_configure
 
 def test_globalization_knobs_still_reach_the_continuation_builder(monkeypatch) -> None:
     """The globalization is not named on ``solve_coupled`` and still arrives at the shared step tail
-    unchanged -- it rides ``**continuation_kwargs`` through the preconditioner session.
+    unchanged -- it rides ``**strategy_kwargs`` through the preconditioner session.
 
     ``grow`` used to be declared on ``solve_coupled`` *and* forwarded explicitly, while the very same
-    call sites already splatted ``**continuation_kwargs`` into the builder -- so the declaration was
+    call sites already splatted ``**strategy_kwargs`` into the builder -- so the declaration was
     pure duplication, costing a parameter on an already-wide signature to buy nothing. Deleting it was
     call-for-call identical, and this pins that: it is the only thing standing between the deletion
     and a silently dropped knob. The knob itself now lives on the ``Globalization``, so what rides the

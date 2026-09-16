@@ -103,7 +103,7 @@ from aquaflux.solve import (
 )
 from aquaflux.solve.implicit import backtracking_line_search  # noqa: E402
 from aquaflux.turbulence import (
-    ForwardSolve,
+    LinearSolveSettings,
     coupled_fields,
     coupled_step,
     omega_wall,
@@ -209,7 +209,7 @@ def capture() -> None:
                 cycle_budget=compare.CYCLE_BUDGET,
                 refresh_on_cycles=compare.REFRESH_ON_CYCLES or None,
             ),
-            forward=ForwardSolve(
+            linear_solve=LinearSolveSettings(
                 rtol=compare.FORWARD_RTOL,
                 restart=compare.FORWARD_RESTART,
                 max_restarts=compare.FORWARD_MAX_RESTARTS,
@@ -253,7 +253,7 @@ def _engine_at(coupled, state):
             inner_tol=compare.INNER_TOL,
             cycle_budget=compare.CYCLE_BUDGET,
         ),
-        forward=ForwardSolve(
+        linear_solve=LinearSolveSettings(
             rtol=compare.FORWARD_RTOL,
             restart=compare.FORWARD_RESTART,
             max_restarts=compare.FORWARD_MAX_RESTARTS,
@@ -573,7 +573,7 @@ def _report_step_at(coupled, state, engine, measure, residual, reference, beta) 
     delta, cycles = solve_linear(
         operator,
         -residual,
-        solver=engine.default_solver(),
+        solver=engine.linear_solver(),
         preconditioner=preconditioner,
         throw=False,
     )
@@ -749,7 +749,7 @@ def _frozen_production_test(built, engines, state, steps, measures, beta) -> Non
             delta, _ = solve_linear(
                 operator,
                 -residual,
-                solver=engine.default_solver(),
+                solver=engine.linear_solver(),
                 preconditioner=preconditioner,
                 throw=False,
             )
@@ -1062,7 +1062,7 @@ def march_from_seed() -> None:
                     cycle_budget=compare.CYCLE_BUDGET,
                     refresh_on_cycles=compare.REFRESH_ON_CYCLES or None,
                 ),
-                forward=ForwardSolve(
+                linear_solve=LinearSolveSettings(
                     rtol=compare.FORWARD_RTOL,
                     restart=compare.FORWARD_RESTART,
                     max_restarts=compare.FORWARD_MAX_RESTARTS,

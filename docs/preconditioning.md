@@ -152,17 +152,17 @@ and an approximate pressure-Schur inverse — and it is built from the flow asse
 
 ```python
 from aquaflux.flow import BlockPreconditioner
-from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver
+from aquaflux.solve import DampedNewtonStep, RootSolver
 
 precond = BlockPreconditioner.build(cavity).factory()
-solver = ImplicitNewtonSolver(
+solver = RootSolver(
     max_steps=30,
-    forward_step=DampedNewtonStep(preconditioner=precond),
+    strategy=DampedNewtonStep(preconditioner=precond),
 )
 ```
 
 `build` returns the preconditioner; `factory()` returns the `state -> M` callable the
-forward step expects. Three arguments matter, and they are independent of one another.
+strategy expects. Three arguments matter, and they are independent of one another.
 
 ### `velocity` — how the momentum block is inverted
 
@@ -245,7 +245,7 @@ above is settable where you already are:
 
 ```python
 from aquaflux.flow import ConvectionTwoLevel, momentum_continuation
-from aquaflux.solve import Globalization, ImplicitNewtonSolver
+from aquaflux.solve import Globalization, RootSolver
 
 continuation = momentum_continuation(
     assembler,
@@ -255,7 +255,7 @@ continuation = momentum_continuation(
     composition="simpler",
     strength_threshold=0.25,
 )
-solver = ImplicitNewtonSolver(max_steps=120, forward_step=continuation)
+solver = RootSolver(max_steps=120, strategy=continuation)
 ```
 
 The continuation also hands the same preconditioner to the adjoint solve, so the gradient is
@@ -308,7 +308,7 @@ fill and sweeps), a {class}`~aquaflux.turbulence.FieldSplit`, or a
 the rungs of a Reynolds continuation, say — open a session with
 {func}`~aquaflux.turbulence.open_session` and pass that instead; for a differentiated solve,
 build a frozen step with {func}`~aquaflux.turbulence.coupled_step` and pass it as
-`continuation`.
+`strategy`.
 
 ### Writing it in a case file
 
@@ -455,7 +455,7 @@ from aquaflux.turbulence import solve_coupled
 
 flow, k, omega = solve_coupled(
     coupled,
-    continuation=continuation,
+    strategy=continuation,
     refresh=RefreshPolicy(trigger=CycleGrowthTrigger(growth=2.0), limit=4),
 )
 ```

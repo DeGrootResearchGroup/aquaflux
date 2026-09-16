@@ -1,6 +1,6 @@
 """When to redo a march step, and how — the observed march's retry policy.
 
-A forward step goes bad in three ways, and on a stiff low-shift saddle all three have the same cheap
+A Newton step goes bad in three ways, and on a stiff low-shift saddle all three have the same cheap
 cure: **more damping**. A larger shift lifts a non-finite correction back into the finite regime, cuts
 the linear solve's cycle count, and shortens the implicit step until it fits inside whatever bound was
 clipping it. :class:`RetryPolicy` holds the thresholds that detect those three cases and the knobs that
@@ -20,7 +20,7 @@ import dataclasses
 import jax.numpy as jnp
 import lineax as lx
 
-from .forward_step import ForwardStep, StepOutcome
+from .strategy import NewtonStrategy, StepOutcome
 
 #: Retry reasons whose response is to RAISE the pseudo-transient shift. The others redo the step at the
 #: shift it already had: ``"cycles"`` because the cure for an expensive solve is a fresh preconditioner
@@ -113,7 +113,7 @@ class RetryPolicy:
 
     Notes
     -----
-    Escalation needs a readable shift leaf on the forward step (a constant relaxation set by a step
+    Escalation needs a readable shift leaf on the Newton step (a constant relaxation set by a step
     control). Without one it no-ops, and a diverged step falls through to :attr:`solver` as though no
     thresholds were set.
     """
@@ -134,14 +134,14 @@ class RetryPolicy:
         """
         return self.on_alpha is not None
 
-    def require_shifted(self, forward_step: ForwardStep) -> None:
+    def require_shifted(self, strategy: NewtonStrategy) -> None:
         """Reject a step this policy cannot escalate, at the seam rather than mid-march.
 
         Escalation raises the pseudo-transient shift, so it needs a step carrying a
         ``relaxation_schedule`` with a readable ``beta`` -- what
-        :class:`~aquaflux.solve.ShiftedForwardStep` declares and :class:`~aquaflux.solve.ForwardStep`
+        :class:`~aquaflux.solve.ShiftedNewtonStrategy` declares and :class:`~aquaflux.solve.NewtonStrategy`
         does not. The distinction was once enforced by ``hasattr`` deep in the march loop, which fails
-        **silently**: a :class:`~aquaflux.solve.DampedNewtonStep` satisfies ``ForwardStep`` in full, so
+        **silently**: a :class:`~aquaflux.solve.DampedNewtonStep` satisfies ``NewtonStrategy`` in full, so
         a march configured to escalate accepted one and then never escalated -- indistinguishable, from
         the log, from a march that never needed to.
 
@@ -158,26 +158,26 @@ class RetryPolicy:
         Raises
         ------
         TypeError
-            If ``forward_step`` carries no ``relaxation_schedule`` with a readable ``beta``.
+            If ``strategy`` carries no ``relaxation_schedule`` with a readable ``beta``.
         """
-        # Checked against the SHIFT specifically, not `isinstance(..., ShiftedForwardStep)`. The
-        # argument is already typed `ForwardStep`, so re-testing those four methods at runtime would
+        # Checked against the SHIFT specifically, not `isinstance(..., ShiftedNewtonStrategy)`. The
+        # argument is already typed `NewtonStrategy`, so re-testing those four methods at runtime would
         # reject a legitimate duck-typed step for a reason that has nothing to do with escalation.
-        schedule = getattr(forward_step, "relaxation_schedule", None)
+        schedule = getattr(strategy, "relaxation_schedule", None)
         if schedule is None or not hasattr(schedule, "beta"):
             raise TypeError(
                 "the beta-escalation retry (RetryPolicy.on_alpha) drives the "
-                "pseudo-transient shift strength, so it needs a forward step whose "
+                "pseudo-transient shift strength, so it needs a Newton step whose "
                 "`relaxation_schedule` exposes a readable `beta` -- a ConstantRelaxation, which a "
                 "StepControl swaps onto a PseudoTransientStep or a DualTimeStep each iteration. The "
                 "default SwitchedEvolutionRelaxation those steps are built with exposes none, so "
-                f"constructing one is not enough on its own. {type(forward_step).__name__} has no "
+                f"constructing one is not enough on its own. {type(strategy).__name__} has no "
                 "readable `beta`, so the retry would silently do nothing. Either run the step under "
                 "a step control, or leave `on_alpha` unset."
             )
 
-    def with_inner_abort(self, forward_step: ForwardStep) -> ForwardStep:
-        """Give ``forward_step`` this policy's stopping thresholds, if it can act on them.
+    def with_inner_abort(self, strategy: NewtonStrategy) -> NewtonStrategy:
+        """Give ``strategy`` this policy's stopping thresholds, if it can act on them.
 
         A step that runs an inner loop can stop the moment it crosses one, rather than iterating on
         inside a loop that will not help: a solve costing more than :attr:`abort_above_cycles`, or a
@@ -197,25 +197,23 @@ class RetryPolicy:
 
         Parameters
         ----------
-        forward_step : ForwardStep
+        strategy : NewtonStrategy
             The march's base step.
 
         Returns
         -------
-        ForwardStep
-            The step carrying the thresholds it can act on, or ``forward_step`` itself.
+        NewtonStrategy
+            The step carrying the thresholds it can act on, or ``strategy`` itself.
         """
         # `dataclasses.replace`, not `eqx.tree_at`: the thresholds are STATIC fields, so they live in
         # the treedef rather than among the leaves and `tree_at` (which addresses leaves) cannot reach
         # them.
         fields = {}
-        if self.abort_above_cycles is not None and hasattr(
-            forward_step, "abort_above_inner_cycles"
-        ):
+        if self.abort_above_cycles is not None and hasattr(strategy, "abort_above_inner_cycles"):
             fields["abort_above_inner_cycles"] = self.abort_above_cycles
-        if self.on_alpha is not None and hasattr(forward_step, "abort_below_alpha"):
+        if self.on_alpha is not None and hasattr(strategy, "abort_below_alpha"):
             fields["abort_below_alpha"] = self.on_alpha
-        return dataclasses.replace(forward_step, **fields) if fields else forward_step
+        return dataclasses.replace(strategy, **fields) if fields else strategy
 
     def has_diverged(self, residual_norm: jnp.ndarray, reference: float) -> bool:
         """Whether a step's residual norm signals a diverged step this policy should redo.

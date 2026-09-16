@@ -70,7 +70,7 @@ paths:
     needs flexible GMRES and has no clean transpose, so it is a deferred forward-only optimization, **not** the
     adjoint path. ⚠️ **Name the forward solve's REGIME.** Since #282 every family stops
     on the same measure — the march's own — and differs only in its restart regime; the multigrid one is
-    `_VCYCLE_FORWARD` (`forward_rtol = 0.3` in the row-scaled `coupled_scaled_norm`, `restart=15`,
+    `_VCYCLE_LINEAR_SOLVE` (`forward_rtol = 0.3` in the row-scaled `coupled_scaled_norm`, `restart=15`,
     `max_restarts=60`), built by `_coupled_step`, not inline in `coupled_amg_continuation`. See
     `solve.md`'s regime table. ⚠️ The symbols `_COUPLED_FORWARD_SOLVER`,
     `_COUPLED_FACTORIZATION_FORWARD_SOLVER` and `_COUPLED_AMG_FORWARD_SOLVER` do not exist; the first two
@@ -318,7 +318,7 @@ paths:
     default forward solver on the complete-LU path too (`_monolithic_factor_step` fell back to it for
     both), so deleting the ILUT without renaming it would have left a solver named after a preconditioner
     that no longer exists. It became `_COUPLED_FACTORIZATION_FORWARD_SOLVER`, and since #282 it is the
-    `_FACTORIZATION_FORWARD` restart regime — the solver object itself is gone, `_coupled_step` builds it.
+    `_FACTORIZATION_LINEAR_SOLVE` restart regime — the solver object itself is gone, `_coupled_step` builds it.
 
 ### ⭐ Ordering, not fill, is what fails zero-fill on `pitzDaily` (2026-08-17)
 
@@ -933,7 +933,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     shifted table is just as smooth. Split on the summary-block delimiter and parse within each block.
 
   **SHIPPED in response:**
-  1. `forward_march(stop_on_limit_stall=3)` (**a new default-on guard**) ends the segment after three
+  1. `newton_march(stop_on_limit_stall=3)` (**a new default-on guard**) ends the segment after three
      consecutive steps that are constraint-bound, non-widening, and **changed the residual by less
      than 1e-3 relative, in either direction** (`_limit_collapsing`).
 
@@ -1092,7 +1092,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   at a root for **any** floor (there `delta = 0`), which is what keeps it out of the converged state and
   therefore out of the implicit-function-theorem adjoint — the adjoint never sees it in any case, since
   `root_adjoint`'s backward rule reads only `jax.vjp(residual_fn, root)` and a transpose solve, never
-  the forward step.
+  the Newton step.
 
   *Configuration, both arms:* `bfs3d`, traced trailing inverse with **`equilibrate=False`**, `k` wall BC
   `zerogradient`, 3-rung Reynolds continuation (`N_POINTS=2`), ILU(0) ×4, `coarse_eq_limit` 2000, plain
@@ -1659,13 +1659,13 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     — 33 tests, 18 of them `slow` — **33 passed**;
   - `test_coupled_lu` + `test_coupled_ilut` (the latter since deleted along with the ILUT it tested;
     see `solve-direct-preconditioners.md`) — **15 passed**. These two matter and were nearly missed:
-    they drive `forward_march` with `step_control` + `precondition_step`, so they pick up
+    they drive `newton_march` with `step_control` + `refresh_preconditioner`, so they pick up
     `stop_on_limit_stall` exactly as the four above do, and they are in neither the fast gate nor the
     list a first pass would think to run;
   - **`-m validation` — 18 passed.**
 
   **The trap, recorded because it nearly landed:** a default-on guard on a *shared* seam is not covered
-  by "the tests for the subsystem I changed". `forward_march` has one production caller, but everything
+  by "the tests for the subsystem I changed". `newton_march` has one production caller, but everything
   that reaches `solve_coupled` with an observer picks the new default up. Enumerate by **who calls the
   seam**, not by which file the change is in.
 

@@ -61,12 +61,12 @@ def test_every_build_of_a_session_shares_one_inverse_and_one_set_of_hooks(case) 
     """A new object in a static field recompiles the coupled solve, so a session must hand back the same ones."""
     coupled, state = case
     session = open_session(MaterializedJacobian(CompleteLu(backend="scipy")), coupled)
-    hook = session.precondition_step
+    hook = session.refresh_preconditioner
     first = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
     second = session.build(state * 1.01, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
     assert first.shift_policy.preconditioner is second.shift_policy.preconditioner
     assert first.inner_refresh is second.inner_refresh
-    assert session.precondition_step is hook
+    assert session.refresh_preconditioner is hook
 
 
 def test_the_session_probe_follows_the_operator_stand_in(case) -> None:
@@ -120,7 +120,7 @@ def test_the_precondition_wrapper_wraps_the_hook_the_march_calls(case) -> None:
     session = open_session(
         MaterializedJacobian(CompleteLu()), coupled, precondition_wrapper=wrapper
     )
-    session.precondition_step("step", None)
+    session.refresh_preconditioner("step", None)
     assert calls == ["step"]
 
 

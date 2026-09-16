@@ -31,7 +31,7 @@ from aquaflux.solve import (
     StepOutcome,
     StepReport,
     SwitchedEvolutionRelaxation,
-    forward_march,
+    newton_march,
 )
 from aquaflux.solve.implicit import backtracking_line_search
 from aquaflux.solve.march import _march_step
@@ -153,12 +153,12 @@ def test_march_without_a_trigger_reaches_the_analytic_root() -> None:
     """Left alone, the march converges to the root and says so.
 
     It used to compare itself against a second, traced Newton loop, which no longer exists -- there is
-    one march, and `ImplicitNewtonSolver` runs it -- so the comparison would now be against itself.
+    one march, and `RootSolver` runs it -- so the comparison would now be against itself.
     The analytic cube root is an independent reference and is what this checks against.
     """
     residual, phi0, root = _march_and_solver_inputs()
 
-    marched = forward_march(
+    marched = newton_march(
         DampedNewtonStep(line_search=10), residual, phi0, max_steps=50, rtol=1e-10, atol=1e-12
     )
 
@@ -188,7 +188,7 @@ def test_a_march_whose_residual_is_already_infinite_does_not_report_converged() 
     right-hand side and raise from inside ``lineax``, reporting a bug upstream of itself rather than
     the fact the caller needs.
     """
-    result = forward_march(
+    result = newton_march(
         DampedNewtonStep(), _AlreadyInfinite(), jnp.zeros(3), max_steps=5, rtol=1e-10, atol=1e-12
     )
 
@@ -218,7 +218,7 @@ class _PoisonUnlessTight(eqx.Module):
     def norm(self):
         return jnp.linalg.norm
 
-    def default_solver(self):
+    def linear_solver(self):
         return "loose"
 
 
@@ -234,11 +234,11 @@ def test_march_retries_a_diverged_step_with_the_tighter_solver() -> None:
     phi0 = jnp.ones((1,))
     step = _PoisonUnlessTight()
 
-    poisoned = forward_march(step, residual, phi0, max_steps=5, rtol=1e-10, atol=1e-12)
+    poisoned = newton_march(step, residual, phi0, max_steps=5, rtol=1e-10, atol=1e-12)
     assert not poisoned.converged
     assert not bool(jnp.isfinite(poisoned.reports[-1].residual_norm))
 
-    recovered = forward_march(
+    recovered = newton_march(
         step, residual, phi0, max_steps=5, rtol=1e-10, atol=1e-12, retry=RetryPolicy(solver="tight")
     )
     assert recovered.converged
@@ -257,8 +257,8 @@ def test_march_does_not_retry_a_finite_step() -> None:
     step = DampedNewtonStep(line_search=10)
     common = dict(max_steps=50, rtol=1e-10, atol=1e-12)
 
-    plain = forward_march(step, residual, phi0, **common)
-    with_retry = forward_march(step, residual, phi0, retry=RetryPolicy(solver="tight"), **common)
+    plain = newton_march(step, residual, phi0, **common)
+    with_retry = newton_march(step, residual, phi0, retry=RetryPolicy(solver="tight"), **common)
 
     assert with_retry.converged and plain.converged
     assert jnp.allclose(with_retry.state, root, atol=1e-8)
@@ -278,7 +278,7 @@ def test_march_stops_where_the_trigger_says_without_raising() -> None:
             return len(history) >= 2
 
     residual, phi0, _ = _march_and_solver_inputs()
-    result = forward_march(
+    result = newton_march(
         DampedNewtonStep(line_search=10),
         residual,
         phi0,
@@ -297,7 +297,7 @@ def test_march_reports_every_step_to_an_observer() -> None:
     """The observer sees each step as it happens; the returned history is the same data."""
     residual, phi0, _ = _march_and_solver_inputs()
     seen: list[StepReport] = []
-    result = forward_march(
+    result = newton_march(
         DampedNewtonStep(line_search=10),
         residual,
         phi0,
@@ -349,14 +349,14 @@ def test_step_control_drives_the_march_and_stays_a_cache_hit() -> None:
 
     # One controlled step pays the compilation (which invokes the residual several times per trace).
     _TRACES.clear()
-    one = forward_march(base, residual, phi0, max_steps=1, **common)
+    one = newton_march(base, residual, phi0, max_steps=1, **common)
     compiled = len(_TRACES)
     assert compiled > 0 and len(one.reports) == 1
 
     # Several controlled steps: β adapts each step (the control is live), yet no step recompiles --
     # the controlled steps differ only in a dynamic β leaf, so _march_step stays a cache hit.
     _TRACES.clear()
-    several = forward_march(base, residual, phi0, max_steps=5, **common)
+    several = newton_march(base, residual, phi0, max_steps=5, **common)
     assert len(several.reports) > 1
     assert len({round(r.residual_ratio, 12) for r in several.reports}) > 1  # β is doing something
     assert len(_TRACES) == compiled  # extra controlled steps added no traces
@@ -375,9 +375,9 @@ class _CountingControl:
 
 
 def test_forward_march_threads_the_step_control_state_across_calls() -> None:
-    """``forward_march`` returns the control state and resumes from a passed-in one (issue #156).
+    """``newton_march`` returns the control state and resumes from a passed-in one (issue #156).
 
-    ``solve_coupled`` runs one ``forward_march`` per preconditioner refresh, so without this a stateful
+    ``solve_coupled`` runs one ``newton_march`` per preconditioner refresh, so without this a stateful
     control (the α-targeting shift climb) restarts every segment. ``rtol = atol = 0`` makes each march
     take exactly ``max_steps`` steps, so the counter is deterministic.
     """
@@ -386,17 +386,17 @@ def test_forward_march_threads_the_step_control_state_across_calls() -> None:
     base = DampedNewtonStep()
     common = dict(rtol=0.0, atol=0.0, step_control=_CountingControl())
 
-    first = forward_march(base, residual, phi0, max_steps=3, **common)
+    first = newton_march(base, residual, phi0, max_steps=3, **common)
     assert first.control_state == 3  # one count per step, started from None
 
     # Threading the returned state continues the count instead of restarting ...
-    threaded = forward_march(
+    threaded = newton_march(
         base, residual, first.state, max_steps=2, control_state=first.control_state, **common
     )
     assert threaded.control_state == 5  # 3 carried in + 2 more steps
 
     # ... whereas omitting it restarts from None (the pre-fix per-segment reset).
-    restarted = forward_march(base, residual, first.state, max_steps=2, **common)
+    restarted = newton_march(base, residual, first.state, max_steps=2, **common)
     assert restarted.control_state == 2
     assert threaded.control_state > restarted.control_state
 
@@ -413,7 +413,7 @@ def test_checkpoint_receives_the_state_behind_each_report() -> None:
     seen: list[StepReport] = []
     saved: list[tuple[StepReport, jnp.ndarray]] = []
 
-    result = forward_march(
+    result = newton_march(
         DampedNewtonStep(line_search=10),
         residual,
         phi0,
@@ -448,12 +448,12 @@ def test_repeated_steps_reuse_the_compiled_march_step() -> None:
     # the step, the line-search ladder, the norm -- so the trace count is not the compile count;
     # what matters is whether *further* steps add any.)
     _TRACES.clear()
-    first = forward_march(step, residual, phi0, max_steps=1, **common)
+    first = newton_march(step, residual, phi0, max_steps=1, **common)
     compiled = len(_TRACES)
     assert compiled > 0 and len(first.reports) == 1
 
     # Several more steps over the same strategy and residual: all cache hits, no tracing at all.
-    more = forward_march(step, residual, first.state, max_steps=4, **common)
+    more = newton_march(step, residual, first.state, max_steps=4, **common)
     assert len(more.reports) > 1  # it really did take several steps
     assert len(_TRACES) == compiled  # ...and none of them recompiled
 
@@ -509,12 +509,12 @@ def test_drift_trigger_is_independent_of_the_damping_confound() -> None:
 
 
 def test_march_reports_the_injected_drift_measure() -> None:
-    """``forward_march`` evaluates the measure once per step and puts the scalar on the report."""
+    """``newton_march`` evaluates the measure once per step and puts the scalar on the report."""
     residual = _Cubic(theta=jnp.asarray(1.0))
     step = DampedNewtonStep(line_search=10)
     seen: list[float] = []
 
-    result = forward_march(
+    result = newton_march(
         step,
         residual.__call__,
         jnp.asarray(2.0),
@@ -554,7 +554,7 @@ def test_the_march_rebuilds_the_measure_each_outer_iteration_and_holds_it_within
         return phi - 1.0
 
     phi0 = jnp.array([4.0, 4.0])
-    result = forward_march(
+    result = newton_march(
         DampedNewtonStep(),
         residual_fn,
         phi0,
@@ -565,7 +565,7 @@ def test_the_march_rebuilds_the_measure_each_outer_iteration_and_holds_it_within
     baseline_states = len(result.reports)
 
     asked.clear()
-    controlled = forward_march(
+    controlled = newton_march(
         DampedNewtonStep(),
         residual_fn,
         phi0,
@@ -604,7 +604,7 @@ class _CyclesFromBeta(eqx.Module):
     def norm(self):
         return jnp.linalg.norm
 
-    def default_solver(self):
+    def linear_solver(self):
         return None
 
 
@@ -627,7 +627,7 @@ def test_a_cycle_spike_redoes_the_step_ONCE_and_does_NOT_escalate() -> None:
     phi0 = jnp.ones((1,))
     seen: list = []
     step = _CyclesFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)))
-    result = forward_march(
+    result = newton_march(
         step,
         residual,
         phi0,
@@ -647,7 +647,7 @@ def test_march_does_not_escalate_below_the_cycle_cap() -> None:
     residual = _Cubic(jnp.zeros((1,)))
     phi0 = jnp.ones((1,))
     step = _CyclesFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)))  # cyc = 40
-    result = forward_march(
+    result = newton_march(
         step,
         residual,
         phi0,
@@ -686,7 +686,7 @@ def test_a_forced_escalation_adds_no_march_step_compilations() -> None:
     # Escalation is driven by a COLLAPSED STEP LENGTH, the only thing that escalates: a costly solve
     # redoes at unchanged β, so it would make this test pass without an escalation ever happening.
     _TRACES.clear()
-    baseline = forward_march(
+    baseline = newton_march(
         step, residual, phi0, max_steps=1, rtol=1e-10, atol=1e-12, retry=RetryPolicy()
     )
     compiled = len(_TRACES)
@@ -695,7 +695,7 @@ def test_a_forced_escalation_adds_no_march_step_compilations() -> None:
     # The same step, now escalating β = 1 -> 2 -> 4 (cyc 40 -> 20 -> 10): both escalation `_march_step`
     # calls must reuse the compiled step -- zero further compilations -- while still recovering the step.
     _TRACES.clear()
-    escalated = forward_march(
+    escalated = newton_march(
         step,
         residual,
         phi0,
@@ -733,7 +733,7 @@ class _NaNUntilDamped(eqx.Module):
     def norm(self):
         return jnp.linalg.norm
 
-    def default_solver(self):
+    def linear_solver(self):
         return "loose"
 
 
@@ -747,7 +747,7 @@ def test_march_escalates_beta_before_the_tight_divergence_retry() -> None:
     )  # root at phi = 0; a non-finite phi gives a non-finite residual
     phi0 = jnp.ones((1,))
     step = _NaNUntilDamped(relaxation_schedule=ConstantRelaxation(jnp.asarray(0.5)), threshold=1.0)
-    result = forward_march(
+    result = newton_march(
         step,
         residual,
         phi0,
@@ -771,7 +771,7 @@ def test_march_falls_back_to_the_tight_retry_when_escalation_cannot_fix_divergen
     phi0 = jnp.ones((1,))
     # threshold unreachable by 0.5 -> 1.0 -> 2.0, so every escalation stays non-finite; only "tight" recovers.
     step = _NaNUntilDamped(relaxation_schedule=ConstantRelaxation(jnp.asarray(0.5)), threshold=1e9)
-    result = forward_march(
+    result = newton_march(
         step,
         residual,
         phi0,
@@ -800,7 +800,7 @@ def test_march_carries_the_escalated_beta_into_the_control() -> None:
     phi0 = jnp.ones((1,))
     step = _AlphaFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)))
     control = DualTimeControl(beta_start=1.0, beta_min=0.01)
-    result = forward_march(
+    result = newton_march(
         step,
         residual,
         phi0,
@@ -840,7 +840,7 @@ class _AlphaFromBeta(eqx.Module):
     def norm(self):
         return jnp.linalg.norm
 
-    def default_solver(self):
+    def linear_solver(self):
         return None
 
 
@@ -853,7 +853,7 @@ def test_march_escalates_beta_on_a_collapsed_step_length() -> None:
     residual = _Cubic(jnp.zeros((1,)))
     phi0 = jnp.ones((1,))
     step = _AlphaFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)))
-    result = forward_march(
+    result = newton_march(
         step,
         residual,
         phi0,
@@ -873,7 +873,7 @@ def test_march_does_not_escalate_on_a_healthy_step_length() -> None:
     phi0 = jnp.ones((1,))
     # beta_needed = 0 => alpha is 1 from the start.
     step = _AlphaFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)), beta_needed=0.0)
-    result = forward_march(
+    result = newton_march(
         step, residual, phi0, max_steps=1, rtol=1e-10, atol=1e-12, retry=RetryPolicy(on_alpha=0.5)
     )
     assert int(result.reports[0].escalations) == 0
@@ -885,7 +885,7 @@ def test_the_alpha_trigger_reports_its_own_reason() -> None:
     reasons: list[str] = []
     residual = _Cubic(jnp.zeros((1,)))
     step = _AlphaFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)))
-    forward_march(
+    newton_march(
         step,
         residual,
         jnp.ones((1,)),
@@ -909,7 +909,7 @@ def test_on_retry_reports_the_beta_the_retried_attempt_will_run_at() -> None:
     seen: list[float] = []
     residual = _Cubic(jnp.zeros((1,)))
     step = _AlphaFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)), beta_needed=9.0)
-    forward_march(
+    newton_march(
         step,
         residual,
         jnp.ones((1,)),
@@ -1132,7 +1132,7 @@ class _PinnedOnItsLimit(eqx.Module):
     def norm(self):
         return jnp.linalg.norm
 
-    def default_solver(self):
+    def linear_solver(self):
         return None
 
 
@@ -1144,7 +1144,7 @@ def test_a_collapsing_constraint_cap_ends_the_segment() -> None:
     100x each one. Ending the segment hands back an honestly unconverged state instead.
     """
     residual = _Cubic(jnp.zeros((1,)))
-    result = forward_march(
+    result = newton_march(
         _PinnedOnItsLimit(),
         residual,
         jnp.ones((1,)),
@@ -1161,7 +1161,7 @@ def test_a_collapsing_constraint_cap_ends_the_segment() -> None:
 def test_the_stall_bailout_is_off_when_unset() -> None:
     """``stop_on_limit_stall=None`` disables the test, so the march runs its whole budget as before."""
     residual = _Cubic(jnp.zeros((1,)))
-    result = forward_march(
+    result = newton_march(
         _PinnedOnItsLimit(),
         residual,
         jnp.ones((1,)),
@@ -1181,7 +1181,7 @@ def test_a_step_control_need_not_drive_the_shift() -> None:
     drive beta and is handed a step without one already fails loudly from its own ``tree_at``.
     """
     residual, phi0, _ = _march_and_solver_inputs()
-    result = forward_march(
+    result = newton_march(
         DampedNewtonStep(line_search=6),
         residual,
         phi0,
@@ -1196,7 +1196,7 @@ def test_a_step_control_need_not_drive_the_shift() -> None:
 def test_the_escalation_refuses_a_step_that_has_no_shift_to_escalate() -> None:
     """The silent failure the gate replaces: a conforming step that simply never escalated.
 
-    ``DampedNewtonStep`` satisfies ``ForwardStep`` in full -- all four declared methods -- so a march
+    ``DampedNewtonStep`` satisfies ``NewtonStrategy`` in full -- all four declared methods -- so a march
     configured to escalate accepted one and then skipped every escalation, because a ``hasattr`` deep
     in the loop came back False. From the log that is indistinguishable from a march that never needed
     to escalate, which is the worst way for a safety net to be missing.
@@ -1208,7 +1208,7 @@ def test_the_escalation_refuses_a_step_that_has_no_shift_to_escalate() -> None:
     # Cost-only is deliberately absent: it redoes at unchanged β, so it needs no shift to read.
     for policy in (RetryPolicy(on_alpha=0.5), RetryPolicy(on_alpha=0.01, abort_above_cycles=3)):
         with pytest.raises(TypeError, match="relaxation_schedule"):
-            forward_march(
+            newton_march(
                 DampedNewtonStep(),
                 residual,
                 jnp.ones((1,)),
@@ -1231,7 +1231,7 @@ def test_the_divergence_retry_works_on_a_step_with_no_shift() -> None:
     loose solver, so the retry and its announcement actually fire.
     """
     seen: list[tuple[str, float]] = []
-    result = forward_march(
+    result = newton_march(
         _PoisonUnlessTight(),
         _Cubic(jnp.zeros((1,))),
         jnp.ones((1,)),
@@ -1269,7 +1269,7 @@ class _UnshiftedStep(eqx.Module):
     def norm(self):
         return jnp.linalg.norm
 
-    def default_solver(self):
+    def linear_solver(self):
         return None
 
 
@@ -1298,7 +1298,7 @@ def test_the_escalation_guard_accepts_a_shift_a_step_control_installs() -> None:
         RetryPolicy(abort_above_cycles=10).require_shifted(_UnshiftedStep())
 
     residual = _Cubic(jnp.zeros((1,)))
-    result = forward_march(
+    result = newton_march(
         _UnshiftedStep(),
         residual,
         jnp.ones((1,)),
@@ -1315,12 +1315,12 @@ def test_the_escalation_guard_accepts_a_shift_a_step_control_installs() -> None:
 def test_the_escalation_guard_still_rejects_a_step_that_can_never_escalate() -> None:
     """With no control to install one, a step carrying no ``beta`` is rejected -- loudly, not silently.
 
-    This is the failure the guard exists for: a ``DampedNewtonStep`` satisfies ``ForwardStep`` in full,
+    This is the failure the guard exists for: a ``DampedNewtonStep`` satisfies ``NewtonStrategy`` in full,
     so a march configured to escalate used to accept one and then never escalate, indistinguishable in
     the log from a march that never needed to.
     """
     with pytest.raises(TypeError, match="relaxation_schedule"):
-        forward_march(
+        newton_march(
             DampedNewtonStep(line_search=0),
             _Cubic(jnp.zeros((1,))),
             jnp.ones((1,)),
@@ -1347,11 +1347,11 @@ def test_a_march_step_does_not_re_evaluate_the_residual_it_was_just_handed() -> 
         _TRACES.clear()
         step = DampedNewtonStep(line_search=line_search)
         residual = _Cubic(jnp.array([8.0, 27.0]))
-        _march_step(step, residual, jnp.array([1.5, 2.5]), jnp.asarray(10.0), step.default_solver())
+        _march_step(step, residual, jnp.array([1.5, 2.5]), jnp.asarray(10.0), step.linear_solver())
         assert len(_TRACES) == 3, f"line_search={line_search} traced {len(_TRACES)} residuals"
 
 
-def test_every_forward_step_reports_the_measure_at_the_iterate_it_returns() -> None:
+def test_every_strategy_reports_the_measure_at_the_iterate_it_returns() -> None:
     """The contract both drivers now rely on, checked on all three shipped strategies.
 
     ``StepOutcome.residual_norm`` must be ``norm(R(phi))`` at the step's OWN returned iterate. A
@@ -1373,7 +1373,7 @@ def test_every_forward_step_reports_the_measure_at_the_iterate_it_returns() -> N
         ),
     ):
         r0 = step.norm()(residual_fn(phi0))
-        outcome = step.stepper()(residual_fn, phi0, r0, step.default_solver())
+        outcome = step.stepper()(residual_fn, phi0, r0, step.linear_solver())
         expected = step.norm()(residual_fn(outcome.phi))
         assert jnp.allclose(outcome.residual_norm, expected, rtol=1e-12, atol=0.0), type(step)
 
@@ -1550,7 +1550,7 @@ def test_the_station_hook_reshapes_the_step_for_the_station_it_is_about_to_run()
         seen.append((station, arrived))
         return step
 
-    forward_march(
+    newton_march(
         DampedNewtonStep(line_search=10),
         residual,
         phi0,
@@ -1580,7 +1580,7 @@ def test_the_step_the_station_hook_RETURNS_is_the_one_that_is_taken() -> None:
         del step, station, arrived
         return DampedNewtonStep(line_search=0)  # no line search at all
 
-    plain = forward_march(
+    plain = newton_march(
         DampedNewtonStep(line_search=10),
         residual,
         phi0,
@@ -1589,7 +1589,7 @@ def test_the_step_the_station_hook_RETURNS_is_the_one_that_is_taken() -> None:
         atol=1e-12,
         homotopy=_CubicRamp(8.0, 64.0, 3, 2),
     )
-    reshaped = forward_march(
+    reshaped = newton_march(
         DampedNewtonStep(line_search=10),
         residual,
         phi0,
@@ -1612,8 +1612,8 @@ def test_the_station_hook_is_ignored_without_a_homotopy_and_is_byte_identical_wh
     def explode(_step, _station, _arrived):
         raise AssertionError("the hook must not be consulted without a homotopy")
 
-    without = forward_march(step, residual, phi0, **kwargs)
-    with_hook = forward_march(step, residual, phi0, station_step=explode, **kwargs)
+    without = newton_march(step, residual, phi0, **kwargs)
+    with_hook = newton_march(step, residual, phi0, station_step=explode, **kwargs)
 
     assert jnp.array_equal(without.state, with_hook.state)
     assert len(without.reports) == len(with_hook.reports)
@@ -1625,8 +1625,8 @@ def test_a_march_with_no_homotopy_is_unchanged() -> None:
     step = DampedNewtonStep(line_search=10)
     kwargs = dict(max_steps=50, rtol=1e-10, atol=1e-12)
 
-    without = forward_march(step, residual, phi0, **kwargs)
-    explicit_none = forward_march(step, residual, phi0, homotopy=None, **kwargs)
+    without = newton_march(step, residual, phi0, **kwargs)
+    explicit_none = newton_march(step, residual, phi0, homotopy=None, **kwargs)
 
     assert without.converged and explicit_none.converged
     assert jnp.array_equal(without.state, explicit_none.state)
@@ -1643,7 +1643,7 @@ def test_the_march_reaches_the_TARGET_root_through_the_ramp() -> None:
     homotopy = _CubicRamp(target, start=target * 100.0, stations=3, steps_per_station=2)
     step = DampedNewtonStep(line_search=10)
 
-    result = forward_march(
+    result = newton_march(
         step,
         _Cubic(target),
         jnp.ones_like(target),
@@ -1673,7 +1673,7 @@ def test_the_march_genuinely_solves_each_station_not_only_the_target() -> None:
     homotopy = _CubicRamp(target, start=target * 1000.0, stations=3, steps_per_station=6)
     step = DampedNewtonStep(line_search=10)
 
-    ramped = forward_march(
+    ramped = newton_march(
         step,
         _Cubic(target),
         jnp.ones_like(target),
@@ -1682,7 +1682,7 @@ def test_the_march_genuinely_solves_each_station_not_only_the_target() -> None:
         atol=1e-12,
         homotopy=homotopy,
     )
-    ignored = forward_march(
+    ignored = newton_march(
         step,
         _Cubic(target),
         jnp.ones_like(target),
@@ -1712,7 +1712,7 @@ def test_the_march_may_not_stop_on_tolerance_before_the_ramp_arrives() -> None:
     homotopy = _CubicRamp(target, start=start, stations=3, steps_per_station=2)
     step = DampedNewtonStep(line_search=10)
 
-    result = forward_march(
+    result = newton_march(
         step,
         _Cubic(target),
         jnp.cbrt(start),
@@ -1739,7 +1739,7 @@ def test_a_march_cut_off_inside_the_ramp_does_not_report_convergence() -> None:
     homotopy = _CubicRamp(target, start=start, stations=4, steps_per_station=2)
     step = DampedNewtonStep(line_search=10)
 
-    result = forward_march(
+    result = newton_march(
         step,
         _Cubic(target),
         jnp.cbrt(start),
@@ -1763,7 +1763,7 @@ def test_the_homotopy_is_entered_once_per_step_and_changes_once_per_station() ->
     homotopy = _CubicRamp(target, start=target * 100.0, stations=3, steps_per_station=4)
     step = DampedNewtonStep(line_search=10)
 
-    result = forward_march(
+    result = newton_march(
         step,
         _Cubic(target),
         jnp.ones_like(target),
@@ -1804,7 +1804,7 @@ class _NoRebase:
 
     Reproduces the march exactly as it ran before the rebase existed, which is what makes the
     comparison below a test of the fix rather than of the fixture. It is also a real case and not only
-    a stub: :func:`~aquaflux.solve.forward_march` reaches the rebase through ``getattr``, so a
+    a stub: :func:`~aquaflux.solve.newton_march` reaches the rebase through ``getattr``, so a
     third-party control that does not implement it degrades to precisely this behaviour.
     """
 
@@ -1830,7 +1830,7 @@ def _ramp_march(homotopy, control, steps, start=1000.0):
         relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
         line_search=8,
     )
-    return forward_march(
+    return newton_march(
         base,
         _Cubic(theta),
         jnp.cbrt(theta * start) * 1.05,

@@ -315,17 +315,17 @@ def test_the_ramp_and_the_target_get_opposite_halves_of_the_continuation_setting
         _tiny_coupled(),
         n_points=1,
         rtol=1e-10,
-        continuation=step,
+        strategy=step,
         preconditioner=spec,
         dual_time=DualTimeLoop(inner_steps=3),
     )
     ramp, target = calls
     # The ramp builds its own at its own viscosity, so it takes the settings and not the frozen step.
-    assert "continuation" not in ramp["kwargs"]
+    assert "strategy" not in ramp["kwargs"]
     assert ramp["kwargs"]["preconditioner"] == spec
     assert ramp["kwargs"]["dual_time"] == DualTimeLoop(inner_steps=3)
     # The target takes the frozen step and none of the settings, which describe a build it will not do.
-    assert target["kwargs"]["continuation"] is step
+    assert target["kwargs"]["strategy"] is step
     assert "preconditioner" not in target["kwargs"]
     assert "dual_time" not in target["kwargs"]
     # ...but the keywords that drive the *solve* rather than a build still reach it.

@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
     from .coupled import TurbulenceDamping
 
-__all__ = ["ForwardSolve", "ShiftSettings", "merged_march_options"]
+__all__ = ["LinearSolveSettings", "ShiftSettings", "merged_march_options"]
 
 
 class ShiftSettings(eqx.Module):
@@ -66,7 +66,7 @@ class ShiftSettings(eqx.Module):
 
 
 @dataclasses.dataclass(frozen=True)
-class ForwardSolve(SettingsValue):
+class LinearSolveSettings(SettingsValue):
     """The shifted forward solve's Krylov regime, as one value.
 
     Each field is resolved against the chosen preconditioner family's own regime when unset: restart
@@ -103,7 +103,7 @@ def merged_march_options(base: dict[str, object], override: dict[str, object]) -
     options carrying ``ShiftSettings(basis=...)`` and a point returning
     ``ShiftSettings(turbulence_damping=...)`` would lose the basis without a word, where the same two
     settings as separate keywords combine. So when both sides give the same key a value of the same
-    settings type -- a :class:`ShiftSettings`, :class:`ForwardSolve`,
+    settings type -- a :class:`ShiftSettings`, :class:`LinearSolveSettings`,
     :class:`~aquaflux.solve.DualTimeLoop` or :class:`~aquaflux.solve.Globalization` -- the point's value
     keeps the fields it sets and takes the rest from the shared one (:func:`~aquaflux.solve.filled_from`).
 

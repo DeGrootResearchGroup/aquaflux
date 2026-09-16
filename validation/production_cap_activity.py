@@ -195,7 +195,7 @@ def objective(nu, *, explicit_limiter, seed):
     def scalar(viscosity):
         coupled = build_case(viscosity, explicit_limiter=explicit_limiter)
         _, k, _ = solve_coupled(
-            coupled, *seed, continuation=continuation, max_steps=60, rtol=1e-10, atol=1e-12
+            coupled, *seed, strategy=continuation, max_steps=60, rtol=1e-10, atol=1e-12
         )
         return jnp.mean(k)
 

@@ -45,7 +45,7 @@ from aquaflux.schemes import CompactGreenGauss
 from aquaflux.solve import (
     DampedNewtonStep,
     Globalization,
-    ImplicitNewtonSolver,
+    RootSolver,
     assembler_residual,
     solve_linear,
 )
@@ -84,10 +84,10 @@ def _reynolds(mu):
     return RHO * U_IN * H / mu
 
 
-def _solve(assembler, *, continuation=None, max_steps=120, **kwargs):
-    if continuation is None:
-        continuation = momentum_continuation(assembler)
-    solver = ImplicitNewtonSolver(max_steps=max_steps, forward_step=continuation, **kwargs)
+def _solve(assembler, *, strategy=None, max_steps=120, **kwargs):
+    if strategy is None:
+        strategy = momentum_continuation(assembler)
+    solver = RootSolver(max_steps=max_steps, strategy=strategy, **kwargs)
     return solver.solve(assembler_residual, assembler.initial_state(), assembler)
 
 
@@ -112,11 +112,9 @@ def test_continuation_is_necessary_beyond_the_laminar_floor() -> None:
     """
     assembler = _channel(24, 16, 5e-3)  # Re = 200
 
-    line_searched = ImplicitNewtonSolver(
+    line_searched = RootSolver(
         max_steps=40,
-        forward_step=DampedNewtonStep(
-            preconditioner=BlockPreconditioner.build(assembler).factory()
-        ),
+        strategy=DampedNewtonStep(preconditioner=BlockPreconditioner.build(assembler).factory()),
     )
     try:
         undamped = line_searched.solve(
@@ -177,9 +175,7 @@ def test_line_search_fails_in_the_convective_regime_even_with_best_preconditione
     best = BlockPreconditioner.build(
         assembler, schur_scaling="msimple", velocity=ConvectionTwoLevel()
     ).factory()
-    line_searched = ImplicitNewtonSolver(
-        max_steps=60, forward_step=DampedNewtonStep(preconditioner=best)
-    )
+    line_searched = RootSolver(max_steps=60, strategy=DampedNewtonStep(preconditioner=best))
     try:
         undamped = line_searched.solve(
             lambda s, a: a.residual(s), assembler.initial_state(), assembler
@@ -234,7 +230,7 @@ def test_continuation_solve_is_differentiable() -> None:
 
     def mean_speed(mu):
         assembler = _channel(24, 16, mu)
-        state = _solve(assembler, continuation=continuation)
+        state = _solve(assembler, strategy=continuation)
         velocity, _ = assembler.unpack(state)
         return jnp.mean(jnp.abs(velocity[:, 0]))
 
@@ -272,7 +268,7 @@ def test_escalation_recovers_an_underdamped_step() -> None:
             schur_scaling="msimple",
             globalization=Globalization(beta0=0.2, max_escalations=max_escalations),
         )
-        return _solve(assembler, continuation=continuation, max_steps=max_steps)
+        return _solve(assembler, strategy=continuation, max_steps=max_steps)
 
     try:
         stalled = solve_with(0)  # under-damped, no escalation
@@ -305,7 +301,7 @@ def test_mass_scaled_schur_reaches_beyond_the_a_p_schur() -> None:
     """
     assembler = _channel(64, 48, 5e-4, wall_growth=1.15)  # Re = 2000, wall-graded
     mass_scaled = momentum_continuation(assembler, schur_scaling="msimple")
-    converged = _solve(assembler, continuation=mass_scaled, max_steps=150)
+    converged = _solve(assembler, strategy=mass_scaled, max_steps=150)
     assert float(jnp.linalg.norm(assembler.residual(converged))) < 1e-8
 
 
@@ -318,12 +314,12 @@ def test_mass_scaled_schur_matches_a_p_schur_at_moderate_reynolds() -> None:
 
     def mean_speed(mu):
         assembler = _channel(32, 24, mu)
-        state = _solve(assembler, continuation=continuation)
+        state = _solve(assembler, strategy=continuation)
         velocity, _ = assembler.unpack(state)
         return jnp.mean(jnp.abs(velocity[:, 0]))
 
     assembler = _channel(32, 24, 2e-3)  # Re = 500
-    state = _solve(assembler, continuation=continuation)
+    state = _solve(assembler, strategy=continuation)
     assert float(jnp.linalg.norm(assembler.residual(state))) < 1e-8
 
     grad = float(jax.grad(mean_speed)(2e-3))
@@ -364,7 +360,7 @@ def test_mass_scale_auto_calibration_converges_at_non_unit_speed() -> None:
     u_in = 100.0
     assembler = _channel(32, 24, RHO * u_in * H / 500.0, wall_growth=1.15, u_in=u_in)  # Re 500
     continuation = momentum_continuation(assembler, schur_scaling="msimple")
-    state = _solve(assembler, continuation=continuation, max_steps=200)
+    state = _solve(assembler, strategy=continuation, max_steps=200)
     assert float(jnp.linalg.norm(assembler.residual(state))) < 1e-8
 
 
@@ -386,7 +382,7 @@ def test_convection_velocity_block_converges_at_high_reynolds() -> None:
         schur_scaling="msimple",
         velocity=ConvectionTwoLevel(),
     )
-    converged = _solve(assembler, continuation=continuation, max_steps=150)
+    converged = _solve(assembler, strategy=continuation, max_steps=150)
     assert float(jnp.linalg.norm(assembler.residual(converged))) < 1e-8
 
 
@@ -404,7 +400,7 @@ def test_convection_velocity_block_is_differentiable() -> None:
 
     def mean_speed(mu):
         assembler = _channel(32, 24, mu, wall_growth=1.15)
-        state = _solve(assembler, continuation=continuation)
+        state = _solve(assembler, strategy=continuation)
         velocity, _ = assembler.unpack(state)
         return jnp.mean(jnp.abs(velocity[:, 0]))
 
@@ -437,12 +433,12 @@ def test_air_velocity_block_converges_and_is_differentiable() -> None:
 
     def mean_speed(mu):
         assembler = _channel(32, 24, mu, wall_growth=1.15)
-        state = _solve(assembler, continuation=continuation)
+        state = _solve(assembler, strategy=continuation)
         velocity, _ = assembler.unpack(state)
         return jnp.mean(jnp.abs(velocity[:, 0]))
 
     assembler = _channel(32, 24, 2e-3, wall_growth=1.15)
-    state = _solve(assembler, continuation=continuation)
+    state = _solve(assembler, strategy=continuation)
     assert float(jnp.linalg.norm(assembler.residual(state))) < 1e-8
 
     grad = float(jax.grad(mean_speed)(2e-3))

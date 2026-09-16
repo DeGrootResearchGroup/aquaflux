@@ -366,7 +366,7 @@
 
   - **The `growth` parameter is NOT a performance regression — hypothesis raised, then DISPROVEN by
     measurement (2026-07-25, settled; do not re-open on the original evidence).** A
-    `forward_march(..., max_steps=1)` on the pitzDaily *plateau* state ran **27 min 42 s** without
+    `newton_march(..., max_steps=1)` on the pitzDaily *plateau* state ran **27 min 42 s** without
     returning, shortly after `backtracking_line_search` gained its `growth` argument, and the
     coincidence was recorded here as a suspected regression with a traced-bound hypothesis. Both the
     hypothesis and the attribution are wrong:
@@ -559,7 +559,7 @@
           continuation removes** (lower cold stiffness → cheap low-β solves), so dual-time (stability +
           honest gauge) and continuation (cheap big-Δτ steps) compose — the point to move to Re continuation.
       - **BUILT (opt-in): `DualTimeStep` (`solve/continuation.py`) + `DualTimeControl`
-        (`solve/step_control.py`).** `DualTimeStep` is a `ForwardStep` whose `stepper()` holds a reference
+        (`solve/step_control.py`).** `DualTimeStep` is a `NewtonStrategy` whose `stepper()` holds a reference
         `φⁿ` and runs an inner Newton loop on `G = R + β d (φ − φⁿ)` to `‖G‖ ≤ inner_tol·‖R(φⁿ)‖` (or
         `inner_steps`), line-searched **monotonically on ‖G‖** (a well-posed fixed-`φⁿ` solve, unlike the
         non-monotone steady residual). The shift is in the residual *and* the Jacobian, so the measured
@@ -689,7 +689,7 @@
       the warm-started root over the stored `profile_base/g*.npz` history — seconds of compute.
   - **⚠️ THE MEASURE'S WEIGHTS ARE STATE-DEPENDENT, so there is no single objective across iterations.**
   `f(x) = Σ wᵢ(x)|Rᵢ(x)|` with `w` from the operator diagonals and field magnitudes. **This governs the
-  OUTER-ITERATION boundary only:** when a `norm_builder` is supplied, `forward_march` rebuilds the
+  OUTER-ITERATION boundary only:** when a `norm_builder` is supplied, `newton_march` rebuilds the
   measure at the state each outer iteration begins from and freezes it for that whole iteration (so the
   line search compares like with like) — so a direction that descends in *this* iteration's frozen `f`
   need not reduce the *next* iteration's `f`. Do not assume the frozen-per-iteration measure behaves
@@ -844,7 +844,7 @@
     α-sentinel, the modal attenuation) are unaffected because they were measured at a single state.
   - **⚠️ SCOPE FIRST: the "SER runs backwards" finding below applies ONLY to a march that does NOT
   refresh (2026-07-25).** SER's `residual_norm_0` is **segment-local** — recomputed at each
-  `forward_march` entry, hence reset at every preconditioner refresh. With a refresh every handful of
+  `newton_march` entry, hence reset at every preconditioner refresh. With a refresh every handful of
   steps the ratio `‖R‖/‖R₀‖` never falls far below one, so **β is pinned near β₀ for the entire march**
   rather than decaying (measured on a drift-refreshed cold-IC pitzDaily march; the per-step β/α table
   that stood here is deleted — it named no preconditioner or forward solver and was taken under the
@@ -1040,7 +1040,7 @@
         frozen** — much cheaper than a whole-policy rebuild, and it avoids the flow refresh's small
         regression. It is adjoint-safe (the preconditioner is `stop_gradient`-ed whatever it is frozen at,
         so a refresh changes only the forward Krylov count, never the converged state or its IFT adjoint).
-        **BUILT** — `forward_march` + `CycleGrowthTrigger` (see the `march.py` section) segment the march
+        **BUILT** — `newton_march` + `CycleGrowthTrigger` (see the `march.py` section) segment the march
         around the off-jit rebuild, which is required because the traced solve is one `lax.while_loop` and
         scipy AMG assembly cannot run inside it; `solve_coupled(refresh=RefreshPolicy(trigger=…))` is the driver.
         **⚠️ SETTLED FROM THE CODE — the old claim here, "a refresh still forces a full recompile because these
@@ -1053,15 +1053,15 @@
         the threshold, not of the level split**, so it does not carry to the traced flow block, which runs at
         0.25 and re-partitions on every refresh; that path keeps the cache hit with
         `SmoothedHierarchy.refit` instead (see the flow-block section). What a refresh still costs is the off-jit scipy
-        rebuild plus the one-off retrace of the rebuilt `ForwardStep`, which is why `refresh.limit` still bounds
+        rebuild plus the one-off retrace of the rebuilt `NewtonStrategy`, which is why `refresh.limit` still bounds
         it. The wall figures once attached to this question (a "~60–240 s" recompile and a "~38 s" refresh) were
         both recorded with no configuration and are deleted with it.
       - **The observed march RETURNS ITS OWN CONVERGED STATE — the traced finishing solve is only the
         not-converged fallback (BUILT).** `solve_coupled`'s observed path (`on_step`/`refresh`/`step_control`)
         is never differentiated — those cannot run under a JAX transform (guarded), so the converged eager
-        state needs no adjoint. When the eager `forward_march` reaches its stopping tolerance **judged in the
+        state needs no adjoint. When the eager `newton_march` reaches its stopping tolerance **judged in the
         measure it steered by** (the per-step-rebuilt `RowScaledNorm` under `scaled_norm`), `solve_coupled`
-        returns that state directly instead of re-marching it through `ImplicitNewtonSolver`. **Why this is
+        returns that state directly instead of re-marching it through `RootSolver`. **Why this is
         required, not just an optimization:** the finishing solve targets the *frozen* base measure (state0
         row scales), which over-reports a developed state's residual (#156 seam 4), so it does not see the
         eager convergence — and being traced it cannot refresh or carry the SER step control, so on an
@@ -1133,7 +1133,7 @@ three orders from the stopping bar. **That was this hole**, and with it closed t
 
 - **The hole.** When no rung of `backtracking_line_search`'s ladder reduces the measure, the search
   returned the longest **finite** one, and "finite" is a very weak bound: on pitzDaily it returned a rung
-  the search had *itself measured* at `1.567e+127`, and `forward_march` then took it as the next anchor
+  the search had *itself measured* at `1.567e+127`, and `newton_march` then took it as the next anchor
   unconditionally (`state = outcome.phi`, no best-of-attempts, no fallback to the pre-step state). The
   fallback exists to avoid a null step, which is a fair argument against the *shortest* rung and no
   argument at all for keeping one 130 decades above the reference. The search had the number in hand and

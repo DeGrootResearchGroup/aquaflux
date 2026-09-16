@@ -62,9 +62,9 @@ import jax.numpy as jnp
 from aquaflux.solve import (
     DEFAULT_GLOBALIZATION,
     Globalization,
-    ImplicitNewtonSolver,
     LocalCourantBasis,
     PseudoTransientStep,
+    RootSolver,
     ShiftBasis,
     ShiftTerm,
     VelocityShiftParts,
@@ -197,16 +197,16 @@ def momentum_continuation(
     shift_basis: ShiftBasis | None = None,
     **preconditioner_kwargs: object,
 ) -> PseudoTransientStep:
-    """The pseudo-transient continuation ``ForwardStep`` for the coupled flow solve.
+    """The pseudo-transient continuation ``NewtonStrategy`` for the coupled flow solve.
 
     Builds the block-SIMPLE preconditioner for ``assembler`` and wires a :class:`MomentumShiftPolicy`
     (the velocity ``a_P`` shift + the matching shifted preconditioner) into the residual-agnostic
     :class:`~aquaflux.solve.PseudoTransientStep` engine, which owns the schedule, the shifted solve,
     and the accept/escalate loop. The result plugs straight into
-    :class:`~aquaflux.solve.ImplicitNewtonSolver` as its ``forward_step`` (the forward Newton loop
+    :class:`~aquaflux.solve.RootSolver` as its ``strategy`` (the forward Newton loop
     uses the diagonally shifted step in place of the default line search; the converged,
     well-conditioned adjoint solve uses the bare block preconditioner, since at ``φ*`` the shift has
-    vanished). ``PseudoTransientStep`` is itself the ``ForwardStep``, so no wrapper is needed.
+    vanished). ``PseudoTransientStep`` is itself the ``NewtonStrategy``, so no wrapper is needed.
 
     Parameters
     ----------
@@ -234,7 +234,7 @@ def momentum_continuation(
     Returns
     -------
     PseudoTransientStep
-        The configured continuation, ready to pass as ``ImplicitNewtonSolver(forward_step=...)``.
+        The configured continuation, ready to pass as ``RootSolver(strategy=...)``.
     """
     preconditioner = BlockPreconditioner.build(assembler, **preconditioner_kwargs)
     policy = (
@@ -290,7 +290,7 @@ def reused_flow_solve(
         a traced program -- ``jax.jit``, ``jax.vmap``, or a traced loop such as ``jax.lax.scan``.
     """
     continuation = momentum_continuation(reference, **build_kwargs)
-    solver = ImplicitNewtonSolver(max_steps=max_steps, forward_step=continuation)
+    solver = RootSolver(max_steps=max_steps, strategy=continuation)
 
     def solve_flow(momentum: MomentumContinuity, state: jnp.ndarray) -> jnp.ndarray:
         # `assembler_residual` rather than a lambda: the march compiles its step with the residual as

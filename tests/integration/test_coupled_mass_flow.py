@@ -216,7 +216,7 @@ def test_constrained_coupled_adjoint_matches_finite_difference(case) -> None:
             flow=flow_ws,
             k=k_ws,
             omega=omega_ws,
-            continuation=continuation,
+            strategy=continuation,
             max_steps=40,
             adjoint_solver=adjoint_solver,
         )

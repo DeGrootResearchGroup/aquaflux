@@ -24,12 +24,12 @@ from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall, PressureOu
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import ImplicitNewtonSolver, assembler_residual
+from aquaflux.solve import RootSolver, assembler_residual
 
 MESH = structured_grid_2d(8, 6, lx=3.0, ly=1.0, named_boundaries=True)
 GEOMETRY = MESH.geometry()
 DIRECT = lx.AutoLinearSolver(well_posed=True)
-SOLVER = ImplicitNewtonSolver(max_steps=4, solver=DIRECT, adjoint_solver=DIRECT)
+SOLVER = RootSolver(max_steps=4, linear_solver=DIRECT, adjoint_solver=DIRECT)
 STEP = 1e-6
 
 

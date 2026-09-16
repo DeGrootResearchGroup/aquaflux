@@ -92,7 +92,7 @@ from aquaflux.solve import (
 from aquaflux.turbulence import (
     CoupledRANS,
     FieldSplit,
-    ForwardSolve,
+    LinearSolveSettings,
     GeometricReynoldsSchedule,
     JacobianProbeSpec,
     LogScalars,
@@ -891,8 +891,8 @@ RETRY_ON_ALPHA = float(os.environ.get("BFS3D_RETRY_ON_ALPHA", "0.01")) or None
 # experiment changes the march's control behaviour rather than just its cost: at a restart of 5 an
 # unscaled `retry.on_cycles = 10` would fire after 50 matrix-vector products where it used to take 150.
 # Scaling by the ratio keeps every bailout at the same matvec count, so the only variable is how much
-# over-solving happens inside a cycle. Vary the restart through `forward=ForwardSolve(restart=...)`, NOT
-# by passing a whole solver as `forward`: the builder's default also carries a loose row-scaled stop that a
+# over-solving happens inside a cycle. Vary the restart through `linear_solve=LinearSolveSettings(restart=...)`, NOT
+# by passing a whole solver as `linear_solve`: the builder's default also carries a loose row-scaled stop that a
 # hand-built solver would silently replace, which measures something else entirely.
 BASELINE_RESTART = 15  # the coupled AMG builder's own default
 FORWARD_RESTART = int(os.environ.get("BFS3D_FORWARD_RESTART", str(BASELINE_RESTART)))
@@ -1026,7 +1026,7 @@ CONTROL = CflResidualDualTimeControl(
 _STEP_LIMIT_DUMPS = 0
 #: The shift and the anchor of the step currently being taken. The limiter is called with only
 #: ``(phi, delta)``, so without these a dump cannot be paired with the linear system that produced it --
-#: and that is exactly what a reader needs to re-solve it. Captured from ``precondition_step``, which the
+#: and that is exactly what a reader needs to re-solve it. Captured from ``refresh_preconditioner``, which the
 #: march calls once per attempt with the step (carrying its beta) and the state the attempt starts from.
 _STEP_BETA, _STEP_ANCHOR = float("nan"), None
 
@@ -1034,7 +1034,7 @@ _STEP_BETA, _STEP_ANCHOR = float("nan"), None
 def _recording_precondition(refresh):
     """Wrap the preconditioner refresh so each attempt's shift and anchor are recorded for the dumps.
 
-    The march calls ``precondition_step(step, state)`` once per attempt, after the control has set beta
+    The march calls ``refresh_preconditioner(step, state)`` once per attempt, after the control has set beta
     and before the step runs -- so it is the one place where both are in hand together. Delegates
     unchanged; only used when the step-limit dump is switched on.
     """
@@ -1451,7 +1451,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             )
             if DUAL_TIME
             else None,
-            forward=ForwardSolve(
+            linear_solve=LinearSolveSettings(
                 rtol=FORWARD_RTOL, restart=FORWARD_RESTART, max_restarts=FORWARD_MAX_RESTARTS
             ),
             positivity_floor=K_POSITIVITY_FLOOR,

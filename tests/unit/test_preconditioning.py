@@ -157,7 +157,7 @@ def test_relative_residual_gmres_is_cheaper_and_adaptive() -> None:
 
 
 def test_relative_residual_gmres_is_hashable_for_the_static_solver_slot() -> None:
-    """It is carried as a static field on the forward step, so it must be hashable and comparable."""
+    """It is carried as a static field on the Newton step, so it must be hashable and comparable."""
     solver = relative_residual_gmres(1e-2)
     assert hash(solver) is not None
     assert solver == relative_residual_gmres(1e-2)

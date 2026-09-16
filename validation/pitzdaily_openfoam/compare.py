@@ -107,7 +107,7 @@ from aquaflux.turbulence import (
     ConstantDamping,
     CoupledRANS,
     FieldSplit,
-    ForwardSolve,
+    LinearSolveSettings,
     GeometricReynoldsSchedule,
     JacobianProbeSpec,
     LogScalars,
@@ -1249,7 +1249,7 @@ def solve_aquaflux(
                 cycle_budget=CYCLE_BUDGET,
                 refresh_on_cycles=REFRESH_ON_CYCLES or None,
             ),
-            forward=ForwardSolve(
+            linear_solve=LinearSolveSettings(
                 rtol=FORWARD_RTOL, restart=FORWARD_RESTART, max_restarts=FORWARD_MAX_RESTARTS
             ),
             jacobian_gradient_sweeps=jacobian_gradient_sweeps,

@@ -1294,7 +1294,7 @@ complete LU and the AMG's coloured probe both still depend on it.
     a LU frozen at β = 0.05 needs 25 / 111 / 217 / **474** GMRES iters at β = 0.1 / 0.5 / 1 / 2 (vs **1**
     when factored at the matching β), and on a real cold ramp the frozen LU **NaN'd** on the overshot
     low-β state (215 cycles → failure). Because the LU factor is cheap (~1 s), the fix is to
-    **re-factor at the current `(state, β)` every step** (`forward_march`'s `precondition_step` seam +
+    **re-factor at the current `(state, β)` every step** (`newton_march`'s `refresh_preconditioner` seam +
     `lu_beta_tracking_refresh`, `.claude/rules/turbulence.md`): exact each step (1 Krylov iter), and robust
     through overshoots (measured: completes the cold ramp where the frozen LU failed, cyc ≤ 18). The
     adjoint uses the last factorization the march built (exact enough at the converged β → 0).

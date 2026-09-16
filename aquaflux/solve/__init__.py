@@ -10,7 +10,7 @@ consume from `solve` is re-exported here, and consumers import from `aquaflux.so
 submodules.** A name absent from `__all__` is internal — reach for it only from that submodule's own
 unit tests. The surface is five groups:
 
-* **The Newton driver, the single step, and the linear solve** — `ImplicitNewtonSolver` (the
+* **The Newton driver, the single step, and the linear solve** — `RootSolver` (the
   driver: converges, globalizes, and carries the implicit-function-theorem adjoint), `root_adjoint`
   (that adjoint on its own: attaches the derivative of a root to a root found by any means),
   `assembler_residual` (the two-argument residual of an assembler passed as the differentiated
@@ -24,7 +24,7 @@ unit tests. The surface is five groups:
   stock componentwise test over-solve; the default is the Euclidean norm, and passing the row-scaled
   `RowScaledNorm` makes the stop weigh every field block comparably instead of letting the
   largest-magnitude block — `omega` on the coupled saddle — decide alone).
-* **Forward globalization** — the `ForwardStep` strategies `DampedNewtonStep`,
+* **Forward globalization** — the `NewtonStrategy` strategies `DampedNewtonStep`,
   `PseudoTransientStep` and `DualTimeStep`, with the `ShiftPolicy` / `ShiftTerm` / `StepAcceptance`
   seams a caller
   implements and the default `DivergenceGuard`, and the injected `ResidualNorm` the strategy judges
@@ -47,13 +47,13 @@ unit tests. The surface is five groups:
   covering each other's blind spots, and reduces exactly to `DualTimeControl` at infinite ratio
   thresholds. A control changes only the path: the root is the residual's, and the adjoint is attached
   at it regardless.
-* **The forward march** — `forward_march`, the eager, forward-only march every Newton solve in the
+* **The forward march** — `newton_march`, the eager, forward-only march every Newton solve in the
   package runs on, reporting each step (`StepReport`, `MarchResult`) and able to stop early. It is what lets a driver rebuild a frozen preconditioner part way through a solve,
   on the evidence of the `RefreshTrigger` it injects — `CoefficientDriftTrigger` watches how far the
   operator's own coefficients have moved since they were frozen (the direct staleness signal, fed by
   the march's `drift_measure`), while `CycleGrowthTrigger` infers it from the per-step linear-solve
   cost. It carries no convergence guard, so the driver that runs it reads `MarchResult.converged`
-  before treating the state as an answer — `ImplicitNewtonSolver` does exactly that, then attaches
+  before treating the state as an answer — `RootSolver` does exactly that, then attaches
   `root_adjoint`. Because it steps in Python it cannot run inside a traced program -- `jax.jit`,
   `jax.vmap`, or a traced loop such as `jax.lax.scan` -- and every
   driver refuses those up front with `refuse_a_transform_the_march_cannot_run_in`; `jax.grad` is
@@ -111,9 +111,9 @@ from .hierarchy_inverse import HierarchyBlockInverse
 from .refresh_timing import PhaseTimer, RefreshTiming
 from .state import CellFields, FieldLayout, GlobalDofs, StateBlock, SubLayout
 from .lu_preconditioner import MonolithicLuPreconditioner
-from .forward_step import (
-    ForwardStep,
-    ShiftedForwardStep,
+from .strategy import (
+    NewtonStrategy,
+    ShiftedNewtonStrategy,
     StepControl,
     StepOutcome,
     StepReport,
@@ -121,7 +121,7 @@ from .forward_step import (
 from .root_adjoint import TransposedPreconditioner, root_adjoint, stop_array_gradients
 from .implicit import (
     DampedNewtonStep,
-    ImplicitNewtonSolver,
+    RootSolver,
     PositiveBlockLimit,
     PositiveBlockProjection,
     assembler_residual,
@@ -147,7 +147,7 @@ from .march import (
     MarchResult,
     RefreshTrigger,
     ResidualHomotopy,
-    forward_march,
+    newton_march,
     refuse_a_transform_the_march_cannot_run_in,
 )
 from .march_log import MarchLogger, combine_metrics, field_change_metrics
@@ -218,13 +218,11 @@ __all__ = [
     "FieldGroups",
     "FieldLayout",
     "FieldSplitAmgPreconditioner",
-    "ForwardStep",
     "GlobalDofs",
     "Globalization",
     "HierarchyBlockInverse",
     "HostFactors",
     "HostPreconditioner",
-    "ImplicitNewtonSolver",
     "InnerIterateCheckpointer",
     "JacobiSmoothed",
     "JacobiSmoothedInverse",
@@ -236,6 +234,7 @@ __all__ = [
     "MonolithicAmgPreconditioner",
     "MonolithicLuPreconditioner",
     "MonotoneLineSearch",
+    "NewtonStrategy",
     "PhaseTimer",
     "PositiveBlockLimit",
     "PositiveBlockProjection",
@@ -250,6 +249,7 @@ __all__ = [
     "ResidualNorm",
     "ResidualRatioDualTimeControl",
     "RetryPolicy",
+    "RootSolver",
     "RowScaledNorm",
     "SettingsMapping",
     "SettingsValue",
@@ -258,7 +258,7 @@ __all__ = [
     "ShiftPolicy",
     "ShiftStrengthControl",
     "ShiftTerm",
-    "ShiftedForwardStep",
+    "ShiftedNewtonStrategy",
     "SimpleSmoothed",
     "SimpleSmoothedInverse",
     "SmoothedHierarchy",
@@ -294,9 +294,9 @@ __all__ = [
     "equilibrate_cell_major",
     "field_change_metrics",
     "filled_from",
-    "forward_march",
     "jacobian_relative_error",
     "materialize_block_jacobian",
+    "newton_march",
     "newton_step",
     "positive_block_limit",
     "positive_block_projection",

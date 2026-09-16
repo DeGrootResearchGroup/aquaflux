@@ -5,7 +5,7 @@ linear residual, which is what the linear paths (transient diffusion, Stokes flo
 initializer) rely on. Because it is plain traced operations rather than a ``custom_vjp``, it also
 differentiates in **both** modes -- the forward-mode ``jacfwd`` that a scalar-parameter sensitivity
 over a whole field wants, as well as reverse-mode. Iterating a nonlinear residual to convergence is
-:class:`~aquaflux.solve.ImplicitNewtonSolver`'s job and is tested in ``test_implicit_solve.py``.
+:class:`~aquaflux.solve.RootSolver`'s job and is tested in ``test_root_solver.py``.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ def test_linear_residual_solved_in_one_step() -> None:
 
 
 def test_damped_newton_stepper_reports_its_linear_solve_cost() -> None:
-    """``DampedNewtonStep.stepper()`` returns a ``StepOutcome`` like every forward step.
+    """``DampedNewtonStep.stepper()`` returns a ``StepOutcome`` like every Newton step.
 
     The line search itself costs only residual evaluations, so a step's reported cost is the single
     linear solve behind it. Nothing consumes the line-searched path's count or α today; they are

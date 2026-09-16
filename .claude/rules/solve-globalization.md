@@ -1,6 +1,6 @@
 ---
 paths:
-  - "aquaflux/solve/forward_step.py"
+  - "aquaflux/solve/strategy.py"
   - "aquaflux/solve/continuation.py"
   - "aquaflux/solve/step_control.py"
   - "aquaflux/solve/retry.py"
@@ -8,7 +8,7 @@ paths:
   - "aquaflux/solve/line_search_growth.py"
 ---
 
-# Rules — `aquaflux/solve/` globalization (forward step, continuation, line search)
+# Rules — `aquaflux/solve/` globalization (Newton step, continuation, line search)
 
 > ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | MonolithicVCycle | FieldSplit)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
 
@@ -60,16 +60,16 @@ What to take from it, none of which is specific to that mechanism:
   alone, no replacement) is what located the wall; a run that changed both at once would have shown a
   number and no mechanism.
 
-## Globalization — forward step, continuation, line search
+## Globalization — Newton step, continuation, line search
 
-- **`ShiftedStep` is the shared body of the two shifted forward steps (`solve/continuation.py`, BUILT
+- **`ShiftedStep` is the shared body of the two shifted Newton steps (`solve/continuation.py`, BUILT
   2026-08-15).** `PseudoTransientStep` and `DualTimeStep` differ entirely in `stepper()` — what one
   *outer step* means — and not at all in how they are configured or interrogated. The eight fields they
   share (`shift_policy`, `relaxation_schedule`, `line_search`, `step_limit`, `step_projection`,
-  `forward_solver`, `residual_norm`, `adjoint_preconditioner_factory`) and all three `ForwardStep`
-  accessors (`norm`, `default_solver`, `adjoint_preconditioner`) were written out **twice, identically**,
+  `krylov_solver`, `residual_norm`, `adjoint_preconditioner_factory`) and all three `NewtonStrategy`
+  accessors (`norm`, `linear_solver`, `adjoint_preconditioner`) were written out **twice, identically**,
   field comments included. A subclass now supplies `stepper` plus the fields its own step shape needs.
-  `DampedNewtonStep` is deliberately NOT a subclass: it has no shift, and its `default_solver` returns a
+  `DampedNewtonStep` is deliberately NOT a subclass: it has no shift, and its `linear_solver` returns a
   different constant, so folding it in would mean inventing a `relaxation_schedule` it does not possess.
   **Verified as a pure refactor**: no field and no default changed on either class, compared field by
   field against the previous implementation (`DualTimeStep.line_search` stays **10** against the base's
@@ -85,7 +85,7 @@ What to take from it, none of which is specific to that mechanism:
   **The asymmetry it exists to express: `R` decides the answer, `J` decides only the rate.** The
   residual defines *which discrete equations are being solved*, so an approximation there moves the
   root; the Jacobian only decides how fast an inexact-Newton iteration reaches whichever root `R`
-  defines, which is the same latitude the forward regime's `rtol = 0.3` (`ForwardSolve`) already takes
+  defines, which is the same latitude the forward regime's `rtol = 0.3` (`LinearSolveSettings`) already takes
   on the linear solve. Holding
   both to one accuracy because one function serves both is a coincidence of implementation, not a
   requirement. The concrete consumer is the gradient reconstruction's sweep count — see
@@ -93,7 +93,7 @@ What to take from it, none of which is specific to that mechanism:
 
   - **The adjoint is exact BY CONSTRUCTION, not by care, and this is the load-bearing property.**
     `root_adjoint`'s backward rule forms `jax.vjp(residual_fn, …)` at the converged state directly and
-    never consults the forward step, so nothing set here can reach a gradient. That is what makes a cheaper
+    never consults the Newton step, so nothing set here can reach a gradient. That is what makes a cheaper
     forward operator legitimate at all: the sensitivity a user asks for stays exact however loosely the
     march got to the root. Pinned by
     `test_a_stand_in_jacobian_leaves_the_adjoint_exact`.
@@ -123,32 +123,32 @@ What to take from it, none of which is specific to that mechanism:
   split has one ordering, so `BlockTriangularFieldSplit.apply` has one body that branches only on
   `transpose` (which reverses the solve order and uses `Cᵀ`).
 
-- **Forward globalization is ONE injected strategy — `forward_step: ForwardStep`.** The forward
-  Newton loop has a single point of variation: `ImplicitNewtonSolver` takes one `forward_step`
-  implementing the `ForwardStep` protocol (`stepper()` → the per-step
-  `(residual_fn, phi, ‖R₀‖, solver) -> phi_next`; `default_solver()` → the inexact-Newton forward
+- **Forward globalization is ONE injected strategy — `strategy: NewtonStrategy`.** The forward
+  Newton loop has a single point of variation: `RootSolver` takes one `strategy`
+  implementing the `NewtonStrategy` protocol (`stepper()` → the per-step
+  `(residual_fn, phi, ‖R₀‖, solver) -> phi_next`; `linear_solver()` → the inexact-Newton forward
   GMRES for that march; `adjoint_preconditioner()` → the converged-state transpose preconditioner).
   Two concrete strategies: **`DampedNewtonStep`** (default — the backtracking line search, holding
   the forward/adjoint preconditioner and the line-search count) and **`PseudoTransientStep`**
   (`aquaflux/solve/`, the residual-agnostic diagonally-shifted march; the flow configures it via
   `aquaflux/flow/`'s `momentum_continuation` factory — no wrapper class). The march calls the
   injected step unconditionally — there is **no `if continuation is None` branch**, and **no separate
-  `line_search`/`preconditioner`/`continuation` constructor args** (they were unified here; do not
+  `line_search`/`preconditioner`/`strategy` constructor args** (they were unified here; do not
   reintroduce them). Each strategy's shift vanishes at the fixed point, so the converged state and
   the IFT adjoint are strategy-independent. When adding a globalization (e.g. a monotone/forcing
-  acceptance), add a `ForwardStep` — do **not** grow a branch in the march.
-  - **`ShiftedForwardStep` is the SECOND contract, and the eager march's beta machinery requires it
-    (binding, 2026-08-15).** `ForwardStep` says what every strategy must *do*; `ShiftedForwardStep`
+  acceptance), add a `NewtonStrategy` — do **not** grow a branch in the march.
+  - **`ShiftedNewtonStrategy` is the SECOND contract, and the eager march's beta machinery requires it
+    (binding, 2026-08-15).** `NewtonStrategy` says what every strategy must *do*; `ShiftedNewtonStrategy`
     says what one must additionally *carry* — a `relaxation_schedule` holding `beta` as a readable,
     replaceable **dynamic** leaf. It is separate rather than folded in because not every strategy has
     a shift: `DampedNewtonStep` globalizes by backtracking alone, and demanding a `relaxation_schedule`
     of it would be inventing a quantity it does not possess.
     **What it replaces, and why it matters more than it looks:** the requirement was enforced by
-    `hasattr` probes scattered through `forward_march`, which fail **silently**. A `DampedNewtonStep`
-    satisfies `ForwardStep` in full, so a march configured with `RetryPolicy.on_cycles` accepted it and then
+    `hasattr` probes scattered through `newton_march`, which fail **silently**. A `DampedNewtonStep`
+    satisfies `NewtonStrategy` in full, so a march configured with `RetryPolicy.on_cycles` accepted it and then
     never escalated — from the log, indistinguishable from a march that never needed to. One reporting
     path failed the *opposite* way and read `active_step.relaxation_schedule` unguarded, so the same
-    conforming step raised `AttributeError` mid-march. `forward_march` now checks **once, on the first
+    conforming step raised `AttributeError` mid-march. `newton_march` now checks **once, on the first
     iteration, against the step the CONTROL produced** (`RetryPolicy.require_shifted`), naming the
     feature and what it needs.
     **⚠️ THE OBJECT CHECKED IS `active_step`, NOT THE STEP HANDED IN, AND THAT IS LOAD-BEARING (fixed
@@ -165,7 +165,7 @@ What to take from it, none of which is specific to that mechanism:
     `test_the_escalation_guard_still_rejects_a_step_that_can_never_escalate` — the pair matters,
     because a gate can be "fixed" by deleting it and only the second test notices.
     ⚠️ **This was found by RUNNING a march, not by the suite, and it was the second such break in one
-    sitting** (the other: `compare.py` handed `solve_coupled` a bare `precondition_step` callable where
+    sitting** (the other: `compare.py` handed `solve_coupled` a bare `refresh_preconditioner` callable where
     a `RefreshPolicy` was expected, so reading the policy raised before step 1). **No test tier drives
     this case's own driver**, so a refactor can tighten a seam, take the case out entirely, and leave
     every gate green. Treat "the fast gate passes" as saying nothing about whether `bfs3d` can march.
@@ -176,13 +176,13 @@ What to take from it, none of which is specific to that mechanism:
       gated either: the protocol only asks it to return a ready-to-run step, a step-agnostic one is
       legitimate (and exercised), and a control that *does* drive beta already fails loudly from its
       own `tree_at`. Gating those would reject what the protocol permits.
-    - **The runtime check tests the SHIFT, not `isinstance(..., ShiftedForwardStep)`.** The argument is
-      already typed `ForwardStep`, so re-testing those four methods at runtime would reject a
+    - **The runtime check tests the SHIFT, not `isinstance(..., ShiftedNewtonStrategy)`.** The argument is
+      already typed `NewtonStrategy`, so re-testing those four methods at runtime would reject a
       legitimate duck-typed step for a reason unrelated to the feature asked for — which it did, on
       every test double, when first written that way.
 - **`continuation.py` — BUILT (`PseudoTransientStep`, residual-agnostic).** The pseudo-transient
-  continuation engine lives **here in `solve/`, not in `flow/`** — it is a `ForwardStep`
-  (`stepper`/`default_solver`/`adjoint_preconditioner`) that runs an **injected**
+  continuation engine lives **here in `solve/`, not in `flow/`** — it is a `NewtonStrategy`
+  (`stepper`/`linear_solver`/`adjoint_preconditioner`) that runs an **injected**
   `RelaxationSchedule` for the shift strength β, the diagonally-shifted solve `(J + diag(βd))δ = −R`
   (`solve_linear(throw=False)`), and the closed-loop accept/escalate `while_loop`. **`stepper()`
   returns a `StepOutcome`** carrying the accepted attempt's cycle count, its line-search factor α (the
@@ -213,7 +213,7 @@ What to take from it, none of which is specific to that mechanism:
     `escalation_factor`), the divergence guard's `divergence_cap`, and the backtracking ladder
     (`line_search`, `grow`, `line_search_growth`). Its two methods, `step(policy, **fields)` and
     `dual_time_step(policy, **fields)`, are the **only** places a globalization becomes a step; the
-    per-problem fields (`adjoint_preconditioner_factory`, `forward_solver`, `residual_norm`,
+    per-problem fields (`adjoint_preconditioner_factory`, `krylov_solver`, `residual_norm`,
     `step_limit`, `step_projection`, `jacobian_residual`) ride through as passthroughs.
     - **Every field is UNSET by default (`None`), and unset falls through — first to the builder's base,
       then to the step class's own default (binding).** `_coupled_step` calls
@@ -247,7 +247,7 @@ What to take from it, none of which is specific to that mechanism:
       of these keywords apiece; `momentum_continuation` and `scalar_pseudo_transient_solve` carried **two**,
       so `beta_floor`, `line_search`, `grow` and the growth rule were unreachable from the flow-only and
       scalar paths, and `line_search_growth` from all six. The problem-specific step fields (`step_limit`,
-      `step_projection`, `forward_solver`, `residual_norm`, `jacobian_residual`) are **still** unreachable
+      `step_projection`, `krylov_solver`, `residual_norm`, `jacobian_residual`) are **still** unreachable
       from those two builders — outside #372's settings, not closed by it. The segregated flow solve
       `bulk_velocity_flow_solve` is a `DampedNewtonStep`, a different engine that takes no `Globalization`.
     - **⚠️ Moving keywords off a builder that keeps `**kwargs` turns a retired name into a silent one.**
@@ -403,7 +403,7 @@ What to take from it, none of which is specific to that mechanism:
   `MomentumShiftPolicy` (velocity-block `a_P` shift + shifted SIMPLE preconditioner), configured into a
   `PseudoTransientStep` by the `momentum_continuation(assembler, …)` **factory** (which builds the
   block preconditioner and injects the `DivergenceGuard` + adjoint factory) — **no wrapper/adapter
-  class**, since `PseudoTransientStep` is itself the `ForwardStep`. The scalar application is
+  class**, since `PseudoTransientStep` is itself the `NewtonStrategy`. The scalar application is
   `aquaflux/turbulence/continuation.py`'s `ScalarShiftPolicy` (the transport operator diagonal — the
   scalar `a_P` analogue from `scalar_transport_shift_diagonal` — as the base shift, with the frozen
   scalar-transport AMG reused **unshifted** as `M`, since the shift only adds positive diagonal),
@@ -411,7 +411,7 @@ What to take from it, none of which is specific to that mechanism:
   the SST driver supports (the fixed-count Newton sub-solve was removed). When a new nonlinear residual
   needs pseudo-time globalization, write a `ShiftPolicy` — do **not** re-implement the march.
   - **`stepper()` returns a `StepOutcome` (`phi_next`, its `residual_norm`, `cycles`, `alpha`, and
-    four more — see `solve-march.md`) — ONE step method on the whole `ForwardStep` protocol,
+    four more — see `solve-march.md`) — ONE step method on the whole `NewtonStrategy` protocol,
     counted/uncounted pair deleted (binding).** Every strategy reports its step's restart-cycle count
     (`DampedNewtonStep` gets it from `newton_correction`, which now returns `(delta, r, cycles)`); a
     consumer with no use for it drops it (`phi, _ = step(…)`). A `counted_stepper()` sibling existed
@@ -420,7 +420,7 @@ What to take from it, none of which is specific to that mechanism:
     The reported count is the **accepted** attempt's, not the sum over rejected escalation attempts —
     the cost of the step actually taken. **A step whose every attempt was rejected reports `0`**
     (`best_cycles` is only written on acceptance): a consumer must treat `0` as *no measurement*, not
-    as *free*, or a rejected step reads as the cheapest in the march. Consumed by `forward_march`
+    as *free*, or a rejected step reads as the cheapest in the march. Consumed by `newton_march`
     (`solve-march.md`), which is since 2026-09-15 the only march there is.
   - ⚠️ **"The count is NOT carried out of `_forward`'s `while_loop`" is DEAD — there is no such loop
     (deleted 2026-09-15, phase 3).** Both of its reasons have lapsed: a generic Newton loop no longer
@@ -439,7 +439,7 @@ What to take from it, none of which is specific to that mechanism:
     residual copies into the graph. It is safe as a non-differentiable `while_loop` because the search is
     **forward-only**: it runs inside a Newton iteration on `stop_gradient` inputs, whose derivative is
     attached afterwards at the root by `root_adjoint` and never differentiates the iteration (every
-    caller is a `ForwardStep`; nothing differentiates through it — audited). Do **not** call it on a differentiated
+    caller is a `NewtonStrategy`; nothing differentiates through it — audited). Do **not** call it on a differentiated
     path. `line_search=0` (default) is the old behaviour: take the full step `φ+δ`, and
     the **only** recourse to an overshoot is escalating β — a *full re-solve*. This was measured to be
     the dominant coupled-RANS cost: from the hybrid IC the full coupled Newton step overshoots by
@@ -452,14 +452,14 @@ What to take from it, none of which is specific to that mechanism:
     adjoint unchanged. The flow and scalar paths leave `line_search` unset, so they take the step's own
     `0` and are bit-identical — a default now, not a limit: since #372 either can be handed
     `Globalization(line_search=…)` without constructing the step by hand.
-  - **`forward_solver` overrides the shared `_INEXACT_CONTINUATION_SOLVER`; the coupled default stops on a
+  - **`krylov_solver` overrides the shared `_INEXACT_CONTINUATION_SOLVER`; the coupled default stops on a
     relative residual in an INJECTED norm (`relative_residual_gmres`, `solve/linear.py`).**
-    `default_solver()` returns the injected `forward_solver` when set, else the shared restart-40 GMRES.
+    `linear_solver()` returns the injected `krylov_solver` when set, else the shared restart-40 GMRES.
     The coupled path injects restart 120 (the stiff saddle needs hundreds of restart-40 cycles; a
     40-vector subspace discards too much Arnoldi history). ⚠️ **The norm it stops in has MOVED since this
     was written — the "global 2-norm" below describes the arrangement these measurements were taken
     under, not the current default.** Since #282 every coupled family stops in the march's own row-scaled
-    measure at the forward regime's `rtol = 0.3` (`ForwardSolve`, #388), built by `_coupled_step` rather
+    measure at the forward regime's `rtol = 0.3` (`LinearSolveSettings`, #388), built by `_coupled_step` rather
     than by any builder; see
     `solve.md`'s regime table. The mechanism below is unaffected and is why the componentwise stock stop
     was abandoned in the first place. **The dominant waste was the TERMINATION, not the restart.** The
@@ -476,9 +476,9 @@ What to take from it, none of which is specific to that mechanism:
     misled a later reader into a wrong hypothesis.** Measured on the real cold-IC march: ~3-5 cycles (often 2-3/step), ~4× fewer
     matvecs to the same `x_r/h`, trajectory unchanged.
 
-  - **The residual measure is an injected `ResidualNorm`, owned by the `ForwardStep` (`solve/norm.py`).**
-    Every `ForwardStep` exposes `norm()`; the march reads it for the outer stopping test
-    (`forward_march`'s segment reference, or a per-iteration `norm_builder`) and the strategy
+  - **The residual measure is an injected `ResidualNorm`, owned by the `NewtonStrategy` (`solve/norm.py`).**
+    Every `NewtonStrategy` exposes `norm()`; the march reads it for the outer stopping test
+    (`newton_march`'s segment reference, or a per-iteration `norm_builder`) and the strategy
     uses the *same* measure for its own globalization — so the convergence test, the SER ramp
     `β = β₀(‖R‖/‖R₀‖)^p`, `backtracking_line_search` (which now takes a `norm=` kwarg), and the
     `DivergenceGuard` all agree on one scale. Default is `jnp.linalg.norm` (`DampedNewtonStep.norm()` and
@@ -504,20 +504,20 @@ What to take from it, none of which is specific to that mechanism:
     arguments go to the static side, hashed by identity). Both were hit and fixed while building #105 —
     do not "modernize" these into `equinox.Module`s.
 - **`norm_builder` — the residual measure is re-derived every outer iteration, and held FIXED within
-  one (binding).** `forward_march(norm_builder=…)` takes a `state -> ResidualNorm` and, at the top of
+  one (binding).** `newton_march(norm_builder=…)` takes a `state -> ResidualNorm` and, at the top of
   each iteration, swaps the rebuilt measure onto the step with `eqx.tree_at` (the same mechanism the
   α-control uses for β) and re-measures `residual_norm_0` against it so the SER ratio stays on one
   scale. Every line-search trial step, the acceptance test and the reported norm within that iteration
   then use the *same* measure — **rebuilding per trial step would let a candidate win by shrinking its
   own denominator rather than its residual**, so the search would stop comparing like with like.
-  - **This is why `residual_norm` is a DATA field on both `ForwardStep`s, not a static one.** A static
+  - **This is why `residual_norm` is a DATA field on both `NewtonStrategy`s, not a static one.** A static
     field lives in the treedef, so swapping it would be a new compilation *every step*. As data, and
     with the measure carrying its scales as traced leaves over a fixed block structure
     (`RowScaledNorm`), the swap is a cache hit. A plain callable (the default) has no array leaves and
     is filtered to the static side regardless, so the default path is byte-identical.
-  - **`RowScaledNorm` was march-only because `ImplicitNewtonSolver` passed its measure through a
+  - **`RowScaledNorm` was march-only because `RootSolver` passed its measure through a
     `custom_vjp` non-differentiable (hashable) slot.** That slot is gone (2026-09-15: the loop runs
     outside the `custom_vjp`, and `root_adjoint` takes no measure), and `solve_coupled` no longer ends
-    in a traced finishing solve. Whether `ImplicitNewtonSolver` now accepts a rebuilt `RowScaledNorm` is
+    in a traced finishing solve. Whether `RootSolver` now accepts a rebuilt `RowScaledNorm` is
     untested.
 

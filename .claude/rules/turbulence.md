@@ -45,15 +45,15 @@ Many entries below are dated history written against the old API. Read them thro
 | `coupled_lu_continuation(..., lu_beta=b, backend=B, stencil_reach=r, ...)` | `coupled_step(..., preconditioner=MaterializedJacobian(CompleteLu(backend=B), build_beta=b, probe=JacobianProbeSpec(stencil_reach=r)))` |
 | `coupled_amg_continuation(..., smoother_fill_levels=…, amg_beta=b)` | `MaterializedJacobian(MonolithicVCycle(smoother_fill_levels=…), build_beta=b)` |
 | `coupled_amg_continuation(..., field_split=True, leading_inverse=L, trailing_inverse=T)` | `MaterializedJacobian(FieldSplit(L, T))` — `L`/`T` are `solve.BlockInverse` values |
-| `probe=` / `preconditioner=` shared across rungs, `amg_beta_tracking_refresh(..., beta_floor=f, observer=o)`, `lu_beta_tracking_refresh` | one session: `open_session(MaterializedJacobian(..., beta_floor=f), coupled, observer=o)`, passed as `solve_coupled(preconditioner=session)`; its `precondition_step` / `rebind` replace the hooks' |
+| `probe=` / `preconditioner=` shared across rungs, `amg_beta_tracking_refresh(..., beta_floor=f, observer=o)`, `lu_beta_tracking_refresh` | one session: `open_session(MaterializedJacobian(..., beta_floor=f), coupled, observer=o)`, passed as `solve_coupled(preconditioner=session)`; its `refresh_preconditioner` / `rebind` replace the hooks' |
 | `reuse=previous.shift_policy, residual_norm=m` | `session.refresh(state, previous, m, **march)` |
 | `solve_coupled(method=M, velocity=…)` | `solve_coupled(preconditioner=BlockDiagonal(method=M, velocity=…))` |
 | `mass_flow_coupled_continuation(..., method=M, **flow_opts)`, `solve_coupled_mass_flow(method=M, **flow_opts)` | the same keyword, `preconditioner=BlockDiagonal(method=M, **flow_opts)`; a `MaterializedJacobian` is refused there |
 | `BlockDiagonal(velocity="convection")`, `"smoothed"`, `"convection-air"` (and the same strings on `BlockPreconditioner.build`, `momentum_continuation`, `reused_flow_solve`) | `ConvectionTwoLevel()`, `ViscousMultilevel()`, `ConvectionAir()` from `aquaflux.flow` (#390); a string is refused |
 | `shift_basis=…`, `velocity_shift_parts=…`, `turbulence_damping=…` on `coupled_step` / the mass-flow builder / `solve_coupled` | `shift=ShiftSettings(basis=…, velocity_parts=…, turbulence_damping=…)` (#387); a Reynolds `point_setup` value merges field by field over the shared one (so does a `Globalization`; an unset field takes the shared setting, so a point cannot reset one to its default) |
 | `inner_steps=N` (N > 1), `inner_tol=…`, `cycle_budget=…`, `refresh_on_cycles=…` | `dual_time=DualTimeLoop(inner_steps=N, …)` (#388); unset is the single shifted step. `inner_observer` / `inner_refresh` without a loop, and a `refresh_on_cycles` with no refresh to fire (a frozen step or a block-diagonal session), are refused where they used to be dropped |
-| `forward_solver=S`, `forward_rtol=…` / `forward_restart=…` / `forward_max_restarts=…` | `forward=S` or `forward=ForwardSolve(rtol=…, restart=…, max_restarts=…)` (#388) — one slot, so a solver beside a regime setting cannot be written |
-| `point_setup` returning `continuation` + `RefreshPolicy(precondition_step=hook)`, `_rebinding` | `solve_reynolds_continuation` / `solve_reynolds_ramp` given `preconditioner=`; `point_setup` keeps only per-point march settings |
+| `krylov_solver=S`, `forward_rtol=…` / `forward_restart=…` / `forward_max_restarts=…` | `linear_solve=S` or `linear_solve=LinearSolveSettings(rtol=…, restart=…, max_restarts=…)` (#388) — one slot, so a solver beside a regime setting cannot be written |
+| `point_setup` returning `strategy` + `RefreshPolicy(refresh_preconditioner=hook)`, `_rebinding` | `solve_reynolds_continuation` / `solve_reynolds_ramp` given `preconditioner=`; `point_setup` keeps only per-point march settings |
 
 ## The closure — model, strain, sources, transport, preconditioner
 
@@ -192,7 +192,7 @@ Many entries below are dated history written against the old API. Read them thro
       useless".** The exact derivative of the cap is **indefinite where the cap is active**, and an
       *unpreconditioned* k solve stagnates there. Flipping the default **broke
       `test_sst_transport.py::test_k_equation_solves_to_a_finite_bounded_field`** — a bare
-      `ImplicitNewtonSolver` (no preconditioner, no globalization) on the k equation, which stopped
+      `RootSolver` (no preconditioner, no globalization) on the k equation, which stopped
       converging inside `max_steps` and raised the convergence guard.
       **Why, exactly:** at that solve's starting field (`k = 0.01`) the cap is active in **24 of 24
       cells — 100 %** — so the exact Jacobian carries the indefinite term *everywhere*; at the
@@ -239,13 +239,13 @@ Many entries below are dated history written against the old API. Read them thro
     (`build(state)` / `refresh(state, previous, residual_norm)`) makes it one decision, with
     `_CallerBuiltContinuation`, `_DefaultContinuation` and `_FinishedContinuation` as its three cases.
     That is the shape #282 had just been fixed for one level down; here it also carried a live defect.
-    - **⚠️ `method` / `reference_state` / `**continuation_kwargs` are REFUSED where they cannot be
+    - **⚠️ `method` / `reference_state` / `**strategy_kwargs` are REFUSED where they cannot be
       forwarded, not dropped.** They configure the continuation `solve_coupled` builds. On the two paths
-      where it builds none — an explicit `continuation`, or a `RefreshPolicy(builder=...)` — they reached
+      where it builds none — an explicit `strategy`, or a `RefreshPolicy(builder=...)` — they reached
       nothing at all, with no error and no log line, so a march asked for `inner_steps=3` /
       `positivity_floor=1e-6` and silently ran the library defaults. `**kwargs` is what made it quiet:
       it accepts every keyword and checks none, and it is the main entry point's door. This had already
-      cost a study harness (`lu_vs_hostilu.py`, since deleted, #371, carried a warning comment about a `precondition_step=`
+      cost a study harness (`lu_vs_hostilu.py`, since deleted, #371, carried a warning comment about a `refresh_preconditioner=`
       swallowed here instead of reaching its `RefreshPolicy`).
     - **`method` now defaults to a sentinel (`_UNSET`), resolving to `"twolevel"` when the solve builds
       the continuation.** Both a real default and an explicit `None` ("no preconditioner method") are
@@ -304,15 +304,15 @@ Many entries below are dated history written against the old API. Read them thro
   - **✅ `open_session` / `PreconditionerSession` / `coupled_step` — the ONE coupled builder, and what
     `solve_coupled`, both Reynolds drivers and both flagship cases run on (#371, 2026-09-14).**
     `_BlockSession` and `_MaterializedSession` are `_ContinuationSource` promoted: `build(state,
-    **march)`, `refresh(state, previous, residual_norm, **march)`, `precondition_step`, `rebind`.
+    **march)`, `refresh(state, previous, residual_norm, **march)`, `refresh_preconditioner`, `rebind`.
     `coupled_step` is the one frozen-step builder and opens a private session. The new path was proven
     **array-identical** to the old builders first (`test_preconditioner_session.py` for block / LU /
     field split, `test_coupled_amg.py` for the V-cycle), then wired:
     - **`solve_coupled(preconditioner=…)` replaced `method=`**, which no longer exists, and
       `_DefaultContinuation` is gone: the default is a `_SessionContinuation` over a `BlockDiagonal()`
       session. Block-preconditioner settings (`velocity=`, `schur_scaling=`, …) are **no longer march
-      keywords** — `**continuation_kwargs` binds against `coupled_step`'s signature and an unknown name
-      raises naming where it belongs. A materialized spec's session supplies `precondition_step`, which
+      keywords** — `**strategy_kwargs` binds against `coupled_step`'s signature and an unknown name
+      raises naming where it belongs. A materialized spec's session supplies `refresh_preconditioner`, which
       makes the march observed (forward-only); a second hook on `RefreshPolicy` beside it is refused, as
       is `jacobian_production_viscosity` beside a session object.
     - **`solve_reynolds_continuation`** opens **one** session for a `MaterializedJacobian` spec, shares
@@ -330,8 +330,8 @@ Many entries below are dated history written against the old API. Read them thro
       `solve_coupled_mass_flow` take `preconditioner: BlockDiagonal | None` in place of `method` +
       `**preconditioner_kwargs`; a `MaterializedJacobian` is refused, because the bordered policy wraps a
       block-diagonal composition and a materialized Jacobian has no constraint row. The bordered measure
-      and `_CONSTRAINED_FORWARD` stay local. **D10 is fixed:** `solve_coupled_mass_flow` refuses
-      `preconditioner` / `reference_state` / march keywords beside a finished `continuation` (through the
+      and `_CONSTRAINED_LINEAR_SOLVE` stay local. **D10 is fixed:** `solve_coupled_mass_flow` refuses
+      `preconditioner` / `reference_state` / march keywords beside a finished `strategy` (through the
       same `_refuse` as `solve_coupled`), where `method="air"` beside a twolevel step used to run twolevel
       in silence. `_refuse_unknown_flow_block_options` is **deleted**: every flow-block option now
       arrives from a spec whose fields are pinned to `BlockPreconditioner.build`, so it could not fire.
@@ -352,7 +352,7 @@ Many entries below are dated history written against the old API. Read them thro
       restated. `preconditioner` and `jacobian_production_viscosity` are refused there: the session owns
       them (user decision Q1).
     - **A frozen `coupled_step` never wires the refresh hook; a session `build` does**, and only when
-      `refresh_on_cycles` is set and no caller `inner_refresh` was given. The hook, `precondition_step`
+      `refresh_on_cycles` is set and no caller `inner_refresh` was given. The hook, `refresh_preconditioner`
       and the mid-step refresh are created once per session, so every build carries the same objects
       (the static-field identity that keeps the coupled solve a compilation-cache hit).
     - **Two latent defects are fixed on the session path only, until S3c removes the other:** the probe
@@ -373,7 +373,7 @@ Many entries below are dated history written against the old API. Read them thro
       reported before review, are in `CLAUDE.md`'s sibling-builder item.
   - **`solve_coupled(refresh=RefreshPolicy(trigger=…))` segments the march to re-freeze the preconditioner — and a refresh
     must CARRY the shift diagonals, not rebuild them (binding).** With a trigger set, the march runs as a
-    sequence of segments of one `aquaflux.solve.forward_march`: each steps until the trigger judges
+    sequence of segments of one `aquaflux.solve.newton_march`: each steps until the trigger judges
     the frozen preconditioner stale, the k/ω AMGs are re-derived at the state reached, and the next
     segment continues; the state the last segment reaches is checked for convergence and handed to
     `root_adjoint`. Segments exist because the AMG rebuild is off-jit scipy work that cannot run inside
@@ -461,7 +461,7 @@ Many entries below are dated history written against the old API. Read them thro
       `jax.vmap`, or a traced loop such as `lax.scan` -- where a
       stopped copy is still abstract — `refuse_a_transform_the_march_cannot_run_in` refuses that before
       any work (it moved to `solve/march.py` and took a `caller=` argument in phase 3, since
-      `ImplicitNewtonSolver.solve` and `solve_coupled_mass_flow` now refuse on the same terms). A session the **caller** re-points at a live assembler (`session.rebind(coupled)` inside
+      `RootSolver.solve` and `solve_coupled_mass_flow` now refuse on the same terms). A session the **caller** re-points at a live assembler (`session.rebind(coupled)` inside
       `jax.grad`) still refuses to build, since the session holds that assembler itself.
   - **`on_step` / `on_checkpoint` instrument the march, and work WITHOUT a refresh trigger.** `on_step`
     receives each `StepReport` (step, cycles, ‖R‖, ratio); `on_checkpoint` additionally receives the
@@ -1153,7 +1153,7 @@ Many entries below are dated history written against the old API. Read them thro
   (a block `CoupledShiftPolicy` = velocity `a_P` shift ⊕ the k/ω transport-diagonal shifts, and a
   block-diagonal preconditioner gluing `BlockPreconditioner` to the two scalar CD-AMGs; the AMG
   hierarchies + numpy-built scalar shift diagonals **frozen at a reference state** off-jit à la
-  `reused_flow_solve`, the velocity `a_P` live). Handed to `ImplicitNewtonSolver`, it gives the
+  `reused_flow_solve`, the velocity `a_P` live). Handed to `RootSolver`, it gives the
   **exact coupled adjoint** (§5) — a single transpose solve on the unfrozen `R_coupled`. The ω wall
   rows are `FixedValueCells`. `CoupledRANS.build` pre-resolves the k/ω boundaries (via
   `turbulence.resolve_boundaries()`, the shared idempotent bind the segregated driver also uses) so the
@@ -1252,9 +1252,9 @@ Many entries below are dated history written against the old API. Read them thro
     2026-08-20) — and the surfaces above `_coupled_step` had drifted TWICE MORE after the tail was
     extracted.** `_coupled_step` builds the default forward solver from `residual_norm` — the march's own
     progress measure — so the solve is steered by and judged by one definition. What is per-family is a
-    `_ForwardSolveRegime` (rtol, restart, cap), and the coupled builders take it as one value,
-    `forward=ForwardSolve(...)` (#388 — the `forward_*` keywords are gone). **Move it through that value,
-    never by passing a whole solver as `forward`, which replaces the measure too.**
+    `_LinearSolveRegime` (rtol, restart, cap), and the coupled builders take it as one value,
+    `linear_solve=LinearSolveSettings(...)` (#388 — the `forward_*` keywords are gone). **Move it through that value,
+    never by passing a whole solver as `linear_solve`, which replaces the measure too.**
     Two things this changed that a reader of an older measurement needs:
     - **`coupled_continuation` and `coupled_lu_continuation` previously stopped on a plain 2-norm at
       `1e-2`.** They now stop on the row-scaled measure at `0.3`. The 2-norm of the coupled residual is
@@ -1268,7 +1268,7 @@ Many entries below are dated history written against the old API. Read them thro
     - **`mass_flow_coupled_continuation` is the one genuine exception and stays Euclidean at `1e-2`**,
       because the row-equilibrated measure has no constraint-aware form — it would scale the border row
       by a diagonal the constraint does not have. Its tolerance differs *because its measure does*; the
-      reason is recorded at `_CONSTRAINED_FORWARD` itself so it reads as a decision, not an omission.
+      reason is recorded at `_CONSTRAINED_LINEAR_SOLVE` itself so it reads as a decision, not an omission.
     **`log(k+1)` does not fix this**: `k = e^w − 1` bounds `k > −1`, not `k > 0`, so the failure above is
     still reachable. It is regular at the wall (unlike `log k`) but that solves the other problem, not
     this one.
@@ -1288,7 +1288,7 @@ Many entries below are dated history written against the old API. Read them thro
     escalation stays the fallback for a bad *direction*, not an overshoot. With it the full-mesh solve
     **descends** (rel 1.0 → 0.48 → 0.44 → 0.31 → 0.20 → ~0.18 over ~6 steps) instead of *stalling at
     rel 1.0* — the case is now solvable at all, a correctness fix, not just speed. **(2) The shifted
-    solve needs a large Krylov subspace:** the block family's regime (`_BLOCK_FORWARD`, ⚠️ **the symbol
+    solve needs a large Krylov subspace:** the block family's regime (`_BLOCK_LINEAR_SOLVE`, ⚠️ **the symbol
     `_COUPLED_FORWARD_SOLVER` no longer exists**) is restart-120 GMRES (the shared
     restart-40 default discards too much Arnoldi history on this stiff saddle system; ~1.4× faster to
     the same solution). **The forward-solve TERMINATION, not a tight tolerance, was the dominant coupled
@@ -1299,7 +1299,7 @@ Many entries below are dated history written against the old API. Read them thro
     divergence, at ~4× fewer matvecs. ⚠️ **The norm it stops in has since moved again** — since #282
     every family stops in the march's own row-scaled measure at `forward_rtol = 0.3`, not a global
     2-norm at 1e-2, so the "~1%" here describes the arrangement this measurement was taken under and not
-    the current default. See the `forward_solver` bullet in `.claude/rules/solve-globalization.md` for the mechanism
+    the current default. See the `krylov_solver` bullet in `.claude/rules/solve-globalization.md` for the mechanism
     (`lineax`'s componentwise stop plus the near-zero-right-hand-side ω wall-fixation rows pinned it to
     the absolute `atol=1e-10` floor, ~9 orders past the requested 1e-3) and the two-arm refutation.
   - **The march's default residual measure is the row-equilibrated `RowScaledNorm` (`coupled_scaled_norm`),
@@ -1382,7 +1382,7 @@ Many entries below are dated history written against the old API. Read them thro
     where plain SIMPLE's inner GMRES genuinely stalls and MSIMPLE converges — just not for a coupled RANS
     solve at any scale this project has measured.
   - **`coupled_lu_continuation` — the COMPLETE-LU coupled PC, the
-    preferred coupled PC on 2D/moderate meshes (BUILT).** A drop-in for `solve_coupled(continuation=…)`
+    preferred coupled PC on 2D/moderate meshes (BUILT).** A drop-in for `solve_coupled(strategy=…)`
     that preconditions the whole `[flow, k, ω]` saddle by factoring the assembled coupled Jacobian
     *completely* (`MonolithicLuPreconditioner`, `.claude/rules/solve-direct-preconditioners.md`), instead of
     the block-diagonal SIMPLE composition, so the preconditioner is the operator's exact inverse and a
@@ -1401,15 +1401,15 @@ Many entries below are dated history written against the old API. Read them thro
     field and is applied via `jax.pure_callback`, with the adjoint's `Mᵀ` supplied directly through a
     `TransposedPreconditioner` (the generic `jax.linear_transpose` machinery cannot transpose a callback —
     `.claude/rules/solve-direct-preconditioners.md`). **Its forward-solve regime is
-    `_FACTORIZATION_FORWARD` (restart-10),
-    NOT the block path's restart-120 `_BLOCK_FORWARD`:** an exact factorization clusters the preconditioned
+    `_FACTORIZATION_LINEAR_SOLVE` (restart-10),
+    NOT the block path's restart-120 `_BLOCK_LINEAR_SOLVE`:** an exact factorization clusters the preconditioned
     spectrum so tightly that the 1% stop is reached within a handful of vectors, and `lineax` GMRES only tests
     convergence at each restart boundary (its sole mid-cycle exit is exact Arnoldi breakdown, which does
     not fire while the residual is merely small), so a 120-vector restart pays many wasted back-solves per
     cycle where a small restart stops as soon as it has converged. The two
     regimes are tuned oppositely on purpose — the block PC genuinely needs a large subspace per cycle, the
     exact factorization needs a small one. That **restart** difference is real; the stopping *measure* is
-    not a per-family choice and is `_coupled_step`'s (#282). Verified: `solve_coupled(continuation=coupled_lu_continuation(...))`
+    not a per-family choice and is `_coupled_step`'s (#282). Verified: `solve_coupled(strategy=coupled_lu_continuation(...))`
     converges to the **same fixed point** as the block PC and passes the **coupled-adjoint FD gate**
     (`tests/integration/test_coupled_lu.py`, run under the `scipy` backend so CI needs no optional dep —
     the complete factorization is exact regardless of backend). With the UMFPACK backend
@@ -1468,7 +1468,7 @@ Many entries below are dated history written against the old API. Read them thro
     Jacobian-vector-product matvecs a stale V-cycle costs. This is the only β-tracking that carries the 3D
     case: the complete LU's factorization is out of memory there. Same forward-only contract as the LU
     hook (raises under `jax.grad`); pass it to
-    `solve_coupled(refresh=RefreshPolicy(precondition_step=…))` (or a `solve_reynolds_continuation` `point_setup`) with a
+    `solve_coupled(refresh=RefreshPolicy(refresh_preconditioner=…))` (or a `solve_reynolds_continuation` `point_setup`) with a
     `coupled_amg_continuation` step and a `DualTimeControl`.
     - **The refresh cadence is COST-TRIGGERED; the scheduled gates are DELETED (2026-09-13, #371).** The
       hook re-fits on its first call, after `rebind`, and mid-step through `refresh_at` when an inner
@@ -1550,7 +1550,7 @@ Many entries below are dated history written against the old API. Read them thro
       four archived marches: rung 1 **86–90 s**, rung 2 **98–106 s**, rung 3 **112–250 s**. Rung 1's is
       the unavoidable first compile; rungs 2–3 are **~190–230 s, ~10 % of the march**.
 
-      The compiled unit is `_march_step`, whose key is the forward step, the residual and the solver.
+      The compiled unit is `_march_step`, whose key is the Newton step, the residual and the solver.
       **Any one difference recompiles the whole coupled solve, so this had to be closed on every axis
       at once** — which is why the earlier probe fix (above) moved only 20 %:
       1. **The preconditioner object.** It rides in a *static* field of the step and is compared by
@@ -1558,7 +1558,7 @@ Many entries below are dated history written against the old API. Read them thro
          `coupled_amg_continuation(preconditioner=…)` glues in an existing V-cycle instead of fitting
          one, and `amg_beta_tracking_refresh(...).rebind(companion)` points the shared refresh hook at
          the new rung and forces its next refresh to a **full** re-materialize — so the V-cycle is
-         still fitted to each rung's own state and shift (the march calls `precondition_step` before a
+         still fitted to each rung's own state and shift (the march calls `refresh_preconditioner` before a
          segment's first step), it is just not a new *object*. The adjoint factory follows for free,
          being a value object over that preconditioner.
       2. **The shift policy's unused block preconditioner.** `MonolithicFactorShiftPolicy` reads only
@@ -1686,16 +1686,16 @@ Many entries below are dated history written against the old API. Read them thro
     An approximate factorization can shrug off a β-mismatch at a few extra cycles; the exact LU is
     *exact-and-brittle* instead, so a frozen-and-occasionally-refreshed design does not suit it. Since the
     LU factor is cheap (~1 s), the fix is to re-factor at the current `(state, β)` **every step**:
-    `lu_beta_tracking_refresh(coupled)` returns a `precondition_step(active_step, state)` (the
-    `forward_march` seam, `.claude/rules/solve-march.md`) that reads β from the step's `ConstantRelaxation` (set
+    `lu_beta_tracking_refresh(coupled)` returns a `refresh_preconditioner(active_step, state)` (the
+    `newton_march` seam, `.claude/rules/solve-march.md`) that reads β from the step's `ConstantRelaxation` (set
     by a `DualTimeControl`) and `refresh_in_place`s the LU at `J(state)+β·d(state)` — exact each step (1
-    iter), robust through overshoots. Measured: `solve_coupled(continuation=coupled_lu_continuation(...),
-    step_control=DualTimeControl(...), precondition_step=lu_beta_tracking_refresh(coupled))` **completes
+    iter), robust through overshoots. Measured: `solve_coupled(strategy=coupled_lu_continuation(...),
+    step_control=DualTimeControl(...), refresh_preconditioner=lu_beta_tracking_refresh(coupled))` **completes
     the cold pitzDaily Reynolds ramp** (rung0 12 + rung1 23 steps to rtol 1e-3) where the **frozen** LU
     failed at the rung-1 overshoot, cyc ≤ 18 throughout. **Forward-march only** (impure host re-factor;
     raises under `jax.grad`, same guard as the refresh/control); the finishing solve and adjoint keep the
     last frozen factorization, exact enough at the converged β → 0 root — so the coupled adjoint is
-    unchanged (still use the plain `coupled_lu_continuation`, no `precondition_step`, for a differentiated
+    unchanged (still use the plain `coupled_lu_continuation`, no `refresh_preconditioner`, for a differentiated
     solve). Requires a `DualTimeControl` (β must be a readable constant); raises with the fix if paired
     with the default switched-evolution schedule. Pinned in `tests/integration/test_coupled_lu.py`
     (exact-at-current-β, cold-march convergence to the block PC's root, grad-guard).
@@ -1759,7 +1759,7 @@ Many entries below are dated history written against the old API. Read them thro
     the body force `β` along the flow direction is itself a **coupled unknown** appended to the state
     and the coupled residual bordered with the constraint row `⟨U_dir⟩ − U_bar = 0`: one honest
     augmented residual `R_aug([flow…, k, ω, β]) = [R_coupled(state; β); ⟨U_dir⟩ − U_bar]`, driven by a
-    single `ImplicitNewtonSolver` — which since 2026-09-15 (phase 3) marches eagerly like every other
+    single `RootSolver` — which since 2026-09-15 (phase 3) marches eagerly like every other
     solve, so this path too **refuses `jax.jit`/`jax.vmap`** and could be given the march's hooks
     (observer, refresh, retries) that only `solve_coupled` passes today. Its bordered residual is
     `_MassFlowConstrainedResidual`, a module rather than the closure it was, so a solver reused across
@@ -1894,12 +1894,12 @@ tuning follow-up noted above.
     momentum equations actually see, and it moves when k and ω move in ways their own norms hide).
   - `coupled_residuals(coupled, continuation, reference_state=None)` → the **per-equation residual** on
     the march's own measure, `coupled_scaled_norm(...).per_block(coupled.residual(state))`. Reads
-    `continuation` **late** for its `shift_policy`, so a refreshed segment's rebuilt diagonals are the
+    `strategy` **late** for its `shift_policy`, so a refreshed segment's rebuilt diagonals are the
     ones used — the same late-read `norm_builder` does. Under a per-rung setup (`point_setup`) the case
     *and* its continuation are both rebuilt, so the reporter must be rebuilt with them (the bfs3d driver
     keeps the current rung's in a list the logger's callable defers to).
   ⚠️ **Equilibrate at the PREVIOUS state, never the logged one** — this is what makes the per-equation
-  rows add up to the `R` reported beside them (pinned `rel=1e-12`). `forward_march` re-derives the
+  rows add up to the `R` reported beside them (pinned `rel=1e-12`). `newton_march` re-derives the
   measure at the state each outer iteration *starts* from and holds it for the whole iteration, so a
   step's residual is `norm_at_start(R(state_at_end))`; scaling at the end state measures the right
   residual in the wrong scales. Consequences: the reporter is **stateful and order-dependent** (once per
@@ -2240,10 +2240,10 @@ tuning follow-up noted above.
                 because the search was a string match on one exact type annotation. **Find implementers
                 of a Protocol structurally (AST), not by grepping a signature** — the same shape as
                 `sibling_builders.py`'s blind spots: a check that cannot see the case reports clean.
-              - **`solve_coupled(station_step=...)` / `forward_march(station_step=...)` — the seam a
+              - **`solve_coupled(station_step=...)` / `newton_march(station_step=...)` — the seam a
                 station-varying setting needs (BUILT 2026-09-11).** `(step, station, arrived) -> step`,
                 called once per outer step when a homotopy is running, letting the caller reshape the
-                forward step for the station it is about to run. It exists because the discriminator a
+                Newton step for the station it is about to run. It exists because the discriminator a
                 per-station setting needs — *which station is this* — is known only to the march, while
                 everything the shift policy can read is a progress measure. ⚠️ It must swap **array**
                 leaves over a fixed structure (`eqx.tree_at`), exactly as the march's own per-step
@@ -2408,7 +2408,7 @@ tuning follow-up noted above.
     march (`inner_steps>1`, whose observed rungs default to the `DualTimeControl` Courant ramp), the
     preconditioner options and the observers all compose unchanged — no coupling to which globalization runs.
   - **⚠️ EXCEPT the continuation keywords, which are split BOTH WAYS between the ramp and the target
-    (binding, #278, 2026-08-20).** A pre-built `continuation` / `reference_state` is frozen at the
+    (binding, #278, 2026-08-20).** A pre-built `strategy` / `reference_state` is frozen at the
     *target* viscosity, so it reaches the **final** solve only and each lower-Re point builds its own
     (`ramp_kwargs`, long-standing). The mirror image is that everything which *configures* a build —
     `method`, and every keyword bound for `coupled_continuation` — reaches the **ramp** only, because
@@ -2468,7 +2468,7 @@ tuning follow-up noted above.
     seed. Pinned by a monkeypatched-`solve_coupled` unit test that the lower-Re points receive
     `intermediate_rtol` and the target receives `rtol`.
   - **`point_setup` — a PER-POINT continuation/precondition seam for a per-companion, per-state
-    preconditioner (BUILT).** The single `continuation`/`reference_state` is dropped for the ramp rungs
+    preconditioner (BUILT).** The single `strategy`/`reference_state` is dropped for the ramp rungs
     (target-specific), so it cannot express a preconditioner that must be rebuilt at *each* rung's own
     viscosity **and** seed state — chiefly the complete-LU β-tracking hook (`coupled_lu_continuation`
     frozen at the point's `(state, β)` + `lu_beta_tracking_refresh` closing over the point's residual),
@@ -2477,7 +2477,7 @@ tuning follow-up noted above.
     dict` is called for **every** point (lower-Re and target) with that point's companion, its **packed
     seed coupled state**, and a `ReynoldsPoint` (1-based `index`, `total`, `viscosity_scale`, plus
     `is_target` / `label`) telling it where in the ramp it is — so a per-point builder never counts its
-    own invocations to recover the loop's index, and can reach the total and the scaling at all, and its keys are merged over `solve_kwargs` (overriding any `continuation`/
+    own invocations to recover the loop's index, and can reach the total and the scaling at all, and its keys are merged over `solve_kwargs` (overriding any `strategy`/
     `reference_state`). To give the built continuation the state the solve begins from, the loop
     **materializes the lowest point's seed** (`hybrid_initialize`) when `point_setup` is set, rather than
     letting `solve_coupled` self-start internally. ⚠️ Under `jax.grad` the **target** point's companion is
@@ -2888,8 +2888,8 @@ tuning follow-up noted above.
     the next, so the ramp never tapes. The final solve runs on the live `coupled` from a stopped seed, so
     `jax.grad` through the wrapper is the target solve's IFT adjoint — **exact and `n_points`-independent**
     (pinned: grad through `n_points=1` equals grad through `n_points=0` and finite differences). Same
-    contract as `solve_coupled`: to differentiate, pass a target-viscosity `continuation` built outside
-    `jax.grad` (used by the final solve only — `continuation`/`reference_state` are dropped from the ramp
+    contract as `solve_coupled`: to differentiate, pass a target-viscosity `strategy` built outside
+    `jax.grad` (used by the final solve only — `strategy`/`reference_state` are dropped from the ramp
     kwargs, since each lower-Re point builds its own preconditioner at its own viscosity) and no
     forward-only keywords.
   - **Failure handling.** A lower-Re point that fails to converge (`EquinoxRuntimeError` from the
@@ -2904,7 +2904,7 @@ tuning follow-up noted above.
   `R_coupled(k, ω, U, p; params) = 0` at the converged state — the `solve/` two-level
   implicit-diff machinery — **not** a differentiation of the Picard iteration. This is now realized:
   `coupled.py`'s `CoupledRANS.residual` **is** that unfrozen `R_coupled`, and `solve_coupled` hands it
-  to `ImplicitNewtonSolver`, whose adjoint is a single transpose solve (FD-verified). At the fixed
+  to `RootSolver`, whose adjoint is a single transpose solve (FD-verified). At the fixed
   point the frozen fields equal the live values, so the coupled residual is satisfied and its
   adjoint is exact; the segregated outer loop is a forward convergence device that is **absent from
   the sensitivity model**. Differentiate **`solve_coupled`, never `solve_segregated`** (the latter is

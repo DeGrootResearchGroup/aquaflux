@@ -3,7 +3,7 @@
 Extends the first-order upwind case to a limited linear-upwind reconstruction with the
 Venkatakrishnan limiter. The limiter makes the residual **nonlinear** (``psi`` depends on the
 field through stencil min/max and a rational function), so the solve needs multiple Newton
-iterations and the implicit-function-theorem adjoint (:class:`ImplicitNewtonSolver`) to
+iterations and the implicit-function-theorem adjoint (:class:`RootSolver`) to
 differentiate the converged state.
 
 The headline experiment: the conventional **deferred-correction** approach lags the limiter
@@ -32,7 +32,7 @@ from aquaflux.discretization import (
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, Limiter, VenkatakrishnanLimiter
-from aquaflux.solve import ImplicitNewtonSolver, newton_step
+from aquaflux.solve import RootSolver, newton_step
 
 from tests.support.fields import face_mass_flux
 
@@ -76,9 +76,7 @@ def _assembler(nx, gamma, scheme):
 
 def _solve(nx, gamma, scheme):
     mesh, cell_geometry, assembler = _assembler(nx, gamma, scheme)
-    phi = ImplicitNewtonSolver().solve(
-        lambda p, a: a.residual(p), jnp.zeros(mesh.n_cells), assembler
-    )
+    phi = RootSolver().solve(lambda p, a: a.residual(p), jnp.zeros(mesh.n_cells), assembler)
     return cell_geometry, assembler, phi
 
 
@@ -121,9 +119,7 @@ def test_limited_solve_differentiable_via_ift() -> None:
         mesh, _, assembler = _assembler(
             40, gamma, LimitedUpwind(limiter=VenkatakrishnanLimiter(k=1.0))
         )
-        phi = ImplicitNewtonSolver().solve(
-            lambda p, a: a.residual(p), jnp.zeros(mesh.n_cells), assembler
-        )
+        phi = RootSolver().solve(lambda p, a: a.residual(p), jnp.zeros(mesh.n_cells), assembler)
         return jnp.mean(phi)
 
     grad = float(jax.grad(objective)(0.05))
@@ -224,7 +220,7 @@ def test_limiter_reduces_overshoot_on_advected_step() -> None:
         # Nothing is lost by stepping eagerly here -- each step's residual is a `_BdfStep`, whose
         # fields are arrays over a fixed structure, so all 39 later steps run on the one compiled
         # Newton step that the first of them builds.
-        solver = ImplicitNewtonSolver(max_steps=30)
+        solver = RootSolver(max_steps=30)
         phi, older = solver.solve(_BdfStep(assembler, phi0, None, dt), phi0, None), phi0
         for _ in range(n_steps - 1):
             phi, older = solver.solve(_BdfStep(assembler, phi, older, dt), phi, None), phi
