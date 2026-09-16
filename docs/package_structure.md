@@ -134,7 +134,8 @@ cfd/                                  # repo root
 │   ├── solve/                        # Newton on the residual, the differentiated linear solve, and the AMG that preconditions it
 │   │   ├── state.py                  #   FieldLayout + CellFields / SubLayout / GlobalDofs: the flat field-major state as named, variable-length blocks (every coupled system's one layout)
 │   │   ├── newton.py                 #   newton_step: the Newton correction on the cell residual
-│   │   ├── implicit.py               #   ImplicitNewtonSolver: Newton to convergence + the implicit-function-theorem adjoint (one transpose solve, not the iteration on the tape)
+│   │   ├── implicit.py               #   ImplicitNewtonSolver: Newton to convergence on stopped inputs, differentiable through the root it reaches
+│   │   ├── root_adjoint.py           #   root_adjoint: the implicit-function-theorem adjoint (one transpose solve) attached to a root found by any means
 │   │   ├── linear.py                 #   solve_linear: differentiable matrix-free linear solve, optional left/right preconditioning; relative_residual_gmres
 │   │   ├── norm.py                   #   ResidualNorm → BlockScaledNorm / RowScaledNorm: the convergence and globalization measures
 │   │   ├── march.py                  #   forward_march: the observed forward-only Newton march + the staleness trigger watching it

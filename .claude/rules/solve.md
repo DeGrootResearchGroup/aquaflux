@@ -370,24 +370,42 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   leaves and the compiled solve is a cache hit; a bare captured closure is hashed by identity and
   misses every time.
 - **`implicit.py` — BUILT (`ImplicitNewtonSolver`).** The nonlinear counterpart: Newton to
-  convergence (`lax.while_loop`, data-dependent stop) with a reverse-mode **IFT adjoint** via
-  `custom_vjp` — one transpose linear solve at the converged state, `dphi*/dtheta =
-  -(dR/dphi)^{-1}(dR/dtheta)`, no Newton loop taped. `solve(residual_fn, phi0, theta)` takes the
-  differentiable params `theta` explicit so the adjoint returns their cotangents. Reverse-mode
-  only (`jax.grad`), which is what a scalar objective through the solver needs. This is the
-  "IFT on the converged Newton state" half of the two-level scheme; it activates with the first
-  nonlinear residual (the flux limiter). Verified
+  convergence (`_forward`, a `lax.while_loop` with a data-dependent stop), run on `stop_gradient`
+  copies of `phi0` and `theta` (`_stopped`, which passes non-array leaves through), with the
+  reverse-mode **IFT adjoint** attached afterwards at the root it reaches by `root_adjoint` — one
+  transpose linear solve, `dphi*/dtheta = -(dR/dphi)^{-1}(dR/dtheta)`, no Newton loop taped.
+  `solve(residual_fn, phi0, theta)` takes the differentiable params `theta` explicit so the adjoint
+  returns their cotangents. Reverse-mode only (`jax.grad`), which is what a scalar objective through
+  the solver needs. This is the "IFT on the converged Newton state" half of the two-level scheme; it
+  activates with the first nonlinear residual (the flux limiter). Verified
   (`test_implicit_solve.py`): converges a nonlinear root, gradient matches the closed form to
   1e-10, and is iteration-count-independent. Used by the limited-advection solve.
+- **`root_adjoint.py` — BUILT 2026-09-15 (phase 1 of unifying the two Newton loops): the IFT adjoint is
+  a standalone step, not a property of the loop.** `root_adjoint(residual_fn, root, theta, *,
+  adjoint_solver=None, adjoint_preconditioner=None)` returns `root` unchanged and carries its derivative
+  (a `custom_vjp` whose backward rule is the transpose solve); `TransposedPreconditioner` moved here with
+  it. Whatever derivative `root` itself carries is **discarded** — its dependence on `theta` is the
+  adjoint's to supply — so any loop may produce the root, including the eager `forward_march` with its
+  hooks. **It does not check that `root` is a root**: the caller owns the convergence test, because only
+  the caller knows the tolerance and measure. Extracted from `_implicit_solve` with
+  `ImplicitNewtonSolver` rewired onto it; values and gradients were compared **bit for bit** before and
+  after across `DampedNewtonStep` (with and without a transposable and a `TransposedPreconditioner`),
+  `PseudoTransientStep`, `DualTimeStep`, module-valued `theta`, `jit(grad)`, `vmap(grad)` and the
+  `phi0` gradient — all identical. Why the extraction: a throwaway toy spike showed the gradient does not
+  depend on the loop, so the eager march can gain the adjoint and the traced/eager split in
+  `solve_coupled` (the `observing` switch behind #369) can be removed — that is phase 2.
+  ⚠️ A `theta` holding a **callable leaf** was already refused before this change (the `custom_vjp`
+  rejects non-JAX-type arguments) and still is; `jax.lax.stop_gradient` on such a tree also raises,
+  which is why `_stopped` filters by `eqx.is_array`.
   - **Convergence guard (binding — the IFT adjoint is only valid at a root).** `_forward` carries the
     terminal residual norm out of the `while_loop` and wraps the returned field in `eqx.error_if`: if
     the residual is non-finite or above `atol + rtol·‖R₀‖` (exhausted `max_steps`, or a `NaN`/`Inf`
     that used to make `residual_norm > tol` short-circuit to `False` and exit with a poisoned field),
-    it **raises `eqx.EquinoxRuntimeError`** instead of returning. The guard sits in `_forward`, so it
-    fires for both the forward value and the `jax.grad` path (the fwd pass saves the guarded field),
+    it **raises `eqx.EquinoxRuntimeError`** instead of returning. The guard runs before `root_adjoint`
+    is reached, on the stopped inputs, so it fires for both the forward value and the `jax.grad` path,
     closing the silent-wrong-gradient hole where the transpose solve at a non-root stays well-posed
-    and raises no `NaN`. The stopping test is one helper, `_within_tolerance`, shared by the loop
-    `cond` and the guard. A `NaN` mid-iteration is often caught first by `lineax`'s own non-finite
+    and raises no `NaN`. The stopping test is one helper, `forward_step.within_tolerance`, shared by the
+    loop `cond` and the guard. A `NaN` mid-iteration is often caught first by `lineax`'s own non-finite
     guard at the next linear solve — both are hard errors, neither is silent.
   - **✅ `solve_coupled(adjoint_solver=…)` — the transpose solve's Krylov settings are REACHABLE
     (BUILT 2026-08-14).** `ImplicitNewtonSolver` has carried an `adjoint_solver` field all along, but

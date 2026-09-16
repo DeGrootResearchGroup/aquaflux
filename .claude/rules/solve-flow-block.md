@@ -155,7 +155,7 @@ difference is why the adjoint's 12 cycles and the probes' 11 are not the same me
 numbers look alike.
 
 **Instrumentation, and why it counts applications rather than cycles.** The restart-cycle count
-`solve_linear` returns is **discarded inside `_implicit_solve_bwd`**, which has no observer, so the
+`solve_linear` returns is **discarded inside `root_adjoint`'s backward rule**, which has no observer, so the
 adjoint's cost is unreachable from outside. `adjoint_probe.TransposeApplyCounter` swaps the host
 preconditioner's `factors` attribute for a delegating proxy (the same mutation an in-place refresh
 performs, seen by an already-compiled solve for the same reason — the callback reads the attribute

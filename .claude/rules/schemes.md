@@ -169,7 +169,7 @@ rungs, `forward_rtol` 0.3, probe reach 5, residual held at swept-4):**
 - ⚠️ **Measured on `simplesmooth`, not on the `petsc` bundle this case shipped until the same day** (see
   the case comment: `petsc` no longer marches it). Cycle counts do not transfer across preconditioner
   families.
-- **The adjoint is untouched, by construction rather than by care.** `_implicit_solve_bwd` differentiates
+- **The adjoint is untouched, by construction rather than by care.** `root_adjoint`'s backward rule differentiates
   the residual it was handed at the converged state and never consults the forward step, so a cheaper
   forward operator cannot reach a gradient. See `.claude/rules/solve-globalization.md`.
 - **Not measured: a genuinely skewed mesh, where `rho` is 0.14–0.26 rather than 5e-03.** There the

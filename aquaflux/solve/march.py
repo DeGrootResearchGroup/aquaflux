@@ -15,8 +15,8 @@ measures progress with the **same** residual norm, but observes every step and m
 
 **The eager march's state is an answer only when it reports ``converged``.** Short of that it is a
 pure accelerator: a driver uses it to reach a better-preconditioned state, and then finishes with a
-real ``ImplicitNewtonSolver.solve()``, which owns the convergence guard, the ``custom_vjp``, and the
-returned field. That is why :func:`forward_march` deliberately has **no** non-convergence guard of
+real ``ImplicitNewtonSolver.solve()``, which owns the convergence guard, the implicit-function-theorem
+adjoint, and the returned field. That is why :func:`forward_march` deliberately has **no** non-convergence guard of
 its own — stopping short is its purpose, and a state it hands back carries no guarantee beyond what
 :attr:`MarchResult.converged` states. Keeping the guard in one place means a march that ends short of
 a root can never be mistaken for a converged one.
