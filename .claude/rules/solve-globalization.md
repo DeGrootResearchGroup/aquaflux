@@ -132,9 +132,9 @@ What to take from it, none of which is specific to that mechanism:
   the forward/adjoint preconditioner and the line-search count) and **`PseudoTransientStep`**
   (`aquaflux/solve/`, the residual-agnostic diagonally-shifted march; the flow configures it via
   `aquaflux/flow/`'s `momentum_continuation` factory — no wrapper class). The march calls the
-  injected step unconditionally — there is **no `if continuation is None` branch**, and **no separate
-  `line_search`/`preconditioner`/`strategy` constructor args** (they were unified here; do not
-  reintroduce them). Each strategy's shift vanishes at the fixed point, so the converged state and
+  injected step unconditionally — there is **no "was a strategy given?" branch**, and the solver grew
+  **no separate `line_search` / `preconditioner` / `continuation` constructor arguments** of its own
+  (they were unified into the strategy; do not reintroduce them). Each strategy's shift vanishes at the fixed point, so the converged state and
   the IFT adjoint are strategy-independent. When adding a globalization (e.g. a monotone/forcing
   acceptance), add a `NewtonStrategy` — do **not** grow a branch in the march.
   - **`ShiftedNewtonStrategy` is the SECOND contract, and the eager march's beta machinery requires it

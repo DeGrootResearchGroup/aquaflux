@@ -942,11 +942,12 @@ paths:
       **zero** implementations there, so `step_control.py` had to import `march` — which forbade the
       reverse, so a defaulting rule about two `solve/` objects could not be written in `solve/` at all
       and ended up in `turbulence/coupled.py`, a package away. And `implicit.py`, named for the Newton
-      solver, was a de-facto contract module handing `_ForwardStep`, `_within_tolerance` and
+      solver, was a de-facto contract module handing the step protocol (then a private
+      `_ForwardStep`, now `NewtonStrategy`), `_within_tolerance` and
       `backtracking_line_search` across boundaries either privately or absent from `__all__` — which
       under this package's own boundary rule read as violations.
     - **`strategy.py` is a LEAF and must stay one.** It imports `linear`, `norm` and `relaxation`,
-      none of which import it back; `implicit`, `march`, `strategy`, `retry`, `step_control`,
+      none of which import it back; `implicit`, `march`, `continuation`, `retry`, `step_control`,
       `march_log` and `checkpoint` all depend on it. Adding an import here that points at any of those
       re-creates exactly the cycle it exists to remove.
     - **What did NOT move, and why.** `backtracking_line_search` stays in `implicit.py`: it is
