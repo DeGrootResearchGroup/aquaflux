@@ -46,6 +46,7 @@ from aquaflux.solve import (
     DampedNewtonStep,
     Globalization,
     ImplicitNewtonSolver,
+    assembler_residual,
     solve_linear,
 )
 
@@ -87,7 +88,7 @@ def _solve(assembler, *, continuation=None, max_steps=120, **kwargs):
     if continuation is None:
         continuation = momentum_continuation(assembler)
     solver = ImplicitNewtonSolver(max_steps=max_steps, forward_step=continuation, **kwargs)
-    return solver.solve(lambda s, a: a.residual(s), assembler.initial_state(), assembler)
+    return solver.solve(assembler_residual, assembler.initial_state(), assembler)
 
 
 @pytest.mark.parametrize(

@@ -13,7 +13,9 @@ unit tests. The surface is five groups:
 * **The Newton driver, the single step, and the linear solve** — `ImplicitNewtonSolver` (the
   driver: converges, globalizes, and carries the implicit-function-theorem adjoint), `root_adjoint`
   (that adjoint on its own: attaches the derivative of a root to a root found by any means),
-  `newton_step`
+  `assembler_residual` (the two-argument residual of an assembler passed as the differentiated
+  parameter — one shared object, so repeated solves reuse the compiled march step that a lambda
+  written at the call site would rebuild), `newton_step`
   (one matrix-free correction — exact in one call for a linear residual, and differentiable in both
   modes), `solve_linear` (returns the solution together with the solve's restart-cycle count —
   the staleness signal a mid-march preconditioner refresh triggers on), `default_linear_solver`, and
@@ -45,14 +47,18 @@ unit tests. The surface is five groups:
   covering each other's blind spots, and reduces exactly to `DualTimeControl` at infinite ratio
   thresholds. A control changes only the path: the root is the residual's, and the adjoint is attached
   at it regardless.
-* **The observed forward march** — `forward_march`, an eager, forward-only march that applies the
-  same `ForwardStep` as the Newton driver but reports each step (`StepReport`, `MarchResult`) and
-  may stop early. It is what lets a driver rebuild a frozen preconditioner part way through a solve,
+* **The forward march** — `forward_march`, the eager, forward-only march every Newton solve in the
+  package runs on, reporting each step (`StepReport`, `MarchResult`) and able to stop early. It is what lets a driver rebuild a frozen preconditioner part way through a solve,
   on the evidence of the `RefreshTrigger` it injects — `CoefficientDriftTrigger` watches how far the
   operator's own coefficients have moved since they were frozen (the direct staleness signal, fed by
   the march's `drift_measure`), while `CycleGrowthTrigger` infers it from the per-step linear-solve
-  cost. It is an accelerator, not a solver: a real `ImplicitNewtonSolver` solve still produces the
-  result. When and how it redoes a bad step is one injected `RetryPolicy` — the three escalation
+  cost. It carries no convergence guard, so the driver that runs it reads `MarchResult.converged`
+  before treating the state as an answer — `ImplicitNewtonSolver` does exactly that, then attaches
+  `root_adjoint`. Because it steps in Python it cannot run inside a traced program -- `jax.jit`,
+  `jax.vmap`, or a traced loop such as `jax.lax.scan` -- and every
+  driver refuses those up front with `refuse_a_transform_the_march_cannot_run_in`; `jax.grad` is
+  unaffected, since the march runs on stopped copies and the derivative is attached at the root
+  afterwards. When and how it redoes a bad step is one injected `RetryPolicy` — the three escalation
   triggers (a costly solve, a collapsed step length, a diverged correction), the shift factor and
   escalation limit, and the optional tighter linear solver that is the fallback for a step more
   damping cannot fix. The default policy retries nothing.
@@ -118,6 +124,7 @@ from .implicit import (
     ImplicitNewtonSolver,
     PositiveBlockLimit,
     PositiveBlockProjection,
+    assembler_residual,
     positive_block_limit,
     positive_block_projection,
 )
@@ -141,6 +148,7 @@ from .march import (
     RefreshTrigger,
     ResidualHomotopy,
     forward_march,
+    refuse_a_transform_the_march_cannot_run_in,
 )
 from .march_log import MarchLogger, combine_metrics, field_change_metrics
 from .saddle_multigrid import (
@@ -265,6 +273,7 @@ __all__ = [
     "TransposedPreconditioner",
     "VelocityShiftParts",
     "air_multigrid_solve",
+    "assembler_residual",
     "block_approximate_inverse",
     "block_stencil_colouring",
     "block_stencil_gather_map",
@@ -292,6 +301,7 @@ __all__ = [
     "positive_block_limit",
     "positive_block_projection",
     "refresh_air_hierarchy",
+    "refuse_a_transform_the_march_cannot_run_in",
     "relative_residual_gmres",
     "restart_cycles",
     "root_adjoint",

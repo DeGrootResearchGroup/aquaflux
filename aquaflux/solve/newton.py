@@ -21,7 +21,9 @@ to avoid.
 
 Neither function jits internally — the caller owns the jit boundary, so a step composes into
 whatever the caller compiles. Wrap the call in ``equinox.filter_jit``; un-jitted, every operation
-dispatches eagerly.
+dispatches eagerly. That is a property of these two functions alone:
+:class:`~aquaflux.solve.ImplicitNewtonSolver` marches in Python and **refuses** ``jit`` and ``vmap``,
+compiling each of its steps for itself.
 """
 
 from __future__ import annotations

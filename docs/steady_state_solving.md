@@ -114,18 +114,24 @@ evaluation and the iteration is undamped — you keep Newton's fast terminal con
 pay for the search only when you need it.
 
 ```python
-from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver
+from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver, assembler_residual
 
 solver = ImplicitNewtonSolver(
     max_steps=30,
     forward_step=DampedNewtonStep(line_search=10),
 )
-state = solver.solve(lambda s, a: a.residual(s), cavity.initial_state(), cavity)
+state = solver.solve(assembler_residual, cavity.initial_state(), cavity)
 ```
 
 The residual is passed as `residual_fn(state, params)` with the parameters explicit — that
 second argument is what the adjoint returns sensitivities for, so pass the assembler there
-rather than capturing it in the closure.
+rather than capturing it in the closure. {func}`~aquaflux.solve.assembler_residual` is exactly
+that function for the common case, `lambda state, assembler: assembler.residual(state)`, and
+using it rather than writing the lambda out is worth a word: the solver compiles its Newton step
+once and reuses it, keyed partly on the residual you hand over, and a lambda written at the call
+site is a new object every call — so a solve called in a loop would recompile every time. Write
+your own as a module-level function (or a small {class}`equinox.Module`, if it carries settings)
+for the same reason.
 
 ### Pseudo-transient continuation — for convection-dominated flow
 
@@ -146,7 +152,7 @@ from aquaflux.solve import Globalization
 
 continuation = momentum_continuation(channel, globalization=Globalization(beta0=2.0))
 solver = ImplicitNewtonSolver(max_steps=120, forward_step=continuation)
-state = solver.solve(lambda s, a: a.residual(s), channel.initial_state(), channel)
+state = solver.solve(assembler_residual, channel.initial_state(), channel)
 ```
 
 {class}`~aquaflux.solve.Globalization` carries how hard the march damps and what it does when a
@@ -164,7 +170,7 @@ geometry and the inlet:
 ```python
 from aquaflux.flow import potential_flow
 
-state = solver.solve(lambda s, a: a.residual(s), potential_flow(channel), channel)
+state = solver.solve(assembler_residual, potential_flow(channel), channel)
 ```
 
 ## Preconditioning the linear solve
@@ -239,7 +245,7 @@ solver = ImplicitNewtonSolver(max_steps=30, forward_step=DampedNewtonStep(precon
 
 def mean_speed(viscosity):
     assembler = cavity_at(viscosity)
-    state = solver.solve(lambda s, a: a.residual(s), assembler.initial_state(), assembler)
+    state = solver.solve(assembler_residual, assembler.initial_state(), assembler)
     velocity, _ = assembler.unpack(state)
     return jnp.mean(jnp.abs(velocity[:, 0]))
 
@@ -255,6 +261,34 @@ scalar objective over a whole field needs. Forward-mode differentiation (`jax.ja
 through {class}`~aquaflux.solve.ImplicitNewtonSolver` raises; use
 {func}`~aquaflux.solve.newton_step` where a forward-mode derivative through a linear solve is
 what you want.
+```
+
+```{note}
+Call the solve **outside** any traced construct — `jax.jit`, `jax.vmap`, and equally
+`jax.lax.scan` or `jax.lax.fori_loop`. It decides how many steps to take from residuals it reads
+back as ordinary numbers, and runs work between steps that a traced program cannot — so it raises
+a `ValueError` naming the problem rather than failing part way through with a message about a
+tracer. Each Newton step is compiled for you, so there is nothing to gain by wrapping the solve;
+`jax.grad` is unaffected, because the iteration runs on values detached from the derivative and
+the gradient is attached to the converged state afterwards.
+
+A transient march is therefore an ordinary Python loop over timesteps. Give each step's residual a
+stable identity — the simplest way is a small {class}`equinox.Module` holding the previous states
+as fields — and the whole loop runs on the Newton step the first few timesteps compile:
+
+```python
+class BdfStep(eqx.Module):
+    assembler: ResidualAssembler
+    phi_old: jnp.ndarray
+    dt: float
+
+    def __call__(self, phi, theta):
+        return self.assembler.residual(phi, phi_old=self.phi_old, dt=self.dt, first_step=True)
+
+phi = phi0
+for _ in range(n_steps):
+    phi = solver.solve(BdfStep(assembler, phi, dt), phi, None)
+```
 ```
 
 ## Non-convergence is an error, not a result
@@ -281,7 +315,7 @@ If you hit it, the useful responses in order are: start from a better initial fi
 | Linear residual (Stokes, scalar diffusion) | {func}`~aquaflux.solve.newton_step` | Called **directly**, not injected: `phi = newton_step(assembler.residual, phi)`. One correction, exact in one call for a linear residual, and differentiable in both modes. |
 | Nonlinear, moderate Reynolds number | {class}`~aquaflux.solve.DampedNewtonStep` | `forward_step=DampedNewtonStep(preconditioner=precond)` — the default strategy. |
 | Convection-dominated / high Reynolds number | {func}`~aquaflux.flow.momentum_continuation` | `forward_step=momentum_continuation(assembler)` — a builder that returns a configured {class}`~aquaflux.solve.PseudoTransientStep`. Pseudo-transient damping that ramps to zero; pair it with {func}`~aquaflux.flow.potential_flow`. |
-| Repeated solves at varying viscosity | {func}`~aquaflux.flow.reused_flow_solve` | Replaces the solver entirely: returns a `solve_flow(momentum, state)` callable, with the preconditioned strategy built once and the compiled solve reused across calls. |
+| Repeated solves at varying viscosity | {func}`~aquaflux.flow.reused_flow_solve` | Replaces the solver entirely: returns a `solve_flow(momentum, state)` callable, with the preconditioned strategy built once and the compiled Newton step reused across calls. |
 
 ```{note}
 The three kinds of name in that table are used in three different ways, which is worth

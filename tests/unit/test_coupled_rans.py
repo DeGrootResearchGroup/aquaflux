@@ -758,7 +758,7 @@ def test_the_coupled_solve_refuses_jit_and_vmap_before_any_work(transform) -> No
     mesh, coupled = _cavity()
     flow, k, omega = coupled.physical_fields(_healthy_state(mesh, coupled))
 
-    with pytest.raises(ValueError, match=r"cannot run under jax\.jit or jax\.vmap"):
+    with pytest.raises(ValueError, match=r"cannot run inside a traced program"):
         if transform == "jit":
             eqx.filter_jit(lambda c: solve_coupled(c, flow, k, omega, rtol=1e-2))(coupled)
         else:

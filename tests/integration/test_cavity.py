@@ -25,7 +25,12 @@ from aquaflux.flow import BlockPreconditioner, MomentumContinuity, MovingWall, N
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver, newton_step
+from aquaflux.solve import (
+    DampedNewtonStep,
+    ImplicitNewtonSolver,
+    assembler_residual,
+    newton_step,
+)
 
 RE, U_LID, RHO = 100.0, 1.0, 1.0
 MU = RHO * U_LID / RE
@@ -83,7 +88,7 @@ def test_cavity_solve_is_differentiable() -> None:
 
     def mean_speed(mu):
         assembler = _cavity(n, mu=mu)
-        state = solver.solve(lambda s, a: a.residual(s), assembler.initial_state(), assembler)
+        state = solver.solve(assembler_residual, assembler.initial_state(), assembler)
         velocity, _ = assembler.unpack(state)
         return jnp.mean(jnp.abs(velocity[:, 0]))
 

@@ -363,23 +363,65 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     work. This matters: the plane-wall sensitivity gate takes `jacfwd` through the whole transient
     march — one linear solve per input, the efficient direction for a scalar parameter against a
     whole field. Pinned in `tests/unit/test_newton.py`.
-- **Neither function jits internally — the caller owns the jit boundary**, matching
-  `ImplicitNewtonSolver`. Wrap calls in `eqx.filter_jit`; un-jitted, every operation dispatches
-  eagerly. For a caller that re-solves in a loop, pass the assembler as an `equinox.Module`
-  **argument** to the jitted function (`reused_flow_solve`'s pattern) so its arrays are dynamic
-  leaves and the compiled solve is a cache hit; a bare captured closure is hashed by identity and
-  misses every time.
+- **Neither function jits internally — the caller owns the jit boundary.** Wrap calls in
+  `eqx.filter_jit`; un-jitted, every operation dispatches eagerly. This is about `newton_step` and
+  `newton_correction`, which are plain traced operations: ⚠️ **`ImplicitNewtonSolver.solve` is the
+  opposite case and REFUSES `jit`/`vmap`** since 2026-09-15 — it marches in Python (see below), and its
+  step is compiled for it. The cache-hit discipline still applies, one level down: pass the assembler as
+  an `equinox.Module` **argument** so its arrays are dynamic leaves, and hand the solve a residual whose
+  identity is stable (`assembler_residual`, a bound method, or a small `equinox.Module`) — a lambda built
+  at the call site is hashed by identity and recompiles the march step on every call.
 - **`implicit.py` — BUILT (`ImplicitNewtonSolver`).** The nonlinear counterpart: Newton to
-  convergence (`_forward`, a `lax.while_loop` with a data-dependent stop), run on `stop_gradient`
-  copies of `phi0` and `theta` (`stop_array_gradients`, which passes non-array leaves through), with the
-  reverse-mode **IFT adjoint** attached afterwards at the root it reaches by `root_adjoint` — one
-  transpose linear solve, `dphi*/dtheta = -(dR/dphi)^{-1}(dR/dtheta)`, no Newton loop taped.
+  convergence on `stop_gradient` copies of `phi0` and `theta` (`stop_array_gradients`, which passes
+  non-array leaves through), with the reverse-mode **IFT adjoint** attached afterwards at the root it
+  reaches by `root_adjoint` — one transpose linear solve,
+  `dphi*/dtheta = -(dR/dphi)^{-1}(dR/dtheta)`, no Newton loop taped.
   `solve(residual_fn, phi0, theta)` takes the differentiable params `theta` explicit so the adjoint
   returns their cotangents. Reverse-mode only (`jax.grad`), which is what a scalar objective through
   the solver needs. This is the "IFT on the converged Newton state" half of the two-level scheme; it
   activates with the first nonlinear residual (the flux limiter). Verified
   (`test_implicit_solve.py`): converges a nonlinear root, gradient matches the closed form to
   1e-10, and is iteration-count-independent. Used by the limited-advection solve.
+  **⚠️ THE LOOP IS `forward_march`, AND THERE IS NO OTHER ONE (binding, 2026-09-15, phase 3 of the
+  unification).** `_forward` — the traced `lax.while_loop` this class used to carry — is **deleted**.
+  One driver now runs every Newton solve in the package, so the hooks (observer, refresh trigger, step
+  control, retries, homotopy, per-step preconditioner re-fit) are reachable from one place and a
+  capability cannot exist on one loop and not the other, which is the defect class #369 was. The price,
+  decided deliberately rather than discovered: **a Python loop cannot run under `jax.jit` or
+  `jax.vmap`** — ⚠️ **nor inside `lax.scan` / `lax.fori_loop`, which is the case that was MISSED when
+  this was scoped and is the one with a real consumer.** A transient march over a *nonlinear* residual
+  scanned the solve (`test_limiter_reduces_overshoot_on_advected_step`, validation tier — the only
+  affected site in the repository, found by running that tier rather than by the grep for `jit`/`vmap`
+  that preceded the decision). It is now a Python loop whose per-step residual is an `equinox.Module`
+  holding the previous states (`_BdfStep`), so the later timesteps run on the compiled Newton step the
+  opening ones build — measured 7/4/4 residual executions for the first three steps and exactly 1 for
+  every step after, that one being the march's own eager reference-norm evaluation. `docs/` carries the
+  pattern for users. **The lesson for the next decision of this shape: "which transforms does this
+  break" is not answered by grepping for the transforms' names — `lax.scan` traces its body just as
+  `jit` does, and a test tier found what the grep did not.** So `solve()` refuses a transform up front via
+  `refuse_a_transform_the_march_cannot_run_in` (defined in `march.py` and **exported**, since
+  `solve_coupled` and `solve_coupled_mass_flow` refuse on the same terms and library code may not
+  deep-import a `solve` submodule — `tests/unit/test_solve_api.py` fails the gate if it does). `jax.grad` is unaffected and is the mode the project needs — the march runs on stopped,
+  concrete values and the derivative is attached at the root afterwards.
+  - **What that cost at the four call sites, and the trap to avoid repeating.** `reused_flow_solve`,
+    `bulk_velocity_flow_solve`, `scalar_pseudo_transient_solve` and `solve_coupled_mass_flow` each wrapped
+    their solve in `eqx.filter_jit` for compile-cache reuse across sweeps; those wrappers are **removed**
+    (they would now hit the refusal). The reuse is preserved one level down, because `_march_step` is
+    itself `filter_jit`-compiled — **but only if the residual handed to the solve has a stable identity**.
+    Each of those call sites passed a freshly built `lambda`, which is a new static cache key per call and
+    would have recompiled the whole march every sweep. They now pass `assembler_residual` (the shared
+    module-level `(state, assembler) -> assembler.residual(state)`), `_BulkVelocityResidual`,
+    `_ParameterFreeResidual` or `_MassFlowConstrainedResidual` — small `equinox.Module`s whose settings
+    compare by value and whose arrays ride as dynamic leaves. `ImplicitNewtonSolver.solve` binds `theta`
+    into `_ResidualAt`, a module for the same reason. Pinned by
+    `test_a_carried_preconditioner_compiles_the_scalar_solve_once`.
+  - ⚠️ **That test measured nothing until this change fixed its fixture, and the reason generalizes.**
+    Under a `lax.while_loop` the body is traced whether or not it executes, so the test's later sweeps —
+    which started from the previous sweep's converged state and took **zero** steps — still reported
+    compilations. An eager loop that takes no steps compiles nothing, so both arms collapsed to the same
+    count. The fixture now disturbs the state each sweep so the march actually runs. The general form:
+    **a fixture that reaches a solver in a state with no work to do can pin a compilation property while
+    exercising none of the solve.**
 - **`root_adjoint.py` — BUILT 2026-09-15 (phase 1 of unifying the two Newton loops): the IFT adjoint is
   a standalone step, not a property of the loop.** `root_adjoint(residual_fn, root, theta, *,
   adjoint_solver=None, adjoint_preconditioner=None)` returns `root` unchanged and carries its derivative
@@ -400,16 +442,24 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   ⚠️ A `theta` holding a **callable leaf** was already refused before this change (the `custom_vjp`
   rejects non-JAX-type arguments) and still is; `jax.lax.stop_gradient` on such a tree also raises,
   which is why `stop_array_gradients` filters by `eqx.is_array`.
-  - **Convergence guard (binding — the IFT adjoint is only valid at a root).** `_forward` carries the
-    terminal residual norm out of the `while_loop` and wraps the returned field in `eqx.error_if`: if
-    the residual is non-finite or above `atol + rtol·‖R₀‖` (exhausted `max_steps`, or a `NaN`/`Inf`
-    that used to make `residual_norm > tol` short-circuit to `False` and exit with a poisoned field),
-    it **raises `eqx.EquinoxRuntimeError`** instead of returning. The guard runs before `root_adjoint`
-    is reached, on the stopped inputs, so it fires for both the forward value and the `jax.grad` path,
-    closing the silent-wrong-gradient hole where the transpose solve at a non-root stays well-posed
-    and raises no `NaN`. The stopping test is one helper, `forward_step.within_tolerance`, shared by the
-    loop `cond` and the guard. A `NaN` mid-iteration is often caught first by `lineax`'s own non-finite
-    guard at the next linear solve — both are hard errors, neither is silent.
+  - **Convergence guard (binding — the IFT adjoint is only valid at a root).** `solve()` reads
+    `MarchResult.converged` and **raises `eqx.EquinoxRuntimeError`** rather than returning a state that
+    is not a root: exhausted `max_steps`, stopped on a collapsing constraint cap, or a non-finite
+    residual norm. It runs before `root_adjoint` is reached, on the stopped inputs, so it fires for both
+    the forward value and the `jax.grad` path, closing the silent-wrong-gradient hole where the transpose
+    solve at a non-root stays well-posed and raises no `NaN`. A plain `raise` since the march is eager —
+    it was an `eqx.error_if` on a traced value while the loop was a `while_loop`; the exception type is
+    unchanged, which is what `solve_reynolds_continuation`'s retreat catches. A `NaN` mid-iteration is
+    often caught first by `lineax`'s own non-finite guard at the next linear solve — both are hard
+    errors, neither is silent.
+    - ⚠️ **`within_tolerance` alone cannot reject a diverged march, and the fix lives in the march
+      (2026-09-15).** It compares with `<=`, so when the residual norm *and* the threshold it is judged
+      against have both run away to `+inf`, `inf <= inf` is `True` — a false "converged" on a state that
+      solves nothing. (A `NaN` fails the comparison on its own; `+inf` is the case that needs help.) The
+      finiteness test therefore sits inside `forward_march`'s own `converged_at`, so **every** consumer of
+      `MarchResult.converged` inherits it rather than each driver re-deriving it, and the march refuses to
+      *step* from a non-finite residual at all — otherwise the step's Krylov solve raises first, reporting
+      a bug upstream of itself instead of the fact that the march never left a state solving nothing.
   - **✅ `solve_coupled(adjoint_solver=…)` — the transpose solve's Krylov settings are REACHABLE
     (BUILT 2026-08-14).** `ImplicitNewtonSolver` has carried an `adjoint_solver` field all along, but
     `solve_coupled` did not expose it: it forwarded the forward-only retry policy's `retry.solver`, and

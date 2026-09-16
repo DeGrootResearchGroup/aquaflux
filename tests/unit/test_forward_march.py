@@ -25,7 +25,6 @@ from aquaflux.solve import (
     CycleGrowthTrigger,
     DampedNewtonStep,
     DualTimeControl,
-    ImplicitNewtonSolver,
     PseudoTransientStep,
     RetryPolicy,
     ShiftTerm,
@@ -150,24 +149,53 @@ def _march_and_solver_inputs():
     return _Cubic(theta), jnp.ones_like(theta), jnp.cbrt(theta)
 
 
-def test_march_without_a_trigger_reaches_the_same_root_as_the_newton_solver() -> None:
-    """The eager march and the traced Newton march take the same path on the same problem.
+def test_march_without_a_trigger_reaches_the_analytic_root() -> None:
+    """Left alone, the march converges to the root and says so.
 
-    They share the step strategy, the residual measure, and the tolerance test; only the loop differs
-    (a Python ``for`` versus a ``lax.while_loop``). This pins that the one duplicated piece -- the loop
-    shell -- has not drifted.
+    It used to compare itself against a second, traced Newton loop, which no longer exists -- there is
+    one march, and `ImplicitNewtonSolver` runs it -- so the comparison would now be against itself.
+    The analytic cube root is an independent reference and is what this checks against.
     """
     residual, phi0, root = _march_and_solver_inputs()
-    step = DampedNewtonStep(line_search=10)
 
-    marched = forward_march(step, residual, phi0, max_steps=50, rtol=1e-10, atol=1e-12)
-    solved = ImplicitNewtonSolver(rtol=1e-10, atol=1e-12, max_steps=50, forward_step=step).solve(
-        lambda p, r: r(p), phi0, residual
+    marched = forward_march(
+        DampedNewtonStep(line_search=10), residual, phi0, max_steps=50, rtol=1e-10, atol=1e-12
     )
 
     assert marched.converged
     assert jnp.allclose(marched.state, root, atol=1e-8)
-    assert jnp.allclose(marched.state, solved, atol=1e-8)
+
+
+class _AlreadyInfinite(eqx.Module):
+    """A residual that is ``+inf`` at every state: a march handed one has diverged before it began."""
+
+    def __call__(self, phi: jnp.ndarray) -> jnp.ndarray:
+        # A genuine function of `phi` (1/0), not a bare `inf` fill, so the value the march reads is
+        # one the arithmetic produced rather than a constant folded in.
+        return 1.0 / phi
+
+
+def test_a_march_whose_residual_is_already_infinite_does_not_report_converged() -> None:
+    """The tolerance test alone cannot reject this, and the march must not step it either.
+
+    ``within_tolerance`` compares with ``<=``. When the residual norm and the threshold it is judged
+    against have both run away to ``+inf``, ``inf <= inf`` is ``True`` -- so a march that only asked
+    that question would report a state solving nothing as converged, and its caller would attach an
+    adjoint to it. (A ``NaN`` fails the comparison on its own; ``+inf`` is the case needing the
+    explicit finiteness test.)
+
+    It must also take **no steps**: the first step's Krylov solve would be handed a non-finite
+    right-hand side and raise from inside ``lineax``, reporting a bug upstream of itself rather than
+    the fact the caller needs.
+    """
+    result = forward_march(
+        DampedNewtonStep(), _AlreadyInfinite(), jnp.zeros(3), max_steps=5, rtol=1e-10, atol=1e-12
+    )
+
+    # The fixture really is the case under test: non-finite before a single step is taken.
+    assert not jnp.all(jnp.isfinite(_AlreadyInfinite()(jnp.zeros(3))))
+    assert not result.converged
+    assert result.reports == ()
 
 
 class _PoisonUnlessTight(eqx.Module):

@@ -41,6 +41,30 @@ from .preconditioner import ScalarTransportPreconditioner
 _ScalarResidual = Callable[[jnp.ndarray], jnp.ndarray]
 
 
+class _ParameterFreeResidual(eqx.Module):
+    """``(phi, theta) -> residual(phi)``: a bare residual in the two-argument form the solver takes.
+
+    A scalar sweep's residual has no differentiable parameters -- its closure fields are frozen into
+    it -- so ``theta`` is ``None`` and this drops it. It is a **module, not a lambda**, because the
+    march compiles each step with the residual as an argument: a closure built per sweep is hashed by
+    identity and would recompile the whole solve every sweep, which is the cost the frozen
+    preconditioner is carried across sweeps to avoid. As a module, ``residual`` (itself a bound method
+    of the sweep's assembler) rides as dynamic array leaves over a fixed structure, so a sweep that
+    changes only values is a compilation-cache hit.
+
+    Attributes
+    ----------
+    residual : callable
+        The bare ``phi -> R`` for this sweep.
+    """
+
+    residual: _ScalarResidual
+
+    def __call__(self, phi: jnp.ndarray, theta: object) -> jnp.ndarray:
+        del theta
+        return self.residual(phi)
+
+
 class ScalarShiftPolicy(eqx.Module):
     """The shift policy for a scalar transport equation's pseudo-transient continuation.
 
@@ -139,7 +163,6 @@ def scalar_pseudo_transient_solve(
         above).
     """
 
-    @eqx.filter_jit
     def solve_scalar(
         residual: _ScalarResidual,
         state: jnp.ndarray,
@@ -154,6 +177,6 @@ def scalar_pseudo_transient_solve(
         newton = ImplicitNewtonSolver(
             rtol=rtol, atol=atol, max_steps=max_steps, solver=solver, forward_step=forward
         )
-        return newton.solve(lambda s, _theta: residual(s), state, None)
+        return newton.solve(_ParameterFreeResidual(residual), state, None)
 
     return solve_scalar

@@ -68,6 +68,7 @@ from aquaflux.solve import (
     ShiftBasis,
     ShiftTerm,
     VelocityShiftParts,
+    assembler_residual,
 )
 
 from .block_preconditioner import BlockPreconditioner
@@ -256,10 +257,9 @@ def reused_flow_solve(
     A segregated outer loop (e.g. the k--omega SST driver) re-solves the momentum system every sweep
     with an updated eddy viscosity ``nu + nu_t``. Building a fresh continuation each sweep rebuilds
     the (off-jit) block-preconditioner AMG hierarchies and, because each is a new object, retraces
-    and recompiles the whole solve — a per-sweep cost that grows with mesh size. This helper builds
-    the continuation once from ``reference`` and returns a jitted solve, so a sweep changes only the
-    viscosity *values* passed as the residual parameters: the compiled solve is reused and nothing is
-    rebuilt.
+    and recompiles the march step — a per-sweep cost that grows with mesh size. This helper builds
+    the continuation once from ``reference``, so a sweep changes only the viscosity *values* passed as
+    the residual parameters: the compiled step is reused and nothing is rebuilt.
 
     Freezing the preconditioner at one viscosity stays effective across the sweeps because the
     preconditioner only accelerates the Krylov iteration (it never enters the converged residual or
@@ -284,14 +284,19 @@ def reused_flow_solve(
     -------
     callable
         ``solve_flow(momentum, state) -> state`` solving ``momentum.residual`` from ``state`` with the
-        frozen preconditioned continuation. Reverse-differentiable in ``momentum`` (the underlying
-        implicit-function-theorem adjoint is unchanged; the ``jit`` wrapper is transparent to it).
+        frozen preconditioned continuation. Reverse-differentiable in ``momentum`` (the
+        implicit-function-theorem adjoint is one transpose solve at the root, whatever path the march
+        took to reach it). Like every march, it steps in Python and so cannot itself be called from inside
+        a traced program -- ``jax.jit``, ``jax.vmap``, or a traced loop such as ``jax.lax.scan``.
     """
     continuation = momentum_continuation(reference, **build_kwargs)
     solver = ImplicitNewtonSolver(max_steps=max_steps, forward_step=continuation)
 
-    @eqx.filter_jit
     def solve_flow(momentum: MomentumContinuity, state: jnp.ndarray) -> jnp.ndarray:
-        return solver.solve(lambda s, m: m.residual(s), state, momentum)
+        # `assembler_residual` rather than a lambda: the march compiles its step with the residual as
+        # an argument, so a closure built here would be a fresh cache key on every sweep and recompile
+        # the solve this helper exists to reuse. `momentum` rides as the parameter, whose arrays are
+        # dynamic leaves, so a sweep that changes only the viscosity is a cache hit.
+        return solver.solve(assembler_residual, state, momentum)
 
     return solve_flow

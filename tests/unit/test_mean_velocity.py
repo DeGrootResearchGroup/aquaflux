@@ -173,7 +173,7 @@ def test_preconditioned_iterative_solve_matches_the_direct_solve() -> None:
 
 def test_preconditioner_requires_a_reference() -> None:
     """A preconditioner needs a concrete reference for the border geometry (else it would carry a
-    tracer through the jitted solve and break differentiation)."""
+    tracer into the preconditioner under ``jax.grad`` and break differentiation)."""
     with pytest.raises(ValueError, match="reference"):
         bulk_velocity_flow_solve(
             target=U_TARGET, solver=lx.GMRES(rtol=1e-8, atol=1e-10), preconditioner=lambda w: w

@@ -14,6 +14,7 @@ import pytest
 from aquaflux.solve import ImplicitNewtonSolver
 from aquaflux.solve.forward_step import within_tolerance
 from aquaflux.solve.implicit import DampedNewtonStep
+from aquaflux.solve.implicit import forward_march as _production_forward_march
 
 
 def _residual(x, theta):
@@ -153,6 +154,118 @@ def test_a_residual_and_its_threshold_that_both_diverge_to_infinity_still_raises
     solver = ImplicitNewtonSolver()
     with pytest.raises(eqx.EquinoxRuntimeError, match="did not converge"):
         solver.solve(_infinite_residual, jnp.zeros(1), jnp.array([1.0])).block_until_ready()
+
+
+@pytest.mark.parametrize("transform", ["jit", "vmap", "scan"])
+def test_the_solve_refuses_a_traced_caller_before_any_work(transform) -> None:
+    """The march steps in Python on concrete values, which a traced program never provides.
+
+    Under ``jax.grad`` the march runs on a ``stop_gradient`` copy, which *is* concrete, so gradients
+    are unaffected -- the other tests here rely on that. Inside a trace the inputs stay abstract and
+    the march would fail somewhere inside itself, on a message about converting a tracer. It is
+    refused at the door instead, and the residual is never evaluated: the check is what runs first,
+    not what runs after a step has already been attempted.
+
+    ``scan`` is here because it is the arm that has a real consumer and the one a search for
+    ``jit``/``vmap`` misses: a transient march steps a nonlinear solve once per timestep, and
+    ``lax.scan`` traces its body exactly as ``jit`` does. Such a loop must be written in Python
+    (``test_limited_advection.py`` is the case in this repository).
+    """
+    evaluations = {"n": 0}
+
+    def counted(x, theta):
+        evaluations["n"] += 1
+        return _residual(x, theta)
+
+    solver = ImplicitNewtonSolver()
+    theta = jnp.array([2.0])
+    with pytest.raises(ValueError, match=r"cannot run inside a traced program"):
+        if transform == "jit":
+            eqx.filter_jit(lambda th: solver.solve(counted, jnp.zeros(1), th))(theta)
+        elif transform == "vmap":
+            jax.vmap(lambda th: solver.solve(counted, jnp.zeros(1), th))(jnp.stack([theta, theta]))
+        else:
+            jax.lax.scan(
+                lambda carry, _: (solver.solve(counted, carry, theta), None),
+                jnp.zeros(1),
+                None,
+                length=2,
+            )
+    assert evaluations["n"] == 0
+
+
+def test_the_non_convergence_error_says_where_the_march_stopped() -> None:
+    """The message carries the residual reached and the steps spent, so a march that ran out of budget
+    is distinguishable from one that stalled -- the two want opposite responses (raise ``max_steps``
+    versus strengthen the globalization), and the step count is what tells them apart."""
+    solver = ImplicitNewtonSolver(max_steps=2)
+    with pytest.raises(eqx.EquinoxRuntimeError, match=r"after 2 of 2 steps"):
+        solver.solve(_residual, jnp.zeros(1), jnp.array([50.0])).block_until_ready()
+
+
+def test_the_solver_hands_the_march_the_settings_it_was_built_with(monkeypatch) -> None:
+    """The solver's own job is now wiring: it owns the tolerances, the budget, the step strategy and
+    the linear solver, and the march does the iterating. A setting that failed to reach the march
+    would leave the march running on its own defaults, which for ``max_steps`` or ``rtol`` is the
+    difference between a converged answer and a wrong one -- and nothing in the returned field would
+    say so."""
+    from aquaflux.solve import implicit
+
+    seen = {}
+
+    def spy(step, residual, phi0, **kwargs):
+        seen.update(kwargs, step=step, residual=residual, phi0=phi0)
+        return _production_forward_march(step, residual, phi0, **kwargs)
+
+    monkeypatch.setattr(implicit, "forward_march", spy)
+    step = DampedNewtonStep(line_search=4)
+    solver = ImplicitNewtonSolver(rtol=1e-8, atol=1e-11, max_steps=17, forward_step=step)
+    theta = jnp.array([2.0])
+
+    solver.solve(_residual, jnp.zeros(1), theta)
+
+    assert seen["step"] is step
+    assert (seen["rtol"], seen["atol"], seen["max_steps"]) == (1e-8, 1e-11, 17)
+    assert seen["solver"] == step.default_solver()
+    # The residual reaches the march bound to the parameter, as the one-argument form it steps.
+    assert seen["residual"].residual_fn is _residual
+    assert jnp.array_equal(seen["residual"].theta, theta)
+
+
+def test_a_stable_residual_keeps_repeated_solves_on_one_compiled_step() -> None:
+    """Re-solving the same problem at new parameter *values* must not recompile the march step.
+
+    The step is compiled with the residual as an argument, so whatever the residual carries that is
+    not an array is part of its cache key. Passing the same function object keeps that key fixed and
+    lets the parameter ride as data; building a ``lambda`` at the call site makes a new object every
+    call, and a solver reused across a sweep would then pay a full compilation per sweep. Both arms
+    are measured here, because the second is the trap and a test of only the first would pass just as
+    well if the binding had been written as a closure.
+
+    One residual execution per solve is the floor: the march evaluates it once, eagerly, for the
+    reference norm it judges progress against.
+    """
+    evaluations = {"n": 0}
+
+    def counted(x, theta):
+        evaluations["n"] += 1
+        return _residual(x, theta)
+
+    solver = ImplicitNewtonSolver()
+    theta = jnp.array([2.0, -5.0, 0.3])
+
+    solver.solve(counted, jnp.zeros(3), theta)
+    first = evaluations["n"]
+    evaluations["n"] = 0
+    solver.solve(counted, jnp.zeros(3), 1.1 * theta)
+    reused = evaluations["n"]
+    evaluations["n"] = 0
+    solver.solve(lambda x, th: counted(x, th), jnp.zeros(3), 1.1 * theta)
+    rebuilt = evaluations["n"]
+
+    assert first > 1  # the first solve compiles the step
+    assert reused == 1  # the second runs on it: only the eager reference-norm evaluation
+    assert rebuilt > reused  # a fresh lambda is a fresh key, and compiles again
 
 
 def test_non_convergence_raises_on_the_grad_path_too() -> None:

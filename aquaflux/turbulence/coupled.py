@@ -91,6 +91,7 @@ from aquaflux.solve import (
     SubLayout,
     TransposedPreconditioner,
     VelocityShiftParts,
+    assembler_residual,
     block_stencil_colouring,
     block_stencil_gather_map,
     column_probe_plan,
@@ -98,6 +99,7 @@ from aquaflux.solve import (
     forward_march,
     positive_block_limit,
     positive_block_projection,
+    refuse_a_transform_the_march_cannot_run_in,
     relative_residual_gmres,
     root_adjoint,
     stop_array_gradients,
@@ -3641,7 +3643,8 @@ def solve_coupled(
     preconditioner re-fit or refresh, a step control, a retry, a callback -- is ordinary Python on
     concrete values that never reaches the gradient, and all of it works under ``jax.grad``. Observing a
     solve with ``on_step`` or ``on_checkpoint`` changes nothing about it. For the same reason it cannot
-    run under ``jax.jit`` or ``jax.vmap``, where the values are abstract: call it outside those
+    run inside a traced program (``jax.jit``, ``jax.vmap``, ``jax.lax.scan``), where the values are
+    abstract: call it outside those
     transforms.
 
     Parameters
@@ -3838,11 +3841,12 @@ def solve_coupled(
         target. The implicit-function-theorem adjoint is valid only at a root, so a state that is not
         one is refused rather than returned.
     ValueError
-        If called under ``jax.jit`` or ``jax.vmap``.
+        If called from inside a traced program -- ``jax.jit``, ``jax.vmap``, or a traced loop such as
+        ``jax.lax.scan``.
     TypeError
         If a continuation setting is passed where the continuation is not built here.
     """
-    _refuse_a_transform_the_march_cannot_run_in((coupled, flow, k, omega))
+    refuse_a_transform_the_march_cannot_run_in((coupled, flow, k, omega), caller="solve_coupled")
     # The march runs on a stopped copy of the assembler, so every build, re-fit, refresh and step below
     # sees concrete arrays even under `jax.grad`. The derivative is attached at the root afterwards.
     frozen = stop_array_gradients(coupled)
@@ -3955,34 +3959,13 @@ def solve_coupled(
         )
     root = _reject_a_root_the_frozen_cap_invalidates(frozen, state)
     root = root_adjoint(
-        _coupled_residual,
+        assembler_residual,
         root,
         coupled,
         adjoint_solver=adjoint_solver,
         adjoint_preconditioner=continuation.adjoint_preconditioner(),
     )
     return coupled.physical_fields(root)
-
-
-def _coupled_residual(state: jnp.ndarray, coupled: CoupledRANS) -> jnp.ndarray:
-    """``R(state; coupled)``, with the assembler as the argument the adjoint differentiates."""
-    return coupled.residual(state)
-
-
-def _refuse_a_transform_the_march_cannot_run_in(pytree: object) -> None:
-    """Raise if ``pytree`` holds abstract values, i.e. the solve is inside ``jax.jit`` or ``jax.vmap``.
-
-    The coupled march steps in Python on concrete values. Under ``jax.grad`` a ``stop_gradient`` copy
-    of an input is concrete, so the march runs and the derivative is attached at the root afterwards;
-    under ``jax.jit`` or ``jax.vmap`` it is still abstract, and the march would fail part way with an
-    error about converting a tracer. Refuse up front instead, saying what to do.
-    """
-    stopped = stop_array_gradients(pytree)
-    if any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree.leaves(stopped)):
-        raise ValueError(
-            "solve_coupled steps its march in Python on concrete values, so it cannot run under "
-            "jax.jit or jax.vmap. Call it outside those transforms; jax.grad through it is supported."
-        )
 
 
 class _MassFlowBorderedPolicy(eqx.Module):
@@ -4153,6 +4136,43 @@ def mass_flow_coupled_continuation(
     )
 
 
+class _MassFlowConstrainedResidual(eqx.Module):
+    """The coupled residual bordered with ``<U_dir> - target``, as a two-argument residual.
+
+    The coupled assembler arrives as the parameter ``theta`` rather than being captured, so the
+    implicit-function-theorem adjoint returns its cotangent and the constrained solve is
+    reverse-differentiable in it. Everything the residual reads from the assembler therefore comes
+    from ``theta``, including the cell volumes.
+
+    A **module rather than a closure**, for the same reason as its flow-block counterpart
+    ``_BulkVelocityResidual`` in ``aquaflux/flow/mean_velocity.py``: the march compiles its step with
+    the residual as an argument, so a closure built per solve would be hashed by identity and
+    recompile the march on every call.
+
+    Attributes
+    ----------
+    flow_direction : int
+        The streamwise axis the bulk velocity is measured and the body force applied along.
+    target : float
+        The bulk (volume-averaged) velocity component to hold.
+    """
+
+    flow_direction: int
+    target: float
+
+    def __call__(self, augmented: jnp.ndarray, theta: CoupledRANS) -> jnp.ndarray:
+        # beta (the last entry) overrides the assembler's body force.
+        coupled_state, beta = augmented[:-1], augmented[-1]
+        forced_momentum = _with_body_force(theta.momentum, self.flow_direction, beta)
+        forced = eqx.tree_at(lambda c: c.momentum, theta, forced_momentum)
+        r_coupled = forced.residual(coupled_state)
+        flow_state, _, _ = theta.layout.unpack(coupled_state)
+        velocity, _ = theta.momentum.unpack(flow_state)
+        volume = theta.momentum.geometry.cell.volume
+        bulk = jnp.sum(velocity[:, self.flow_direction] * volume) / jnp.sum(volume)
+        return jnp.append(r_coupled, bulk - self.target)
+
+
 def solve_coupled_mass_flow(
     coupled: CoupledRANS,
     target: float,
@@ -4210,6 +4230,9 @@ def solve_coupled_mass_flow(
         ``continuation``, which already carries its configuration -- they would otherwise be dropped
         without a word.
     """
+    refuse_a_transform_the_march_cannot_run_in(
+        (coupled, flow, k, omega), caller="solve_coupled_mass_flow"
+    )
     given = dict(continuation_kwargs)
     if preconditioner is not None:
         given["preconditioner"] = preconditioner
@@ -4251,18 +4274,6 @@ def solve_coupled_mass_flow(
         **({} if adjoint_solver is None else {"adjoint_solver": adjoint_solver}),
     )
 
-    def constrained_residual(augmented: jnp.ndarray, theta: CoupledRANS) -> jnp.ndarray:
-        # theta is the coupled assembler (the differentiable parameter); beta overrides its body force.
-        coupled_state, beta = augmented[:-1], augmented[-1]
-        forced_momentum = _with_body_force(theta.momentum, flow_direction, beta)
-        forced = eqx.tree_at(lambda c: c.momentum, theta, forced_momentum)
-        r_coupled = forced.residual(coupled_state)
-        flow_state, _, _ = theta.layout.unpack(coupled_state)
-        velocity, _ = theta.momentum.unpack(flow_state)
-        volume = theta.momentum.geometry.cell.volume
-        bulk = jnp.sum(velocity[:, flow_direction] * volume) / jnp.sum(volume)
-        return jnp.append(r_coupled, bulk - target)
-
-    solved = solver.solve(constrained_residual, augmented0, coupled)
+    solved = solver.solve(_MassFlowConstrainedResidual(flow_direction, target), augmented0, coupled)
     flow_s, k_s, omega_s = coupled.physical_fields(solved[:-1])
     return flow_s, k_s, omega_s, solved[-1]

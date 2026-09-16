@@ -131,12 +131,12 @@ What to take from it, none of which is specific to that mechanism:
   Two concrete strategies: **`DampedNewtonStep`** (default — the backtracking line search, holding
   the forward/adjoint preconditioner and the line-search count) and **`PseudoTransientStep`**
   (`aquaflux/solve/`, the residual-agnostic diagonally-shifted march; the flow configures it via
-  `aquaflux/flow/`'s `momentum_continuation` factory — no wrapper class). `_forward` calls the
+  `aquaflux/flow/`'s `momentum_continuation` factory — no wrapper class). The march calls the
   injected step unconditionally — there is **no `if continuation is None` branch**, and **no separate
   `line_search`/`preconditioner`/`continuation` constructor args** (they were unified here; do not
   reintroduce them). Each strategy's shift vanishes at the fixed point, so the converged state and
   the IFT adjoint are strategy-independent. When adding a globalization (e.g. a monotone/forcing
-  acceptance), add a `ForwardStep` — do **not** grow a branch in `_forward`.
+  acceptance), add a `ForwardStep` — do **not** grow a branch in the march.
   - **`ShiftedForwardStep` is the SECOND contract, and the eager march's beta machinery requires it
     (binding, 2026-08-15).** `ForwardStep` says what every strategy must *do*; `ShiftedForwardStep`
     says what one must additionally *carry* — a `relaxation_schedule` holding `beta` as a readable,
@@ -186,7 +186,7 @@ What to take from it, none of which is specific to that mechanism:
   `RelaxationSchedule` for the shift strength β, the diagonally-shifted solve `(J + diag(βd))δ = −R`
   (`solve_linear(throw=False)`), and the closed-loop accept/escalate `while_loop`. **`stepper()`
   returns a `StepOutcome`** carrying the accepted attempt's cycle count, its line-search factor α (the
-  step-quality signal, ≤1; `_forward` drops both off the `custom_vjp` primal, a march reads them), and
+  step-quality signal, ≤1; a march reads both off the report), and
   **its `residual_norm`** — the measure at the accepted candidate, which the escalation carry now
   transports beside the candidate it belongs to (a fully-rejected step returns `phi` untouched, so it
   reports `phi`'s own measure, the `residual_norm` the caller handed in). The attempt already formed it
@@ -421,13 +421,13 @@ What to take from it, none of which is specific to that mechanism:
     the cost of the step actually taken. **A step whose every attempt was rejected reports `0`**
     (`best_cycles` is only written on acceptance): a consumer must treat `0` as *no measurement*, not
     as *free*, or a rejected step reads as the cheapest in the march. Consumed by `forward_march`
-    (`solve-march.md`); dropped by `_forward`.
-  - **The count is NOT carried out of `_forward`'s `while_loop` (binding).** It would force the
-    *generic* Newton loop to pick which step's count survives (last / max / sum), which is a reporting
-    policy the solver has no business owning. Per-step cost is observed eagerly instead, by
-    `forward_march`. (A second reason, that an `int32` would land in the primal output of the solve's
-    `custom_vjp`, lapsed on 2026-09-15: the loop now runs outside it, and the adjoint is attached
-    afterwards by `root_adjoint`.)
+    (`solve-march.md`), which is since 2026-09-15 the only march there is.
+  - ⚠️ **"The count is NOT carried out of `_forward`'s `while_loop`" is DEAD — there is no such loop
+    (deleted 2026-09-15, phase 3).** Both of its reasons have lapsed: a generic Newton loop no longer
+    has to choose which step's count survives, because the one march reports **every** step through
+    `StepReport`; and the `int32`-in-a-`custom_vjp`-primal objection went when the loop moved outside
+    the `custom_vjp` (the adjoint is attached afterwards by `root_adjoint`). Per-step cost is simply
+    observed.
 
   - **`line_search` — backtrack the shifted step before escalating β (binding, the coupled-RANS fix).**
     The step optionally scales the shifted correction `δ` back along `{1, 1/2, …, 1/2**line_search}`
@@ -477,8 +477,8 @@ What to take from it, none of which is specific to that mechanism:
     matvecs to the same `x_r/h`, trajectory unchanged.
 
   - **The residual measure is an injected `ResidualNorm`, owned by the `ForwardStep` (`solve/norm.py`).**
-    Every `ForwardStep` exposes `norm()`; `ImplicitNewtonSolver` reads it for the outer stopping test
-    (threaded into `_forward` as its argument `norm_fn`) and the strategy
+    Every `ForwardStep` exposes `norm()`; the march reads it for the outer stopping test
+    (`forward_march`'s segment reference, or a per-iteration `norm_builder`) and the strategy
     uses the *same* measure for its own globalization — so the convergence test, the SER ramp
     `β = β₀(‖R‖/‖R₀‖)^p`, `backtracking_line_search` (which now takes a `norm=` kwarg), and the
     `DivergenceGuard` all agree on one scale. Default is `jnp.linalg.norm` (`DampedNewtonStep.norm()` and

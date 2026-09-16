@@ -18,7 +18,7 @@ from aquaflux.flow import BlockPreconditioner, MomentumContinuity, MovingWall, N
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver
+from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver, assembler_residual
 from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
@@ -40,7 +40,7 @@ def _solve_flow(momentum, state):
     solver = ImplicitNewtonSolver(
         max_steps=30, forward_step=DampedNewtonStep(preconditioner=preconditioner)
     )
-    return momentum, solver.solve(lambda s, m: m.residual(s), state, momentum)
+    return momentum, solver.solve(assembler_residual, state, momentum)
 
 
 def _cavity():

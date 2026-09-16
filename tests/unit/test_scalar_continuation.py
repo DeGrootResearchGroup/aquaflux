@@ -215,7 +215,13 @@ def _sweep_traces(*, freeze):
 
     Mimics the driver's sweep: a shift diagonal rebuilt from a changing diffusivity each sweep, with
     the preconditioner either carried across sweeps or rebuilt. Returns the per-sweep count of
-    residual traces and the converged field.
+    residual executions and the converged field.
+
+    Each sweep starts from a **disturbed** state, and that is load-bearing rather than incidental: the
+    residual itself is fixed across sweeps (only the shift and the preconditioner follow the changing
+    diffusivity), so a sweep resumed from the previous sweep's converged state is already inside
+    tolerance and marches zero steps -- and a march that takes no steps compiles nothing, so both arms
+    would report the same count and the test could not tell them apart.
     """
     mesh, geometry, volume_flux, residual = _reactive_transport(16, 8)
     n = mesh.n_cells
@@ -245,26 +251,32 @@ def _sweep_traces(*, freeze):
             )
         )
         before = traces["n"]
-        state = solve(counting_residual, state, ScalarShiftPolicy(shift, precond))
+        state = solve(
+            counting_residual, state * (1.0 + 0.25 * sweep), ScalarShiftPolicy(shift, precond)
+        )
         per_sweep.append(traces["n"] - before)
     return per_sweep, state
 
 
 def test_a_carried_preconditioner_compiles_the_scalar_solve_once() -> None:
-    """Reusing one preconditioner across sweeps makes the jitted solve a compilation-cache hit.
+    """Reusing one preconditioner across sweeps makes the compiled march step a cache hit.
 
     The preconditioner is a frozen, off-jit constant, so ``equinox.filter_jit`` keeps it on the
-    static side, hashed by object identity: carrying **one** instance across sweeps reuses the
-    compiled solve, while a freshly built one each sweep re-compiles the whole
-    ``ImplicitNewtonSolver`` -- the escalation loop, the GMRES, and the V-cycle. Only the shift
-    diagonal changes per sweep, and being an array it re-traces nothing.
+    static side of the march step, hashed by object identity: carrying **one** instance across sweeps
+    reuses the compiled step, while a freshly built one each sweep re-compiles it -- the escalation
+    loop, the GMRES, and the V-cycle. Only the shift diagonal changes per sweep, and being an array it
+    re-traces nothing.
+
+    The count is residual *executions*, and a converged sweep is not free of them: the march evaluates
+    the residual once, eagerly, for the reference norm it judges progress against. So **one** per sweep
+    is the no-recompile floor here, and a retrace costs several on top of it.
     """
     frozen, frozen_state = _sweep_traces(freeze=True)
     rebuilt, rebuilt_state = _sweep_traces(freeze=False)
 
-    assert frozen[0] > 0  # the first sweep compiles
-    assert frozen[1:] == [0, 0, 0]  # and every later sweep is a cache hit
-    assert all(count > 0 for count in rebuilt)  # rebuilding re-compiles every sweep
+    assert frozen[0] > 1  # the first sweep compiles
+    assert frozen[1:] == [1, 1, 1]  # and every later sweep runs on the compiled step
+    assert all(count > 1 for count in rebuilt[1:])  # rebuilding re-compiles every sweep
     # Freezing the preconditioner only changes how fast the Krylov iteration converges, never the
     # converged field -- so the two paths agree to solver tolerance.
     assert float(jnp.max(jnp.abs(frozen_state - rebuilt_state))) < 1e-10
