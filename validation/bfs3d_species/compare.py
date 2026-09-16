@@ -69,7 +69,7 @@ from aquaflux.io import (  # noqa: E402
     read_volume_scalar_field,
 )
 from aquaflux.schemes import CorrectedGreenGauss, VenkatakrishnanLimiter  # noqa: E402
-from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver  # noqa: E402
+from aquaflux.solve import DampedNewtonStep, RootSolver  # noqa: E402
 from aquaflux.transport import ScalarTransport, effective_diffusivity  # noqa: E402
 from aquaflux.turbulence import scalar_transport_preconditioner  # noqa: E402
 from injector import injected_value  # noqa: E402
@@ -166,8 +166,8 @@ def solve_tracer(transport, mesh, geometry, flux, diffusivity):
         residual,
         jnp.zeros(mesh.n_cells),
     )
-    solver = ImplicitNewtonSolver(
-        max_steps=20, forward_step=DampedNewtonStep(preconditioner=preconditioner)
+    solver = RootSolver(
+        max_steps=20, strategy=DampedNewtonStep(preconditioner=preconditioner)
     )
     return solver.solve(lambda c, _: residual(c), jnp.zeros(mesh.n_cells), None)
 

@@ -1,7 +1,7 @@
 """The observed, forward-only Newton march, and the staleness trigger that watches it.
 
-:func:`forward_march` is the loop every Newton solve in this package runs on. It steps an injected
-:class:`~aquaflux.solve.ForwardStep` until the residual meets a tolerance, and between steps — in
+:func:`newton_march` is the loop every Newton solve in this package runs on. It steps an injected
+:class:`~aquaflux.solve.NewtonStrategy` until the residual meets a tolerance, and between steps — in
 plain Python, outside the compiled step — it reports what the step cost, lets a control reshape the
 next one, lets a policy redo a bad one, and can stop early so a driver can do work no traced program
 could.
@@ -19,14 +19,14 @@ on ``stop_gradient`` copies, so it sees concrete values, and the derivative is a
 converged state afterwards by :func:`~aquaflux.solve.root_adjoint` — one transpose solve at the root,
 independent of how the march reached it, so nothing about the iteration is taped.
 
-**The march's state is an answer only when it reports ``converged``.** :func:`forward_march`
+**The march's state is an answer only when it reports ``converged``.** :func:`newton_march`
 deliberately has **no** non-convergence guard of its own — stopping short, on a trigger or out of
 steps, is part of its purpose — so the driver that calls it owns that test, and refuses a state that is
 not a root before attaching the adjoint to it. A state the march hands back carries no guarantee
 beyond what :attr:`MarchResult.converged` states.
 
 **Two reference residual norms, and conflating them breaks the march.** Each call to
-:func:`forward_march` computes its own ``residual_norm_0`` from the state it is handed, and passes
+:func:`newton_march` computes its own ``residual_norm_0`` from the state it is handed, and passes
 *that* to the step. The pseudo-transient schedule ramps its damping as ``beta = beta_0 (‖R‖/‖R₀‖)^p``,
 so a segment restarted after a refresh must restart its ramp too. (A refresh **carries** the shift
 diagonals rather than rebuilding them -- rebuilding them was measured to freeze the march -- so the
@@ -49,10 +49,10 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 
-from .forward_step import ForwardStep, StepControl, StepOutcome, StepReport, within_tolerance
 from .norm import ResidualNorm
 from .retry import ESCALATING_REASONS, NO_RETRIES, RetryPolicy
 from .root_adjoint import stop_array_gradients
+from .strategy import NewtonStrategy, StepControl, StepOutcome, StepReport, within_tolerance
 
 
 def refuse_a_transform_the_march_cannot_run_in(pytree: object, *, caller: str) -> None:
@@ -95,7 +95,7 @@ def refuse_a_transform_the_march_cannot_run_in(pytree: object, *, caller: str) -
 def combine_observers(*callbacks: Callable[..., None]) -> Callable[..., None]:
     """Fan one march callback out to several observers, called in order with the same arguments.
 
-    ``forward_march`` takes a single ``on_step`` / ``on_checkpoint``, but a run usually wants more than
+    ``newton_march`` takes a single ``on_step`` / ``on_checkpoint``, but a run usually wants more than
     one thing to happen per step -- log it *and* checkpoint it. Composing them here keeps a driver from
     writing its own lambda, which is where one observer silently gets dropped from a later edit.
 
@@ -129,7 +129,7 @@ def combine_observers(*callbacks: Callable[..., None]) -> Callable[..., None]:
 
 
 class MarchResult(NamedTuple):
-    """The outcome of one :func:`forward_march` segment.
+    """The outcome of one :func:`newton_march` segment.
 
     Attributes
     ----------
@@ -141,13 +141,13 @@ class MarchResult(NamedTuple):
     converged : bool
         Whether the march reached the requested tolerance against the global reference norm, with a
         finite residual norm. A non-finite one is never reported as converged, however the tolerance
-        test compares (see :func:`forward_march`).
+        test compares (see :func:`newton_march`).
     triggered : bool
         Whether the march stopped early because the injected trigger fired.
     control_state : object
         The injected :class:`StepControl`'s carried state as of the last step (``None`` if no control
         was used). Returned so a driver running one segment per preconditioner refresh can **thread** it
-        into the next segment's :func:`forward_march`, rather than each segment restarting the control
+        into the next segment's :func:`newton_march`, rather than each segment restarting the control
         from scratch — a stateful control (e.g. one climbing the shift strength over many steps) would
         otherwise throw its progress away at every refresh.
     """
@@ -178,7 +178,7 @@ class ResidualHomotopy(Protocol):
 
     **The stopping test is gated on arrival.** A march running a homotopy may not stop on its residual
     tolerance until :meth:`arrived` is true, because a small residual at an intermediate station says
-    nothing about the target problem. :func:`forward_march` enforces this; an implementation only has
+    nothing about the target problem. :func:`newton_march` enforces this; an implementation only has
     to answer honestly.
 
     **Stations are coarser than steps, deliberately.** :meth:`enter` is called once per outer step, but
@@ -196,7 +196,7 @@ class ResidualHomotopy(Protocol):
         does it here, so the operator the step solves against and the residual it drives agree.
 
         Return a **bound method of a module** rather than a freshly-built closure, for the same reason
-        :func:`forward_march`'s own ``residual_fn`` must be one: its arrays then ride as dynamic leaves
+        :func:`newton_march`'s own ``residual_fn`` must be one: its arrays then ride as dynamic leaves
         and each step stays a compilation-cache hit instead of recompiling per station.
         """
 
@@ -224,7 +224,7 @@ class ResidualHomotopy(Protocol):
         keys on the residual *ratio* forms that ratio across consecutive steps, and the ratio is
         meaningful only when both residuals came from the same station -- a station change raises the
         residual because the problem got harder, which such a control would otherwise read as
-        divergence and brake on. :func:`forward_march` therefore rebases the control at a change (see
+        divergence and brake on. :func:`newton_march` therefore rebases the control at a change (see
         :meth:`~aquaflux.solve.ShiftStrengthControl.rebase`).
 
         Only equality between adjacent steps is read, never the value or the spacing, so an
@@ -405,19 +405,19 @@ class CoefficientDriftTrigger(eqx.Module):
         return history[-1].drift >= self.threshold
 
 
-def _shift_of(forward_step: ForwardStep) -> float | None:
+def _shift_of(strategy: NewtonStrategy) -> float | None:
     """The step's current shift strength, for **reporting**, or ``None`` if it has no shift.
 
     Reporting must never demand a shift: a plain damped-Newton step legitimately has none, and a march
     of one is a perfectly ordinary thing to run and to log. This is the read that belongs on every
     reporting path -- ``StepReport.shift``, and the retry announcement, which reached for
-    ``forward_step.relaxation_schedule`` unguarded and raised ``AttributeError`` on exactly such a step.
+    ``strategy.relaxation_schedule`` unguarded and raised ``AttributeError`` on exactly such a step.
 
     It stays on the march rather than moving to :class:`~aquaflux.solve.RetryPolicy` with the retry
     decisions: reporting a step's shift is not a retry concern, and the step summary reads it on every
     step whether or not any retry is configured.
     """
-    return getattr(getattr(forward_step, "relaxation_schedule", None), "beta", None)
+    return getattr(getattr(strategy, "relaxation_schedule", None), "beta", None)
 
 
 def _limit_collapsing(
@@ -483,7 +483,7 @@ def _limit_collapsing(
 
 @eqx.filter_jit
 def _march_step(
-    forward_step: ForwardStep,
+    strategy: NewtonStrategy,
     residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
     phi: jnp.ndarray,
     residual_norm_0: jnp.ndarray,
@@ -491,12 +491,12 @@ def _march_step(
 ) -> tuple[StepOutcome, jnp.ndarray]:
     """One observed step: the step's :class:`StepOutcome`, and the residual norm at the state it produced.
 
-    Compiled as a unit, and — this is the load-bearing part — ``forward_step`` and ``residual_fn``
+    Compiled as a unit, and — this is the load-bearing part — ``strategy`` and ``residual_fn``
     are **arguments, not captured values**, so repeated steps hit the compilation cache instead of
     retracing the shifted solve every iteration (which would dominate the whole march). Two things
     are required of the caller for that to hold:
 
-    * pass the **same** ``forward_step`` object for every step of a segment (a rebuilt one is a new
+    * pass the **same** ``strategy`` object for every step of a segment (a rebuilt one is a new
       compilation, which is the intended one-off cost of a refresh); and
     * pass a **bound method** of a module as ``residual_fn`` (e.g. ``coupled.residual``), which is a
       pytree whose arrays ride as dynamic leaves. A freshly-created ``lambda`` is hashed by identity,
@@ -506,16 +506,16 @@ def _march_step(
     from a fresh evaluation here. A globalized step ends in a line search, which already formed the
     measure at the rung it kept, so evaluating the residual again at that same point cost a full
     residual per march step to recompute a number the step was holding. It is the step's own measure,
-    which is this march's measure: when ``norm_builder`` is given, `forward_march` rebuilds the *step's*
+    which is this march's measure: when ``norm_builder`` is given, `newton_march` rebuilds the *step's*
     ``residual_norm`` at each outer iteration, so the search, the acceptance test and the reported norm
     are one measure by construction -- that is the invariant this relies on.
     """
-    outcome = forward_step.stepper()(residual_fn, phi, residual_norm_0, solver)
+    outcome = strategy.stepper()(residual_fn, phi, residual_norm_0, solver)
     return outcome, outcome.residual_norm
 
 
-def forward_march(
-    forward_step: ForwardStep,
+def newton_march(
+    strategy: NewtonStrategy,
     residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
     phi0: jnp.ndarray,
     *,
@@ -530,17 +530,17 @@ def forward_march(
     checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     drift_measure: Callable[[jnp.ndarray], float] | None = None,
     norm_builder: Callable[[jnp.ndarray], ResidualNorm] | None = None,
-    precondition_step: Callable[[ForwardStep, jnp.ndarray], None] | None = None,
+    refresh_preconditioner: Callable[[NewtonStrategy, jnp.ndarray], None] | None = None,
     solver: lx.AbstractLinearSolver | None = None,
     retry: RetryPolicy = NO_RETRIES,
     stop_on_limit_stall: int | None = 3,
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
-    station_step: Callable[[ForwardStep, int, bool], ForwardStep] | None = None,
+    station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
 ) -> MarchResult:
     """March the residual eagerly, reporting each step and stopping early if the trigger fires.
 
-    The one Newton loop in this package: :class:`~aquaflux.solve.ImplicitNewtonSolver` runs it, and
+    The one Newton loop in this package: :class:`~aquaflux.solve.RootSolver` runs it, and
     so does every coupled driver. Stepping eagerly is what lets a driver observe per-step cost or
     interpose work that cannot run under ``jit`` (rebuilding a frozen preconditioner) -- and, for the
     same reason, is why a solve cannot be called inside ``jit`` or ``vmap`` (see
@@ -554,7 +554,7 @@ def forward_march(
 
     Parameters
     ----------
-    forward_step : ForwardStep
+    strategy : NewtonStrategy
         The globalized step strategy to apply. The **same object** must be used for every step of a
         segment, or each step recompiles.
     residual_fn : callable
@@ -576,7 +576,7 @@ def forward_march(
         ``None`` marches to convergence or ``max_steps``.
     step_control : StepControl, optional
         Reshapes the step each iteration from the previous step's report (e.g. driving the shift
-        strength β toward a line-search-factor target). ``None`` runs ``forward_step`` unchanged, so
+        strength β toward a line-search-factor target). ``None`` runs ``strategy`` unchanged, so
         the march is byte-identical to an uncontrolled one. Forward-only, like ``trigger``.
     control_state : object, optional
         The initial state for ``step_control`` (``None`` on a fresh march). A driver that runs one
@@ -615,8 +615,8 @@ def forward_march(
         acceptance test and the reported norm. Rebuilding it per trial step instead would let a
         candidate win by shrinking its own denominator rather than its residual. The segment reference
         the damping schedule ramps against is taken in this same measure, so the ratio divides two
-        comparably-scaled quantities. ``None`` (the default) uses ``forward_step.norm()`` throughout.
-    precondition_step : callable, optional
+        comparably-scaled quantities. ``None`` (the default) uses ``strategy.norm()`` throughout.
+    refresh_preconditioner : callable, optional
         ``(active_step, state) -> None``, called before each step (after the control has set the shift
         strength on ``active_step``) to refresh that step's frozen host preconditioner from the current
         state and shift. It runs in this eager loop -- a host operation outside the jitted ``_march_step``
@@ -640,7 +640,7 @@ def forward_march(
         it is the scale the first step's inner loop is judged against; with no homotopy that is
         ``residual_fn`` and nothing changes.
     station_step : callable, optional
-        ``(step, station, arrived) -> step``, letting the caller reshape the forward step for the
+        ``(step, station, arrived) -> step``, letting the caller reshape the Newton step for the
         station it is about to run -- the counterpart, on the *step*, of what a homotopy does to the
         *problem*. Only consulted when a ``homotopy`` is given; ``None`` (the default) is
         byte-identical.
@@ -657,7 +657,7 @@ def forward_march(
         solve at every station -- turning the cheapest possible setting into the dominant cost of the
         march. Swap with ``equinox.tree_at`` over a fixed structure, as the measure above is swapped.
     solver : lineax.AbstractLinearSolver, optional
-        The linear solver for each step; defaults to ``forward_step.default_solver()``.
+        The linear solver for each step; defaults to ``strategy.linear_solver()``.
     retry : RetryPolicy
         When and how to redo a step: the three escalation triggers (cost, step length, divergence),
         the shift factor and escalation limit, and the optional tighter linear solver. See
@@ -671,7 +671,7 @@ def forward_march(
         doubling is far cheaper than a tight Krylov solve. ``retry.solver`` is the **fallback**, for a
         step that is *still* diverged afterwards, or when escalation is unavailable (no threshold set,
         or no ``β`` leaf to escalate -- the configuration where the tighter solve is the sole and
-        original retry). Each escalation re-matches the preconditioner through ``precondition_step``;
+        original retry). Each escalation re-matches the preconditioner through ``refresh_preconditioner``;
         the divergence retry does not, because the factorization is already fresh at this
         ``(state, β)`` and only the Krylov tolerance is at fault.
     stop_on_limit_stall : int or None
@@ -702,10 +702,10 @@ def forward_march(
         The state reached, the per-step reports, and whether the march converged or was triggered.
     """
     if solver is None:
-        solver = forward_step.default_solver()
+        solver = strategy.linear_solver()
     # When the measure is rebuilt each iteration, the segment reference must be taken in that same
     # measure -- otherwise the damping schedule divides two differently-scaled quantities.
-    norm = norm_builder(phi0) if norm_builder is not None else forward_step.norm()
+    norm = norm_builder(phi0) if norm_builder is not None else strategy.norm()
 
     # The segment-local reference: what the step's damping schedule ramps against. Recomputed here,
     # never inherited, so a segment resumed after a refresh restarts its ramp. It is fixed for the
@@ -723,7 +723,7 @@ def forward_march(
     # whole step is back. Push them down to the step so it can stop there and then, rather than
     # finishing inner iterations whose results this loop is about to discard. One number each, set in
     # one place: a step that took its own copy would be a second spelling to keep in step with this one.
-    forward_step = retry.with_inner_abort(forward_step)
+    strategy = retry.with_inner_abort(strategy)
 
     state = phi0
     current = float(residual_norm_0)
@@ -769,7 +769,7 @@ def forward_march(
             arrived = homotopy.arrived(len(reports))
         # A step control reshapes the base step from the previous report (None runs it unchanged, so
         # the loop is byte-identical). It threads its own state; the march stays ignorant of β.
-        active_step = forward_step
+        active_step = strategy
         if norm_builder is not None:
             # Re-derive the residual measure at the state this outer iteration starts from, and hold
             # it for the whole iteration -- every trial step of the line search, the acceptance test
@@ -829,7 +829,7 @@ def forward_march(
                 active_step, previous_report, control_state
             )
         # Check the step can support what was ASKED FOR -- loudly, and once. The escalation drives the
-        # pseudo-transient shift, which `ForwardStep` does not promise (see `RetryPolicy.require_shifted`);
+        # pseudo-transient shift, which `NewtonStrategy` does not promise (see `RetryPolicy.require_shifted`);
         # the `hasattr` this replaces sat in the escalation's own loop condition and failed **silently**,
         # so a march configured to escalate simply never did.
         #
@@ -844,14 +844,14 @@ def forward_march(
         # already fails loudly from inside itself when its `tree_at` cannot find the field.
         if retry.escalates and not reports:
             retry.require_shifted(active_step)
-        if precondition_step is not None:
+        if refresh_preconditioner is not None:
             # Refresh the step's (frozen, host) preconditioner from the state and shift strength this
             # step is about to run at -- e.g. re-factoring a complete LU at the current (state, β) so it
             # is the exact inverse of the operator actually solved. Runs HERE, in the eager loop (a host
             # op outside the jitted `_march_step`), after the control has set β on `active_step`. It
             # mutates the step's static preconditioner in place, so `_march_step` stays a compilation
             # cache hit. Forward-only, like the trigger and the control.
-            precondition_step(active_step, state)
+            refresh_preconditioner(active_step, state)
         prestep_state = state
         outcome, residual_norm = _march_step(
             active_step, step_residual, prestep_state, residual_norm_0, solver
@@ -863,7 +863,7 @@ def forward_march(
         # mid-step refresh has already built it by the time the step returns), so it is redone at the
         # shift it already had. `RetryPolicy.retry_reason` names the reason and `ESCALATING_REASONS`
         # says which of them raise β. Escalate β FIRST (redo from the pre-step state at `β *= retry.beta_factor`,
-        # re-matching the frozen preconditioner via `precondition_step`), because a larger β lifts the
+        # re-matching the frozen preconditioner via `refresh_preconditioner`), because a larger β lifts the
         # correction out of the non-finite regime, cuts the cycle count AND shortens the implicit step until
         # it fits inside whatever was clipping it, and it is far cheaper than the tight-Krylov divergence
         # retry below -- on the coupled AMG march a NaN'd low-β step recovers in a handful of cycles at 2β,
@@ -910,7 +910,7 @@ def forward_march(
                 active_step = eqx.tree_at(
                     lambda s: s.relaxation_schedule.beta, active_step, escalated
                 )
-            if precondition_step is not None:
+            if refresh_preconditioner is not None:
                 # Re-match the preconditioner to the escalated β. Whether this actually rebuilds is the
                 # HOOK'S decision, not this call's: a gated refresh may judge the move too small to be
                 # worth its cost and reuse the standing factorization. That is worth stating, because a
@@ -923,7 +923,7 @@ def forward_march(
                 # established cause -- the same steps were also positivity-cap-bound, and the two
                 # explanations are not separated by that data. Whichever it is, a refresh hook used
                 # with escalation should let a doubling through: re-matching is what this call asks for.
-                precondition_step(active_step, prestep_state)
+                refresh_preconditioner(active_step, prestep_state)
             outcome, residual_norm = _march_step(
                 active_step, step_residual, prestep_state, residual_norm_0, solver
             )
@@ -942,7 +942,7 @@ def forward_march(
                 # `_shift_of`, not a direct read: the divergence retry needs no shift, so it runs on
                 # steps that have none, and this reported the shift by reaching straight through
                 # `relaxation_schedule` -- raising `AttributeError` on a step that satisfies
-                # `ForwardStep` in full. Unchanged beta here in any case; nothing escalated.
+                # `NewtonStrategy` in full. Unchanged beta here in any case; nothing escalated.
                 on_retry("solver", retries + 1, float(_shift_of(active_step) or 0.0))
             outcome, residual_norm = _march_step(
                 active_step, step_residual, prestep_state, residual_norm_0, retry.solver
@@ -962,7 +962,7 @@ def forward_march(
             )
         state = outcome.phi
         current = float(residual_norm)
-        # Not every ForwardStep carries a relaxation schedule (a plain damped-Newton step has none), and
+        # Not every NewtonStrategy carries a relaxation schedule (a plain damped-Newton step has none), and
         # a schedule need not expose a readable beta -- report 0 rather than demanding either.
         step_shift = _shift_of(active_step)
         report = StepReport(

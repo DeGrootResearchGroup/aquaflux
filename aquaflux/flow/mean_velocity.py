@@ -16,7 +16,7 @@ augmented with the constraint equation:
 This is one honest residual: automatic differentiation assembles the whole bordered Jacobian ``J_aug =
 [[J, a], [c^T, 0]]`` -- the force column ``a = dR_flow/dbeta = -V`` on the flow-direction momentum rows
 (``beta`` enters as ``R = flux - beta V``) and the averaging row ``c^T = d<U>/dw = V/sum(V)`` there --
-and the ordinary Newton solver (:class:`~aquaflux.solve.ImplicitNewtonSolver`) drives it to a converged
+and the ordinary Newton solver (:class:`~aquaflux.solve.RootSolver`) drives it to a converged
 root, with no bespoke solver and no hand-derived linearization. ``<U> = U_bar`` therefore holds at the
 converged root **by construction**, so the bulk velocity can never overshoot while the eddy viscosity
 is still developing (the failure the old proportional controller had at high Reynolds number / high
@@ -66,7 +66,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import lineax as lx
 
-from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver
+from aquaflux.solve import DampedNewtonStep, RootSolver
 
 if TYPE_CHECKING:
     from .momentum import MomentumContinuity
@@ -190,7 +190,7 @@ def bulk_velocity_flow_solve(
     Solves the flow with the body force ``beta`` (along ``flow_direction``) treated as a Lagrange
     multiplier for the constraint ``<U_dir> = target`` -- ``beta`` appended to the state and the flow
     residual augmented with the constraint equation, driven by the production
-    :class:`~aquaflux.solve.ImplicitNewtonSolver` (see the module docstring). The initial ``beta`` is
+    :class:`~aquaflux.solve.RootSolver` (see the module docstring). The initial ``beta`` is
     read from ``momentum.body_force[flow_direction]``, and the returned ``momentum`` carries the
     converged ``beta`` (via :func:`equinox.tree_at`), so a segregated outer loop can thread it forward.
 
@@ -248,10 +248,10 @@ def bulk_velocity_flow_solve(
         momentum: MomentumContinuity, state: jnp.ndarray
     ) -> tuple[MomentumContinuity, jnp.ndarray]:
         augmented0 = jnp.append(state, momentum.body_force[flow_direction])
-        newton = ImplicitNewtonSolver(
+        newton = RootSolver(
             max_steps=max_steps,
-            solver=solver,
-            forward_step=DampedNewtonStep(preconditioner=augmented_preconditioner),
+            linear_solver=solver,
+            strategy=DampedNewtonStep(preconditioner=augmented_preconditioner),
         )
         augmented = newton.solve(augmented_residual, augmented0, momentum)
         flow, beta = augmented[:-1], augmented[-1]

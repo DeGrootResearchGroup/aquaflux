@@ -26,7 +26,7 @@ from aquaflux.discretization import (
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.solve.continuation import PseudoTransientStep
-from aquaflux.solve.implicit import ImplicitNewtonSolver
+from aquaflux.solve.implicit import RootSolver
 from aquaflux.solve.newton import newton_step
 from aquaflux.solve.relaxation import SwitchedEvolutionRelaxation
 from aquaflux.turbulence import ScalarShiftPolicy, scalar_pseudo_transient_solve
@@ -202,7 +202,7 @@ def test_engine_leaves_a_clean_ift_adjoint() -> None:
         engine = PseudoTransientStep(
             ScalarShiftPolicy(shift), relaxation_schedule=SwitchedEvolutionRelaxation(beta0=2.0)
         )
-        solver = ImplicitNewtonSolver(max_steps=60, forward_step=engine)
+        solver = RootSolver(max_steps=60, strategy=engine)
         return jnp.sum(solver.solve(residual_fn, jnp.full(n, 1.0), c) ** 2)
 
     grad = float(jax.grad(solved_norm)(REACTION))

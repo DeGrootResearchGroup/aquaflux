@@ -1,7 +1,7 @@
 """Replay the march's stall bailout over every march log on disk, and count what it would do.
 
 The bailout ends a segment once a constraint-bound step stops changing anything
-(``forward_march(stop_on_limit_stall=...)``). Its danger is not missing a lock-up -- those are
+(``newton_march(stop_on_limit_stall=...)``). Its danger is not missing a lock-up -- those are
 unmistakable once seen -- but ending a rung that would have recovered, and **a march that recovers looks
 exactly like one that does not, right up until it does.** So a candidate rule cannot be judged on the
 run that motivated it. It has to be replayed over the healthy marches too.

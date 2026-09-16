@@ -1,6 +1,6 @@
 """Streaming per-step log for an observed march -- the reporting half of the ``on_step`` seam.
 
-:func:`~aquaflux.solve.forward_march` (and the solvers that drive it) hand every observed step to an
+:func:`~aquaflux.solve.newton_march` (and the solvers that drive it) hand every observed step to an
 ``on_step`` / ``on_checkpoint`` callback, but a caller that wants to *watch* a long march then has to
 write the formatter itself. Each study writing its own means the same field extraction and format
 string are re-derived per script, they drift, and a reporting gap is fixed in one and not the others.
@@ -37,10 +37,10 @@ from typing import IO, Any
 import numpy as np
 
 from ..text_table import Column, TextTable
-from .forward_step import StepReport
 from .linear import restart_cycles
 from .refresh_timing import RefreshTiming
 from .retry import ESCALATING_REASONS
+from .strategy import StepReport
 
 #: Below this many seconds an unattributed remainder is measurement noise, not a missing phase, and
 #: reporting it would only add a column of zeros to every refresh line.
@@ -442,7 +442,7 @@ class MarchLogger:
     def on_retry(self, reason: str, attempt: int, beta: float) -> None:
         """``on_retry`` callback: announce that the step about to be repeated is being redone, and why.
 
-        Matches the hook :func:`~aquaflux.solve.forward_march` calls just before a redo
+        Matches the hook :func:`~aquaflux.solve.newton_march` calls just before a redo
         (``on_retry=logger.on_retry``). Without it a log shows the same step's work two or three times
         with nothing between the blocks, leaving a reader to infer the trigger from the numbers -- and
         the four triggers (a step cut short on cost, a collapsed step length, a diverged step, a

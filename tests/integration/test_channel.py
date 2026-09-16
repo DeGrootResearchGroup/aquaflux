@@ -7,7 +7,7 @@ lid-driven cavity (:mod:`tests.integration.test_cavity`) and the Stokes Poiseuil
 convective domain needs that a closed one hides:
 
 * a **globalized** Newton step — the undamped full step overshoots from the uniform initial field
-  and diverges, so :class:`ImplicitNewtonSolver` damps it with a backtracking line search; and
+  and diverges, so :class:`RootSolver` damps it with a backtracking line search; and
 * a **non-singular pressure Schur** in the block preconditioner — its interior part is a pure-Neumann
   Laplacian, de-singularised here by the pressure-outlet boundary coupling
   (:meth:`~aquaflux.flow.PressureOutlet.pressure_schur_coefficient`).
@@ -34,7 +34,7 @@ from aquaflux.flow import (
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver, assembler_residual
+from aquaflux.solve import DampedNewtonStep, RootSolver, assembler_residual
 
 H, L, U_IN, RHO = 1.0, 4.0, 1.0, 1.0
 MU = 0.01  # Re = rho U H / mu = 100
@@ -63,8 +63,8 @@ def _channel(nx=16, ny=8, mu=MU):
 def _solve(assembler, precond=None, line_search=10, **kwargs):
     if precond is None:
         precond = BlockPreconditioner.build(assembler).factory()
-    forward_step = DampedNewtonStep(preconditioner=precond, line_search=line_search)
-    solver = ImplicitNewtonSolver(max_steps=30, forward_step=forward_step, **kwargs)
+    strategy = DampedNewtonStep(preconditioner=precond, line_search=line_search)
+    solver = RootSolver(max_steps=30, strategy=strategy, **kwargs)
     return solver.solve(assembler_residual, assembler.initial_state(), assembler)
 
 

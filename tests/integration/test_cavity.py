@@ -27,7 +27,7 @@ from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.solve import (
     DampedNewtonStep,
-    ImplicitNewtonSolver,
+    RootSolver,
     assembler_residual,
     newton_step,
 )
@@ -82,9 +82,7 @@ def test_cavity_solve_is_differentiable() -> None:
     wrong value here; only an FD comparison catches it."""
     n = 20
     precond = BlockPreconditioner.build(_cavity(n)).factory()  # stop_gradient-ed; reuse across mu
-    solver = ImplicitNewtonSolver(
-        max_steps=30, forward_step=DampedNewtonStep(preconditioner=precond)
-    )
+    solver = RootSolver(max_steps=30, strategy=DampedNewtonStep(preconditioner=precond))
 
     def mean_speed(mu):
         assembler = _cavity(n, mu=mu)

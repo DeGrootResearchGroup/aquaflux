@@ -199,7 +199,7 @@ def test_the_split_continuation_converges_to_the_monolithic_fixed_point():
         reference,
         preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed())),
     )
-    flow_s, k_s, omega_s = solve_coupled(coupled, flow, k, omega, continuation=split, max_steps=40)
+    flow_s, k_s, omega_s = solve_coupled(coupled, flow, k, omega, strategy=split, max_steps=40)
     assert float(jnp.linalg.norm(coupled.residual(coupled.pack_state(flow_s, k_s, omega_s)))) < 1e-8
 
     mono = coupled_step(
@@ -207,7 +207,7 @@ def test_the_split_continuation_converges_to_the_monolithic_fixed_point():
         reference,
         preconditioner=MaterializedJacobian(MonolithicVCycle(smoother_fill_levels=SMOOTHER_FILL)),
     )
-    flow_m, k_m, omega_m = solve_coupled(coupled, flow, k, omega, continuation=mono, max_steps=40)
+    flow_m, k_m, omega_m = solve_coupled(coupled, flow, k, omega, strategy=mono, max_steps=40)
     assert float(jnp.linalg.norm(flow_s - flow_m) / jnp.linalg.norm(flow_m)) < 1e-4
     assert float(jnp.linalg.norm(k_s - k_m) / jnp.linalg.norm(k_m)) < 1e-3
     assert float(jnp.linalg.norm(omega_s - omega_m) / jnp.linalg.norm(omega_m)) < 1e-4

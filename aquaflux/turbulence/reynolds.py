@@ -271,7 +271,7 @@ def _step_down(scale: float, factor: float) -> float:
 #: The keywords that drive the *solve* rather than configure a continuation, derived from
 #: :func:`~aquaflux.turbulence.solve_coupled`'s own signature so the two cannot drift apart. Everything
 #: else a caller passes -- ``preconditioner``, ``reference_state``, and every march keyword bound for
-#: :func:`~aquaflux.turbulence.coupled_step` behind ``**continuation_kwargs`` -- describes a
+#: :func:`~aquaflux.turbulence.coupled_step` behind ``**strategy_kwargs`` -- describes a
 #: continuation, and reaches the target solve only when that solve is the one building it.
 _SOLVE_ONLY = frozenset(inspect.signature(solve_coupled).parameters) - {
     "coupled",
@@ -281,7 +281,7 @@ _SOLVE_ONLY = frozenset(inspect.signature(solve_coupled).parameters) - {
     "preconditioner",
     "reference_state",
     # `inspect.signature` names the `**kwargs` parameter itself; it is not a keyword anyone passes.
-    "continuation_kwargs",
+    "strategy_kwargs",
 }
 
 
@@ -363,7 +363,7 @@ def solve_reynolds_continuation(
         leave ``point_setup`` ``None`` when differentiating. ``None`` (default) leaves the ramp byte-identical: each point builds its own continuation
         from :func:`~aquaflux.turbulence.solve_coupled`'s defaults, and the seed is passed through as-is
         (the lowest point self-starts inside ``solve_coupled``). When set, its keys **override** any
-        ``continuation`` / ``reference_state`` in ``solve_kwargs`` (they are mutually exclusive uses).
+        ``strategy`` / ``reference_state`` in ``solve_kwargs`` (they are mutually exclusive uses).
     seed_projection : callable, optional
         ``(companion, seed_state, point) -> state``, a **per-point correction of the seed itself**,
         applied to the packed coupled state before that point's solve begins. It exists because a rung
@@ -387,16 +387,16 @@ def solve_reynolds_continuation(
         identity in floating point under a log-solved field -- and a declined rung has to stay
         bit-identical to the arm it is being compared against.
     **solve_kwargs
-        Forwarded to every per-Re :func:`~aquaflux.turbulence.solve_coupled`. ``continuation`` and
+        Forwarded to every per-Re :func:`~aquaflux.turbulence.solve_coupled`. ``strategy`` and
         ``reference_state`` are **target-specific** (a preconditioner frozen at the target viscosity),
         so they are applied to the final solve only; each lower-Re point builds its own continuation at
         its own viscosity. The split runs the other way too: ``preconditioner`` and every march keyword
         bound for :func:`~aquaflux.turbulence.coupled_step` describe a continuation *this function
-        builds*, so when ``continuation`` is supplied they reach the **ramp** only — the target is not
+        builds*, so when ``strategy`` is supplied they reach the **ramp** only — the target is not
         building one. A :class:`~aquaflux.turbulence.MaterializedJacobian` ``preconditioner`` is opened
         as **one** session shared by every point and re-pointed at each point's companion, so every
         rung glues in the same inverse and refresh hook rather than recompiling the coupled solve; a
-        :class:`~aquaflux.turbulence.BlockDiagonal` one is built per point at its own viscosity. ⚠️ A ``point_setup`` that returns a ``continuation`` supplies one to **every** point, which
+        :class:`~aquaflux.turbulence.BlockDiagonal` one is built per point at its own viscosity. ⚠️ A ``point_setup`` that returns a ``strategy`` supplies one to **every** point, which
         leaves such settings dead everywhere; ``solve_coupled`` then rejects them rather than dropping
         them, so pass them to the builder inside ``point_setup`` instead.
 
@@ -422,7 +422,7 @@ def solve_reynolds_continuation(
     (the user's true differentiable parameters) from a stopped seed, so ``jax.grad`` through this
     function is **identical** to differentiating a direct :func:`~aquaflux.turbulence.solve_coupled` --
     exact and independent of ``n_points``. As with a direct solve, to differentiate, pass a
-    ``continuation`` built on concrete parameters outside ``jax.grad`` (used by the final solve) and no
+    ``strategy`` built on concrete parameters outside ``jax.grad`` (used by the final solve) and no
     forward-only keywords (``refresh`` / ``on_step`` / ``step_control`` / ``point_setup``).
     """
     if n_points < 0:
@@ -432,7 +432,7 @@ def solve_reynolds_continuation(
     # Build the companions from a stopped copy so the ramp -- which only makes an initial guess --
     # never tapes onto the target-Re adjoint.
     frozen = jax.lax.stop_gradient(coupled)
-    # The split runs BOTH ways, and this is the whole of it. `continuation` / `reference_state` freeze a
+    # The split runs BOTH ways, and this is the whole of it. `strategy` / `reference_state` freeze a
     # preconditioner at the TARGET viscosity, so they belong to the final solve only and each lower-Re
     # point builds its own at its own viscosity. The mirror image is that everything which *configures*
     # a continuation this function builds -- `preconditioner`, and every march keyword of `coupled_step`
@@ -444,11 +444,11 @@ def solve_reynolds_continuation(
     ramp_kwargs = {
         key: value
         for key, value in solve_kwargs.items()
-        if key not in ("continuation", "reference_state")
+        if key not in ("strategy", "reference_state")
     }
     target_kwargs = (
         solve_kwargs
-        if solve_kwargs.get("continuation") is None
+        if solve_kwargs.get("strategy") is None
         else {key: value for key, value in solve_kwargs.items() if key in _SOLVE_ONLY}
     )
     # The lower-Re points are only seeds for the next Reynolds number, so converge them loosely --
@@ -477,7 +477,7 @@ def solve_reynolds_continuation(
         # One Reynolds point. Without `point_setup` this is the plain solve (byte-identical to before,
         # seed passed through — the lowest point self-starts inside solve_coupled). With it, materialize
         # the seed (hybrid start for the lowest point) so the per-point continuation freezes at the same
-        # state the solve begins from, then merge the point's own continuation / precondition_step over
+        # state the solve begins from, then merge the point's own continuation / refresh_preconditioner over
         # the base kwargs.
         if point_setup is None and seed_projection is None:
             return solve_coupled(assembler, *seed_fields, **base_kwargs)

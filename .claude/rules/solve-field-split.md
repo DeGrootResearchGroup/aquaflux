@@ -492,7 +492,7 @@ monolithic `AmgVCycle` is unchanged.
     This does not reopen gating on `binding_limit == 1` (measured and reverted, below).
 
     **⚠️ AND THE FUTILITY READING IS CONFOUNDED.** The host trio's step-51 attempts all ran with
-    `pc none 0.0s` — the β-mismatch gate was off, so the `precondition_step` the march calls on
+    `pc none 0.0s` — the β-mismatch gate was off, so the `refresh_preconditioner` the march calls on
     every escalation does nothing, and every escalated attempt was solved against a V-cycle built for
     β = 0.0293. Step 52 escaped only because its inner solve happened to trip the mid-step rebuild. So
     **"the ladder is futile" and "the ladder was never given a matched preconditioner" are NOT separated
@@ -542,7 +542,7 @@ monolithic `AmgVCycle` is unchanged.
   - **NOT YET BUILT: the production wiring.** There is no `coupled_field_split_continuation` / shift
     policy, deliberately — the forward march is where a continuation builder would be used and the split
     *loses* there. What the measurement argues for is a **`β = 0` adjoint-only** preconditioner seam
-    (`ForwardStep.adjoint_preconditioner()` already exists as the natural home), plus the traced k/ω
+    (`NewtonStrategy.adjoint_preconditioner()` already exists as the natural home), plus the traced k/ω
     hierarchy the damped-Jacobi result unlocks. Both are unbuilt.
   - **✅ THE MONOLITHIC MATERIALIZE NO LONGER STORES THE BLOCK IT THROWS AWAY — BUILT AND VERIFIED
     (2026-08-18).** `FieldSplitAmgPreconditioner.build`/`refresh_in_place` still call the inherited

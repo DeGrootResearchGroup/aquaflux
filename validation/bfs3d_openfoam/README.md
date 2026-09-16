@@ -255,7 +255,7 @@ closure.
   totals line up.
 - `zero_pattern_pivots.py` — what the preconditioner's sparsity pattern actually contains at **zero
   pseudo-transient shift**, and the incomplete-LU pivots it produces. Zero shift is the operator the
-  adjoint solves, so every gradient goes through it, and no forward step ever visits it (the march floors
+  adjoint solves, so every gradient goes through it, and no Newton step ever visits it (the march floors
   its preconditioner at a positive shift) — which is why it needs a harness of its own rather than a march.
   It sweeps the probing reach against how the shift and the equilibration are written, since both decide
   whether the assembler's stored *exactly-zero* positions survive into the factorization, and reports the

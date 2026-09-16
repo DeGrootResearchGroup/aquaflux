@@ -1,7 +1,7 @@
 """The dual-time loop and the forward-solve regime as values, and the combinations they refuse.
 
 The coupled march's inner loop (``inner_steps``, ``inner_tol``, ``cycle_budget``, ``refresh_on_cycles``)
-and its Krylov regime (``forward_solver`` and a ``forward_*`` trio) were loose keywords, several of them
+and its Krylov regime (``krylov_solver`` and a ``forward_*`` trio) were loose keywords, several of them
 inert without another: loop settings on a single shifted step, a regime beside an explicit solver, a
 refresh count with nothing to fire. Each was accepted and reached nothing. As values the first two
 cannot be written at all, and the third is refused where the march knows whether a refresh exists.
@@ -18,15 +18,15 @@ from aquaflux.solve import DualTimeLoop, DualTimeStep, PseudoTransientStep, rela
 from aquaflux.turbulence import (
     BlockDiagonal,
     CompleteLu,
-    ForwardSolve,
+    LinearSolveSettings,
     MaterializedJacobian,
     coupled_step,
     open_session,
 )
 from aquaflux.turbulence.coupled import (
-    _BLOCK_FORWARD,
-    _CONSTRAINED_FORWARD,
-    _resolved_forward,
+    _BLOCK_LINEAR_SOLVE,
+    _CONSTRAINED_LINEAR_SOLVE,
+    _resolved_linear_solve,
     mass_flow_coupled_continuation,
 )
 from aquaflux.turbulence.march_settings import merged_march_options
@@ -37,7 +37,7 @@ _LOOP_FIELDS = ("inner_steps", "inner_tol", "cycle_budget", "refresh_on_cycles")
 #: The loose keywords the two values replaced -- none may reappear on a builder beside them.
 _RETIRED = (
     *_LOOP_FIELDS,
-    "forward_solver",
+    "krylov_solver",
     "forward_rtol",
     "forward_restart",
     "forward_max_restarts",
@@ -53,7 +53,7 @@ def case():
 def test_every_coupled_builder_takes_the_values_and_none_of_the_keywords_they_replaced() -> None:
     for builder in (coupled_step, mass_flow_coupled_continuation):
         parameters = set(inspect.signature(builder).parameters)
-        assert {"dual_time", "forward"} <= parameters, builder.__name__
+        assert {"dual_time", "linear_solve"} <= parameters, builder.__name__
         assert not parameters & set(_RETIRED), builder.__name__
 
 
@@ -64,7 +64,9 @@ def test_the_loop_value_names_exactly_its_dual_time_step_fields() -> None:
 
 
 def test_the_forward_value_names_exactly_the_regime_s_fields() -> None:
-    assert {field.name for field in dataclasses.fields(ForwardSolve)} == set(_BLOCK_FORWARD._fields)
+    assert {field.name for field in dataclasses.fields(LinearSolveSettings)} == set(
+        _BLOCK_LINEAR_SOLVE._fields
+    )
 
 
 def test_a_loop_of_fewer_than_two_inner_steps_is_refused_and_points_at_the_single_step() -> None:
@@ -73,21 +75,21 @@ def test_a_loop_of_fewer_than_two_inner_steps_is_refused_and_points_at_the_singl
 
 
 @pytest.mark.parametrize(
-    "base", [_BLOCK_FORWARD, _CONSTRAINED_FORWARD], ids=["block", "constrained"]
+    "base", [_BLOCK_LINEAR_SOLVE, _CONSTRAINED_LINEAR_SOLVE], ids=["block", "constrained"]
 )
 @pytest.mark.parametrize(
     "fields", [{}, {"restart": 15}, {"rtol": 0.1, "restart": 30, "max_restarts": 9}], ids=str
 )
 def test_a_forward_value_resolves_each_unset_field_to_the_family_s_regime(base, fields) -> None:
-    regime, solver = _resolved_forward(ForwardSolve(**fields), base)
+    regime, solver = _resolved_linear_solve(LinearSolveSettings(**fields), base)
     assert regime == base._replace(**fields)
     assert solver is None
-    assert _resolved_forward(None, base) == (base, None)
+    assert _resolved_linear_solve(None, base) == (base, None)
 
 
 def test_a_solver_given_as_the_forward_value_replaces_the_regime() -> None:
     solver = relative_residual_gmres(1e-4)
-    assert _resolved_forward(solver, _BLOCK_FORWARD) == (_BLOCK_FORWARD, solver)
+    assert _resolved_linear_solve(solver, _BLOCK_LINEAR_SOLVE) == (_BLOCK_LINEAR_SOLVE, solver)
 
 
 def test_the_loop_selects_the_step_shape_and_reaches_its_fields(case) -> None:
@@ -95,11 +97,15 @@ def test_the_loop_selects_the_step_shape_and_reaches_its_fields(case) -> None:
     spec = BlockDiagonal(method=None)
     loop = DualTimeLoop(inner_steps=3, inner_tol=1e-3, cycle_budget=40)
     dual = coupled_step(
-        coupled, state, preconditioner=spec, dual_time=loop, forward=ForwardSolve(restart=30)
+        coupled,
+        state,
+        preconditioner=spec,
+        dual_time=loop,
+        linear_solve=LinearSolveSettings(restart=30),
     )
     assert type(dual) is DualTimeStep
     assert (dual.inner_steps, dual.inner_tol, dual.cycle_budget) == (3, 1e-3, 40)
-    assert dual.forward_solver.restart == 30
+    assert dual.krylov_solver.restart == 30
     assert type(coupled_step(coupled, state, preconditioner=spec)) is PseudoTransientStep
     mass_flow = mass_flow_coupled_continuation(coupled, state, preconditioner=spec, dual_time=loop)
     assert type(mass_flow) is DualTimeStep
@@ -144,12 +150,15 @@ def test_a_refresh_count_with_nothing_to_fire_is_refused_but_a_materialized_sess
 def test_a_point_s_loop_and_forward_values_merge_field_by_field_over_the_shared_ones() -> None:
     base = {
         "dual_time": DualTimeLoop(inner_steps=5, cycle_budget=40),
-        "forward": ForwardSolve(restart=15),
+        "linear_solve": LinearSolveSettings(restart=15),
     }
-    override = {"dual_time": DualTimeLoop(cycle_budget=20), "forward": ForwardSolve(rtol=0.1)}
+    override = {
+        "dual_time": DualTimeLoop(cycle_budget=20),
+        "linear_solve": LinearSolveSettings(rtol=0.1),
+    }
     merged = merged_march_options(base, override)
     assert merged["dual_time"] == DualTimeLoop(inner_steps=5, cycle_budget=20)
-    assert merged["forward"] == ForwardSolve(rtol=0.1, restart=15)
+    assert merged["linear_solve"] == LinearSolveSettings(rtol=0.1, restart=15)
 
 
 def test_a_point_s_globalization_merges_field_by_field_too() -> None:
@@ -166,6 +175,7 @@ def test_a_point_s_globalization_merges_field_by_field_too() -> None:
 def test_an_unset_field_takes_the_shared_setting_rather_than_the_family_default() -> None:
     """The documented limit of the merge: ``None`` cannot ask for the default back over a shared setting."""
     merged = merged_march_options(
-        {"forward": ForwardSolve(rtol=1e-2)}, {"forward": ForwardSolve(restart=30)}
-    )["forward"]
-    assert merged == ForwardSolve(rtol=1e-2, restart=30)
+        {"linear_solve": LinearSolveSettings(rtol=1e-2)},
+        {"linear_solve": LinearSolveSettings(restart=30)},
+    )["linear_solve"]
+    assert merged == LinearSolveSettings(rtol=1e-2, restart=30)

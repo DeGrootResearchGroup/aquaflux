@@ -37,7 +37,7 @@ Engineering Principles.
   velocity) and hands it to
   `CellBalance((DiffusionFlux, PressureForce, AdvectionFlux)).residual(component, context)`.
   Continuity is `Σ mdot_f = 0`. The whole Jacobian comes from AD; solved by the existing
-  `ImplicitNewtonSolver`.
+  `RootSolver`.
   - **`PressureForce` (`momentum.py`, exported from `aquaflux.flow`) is the one flow-specific
     operator.** `p_f n_i A` — the momentum pressure term written as what it is, a surface flux of
     momentum — carrying the already-reconstructed face pressure as constructor state and the
@@ -370,7 +370,7 @@ Engineering Principles.
   `β` a **scalar Lagrange multiplier** on the constraint `⟨U_dir⟩ − U_bar = 0`, solved *jointly* with
   the flow — not by an outer proportional controller. `β` is **appended to the flow state** and the
   flow residual is augmented with the constraint equation, `R_aug([w,β]) = [R_flow(w;β); ⟨U_dir⟩(w) −
-  U_bar]`; this **one honest residual** is handed to the production `ImplicitNewtonSolver`, and **AD
+  U_bar]`; this **one honest residual** is handed to the production `RootSolver`, and **AD
   assembles the whole bordered Jacobian** (the force column `∂R/∂β = −V` on the flow-direction momentum
   rows, since `R = flux − βV`, and the averaging row `∂⟨U⟩/∂w = V/ΣV`) — **no bespoke solver, no
   hand-derived border** (an earlier version hand-rolled a two-solve rank-one elimination purely to keep
@@ -437,7 +437,7 @@ Engineering Principles.
     confirmations: `β₀ ≤ 0.1` converges to `1e-16` in 30 steps, and starting from `potential_flow`'s plug
     reaches `7e-13`. **Fix shipped = the velocity scale + plug start** (`flow/scales.py`), not a change
     to the schedule. A cold rest start on a body-force domain still crawls and is left to fail loudly
-    (`ImplicitNewtonSolver` raises); revisiting that means revisiting cross-step SER, which was measured
+    (`RootSolver` raises); revisiting that means revisiting cross-step SER, which was measured
     ~24% slower on the inlet channel and rejected.
 - **Field initialization — BUILT (`flow/initialization.py`).** `laplace_field(mesh, geometry, boundary,
   …)` solves a scalar Laplace `div(Γ∇φ)=0` (one exact linear step) — the harmonic interpolant of any

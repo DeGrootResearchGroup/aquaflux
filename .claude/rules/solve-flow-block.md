@@ -168,7 +168,7 @@ it separates running from hung, **not** converging from stagnating.
 one thing a finite-difference check cannot substitute for.** A matching finite difference shows the
 derivative is *right*, not that it came from the implicit-function-theorem solve rather than the march
 taped onto the tape. The designed test is to repeat the gradient from a **different starting iterate** —
-which changes the forward step count while leaving the root, and therefore the gradient, alone. Run at
+which changes the Newton step count while leaving the root, and therefore the gradient, alone. Run at
 identical settings (`rtol` 1e-4, `forward_rtol` 0.3, PETSc flow block, adjoint restart 120 to 1e-6),
 varying only which checkpoint the solve starts from — `state-00067` is step 28 of the target rung and
 `state-00066` is step 27, one step further out on the same trajectory:

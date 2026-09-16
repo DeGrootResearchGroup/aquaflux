@@ -23,7 +23,7 @@ from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, GmresGradientSolve, SweptGradientSolve
 from aquaflux.solve import (
     DampedNewtonStep,
-    ImplicitNewtonSolver,
+    RootSolver,
     assembler_residual,
     newton_step,
 )
@@ -97,9 +97,7 @@ def test_swept_gradient_flow_is_differentiable() -> None:
     differences** -- not merely finite -- with the swept (fixed-sweep) corrected gradient."""
     scheme = CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=16))
     precond = BlockPreconditioner.build(_cavity(scheme)).factory()  # stop_gradient-ed; reuse
-    solver = ImplicitNewtonSolver(
-        max_steps=30, forward_step=DampedNewtonStep(preconditioner=precond)
-    )
+    solver = RootSolver(max_steps=30, strategy=DampedNewtonStep(preconditioner=precond))
 
     def mean_speed(mu):
         assembler = _cavity(scheme, mu=mu)

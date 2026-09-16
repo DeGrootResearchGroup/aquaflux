@@ -1,8 +1,8 @@
-"""The contracts the forward march is written against, in one place.
+"""The contracts the Newton march is written against, in one place.
 
 Four things travel between the Newton driver, the eager march, the globalization strategies, the step
-controls and the retry policy: what a **strategy** must provide (:class:`ForwardStep`, and
-:class:`ShiftedForwardStep` for the shift-driven half), what a **step** returns
+controls and the retry policy: what a **strategy** must provide (:class:`NewtonStrategy`, and
+:class:`ShiftedNewtonStrategy` for the shift-driven half), what a **step** returns
 (:class:`StepOutcome`), what a **march** reports (:class:`StepReport`), and what a **control** does with
 that report (:class:`StepControl`). None of them belongs to any one of those modules, and every one of
 them was living in whichever module happened to need it first.
@@ -31,9 +31,9 @@ from .norm import ResidualNorm
 from .relaxation import RelaxationSchedule
 
 __all__ = [
-    "ForwardStep",
     "LineSearchStep",
-    "ShiftedForwardStep",
+    "NewtonStrategy",
+    "ShiftedNewtonStrategy",
     "StepControl",
     "StepFn",
     "StepOutcome",
@@ -72,7 +72,7 @@ class LineSearchStep(NamedTuple):
 
 
 class StepOutcome(NamedTuple):
-    """What one forward step produced, what it cost, and how it ended.
+    """What one Newton step produced, what it cost, and how it ended.
 
     A record rather than a widening tuple: these eight values travel together through every stepper and
     both consumers, and a positional 8-tuple is where a caller silently mis-unpacks one for another.
@@ -82,7 +82,7 @@ class StepOutcome(NamedTuple):
     phi : jnp.ndarray
         The stepped iterate -- the only part that is the step's *result*; the rest is cost and quality.
     residual_norm : jnp.ndarray
-        ``norm(R(phi))`` at :attr:`phi`, in the step's own measure (:meth:`ForwardStep.norm`) -- what
+        ``norm(R(phi))`` at :attr:`phi`, in the step's own measure (:meth:`NewtonStrategy.norm`) -- what
         the driver judges convergence by.
 
         **It is returned rather than recomputed because the step already knows it.** A globalized step
@@ -134,7 +134,7 @@ StepFn = Callable[
 ]
 
 
-class ForwardStep(Protocol):
+class NewtonStrategy(Protocol):
     """A globalized Newton forward-step strategy (line search, pseudo-transient continuation, ...).
 
     The single point of variation in the forward loop: given the residual, the current iterate, the
@@ -151,7 +151,7 @@ class ForwardStep(Protocol):
     """
 
     def stepper(self) -> StepFn:
-        """The forward step ``(residual_fn, phi, residual_norm_0, solver) -> StepOutcome``.
+        """The Newton step ``(residual_fn, phi, residual_norm_0, solver) -> StepOutcome``.
 
         ``StepOutcome.cycles`` is the restart-cycle count of the linear solve behind the accepted step
         (its cost, which an observed march reads to detect a stale preconditioner);
@@ -161,7 +161,7 @@ class ForwardStep(Protocol):
         iterate writes ``outcome = step(…)`` and reads ``outcome.phi``.
         """
 
-    def default_solver(self) -> lx.AbstractLinearSolver:
+    def linear_solver(self) -> lx.AbstractLinearSolver:
         """The forward-loop linear solver to use when the caller supplies none (an inexact-Newton
         default whose tolerances suit this strategy's march)."""
 
@@ -181,25 +181,25 @@ class ForwardStep(Protocol):
 
 
 @runtime_checkable
-class ShiftedForwardStep(ForwardStep, Protocol):
-    """A :class:`ForwardStep` whose globalization is a **shift strength an external control can drive**.
+class ShiftedNewtonStrategy(NewtonStrategy, Protocol):
+    """A :class:`NewtonStrategy` whose globalization is a **shift strength an external control can drive**.
 
-    :class:`ForwardStep` says what every strategy must *do*. This says what a strategy must additionally
+    :class:`NewtonStrategy` says what every strategy must *do*. This says what a strategy must additionally
     *carry* for the eager march's feedback machinery to work on it: a ``relaxation_schedule`` holding the
     pseudo-transient shift ``beta`` as a readable, replaceable leaf. The schedule that exposes such a
     leaf is :class:`~aquaflux.solve.ConstantRelaxation`, which a :class:`StepControl` swaps in once per
     iteration; the :class:`~aquaflux.solve.SwitchedEvolutionRelaxation` a shifted step is built with by
     default computes ``beta`` from the residual ratio and exposes nothing to read or replace.
 
-    **Why it is a separate protocol rather than more of `ForwardStep`.** Not every strategy has a shift.
+    **Why it is a separate protocol rather than more of `NewtonStrategy`.** Not every strategy has a shift.
     :class:`DampedNewtonStep` globalizes by backtracking alone and has no ``relaxation_schedule`` at all,
     and requiring one of it would be inventing a quantity it does not possess. But
-    :func:`~aquaflux.solve.forward_march`'s beta escalation and every
+    :func:`~aquaflux.solve.newton_march`'s beta escalation and every
     :class:`~aquaflux.solve.StepControl` *do* need one -- they raise beta on a bad step and drive it
     between steps -- so the requirement is real and belongs written down.
 
     **Why an explicit up-front check rather than a ``hasattr`` probe at the point of use.** A probe fails
-    *silently*: a `DampedNewtonStep` satisfies `ForwardStep` completely, so passing one with
+    *silently*: a `DampedNewtonStep` satisfies `NewtonStrategy` completely, so passing one with
     ``RetryPolicy.on_alpha`` set is accepted and then simply never escalates -- and a march that quietly
     declines to escalate looks exactly like one that never needed to. Reading
     ``active_step.relaxation_schedule`` unguarded fails the opposite way, raising ``AttributeError``
@@ -283,7 +283,7 @@ class StepReport(NamedTuple):
 
         It is a **scalar**, deliberately: computing it needs the state, but putting the state on the
         report would cost the replay property that makes trigger calibration cheap (see
-        ``forward_march``'s ``checkpoint``). Reducing it to a number here keeps a trigger a pure
+        ``newton_march``'s ``checkpoint``). Reducing it to a number here keeps a trigger a pure
         function of numbers while still letting it see the physics.
     """
 
@@ -312,7 +312,7 @@ class StepReport(NamedTuple):
 
 
 class StepControl(Protocol):
-    """Reshapes the forward step each iteration from the march's own feedback (forward-only).
+    """Reshapes the strategy each iteration from the march's own feedback (forward-only).
 
     Where a :class:`~aquaflux.solve.RelaxationSchedule` is a *memoryless* rule that lives on the
     differentiable step, a step control is **stateful and reads the previous step's outcome** — the
@@ -320,16 +320,16 @@ class StepControl(Protocol):
     available *after* a step, and a control may raise under ``jax.grad``, so it lives here on the eager
     march, alongside :class:`RefreshTrigger`, never on the traced Newton path.
 
-    ``next_step`` returns a ready-to-run :class:`~aquaflux.solve.ForwardStep` (typically ``base_step``
+    ``next_step`` returns a ready-to-run :class:`~aquaflux.solve.NewtonStrategy` (typically ``base_step``
     with its shift strength replaced, via :class:`~aquaflux.solve.ConstantRelaxation` on a dynamic β
     leaf so :func:`_march_step` stays a compilation-cache hit) plus its own updated state. The march
     threads that state and stays ignorant of what the control adjusts, so it works for any
-    ``ForwardStep`` — the control, not the march, knows about β.
+    ``NewtonStrategy`` — the control, not the march, knows about β.
     """
 
     def next_step(
-        self, base_step: ForwardStep, previous: StepReport | None, state: object
-    ) -> tuple[ForwardStep, object]:
+        self, base_step: NewtonStrategy, previous: StepReport | None, state: object
+    ) -> tuple[NewtonStrategy, object]:
         # NOTE: the shipped control reshapes the shift strength, so it requires a
         # `PseudoTransientStep` specifically -- the annotation is wider than the real contract, and
         # passing a `DampedNewtonStep` raises `AttributeError` inside the march loop rather than
@@ -338,7 +338,7 @@ class StepControl(Protocol):
 
         Parameters
         ----------
-        base_step : ForwardStep
+        base_step : NewtonStrategy
             The march's base step, whose non-shift configuration (preconditioner, line search, norm)
             the control reuses.
         previous : StepReport or None

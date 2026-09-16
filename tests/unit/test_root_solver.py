@@ -11,10 +11,10 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
-from aquaflux.solve import ImplicitNewtonSolver
-from aquaflux.solve.forward_step import within_tolerance
+from aquaflux.solve import RootSolver
 from aquaflux.solve.implicit import DampedNewtonStep
-from aquaflux.solve.implicit import forward_march as _production_forward_march
+from aquaflux.solve.implicit import newton_march as _production_forward_march
+from aquaflux.solve.strategy import within_tolerance
 
 
 def _residual(x, theta):
@@ -24,14 +24,14 @@ def _residual(x, theta):
 
 def test_converges_to_nonlinear_root() -> None:
     theta = jnp.array([2.0, -5.0, 0.3])
-    x = ImplicitNewtonSolver().solve(_residual, jnp.zeros(3), theta)
+    x = RootSolver().solve(_residual, jnp.zeros(3), theta)
     assert jnp.allclose(_residual(x, theta), 0.0, atol=1e-9)
 
 
 def test_ift_gradient_matches_closed_form() -> None:
     """Reverse-mode gradient through the converged root equals the analytical derivative."""
     theta = jnp.array([2.0, -5.0, 0.3])
-    solver = ImplicitNewtonSolver()
+    solver = RootSolver()
     x_star = solver.solve(_residual, jnp.zeros(3), theta)
     grad = jax.grad(lambda th: jnp.sum(solver.solve(_residual, jnp.zeros(3), th)))(theta)
     analytic = 1.0 / (3.0 * x_star**2 + 1.0)
@@ -45,20 +45,22 @@ def _newton_steps_taken(solver, residual_fn, phi0, theta):
     ``_forward`` computes this count internally (the ``step`` carried alongside the iterate) but
     discards it before returning, and the count is data-dependent (``lax.while_loop``), so it
     cannot be read back through a traced ``jax.grad`` call. This calls the same production step
-    function (``forward_step.stepper()``) and the same stopping test (``within_tolerance``) in a
+    function (``strategy.stepper()``) and the same stopping test (``within_tolerance``) in a
     plain, eager Python loop instead, which is the only way to observe the real trip count.
     """
-    forward_step_fn = solver.forward_step.stepper()
+    strategy_step = solver.strategy.stepper()
     lin_solver = (
-        solver.solver if solver.solver is not None else solver.forward_step.default_solver()
+        solver.linear_solver
+        if solver.linear_solver is not None
+        else solver.strategy.linear_solver()
     )
-    norm_fn = solver.forward_step.norm()
+    norm_fn = solver.strategy.norm()
     residual_norm_0 = norm_fn(residual_fn(phi0, theta))
     phi, residual_norm, step = phi0, residual_norm_0, 0
     while step < solver.max_steps and not within_tolerance(
         residual_norm, residual_norm_0, solver.rtol, solver.atol
     ):
-        outcome = forward_step_fn(lambda p: residual_fn(p, theta), phi, residual_norm_0, lin_solver)
+        outcome = strategy_step(lambda p: residual_fn(p, theta), phi, residual_norm_0, lin_solver)
         phi, residual_norm = outcome.phi, outcome.residual_norm
         step += 1
     return step, phi
@@ -84,7 +86,7 @@ def test_ift_gradient_is_iteration_count_independent() -> None:
     nothing real would pass no matter what the adjoint did.
     """
     theta = jnp.array([1.5])
-    solver = ImplicitNewtonSolver()
+    solver = RootSolver()
     near, far = jnp.zeros(1), jnp.array([50.0])
 
     steps_near, root_near = _newton_steps_taken(solver, _residual, near, theta)
@@ -111,7 +113,7 @@ def test_non_convergence_within_max_steps_raises_instead_of_returning_a_poisoned
     """Exhausting ``max_steps`` short of tolerance must raise, not silently return a non-root whose
     implicit-function-theorem adjoint would be a wrong gradient with no NaN to flag it."""
     theta = jnp.array([50.0])  # Newton from 0 needs many steps; two is far short of the root
-    solver = ImplicitNewtonSolver(max_steps=2)
+    solver = RootSolver(max_steps=2)
     with pytest.raises(eqx.EquinoxRuntimeError, match="did not converge"):
         solver.solve(_residual, jnp.zeros(1), theta).block_until_ready()
 
@@ -127,7 +129,7 @@ def test_non_finite_residual_raises_instead_of_exiting_silently() -> None:
     # shrinking the step back into the domain, so disable it to reach the non-finite iterate. One
     # step lands at x < 0, so the loop exits on the step count with a non-finite residual norm — the
     # finiteness guard turns that into the hard error (before any further linear solve on the NaN).
-    solver = ImplicitNewtonSolver(max_steps=1, forward_step=DampedNewtonStep(line_search=0))
+    solver = RootSolver(max_steps=1, strategy=DampedNewtonStep(line_search=0))
     with pytest.raises(eqx.EquinoxRuntimeError, match="did not converge"):
         solver.solve(_sqrt_residual, jnp.array([4.0]), jnp.array([-1.0])).block_until_ready()
 
@@ -151,7 +153,7 @@ def test_a_residual_and_its_threshold_that_both_diverge_to_infinity_still_raises
         del theta
         return 1.0 / x
 
-    solver = ImplicitNewtonSolver()
+    solver = RootSolver()
     with pytest.raises(eqx.EquinoxRuntimeError, match="did not converge"):
         solver.solve(_infinite_residual, jnp.zeros(1), jnp.array([1.0])).block_until_ready()
 
@@ -177,7 +179,7 @@ def test_the_solve_refuses_a_traced_caller_before_any_work(transform) -> None:
         evaluations["n"] += 1
         return _residual(x, theta)
 
-    solver = ImplicitNewtonSolver()
+    solver = RootSolver()
     theta = jnp.array([2.0])
     with pytest.raises(ValueError, match=r"cannot run inside a traced program"):
         if transform == "jit":
@@ -198,7 +200,7 @@ def test_the_non_convergence_error_says_where_the_march_stopped() -> None:
     """The message carries the residual reached and the steps spent, so a march that ran out of budget
     is distinguishable from one that stalled -- the two want opposite responses (raise ``max_steps``
     versus strengthen the globalization), and the step count is what tells them apart."""
-    solver = ImplicitNewtonSolver(max_steps=2)
+    solver = RootSolver(max_steps=2)
     with pytest.raises(eqx.EquinoxRuntimeError, match=r"after 2 of 2 steps"):
         solver.solve(_residual, jnp.zeros(1), jnp.array([50.0])).block_until_ready()
 
@@ -217,16 +219,16 @@ def test_the_solver_hands_the_march_the_settings_it_was_built_with(monkeypatch) 
         seen.update(kwargs, step=step, residual=residual, phi0=phi0)
         return _production_forward_march(step, residual, phi0, **kwargs)
 
-    monkeypatch.setattr(implicit, "forward_march", spy)
+    monkeypatch.setattr(implicit, "newton_march", spy)
     step = DampedNewtonStep(line_search=4)
-    solver = ImplicitNewtonSolver(rtol=1e-8, atol=1e-11, max_steps=17, forward_step=step)
+    solver = RootSolver(rtol=1e-8, atol=1e-11, max_steps=17, strategy=step)
     theta = jnp.array([2.0])
 
     solver.solve(_residual, jnp.zeros(1), theta)
 
     assert seen["step"] is step
     assert (seen["rtol"], seen["atol"], seen["max_steps"]) == (1e-8, 1e-11, 17)
-    assert seen["solver"] == step.default_solver()
+    assert seen["solver"] == step.linear_solver()
     # The residual reaches the march bound to the parameter, as the one-argument form it steps.
     assert seen["residual"].residual_fn is _residual
     assert jnp.array_equal(seen["residual"].theta, theta)
@@ -251,7 +253,7 @@ def test_a_stable_residual_keeps_repeated_solves_on_one_compiled_step() -> None:
         evaluations["n"] += 1
         return _residual(x, theta)
 
-    solver = ImplicitNewtonSolver()
+    solver = RootSolver()
     theta = jnp.array([2.0, -5.0, 0.3])
 
     solver.solve(counted, jnp.zeros(3), theta)
@@ -272,7 +274,7 @@ def test_non_convergence_raises_on_the_grad_path_too() -> None:
     """The whole point: the silently-wrong output is a *gradient*, so the guard must also fire when
     the solve is reached only through ``jax.grad`` (the backward pass linearizes the non-root)."""
     theta = jnp.array([50.0])
-    solver = ImplicitNewtonSolver(max_steps=2)
+    solver = RootSolver(max_steps=2)
     with pytest.raises(eqx.EquinoxRuntimeError, match="did not converge"):
         jax.grad(lambda th: jnp.sum(solver.solve(_residual, jnp.zeros(1), th)))(
             theta

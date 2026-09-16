@@ -140,7 +140,7 @@ def capture_inner_iterates(coupled, state, beta, seed_state):
         inner_observer=observer,
     )
     reference_norm = engine.norm()(coupled.residual(state))
-    result = engine.stepper()(coupled.residual, state, reference_norm, engine.default_solver())
+    result = engine.stepper()(coupled.residual, state, reference_norm, engine.linear_solver())
     result.phi.block_until_ready()  # flush the ordered debug callbacks before reading `records`
     print(
         f"one step from the checkpoint at beta {beta}: {len(records)} inner iterations",

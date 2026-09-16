@@ -641,7 +641,7 @@ data model. Each had nothing in `validation/` or any test selecting it.
   zero-fill factorization and went in a follow-up commit; `cell_major_permutation` moved back into
   `frozen_operator.py`.
 
-## Globalization (forward step, continuation, line search) — closed investigations
+## Globalization (Newton step, continuation, line search) — closed investigations
 
 Full detail is in `solve-globalization-log.md` (no `paths:`, reference-only); the current architecture
 and binding defaults are in `solve-globalization.md`.

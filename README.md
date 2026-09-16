@@ -95,7 +95,7 @@ from aquaflux.flow import BlockPreconditioner, MomentumContinuity, MovingWall, N
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver
+from aquaflux.solve import DampedNewtonStep, RootSolver
 
 
 def cavity(viscosity):
@@ -122,10 +122,10 @@ def cavity(viscosity):
 residual = lambda state, problem: problem.residual(state)
 
 # The block preconditioner accelerates the Krylov solve; build it once and reuse it.
-# The forward step is a line-searched Newton step carrying that preconditioner.
+# The strategy is a line-searched Newton step carrying that preconditioner.
 precond = BlockPreconditioner.build(cavity(1e-2)).factory()
-solver = ImplicitNewtonSolver(
-    max_steps=30, forward_step=DampedNewtonStep(preconditioner=precond)
+solver = RootSolver(
+    max_steps=30, strategy=DampedNewtonStep(preconditioner=precond)
 )
 
 problem = cavity(1e-2)

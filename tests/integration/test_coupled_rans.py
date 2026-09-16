@@ -217,7 +217,7 @@ def test_coupled_adjoint_matches_finite_difference(case) -> None:
             coupled.turbulence.molecular_viscosity * nu_scale,
         )
         _, k, _ = solve_coupled(
-            scaled, flow_ws, k_ws, omega_ws, continuation=continuation, max_steps=40
+            scaled, flow_ws, k_ws, omega_ws, strategy=continuation, max_steps=40
         )
         return jnp.sum(k**2)
 
@@ -265,7 +265,7 @@ def test_the_coupled_adjoint_is_independent_of_the_forward_iteration_count(case)
             coupled,
             coupled.turbulence.molecular_viscosity * nu_scale,
         )
-        _, k, _ = solve_coupled(scaled, flow_ws, k_ws, omega_ws, continuation=step, max_steps=60)
+        _, k, _ = solve_coupled(scaled, flow_ws, k_ws, omega_ws, strategy=step, max_steps=60)
         return jnp.sum(k**2)
 
     single, dual = continuation(None), continuation(DualTimeLoop(inner_steps=3))
@@ -278,7 +278,7 @@ def test_the_coupled_adjoint_is_independent_of_the_forward_iteration_count(case)
             flow_ws,
             k_ws,
             omega_ws,
-            continuation=step,
+            strategy=step,
             max_steps=60,
             on_step=lambda report: seen.append(report),
         )
@@ -303,7 +303,7 @@ def test_the_injected_adjoint_solver_reaches_the_transpose_solve_and_only_it(cas
     """``adjoint_solver`` controls the gradient's transpose solve, and leaves the forward march alone.
 
     The transpose solve meets the **unshifted** operator, with none of the pseudo-transient diagonal
-    the forward steps enjoy, so its Krylov settings have to be choosable separately from theirs. This
+    the Newton steps enjoy, so its Krylov settings have to be choosable separately from theirs. This
     pins that they are: a solver crippled to a single Krylov vector and a single restart cycle cannot
     reach the tolerance it is given, so ``jax.grad`` fails outright -- while the very same argument
     leaves the forward value untouched, which is what shows it reaches the adjoint and nothing else.
@@ -328,7 +328,7 @@ def test_the_injected_adjoint_solver_reaches_the_transpose_solve_and_only_it(cas
             flow_ws,
             k_ws,
             omega_ws,
-            continuation=continuation,
+            strategy=continuation,
             max_steps=40,
             adjoint_solver=adjoint_solver,
         )
@@ -407,7 +407,7 @@ def test_coupled_log_omega_adjoint_matches_finite_difference(case) -> None:
             log_omega.turbulence.molecular_viscosity * nu_scale,
         )
         _, k, _ = solve_coupled(
-            scaled, flow_ws, k_ws, omega_ws, continuation=continuation, max_steps=40
+            scaled, flow_ws, k_ws, omega_ws, strategy=continuation, max_steps=40
         )
         return jnp.sum(k**2)
 

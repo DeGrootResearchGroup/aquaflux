@@ -95,7 +95,7 @@ appreciable Reynolds number, the full step overshoots — often catastrophically
 iteration diverges. **Globalization** is what reshapes the early part of the path so the
 iteration stays somewhere Newton can work from.
 
-`aquaflux` expresses this as one injected strategy, the solver's `forward_step`. Two are
+`aquaflux` expresses this as one injected object, the solver's `strategy`. Two are
 built in, and both share a property worth stating up front:
 
 ```{important}
@@ -114,11 +114,11 @@ evaluation and the iteration is undamped — you keep Newton's fast terminal con
 pay for the search only when you need it.
 
 ```python
-from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver, assembler_residual
+from aquaflux.solve import DampedNewtonStep, RootSolver, assembler_residual
 
-solver = ImplicitNewtonSolver(
+solver = RootSolver(
     max_steps=30,
-    forward_step=DampedNewtonStep(line_search=10),
+    strategy=DampedNewtonStep(line_search=10),
 )
 state = solver.solve(assembler_residual, cavity.initial_state(), cavity)
 ```
@@ -151,7 +151,7 @@ from aquaflux.flow import momentum_continuation
 from aquaflux.solve import Globalization
 
 continuation = momentum_continuation(channel, globalization=Globalization(beta0=2.0))
-solver = ImplicitNewtonSolver(max_steps=120, forward_step=continuation)
+solver = RootSolver(max_steps=120, strategy=continuation)
 state = solver.solve(assembler_residual, channel.initial_state(), channel)
 ```
 
@@ -183,9 +183,9 @@ system is a saddle-point problem: it does not respond to a generic Krylov method
 from aquaflux.flow import BlockPreconditioner
 
 precond = BlockPreconditioner.build(cavity).factory()
-solver = ImplicitNewtonSolver(
+solver = RootSolver(
     max_steps=30,
-    forward_step=DampedNewtonStep(preconditioner=precond),
+    strategy=DampedNewtonStep(preconditioner=precond),
 )
 ```
 
@@ -220,7 +220,7 @@ solve at the converged state, whose cost is completely independent of how many N
 the forward solve took.
 
 You do not have to ask for any of this.
-{meth}`solver.solve <aquaflux.solve.ImplicitNewtonSolver.solve>` is differentiable — here, with
+{meth}`solver.solve <aquaflux.solve.RootSolver.solve>` is differentiable — here, with
 respect to the fluid's viscosity, by rebuilding the assembler inside the differentiated
 function:
 
@@ -241,7 +241,7 @@ def cavity_at(viscosity):
     )
 
 precond = BlockPreconditioner.build(cavity_at(0.01)).factory()   # built once, outside grad
-solver = ImplicitNewtonSolver(max_steps=30, forward_step=DampedNewtonStep(preconditioner=precond))
+solver = RootSolver(max_steps=30, strategy=DampedNewtonStep(preconditioner=precond))
 
 def mean_speed(viscosity):
     assembler = cavity_at(viscosity)
@@ -258,7 +258,7 @@ residual depends on.
 ```{note}
 The steady solve is differentiable in **reverse mode** (`jax.grad`, `jax.vjp`), which is what a
 scalar objective over a whole field needs. Forward-mode differentiation (`jax.jacfwd`, `jax.jvp`)
-through {class}`~aquaflux.solve.ImplicitNewtonSolver` raises; use
+through {class}`~aquaflux.solve.RootSolver` raises; use
 {func}`~aquaflux.solve.newton_step` where a forward-mode derivative through a linear solve is
 what you want.
 ```
@@ -299,7 +299,7 @@ one, with nothing to signal that it is wrong.
 
 So the solver refuses to return it. If the iteration exhausts `max_steps` short of tolerance,
 or the residual norm becomes non-finite,
-{meth}`~aquaflux.solve.ImplicitNewtonSolver.solve` raises `equinox.EquinoxRuntimeError` rather
+{meth}`~aquaflux.solve.RootSolver.solve` raises `equinox.EquinoxRuntimeError` rather
 than handing back a state that cannot be trusted. This happens on the `jax.grad` path too, so a
 sensitivity can never be built quietly on an unconverged field.
 
@@ -313,8 +313,8 @@ If you hit it, the useful responses in order are: start from a better initial fi
 | Situation | Use | How it goes in |
 | --- | --- | --- |
 | Linear residual (Stokes, scalar diffusion) | {func}`~aquaflux.solve.newton_step` | Called **directly**, not injected: `phi = newton_step(assembler.residual, phi)`. One correction, exact in one call for a linear residual, and differentiable in both modes. |
-| Nonlinear, moderate Reynolds number | {class}`~aquaflux.solve.DampedNewtonStep` | `forward_step=DampedNewtonStep(preconditioner=precond)` — the default strategy. |
-| Convection-dominated / high Reynolds number | {func}`~aquaflux.flow.momentum_continuation` | `forward_step=momentum_continuation(assembler)` — a builder that returns a configured {class}`~aquaflux.solve.PseudoTransientStep`. Pseudo-transient damping that ramps to zero; pair it with {func}`~aquaflux.flow.potential_flow`. |
+| Nonlinear, moderate Reynolds number | {class}`~aquaflux.solve.DampedNewtonStep` | `strategy=DampedNewtonStep(preconditioner=precond)` — the default strategy. |
+| Convection-dominated / high Reynolds number | {func}`~aquaflux.flow.momentum_continuation` | `strategy=momentum_continuation(assembler)` — a builder that returns a configured {class}`~aquaflux.solve.PseudoTransientStep`. Pseudo-transient damping that ramps to zero; pair it with {func}`~aquaflux.flow.potential_flow`. |
 | Repeated solves at varying viscosity | {func}`~aquaflux.flow.reused_flow_solve` | Replaces the solver entirely: returns a `solve_flow(momentum, state)` callable, with the preconditioned strategy built once and the compiled Newton step reused across calls. |
 
 ```{note}
@@ -323,8 +323,8 @@ knowing before the next one surprises you.
 
 A **class** is an injectable strategy. {class}`~aquaflux.solve.DampedNewtonStep` and
 {class}`~aquaflux.solve.PseudoTransientStep` both implement the
-{class}`~aquaflux.solve.ForwardStep` protocol — four methods, not one call — and hold their
-own configuration, which is what `forward_step=` takes.
+{class}`~aquaflux.solve.NewtonStrategy` protocol — four methods, not one call — and hold their
+own configuration, which is what `strategy=` takes.
 
 A **builder function** assembles one of those strategies from a handful of settings and hands
 it back. {func}`~aquaflux.flow.momentum_continuation` returns a
@@ -335,7 +335,7 @@ scalars instead.
 
 A **plain function** is a standalone operation with no configuration to hold and nothing to
 inject it into. {func}`~aquaflux.solve.newton_step` is one Newton correction; it is not a
-forward step and cannot be passed as one.
+Newton step and cannot be passed as one.
 ```
 
 The default tolerances (`rtol=1e-10`, `atol=1e-12`) are deliberately tight, since the residual

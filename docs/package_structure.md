@@ -134,15 +134,16 @@ cfd/                                  # repo root
 │   ├── solve/                        # Newton on the residual, the differentiated linear solve, and the AMG that preconditions it
 │   │   ├── state.py                  #   FieldLayout + CellFields / SubLayout / GlobalDofs: the flat field-major state as named, variable-length blocks (every coupled system's one layout)
 │   │   ├── newton.py                 #   newton_step: the Newton correction on the cell residual
-│   │   ├── implicit.py               #   ImplicitNewtonSolver: Newton to convergence on stopped inputs (marching with forward_march), differentiable through the root it reaches; assembler_residual
+│   │   ├── implicit.py               #   RootSolver: Newton to convergence on stopped inputs (marching with newton_march), differentiable through the root it reaches; assembler_residual
 │   │   ├── root_adjoint.py           #   root_adjoint: the implicit-function-theorem adjoint (one transpose solve) attached to a root found by any means
 │   │   ├── linear.py                 #   solve_linear: differentiable matrix-free linear solve, optional left/right preconditioning; relative_residual_gmres
 │   │   ├── norm.py                   #   ResidualNorm → BlockScaledNorm / RowScaledNorm: the convergence and globalization measures
-│   │   ├── march.py                  #   forward_march: the observed forward-only Newton march every solve runs on + the staleness trigger watching it
+│   │   ├── march.py                  #   newton_march: the observed forward-only Newton march every solve runs on + the staleness trigger watching it
+│   │   ├── strategy.py               #   NewtonStrategy / ShiftedNewtonStrategy + StepOutcome / StepReport / StepControl: the contracts the march is written against
 │   │   ├── march_log.py              #   MarchLogger: the streaming per-step log (the reporting half of the on_step seam)
 │   │   ├── checkpoint.py             #   StateCheckpointer: periodic state persistence (the on_checkpoint seam)
 │   │   ├── step_control.py           #   feedback step controls for the eager march (DualTimeControl and friends)
-│   │   ├── continuation.py           #   PseudoTransientStep / ForwardStep: continuation as a residual-agnostic forward step
+│   │   ├── continuation.py           #   PseudoTransientStep / NewtonStrategy: continuation as a residual-agnostic Newton step
 │   │   ├── relaxation.py             #   RelaxationSchedule → SwitchedEvolutionRelaxation, ConstantRelaxation: how the shift strength beta is set each step
 │   │   ├── shift_basis.py            #   ShiftBasis: how the pseudo-transient shift's spatial distribution is built from a cell's operator parts
 │   │   ├── line_search_growth.py     #   LineSearchGrowth: how much the residual may grow and still be accepted

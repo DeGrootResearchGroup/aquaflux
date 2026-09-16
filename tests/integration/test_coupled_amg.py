@@ -104,7 +104,7 @@ def test_amg_solve_converges_and_matches_the_block_preconditioned_solve(case) ->
         preconditioner=MaterializedJacobian(MonolithicVCycle(smoother_fill_levels=SMOOTHER_FILL)),
     )
     flow_a, k_a, omega_a = solve_coupled(
-        coupled, flow_ws, k_ws, omega_ws, continuation=amg, max_steps=40
+        coupled, flow_ws, k_ws, omega_ws, strategy=amg, max_steps=40
     )
 
     residual_norm = float(
@@ -153,7 +153,7 @@ def test_amg_adjoint_matches_finite_difference(case) -> None:
             coupled.turbulence.molecular_viscosity * nu_scale,
         )
         _, k, _ = solve_coupled(
-            scaled, flow_ws, k_ws, omega_ws, continuation=continuation, max_steps=40
+            scaled, flow_ws, k_ws, omega_ws, strategy=continuation, max_steps=40
         )
         return jnp.sum(k**2)
 
@@ -194,7 +194,7 @@ def test_amg_beta_floor_builds_the_preconditioner_above_the_marchs_own_beta(
         lambda _self, _mv, _plan, shift, **_kw: seen.__setitem__("shift", np.asarray(shift)),
     )
 
-    session.precondition_step(active, state)
+    session.refresh_preconditioner(active, state)
 
     diagonal = np.asarray(active.shift_policy.base.shift_term(state).diagonal)
     assert np.allclose(seen["shift"], floor * diagonal)  # built at the FLOOR, not at β
@@ -228,7 +228,7 @@ def test_inner_refresh_rebuilds_at_the_iterate_it_is_handed(case, monkeypatch) -
         "refresh_in_place",
         lambda _self, _mv, _plan, shift, **_kw: built_at.append(np.asarray(shift)),
     )
-    session.precondition_step(
+    session.refresh_preconditioner(
         active, state
     )  # the march calls this before each step; it binds the hook
     built_at.clear()  # that binding call also does the step's own refresh, which is not under test
@@ -286,7 +286,7 @@ def _continuation_ready(momentum):
 def test_sharing_one_preconditioner_makes_a_new_rung_a_march_step_cache_hit() -> None:
     """A Reynolds rung that reuses the V-cycle OBJECT must not recompile the coupled solve.
 
-    The preconditioner rides in a static field of the forward step, so it is part of the compiled
+    The preconditioner rides in a static field of the Newton step, so it is part of the compiled
     step's cache key and is compared by identity: a rung that fits its own V-cycle hands ``_march_step``
     a new key and pays a full compilation of the coupled solve. That was the largest fixed overhead of
     the three-dimensional march -- the three most expensive steps of every archived run were exactly the
@@ -321,7 +321,7 @@ def test_sharing_one_preconditioner_makes_a_new_rung_a_march_step_cache_hit() ->
             _CountingRans(inner=assembler).residual,
             state,
             jnp.asarray(1.0),
-            step.default_solver(),
+            step.linear_solver(),
         )
         return len(_RUNG_TRACES) - before
 

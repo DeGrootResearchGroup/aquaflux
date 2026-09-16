@@ -18,7 +18,7 @@ from aquaflux.flow import VelocityFields
 from aquaflux.mesh import CellZones, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel, ZoneConstant
 from aquaflux.schemes import CorrectedGreenGauss, GradientScheme, ImposedGradient
-from aquaflux.solve import ImplicitNewtonSolver
+from aquaflux.solve import RootSolver
 from aquaflux.turbulence import (
     SSTClosureFields,
     SSTModel,
@@ -111,7 +111,7 @@ def test_k_equation_solves_to_a_finite_bounded_field() -> None:
     this checks only convergence, finiteness, and a sensible magnitude.
 
     **This is the configuration the production limiter exists for, and the only measured case where
-    it is load-bearing.** The solve is a bare ``ImplicitNewtonSolver`` -- no preconditioner, no
+    it is load-bearing.** The solve is a bare ``RootSolver`` -- no preconditioner, no
     globalization -- and the cap is active in EVERY cell at the starting field (asserted below), so
     with the exact operator the k-Jacobian carries the cap's indefinite derivative everywhere and the
     unpreconditioned Newton stagnates rather than converging. Opting in drops that term and restores
@@ -137,7 +137,7 @@ def test_k_equation_solves_to_a_finite_bounded_field() -> None:
     assert bool(jnp.all(production > limit))
 
     residual = turb.k_residual(jnp.zeros(mesh.n_faces), _closure(turb))
-    k = ImplicitNewtonSolver(max_steps=30).solve(
+    k = RootSolver(max_steps=30).solve(
         lambda phi, _: residual(phi), jnp.full(mesh.n_cells, 0.01), None
     )
     assert float(jnp.linalg.norm(residual(k))) < 1e-8  # the equation is solvable
@@ -154,7 +154,7 @@ def test_omega_equation_fixes_the_wall_cells_to_the_adaptive_value() -> None:
     mesh, turb = _turbulence()
     closure = _closure(turb)
     residual = turb.omega_residual(jnp.zeros(mesh.n_faces), closure)
-    omega = ImplicitNewtonSolver(max_steps=40).solve(
+    omega = RootSolver(max_steps=40).solve(
         lambda phi, _: residual(phi), jnp.full(mesh.n_cells, 10.0), None
     )
     assert float(jnp.linalg.norm(residual(omega))) < 1e-6

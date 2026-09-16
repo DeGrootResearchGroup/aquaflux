@@ -10,7 +10,7 @@ turbulence or of coupling -- they describe how a march damps -- so the gap was d
 it was invisible to review because no single builder looked wrong.
 
 **What this does NOT claim.** The problem-specific step fields -- ``step_limit``, ``step_projection``,
-``forward_solver``, ``residual_norm``, ``jacobian_residual`` -- are not settings of the globalization,
+``krylov_solver``, ``residual_norm``, ``jacobian_residual`` -- are not settings of the globalization,
 and the flow-only and scalar builders still do not expose them. Nor can any builder be given a
 non-default acceptance rule or relaxation schedule: those are flattened to ``divergence_cap`` and
 ``beta0``/``exponent``/``beta_floor``.

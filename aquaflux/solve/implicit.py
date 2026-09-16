@@ -2,7 +2,7 @@
 
 For a genuinely nonlinear residual (e.g. a flux-limited advection scheme) Newton takes many
 iterations, and differentiating through the unrolled iterations would tape every step. Instead the
-iteration runs on ``stop_gradient`` copies of its inputs — as :func:`~aquaflux.solve.forward_march`,
+iteration runs on ``stop_gradient`` copies of its inputs — as :func:`~aquaflux.solve.newton_march`,
 the one Newton loop in this package — and the root it reaches is handed to
 :func:`~aquaflux.solve.root_adjoint`, which attaches the implicit-function-theorem derivative: one
 transpose linear solve at the root, independent of the iteration count.
@@ -24,15 +24,15 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 
-from .forward_step import ForwardStep, LineSearchStep, StepFn, StepOutcome
 from .linear import corrected_cycles as _corrected
-from .march import MarchResult, forward_march, refuse_a_transform_the_march_cannot_run_in
+from .march import MarchResult, newton_march, refuse_a_transform_the_march_cannot_run_in
 from .newton import newton_correction
 from .norm import ResidualNorm
 from .root_adjoint import root_adjoint, stop_array_gradients
+from .strategy import LineSearchStep, NewtonStrategy, StepFn, StepOutcome
 
-# What a forward step returns, and what each value is for, is documented on `StepOutcome` and the
-# `StepFn` alias in `forward_step.py`, which is where both are defined.
+# What a Newton step returns, and what each value is for, is documented on `StepOutcome` and the
+# `StepFn` alias in `strategy.py`, which is where both are defined.
 #
 # Inexact-Newton forward solver: each Newton step's linear solve need only make Newton progress,
 # not be exact — the next step corrects the leftover. A loose relative tolerance cuts the GMRES
@@ -50,7 +50,7 @@ class PositiveBlockLimit:
 
     Built by :func:`positive_block_limit`, whose docstring carries the rule and the failure it exists
     to prevent. This is a **value object rather than a closure**, and that is load-bearing: it rides in
-    a forward step's ``step_limit``, which is a *static* field and therefore part of the compiled
+    a strategy's ``step_limit``, which is a *static* field and therefore part of the compiled
     step's cache key. Static fields are compared by ``__eq__``, so two structurally identical limiters
     built at different times are interchangeable here and a closure is not -- functions compare by
     identity, so every rebuild is a fresh key and recompiles the whole coupled solve.
@@ -142,7 +142,7 @@ def positive_block_limit(
     PositiveBlockLimit
         A callable ``(phi, delta) -> alpha_max``, a scalar in ``(0, 1]``, for
         ``backtracking_line_search``'s ``max_alpha``. A **value object**, not a closure, so that two
-        limiters built for the same block are equal and a forward step carrying one stays a
+        limiters built for the same block are equal and a Newton step carrying one stays a
         compilation-cache hit across rebuilds (see :class:`PositiveBlockLimit`).
 
     Notes
@@ -161,7 +161,7 @@ class PositiveBlockProjection:
 
     Built by :func:`positive_block_projection`, whose docstring carries the rule and why it exists
     beside the cap. A **value object rather than a closure** for the same reason as
-    :class:`PositiveBlockLimit`: it rides in a forward step's static fields, which are compared by
+    :class:`PositiveBlockLimit`: it rides in a strategy's static fields, which are compared by
     ``__eq__`` to form the compiled step's cache key, and a closure compares by identity so every
     rebuild would recompile the whole solve.
 
@@ -244,7 +244,7 @@ def positive_block_projection(
     -------
     PositiveBlockProjection
         A callable ``(phi, delta) -> delta'`` of the same shape as ``delta``. A value object, not a
-        closure, so a forward step carrying one stays a compilation-cache hit across rebuilds.
+        closure, so a Newton step carrying one stays a compilation-cache hit across rebuilds.
 
     Notes
     -----
@@ -568,7 +568,7 @@ class DampedNewtonStep(eqx.Module):
     preconditioner : callable or None
         A factory ``phi -> M`` giving the preconditioner ``M`` (a matvec approximating
         ``J^{-1}``) for each Newton step's linear solve, built at the current iterate (e.g.
-        :meth:`aquaflux.flow.BlockPreconditioner.factory`). Used for the forward steps and,
+        :meth:`aquaflux.flow.BlockPreconditioner.factory`). Used for the Newton steps and,
         transposed, for the adjoint (transpose) solve, so gradients are mesh-independent too.
         ``None`` solves unpreconditioned — usable only on small or well-conditioned systems; the
         coupled flow saddle-point needs one. Static.
@@ -606,7 +606,7 @@ class DampedNewtonStep(eqx.Module):
 
         return step
 
-    def default_solver(self) -> lx.AbstractLinearSolver:
+    def linear_solver(self) -> lx.AbstractLinearSolver:
         """The inexact-Newton forward solver (loose relative tolerance; the next step corrects the
         leftover, cutting the matvec count per step several-fold with the converged state unchanged)."""
         return _INEXACT_FORWARD_SOLVER
@@ -625,7 +625,7 @@ class DampedNewtonStep(eqx.Module):
 def assembler_residual(state: jnp.ndarray, assembler: object) -> jnp.ndarray:
     """``R(state)`` of an assembler carried as the parameter the adjoint differentiates.
 
-    The two-argument form :meth:`ImplicitNewtonSolver.solve` and
+    The two-argument form :meth:`RootSolver.solve` and
     :func:`~aquaflux.solve.root_adjoint` take, for the common case where the differentiable parameter
     *is* the assembler. A **module-level function rather than a lambda at each call site**, so every
     driver that solves an assembler's residual hands over the same object: the march compiles its step
@@ -665,7 +665,7 @@ class _ResidualAt(eqx.Module):
     Attributes
     ----------
     residual_fn : callable
-        ``(phi, theta) -> R``, the residual as :meth:`ImplicitNewtonSolver.solve` receives it.
+        ``(phi, theta) -> R``, the residual as :meth:`RootSolver.solve` receives it.
     theta : pytree
         The parameter value to hold fixed, already stripped of any derivative it carried.
     """
@@ -677,7 +677,7 @@ class _ResidualAt(eqx.Module):
         return self.residual_fn(phi, self.theta)
 
 
-class ImplicitNewtonSolver(eqx.Module):
+class RootSolver(eqx.Module):
     """Newton solve to convergence with a reverse-mode IFT adjoint.
 
     Use for nonlinear residuals where the forward iteration count is data-dependent and the
@@ -690,9 +690,9 @@ class ImplicitNewtonSolver(eqx.Module):
         Relative / absolute stopping tolerances on the residual norm (static).
     max_steps : int
         Maximum Newton iterations (static).
-    solver : lineax.AbstractLinearSolver or None
+    linear_solver : lineax.AbstractLinearSolver or None
         Linear solver for the forward Newton steps. ``None`` uses the forward-step strategy's own
-        default (:meth:`ForwardStep.default_solver`) — an **inexact-Newton** GMRES whose tolerances
+        default (:meth:`NewtonStrategy.linear_solver`) — an **inexact-Newton** GMRES whose tolerances
         suit that strategy's march (a loose relative tolerance for the line search, plus a tight
         *absolute* floor for the pseudo-transient continuation so its march is not capped short of
         the nonlinear tolerance near convergence). The converged state is unaffected — the loop
@@ -700,8 +700,8 @@ class ImplicitNewtonSolver(eqx.Module):
     adjoint_solver : lineax.AbstractLinearSolver or None
         Linear solver for the adjoint (transpose) solve. ``None`` uses the tight
         :func:`default_linear_solver`, because this single solve at the converged state sets the
-        gradient accuracy directly and should not be loosened along with the forward steps.
-    forward_step : ForwardStep
+        gradient accuracy directly and should not be loosened along with the Newton steps.
+    strategy : NewtonStrategy
         The globalized forward-step strategy that supplies each Newton iteration. A **pytree field,
         deliberately not static**: a step control varies the shift strength by swapping in a
         :class:`~aquaflux.solve.ConstantRelaxation` carrying ``beta`` as a dynamic leaf, and that is
@@ -709,7 +709,7 @@ class ImplicitNewtonSolver(eqx.Module):
         :class:`DampedNewtonStep` backtracking line search by default, or a :class:`PseudoTransientStep`
         (e.g. from :func:`aquaflux.flow.momentum_continuation`) for a high-Reynolds convective flow. The
         strategy also owns the forward preconditioner and, transposed, the adjoint preconditioner
-        (via :meth:`ForwardStep.adjoint_preconditioner`), so gradients are mesh-independent too.
+        (via :meth:`NewtonStrategy.adjoint_preconditioner`), so gradients are mesh-independent too.
         Every strategy's shift vanishes at the fixed point, so the converged state and the IFT
         adjoint are the same regardless of which is used. Defaults to an unpreconditioned
         ``DampedNewtonStep`` — pass ``DampedNewtonStep(preconditioner=...)`` for a coupled flow,
@@ -719,9 +719,9 @@ class ImplicitNewtonSolver(eqx.Module):
     rtol: float = eqx.field(static=True, default=1e-10)
     atol: float = eqx.field(static=True, default=1e-12)
     max_steps: int = eqx.field(static=True, default=50)
-    solver: lx.AbstractLinearSolver | None = None
+    linear_solver: lx.AbstractLinearSolver | None = None
     adjoint_solver: lx.AbstractLinearSolver | None = None
-    forward_step: ForwardStep = eqx.field(default_factory=DampedNewtonStep)
+    strategy: NewtonStrategy = eqx.field(default_factory=DampedNewtonStep)
 
     def solve(
         self,
@@ -763,16 +763,14 @@ class ImplicitNewtonSolver(eqx.Module):
             root, so a non-converged field is rejected rather than returned (its gradient would be
             silently wrong). Raised at solve time, and equally on the ``jax.grad`` path.
         """
-        refuse_a_transform_the_march_cannot_run_in(
-            (phi0, theta), caller="ImplicitNewtonSolver.solve"
-        )
-        forward = self.forward_step
-        solver = self.solver if self.solver is not None else forward.default_solver()
+        refuse_a_transform_the_march_cannot_run_in((phi0, theta), caller="RootSolver.solve")
+        strategy = self.strategy
+        solver = self.linear_solver if self.linear_solver is not None else strategy.linear_solver()
         # The march runs on stopped copies and is never differentiated, so its Python loop sees
         # concrete values on the `jax.grad` path as well; the derivative is attached below, at the
         # root it reaches.
-        result = forward_march(
-            forward,
+        result = newton_march(
+            strategy,
             _ResidualAt(residual_fn, stop_array_gradients(theta)),
             stop_array_gradients(phi0),
             max_steps=self.max_steps,
@@ -786,14 +784,14 @@ class ImplicitNewtonSolver(eqx.Module):
         # nothing, so a state short of the root would yield a silently wrong gradient.
         if not result.converged:
             raise eqx.EquinoxRuntimeError(
-                f"ImplicitNewtonSolver did not converge: {_how_it_ended(result, self.max_steps)}, "
+                f"RootSolver did not converge: {_how_it_ended(result, self.max_steps)}, "
                 "short of atol + rtol*||R0|| or with a non-finite residual norm. The "
                 "implicit-function-theorem adjoint is only valid at a converged root, so the returned "
                 "field and any gradient built on it would be silently wrong. Raise max_steps, loosen "
                 "the tolerances, or use a stronger globalization (e.g. pseudo-transient continuation "
                 "for a high-Reynolds flow)."
             )
-        # The strategy owns both the forward step and the adjoint preconditioner (the same
+        # The strategy owns both the Newton step and the adjoint preconditioner (the same
         # preconditioner it applies forward, transposed at the converged state), so a high-Re solve
         # needs a single strategy for both the forward globalization and the mesh-independent adjoint.
         return root_adjoint(
@@ -801,7 +799,7 @@ class ImplicitNewtonSolver(eqx.Module):
             result.state,
             theta,
             adjoint_solver=self.adjoint_solver,
-            adjoint_preconditioner=forward.adjoint_preconditioner(),
+            adjoint_preconditioner=strategy.adjoint_preconditioner(),
         )
 
 

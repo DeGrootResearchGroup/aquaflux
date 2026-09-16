@@ -39,13 +39,13 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 
-from .forward_step import StepFn, StepOutcome
 from .implicit import backtracking_line_search
 from .line_search_growth import LineSearchGrowth, MonotoneLineSearch
 from .linear import corrected_cycles, solve_linear
 from .norm import ResidualNorm
 from .relaxation import RelaxationSchedule, SwitchedEvolutionRelaxation
 from .settings_value import SettingsValue, filled_from
+from .strategy import StepFn, StepOutcome
 
 # Inexact-Newton forward solver for the pseudo-transient march: a loose *relative* tolerance (each
 # shifted step need only make Newton progress; the next step corrects the leftover) but a *tight*
@@ -283,7 +283,7 @@ class DivergenceGuard(eqx.Module):
 
 
 class ShiftedStep(eqx.Module):
-    """The configuration and accessors every diagonally-shifted forward step shares.
+    """The configuration and accessors every diagonally-shifted strategy shares.
 
     :class:`PseudoTransientStep` takes one shifted Newton step per outer iteration;
     :class:`DualTimeStep` runs an inner Newton loop to convergence on a backward-Euler residual. They
@@ -297,7 +297,7 @@ class ShiftedStep(eqx.Module):
     for the single-step march, the inner-loop bounds and observability hooks for the dual-time one.
 
     **Why the accessors are worth sharing even though they are one line each.** They are the
-    :class:`~aquaflux.solve.ForwardStep` contract's answers, so a third strategy that gets one subtly
+    :class:`~aquaflux.solve.NewtonStrategy` contract's answers, so a third strategy that gets one subtly
     wrong -- returning a fresh norm rather than the configured one, say -- fails somewhere far from the
     mistake: the convergence test and the globalization would then judge progress by different measures,
     which is a silent wrong answer rather than an error.
@@ -317,7 +317,7 @@ class ShiftedStep(eqx.Module):
         correction. Both guard the *state* rather than the march -- a field that must stay positive must
         stay positive whichever strategy is stepping it -- which is why they are here rather than on one
         subclass. Both default ``None``, the unconstrained step exactly.
-    forward_solver : lineax.AbstractLinearSolver or None
+    krylov_solver : lineax.AbstractLinearSolver or None
         The shifted-solve Krylov solver, or ``None`` for this march's shared inexact default. Data, not
         static: a solver configured with a row-scaled stopping measure carries that measure's scale
         arrays, and equinox rightly warns when arrays go in a static field -- static leaves join the jit
@@ -339,7 +339,7 @@ class ShiftedStep(eqx.Module):
         completely different amounts of approximation and there is no reason for one number to serve
         both. This field is where that asymmetry is expressed. It reaches the *forward* march alone: the
         implicit-function-theorem adjoint differentiates the residual it was handed, at the converged
-        state, without consulting the forward step at all, so a gradient stays exact whatever is set
+        state, without consulting the strategy at all, so a gradient stays exact whatever is set
         here.
 
         Data, not static, for the reason ``residual_norm`` is: the natural thing to pass is a bound
@@ -356,7 +356,7 @@ class ShiftedStep(eqx.Module):
     step_projection: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = eqx.field(
         static=True, default=None
     )
-    forward_solver: lx.AbstractLinearSolver | None = None
+    krylov_solver: lx.AbstractLinearSolver | None = None
     residual_norm: ResidualNorm = eqx.field(default=jnp.linalg.norm)
     adjoint_preconditioner_factory: (
         Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None
@@ -367,15 +367,15 @@ class ShiftedStep(eqx.Module):
         """The residual measure the march and the outer stopping test share (:attr:`residual_norm`)."""
         return self.residual_norm
 
-    def default_solver(self) -> lx.AbstractLinearSolver:
-        """The injected :attr:`forward_solver` when set, else the shared inexact continuation default.
+    def linear_solver(self) -> lx.AbstractLinearSolver:
+        """The injected :attr:`krylov_solver` when set, else the shared inexact continuation default.
 
         A loose relative tolerance with a tight absolute floor and a generous restart/stagnation budget,
         so the march is not capped short of the nonlinear tolerance and rides out the stiffer shifted
         operators a graded, high-Reynolds mesh produces.
         """
         return (
-            self.forward_solver if self.forward_solver is not None else _INEXACT_CONTINUATION_SOLVER
+            self.krylov_solver if self.krylov_solver is not None else _INEXACT_CONTINUATION_SOLVER
         )
 
     def adjoint_preconditioner(
@@ -386,12 +386,12 @@ class ShiftedStep(eqx.Module):
 
 
 class PseudoTransientStep(ShiftedStep):
-    """Pseudo-transient continuation as a :class:`~aquaflux.solve.ForwardStep` (see the module docstring).
+    """Pseudo-transient continuation as a :class:`~aquaflux.solve.NewtonStrategy` (see the module docstring).
 
     The residual-agnostic engine: it forms the switched-evolution-relaxation shift, solves the
     shifted Newton system, and runs the closed-loop accept/escalate loop, delegating every
     problem-specific choice to an injected :class:`ShiftPolicy`. Plug it into
-    :class:`~aquaflux.solve.ImplicitNewtonSolver` as its ``forward_step``.
+    :class:`~aquaflux.solve.RootSolver` as its ``strategy``.
 
     Attributes
     ----------
@@ -443,7 +443,7 @@ class PseudoTransientStep(ShiftedStep):
         not descend). The ``β`` escalation remains the fallback for a genuinely bad direction (an
         ill-conditioned shifted solve). Like the shift, it only reshapes the forward path, so the
         converged state and the IFT adjoint are unchanged.
-    forward_solver : lineax.AbstractLinearSolver or None
+    krylov_solver : lineax.AbstractLinearSolver or None
         The linear solver for the shifted forward solves, overriding the shared
         :data:`_INEXACT_CONTINUATION_SOLVER` when set. A stiff coupled system whose shifted
         operator needs a larger Krylov subspace to converge without restarting can pass a
@@ -741,7 +741,7 @@ class DualTimeStep(ShiftedStep):
         ``G = 0`` is a well-posed fixed-``φⁿ`` solve, so the inner line search is strict-descent
         (monotone) on ``‖G‖`` — unlike the non-monotone steady residual the outer march tolerates.
         Default ``10``.
-    forward_solver : lineax.AbstractLinearSolver or None
+    krylov_solver : lineax.AbstractLinearSolver or None
         The shifted-solve Krylov solver, overriding the shared :data:`_INEXACT_CONTINUATION_SOLVER`
         when set.
     residual_norm : ResidualNorm
@@ -815,7 +815,7 @@ class DualTimeStep(ShiftedStep):
         Forward-only, like the retry it pairs with.
     abort_above_inner_cycles : int or None
         Stop the inner loop as soon as any **single** solve has cost more than this (static). Set by
-        :func:`~aquaflux.solve.forward_march` from its own ``retry.abort_above_cycles``, so the two are one number
+        :func:`~aquaflux.solve.newton_march` from its own ``retry.abort_above_cycles``, so the two are one number
         rather than two that must be kept in step; a caller driving this class directly may set it itself.
 
         This is the *same* predicate the march applies after the step returns — cost above the threshold
@@ -941,7 +941,7 @@ class DualTimeStep(ShiftedStep):
                 # after ~one over-budget inner iteration (~`cycle_budget` matvecs) instead of running the
                 # full `inner_steps` into the restart cap (measured ~5× the cost on the 3D coupled march).
                 # The partial, non-converged iterate this returns is meant to be discarded by the march's
-                # cost redo (`forward_march(retry.abort_above_cycles < cycle_budget)`), which redoes the step
+                # cost redo (`newton_march(retry.abort_above_cycles < cycle_budget)`), which redoes the step
                 # at the SAME β on the refreshed preconditioner -- so pair the two, or the truncated iterate
                 # is accepted as it stands. `cycle_budget=None` (default) is
                 # byte-identical (the budget term is elided at trace time, as `cycle_budget` is static).
@@ -1346,7 +1346,7 @@ class Globalization(eqx.Module):
             The problem's shift diagonal and shifted-operator preconditioner.
         **fields
             The step's remaining, problem-specific fields, passed straight through:
-            ``adjoint_preconditioner_factory``, ``forward_solver``, ``residual_norm``, ``step_limit``,
+            ``adjoint_preconditioner_factory``, ``krylov_solver``, ``residual_norm``, ``step_limit``,
             ``step_projection``, ``jacobian_residual``. A field left out, or passed as ``None``, keeps
             :class:`PseudoTransientStep`'s own default. A step field this object leaves unset may be
             supplied here instead -- a non-default ``acceptance`` rule, say, with
@@ -1355,7 +1355,7 @@ class Globalization(eqx.Module):
         Returns
         -------
         PseudoTransientStep
-            The forward step to hand :class:`~aquaflux.solve.ImplicitNewtonSolver`.
+            The Newton strategy to hand :class:`~aquaflux.solve.RootSolver`.
 
         Raises
         ------
@@ -1405,7 +1405,7 @@ class Globalization(eqx.Module):
         Returns
         -------
         DualTimeStep
-            The forward step to hand :class:`~aquaflux.solve.ImplicitNewtonSolver`.
+            The Newton strategy to hand :class:`~aquaflux.solve.RootSolver`.
 
         Raises
         ------

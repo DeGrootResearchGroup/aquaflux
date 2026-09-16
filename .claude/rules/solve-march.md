@@ -5,7 +5,7 @@ paths:
   - "aquaflux/solve/checkpoint.py"
 ---
 
-# Rules — `aquaflux/solve/` the observed march (`forward_march`, triggers, controls, logging)
+# Rules — `aquaflux/solve/` the observed march (`newton_march`, triggers, controls, logging)
 
 > ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | MonolithicVCycle | FieldSplit)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
 
@@ -18,10 +18,10 @@ paths:
 > leave a current-status summary here, following the pattern in `solve-flow-block.md` /
 > `solve-flow-block-log.md`. See `solve.md`'s "Where new content goes".
 
-## The observed march — forward_march, triggers, controls, logging
+## The observed march — newton_march, triggers, controls, logging
 
 - **`ResidualHomotopy` — a continuation walked INSIDE one march, not as a ladder of marches (BUILT
-  2026-09-09).** A `Protocol` on `forward_march(homotopy=…)` with two methods: `enter(step)` makes the
+  2026-09-09).** A `Protocol` on `newton_march(homotopy=…)` with two methods: `enter(step)` makes the
   station that step solves current and returns its residual, and `arrived(step)` says whether that
   station is the **target**. `None` (the default) is byte-identical and is pinned by a test, since an
   added seam that moves the incumbent path is a defect rather than a feature.
@@ -58,7 +58,7 @@ paths:
     Against the ladder that is **1.7x steps, 1.60x cycles, 1.53x wall**. The last two rows are the
     whole argument for `redamp` and are covered in its own entry below.
   - **⚠️ THE STOPPING TEST IS GATED ON ARRIVAL, and this is the load-bearing correctness property.** A
-    small residual at an intermediate station says nothing about the target, so `forward_march` may not
+    small residual at an intermediate station says nothing about the target, so `newton_march` may not
     stop — and `MarchResult.converged` may not be `True` — until `arrived`. Both directions are pinned
     by starting a march **at a station's own exact root**, where the tolerance test passes on step one:
     without the gate it returns there and reports success at a state that does not solve the target.
@@ -84,7 +84,7 @@ paths:
     case*, not a standing preference for coarse stations.
   - **⚠️ `redamp` — RE-DAMP ON ENTERING A STATION, AND THE MARCH BREAKS WITHOUT IT (BUILT 2026-09-09).**
     `ShiftStrengthControl.redamp(state, factor)` multiplies β by `ResidualHomotopy.shift_factor(step)`
-    on the step that first faces a new station, and `forward_march` **holds** the control for that step.
+    on the step that first faces a new station, and `newton_march` **holds** the control for that step.
     It is the companion of `rebase` and they fire on **adjacent steps for different reasons**: this on
     the entering step, that on the next one, which is the first whose ratio would straddle the boundary.
     - **⚠️ THE SPURIOUS BRAKE `rebase` REMOVES WAS LOAD-BEARING.** This is the case's instance of a
@@ -187,7 +187,7 @@ paths:
 - **⚠️ `MarchLogger.on_step` and `.on_checkpoint` are MUTUALLY EXCLUSIVE renderings of one event —
   wire one, never both (measured 2026-08-15).** Both call `_log`; they differ only in whether the
   injected case metrics are appended (`on_checkpoint` has the state, `on_step` does not). But
-  `forward_march` calls its `observer` and `checkpoint` seams **unconditionally on every step**, so
+  `newton_march` calls its `observer` and `checkpoint` seams **unconditionally on every step**, so
   handing the same logger to both logs every step **twice** and double-counts the logger's own step
   and cumulative-cycle totals — measured, 2 steps produce 4 rows and `cum 8` against the correct
   `cum 4`. The shipped driver wires `on_checkpoint` and deliberately leaves `on_step` unwired; prefer
@@ -200,18 +200,18 @@ paths:
   the log's output format, not a signature refactor.
 
 
-- **`march.py` — BUILT (`forward_march`, `StepReport`/`MarchResult`, `RefreshTrigger`/`CycleGrowthTrigger`):
+- **`march.py` — BUILT (`newton_march`, `StepReport`/`MarchResult`, `RefreshTrigger`/`CycleGrowthTrigger`):
   the observed, forward-only march that drives a mid-march preconditioner refresh.**
   - **ONE march (binding — 2026-09-15, phase 3 of the unification; this replaces "two marches, one
-    decision layer").** `forward_march` is the only Newton loop in the package. The traced `_forward`
-    (a `lax.while_loop` inside `ImplicitNewtonSolver`) is **deleted**; `ImplicitNewtonSolver.solve` now
-    marches with `forward_march` on `stop_array_gradients` copies, owns the root guard, and hands the
+    decision layer").** `newton_march` is the only Newton loop in the package. The traced `_forward`
+    (a `lax.while_loop` inside `RootSolver`) is **deleted**; `RootSolver.solve` now
+    marches with `newton_march` on `stop_array_gradients` copies, owns the root guard, and hands the
     root to `root_adjoint`. What that buys is that a capability can no longer exist on one loop and not
     the other — the shape of #369, which phase 2 fixed inside `solve_coupled` and this removes the
     remaining home for. What it costs is `jit`/`vmap`: a Python loop cannot run under either, so every
     entry point refuses them up front through
     `refuse_a_transform_the_march_cannot_run_in(pytree, caller=…)`, which lives **here** in `march.py`
-    and is called by `ImplicitNewtonSolver.solve`, `solve_coupled` and `solve_coupled_mass_flow`. That
+    and is called by `RootSolver.solve`, `solve_coupled` and `solve_coupled_mass_flow`. That
     was decided, not discovered: nothing in the repository `vmap`s a solve, and the four library builders
     that jitted one did so for compile-cache reuse, which the `filter_jit`-compiled `_march_step` gives
     them anyway (see `solve.md`'s `implicit.py` entry for the residual-identity condition that keeps).
@@ -221,12 +221,12 @@ paths:
   - **NOTHING in the refresh machinery reads the line-search α, and on `bfs3d` almost nothing reads
     anything else either (source-verified against the current defaults).** Two independent refresh paths
     exist and they key on different things: the post-step `RefreshTrigger`s (`CycleGrowthTrigger` →
-    `cycles` + `residual_ratio`; `CoefficientDriftTrigger` → `ν_t` drift) and the per-attempt `precondition_step` hook (`amg_beta_tracking_refresh`, which since 2026-09-13
+    `cycles` + `residual_ratio`; `CoefficientDriftTrigger` → `ν_t` drift) and the per-attempt `refresh_preconditioner` hook (`amg_beta_tracking_refresh`, which since 2026-09-13
     (#371) re-fits only on its first call and after `rebind` — its scheduled gates were deleted).
     **Neither reads `alpha` or `binding_limit`**, so a collapsed line search can only ever escalate β — it
     can never buy a rebuild — and the **only** live cost trigger is the reactive mid-step "one solve
     reached `refresh_on_cycles` restart cycles". Two consequences worth holding: (a) an α-triggered
-    refresh needs **no new trigger** — `precondition_step` is already called once per *attempt*, after the
+    refresh needs **no new trigger** — `refresh_preconditioner` is already called once per *attempt*, after the
     control has set β, so a rebuild on escalation would be a condition inside that hook (the deleted
     `beta_rel_change` gate was one, never measured in that role); (b) that would **not** address
     the lock-ups this case actually hits, which run at `binding_limit < 1` (the positivity ratchet) where
@@ -237,25 +237,25 @@ paths:
     The root guard raises whenever the terminal state is not a root, and a trigger-stopped segment exits
     un-converged *by design*. Putting the early stop behind the guard would require an **exemption** in
     it — a production path returning a non-root without raising, which is exactly the
-    silent-wrong-gradient hole the guard exists to close. So the trigger stays a `forward_march`
-    argument that `ImplicitNewtonSolver.solve` does not pass, and the driver that does pass one
+    silent-wrong-gradient hole the guard exists to close. So the trigger stays a `newton_march`
+    argument that `RootSolver.solve` does not pass, and the driver that does pass one
     (`solve_coupled`) owns its own convergence test at the end. Chunking a march with `max_steps=1`
     fails independently: it recomputes `residual_norm_0` per chunk, pinning the SER ramp at β₀ forever.
   - ⚠️ **"The eager march NEVER returns the answer" is DEAD (was: a staged solve ends with a traced
-    `ImplicitNewtonSolver.solve` that owns the guard and the result).** Phase 2 removed the finishing
+    `RootSolver.solve` that owns the guard and the result).** Phase 2 removed the finishing
     solve from `solve_coupled` and phase 3 removed the traced loop entirely: the march's state **is** the
     answer, and the guard is the driver's explicit test on `MarchResult.converged` before
     `root_adjoint`. The invariant that survives is the one that mattered — the guard is unconditionally
     on the path that produces the returned state — but it now has one home *per driver* rather than one
     home in total.
   - **Two reference norms, and conflating them freezes the march (binding).** `residual_norm_0` is
-    **segment-local** (recomputed at each `forward_march` entry, handed to `stepper()` for the SER ramp);
+    **segment-local** (recomputed at each `newton_march` entry, handed to `stepper()` for the SER ramp);
     `reference_norm` is **global** (fixed across segments, used for the convergence test and the reported
     ratio). Substituting the second for the first pairs a refreshed, larger shift diagonal with the small
     β belonging to the pre-refresh residual — the over-damping freeze documented in `turbulence.md`.
   - **Per-step jit cache hit is mandatory, not an optimization (top implementation risk).** The per-step
-    call goes through the module-level `eqx.filter_jit`'d `_march_step`, taking the `ForwardStep` **and**
-    the residual as *arguments*. Two caller obligations: pass the **same** `forward_step` object across a
+    call goes through the module-level `eqx.filter_jit`'d `_march_step`, taking the `NewtonStrategy` **and**
+    the residual as *arguments*. Two caller obligations: pass the **same** `strategy` object across a
     segment (a rebuilt one is the intended one-off recompile per refresh), and pass a **bound module
     method** (`coupled.residual`) rather than a freshly-built `lambda`, which `filter_jit` hashes by
     identity. Retracing per step would cost the 60–240 s compile *every step* and dominate the march it
@@ -263,7 +263,7 @@ paths:
     invoked several times *within one trace* (step, line-search ladder, norm), so trace count ≠ compile
     count — assert that further steps add none, not that the total is 1.
   - **`solve_coupled` does NOT declare `grow`, and must not be "fixed" to (binding).** It is a
-    `coupled_continuation` parameter and reaches it through `**continuation_kwargs`, which
+    `coupled_continuation` parameter and reaches it through `**strategy_kwargs`, which
     `solve_coupled` already splats into that same function at both of its build sites. Declaring it as
     well — which it used to — meant an extra parameter on an already-wide signature forwarding what was
     forwarded anyway. Its documented home is `coupled_continuation`, where the parameter actually
@@ -271,14 +271,14 @@ paths:
     (`descent_backoff` / `descent_test` used to be named alongside it here; both are deleted — see
     `.claude/notes/solve-refuted-directions.md`.)
   - **The four refresh settings are ONE injected object — `RefreshPolicy` (`solve/refresh.py`),
-    exported from `aquaflux.solve` (BUILT).** `trigger` / `limit` / `builder` / `precondition_step`
+    exported from `aquaflux.solve` (BUILT).** `trigger` / `limit` / `builder` / `refresh_preconditioner`
     were four keyword arguments on `solve_coupled`, meaningless apart: a `limit` with no trigger bounds
     a loop that never runs, a `builder` with no trigger is called once. The derived predicates and the
     one validation are on the object — `refreshes` (trigger AND budget), `observes` (does this force
     the eager march), `segments` (= `limit + 1`), `is_last_segment`, and `require_rebuildable`, which
     raises when a caller-supplied step has no builder to rebuild it with.
-    - **It is a DRIVER-level object and `forward_march` does NOT take it (binding).** The march uses
-      only `trigger` and `precondition_step`; `limit` and `builder` govern the *sequence of segments*,
+    - **It is a DRIVER-level object and `newton_march` does NOT take it (binding).** The march uses
+      only `trigger` and `refresh_preconditioner`; `limit` and `builder` govern the *sequence of segments*,
       which is the driver's loop. Passing the whole policy down would hand the march two fields it
       cannot act on — the "smallest sufficient collaborator" rule, and the reason this differs from
       `RetryPolicy`, which the march consumes whole.
@@ -287,7 +287,7 @@ paths:
       ran an observed pre-march; that solve now has one march, so nothing selects between marches.
   - **The six retry settings are ONE injected object — `RetryPolicy` (`solve/retry.py`), exported from
     `aquaflux.solve` (BUILT).** `solver` / `divergence_cap` / `on_cycles` / `on_alpha` / `beta_factor` /
-    `cycles_limit` used to be six parallel keyword arguments on **both** `forward_march` and
+    `cycles_limit` used to be six parallel keyword arguments on **both** `newton_march` and
     `solve_coupled`, and they are meaningless apart: a `beta_factor` with no threshold escalates nothing,
     a `cycles_limit` bounds a loop that never runs. The three decisions taken from them read three or
     four each, so they are **methods on the policy** rather than free functions taking a subset —
@@ -298,18 +298,18 @@ paths:
     dtype/weak type and recompiles the whole coupled solve on every retry).
     - **`NO_RETRIES` is the shared default instance**, so both signatures' defaults name what the default
       *means* rather than how it is spelled; it is byte-identical to the old all-`None` defaults.
-    - **The ORDER stays on `forward_march`, not on the policy** — escalation first, `solver` as the
+    - **The ORDER stays on `newton_march`, not on the policy** — escalation first, `solver` as the
       fallback — because it is a property of the loop, not of the settings. Likewise `on_retry` stays a
       separate argument: it is *reporting*, and it belongs with the other observation seams rather than
       with the thresholds.
-    - **`forward_march` takes the whole policy; a refresh policy would NOT be passed the same way.** The
+    - **`newton_march` takes the whole policy; a refresh policy would NOT be passed the same way.** The
       march uses all six, so the object is the smallest sufficient collaborator there. Do not extend this
       to arguments a callee does not need in full.
   - **Reactive divergence retry — `retry.solver` recovers a step an INEXACT preconditioner poisons,
     without tightening every step (BUILT).** An *inexact* preconditioner can return a
     non-finite correction on the stiff operator an aggressive Courant overshoot produces, where the
     *exact* complete-LU returns a finite one — the loose default Krylov tolerance is what leaves that
-    correction too inaccurate. `forward_march(retry=RetryPolicy(solver=…, divergence_cap=inf))` redoes a diverged
+    correction too inaccurate. `newton_march(retry=RetryPolicy(solver=…, divergence_cap=inf))` redoes a diverged
     step **from the same pre-step state** at the tighter `retry.solver`; the trigger is
     `RetryPolicy.has_diverged` (non-finite, or `> divergence_cap·reference` — default `inf`, i.e. non-finite only,
     because the residual legitimately *rises* during development via `β×travel`, so a tight cap would
@@ -325,7 +325,7 @@ paths:
     rung-1 steps 1–7 ran on the cheap loose solver and *only* the diverged step 8 retried tight —
     recovering to the exact-LU value (ratio 9.72e-2) and tracking the LU on — instead of paying the tight
     solve on every step. Threaded through `solve_coupled(retry=RetryPolicy(solver=…))`; forward-only (raises under
-    `jax.grad`, same guard as the refresh/control). Pinned by `test_forward_march.py`
+    `jax.grad`, same guard as the refresh/control). Pinned by `test_newton_march.py`
     (`test_march_retries_a_diverged_step_with_the_tighter_solver`, `test_march_does_not_retry_a_finite_step`).
     On 2D the exact LU is cheaper *and* robust for free, so this is really a 3D-readiness lever (where the
     LU's fill is the wall and the algebraic multigrid is the option).
@@ -338,16 +338,16 @@ paths:
     *non-finite* one — and on the stiff low-β saddle **both have the same cheap cure: more damping.** A
     larger β lifts the correction out of the NaN regime *and* cuts the cycle count (a stronger pseudo-time
     shift makes the same frozen preconditioner more diagonally dominant), and it is far cheaper than the
-    tight-Krylov divergence retry. So `forward_march(retry=RetryPolicy(on_cycles=N, beta_factor=2.0,
+    tight-Krylov divergence retry. So `newton_march(retry=RetryPolicy(on_cycles=N, beta_factor=2.0,
     cycles_limit=2))` redoes a step whose count exceeds `N` **or** that diverged (non-finite / over
     `retry.divergence_cap`) **from the same pre-step state** with β escalated (`×retry.beta_factor`,
-    re-applying `precondition_step` at the new β so a β-tracking refresh re-shifts), up to
+    re-applying `refresh_preconditioner` at the new β so a β-tracking refresh re-shifts), up to
     `retry.cycles_limit` times or until it converges/drops below `N`. It reads β off
     `active_step.relaxation_schedule.beta` (a `ConstantRelaxation` / `DualTimeStep`), so it requires a
     readable β and is inert on the default switched-evolution schedule. an unset threshold (the default) is
     **byte-identical** (and a diverged step then falls straight to `retry.solver`, the pre-reorder
     behaviour). Forward-only; threaded through `solve_coupled(retry=RetryPolicy(on_cycles=…))`. Pinned by
-    `test_forward_march.py` (`test_a_cycle_spike_redoes_the_step_ONCE_and_does_NOT_escalate`,
+    `test_newton_march.py` (`test_a_cycle_spike_redoes_the_step_ONCE_and_does_NOT_escalate`,
     `…_does_not_escalate_below_the_cycle_cap`, `…_escalates_beta_before_the_tight_divergence_retry`,
     `…_falls_back_to_the_tight_retry_when_escalation_cannot_fix_divergence`).
     - **The escalation must keep `_march_step` a compile-cache HIT (binding — a measured recompile
@@ -412,10 +412,10 @@ paths:
       bind — just a whole stagnating solve too late.
     - **`DualTimeStep(abort_above_inner_cycles=…)` — stop the moment the attempt is KNOWN to be
       discarded (BUILT).** `retry.abort_above_cycles` is a **per-solve** quantity, so the instant one solve
-      exceeds it with the inner target unmet, `forward_march` is going to bin the whole attempt and redo
-      it at a larger β. Yet the check lived only in `forward_march`, *after* the step returned — so the
+      exceeds it with the inner target unmet, `newton_march` is going to bin the whole attempt and redo
+      it at a larger β. Yet the check lived only in `newton_march`, *after* the step returned — so the
       step kept running inner iterations whose results were already destined for the bin. The same
-      predicate now sits in the inner loop's `cond`, and `forward_march` pushes its own `retry.abort_above_cycles`
+      predicate now sits in the inner loop's `cond`, and `newton_march` pushes its own `retry.abort_above_cycles`
       down via `RetryPolicy.with_inner_abort` (using `dataclasses.replace`, not `eqx.tree_at` — the field is static,
       so it is in the treedef, not among the leaves), so there is **one** number rather than two to keep
       in step.
@@ -437,7 +437,7 @@ paths:
       **⚠️ MEASURE IT IN WALL, NOT IN THE CYCLE TOTAL.** The march's reported `cyc` is the **accepted**
       attempt's count only, so discarded work was never in it: total cycles moved 348 → 347 while a real
       250 s came out. A prediction phrased against the cycle total would read as a total miss.
-      **⚠️ It is NOT purely a cost change.** `precondition_step` runs per *attempt*, so truncating a
+      **⚠️ It is NOT purely a cost change.** `refresh_preconditioner` runs per *attempt*, so truncating a
       discarded attempt changes the refresh sequence and hence the V-cycle the next step sees: the two
       marches agree step-for-step through 52 and then diverge (61 vs 62 steps, same `x_r/h` 8.36, both
       converged). Benign here, but do not describe the abort as trajectory-neutral.
@@ -470,7 +470,7 @@ paths:
       returning it unchanged — with `limit 4.37e-10`, i.e. the **positivity cap**, not the descent test,
       is what admits nothing. The four steps cost ~233 s to cross half a decade.
       Both halves are now built and are the same predicate in two places, as the cost bailout already is:
-      **`forward_march(retry=RetryPolicy(on_alpha=α))`** escalates β (reason `"alpha"` on `on_retry`), and it is pushed
+      **`newton_march(retry=RetryPolicy(on_alpha=α))`** escalates β (reason `"alpha"` on `on_retry`), and it is pushed
       into **`DualTimeStep.abort_below_alpha`** by `RetryPolicy.with_inner_abort` so the inner loop exits at the
       collapse instead of iterating on. `RetryPolicy.retry_reason` now owns which of the three reasons applies,
       so the decision and the string reported for it cannot disagree.
@@ -517,7 +517,7 @@ paths:
       *here*": it fires exactly where β went too low. But without carrying it back, the next outer step's
       `step_control.next_step` recomputes β from the control's own (floor-ward) trajectory and **re-pays the
       escalation every step** — the observed low-β tail (β pinned at the floor, each step re-escalating). So
-      after an escalation `forward_march` seeds the control's carried β with the escalated value via
+      after an escalation `newton_march` seeds the control's carried β with the escalated value via
       `step_control.carry_beta(state, β)` — **one implementation on `ShiftStrengthControl`, over the shared
       `(beta, memo)` state, so no control can be missing it** (it once was: the deleted single-step
       α-targeter had none, and the `hasattr` guard below meant its escalation feedback vanished in
@@ -526,13 +526,13 @@ paths:
       `beta_min` can be driven toward zero and the controller — with escalation as the safety net and the
       carry as the memory — finds how large a timestep each region tolerates, rather than a global floor
       capping it. Only fires when β was actually escalated and the control exposes `carry_beta`; no
-      escalation ⇒ byte-identical. Pinned by `test_forward_march.py`
+      escalation ⇒ byte-identical. Pinned by `test_newton_march.py`
       (`…carries_the_escalated_beta_into_the_control`) and `test_step_control.py`
       (`test_carry_beta_seeds_the_carried_state`).
   - **`CoefficientDriftTrigger` — the PREFERRED staleness trigger: measure the drift, don't infer it
     from cost (binding for new work).** A frozen preconditioner is stale exactly when the operator it
     approximates has moved, so the honest signal is that movement itself. `StepReport.drift` carries a
-    **scalar** relative drift produced by `forward_march(drift_measure=…)`; the coupled RANS measure is
+    **scalar** relative drift produced by `newton_march(drift_measure=…)`; the coupled RANS measure is
     `turbulence.eddy_viscosity_drift(coupled, reference_state)` — `‖Δν_t‖/‖ν_t,ref‖` — because `ν_t` is
     what the frozen k/ω transport operators are assembled from.
     - **Why it beats `CycleGrowthTrigger` (which it supersedes for this job).** The cycle count rises
@@ -642,7 +642,7 @@ paths:
     The trigger and a future logger consume the identical objects, so there is no second reporting path.
     Per-step observation is available wherever a driver passes an `observer`, which since phase 3 means
     every march including the differentiable one — the state it reports is a `stop_gradient` copy, so an
-    observer sees concrete values under `jax.grad` too. `ImplicitNewtonSolver` does not *expose* the
+    observer sees concrete values under `jax.grad` too. `RootSolver` does not *expose* the
     argument (its surface was left alone in that change); `solve_coupled` does.
   - **`shift` / `escalations` / `diverged_retry` on the report, and `MarchLogger` (`solve/march_log.py`)
     — the reporting half of the `on_step` seam (BUILT).** Every driver used to write its own
@@ -698,7 +698,7 @@ paths:
     find any one of them.
     An over-wide value **widens its row rather than being truncated**: a cut-off number is a wrong
     number. Pinned by `tests/unit/test_text_table.py`.
-  - **`StepOutcome` — the forward step's return is a record, not a tuple (BUILT).** It grew to eight
+  - **`StepOutcome` — the strategy's return is a record, not a tuple (BUILT).** It grew to eight
     values (`phi, residual_norm, cycles, alpha, inner_iterations, reached_target, max_inner_cycles,
     binding_limit`), which is the missing-object smell: a positional tuple is where a consumer silently
     mis-unpacks one field for another, and every growth broke all five test doubles separately — which
@@ -716,7 +716,7 @@ paths:
       Small beside the 15--30 Krylov matvecs a step spends, so this is tidiness with a measurable edge
       rather than a speed lever, and it should not be quoted as one.
       **It rests on ONE invariant: the step's measure and the driver's are the same object.**
-      The march takes its measure from `forward_step.norm()`, and rebuilds the
+      The march takes its measure from `strategy.norm()`, and rebuilds the
       *step's* `residual_norm` field through `norm_builder`, so the search, the acceptance test and the
       reported norm are one measure by construction. Break that and the convergence test runs against a
       residual history measured in a different scale from the reference it is compared with.
@@ -741,7 +741,7 @@ paths:
     - **`reached_target`** — did the step run to its OWN stopping criterion, or was it cut short? A
       cost-only escalation cannot tell an expensive success from a grind and **discards the success**:
       measured, an inner loop that reached `‖G‖ = 3.0e-6` against a `1.0e-5` target was thrown away for
-      costing 54 raw cycles, wasting the work *and* replacing it with a shorter step. `forward_march`
+      costing 54 raw cycles, wasting the work *and* replacing it with a shorter step. `newton_march`
       now fires only when `cycles > retry.abort_above_cycles` **and not** `reached_target`.
     - **`max_inner_cycles`** — the offset-corrected cost of the step's most expensive SINGLE solve, and
       what `retry.abort_above_cycles` triggers on. A **summed** threshold is not a difficulty signal: it
@@ -807,7 +807,7 @@ paths:
     **Known defect, not yet fixed:** the checkpointer writes whatever the march reports *including the
     failed step*, so the newest file can be the poisoned state — and a driver calling it "last good
     state" is then lying. Skip a non-finite report, or do not claim "good".
-  - **`on_retry(reason, attempt, beta)` — say WHY a step is being redone (BUILT).** `forward_march`
+  - **`on_retry(reason, attempt, beta)` — say WHY a step is being redone (BUILT).** `newton_march`
   calls it immediately before a redo with `"diverged"`, `"cycles"` or `"alpha"` — the three
   `RetryPolicy.retry_reason` returns (⚠️ only `"diverged"`/`"alpha"` escalate β since 2026-08-17;
   `"cycles"` redoes at the same shift) — or `"solver"` for the tight-Krylov
@@ -826,7 +826,7 @@ paths:
       Pinned by `test_on_retry_reports_the_beta_the_retried_attempt_will_run_at` (at a *non-default*
       factor, since 2 cannot catch this) and two `test_march_log.py` tests.
   - **A self-rescaling measure means two "same" residuals are NOT the same number (binding trap).**
-    `forward_march(norm_builder=…)` re-derives the `RowScaledNorm` at the state each outer iteration
+    `newton_march(norm_builder=…)` re-derives the `RowScaledNorm` at the state each outer iteration
     *begins from* and holds it for that whole iteration. So the `R` reported at the end of step N and
     the `‖G‖` entering step N+1 measure the **identical state** in **different scales**. Measured over
     one 62-step `bfs3d` march: they differed on **every** step — up to 2× early on, converging to 1 as
@@ -901,7 +901,7 @@ paths:
       `coupled_fields`, so the two grids join. Costs **one extra residual evaluation per logged step**,
       which is why it is opt-in. **The rows add up to the `R` printed above them, exactly** — pinned at
       `rel=1e-12`. That requires equilibrating at the **previous** state, not the logged one:
-      `forward_march` re-derives the measure at the state each outer iteration *starts* from and holds
+      `newton_march` re-derives the measure at the state each outer iteration *starts* from and holds
       it for the whole iteration (every trial step, the acceptance test, and the reported norm), so a
       step's residual is `norm_at_start(R(state_at_end))`. Scaling at the end state measures the right
       residual vector in the *wrong* scales and the rows stop adding up. `coupled_residuals` is
@@ -918,8 +918,8 @@ paths:
     Pinned by `tests/unit/test_march_log.py`, whose assertions read **cells** rather than substrings, so
     a column reordering is not a false failure while a wrong value still is.
 
-  - **`precondition_step` — per-step refresh of the step's frozen host preconditioner (binding,
-    forward-only).** `forward_march(precondition_step=…)` calls `precondition_step(active_step, state)`
+  - **`refresh_preconditioner` — per-step refresh of the step's frozen host preconditioner (binding,
+    forward-only).** `newton_march(refresh_preconditioner=…)` calls `refresh_preconditioner(active_step, state)`
     before each `_march_step`, *after* the control has set β on `active_step`, to re-derive the step's
     **static** host preconditioner from the current `(state, β)`. It runs in the eager loop (a host op
     outside the jitted step) and mutates the preconditioner in place, so `_march_step` stays a
@@ -933,8 +933,8 @@ paths:
     (which fires occasionally, restarts a *segment*, and returns a *new* step): this fires every step (the
     consumer may itself no-op) and mutates in place. Forward-only (impure), folded into the same `observing`
     gate and `jax.grad` guard as the trigger/control; `None` is byte-identical to before.
-  - **The forward-step CONTRACTS live in `solve/forward_step.py`, not in whichever module needed them
-    first (binding, 2026-08-15).** `ForwardStep`, `ShiftedForwardStep`, `StepOutcome`, `StepReport`,
+  - **The forward-step CONTRACTS live in `solve/strategy.py`, not in whichever module needed them
+    first (binding, 2026-08-15).** `NewtonStrategy`, `ShiftedNewtonStrategy`, `StepOutcome`, `StepReport`,
     `StepControl`, the `StepFn` callable alias and `within_tolerance` are what travel between the Newton
     driver, the eager march, the globalization strategies, the step controls and the retry policy. None
     belongs to any one of them, and every one of them was living wherever it was first written.
@@ -942,16 +942,17 @@ paths:
       **zero** implementations there, so `step_control.py` had to import `march` — which forbade the
       reverse, so a defaulting rule about two `solve/` objects could not be written in `solve/` at all
       and ended up in `turbulence/coupled.py`, a package away. And `implicit.py`, named for the Newton
-      solver, was a de-facto contract module handing `_ForwardStep`, `_within_tolerance` and
+      solver, was a de-facto contract module handing the step protocol (then a private
+      `_ForwardStep`, now `NewtonStrategy`), `_within_tolerance` and
       `backtracking_line_search` across boundaries either privately or absent from `__all__` — which
       under this package's own boundary rule read as violations.
-    - **`forward_step.py` is a LEAF and must stay one.** It imports `linear`, `norm` and `relaxation`,
+    - **`strategy.py` is a LEAF and must stay one.** It imports `linear`, `norm` and `relaxation`,
       none of which import it back; `implicit`, `march`, `continuation`, `retry`, `step_control`,
       `march_log` and `checkpoint` all depend on it. Adding an import here that points at any of those
       re-creates exactly the cycle it exists to remove.
     - **What did NOT move, and why.** `backtracking_line_search` stays in `implicit.py`: it is
       behaviour, not a contract, and moving it would make the contract module carry a line search.
-      `MarchResult` stays in `march.py` — only `forward_march` produces it. The concrete strategies,
+      `MarchResult` stays in `march.py` — only `newton_march` produces it. The concrete strategies,
       triggers and controls stay with their own modules; a contract module holds contracts.
     - The rule the cycle was blocking is now `solve/step_control.py`'s `default_dual_time_control`,
       beside the controls it chooses between, and exported.
@@ -959,11 +960,11 @@ paths:
     twin of `RelaxationSchedule`, deliberately NOT one interface).** A `RelaxationSchedule` is memoryless
     and lives on the differentiable step; a `StepControl` reads the *previous* `StepReport` (α, cost) —
     feedback available only after a step — to reshape the next step, and may raise under `jax.grad`, so it
-    lives here beside `RefreshTrigger`, never on the traced path. `forward_march(step_control=…)` calls
-    `next_step(base, previous, state) -> (ForwardStep, new_state)`, threading the control's own state; the
+    lives here beside `RefreshTrigger`, never on the traced path. `newton_march(step_control=…)` calls
+    `next_step(base, previous, state) -> (NewtonStrategy, new_state)`, threading the control's own state; the
     march stays β-ignorant (the control returns a ready-to-run step, typically `base` with a
     `ConstantRelaxation` β leaf via `tree_at`, so `_march_step` stays a cache hit). **The control state
-    survives across preconditioner refreshes (issue #156):** `forward_march` takes an incoming
+    survives across preconditioner refreshes (issue #156):** `newton_march` takes an incoming
     `control_state` and returns the final one on `MarchResult`, and `solve_coupled` threads it from each
     segment into the next — so a control that climbs β over many steps continues past a refresh instead of
     resetting to `beta_start` at every segment (the α-controller and the refresh were co-designed but
@@ -984,7 +985,7 @@ paths:
       universal and `memo` is whatever the rule remembers (`None` for the memoryless Courant rule, the
       previous residual for the two ratio rules). **Why it exists:** written three times, the bookkeeping
       drifted — `carry_beta` was byte-identical in two controls and *absent* from the third, which
-      `forward_march` probes for with `hasattr`, so that control silently dropped its escalation
+      `newton_march` probes for with `hasattr`, so that control silently dropped its escalation
       feedback; and the same class reset β at a refresh boundary where the others held it, i.e. the
       sawtooth defect fixed for `DualTimeControl` never reached it. Both were invisible because each
       class carried its own `next_step`. The refactor is verified **bit-for-bit** against the previous

@@ -1,6 +1,6 @@
 """Feedback step controls for the eager march (forward-only).
 
-A :class:`~aquaflux.solve.StepControl` reshapes the forward step each iteration from the previous
+A :class:`~aquaflux.solve.StepControl` reshapes the Newton step each iteration from the previous
 step's outcome. All three members here drive the pseudo-transient shift strength β, and all three are
 :class:`ShiftStrengthControl` subclasses supplying nothing but their adaptation rule:
 
@@ -36,8 +36,8 @@ import equinox as eqx
 import jax.numpy as jnp
 
 from .continuation import DualTimeStep
-from .forward_step import ForwardStep, StepControl, StepReport
 from .relaxation import ConstantRelaxation
+from .strategy import NewtonStrategy, StepControl, StepReport
 
 
 class ShiftStrengthControl(eqx.Module):
@@ -49,7 +49,7 @@ class ShiftStrengthControl(eqx.Module):
     the concrete controls**, and it is two to five lines in each; everything else is written once here.
 
     Solving it three times is what let them drift. :meth:`carry_beta` was byte-identical in two of them
-    and **absent from a third**, which :func:`~aquaflux.solve.forward_march` probes for with ``hasattr``
+    and **absent from a third**, which :func:`~aquaflux.solve.newton_march` probes for with ``hasattr``
     — so that control silently could not receive the escalation feedback, and nothing reported it. The
     same class also reset β to ``beta_start`` at every refresh boundary rather than holding it, which is
     the sawtooth defect recorded and fixed for the dual-time controls; it never got the fix, because the
@@ -104,8 +104,8 @@ class ShiftStrengthControl(eqx.Module):
         return float(min(max(beta, self.beta_min), self.beta_max))
 
     def next_step(
-        self, base_step: ForwardStep, previous: StepReport | None, state: object
-    ) -> tuple[ForwardStep, tuple[float, object]]:
+        self, base_step: NewtonStrategy, previous: StepReport | None, state: object
+    ) -> tuple[NewtonStrategy, tuple[float, object]]:
         """The base step carrying a constant β, and the ``(beta, memo)`` state to carry forward.
 
         ``state`` is ``None`` only on the very first step of the whole march; β is :attr:`beta_start`
@@ -117,7 +117,7 @@ class ShiftStrengthControl(eqx.Module):
 
         β rides as a :class:`~aquaflux.solve.ConstantRelaxation` on a **dynamic** leaf, so a controlled
         step differs from the base one only in that leaf's *value* and
-        :func:`~aquaflux.solve.forward_march`'s jitted step stays a compilation-cache hit. ``base_step``
+        :func:`~aquaflux.solve.newton_march`'s jitted step stays a compilation-cache hit. ``base_step``
         must therefore carry a ``relaxation_schedule`` to replace -- these are shift-strength controls.
         """
         if state is None:  # the very first step of the whole march
@@ -134,7 +134,7 @@ class ShiftStrengthControl(eqx.Module):
     def carry_beta(self, state: object, beta: float) -> tuple[float, object]:
         """Seed the carried β with an externally-chosen value, keeping the memo.
 
-        Called by :func:`~aquaflux.solve.forward_march` after a β-escalation retry, so the ramp continues
+        Called by :func:`~aquaflux.solve.newton_march` after a β-escalation retry, so the ramp continues
         from the escalation's discovered-safe β instead of the control's own last β. The memo is
         preserved so a rule keying on a residual ratio does not lose its reference and mis-read the next
         step as a huge reduction.
@@ -145,7 +145,7 @@ class ShiftStrengthControl(eqx.Module):
     def redamp(self, state: object, factor: float) -> object:
         """The carried state with β multiplied by ``factor``, memo untouched.
 
-        Called by :func:`~aquaflux.solve.forward_march` on the first step of a new
+        Called by :func:`~aquaflux.solve.newton_march` on the first step of a new
         :class:`~aquaflux.solve.ResidualHomotopy` station, to re-damp *deliberately* for a problem that
         has just changed. It is the companion of :meth:`rebase`, and the two fire on **different
         steps**: this on the step that first faces the new station, that on the step after, which is
@@ -227,7 +227,7 @@ class ShiftStrengthControl(eqx.Module):
         """The carried state with the remembered residual DROPPED, keeping β -- the mirror of
         :meth:`carry_beta`.
 
-        Called by :func:`~aquaflux.solve.forward_march` at a boundary where the **problem itself
+        Called by :func:`~aquaflux.solve.newton_march` at a boundary where the **problem itself
         changed**, which today means a :class:`~aquaflux.solve.ResidualHomotopy` moving to its next
         station. The two methods exist for opposite reasons and the asymmetry is the point:
         ``carry_beta`` keeps the memo because a β escalation changes only how far the march steps
@@ -468,7 +468,7 @@ class CflResidualDualTimeControl(ShiftStrengthControl):
 
 
 def default_dual_time_control(
-    step_control: StepControl | None, continuation: ForwardStep
+    step_control: StepControl | None, strategy: NewtonStrategy
 ) -> StepControl | None:
     """The step control for a march: the caller's, or the default Courant ramp for a dual-time march
     that was given none.
@@ -477,7 +477,7 @@ def default_dual_time_control(
     calls it. That is where it was: `StepControl` was declared in `march.py` with no implementations
     there, so `step_control.py` had to import `march` -- which forbade the reverse, so a rule about two
     `solve/` objects could not be expressed in `solve/` at all. With the contract in
-    :mod:`~aquaflux.solve.forward_step` that constraint is gone and the rule comes home.
+    :mod:`~aquaflux.solve.strategy` that constraint is gone and the rule comes home.
 
     A **dual-time** march (a :class:`~aquaflux.solve.DualTimeStep`, whose reported ``alpha`` is the
     backward-Euler inner-loop comfort a Courant ramp reads) handed **no** ``step_control`` defaults to
@@ -491,7 +491,7 @@ def default_dual_time_control(
     ----------
     step_control : StepControl or None
         The caller-supplied control (``None`` if none was given).
-    continuation : ForwardStep
+    strategy : NewtonStrategy
         The globalization step the march applies.
 
     Returns
@@ -499,6 +499,6 @@ def default_dual_time_control(
     StepControl or None
         ``DualTimeControl()`` when defaulting applies; ``step_control`` otherwise.
     """
-    if step_control is None and isinstance(continuation, DualTimeStep):
+    if step_control is None and isinstance(strategy, DualTimeStep):
         return DualTimeControl()
     return step_control

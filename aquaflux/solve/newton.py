@@ -13,7 +13,7 @@ analytic residual and never import a specific operator.
 flow, a Laplace initializer — a single :func:`newton_step` is exact, and being plain traced
 operations it differentiates in **both** modes: the forward-mode ``jacfwd`` that a scalar-parameter
 sensitivity over a whole field wants, as well as reverse-mode. For a *nonlinear* residual, iterate
-with :class:`~aquaflux.solve.ImplicitNewtonSolver`, which stops on a convergence test, globalizes
+with :class:`~aquaflux.solve.RootSolver`, which stops on a convergence test, globalizes
 the march, and carries the implicit-function-theorem adjoint. Do **not** write a fixed-count loop
 over :func:`newton_step` for a nonlinear residual: it cannot tell convergence from exhaustion, and
 taping the unrolled steps is exactly the gradient path the two-level implicit differentiation exists
@@ -22,7 +22,7 @@ to avoid.
 Neither function jits internally — the caller owns the jit boundary, so a step composes into
 whatever the caller compiles. Wrap the call in ``equinox.filter_jit``; un-jitted, every operation
 dispatches eagerly. That is a property of these two functions alone:
-:class:`~aquaflux.solve.ImplicitNewtonSolver` marches in Python and **refuses** ``jit`` and ``vmap``,
+:class:`~aquaflux.solve.RootSolver` marches in Python and **refuses** ``jit`` and ``vmap``,
 compiling each of its steps for itself.
 """
 
@@ -53,7 +53,7 @@ def newton_step(
     with a line search.
 
     Exact in one call for a linear residual. For a nonlinear one, iterate with
-    :class:`~aquaflux.solve.ImplicitNewtonSolver` rather than calling this a fixed number of times
+    :class:`~aquaflux.solve.RootSolver` rather than calling this a fixed number of times
     (see the module docstring).
 
     Parameters

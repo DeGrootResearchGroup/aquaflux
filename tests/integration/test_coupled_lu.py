@@ -148,7 +148,7 @@ def test_lu_solve_converges_and_matches_the_block_preconditioned_solve(case) -> 
         coupled, reference_state, preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND))
     )
     flow_l, k_l, omega_l = solve_coupled(
-        coupled, flow_ws, k_ws, omega_ws, continuation=lu, max_steps=40
+        coupled, flow_ws, k_ws, omega_ws, strategy=lu, max_steps=40
     )
     residual_norm = float(
         jnp.linalg.norm(coupled.residual(coupled.pack_state(flow_l, k_l, omega_l)))
@@ -194,7 +194,7 @@ def test_lu_adjoint_matches_finite_difference(case) -> None:
             coupled.turbulence.molecular_viscosity * nu_scale,
         )
         _, k, _ = solve_coupled(
-            scaled, flow_ws, k_ws, omega_ws, continuation=continuation, max_steps=40
+            scaled, flow_ws, k_ws, omega_ws, strategy=continuation, max_steps=40
         )
         return jnp.sum(k**2)
 
@@ -206,7 +206,7 @@ def test_lu_adjoint_matches_finite_difference(case) -> None:
 
 @pytest.mark.slow
 def test_a_complete_lu_session_makes_the_lu_exact_at_the_current_beta(case) -> None:
-    """A complete-LU session's precondition_step re-factors at the step's current beta, inverting J + beta*d.
+    """A complete-LU session's refresh_preconditioner re-factors at the step's current beta, inverting J + beta*d.
 
     A frozen LU is exact only for the beta it was built at; the session's per-step hook re-factors at the
     beta the DualTimeControl set on the step, so after it the factorization inverts the *current* shifted
@@ -232,7 +232,7 @@ def test_a_complete_lu_session_makes_the_lu_exact_at_the_current_beta(case) -> N
     dual = session.build(state, dual_time=DualTimeLoop(inner_steps=5))
     # the control sets a ConstantRelaxation(beta) on the step, at a beta DIFFERENT from the build beta
     active, _ = DualTimeControl(beta_start=0.7).next_step(dual, None, None)
-    session.precondition_step(active, state)  # re-factor at (state, beta=0.7)
+    session.refresh_preconditioner(active, state)  # re-factor at (state, beta=0.7)
 
     # the shifted operator the step actually solves at this beta
     n_cells = coupled.momentum.mesh.n_cells

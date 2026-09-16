@@ -60,7 +60,7 @@ and marking its build hook abstract; do not add a per-family `__new__`.
 **How two partial settings values combine is written once too: `solve.filled_from(value, base)` (#399
 review).** Each `None` field of `value` takes `base`'s. `SettingsValue.filled_from` delegates to it, and
 so do the settings objects that are `equinox` modules (`Globalization.filled_from` and `with_defaults`,
-`turbulence.ShiftSettings.filled_from`); before, `ShiftSettings`, `ForwardSolve` and `DualTimeLoop` each
+`turbulence.ShiftSettings.filled_from`); before, `ShiftSettings`, `LinearSolveSettings` and `DualTimeLoop` each
 carried an identical body and `Globalization.with_defaults` a fourth, and because the Reynolds merge
 (`merged_march_options`) recognizes a mergeable value by its `filled_from`, `Globalization` alone was
 still replaced whole per point. ⚠️ **`None` cannot reset a shared field to its default** — it means "take
@@ -105,6 +105,41 @@ must compare by value — an array-valued field would need its own rule; none ex
 - Milestone 0: a single scalar diffusion system; the plumbing must generalize to the
   coupled p–U block later without redesign.
 
+## ⚠️ RENAMED 2026-09-15 — grep this table before believing an old name is missing
+
+Phase 4 of the Newton-loop unification renamed the solver vocabulary, because four words each meant
+four to seven different things: "forward" named the strategy, the loop, the Krylov settings *and*
+"not differentiable"; "solver" named the nonlinear driver and the linear one; "continuation" named a
+method and any strategy at all. **Every old name below is gone from the tree**, so a search for one
+lands here rather than on nothing — which is the point of keeping the table (issues, PR bodies, the
+archived march logs and any private notes still use the left column).
+
+| was | is | note |
+|---|---|---|
+| `ImplicitNewtonSolver` | `RootSolver` | "implicit" read as implicit time-stepping. **Not** `NewtonSolver`: a class of that name was deleted in #102 and the record of that deletion is still binding, so the name would collide with it |
+| `ForwardStep` | `NewtonStrategy` | the protocol; `ShiftedForwardStep` → `ShiftedNewtonStrategy` |
+| `forward_step.py` | `strategy.py` | the contract module (`NewtonStrategy`, `StepOutcome`, `StepReport`, `StepControl`) |
+| `forward_march` | `newton_march` | there is only one march now (phase 3), and "forward" no longer distinguishes it from anything |
+| `RootSolver.forward_step=` | `RootSolver.strategy=` | it holds a `NewtonStrategy` |
+| `solve_coupled(continuation=)` | `strategy=` | it accepts any strategy, not only a continuation; `**continuation_kwargs` → `**strategy_kwargs` |
+| `ForwardStep.default_solver()` | `NewtonStrategy.linear_solver()` | "solver" alone means the nonlinear driver everywhere else |
+| `RootSolver.solver=` | `linear_solver=` | same reason; `adjoint_solver` was already unambiguous and is unchanged |
+| `PseudoTransientStep.forward_solver=` | `krylov_solver=` | the caller's override for the inner linear solve; `linear_solver()` is the method that resolves it |
+| `coupled_step(forward=)`, `ForwardSolve` | `linear_solve=`, `LinearSolveSettings` | the Krylov settings, which are neither forward-mode nor the march |
+| `precondition_step` | `refresh_preconditioner` | a per-step hook, not a step |
+| `_ForwardSolveRegime`, `_BLOCK_FORWARD`, … | `_LinearSolveRegime`, `_BLOCK_LINEAR_SOLVE`, … | private regimes of the same inner solve |
+
+**Deliberately NOT renamed**, so do not "finish the job":
+
+- **`stepper()`** stays. It is the only use of that word in the package, so it is already unambiguous,
+  and `step()` would collide with `Globalization.step()` and `coupled_step()`, which build the step
+  *object* — one word, two jobs, which is the defect this exercise removes.
+- **`DampedNewtonStep`, `PseudoTransientStep`, `DualTimeStep`, `StepOutcome`, `StepReport`,
+  `StepControl`** keep "Step". Across all of them "step" means one outer iteration, consistently; the
+  full `Iteration` vocabulary was considered and rejected as churn without a gain in clarity.
+- **`momentum_continuation`, `mass_flow_coupled_continuation`, `coupled_step`** keep their names: they
+  build genuine pseudo-transient continuations, which is the word used correctly.
+
 ## Index — where the detail lives
 
 **This file used to be one 8,500-line document; it is now split by subsystem, each part scoped so it
@@ -120,9 +155,9 @@ testability seam. Everything subsystem-specific moved out:
 | `solve-flow-block.md` | `saddle_multigrid.py`, `shift_basis.py` | Traced preconditioning of the `[u, v, w, p]` saddle — current status only |
 | `.claude/notes/solve-flow-block-log.md` | *(never auto-loads)* | The full dated investigation behind the flow block, including qualified/retracted findings |
 | `solve-field-split.md` | `field_split.py` | The block-triangular field split (saddle plus two transported scalars) |
-| `solve-globalization.md` | `forward_step.py`, `continuation.py`, `step_control.py`, `retry.py`, `relaxation.py`, `line_search_growth.py` | Forward-step architecture, pseudo-transient continuation, line search — current status only |
+| `solve-globalization.md` | `strategy.py`, `continuation.py`, `step_control.py`, `retry.py`, `relaxation.py`, `line_search_growth.py` | Forward-step architecture, pseudo-transient continuation, line search — current status only |
 | `.claude/notes/solve-globalization-log.md` | *(never auto-loads)* | The dated investigation behind the globalization architecture |
-| `solve-march.md` | `march.py`, `march_log.py`, `checkpoint.py` | The observed march: `forward_march`, triggers, controls, logging |
+| `solve-march.md` | `march.py`, `march_log.py`, `checkpoint.py` | The observed march: `newton_march`, triggers, controls, logging |
 | `.claude/notes/solve-refuted-directions.md` | *(never auto-loads)* | A cross-cutting ledger of closed/refuted ideas — check here before proposing something that sounds already tried |
 
 The two `-log.md` files and `solve-refuted-directions.md` live in **`.claude/notes/`, outside the
@@ -226,25 +261,25 @@ halves of the decision are now separated:
   therefore only meaningful beside its measure** — `0.3` row-scaled and `1e-2` Euclidean are not
   comparable numbers.
 * **The restart regime is per preconditioner family**, which is the part that genuinely differs, as
-  `_ForwardSolveRegime` values in `turbulence/coupled.py`:
+  `_LinearSolveRegime` values in `turbulence/coupled.py`:
 
 | regime | preconditioner (`coupled_step` / a session) | rtol | restart | max_restarts |
 |---|---|---|---|---|
-| `_BLOCK_FORWARD` | `BlockDiagonal` (block-SIMPLE) | 0.3 | 120 | 15 |
-| `_FACTORIZATION_FORWARD` | `MaterializedJacobian(CompleteLu)` | 0.3 | 10 | 40 |
-| `_VCYCLE_FORWARD` | `MaterializedJacobian(MonolithicVCycle \| FieldSplit)` (3D `bfs3d`) | 0.3 | 15 | 60 |
-| `_CONSTRAINED_FORWARD` | `mass_flow_coupled_continuation` | **1e-2, Euclidean** | 120 | 15 |
+| `_BLOCK_LINEAR_SOLVE` | `BlockDiagonal` (block-SIMPLE) | 0.3 | 120 | 15 |
+| `_FACTORIZATION_LINEAR_SOLVE` | `MaterializedJacobian(CompleteLu)` | 0.3 | 10 | 40 |
+| `_VCYCLE_LINEAR_SOLVE` | `MaterializedJacobian(MonolithicVCycle \| FieldSplit)` (3D `bfs3d`) | 0.3 | 15 | 60 |
+| `_CONSTRAINED_LINEAR_SOLVE` | `mass_flow_coupled_continuation` | **1e-2, Euclidean** | 120 | 15 |
 
-Both coupled builders take the regime as one value, `forward=ForwardSolve(rtol=…, restart=…,
+Both coupled builders take the regime as one value, `linear_solve=LinearSolveSettings(rtol=…, restart=…,
 max_restarts=…)` (#388 — there are no `forward_*` keywords any more). ⚠️ **Move the tolerance or the
-restart with that value, never by passing a whole solver as `forward`** — a solver also replaces the
+restart with that value, never by passing a whole solver as `linear_solve`** — a solver also replaces the
 stopping measure, which is a far larger change than the one intended.
 
 ⚠️ **`0.3` on the block and complete-LU families is the multigrid family's CALIBRATION, carried across
 because it is a property of the measure, not of multigrid — it has not been re-measured there.** Those
 two ran `1e-2` in a plain 2-norm before #282, so any recorded cost measured on them predates the change;
 the earlier arrangement is the drift the issue documents, not a calibration.
-(`_FACTORIZATION_FORWARD` was `_COUPLED_ILUT_FORWARD_SOLVER` while the now-deleted monolithic ILUT was
+(`_FACTORIZATION_LINEAR_SOLVE` was `_COUPLED_ILUT_FORWARD_SOLVER` while the now-deleted monolithic ILUT was
 its other consumer, then `_COUPLED_FACTORIZATION_FORWARD_SOLVER` — see `solve-direct-preconditioners.md`.)
 
 **Preconditioning side: RIGHT** (`solve_linear`'s default, taken by `_shifted_solve`), so the Krylov
@@ -351,11 +386,11 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     exact linear solve. The turbulence scalars had already migrated off it for exactly these reasons
     (see `turbulence/continuation.py`).
   - **The split to hold to.** *Linear* residual → `newton_step`, exact in one call. *Nonlinear*
-    residual → `ImplicitNewtonSolver` (converges, globalizes, IFT adjoint). Do **not** reintroduce a
+    residual → `RootSolver` (converges, globalizes, IFT adjoint). Do **not** reintroduce a
     fixed-count loop over `newton_step` in library code. A *test* may write one inline when the point
     is to show unglobalized Newton is insufficient (`test_scalar_continuation.py`) or to isolate a
     preconditioner (`test_turbulent_channel.py`) — that is 2 lines and self-documenting, not a class.
-  - **`newton_step` is the only path that differentiates in FORWARD mode.** `ImplicitNewtonSolver` is
+  - **`newton_step` is the only path that differentiates in FORWARD mode.** `RootSolver` is
     a `jax.custom_vjp`, which registers only the reverse rule, so `jacfwd`/`jvp` through it raises
     `TypeError` — a JAX API consequence, not a mathematical one (the IFT gives the tangent just as
     readily; a `custom_jvp` would serve both, at the cost of the separate tight `adjoint_solver` the
@@ -365,13 +400,13 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     whole field. Pinned in `tests/unit/test_newton.py`.
 - **Neither function jits internally — the caller owns the jit boundary.** Wrap calls in
   `eqx.filter_jit`; un-jitted, every operation dispatches eagerly. This is about `newton_step` and
-  `newton_correction`, which are plain traced operations: ⚠️ **`ImplicitNewtonSolver.solve` is the
+  `newton_correction`, which are plain traced operations: ⚠️ **`RootSolver.solve` is the
   opposite case and REFUSES `jit`/`vmap`** since 2026-09-15 — it marches in Python (see below), and its
   step is compiled for it. The cache-hit discipline still applies, one level down: pass the assembler as
   an `equinox.Module` **argument** so its arrays are dynamic leaves, and hand the solve a residual whose
   identity is stable (`assembler_residual`, a bound method, or a small `equinox.Module`) — a lambda built
   at the call site is hashed by identity and recompiles the march step on every call.
-- **`implicit.py` — BUILT (`ImplicitNewtonSolver`).** The nonlinear counterpart: Newton to
+- **`implicit.py` — BUILT (`RootSolver`).** The nonlinear counterpart: Newton to
   convergence on `stop_gradient` copies of `phi0` and `theta` (`stop_array_gradients`, which passes
   non-array leaves through), with the reverse-mode **IFT adjoint** attached afterwards at the root it
   reaches by `root_adjoint` — one transpose linear solve,
@@ -380,9 +415,9 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   returns their cotangents. Reverse-mode only (`jax.grad`), which is what a scalar objective through
   the solver needs. This is the "IFT on the converged Newton state" half of the two-level scheme; it
   activates with the first nonlinear residual (the flux limiter). Verified
-  (`test_implicit_solve.py`): converges a nonlinear root, gradient matches the closed form to
+  (`test_root_solver.py`): converges a nonlinear root, gradient matches the closed form to
   1e-10, and is iteration-count-independent. Used by the limited-advection solve.
-  **⚠️ THE LOOP IS `forward_march`, AND THERE IS NO OTHER ONE (binding, 2026-09-15, phase 3 of the
+  **⚠️ THE LOOP IS `newton_march`, AND THERE IS NO OTHER ONE (binding, 2026-09-15, phase 3 of the
   unification).** `_forward` — the traced `lax.while_loop` this class used to carry — is **deleted**.
   One driver now runs every Newton solve in the package, so the hooks (observer, refresh trigger, step
   control, retries, homotopy, per-step preconditioner re-fit) are reachable from one place and a
@@ -412,7 +447,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     would have recompiled the whole march every sweep. They now pass `assembler_residual` (the shared
     module-level `(state, assembler) -> assembler.residual(state)`), `_BulkVelocityResidual`,
     `_ParameterFreeResidual` or `_MassFlowConstrainedResidual` — small `equinox.Module`s whose settings
-    compare by value and whose arrays ride as dynamic leaves. `ImplicitNewtonSolver.solve` binds `theta`
+    compare by value and whose arrays ride as dynamic leaves. `RootSolver.solve` binds `theta`
     into `_ResidualAt`, a module for the same reason. Pinned by
     `test_a_carried_preconditioner_compiles_the_scalar_solve_once`.
   - ⚠️ **That test measured nothing until this change fixed its fixture, and the reason generalizes.**
@@ -427,16 +462,16 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   adjoint_solver=None, adjoint_preconditioner=None)` returns `root` unchanged and carries its derivative
   (a `custom_vjp` whose backward rule is the transpose solve); `TransposedPreconditioner` moved here with
   it. Whatever derivative `root` itself carries is **discarded** — its dependence on `theta` is the
-  adjoint's to supply — so any loop may produce the root, including the eager `forward_march` with its
+  adjoint's to supply — so any loop may produce the root, including the eager `newton_march` with its
   hooks. **It does not check that `root` is a root**: the caller owns the convergence test, because only
   the caller knows the tolerance and measure. Extracted from `_implicit_solve` with
-  `ImplicitNewtonSolver` rewired onto it; values and gradients were compared **bit for bit** before and
+  `RootSolver` rewired onto it; values and gradients were compared **bit for bit** before and
   after across `DampedNewtonStep` (with and without a transposable and a `TransposedPreconditioner`),
   `PseudoTransientStep`, `DualTimeStep`, module-valued `theta`, `jit(grad)`, `vmap(grad)` and the
   `phi0` gradient — all identical. Why the extraction: a throwaway toy spike showed the gradient does not
   depend on the loop, so the eager march can gain the adjoint and the traced/eager split in
   `solve_coupled` (the `observing` switch behind #369) can be removed. **Phase 2 did that
-  (2026-09-15):** `solve_coupled` marches once with `forward_march` on `stop_array_gradients` copies and
+  (2026-09-15):** `solve_coupled` marches once with `newton_march` on `stop_array_gradients` copies and
   attaches `root_adjoint`; see `turbulence.md`. `stop_array_gradients` (also in `root_adjoint.py`) is the
   one helper both loops use to stop a pytree's array leaves.
   ⚠️ A `theta` holding a **callable leaf** was already refused before this change (the `custom_vjp`
@@ -456,12 +491,12 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       (2026-09-15).** It compares with `<=`, so when the residual norm *and* the threshold it is judged
       against have both run away to `+inf`, `inf <= inf` is `True` — a false "converged" on a state that
       solves nothing. (A `NaN` fails the comparison on its own; `+inf` is the case that needs help.) The
-      finiteness test therefore sits inside `forward_march`'s own `converged_at`, so **every** consumer of
+      finiteness test therefore sits inside `newton_march`'s own `converged_at`, so **every** consumer of
       `MarchResult.converged` inherits it rather than each driver re-deriving it, and the march refuses to
       *step* from a non-finite residual at all — otherwise the step's Krylov solve raises first, reporting
       a bug upstream of itself instead of the fact that the march never left a state solving nothing.
   - **✅ `solve_coupled(adjoint_solver=…)` — the transpose solve's Krylov settings are REACHABLE
-    (BUILT 2026-08-14).** `ImplicitNewtonSolver` has carried an `adjoint_solver` field all along, but
+    (BUILT 2026-08-14).** `RootSolver` has carried an `adjoint_solver` field all along, but
     `solve_coupled` did not expose it: it forwarded the forward-only retry policy's `retry.solver`, and
     nothing for the transpose. So every `jax.grad` through a coupled solve fell through to
     `default_linear_solver()` = `lx.GMRES(rtol=1e-10, atol=1e-10)` at **lineax's own** restart length
@@ -472,7 +507,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     `None` (default) keeps `default_linear_solver()` and is byte-identical.
     Build one with `relative_residual_gmres(rtol, restart=…, stagnation_iters=…, max_restarts=…)`.
     **Why it is a separate injection point from the forward solver, and not a knob to unify with it:**
-    the two meet different operators. The forward steps solve `J + β d`, which the pseudo-transient
+    the two meet different operators. The Newton steps solve `J + β d`, which the pseudo-transient
     shift keeps diagonally dominant; the transpose solve meets `J` itself at β = 0 with no shift to
     soften it, once, and its accuracy *is* the gradient's accuracy.
     Pinned by `test_the_injected_adjoint_solver_reaches_the_transpose_solve_and_only_it`
@@ -560,8 +595,8 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
      The general form still bites: **a hand-built forward solver replaces the stopping MEASURE, not
      just the tolerance**, and **it does not announce itself** — at a state where both converge in one
      cycle a self-check still passes and reports a validation it never performed. Take the restart or
-     the tolerance through `forward=ForwardSolve(restart=…, rtol=…)`, never by passing a whole solver
-     in that same `forward` slot (#388).
+     the tolerance through `linear_solve=LinearSolveSettings(restart=…, rtol=…)`, never by passing a whole solver
+     in that same `linear_solve` slot (#388).
      Note also what the regime's `rtol = 0.3` *is*: an inexact-Newton forcing term on the **linear** residual
      per inner solve, not a solution tolerance — accuracy comes from the inner loop iterating. And the
      **achieved** reduction is routinely tighter than the requested one, because a restarted GMRES tests

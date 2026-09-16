@@ -21,13 +21,13 @@ from aquaflux.solve import (
     ConstantRelaxation,
     DivergenceGuard,
     DualTimeStep,
-    ImplicitNewtonSolver,
     MonotoneLineSearch,
     PseudoTransientStep,
     RelaxedFarFromRoot,
+    RootSolver,
     ShiftTerm,
     SwitchedEvolutionRelaxation,
-    forward_march,
+    newton_march,
     positive_block_limit,
     positive_block_projection,
 )
@@ -105,7 +105,7 @@ def test_the_step_hands_the_policy_the_residual_it_just_computed() -> None:
     # One step, driven directly: a whole march runs inside a `while_loop`, where a recorded array is a
     # tracer that cannot be read afterwards.
     step.stepper()(
-        residual_theta, phi0, jnp.linalg.norm(residual_theta(phi0)), step.default_solver()
+        residual_theta, phi0, jnp.linalg.norm(residual_theta(phi0)), step.linear_solver()
     )
 
     assert seen, "the policy was never asked for a shift"
@@ -126,7 +126,7 @@ def test_a_row_relaxation_reaches_the_SHIFTED_OPERATOR_not_just_the_policy() -> 
 
     def march(policy):
         step = PseudoTransientStep(policy, relaxation_schedule=ConstantRelaxation(beta=2.0))
-        solver = ImplicitNewtonSolver(rtol=1e-10, atol=1e-10, max_steps=200, forward_step=step)
+        solver = RootSolver(rtol=1e-10, atol=1e-10, max_steps=200, strategy=step)
         return solver.solve(_residual, jnp.ones_like(theta), theta)
 
     by_row = march(_BlockDampedShiftPolicy(ratio=4.0))
@@ -146,7 +146,7 @@ def test_pseudo_transient_engine_runs_without_flow() -> None:
     step = PseudoTransientStep(
         UniformShiftPolicy(strength=1.0), relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0)
     )
-    solver = ImplicitNewtonSolver(rtol=1e-10, atol=1e-10, max_steps=200, forward_step=step)
+    solver = RootSolver(rtol=1e-10, atol=1e-10, max_steps=200, strategy=step)
 
     phi = solver.solve(_residual, jnp.ones_like(theta), theta)
 
@@ -160,7 +160,7 @@ def test_pseudo_transient_engine_is_differentiable() -> None:
     step = PseudoTransientStep(
         UniformShiftPolicy(strength=1.0), relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0)
     )
-    solver = ImplicitNewtonSolver(rtol=1e-10, atol=1e-10, max_steps=200, forward_step=step)
+    solver = RootSolver(rtol=1e-10, atol=1e-10, max_steps=200, strategy=step)
 
     def solved_sum(t: jnp.ndarray) -> jnp.ndarray:
         return jnp.sum(solver.solve(_residual, jnp.ones_like(t), t))
@@ -211,11 +211,11 @@ def test_a_stand_in_jacobian_leaves_the_root_where_the_residual_puts_it() -> Non
     must therefore not move the converged state off ``cbrt(theta)``.
     """
     theta = jnp.array([8.0, 27.0, 64.0])
-    solver = ImplicitNewtonSolver(
+    solver = RootSolver(
         rtol=1e-10,
         atol=1e-10,
         max_steps=400,
-        forward_step=_jacobian_narrowed_step(
+        strategy=_jacobian_narrowed_step(
             jacobian_residual=lambda p: _scaled_slope_residual(p, theta)
         ),
     )
@@ -263,7 +263,7 @@ def test_a_stand_in_jacobian_genuinely_changes_the_step_it_produces() -> None:
 
 
 def test_a_stand_in_jacobian_leaves_the_adjoint_exact() -> None:
-    """The gradient is unchanged, because the adjoint never consults the forward step.
+    """The gradient is unchanged, because the adjoint never consults the Newton step.
 
     The implicit-function-theorem reverse rule differentiates the residual it was handed, at the
     converged state, so an approximate *forward* operator cannot reach it. That is the property that
@@ -273,7 +273,7 @@ def test_a_stand_in_jacobian_leaves_the_adjoint_exact() -> None:
     theta = jnp.array([8.0])
 
     def solved_sum(t: jnp.ndarray, step: PseudoTransientStep) -> jnp.ndarray:
-        solver = ImplicitNewtonSolver(rtol=1e-10, atol=1e-10, max_steps=400, forward_step=step)
+        solver = RootSolver(rtol=1e-10, atol=1e-10, max_steps=400, strategy=step)
         return jnp.sum(solver.solve(_residual, jnp.ones_like(t), t))
 
     exact_step = _jacobian_narrowed_step()
@@ -301,7 +301,7 @@ def test_the_dual_time_step_carries_a_stand_in_jacobian_too() -> None:
         inner_tol=1e-2,
         jacobian_residual=lambda p: _scaled_slope_residual(p, theta),
     )
-    solver = ImplicitNewtonSolver(rtol=1e-10, atol=1e-10, max_steps=400, forward_step=step)
+    solver = RootSolver(rtol=1e-10, atol=1e-10, max_steps=400, strategy=step)
 
     phi = solver.solve(_residual, jnp.ones_like(theta), theta)
 
@@ -349,7 +349,7 @@ def test_injected_acceptance_policy_is_honoured() -> None:
         relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
         acceptance=RejectFirstAttempt(),
     )
-    solver = ImplicitNewtonSolver(rtol=1e-10, atol=1e-10, max_steps=200, forward_step=step)
+    solver = RootSolver(rtol=1e-10, atol=1e-10, max_steps=200, strategy=step)
 
     phi = solver.solve(_residual, jnp.ones_like(theta), theta)
 
@@ -398,11 +398,11 @@ def test_line_search_recovers_an_overshooting_step_without_escalation() -> None:
     theta = jnp.array([1000.0])
     policy = UniformShiftPolicy(strength=1.0)
 
-    searched = ImplicitNewtonSolver(
+    searched = RootSolver(
         rtol=1e-8,
         atol=1e-10,
         max_steps=200,
-        forward_step=PseudoTransientStep(
+        strategy=PseudoTransientStep(
             policy,
             relaxation_schedule=SwitchedEvolutionRelaxation(beta0=0.01),
             max_escalations=0,
@@ -413,11 +413,11 @@ def test_line_search_recovers_an_overshooting_step_without_escalation() -> None:
     assert jnp.allclose(phi, jnp.cbrt(theta), atol=1e-5)
 
     # No line search and no escalation: the overshoot is never tamed, so the solve cannot converge.
-    unsearched = ImplicitNewtonSolver(
+    unsearched = RootSolver(
         rtol=1e-8,
         atol=1e-10,
         max_steps=50,
-        forward_step=PseudoTransientStep(
+        strategy=PseudoTransientStep(
             policy,
             relaxation_schedule=SwitchedEvolutionRelaxation(beta0=0.01),
             max_escalations=0,
@@ -441,7 +441,7 @@ def test_stepper_returns_the_step_and_its_linear_solve_cycle_count() -> None:
         UniformShiftPolicy(strength=1.0), relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0)
     )
     residual_norm_0 = jnp.linalg.norm(_residual(phi0, theta))
-    solver = step.default_solver()
+    solver = step.linear_solver()
 
     def residual_fn(phi):
         return _residual(phi, theta)
@@ -653,8 +653,8 @@ def test_the_positivity_cap_is_available_on_the_pseudo_transient_step() -> None:
     phi0 = jnp.array([1.0, 2.0])
     common = dict(max_steps=1, rtol=1e-12, atol=1e-14)
 
-    unguarded = forward_march(_unshifted_step(), _NegativeRoot(), phi0, **common)
-    guarded = forward_march(
+    unguarded = newton_march(_unshifted_step(), _NegativeRoot(), phi0, **common)
+    guarded = newton_march(
         _unshifted_step(step_limit=positive_block_limit(0, 2, tau=0.99)),
         _NegativeRoot(),
         phi0,
@@ -675,7 +675,7 @@ def test_the_per_entry_projection_is_available_too_and_leaves_the_cap_inactive()
     to avoid.
     """
     phi0 = jnp.array([1.0, 2.0])
-    projected = forward_march(
+    projected = newton_march(
         _unshifted_step(step_projection=positive_block_projection(0, 2, tau=0.99)),
         _NegativeRoot(),
         phi0,
@@ -697,8 +697,8 @@ def test_both_default_to_off_and_leave_the_step_untouched() -> None:
 
     phi0 = jnp.array([1.0, 2.0])
     common = dict(max_steps=1, rtol=1e-12, atol=1e-14)
-    without = forward_march(_unshifted_step(), _NegativeRoot(), phi0, **common)
-    explicit_none = forward_march(
+    without = newton_march(_unshifted_step(), _NegativeRoot(), phi0, **common)
+    explicit_none = newton_march(
         _unshifted_step(step_limit=None, step_projection=None), _NegativeRoot(), phi0, **common
     )
     assert jnp.array_equal(without.state, explicit_none.state)

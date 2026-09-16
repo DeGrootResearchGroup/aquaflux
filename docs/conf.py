@@ -48,7 +48,14 @@ SUBPACKAGE_GROUPS = {
         ("Nonlinear solve", ["implicit", "root_adjoint", "newton"]),
         (
             "The pseudo-transient march",
-            ["continuation", "march", "step_control", "relaxation", "line_search_growth"],
+            [
+                "continuation",
+                "march",
+                "strategy",
+                "step_control",
+                "relaxation",
+                "line_search_growth",
+            ],
         ),
         ("Observing and checkpointing a march", ["march_log", "checkpoint", "refresh_timing"]),
         ("Linear solves and residual measures", ["linear", "norm", "shift_basis"]),

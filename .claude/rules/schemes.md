@@ -170,7 +170,7 @@ rungs, `forward_rtol` 0.3, probe reach 5, residual held at swept-4):**
   the case comment: `petsc` no longer marches it). Cycle counts do not transfer across preconditioner
   families.
 - **The adjoint is untouched, by construction rather than by care.** `root_adjoint`'s backward rule differentiates
-  the residual it was handed at the converged state and never consults the forward step, so a cheaper
+  the residual it was handed at the converged state and never consults the Newton step, so a cheaper
   forward operator cannot reach a gradient. See `.claude/rules/solve-globalization.md`.
 - **Not measured: a genuinely skewed mesh, where `rho` is 0.14–0.26 rather than 5e-03.** There the
   residual needs many more sweeps and the *ratio* between the two counts should be much larger — which

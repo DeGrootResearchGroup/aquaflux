@@ -32,7 +32,7 @@ import lineax as lx
 from aquaflux.solve import (
     DEFAULT_GLOBALIZATION,
     Globalization,
-    ImplicitNewtonSolver,
+    RootSolver,
     ShiftTerm,
 )
 
@@ -123,8 +123,8 @@ def scalar_pseudo_transient_solve(
 
     A drop-in for the :func:`~aquaflux.turbulence.solve_segregated` ``solve_scalar`` slot in its
     continuation mode: the driver passes a per-sweep :class:`ScalarShiftPolicy` as the third argument,
-    and this drives the scalar residual to convergence with an :class:`~aquaflux.solve.ImplicitNewtonSolver`
-    whose forward step is the pseudo-transient march (switched-evolution-relaxation shift + closed-loop
+    and this drives the scalar residual to convergence with an :class:`~aquaflux.solve.RootSolver`
+    whose Newton step is the pseudo-transient march (switched-evolution-relaxation shift + closed-loop
     accept/escalate) -- the same globalization the flow block has, for the stiff reactive k/omega
     equations. A ``None`` policy falls back to an unpreconditioned, unshifted continuation solve.
 
@@ -174,8 +174,8 @@ def scalar_pseudo_transient_solve(
             ScalarShiftPolicy(jnp.zeros_like(state)) if policy is None else policy,
             adjoint_preconditioner_factory=None if policy is None else policy.preconditioner,
         )
-        newton = ImplicitNewtonSolver(
-            rtol=rtol, atol=atol, max_steps=max_steps, solver=solver, forward_step=forward
+        newton = RootSolver(
+            rtol=rtol, atol=atol, max_steps=max_steps, linear_solver=solver, strategy=forward
         )
         return newton.solve(_ParameterFreeResidual(residual), state, None)
 

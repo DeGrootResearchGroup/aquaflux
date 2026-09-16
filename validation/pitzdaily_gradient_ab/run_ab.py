@@ -79,7 +79,7 @@ from aquaflux.solve import (
 from aquaflux.turbulence import (
     CoupledJacobianProbe,
     FieldSplit,
-    ForwardSolve,
+    LinearSolveSettings,
     JacobianProbeSpec,
     MaterializedJacobian,
     coupled_fields,
@@ -392,7 +392,7 @@ def solve_arm(gradient_scheme, log_path, *, reach=None, points=None, max_steps=N
                 cycle_budget=compare.CYCLE_BUDGET,
                 refresh_on_cycles=compare.REFRESH_ON_CYCLES or None,
             ),
-            forward=ForwardSolve(
+            linear_solve=LinearSolveSettings(
                 rtol=compare.FORWARD_RTOL,
                 restart=compare.FORWARD_RESTART,
                 max_restarts=compare.FORWARD_MAX_RESTARTS,

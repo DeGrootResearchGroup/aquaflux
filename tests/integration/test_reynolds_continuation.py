@@ -109,7 +109,7 @@ def test_adjoint_matches_a_direct_solve_and_is_point_count_independent(channel) 
             scaled,
             n_points=n_points,
             max_steps=MAX_STEPS,
-            continuation=continuation,
+            strategy=continuation,
             preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
         )
         return jnp.sum(k**2)

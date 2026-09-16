@@ -683,7 +683,7 @@ been applied to the two outer sites.
 **✅ A SINGLE FORWARD SOLVE WAS BOUNDED ONLY AT 60 RESTARTS, LONG PAST THE POINT ITS ATTEMPT WAS DOOMED
 (fixed).** `cycle_budget` and `abort_above_inner_cycles` are both tested in `DualTimeStep`'s `cond`,
 i.e. **between** inner iterations, so neither can stop a solve already running — and neither bounded any
-of the 41–45 cycle solves in the archived marches. Meanwhile `forward_march` discards an attempt whose
+of the 41–45 cycle solves in the archived marches. Meanwhile `newton_march` discards an attempt whose
 worst solve passes `retry.abort_above_cycles` without reaching target, so a solve at 11 corrected cycles has
 already determined its work will be thrown away.
 
@@ -1386,7 +1386,7 @@ step) where a Newton step at a root should be quadratic. The per-step contractio
 it for.
 
 **How far it actually gets, measured 2026-08-15 (this supersedes "1e-8 was not demonstrated; how many
-steps is unknown"):** the guard in `ImplicitNewtonSolver` passes — i.e. the solve genuinely converged — at
+steps is unknown"):** the guard in `RootSolver` passes — i.e. the solve genuinely converged — at
 
 | `rtol` | steps allowed | outcome |
 |---|---|---|
@@ -1442,7 +1442,7 @@ because they cost real time to learn:
   cannot move the root.
 - **⚠️ `on_step` CANNOT BE USED UNDER `jax.grad`, and it is the observer that makes a march readable.**
   `solve_coupled` raises rather than letting it through: `refresh.trigger` / `step_control` / `on_step` /
-  `on_checkpoint` / `precondition_step` / `retry` all drive a forward-only **eager** march that
+  `on_checkpoint` / `refresh_preconditioner` / `retry` all drive a forward-only **eager** march that
   steps in Python on concrete residual norms, which a differentiation tracer cannot flow through. The
   adjoint is refresh-independent, so the single-stage solve returns the identical gradient; the cost is
   only that **a differentiated evaluation is silent**. The probe therefore builds the objective twice,

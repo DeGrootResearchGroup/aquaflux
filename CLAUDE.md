@@ -352,8 +352,8 @@ preserve the old one.**
 
 - **No thin adapters kept only to preserve an API.** A wrapper class or forwarding function that exists
   solely to re-expose a refactored abstraction under its former shape is dead weight: delete it and
-  point callers at the real object. (E.g. a `PseudoTransientStep` *is* the `ForwardStep`, so a
-  `PseudoTransientContinuation` class that only delegated `stepper`/`default_solver`/… was removed in
+  point callers at the real object. (E.g. a `PseudoTransientStep` *is* the `NewtonStrategy`, so a
+  `PseudoTransientContinuation` class that only delegated `stepper`/`linear_solver`/… was removed in
   favour of a `momentum_continuation` factory returning the engine directly.)
 - **No deprecation shims, aliases, or back-compat branches.** No `old_name = new_name` re-exports, no
   `if legacy_arg is not None` compatibility paths, no keeping a parameter alive "so nothing breaks."
