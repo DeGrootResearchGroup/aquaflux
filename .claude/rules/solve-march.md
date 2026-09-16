@@ -716,7 +716,7 @@ paths:
       Small beside the 15--30 Krylov matvecs a step spends, so this is tidiness with a measurable edge
       rather than a speed lever, and it should not be quoted as one.
       **It rests on ONE invariant: the step's measure and the driver's are the same object.**
-      `ImplicitNewtonSolver` passes `forward.norm()` as `norm_fn`, and `forward_march` rebuilds the
+      The march takes its measure from `forward_step.norm()`, and rebuilds the
       *step's* `residual_norm` field through `norm_builder`, so the search, the acceptance test and the
       reported norm are one measure by construction. Break that and the convergence test runs against a
       residual history measured in a different scale from the reference it is compared with.

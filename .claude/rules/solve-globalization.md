@@ -492,8 +492,8 @@ What to take from it, none of which is specific to that mechanism:
     starved (measured: k median collapses to ~7e-5 vs a physical ~0.5, and the march freezes). `coupled.py`
     builds a `BlockScaledNorm` over `[flow, k, ω]` (and `[…, β]` for the mass-flow bordered march) with
     per-field scales `‖R0_field‖` at the reference state, so the whole system is judged. The adjoint never
-    forms a residual norm, so `norm_fn` is a **forward-only** device — the converged state and IFT
-    gradient are norm-independent, and `root_adjoint` does not take it at all.
+    forms a residual norm, so the measure is a **forward-only** device — the converged state and IFT
+    gradient are norm-independent, and `root_adjoint` does not take one at all.
   - **A `ShiftPolicy`'s preconditioner must stay a non-pytree (binding, #105).** `ScalarTransportPreconditioner`
     (`turbulence/preconditioner.py`) is a plain `dataclasses.dataclass(frozen=True, eq=False)` ABC with
     `ConvectionAmgPreconditioner` / `AirAmgPreconditioner` concrete strategies — deliberately **not** an
