@@ -59,6 +59,7 @@ from aquaflux.solve import (  # noqa: E402
     FieldSplitAmgPreconditioner,
     build_block_triangular_field_split,
 )
+from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
 
 compare = fsp.compare
 
@@ -171,7 +172,7 @@ def main() -> None:
 
     plan = fsp._coupled_jacobian_plan(coupled, 3, compare.COLUMN_REACH)
     structure = fsp.block_stencil_gather_map(plan)
-    base = fsp._coupled_shift_policy(coupled, state, "twolevel")
+    base = fsp._coupled_shift_policy(coupled, state, ScalarTwoLevel())
     rhs = -coupled.residual(state)
     print(f"right-hand side |R| {float(jnp.linalg.norm(rhs)):.4e}", flush=True)
 

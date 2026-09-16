@@ -41,18 +41,19 @@ Many entries below are dated history written against the old API. Read them thro
 
 | was | is |
 |---|---|
-| `coupled_continuation(coupled, state, method=M, **flow_opts, **march)` | `coupled_step(coupled, state, preconditioner=BlockDiagonal(method=M, **flow_opts), **march)` |
+| `coupled_continuation(coupled, state, method=M, **flow_opts, **march)` | `coupled_step(coupled, state, preconditioner=BlockDiagonal(scalar=S, **flow_opts), **march)` |
 | `coupled_lu_continuation(..., lu_beta=b, backend=B, stencil_reach=r, ...)` | `coupled_step(..., preconditioner=MaterializedJacobian(CompleteLu(backend=B), build_beta=b, probe=JacobianProbeSpec(stencil_reach=r)))` |
 | `coupled_amg_continuation(..., smoother_fill_levels=…, amg_beta=b)` | `MaterializedJacobian(MonolithicVCycle(smoother_fill_levels=…), build_beta=b)` |
 | `coupled_amg_continuation(..., field_split=True, leading_inverse=L, trailing_inverse=T)` | `MaterializedJacobian(FieldSplit(L, T))` — `L`/`T` are `solve.BlockInverse` values |
 | `probe=` / `preconditioner=` shared across rungs, `amg_beta_tracking_refresh(..., beta_floor=f, observer=o)`, `lu_beta_tracking_refresh` | one session: `open_session(MaterializedJacobian(..., beta_floor=f), coupled, observer=o)`, passed as `solve_coupled(preconditioner=session)`; its `refresh_preconditioner` / `rebind` replace the hooks' |
 | `reuse=previous.shift_policy, residual_norm=m` | `session.refresh(state, previous, m, **march)` |
-| `solve_coupled(method=M, velocity=…)` | `solve_coupled(preconditioner=BlockDiagonal(method=M, velocity=…))` |
-| `mass_flow_coupled_continuation(..., method=M, **flow_opts)`, `solve_coupled_mass_flow(method=M, **flow_opts)` | the same keyword, `preconditioner=BlockDiagonal(method=M, **flow_opts)`; a `MaterializedJacobian` is refused there |
+| `solve_coupled(method=M, velocity=…)` | `solve_coupled(preconditioner=BlockDiagonal(scalar=S, velocity=…))` |
+| `mass_flow_coupled_continuation(..., method=M, **flow_opts)`, `solve_coupled_mass_flow(method=M, **flow_opts)` | the same keyword, `preconditioner=BlockDiagonal(scalar=S, **flow_opts)`; a `MaterializedJacobian` is refused there |
 | `BlockDiagonal(velocity="convection")`, `"smoothed"`, `"convection-air"` (and the same strings on `BlockPreconditioner.build`, `momentum_continuation`, `reused_flow_solve`) | `ConvectionTwoLevel()`, `ViscousMultilevel()`, `ConvectionAir()` from `aquaflux.flow` (#390); a string is refused |
 | `shift_basis=…`, `velocity_shift_parts=…`, `turbulence_damping=…` on `coupled_step` / the mass-flow builder / `solve_coupled` | `shift=ShiftSettings(basis=…, velocity_parts=…, turbulence_damping=…)` (#387); a Reynolds `point_setup` value merges field by field over the shared one (so does a `Globalization`; an unset field takes the shared setting, so a point cannot reset one to its default) |
 | `inner_steps=N` (N > 1), `inner_tol=…`, `cycle_budget=…`, `refresh_on_cycles=…` | `dual_time=DualTimeLoop(inner_steps=N, …)` (#388); unset is the single shifted step. `inner_observer` / `inner_refresh` without a loop, and a `refresh_on_cycles` with no refresh to fire (a frozen step or a block-diagonal session), are refused where they used to be dropped |
 | `krylov_solver=S`, `forward_rtol=…` / `forward_restart=…` / `forward_max_restarts=…` | `linear_solve=S` or `linear_solve=LinearSolveSettings(rtol=…, restart=…, max_restarts=…)` (#388) — one slot, so a solver beside a regime setting cannot be written |
+| the scalar multigrid string `M` = `"twolevel"` / `"air"` / `None` — on `BlockDiagonal.method`, `scalar_transport_preconditioner(method=)`, `SSTTurbulence.k_preconditioner`/`omega_preconditioner(method=)`, `solve_segregated(scalar_preconditioner=)`, and `_coupled_shift_policy(coupled, state, M)` | a `ScalarBlock` value `S` = `ScalarTwoLevel()` / `ScalarAir()` / `UnpreconditionedScalars()` from `aquaflux.turbulence` (#394), on `BlockDiagonal.scalar` and a `scalar=` keyword everywhere else; `_UNSET` and `resolved_method` are gone (`resolved_scalar`); a string is refused |
 | `point_setup` returning `strategy` + `RefreshPolicy(refresh_preconditioner=hook)`, `_rebinding` | `solve_reynolds_continuation` / `solve_reynolds_ramp` given `preconditioner=`; `point_setup` keeps only per-point march settings |
 
 ## The closure — model, strain, sources, transport, preconditioner
@@ -239,7 +240,7 @@ Many entries below are dated history written against the old API. Read them thro
     (`build(state)` / `refresh(state, previous, residual_norm)`) makes it one decision, with
     `_CallerBuiltContinuation`, `_DefaultContinuation` and `_FinishedContinuation` as its three cases.
     That is the shape #282 had just been fixed for one level down; here it also carried a live defect.
-    - **⚠️ `method` / `reference_state` / `**strategy_kwargs` are REFUSED where they cannot be
+    - **⚠️ `preconditioner` / `reference_state` / `**strategy_kwargs` are REFUSED where they cannot be
       forwarded, not dropped.** They configure the continuation `solve_coupled` builds. On the two paths
       where it builds none — an explicit `strategy`, or a `RefreshPolicy(builder=...)` — they reached
       nothing at all, with no error and no log line, so a march asked for `inner_steps=3` /
@@ -247,12 +248,10 @@ Many entries below are dated history written against the old API. Read them thro
       it accepts every keyword and checks none, and it is the main entry point's door. This had already
       cost a study harness (`lu_vs_hostilu.py`, since deleted, #371, carried a warning comment about a `refresh_preconditioner=`
       swallowed here instead of reaching its `RefreshPolicy`).
-    - **`method` now defaults to a sentinel (`_UNSET`), resolving to `"twolevel"` when the solve builds
-      the continuation.** Both a real default and an explicit `None` ("no preconditioner method") are
-      meaningful, so neither could stand for "not given" — and without that distinction the guard could
-      not refuse an explicitly-passed `method` without refusing the default nobody asked for. The
-      sentinel is defined in `preconditioner_spec.py` (moved 2026-09-14, #371), because
-      `BlockDiagonal.method` has the same two meanings; `coupled.py` imports it.
+    - **There is no `_UNSET` sentinel any more (#394, 2026-09-16).** It existed because the scalar
+      multigrid was a string whose `None` meant "no preconditioner", so "not given" needed a third
+      value. "No preconditioner" is now the value `UnpreconditionedScalars()`, so `None` means unset
+      here as on every other settings field.
   - **✅ `preconditioner_spec.py`, the preconditioner as a value (#371, 2026-09-14) — consumed by every
     session, and readable from a case file (#391).** `BlockDiagonal` | `MaterializedJacobian(inverse=
     CompleteLu | MonolithicVCycle | FieldSplit(leading, trailing), probe=JacobianProbeSpec, build_beta,
@@ -270,18 +269,31 @@ Many entries below are dated history written against the old API. Read them thro
       is the registered class itself (not merely one of the same name) and refuses anything that is not
       plain data — a numpy scalar, a callable — naming its path, so its output always survives a JSON or
       YAML writer. `test_preconditioner_spec_mapping.py` finds every public `VelocityBlock` /
-      `BlockInverse` subclass from the exports of **every** `aquaflux` subpackage and fails if the mapping
+      `ScalarBlock` / `BlockInverse` subclass from the exports of **every** `aquaflux` subpackage and fails if the mapping
       does not accept it, so a new value class cannot be silently unwritable.
     - ⚠️ **Only field NAMES and kinds are checked on reading, not field VALUES** — `backend: umfpak`,
       `backend: {kind: CompleteLu}` and `smoother_sweeps: true` all load and fail (or are ignored) at
       build. Per-position validation is #424 (and #375's discriminated unions).
-    - **"Default omitted" is judged by EQUALITY WITH THE FIELD'S DEFAULT, not by `None`** — which is what
-      makes `BlockDiagonal.method` round-trip: its default is the `_UNSET` sentinel, so an absent key is
-      the default multigrid while an explicit `null` is "no scalar preconditioner". Two fields break the
-      issue's "`None` for unset" wording: that one, and `MaterializedJacobian.probe`, where an absent key
-      is the default probe and `probe: null` is refused. `_UNSET` pickles and copies by reference to the
-      module-level singleton (`_Unset.__reduce__`); before, a copied `BlockDiagonal()` held a new
-      sentinel, compared unequal to the original and resolved its method to `<default>`.
+    - **"Default omitted" is judged by EQUALITY WITH THE FIELD'S DEFAULT, not by `None`.** One field
+      breaks the "`None` for unset" wording: `MaterializedJacobian.probe`, where an absent key is the
+      default probe and `probe: null` is refused. (`BlockDiagonal.method` was a second, with an `_UNSET`
+      default that made an explicit `null` mean "no scalar preconditioner"; #394 replaced it with
+      `scalar`, where `null` and an absent key are both unset and no preconditioner is
+      `{kind: UnpreconditionedScalars}`.)
+    - **The scalar block is a value family beside the velocity block (#394, 2026-09-16).**
+      `ScalarBlock` (abstract `SettingsValue`) with `ScalarTwoLevel(v_cycles)`, `ScalarAir(v_cycles)` and
+      `UnpreconditionedScalars()`, in `turbulence/preconditioner.py` beside
+      `scalar_transport_preconditioner`, which takes `scalar=` and **returns `None` for
+      `UnpreconditionedScalars` without assembling the operator** (the value's `_build` is handed a
+      zero-argument `operator()` closure, so a value that builds nothing never pays the `J·1` residual
+      evaluation). That `None` is what `k_shift_policy(preconditioner=)` and
+      `_reparametrized_preconditioner` already read as shift-only, so neither the coupled policy nor the
+      segregated driver branches on the choice. Defaults are byte-identical: `_DEFAULT_SCALAR_BLOCK =
+      ScalarTwoLevel()` is the one home for the builder's, `SSTTurbulence`'s and the spec's unset value,
+      and `solve_segregated` still defaults to no preconditioner (`UnpreconditionedScalars()`). Each
+      multigrid value's fields are pinned to its preconditioner dataclass's fields minus `hierarchy`
+      (`test_scalar_transport_preconditioner.py`), which made the scalar `v_cycles` reachable from a
+      spec for the first time; `BlockDiagonal.v_cycles` stays the **flow** block's alone.
     - `JacobianProbeSpec.column_reach` is stored as a tuple of `int`s **however it arrives** — a
       tuple of floats from a parser included; it used to convert only non-tuples, and the loader hands
       over tuples.
@@ -501,13 +513,13 @@ Many entries below are dated history written against the old API. Read them thro
     the outer GMRES cycle count materially while refreshing the *flow* block does not (measured at β=2
     with the production lAIR scalars, but on a separated pitzDaily state that is not replayable and with
     no smoother/aggregation recorded — re-measure before relying on the sizes). It matters **only for
-    `method="air"`** — lAIR's C/F split
+    `ScalarAir()`** — lAIR's C/F split
     reads operator values, so a plain rebuild changes every shape below the first level or two and would
     force a recompile of the solve it accelerates (`reuse` routes to
-    `~aquaflux.solve.refresh_air_hierarchy`). For `method="twolevel"` the aggregation reads only the
+    `~aquaflux.solve.refresh_air_hierarchy`). For `ScalarTwoLevel()` the aggregation reads only the
     graph, so a rebuild is already structure-preserving and `reuse` is accepted but changes nothing.
     A `ScaledScalarPreconditioner` wrapper is unwrapped (the log chain-rule scale is re-derived at the
-    new state by the caller), and reusing across *different* methods raises. Pinned in
+    new state by the caller), and reusing across *different* kinds of scalar block raises. Pinned in
     `tests/unit/test_scalar_transport_preconditioner.py`: the lAIR refresh preserves shapes **where a
     rebuild provably does not**, the twolevel path is structure-preserving either way, and a refreshed
     preconditioner **beats the stale one on the developed operator** (so the reused split is a real
@@ -517,7 +529,7 @@ Many entries below are dated history written against the old API. Read them thro
   ν_t grows — freezing it would under-damp the march and lean on `DivergenceGuard` escalation) and an
   **AMG preconditioner built once and carried** (it only accelerates the Krylov iteration, and rebuilding
   it per sweep cost ~0.9 s (k) + ~1.0 s (ω) at 4k cells *and* re-compiled the whole solve every sweep).
-  `SSTTurbulence` therefore splits `k_preconditioner`/`omega_preconditioner` (frozen, `method=`) from
+  `SSTTurbulence` therefore splits `k_preconditioner`/`omega_preconditioner` (frozen, `scalar=`) from
   `k_shift_policy`/`omega_shift_policy` (per sweep, `preconditioner=`); `solve_segregated` builds the
   former on the first sweep and the latter every sweep. Measured: traces per sweep went `[5,5,5,5,5]` →
   `[5,5,0,0,0]` with the converged field bit-identical — **under the traced solve of the day; the counts
@@ -2417,7 +2429,7 @@ tuning follow-up noted above.
     (binding, #278, 2026-08-20).** A pre-built `strategy` / `reference_state` is frozen at the
     *target* viscosity, so it reaches the **final** solve only and each lower-Re point builds its own
     (`ramp_kwargs`, long-standing). The mirror image is that everything which *configures* a build —
-    `method`, and every keyword bound for `coupled_continuation` — reaches the **ramp** only, because
+    `preconditioner`, and every keyword bound for `coupled_step` — reaches the **ramp** only, because
     the target is not building one when the caller supplied it (`target_kwargs`, keyed on `_SOLVE_ONLY`,
     derived from `solve_coupled`'s own signature so the two cannot drift). **Passing both at once is the
     ordinary case, not a mistake.** Only the ramp half existed, so such a call reached `solve_coupled`

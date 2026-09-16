@@ -20,6 +20,7 @@ from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.solve import DampedNewtonStep, RootSolver, assembler_residual
 from aquaflux.turbulence import (
+    ScalarTwoLevel,
     SSTModel,
     SSTTurbulence,
     scalar_pseudo_transient_solve,
@@ -90,7 +91,7 @@ def test_segregated_cavity_is_stable_and_active() -> None:
         jnp.full(mesh.n_cells, 1e-4),  # seed k > 0 so the shear production can start
         jnp.full(mesh.n_cells, 1.0),
         max_sweeps=10,
-        scalar_preconditioner="twolevel",
+        scalar_preconditioner=ScalarTwoLevel(),
     )
     assert not bool(jnp.any(jnp.isnan(flow)))
     assert not bool(jnp.any(jnp.isnan(k)))

@@ -43,6 +43,14 @@ from aquaflux.solve import (
     SimpleSmoothed,
 )
 
+from .preconditioner import (
+    _DEFAULT_SCALAR_BLOCK,
+    ScalarAir,
+    ScalarBlock,
+    ScalarTwoLevel,
+    UnpreconditionedScalars,
+)
+
 __all__ = [
     "BlockDiagonal",
     "CompleteLu",
@@ -53,31 +61,6 @@ __all__ = [
     "preconditioner_spec_from_mapping",
     "preconditioner_spec_to_mapping",
 ]
-
-
-class _Unset:
-    """The type of :data:`_UNSET`, so a published signature reads ``method=<default>``.
-
-    A bare ``object()`` would render in the API reference as ``<object object at 0x...>``, which tells a
-    reader nothing and changes on every build.
-    """
-
-    def __repr__(self) -> str:
-        return "<default>"
-
-    def __reduce__(self) -> str:
-        # Copied or pickled by reference to the one module-level sentinel, so ``method is _UNSET`` -- and
-        # with it a spec's equality and its default -- survives ``copy.deepcopy`` and ``pickle``.
-        return "_UNSET"
-
-
-#: Sentinel for "the caller did not name this", for a setting whose ``None`` already means something.
-#: The block-diagonal family's scalar ``method`` has a meaningful default *and* a meaningful ``None``
-#: ("no scalar preconditioner"), so neither can stand for "not given".
-_UNSET = _Unset()
-
-#: The scalar multigrid the block-diagonal family uses when its ``method`` is unset.
-_DEFAULT_SCALAR_METHOD = "twolevel"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -116,22 +99,29 @@ class BlockDiagonal(SettingsValue):
     """The block-diagonal family: a block-SIMPLE flow preconditioner and a scalar multigrid for k and omega.
 
     Assembled from the transport operators at a reference state, with no Jacobian materialized. Every
-    field but ``method`` is the keyword of the same name on
+    field but ``scalar`` is the keyword of the same name on
     :meth:`~aquaflux.flow.BlockPreconditioner.build`; unset, the coupled march takes
-    :class:`~aquaflux.flow.ConvectionTwoLevel` as the velocity block and a strength threshold of ``0.25``, and every other setting takes that builder's own
-    default. That builder's ``reference_state`` is not a setting: the coupled march supplies it.
+    :class:`~aquaflux.flow.ConvectionTwoLevel` as the velocity block and a strength threshold of
+    ``0.25``, and every other setting takes that builder's own default. That builder's
+    ``reference_state`` is not a setting: the coupled march supplies it.
 
     Attributes
     ----------
-    method : {"twolevel", "air"} or None
-        The scalar multigrid for the ``k`` and ``omega`` blocks. ``None`` leaves those blocks
-        unpreconditioned, which is a real choice rather than an absence, so "not set" is a separate
-        sentinel that resolves to ``"twolevel"``.
+    scalar : ScalarBlock or None
+        How the ``k`` and ``omega`` blocks are preconditioned: :class:`~aquaflux.turbulence.ScalarTwoLevel`,
+        :class:`~aquaflux.turbulence.ScalarAir`, or :class:`~aquaflux.turbulence.UnpreconditionedScalars`
+        to leave them unpreconditioned. Unset, the two-level hierarchy.
     velocity, schur_scaling, composition, mass_scale, v_cycles, strength_threshold
         The flow block's settings -- see :meth:`~aquaflux.flow.BlockPreconditioner.build`.
+        ``v_cycles`` is the flow block's alone; the scalar blocks' is set on their own value.
+
+    Raises
+    ------
+    TypeError
+        If ``scalar`` or ``velocity`` is set to something other than a value of its family.
     """
 
-    method: str | None | _Unset = _UNSET
+    scalar: ScalarBlock | None = None
     velocity: VelocityBlock | None = None
     schur_scaling: str | None = None
     composition: str | None = None
@@ -140,21 +130,26 @@ class BlockDiagonal(SettingsValue):
     strength_threshold: float | None = None
 
     def __post_init__(self) -> None:
+        if self.scalar is not None and not isinstance(self.scalar, ScalarBlock):
+            raise TypeError(
+                "BlockDiagonal.scalar must be a scalar-block value such as ScalarTwoLevel(), "
+                f"ScalarAir() or UnpreconditionedScalars(), got {self.scalar!r}."
+            )
         if self.velocity is not None and not isinstance(self.velocity, VelocityBlock):
             raise TypeError(
                 "BlockDiagonal.velocity must be a velocity-block value such as ConvectionTwoLevel(), "
                 f"ViscousMultilevel() or ConvectionAir(), got {self.velocity!r}."
             )
 
-    def resolved_method(self) -> str | None:
-        """The scalar multigrid this spec selects, with an unset ``method`` resolved to its default.
+    def resolved_scalar(self) -> ScalarBlock:
+        """The scalar block this spec selects, with an unset ``scalar`` resolved to the default.
 
         Returns
         -------
-        str or None
-            ``"twolevel"``, ``"air"``, or ``None`` for unpreconditioned scalar blocks.
+        ScalarBlock
+            The set value, or :class:`~aquaflux.turbulence.ScalarTwoLevel` when unset.
         """
-        return _DEFAULT_SCALAR_METHOD if self.method is _UNSET else self.method
+        return _DEFAULT_SCALAR_BLOCK if self.scalar is None else self.scalar
 
     def flow_block_options(self) -> dict[str, object]:
         """The flow block's settings this spec sets, as keywords for the block-SIMPLE builder.
@@ -162,9 +157,9 @@ class BlockDiagonal(SettingsValue):
         Returns
         -------
         dict
-            The set flow-block fields; ``method`` is never among them.
+            The set flow-block fields; ``scalar`` is never among them.
         """
-        return {name: value for name, value in self.settings().items() if name != "method"}
+        return {name: value for name, value in self.settings().items() if name != "scalar"}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -290,7 +285,7 @@ class MaterializedJacobian:
 _SPEC_FAMILIES = (BlockDiagonal, MaterializedJacobian)
 
 #: Every value a spec file may name, at any level: the two families, the materialized inverses and the
-#: probe, and the block inverses and velocity blocks nested inside them.
+#: probe, and the block inverses, velocity blocks and scalar blocks nested inside them.
 _SPEC_MAPPING = SettingsMapping(
     [
         *_SPEC_FAMILIES,
@@ -304,6 +299,9 @@ _SPEC_MAPPING = SettingsMapping(
         ViscousMultilevel,
         ConvectionTwoLevel,
         ConvectionAir,
+        ScalarTwoLevel,
+        ScalarAir,
+        UnpreconditionedScalars,
     ]
 )
 
@@ -333,9 +331,9 @@ def preconditioner_spec_from_mapping(
         probe: {kind: JacobianProbeSpec, column_reach: [3, 3, 3, 3, 2, 2]}
         beta_floor: 0.05
 
-    A ``BlockDiagonal``'s ``method`` is the one field where an explicit ``null`` differs from leaving the
-    key out: ``null`` leaves the scalar blocks unpreconditioned, while an absent key takes the default
-    multigrid.
+    As everywhere in a spec, ``null`` and an absent key both mean "not set". Leaving a
+    ``BlockDiagonal``'s scalar blocks unpreconditioned is a value of its own,
+    ``scalar: {kind: UnpreconditionedScalars}``.
 
     Parameters
     ----------

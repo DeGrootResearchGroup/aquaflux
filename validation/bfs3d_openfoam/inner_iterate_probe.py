@@ -78,6 +78,7 @@ from aquaflux.solve.amg_preconditioner import ShiftedCellMajorOperator  # noqa: 
 from aquaflux.turbulence import (
     MaterializedJacobian,
     MonolithicVCycle,
+    ScalarTwoLevel,  # noqa: E402
     coupled_step,
 )
 from aquaflux.turbulence.coupled import (  # noqa: E402
@@ -157,9 +158,9 @@ def capture_inner_iterates(coupled, state, beta, seed_state):
 
 def solve_with(label, coupled, state, pc_state, beta, plan, structure, n_fields):
     """Solve the shifted system at ``state`` with the preconditioner built at ``pc_state``."""
-    base = _coupled_shift_policy(coupled, state, "twolevel")
+    base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     op_shift = _frozen_shift_diagonal(base, beta, state)
-    pc_base = _coupled_shift_policy(coupled, pc_state, "twolevel")
+    pc_base = _coupled_shift_policy(coupled, pc_state, ScalarTwoLevel())
     pc_shift = _frozen_shift_diagonal(pc_base, max(beta, FLOOR), pc_state)
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
         lambda v: _jacobian_matvec(coupled, pc_state, v),

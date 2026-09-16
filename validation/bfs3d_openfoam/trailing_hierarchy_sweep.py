@@ -56,6 +56,7 @@ from aquaflux.solve import (  # noqa: E402
     solve_linear,
     symmetrically_equilibrate,
 )
+from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _coupled_jacobian_plan,
     _coupled_shift_policy,
@@ -401,7 +402,7 @@ def main() -> None:
     state = load_state(name)
     plan = _coupled_jacobian_plan(coupled, 3)
     structure = block_stencil_gather_map(plan)
-    base = _coupled_shift_policy(coupled, state, "twolevel")
+    base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     jacobian = materialize(coupled, state, plan, structure, n_fields)
     shift = _frozen_shift_diagonal(base, pc_beta, state) if pc_beta > 0 else np.zeros(groups.n_dofs)
     block = trailing_block(MonolithicAmgPreconditioner._shifted(jacobian, shift), groups)

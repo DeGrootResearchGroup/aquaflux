@@ -25,6 +25,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import scipy.sparse as sp  # noqa: E402
+from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _coupled_shift_policy,
     _frozen_shift_diagonal,
@@ -101,7 +102,7 @@ def run(name, coupled, betas, arms=("ilu0", "ilu1"), reach=3):
     state, residual = seed_state(coupled)
     rhs = -np.asarray(residual, dtype=np.float64)
     jacobian = materialize(coupled, state, reach)
-    base = _coupled_shift_policy(coupled, state, "twolevel")
+    base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     order_set = orderings(coupled)
 
     for beta in betas:

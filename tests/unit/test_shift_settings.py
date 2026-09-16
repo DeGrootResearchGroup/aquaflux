@@ -21,6 +21,7 @@ from aquaflux.turbulence import (
     ConstantDamping,
     MaterializedJacobian,
     ShiftSettings,
+    UnpreconditionedScalars,
     coupled_step,
     open_session,
     solve_reynolds_continuation,
@@ -76,7 +77,9 @@ def test_the_damping_reaches_the_policy_of_every_family_and_the_mass_flow_builde
     shift = ShiftSettings(basis=_BASIS, turbulence_damping=2.0)
     relaxation = jnp.asarray(0.5)
 
-    block = coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None), shift=shift)
+    block = coupled_step(
+        coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()), shift=shift
+    )
     assert float(block.shift_policy.turbulence_damping.factor(relaxation, None)) == 2.0
     assert block.shift_policy.shift_basis is _BASIS
 
@@ -85,7 +88,7 @@ def test_the_damping_reaches_the_policy_of_every_family_and_the_mass_flow_builde
     assert float(lu.shift_policy.base.turbulence_damping.factor(relaxation, None)) == 2.0
 
     mass_flow = mass_flow_coupled_continuation(
-        coupled, state, preconditioner=BlockDiagonal(method=None), shift=shift
+        coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()), shift=shift
     )
     assert float(mass_flow.shift_policy.inner.turbulence_damping.factor(relaxation, None)) == 2.0
 

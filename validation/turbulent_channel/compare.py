@@ -24,7 +24,6 @@ import time
 from pathlib import Path
 
 import aquaflux  # noqa: F401  (enables x64)
-import jax.numpy as jnp
 import lineax as lx
 import numpy as np
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
@@ -34,6 +33,7 @@ from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.turbulence import (
+    ScalarAir,
     SSTModel,
     SSTTurbulence,
     bulk_velocity,
@@ -131,7 +131,7 @@ def solve_case(Re_b, ny, growth, beta0, sweeps):
         omega0,
         max_sweeps=sweeps,
         relaxation=0.9,
-        scalar_preconditioner="air",
+        scalar_preconditioner=ScalarAir(),
     )
     dt = time.time() - t0
 

@@ -38,7 +38,14 @@ from aquaflux.flow import ConvectionTwoLevel, MomentumContinuity, NoSlipWall
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.turbulence import BlockDiagonal, SSTModel, SSTTurbulence, hybrid_initialize
+from aquaflux.turbulence import (
+    BlockDiagonal,
+    ScalarAir,
+    ScalarTwoLevel,
+    SSTModel,
+    SSTTurbulence,
+    hybrid_initialize,
+)
 from aquaflux.turbulence.coupled import CoupledRANS, solve_coupled
 
 RHO, U_B, H = 1.0, 1.0, 2.0
@@ -95,7 +102,7 @@ def case():
         k0,
         omega0,
         max_steps=MAX_STEPS,
-        preconditioner=BlockDiagonal(method="air", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarAir(), **PRECONDITIONER),
     )
     return {
         "mesh": mesh,
@@ -162,7 +169,7 @@ def test_coupled_fixed_point_is_amg_method_independent(case) -> None:
         k0,
         omega0,
         max_steps=400,
-        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
 
     assert float(jnp.linalg.norm(flow_tl - flow_air) / jnp.linalg.norm(flow_air)) < 1e-6

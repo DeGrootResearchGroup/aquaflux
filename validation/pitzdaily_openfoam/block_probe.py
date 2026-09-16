@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ilu_fill_probe as P
 import numpy as np
+from aquaflux.turbulence import ScalarTwoLevel
 from aquaflux.turbulence.coupled import _coupled_shift_policy, _frozen_shift_diagonal
 from ilu_fill_probe import assemble, ilu_pivots, ksp_solve, materialize
 from state_probe import openfoam_state
@@ -32,7 +33,7 @@ def sub(A, b, keep):
 for label, state in (("COLD", P.seed_state(coupled)[0]), ("DEVELOPED", openfoam_state(coupled))):
     rhs = -np.asarray(coupled.residual(state), dtype=np.float64)
     J = materialize(coupled, state, 3)
-    base = _coupled_shift_policy(coupled, state, "twolevel")
+    base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     for beta in (0.05,):
         shift = _frozen_shift_diagonal(base, beta, state)
         A, s, perm = assemble(J, np.asarray(shift), nf)

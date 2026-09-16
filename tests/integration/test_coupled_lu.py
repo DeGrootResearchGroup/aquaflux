@@ -38,8 +38,10 @@ from aquaflux.turbulence import (
     CompleteLu,
     CoupledRANS,
     MaterializedJacobian,
+    ScalarTwoLevel,
     SSTModel,
     SSTTurbulence,
+    UnpreconditionedScalars,
     coupled_step,
     hybrid_initialize,
     inlet_k,
@@ -165,7 +167,7 @@ def test_lu_solve_converges_and_matches_the_block_preconditioned_solve(case) -> 
         k_ws,
         omega_ws,
         max_steps=40,
-        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
     assert float(jnp.linalg.norm(flow_l - flow_b) / jnp.linalg.norm(flow_b)) < 1e-4
     assert float(jnp.linalg.norm(k_l - k_b) / jnp.linalg.norm(k_b)) < 1e-3
@@ -241,7 +243,9 @@ def test_a_complete_lu_session_makes_the_lu_exact_at_the_current_beta(case) -> N
     colouring = block_stencil_colouring(np.asarray(owner), np.asarray(nb), n_cells, 3)
     frozen = jax.lax.stop_gradient(state)
     mv = jax.jit(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
-    d = np.asarray(_coupled_shift_policy(coupled, state, None).shift_term(state).diagonal)
+    d = np.asarray(
+        _coupled_shift_policy(coupled, state, UnpreconditionedScalars()).shift_term(state).diagonal
+    )
     A = (
         materialize_block_jacobian(mv, ColumnProbePlan.uniform(colouring, n_fields))
         + sp.diags(0.7 * d)
@@ -280,7 +284,7 @@ def test_lu_beta_tracking_forward_march_converges_to_the_same_fixed_point(case) 
         k_ws,
         omega_ws,
         max_steps=40,
-        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
     assert float(jnp.linalg.norm(flow_l - flow_b) / jnp.linalg.norm(flow_b)) < 1e-4
     assert float(jnp.linalg.norm(k_l - k_b) / jnp.linalg.norm(k_b)) < 1e-3

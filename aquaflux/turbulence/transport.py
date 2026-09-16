@@ -52,6 +52,8 @@ from .boundary import (
 )
 from .continuation import ScalarShiftPolicy
 from .preconditioner import (
+    _DEFAULT_SCALAR_BLOCK,
+    ScalarBlock,
     ScalarTransportPreconditioner,
     scalar_transport_preconditioner,
     scalar_transport_shift_diagonal_parts,
@@ -890,9 +892,9 @@ class SSTTurbulence(eqx.Module):
         closure: SSTClosureFields,
         reference: jnp.ndarray,
         *,
-        method: str = "twolevel",
+        scalar: ScalarBlock = _DEFAULT_SCALAR_BLOCK,
         reuse: ScalarTransportPreconditioner | None = None,
-    ) -> ScalarTransportPreconditioner:
+    ) -> ScalarTransportPreconditioner | None:
         """The convection-diffusion AMG preconditioning the k-equation's shifted solve.
 
         Split from :meth:`k_shift_policy` because the two have different lifetimes: building the
@@ -913,9 +915,14 @@ class SSTTurbulence(eqx.Module):
             frozen operator the *harder* of the two).
         reference : jnp.ndarray
             The field the frozen operator linearizes at, shape ``(n_cells,)``.
-        method : {"twolevel", "air"}
-            The convection hierarchy: stable two-level aggregation, or the reduction-based (lAIR)
-            hierarchy that coarsens fully and stays mesh-independent at large sizes.
+        scalar : ScalarBlock
+            The hierarchy and its settings: :class:`~aquaflux.turbulence.ScalarTwoLevel` (stable
+            two-level aggregation, the default), :class:`~aquaflux.turbulence.ScalarAir` (lAIR, which
+            coarsens fully and stays mesh-independent at large sizes), or
+            :class:`~aquaflux.turbulence.UnpreconditionedScalars`, for which this returns ``None``.
+        reuse : ScalarTransportPreconditioner, optional
+            A preconditioner built earlier whose coarsening a refresh keeps -- see
+            :func:`~aquaflux.turbulence.scalar_transport_preconditioner`.
         """
         diffusivity = self._diffusivity(
             closure.nu_t, closure.f1, self.model.sigma_k1, self.model.sigma_k2
@@ -927,7 +934,7 @@ class SSTTurbulence(eqx.Module):
             self._volume_flux(mdot),
             self.k_residual(mdot, closure),
             reference,
-            method=method,
+            scalar=scalar,
             reuse=reuse,
         )
 
@@ -1003,9 +1010,9 @@ class SSTTurbulence(eqx.Module):
         closure: SSTClosureFields,
         reference: jnp.ndarray,
         *,
-        method: str = "twolevel",
+        scalar: ScalarBlock = _DEFAULT_SCALAR_BLOCK,
         reuse: ScalarTransportPreconditioner | None = None,
-    ) -> ScalarTransportPreconditioner:
+    ) -> ScalarTransportPreconditioner | None:
         """The convection-diffusion AMG preconditioning the omega-equation's shifted solve.
 
         As :meth:`k_preconditioner`, with the omega diffusivity and the near-wall fixed cells
@@ -1021,7 +1028,7 @@ class SSTTurbulence(eqx.Module):
             self._volume_flux(mdot),
             self.omega_residual(mdot, closure),
             reference,
-            method=method,
+            scalar=scalar,
             fixed_cells=self.wall_cells,
             reuse=reuse,
         )

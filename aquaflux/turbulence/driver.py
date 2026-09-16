@@ -63,6 +63,8 @@ from typing import TYPE_CHECKING
 import equinox as eqx
 import jax.numpy as jnp
 
+from .preconditioner import ScalarBlock, UnpreconditionedScalars
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -70,6 +72,10 @@ if TYPE_CHECKING:
 
     from .preconditioner import ScalarTransportPreconditioner
     from .transport import SSTClosureFields, SSTTurbulence
+
+# The segregated loop's default scalar block, held as a module singleton so it is not constructed in
+# the signature's defaults.
+_UNPRECONDITIONED = UnpreconditionedScalars()
 
 
 @eqx.filter_jit
@@ -183,7 +189,7 @@ def solve_segregated(
     k_floor: float = 1e-8,
     omega_floor: float = 1e-8,
     nut_max_coeff: float = 1e5,
-    scalar_preconditioner: str | None = None,
+    scalar_preconditioner: ScalarBlock = _UNPRECONDITIONED,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system by the segregated Picard loop.
 
@@ -241,11 +247,12 @@ def solve_segregated(
         value, it is inactive at convergence for a physical field (where ``nu_t / nu`` is orders below
         ``nut_max_coeff``), so it never pins a converged cell -- unlike a fixed ``omega`` floor, whose
         activity at the fixed point would pollute the sensitivity through that cell.
-    scalar_preconditioner : {"twolevel", "air"} or None
-        When set, the per-sweep :class:`~aquaflux.turbulence.continuation.ScalarShiftPolicy` carries a
-        convection-diffusion AMG (the given multigrid method) for its shifted-operator solve -- the
-        mesh-independent scalar solve a high-Reynolds case needs. ``None`` is a shift-only
-        (unpreconditioned) continuation solve.
+    scalar_preconditioner : ScalarBlock
+        The preconditioner the per-sweep :class:`~aquaflux.turbulence.continuation.ScalarShiftPolicy`
+        carries for its shifted-operator solve. A multigrid value
+        (:class:`~aquaflux.turbulence.ScalarTwoLevel`, :class:`~aquaflux.turbulence.ScalarAir`) gives
+        the mesh-independent scalar solve a high-Reynolds case needs; the default,
+        :class:`~aquaflux.turbulence.UnpreconditionedScalars`, is a shift-only continuation solve.
 
     Returns
     -------
@@ -263,6 +270,7 @@ def solve_segregated(
     # Built from the first sweep's operator and then reused (see the sweep body).
     k_amg: ScalarTransportPreconditioner | None = None
     omega_amg: ScalarTransportPreconditioner | None = None
+    amg_built = False
     for _ in range(max_sweeps):
         # Adaptive under-relaxation: open from the floor toward the ceiling as the coupled increment
         # falls (SER ramp). The first sweep, and a constant-relaxation run, use the floor unchanged.
@@ -284,11 +292,12 @@ def solve_segregated(
         # bundles the transport shift diagonal with the (optional) AMG for the injected solve to use.
         # The AMG is built once here and carried; the shift diagonal is rebuilt every sweep (the
         # module docstring has the why for each).
-        if scalar_preconditioner is not None and k_amg is None:
-            k_amg = turbulence.k_preconditioner(mdot, closure, k, method=scalar_preconditioner)
+        if not amg_built:
+            k_amg = turbulence.k_preconditioner(mdot, closure, k, scalar=scalar_preconditioner)
             omega_amg = turbulence.omega_preconditioner(
-                mdot, closure, omega, method=scalar_preconditioner
+                mdot, closure, omega, scalar=scalar_preconditioner
             )
+            amg_built = True
 
         k_policy = turbulence.k_shift_policy(mdot, closure, k, preconditioner=k_amg)
         k_solved = solve_scalar(turbulence.k_residual(mdot, closure), k, k_policy)

@@ -29,7 +29,7 @@ from aquaflux.solve.continuation import PseudoTransientStep
 from aquaflux.solve.implicit import RootSolver
 from aquaflux.solve.newton import newton_step
 from aquaflux.solve.relaxation import SwitchedEvolutionRelaxation
-from aquaflux.turbulence import ScalarShiftPolicy, scalar_pseudo_transient_solve
+from aquaflux.turbulence import ScalarShiftPolicy, ScalarTwoLevel, scalar_pseudo_transient_solve
 from aquaflux.turbulence.preconditioner import (
     scalar_transport_preconditioner,
     scalar_transport_shift_diagonal,
@@ -131,7 +131,13 @@ def test_continuation_globalizes_where_fixed_count_newton_stalls() -> None:
     reference = jnp.full(mesh.n_cells, 0.5)
     n = mesh.n_cells
     precond = scalar_transport_preconditioner(
-        mesh, geometry, jnp.full(n, GAMMA), volume_flux, residual, reference, method="twolevel"
+        mesh,
+        geometry,
+        jnp.full(n, GAMMA),
+        volume_flux,
+        residual,
+        reference,
+        scalar=ScalarTwoLevel(),
     )
     shift = scalar_transport_shift_diagonal(
         mesh, geometry, jnp.full(n, GAMMA), volume_flux, residual, reference

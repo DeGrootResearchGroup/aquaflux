@@ -51,7 +51,7 @@ from aquaflux.solve import (  # noqa: E402
     MonolithicAmgPreconditioner,
     block_stencil_gather_map,
 )
-from aquaflux.turbulence import positive_k_limit  # noqa: E402
+from aquaflux.turbulence import ScalarTwoLevel, positive_k_limit  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _coupled_jacobian_plan,
     _coupled_shift_policy,
@@ -186,7 +186,7 @@ def main() -> None:
     # the preconditioner built at the floor.
     plan = _coupled_jacobian_plan(coupled, 3)
     structure = block_stencil_gather_map(plan)
-    base = _coupled_shift_policy(coupled, state, "twolevel")
+    base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
         lambda v: _jacobian_matvec(coupled, state, v), plan, None, None, structure
     )

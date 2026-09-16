@@ -51,6 +51,7 @@ from aquaflux.solve import (  # noqa: E402
 from aquaflux.turbulence import (  # noqa: E402
     CoupledRANS,
     LogScalars,
+    ScalarTwoLevel,  # noqa: E402
     SSTModel,
     SSTTurbulence,
     hybrid_initialize,
@@ -427,7 +428,7 @@ def run_case(name, coupled, betas, reach=3, arms=ARMS, localize=False):
         "    " + "  ".join(f"{names[c]}:{err[:, c].max():.2e}" for c in range(n_fields)), flush=True
     )
 
-    base = _coupled_shift_policy(coupled, state, "twolevel")
+    base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     results = {}
     for beta in betas:
         shift = _frozen_shift_diagonal(base, beta, state) if beta > 0 else np.zeros(n_fields * n)

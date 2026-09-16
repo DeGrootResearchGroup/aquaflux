@@ -31,6 +31,7 @@ from aquaflux.turbulence import (
     CoupledRANS,
     MaterializedJacobian,
     MonolithicVCycle,
+    ScalarTwoLevel,
     coupled_step,
     open_session,
     solve_coupled,
@@ -121,7 +122,7 @@ def test_amg_solve_converges_and_matches_the_block_preconditioned_solve(case) ->
         k_ws,
         omega_ws,
         max_steps=40,
-        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
     assert float(jnp.linalg.norm(flow_a - flow_b) / jnp.linalg.norm(flow_b)) < 1e-4
     assert float(jnp.linalg.norm(k_a - k_b) / jnp.linalg.norm(k_b)) < 1e-3

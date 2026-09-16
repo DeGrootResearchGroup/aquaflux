@@ -73,6 +73,7 @@ from aquaflux.solve import (  # noqa: E402
     solve_linear,
 )
 from aquaflux.solve.amg_preconditioner import ShiftedCellMajorOperator  # noqa: E402
+from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _PROBE_BATCH_SIZE,
     _batched_jacobian_matvec,
@@ -342,7 +343,7 @@ def arm(label, coupled, state, rhs, op_shift, assembled, n_fields, options, solv
 
 def probe_state(coupled, state, march_beta, label, plan, structure, n_fields):
     """Run every arm at one state, reporting each and surviving any that fails."""
-    base = _coupled_shift_policy(coupled, state, "twolevel")
+    base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     self_check = march_solver(coupled, base, state)
     op_shift = _frozen_shift_diagonal(base, march_beta, state)
     pc_shift = _frozen_shift_diagonal(base, max(march_beta, FLOOR), state)

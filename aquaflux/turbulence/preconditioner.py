@@ -32,12 +32,14 @@ from collections.abc import Callable
 import jax
 import jax.numpy as jnp
 import numpy as np
+import scipy.sparse as sp
 
 from aquaflux.discretization import flux_continuous_conductance
 from aquaflux.mesh import Mesh
 from aquaflux.mesh.geometry import MeshGeometry
 from aquaflux.solve import (
     AirHierarchy,
+    SettingsValue,
     SmoothedHierarchy,
     air_multigrid_solve,
     build_air_hierarchy,
@@ -139,6 +141,111 @@ class AirAmgPreconditioner(ScalarTransportPreconditioner):
 
     def apply(self, residual: jnp.ndarray) -> jnp.ndarray:
         return air_multigrid_solve(self.hierarchy, residual, cycles=self.v_cycles)
+
+
+@dataclasses.dataclass(frozen=True)
+class ScalarBlock(SettingsValue, abc.ABC):
+    """How the scalar transport blocks (``k`` and ``omega``) are preconditioned, as a value.
+
+    Each concrete value names one choice and carries only its own settings: a multigrid hierarchy fitted
+    to the frozen convection-diffusion operator (:class:`ScalarTwoLevel`, :class:`ScalarAir`), or no
+    preconditioner at all (:class:`UnpreconditionedScalars`). Leaving the blocks unpreconditioned is a
+    value like the others rather than a ``None``, so ``None`` is free to mean "not set here" wherever a
+    scalar block is an optional setting. Every field defaults to ``None``: only set fields reach the
+    preconditioner class, whose own defaults stay the only defaults.
+
+    This class is abstract: construct :class:`ScalarTwoLevel`, :class:`ScalarAir` or
+    :class:`UnpreconditionedScalars`.
+    """
+
+    @abc.abstractmethod
+    def _build(
+        self,
+        operator: Callable[[], sp.csr_matrix],
+        reuse: ScalarTransportPreconditioner | None,
+    ) -> ScalarTransportPreconditioner | None:
+        """Build the preconditioner this value names.
+
+        ``operator`` assembles the frozen operator when called, so a value that needs none does not pay
+        for the assembly; ``reuse`` is the preconditioner whose coarsening a refresh keeps.
+        """
+
+
+@dataclasses.dataclass(frozen=True)
+class ScalarTwoLevel(ScalarBlock):
+    """A two-level nonsymmetric aggregation hierarchy, builds :class:`ConvectionAmgPreconditioner`.
+
+    Stable across cell Peclet; the default for the scalar blocks. Aggregation reads only the operator's
+    graph, so a rebuild on a fixed mesh already reproduces the coarsening and a refresh needs no reuse.
+
+    Attributes
+    ----------
+    v_cycles : int or None
+        V-cycles per apply.
+    """
+
+    v_cycles: int | None = None
+
+    def _build(
+        self,
+        operator: Callable[[], sp.csr_matrix],
+        reuse: ScalarTransportPreconditioner | None,
+    ) -> ScalarTransportPreconditioner:
+        # Aggregation coarsening reads only the graph, so on a fixed mesh a plain rebuild already
+        # reproduces the structure exactly -- `reuse` needs no special handling here.
+        del reuse
+        return ConvectionAmgPreconditioner(
+            build_convection_hierarchy(operator()), **self.settings()
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class ScalarAir(ScalarBlock):
+    """A reduction-based (lAIR) hierarchy, builds :class:`AirAmgPreconditioner`.
+
+    Coarsens fully and stays mesh-independent at large sizes, where the two-level hierarchy's direct
+    coarse solve does not scale.
+
+    Attributes
+    ----------
+    v_cycles : int or None
+        V-cycles per apply.
+    """
+
+    v_cycles: int | None = None
+
+    def _build(
+        self,
+        operator: Callable[[], sp.csr_matrix],
+        reuse: ScalarTransportPreconditioner | None,
+    ) -> ScalarTransportPreconditioner:
+        # Reduction coarsening reads operator values, so a plain rebuild at a new state would change
+        # the C/F split and every shape below the first level or two -- a new compilation signature.
+        # Re-deriving the values on the reused hierarchy's frozen coarsening keeps the signature, so
+        # the solve this preconditions is not recompiled by the refresh.
+        a = operator()
+        hierarchy = (
+            build_air_hierarchy(a)
+            if reuse is None
+            else refresh_air_hierarchy(_reused_hierarchy(reuse, AirAmgPreconditioner), a)
+        )
+        return AirAmgPreconditioner(hierarchy, **self.settings())
+
+
+@dataclasses.dataclass(frozen=True)
+class UnpreconditionedScalars(ScalarBlock):
+    """No preconditioner for the scalar blocks: their shifted solves run on the shift alone."""
+
+    def _build(
+        self,
+        operator: Callable[[], sp.csr_matrix],
+        reuse: ScalarTransportPreconditioner | None,
+    ) -> None:
+        del operator, reuse
+
+
+#: The scalar block used where none is named: the two-level aggregation hierarchy.
+_DEFAULT_SCALAR_BLOCK = ScalarTwoLevel()
 
 
 def _scalar_operator_pieces(
@@ -299,11 +406,10 @@ def scalar_transport_preconditioner(
     residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
     reference: jnp.ndarray,
     *,
-    method: str = "twolevel",
-    v_cycles: int = 1,
+    scalar: ScalarBlock = _DEFAULT_SCALAR_BLOCK,
     fixed_cells: jnp.ndarray | None = None,
     reuse: ScalarTransportPreconditioner | None = None,
-) -> ScalarTransportPreconditioner:
+) -> ScalarTransportPreconditioner | None:
     """A frozen convection-diffusion V-cycle preconditioner for a scalar transport equation.
 
     Parameters
@@ -322,11 +428,10 @@ def scalar_transport_preconditioner(
         The field the frozen operator linearizes at, shape ``(n_cells,)`` (e.g. the current sweep's
         field). For a linear transport equation any reference gives the same operator; a piecewise
         source (a limiter) is captured at its reference branch.
-    method : {"twolevel", "air"}
-        The convection hierarchy: the stable two-level aggregation (default) or the reduction-based
-        (lAIR) hierarchy that coarsens fully and stays mesh-independent at large sizes.
-    v_cycles : int
-        V-cycles per apply.
+    scalar : ScalarBlock
+        Which hierarchy coarsens the operator, and its settings: :class:`ScalarTwoLevel` (the default)
+        or :class:`ScalarAir`. :class:`UnpreconditionedScalars` builds nothing and returns ``None``,
+        without assembling the operator.
     fixed_cells : jnp.ndarray, optional
         Cells whose residual is a value fixation written by its own :class:`~aquaflux.discretization.FixationRow`
         (``phi - target`` directly, ``log(phi/target)`` under a log parametrization) (e.g. the omega near-wall cells):
@@ -334,58 +439,56 @@ def scalar_transport_preconditioner(
         dropped, unit diagonal) to match the operator the solve actually inverts.
     reuse : ScalarTransportPreconditioner, optional
         A preconditioner built earlier on the same mesh whose **coarsening is reused**, so this call
-        re-derives only the values at the new state. This matters for ``method="air"``: lAIR's C/F
+        re-derives only the values at the new state. This matters for :class:`ScalarAir`: lAIR's C/F
         split reads operator values, so a plain rebuild changes every shape below the first level or
         two and the refreshed preconditioner would force a recompile of the solve it accelerates;
         reusing the frozen split keeps the compilation signature (see
-        :func:`~aquaflux.solve.refresh_air_hierarchy`). For ``method="twolevel"`` the aggregation reads
-        only the graph, so a rebuild is already structure-preserving and this argument changes nothing.
-        Must have been built with the same ``method``. A :class:`ScaledScalarPreconditioner` wrapper is
-        unwrapped, since the reparametrization scale is re-derived at the new state by the caller.
+        :func:`~aquaflux.solve.refresh_air_hierarchy`). For :class:`ScalarTwoLevel` the aggregation
+        reads only the graph, so a rebuild is already structure-preserving and this argument changes
+        nothing. Must have been built with the same kind of ``scalar``. A
+        :class:`ScaledScalarPreconditioner` wrapper is unwrapped, since the reparametrization scale is
+        re-derived at the new state by the caller.
 
     Returns
     -------
-    ScalarTransportPreconditioner
-        The frozen, ``phi``-independent preconditioner, callable as a ``phi -> M`` factory.
+    ScalarTransportPreconditioner or None
+        The frozen, ``phi``-independent preconditioner, callable as a ``phi -> M`` factory; ``None``
+        for :class:`UnpreconditionedScalars`.
+
+    Raises
+    ------
+    TypeError
+        If ``scalar`` is not a :class:`ScalarBlock` value.
     """
-    if method not in ("twolevel", "air"):
-        raise ValueError(f"unknown method {method!r}; use 'twolevel' or 'air'")
-    owner_e, nb_e, visc_int, mdot_int, boundary_diagonal, n = _scalar_operator_pieces(
-        mesh, geometry, diffusivity, volume_flux, residual_fn, reference
-    )
-
-    if fixed_cells is not None:
-        fixed = np.asarray(fixed_cells)
-        is_fixed = np.zeros(n, dtype=bool)
-        is_fixed[fixed] = True
-        keep = ~(is_fixed[owner_e] | is_fixed[nb_e])
-        owner_e, nb_e = owner_e[keep], nb_e[keep]
-        visc_int, mdot_int = visc_int[keep], mdot_int[keep]
-        boundary_diagonal = boundary_diagonal.copy()
-        # Identity rows: the residual there is the value fixation, not a transport balance. A unit
-        # diagonal presumes the fixation row has unit derivative in the solved unknown -- true of the
-        # row forms in use, but a caller rescaling this operator for a reparametrized block must take
-        # each row's own derivative rather than the block-wide chain factor, or these rows come out
-        # mis-scaled by the field itself.
-        boundary_diagonal[fixed] = 1.0
-
-    a = convection_diffusion_operator(
-        owner_e, nb_e, visc_int, n, flux=mdot_int, boundary_diagonal=boundary_diagonal
-    )
-    if method == "air":
-        # Reduction coarsening reads operator values, so a plain rebuild at a new state would change
-        # the C/F split and every shape below the first level or two -- a new compilation signature.
-        # Re-deriving the values on the reused hierarchy's frozen coarsening keeps the signature, so
-        # the solve this preconditions is not recompiled by the refresh.
-        hierarchy = (
-            build_air_hierarchy(a)
-            if reuse is None
-            else refresh_air_hierarchy(_reused_hierarchy(reuse, AirAmgPreconditioner), a)
+    if not isinstance(scalar, ScalarBlock):
+        raise TypeError(
+            "scalar must be a scalar-block value such as ScalarTwoLevel(), ScalarAir() or "
+            f"UnpreconditionedScalars(), got {scalar!r}."
         )
-        return AirAmgPreconditioner(hierarchy, v_cycles=v_cycles)
-    # Aggregation coarsening reads only the graph, so on a fixed mesh a plain rebuild already
-    # reproduces the structure exactly -- `reuse` needs no special handling here.
-    return ConvectionAmgPreconditioner(build_convection_hierarchy(a), v_cycles=v_cycles)
+
+    def operator() -> sp.csr_matrix:
+        owner_e, nb_e, visc_int, mdot_int, boundary_diagonal, n = _scalar_operator_pieces(
+            mesh, geometry, diffusivity, volume_flux, residual_fn, reference
+        )
+        if fixed_cells is not None:
+            fixed = np.asarray(fixed_cells)
+            is_fixed = np.zeros(n, dtype=bool)
+            is_fixed[fixed] = True
+            keep = ~(is_fixed[owner_e] | is_fixed[nb_e])
+            owner_e, nb_e = owner_e[keep], nb_e[keep]
+            visc_int, mdot_int = visc_int[keep], mdot_int[keep]
+            boundary_diagonal = boundary_diagonal.copy()
+            # Identity rows: the residual there is the value fixation, not a transport balance. A unit
+            # diagonal presumes the fixation row has unit derivative in the solved unknown -- true of
+            # the row forms in use, but a caller rescaling this operator for a reparametrized block
+            # must take each row's own derivative rather than the block-wide chain factor, or these
+            # rows come out mis-scaled by the field itself.
+            boundary_diagonal[fixed] = 1.0
+        return convection_diffusion_operator(
+            owner_e, nb_e, visc_int, n, flux=mdot_int, boundary_diagonal=boundary_diagonal
+        )
+
+    return scalar._build(operator, reuse)
 
 
 def _reused_hierarchy(reuse: ScalarTransportPreconditioner, expected: type) -> object:
@@ -400,7 +503,7 @@ def _reused_hierarchy(reuse: ScalarTransportPreconditioner, expected: type) -> o
     if not isinstance(reuse, expected):
         raise ValueError(
             f"cannot refresh a {type(reuse).__name__} as a {expected.__name__}: the reused "
-            "preconditioner must have been built with the same `method`, since the coarsening "
+            "preconditioner must have been built with the same kind of `scalar`, since the coarsening "
             "families are not interchangeable."
         )
     return reuse.hierarchy

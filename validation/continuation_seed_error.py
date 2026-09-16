@@ -56,6 +56,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from aquaflux.turbulence import UnpreconditionedScalars
 
 VALIDATION = Path(__file__).resolve().parent
 ROOT = VALIDATION.parent
@@ -100,7 +101,9 @@ def judged_norm(coupled, state):
     from aquaflux.turbulence.coupled import _coupled_shift_policy, coupled_scaled_norm
 
     return coupled_scaled_norm(
-        coupled, _coupled_shift_policy(coupled, state, None, build_flow_block=False), state
+        coupled,
+        _coupled_shift_policy(coupled, state, UnpreconditionedScalars(), build_flow_block=False),
+        state,
     )
 
 

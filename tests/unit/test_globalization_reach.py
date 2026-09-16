@@ -52,6 +52,7 @@ from aquaflux.turbulence import (
     CompleteLu,
     MaterializedJacobian,
     ScalarShiftPolicy,
+    UnpreconditionedScalars,
     coupled_step,
     open_session,
     scalar_pseudo_transient_solve,
@@ -185,13 +186,16 @@ def test_the_shipped_defaults_are_the_ones_every_case_was_measured_under(case) -
     _assert_carries(momentum_continuation(coupled.momentum), SHIPPED)
     coupled_shipped = dataclasses.replace(SHIPPED, line_search=COUPLED_LINE_SEARCH)
     _assert_carries(
-        coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None)), coupled_shipped
+        coupled_step(
+            coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+        ),
+        coupled_shipped,
     )
     _assert_carries(
         coupled_step(
             coupled,
             state,
-            preconditioner=BlockDiagonal(method=None),
+            preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
             dual_time=DualTimeLoop(inner_steps=3),
         ),
         coupled_shipped,
@@ -214,13 +218,18 @@ def test_one_override_changes_one_setting_and_each_builder_keeps_its_own_base(ca
         dataclasses.replace(SHIPPED, beta0=1.5),
     )
     _assert_carries(
-        coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None), globalization=one),
+        coupled_step(
+            coupled,
+            state,
+            preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
+            globalization=one,
+        ),
         dataclasses.replace(SHIPPED, beta0=1.5, line_search=COUPLED_LINE_SEARCH),
     )
     opted_out = coupled_step(
         coupled,
         state,
-        preconditioner=BlockDiagonal(method=None),
+        preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
         globalization=Globalization(line_search=0),
     )
     assert opted_out.line_search == 0
@@ -289,7 +298,11 @@ def test_the_coupled_builders_forward_every_field(case, dual_time: bool) -> None
     extra = {"dual_time": DualTimeLoop(inner_steps=3, inner_tol=1e-3)} if dual_time else {}
     built = {
         "block": coupled_step(
-            coupled, state, preconditioner=BlockDiagonal(method=None), globalization=asked, **extra
+            coupled,
+            state,
+            preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
+            globalization=asked,
+            **extra,
         ),
         "lu": coupled_step(
             coupled,
@@ -299,7 +312,11 @@ def test_the_coupled_builders_forward_every_field(case, dual_time: bool) -> None
             **extra,
         ),
         "mass flow": mass_flow_coupled_continuation(
-            coupled, state, preconditioner=BlockDiagonal(method=None), globalization=asked, **extra
+            coupled,
+            state,
+            preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
+            globalization=asked,
+            **extra,
         ),
     }
     for name, step in built.items():
@@ -319,12 +336,17 @@ def test_a_dual_time_step_refuses_a_setting_it_has_no_field_for(case, field: str
         coupled_step(
             coupled,
             state,
-            preconditioner=BlockDiagonal(method=None),
+            preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
             globalization=one,
             dual_time=DualTimeLoop(inner_steps=3),
         )
     # ...and the same object is accepted by the single-step shape, which has the ladder.
-    coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None), globalization=one)
+    coupled_step(
+        coupled,
+        state,
+        preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
+        globalization=one,
+    )
 
 
 def test_a_step_field_the_step_does_not_declare_is_refused_even_as_none() -> None:
@@ -359,7 +381,7 @@ def test_a_refresh_refuses_a_keyword_the_flow_block_does_not_take(case) -> None:
     against one signature on every build and every refresh, so both raise, and say where it belongs.
     """
     coupled, state = case
-    session = open_session(BlockDiagonal(method=None), coupled)
+    session = open_session(BlockDiagonal(scalar=UnpreconditionedScalars()), coupled)
     base = session.build(state)
     with pytest.raises(TypeError, match=r"beta0.*Globalization"):
         session.build(state, beta0=1.5)
