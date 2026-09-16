@@ -9,11 +9,14 @@ residual. The coupled solve self-starting from this IC is the slow integration t
 
 from __future__ import annotations
 
+import inspect
+
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax.numpy as jnp
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
-from aquaflux.discretization import FirstOrderUpwind
+from aquaflux.discretization import FirstOrderUpwind, ResidualAssembler
 from aquaflux.flow import (
     MomentumContinuity,
     MovingWall,
@@ -27,7 +30,13 @@ from aquaflux.flow import (
 from aquaflux.flow.initialization import _pressure_outlet_cells
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
-from aquaflux.schemes import CompactGreenGauss
+from aquaflux.schemes import (
+    DEFAULT_GRADIENT_SCHEME,
+    CompactGreenGauss,
+    GradientScheme,
+    MultipleCorrectionGradient,
+)
+from aquaflux.transport import ScalarTransport
 from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
@@ -38,17 +47,32 @@ from aquaflux.turbulence import (
     omega_wall_value,
 )
 
+from tests.support.meshes import perturbed_grid_2d
+
 RHO, U_IN, NU = 1.0, 1.0, 1e-2
 
+#: Passed to a fixture in place of a scheme to mean "name none", which is not the same as
+#: naming ``None`` (that means *no* reconstruction). The distinction is the whole subject of
+#: the last section of this file.
+_UNNAMED = object()
 
-def _channel(nx=16, ny=12, lx=3.0, ly=1.0, y_nodes=None):
+#: The scheme this file's fixtures have always used, as a shared instance (a call in an
+#: argument default would be evaluated once anyway, and less visibly).
+_COMPACT = CompactGreenGauss()
+
+
+def _channel(nx=16, ny=12, lx=3.0, ly=1.0, y_nodes=None, gradient_scheme=_COMPACT):
     mesh = structured_grid_2d(nx, ny, lx=lx, ly=ly, named_boundaries=True, y_nodes=y_nodes)
     geometry = mesh.geometry()
-    momentum = MomentumContinuity.build(
+    return mesh, geometry, _momentum_on(mesh, geometry, gradient_scheme)
+
+
+def _momentum_on(mesh, geometry, gradient_scheme=_UNNAMED):
+    scheme = {} if gradient_scheme is _UNNAMED else {"gradient_scheme": gradient_scheme}
+    return MomentumContinuity.build(
         mesh,
         geometry,
         PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)}),
-        CompactGreenGauss(),
         BoundaryConditions(
             {
                 "left": VelocityInlet(velocity=(U_IN, 0.0)),
@@ -57,9 +81,9 @@ def _channel(nx=16, ny=12, lx=3.0, ly=1.0, y_nodes=None):
                 "top": NoSlipWall(),
             }
         ),
+        **scheme,
         advection_scheme=FirstOrderUpwind(),
     )
-    return mesh, geometry, momentum
 
 
 def test_laplace_field_reproduces_a_linear_harmonic() -> None:
@@ -124,7 +148,6 @@ def test_potential_flow_is_zero_on_a_closed_domain() -> None:
         mesh,
         geometry,
         PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)}),
-        CompactGreenGauss(),
         BoundaryConditions(
             {
                 "top": MovingWall(velocity=(U_IN, 0.0)),
@@ -133,6 +156,7 @@ def test_potential_flow_is_zero_on_a_closed_domain() -> None:
                 "right": NoSlipWall(),
             }
         ),
+        gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
         pressure_pin=0,
     )
@@ -153,7 +177,6 @@ def test_potential_flow_survives_a_wall_resolved_aspect_ratio(growth: float) -> 
         mesh,
         geometry,
         PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)}),
-        CompactGreenGauss(),
         BoundaryConditions(
             {
                 "left": VelocityInlet(velocity=(U_IN, 0.0)),
@@ -162,6 +185,7 @@ def test_potential_flow_survives_a_wall_resolved_aspect_ratio(growth: float) -> 
                 "top": NoSlipWall(),
             }
         ),
+        gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
     )
     assert (lx / 16) / float(y_nodes[1]) > 1e3  # the regime that used to fail
@@ -178,14 +202,15 @@ def test_potential_flow_survives_a_wall_resolved_aspect_ratio(growth: float) -> 
     assert float(jnp.max(jnp.abs(velocity[:, 1]))) < 1e-3
 
 
-def _turbulence(mesh, geometry, k_in, omega_in, nu=NU):
+def _turbulence(mesh, geometry, k_in, omega_in, nu=NU, gradient_scheme=_COMPACT):
+    scheme = {} if gradient_scheme is _UNNAMED else {"gradient_scheme": gradient_scheme}
     return SSTTurbulence.build(
         SSTModel(),
         mesh,
         geometry,
-        CompactGreenGauss(),
         FirstOrderUpwind(),
         PropertyModel({"viscosity": Constant(RHO * nu), "density": Constant(RHO)}),
+        **scheme,
         wall_patches=["bottom", "top"],
         k_boundary=BoundaryConditions(
             {
@@ -328,8 +353,8 @@ def _periodic_channel(beta=0.0035, mu_factor=1.0):
         mesh,
         geometry,
         properties,
-        CompactGreenGauss(),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
+        gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
         pressure_pin=0,
         body_force=(beta, 0.0),
@@ -338,9 +363,9 @@ def _periodic_channel(beta=0.0035, mu_factor=1.0):
         SSTModel(),
         mesh,
         geometry,
-        CompactGreenGauss(),
         FirstOrderUpwind(),
         properties,
+        gradient_scheme=CompactGreenGauss(),
         wall_patches=["bottom", "top"],
         k_boundary=BoundaryConditions({"bottom": Dirichlet(0.0), "top": Dirichlet(0.0)}),
         omega_boundary=BoundaryConditions({"bottom": ZeroGradient(), "top": ZeroGradient()}),
@@ -419,3 +444,156 @@ def test_hybrid_initialize_seeds_the_wall_closure_the_residual_imposes() -> None
     # it anywhere (the profile is applied with a maximum against the interpolant).
     assert jnp.allclose(omega[wall], imposed[wall], rtol=1e-10)
     assert bool(jnp.all(omega >= imposed - 1e-12))
+
+
+# --------------------------------------------------------------------------------------------------
+# One gradient scheme per run
+#
+# The initializers used to substitute a scheme of their own whenever none was passed, while the
+# assemblers did not -- so a caller who named none got one reconstruction in the initial condition
+# and another in the residual. That is a discretization difference arriving through an omission, and
+# nothing reported it. The initializers now read the scheme off the assembler they are initializing,
+# so the two cannot disagree; the assemblers take one shared default when told nothing.
+# --------------------------------------------------------------------------------------------------
+
+
+#: Labels recorded by `_RecordingGradient` as it reconstructs, in call order.
+_RECONSTRUCTED_WITH: list[str] = []
+
+
+class _RecordingGradient(GradientScheme):
+    """``inner``, plus a note of every reconstruction it is asked for.
+
+    Which scheme an initializer *used* cannot be read off the field it returns: two schemes agree to
+    round-off on an orthogonal mesh, so a field comparison there would pass whichever one ran. This
+    records the asking instead, and delegates the arithmetic unchanged, so a solve driven through it
+    is the solve driven through ``inner``.
+    """
+
+    inner: GradientScheme
+    label: str = eqx.field(static=True)
+
+    def bind(self, mesh, geometry):
+        return _RecordingGradient(inner=self.inner.bind(mesh, geometry), label=self.label)
+
+    def _reconstruct_gradient(self, field, mesh, geometry, boundary_values, **kwargs):
+        # The reconstruction hook rather than the public `gradients`, so the base class keeps
+        # applying an imposed gradient exactly once, as it does for every other scheme.
+        _RECONSTRUCTED_WITH.append(self.label)
+        return self.inner._reconstruct_gradient(field, mesh, geometry, boundary_values, **kwargs)
+
+
+@pytest.fixture
+def recorded():
+    """Wrap a scheme so its use is recorded, and give the test the (cleared) record."""
+    _RECONSTRUCTED_WITH.clear()
+    yield lambda scheme, label: _RecordingGradient(inner=scheme, label=label)
+    _RECONSTRUCTED_WITH.clear()
+
+
+def test_a_build_that_names_no_gradient_scheme_takes_the_one_shared_default() -> None:
+    """Both assemblers that cannot do without a gradient default to the same scheme.
+
+    Two builders each writing down their own default is how the three-way disagreement started, so
+    what is pinned is that they agree with ``DEFAULT_GRADIENT_SCHEME`` -- not merely that each
+    happens to be a multiple-correction scheme.
+    """
+    mesh, geometry, momentum = _channel(gradient_scheme=_UNNAMED)
+    turbulence = _turbulence(mesh, geometry, 1e-3, 10.0, gradient_scheme=_UNNAMED)
+
+    assert isinstance(DEFAULT_GRADIENT_SCHEME, MultipleCorrectionGradient)
+    # Both builders bind what they are handed, so compare the choices the default makes -- its
+    # closure and its fallback are the whole of them.
+    for scheme in (momentum.gradient_scheme, turbulence.gradient_scheme):
+        assert isinstance(scheme, MultipleCorrectionGradient)
+        assert type(scheme.boundary_closure) is type(DEFAULT_GRADIENT_SCHEME.boundary_closure)
+        assert scheme.fallback == DEFAULT_GRADIENT_SCHEME.fallback
+
+
+def test_the_potential_flow_initializer_reconstructs_with_the_flows_own_scheme(recorded) -> None:
+    """``potential_flow`` reconstructs with the scheme its assembler carries, whatever that is."""
+    mesh, geometry, _ = _channel()
+    momentum = _momentum_on(mesh, geometry, recorded(_COMPACT, "flow-scheme"))
+
+    _RECONSTRUCTED_WITH.clear()  # what the initializer reconstructs, not what the build did
+    potential_flow(momentum)
+
+    assert _RECONSTRUCTED_WITH, "the initializer reconstructed no gradient at all"
+    assert set(_RECONSTRUCTED_WITH) == {"flow-scheme"}
+
+
+def test_the_hybrid_initializer_reconstructs_each_field_with_that_fields_own_scheme(
+    recorded,
+) -> None:
+    """k and omega are smoothed with the turbulence assembler's scheme, the flow with the flow's.
+
+    Stated per field rather than per run because the two assemblers are built separately and nothing
+    forces them to agree: each field's initial condition still has to match the residual that will
+    be driven to zero for *it*.
+    """
+    mesh, geometry, _ = _channel()
+    momentum = _momentum_on(mesh, geometry, recorded(_COMPACT, "flow-scheme"))
+    turbulence = _turbulence(
+        mesh,
+        geometry,
+        1e-3,
+        10.0,
+        gradient_scheme=_RecordingGradient(_COMPACT, "turbulence-scheme"),
+    )
+
+    # ⚠️ Not optional. `SSTTurbulence.build` reconstructs the wall-distance gradient with this very
+    # scheme, so without clearing here the first assertion below is satisfied by the *build* and
+    # holds however the initializer behaves -- the shape of a test that cannot fail. It was one:
+    # pointing `hybrid_initialize` at the flow's scheme left this green until the clear was added.
+    _RECONSTRUCTED_WITH.clear()
+    hybrid_initialize(momentum, turbulence)
+
+    assert "turbulence-scheme" in _RECONSTRUCTED_WITH  # the k and omega Laplace solves
+    assert "flow-scheme" in _RECONSTRUCTED_WITH  # the potential flow underneath them
+
+
+def test_two_gradient_schemes_give_two_different_initial_conditions() -> None:
+    """The scheme an initializer picks is a physics choice, not bookkeeping.
+
+    On a skewed mesh the reconstruction moves the harmonic field and the velocity read from it, so a
+    run whose initial condition silently used a different scheme from its residual started somewhere
+    the residual does not describe. This is what makes the two tests above worth having -- without
+    it they pin a distinction that might carry no consequence.
+    """
+    mesh = perturbed_grid_2d(12, 10, lx=3.0, ly=1.0, perturb=0.25, named_boundaries=True)
+    geometry = mesh.geometry()
+
+    compact = _momentum_on(mesh, geometry, _COMPACT)
+    multiple_correction = _momentum_on(mesh, geometry, MultipleCorrectionGradient())
+    from_compact, _ = compact.unpack(potential_flow(compact))
+    from_correction, _ = multiple_correction.unpack(potential_flow(multiple_correction))
+
+    assert bool(jnp.all(jnp.isfinite(from_compact)))
+    assert bool(jnp.all(jnp.isfinite(from_correction)))
+    spread = float(jnp.max(jnp.abs(from_correction - from_compact)))
+    assert spread > 1e-6 * float(jnp.max(jnp.abs(from_compact)))
+
+
+def test_no_initializer_names_a_gradient_scheme_of_its_own() -> None:
+    """The four builders and the two initializers express ONE policy for this one choice.
+
+    A census rather than a behavioural check, because the failure it guards against is drift across
+    call sites that each look reasonable alone: a keyword quietly re-added to an initializer brings
+    back exactly the two-schemes-in-one-run defect, and no single site would look wrong. The two
+    sentinels are what the policy is: ``None`` means *no* reconstruction, ``DEFAULT_GRADIENT_SCHEME``
+    is what an assembler that needs one takes when told nothing, and an initializer chooses neither.
+    """
+    optional = (ResidualAssembler.build, ScalarTransport.build)
+    required = (MomentumContinuity.build, SSTTurbulence.build)
+
+    for build in optional + required:
+        parameter = inspect.signature(build).parameters["gradient_scheme"]
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY, build.__qualname__
+        expected = None if build in optional else DEFAULT_GRADIENT_SCHEME
+        assert parameter.default is expected, build.__qualname__
+
+    for initializer in (potential_flow, hybrid_initialize):
+        assert "gradient_scheme" not in inspect.signature(initializer).parameters, (
+            f"{initializer.__qualname__} takes a gradient scheme again -- it can then disagree with "
+            "the assembler it is initializing, which is the defect this policy removes"
+        )

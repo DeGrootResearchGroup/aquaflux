@@ -72,7 +72,6 @@ def _channel(nx=28, ny=20, growth=1.2):
         mesh,
         geometry,
         properties,
-        CompactGreenGauss(),
         BoundaryConditions(
             {
                 "left": VelocityInlet(velocity=(U_IN, 0.0)),
@@ -81,15 +80,16 @@ def _channel(nx=28, ny=20, growth=1.2):
                 "top": NoSlipWall(),
             }
         ),
+        gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
     )
     turbulence = SSTTurbulence.build(
         model,
         mesh,
         geometry,
-        CompactGreenGauss(),
         FirstOrderUpwind(),
         properties,
+        gradient_scheme=CompactGreenGauss(),
         wall_patches=["bottom", "top"],
         k_boundary=BoundaryConditions(
             {

@@ -57,7 +57,6 @@ def _flow(nx=16, ny=8):
         mesh,
         geometry,
         PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)}),
-        CompactGreenGauss(),
         BoundaryConditions(
             {
                 "left": VelocityInlet(velocity=(U_IN, 0.0)),
@@ -66,6 +65,7 @@ def _flow(nx=16, ny=8):
                 "top": NoSlipWall(),
             }
         ),
+        gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
     )
     # The block preconditioner plus a backtracking line search, as the channel flow tests use: the

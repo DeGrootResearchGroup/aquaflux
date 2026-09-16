@@ -40,7 +40,6 @@ def _cavity(scheme, n=12, perturb=0.15, mu=MU):
         mesh,
         geom,
         PropertyModel({"viscosity": Constant(mu), "density": Constant(RHO)}),
-        scheme,
         BoundaryConditions(
             {
                 "top": MovingWall(velocity=(U_LID, 0.0)),
@@ -49,6 +48,7 @@ def _cavity(scheme, n=12, perturb=0.15, mu=MU):
                 "right": NoSlipWall(),
             }
         ),
+        gradient_scheme=scheme,
         advection_scheme=FirstOrderUpwind(),
         pressure_pin=0,
     )

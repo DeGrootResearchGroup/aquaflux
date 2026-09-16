@@ -94,7 +94,6 @@ from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import BlockPreconditioner, MomentumContinuity, MovingWall, NoSlipWall
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
-from aquaflux.schemes import CompactGreenGauss
 from aquaflux.solve import DampedNewtonStep, RootSolver
 
 
@@ -105,7 +104,6 @@ def cavity(viscosity):
         mesh,
         mesh.geometry(),
         PropertyModel({"viscosity": Constant(viscosity), "density": Constant(1.0)}),
-        CompactGreenGauss(),
         BoundaryConditions(
             {
                 "top": MovingWall(velocity=(1.0, 0.0)),

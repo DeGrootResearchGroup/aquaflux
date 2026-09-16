@@ -1783,6 +1783,12 @@ Many entries below are dated history written against the old API. Read them thro
 ## Initialization, diagnostics, Reynolds continuation
 
 - **`initialization.py` — `hybrid_initialize` (cold-start, the reason `solve_coupled` self-starts).**
+  ⚠️ **It takes NO `gradient_scheme` argument (#361, 2026-09-16).** k and omega are smoothed with
+  `turbulence.gradient_scheme` and the flow through `potential_flow`, which reads
+  `momentum.gradient_scheme` — each field's initial condition reconstructed the way its own residual
+  will be. It used to substitute `CompactGreenGauss()`, and every caller omitted the argument, so every
+  case started on a discretization it was not solving. Do not add the keyword back; the assemblers'
+  own default is `schemes.DEFAULT_GRADIENT_SCHEME` (see `.claude/rules/schemes.md`).
   The monolithic Newton is a *local* method: from a raw cold start (`u=0`, uniform k/ω) it **stalls** —
   the near-wall ω fixation alone injects a `~6ν/(β₁d²)` jump, and a uniform interior is far from a
   consistent field the inner solve can precondition. `hybrid_initialize(momentum, turbulence)` builds a

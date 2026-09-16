@@ -37,7 +37,6 @@ def _cavity(mu, n, advection):
         mesh,
         geom,
         PropertyModel({"viscosity": Constant(mu), "density": Constant(RHO)}),
-        CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=16)),
         BoundaryConditions(
             {
                 "top": MovingWall(velocity=(1.0, 0.0)),
@@ -46,6 +45,7 @@ def _cavity(mu, n, advection):
                 "right": NoSlipWall(),
             }
         ),
+        gradient_scheme=CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=16)),
         advection_scheme=advection,
         pressure_pin=0,
     )

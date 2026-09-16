@@ -91,7 +91,6 @@ def build_case():
         mesh,
         geom,
         properties,
-        grad,
         BoundaryConditions(
             {
                 "inlet": VelocityInlet(velocity=U_IN),
@@ -100,15 +99,16 @@ def build_case():
                 "lampWall": NoSlipWall(),
             }
         ),
+        gradient_scheme=grad,
         advection_scheme=momentum_upwind,
     )
     turbulence = SSTTurbulence.build(
         SSTModel(),
         mesh,
         geom,
-        grad,
         scalar_upwind,
         properties,
+        gradient_scheme=grad,
         wall_patches=WALLS,
         explicit_production_limiter=True,
         k_boundary=BoundaryConditions(

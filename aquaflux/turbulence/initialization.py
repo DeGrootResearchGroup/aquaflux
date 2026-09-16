@@ -55,13 +55,11 @@ import jax.numpy as jnp
 
 from aquaflux.flow.initialization import laplace_field, potential_flow
 from aquaflux.flow.scales import friction_velocity, hydraulic_length
-from aquaflux.schemes import CompactGreenGauss
 
 from .boundary import equilibrium_k, inlet_omega, omega_wall
 
 if TYPE_CHECKING:
     from aquaflux.flow import MomentumContinuity
-    from aquaflux.schemes import GradientScheme
 
     from .transport import SSTTurbulence
 
@@ -70,7 +68,6 @@ def hybrid_initialize(
     momentum: MomentumContinuity,
     turbulence: SSTTurbulence,
     *,
-    gradient_scheme: GradientScheme | None = None,
     k_floor: float = 1e-8,
     omega_floor: float = 1e-8,
     length_scale_factor: float = 0.09,
@@ -82,11 +79,9 @@ def hybrid_initialize(
     momentum : MomentumContinuity
         The flow assembler (supplies the potential-flow boundary data and mesh).
     turbulence : SSTTurbulence
-        The SST closure (supplies the k/omega boundary conditions and the per-cell wall distance /
-        viscosity that set the analytical near-wall ``omega`` profile).
-    gradient_scheme : GradientScheme or None
-        The scheme for the Laplace solves' gradient reconstruction (defaults to
-        :class:`~aquaflux.schemes.CompactGreenGauss`).
+        The SST closure (supplies the k/omega boundary conditions, the per-cell wall distance /
+        viscosity that set the analytical near-wall ``omega`` profile, **and** the gradient scheme
+        the k/omega Laplace solves reconstruct with).
     k_floor, omega_floor : float
         Positive floors applied to the smoothed fields, matching the solver's realizability floors.
     length_scale_factor : float
@@ -102,9 +97,13 @@ def hybrid_initialize(
         ``(n_cells,)`` -- ready to hand to :func:`~aquaflux.turbulence.solve_coupled`.
     """
     mesh, geometry = momentum.mesh, momentum.geometry
-    gradient_scheme = gradient_scheme or CompactGreenGauss()
+    # Each field is smoothed with the reconstruction its own residual uses, taken from the assembler
+    # that owns it rather than chosen here. An initializer that picks its own puts one discretization
+    # in the initial condition and another in the equations being solved -- a physics difference
+    # introduced by an omission, and one nothing downstream reports.
+    gradient_scheme = turbulence.gradient_scheme
 
-    flow = potential_flow(momentum, gradient_scheme=gradient_scheme)
+    flow = potential_flow(momentum)
 
     k, _ = laplace_field(mesh, geometry, turbulence.k_boundary, gradient_scheme=gradient_scheme)
     omega, _ = laplace_field(

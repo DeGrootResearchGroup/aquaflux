@@ -39,8 +39,8 @@ def _solve(nx, ny):
         mesh,
         geometry,
         PropertyModel({"viscosity": Constant(MU), "density": Constant(RHO)}),
-        CorrectedGreenGauss(),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
+        gradient_scheme=CorrectedGreenGauss(),
         pressure_pin=0,  # periodic + walls is a closed domain: fix the pressure datum
         body_force=(BETA, 0.0),
     )

@@ -35,8 +35,8 @@ def _build(boundary, *, mu=0.1, body_force=None, periodic=False, pin=None):
         mesh,
         mesh.geometry(),
         PropertyModel({"viscosity": Constant(mu), "density": Constant(RHO)}),
-        CompactGreenGauss(),
         BoundaryConditions(boundary),
+        gradient_scheme=CompactGreenGauss(),
         body_force=body_force,
         pressure_pin=pin,
     )

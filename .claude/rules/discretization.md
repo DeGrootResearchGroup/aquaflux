@@ -45,7 +45,11 @@ Principles.
   default `()`) and `FaceFluxOperator`/`AdvectionScheme` carry `uses_gradient() -> bool` (default
   `False`); `ResidualAssembler.build` validates both — `properties.require(*names)` over every
   operator's `requires()`, and refuses `gradient_scheme=None` when any flux operator's
-  `uses_gradient()` is `True`. `DiffusionFlux.requires()` returns `(self.coefficient,)`;
+  `uses_gradient()` is `True`. ⚠️ **`gradient_scheme=None` means NO reconstruction here and keeps
+  meaning that (#361, 2026-09-16)** — it is a checked state, and the right one for pure diffusion on
+  an orthogonal mesh, so this builder (and `ScalarTransport.build`) deliberately did **not** take the
+  library default that `MomentumContinuity.build`/`SSTTurbulence.build` now carry. One sentinel, one
+  meaning: `None` is never a stand-in for "choose for me". `DiffusionFlux.requires()` returns `(self.coefficient,)`;
   `AdvectionFlux.uses_gradient()` delegates to its scheme, and `LimitedUpwind.uses_gradient()` is
   unconditionally `True` (its 2nd-order reconstruction reads the gradient whether or not a limiter
   is set) — the one scheme for which `gradient_scheme=None` used to silently degrade to first order

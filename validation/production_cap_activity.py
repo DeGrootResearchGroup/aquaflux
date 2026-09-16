@@ -83,7 +83,6 @@ def build_case(nu=NU, *, explicit_limiter: bool):
         mesh,
         geometry,
         properties,
-        CompactGreenGauss(),
         BoundaryConditions(
             {
                 "left": VelocityInlet(velocity=(U_IN, 0.0)),
@@ -92,15 +91,16 @@ def build_case(nu=NU, *, explicit_limiter: bool):
                 "top": NoSlipWall(),
             }
         ),
+        gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
     )
     turbulence = SSTTurbulence.build(
         model,
         mesh,
         geometry,
-        CompactGreenGauss(),
         FirstOrderUpwind(),
         properties,
+        gradient_scheme=CompactGreenGauss(),
         wall_patches=["bottom", "top"],
         explicit_production_limiter=explicit_limiter,
         k_boundary=BoundaryConditions(

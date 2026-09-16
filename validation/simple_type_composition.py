@@ -83,7 +83,6 @@ def channel(nx: int, ny: int, mu: float, u_in: float = 1.0) -> MomentumContinuit
         mesh,
         mesh.geometry(),
         PropertyModel({"viscosity": Constant(mu), "density": Constant(1.0)}),
-        CompactGreenGauss(),
         BoundaryConditions(
             {
                 "left": VelocityInlet(velocity=(u_in, 0.0)),
@@ -92,6 +91,7 @@ def channel(nx: int, ny: int, mu: float, u_in: float = 1.0) -> MomentumContinuit
                 "top": NoSlipWall(),
             }
         ),
+        gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
     )
 
@@ -101,9 +101,9 @@ def developing(assembler: MomentumContinuity, rtol: float) -> jnp.ndarray:
     continuation = momentum_continuation(
         assembler, schur_scaling="msimple", velocity=ConvectionTwoLevel()
     )
-    return RootSolver(
-        max_steps=200, rtol=rtol, atol=0.0, strategy=continuation
-    ).solve(assembler_residual, assembler.initial_state(), assembler)
+    return RootSolver(max_steps=200, rtol=rtol, atol=0.0, strategy=continuation).solve(
+        assembler_residual, assembler.initial_state(), assembler
+    )
 
 
 def probe(

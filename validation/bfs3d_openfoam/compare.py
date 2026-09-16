@@ -1189,7 +1189,6 @@ def build_case(model=None, momentum_advection=None, gradient=None):
         mesh,
         geom,
         properties,
-        grad,
         BoundaryConditions(
             {
                 "inlet": VelocityInlet(velocity=(U_IN, 0.0, 0.0)),
@@ -1199,15 +1198,16 @@ def build_case(model=None, momentum_advection=None, gradient=None):
                 "sideWalls": NoSlipWall(),
             }
         ),
+        gradient_scheme=grad,
         advection_scheme=momentum_upwind,
     )
     turbulence = SSTTurbulence.build(
         model,
         mesh,
         geom,
-        grad,
         scalar_upwind,
         properties,
+        gradient_scheme=grad,
         wall_patches=WALLS,
         explicit_production_limiter=PRODUCTION_LIMITER,
         k_boundary=BoundaryConditions(

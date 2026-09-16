@@ -148,7 +148,8 @@ Engineering Principles.
     `velocity_gradient(state)` outright (pre-release, no shim); a caller that only wants the tensor
     writes `velocity_fields(state).gradient`.
   - **Fluid properties come
-  from a `PropertyModel`** (`build(mesh, geom, properties, gradient_scheme, boundary, …)`, must supply
+  from a `PropertyModel`** (`build(mesh, geom, properties, boundary, *, gradient_scheme=…)` — the
+  scheme is keyword-only and defaults to `schemes.DEFAULT_GRADIENT_SCHEME`; must supply
   `"viscosity"`+`"density"`; `.viscosity`/`.density` evaluate them per-cell) — see
   `.claude/rules/properties.md`. **`boundary` is a `BoundaryConditions({name: FlowBoundary})`**
   collection (constructed like a `PropertyModel`), bound inside `build` via
@@ -458,6 +459,12 @@ Engineering Principles.
   `test_potential_flow_is_zero_on_a_closed_domain` is the guard — do not widen the fallback to
   `characteristic_velocity`, which reports the *lid* speed. Otherwise closed domains return the zero
   state (or pin `pressure_pin`). Usable to warm-start **any** solve (flow-only, segregated, coupled).
+  ⚠️ **It takes NO `gradient_scheme` argument and must not be given one back (#361).** It
+  reconstructs `grad phi` with `momentum.gradient_scheme` — the scheme that assembler will be solved
+  with. It used to substitute `CompactGreenGauss()` instead, and since every caller in the repository
+  omitted the argument, every case initialized on one discretization and solved on another. Taking the
+  scheme from the assembler is what makes that unrepresentable rather than merely discouraged; see
+  `.claude/rules/schemes.md` for the default and the test census that pins the policy.
 - **Bernoulli pressure seed — BUILT (`flow/initialization.py`, `bernoulli_pressure`).** `potential_flow`
   no longer returns `p=0`: it seeds the **dynamic** pressure `p = ½ρ(|u_ref|² − |u|²)` consistent with
   the irrotational velocity (`p + ½ρ|u|² = const`), anchored so the mean pressure over the

@@ -41,6 +41,7 @@ from .gradient import (
     narrow_gradient_sweeps,
 )
 from .multiple_correction import (
+    DEFAULT_GRADIENT_SCHEME,
     Corrections,
     CellwiseFallback,
     GradientBoundaryClosure,
@@ -57,6 +58,7 @@ from .interpolation import (
 from .limiter import Limiter, VenkatakrishnanLimiter
 
 __all__ = [
+    "DEFAULT_GRADIENT_SCHEME",
     "AveragedInteriorHessian",
     "AveragedNeighbourHessian",
     "CellBlockJacobi",

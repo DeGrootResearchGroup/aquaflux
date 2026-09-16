@@ -954,7 +954,6 @@ def build_case(model=None, gradient_scheme=None):
         mesh,
         geom,
         properties,
-        grad,
         BoundaryConditions(
             {
                 "inlet": VelocityInlet(velocity=(U_IN, 0.0)),
@@ -963,6 +962,7 @@ def build_case(model=None, gradient_scheme=None):
                 "lowerWall": NoSlipWall(),
             }
         ),
+        gradient_scheme=grad,
         advection_scheme=momentum_upwind,
     )
     # ⚠️ MATCHES THE SIBLING CASE'S LINEARIZATION. With the limiter left implicit the Jacobian
@@ -973,9 +973,9 @@ def build_case(model=None, gradient_scheme=None):
         model,
         mesh,
         geom,
-        grad,
         scalar_upwind,
         properties,
+        gradient_scheme=grad,
         wall_patches=WALLS,
         explicit_production_limiter=True,
         k_boundary=BoundaryConditions(
