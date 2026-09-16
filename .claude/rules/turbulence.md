@@ -373,11 +373,11 @@ Many entries below are dated history written against the old API. Read them thro
       reported before review, are in `CLAUDE.md`'s sibling-builder item.
   - **`solve_coupled(refresh=RefreshPolicy(trigger=…))` segments the march to re-freeze the preconditioner — and a refresh
     must CARRY the shift diagonals, not rebuild them (binding).** With a trigger set, the march runs as a
-    sequence of *observed* segments (`aquaflux.solve.forward_march`): each steps until the trigger judges
+    sequence of segments of one `aquaflux.solve.forward_march`: each steps until the trigger judges
     the frozen preconditioner stale, the k/ω AMGs are re-derived at the state reached, and the next
-    segment continues — then a real `ImplicitNewtonSolver.solve()` finishes and produces the result.
-    Segments exist because the AMG rebuild is off-jit scipy work that cannot run inside the
-    `lax.while_loop`; that part is not subtle. **The trigger is the drift of `ν_t` since the freeze
+    segment continues; the state the last segment reaches is checked for convergence and handed to
+    `root_adjoint`. Segments exist because the AMG rebuild is off-jit scipy work that cannot run inside
+    a traced loop; that part is not subtle. **The trigger is the drift of `ν_t` since the freeze
     state** — `CoefficientDriftTrigger` reading `StepReport.drift`, which `solve_coupled` fills from
     `eddy_viscosity_drift(coupled, <segment start>)`. `ν_t` is the right coefficient because it is what
     the frozen k/ω transport operators are assembled from, so its movement *is* the staleness. The
@@ -415,14 +415,18 @@ Many entries below are dated history written against the old API. Read them thro
     so a slightly-stale factor changes only the path, never the converged state or its adjoint (the same
     argument that carries the flow block). Rebuilding the transport was measured ~1.87× faster end-to-end
     on pitzDaily than a stale baseline (~925 s vs 1726 s to rel 3e-2, flat ~22 s/step vs 100–300 s/step). Also: `max_steps` applies to **each** segment (so up to
-    `(refresh.limit+1)·max_steps` march steps plus the finishing solve's own allowance, deliberately not
-    split — either segment may need the full allowance); the finishing solve is handed the **absolute**
-    target `atol + rtol·‖R0‖` measured at the initial state, so a refreshed solve stops exactly where an
-    unrefreshed one does for **any** number of refreshes (a relative tolerance would be measured against
-    whatever the pre-march reached and compound a silent tightening per refresh — this is what the old
+    `(refresh.limit+1)·max_steps` march steps, deliberately not split — either segment may need the full
+    allowance, and since 2026-09-15 there is no finishing solve to add a second budget). ⚠️ **The last
+    segment is marched WITHOUT the trigger** (it has no refresh left to spend): with no finishing solve
+    after the march, a last segment stopped where its trigger fired ends the whole solve short of the root.
+    That was the first version of the unified march, and four staged-refresh integration tests caught it
+    (residual 4.9e-02 against a 1.37e-11 target); pinned fast by
+    `test_the_last_refresh_segment_marches_without_the_trigger`. The stopping
+    target `atol + rtol·‖R0‖` is measured once, at the initial state, and held across every segment, so a
+    refreshed solve stops exactly where an unrefreshed one does for **any** number of refreshes (a
+    target re-measured per segment would compound a silent tightening per refresh — this is what the old
     `rtol/refresh_rtol` compensation approximated, and why the `refresh_rtol <= rtol` constraint existed;
-    both are now gone). The absolute form is available precisely *because* the refresh path is
-    forward-only, so `‖R0‖` is concrete rather than traced. The constrained path
+    both are now gone). The constrained path
   - **⚠️ THE CONSTRAINED ADJOINT TEST WAS PASSING BY ~1e-11, AND THAT IS A PROPERTY OF THE
     PRECONDITIONER, NOT OF THE TEST (measured 2026-08-19).**
     `test_constrained_coupled_adjoint_matches_finite_difference` differentiates at a warm state produced
@@ -443,44 +447,41 @@ Many entries below are dated history written against the old API. Read them thro
     a different accelerator — can flip it, and the flip says nothing about the change.
     (`mass_flow_coupled_continuation` / `solve_coupled_mass_flow`) has **no** staged refresh — thread
     `reuse` through if that driver is added.
-    - **The trigger is forward-only — it *raises* under `jax.grad`, and must (binding).** The refresh
-      re-derives the preconditioner from the **mid-march** state, which is a tracer when differentiating;
-      the refreshed preconditioner would capture it and escape the converged solve's `custom_vjp` as an
-      `UnexpectedTracerError` (the general "build the preconditioner from concrete params *outside*
-      `jax.grad`" footgun: a `BlockPreconditioner` must be constructed once, from concrete parameter
-      values, *outside* the differentiated region — build it inside and it captures a tracer and leaks).
-      A refresh also forbids an explicit `continuation`,
-      so there is **no** concrete-preconditioner path through it — hence the honest behaviour is a clear
-      up-front `ValueError`, not a leak. `solve_coupled` guards this with `_is_traced((coupled, flow, k,
-      omega))` (reliable because the solve is eager-only — the scalar AMGs are off-jit scipy, so a tracer
-      leaf can only mean a wrapping transform). To differentiate, drop `refresh.trigger` and take the
-      gradient of the single-stage solve with a `continuation` built on concrete params outside
-      `jax.grad`; the adjoint is refresh-independent (the preconditioner is `stop_gradient`-ed, both
-      marches reach the same converged state, so the IFT adjoint is identical), so nothing is lost. This
-      is why the refresh's gradient property is covered by *forward* tests (`same fixed point`) plus the
-      existing single-stage adjoint gate, and by a fast unit test that the guard fires — **not** by an
-      adjoint test through the staged solve (there is none: that path cannot be differentiated).
+    - **The refresh, the per-step re-fit, controls and retries all work under `jax.grad` (2026-09-15,
+      phase 2 of unifying the two Newton loops; this reverses a binding "raises under `jax.grad`").**
+      `solve_coupled` runs its one march on `stop_array_gradients` copies of the assembler and the initial
+      state, so every preconditioner it builds or refreshes sees concrete arrays, and `root_adjoint`
+      attaches the adjoint at the root reached. The old refusal existed because the mid-march state was a
+      tracer and a refreshed preconditioner would capture it; with stopped copies there is no tracer to
+      capture. Pinned by `test_a_refreshed_solve_is_differentiable_and_gives_the_unrefreshed_gradient`
+      and, for the materialized re-fit, `test_a_solve_that_re_fits_its_lu_every_step_is_differentiable`.
+      ⚠️ **Two traps survive.** Anything a hook caches must be built from those stopped copies: an array
+      built from un-stopped values does not fail during `jax.grad`, only later, as
+      `UnexpectedTracerError`. And the solve **cannot** run under `jax.jit` or `jax.vmap`, where a
+      stopped copy is still abstract — `_refuse_a_transform_the_march_cannot_run_in` refuses that before
+      any work. A session the **caller** re-points at a live assembler (`session.rebind(coupled)` inside
+      `jax.grad`) still refuses to build, since the session holds that assembler itself.
   - **`on_step` / `on_checkpoint` instrument the march, and work WITHOUT a refresh trigger.** `on_step`
     receives each `StepReport` (step, cycles, ‖R‖, ratio); `on_checkpoint` additionally receives the
     *solved-variable* state (map with `physical_fields`). Both are the seam a solver study logs a long
     march through — needed because a multi-hour coupled march that prints nothing cannot be told from a
     hung one, and this case's documented failure mode is a march that keeps stepping while the residual
-    creeps *upward*. Only the observed segments call back; the finishing solve is traced. See the
+    creeps *upward*. Every step calls back, and a callback changes nothing about the march. See the
     `march.py` bullets in `.claude/rules/solve-march.md` for why observation is not gated on the trigger and why
     the state rides a separate seam from the report history.
   - **`solve_coupled(step_control=…)` — the dual-time march DEFAULTS to the `DualTimeControl` Courant
-    ramp; other controls are opt-in.** A `StepControl` reshapes the shift strength β each observed step
-    from the previous report; all are forward-only (raise under `jax.grad`, same guard as the refresh).
-    - **Default (`inner_steps > 1`, observing):** `solve_coupled` auto-selects `DualTimeControl` (the
-      α-based Courant ramp) when the march is a `DualTimeStep`, a refresh/observer is active, and no
-      control was supplied (`default_dual_time_control` -- **in `solve/step_control.py` since
+    ramp; other controls are opt-in.** A `StepControl` reshapes the shift strength β each step from the
+    previous report; it runs between steps on concrete values and never reaches the gradient.
+    - **Default (`dual_time` set):** `solve_coupled` auto-selects `DualTimeControl` (the α-based Courant
+      ramp) whenever the march is a `DualTimeStep` and no control was supplied — since 2026-09-15 whether
+      or not anything observes the march, which changes the path of dual-time solves that used to run
+      traced (the root is unchanged) (`default_dual_time_control` -- **in `solve/step_control.py` since
       2026-08-15**, beside the controls it chooses between; it lived here only because an import cycle
       made it inexpressible in `solve/`. Unit-tested in `test_coupled_rans.py`). It grows
       the pseudo-timestep while the inner loop stays comfortable and **carries β across refreshes**,
       reaching a developed pitzDaily recirculation in materially fewer outer steps than the residual-keyed
       control, and carrying a full cold ramp to the target Reynolds number (step counts measured on pitzDaily,
-      configuration not recorded — re-measure before relying on them). The injection never turns
-      observation on, so the differentiable single-stage solve is untouched. See the DualTimeStep bullet
+      configuration not recorded — re-measure before relying on them). See the DualTimeStep bullet
       in `.claude/rules/solve-march.md`.
     - **Opt-in `ResidualRatioDualTimeControl`:** ramps β by the steady-residual ratio; safe when that
       residual is a reliable progress signal, but it pins β on the flat `β×travel` pitzDaily plateau
@@ -2470,8 +2471,9 @@ tuning follow-up noted above.
     own invocations to recover the loop's index, and can reach the total and the scaling at all, and its keys are merged over `solve_kwargs` (overriding any `continuation`/
     `reference_state`). To give the built continuation the state the solve begins from, the loop
     **materializes the lowest point's seed** (`hybrid_initialize`) when `point_setup` is set, rather than
-    letting `solve_coupled` self-start internally. **Forward-only** (the `precondition_step` it returns
-    raises under `jax.grad`), so leave it `None` when differentiating. **`None` (default) is
+    letting `solve_coupled` self-start internally. ⚠️ Under `jax.grad` the **target** point's companion is
+    the live assembler, so a `point_setup` that builds a preconditioner from it must build from
+    `stop_array_gradients(companion)`, or the preconditioner captures a tracer. **`None` (default) is
     byte-identical** — each point self-starts and builds its own default continuation. Pinned by a
     monkeypatched-`solve_coupled` unit test (called per point, kwargs merged, lowest seed materialized;
     and `None` reproduces the plain ramp). Used by

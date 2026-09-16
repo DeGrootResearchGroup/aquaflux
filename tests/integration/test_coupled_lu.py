@@ -286,12 +286,17 @@ def test_lu_beta_tracking_forward_march_converges_to_the_same_fixed_point(case) 
     assert float(jnp.linalg.norm(k_l - k_b) / jnp.linalg.norm(k_b)) < 1e-3
 
 
-def test_precondition_step_raises_under_jax_grad(case) -> None:
-    """A materialized preconditioner re-fits before every step, which is forward-only.
+@pytest.mark.slow
+def test_a_solve_that_re_fits_its_lu_every_step_is_differentiable(case) -> None:
+    """A materialized preconditioner re-fits before every step, and ``jax.grad`` still runs through it.
 
-    Differentiating a solve given one raises rather than letting a mid-march re-fit capture the tracer.
+    It used to raise: the re-fit ran on the path being differentiated and would have captured the
+    tracer. The march now runs on stopped copies and the adjoint is attached at the root it reaches, so
+    no re-fit ever sees a tracer, and the gradient must match finite differences like the frozen
+    step's does above. The re-fit reads the step's shift strength, so the march carries a
+    ``DualTimeControl``, configured as the forward test below that reaches the block preconditioner's
+    root.
     """
-    import equinox as eqx
     from aquaflux.solve import DualTimeControl
 
     coupled = case["coupled"]
@@ -309,10 +314,14 @@ def test_precondition_step_raises_under_jax_grad(case) -> None:
             k_ws,
             omega_ws,
             preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND)),
-            step_control=DualTimeControl(),
-            max_steps=5,
+            dual_time=DualTimeLoop(inner_steps=5, inner_tol=1e-3),
+            step_control=DualTimeControl(beta_start=0.5, beta_min=0.02),
+            scaled_norm=True,
+            max_steps=60,
         )
         return jnp.sum(k**2)
 
-    with pytest.raises(ValueError, match="forward-only"):
-        jax.grad(objective)(1.0)
+    analytic = float(jax.grad(objective)(1.0))
+    eps = 1e-4
+    finite_difference = float((objective(1.0 + eps) - objective(1.0 - eps)) / (2 * eps))
+    assert abs(analytic - finite_difference) / abs(finite_difference) < 1e-5

@@ -25,7 +25,7 @@ from .forward_step import ForwardStep, LineSearchStep, StepFn, StepOutcome, with
 from .linear import corrected_cycles as _corrected
 from .newton import newton_correction
 from .norm import ResidualNorm
-from .root_adjoint import root_adjoint
+from .root_adjoint import root_adjoint, stop_array_gradients
 
 # What a forward step returns, and what each value is for, is documented on `StepOutcome` and the
 # `StepFn` alias in `forward_step.py`, which is where both are defined.
@@ -686,18 +686,6 @@ def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_st
     )
 
 
-def _stopped(tree: object) -> object:
-    """``tree`` with every array leaf behind ``stop_gradient``; any other leaf is passed through.
-
-    The Newton iteration runs on these copies, so nothing it does is recorded for differentiation --
-    which is what lets it stop on a data-dependent test. ``jax.lax.stop_gradient`` applied to the tree
-    directly would reject a non-array leaf.
-    """
-    return jax.tree.map(
-        lambda leaf: jax.lax.stop_gradient(leaf) if eqx.is_array(leaf) else leaf, tree
-    )
-
-
 class ImplicitNewtonSolver(eqx.Module):
     """Newton solve to convergence with a reverse-mode IFT adjoint.
 
@@ -781,8 +769,8 @@ class ImplicitNewtonSolver(eqx.Module):
         # inside it raises before a non-root can reach the adjoint, on the gradient path as well.
         root = _forward(
             residual_fn,
-            _stopped(phi0),
-            _stopped(theta),
+            stop_array_gradients(phi0),
+            stop_array_gradients(theta),
             self.rtol,
             self.atol,
             self.max_steps,

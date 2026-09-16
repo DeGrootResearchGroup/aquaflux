@@ -371,7 +371,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   misses every time.
 - **`implicit.py` — BUILT (`ImplicitNewtonSolver`).** The nonlinear counterpart: Newton to
   convergence (`_forward`, a `lax.while_loop` with a data-dependent stop), run on `stop_gradient`
-  copies of `phi0` and `theta` (`_stopped`, which passes non-array leaves through), with the
+  copies of `phi0` and `theta` (`stop_array_gradients`, which passes non-array leaves through), with the
   reverse-mode **IFT adjoint** attached afterwards at the root it reaches by `root_adjoint` — one
   transpose linear solve, `dphi*/dtheta = -(dR/dphi)^{-1}(dR/dtheta)`, no Newton loop taped.
   `solve(residual_fn, phi0, theta)` takes the differentiable params `theta` explicit so the adjoint
@@ -393,10 +393,13 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   `PseudoTransientStep`, `DualTimeStep`, module-valued `theta`, `jit(grad)`, `vmap(grad)` and the
   `phi0` gradient — all identical. Why the extraction: a throwaway toy spike showed the gradient does not
   depend on the loop, so the eager march can gain the adjoint and the traced/eager split in
-  `solve_coupled` (the `observing` switch behind #369) can be removed — that is phase 2.
+  `solve_coupled` (the `observing` switch behind #369) can be removed. **Phase 2 did that
+  (2026-09-15):** `solve_coupled` marches once with `forward_march` on `stop_array_gradients` copies and
+  attaches `root_adjoint`; see `turbulence.md`. `stop_array_gradients` (also in `root_adjoint.py`) is the
+  one helper both loops use to stop a pytree's array leaves.
   ⚠️ A `theta` holding a **callable leaf** was already refused before this change (the `custom_vjp`
   rejects non-JAX-type arguments) and still is; `jax.lax.stop_gradient` on such a tree also raises,
-  which is why `_stopped` filters by `eqx.is_array`.
+  which is why `stop_array_gradients` filters by `eqx.is_array`.
   - **Convergence guard (binding — the IFT adjoint is only valid at a root).** `_forward` carries the
     terminal residual norm out of the `while_loop` and wraps the returned field in `eqx.error_if`: if
     the residual is non-finite or above `atol + rtol·‖R₀‖` (exhausted `max_steps`, or a `NaN`/`Inf`

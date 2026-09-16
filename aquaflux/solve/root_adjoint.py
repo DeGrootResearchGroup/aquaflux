@@ -26,13 +26,38 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import lineax as lx
 
 from .linear import default_linear_solver, solve_linear
 
-__all__ = ["TransposedPreconditioner", "root_adjoint"]
+__all__ = ["TransposedPreconditioner", "root_adjoint", "stop_array_gradients"]
+
+
+def stop_array_gradients(tree: object) -> object:
+    """``tree`` with ``stop_gradient`` applied to every array leaf; any other leaf is passed through.
+
+    The iteration that finds a root runs on such a copy, so nothing it does is recorded for
+    differentiation -- which is what lets it stop on a data-dependent test, observe itself, or do host
+    work between steps. Under ``jax.grad`` the stopped arrays are concrete; under ``jax.jit`` or
+    ``jax.vmap`` they are still abstract. ``jax.lax.stop_gradient`` applied to the tree directly would
+    reject a non-array leaf, such as a callable field of an ``equinox`` module.
+
+    Parameters
+    ----------
+    tree : pytree
+        Any pytree; ``None`` leaves are allowed.
+
+    Returns
+    -------
+    pytree
+        ``tree``, with each array leaf replaced by ``jax.lax.stop_gradient`` of it.
+    """
+    return jax.tree.map(
+        lambda leaf: jax.lax.stop_gradient(leaf) if eqx.is_array(leaf) else leaf, tree
+    )
 
 
 @dataclasses.dataclass(frozen=True)

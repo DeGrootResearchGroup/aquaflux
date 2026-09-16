@@ -59,7 +59,7 @@ class RefreshPolicy:
         materialized off the jit path -- refresh at all. It is also what lifts the restriction that a
         caller-supplied step cannot be refreshed: the builder is *how* the refresh rebuilds.
     precondition_step : callable or None
-        ``(active_step, state) -> None``, called before **each** observed step to re-derive that
+        ``(active_step, state) -> None``, called before **each** march step to re-derive that
         step's frozen host preconditioner from the state and shift strength the step is about to run
         at. It mutates in place, so the compiled step stays a cache hit.
 
@@ -89,22 +89,11 @@ class RefreshPolicy:
         return self.trigger is not None and self.limit > 0
 
     @property
-    def observes(self) -> bool:
-        """Whether this policy requires the driver to run the observed (eager) march at all.
-
-        True when anything here needs per-step evidence or a per-step hook. A policy carrying only a
-        ``builder`` does **not** make a march observed: without a trigger the builder is called once,
-        for the initial build, which a single-stage solve does just as well.
-        """
-        return self.refreshes or self.precondition_step is not None
-
-    @property
     def segments(self) -> int:
         """How many march segments the driver runs: one more than the refresh budget.
 
         ``limit`` refreshes means ``limit + 1`` segments -- the segment *after* the last refresh must
-        still be marched, or the newly-refreshed preconditioner would only ever be used by the
-        finishing solve and its steps would go unobserved.
+        still be marched, or the newly-refreshed preconditioner would never be used.
         """
         return self.limit + 1
 

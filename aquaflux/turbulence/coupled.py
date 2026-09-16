@@ -99,6 +99,8 @@ from aquaflux.solve import (
     positive_block_limit,
     positive_block_projection,
     relative_residual_gmres,
+    root_adjoint,
+    stop_array_gradients,
 )
 
 from .initialization import hybrid_initialize, wall_consistent_omega
@@ -2311,8 +2313,8 @@ def _coupled_step(
     # An explicit `residual_norm` (passed by `solve_coupled` on every refresh) is used as-is, so a
     # self-normalising measure's reference scales stay fixed at the state the *global* progress
     # reference was measured against. Rebuilding it at each refresh's developed state would re-base it
-    # back toward one, making the convergence test unreachable and mismatching the finishing solve's
-    # absolute target (issue #156, seam 4).
+    # back toward one, making the convergence test -- whose target is measured once, at the initial
+    # state -- unreachable (issue #156, seam 4).
     if residual_norm is None:
         # The default is the row-equilibrated norm. The plain Euclidean norm of the coupled residual is
         # dominated by the omega block (its magnitude dwarfs the flow and k blocks), so it barely moves
@@ -3444,9 +3446,9 @@ class _ContinuationSource(Protocol):
         """Re-freeze at the developed ``state``, keeping ``residual_norm`` as the progress measure.
 
         The measure is re-injected rather than rebuilt: a self-normalising one would re-base at the
-        developed state, making the convergence test unreachable and mismatching the finishing solve's
-        absolute target. ``previous`` is the step being replaced, for an implementation that can reuse
-        part of it.
+        developed state, making the convergence test -- whose target is measured once, at the initial
+        state -- unreachable. ``previous`` is the step being replaced, for an implementation that can
+        reuse part of it.
         """
         ...
 
@@ -3625,42 +3627,41 @@ def solve_coupled(
     station_step: Callable[[ForwardStep, int, bool], ForwardStep] | None = None,
     **continuation_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Solve the coupled RANS system ``R(u, p, k, omega) = 0`` by one monolithic Newton solve.
+    """Solve the coupled RANS system ``R(u, p, k, omega) = 0`` by one monolithic Newton march.
 
-    A single :class:`~aquaflux.solve.ImplicitNewtonSolver` on :meth:`CoupledRANS.residual`, globalized
-    by the pseudo-transient step :func:`coupled_step` describes -- the coupled counterpart of the flow
-    block's :func:`~aquaflux.flow.reused_flow_solve`. Reverse-differentiable through the converged state
-    by the coupled implicit-function-theorem adjoint (a single transpose solve on the unfrozen
-    ``R_coupled``) -- the exact coupled sensitivity, rather than a differentiation of the segregated
-    Picard iteration.
+    The march (:func:`~aquaflux.solve.forward_march`) drives :meth:`CoupledRANS.residual` to zero with
+    the pseudo-transient step :func:`coupled_step` describes -- the coupled counterpart of the flow
+    block's :func:`~aquaflux.flow.reused_flow_solve`. The root it reaches is handed to
+    :func:`~aquaflux.solve.root_adjoint`, which makes the result reverse-differentiable by the coupled
+    implicit-function-theorem adjoint (a single transpose solve on the unfrozen ``R_coupled``) -- the
+    exact coupled sensitivity, rather than a differentiation of the segregated Picard iteration.
+
+    **There is one march, however the solve is configured or observed.** It runs on ``stop_gradient``
+    copies of the assembler and the initial state, so everything it does between steps -- a
+    preconditioner re-fit or refresh, a step control, a retry, a callback -- is ordinary Python on
+    concrete values that never reaches the gradient, and all of it works under ``jax.grad``. Observing a
+    solve with ``on_step`` or ``on_checkpoint`` changes nothing about it. For the same reason it cannot
+    run under ``jax.jit`` or ``jax.vmap``, where the values are abstract: call it outside those
+    transforms.
 
     Parameters
     ----------
     coupled : CoupledRANS
         The coupled residual assembler; **the differentiable parameter pytree** for the adjoint.
-    station_step : callable, optional
-        ``(step, station, arrived) -> step``, forwarded to
-        :func:`~aquaflux.solve.forward_march`: reshape the forward step for the continuation station it
-        is about to run. The use it exists for is a per-block damping that differs between a homotopy's
-        intermediate stations and its target -- measured on a viscosity ramp, the closure's rows want a
-        much larger share of the shift while the ramp is walking than once the target problem is
-        reached, and no signal a shift policy can read for itself distinguishes those. Forward-only
-        (the march's other observation seams are), and ``None`` (the default) is byte-identical.
-        ⚠️ It must swap **array** leaves over a fixed structure or every station recompiles the solve.
     flow, k, omega : jnp.ndarray or None
         The initial flow state ``((dim + 1) n_cells,)`` and turbulence fields ``(n_cells,)``. **Leave
         any of them ``None`` to self-start from a hybrid initial condition**
         (:func:`~aquaflux.turbulence.hybrid_initialize` -- potential-flow velocity + Laplace-smoothed
         turbulence), so ``solve_coupled(coupled)`` converges from nothing; the monolithic Newton stalls
         from a raw cold start otherwise. The initial state also seeds the frozen preconditioner unless
-        ``reference_state`` is given. (When differentiating, pass an explicit state built outside
-        ``jax.grad``.)
+        ``reference_state`` is given. It is never differentiated through: the root does not depend on
+        where the march began.
     continuation : ForwardStep or None
         A pre-built continuation step (a :class:`~aquaflux.solve.PseudoTransientStep` or a
-        :class:`~aquaflux.solve.DualTimeStep`). **Build it once outside ``jax.grad`` and pass it here when
-        differentiating** (the block preconditioner must be constructed with concrete parameters, not
-        traced -- see the flow preconditioner note); ``None`` builds it internally from the initial
-        state, which is the convenient forward-only path.
+        :class:`~aquaflux.solve.DualTimeStep`, e.g. from :func:`coupled_step`); ``None`` builds one from
+        the initial state. A pre-built step keeps the preconditioner it was built with, which under
+        ``jax.grad`` means one frozen at those parameter values -- a change to the Krylov iteration,
+        never to the gradient.
     reference_state : jnp.ndarray or None
         The coupled state to freeze the internally-built preconditioner at; defaults to the initial
         state. ⚠️ **Rejected**, not ignored, when the continuation is not built here -- see
@@ -3670,13 +3671,13 @@ def solve_coupled(
         solve; ``None`` is :class:`~aquaflux.turbulence.BlockDiagonal` with every setting unset. Pass a
         session (:func:`open_session`) to share one inverse and its refresh hook across several solves
         -- the rungs of a Reynolds continuation, say. A materialized-Jacobian preconditioner re-fits its
-        inverse before every step, which makes the march observed and therefore forward-only; to
-        differentiate, build a frozen step with :func:`coupled_step` and pass it as ``continuation``.
-        Rejected on the same terms as ``reference_state``.
+        inverse before every step, from concrete values, so it too works under ``jax.grad``. Rejected on
+        the same terms as ``reference_state``.
     max_steps : int
-        Newton iteration cap for the continuation march.
+        Outer-step cap for **each** march segment (see ``refresh``).
     rtol, atol : float
-        Nonlinear stopping tolerances on the coupled residual norm.
+        Stopping tolerances, tested as ``||R|| <= atol + rtol * ||R0||`` in the march's residual measure
+        (see ``scaled_norm``), with ``||R0||`` taken at the initial state and held for the whole solve.
     adjoint_solver : lineax.AbstractLinearSolver, optional
         The linear solver for the **adjoint** (transpose) solve behind every ``jax.grad`` through this
         function -- the one solve the implicit-function-theorem gradient is built from, taken once at the
@@ -3693,15 +3694,12 @@ def solve_coupled(
         How the frozen preconditioner is kept current: the staleness ``trigger``, the refresh
         ``limit``, an optional ``builder`` that reconstructs the forward step, and the per-step
         ``precondition_step`` hook. See :class:`~aquaflux.solve.RefreshPolicy` for each setting. The
-        default refreshes nothing, which is the single-stage march.
+        default refreshes nothing, which is a single-segment march.
 
-        With a trigger set the solve runs as a sequence of **observed segments**
-        (:func:`~aquaflux.solve.forward_march`): each steps until the trigger fires, the preconditioner
-        is re-derived at the state reached, and the next segment continues from there. A traced
-        :class:`~aquaflux.solve.ImplicitNewtonSolver` solve then finishes **only if** the observed march
-        stopped short of the tolerance in its own measure; a march that reached it returns that state
-        directly (see ``on_step`` / ``on_checkpoint``). Segments exist because the rebuild is off-jit
-        work that cannot run inside a traced loop.
+        With a trigger set the march runs as a sequence of **segments**: each steps until the trigger
+        fires, the preconditioner is re-derived at the state reached, and the next segment continues
+        from there. The last segment, with no refresh left to spend, ignores the trigger and marches to
+        convergence or to ``max_steps``.
 
         This solve supplies the trigger's staleness measure itself (:func:`eddy_viscosity_drift`,
         ``nu_t`` being what the frozen k/omega transport operators are assembled from), **re-based at
@@ -3715,127 +3713,66 @@ def solve_coupled(
         state the march has left. Two corrections worth keeping: a refresh **rebuilds** the shift's
         transport time scale at the developed state while **carrying** its coordinate factor
         ``d(phi)/d(w)`` frozen (rebuilding the whole product was measured to freeze the march), so the
-        justification is *not* that a grown ``d`` needs
-        a fresh ``beta``; and with refreshes every few steps the residual ratio never falls far below
-        one, so **``beta`` stays pinned near ``beta0``** for the whole march instead of ramping down --
-        a different damping level has to come from ``beta0``, not from expecting the ramp to find it.
+        justification is *not* that a grown ``d`` needs a fresh ``beta``; and with refreshes every few
+        steps the residual ratio never falls far below one, so **``beta`` stays pinned near ``beta0``**
+        for the whole march instead of ramping down -- a different damping level has to come from
+        ``beta0``, not from expecting the ramp to find it.
 
-        ``rtol`` means the same thing with and without a refresh: the finishing solve is given the
-        **absolute** target ``atol + rtol * ||R0||`` measured at the initial state, so a refreshed solve
-        stops at exactly the residual an unrefreshed one would, for any number of refreshes. (Available
-        precisely because this path is forward-only, so ``||R0||`` is a concrete number rather than a
-        traced one.) ``max_steps`` applies to **each** segment, so a refreshed solve may take up to
-        ``refresh.segments * max_steps`` march steps plus the finishing solve's own allowance -- the
-        budget is deliberately not split, since either segment may legitimately need the full allowance.
+        ``rtol`` means the same thing with and without a refresh: the stopping target is measured once,
+        at the initial state, and held across every segment, so a refreshed solve stops at exactly the
+        residual an unrefreshed one would, for any number of refreshes. ``max_steps`` applies to
+        **each** segment, so a refreshed solve may take up to ``refresh.segments * max_steps`` steps --
+        the budget is deliberately not split, since either segment may legitimately need the full
+        allowance.
 
-        **Forward-only -- not usable under ``jax.grad`` (raises).** The refresh re-derives the
-        preconditioner from the *mid-march* state, which is a tracer when differentiating, so the
-        refreshed preconditioner would capture it and escape the converged solve's ``custom_vjp``. To
-        obtain gradients, drop the refresh and differentiate the single-stage solve with a
-        ``continuation`` built on concrete parameters outside ``jax.grad`` -- the adjoint is
-        refresh-independent, so the gradient is identical.
+        **Why refresh:** the frozen scalar preconditioners go stale as the flow separates. Their coarse
+        space was fitted to the pre-separation operator, so re-deriving them at the developed state cuts
+        the shifted solve's outer Krylov count; the flow block does *not* go stale and is carried over
+        untouched. The refresh costs one extra compilation of the shifted solve, which that saving repays
+        within a step or two at mesh sizes where this matters. The win appears only once the flow
+        separates -- refreshing at a pre-separation state buys nothing and can cost.
+        :class:`~aquaflux.solve.CycleGrowthTrigger` therefore gates on the residual having fallen as
+        well as on the cost having risen; :class:`~aquaflux.solve.CoefficientDriftTrigger` needs no such
+        gate, because an undeveloped flow is one whose coefficients have not moved.
+
+        A refresh re-derives the preconditioner from a concrete copy of a mid-march state, so it works
+        under ``jax.grad``. The gradient is the one an unrefreshed solve gives: the preconditioner only
+        accelerates the Krylov iteration, and every march reaches the same root.
+    step_control : StepControl, optional
+        Reshapes the forward step each iteration from the previous step's report. **A dual-time march**
+        (``dual_time`` given, a :class:`~aquaflux.solve.DualTimeStep`) given no control **defaults to**
+        :class:`~aquaflux.solve.DualTimeControl`, the Courant ramp that grows the pseudo-timestep while
+        the inner loop stays comfortable (measured ~4× fewer outer steps to a developed recirculation on
+        a cold-start pitzDaily ramp than the residual-keyed schedule). Pass an explicit control (e.g.
+        :class:`~aquaflux.solve.ResidualRatioDualTimeControl`) to override, or pass one built with
+        different knobs. The single-step march (``dual_time`` unset, the default) gets no default
+        control.
     scaled_norm : bool
         **Rebuild** the default row-equilibrated measure (:class:`~aquaflux.solve.RowScaledNorm`) at the
         start of every outer iteration -- holding it fixed across that iteration's line search -- rather
         than freezing it once at the initial state as the default does. The scales (each row's own
         diagonal, each field's magnitude) then track the developing flow instead of the initial
-        condition. Only the observed pre-march is affected; the finishing solve keeps the continuation's
-        initial-state measure, so its absolute stopping target is computed there. Off by default: the
-        frozen row-scaled measure is already the default steering norm (see ``residual_norm``), and the
-        per-iteration rebuild is the finer, more expensive refinement.
+        condition. The reference ``||R0||`` and the final convergence test are both taken in this
+        measure, at the initial state and at the state reached: a frozen initial-state measure
+        over-reports a developed residual, and a test in it can demand a residual the march never
+        reaches. Off by default: the frozen row-scaled measure is already the default steering norm
+        (see ``residual_norm``), and the per-iteration rebuild is the finer, more expensive refinement.
     on_step : callable, optional
         Called with each :class:`~aquaflux.solve.StepReport` as the march produces it -- the seam for
-        logging a long solve's progress and cost. The refresh trigger reads the same reports.
+        logging a long solve's progress and cost. The refresh trigger reads the same reports. It only
+        observes: a solve given one takes exactly the steps a solve without one takes.
     on_checkpoint : callable, optional
-        Called with ``(report, state)`` after each observed step, for saving intermediate states of a
-        long march. Kept separate from ``on_step`` so the report history stays purely numeric and a
-        refresh trigger remains replayable offline (see
-        :func:`~aquaflux.solve.forward_march`). Note the *state* here is the solved-variable state,
-        not the physical fields -- map it with :meth:`CoupledRANS.physical_fields`.
-
-        Both callbacks see only the **observed** segments, not the finishing solve, whose march is
-        traced and cannot call back into Python.
-
-        **Supplying either one makes the march observed, which changes how ``max_steps`` is spent.**
-        An unobserved solve runs one traced march with the whole ``max_steps`` budget. An observed one
-        runs the eager pre-march to ``max_steps`` and, **if it has reached the stopping tolerance in its
-        own measure, returns that state directly** -- it is forward-only (never differentiated, since the
-        refresh/step control cannot run under a JAX transform), so its converged state needs no adjoint
-        and there is nothing to gain from re-marching it through the traced finishing solve. The finishing
-        solve runs only when the eager march stops *short* of the tolerance, as a fallback that owns the
-        convergence guard, and it is given ``max_steps`` again. So a solve needing many contiguous steps
-        can exhaust a tight budget in the pre-march and leave the finishing-solve fallback unable to reach
-        a root -- which it reports by raising. Raise ``max_steps`` when instrumenting a solve that was
-        already near its limit.
-
-        **Why:** the frozen scalar preconditioners go stale as the flow separates. Their coarse space
-        was fitted to the pre-separation operator, so re-deriving them at the developed state cuts the
-        shifted solve's outer Krylov count; the flow block does *not* go stale and is carried over
-        untouched. The refresh
-        costs one extra compilation of the shifted solve, which that saving repays within a step or two
-        at mesh sizes where this matters. The win appears only once the flow separates -- refreshing at
-        a pre-separation state buys nothing and can cost. :class:`~aquaflux.solve.CycleGrowthTrigger`
-        therefore gates on the residual having fallen as well as on the cost having risen;
-        :class:`~aquaflux.solve.CoefficientDriftTrigger` needs no such gate, because an undeveloped
-        flow is one whose coefficients have not moved.
-
-        **Forward-only accelerator -- not usable under ``jax.grad`` (raises).** The refresh re-derives
-        the preconditioner from the *mid-march* state; when differentiating, that state is a tracer, so
-        the refreshed preconditioner would capture it and escape the converged solve's ``custom_vjp`` as
-        a leaked tracer (the same reason a preconditioner must be built from concrete parameters outside
-        ``jax.grad``). Since a refresh also forbids an explicit ``continuation`` (it must rebuild), there
-        is no concrete-preconditioner path through it, so a trigger set under differentiation raises
-        rather than leaking. To obtain gradients, drop the refresh and differentiate the
-        single-stage solve with a ``continuation`` built on concrete parameters outside ``jax.grad`` --
-        the adjoint is refresh-independent anyway (the preconditioner is ``stop_gradient``-ed and only
-        accelerates the Krylov iteration, so both marches reach the same converged state and thus the
-        same implicit-function-theorem adjoint).
-
-        **Each segment restarts the damping ramp, and that is load-bearing (binding).** The
-        switched-evolution ramp is defined relative to where a segment began, so a segment handed a new
-        state must measure its **own** reference residual; carrying the pre-refresh reference across --
-        to keep the ramp "continuous", which looks like the more principled choice -- makes ``beta``
-        mean something measured against a state the march has left, and the step is damped by a factor
-        chosen for a residual that no longer applies.
-
-        Two corrections to note, because earlier versions of this docstring stated both wrongly. First,
-        a refresh **rebuilds** the shift's transport time scale at the developed state while
-        **carrying** its coordinate factor ``d(phi)/d(w)`` frozen (rebuilding the whole product was
-        measured to freeze the march), so the justification
-        is *not* that a grown ``d`` must be paired with a fresh ``beta``. Second, the consequence of
-        the segment-local reference is easy to miss and matters more than the rule itself: with
-        refreshes every few steps the residual ratio never falls far below one, so **``beta`` stays
-        pinned near ``beta0`` for the whole march** instead of ramping down -- if a different damping
-        level is wanted it has to come from ``beta0``, not from expecting the ramp to find it.
-
-        ``rtol`` means the same thing with and without a refresh: the finishing solve is given the
-        **absolute** target ``atol + rtol * ||R0||`` measured at the initial state, so a refreshed solve
-        stops at exactly the residual an unrefreshed one would, for any number of refreshes. (This is
-        available precisely because the refresh path is forward-only, so ``||R0||`` is a concrete
-        number rather than a traced one.)
-
-        ``max_steps`` applies to **each** segment, so a refreshed solve may take up to
-        ``refresh.segments * max_steps`` march steps plus the finishing solve's own allowance. The
-        budget is deliberately not split: either segment may legitimately need
-        the full allowance, and halving it would fail a march that a single-stage solve completes.
-    step_control : StepControl, optional
-        Reshapes the forward step each observed iteration from the previous step's report (forward-only;
-        it raises under ``jax.grad``, and so is consulted only on the observed march, never the
-        differentiable single-stage solve). **A dual-time march** (``dual_time`` given, a
-        :class:`~aquaflux.solve.DualTimeStep`) that is already observing — a refresh or an
-        observer is set — **defaults to** :class:`~aquaflux.solve.DualTimeControl`, the Courant ramp that
-        grows the pseudo-timestep while the inner loop stays comfortable (measured ~4× fewer outer steps
-        to a developed recirculation on a cold-start pitzDaily ramp than the residual-keyed schedule).
-        Pass an explicit control (e.g. :class:`~aquaflux.solve.ResidualRatioDualTimeControl`) to override,
-        or pass one built with different knobs. The single-step march (``dual_time`` unset, the default)
-        gets no default control.
+        Called with ``(report, state)`` after each step, for saving intermediate states of a long march.
+        Kept separate from ``on_step`` so the report history stays purely numeric and a refresh trigger
+        remains replayable offline (see :func:`~aquaflux.solve.forward_march`). Note the *state* here is
+        the solved-variable state, not the physical fields -- map it with
+        :meth:`CoupledRANS.physical_fields`.
     retry : RetryPolicy
-        When and how the observed march redoes a bad step (forward-only, same guard as the other
-        observed-march arguments): the cost and step-length escalation thresholds, the ``β`` factor and
-        escalation limit, and the optional tighter linear solver. See
+        When and how the march redoes a bad step: the cost and step-length escalation thresholds, the
+        ``β`` factor and escalation limit, and the optional tighter linear solver. See
         :class:`~aquaflux.solve.RetryPolicy` for each setting and :func:`~aquaflux.solve.forward_march`
         for the order they fire in. The default policy retries nothing, which is byte-identical to a
-        march without retries -- and note that setting **any** of them makes the march observed.
+        march without retries.
 
         Both escalation triggers need a ``β``-carrying step control, since escalation works by scaling
         the shift leaf the control sets. The two failures they cover are genuinely different: a high
@@ -3853,8 +3790,21 @@ def solve_coupled(
         exact-LU path never diverges and needs none.
     on_retry : callable, optional
         ``(reason, attempt, beta) -> None``, forwarded to
-        :func:`~aquaflux.solve.forward_march`: called before a step is redone, with why. Forward-only
-        reporting; a log without it shows a step's work twice and never says what triggered the redo.
+        :func:`~aquaflux.solve.forward_march`: called before a step is redone, with why. A log without it
+        shows a step's work twice and never says what triggered the redo.
+    homotopy : ResidualHomotopy, optional
+        Walk a sequence of related problems within this one march, ending at the target (see
+        :func:`~aquaflux.solve.forward_march`). The solve converges only once the homotopy has arrived:
+        a converged intermediate station is not an answer.
+    station_step : callable, optional
+        ``(step, station, arrived) -> step``, forwarded to
+        :func:`~aquaflux.solve.forward_march`: reshape the forward step for the continuation station it
+        is about to run. The use it exists for is a per-block damping that differs between a homotopy's
+        intermediate stations and its target -- measured on a viscosity ramp, the closure's rows want a
+        much larger share of the shift while the ramp is walking than once the target problem is
+        reached, and no signal a shift policy can read for itself distinguishes those. It reshapes the
+        path, not the root, and ``None`` (the default) is byte-identical.
+        ⚠️ It must swap **array** leaves over a fixed structure or every station recompiles the solve.
     **continuation_kwargs
         The march settings of :func:`coupled_step` (``dual_time``, ``positivity_floor``, ``forward``,
         ...), handed to every build and refresh of the internally-built continuation; an unknown
@@ -3879,160 +3829,160 @@ def solve_coupled(
     -------
     tuple of jnp.ndarray
         The converged ``(flow, k, omega)``.
+
+    Raises
+    ------
+    equinox.EquinoxRuntimeError
+        If the march ends short of its stopping target -- it exhausted ``max_steps`` in its last
+        segment, stopped on a stalled positivity cap, went non-finite, or a homotopy never reached its
+        target. The implicit-function-theorem adjoint is valid only at a root, so a state that is not
+        one is refused rather than returned.
+    ValueError
+        If called under ``jax.jit`` or ``jax.vmap``.
+    TypeError
+        If a continuation setting is passed where the continuation is not built here.
     """
+    _refuse_a_transform_the_march_cannot_run_in((coupled, flow, k, omega))
+    # The march runs on a stopped copy of the assembler, so every build, re-fit, refresh and step below
+    # sees concrete arrays even under `jax.grad`. The derivative is attached at the root afterwards.
+    frozen = stop_array_gradients(coupled)
     # One decision -- which continuation this solve runs -- made once, for the initial build and every
     # refresh alike, and refusing any setting the chosen source cannot receive rather than dropping it.
     # Made before anything else, so a misconfiguration raises before any work is done.
     source = _continuation_source(
-        coupled, continuation, refresh, preconditioner, reference_state, continuation_kwargs
+        frozen,
+        continuation,
+        refresh,
+        preconditioner,
+        stop_array_gradients(reference_state),
+        continuation_kwargs,
     )
     # A materialized session re-fits its inverse before every step; a caller-built step brings its own.
     precondition_step = refresh.precondition_step or source.precondition_step
-    # The observed pre-march also runs when the caller only wants to *watch* the solve. Observability
-    # must not require enabling a refresh: the reference march a refresh is calibrated against is by
-    # definition unrefreshed, and it is the longest-running one, so it is the one that most needs to
-    # report progress rather than sit silent for hours.
-    observing = (
-        refresh.observes
-        or precondition_step is not None
-        or step_control is not None
-        or on_step is not None
-        or on_checkpoint is not None
-        or retry.solver is not None
-        or retry.escalates
-    )
-    if observing and _is_traced((coupled, flow, k, omega)):
-        # The refresh re-derives the preconditioner from the mid-march state, which is a tracer when
-        # differentiating; the refreshed preconditioner would capture it and escape the converged
-        # solve's custom_vjp as a leaked tracer. There is no concrete-preconditioner path through a
-        # refresh (it forbids an explicit `continuation`), so this cannot be worked around here --
-        # raise with the fix rather than letting the leak surface as an opaque UnexpectedTracerError.
-        raise ValueError(
-            "refresh/step_control/on_step/on_checkpoint/retry drive a "
-            "forward-only eager march and cannot be used "
-            "under jax.grad (or any JAX transform): the march steps in Python on concrete residual "
-            "norms, and a mid-march preconditioner rebuild would capture the differentiation tracer. "
-            "Drop them and differentiate the single-stage solve with a `continuation` "
-            "built on concrete parameters outside jax.grad -- the adjoint is refresh-independent, so "
-            "the gradient is identical."
-        )
     if flow is None or k is None or omega is None:
-        flow, k, omega = hybrid_initialize(coupled.momentum, coupled.turbulence)
+        flow, k, omega = hybrid_initialize(frozen.momentum, frozen.turbulence)
     # `flow, k, omega` are the physical initial condition; map into the solved-variable space (the
-    # identity for DirectScalars, log for LogScalars) so the Newton march iterates on the right unknown.
-    state = coupled.state_from_physical(flow, k, omega)
+    # identity for DirectScalars, log for LogScalars) so the march iterates on the right unknown.
+    state = frozen.state_from_physical(*stop_array_gradients((flow, k, omega)))
     # A refresh rebuilds the step; a caller-supplied step with no builder leaves it nothing to rebuild
     # WITH, so the refresh would silently never happen. The policy owns that check.
     refresh.require_rebuildable(continuation)
     if continuation is None:
         continuation = source.build(state)
 
-    # A dual-time observed march with no caller control defaults to the Courant ramp (see the helper): it
-    # grows the pseudo-timestep while the inner loop stays comfortable, carried across the refreshes
-    # below, reaching a developed recirculation in far fewer outer steps than the residual-keyed schedule.
-    # It is injected only where a control runs and never turns observation on, so the differentiable
-    # single-stage solve (guarded above) is untouched.
-    step_control = default_dual_time_control(step_control, observing, continuation)
+    # A dual-time march with no caller control defaults to the Courant ramp (see the helper): it grows
+    # the pseudo-timestep while the inner loop stays comfortable, carried across the refreshes below,
+    # reaching a developed recirculation in far fewer outer steps than the residual-keyed schedule.
+    step_control = default_dual_time_control(step_control, continuation)
 
-    stage_rtol, stage_atol = rtol, atol
-    if observing:
-        # Observed pre-march: step until the trigger judges the frozen preconditioner stale, re-freeze,
-        # and continue from there. Each segment is an accelerator only -- it may stop short of a root,
-        # and carries no convergence guard -- so the finishing solve below still produces the result.
-        # `coupled.residual` is passed as a bound method (a pytree), not a lambda, so its arrays ride
-        # as dynamic leaves and every step within a segment is a compilation-cache hit.
-        # The global progress reference AND the residual measure that produces it must come from the
-        # same state, held fixed across every segment: a `BlockScaledNorm` is self-normalising, so a
-        # per-refresh rebuild would re-base it and make the convergence test unreachable (seam 4). Hold
-        # the initial measure and re-inject it into every refreshed continuation.
-        base_norm = continuation.norm()
-        # The finishing solve's absolute target is always measured in the continuation's own measure,
-        # whatever the march is steered by, because that solve keeps that measure (see below).
-        base_reference = float(base_norm(coupled.residual(state)))
-        norm_builder = None
-        reference_norm = base_reference
-        if scaled_norm:
-            # Re-derive the row-equilibrated measure at whatever state each outer iteration starts
-            # from -- reading `continuation` at call time, so a refreshed segment's diagonals are used.
-            def norm_builder(at_state: jnp.ndarray) -> ResidualNorm:
-                return coupled_scaled_norm(coupled, continuation.shift_policy, at_state)
+    # The global progress reference AND the residual measure that produces it must come from the same
+    # state, held fixed across every segment: a `BlockScaledNorm` is self-normalising, so a per-refresh
+    # rebuild would re-base it and make the convergence test unreachable (seam 4). Hold the initial
+    # measure and re-inject it into every refreshed continuation. `coupled.residual` is passed as a
+    # bound method (a pytree), not a lambda, so its arrays ride as dynamic leaves and every step within
+    # a segment is a compilation-cache hit.
+    base_norm = continuation.norm()
+    norm_builder = None
+    reference_norm = float(base_norm(frozen.residual(state)))
+    if scaled_norm:
+        # Re-derive the row-equilibrated measure at whatever state each outer iteration starts from --
+        # reading `continuation` at call time, so a refreshed segment's diagonals are used.
+        def norm_builder(at_state: jnp.ndarray) -> ResidualNorm:
+            return coupled_scaled_norm(frozen, continuation.shift_policy, at_state)
 
-            # The march's progress reference must be in the march's own measure, or `residual_ratio`
-            # (and the switched-evolution shift that reads it) would divide two different scales.
-            reference_norm = float(norm_builder(state)(coupled.residual(state)))
-        # `refresh.limit` refreshes means `refresh.segments` segments: the segment *after* the last
-        # refresh must still be marched here, or the newly-refreshed preconditioner would only ever be
-        # used by the finishing solve and its steps would go unobserved.
-        control_state: object = None
-        for segment in range(refresh.segments):
-            result = forward_march(
-                continuation,
-                coupled.residual,
-                state,
-                max_steps=max_steps,
-                rtol=rtol,
-                atol=atol,
-                reference_norm=reference_norm,
-                trigger=refresh.trigger,
-                step_control=step_control,
-                # Threaded across segments so a stateful control (the alpha-targeting shift climb)
-                # continues past each refresh rather than restarting -- the same global-lifetime carry
-                # as `reference_norm`, unlike the per-segment damping reference and drift measure.
-                control_state=control_state,
-                observer=on_step,
-                checkpoint=on_checkpoint,
-                # Re-based every segment, against the state this segment's preconditioner was frozen
-                # at -- which is the segment's own starting state, since a refresh re-freezes at the
-                # state it stopped on. Carrying one measure across segments would keep reporting the
-                # drift a refresh had just absorbed, and re-fire immediately.
-                drift_measure=eddy_viscosity_drift(coupled, jax.lax.stop_gradient(state)),
-                norm_builder=norm_builder,
-                precondition_step=precondition_step,
-                retry=retry,
-                on_retry=on_retry,
-                homotopy=homotopy,
-                station_step=station_step,
-            )
-            state = result.state
-            control_state = result.control_state
-            if not result.triggered or refresh.is_last_segment(segment):
-                break
-            # Re-freeze at the developed state, holding the initial-state measure as the progress
-            # reference across the refresh (seam 4) -- how the re-freeze is done is the source's, and
-            # is the same choice made at the initial build above rather than a second one made here.
-            continuation = source.refresh(jax.lax.stop_gradient(state), continuation, base_norm)
-        # The observed march is never differentiated -- the refresh, step control and per-step norm
-        # rebuild cannot run under a JAX transform (guarded above) -- so its converged state needs no
-        # adjoint, and there is no reason to re-march it through the traced finishing solve. When the
-        # eager march has already reached its stopping tolerance, return that state directly. Judge it in
-        # the SAME measure the march steered by (a per-step-rebuilt `RowScaledNorm` under `scaled_norm`),
-        # which is what the march actually converged in; the frozen finishing-solve measure disagrees with
-        # it at a developed state (the state0 row scales over-report the developed residual), so the traced
-        # finishing solve -- which cannot refresh or carry the step control -- would chase an unreachable
-        # target off the converged state and diverge on an aggressive low-shift path. The finishing solve
-        # below then runs only as the not-converged fallback (and is the plain differentiable path's sole
-        # march, unchanged).
-        final_measure = norm_builder(state) if norm_builder is not None else base_norm
-        if float(final_measure(coupled.residual(state))) <= atol + rtol * reference_norm:
-            return coupled.physical_fields(
-                _reject_a_root_the_frozen_cap_invalidates(coupled, state)
-            )
-        # Hand the finishing solve the *absolute* target measured at the initial state, so a refreshed
-        # solve stops exactly where an unrefreshed one would. A relative tolerance would be measured
-        # against whatever residual the pre-march reached, silently tightening the solve by that factor
-        # (and compounding with every extra refresh). This is only possible because the refresh path is
-        # forward-only, so `reference_norm` is a concrete number rather than a traced one.
-        stage_rtol, stage_atol = 0.0, atol + rtol * base_reference
+        # The march's progress reference must be in the march's own measure, or `residual_ratio` (and
+        # the switched-evolution shift that reads it) would divide two different scales.
+        reference_norm = float(norm_builder(state)(frozen.residual(state)))
+    # `refresh.limit` refreshes means `refresh.segments` segments: the segment *after* the last refresh
+    # must still be marched, or the newly-refreshed preconditioner would never be used.
+    control_state: object = None
+    for segment in range(refresh.segments):
+        result = forward_march(
+            continuation,
+            frozen.residual,
+            state,
+            max_steps=max_steps,
+            rtol=rtol,
+            atol=atol,
+            reference_norm=reference_norm,
+            # The last segment has no refresh left to spend, so it marches to convergence or to
+            # `max_steps` rather than stopping where the trigger fires -- with no second solve after
+            # the march, a segment stopped there would end the solve short of the root.
+            trigger=None if refresh.is_last_segment(segment) else refresh.trigger,
+            step_control=step_control,
+            # Threaded across segments so a stateful control (the alpha-targeting shift climb)
+            # continues past each refresh rather than restarting -- the same global-lifetime carry
+            # as `reference_norm`, unlike the per-segment damping reference and drift measure.
+            control_state=control_state,
+            observer=on_step,
+            checkpoint=on_checkpoint,
+            # Re-based every segment, against the state this segment's preconditioner was frozen
+            # at -- which is the segment's own starting state, since a refresh re-freezes at the
+            # state it stopped on. Carrying one measure across segments would keep reporting the
+            # drift a refresh had just absorbed, and re-fire immediately.
+            drift_measure=eddy_viscosity_drift(frozen, state),
+            norm_builder=norm_builder,
+            precondition_step=precondition_step,
+            retry=retry,
+            on_retry=on_retry,
+            homotopy=homotopy,
+            station_step=station_step,
+        )
+        state = result.state
+        control_state = result.control_state
+        if not result.triggered or refresh.is_last_segment(segment):
+            break
+        # Re-freeze at the developed state, holding the initial-state measure as the progress
+        # reference across the refresh (seam 4) -- how the re-freeze is done is the source's, and
+        # is the same choice made at the initial build above rather than a second one made here.
+        continuation = source.refresh(state, continuation, base_norm)
 
-    solver = ImplicitNewtonSolver(
-        max_steps=max_steps,
-        rtol=stage_rtol,
-        atol=stage_atol,
+    # Judge convergence in the SAME measure the march steered by (a per-step-rebuilt `RowScaledNorm`
+    # under `scaled_norm`), which is what the march actually converged in: the frozen initial-state
+    # measure over-reports a developed residual, and a test in it can demand one the march never reaches.
+    final_measure = norm_builder(state) if norm_builder is not None else base_norm
+    residual_norm = float(final_measure(frozen.residual(state)))
+    target = atol + rtol * reference_norm
+    arrived = homotopy is None or result.converged
+    if not (math.isfinite(residual_norm) and residual_norm <= target and arrived):
+        raise eqx.EquinoxRuntimeError(
+            f"solve_coupled did not converge: the march ended at residual {residual_norm:.3e} against "
+            f"a target of {target:.3e} (atol + rtol*||R0||)"
+            + ("" if arrived else ", and its homotopy never reached the target problem")
+            + ". The implicit-function-theorem adjoint is only valid at a converged root, so the fields "
+            "and any gradient built on them would be silently wrong. Raise max_steps, loosen the "
+            "tolerances, or strengthen the globalization (a dual-time loop, a retry policy)."
+        )
+    root = _reject_a_root_the_frozen_cap_invalidates(frozen, state)
+    root = root_adjoint(
+        _coupled_residual,
+        root,
+        coupled,
         adjoint_solver=adjoint_solver,
-        forward_step=continuation,
+        adjoint_preconditioner=continuation.adjoint_preconditioner(),
     )
-    solved = solver.solve(lambda s, c: c.residual(s), state, coupled)
-    return coupled.physical_fields(_reject_a_root_the_frozen_cap_invalidates(coupled, solved))
+    return coupled.physical_fields(root)
+
+
+def _coupled_residual(state: jnp.ndarray, coupled: CoupledRANS) -> jnp.ndarray:
+    """``R(state; coupled)``, with the assembler as the argument the adjoint differentiates."""
+    return coupled.residual(state)
+
+
+def _refuse_a_transform_the_march_cannot_run_in(pytree: object) -> None:
+    """Raise if ``pytree`` holds abstract values, i.e. the solve is inside ``jax.jit`` or ``jax.vmap``.
+
+    The coupled march steps in Python on concrete values. Under ``jax.grad`` a ``stop_gradient`` copy
+    of an input is concrete, so the march runs and the derivative is attached at the root afterwards;
+    under ``jax.jit`` or ``jax.vmap`` it is still abstract, and the march would fail part way with an
+    error about converting a tracer. Refuse up front instead, saying what to do.
+    """
+    stopped = stop_array_gradients(pytree)
+    if any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree.leaves(stopped)):
+        raise ValueError(
+            "solve_coupled steps its march in Python on concrete values, so it cannot run under "
+            "jax.jit or jax.vmap. Call it outside those transforms; jax.grad through it is supported."
+        )
 
 
 class _MassFlowBorderedPolicy(eqx.Module):

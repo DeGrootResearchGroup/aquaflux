@@ -43,7 +43,8 @@ unit tests. The surface is five groups:
   `CflResidualDualTimeControl` combines them: it grows on the inner-loop comfort α (fast on the
   flat-residual development) but brakes on a rising residual (safe on the overshoot), the two signals
   covering each other's blind spots, and reduces exactly to `DualTimeControl` at infinite ratio
-  thresholds. The finishing solve owns the converged root and the adjoint regardless.
+  thresholds. A control changes only the path: the root is the residual's, and the adjoint is attached
+  at it regardless.
 * **The observed forward march** — `forward_march`, an eager, forward-only march that applies the
   same `ForwardStep` as the Newton driver but reports each step (`StepReport`, `MarchResult`) and
   may stop early. It is what lets a driver rebuild a frozen preconditioner part way through a solve,
@@ -111,7 +112,7 @@ from .forward_step import (
     StepOutcome,
     StepReport,
 )
-from .root_adjoint import TransposedPreconditioner, root_adjoint
+from .root_adjoint import TransposedPreconditioner, root_adjoint, stop_array_gradients
 from .implicit import (
     DampedNewtonStep,
     ImplicitNewtonSolver,
@@ -297,5 +298,6 @@ __all__ = [
     "shifted_jacobian",
     "smoothed_multigrid_solve",
     "solve_linear",
+    "stop_array_gradients",
     "symmetrically_equilibrate",
 ]
