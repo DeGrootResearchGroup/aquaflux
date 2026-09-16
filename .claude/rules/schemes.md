@@ -2475,24 +2475,14 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   four combinations, because a detector that fired on every tetrahedral mesh, or on every owner
   closure, would be useless.
 
-  ⚠️ **WHETHER `SkewCorrectedGradient` STALLS A MARCH ON A MESH THAT NEEDS IT IS STILL UNTESTED, but
-  the reason is narrower than it first looked.** The stall is measured only on pitzDaily, which is 2D
-  quadrilateral with **no tetrahedra at all** — so it says nothing about the regime the skew closure
-  exists for. Two corrections to earlier statements here:
-  - **A reactor march does exist** (`validation/uvreactor_openfoam/march.py` + `case.py`, on the
-    `claude/uv-reactor-gpu-test-52eea5` branch — Reynolds continuation, dual-time, refreshed
-    preconditioner). "No march for the reactor" was wrong. It is GPU-scale, and this case's own README
-    records case assembly plus `hybrid_initialize` being OOM-killed at full scale on a shared
-    development machine, so it is not a run to start here.
-  - **But the reactor would not test the question anyway**, because its four-faced cells all have one
-    boundary face and `OwnerGradient` reconstructs it exactly (above). A reactor march under skew
-    would answer the *weaker* and still-useful question — is the stall pitzDaily-specific or general
-    on a 3D polyhedral mesh — not whether skew is safe where it is *required*.
-
-  What would settle the original question is a marchable case containing tetrahedra with **two or
-  more boundary faces**, which no case here has. Until then: the skew closure is unproven on a march
-  anywhere, broken on the one march that exists, and needed only on a cell shape none of the shipped
-  cases contain.
+  ⚠️ **WHETHER `SkewCorrectedGradient` STALLS A MARCH ON A MESH THAT NEEDS IT WAS UNTESTED FOR A WHILE;
+  A CASE WITH THE RIGHT CELL SHAPE NOW EXISTS (`validation/tetrahedral_gradient_ab/`, #432) — see the
+  dated entry below the `fallback` default discussion for what it found and what is still open.** The
+  stall this section's earlier entries measure is on pitzDaily, which is 2D quadrilateral with **no
+  tetrahedra at all**, so it never tested the regime the skew closure exists for on its own; the
+  reactor march (`validation/uvreactor_openfoam/march.py`, GPU-scale) does not either, because its
+  four-faced cells all have exactly one boundary face and `OwnerGradient` reconstructs it exactly
+  (above). Both remain true as background — neither is the case that settles this.
 
   **✅✅ THE ACCURATE CLOSURE NO LONGER HAS TO BE CHOSEN FOR THE WHOLE MESH — `CellwiseFallback`
   (2026-08-24).** The two closures fail in opposite regimes and both regimes are **local**, so
@@ -2533,13 +2523,52 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
 
   ⚠️ **What this does NOT do is explain the stall of GLOBAL skew, which is still unknown.** The
   fallback removes the need to apply it globally; it does not make it safe to. On a mesh that *does*
-  need repair the closure runs on those few cells, and whether that is safe on a march is untested —
-  no case here has both the cell shape and a march. A fourth candidate difference was measured and is
+  need repair the closure runs on those few cells, and whether that is safe on a march is still
+  untested — a case with the cell shape now exists (below) but cannot currently be marched at all,
+  under either closure, for reasons unrelated to this defect (#435). A fourth candidate difference was
+  measured and is
   recorded as unquantified rather than as a cause: at a developed near-wall `omega` field the two
   closures' reconstructed `|grad omega|` differs by up to **16.6 % on 490 of 12225 cells** (median
   0), which persists *after* the `boundary_values_at` fix. At the cold initial condition the coupled
   residual agrees to 0.9–14 % per block and the Jacobian action to **2 %**, so whatever it is, it is
   a developed-state effect.
+
+  **✅✅ A MARCHABLE MESH WITH THE CELL SHAPE NOW EXISTS — `validation/tetrahedral_gradient_ab/`
+  (2026-09-16, #432) — AND THE LOCAL REPAIR IS CONFIRMED AT THE M2 LEVEL ON IT.** A small gmsh-built
+  tetrahedral duct (2462 cells, `of_case/make_mesh.py`), unstructured (no special construction needed
+  — any tet mesh of a box has cells owning two or more boundary faces at its edges), with **176**
+  such cells. Measured directly (`bound.prepared.m2_inverse`, not the exact-quadratic probe `bind`'s
+  own warning uses, which this file's own earlier entries note cannot see everything):
+
+  | | `fallback=None` | `fallback=SkewCorrectedGradient()` |
+  |---|---|---|
+  | worst corner cell's `max\|M2⁻¹\|` | **3.29e16** | **10.1** |
+  | cells above the 1e4 threshold | 176 | **0** |
+
+  Fifteen orders of magnitude at the single worst cell, on a real mesh with an inlet, an outlet, and
+  boundary conditions attached — not the synthetic `tetrahedral_grid_3d` unit fixture or a perturbed-tet
+  probe every prior number in this section was measured on. The repair does exactly what it is supposed
+  to, at the level it operates on.
+
+  ⚠️ **What is still NOT answered: the march itself.** This case cannot currently get a coupled RANS
+  solve started at all, under *either* arm, for reasons that measure out as independent of the defect
+  above (both arms are affected almost identically) — filed separately as **#435** rather than chased
+  further here, because it is a march-robustness question on this specific mesh/BC combination, not a
+  new instance of the corner-cell mechanism:
+  - `hybrid_initialize`'s AMG-preconditioned potential-flow seed stagnates under both arms. Materializing
+    the *exact* reconstruction Jacobian for the same scalar Laplace problem gives condition numbers of
+    **3.3e19** (owner) and **1.7e19** (repaired) — both past float64's solvable range, and close enough
+    to each other (1.9×, against the corner-cell M2's fifteen-order gap above) that this is evidently a
+    *different* ill-conditioning, not the one this section is about.
+  - Hand-built substitute initial conditions (a uniform plug; wall-tapered profiles) either trip their
+    own numerical hazards — a `dist**(1/7)` turbulent-pipe taper's unbounded wall curvature meets the
+    Hessian correction and produces a **1.3e16** velocity gradient at a cell whose own `max|M2⁻¹|` is a
+    healthy 2.94, identically under both arms — or leave the coupled Newton march with `alpha = 0` at
+    every step, at every pseudo-time shift up to the retry ladder's cap, across a Reynolds-number sweep
+    from the target down to 1/10000th of it.
+
+  So: **the corner-cell defect and its local fix are as well-evidenced now as the M2 arithmetic can make
+  them; whether the fix is safe under a real march remains open, blocked on #435.**
 
   ⚠️ **A design defect found by writing the fallback, and worth remembering: a defaulted `eqx.field`
   on an abstract base makes every subclass field defaulted too.** `reads_boundary_values` was

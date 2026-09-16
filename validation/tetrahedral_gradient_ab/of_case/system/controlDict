@@ -1,0 +1,31 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | tetrahedral_gradient_ab: mesh import only, no solve
+   \\    /   O peration     |
+    \\  /    A nd           |
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      controlDict;
+}
+// This case exists only to convert a gmsh tetrahedral mesh to OpenFOAM polyMesh via
+// `gmshToFoam` -- see ../README.md. No OpenFOAM solve is run here.
+
+application     foamRun;
+startFrom       startTime;
+startTime       0;
+stopAt          endTime;
+endTime         0;
+deltaT          1;
+writeControl    timeStep;
+writeInterval   1;
+purgeWrite      0;
+writeFormat     ascii;
+writePrecision  8;
+writeCompression off;
+timeFormat      general;
+timePrecision   6;
+runTimeModifiable true;
