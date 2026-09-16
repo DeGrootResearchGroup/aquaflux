@@ -64,7 +64,7 @@ from aquaflux.flow import (
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import ImplicitNewtonSolver, relative_residual_gmres
+from aquaflux.solve import ImplicitNewtonSolver, assembler_residual, relative_residual_gmres
 
 #: The tolerance every arm is driven to, on the TRUE residual, and the Krylov subspace size before a
 #: restart. The cap exists so a failing arm reports a failure instead of running for the afternoon.
@@ -103,7 +103,7 @@ def developing(assembler: MomentumContinuity, rtol: float) -> jnp.ndarray:
     )
     return ImplicitNewtonSolver(
         max_steps=200, rtol=rtol, atol=0.0, forward_step=continuation
-    ).solve(lambda state, asm: asm.residual(state), assembler.initial_state(), assembler)
+    ).solve(assembler_residual, assembler.initial_state(), assembler)
 
 
 def probe(

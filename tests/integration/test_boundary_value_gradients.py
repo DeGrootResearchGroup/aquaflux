@@ -24,7 +24,7 @@ from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall, PressureOu
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import ImplicitNewtonSolver
+from aquaflux.solve import ImplicitNewtonSolver, assembler_residual
 
 MESH = structured_grid_2d(8, 6, lx=3.0, ly=1.0, named_boundaries=True)
 GEOMETRY = MESH.geometry()
@@ -71,7 +71,7 @@ def _channel(inlet, *, top=None, outlet_pressure=0.0):
 
 
 def _flow(assembler):
-    return SOLVER.solve(lambda s, m: m.residual(s), assembler.initial_state(), assembler)
+    return SOLVER.solve(assembler_residual, assembler.initial_state(), assembler)
 
 
 def _mean_streamwise_speed(assembler):
@@ -145,7 +145,7 @@ def test_gradient_with_respect_to_a_dirichlet_field_coefficient() -> None:
                 }
             ),
         )
-        phi = SOLVER.solve(lambda s, m: m.residual(s), jnp.zeros(MESH.n_cells), assembler)
+        phi = SOLVER.solve(assembler_residual, jnp.zeros(MESH.n_cells), assembler)
         return jnp.mean(phi)
 
     _assert_matches_finite_difference(mean_value, 2.0)

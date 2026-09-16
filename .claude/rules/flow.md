@@ -400,8 +400,8 @@ Engineering Principles.
     never the solution or adjoint (contrast the *residual*, whose Jacobian is AD-assembled). This is the
     robust production path (large iterative solve); `preconditioner=None` (a direct or small solve) needs
     none of it. **The bordered preconditioner is built once in the builder from a concrete `reference`**
-    (required whenever `preconditioner` is given), **not** inside the jitted solve from its traced
-    `momentum` argument — a tracer captured into the (non-differentiated) preconditioner breaks `jax.grad`
+    (required whenever `preconditioner` is given), **not** inside the solve from the `momentum` it is
+    called with — a tracer captured into the (non-differentiated) preconditioner breaks `jax.grad`
     ("no constant handler" / closed-over-value). Pinned by `test_mean_velocity.py`: with an exact `M` the
     bordered preconditioner is exactly `J_aug⁻¹` (and AD's border matches the hand-built `a`/`c`), and the
     block-preconditioned GMRES augmented solve lands on the direct solve's answer.

@@ -452,7 +452,7 @@ class PseudoTransientStep(ShiftedStep):
         The residual measure ``R -> scalar`` the march judges progress by (data, not static — see
         :class:`ShiftedStep`; default the
         Euclidean norm): the switched-evolution-relaxation ramp ``β = β₀(‖R‖/‖R₀‖)^p``, the line
-        search, and the acceptance/divergence guard all use it, and :class:`ImplicitNewtonSolver`
+        search, and the acceptance/divergence guard all use it, and the march
         reads it (via :meth:`norm`) for the outer stopping test, so one measure governs the whole
         solve. A heterogeneous block system (e.g. coupled RANS, where ``omega`` is O(1e5) and ``k``
         O(1e-3)) needs a scaled measure so the march *sees* every block — with the plain norm the

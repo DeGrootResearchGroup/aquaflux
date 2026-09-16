@@ -21,7 +21,12 @@ from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import BlockPreconditioner, MomentumContinuity, MovingWall, NoSlipWall
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, GmresGradientSolve, SweptGradientSolve
-from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver, newton_step
+from aquaflux.solve import (
+    DampedNewtonStep,
+    ImplicitNewtonSolver,
+    assembler_residual,
+    newton_step,
+)
 
 from tests.support.meshes import perturbed_grid_2d
 
@@ -98,7 +103,7 @@ def test_swept_gradient_flow_is_differentiable() -> None:
 
     def mean_speed(mu):
         assembler = _cavity(scheme, mu=mu)
-        state = solver.solve(lambda s, a: a.residual(s), assembler.initial_state(), assembler)
+        state = solver.solve(assembler_residual, assembler.initial_state(), assembler)
         velocity, _ = assembler.unpack(state)
         return jnp.mean(jnp.abs(velocity[:, 0]))
 

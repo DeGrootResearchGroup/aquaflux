@@ -134,11 +134,11 @@ cfd/                                  # repo root
 │   ├── solve/                        # Newton on the residual, the differentiated linear solve, and the AMG that preconditions it
 │   │   ├── state.py                  #   FieldLayout + CellFields / SubLayout / GlobalDofs: the flat field-major state as named, variable-length blocks (every coupled system's one layout)
 │   │   ├── newton.py                 #   newton_step: the Newton correction on the cell residual
-│   │   ├── implicit.py               #   ImplicitNewtonSolver: Newton to convergence on stopped inputs, differentiable through the root it reaches
+│   │   ├── implicit.py               #   ImplicitNewtonSolver: Newton to convergence on stopped inputs (marching with forward_march), differentiable through the root it reaches; assembler_residual
 │   │   ├── root_adjoint.py           #   root_adjoint: the implicit-function-theorem adjoint (one transpose solve) attached to a root found by any means
 │   │   ├── linear.py                 #   solve_linear: differentiable matrix-free linear solve, optional left/right preconditioning; relative_residual_gmres
 │   │   ├── norm.py                   #   ResidualNorm → BlockScaledNorm / RowScaledNorm: the convergence and globalization measures
-│   │   ├── march.py                  #   forward_march: the observed forward-only Newton march + the staleness trigger watching it
+│   │   ├── march.py                  #   forward_march: the observed forward-only Newton march every solve runs on + the staleness trigger watching it
 │   │   ├── march_log.py              #   MarchLogger: the streaming per-step log (the reporting half of the on_step seam)
 │   │   ├── checkpoint.py             #   StateCheckpointer: periodic state persistence (the on_checkpoint seam)
 │   │   ├── step_control.py           #   feedback step controls for the eager march (DualTimeControl and friends)

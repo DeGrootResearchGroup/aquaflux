@@ -16,6 +16,7 @@ to the lagged "before". The lagged behaviour is emulated with ``stop_gradient`` 
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -147,6 +148,40 @@ def test_limited_scheme_is_second_order() -> None:
     assert order > 1.8
 
 
+class _BdfStep(eqx.Module):
+    """The residual of one backward-difference timestep: ``phi -> R(phi; phi_old, phi_older)``.
+
+    A module rather than a closure over the previous states, for the reason the Newton solver's
+    docstring gives: the solve compiles its step with the residual as an argument, and a closure built
+    per timestep is hashed by identity, so a time loop written with one would recompile the whole
+    solve at every timestep. Here the previous states are array fields over a fixed structure, so the
+    opening steps compile and the rest of the march runs on what they built -- measured on this
+    fixture, the first three steps execute the residual in Python and every step after them executes
+    it exactly once, which is the march's own eager evaluation of its reference norm.
+
+    ``phi_older`` is ``None`` on the first step, which the transient term reads as "start from the
+    first-order form". That is a structural difference rather than a value, so the first step is a
+    separate compilation from the rest whatever else happens.
+    """
+
+    assembler: ResidualAssembler
+    phi_old: jnp.ndarray
+    phi_older: jnp.ndarray | None
+    dt: float
+
+    def __call__(self, phi: jnp.ndarray, theta: object) -> jnp.ndarray:
+        del theta  # the transient march has no differentiable parameter
+        if self.phi_older is None:
+            return self.assembler.residual(phi, phi_old=self.phi_old, dt=self.dt, first_step=True)
+        return self.assembler.residual(
+            phi,
+            phi_old=self.phi_old,
+            phi_older=self.phi_older,
+            dt=self.dt,
+            first_step=False,
+        )
+
+
 @pytest.mark.validation
 def test_limiter_reduces_overshoot_on_advected_step() -> None:
     """Advecting a top-hat: the limiter substantially reduces the over/undershoot of the
@@ -183,25 +218,16 @@ def test_limiter_reduces_overshoot_on_advected_step() -> None:
         dt = 0.4 / n_steps
         # The limiter makes each step nonlinear, so the sub-solve converges on a tolerance rather
         # than a fixed count -- a count cannot tell convergence from exhaustion.
+        #
+        # The time loop is a **Python** loop, not a `lax.scan`: the solve marches in Python, so it
+        # cannot run inside a traced construct and refuses one rather than failing part way through.
+        # Nothing is lost by stepping eagerly here -- each step's residual is a `_BdfStep`, whose
+        # fields are arrays over a fixed structure, so all 39 later steps run on the one compiled
+        # Newton step that the first of them builds.
         solver = ImplicitNewtonSolver(max_steps=30)
-        phi1 = solver.solve(
-            lambda p, _theta: assembler.residual(p, phi_old=phi0, dt=dt, first_step=True),
-            phi0,
-            None,
-        )
-
-        def step(carry, _):
-            old, older = carry
-            new = solver.solve(
-                lambda p, _theta: assembler.residual(
-                    p, phi_old=old, phi_older=older, dt=dt, first_step=False
-                ),
-                old,
-                None,
-            )
-            return (new, old), None
-
-        (phi, _), _ = jax.lax.scan(step, (phi1, phi0), None, length=n_steps - 1)
+        phi, older = solver.solve(_BdfStep(assembler, phi0, None, dt), phi0, None), phi0
+        for _ in range(n_steps - 1):
+            phi, older = solver.solve(_BdfStep(assembler, phi, older, dt), phi, None), phi
         return phi
 
     unlimited = advect_tophat(None)

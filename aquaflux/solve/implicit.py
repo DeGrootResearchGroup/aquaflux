@@ -2,13 +2,16 @@
 
 For a genuinely nonlinear residual (e.g. a flux-limited advection scheme) Newton takes many
 iterations, and differentiating through the unrolled iterations would tape every step. Instead the
-iteration runs on ``stop_gradient`` copies of its inputs, stops on a data-dependent test
-(``lax.while_loop``), and the root it reaches is handed to
+iteration runs on ``stop_gradient`` copies of its inputs — as :func:`~aquaflux.solve.forward_march`,
+the one Newton loop in this package — and the root it reaches is handed to
 :func:`~aquaflux.solve.root_adjoint`, which attaches the implicit-function-theorem derivative: one
 transpose linear solve at the root, independent of the iteration count.
 
 The derivative is defined only for reverse mode (``jax.grad`` / ``jax.vjp``), which is what a
-scalar objective through the solver needs.
+scalar objective through the solver needs. The march steps in Python, which is what lets a driver
+interpose host work between steps; the cost is that a solve cannot itself run under ``jax.jit`` or
+``jax.vmap``, and says so rather than failing part way through. Each step is compiled, so there is
+nothing to gain by wrapping the solve in either.
 """
 
 from __future__ import annotations
@@ -21,8 +24,9 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 
-from .forward_step import ForwardStep, LineSearchStep, StepFn, StepOutcome, within_tolerance
+from .forward_step import ForwardStep, LineSearchStep, StepFn, StepOutcome
 from .linear import corrected_cycles as _corrected
+from .march import MarchResult, forward_march, refuse_a_transform_the_march_cannot_run_in
 from .newton import newton_correction
 from .norm import ResidualNorm
 from .root_adjoint import root_adjoint, stop_array_gradients
@@ -618,72 +622,59 @@ class DampedNewtonStep(eqx.Module):
         return self.preconditioner
 
 
-def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_step_fn, norm_fn):
-    """Newton iterate to convergence (``lax.while_loop``); return the converged field or error.
+def assembler_residual(state: jnp.ndarray, assembler: object) -> jnp.ndarray:
+    """``R(state)`` of an assembler carried as the parameter the adjoint differentiates.
 
-    Each iteration applies the injected ``forward_step_fn`` — the globalized Newton step the
-    :class:`ForwardStep` strategy supplies (a backtracking line search by default, a pseudo-transient
-    continuation for a high-Reynolds convective flow). Every strategy's shift vanishes at the fixed
-    point, so the converged field solves the same unshifted ``R(phi, theta) = 0`` and the stopping
-    test is unchanged.
+    The two-argument form :meth:`ImplicitNewtonSolver.solve` and
+    :func:`~aquaflux.solve.root_adjoint` take, for the common case where the differentiable parameter
+    *is* the assembler. A **module-level function rather than a lambda at each call site**, so every
+    driver that solves an assembler's residual hands over the same object: the march compiles its step
+    with the residual as an argument, and a lambda is hashed by identity, so a fresh one is a new cache
+    key and recompiles the whole march on every call.
 
-    ``norm_fn`` is the residual measure the stopping test uses — the **same** measure the forward
-    step judges its own globalization by (the strategy owns it, via :meth:`ForwardStep.norm`), so a
-    heterogeneous block system's convergence and its line search agree on one scale. The default is
-    the Euclidean norm.
+    Parameters
+    ----------
+    state : jnp.ndarray
+        The state to evaluate at.
+    assembler : object
+        Anything with a ``residual(state)`` method -- a flow, scalar-transport or coupled assembler.
 
-    The loop can exit without converging in two ways: it exhausts ``max_steps`` short of tolerance,
-    or the residual norm becomes non-finite (``NaN``/``Inf``), which :func:`within_tolerance` never
-    satisfies, so the loop runs out its whole step budget. Both leave a field that does *not* solve
-    ``R = 0``. The
-    implicit-function-theorem adjoint linearizes the residual at whatever field this returns, so a
-    non-converged field would yield a **silently wrong gradient** — the transpose solve is still
-    well-posed and raises no ``NaN``. Guard against that here: if the terminal residual is non-finite
-    or above tolerance, raise instead of returning a poisoned field, so neither the forward value nor
-    the gradient built on it can be used unknowingly.
+    Returns
+    -------
+    jnp.ndarray
+        The residual at ``state``.
     """
-    residual_norm_0 = norm_fn(residual_fn(phi0, theta))
+    return assembler.residual(state)
 
-    def cond(carry):
-        _, step, residual_norm = carry
-        return (step < max_steps) & ~within_tolerance(residual_norm, residual_norm_0, rtol, atol)
 
-    def body(carry):
-        phi, step, _ = carry
+class _ResidualAt(eqx.Module):
+    """``phi -> residual_fn(phi, theta)``: the two-argument residual bound to one parameter value.
 
-        def residual_theta(p):
-            return residual_fn(p, theta)
+    The march compiles each step with the residual as an **argument**, so whatever that residual
+    carries that is not an array is part of the compiled step's cache key. A closure built per solve
+    is hashed by identity, so a fresh one would be a new key and recompile the whole march every
+    call -- which is precisely what the callers that reuse one solver across a sweep are built to
+    avoid. This is a module instead: ``theta``'s arrays ride as dynamic leaves while ``residual_fn``
+    and the tree structure sit on the static side, so two solves of the same problem at different
+    parameter *values* are one compilation.
 
-        # The step's cycle count and line-search factor are dropped here, deliberately: carrying
-        # either out of this loop would force it to choose which step's value survives (last / max /
-        # sum), which is a reporting/control policy the Newton solver has no business owning. A march
-        # that wants per-step cost or the line-search factor observes them eagerly instead
-        # (`forward_march`).
-        #
-        # The residual norm is the one member that IS kept, because the loop's own stopping test needs
-        # it and it is already in the carry -- there is no float0 question, only which value goes in.
-        # It comes from the step rather than from a fresh `norm_fn(residual_fn(phi))`: a globalized step
-        # ends in a line search that evaluated exactly this at the rung it kept, so re-forming it here
-        # spent a whole residual evaluation per Newton iteration to recompute a number the step was
-        # holding. That is sound only because the step's measure and `norm_fn` are the same object --
-        # `ImplicitNewtonSolver` passes `forward.norm()` as `norm_fn`, which is the invariant to keep if
-        # this ever takes its measure from elsewhere.
-        outcome = forward_step_fn(residual_theta, phi, residual_norm_0, solver)
-        return outcome.phi, step + 1, outcome.residual_norm
+    That holds only as far as ``residual_fn`` itself is stable. Pass a module-level function or a
+    bound method of a module (whose arrays are dynamic leaves in the same way); a lambda built at the
+    call site is a new object every time and misses the cache however this is written.
 
-    phi, _, residual_norm = jax.lax.while_loop(cond, body, (phi0, 0, residual_norm_0))
-    converged = jnp.isfinite(residual_norm) & within_tolerance(
-        residual_norm, residual_norm_0, rtol, atol
-    )
-    return eqx.error_if(
-        phi,
-        ~converged,
-        "ImplicitNewtonSolver did not converge: the Newton residual norm did not reach "
-        "atol + rtol*||R0|| within max_steps, or became non-finite. The implicit-function-theorem "
-        "adjoint is only valid at a converged root, so the returned field and any gradient built on "
-        "it would be silently wrong. Raise max_steps, loosen the tolerances, or use a stronger "
-        "globalization (e.g. pseudo-transient continuation for a high-Reynolds flow).",
-    )
+    Attributes
+    ----------
+    residual_fn : callable
+        ``(phi, theta) -> R``, the residual as :meth:`ImplicitNewtonSolver.solve` receives it.
+    theta : pytree
+        The parameter value to hold fixed, already stripped of any derivative it carried.
+    """
+
+    residual_fn: Callable[[jnp.ndarray, object], jnp.ndarray]
+    theta: object
+
+    def __call__(self, phi: jnp.ndarray) -> jnp.ndarray:
+        return self.residual_fn(phi, self.theta)
 
 
 class ImplicitNewtonSolver(eqx.Module):
@@ -743,7 +734,11 @@ class ImplicitNewtonSolver(eqx.Module):
         Parameters
         ----------
         residual_fn : callable
-            Maps ``(phi, theta)`` to the residual of shape ``(n_cells,)``.
+            Maps ``(phi, theta)`` to the residual of shape ``(n_cells,)``. Pass a **stable object** —
+            a module-level function such as :func:`assembler_residual`, a bound method of a module, or
+            a small :class:`equinox.Module` carrying its settings. The Newton step is compiled with
+            this as an argument, so a ``lambda`` written at the call site is a fresh cache key and
+            recompiles the march on every call.
         phi0 : jnp.ndarray
             Initial guess, shape ``(n_cells,)``.
         theta : pytree
@@ -756,35 +751,65 @@ class ImplicitNewtonSolver(eqx.Module):
 
         Raises
         ------
+        ValueError
+            If called from inside a traced program -- ``jax.jit``, ``jax.vmap``, or a traced loop
+            such as ``jax.lax.scan``. The march steps in Python on concrete values, so a transient
+            march over this solve is an ordinary Python loop; ``jax.grad`` is supported and is
+            unaffected.
         equinox.EquinoxRuntimeError
             If the Newton iteration does not converge — it exhausts ``max_steps`` short of
-            ``atol + rtol*||R0||`` or the residual norm becomes non-finite. The
-            implicit-function-theorem adjoint is valid only at a converged root, so a
-            non-converged field is rejected rather than returned (its gradient would be silently
-            wrong). Raised at solve time, and equally on the ``jax.grad`` path.
+            ``atol + rtol*||R0||``, stalls against a collapsing constraint cap, or the residual norm
+            becomes non-finite. The implicit-function-theorem adjoint is valid only at a converged
+            root, so a non-converged field is rejected rather than returned (its gradient would be
+            silently wrong). Raised at solve time, and equally on the ``jax.grad`` path.
         """
+        refuse_a_transform_the_march_cannot_run_in(
+            (phi0, theta), caller="ImplicitNewtonSolver.solve"
+        )
         forward = self.forward_step
         solver = self.solver if self.solver is not None else forward.default_solver()
-        # The iteration runs on stopped copies and is never differentiated; the convergence guard
-        # inside it raises before a non-root can reach the adjoint, on the gradient path as well.
-        root = _forward(
-            residual_fn,
+        # The march runs on stopped copies and is never differentiated, so its Python loop sees
+        # concrete values on the `jax.grad` path as well; the derivative is attached below, at the
+        # root it reaches.
+        result = forward_march(
+            forward,
+            _ResidualAt(residual_fn, stop_array_gradients(theta)),
             stop_array_gradients(phi0),
-            stop_array_gradients(theta),
-            self.rtol,
-            self.atol,
-            self.max_steps,
-            solver,
-            forward.stepper(),
-            forward.norm(),
+            max_steps=self.max_steps,
+            rtol=self.rtol,
+            atol=self.atol,
+            solver=solver,
         )
+        # The march carries no guard of its own -- stopping short is part of what it is for -- so the
+        # convergence test is owned here, on the path that produces the returned field. It must run
+        # before `root_adjoint`: the transpose solve at a non-root is still well-posed and raises
+        # nothing, so a state short of the root would yield a silently wrong gradient.
+        if not result.converged:
+            raise eqx.EquinoxRuntimeError(
+                f"ImplicitNewtonSolver did not converge: {_how_it_ended(result, self.max_steps)}, "
+                "short of atol + rtol*||R0|| or with a non-finite residual norm. The "
+                "implicit-function-theorem adjoint is only valid at a converged root, so the returned "
+                "field and any gradient built on it would be silently wrong. Raise max_steps, loosen "
+                "the tolerances, or use a stronger globalization (e.g. pseudo-transient continuation "
+                "for a high-Reynolds flow)."
+            )
         # The strategy owns both the forward step and the adjoint preconditioner (the same
         # preconditioner it applies forward, transposed at the converged state), so a high-Re solve
         # needs a single strategy for both the forward globalization and the mesh-independent adjoint.
         return root_adjoint(
             residual_fn,
-            root,
+            result.state,
             theta,
             adjoint_solver=self.adjoint_solver,
             adjoint_preconditioner=forward.adjoint_preconditioner(),
         )
+
+
+def _how_it_ended(result: MarchResult, max_steps: int) -> str:
+    """Where a march that did not converge left off, for the error that rejects its state."""
+    if not result.reports:
+        return "the march took no steps"
+    return (
+        f"the march ended at residual {result.reports[-1].residual_norm:.3e} after "
+        f"{len(result.reports)} of {max_steps} steps"
+    )

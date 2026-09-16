@@ -202,14 +202,22 @@ paths:
 
 - **`march.py` — BUILT (`forward_march`, `StepReport`/`MarchResult`, `RefreshTrigger`/`CycleGrowthTrigger`):
   the observed, forward-only march that drives a mid-march preconditioner refresh.**
-  - **Two marches, ONE decision layer (binding — this is the shape to hold).** `_forward` (traced,
-    on stopped inputs with the adjoint attached after it by `root_adjoint`, has the root guard, cannot
-    stop early, cannot be observed) and `forward_march`
-    (eager Python loop, forward-only, **no guard by design**, stops on an injected trigger, reports every
-    step). They are not duplicates: `forward_march` calls the **same** `forward_step.stepper()`, the same
-    `forward_step.norm()` (for its segment reference — the per-step norm now rides out of the step on
-    `StepOutcome.residual_norm`), and the same `within_tolerance`. The only residue is a ~6-line loop shell,
-    pinned against drift by a test that both marches reach the same state on the same residual.
+  - **ONE march (binding — 2026-09-15, phase 3 of the unification; this replaces "two marches, one
+    decision layer").** `forward_march` is the only Newton loop in the package. The traced `_forward`
+    (a `lax.while_loop` inside `ImplicitNewtonSolver`) is **deleted**; `ImplicitNewtonSolver.solve` now
+    marches with `forward_march` on `stop_array_gradients` copies, owns the root guard, and hands the
+    root to `root_adjoint`. What that buys is that a capability can no longer exist on one loop and not
+    the other — the shape of #369, which phase 2 fixed inside `solve_coupled` and this removes the
+    remaining home for. What it costs is `jit`/`vmap`: a Python loop cannot run under either, so every
+    entry point refuses them up front through
+    `refuse_a_transform_the_march_cannot_run_in(pytree, caller=…)`, which lives **here** in `march.py`
+    and is called by `ImplicitNewtonSolver.solve`, `solve_coupled` and `solve_coupled_mass_flow`. That
+    was decided, not discovered: nothing in the repository `vmap`s a solve, and the four library builders
+    that jitted one did so for compile-cache reuse, which the `filter_jit`-compiled `_march_step` gives
+    them anyway (see `solve.md`'s `implicit.py` entry for the residual-identity condition that keeps).
+    The march is still **forward-only and still carries no guard by design** — stopping short on a
+    trigger is its purpose — so every caller reads `MarchResult.converged` before treating the state as
+    a result.
   - **NOTHING in the refresh machinery reads the line-search α, and on `bfs3d` almost nothing reads
     anything else either (source-verified against the current defaults).** Two independent refresh paths
     exist and they key on different things: the post-step `RefreshTrigger`s (`CycleGrowthTrigger` →
@@ -225,16 +233,21 @@ paths:
     the direction is measured accurate and the solve already over-delivers against its tolerance. Where α
     *is* the right refresh signal is the **constraint-free** collapse (`binding_limit == 1`, direction
     genuinely bad), and that case is invisible to every trigger today.
-  - **Why the early-stop could NOT go inside `ImplicitNewtonSolver` (binding — do not "simplify" it back).**
-    `_forward`'s guard raises whenever the terminal state is not a root, and a trigger-stopped segment
-    exits un-converged *by design*. Injecting a count-based early stop would therefore require an
-    **exemption** in that guard — creating a production path that returns a non-root without raising,
-    which is exactly the silent-wrong-gradient hole the guard exists to close. Chunking `_forward` with
-    `max_steps=1` fails independently: it recomputes `residual_norm_0` per chunk, pinning the SER ramp at
-    β₀ forever.
-  - **The eager march NEVER returns the answer.** It is a pure accelerator; every staged solve ends with
-    a real `ImplicitNewtonSolver.solve()` that owns the guard, the `custom_vjp`, and the result. So the
-    guard has exactly one home and is unconditionally on the path that produces the returned state.
+  - **Why the early stop is the DRIVER's, not the solver's (binding — do not "simplify" it back).**
+    The root guard raises whenever the terminal state is not a root, and a trigger-stopped segment exits
+    un-converged *by design*. Putting the early stop behind the guard would require an **exemption** in
+    it — a production path returning a non-root without raising, which is exactly the
+    silent-wrong-gradient hole the guard exists to close. So the trigger stays a `forward_march`
+    argument that `ImplicitNewtonSolver.solve` does not pass, and the driver that does pass one
+    (`solve_coupled`) owns its own convergence test at the end. Chunking a march with `max_steps=1`
+    fails independently: it recomputes `residual_norm_0` per chunk, pinning the SER ramp at β₀ forever.
+  - ⚠️ **"The eager march NEVER returns the answer" is DEAD (was: a staged solve ends with a traced
+    `ImplicitNewtonSolver.solve` that owns the guard and the result).** Phase 2 removed the finishing
+    solve from `solve_coupled` and phase 3 removed the traced loop entirely: the march's state **is** the
+    answer, and the guard is the driver's explicit test on `MarchResult.converged` before
+    `root_adjoint`. The invariant that survives is the one that mattered — the guard is unconditionally
+    on the path that produces the returned state — but it now has one home *per driver* rather than one
+    home in total.
   - **Two reference norms, and conflating them freezes the march (binding).** `residual_norm_0` is
     **segment-local** (recomputed at each `forward_march` entry, handed to `stepper()` for the SER ramp);
     `reference_norm` is **global** (fixed across segments, used for the convergence test and the reported
@@ -627,8 +640,10 @@ paths:
     inner_iterations, shift, escalations, diverged_retry)` + `MarchResult`,
     plus an optional streaming `observer` (a long march must not withhold all logging until it finishes).
     The trigger and a future logger consume the identical objects, so there is no second reporting path.
-    Per-step observation exists only where the march is eager — the traced `_forward` would need
-    `jax.debug.callback`, a separate decision; do not promise per-step reporting on the differentiable path.
+    Per-step observation is available wherever a driver passes an `observer`, which since phase 3 means
+    every march including the differentiable one — the state it reports is a `stop_gradient` copy, so an
+    observer sees concrete values under `jax.grad` too. `ImplicitNewtonSolver` does not *expose* the
+    argument (its surface was left alone in that change); `solve_coupled` does.
   - **`shift` / `escalations` / `diverged_retry` on the report, and `MarchLogger` (`solve/march_log.py`)
     — the reporting half of the `on_step` seam (BUILT).** Every driver used to write its own
     `on_step`/`on_checkpoint` formatter, so the copies drifted and a gap fixed in one persisted in the
@@ -692,8 +707,8 @@ paths:
     (`phi_next, cycles, alpha, *_ = ...`) began reading the norm as its cycle count and failed on the
     dtype. Four of the fields are there because a march could not otherwise act correctly:
     - **`residual_norm`** — `norm(R(phi))` at the step's own returned iterate, in the step's own measure.
-      **Both drivers used to evaluate this for themselves** (`_forward`'s loop body, `_march_step`'s
-      return), spending a full residual per outer iteration to recompute a number the step was already
+      **Both drivers used to evaluate this for themselves** (the deleted `_forward`'s loop body,
+      `_march_step`'s return), spending a full residual per outer iteration to recompute a number the step was already
       holding: a globalized step ends in a line search that evaluated the measure at every rung it
       walked, so the value at the rung it kept is in hand when the step returns. Measured on
       `_march_step`, **4 residual traces per compiled step down to 3** — the Newton correction's
@@ -701,7 +716,7 @@ paths:
       Small beside the 15--30 Krylov matvecs a step spends, so this is tidiness with a measurable edge
       rather than a speed lever, and it should not be quoted as one.
       **It rests on ONE invariant: the step's measure and the driver's are the same object.**
-      `ImplicitNewtonSolver` passes `forward.norm()` as `norm_fn`, and `forward_march` rebuilds the
+      The march takes its measure from `forward_step.norm()`, and rebuilds the
       *step's* `residual_norm` field through `norm_builder`, so the search, the acceptance test and the
       reported norm are one measure by construction. Break that and the convergence test runs against a
       residual history measured in a different scale from the reference it is compared with.

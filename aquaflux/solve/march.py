@@ -1,24 +1,29 @@
-"""An observed, forward-only Newton march, and the staleness trigger that watches it.
+"""The observed, forward-only Newton march, and the staleness trigger that watches it.
 
-:class:`~aquaflux.solve.ImplicitNewtonSolver` runs its Newton march inside a ``lax.while_loop`` and
-returns only the converged field. That is exactly right for the differentiable solve — the loop is
-never taped, and the implicit-function-theorem adjoint is one transpose solve at the root — but it
-makes the march *opaque*: nothing outside can see what each step cost, and nothing can stop the loop
-part way to do work that cannot run under ``jit``.
+:func:`forward_march` is the loop every Newton solve in this package runs on. It steps an injected
+:class:`~aquaflux.solve.ForwardStep` until the residual meets a tolerance, and between steps — in
+plain Python, outside the compiled step — it reports what the step cost, lets a control reshape the
+next one, lets a policy redo a bad one, and can stop early so a driver can do work no traced program
+could.
 
-Refreshing a frozen algebraic-multigrid (AMG) preconditioner mid-march needs both. The rebuild
-assembles ``scipy`` sparse matrices, which cannot happen inside a traced loop, and the *decision* to
-rebuild is made from the per-step linear-solve cost. So this module adds a second march — an eager
-Python loop, :func:`forward_march` — that steps the **same** injected
-:class:`~aquaflux.solve.ForwardStep`, judges convergence with the **same** tolerance test, and
-measures progress with the **same** residual norm, but observes every step and may stop early.
+Refreshing a frozen algebraic-multigrid (AMG) preconditioner mid-march is the motivating case and
+needs all of that: the rebuild assembles ``scipy`` sparse matrices, which cannot happen inside a
+traced loop, and the *decision* to rebuild is made from the per-step linear-solve cost.
 
-**The eager march's state is an answer only when it reports ``converged``.** :func:`forward_march`
+Stepping in Python is also the one thing this march cannot do inside a traced program -- ``jax.jit``,
+``jax.vmap``, or a traced loop such as ``jax.lax.scan`` -- where the values it reads back are still
+abstract. Every driver therefore refuses those transforms up
+front with :func:`refuse_a_transform_the_march_cannot_run_in`, rather than failing part way with a
+message about a tracer. ``jax.grad`` is unaffected and is the mode that matters here: the march runs
+on ``stop_gradient`` copies, so it sees concrete values, and the derivative is attached to the
+converged state afterwards by :func:`~aquaflux.solve.root_adjoint` — one transpose solve at the root,
+independent of how the march reached it, so nothing about the iteration is taped.
+
+**The march's state is an answer only when it reports ``converged``.** :func:`forward_march`
 deliberately has **no** non-convergence guard of its own — stopping short, on a trigger or out of
 steps, is part of its purpose — so the driver that calls it owns that test, and refuses a state that is
-not a root before attaching the implicit-function-theorem adjoint to it with
-:func:`~aquaflux.solve.root_adjoint`. A state the march hands back carries no guarantee beyond what
-:attr:`MarchResult.converged` states.
+not a root before attaching the adjoint to it. A state the march hands back carries no guarantee
+beyond what :attr:`MarchResult.converged` states.
 
 **Two reference residual norms, and conflating them breaks the march.** Each call to
 :func:`forward_march` computes its own ``residual_norm_0`` from the state it is handed, and passes
@@ -35,16 +40,56 @@ reported ratio mean the same thing throughout. The first must never be substitut
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Sequence
 from typing import Any, NamedTuple, Protocol
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import lineax as lx
 
 from .forward_step import ForwardStep, StepControl, StepOutcome, StepReport, within_tolerance
 from .norm import ResidualNorm
 from .retry import ESCALATING_REASONS, NO_RETRIES, RetryPolicy
+from .root_adjoint import stop_array_gradients
+
+
+def refuse_a_transform_the_march_cannot_run_in(pytree: object, *, caller: str) -> None:
+    """Raise if ``pytree`` holds abstract values, i.e. the march is inside a traced program.
+
+    The march steps in Python on concrete values: it reads residual norms back as floats, runs host
+    work between steps, and decides how many steps to take from what it sees. Under ``jax.grad`` a
+    ``stop_gradient`` copy of an input is concrete, so the march runs and the derivative is attached
+    at the root afterwards; inside any **traced** program it is still abstract, and the march would
+    fail part way with an error about converting a tracer to a Python value -- far from the call that
+    caused it. Refuse up front instead, naming the entry point and saying what to do.
+
+    ⚠️ **"Traced" is wider than ``jit`` and ``vmap``.** ``jax.lax.scan`` and ``jax.lax.fori_loop``
+    trace their bodies too, so a transient march that steps a nonlinear solve inside one is refused
+    here as well; write that time loop in Python and give each step's residual a stable identity (a
+    small ``equinox.Module`` holding the previous states) so the later steps run on the compiled Newton
+    step the opening ones build.
+
+    Parameters
+    ----------
+    pytree : pytree
+        The solve's inputs, whose leaves carry the abstractness of any transform in force.
+    caller : str
+        The entry point to name in the message, e.g. ``"solve_coupled"``.
+
+    Raises
+    ------
+    ValueError
+        If any leaf is a tracer.
+    """
+    stopped = stop_array_gradients(pytree)
+    if any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree.leaves(stopped)):
+        raise ValueError(
+            f"{caller} steps its march in Python on concrete values, so it cannot run inside a traced "
+            "program: not under jax.jit or jax.vmap, and not inside jax.lax.scan or another traced "
+            "loop. Call it outside those; jax.grad through it is supported."
+        )
 
 
 def combine_observers(*callbacks: Callable[..., None]) -> Callable[..., None]:
@@ -94,7 +139,9 @@ class MarchResult(NamedTuple):
     reports : tuple of StepReport
         One report per step taken, in order.
     converged : bool
-        Whether the march reached the requested tolerance against the global reference norm.
+        Whether the march reached the requested tolerance against the global reference norm, with a
+        finite residual norm. A non-finite one is never reported as converged, however the tolerance
+        test compares (see :func:`forward_march`).
     triggered : bool
         Whether the march stopped early because the injected trigger fired.
     control_state : object
@@ -493,11 +540,11 @@ def forward_march(
 ) -> MarchResult:
     """March the residual eagerly, reporting each step and stopping early if the trigger fires.
 
-    A forward-only counterpart to :class:`~aquaflux.solve.ImplicitNewtonSolver`'s traced march,
-    for a driver that must observe per-step cost or interpose work that cannot run under ``jit``
-    (rebuilding a frozen preconditioner). It applies the same injected ``forward_step``, the same
-    residual measure (``forward_step.norm()``), and the same stopping test, so the two marches take
-    the same path on the same problem.
+    The one Newton loop in this package: :class:`~aquaflux.solve.ImplicitNewtonSolver` runs it, and
+    so does every coupled driver. Stepping eagerly is what lets a driver observe per-step cost or
+    interpose work that cannot run under ``jit`` (rebuilding a frozen preconditioner) -- and, for the
+    same reason, is why a solve cannot be called inside ``jit`` or ``vmap`` (see
+    :func:`refuse_a_transform_the_march_cannot_run_in`).
 
     **This function may return a state that does not solve the residual, without raising** — that is
     the point of a march that can stop early. It carries no convergence guard, so a caller must read
@@ -687,7 +734,15 @@ def forward_march(
     # driver can continue a stateful control across a refresh instead of restarting it.
 
     def converged_at(residual_norm: float) -> bool:
-        return bool(within_tolerance(jnp.asarray(residual_norm), reference, rtol, atol))
+        # Finiteness is tested separately because `within_tolerance` alone cannot reject a diverged
+        # march: it compares with `<=`, and when the residual norm AND the threshold it is judged
+        # against have both run away to `+inf`, `inf <= inf` is True -- a false "converged" on a state
+        # that solves nothing. A NaN norm already fails the comparison on its own (every NaN
+        # comparison is false); `+inf` is the case that needs this.
+        return bool(
+            jnp.isfinite(jnp.asarray(residual_norm))
+            and within_tolerance(jnp.asarray(residual_norm), reference, rtol, atol)
+        )
 
     # Whether the step just set up runs the TARGET problem. A homotopy march may not stop on the
     # residual tolerance before it does -- a small residual at an intermediate station says nothing
@@ -695,7 +750,17 @@ def forward_march(
     # homotopy it is True throughout and the stopping test is unchanged.
     arrived = homotopy is None
 
-    while len(reports) < max_steps and not (converged_at(current) and arrived) and not triggered:
+    # A non-finite residual at the state the march is handed stops it before it steps: the step's
+    # linear solve would be asked to factor a NaN/inf right-hand side and raise from inside the Krylov
+    # solver, which reports a bug upstream of itself rather than the fact the caller needs -- that this
+    # march never left a state solving nothing. The post-step break below is the same rule one step
+    # later, for a residual that goes non-finite on the way.
+    while (
+        len(reports) < max_steps
+        and math.isfinite(current)
+        and not (converged_at(current) and arrived)
+        and not triggered
+    ):
         # The station this step drives. `enter` is where a homotopy re-points whatever must follow the
         # parameter (a preconditioner refresh), so it runs before the control and the refresh below.
         step_residual = residual_fn

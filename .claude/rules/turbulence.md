@@ -457,9 +457,11 @@ Many entries below are dated history written against the old API. Read them thro
       and, for the materialized re-fit, `test_a_solve_that_re_fits_its_lu_every_step_is_differentiable`.
       ⚠️ **Two traps survive.** Anything a hook caches must be built from those stopped copies: an array
       built from un-stopped values does not fail during `jax.grad`, only later, as
-      `UnexpectedTracerError`. And the solve **cannot** run under `jax.jit` or `jax.vmap`, where a
-      stopped copy is still abstract — `_refuse_a_transform_the_march_cannot_run_in` refuses that before
-      any work. A session the **caller** re-points at a live assembler (`session.rebind(coupled)` inside
+      `UnexpectedTracerError`. And the solve **cannot** run inside a traced program -- `jax.jit`,
+      `jax.vmap`, or a traced loop such as `lax.scan` -- where a
+      stopped copy is still abstract — `refuse_a_transform_the_march_cannot_run_in` refuses that before
+      any work (it moved to `solve/march.py` and took a `caller=` argument in phase 3, since
+      `ImplicitNewtonSolver.solve` and `solve_coupled_mass_flow` now refuse on the same terms). A session the **caller** re-points at a live assembler (`session.rebind(coupled)` inside
       `jax.grad`) still refuses to build, since the session holds that assembler itself.
   - **`on_step` / `on_checkpoint` instrument the march, and work WITHOUT a refresh trigger.** `on_step`
     receives each `StepReport` (step, cycles, ‖R‖, ratio); `on_checkpoint` additionally receives the
@@ -518,10 +520,13 @@ Many entries below are dated history written against the old API. Read them thro
   `SSTTurbulence` therefore splits `k_preconditioner`/`omega_preconditioner` (frozen, `method=`) from
   `k_shift_policy`/`omega_shift_policy` (per sweep, `preconditioner=`); `solve_segregated` builds the
   former on the first sweep and the latter every sweep. Measured: traces per sweep went `[5,5,5,5,5]` →
-  `[5,5,0,0,0]` with the converged field bit-identical. Pinned by
-  `test_a_carried_preconditioner_compiles_the_scalar_solve_once`.
+  `[5,5,0,0,0]` with the converged field bit-identical — **under the traced solve of the day; the counts
+  moved when the solve became an eager march (2026-09-15), because a converged sweep now traces nothing
+  and every sweep pays one eager residual evaluation for the march's reference norm.** The property is
+  unchanged and still pinned by `test_a_carried_preconditioner_compiles_the_scalar_solve_once`, whose
+  fixture had to start disturbing the state to keep measuring it (see `solve.md`).
 - **`transport.py`'s `omega_residual` returns a `WallFixedResidual`, not a closure (binding, #105).** It is
-  rebuilt every sweep and passed into the jitted scalar solve, so as a bare closure it landed on
+  rebuilt every sweep and reaches the compiled march step as an argument, so as a bare closure it landed on
   `filter_jit`'s static side and identity-missed the cache every sweep. As an `equinox.Module` its arrays
   ride on the traced side and only their *values* change. (`k_residual` already returned a bound
   `ResidualAssembler.residual`, which equinox treats as a pytree — that one was always fine.) Note the
@@ -1754,7 +1759,11 @@ Many entries below are dated history written against the old API. Read them thro
     the body force `β` along the flow direction is itself a **coupled unknown** appended to the state
     and the coupled residual bordered with the constraint row `⟨U_dir⟩ − U_bar = 0`: one honest
     augmented residual `R_aug([flow…, k, ω, β]) = [R_coupled(state; β); ⟨U_dir⟩ − U_bar]`, driven by a
-    single `ImplicitNewtonSolver`. The border column/row `(a, c)` and the Schur (constraint)
+    single `ImplicitNewtonSolver` — which since 2026-09-15 (phase 3) marches eagerly like every other
+    solve, so this path too **refuses `jax.jit`/`jax.vmap`** and could be given the march's hooks
+    (observer, refresh, retries) that only `solve_coupled` passes today. Its bordered residual is
+    `_MassFlowConstrainedResidual`, a module rather than the closure it was, so a solver reused across
+    calls keeps one compiled step. The border column/row `(a, c)` and the Schur (constraint)
     preconditioner are the flow block's own primitives (`_constraint_vectors`,
     `_bordered_preconditioner`, `_with_body_force` from `flow/mean_velocity.py`) reused in the coupled
     `[flow…, k, ω]` layout by `_coupled_constraint_vectors` — the same Schur elimination one careful

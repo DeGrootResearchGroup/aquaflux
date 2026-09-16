@@ -52,9 +52,9 @@ and needs none of this. The **adjoint** transpose solve at the converged root is
 :func:`jax.linear_transpose` (``M_aug`` is linear, so ``M_aug^T ~ J_aug^{-T}`` exactly), so the reverse
 pass is mesh-independent too with no extra code; the gradient is identical to the unpreconditioned
 adjoint's (a preconditioner never changes the sensitivity). The bordered preconditioner is built once,
-in the builder, from a concrete ``reference`` -- **not** inside the jitted solve from its traced
-``momentum`` argument, which would leave a tracer in the (non-differentiated) preconditioner and break
-``jax.grad``.
+in the builder, from a concrete ``reference`` -- **not** inside the solve from the ``momentum`` it is
+called with, which under ``jax.grad`` would leave a tracer in the (non-differentiated) preconditioner
+and break the gradient.
 """
 
 from __future__ import annotations
@@ -142,6 +142,40 @@ def _bordered_preconditioner(
     return factory
 
 
+class _BulkVelocityResidual(eqx.Module):
+    """The flow residual bordered with ``<U_dir> - target``, as a two-argument residual.
+
+    The assembler arrives as the Newton solve's differentiable parameter ``theta`` rather than being
+    captured, so the implicit-function-theorem adjoint returns its cotangent and the constrained solve
+    is reverse-differentiable in it (e.g. in its viscosity). **Everything the residual reads from the
+    assembler therefore comes from** ``theta``, including the cell volumes: a value captured from an
+    outer assembler would be a closed-over input of the adjoint's ``custom_vjp`` and differentiating it
+    raises.
+
+    A **module rather than a closure**, so that the two settings below are compared by value: the march
+    compiles its step with the residual as an argument, and a closure built per solve is hashed by
+    identity, so a solver reused across a sweep would recompile every call.
+
+    Attributes
+    ----------
+    flow_direction : int
+        The streamwise axis the bulk velocity is measured and the body force applied along.
+    target : float
+        The bulk (volume-averaged) velocity component to hold.
+    """
+
+    flow_direction: int
+    target: float
+
+    def __call__(self, augmented: jnp.ndarray, theta: MomentumContinuity) -> jnp.ndarray:
+        flow, beta = augmented[:-1], augmented[-1]
+        forced = _with_body_force(theta, self.flow_direction, beta)
+        velocity, _ = forced.unpack(flow)
+        volume = theta.geometry.cell.volume
+        bulk = jnp.sum(velocity[:, self.flow_direction] * volume) / jnp.sum(volume)
+        return jnp.append(forced.residual(flow), bulk - self.target)
+
+
 def bulk_velocity_flow_solve(
     *,
     target: float,
@@ -208,24 +242,11 @@ def bulk_velocity_flow_solve(
         force, average = _constraint_vectors(reference, flow_direction)
         augmented_preconditioner = _bordered_preconditioner(preconditioner, force, average)
 
-    @eqx.filter_jit
+    augmented_residual = _BulkVelocityResidual(flow_direction, target)
+
     def solve(
         momentum: MomentumContinuity, state: jnp.ndarray
     ) -> tuple[MomentumContinuity, jnp.ndarray]:
-        # The assembler is threaded as the Newton solve's differentiable parameter ``theta`` (not
-        # captured), so the implicit-function-theorem adjoint returns its cotangent -- the constrained
-        # solve is reverse-differentiable in ``momentum`` (e.g. its viscosity). Everything the residual
-        # reads from the assembler therefore comes from ``theta``, including the cell volumes; a value
-        # captured from the outer ``momentum`` here would be a closed-over ``custom_vjp`` input and
-        # differentiating it raises.
-        def augmented_residual(augmented: jnp.ndarray, theta: MomentumContinuity) -> jnp.ndarray:
-            flow, beta = augmented[:-1], augmented[-1]
-            forced = _with_body_force(theta, flow_direction, beta)
-            velocity, _ = forced.unpack(flow)
-            volume = theta.geometry.cell.volume
-            bulk = jnp.sum(velocity[:, flow_direction] * volume) / jnp.sum(volume)
-            return jnp.append(forced.residual(flow), bulk - target)
-
         augmented0 = jnp.append(state, momentum.body_force[flow_direction])
         newton = ImplicitNewtonSolver(
             max_steps=max_steps,
