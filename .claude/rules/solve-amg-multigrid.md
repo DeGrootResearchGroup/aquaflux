@@ -1274,7 +1274,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   **⚠️ The probe that first "measured" this question was structurally incapable of answering it — check
   for this failure mode before trusting any arm comparison.** It preconditioned with
   `CoupledShiftPolicy.make_preconditioner`, which is block-SIMPLE on `[u,v,w,p]` plus (with
-  `method=None`) **identity on `k` and `ω`**. `equilibrate` lives only inside the engine's
+  `method=None`, now `scalar=UnpreconditionedScalars()`) **identity on `k` and `ω`**. `equilibrate` lives only inside the engine's
   `FieldSplitAmgPreconditioner` (via `trailing_inverse`), so **both arms ran identical code** and
   returned identical corrections — reported as "no effect". Two ~2 GB Jacobians were built and discarded
   to produce it. The faithfulness gate could not catch it: the gate forms `operator(δ) − b`, which
@@ -2125,7 +2125,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   the shapes: on a 600-cell chain, cold vs developed coefficients (5000× flux, 1000× viscosity ramp)
   gave **identical L0–L2 but divergent L3–L5** (`n_coarse` 37→38, then `n` 37→38 / `nnz` 109→112,
   18→19 / 52→55), i.e. a different jit signature and therefore a recompile anyway. The aggregation
-  path was invariant at *every* level in the same comparison. **Consequence:** for `method="air"` (and
+  path was invariant at *every* level in the same comparison. **Consequence:** for `ScalarAir()` (and
   `velocity=ConvectionAir()`) a cheap refresh requires **reusing the reference's frozen C/F split and
   prolongation and recomputing only the values on it** — legitimate, since any valid split gives a
   valid preconditioner. That is **`refresh_air_hierarchy(hierarchy, a_new)`** (below),
@@ -2272,9 +2272,9 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
       of the whole fixed-cycle map, since `R != Pᵀ` makes swapping the transfers by hand wrong.
       Selected on `bfs3d` by `BFS3D_TURBULENCE_INVERSE=air`.
   - **What is NOT yet re-measured: whether lAIR is any good on `bfs3d`.** Everything above is setup
-    cost and a 2D contraction fixture. `method="air"` is opt-in in both consumers
-    (`scalar_transport_preconditioner`, `BlockPreconditioner` via `velocity=ConvectionAir()`) and both
-    default to `twolevel`, so no shipped default moved.
+    cost and a 2D contraction fixture. lAIR is opt-in in both consumers
+    (`scalar_transport_preconditioner` via `scalar=ScalarAir()`, `BlockPreconditioner` via
+    `velocity=ConvectionAir()`) and both default to two-level aggregation, so no shipped default moved.
 - **`refresh_air_hierarchy` — the lAIR refresh that keeps the compilation signature (BUILT).** It
   re-derives an lAIR hierarchy's **values** at a new operator while holding the coarsening fixed: each
   level reuses its stored C/F split (recovered from the level's own masks) and its stored

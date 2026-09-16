@@ -49,6 +49,7 @@ from aquaflux.solve import (  # noqa: E402
     block_stencil_gather_map,
     build_convection_hierarchy,
 )
+from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _coupled_jacobian_plan,
     _coupled_shift_policy,
@@ -128,7 +129,7 @@ def main() -> None:
     groups = FieldGroups.split_before(coupled.layout, "k")
     print(f"{'=' * 88}\n{name}: {description}\nmarch shift {march_beta}\n{'=' * 88}", flush=True)
     state = load_state(name)
-    base = _coupled_shift_policy(coupled, state, "twolevel")
+    base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     plan = _coupled_jacobian_plan(coupled, 3)
     jacobian = materialize(
         coupled,

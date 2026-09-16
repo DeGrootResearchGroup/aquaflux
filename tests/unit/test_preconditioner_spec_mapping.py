@@ -7,11 +7,9 @@ preconditioner.
 
 from __future__ import annotations
 
-import copy
 import importlib
 import inspect
 import json
-import pickle
 import pkgutil
 
 import aquaflux
@@ -26,6 +24,10 @@ from aquaflux.turbulence import (
     JacobianProbeSpec,
     MaterializedJacobian,
     MonolithicVCycle,
+    ScalarAir,
+    ScalarBlock,
+    ScalarTwoLevel,
+    UnpreconditionedScalars,
     preconditioner_spec_from_mapping,
     preconditioner_spec_to_mapping,
 )
@@ -34,8 +36,9 @@ from aquaflux.turbulence.preconditioner_spec import _SPEC_MAPPING
 #: One spec per shape a case file can take, together holding every value class at least once.
 _SPECS = [
     BlockDiagonal(),
-    BlockDiagonal(method=None),
-    BlockDiagonal(method="air", velocity=ViscousMultilevel()),
+    BlockDiagonal(scalar=UnpreconditionedScalars()),
+    BlockDiagonal(scalar=ScalarAir(), velocity=ViscousMultilevel()),
+    BlockDiagonal(scalar=ScalarTwoLevel(v_cycles=2)),
     BlockDiagonal(velocity=ConvectionAir(), v_cycles=2),
     BlockDiagonal(
         velocity=ConvectionTwoLevel(sweeps=3, omega=0.7),
@@ -90,15 +93,16 @@ def _exported_classes() -> set[type]:
 def _public_value_classes() -> set[type]:
     """Every concrete public value a spec can hold.
 
-    The nested families -- velocity blocks and block inverses, which grow as methods are added -- are
+    The nested families -- velocity blocks, scalar blocks and block inverses, which grow as methods are
+    added -- are
     found from every subpackage's exports, so a new member exported anywhere is caught. The spec's own
     classes, which do not form an open family, are named here.
     """
     nested = {
         cls
         for cls in _exported_classes()
-        if issubclass(cls, VelocityBlock | BlockInverse)
-        and cls not in (VelocityBlock, BlockInverse)
+        if issubclass(cls, VelocityBlock | ScalarBlock | BlockInverse)
+        and cls not in (VelocityBlock, ScalarBlock, BlockInverse)
         and not inspect.isabstract(cls)
     }
     spec_classes = {BlockDiagonal, MaterializedJacobian, CompleteLu, MonolithicVCycle, FieldSplit}
@@ -142,17 +146,6 @@ def test_a_column_reach_read_from_a_file_is_the_same_value_as_one_given_in_code(
     assert all(type(r) is int for r in read.probe.column_reach)
 
 
-@pytest.mark.parametrize(
-    "duplicate", [copy.copy, copy.deepcopy, lambda s: pickle.loads(pickle.dumps(s))]
-)
-def test_an_unset_scalar_method_survives_copying_and_pickling(duplicate) -> None:
-    """The sentinel is compared by identity, so a copy that made a new one changed the spec's meaning."""
-    duplicated = duplicate(BlockDiagonal())
-    assert duplicated == BlockDiagonal()
-    assert duplicated.resolved_method() == "twolevel"
-    assert preconditioner_spec_to_mapping(duplicated) == {"kind": "BlockDiagonal"}
-
-
 def test_a_numpy_scalar_setting_is_refused_on_writing_naming_the_setting() -> None:
     with pytest.raises(TypeError, match="float32 at 'build_beta' is not plain data"):
         preconditioner_spec_to_mapping(
@@ -190,21 +183,15 @@ def test_the_default_probe_is_omitted_and_an_omitted_probe_reads_back_as_the_def
     assert read.probe == JacobianProbeSpec()
 
 
-def test_an_explicit_null_scalar_method_differs_from_an_absent_one() -> None:
-    assert preconditioner_spec_to_mapping(BlockDiagonal()) == {"kind": "BlockDiagonal"}
-    assert preconditioner_spec_to_mapping(BlockDiagonal(method=None)) == {
+def test_unpreconditioned_scalar_blocks_are_a_kind_and_a_null_scalar_is_the_default() -> None:
+    """``null`` means "not set" for the scalar block as for every field; no preconditioner is a kind."""
+    assert preconditioner_spec_to_mapping(BlockDiagonal(scalar=UnpreconditionedScalars())) == {
         "kind": "BlockDiagonal",
-        "method": None,
+        "scalar": {"kind": "UnpreconditionedScalars"},
     }
-    assert (
-        preconditioner_spec_from_mapping({"kind": "BlockDiagonal"}).resolved_method() == "twolevel"
-    )
-    assert (
-        preconditioner_spec_from_mapping(
-            {"kind": "BlockDiagonal", "method": None}
-        ).resolved_method()
-        is None
-    )
+    null = preconditioner_spec_from_mapping({"kind": "BlockDiagonal", "scalar": None})
+    assert null == BlockDiagonal()
+    assert null.resolved_scalar() == ScalarTwoLevel()
 
 
 @pytest.mark.parametrize(

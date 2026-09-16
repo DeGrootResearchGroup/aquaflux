@@ -100,6 +100,7 @@ from aquaflux.solve import (  # noqa: E402
     restart_cycles,
     solve_linear,
 )
+from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _PROBE_BATCH_SIZE,
     _batched_jacobian_matvec,
@@ -602,7 +603,7 @@ def main():
     # matrix. Reading the case's value is what keeps this probe on the right side of that.
     plan = _coupled_jacobian_plan(coupled, 3, compare.COLUMN_REACH)
     structure = block_stencil_gather_map(plan)
-    base = _coupled_shift_policy(coupled, state, "twolevel")
+    base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     rhs = -coupled.residual(state)
     op_shift = _frozen_shift_diagonal(base, march_beta, state) if march_beta > 0 else 0.0
     # Report both norms, so the run records the one way it departs from the march: the march solved for
@@ -616,7 +617,7 @@ def main():
     if stale:
         print("  preconditioner built at a DIFFERENT state:", flush=True)
         pc_state = load_state(pc_state_name)
-        pc_base = _coupled_shift_policy(coupled, pc_state, "twolevel")
+        pc_base = _coupled_shift_policy(coupled, pc_state, ScalarTwoLevel())
     else:
         pc_state, pc_base = state, base
     jacobian = materialize(coupled, pc_state, plan, structure, n_fields)

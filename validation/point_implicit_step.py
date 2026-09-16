@@ -54,6 +54,7 @@ from pathlib import Path
 
 import numpy as np
 import scipy.sparse as sp
+from aquaflux.turbulence import UnpreconditionedScalars
 
 VALIDATION = Path(__file__).resolve().parent
 sys.path.insert(0, str(VALIDATION.parent))
@@ -106,7 +107,9 @@ def main() -> None:
     flow, k, omega = hybrid_initialize(coupled.momentum, coupled.turbulence)
     state = coupled.state_from_physical(flow, k, omega)
 
-    policy = _coupled_shift_policy(coupled, state, None, build_flow_block=False)
+    policy = _coupled_shift_policy(
+        coupled, state, UnpreconditionedScalars(), build_flow_block=False
+    )
     measure = coupled_scaled_norm(coupled, policy, state)
     residual = coupled.residual(state)
     base = float(measure(residual))

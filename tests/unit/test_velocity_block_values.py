@@ -39,7 +39,7 @@ from aquaflux.flow.block_preconditioner import (
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.turbulence import BlockDiagonal
+from aquaflux.turbulence import BlockDiagonal, UnpreconditionedScalars
 from aquaflux.turbulence.coupled import _coupled_shift_policy
 
 from tests.unit.test_coupled_rans import _cavity, _healthy_state
@@ -142,9 +142,9 @@ def test_the_viscous_value_is_the_default_and_says_nothing_on_a_closed_domain() 
 def test_the_coupled_default_flow_block_is_the_two_level_convection_value() -> None:
     mesh, coupled = _cavity(4)
     state = _healthy_state(mesh, coupled)
-    default = _coupled_shift_policy(coupled, state, None).flow_preconditioner
+    default = _coupled_shift_policy(coupled, state, UnpreconditionedScalars()).flow_preconditioner
     explicit = _coupled_shift_policy(
-        coupled, state, None, velocity=ConvectionTwoLevel()
+        coupled, state, UnpreconditionedScalars(), velocity=ConvectionTwoLevel()
     ).flow_preconditioner
     assert isinstance(default.velocity, TwoLevelConvectionVelocity)
     for a, b in zip(jax.tree.leaves(default), jax.tree.leaves(explicit), strict=True):

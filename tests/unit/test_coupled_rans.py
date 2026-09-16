@@ -43,9 +43,12 @@ from aquaflux.turbulence import (
     LogScalars,
     MaterializedJacobian,
     MonolithicVCycle,
+    ScalarAir,
+    ScalarTwoLevel,
     ShiftSettings,
     SSTModel,
     SSTTurbulence,
+    UnpreconditionedScalars,
     coupled_equation_names,
     coupled_fields,
     coupled_residuals,
@@ -205,7 +208,9 @@ def test_lu_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None
     lu_step = coupled_step(
         coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
     )
-    block_step = coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None))
+    block_step = coupled_step(
+        coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+    )
     # Each built step carries the solver it will run; the LU's is the small-restart one by default.
     assert lu_step.krylov_solver.restart == 10
     assert block_step.krylov_solver.restart == 120
@@ -243,14 +248,16 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
     # escalation ladder cannot catch `k < 0` -- the divergence guard fires on a residual that is already
     # non-finite, by which point `sqrt(k)` has poisoned the closure.
     built = {
-        "block": coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None)),
+        "block": coupled_step(
+            coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+        ),
         "lu": coupled_step(
             coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
         ),
         "block dual-time": coupled_step(
             coupled,
             state,
-            preconditioner=BlockDiagonal(method=None),
+            preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
             dual_time=DualTimeLoop(inner_steps=2),
         ),
     }
@@ -314,7 +321,9 @@ def test_every_builder_stops_the_forward_solve_in_the_march_s_own_measure() -> N
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
     for name, step in {
-        "block": coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None)),
+        "block": coupled_step(
+            coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+        ),
         "lu": coupled_step(
             coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
         ),
@@ -328,9 +337,14 @@ def test_every_builder_stops_the_forward_solve_in_the_march_s_own_measure() -> N
     # An explicit measure is honoured all the way through, so the two cannot come apart there either --
     # which is what `solve_coupled` relies on when it re-injects the march's initial measure at every
     # refresh rather than letting a self-normalising one re-base at the developed state.
-    base = coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None))
+    base = coupled_step(
+        coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+    )
     explicit = coupled_step(
-        coupled, state, preconditioner=BlockDiagonal(method=None), residual_norm=base.residual_norm
+        coupled,
+        state,
+        preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
+        residual_norm=base.residual_norm,
     )
     assert explicit.krylov_solver.norm is explicit.residual_norm is base.residual_norm
 
@@ -345,7 +359,9 @@ def test_the_constrained_builder_keeps_a_euclidean_stop_for_a_stated_reason() ->
     """
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
-    step = mass_flow_coupled_continuation(coupled, state, preconditioner=BlockDiagonal(method=None))
+    step = mass_flow_coupled_continuation(
+        coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+    )
     assert step.residual_norm is jnp.linalg.norm
     assert step.krylov_solver.norm is step.residual_norm
 
@@ -367,7 +383,7 @@ def test_the_constrained_builder_refuses_a_materialized_preconditioner() -> None
 @pytest.mark.parametrize(
     "configuration",
     [
-        {"preconditioner": BlockDiagonal(method="air")},
+        {"preconditioner": BlockDiagonal(scalar=ScalarAir())},
         {"reference_state": "state"},
         {"dual_time": DualTimeLoop(inner_steps=3)},
     ],
@@ -379,13 +395,13 @@ def test_the_constrained_solve_refuses_configuration_beside_a_finished_continuat
     """Configuration for a step the solve is not building is refused, not dropped.
 
     A finished ``strategy`` already carries its preconditioner, reference and march settings, so
-    passing any of them beside it used to reach nothing: ``method="air"`` beside a twolevel step ran
-    twolevel, with no error. The refusal comes before the initial condition is built.
+    passing any of them beside it used to reach nothing: an lAIR scalar block beside a two-level step
+    ran two-level, with no error. The refusal comes before the initial condition is built.
     """
     mesh, coupled = _cavity(4)
     state = _healthy_state(mesh, coupled)
     continuation = mass_flow_coupled_continuation(
-        coupled, state, preconditioner=BlockDiagonal(method=None)
+        coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
     )
     given = {name: state if value == "state" else value for name, value in configuration.items()}
     with pytest.raises(TypeError, match=r"configure the continuation `solve_coupled_mass_flow`"):
@@ -461,7 +477,9 @@ def test_continuation_settings_are_refused_where_they_would_be_dropped() -> None
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
     flow, k, omega = coupled.physical_fields(state)
-    step = coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None))
+    step = coupled_step(
+        coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+    )
 
     for kwargs in (
         {"strategy": step, "dual_time": DualTimeLoop(inner_steps=3)},
@@ -474,7 +492,7 @@ def test_continuation_settings_are_refused_where_they_would_be_dropped() -> None
         },
         {
             "refresh": RefreshPolicy(builder=lambda s: step),
-            "preconditioner": BlockDiagonal(method=None),
+            "preconditioner": BlockDiagonal(scalar=UnpreconditionedScalars()),
         },
     ):
         offender = next(iter(set(kwargs) - {"strategy", "refresh"}))
@@ -496,7 +514,7 @@ def test_the_settings_are_still_accepted_where_the_solve_does_build_the_continua
             coupled=coupled,
             strategy=None,
             refresh=refresh,
-            preconditioner=BlockDiagonal(method=None),
+            preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
             reference_state=state,
             kwargs={"dual_time": DualTimeLoop(inner_steps=2)},
         )
@@ -504,7 +522,7 @@ def test_the_settings_are_still_accepted_where_the_solve_does_build_the_continua
         # ...and it carries them, rather than accepting and then dropping them one layer down.
         assert source.march == {"dual_time": DualTimeLoop(inner_steps=2)}
         assert source.reference_state is state
-        assert source.session._spec == BlockDiagonal(method=None)
+        assert source.session._spec == BlockDiagonal(scalar=UnpreconditionedScalars())
 
 
 def test_an_unnamed_preconditioner_is_the_default_block_diagonal_family() -> None:
@@ -523,7 +541,7 @@ def test_an_unnamed_preconditioner_is_the_default_block_diagonal_family() -> Non
         kwargs={},
     )
     assert source.session._spec == BlockDiagonal()
-    assert source.session._spec.resolved_method() == "twolevel"
+    assert source.session._spec.resolved_scalar() == ScalarTwoLevel()
     assert source.refresh_preconditioner is None
 
 
@@ -563,7 +581,9 @@ def test_the_continuation_source_is_one_decision_for_the_build_and_every_refresh
 
     def builder(s):
         built.append(s)
-        return coupled_step(coupled, s, preconditioner=BlockDiagonal(method=None))
+        return coupled_step(
+            coupled, s, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+        )
 
     source = coupled_module._continuation_source(
         coupled=coupled,
@@ -930,7 +950,7 @@ def test_refreshing_the_policy_rebuilds_transport_and_carries_the_coordinate_fac
     should track the flow -- while carrying the coordinate factor frozen, so the temporal ratio
     ``transport(state)/transport(reference)`` has that range cancel. Pinned here at the mechanism,
     without a full separating march. The flow block is carried too; the scalar AMG refresh itself is
-    pinned in ``test_scalar_transport_preconditioner``. ``method=None`` and the symmetric viscous
+    pinned in ``test_scalar_transport_preconditioner``. Unpreconditioned scalar blocks and the symmetric viscous
     velocity block keep the policy build robust to the two synthetic states.
     """
     from aquaflux.turbulence.coupled import _coupled_shift_policy
@@ -943,9 +963,9 @@ def test_refreshing_the_policy_rebuilds_transport_and_carries_the_coordinate_fac
     developed = _healthy_state(mesh, coupled, seed=1)  # a *different*, more-developed reference
 
     kw = dict(velocity=ViscousMultilevel())
-    base = _coupled_shift_policy(coupled, cold, None, **kw)
-    refreshed = _coupled_shift_policy(coupled, developed, None, base, **kw)
-    rebuilt = _coupled_shift_policy(coupled, developed, None, **kw)
+    base = _coupled_shift_policy(coupled, cold, UnpreconditionedScalars(), **kw)
+    refreshed = _coupled_shift_policy(coupled, developed, UnpreconditionedScalars(), base, **kw)
+    rebuilt = _coupled_shift_policy(coupled, developed, UnpreconditionedScalars(), **kw)
 
     # The coordinate factor (jacobian_scale) is carried from `base` frozen ...
     assert jnp.array_equal(refreshed.k_jacobian_scale, base.k_jacobian_scale)
@@ -972,7 +992,7 @@ def test_refresh_carries_the_block_scaled_progress_norm_fixed_at_the_initial_sta
     mesh, coupled = _cavity()
     cold = _healthy_state(mesh, coupled, seed=0)
     developed = _healthy_state(mesh, coupled, seed=1)
-    spec = BlockDiagonal(method=None, velocity=ViscousMultilevel())
+    spec = BlockDiagonal(scalar=UnpreconditionedScalars(), velocity=ViscousMultilevel())
     session = open_session(spec, coupled)
 
     base = session.build(cold, block_scaled_norm=True)
@@ -1185,7 +1205,9 @@ def test_the_per_equation_residuals_compose_into_the_march_s_own_measure() -> No
     are the very numbers that scalar is built from -- not a separately-scaled lookalike."""
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
-    engine = coupled_step(coupled, state, preconditioner=BlockDiagonal(method=None))
+    engine = coupled_step(
+        coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+    )
 
     reported = coupled_residuals(coupled, engine)(state)
 
@@ -1205,7 +1227,9 @@ def test_the_per_equation_rows_add_up_to_the_residual_the_march_reports() -> Non
     mesh, coupled = _cavity()
     start = _healthy_state(mesh, coupled, seed=0)
     end = _healthy_state(mesh, coupled, seed=1)
-    engine = coupled_step(coupled, start, preconditioner=BlockDiagonal(method=None))
+    engine = coupled_step(
+        coupled, start, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+    )
     reported_by_march = float(
         coupled_scaled_norm(coupled, engine.shift_policy, start)(coupled.residual(end))
     )
@@ -1225,7 +1249,9 @@ def test_each_step_equilibrates_at_the_state_it_started_from() -> None:
     first = _healthy_state(mesh, coupled, seed=0)
     second = _healthy_state(mesh, coupled, seed=1)
     third = _healthy_state(mesh, coupled, seed=2)
-    engine = coupled_step(coupled, first, preconditioner=BlockDiagonal(method=None))
+    engine = coupled_step(
+        coupled, first, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+    )
 
     residuals = coupled_residuals(coupled, engine, first)
     residuals(second)  # step 1 consumes the seed and records `second`

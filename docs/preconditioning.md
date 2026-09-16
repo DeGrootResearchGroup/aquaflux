@@ -125,16 +125,22 @@ and *returns* the `phi -> residual` closure, which is what gets frozen.
 It returns a {class}`~aquaflux.turbulence.ScalarTransportPreconditioner`, which is a
 `phi -> M` factory of the shape the solvers expect.
 
-The `method` argument picks the hierarchy:
+The `scalar` argument picks the hierarchy, as a value that carries its own settings (the
+V-cycles per apply, `v_cycles`):
 
-- `"twolevel"` (default) builds a {class}`~aquaflux.turbulence.ConvectionAmgPreconditioner`
-  — a stable two-level nonsymmetric aggregation. Two levels by design: a
-  coarse-of-coarse convection operator acquires modes that a single-factor smoother cannot
-  damp.
-- `"air"` builds an {class}`~aquaflux.turbulence.AirAmgPreconditioner`, the reduction-based
-  local approximate ideal restriction (lAIR) method of Manteuffel, Ruge & Southworth
-  (2018). It coarsens all the way down and stays mesh-independent, which is what the
-  two-level method gives up.
+- {class}`~aquaflux.turbulence.ScalarTwoLevel` (default) builds a
+  {class}`~aquaflux.turbulence.ConvectionAmgPreconditioner` — a stable two-level nonsymmetric
+  aggregation. Two levels by design: a coarse-of-coarse convection operator acquires modes
+  that a single-factor smoother cannot damp.
+- {class}`~aquaflux.turbulence.ScalarAir` builds an
+  {class}`~aquaflux.turbulence.AirAmgPreconditioner`, the reduction-based local approximate
+  ideal restriction (lAIR) method of Manteuffel, Ruge & Southworth (2018). It coarsens all the
+  way down and stays mesh-independent, which is what the two-level method gives up.
+- {class}`~aquaflux.turbulence.UnpreconditionedScalars` builds nothing: the call returns
+  `None`, which every consumer reads as a shift-only solve. It is a value rather than a `None`
+  argument so that the same three choices can be written wherever a scalar block is configured
+  — the segregated loop's `scalar_preconditioner`, and the `scalar` field of a
+  {class}`~aquaflux.turbulence.BlockDiagonal` spec.
 
 Two smaller pieces belong here. `fixed_cells` names cells whose residual is a value
 fixation rather than a transport balance — a prescribed near-wall `ω`, for instance. Those
@@ -342,10 +348,9 @@ A field left out takes its class's default, so a file names only what it changes
 is read as a tuple. An unknown `kind`, or a field its class does not have, is refused with the
 path to the entry — a misspelt field name is an error rather than a default in disguise. The
 *values* of plain settings are not checked when the file is read: a misspelt `backend`, say,
-is refused only when the preconditioner is built. One
-field behaves differently: on a {class}`~aquaflux.turbulence.BlockDiagonal`, an explicit
-`method: null` leaves the scalar blocks unpreconditioned, while leaving `method` out takes
-the default multigrid.
+is refused only when the preconditioner is built. An explicit `null` means the same as
+leaving the field out. To leave a {class}`~aquaflux.turbulence.BlockDiagonal`'s scalar blocks
+unpreconditioned, name that as a value: `scalar: {kind: UnpreconditionedScalars}`.
 {func}`~aquaflux.turbulence.preconditioner_spec_to_mapping` writes a spec back in the same
 form, leaving out every field at its default.
 
@@ -562,5 +567,5 @@ From there:
 - **The solve converges but the Newton step is rejected.** That is globalization rather
   than preconditioning: see [Steady-state solving](steady_state_solving.md).
 - **It converges on a small mesh and fails on a large one.** Suspect a two-level method
-  where a fully coarsening one is needed — `"air"` for a transported scalar, or an lAIR
+  where a fully coarsening one is needed — `ScalarAir()` for a transported scalar, or an lAIR
   block inverse in a field split.

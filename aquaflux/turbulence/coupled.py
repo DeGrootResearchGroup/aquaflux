@@ -107,10 +107,12 @@ from aquaflux.solve import (
 
 from .initialization import hybrid_initialize, wall_consistent_omega
 from .march_settings import LinearSolveSettings, ShiftSettings
-from .preconditioner import ScalarTransportPreconditioner, ScaledScalarPreconditioner
-
-# `_UNSET` is "not given" for `solve_coupled`'s `method`, whose `None` already means something; it is
-# shared with the block-diagonal spec, whose `method` has the same two meanings.
+from .preconditioner import (
+    ScalarBlock,
+    ScalarTransportPreconditioner,
+    ScaledScalarPreconditioner,
+    UnpreconditionedScalars,
+)
 from .preconditioner_spec import (
     BlockDiagonal,
     CompleteLu,
@@ -1458,7 +1460,7 @@ def _k_positivity_guards(
     and it reports ``alpha_max = 1`` regardless of what floor it was built with. So a caller who
     raises ``positivity_floor`` under the default projection gets neither an error nor the
     protection they asked for -- the limiter that floor feeds never binds. Raised here instead of
-    silently doing nothing, the same choice already made for ``method`` / ``reference_state`` /
+    silently doing nothing, the same choice already made for ``preconditioner`` / ``reference_state`` /
     ``**strategy_kwargs`` in :func:`_continuation_source`.
 
     A non-zero floor is not refused when ``k`` is solved in log form (:func:`positive_k_limit`
@@ -1606,7 +1608,7 @@ def coupled_scaled_norm(
 def _coupled_shift_policy(
     coupled: CoupledRANS,
     reference_state: jnp.ndarray,
-    method: str | None,
+    scalar: ScalarBlock,
     reuse: CoupledShiftPolicy | None = None,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     velocity_shift_parts: VelocityShiftParts | None = None,
@@ -1730,28 +1732,26 @@ def _coupled_shift_policy(
         coupled.omega_transform, omega_ref, coupled.turbulence.wall_cells
     )
 
-    k_amg = omega_amg = None
-    if method is not None:
-        k_amg = _reparametrized_preconditioner(
-            coupled.turbulence.k_preconditioner(
-                mdot,
-                closure,
-                k_ref,
-                method=method,
-                reuse=None if reuse is None else reuse.k_preconditioner,
-            ),
-            k_scale,
-        )
-        omega_amg = _reparametrized_preconditioner(
-            coupled.turbulence.omega_preconditioner(
-                mdot,
-                closure,
-                omega_ref,
-                method=method,
-                reuse=None if reuse is None else reuse.omega_preconditioner,
-            ),
-            omega_scale,
-        )
+    k_amg = _reparametrized_preconditioner(
+        coupled.turbulence.k_preconditioner(
+            mdot,
+            closure,
+            k_ref,
+            scalar=scalar,
+            reuse=None if reuse is None else reuse.k_preconditioner,
+        ),
+        k_scale,
+    )
+    omega_amg = _reparametrized_preconditioner(
+        coupled.turbulence.omega_preconditioner(
+            mdot,
+            closure,
+            omega_ref,
+            scalar=scalar,
+            reuse=None if reuse is None else reuse.omega_preconditioner,
+        ),
+        omega_scale,
+    )
 
     # On a refresh keep the basis the reused policy was built with, so the rebuilt transport diagonal
     # combines its convective/dissipative parts the same way the carried coordinate factor expects.
@@ -2179,7 +2179,7 @@ def _monolithic_shift_source(
     return _coupled_shift_policy(
         coupled,
         reference_state,
-        None,
+        UnpreconditionedScalars(),
         shift_basis=shift_basis,
         velocity_shift_parts=velocity_shift_parts,
         turbulence_damping=turbulence_damping,
@@ -2898,7 +2898,7 @@ class _BlockSession:
         policy = _coupled_shift_policy(
             coupled,
             state,
-            self._spec.resolved_method(),
+            self._spec.resolved_scalar(),
             reuse,
             *_resolved_shift(keywords.pop("shift")),
             **self._spec.flow_block_options(),
@@ -4111,7 +4111,7 @@ def mass_flow_coupled_continuation(
     policy = _coupled_shift_policy(
         coupled,
         reference_state,
-        preconditioner.resolved_method(),
+        preconditioner.resolved_scalar(),
         None,
         *_resolved_shift(shift),
         **preconditioner.flow_block_options(),

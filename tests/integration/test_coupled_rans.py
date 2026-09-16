@@ -36,6 +36,7 @@ from aquaflux.solve import NO_REFRESH, DualTimeLoop, RefreshPolicy
 from aquaflux.turbulence import (
     BlockDiagonal,
     LogScalars,
+    ScalarTwoLevel,
     SSTModel,
     SSTTurbulence,
     coupled_step,
@@ -167,7 +168,7 @@ def test_coupled_newton_converges_and_matches_the_segregated_solution(case) -> N
         k_ws,
         omega_ws,
         max_steps=40,
-        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
 
     # Converged to machine precision, with a healthy, strictly-positive turbulence field.
@@ -191,7 +192,7 @@ def test_coupled_newton_converges_and_matches_the_segregated_solution(case) -> N
         max_sweeps=60,
         rtol=1e-9,
         relaxation=0.9,
-        scalar_preconditioner="twolevel",
+        scalar_preconditioner=ScalarTwoLevel(),
     )
     assert float(jnp.linalg.norm(flow - flow_s) / jnp.linalg.norm(flow_s)) < 1e-4
     assert float(jnp.linalg.norm(k - k_s) / jnp.linalg.norm(k_s)) < 1e-3
@@ -207,7 +208,9 @@ def test_coupled_adjoint_matches_finite_difference(case) -> None:
     # must not be traced); differentiate only the converged solve through the coupled IFT adjoint.
     reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
     continuation = coupled_step(
-        coupled, reference_state, preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER)
+        coupled,
+        reference_state,
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
 
     def objective(nu_scale):
@@ -255,7 +258,7 @@ def test_the_coupled_adjoint_is_independent_of_the_forward_iteration_count(case)
         return coupled_step(
             coupled,
             reference_state,
-            preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+            preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
             dual_time=dual_time,
         )
 
@@ -313,7 +316,9 @@ def test_the_injected_adjoint_solver_reaches_the_transpose_solve_and_only_it(cas
 
     reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
     continuation = coupled_step(
-        coupled, reference_state, preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER)
+        coupled,
+        reference_state,
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
     strangled = lx.GMRES(rtol=1e-12, atol=1e-12, restart=1, max_steps=1)
 
@@ -362,7 +367,7 @@ def test_coupled_log_omega_converges_to_the_same_positive_fixed_point(case) -> N
         k_ws,
         omega_ws,
         max_steps=40,
-        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
     residual_norm = float(
         jnp.linalg.norm(log_omega.residual(log_omega.state_from_physical(flow_l, k_l, omega_l)))
@@ -376,7 +381,7 @@ def test_coupled_log_omega_converges_to_the_same_positive_fixed_point(case) -> N
         k_ws,
         omega_ws,
         max_steps=40,
-        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
     assert float(jnp.linalg.norm(flow_l - flow_d) / jnp.linalg.norm(flow_d)) < 1e-4
     assert float(jnp.linalg.norm(k_l - k_d) / jnp.linalg.norm(k_d)) < 1e-3
@@ -397,7 +402,7 @@ def test_coupled_log_omega_adjoint_matches_finite_difference(case) -> None:
     continuation = coupled_step(
         log_omega,
         log_omega.state_from_physical(flow_ws, k_ws, omega_ws),
-        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
 
     def objective(nu_scale):
@@ -426,7 +431,9 @@ def test_coupled_solve_self_starts_from_a_cold_hybrid_initial_condition() -> Non
     coupled = CoupledRANS.build(momentum, turbulence)
 
     flow, k, omega = solve_coupled(
-        coupled, max_steps=40, preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER)
+        coupled,
+        max_steps=40,
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
 
     residual_norm = float(jnp.linalg.norm(coupled.residual(coupled.pack_state(flow, k, omega))))
@@ -472,7 +479,7 @@ def test_staged_preconditioner_refresh_reaches_the_same_fixed_point(case) -> Non
         k_ws,
         omega_ws,
         max_steps=40,
-        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
     staged = solve_coupled(
         coupled,
@@ -483,7 +490,7 @@ def test_staged_preconditioner_refresh_reaches_the_same_fixed_point(case) -> Non
         refresh=RefreshPolicy(
             trigger=_RefreshAfter(steps=3)
         ),  # march a little, re-freeze, then finish
-        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
 
     for name, one, two in zip(("flow", "k", "omega"), single, staged, strict=True):
@@ -510,7 +517,9 @@ def test_staged_refresh_stops_at_the_same_tolerance(case) -> None:
     rtol = 1e-3
 
     common = dict(
-        max_steps=40, rtol=rtol, preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER)
+        max_steps=40,
+        rtol=rtol,
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
     single = solve_coupled(coupled, flow_ws, k_ws, omega_ws, **common)
     staged = solve_coupled(
@@ -553,7 +562,7 @@ def test_observing_a_solve_changes_nothing_about_it(case) -> None:
     flow_ws, k_ws, omega_ws = case["coupled_start"]
     common = dict(
         max_steps=60,
-        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
         dual_time=DualTimeLoop(inner_steps=3),
     )
 
@@ -591,7 +600,7 @@ def test_a_refreshed_solve_is_differentiable_and_gives_the_unrefreshed_gradient(
             omega_ws,
             max_steps=40,
             refresh=refresh,
-            preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+            preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
         )
         return jnp.sum(k**2)
 
@@ -623,7 +632,7 @@ def test_the_march_reports_progress_without_a_refresh_trigger(case) -> None:
         rtol=1e-2,  # loose -- this test is about reporting, not about how deep it gets
         on_step=seen.append,
         on_checkpoint=lambda report, state: saved.append((report.step, state)),
-        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
 
     assert seen, "an instrumented solve produced no step reports"
@@ -661,7 +670,7 @@ def test_a_refresh_is_observed_as_two_reported_segments(case) -> None:
         max_steps=40,
         refresh=RefreshPolicy(trigger=_RefreshAfter(steps=refresh_after)),
         on_step=reports.append,
-        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
 
     # Each segment numbers its own steps from 0, so the refresh boundary is where the index resets.
@@ -706,7 +715,7 @@ def test_the_drift_measure_is_rebased_at_every_refresh(case) -> None:
         max_steps=40,
         refresh=RefreshPolicy(trigger=_RefreshAfter(steps=4)),
         on_step=reports.append,
-        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
 
     boundaries = [i for i, r in enumerate(reports) if r.step == 0 and i > 0]

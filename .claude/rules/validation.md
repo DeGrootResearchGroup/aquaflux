@@ -122,7 +122,7 @@ a mesh. **A green run there does not mean the cases work.** It is blind to:
   whichever builder it is given, so every keyword is "accepted" *statically* and none is checked here —
   and this is the main entry point. ✅ **Narrowed 2026-08-20 (#278): the case where there is no builder
   to forward to is now a `TypeError` at the call rather than silence.** Given an explicit `strategy`
-  or a `RefreshPolicy(builder=...)`, `method` / `reference_state` / `**strategy_kwargs` are refused
+  or a `RefreshPolicy(builder=...)`, `preconditioner` / `reference_state` / `**strategy_kwargs` are refused
   by name instead of dropped — which is how `refresh_preconditioner=` used to vanish on its way to a
   `RefreshPolicy`. What is still unchecked is a keyword that *does* reach the default builder and is
   wrong there; that raises at run time, in the builder, not here.

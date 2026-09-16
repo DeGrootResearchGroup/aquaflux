@@ -57,6 +57,7 @@ from aquaflux.solve import (  # noqa: E402
     block_stencil_gather_map,
 )
 from aquaflux.solve.amg_preconditioner import ShiftedCellMajorOperator  # noqa: E402
+from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _PROBE_BATCH_SIZE,
     _batched_jacobian_matvec,
@@ -103,7 +104,7 @@ def main():
     n_cells = coupled.layout.n_cells
     plan = _coupled_jacobian_plan(coupled, 3)
     structure = block_stencil_gather_map(plan)
-    policy = _coupled_shift_policy(coupled, state, "twolevel")
+    policy = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
         lambda v: _jacobian_matvec(coupled, state, v),
         plan,

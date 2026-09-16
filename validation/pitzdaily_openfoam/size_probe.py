@@ -23,6 +23,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import ilu_fill_probe as P  # noqa: E402
+from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _coupled_shift_policy,
     _frozen_shift_diagonal,
@@ -51,7 +52,7 @@ def run(label, coupled, betas, nu):
     state, residual = seed_state(coupled)
     rhs = -np.asarray(residual, dtype=np.float64)
     jacobian = materialize(coupled, state, 3)
-    base = _coupled_shift_policy(coupled, state, "twolevel")
+    base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     for beta in betas:
         shift = _frozen_shift_diagonal(base, beta, state) if beta > 0 else np.zeros(n_fields * n)
         cell_major, scaling, perm = assemble(jacobian, np.asarray(shift), n_fields)

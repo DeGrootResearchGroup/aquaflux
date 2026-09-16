@@ -19,6 +19,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 from aquaflux.properties import Constant, PropertyModel
+from aquaflux.turbulence import ScalarAir, UnpreconditionedScalars
 from aquaflux.turbulence.driver import _relative_change, _sweep_relaxation, solve_segregated
 
 
@@ -134,10 +135,10 @@ class _StubTurbulence(eqx.Module):
     def closure_fields(self, velocity_fields, k, omega):
         return None
 
-    def k_preconditioner(self, mdot, closure, k, method="twolevel"):
+    def k_preconditioner(self, mdot, closure, k, *, scalar):
         return None
 
-    def omega_preconditioner(self, mdot, closure, omega, method="twolevel"):
+    def omega_preconditioner(self, mdot, closure, omega, *, scalar):
         return None
 
     def k_shift_policy(self, mdot, closure, k, preconditioner=None):
@@ -153,13 +154,22 @@ class _StubTurbulence(eqx.Module):
         return None
 
 
-def _drive(*, max_sweeps, rtol, contraction, relaxation=1.0, relaxation_max=None):
+def _drive(
+    *,
+    max_sweeps,
+    rtol,
+    contraction,
+    relaxation=1.0,
+    relaxation_max=None,
+    turbulence_class=_StubTurbulence,
+    **driver_options,
+):
     """Run the driver with solvers that contract each field toward a fixed target by ``contraction``
     per solve, counting the sweeps actually taken. ``contraction`` in ``[0, 1)`` converges;
     ``rtol=0`` never accepts, forcing the cap."""
     n = 4
     momentum = _StubMomentum(PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}))
-    turbulence = _StubTurbulence(jnp.full(n, 1.0))
+    turbulence = turbulence_class(jnp.full(n, 1.0))
     flow_target, scalar_target = jnp.ones(n), jnp.full(n, 2.0)
     sweeps = []
 
@@ -182,6 +192,7 @@ def _drive(*, max_sweeps, rtol, contraction, relaxation=1.0, relaxation_max=None
         rtol=rtol,
         relaxation=relaxation,
         relaxation_max=relaxation_max,
+        **driver_options,
     )
     return len(sweeps), flow, k, omega
 
@@ -213,3 +224,40 @@ def test_adaptive_relaxation_is_no_slower_than_a_constant_floor() -> None:
             max_sweeps=200, rtol=1e-4, contraction=0.7, relaxation=0.3, relaxation_max=1.0
         )
     assert ramped <= constant
+
+
+#: What the recording closure was asked to build, in order: ``(field, scalar block)``.
+_BUILT: list[tuple[str, object]] = []
+
+
+class _RecordingTurbulence(_StubTurbulence):
+    """The inert closure, recording each scalar preconditioner the driver asks it to build."""
+
+    def k_preconditioner(self, mdot, closure, k, *, scalar):
+        _BUILT.append(("k", scalar))
+
+    def omega_preconditioner(self, mdot, closure, omega, *, scalar):
+        _BUILT.append(("omega", scalar))
+
+
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [({}, UnpreconditionedScalars()), ({"scalar_preconditioner": ScalarAir()}, ScalarAir())],
+    ids=["default", "air"],
+)
+def test_the_scalar_preconditioners_are_built_once_whatever_the_block(options, expected) -> None:
+    """Built on the first sweep and carried, including when the block builds nothing.
+
+    An unpreconditioned block's build returns ``None``, so a loop that took a ``None`` preconditioner
+    to mean "not built yet" would ask for it again on every sweep. The default is no preconditioner.
+    """
+    _BUILT.clear()
+    with pytest.warns(UserWarning, match="did not reach"):
+        _drive(
+            max_sweeps=4,
+            rtol=0.0,
+            contraction=0.5,
+            turbulence_class=_RecordingTurbulence,
+            **options,
+        )
+    assert _BUILT == [("k", expected), ("omega", expected)]

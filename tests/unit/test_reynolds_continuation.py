@@ -27,8 +27,10 @@ from aquaflux.turbulence import (
     AdaptiveReynoldsSchedule,
     CoupledRANS,
     GeometricReynoldsSchedule,
+    ScalarTwoLevel,
     SSTModel,
     SSTTurbulence,
+    UnpreconditionedScalars,
     ViscosityRampHomotopy,
     solve_reynolds_continuation,
 )
@@ -310,7 +312,7 @@ def test_the_ramp_and_the_target_get_opposite_halves_of_the_continuation_setting
 
     calls = _record_solves(monkeypatch)
     step = object()  # `solve_coupled` is patched out, so its type does not matter here
-    spec = BlockDiagonal(method="twolevel", schur_scaling="msimple")
+    spec = BlockDiagonal(scalar=ScalarTwoLevel(), schur_scaling="msimple")
     solve_reynolds_continuation(
         _tiny_coupled(),
         n_points=1,
@@ -341,7 +343,7 @@ def test_without_a_continuation_the_target_keeps_every_setting(monkeypatch) -> N
     from aquaflux.turbulence import BlockDiagonal
 
     calls = _record_solves(monkeypatch)
-    spec = BlockDiagonal(method="twolevel", schur_scaling="msimple")
+    spec = BlockDiagonal(scalar=ScalarTwoLevel(), schur_scaling="msimple")
     solve_reynolds_continuation(
         _tiny_coupled(),
         n_points=1,
@@ -924,7 +926,12 @@ def test_a_refresh_CARRIES_the_damping_rather_than_dropping_it_to_one() -> None:
     assert built.turbulence_damping.factor(jnp.asarray(0.5), None) == 7.0
 
     refreshed = _coupled_shift_policy(
-        coupled, state, None, reuse=built, turbulence_damping=1.0, build_flow_block=False
+        coupled,
+        state,
+        UnpreconditionedScalars(),
+        reuse=built,
+        turbulence_damping=1.0,
+        build_flow_block=False,
     )
     assert refreshed.turbulence_damping.factor(jnp.asarray(0.5), None) == 7.0
 
@@ -1174,7 +1181,9 @@ def test_a_refresh_REBUILDS_the_tapers_reference_rather_than_carrying_it() -> No
     built = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS, None, stale)
     assert float(built.turbulence_damping.reference) == pytest.approx(1e9)
 
-    refreshed = _coupled_shift_policy(coupled, state, None, reuse=built, build_flow_block=False)
+    refreshed = _coupled_shift_policy(
+        coupled, state, UnpreconditionedScalars(), reuse=built, build_flow_block=False
+    )
     # The configuration survives; the reference is the one this state actually implies.
     assert refreshed.turbulence_damping.initial == 9.0
     assert float(refreshed.turbulence_damping.reference) == pytest.approx(

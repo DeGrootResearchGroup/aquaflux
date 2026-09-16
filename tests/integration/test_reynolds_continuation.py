@@ -15,7 +15,12 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
 import pytest
-from aquaflux.turbulence import BlockDiagonal, coupled_step, solve_reynolds_continuation
+from aquaflux.turbulence import (
+    BlockDiagonal,
+    ScalarTwoLevel,
+    coupled_step,
+    solve_reynolds_continuation,
+)
 from aquaflux.turbulence.coupled import CoupledRANS, solve_coupled
 
 # The 560-cell turbulent channel (Re = U H / nu = 2500) and its constants, reused verbatim so the case
@@ -39,13 +44,13 @@ def test_reaches_the_same_root_as_a_direct_solve(channel) -> None:
         n_points=2,
         max_steps=MAX_STEPS,
         rtol=1e-10,
-        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
     flow_d, k_d, omega_d = solve_coupled(
         channel,
         max_steps=MAX_STEPS,
         rtol=1e-10,
-        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
 
     # The continuation dissolves at the target, so the root is the direct solve's root. The k bound is
@@ -72,13 +77,13 @@ def test_zero_points_is_a_plain_direct_solve(channel) -> None:
         n_points=0,
         max_steps=MAX_STEPS,
         rtol=1e-10,
-        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
     flow_d, k_d, omega_d = solve_coupled(
         channel,
         max_steps=MAX_STEPS,
         rtol=1e-10,
-        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
     assert jnp.array_equal(flow_c, flow_d)
     assert jnp.array_equal(k_c, k_d)
@@ -100,7 +105,7 @@ def test_adjoint_matches_a_direct_solve_and_is_point_count_independent(channel) 
     continuation = coupled_step(
         channel,
         channel.pack_state(*_hybrid(channel)),
-        preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
 
     def objective(nu_scale, n_points):
@@ -110,7 +115,7 @@ def test_adjoint_matches_a_direct_solve_and_is_point_count_independent(channel) 
             n_points=n_points,
             max_steps=MAX_STEPS,
             strategy=continuation,
-            preconditioner=BlockDiagonal(method="twolevel", **PRECONDITIONER),
+            preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
         )
         return jnp.sum(k**2)
 

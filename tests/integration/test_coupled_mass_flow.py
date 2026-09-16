@@ -36,7 +36,7 @@ from aquaflux.flow.mean_velocity import _with_body_force
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.turbulence import BlockDiagonal, SSTModel, SSTTurbulence
+from aquaflux.turbulence import BlockDiagonal, ScalarAir, ScalarTwoLevel, SSTModel, SSTTurbulence
 from aquaflux.turbulence.coupled import (
     CoupledRANS,
     mass_flow_coupled_continuation,
@@ -104,7 +104,7 @@ def case():
         coupled,
         target=U_B,
         flow_direction=0,
-        preconditioner=BlockDiagonal(method="air", **FLOW_BLOCK),
+        preconditioner=BlockDiagonal(scalar=ScalarAir(), **FLOW_BLOCK),
         max_steps=MAX_STEPS,
     )
     return {
@@ -161,7 +161,7 @@ def test_constrained_fixed_point_is_amg_method_independent(case) -> None:
         coupled,
         target=U_B,
         flow_direction=0,
-        preconditioner=BlockDiagonal(method="twolevel", **FLOW_BLOCK),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **FLOW_BLOCK),
         max_steps=400,
     )
 
@@ -200,7 +200,7 @@ def test_constrained_coupled_adjoint_matches_finite_difference(case) -> None:
         coupled,
         reference_state,
         flow_direction=0,
-        preconditioner=BlockDiagonal(method="twolevel", **FLOW_BLOCK),
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **FLOW_BLOCK),
     )
 
     def objective(nu_scale):

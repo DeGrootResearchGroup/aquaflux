@@ -10,10 +10,13 @@ count from growing with problem size at high cell Peclet.
 
 from __future__ import annotations
 
+import dataclasses
+
 import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import (
     AdvectionFlux,
@@ -24,6 +27,11 @@ from aquaflux.discretization import (
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, FieldProperty, PropertyModel
 from aquaflux.turbulence.preconditioner import (
+    AirAmgPreconditioner,
+    ConvectionAmgPreconditioner,
+    ScalarAir,
+    ScalarTwoLevel,
+    UnpreconditionedScalars,
     scalar_transport_preconditioner,
     scalar_transport_shift_diagonal,
 )
@@ -89,7 +97,7 @@ def test_scalar_shift_diagonal_is_the_operator_diagonal_under_graded_diffusivity
     assert jnp.allclose(shift, diag_j, rtol=1e-9, atol=1e-9)
 
 
-def _contraction(nx, ny, method, *, seed=0):
+def _contraction(nx, ny, scalar, *, seed=0):
     mesh, geometry, volume_flux, residual = _transport(nx, ny)
     reference = jnp.ones(mesh.n_cells)
     m = scalar_transport_preconditioner(
@@ -99,7 +107,7 @@ def _contraction(nx, ny, method, *, seed=0):
         volume_flux,
         residual,
         reference,
-        method=method,
+        scalar=scalar,
     )(reference)
 
     def jacobian(v):
@@ -116,15 +124,15 @@ def _contraction(nx, ny, method, *, seed=0):
 def test_preconditioner_strongly_contracts_the_convection_diffusion_error() -> None:
     """A single V-cycle brings ``J M v`` close to ``v`` -- i.e. ``M`` approximates ``J^{-1}`` well --
     on the convection-dominated operator, for both the two-level and the reduction-based hierarchy."""
-    assert _contraction(32, 16, "twolevel") < 0.5
-    assert _contraction(32, 16, "air") < 0.2  # lAIR is near-exact per cycle
+    assert _contraction(32, 16, ScalarTwoLevel()) < 0.5
+    assert _contraction(32, 16, ScalarAir()) < 0.2  # lAIR is near-exact per cycle
 
 
 def test_preconditioner_contraction_is_mesh_independent() -> None:
     """The contraction stays bounded as the mesh refines -- the scalable-iteration property (an
     unpreconditioned convection solve would instead need O(N) iterations)."""
-    coarse = _contraction(24, 12, "twolevel")
-    fine = _contraction(48, 24, "twolevel")
+    coarse = _contraction(24, 12, ScalarTwoLevel())
+    fine = _contraction(48, 24, ScalarTwoLevel())
     assert coarse < 0.5 and fine < 0.5
     assert fine < 1.6 * coarse  # bounded, not growing with size
 
@@ -143,7 +151,7 @@ def test_preconditioner_apply_is_linear() -> None:
     assert jnp.allclose(m(2.0 * a - 3.0 * b), 2.0 * m(a) - 3.0 * m(b), atol=1e-9)
 
 
-def _built(method, diffusivity_scale, flux_scale, *, reuse=None):
+def _built(scalar, diffusivity_scale, flux_scale, *, reuse=None):
     """A preconditioner for the transport operator at a scaled diffusivity / flux (same mesh)."""
     mesh, geometry, volume_flux, residual = _transport(24, 12)
     reference = jnp.ones(mesh.n_cells)
@@ -154,7 +162,7 @@ def _built(method, diffusivity_scale, flux_scale, *, reuse=None):
         volume_flux * flux_scale,
         residual,
         reference,
-        method=method,
+        scalar=scalar,
         reuse=reuse,
     )
 
@@ -178,10 +186,10 @@ def test_refreshing_an_air_scalar_preconditioner_preserves_its_structure() -> No
     count then depended on which product entries came out exactly zero. That is fixed
     (`multigrid._galerkin_coarse`), so the shape difference has to come from the coarsening itself.
     """
-    cold = _built("air", 1.0, 1.0)
-    refreshed = _built("air", 0.05, 20.0, reuse=cold)
+    cold = _built(ScalarAir(), 1.0, 1.0)
+    refreshed = _built(ScalarAir(), 0.05, 20.0, reuse=cold)
     # Diffusion-dominated rather than more convective: the balance has to move, not just the magnitudes.
-    rebuilt = _built("air", 1.0, 1e-3)
+    rebuilt = _built(ScalarAir(), 1.0, 1e-3)
 
     cold_shapes = [(lv.n, lv.n_coarse, lv.operator.data.shape) for lv in cold.hierarchy.levels]
     refreshed_shapes = [
@@ -203,12 +211,12 @@ def test_refreshing_an_air_scalar_preconditioner_preserves_its_structure() -> No
 def test_refreshing_a_twolevel_scalar_preconditioner_is_structure_preserving_anyway() -> None:
     """The aggregation path needs no ``reuse``: its coarsening reads only the graph.
 
-    Pinned so the asymmetry with lAIR is explicit — for ``method="twolevel"`` a plain rebuild at a new
+    Pinned so the asymmetry with lAIR is explicit — for :class:`ScalarTwoLevel` a plain rebuild at a new
     state already reproduces the structure, so ``reuse`` is accepted but changes nothing.
     """
-    cold = _built("twolevel", 1.0, 1.0)
-    rebuilt = _built("twolevel", 0.05, 20.0)
-    reused = _built("twolevel", 0.05, 20.0, reuse=cold)
+    cold = _built(ScalarTwoLevel(), 1.0, 1.0)
+    rebuilt = _built(ScalarTwoLevel(), 0.05, 20.0)
+    reused = _built(ScalarTwoLevel(), 0.05, 20.0, reuse=cold)
 
     shapes = [(lv.n, lv.n_coarse, lv.operator.data.shape) for lv in cold.hierarchy.levels]
     assert [
@@ -259,7 +267,7 @@ def test_refreshed_air_preconditioner_tracks_the_new_operator() -> None:
         cold_flux,
         cold_residual,
         reference,
-        method="air",
+        scalar=ScalarAir(),
     )
     refreshed = scalar_transport_preconditioner(
         mesh,
@@ -268,7 +276,7 @@ def test_refreshed_air_preconditioner_tracks_the_new_operator() -> None:
         dev_flux,
         dev_residual,
         reference,
-        method="air",
+        scalar=ScalarAir(),
         reuse=cold,
     )
 
@@ -285,10 +293,61 @@ def test_refreshed_air_preconditioner_tracks_the_new_operator() -> None:
     assert fresh < stale, f"refreshed ({fresh:.3e}) did not beat stale ({stale:.3e})"
 
 
-def test_refreshing_rejects_a_mismatched_method() -> None:
+def test_refreshing_rejects_a_mismatched_scalar_block() -> None:
     """Refreshing an aggregation preconditioner as lAIR (or vice versa) raises rather than mis-reusing."""
-    import pytest
+    cold_twolevel = _built(ScalarTwoLevel(), 1.0, 1.0)
+    with pytest.raises(ValueError, match="same kind of `scalar`"):
+        _built(ScalarAir(), 0.05, 20.0, reuse=cold_twolevel)
 
-    cold_twolevel = _built("twolevel", 1.0, 1.0)
-    with pytest.raises(ValueError, match="same `method`"):
-        _built("air", 0.05, 20.0, reuse=cold_twolevel)
+
+@pytest.mark.parametrize(
+    ("value", "preconditioner"),
+    [(ScalarTwoLevel, ConvectionAmgPreconditioner), (ScalarAir, AirAmgPreconditioner)],
+    ids=["two-level", "air"],
+)
+def test_each_scalar_value_names_exactly_its_preconditioner_s_own_settings(
+    value, preconditioner
+) -> None:
+    """A value's fields are its preconditioner's fields, less the hierarchy the build supplies.
+
+    A setting added to a preconditioner and not to its value -- or the reverse -- fails here rather than
+    becoming unreachable, which is how ``v_cycles`` sat unreachable from a coupled spec behind the string.
+    """
+    settings = {field.name for field in dataclasses.fields(preconditioner)} - {"hierarchy"}
+    assert {field.name for field in dataclasses.fields(value)} == settings
+
+
+def test_leaving_the_blocks_unpreconditioned_has_no_settings() -> None:
+    assert dataclasses.fields(UnpreconditionedScalars) == ()
+
+
+@pytest.mark.parametrize("value", [ScalarTwoLevel, ScalarAir], ids=["two-level", "air"])
+def test_a_set_v_cycle_count_reaches_the_preconditioner_and_an_unset_one_keeps_its_default(
+    value,
+) -> None:
+    assert _built(value(v_cycles=3), 1.0, 1.0).v_cycles == 3
+    assert _built(value(), 1.0, 1.0).v_cycles == 1
+
+
+def test_unpreconditioned_scalars_build_nothing_and_assemble_no_operator() -> None:
+    """The operator's ``J . 1`` row sum is a residual evaluation, which a value that builds nothing skips."""
+    mesh, geometry, volume_flux, _ = _transport(8, 4)
+
+    def residual(phi):
+        raise AssertionError("the operator was assembled for a block that is not preconditioned")
+
+    built = scalar_transport_preconditioner(
+        mesh,
+        geometry,
+        jnp.full(mesh.n_cells, GAMMA),
+        volume_flux,
+        residual,
+        jnp.ones(mesh.n_cells),
+        scalar=UnpreconditionedScalars(),
+    )
+    assert built is None
+
+
+def test_a_scalar_block_given_as_a_string_is_refused() -> None:
+    with pytest.raises(TypeError, match="scalar must be a scalar-block value"):
+        _built("air", 1.0, 1.0)

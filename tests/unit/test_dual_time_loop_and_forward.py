@@ -20,6 +20,7 @@ from aquaflux.turbulence import (
     CompleteLu,
     LinearSolveSettings,
     MaterializedJacobian,
+    UnpreconditionedScalars,
     coupled_step,
     open_session,
 )
@@ -94,7 +95,7 @@ def test_a_solver_given_as_the_forward_value_replaces_the_regime() -> None:
 
 def test_the_loop_selects_the_step_shape_and_reaches_its_fields(case) -> None:
     coupled, state = case
-    spec = BlockDiagonal(method=None)
+    spec = BlockDiagonal(scalar=UnpreconditionedScalars())
     loop = DualTimeLoop(inner_steps=3, inner_tol=1e-3, cycle_budget=40)
     dual = coupled_step(
         coupled,
@@ -117,7 +118,10 @@ def test_a_loop_hook_without_a_loop_is_refused(case, hook) -> None:
     coupled, state = case
     with pytest.raises(TypeError, match=hook):
         coupled_step(
-            coupled, state, preconditioner=BlockDiagonal(method=None), **{hook: lambda *a: None}
+            coupled,
+            state,
+            preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
+            **{hook: lambda *a: None},
         )
 
 
@@ -129,7 +133,9 @@ def test_a_refresh_count_with_nothing_to_fire_is_refused_but_a_materialized_sess
     with pytest.raises(
         TypeError, match="refresh_on_cycles"
     ):  # a block-diagonal session has no refresh
-        open_session(BlockDiagonal(method=None), coupled).build(state, dual_time=loop)
+        open_session(BlockDiagonal(scalar=UnpreconditionedScalars()), coupled).build(
+            state, dual_time=loop
+        )
     spec = MaterializedJacobian(CompleteLu(backend="scipy"))
     with pytest.raises(TypeError, match="refresh_on_cycles"):  # nor does a frozen step
         coupled_step(coupled, state, preconditioner=spec, dual_time=loop)
@@ -141,7 +147,7 @@ def test_a_refresh_count_with_nothing_to_fire_is_refused_but_a_materialized_sess
     coupled_step(
         coupled,
         state,
-        preconditioner=BlockDiagonal(method=None),
+        preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
         dual_time=loop,
         inner_refresh=lambda iterate: None,
     )

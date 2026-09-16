@@ -29,7 +29,7 @@ from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.solve import newton_step
-from aquaflux.turbulence import SSTModel, SSTTurbulence, inlet_k, inlet_omega
+from aquaflux.turbulence import ScalarTwoLevel, SSTModel, SSTTurbulence, inlet_k, inlet_omega
 
 RHO, U_IN, H, L = 1.0, 1.0, 1.0, 6.0
 NU = 2e-4  # Re = rho U H / mu = 5000
@@ -129,7 +129,7 @@ def test_exact_production_limiter_solves_with_the_preconditioner() -> None:
 
     residual = turbulence.k_residual(mdot, closure)
     # The AMG the continuation policy carries, applied to a bare Newton solve to isolate it.
-    preconditioner = turbulence.k_preconditioner(mdot, closure, k, method="twolevel")
+    preconditioner = turbulence.k_preconditioner(mdot, closure, k, scalar=ScalarTwoLevel())
     gmres = lineax.GMRES(rtol=1e-8, atol=1e-8, restart=32, stagnation_iters=32)
     # Bare (unglobalized) Newton, written out so the AMG is the only thing under test.
     solved = k

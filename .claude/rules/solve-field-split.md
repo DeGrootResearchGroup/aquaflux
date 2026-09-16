@@ -761,7 +761,7 @@ raw CSR storage), plausibly several to tens of GB per copy — likely still larg
 hierarchy's now-fixed dense-coarse-solve wall ever was, just smaller than before this fix.
 
 The scalar block-diagonal preconditioner path (`coupled_continuation`'s default `CoupledShiftPolicy`,
-`method="twolevel"`/`"air"`) avoids materializing any Jacobian at all — each field's operator is built
+`ScalarTwoLevel()`/`ScalarAir()`) avoids materializing any Jacobian at all — each field's operator is built
 analytically from ~one JVP, no colouring, no full-Jacobian storage — but `bfs3d` moved away from it
 because the cheaper composition was measured insufficient at this case's Reynolds number (see the
 flow-block preconditioning notes). **A genuinely cheaper route beyond the `active_rows` fix, scoped but
