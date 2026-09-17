@@ -504,7 +504,9 @@ What to take from it, none of which is specific to that mechanism:
     arguments go to the static side, hashed by identity). Both were hit and fixed while building #105 —
     do not "modernize" these into `equinox.Module`s.
 - **`norm_builder` — the residual measure is re-derived every outer iteration, and held FIXED within
-  one (binding).** `newton_march(norm_builder=…)` takes a `state -> ResidualNorm` and, at the top of
+  one (binding).** `newton_march(norm_builder=…)` takes a `(step, state) -> ResidualNorm` (the step so a
+  measure can read its row diagonals from the step's shift; since #370 a solve builds it from its
+  `Convergence` measure with `ResidualMeasure._builder`) and, at the top of
   each iteration, swaps the rebuilt measure onto the step with `eqx.tree_at` (the same mechanism the
   α-control uses for β) and re-measures `residual_norm_0` against it so the SER ratio stays on one
   scale. Every line-search trial step, the acceptance test and the reported norm within that iteration
@@ -515,6 +517,17 @@ What to take from it, none of which is specific to that mechanism:
     with the measure carrying its scales as traced leaves over a fixed block structure
     (`RowScaledNorm`), the swap is a cache hit. A plain callable (the default) has no array leaves and
     is filtered to the static side regardless, so the default path is byte-identical.
+  - **⚠️ AND THE STEP'S LINEAR SOLVE MUST READ THE SWAPPED MEASURE, which it did not until #370
+    (2026-09-16).** The swap reaches `step.residual_norm` only. The march resolves its Krylov solver
+    **once** (`strategy.linear_solver()`), and `_coupled_step` had built that solver with
+    `norm=residual_norm` captured at build — so under a rebuilt measure the outer stop, line search and
+    shift used the rebuilt one while every inner `rtol = 0.3` stop used the build-time one (on a
+    refreshed march, the initial-state measure carried into each refresh). Both flagship cases ran this
+    way. The fix: `relative_residual_gmres(norm=None)` means "the measure of the step that runs me", and
+    all three steppers (`PseudoTransientStep`, `DualTimeStep`, `DampedNewtonStep`) call
+    `solve.in_progress_measure(solver, self.residual_norm)` before solving; an explicit norm or a stock
+    `lineax` solver is left alone, and a `norm=None` solver run outside a step raises. Pinned by
+    `test_convergence.py::test_each_step_stops_a_measure_following_linear_solve_in_its_own_measure`.
   - **`RowScaledNorm` was march-only because `RootSolver` passed its measure through a
     `custom_vjp` non-differentiable (hashable) slot.** That slot is gone (2026-09-15: the loop runs
     outside the `custom_vjp`, and `root_adjoint` takes no measure), and `solve_coupled` no longer ends

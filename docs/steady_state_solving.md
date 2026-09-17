@@ -308,7 +308,7 @@ sensitivity can never be built quietly on an unconverged field.
 If you hit it, the useful responses in order are: start from a better initial field
 ({func}`~aquaflux.flow.potential_flow`), switch from the line search to
 {func}`~aquaflux.flow.momentum_continuation`, raise `max_steps`, and only then loosen
-`rtol`/`atol`.
+the tolerances.
 
 ## Choosing the pieces
 
@@ -343,3 +343,41 @@ Newton step and cannot be passed as one.
 The default tolerances (`rtol=1e-10`, `atol=1e-12`) are deliberately tight, since the residual
 norm is what the adjoint's validity rests on. `max_steps` defaults to 50, which suits a
 line-searched solve; a continuation march legitimately takes more.
+
+## The stopping test is a tolerance *and* a measure
+
+A solve stops when `measure(R) <= atol + rtol * measure(R0)`, where `R0` is the residual at the
+starting state. The two tolerances mean nothing without the measure they are taken in, so a solve
+takes all three as one value, {class}`~aquaflux.solve.Convergence`:
+
+```python
+from aquaflux.solve import Convergence, Euclidean, RootSolver
+
+solver = RootSolver(convergence=Convergence(measure=Euclidean(), rtol=1e-8), strategy=step)
+```
+
+Any field left unset takes the solve's own default. There are three measures:
+
+| Measure | What it is | Where it fits |
+| --- | --- | --- |
+| {class}`~aquaflux.solve.Euclidean` | the plain 2-norm of the residual | unknowns on comparable scales |
+| {class}`~aquaflux.solve.RowScaled` | each row divided by its own diagonal and each field by its magnitude, so every equation reports a fractional change; rebuilt at the start of every outer iteration | a coupled system whose fields differ by orders of magnitude; the default for {func}`~aquaflux.turbulence.solve_coupled` |
+| {class}`~aquaflux.solve.BlockScaled` | each field's residual divided by its own magnitude at the starting state, held for the whole solve | a coupled system, more coarsely |
+
+The measure is not only the one the solve is judged in; it is the one the march steers by. Each
+outer iteration builds it at the state it starts from and hands it to the step, whose line search,
+pseudo-transient shift and linear-solve stop all read it. This is why the choice matters: the
+Euclidean norm of a coupled turbulent residual is almost entirely the `omega` equation, so a march
+steered by it cannot see the flow converge, and a linear solve stopped in it resolves `omega` while
+leaving the velocity correction coarse.
+
+A problem that cannot supply a measure refuses it by name when the solve starts. A generic
+{class}`~aquaflux.solve.RootSolver` knows nothing of its residual's rows or fields, so it supports
+{class}`~aquaflux.solve.Euclidean` unless it is given the residual's own measures; and with no
+measure set it keeps the step's own.
+
+```{note}
+A relative tolerance asks for a fraction of the *starting* residual, so a better initial field
+asks for a smaller residual. When every solve in a sequence must reach one level whatever it
+starts from, as the rungs of a continuation must, set `rtol=0` and give that level as `atol`.
+```

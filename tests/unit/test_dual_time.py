@@ -18,6 +18,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 from aquaflux.solve import (
+    Convergence,
     DivergenceGuard,
     DualTimeStep,
     PseudoTransientStep,
@@ -93,7 +94,9 @@ def test_the_dual_time_step_hands_the_policy_the_residual_it_just_computed() -> 
 
 
 def _solver(step: DualTimeStep, max_steps: int = 200) -> RootSolver:
-    return RootSolver(rtol=1e-10, atol=1e-10, max_steps=max_steps, strategy=step)
+    return RootSolver(
+        convergence=Convergence(rtol=1e-10, atol=1e-10), max_steps=max_steps, strategy=step
+    )
 
 
 def test_dual_time_converges_without_flow() -> None:
@@ -296,9 +299,9 @@ def test_dual_time_one_inner_step_is_a_single_shifted_step() -> None:
     # And the full dual-time march reaches the same root as the escalating pseudo-transient march.
     pseudo = PseudoTransientStep(policy, relaxation_schedule=schedule)
     root_dual = _solver(dual).solve(_residual, phi0, theta)
-    root_pseudo = RootSolver(rtol=1e-10, atol=1e-10, max_steps=200, strategy=pseudo).solve(
-        _residual, phi0, theta
-    )
+    root_pseudo = RootSolver(
+        convergence=Convergence(rtol=1e-10, atol=1e-10), max_steps=200, strategy=pseudo
+    ).solve(_residual, phi0, theta)
     assert jnp.allclose(root_dual, root_pseudo, atol=1e-8)
 
 

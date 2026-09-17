@@ -45,7 +45,7 @@ from aquaflux.flow import (  # noqa: E402
 from aquaflux.io import read_openfoam  # noqa: E402
 from aquaflux.properties import Constant, PropertyModel  # noqa: E402
 from aquaflux.schemes import CorrectedGreenGauss, VenkatakrishnanLimiter  # noqa: E402
-from aquaflux.solve import MarchLogger  # noqa: E402
+from aquaflux.solve import Convergence, MarchLogger  # noqa: E402
 from aquaflux.turbulence import (  # noqa: E402
     CoupledRANS,
     LogScalars,
@@ -168,8 +168,7 @@ def main() -> None:
             k,
             omega,
             max_steps=MAX_STEPS,
-            rtol=0.0,
-            atol=1e-8,
+            convergence=Convergence(rtol=0.0, atol=1e-8),
             on_checkpoint=logger.on_checkpoint,
         )
     except Exception as exc:

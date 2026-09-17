@@ -386,7 +386,7 @@ def test_a_refresh_refuses_a_keyword_the_flow_block_does_not_take(case) -> None:
     with pytest.raises(TypeError, match=r"beta0.*Globalization"):
         session.build(state, beta0=1.5)
     with pytest.raises(TypeError, match=r"beta0.*Globalization"):
-        session.refresh(state, base, base.norm(), beta0=1.5)
+        session.refresh(state, base, beta0=1.5)
     # A flow-block setting cannot be misplaced at all: the spec's fields are that builder's keywords,
     # which is exact only while `build` declares every option it accepts.
     kinds = {

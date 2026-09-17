@@ -275,7 +275,6 @@ def test_lu_beta_tracking_forward_march_converges_to_the_same_fixed_point(case) 
         preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND)),
         dual_time=DualTimeLoop(inner_steps=5, inner_tol=1e-3),
         step_control=DualTimeControl(beta_start=0.5, beta_min=0.02),
-        scaled_norm=True,
         max_steps=60,
     )
     flow_b, k_b, _ = solve_coupled(
@@ -320,7 +319,6 @@ def test_a_solve_that_re_fits_its_lu_every_step_is_differentiable(case) -> None:
             preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND)),
             dual_time=DualTimeLoop(inner_steps=5, inner_tol=1e-3),
             step_control=DualTimeControl(beta_start=0.5, beta_min=0.02),
-            scaled_norm=True,
             max_steps=60,
         )
         return jnp.sum(k**2)

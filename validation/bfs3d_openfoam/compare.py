@@ -78,6 +78,7 @@ from aquaflux.schemes import CorrectedGreenGauss, VenkatakrishnanLimiter
 from aquaflux.solve import (
     AirReduction,
     CflResidualDualTimeControl,
+    Convergence,
     DualTimeLoop,
     InnerIterateCheckpointer,
     JacobiSmoothed,
@@ -1458,14 +1459,11 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             positivity_projection=K_POSITIVITY_PROJECTION,
             inner_observer=inner_observer if DUAL_TIME else None,
             max_steps=MAX_STEPS,
-            rtol=RTOL,
-            atol=ATOL,
+            convergence=Convergence(rtol=RTOL, atol=ATOL),
             schedule=SCHEDULE,
-            intermediate_rtol=None,  # every rung stops at the same ABSOLUTE bar
-            intermediate_atol=ATOL,
+            intermediate=Convergence(atol=ATOL),  # every rung stops at the same ABSOLUTE bar
             step_control=CONTROL,
             point_setup=point_setup,
-            scaled_norm=True,  # rebuild the row scales each outer step
             on_checkpoint=on_checkpoint,
             on_retry=logger.on_retry,
             retry=RetryPolicy(

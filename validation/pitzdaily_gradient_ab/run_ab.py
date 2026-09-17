@@ -71,6 +71,7 @@ from aquaflux.schemes import (  # noqa: E402
     SweptGradientSolve,
 )
 from aquaflux.solve import (
+    Convergence,
     DualTimeLoop,
     JacobiSmoothed,
     MarchLogger,
@@ -79,8 +80,8 @@ from aquaflux.solve import (
 from aquaflux.turbulence import (
     CoupledJacobianProbe,
     FieldSplit,
-    LinearSolveSettings,
     JacobianProbeSpec,
+    LinearSolveSettings,
     MaterializedJacobian,
     coupled_fields,
     open_session,
@@ -401,14 +402,11 @@ def solve_arm(gradient_scheme, log_path, *, reach=None, points=None, max_steps=N
             positivity_projection=compare.POSITIVITY_PROJECTION,
             inner_observer=logger.on_inner,
             max_steps=max_steps,
-            rtol=compare.RTOL,
-            atol=compare.ATOL,
-            intermediate_rtol=None,
-            intermediate_atol=compare.ATOL,
+            convergence=Convergence(rtol=compare.RTOL, atol=compare.ATOL),
+            intermediate=Convergence(atol=compare.ATOL),
             step_control=compare.CONTROL,
             retry=compare.RETRY,
             point_setup=point_setup,
-            scaled_norm=True,
             on_checkpoint=logger.on_checkpoint,
             on_retry=logger.on_retry,
         )

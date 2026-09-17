@@ -53,11 +53,11 @@ sys.path.insert(0, str(CASE))
 sys.path.insert(0, str(CASE.parents[1]))
 
 import compare  # noqa: E402
-from aquaflux.solve import relative_residual_gmres  # noqa: E402
+from aquaflux.solve import Convergence, relative_residual_gmres  # noqa: E402
 from aquaflux.turbulence import (
     FieldSplit,
-    LinearSolveSettings,
     JacobianProbeSpec,
+    LinearSolveSettings,
     MaterializedJacobian,
     coupled_step,
     solve_coupled,
@@ -344,7 +344,7 @@ def make_objective(coupled, start, continuation, *, observe: bool = True):
             omega,
             strategy=continuation,
             max_steps=MAX_STEPS,
-            rtol=RTOL,
+            convergence=Convergence(rtol=RTOL),
             adjoint_solver=adjoint_solver(),
             **({"on_step": _step_logger(f"solve {label['n']}")} if observe else {}),
         )

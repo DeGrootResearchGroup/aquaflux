@@ -15,6 +15,7 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
 import pytest
+from aquaflux.solve import Convergence
 from aquaflux.turbulence import (
     BlockDiagonal,
     ScalarTwoLevel,
@@ -43,13 +44,13 @@ def test_reaches_the_same_root_as_a_direct_solve(channel) -> None:
         channel,
         n_points=2,
         max_steps=MAX_STEPS,
-        rtol=1e-10,
+        convergence=Convergence(rtol=1e-10),
         preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
     flow_d, k_d, omega_d = solve_coupled(
         channel,
         max_steps=MAX_STEPS,
-        rtol=1e-10,
+        convergence=Convergence(rtol=1e-10),
         preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
 
@@ -76,13 +77,13 @@ def test_zero_points_is_a_plain_direct_solve(channel) -> None:
         channel,
         n_points=0,
         max_steps=MAX_STEPS,
-        rtol=1e-10,
+        convergence=Convergence(rtol=1e-10),
         preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
     flow_d, k_d, omega_d = solve_coupled(
         channel,
         max_steps=MAX_STEPS,
-        rtol=1e-10,
+        convergence=Convergence(rtol=1e-10),
         preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
     assert jnp.array_equal(flow_c, flow_d)

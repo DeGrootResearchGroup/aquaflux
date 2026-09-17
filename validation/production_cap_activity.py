@@ -37,9 +37,9 @@ from pathlib import Path
 # thing the case harnesses under `validation/*/` do.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import aquaflux  # noqa: F401, E402  (enables x64)
-import jax  # noqa: E402
-import jax.numpy as jnp  # noqa: E402
+import aquaflux  # noqa: F401  (enables x64)
+import jax
+import jax.numpy as jnp
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import (
@@ -52,6 +52,7 @@ from aquaflux.flow import (
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
+from aquaflux.solve import Convergence
 from aquaflux.turbulence import (
     BlockDiagonal,
     CoupledRANS,
@@ -173,8 +174,7 @@ def solve(nu, *, explicit_limiter, state=None):
         k0,
         o0,
         max_steps=60,
-        rtol=1e-10,
-        atol=1e-12,
+        convergence=Convergence(rtol=1e-10, atol=1e-12),
         preconditioner=BlockDiagonal(**PRECONDITIONER),
     )
 
@@ -195,7 +195,11 @@ def objective(nu, *, explicit_limiter, seed):
     def scalar(viscosity):
         coupled = build_case(viscosity, explicit_limiter=explicit_limiter)
         _, k, _ = solve_coupled(
-            coupled, *seed, strategy=continuation, max_steps=60, rtol=1e-10, atol=1e-12
+            coupled,
+            *seed,
+            strategy=continuation,
+            max_steps=60,
+            convergence=Convergence(rtol=1e-10, atol=1e-12),
         )
         return jnp.mean(k)
 

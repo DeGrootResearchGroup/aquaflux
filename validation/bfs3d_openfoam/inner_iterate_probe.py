@@ -63,6 +63,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
+import equinox as eqx  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 from aquaflux.solve import (  # noqa: E402  # noqa: E402
     AmgVCycle,
@@ -139,6 +140,10 @@ def capture_inner_iterates(coupled, state, beta, seed_state):
             cycle_budget=compare.CYCLE_BUDGET,
         ),
         inner_observer=observer,
+    )
+    # The march hands a step its measure at every outer iteration; driven directly, it must be given one.
+    engine = eqx.tree_at(
+        lambda s: s.residual_norm, engine, coupled_scaled_norm(coupled, engine.shift_policy, state)
     )
     reference_norm = engine.norm()(coupled.residual(state))
     result = engine.stepper()(coupled.residual, state, reference_norm, engine.linear_solver())

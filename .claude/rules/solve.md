@@ -128,6 +128,7 @@ archived march logs and any private notes still use the left column).
 | `coupled_step(forward=)`, `ForwardSolve` | `linear_solve=`, `LinearSolveSettings` | the Krylov settings, which are neither forward-mode nor the march |
 | `precondition_step` | `refresh_preconditioner` | a per-step hook, not a step |
 | `_ForwardSolveRegime`, `_BLOCK_FORWARD`, … | `_LinearSolveRegime`, `_BLOCK_LINEAR_SOLVE`, … | private regimes of the same inner solve |
+| `RootSolver(rtol=, atol=)`, `solve_coupled(rtol=, atol=, scaled_norm=)`, `solve_coupled_mass_flow(rtol=, atol=)` | `convergence=Convergence(measure=…, rtol=…, atol=…)` (#370, 2026-09-16) | the measure and its tolerances as one value; `RootSolver` also takes `measures=` for a structured residual |
 
 **Deliberately NOT renamed**, so do not "finish the job":
 
@@ -254,12 +255,14 @@ recorded error.** A default here that disagrees with the code is a defect — fi
 symbols — every one of those is dead. `_coupled_step` builds the default solver itself, and the two
 halves of the decision are now separated:
 
-* **The stop is the march's own progress measure**, whatever that is — the row-equilibrated
-  `coupled_scaled_norm` by default, `BlockScaledNorm` under `block_scaled_norm=True`, the plain
-  Euclidean norm on the bordered mass-flow path. Steering and judging therefore come from one
-  definition, and a solve cannot converge in a quantity the march never reads. ⚠️ **A tolerance is
-  therefore only meaningful beside its measure** — `0.3` row-scaled and `1e-2` Euclidean are not
-  comparable numbers.
+* **The stop is the march's own progress measure**, whatever the solve's `Convergence` names — the
+  row-equilibrated `coupled_scaled_norm` (`RowScaled()`, rebuilt every outer iteration) by default,
+  `BlockScaledNorm` under `BlockScaled()`, the plain Euclidean norm by default on the bordered
+  mass-flow path. The default solver is `relative_residual_gmres(norm=None)`, which each step binds to
+  the measure it is being judged by at that moment (see `solve-globalization.md`'s `norm_builder`
+  entry), so steering and judging come from one definition even as the measure is rebuilt. ⚠️ **A
+  tolerance is therefore only meaningful beside its measure** — `0.3` row-scaled and `1e-2` Euclidean
+  are not comparable numbers.
 * **The restart regime is per preconditioner family**, which is the part that genuinely differs, as
   `_LinearSolveRegime` values in `turbulence/coupled.py`:
 
@@ -332,6 +335,54 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   - Pinned by `tests/unit/test_state.py` (mesh-free: shape, addressing, packing, the bordered
     extension, the construction refusals, and the zero-leaf/hashable pytree properties).
 
+- **`convergence.py` — the stopping test as ONE value (BUILT 2026-09-16, #370).** `Convergence(measure,
+  rtol, atol)`, a `SettingsValue` with `None`-unset fields, and the measure family `ResidualMeasure`
+  (abstract) = `Euclidean()` / `RowScaled()` / `BlockScaled()`. Each measure builds a
+  `MeasureBuilder = (step, state) -> ResidualNorm` against a `ResidualMeasures` source the problem
+  supplies (`row_scaled(step, state)`, `block_scaled(state)`); `PLAIN_RESIDUAL` supports only Euclidean
+  and refuses the others by name. `RowScaled` is rebuilt at every state it is asked about;
+  `BlockScaled` takes the initial state's scales once and holds them (it normalizes itself, so
+  re-basing at a refresh would put the stop out of reach — #156 seam 4).
+  - **Why one value:** `rtol` meant a row-scaled tolerance on one path and a Euclidean one on another,
+    and the measure was chosen by three settings in two places (`block_scaled_norm` / `residual_norm`
+    on the step builders, `scaled_norm` on `solve_coupled` for *when* the scales were rebuilt). There is
+    no step-level measure choice any more: `coupled_step` and `mass_flow_coupled_continuation` take
+    neither keyword, and the march hands the step its measure every outer iteration. A case file can
+    therefore write `convergence: {measure: {kind: RowScaled}, rtol: 0.0, atol: 1.0e-5}` with one meaning.
+  - **`RootSolver`:** unset measure → the strategy's own `residual_norm` (no builder, byte-identical to
+    before); a set one is built against `RootSolver.measures` (default `PLAIN_RESIDUAL`).
+    `solve_coupled` defaults to `RowScaled()` against `_CoupledMeasures`; `solve_coupled_mass_flow` to
+    `Euclidean()` against `_MassFlowMeasures` (block-scaled allowed, row-scaled refused — the border row
+    has no diagonal).
+  - **⚠️ THE FROZEN ROW-SCALED MEASURE WAS DELETED, AND THIS IS WHAT DECIDED IT (measured 2026-09-16).**
+    The default used to freeze the row scales at the step's build state; `scaled_norm=True` rebuilt them.
+    *Cost:* on pitzDaily (12225 cells) at a converged checkpoint (step 31 of a shipped run), commit
+    `e7fa44d`, jax 0.10.2, macOS arm64, an **eager** rebuild (as the march calls it) is **8.2 ms**, a
+    jitted one **0.25 ms**, one coupled residual **8.6 ms**, its jvp **13.9 ms**, against **~19 s** per
+    outer step in that run — ~0.04 % of a step (`validation/pitzdaily_openfoam/measure_rebuild_cost.py`).
+    *Behaviour:* with the rebuild forced on every row-scaled `solve_coupled`, the fast tier (1843) and
+    slow tier (43 of 44) passed; the one failure was
+    `test_the_coupled_adjoint_is_independent_of_the_forward_iteration_count`, whose two arms both took
+    20 steps (17/20 frozen) so its distinct-path guard refused — a fixture, not a gradient. Steps over
+    26 matched tests rose **1213 → 1302 (+7 %)**, both periodic-channel tests ~48 → 72. Scoring each final
+    state in all three measures showed **neither form consistently tighter** (the periodic
+    AMG-independence test stopped *looser* after more steps), so the difference is steering, not
+    stopping bar. These fixtures are small, mildly developed flows and cannot show the recorded
+    developed-flow failure of the frozen form; they show nothing *needs* it. Both flagship cases already
+    rebuilt.
+  - ⚠️ **That measurement predates the linear-solve binding fix above**, so its step counts are for a
+    rebuilt outer measure with a build-time inner stop. The inner stop now follows too; re-measure before
+    quoting counts.
+  - **pitzDaily with the whole change, against a control built from `main` (2026-09-16).** Control:
+    `e7fa44d` in a scratch worktree; arm: this change. Both `validation/pitzdaily_openfoam/compare.py` at
+    its shipped defaults (viscosity ramp 16 stations x 1, momentum-only scaling, turbulence damping 3,
+    dual-time 5 / 0.01, field split `simplesmooth` / `jacobi_smoothed`, stop `rtol=0, atol=1e-5`,
+    row-scaled measure rebuilt per step in both). **Both 31 steps, `x_r/h` 8.0686, final `|R|`
+    7.841e-06 / 7.839e-06, no retries.** The two logs are identical through step 17; from step 18 (the
+    target station) the per-step residuals agree to four figures while the restart cycles differ by ±1–2
+    per step, **194 → 202 in total (+4 %)** — the inner Krylov stop now reading the rebuilt measure
+    instead of the one the step was built with. Wall clock is not quotable: another session loaded the
+    machine during the arm (1-minute load ~10).
 - **`linear.py` — BUILT.** `solve_linear(matvec, b, solver, preconditioner=None)` is a
   matrix-free wrapper over `lineax` (default restarted GMRES); `lineax` supplies the
   **implicit-diff of the linear solve** (the Krylov loop is not taped). This is the load-bearing

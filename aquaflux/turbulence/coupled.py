@@ -63,7 +63,9 @@ from aquaflux.solve import (
     BlockScaledNorm,
     CellFields,
     ColumnProbePlan,
+    Convergence,
     DualTimeLoop,
+    Euclidean,
     FieldGroups,
     FieldLayout,
     FieldSplitAmgPreconditioner,
@@ -79,9 +81,9 @@ from aquaflux.solve import (
     RefreshPolicy,
     RefreshTiming,
     ResidualHomotopy,
-    ResidualNorm,
     RetryPolicy,
     RootSolver,
+    RowScaled,
     RowScaledNorm,
     ShiftBasis,
     ShiftPolicy,
@@ -1199,7 +1201,7 @@ def _reparametrized_preconditioner(
 # regime, and they all share one stopping *measure* -- the two are separate decisions and only the first
 # is a property of the preconditioner.
 #
-# THE MEASURE (shared, and built in `_coupled_step` from the march's own progress measure). Each
+# THE MEASURE (shared: the linear solve stops in whatever progress measure the march hands the step). Each
 # pseudo-transient step is an inexact Newton step, so the linear solve only has to resolve the
 # correction to the accuracy the globalized march actually uses; the converged root and its adjoint are
 # fixed by the nonlinear stop and the vanishing shift, not by the linear tolerance. What that argument
@@ -1213,7 +1215,7 @@ def _reparametrized_preconditioner(
 #    (whose residual sits orders above the flow's), so it halts once omega is resolved while the
 #    flow-dominated part of the Newton step is still coarse -- measured ~116% velocity error, i.e.
 #    effectively blind to the block the march is actually trying to develop.
-# So the default stop is the march's OWN row-scaled progress measure (`coupled_scaled_norm`), which
+# So the stop is the march's OWN progress measure -- by default the row-scaled `coupled_scaled_norm`, which
 # weighs every field comparably, at a *loose* tolerance: every block is seen and resolved loosely,
 # rather than one block resolved and the rest unseen. Calibrated on the developed backward-facing step:
 # at `rtol = 0.3` the velocity correction is resolved to ~25% for ~1.5x the plain-2-norm cycle count;
@@ -1228,8 +1230,9 @@ def _reparametrized_preconditioner(
 # runs those builders, so nothing on record is affected, and a cap that binds shows up as a truncated
 # solve rather than as a wrong answer.
 #
-# Steering and judging by one definition is the point: `_coupled_step` passes the very measure object the
-# march reports and accepts steps in, so the solve cannot converge in a quantity the march does not read.
+# Steering and judging by one definition is the point: the default solver takes its norm from the step at
+# every step (`relative_residual_gmres(norm=None)`), so it stops in the very measure the march reports and
+# accepts steps in -- including after the march has rebuilt that measure at a new state.
 #
 # THE RESTART LENGTH (per family). A restarted GMRES tests its stop only at each restart boundary, so
 # the subspace should match how many vectors the preconditioner actually needs.
@@ -1239,9 +1242,9 @@ class _LinearSolveRegime(NamedTuple):
     Attributes
     ----------
     rtol : float
-        Relative tolerance, **in the march's own progress measure** (see :func:`_coupled_step`) unless
-        that measure is the plain Euclidean norm, in which case it is a Euclidean tolerance. The two are
-        not interchangeable numbers, which is why the regime carries them together.
+        Relative tolerance, **in the progress measure the march hands the step** (the solve's
+        :class:`~aquaflux.solve.Convergence` measure). The same number is a different tightness under a
+        different measure, so each regime's value is set for the measure its path defaults to.
     restart : int
         Arnoldi restart length.
     max_restarts : int
@@ -1334,15 +1337,15 @@ def _coupled_block_scales(coupled: CoupledRANS, reference_state: jnp.ndarray) ->
 
 
 def _coupled_residual_norm(coupled: CoupledRANS, reference_state: jnp.ndarray) -> BlockScaledNorm:
-    """The opt-in block-scaled residual norm over ``[flow, k, omega]`` (``block_scaled_norm=True``).
+    """The block-scaled residual norm over ``[flow, k, omega]``, the measure :class:`~aquaflux.solve.BlockScaled` names.
 
     Each field's residual is divided by its own initial magnitude before the norm is formed, so the
     switched-evolution-relaxation ramp, the line search, and the outer stopping test all judge every
     field rather than the ``omega`` block that dominates the plain Euclidean norm (``omega`` is
     O(1e5) here, ``k`` O(1e-3)): with the plain norm a step that collapses ``k`` barely moves ‖R‖ and
     is accepted. This is the coarser of the two field-aware measures -- one scale per block -- and is
-    the opt-in ``block_scaled_norm=True`` alternative to the default :func:`coupled_scaled_norm`, which
-    additionally equilibrates each row by its own diagonal.
+    the alternative to the default :func:`coupled_scaled_norm`, which additionally equilibrates each row
+    by its own diagonal.
     """
     return BlockScaledNorm(coupled.layout.sizes, _coupled_block_scales(coupled, reference_state))
 
@@ -1366,6 +1369,51 @@ def _mass_flow_residual_norm(coupled: CoupledRANS, reference_state: jnp.ndarray)
     """
     s_flow, s_k, s_omega = _coupled_block_scales(coupled, reference_state)
     return BlockScaledNorm(_mass_flow_layout(coupled).sizes, (s_flow, s_k, s_omega, s_flow))
+
+
+class _CoupledMeasures(eqx.Module):
+    """What the coupled RANS residual can be measured in: row-scaled and block-scaled as well as Euclidean.
+
+    Attributes
+    ----------
+    coupled : CoupledRANS
+        The assembler whose residual is measured, with its gradients stopped.
+    """
+
+    coupled: CoupledRANS
+
+    def row_scaled(self, step: NewtonStrategy, state: jnp.ndarray) -> RowScaledNorm:
+        # The row diagonals are the step's own shift base, so a refreshed step's are read.
+        return coupled_scaled_norm(self.coupled, step.shift_policy, state)
+
+    def block_scaled(self, state: jnp.ndarray) -> BlockScaledNorm:
+        return _coupled_residual_norm(self.coupled, state)
+
+
+class _MassFlowMeasures(eqx.Module):
+    """What the mass-flow-constrained residual can be measured in: block-scaled as well as Euclidean.
+
+    There is no row-scaled measure here: the border row holding the constraint has no diagonal to
+    equilibrate by, and borrowing one would misreport it.
+
+    Attributes
+    ----------
+    coupled : CoupledRANS
+        The assembler whose bordered residual is measured, with its gradients stopped.
+    """
+
+    coupled: CoupledRANS
+
+    def row_scaled(self, step: NewtonStrategy, state: jnp.ndarray) -> RowScaledNorm:
+        del step, state
+        raise TypeError(
+            "RowScaled() has no form for the mass-flow-constrained solve: the constraint's border row "
+            "has no diagonal to equilibrate by. Use Euclidean() (the default) or BlockScaled()."
+        )
+
+    def block_scaled(self, state: jnp.ndarray) -> BlockScaledNorm:
+        # The bordered state carries the multiplier last; the block scales are the coupled blocks'.
+        return _mass_flow_residual_norm(self.coupled, state[:-1])
 
 
 def positive_k_limit(coupled: CoupledRANS, tau: float = 0.99, floor: float = 0.0):
@@ -2212,8 +2260,6 @@ def _coupled_step(
     globalization: Globalization,
     dual_time: DualTimeLoop | None,
     krylov_solver: lx.AbstractLinearSolver | None,
-    block_scaled_norm: bool,
-    residual_norm: ResidualNorm | None,
     inner_observer: Callable[..., None] | None = None,
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     step_limit: Callable[..., jnp.ndarray] | None = None,
@@ -2225,9 +2271,8 @@ def _coupled_step(
 
     **The one place the coupled march's globalization is configured**, for every preconditioner. What
     differs between the block-diagonal and monolithic paths is which policy they hand in and which
-    Krylov restart regime they name; the schedule, the progress measure, the forward solve's *stopping
-    measure*, the line search, the escalation ladder, the dual-time inner loop and the positivity guard
-    are one implementation.
+    Krylov restart regime they name; the schedule, the line search, the escalation ladder, the dual-time
+    inner loop and the positivity guard are one implementation.
 
     That matters more than the duplication it removes. The builders each grew their own copy of this
     tail, and the copies drifted in ways that had nothing to do with preconditioning: the monolithic one
@@ -2235,27 +2280,27 @@ def _coupled_step(
     gained the growth rungs and the descent backoff, and neither gained the other's. A march's
     globalization should not depend on which matrix its preconditioner was built from.
 
-    The forward solve's stopping measure is here for the same reason and is the later instance of the
-    same drift: the argument for stopping on the coupled residual's row-scaled measure rather than a
-    plain 2-norm is about the residual (~100% ``omega``, so a 2-norm halts while the flow-dominated part
-    of the step is still coarse), not about any preconditioner, yet it reached only the builder being
-    worked on at the time. Here it is one decision, and it is the measure the march itself reports and
-    accepts steps in -- so the solve is steered by, and judged by, one definition.
+    The step carries **no residual measure of its own choosing**. The measure is part of the solve's
+    stopping test (:class:`~aquaflux.solve.Convergence`), and the march that runs the step hands it in at
+    every outer iteration. The default linear solve stops in whatever that measure is at the time
+    (``relative_residual_gmres(norm=None)``), so the line search, the shift, the linear solve's stop and
+    the convergence test are all taken in one definition. A step marched with no measure given is judged
+    by the Euclidean norm.
 
     Parameters
     ----------
     coupled : CoupledRANS
-        The coupled residual assembler, for the default progress measure.
+        The coupled residual assembler, for the Jacobian operator the Krylov solve applies.
     reference_state : jnp.ndarray
-        The state the default progress measure takes its reference scales from.
+        The state the preconditioner and the shift were frozen at.
     policy : ShiftPolicy
         The composed shift-and-preconditioner policy — a :class:`CoupledShiftPolicy` for the
         block-diagonal path, a :class:`MonolithicFactorShiftPolicy` for a materialized one.
     regime : _LinearSolveRegime
         The Krylov tolerance and restart regime for the default forward solve, used when
         ``krylov_solver`` is ``None``. Only the *regime* is per-family (a near-exact factorization
-        needs a far smaller Arnoldi subspace than a block-diagonal preconditioner); the norm the
-        tolerance is measured in is ``residual_norm``, i.e. the march's own progress measure.
+        needs a far smaller Arnoldi subspace than a block-diagonal preconditioner); the tolerance is
+        measured in the progress measure the march hands the step.
     globalization : Globalization
         How hard the march damps and what it does when a step misbehaves: the pseudo-transient
         schedule, the escalation ladder, the divergence guard and the line search, in one object all
@@ -2267,8 +2312,8 @@ def _coupled_step(
         The dual-time inner loop, or ``None`` for the single shifted step. Unlike the settings above
         this is not shared: the flow-only and scalar marches have no dual-time form, so the loop is a
         coupled choice and stays on the coupled builders.
-    krylov_solver, block_scaled_norm, residual_norm, inner_observer, inner_refresh, step_limit, step_projection
-        The linear solve, the progress measure and the per-step guards. See the two step classes.
+    krylov_solver, inner_observer, inner_refresh, step_limit, step_projection
+        The linear solve and the per-step guards. See the two step classes.
     jacobian_production_viscosity : bool
         Freeze ``k`` inside the k-production's eddy viscosity in the **operator** the shifted solve
         differentiates, leaving the residual it is driving to zero exact (see
@@ -2312,24 +2357,6 @@ def _coupled_step(
         A :class:`~aquaflux.solve.DualTimeStep` when ``dual_time`` is given, else a
         :class:`~aquaflux.solve.PseudoTransientStep`.
     """
-    # An explicit `residual_norm` (passed by `solve_coupled` on every refresh) is used as-is, so a
-    # self-normalising measure's reference scales stay fixed at the state the *global* progress
-    # reference was measured against. Rebuilding it at each refresh's developed state would re-base it
-    # back toward one, making the convergence test -- whose target is measured once, at the initial
-    # state -- unreachable (issue #156, seam 4).
-    if residual_norm is None:
-        # The default is the row-equilibrated norm. The plain Euclidean norm of the coupled residual is
-        # dominated by the omega block (its magnitude dwarfs the flow and k blocks), so it barely moves
-        # while the flow develops and mis-ranks a separating flow -- steering and the stopping test then
-        # judge omega alone. `RowScaledNorm` (:func:`coupled_scaled_norm`) divides each row by its own
-        # diagonal and each block by its field magnitude, reporting a fractional change per equation, so
-        # every block contributes comparably. `block_scaled_norm=True` selects the coarser per-block
-        # variant; pass `residual_norm=jnp.linalg.norm` for the plain Euclidean one.
-        residual_norm = (
-            _coupled_residual_norm(coupled, reference_state)
-            if block_scaled_norm
-            else coupled_scaled_norm(coupled, policy, reference_state)
-        )
     # The residual whose Jacobian--vector product is the Krylov operator. `None` leaves the step
     # differentiating the residual it is driving to zero, exactly as before.
     jacobian_operator = _probed_assembler(coupled, jacobian_gradient_sweeps)
@@ -2340,15 +2367,16 @@ def _coupled_step(
         if jacobian_gradient_sweeps is None and not jacobian_production_viscosity
         else jacobian_operator.residual
     )
-    # The forward solve stops in the SAME measure object the march reports and accepts steps in, so a
-    # solve cannot converge in a quantity the march does not read. That is the shared half of the
-    # decision; only the restart regime differs per preconditioner family (see `_LinearSolveRegime`).
+    # The linear solve stops in the measure the march is judging the step by at that moment (`norm=None`),
+    # so a solve cannot converge in a quantity the march does not read -- including after the march has
+    # rebuilt the measure at a new state. That is the shared half of the decision; only the restart
+    # regime differs per preconditioner family (see `_LinearSolveRegime`).
     solver = (
         krylov_solver
         if krylov_solver is not None
         else relative_residual_gmres(
             regime.rtol,
-            norm=residual_norm,
+            norm=None,
             restart=regime.restart,
             stagnation_iters=40,
             max_restarts=regime.max_restarts,
@@ -2388,7 +2416,6 @@ def _coupled_step(
             policy,
             **dual_time.settings(),
             krylov_solver=solver,
-            residual_norm=residual_norm,
             adjoint_preconditioner_factory=policy.adjoint_factory(),
             inner_observer=inner_observer,
             inner_refresh=inner_refresh,
@@ -2404,7 +2431,6 @@ def _coupled_step(
     return globalization.step(
         policy,
         krylov_solver=solver,
-        residual_norm=residual_norm,
         adjoint_preconditioner_factory=policy.adjoint_factory(),
         step_limit=step_limit,
         step_projection=step_projection,
@@ -2422,8 +2448,6 @@ def _monolithic_factor_step(
     dual_time: DualTimeLoop | None,
     krylov_solver: lx.AbstractLinearSolver | None,
     regime: _LinearSolveRegime,
-    block_scaled_norm: bool,
-    residual_norm: ResidualNorm | None,
     inner_observer: Callable[..., None] | None = None,
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     step_limit: Callable[..., jnp.ndarray] | None = None,
@@ -2447,8 +2471,6 @@ def _monolithic_factor_step(
         globalization=globalization,
         dual_time=dual_time,
         krylov_solver=krylov_solver,
-        block_scaled_norm=block_scaled_norm,
-        residual_norm=residual_norm,
         inner_observer=inner_observer,
         inner_refresh=inner_refresh,
         step_limit=step_limit,
@@ -2722,13 +2744,9 @@ class PreconditionerSession(Protocol):
         ...
 
     def refresh(
-        self,
-        state: jnp.ndarray,
-        previous: NewtonStrategy,
-        residual_norm: ResidualNorm,
-        **march: object,
+        self, state: jnp.ndarray, previous: NewtonStrategy, **march: object
     ) -> NewtonStrategy:
-        """Re-freeze at the developed ``state``, keeping ``residual_norm`` as the progress measure."""
+        """Re-freeze at the developed ``state``; ``previous`` is the step it replaces."""
         ...
 
     def rebind(self, coupled: CoupledRANS) -> None:
@@ -2865,21 +2883,11 @@ class _BlockSession:
         return self._build(state, march, track=True)
 
     def refresh(
-        self,
-        state: jnp.ndarray,
-        previous: NewtonStrategy,
-        residual_norm: ResidualNorm,
-        **march: object,
+        self, state: jnp.ndarray, previous: NewtonStrategy, **march: object
     ) -> NewtonStrategy:
         # Re-derives the k/omega hierarchies on their reused coarsening and rebuilds the shift's
         # transport time scale, carrying the flow block and the shift's coordinate factor over.
-        return self._finish(
-            self._step(
-                state,
-                {**_march_keywords(march), "residual_norm": residual_norm},
-                reuse=previous.shift_policy,
-            )
-        )
+        return self._finish(self._step(state, _march_keywords(march), reuse=previous.shift_policy))
 
     def rebind(self, coupled: CoupledRANS) -> None:
         del coupled
@@ -2975,18 +2983,14 @@ class _MaterializedSession:
         return self._build(state, march, track=True)
 
     def refresh(
-        self,
-        state: jnp.ndarray,
-        previous: NewtonStrategy,
-        residual_norm: ResidualNorm,
-        **march: object,
+        self, state: jnp.ndarray, previous: NewtonStrategy, **march: object
     ) -> NewtonStrategy:
         del previous  # the shared inverse is re-fitted in place, not re-derived from the old step
         step = self._build(state, march, track=True)
         if self._hook is not None:
             # The standing inverse was fitted before the march moved; force the next refresh to be full.
             self._hook.rebind(self._coupled)
-        return eqx.tree_at(lambda c: c.residual_norm, step, residual_norm)
+        return step
 
     def rebind(self, coupled: CoupledRANS) -> None:
         current = self._coupled
@@ -3237,8 +3241,6 @@ def coupled_step(
     dual_time: DualTimeLoop | None = None,
     linear_solve: LinearSolveSettings | lx.AbstractLinearSolver | None = None,
     shift: ShiftSettings | None = None,
-    block_scaled_norm: bool = False,
-    residual_norm: ResidualNorm | None = None,
     inner_observer: Callable[..., None] | None = None,
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     positivity_floor: float = 0.0,
@@ -3283,25 +3285,19 @@ def coupled_step(
     linear_solve : LinearSolveSettings, lineax.AbstractLinearSolver or None
         The shifted solve. A :class:`LinearSolveSettings` moves the regime -- unset, restart ``120`` for the
         block-diagonal family, ``10`` for a complete LU and ``15`` for a multigrid V-cycle or a field
-        split, each at a relative tolerance of ``0.3`` -- and keeps the stop in the march's own progress
-        measure. That tolerance is measured **in the progress measure**, not the Euclidean norm: the
-        coupled residual's 2-norm is ~100% ``omega``, so a 2-norm stop halts while the flow-dominated
-        part of the step is still coarse. ``max_restarts`` is the only bound on a single running solve
+        split, each at a relative tolerance of ``0.3`` -- and keeps the stop in the progress measure the
+        march judges the step by (the solve's :class:`~aquaflux.solve.Convergence` measure), not the
+        Euclidean norm: the coupled residual's 2-norm is ~100% ``omega``, so a 2-norm stop halts while
+        the flow-dominated part of the step is still coarse. ``max_restarts`` is the only bound on a single running solve
         and counts raw ``lineax`` restarts, which carry a fixed ``+2`` per solve; keep its corrected
         count strictly above ``retry.abort_above_cycles``, or a truncated solve is accepted instead of
         redone. A whole solver replaces the regime **and** the stopping measure, which is a larger
         change than it looks.
-    block_scaled_norm : bool
-        Measure progress in the coarser per-block :class:`~aquaflux.solve.BlockScaledNorm` rather than
-        the default row-equilibrated :class:`~aquaflux.solve.RowScaledNorm`.
     shift : ShiftSettings or None
         How the pseudo-time shift diagonal is formed: its basis, where the velocity shift's parts come
         from, and how much harder the closure's rows are damped than the flow's (see
         :class:`ShiftSettings`). Unset, the full operator diagonal, damped uniformly. It changes only
         the path: the shift vanishes at the root.
-    residual_norm : ResidualNorm or None
-        An explicit progress measure, overriding ``block_scaled_norm``. A refresh passes the march's
-        initial measure here, so a self-normalising measure does not re-base at the developed state.
     inner_observer : callable or None
         A per-inner-iteration hook forwarded to the dual-time step. Forward-only.
     inner_refresh : callable or None
@@ -3326,7 +3322,8 @@ def coupled_step(
     -------
     NewtonStrategy
         A :class:`~aquaflux.solve.PseudoTransientStep`, or a :class:`~aquaflux.solve.DualTimeStep` when
-        ``dual_time`` is given.
+        ``dual_time`` is given. It carries no residual measure of its own: :func:`solve_coupled` hands
+        it the measure its :class:`~aquaflux.solve.Convergence` names at every outer iteration.
     """
     session = open_session(
         preconditioner, coupled, jacobian_production_viscosity=jacobian_production_viscosity
@@ -3338,8 +3335,6 @@ def coupled_step(
             "dual_time": dual_time,
             "linear_solve": linear_solve,
             "shift": shift,
-            "block_scaled_norm": block_scaled_norm,
-            "residual_norm": residual_norm,
             "inner_observer": inner_observer,
             "inner_refresh": inner_refresh,
             "positivity_floor": positivity_floor,
@@ -3449,15 +3444,11 @@ class _ContinuationSource(Protocol):
         """The continuation to start the march with, frozen at ``state``."""
         ...
 
-    def refresh(
-        self, state: jnp.ndarray, previous: NewtonStrategy, residual_norm: ResidualNorm
-    ) -> NewtonStrategy:
-        """Re-freeze at the developed ``state``, keeping ``residual_norm`` as the progress measure.
+    def refresh(self, state: jnp.ndarray, previous: NewtonStrategy) -> NewtonStrategy:
+        """Re-freeze at the developed ``state``.
 
-        The measure is re-injected rather than rebuilt: a self-normalising one would re-base at the
-        developed state, making the convergence test -- whose target is measured once, at the initial
-        state -- unreachable. ``previous`` is the step being replaced, for an implementation that can
-        reuse part of it.
+        ``previous`` is the step being replaced, for an implementation that can reuse part of it. The
+        residual measure is not the step's to keep: the march hands its own to every step it runs.
         """
         ...
 
@@ -3480,11 +3471,9 @@ class _CallerBuiltContinuation:
     def build(self, state: jnp.ndarray) -> NewtonStrategy:
         return self.builder(state)
 
-    def refresh(
-        self, state: jnp.ndarray, previous: NewtonStrategy, residual_norm: ResidualNorm
-    ) -> NewtonStrategy:
+    def refresh(self, state: jnp.ndarray, previous: NewtonStrategy) -> NewtonStrategy:
         del previous  # the builder re-derives everything from the state
-        return eqx.tree_at(lambda c: c.residual_norm, self.builder(state), residual_norm)
+        return self.builder(state)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -3506,9 +3495,7 @@ class _FinishedContinuation:
             "driver bug -- the supplied step should have been used directly."
         )
 
-    def refresh(
-        self, state: jnp.ndarray, previous: NewtonStrategy, residual_norm: ResidualNorm
-    ) -> NewtonStrategy:
+    def refresh(self, state: jnp.ndarray, previous: NewtonStrategy) -> NewtonStrategy:
         raise TypeError(
             "a refresh triggered but the explicit `strategy` cannot be rebuilt: pass "
             "`RefreshPolicy(builder=...)` so the solve can re-freeze it at each developed state."
@@ -3536,10 +3523,8 @@ class _SessionContinuation:
         reference = state if self.reference_state is None else self.reference_state
         return self.session.build(reference, **self.march)
 
-    def refresh(
-        self, state: jnp.ndarray, previous: NewtonStrategy, residual_norm: ResidualNorm
-    ) -> NewtonStrategy:
-        return self.session.refresh(state, previous, residual_norm, **self.march)
+    def refresh(self, state: jnp.ndarray, previous: NewtonStrategy) -> NewtonStrategy:
+        return self.session.refresh(state, previous, **self.march)
 
 
 def _continuation_source(
@@ -3612,6 +3597,12 @@ def _refuse(given: dict, owner: str, why: str, solver: str = "solve_coupled") ->
     )
 
 
+#: The stopping test of a coupled solve given no :class:`~aquaflux.solve.Convergence`, and the base an
+#: incomplete one is filled from. Row-scaled, because the coupled residual's Euclidean norm is almost
+#: entirely the ``omega`` block and so judges nothing else.
+_COUPLED_CONVERGENCE = Convergence(measure=RowScaled(), rtol=1e-10, atol=1e-12)
+
+
 def solve_coupled(
     coupled: CoupledRANS,
     flow: jnp.ndarray | None = None,
@@ -3622,12 +3613,10 @@ def solve_coupled(
     reference_state: jnp.ndarray | None = None,
     preconditioner: BlockDiagonal | MaterializedJacobian | PreconditionerSession | None = None,
     max_steps: int = 60,
-    rtol: float = 1e-10,
-    atol: float = 1e-12,
+    convergence: Convergence | None = None,
     adjoint_solver: lx.AbstractLinearSolver | None = None,
     refresh: RefreshPolicy = NO_REFRESH,
     step_control: StepControl | None = None,
-    scaled_norm: bool = False,
     on_step: Callable[[StepReport], None] | None = None,
     on_checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     retry: RetryPolicy = NO_RETRIES,
@@ -3685,9 +3674,15 @@ def solve_coupled(
         the same terms as ``reference_state``.
     max_steps : int
         Outer-step cap for **each** march segment (see ``refresh``).
-    rtol, atol : float
-        Stopping tolerances, tested as ``||R|| <= atol + rtol * ||R0||`` in the march's residual measure
-        (see ``scaled_norm``), with ``||R0||`` taken at the initial state and held for the whole solve.
+    convergence : Convergence or None
+        The stopping test, ``measure(R) <= atol + rtol * measure(R0)``, with ``R0`` the residual at the
+        initial state. Unset fields take :class:`~aquaflux.solve.RowScaled`, ``rtol = 1e-10`` and
+        ``atol = 1e-12``. The measure is the one the march steers by as well as the one it is judged in:
+        every outer iteration builds it at the state it starts from and hands it to the step, whose line
+        search, shift and linear solve all read it, and the final test is taken in it at the state
+        reached. A :class:`~aquaflux.solve.RowScaled` measure therefore follows the developing flow; a
+        :class:`~aquaflux.solve.BlockScaled` one keeps the scales of the initial state for the whole
+        solve, across every refresh. It replaces whatever measure a supplied ``strategy`` was built with.
     adjoint_solver : lineax.AbstractLinearSolver, optional
         The linear solver for the **adjoint** (transpose) solve behind every ``jax.grad`` through this
         function -- the one solve the implicit-function-theorem gradient is built from, taken once at the
@@ -3728,7 +3723,7 @@ def solve_coupled(
         for the whole march instead of ramping down -- a different damping level has to come from
         ``beta0``, not from expecting the ramp to find it.
 
-        ``rtol`` means the same thing with and without a refresh: the stopping target is measured once,
+        ``convergence`` means the same thing with and without a refresh: the stopping target is measured once,
         at the initial state, and held across every segment, so a refreshed solve stops at exactly the
         residual an unrefreshed one would, for any number of refreshes. ``max_steps`` applies to
         **each** segment, so a refreshed solve may take up to ``refresh.segments * max_steps`` steps --
@@ -3757,16 +3752,6 @@ def solve_coupled(
         :class:`~aquaflux.solve.ResidualRatioDualTimeControl`) to override, or pass one built with
         different knobs. The single-step march (``dual_time`` unset, the default) gets no default
         control.
-    scaled_norm : bool
-        **Rebuild** the default row-equilibrated measure (:class:`~aquaflux.solve.RowScaledNorm`) at the
-        start of every outer iteration -- holding it fixed across that iteration's line search -- rather
-        than freezing it once at the initial state as the default does. The scales (each row's own
-        diagonal, each field's magnitude) then track the developing flow instead of the initial
-        condition. The reference ``||R0||`` and the final convergence test are both taken in this
-        measure, at the initial state and at the state reached: a frozen initial-state measure
-        over-reports a developed residual, and a test in it can demand a residual the march never
-        reaches. Off by default: the frozen row-scaled measure is already the default steering norm
-        (see ``residual_norm``), and the per-iteration rebuild is the finer, more expensive refinement.
     on_step : callable, optional
         Called with each :class:`~aquaflux.solve.StepReport` as the march produces it -- the seam for
         logging a long solve's progress and cost. The refresh trigger reads the same reports. It only
@@ -3886,24 +3871,20 @@ def solve_coupled(
     # reaching a developed recirculation in far fewer outer steps than the residual-keyed schedule.
     step_control = default_dual_time_control(step_control, strategy)
 
-    # The global progress reference AND the residual measure that produces it must come from the same
-    # state, held fixed across every segment: a `BlockScaledNorm` is self-normalising, so a per-refresh
-    # rebuild would re-base it and make the convergence test unreachable (seam 4). Hold the initial
-    # measure and re-inject it into every refreshed continuation. `coupled.residual` is passed as a
-    # bound method (a pytree), not a lambda, so its arrays ride as dynamic leaves and every step within
-    # a segment is a compilation-cache hit.
-    base_norm = strategy.norm()
-    norm_builder = None
-    reference_norm = float(base_norm(frozen.residual(state)))
-    if scaled_norm:
-        # Re-derive the row-equilibrated measure at whatever state each outer iteration starts from --
-        # reading `strategy` at call time, so a refreshed segment's diagonals are used.
-        def norm_builder(at_state: jnp.ndarray) -> ResidualNorm:
-            return coupled_scaled_norm(frozen, strategy.shift_policy, at_state)
-
-        # The march's progress reference must be in the march's own measure, or `residual_ratio` (and
-        # the switched-evolution shift that reads it) would divide two different scales.
-        reference_norm = float(norm_builder(state)(frozen.residual(state)))
+    # The measure is built once per outer iteration by the march, from the one builder made here, and
+    # the global progress reference is taken in it at the initial state. A `BlockScaled` builder holds
+    # the initial state's scales for the whole solve, so a refresh cannot re-base it (which would put the
+    # target, measured once here, out of reach); a `RowScaled` one re-reads the step it is handed, so a
+    # refreshed step's diagonals are used. `frozen.residual` is passed as a bound method (a pytree), not
+    # a lambda, so its arrays ride as dynamic leaves and every step within a segment is a
+    # compilation-cache hit.
+    convergence = (
+        _COUPLED_CONVERGENCE
+        if convergence is None
+        else convergence.filled_from(_COUPLED_CONVERGENCE)
+    )
+    norm_builder = convergence.measure._builder(_CoupledMeasures(frozen), state)
+    reference_norm = float(norm_builder(strategy, state)(frozen.residual(state)))
     # `refresh.limit` refreshes means `refresh.segments` segments: the segment *after* the last refresh
     # must still be marched, or the newly-refreshed preconditioner would never be used.
     control_state: object = None
@@ -3913,8 +3894,8 @@ def solve_coupled(
             frozen.residual,
             state,
             max_steps=max_steps,
-            rtol=rtol,
-            atol=atol,
+            rtol=convergence.rtol,
+            atol=convergence.atol,
             reference_norm=reference_norm,
             # The last segment has no refresh left to spend, so it marches to convergence or to
             # `max_steps` rather than stopping where the trigger fires -- with no second solve after
@@ -3943,17 +3924,13 @@ def solve_coupled(
         control_state = result.control_state
         if not result.triggered or refresh.is_last_segment(segment):
             break
-        # Re-freeze at the developed state, holding the initial-state measure as the progress
-        # reference across the refresh (seam 4) -- how the re-freeze is done is the source's, and
-        # is the same choice made at the initial build above rather than a second one made here.
-        strategy = source.refresh(state, strategy, base_norm)
+        # Re-freeze at the developed state -- how the re-freeze is done is the source's, and is the same
+        # choice made at the initial build above rather than a second one made here.
+        strategy = source.refresh(state, strategy)
 
-    # Judge convergence in the SAME measure the march steered by (a per-step-rebuilt `RowScaledNorm`
-    # under `scaled_norm`), which is what the march actually converged in: the frozen initial-state
-    # measure over-reports a developed residual, and a test in it can demand one the march never reaches.
-    final_measure = norm_builder(state) if norm_builder is not None else base_norm
-    residual_norm = float(final_measure(frozen.residual(state)))
-    target = atol + rtol * reference_norm
+    # Judge convergence in the measure the march steered by, built at the state reached.
+    residual_norm = float(norm_builder(strategy, state)(frozen.residual(state)))
+    target = convergence.atol + convergence.rtol * reference_norm
     arrived = homotopy is None or result.converged
     if not (math.isfinite(residual_norm) and residual_norm <= target and arrived):
         raise eqx.EquinoxRuntimeError(
@@ -4053,7 +4030,6 @@ def mass_flow_coupled_continuation(
     dual_time: DualTimeLoop | None = None,
     linear_solve: LinearSolveSettings | lx.AbstractLinearSolver | None = None,
     shift: ShiftSettings | None = None,
-    block_scaled_norm: bool = False,
     inner_observer: Callable[..., None] | None = None,
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     positivity_floor: float = 0.0,
@@ -4067,20 +4043,15 @@ def mass_flow_coupled_continuation(
     the mass-flow constraint (:class:`_MassFlowBorderedPolicy`), so it drives the augmented
     ``[flow..., k, omega, beta]`` system where ``beta`` is a Lagrange multiplier for ``<U_dir> =
     target``. The march settings are :func:`coupled_step`'s (including ``globalization`` /
-    ``linear_solve`` / ``block_scaled_norm`` / ``shift``);
-    ``flow_direction`` selects the constrained velocity component. ``block_scaled_norm`` here extends the
-    same block-scaled measure with the constraint dof. Its ``linear_solve`` regime is
-    :func:`coupled_step`'s too, but this path defaults to :data:`_CONSTRAINED_LINEAR_SOLVE` rather than
-    :data:`_BLOCK_LINEAR_SOLVE`: the restart regime is the same, and the **tolerance differs because the
-    measure does** -- the forward solve stops in the march's own progress measure, which here is the plain
-    Euclidean norm for the reason given below, so a Euclidean tolerance is what it takes.
+    ``linear_solve`` / ``shift``); ``flow_direction`` selects the constrained velocity component. Its
+    ``linear_solve`` regime is :func:`coupled_step`'s too, but this path defaults to
+    :data:`_CONSTRAINED_LINEAR_SOLVE` rather than :data:`_BLOCK_LINEAR_SOLVE`: the restart regime is the
+    same, and the **tolerance differs because the measure does** -- the linear solve stops in the march's
+    progress measure, which on this path is by default the plain Euclidean norm (see
+    :func:`solve_coupled_mass_flow`), so a Euclidean tolerance is what it takes.
 
     Routes through :func:`_coupled_step` like its siblings, so the globalization is the same one they
-    run. Two things here are genuinely its own and are passed explicitly rather than defaulted: the
-    policy is wrapped in the bordered constraint policy, and the progress measure stays the plain
-    Euclidean norm unless ``block_scaled_norm`` — the row-equilibrated default the other builders take
-    has no constraint-aware form yet, and applying it here would scale the border row by a diagonal it
-    does not have.
+    run. What is genuinely its own is the policy, wrapped in the bordered constraint policy.
 
     ``preconditioner`` must be a :class:`~aquaflux.turbulence.BlockDiagonal` (``None`` takes
     ``BlockDiagonal()``). The constraint borders a block-diagonal policy, whose composed preconditioner
@@ -4127,13 +4098,6 @@ def mass_flow_coupled_continuation(
         globalization=globalization,
         dual_time=dual_time,
         krylov_solver=krylov_solver,
-        block_scaled_norm=block_scaled_norm,
-        # Its own, not the shared default -- see the note above.
-        residual_norm=(
-            _mass_flow_residual_norm(coupled, reference_state)
-            if block_scaled_norm
-            else jnp.linalg.norm
-        ),
         inner_observer=inner_observer,
         inner_refresh=inner_refresh,
         step_limit=step_limit,
@@ -4180,6 +4144,11 @@ class _MassFlowConstrainedResidual(eqx.Module):
         return jnp.append(r_coupled, bulk - self.target)
 
 
+#: The stopping test of a mass-flow-constrained solve given no :class:`~aquaflux.solve.Convergence`. The
+#: row-scaled measure the unconstrained solve defaults to has no form for the bordered system.
+_MASS_FLOW_CONVERGENCE = Convergence(measure=Euclidean(), rtol=1e-10, atol=1e-12)
+
+
 def solve_coupled_mass_flow(
     coupled: CoupledRANS,
     target: float,
@@ -4192,8 +4161,7 @@ def solve_coupled_mass_flow(
     reference_state: jnp.ndarray | None = None,
     preconditioner: BlockDiagonal | None = None,
     max_steps: int = 60,
-    rtol: float = 1e-10,
-    atol: float = 1e-12,
+    convergence: Convergence | None = None,
     adjoint_solver: lx.AbstractLinearSolver | None = None,
     **strategy_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
@@ -4221,6 +4189,12 @@ def solve_coupled_mass_flow(
         The bulk (volume-averaged) velocity component to hold along ``flow_direction``.
     flow_direction : int
         The streamwise axis the bulk velocity is measured and the body force applied along.
+    convergence : Convergence or None
+        The stopping test. Unset fields take :class:`~aquaflux.solve.Euclidean`, ``rtol = 1e-10`` and
+        ``atol = 1e-12``. The measure may be :class:`~aquaflux.solve.Euclidean` or
+        :class:`~aquaflux.solve.BlockScaled` (whose constraint row shares the flow block's scale);
+        :class:`~aquaflux.solve.RowScaled` is refused, since the constraint's border row has no diagonal
+        to equilibrate by.
     preconditioner : BlockDiagonal or None
         The block-diagonal preconditioner the constrained step is built with; ``None`` takes
         ``BlockDiagonal()``. See :func:`mass_flow_coupled_continuation` for why no other family applies.
@@ -4269,9 +4243,13 @@ def solve_coupled_mass_flow(
             **strategy_kwargs,
         )
     solver = RootSolver(
+        convergence=(
+            _MASS_FLOW_CONVERGENCE
+            if convergence is None
+            else convergence.filled_from(_MASS_FLOW_CONVERGENCE)
+        ),
+        measures=_MassFlowMeasures(stop_array_gradients(coupled)),
         max_steps=max_steps,
-        rtol=rtol,
-        atol=atol,
         strategy=strategy,
         # Exposed for the same reason `solve_coupled` exposes it, and this path needs it more: the
         # transpose solve here runs at zero shift against a block-diagonal preconditioner, which is

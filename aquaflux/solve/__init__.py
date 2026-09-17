@@ -135,6 +135,7 @@ from .line_search_growth import (
 )
 from .linear import (
     default_linear_solver,
+    in_progress_measure,
     relative_residual_gmres,
     restart_cycles,
     solve_linear,
@@ -169,6 +170,16 @@ from .multigrid import (
 )
 from .newton import newton_step
 from .norm import BlockScaledNorm, ResidualNorm, RowScaledNorm
+from .convergence import (
+    PLAIN_RESIDUAL,
+    BlockScaled,
+    Convergence,
+    Euclidean,
+    MeasureBuilder,
+    ResidualMeasure,
+    ResidualMeasures,
+    RowScaled,
+)
 from .relaxation import ConstantRelaxation, RelaxationSchedule, SwitchedEvolutionRelaxation
 from .refresh import NO_REFRESH, RefreshPolicy
 from .retry import ESCALATING_REASONS, NO_RETRIES, RetryPolicy
@@ -197,11 +208,13 @@ __all__ = [
     "ESCALATING_REASONS",
     "NO_REFRESH",
     "NO_RETRIES",
+    "PLAIN_RESIDUAL",
     "AirHierarchy",
     "AirReduction",
     "AmgVCycle",
     "BlockColouring",
     "BlockInverse",
+    "BlockScaled",
     "BlockScaledNorm",
     "BlockTriangularFieldSplit",
     "CellFields",
@@ -209,12 +222,14 @@ __all__ = [
     "CoefficientDriftTrigger",
     "ColumnProbePlan",
     "ConstantRelaxation",
+    "Convergence",
     "CycleGrowthTrigger",
     "DampedNewtonStep",
     "DivergenceGuard",
     "DualTimeControl",
     "DualTimeLoop",
     "DualTimeStep",
+    "Euclidean",
     "FieldGroups",
     "FieldLayout",
     "FieldSplitAmgPreconditioner",
@@ -231,6 +246,7 @@ __all__ = [
     "MarchLogger",
     "MarchResult",
     "MaterializedJacobianPreconditioner",
+    "MeasureBuilder",
     "MonolithicAmgPreconditioner",
     "MonolithicLuPreconditioner",
     "MonotoneLineSearch",
@@ -246,10 +262,13 @@ __all__ = [
     "RelaxationSchedule",
     "RelaxedFarFromRoot",
     "ResidualHomotopy",
+    "ResidualMeasure",
+    "ResidualMeasures",
     "ResidualNorm",
     "ResidualRatioDualTimeControl",
     "RetryPolicy",
     "RootSolver",
+    "RowScaled",
     "RowScaledNorm",
     "SettingsMapping",
     "SettingsValue",
@@ -294,6 +313,7 @@ __all__ = [
     "equilibrate_cell_major",
     "field_change_metrics",
     "filled_from",
+    "in_progress_measure",
     "jacobian_relative_error",
     "materialize_block_jacobian",
     "newton_march",

@@ -31,6 +31,7 @@ import lineax as lx
 
 from aquaflux.solve import (
     DEFAULT_GLOBALIZATION,
+    Convergence,
     Globalization,
     RootSolver,
     ShiftTerm,
@@ -175,7 +176,10 @@ def scalar_pseudo_transient_solve(
             adjoint_preconditioner_factory=None if policy is None else policy.preconditioner,
         )
         newton = RootSolver(
-            rtol=rtol, atol=atol, max_steps=max_steps, linear_solver=solver, strategy=forward
+            convergence=Convergence(rtol=rtol, atol=atol),
+            max_steps=max_steps,
+            linear_solver=solver,
+            strategy=forward,
         )
         return newton.solve(_ParameterFreeResidual(residual), state, None)
 

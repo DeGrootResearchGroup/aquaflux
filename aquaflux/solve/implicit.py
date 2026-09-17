@@ -24,7 +24,9 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 
+from .convergence import PLAIN_RESIDUAL, Convergence, ResidualMeasures
 from .linear import corrected_cycles as _corrected
+from .linear import in_progress_measure
 from .march import MarchResult, newton_march, refuse_a_transform_the_march_cannot_run_in
 from .newton import newton_correction
 from .norm import ResidualNorm
@@ -597,6 +599,7 @@ class DampedNewtonStep(eqx.Module):
         norm = self.residual_norm
 
         def step(residual_fn, phi, residual_norm_0, solver):
+            solver = in_progress_measure(solver, norm)
             # The starting norm is unused: each step's line search is decided from the residual at
             # the current iterate, not the initial one.
             del residual_norm_0
@@ -677,6 +680,11 @@ class _ResidualAt(eqx.Module):
         return self.residual_fn(phi, self.theta)
 
 
+#: The stopping tolerances a root solve takes when its :class:`Convergence` leaves them unset. The measure
+#: stays unset: it is the strategy's own.
+_ROOT_CONVERGENCE = Convergence(rtol=1e-10, atol=1e-12)
+
+
 class RootSolver(eqx.Module):
     """Newton solve to convergence with a reverse-mode IFT adjoint.
 
@@ -686,8 +694,16 @@ class RootSolver(eqx.Module):
 
     Attributes
     ----------
-    rtol, atol : float
-        Relative / absolute stopping tolerances on the residual norm (static).
+    convergence : Convergence
+        The stopping test, ``measure(R) <= atol + rtol * measure(R0)`` (static). Unset tolerances are
+        ``rtol = 1e-10`` and ``atol = 1e-12``. An unset measure is the strategy's own
+        (:meth:`NewtonStrategy.norm`, the Euclidean norm unless the strategy was built with another); a
+        set one is rebuilt against ``measures`` at the start of every iteration and replaces it for the
+        line search, the shift, the linear solve's stop and the convergence test alike.
+    measures : ResidualMeasures
+        What the residual can be measured in, for a set ``convergence.measure``. The default,
+        :data:`PLAIN_RESIDUAL`, supports only :class:`Euclidean`; a solve over a structured residual
+        passes that residual's own.
     max_steps : int
         Maximum Newton iterations (static).
     linear_solver : lineax.AbstractLinearSolver or None
@@ -696,7 +712,7 @@ class RootSolver(eqx.Module):
         suit that strategy's march (a loose relative tolerance for the line search, plus a tight
         *absolute* floor for the pseudo-transient continuation so its march is not capped short of
         the nonlinear tolerance near convergence). The converged state is unaffected — the loop
-        still drives the residual to ``rtol``/``atol``.
+        still drives the residual to :attr:`convergence`.
     adjoint_solver : lineax.AbstractLinearSolver or None
         Linear solver for the adjoint (transpose) solve. ``None`` uses the tight
         :func:`default_linear_solver`, because this single solve at the converged state sets the
@@ -716,8 +732,8 @@ class RootSolver(eqx.Module):
         which needs one.
     """
 
-    rtol: float = eqx.field(static=True, default=1e-10)
-    atol: float = eqx.field(static=True, default=1e-12)
+    convergence: Convergence = eqx.field(static=True, default=Convergence())
+    measures: ResidualMeasures = PLAIN_RESIDUAL
     max_steps: int = eqx.field(static=True, default=50)
     linear_solver: lx.AbstractLinearSolver | None = None
     adjoint_solver: lx.AbstractLinearSolver | None = None
@@ -766,16 +782,23 @@ class RootSolver(eqx.Module):
         refuse_a_transform_the_march_cannot_run_in((phi0, theta), caller="RootSolver.solve")
         strategy = self.strategy
         solver = self.linear_solver if self.linear_solver is not None else strategy.linear_solver()
+        convergence = self.convergence.filled_from(_ROOT_CONVERGENCE)
+        start = stop_array_gradients(phi0)
         # The march runs on stopped copies and is never differentiated, so its Python loop sees
         # concrete values on the `jax.grad` path as well; the derivative is attached below, at the
         # root it reaches.
         result = newton_march(
             strategy,
             _ResidualAt(residual_fn, stop_array_gradients(theta)),
-            stop_array_gradients(phi0),
+            start,
             max_steps=self.max_steps,
-            rtol=self.rtol,
-            atol=self.atol,
+            rtol=convergence.rtol,
+            atol=convergence.atol,
+            norm_builder=(
+                None
+                if convergence.measure is None
+                else convergence.measure._builder(self.measures, start)
+            ),
             solver=solver,
         )
         # The march carries no guard of its own -- stopping short is part of what it is for -- so the

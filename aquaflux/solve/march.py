@@ -49,7 +49,7 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 
-from .norm import ResidualNorm
+from .convergence import MeasureBuilder
 from .retry import ESCALATING_REASONS, NO_RETRIES, RetryPolicy
 from .root_adjoint import stop_array_gradients
 from .strategy import NewtonStrategy, StepControl, StepOutcome, StepReport, within_tolerance
@@ -529,7 +529,7 @@ def newton_march(
     observer: Callable[[StepReport], None] | None = None,
     checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     drift_measure: Callable[[jnp.ndarray], float] | None = None,
-    norm_builder: Callable[[jnp.ndarray], ResidualNorm] | None = None,
+    norm_builder: MeasureBuilder | None = None,
     refresh_preconditioner: Callable[[NewtonStrategy, jnp.ndarray], None] | None = None,
     solver: lx.AbstractLinearSolver | None = None,
     retry: RetryPolicy = NO_RETRIES,
@@ -610,12 +610,14 @@ def newton_march(
         older than the last refresh would report movement that has already been absorbed and refresh
         again immediately.
     norm_builder : callable, optional
-        ``state -> ResidualNorm``, re-deriving the residual measure at the state each outer iteration
-        starts from and holding it for that whole iteration — every trial step of the line search, the
+        ``(step, state) -> ResidualNorm``, re-deriving the residual measure at the state each outer
+        iteration starts from and holding it for that whole iteration — every trial step of the line search, the
         acceptance test and the reported norm. Rebuilding it per trial step instead would let a
         candidate win by shrinking its own denominator rather than its residual. The segment reference
         the damping schedule ramps against is taken in this same measure, so the ratio divides two
-        comparably-scaled quantities. ``None`` (the default) uses ``strategy.norm()`` throughout.
+        comparably-scaled quantities. ``step`` is ``strategy``, for a measure that reads its scales from the
+        step's shift; a solve builds one from its :class:`~aquaflux.solve.ResidualMeasure`.
+        ``None`` (the default) uses ``strategy.norm()`` throughout.
     refresh_preconditioner : callable, optional
         ``(active_step, state) -> None``, called before each step (after the control has set the shift
         strength on ``active_step``) to refresh that step's frozen host preconditioner from the current
@@ -705,7 +707,7 @@ def newton_march(
         solver = strategy.linear_solver()
     # When the measure is rebuilt each iteration, the segment reference must be taken in that same
     # measure -- otherwise the damping schedule divides two differently-scaled quantities.
-    norm = norm_builder(phi0) if norm_builder is not None else strategy.norm()
+    norm = norm_builder(strategy, phi0) if norm_builder is not None else strategy.norm()
 
     # The segment-local reference: what the step's damping schedule ramps against. Recomputed here,
     # never inherited, so a segment resumed after a refresh restarts its ramp. It is fixed for the
@@ -777,7 +779,9 @@ def newton_march(
             # candidate win by shrinking its own denominator rather than its residual, so the search
             # would stop comparing like with like. The swap is a compilation-cache hit as long as the
             # measure carries its scales as data over a fixed block structure.
-            active_step = eqx.tree_at(lambda s: s.residual_norm, active_step, norm_builder(state))
+            active_step = eqx.tree_at(
+                lambda s: s.residual_norm, active_step, norm_builder(strategy, state)
+            )
         if station_step is not None and homotopy is not None:
             # Let the caller reshape the step for the station it is about to run -- the seam by which
             # anything a homotopy changes about the PROBLEM can be matched by a change to how the step

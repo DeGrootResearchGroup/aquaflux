@@ -826,7 +826,7 @@ paths:
       Pinned by `test_on_retry_reports_the_beta_the_retried_attempt_will_run_at` (at a *non-default*
       factor, since 2 cannot catch this) and two `test_march_log.py` tests.
   - **A self-rescaling measure means two "same" residuals are NOT the same number (binding trap).**
-    `newton_march(norm_builder=…)` re-derives the `RowScaledNorm` at the state each outer iteration
+    `newton_march(norm_builder=…)` (a `(step, state)` builder) re-derives the `RowScaledNorm` at the state each outer iteration
     *begins from* and holds it for that whole iteration. So the `R` reported at the end of step N and
     the `‖G‖` entering step N+1 measure the **identical state** in **different scales**. Measured over
     one 62-step `bfs3d` march: they differed on **every** step — up to 2× early on, converging to 1 as
