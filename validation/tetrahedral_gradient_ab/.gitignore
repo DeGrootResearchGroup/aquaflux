@@ -1,0 +1,6 @@
+# Regenerable: rebuild with `python3 of_case/make_mesh.py` then `gmshToFoam` -- see README.md.
+of_case/duct.msh
+of_case/constant/polyMesh/
+# Streamed run logs (python3 -u > *.log redirects via run_case.sh).
+*.log
+__pycache__/
