@@ -17,7 +17,11 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | piece | state |
 |---|---|
 | `solid_angle.py` — the two geometric kernels | **BUILT** |
-| STL parsing, `Surfaces` | Not yet built |
+| `stl.py` — ASCII and binary STL reading | **BUILT** |
+| `surfaces.py` — the `Surfaces` value object | **BUILT** |
+| `checks.py` — build-time geometry checks | **BUILT** |
+| `subdivide.py` — the width-over-distance refinement | **BUILT** |
+| `Profile` strategy family (Lambertian, cosine-power) | Not yet built — lands with the gather, its only consumer |
 | the chunked gather, point and line sources | Not yet built |
 | the radiosity system | Not yet built |
 | Beer–Lambert optical depth, voxel-grid traversal | Not yet built |
@@ -96,6 +100,75 @@ test sweeps obliquity across its whole range for exactly this reason.
 All five mutations of the kernels were verified to fail the suite: `arctan2`→`arccos`, drop
 the clip, drop either magnitude, and return the plain solid angle from the projected function.
 
+
+## ⚠️ A ZERO-AREA FACET IS LEGAL — IT IS A POINT SOURCE
+
+The guard a reader reaches for is the bug. `Surfaces` carries **emission** (W/m², areal) and
+**radiant power** (W, point) as separate fields, and a point source is a degenerate triangle
+with zero area carrying power. Rejecting degenerate triangles deletes every point source in
+the set; dividing by the area to get a normal fills the geometry with NaN, which then reaches
+every gradient that touches the surface rather than only the facet that caused it. The normal
+is zero on such a facet, and `from_triangles` guards the division rather than the input.
+
+**Power is also extensive, which is why `refine_for_receivers` refuses to carry it.** Emission
+and reflectance are intensive and are inherited unchanged by a facet's children; power would
+have to be divided among them. Refine the areal facets, then add the point sources.
+
+## ⚠️ DETECT THE STL FORMAT BY FILE LENGTH, NOT BY THE LEADING KEYWORD
+
+A binary STL's 80-byte header is arbitrary text and exporters have shipped headers beginning
+with the word `solid`. A reader that sniffs the keyword then attempts an ASCII parse of binary
+data — failing on unparsable numbers if you are lucky, and returning garbage from a stray
+`vertex` byte sequence if you are not. A binary file's length is exactly
+`84 + 50 × count` with the count read from its own header, which no ASCII file matches except
+by coincidence. That is the test, and it is pinned by a fixture whose header starts with
+`solid`.
+
+Body names are load-bearing: they are how optical properties are assigned, so `per_facet`
+raises on a name the file does not contain and on a body the mapping omits. A silently dropped
+name leaves a lamp emitting nothing, which looks like a physics result.
+
+## Winding is checked, and it is the most common real defect
+
+A triangulated surface carries no orientation of its own — outwardness is inferred from vertex
+order. Exporters, boolean operations and hand edits all produce files where some triangles
+disagree with their neighbours, and those facets' normals point into the solid, where the
+source-side visibility clamp discards them. **The surface emits less over that patch and
+nothing anywhere reports an error.** `check_winding` raises; `winding_report` returns the
+counts without raising.
+
+The test is edge parity: every shared edge must be traversed in opposite directions by its two
+triangles. Vertices are merged within a tolerance **relative to the model's extent** first,
+because an STL repeats an edge's endpoints in each triangle as separately-rounded coordinates —
+match them exactly and no edge is ever shared, so no conflict can ever be found and every edge
+reads as a boundary.
+
+Boundary edges (one triangle) are fine — open surfaces are legal. Non-manifold edges (three or
+more) are counted but not fatal: a gather never has to decide which side of a surface it is on,
+which is also why watertightness is **not** required here even though ray-tracing codes that
+track a medium do require it.
+
+## The refinement criterion, and why the distance is measured from the corner
+
+The closed-form solid angle is exact at any apparent size, so refinement is not about the
+geometry term. It is about what the model assumes constant across a facet: one emission, one
+reflectance, one outgoing radiance. The criterion is lighting simulation's own — refine until
+longest edge over distance to the nearest receiver falls below 0.25 (0.15 and 0.05 for accurate
+work), and **report the realized distribution**, so a build states the accuracy it reached
+rather than the one it was asked for.
+
+Two details:
+
+- **Distance is the minimum over the three vertices and the centroid, not the centroid alone.**
+  A centroid distance is never smaller, so it can only refine less, and it under-refines exactly
+  where a receiver sits closest to a facet — the worst case. The separating fixture is narrow
+  (most geometries refine under both measures), so the test constructs one that straddles the
+  threshold and asserts it still straddles it.
+- **The four-way split's middle child must keep its siblings' winding.** Reversed, a quarter of
+  every refined facet stops emitting, and `check_winding` then blames the input file.
+
+Splitting at edge midpoints into four *similar* triangles preserves shape quality where
+repeated bisection of one edge would not, and conserves area exactly.
 ## Documentation
 
 The package is **deliberately absent from `docs/conf.py`'s `PUBLIC_SUBPACKAGES`.** Listing a
