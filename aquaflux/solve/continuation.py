@@ -41,7 +41,7 @@ import lineax as lx
 
 from .implicit import backtracking_line_search
 from .line_search_growth import LineSearchGrowth, MonotoneLineSearch
-from .linear import corrected_cycles, solve_linear
+from .linear import corrected_cycles, in_progress_measure, solve_linear
 from .norm import ResidualNorm
 from .relaxation import RelaxationSchedule, SwitchedEvolutionRelaxation
 from .settings_value import SettingsValue, filled_from
@@ -548,6 +548,8 @@ class PseudoTransientStep(ShiftedStep):
             residual_norm_0: jnp.ndarray,
             solver: lx.AbstractLinearSolver,
         ) -> StepOutcome:
+            # The linear solve stops in the measure this step is judged by, not one fixed at configuration.
+            solver = in_progress_measure(solver, norm)
             residual = residual_fn(phi)
             residual_norm = norm(residual)
             # `residual` is `R(phi)`, computed just above: a policy that tapers its shift on how far
@@ -907,6 +909,8 @@ class DualTimeStep(ShiftedStep):
             residual_norm_0: jnp.ndarray,
             solver: lx.AbstractLinearSolver,
         ) -> StepOutcome:
+            # The linear solves stop in the measure this step is judged by, not one fixed at configuration.
+            solver = in_progress_measure(solver, norm)
             reference = phi  # φⁿ, held across the inner loop
             # ‖R(φⁿ)‖ = ‖G(φⁿ)‖: the transient term β d (φ − φⁿ) is zero at the anchor, so the honest
             # steady residual at the anchor and the inner loop's starting G-norm are the same number.

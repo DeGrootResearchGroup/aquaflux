@@ -32,7 +32,15 @@ from aquaflux.flow import (
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import NO_REFRESH, DualTimeLoop, RefreshPolicy
+from aquaflux.solve import (
+    DEFAULT_GLOBALIZATION,
+    NO_REFRESH,
+    Convergence,
+    DualTimeLoop,
+    Euclidean,
+    Globalization,
+    RefreshPolicy,
+)
 from aquaflux.turbulence import (
     BlockDiagonal,
     LogScalars,
@@ -240,11 +248,12 @@ def test_the_coupled_adjoint_is_independent_of_the_forward_iteration_count(case)
     gradient that depends on how it got there. The distinguishing experiment is to change the path
     and leave the destination alone.
 
-    The dual-time loop is the lever, as it is for the same property at unit level: none is a single
-    pseudo-transient step per outer iteration and ``DualTimeLoop(inner_steps=3)`` runs an inner Newton
-    loop, so the two
-    marches take materially different numbers of outer steps through materially different
-    intermediate states, and stop at the same converged residual.
+    The lever is the pseudo-transient shift strength: the default ``beta0`` and a gentler
+    ``Globalization(beta0=0.5)`` damp every step differently, so the two marches take materially
+    different numbers of outer steps through materially different intermediate states, and stop at the
+    same converged residual. (A dual-time inner loop was the lever until the coupled solve's row-scaled
+    measure began to be rebuilt every outer iteration; under that measure it changes the inner
+    iterations but not the outer step count on this channel, 20 either way.)
 
     The step counts are measured -- in separate runs with an observer, which changes nothing about the
     march -- and asserted to differ. Without that, a test that varied only a cap the solve never reaches
@@ -254,12 +263,12 @@ def test_the_coupled_adjoint_is_independent_of_the_forward_iteration_count(case)
     flow_ws, k_ws, omega_ws = case["coupled_start"]
     reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
 
-    def continuation(dual_time):
+    def continuation(globalization):
         return coupled_step(
             coupled,
             reference_state,
             preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
-            dual_time=dual_time,
+            globalization=globalization,
         )
 
     def objective(nu_scale, step):
@@ -271,7 +280,7 @@ def test_the_coupled_adjoint_is_independent_of_the_forward_iteration_count(case)
         _, k, _ = solve_coupled(scaled, flow_ws, k_ws, omega_ws, strategy=step, max_steps=60)
         return jnp.sum(k**2)
 
-    single, dual = continuation(None), continuation(DualTimeLoop(inner_steps=3))
+    default, gentle = continuation(DEFAULT_GLOBALIZATION), continuation(Globalization(beta0=0.5))
 
     # The paths genuinely differ, so the comparison below is not a configuration against itself.
     def outer_steps(step):
@@ -287,18 +296,18 @@ def test_the_coupled_adjoint_is_independent_of_the_forward_iteration_count(case)
         )
         return len(seen)
 
-    steps_single, steps_dual = outer_steps(single), outer_steps(dual)
-    assert steps_single != steps_dual, (
-        f"both configurations marched in {steps_single} outer steps, so this test compares one "
+    steps_default, steps_gentle = outer_steps(default), outer_steps(gentle)
+    assert steps_default != steps_gentle, (
+        f"both configurations marched in {steps_default} outer steps, so this test compares one "
         "path against itself and cannot detect a taped adjoint"
     )
 
     # Same root: the two marches stop on the same coupled residual tolerance.
-    assert float(objective(1.0, single)) == pytest.approx(float(objective(1.0, dual)), rel=1e-8)
+    assert float(objective(1.0, default)) == pytest.approx(float(objective(1.0, gentle)), rel=1e-8)
 
-    grad_single = float(jax.grad(objective)(1.0, single))
-    grad_dual = float(jax.grad(objective)(1.0, dual))
-    assert grad_single == pytest.approx(grad_dual, rel=1e-6)
+    grad_default = float(jax.grad(objective)(1.0, default))
+    grad_gentle = float(jax.grad(objective)(1.0, gentle))
+    assert grad_default == pytest.approx(grad_gentle, rel=1e-6)
 
 
 @pytest.mark.slow
@@ -500,7 +509,7 @@ def test_staged_preconditioner_refresh_reaches_the_same_fixed_point(case) -> Non
 
 @pytest.mark.slow
 def test_staged_refresh_stops_at_the_same_tolerance(case) -> None:
-    """``rtol`` must mean the same thing with and without a refresh.
+    """A relative tolerance must mean the same thing with and without a refresh.
 
     The stopping target is measured once, at the initial state, and held across every segment, so a
     refreshed solve stops where an unrefreshed one does however many segments it took. A target
@@ -508,7 +517,8 @@ def test_staged_refresh_stops_at_the_same_tolerance(case) -> None:
     reached, silently tightening the solve by that factor (and compounding with each further refresh)
     -- which turns a converging solve into far more work or a ``max_steps`` failure. Both paths are driven to a loose ``rtol``
     here so each stops *on tolerance* rather than overshooting to machine zero, which is what makes
-    the comparison able to detect the difference.
+    the comparison able to detect the difference. Both are measured in the Euclidean norm, the one the
+    assertions below take, so the requested bar and the checked one are the same quantity.
     """
     coupled = case["coupled"]
     flow_ws, k_ws, omega_ws = case["coupled_start"]
@@ -518,7 +528,7 @@ def test_staged_refresh_stops_at_the_same_tolerance(case) -> None:
 
     common = dict(
         max_steps=40,
-        rtol=rtol,
+        convergence=Convergence(measure=Euclidean(), rtol=rtol),
         preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
     )
     single = solve_coupled(coupled, flow_ws, k_ws, omega_ws, **common)
@@ -629,7 +639,7 @@ def test_the_march_reports_progress_without_a_refresh_trigger(case) -> None:
         k_ws,
         omega_ws,
         max_steps=40,  # must actually converge: the finishing solve raises on a non-root
-        rtol=1e-2,  # loose -- this test is about reporting, not about how deep it gets
+        convergence=Convergence(rtol=1e-2),
         on_step=seen.append,
         on_checkpoint=lambda report, state: saved.append((report.step, state)),
         preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),

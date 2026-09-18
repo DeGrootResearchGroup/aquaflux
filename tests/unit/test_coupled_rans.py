@@ -10,6 +10,7 @@ tests (:mod:`tests.integration.test_coupled_rans`).
 from __future__ import annotations
 
 import dataclasses
+import functools
 import inspect
 
 import aquaflux  # noqa: F401  (enables x64)
@@ -27,8 +28,12 @@ from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss, CorrectedGreenGauss, SweptGradientSolve
 from aquaflux.solve import (
     NO_REFRESH,
+    BlockScaled,
+    BlockScaledNorm,
+    Convergence,
     CycleGrowthTrigger,
     DualTimeLoop,
+    Euclidean,
     Globalization,
     PseudoTransientStep,
     RefreshPolicy,
@@ -280,9 +285,7 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
         # the multigrid builder alone, although the argument for them is about the *coupled residual*
         # (~100% omega under a plain 2-norm, so the flow block goes unresolved) and not about multigrid.
         "linear_solve",
-        # The progress measure and the shift.
-        "block_scaled_norm",
-        # ...one value since #387, so the velocity parts -- once on two builders of four -- cannot fall
+        # The shift, one value since #387, so the velocity parts -- once on two builders of four -- cannot fall
         # off one again.
         "shift",
         # The per-step guards.
@@ -298,72 +301,61 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
         missing = shared - set(inspect.signature(builder).parameters)
         assert not missing, f"{builder.__name__} cannot be given {sorted(missing)}"
 
-    # One deliberate carve-out, pinned so it stays deliberate: the mass-flow builder takes no explicit
-    # `residual_norm`, because the constrained path has no staged-refresh driver to inject a frozen
-    # measure, and it supplies its own constraint-aware one. Every other builder takes it.
-    assert "residual_norm" not in inspect.signature(mass_flow_coupled_continuation).parameters
-    for builder in builders[:-1]:
-        assert "residual_norm" in inspect.signature(builder).parameters
+    # And neither takes a residual measure: the measure belongs to the solve's `Convergence`, and the
+    # march hands it to the step at every outer iteration (#370).
+    for builder in builders:
+        taken = {"residual_norm", "block_scaled_norm"} & set(inspect.signature(builder).parameters)
+        assert not taken, (
+            f"{builder.__name__} chooses a measure the solve should own: {sorted(taken)}"
+        )
 
 
-def test_every_builder_stops_the_forward_solve_in_the_march_s_own_measure() -> None:
-    """The forward solve's stopping measure is the march's progress measure, on every builder.
+def test_every_builder_stops_its_linear_solve_in_the_measure_the_march_hands_the_step() -> None:
+    """The default linear solve names no measure of its own, on every builder.
 
-    Two separate rules meet here. The march must be steered by and judged by one definition, so the
-    linear solve cannot converge in a quantity the march never reads. And the *reason* the coupled
-    residual needs a row-scaled stop is about the residual, not about any preconditioner: a plain
-    2-norm of it is ~100% ``omega``, whose residual sits orders above the flow's, so a solve stops once
-    ``omega`` is resolved while the flow-dominated part of the Newton step is still coarse. That
-    argument reached only the builder being worked on at the time, leaving the default path -- what
-    ``solve_coupled`` builds when nothing is passed -- stopping on the norm its own docstring calls
-    effectively blind.
+    The march builds the measure afresh at each outer iteration and hands it to the step; a solver built
+    with a fixed norm would go on stopping in the measure of the state it was configured at, which is the
+    mismatch #370 found under a rebuilt measure. ``norm=None`` is how a solver says "whichever measure
+    the step is being judged by"; that each step class honours it is pinned beside the steps.
     """
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
-    for name, step in {
+    steps = {
         "block": coupled_step(
             coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
         ),
         "lu": coupled_step(
             coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
         ),
-    }.items():
-        assert step.krylov_solver.norm is step.residual_norm, (
-            f"{name} steers on one measure and stops its linear solve on another"
-        )
-        # ...and that measure is the row-equilibrated one, not the Euclidean norm it used to be.
-        assert isinstance(step.residual_norm, RowScaledNorm), name
-
-    # An explicit measure is honoured all the way through, so the two cannot come apart there either --
-    # which is what `solve_coupled` relies on when it re-injects the march's initial measure at every
-    # refresh rather than letting a self-normalising one re-base at the developed state.
-    base = coupled_step(
-        coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
-    )
-    explicit = coupled_step(
-        coupled,
-        state,
-        preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
-        residual_norm=base.residual_norm,
-    )
-    assert explicit.krylov_solver.norm is explicit.residual_norm is base.residual_norm
+        "mass flow": mass_flow_coupled_continuation(
+            coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+        ),
+    }
+    for name, step in steps.items():
+        assert step.krylov_solver.norm is None, f"{name} stops its linear solve in a fixed measure"
 
 
-def test_the_constrained_builder_keeps_a_euclidean_stop_for_a_stated_reason() -> None:
-    """The bordered mass-flow path is the one that genuinely differs, and it differs consistently.
+def test_each_solve_measures_the_residual_it_can_measure() -> None:
+    """The coupled residual supports every measure; the bordered mass-flow residual has no row-scaled one.
 
-    The row-equilibrated measure has no constraint-aware form: it would scale the border row by a
-    diagonal the constraint does not have. So that march is judged in the Euclidean norm — and its
-    forward solve therefore stops there too, at a Euclidean tolerance, because the tolerance and the
-    norm it is measured in are one decision. This is a property of the path, not a surface that drifted.
+    Its border row holds the constraint, which has no diagonal to equilibrate by, so a row-scaled
+    measure there would misreport it. Refused by name rather than computed wrongly.
     """
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
-    step = mass_flow_coupled_continuation(
+    step = coupled_step(
         coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
     )
-    assert step.residual_norm is jnp.linalg.norm
-    assert step.krylov_solver.norm is step.residual_norm
+    measures = coupled_module._CoupledMeasures(coupled)
+    assert isinstance(measures.row_scaled(step, state), RowScaledNorm)
+    assert isinstance(measures.block_scaled(state), BlockScaledNorm)
+
+    bordered = jnp.append(state, 0.0)
+    mass_flow = coupled_module._MassFlowMeasures(coupled)
+    with pytest.raises(TypeError, match=r"RowScaled.*border row"):
+        mass_flow.row_scaled(step, bordered)
+    # The multiplier shares the flow block's scale, so the bordered measure has one more block.
+    assert mass_flow.block_scaled(bordered).sizes == (*coupled.layout.sizes, 1)
 
 
 def test_the_constrained_builder_refuses_a_materialized_preconditioner() -> None:
@@ -595,14 +587,10 @@ def test_the_continuation_source_is_one_decision_for_the_build_and_every_refresh
     )
     first = source.build(state)
     assert len(built) == 1
-    # A refresh re-invokes the SAME builder, and re-injects the march's measure rather than rebuilding
-    # it -- a self-normalising measure rebuilt at a developed state would re-base the convergence test.
-    measure = coupled_scaled_norm(coupled, first.shift_policy, state)
-    refreshed = source.refresh(state, first, measure)
+    # A refresh re-invokes the SAME builder. The measure is not the step's to carry: the march hands its
+    # own to every step it runs.
+    source.refresh(state, first)
     assert len(built) == 2
-    # Value, not identity: the builder path re-injects the measure with `tree_at`, which rebuilds
-    # the pytree around the substituted leaf. What must hold is that the scales did not move.
-    assert bool(eqx.tree_equal(refreshed.residual_norm, measure))
 
 
 def test_coupled_build_resolves_boundaries_so_the_residual_jits() -> None:
@@ -780,11 +768,13 @@ def test_the_coupled_solve_refuses_jit_and_vmap_before_any_work(transform) -> No
 
     with pytest.raises(ValueError, match=r"cannot run inside a traced program"):
         if transform == "jit":
-            eqx.filter_jit(lambda c: solve_coupled(c, flow, k, omega, rtol=1e-2))(coupled)
+            eqx.filter_jit(
+                lambda c: solve_coupled(c, flow, k, omega, convergence=Convergence(rtol=1e-2))
+            )(coupled)
         else:
-            jax.vmap(lambda f: solve_coupled(coupled, f, k, omega, rtol=1e-2))(
-                jnp.stack([flow, flow])
-            )
+            jax.vmap(
+                lambda f: solve_coupled(coupled, f, k, omega, convergence=Convergence(rtol=1e-2))
+            )(jnp.stack([flow, flow]))
 
 
 def test_the_march_is_handed_the_homotopy_and_the_same_arguments_whether_or_not_it_is_observed(
@@ -810,8 +800,10 @@ def test_the_march_is_handed_the_homotopy_and_the_same_arguments_whether_or_not_
     monkeypatch.setattr(coupled_module, "newton_march", recording_march)
     homotopy = object()
     # A target no state can miss, so the recorded march's untouched state is accepted as the root; a
-    # pre-built step with a plain Euclidean measure keeps the test to the wiring.
-    loose = dict(rtol=1.0, atol=1e30, strategy=_single_step())
+    # pre-built step and the plain Euclidean measure keep the test to the wiring.
+    loose = dict(
+        convergence=Convergence(measure=Euclidean(), rtol=1.0, atol=1e30), strategy=_single_step()
+    )
 
     solve_coupled(coupled, flow, k, omega, homotopy=homotopy, **loose)
     solve_coupled(coupled, flow, k, omega, homotopy=homotopy, on_step=print, **loose)
@@ -861,8 +853,7 @@ def test_a_march_that_ends_short_of_a_root_is_refused_rather_than_returned(
             flow,
             k,
             omega,
-            rtol=0.0,
-            atol=atol,
+            convergence=Convergence(rtol=0.0, atol=atol),
             homotopy=homotopy,
             strategy=_single_step(),
         )
@@ -894,8 +885,7 @@ def test_the_last_refresh_segment_marches_without_the_trigger(monkeypatch) -> No
         flow,
         k,
         omega,
-        rtol=1.0,
-        atol=1e30,
+        convergence=Convergence(measure=Euclidean(), rtol=1.0, atol=1e30),
         strategy=step,
         refresh=RefreshPolicy(trigger=trigger, limit=2, builder=lambda state: step),
     )
@@ -934,7 +924,7 @@ def test_refresh_trigger_with_an_explicit_continuation_and_no_builder_is_rejecte
             flow,
             k,
             omega,
-            rtol=1e-2,
+            convergence=Convergence(rtol=1e-2),
             strategy=PseudoTransientStep(_TrivialShiftPolicy()),
             refresh=RefreshPolicy(trigger=CycleGrowthTrigger()),
         )
@@ -980,31 +970,92 @@ def test_refreshing_the_policy_rebuilds_transport_and_carries_the_coordinate_fac
     assert refreshed.flow_preconditioner is base.flow_preconditioner
 
 
-def test_refresh_carries_the_block_scaled_progress_norm_fixed_at_the_initial_state() -> None:
-    """A refresh reuses the initial residual measure, so block-scaled progress does not re-base (#156 s4).
+class _Recorded(Exception):
+    """Raised by a recording march to end a solve once its arguments are captured."""
 
-    ``BlockScaledNorm`` is self-normalising: at the state its per-block scales were built at it returns
-    ``sqrt(n_blocks)``. If a refresh rebuilt it at the developed state, every ``residual_ratio`` would
-    jump back toward one and the convergence test become unreachable. A session's refresh, handed the
-    march's measure (what ``solve_coupled`` passes on every refresh), uses it verbatim instead of
-    rebuilding, so the measure stays fixed at the state the global progress reference was measured at.
+
+def _recorded_measure_builders(
+    monkeypatch, coupled, state, convergence, segments=1, stop_after_recording=False
+):
+    """Run ``solve_coupled`` on a recording march, returning the measure builder each segment received.
+
+    ``stop_after_recording`` ends the solve at the first march, for a measure whose value at the
+    synthetic state is not finite and would otherwise be refused by the final convergence check.
+    """
+    from aquaflux.solve import MarchResult
+
+    builders: list[tuple[object, object]] = []
+
+    def recording_march(step, residual_fn, at, **kwargs):
+        builders.append((step, kwargs["norm_builder"]))
+        if stop_after_recording:
+            raise _Recorded
+        return MarchResult(at, (), True, kwargs["trigger"] is not None, None)
+
+    monkeypatch.setattr(coupled_module, "newton_march", recording_march)
+    step = coupled_step(
+        coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+    )
+    loose = Convergence(rtol=1.0, atol=1e30)
+    call = functools.partial(
+        solve_coupled,
+        coupled,
+        *coupled.physical_fields(state),
+        convergence=loose if convergence is None else convergence.filled_from(loose),
+        strategy=step,
+        refresh=RefreshPolicy(trigger=object(), limit=segments - 1, builder=lambda s: step)
+        if segments > 1
+        else NO_REFRESH,
+    )
+    if stop_after_recording:
+        with pytest.raises(_Recorded):
+            call()
+    else:
+        call()
+    return builders
+
+
+def test_a_coupled_solve_rebuilds_its_row_scaled_measure_at_the_state_each_iteration_starts(
+    monkeypatch,
+) -> None:
+    """Unset, the measure is row-scaled and built at whatever state it is asked about, from the step.
+
+    A measure frozen at the initial state over-reports a developed residual, and a stopping target
+    taken in it can ask for a residual the march never reaches, so the scales follow the flow. The step
+    it is handed supplies the row diagonals, so a refreshed step's are the ones read.
     """
     mesh, coupled = _cavity()
     cold = _healthy_state(mesh, coupled, seed=0)
     developed = _healthy_state(mesh, coupled, seed=1)
-    spec = BlockDiagonal(scalar=UnpreconditionedScalars(), velocity=ViscousMultilevel())
-    session = open_session(spec, coupled)
+    ((step, builder),) = _recorded_measure_builders(
+        monkeypatch, coupled, cold, None, stop_after_recording=True
+    )
 
-    base = session.build(cold, block_scaled_norm=True)
-    base_norm = base.norm()
-    refreshed = session.refresh(developed, base, base_norm, block_scaled_norm=True)
-    # The refreshed continuation measures progress with the *same* norm object, not a re-based one.
-    assert refreshed.norm() is base_norm
-    # And that carry matters: a from-scratch rebuild at the developed state re-bases the per-block
-    # scales, so it scores the same residual differently (it self-normalises to sqrt(n_blocks) there).
-    rebuilt = coupled_step(coupled, developed, preconditioner=spec, block_scaled_norm=True)
-    r_dev = coupled.residual(developed)
-    assert not jnp.allclose(base_norm(r_dev), rebuilt.norm()(r_dev))
+    for state in (cold, developed):
+        expected = coupled_scaled_norm(coupled, step.shift_policy, state)
+        assert bool(eqx.tree_equal(builder(step, state), expected))
+    assert not jnp.allclose(builder(step, cold).field_scale, builder(step, developed).field_scale)
+
+
+def test_a_block_scaled_solve_holds_the_initial_scales_across_every_refresh(monkeypatch) -> None:
+    """A self-normalising measure keeps the scales of the state the solve started from (#156 seam 4).
+
+    ``BlockScaledNorm`` returns ``sqrt(n_blocks)`` at the state its scales were taken at. Re-taking
+    them at a refresh's developed state would re-base every later residual toward that, and leave the
+    stopping target -- measured once, at the start -- out of reach. Every segment's builder therefore
+    returns the one measure, whatever step and state it is asked about.
+    """
+    mesh, coupled = _cavity()
+    cold = _healthy_state(mesh, coupled, seed=0)
+    developed = _healthy_state(mesh, coupled, seed=1)
+    builders = _recorded_measure_builders(
+        monkeypatch, coupled, cold, Convergence(measure=BlockScaled()), segments=2
+    )
+
+    assert len(builders) == 2
+    held = coupled_module._coupled_residual_norm(coupled, cold)
+    for step, builder in builders:
+        assert bool(eqx.tree_equal(builder(step, developed), held))
 
 
 def test_fixation_rows_take_their_own_derivative_not_the_chain_factor() -> None:

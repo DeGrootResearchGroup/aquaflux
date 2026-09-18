@@ -75,8 +75,9 @@ class LinearSolveSettings(SettingsValue):
     mass-flow-constrained march. A builder takes this value or a whole ``lineax`` solver in the same
     parameter, never both, because a solver replaces the regime -- and the stopping measure with it.
 
-    ⚠️ **``rtol`` is measured in the march's own progress measure**, not the Euclidean norm, except on
-    the mass-flow-constrained march, whose measure is Euclidean. The coupled residual's 2-norm is almost
+    ⚠️ **``rtol`` is measured in the solve's progress measure** -- the measure of its
+    :class:`~aquaflux.solve.Convergence`, row-scaled by default and Euclidean by default on the
+    mass-flow-constrained march -- not in the Euclidean norm. The coupled residual's 2-norm is almost
     entirely ``omega``, so a Euclidean stop halts while the flow-dominated part of the step is still
     coarse. The same number is therefore not the same tightness under a different measure.
 
@@ -104,7 +105,8 @@ def merged_march_options(base: dict[str, object], override: dict[str, object]) -
     ``ShiftSettings(turbulence_damping=...)`` would lose the basis without a word, where the same two
     settings as separate keywords combine. So when both sides give the same key a value of the same
     settings type -- a :class:`ShiftSettings`, :class:`LinearSolveSettings`,
-    :class:`~aquaflux.solve.DualTimeLoop` or :class:`~aquaflux.solve.Globalization` -- the point's value
+    :class:`~aquaflux.solve.Convergence`, :class:`~aquaflux.solve.DualTimeLoop` or
+    :class:`~aquaflux.solve.Globalization` -- the point's value
     keeps the fields it sets and takes the rest from the shared one (:func:`~aquaflux.solve.filled_from`).
 
     ⚠️ **A point cannot reset a shared field to its default through a value.** Leaving the field unset

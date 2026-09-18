@@ -22,7 +22,7 @@ from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, Veloci
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import DualTimeLoop
+from aquaflux.solve import BlockScaled, Convergence, DualTimeLoop
 from aquaflux.turbulence import (
     AdaptiveReynoldsSchedule,
     CoupledRANS,
@@ -245,7 +245,7 @@ def test_coupled_rescale_preserves_the_scalar_transforms() -> None:
 
 
 def _record_solves(monkeypatch):
-    """Patch the wrapper's ``solve_coupled`` to record ``(scale, seed_is_none, rtol)`` per call."""
+    """Patch the wrapper's ``solve_coupled`` to record ``(scale, seed_is_none, convergence)`` per call."""
     import aquaflux.turbulence.reynolds as reynolds
 
     calls = []
@@ -258,7 +258,7 @@ def _record_solves(monkeypatch):
             {
                 "scale": scale,
                 "seed_is_none": flow is None,
-                "rtol": kwargs.get("rtol"),
+                "convergence": kwargs.get("convergence"),
                 "kwargs": kwargs,
             }
         )
@@ -270,7 +270,7 @@ def _record_solves(monkeypatch):
 
 def test_ramp_visits_every_scale_and_threads_seeds(monkeypatch) -> None:
     calls = _record_solves(monkeypatch)
-    solve_reynolds_continuation(_tiny_coupled(), n_points=2, rtol=1e-10)
+    solve_reynolds_continuation(_tiny_coupled(), n_points=2, convergence=Convergence(rtol=1e-10))
     # Three solves at the schedule's scales, descending to the target (1.0).
     assert [round(c["scale"], 6) for c in calls] == [100.0, 10.0, 1.0]
     # The first point self-starts (no seed); every later point is warm-started.
@@ -279,22 +279,52 @@ def test_ramp_visits_every_scale_and_threads_seeds(monkeypatch) -> None:
 
 def test_intermediate_points_use_the_loose_tolerance_and_target_uses_rtol(monkeypatch) -> None:
     calls = _record_solves(monkeypatch)
-    solve_reynolds_continuation(_tiny_coupled(), n_points=2, rtol=1e-10, intermediate_rtol=1e-2)
+    solve_reynolds_continuation(
+        _tiny_coupled(),
+        n_points=2,
+        convergence=Convergence(rtol=1e-10),
+        intermediate=Convergence(rtol=1e-2),
+    )
     # Lower-Re points converge loosely; the target keeps the caller's tight rtol.
-    assert [c["rtol"] for c in calls] == [1e-2, 1e-2, 1e-10]
+    assert [c["convergence"].rtol for c in calls] == [1e-2, 1e-2, 1e-10]
+
+
+def test_the_intermediate_test_takes_what_it_leaves_unset_from_the_target(monkeypatch) -> None:
+    """A caller's measure and absolute bar reach every point unless the intermediate test sets its own.
+
+    Without this, a loosened rung would silently fall back to the solve's default measure while the
+    target ran in the caller's, and the two would stop at bars that cannot be compared.
+    """
+    calls = _record_solves(monkeypatch)
+    target = Convergence(measure=BlockScaled(), rtol=0.0, atol=1e-5)
+    solve_reynolds_continuation(
+        _tiny_coupled(), n_points=1, convergence=target, intermediate=Convergence(atol=1e-3)
+    )
+    ramp, final = (c["convergence"] for c in calls)
+    assert ramp == Convergence(measure=BlockScaled(), rtol=0.0, atol=1e-3)
+    assert final == target
 
 
 def test_intermediate_rtol_none_converges_every_point_to_rtol(monkeypatch) -> None:
     calls = _record_solves(monkeypatch)
-    solve_reynolds_continuation(_tiny_coupled(), n_points=2, rtol=1e-10, intermediate_rtol=None)
-    assert [c["rtol"] for c in calls] == [1e-10, 1e-10, 1e-10]
+    solve_reynolds_continuation(
+        _tiny_coupled(),
+        n_points=2,
+        convergence=Convergence(rtol=1e-10),
+        intermediate=None,
+    )
+    assert [c["convergence"].rtol for c in calls] == [1e-10, 1e-10, 1e-10]
 
 
 def test_zero_points_calls_solve_once_at_the_target(monkeypatch) -> None:
     calls = _record_solves(monkeypatch)
-    solve_reynolds_continuation(_tiny_coupled(), n_points=0, rtol=1e-8)
+    solve_reynolds_continuation(_tiny_coupled(), n_points=0, convergence=Convergence(rtol=1e-8))
     assert len(calls) == 1
-    assert calls[0]["scale"] == 1.0 and calls[0]["seed_is_none"] and calls[0]["rtol"] == 1e-8
+    assert (
+        calls[0]["scale"] == 1.0
+        and calls[0]["seed_is_none"]
+        and calls[0]["convergence"].rtol == 1e-8
+    )
 
 
 def test_the_ramp_and_the_target_get_opposite_halves_of_the_continuation_settings(
@@ -316,7 +346,7 @@ def test_the_ramp_and_the_target_get_opposite_halves_of_the_continuation_setting
     solve_reynolds_continuation(
         _tiny_coupled(),
         n_points=1,
-        rtol=1e-10,
+        convergence=Convergence(rtol=1e-10),
         strategy=step,
         preconditioner=spec,
         dual_time=DualTimeLoop(inner_steps=3),
@@ -331,7 +361,7 @@ def test_the_ramp_and_the_target_get_opposite_halves_of_the_continuation_setting
     assert "preconditioner" not in target["kwargs"]
     assert "dual_time" not in target["kwargs"]
     # ...but the keywords that drive the *solve* rather than a build still reach it.
-    assert target["kwargs"]["rtol"] == 1e-10
+    assert target["kwargs"]["convergence"] == Convergence(rtol=1e-10)
 
 
 def test_without_a_continuation_the_target_keeps_every_setting(monkeypatch) -> None:
@@ -347,7 +377,7 @@ def test_without_a_continuation_the_target_keeps_every_setting(monkeypatch) -> N
     solve_reynolds_continuation(
         _tiny_coupled(),
         n_points=1,
-        rtol=1e-10,
+        convergence=Convergence(rtol=1e-10),
         preconditioner=spec,
         dual_time=DualTimeLoop(inner_steps=3),
     )
@@ -369,7 +399,7 @@ def test_a_materialized_preconditioner_is_one_session_shared_by_every_point(monk
     solve_reynolds_continuation(
         _tiny_coupled(),
         n_points=1,
-        rtol=1e-10,
+        convergence=Convergence(rtol=1e-10),
         preconditioner=MaterializedJacobian(CompleteLu()),
         jacobian_production_viscosity=True,
     )
@@ -412,7 +442,9 @@ def test_point_setup_builds_per_point_kwargs_and_materializes_the_first_seed(mon
         setups.append(scale)
         return {"tag": scale}  # a marker kwarg proving the merge reaches solve_coupled
 
-    solve_reynolds_continuation(coupled, n_points=2, rtol=1e-10, point_setup=point_setup)
+    solve_reynolds_continuation(
+        coupled, n_points=2, convergence=Convergence(rtol=1e-10), point_setup=point_setup
+    )
 
     # Called once per point (lower-Re and target), at each companion's viscosity scale...
     assert setups == [100.0, 10.0, 1.0]
@@ -427,7 +459,7 @@ def test_point_setup_none_is_byte_identical_to_the_plain_ramp(monkeypatch) -> No
     """Default (``point_setup=None``): the lowest point self-starts inside solve_coupled and no
     per-point kwargs are added -- the ramp is exactly the pre-existing one."""
     calls = _record_solves(monkeypatch)
-    solve_reynolds_continuation(_tiny_coupled(), n_points=2, rtol=1e-10)
+    solve_reynolds_continuation(_tiny_coupled(), n_points=2, convergence=Convergence(rtol=1e-10))
     assert [c["seed_is_none"] for c in calls] == [True, False, False]  # first point self-starts
 
 
@@ -454,7 +486,9 @@ def test_point_setup_receives_the_points_position_in_the_ramp(monkeypatch) -> No
         seen.append(point)
         return {}
 
-    solve_reynolds_continuation(coupled, n_points=2, rtol=1e-10, point_setup=point_setup)
+    solve_reynolds_continuation(
+        coupled, n_points=2, convergence=Convergence(rtol=1e-10), point_setup=point_setup
+    )
 
     assert [p.index for p in seen] == [1, 2, 3]  # 1-based, anchor first
     assert [p.total for p in seen] == [3, 3, 3]  # n_points + 1, including the target
@@ -497,7 +531,7 @@ def test_seed_projection_replaces_the_state_the_point_actually_solves_from(monke
     solve_reynolds_continuation(
         coupled,
         n_points=2,
-        rtol=1e-10,
+        convergence=Convergence(rtol=1e-10),
         seed_projection=seed_projection,
         point_setup=point_setup,
     )
@@ -513,7 +547,7 @@ def test_seed_projection_none_leaves_the_ramp_untouched(monkeypatch) -> None:
     """The default must not materialize the lowest point's seed, which is the one observable
     difference the hook's plumbing could otherwise leak into the ungated path."""
     calls = _record_solves(monkeypatch)
-    solve_reynolds_continuation(_tiny_coupled(), n_points=2, rtol=1e-10)
+    solve_reynolds_continuation(_tiny_coupled(), n_points=2, convergence=Convergence(rtol=1e-10))
     assert [c["seed_is_none"] for c in calls] == [True, False, False]
 
 
@@ -545,7 +579,7 @@ def test_a_projection_that_declines_a_point_leaves_that_point_untouched(monkeypa
     solve_reynolds_continuation(
         coupled,
         n_points=1,
-        rtol=1e-10,
+        convergence=Convergence(rtol=1e-10),
         seed_projection=lambda companion, state, point: state,  # declines every point
     )
 
@@ -591,7 +625,10 @@ def test_a_failed_rung_retreats_and_the_ramp_continues(monkeypatch) -> None:
     """
     attempts = _fail_at(monkeypatch, doomed={10.0})
     solve_reynolds_continuation(
-        _tiny_coupled(), n_points=2, rtol=1e-10, schedule=AdaptiveReynoldsSchedule()
+        _tiny_coupled(),
+        n_points=2,
+        convergence=Convergence(rtol=1e-10),
+        schedule=AdaptiveReynoldsSchedule(),
     )
     assert attempts[0] == 100.0  # the anchor
     assert attempts[1] == 10.0  # the decade step, which fails
@@ -608,7 +645,9 @@ def test_the_same_failure_ENDS_the_run_under_the_fixed_ladder(monkeypatch) -> No
     """
     _fail_at(monkeypatch, doomed={10.0})
     with pytest.raises(RuntimeError, match="offered no gentler step"):
-        solve_reynolds_continuation(_tiny_coupled(), n_points=2, rtol=1e-10)
+        solve_reynolds_continuation(
+            _tiny_coupled(), n_points=2, convergence=Convergence(rtol=1e-10)
+        )
 
 
 def test_a_failed_TARGET_rung_also_retreats(monkeypatch) -> None:
@@ -619,7 +658,10 @@ def test_a_failed_TARGET_rung_also_retreats(monkeypatch) -> None:
     """
     attempts = _fail_at(monkeypatch, doomed={1.0})
     solve_reynolds_continuation(
-        _tiny_coupled(), n_points=1, rtol=1e-10, schedule=AdaptiveReynoldsSchedule()
+        _tiny_coupled(),
+        n_points=1,
+        convergence=Convergence(rtol=1e-10),
+        schedule=AdaptiveReynoldsSchedule(),
     )
     assert attempts[:2] == [10.0, 1.0]  # anchor, then the target, which fails
     assert 1.0 < attempts[2] < 10.0  # a rung inserted between the last root and the target
@@ -1321,7 +1363,7 @@ def test_the_ramp_arm_is_one_warm_started_solve_on_the_target_carrying_the_homot
         stations=24,
         steps_per_station=1,
         point_setup=lambda companion, state, point: {},
-        rtol=1e-10,
+        convergence=Convergence(rtol=1e-10),
     )
 
     assert len(calls) == 1
@@ -1332,7 +1374,7 @@ def test_the_ramp_arm_is_one_warm_started_solve_on_the_target_carrying_the_homot
     homotopy = calls[0]["kwargs"]["homotopy"]
     assert isinstance(homotopy, ViscosityRampHomotopy)
     assert (homotopy.anchor, homotopy.stations, homotopy.steps_per_station) == (100.0, 24, 1)
-    assert calls[0]["kwargs"]["rtol"] == 1e-10
+    assert calls[0]["kwargs"]["convergence"] == Convergence(rtol=1e-10)
 
 
 def test_the_ramp_arm_merges_a_point_s_settings_value_field_by_field_over_the_shared_one(
@@ -1448,19 +1490,17 @@ def test_the_ramp_arm_drops_exactly_the_keywords_the_ladder_owns(monkeypatch) ->
     # a case calls this and passing it separately beside the dict is the same keyword twice.
     ladder_options = dict(
         schedule=GeometricReynoldsSchedule(ratio=10.0),
-        intermediate_rtol=1e-2,
-        intermediate_atol=1e-5,
+        intermediate=Convergence(rtol=1e-2, atol=1e-5),
         seed_projection=lambda assembler, state, point: state,
         point_setup=lambda companion, state, point: {},
-        rtol=1e-10,
-        atol=1e-5,
+        convergence=Convergence(rtol=1e-10, atol=1e-5),
         max_steps=7,
     )
     solve_reynolds_ramp(coupled, anchor=100.0, stations=4, steps_per_station=3, **ladder_options)
 
     passed = calls[0]["kwargs"]
     assert not (_LADDER_ONLY & set(passed))
-    assert (passed["rtol"], passed["atol"], passed["max_steps"]) == (1e-10, 1e-5, 7)
+    assert (passed["convergence"], passed["max_steps"]) == (Convergence(rtol=1e-10, atol=1e-5), 7)
 
 
 def test_the_ladder_only_keywords_are_derived_from_the_two_signatures() -> None:
@@ -1478,7 +1518,7 @@ def test_the_ladder_only_keywords_are_derived_from_the_two_signatures() -> None:
     ladder = set(inspect.signature(solve_reynolds_continuation).parameters)
     solve = set(inspect.signature(solve_coupled).parameters)
     assert _LADDER_ONLY == ladder - solve - {"solve_kwargs"}
-    assert {"schedule", "intermediate_rtol", "intermediate_atol", "seed_projection"} <= _LADDER_ONLY
+    assert {"schedule", "intermediate", "seed_projection"} <= _LADDER_ONLY
     # `point_setup` is the ramp arm's own parameter and never travels in the forwarded options.
     assert "point_setup" in _LADDER_ONLY
 

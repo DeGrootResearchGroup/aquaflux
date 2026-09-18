@@ -32,6 +32,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import lineax as lx
@@ -125,6 +126,12 @@ class _RelativeResidualGMRES(lx.GMRES):
     def compute(
         self, state: Any, vector: Any, options: dict[str, Any]
     ) -> tuple[Any, Any, dict[str, Any]]:
+        if self.norm is None:
+            raise TypeError(
+                "this GMRES stops in the progress measure of the Newton step that runs it "
+                "(relative_residual_gmres(norm=None)), and it was run outside one. Pass the measure as "
+                "`norm`, or hand the solver to a step."
+            )
         # Scale the right-hand side to unit ``self.norm`` so the (absolute) ``atol`` floor acts as a
         # relative tolerance; undo the scaling on the returned solution (the map ``b -> x`` is linear, so
         # a constant factor passes straight through). ``jnp.where`` guards a zero right-hand side.
@@ -138,7 +145,7 @@ class _RelativeResidualGMRES(lx.GMRES):
 def relative_residual_gmres(
     rtol: float,
     *,
-    norm: Callable[[Any], jnp.ndarray] = _global_two_norm,
+    norm: Callable[[Any], jnp.ndarray] | None = _global_two_norm,
     restart: int = 120,
     stagnation_iters: int = 40,
     max_restarts: int | None = None,
@@ -165,6 +172,11 @@ def relative_residual_gmres(
         correction is never left blind. Pairing it with a *loose* ``rtol`` gives a cheap yet flow-aware
         inexact-Newton stop. The measure is a fixed, physically row-scaled one (state row-diagonals),
         not a per-solve right-hand-side normalization, so the stop is problem-independent.
+
+        ``None`` takes the measure from the Newton step that runs the solver, **at each step**
+        (:func:`in_progress_measure`): a march that rebuilds its measure every outer iteration then
+        stops its linear solves in the rebuilt one, rather than in whichever measure was current when
+        the solver was configured. Such a solver cannot be run outside a step.
     restart : int
         The Krylov subspace size before a restart (default ``120``).
     stagnation_iters : int
@@ -194,6 +206,33 @@ def relative_residual_gmres(
         stagnation_iters=stagnation_iters,
         max_steps=max_restarts,
     )
+
+
+def in_progress_measure(
+    solver: lx.AbstractLinearSolver, norm: Callable[[Any], jnp.ndarray]
+) -> lx.AbstractLinearSolver:
+    """``solver``, stopping in ``norm`` if it was configured to follow the running step's measure.
+
+    A Newton step calls this with its own progress measure before each linear solve, so a solver built
+    with ``relative_residual_gmres(norm=None)`` stops in the measure the march is judging that step by.
+    Any other solver -- one given an explicit ``norm``, or a stock ``lineax`` solver -- is returned
+    unchanged.
+
+    Parameters
+    ----------
+    solver : lineax.AbstractLinearSolver
+        The linear solver the step was given.
+    norm : callable
+        The step's progress measure, ``v -> scalar``.
+
+    Returns
+    -------
+    lineax.AbstractLinearSolver
+        The solver to run.
+    """
+    if isinstance(solver, _RelativeResidualGMRES) and solver.norm is None:
+        return eqx.tree_at(lambda s: s.norm, solver, norm, is_leaf=lambda leaf: leaf is None)
+    return solver
 
 
 def solve_linear(

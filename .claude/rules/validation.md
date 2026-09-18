@@ -219,7 +219,7 @@ cannot be written. The guard is what catches the next module that does branch.
 - **A setting the banner prints must be a setting that is in force.** Printing an intended value that
   the builder never received is worse than printing nothing.
 - **⚠️ Do NOT gate a loaded checkpoint on its own recorded `residual_norm`.** That number is whatever
-  measure the march was *steered* by, and both cases march with `scaled_norm=True` — a row-equilibrated
+  measure the march was *steered* by, and both cases march in the row-scaled measure (the default since #370) — a row-equilibrated
   norm, not a Euclidean one. Comparing the two rejects a perfectly good state: `bfs3d`'s `state-00069`
   records `2.64e-06` and computes `1.04e-03` under `jnp.linalg.norm`, a factor of **395** that is
   entirely the change of measure. Gate against the case's **own self-start** in whichever single norm

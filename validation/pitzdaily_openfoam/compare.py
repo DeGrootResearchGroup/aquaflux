@@ -93,6 +93,7 @@ from aquaflux.schemes import (
 )
 from aquaflux.solve import (
     CflResidualDualTimeControl,
+    Convergence,
     DualTimeLoop,
     JacobiSmoothed,
     MarchLogger,
@@ -170,8 +171,9 @@ RTOL, ATOL = 0.0, 1e-5
 #   * `POSITIVITY_FLOOR` -- without it the step limiter's room is a purely RELATIVE quantity, so a
 #     numerically dead cell ratchets the global step cap by a factor of a hundred per step until the
 #     march is taking no step at all while every field still reads finite.
-#   * `scaled_norm` -- the coupled Euclidean residual is very nearly all omega, so a march judged on
-#     it cannot see the flow converge. The row-scaled measure judges every equation comparably.
+#   * the row-scaled residual measure (the coupled solve's default) -- the coupled Euclidean residual
+#     is very nearly all omega, so a march judged on it cannot see the flow converge. The row-scaled
+#     measure judges every equation comparably.
 # ---------------------------------------------------------------------------------------------
 
 #: ⚠️ REYNOLDS CONTINUATION, BECAUSE A COLD SOLVE AT THE TARGET REYNOLDS NUMBER DOES NOT REACH THE
@@ -1259,16 +1261,13 @@ def solve_aquaflux(
             max_steps=MAX_STEPS,
             # `None` unless a target ratio was asked for, which keeps a single-ratio march unchanged.
             station_step=station_damping if TURB_DAMPING_TARGET else None,
-            rtol=RTOL,
-            atol=ATOL,
-            intermediate_rtol=None,  # every rung stops at the same ABSOLUTE bar
-            intermediate_atol=ATOL,
+            convergence=Convergence(rtol=RTOL, atol=ATOL),
+            intermediate=Convergence(atol=ATOL),  # every rung stops at the same ABSOLUTE bar
             schedule=GeometricReynoldsSchedule(ratio=RATIO),
             step_control=CONTROL,
             retry=RETRY,
             point_setup=point_setup,
             seed_projection=_seed_projection if SEED_REPAIR != "off" else None,
-            scaled_norm=True,  # rebuild the row scales each outer step
             on_checkpoint=(
                 logger.on_checkpoint
                 if checkpoints is None

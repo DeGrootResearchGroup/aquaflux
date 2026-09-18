@@ -142,7 +142,7 @@ def load_state(coupled, seed, path: Path | None):
     """A checkpoint gated against this case's OWN self-start, or the self-start itself.
 
     ⚠️ **Do not gate against a checkpoint's recorded ``residual_norm``.** That is whatever measure the
-    march was steered by, and this case marches with ``scaled_norm=True`` -- a row-equilibrated norm,
+    march was steered by, and this case marches in the row-scaled measure -- a row-equilibrated norm,
     not a Euclidean one. Comparing the two rejects a perfectly good state (on the sibling case the same
     checkpoint records ``2.64e-06`` and computes ``1.04e-03``, a factor of 395 that is entirely the
     change of measure). Comparing against the SELF-START in one norm is immune, because both ends move

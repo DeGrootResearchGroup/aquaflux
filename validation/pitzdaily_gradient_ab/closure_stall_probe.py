@@ -97,6 +97,7 @@ from aquaflux.schemes import (  # noqa: E402
 )
 from aquaflux.schemes.interpolation import non_orthogonal_correction  # noqa: E402
 from aquaflux.solve import (
+    Convergence,
     DualTimeLoop,
     MarchLogger,
     solve_linear,
@@ -219,14 +220,11 @@ def capture() -> None:
             preconditioner=session,
             inner_observer=logger.on_inner,
             max_steps=compare.MAX_STEPS,
-            rtol=compare.RTOL,
-            atol=compare.ATOL,
-            intermediate_rtol=None,
-            intermediate_atol=compare.ATOL,
+            convergence=Convergence(rtol=compare.RTOL, atol=compare.ATOL),
+            intermediate=Convergence(atol=compare.ATOL),
             step_control=compare.CONTROL,
             retry=compare.RETRY,
             point_setup=point_setup,
-            scaled_norm=True,
             on_checkpoint=logger.on_checkpoint,
             on_retry=logger.on_retry,
         )
@@ -1071,11 +1069,9 @@ def march_from_seed() -> None:
                 positivity_projection=compare.POSITIVITY_PROJECTION,
                 inner_observer=on_inner,
                 max_steps=MARCH_STEPS,
-                rtol=compare.RTOL,
-                atol=compare.ATOL,
+                convergence=Convergence(rtol=compare.RTOL, atol=compare.ATOL),
                 step_control=compare.CONTROL,
                 retry=compare.RETRY,
-                scaled_norm=True,
                 on_step=on_step,
             )
         except Exception as exc:  # a step cap is how this probe stops; it is not a failure here

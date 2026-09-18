@@ -11,8 +11,8 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
-from aquaflux.solve import RootSolver
-from aquaflux.solve.implicit import DampedNewtonStep
+from aquaflux.solve import Convergence, RootSolver
+from aquaflux.solve.implicit import _ROOT_CONVERGENCE, DampedNewtonStep
 from aquaflux.solve.implicit import newton_march as _production_forward_march
 from aquaflux.solve.strategy import within_tolerance
 
@@ -55,10 +55,11 @@ def _newton_steps_taken(solver, residual_fn, phi0, theta):
         else solver.strategy.linear_solver()
     )
     norm_fn = solver.strategy.norm()
+    convergence = solver.convergence.filled_from(_ROOT_CONVERGENCE)
     residual_norm_0 = norm_fn(residual_fn(phi0, theta))
     phi, residual_norm, step = phi0, residual_norm_0, 0
     while step < solver.max_steps and not within_tolerance(
-        residual_norm, residual_norm_0, solver.rtol, solver.atol
+        residual_norm, residual_norm_0, convergence.rtol, convergence.atol
     ):
         outcome = strategy_step(lambda p: residual_fn(p, theta), phi, residual_norm_0, lin_solver)
         phi, residual_norm = outcome.phi, outcome.residual_norm
@@ -221,7 +222,7 @@ def test_the_solver_hands_the_march_the_settings_it_was_built_with(monkeypatch) 
 
     monkeypatch.setattr(implicit, "newton_march", spy)
     step = DampedNewtonStep(line_search=4)
-    solver = RootSolver(rtol=1e-8, atol=1e-11, max_steps=17, strategy=step)
+    solver = RootSolver(convergence=Convergence(rtol=1e-8, atol=1e-11), max_steps=17, strategy=step)
     theta = jnp.array([2.0])
 
     solver.solve(_residual, jnp.zeros(1), theta)

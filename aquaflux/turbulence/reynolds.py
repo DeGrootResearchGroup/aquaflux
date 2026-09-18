@@ -25,6 +25,8 @@ from typing import TYPE_CHECKING, Protocol
 import equinox as eqx
 import jax
 
+from aquaflux.solve import Convergence
+
 from .coupled import open_session, solve_coupled
 from .initialization import hybrid_initialize
 from .march_settings import merged_march_options
@@ -285,13 +287,17 @@ _SOLVE_ONLY = frozenset(inspect.signature(solve_coupled).parameters) - {
 }
 
 
+#: The lower-Re points' stopping test when none is given: a loose relative tolerance, everything else the
+#: target's.
+_LOOSE_SEEDS = Convergence(rtol=1e-2)
+
+
 def solve_reynolds_continuation(
     coupled: CoupledRANS,
     n_points: int,
     *,
     schedule: ReynoldsSchedule | None = None,
-    intermediate_rtol: float | None = 1e-2,
-    intermediate_atol: float | None = None,
+    intermediate: Convergence | None = _LOOSE_SEEDS,
     point_setup: Callable[[CoupledRANS, jnp.ndarray, ReynoldsPoint], dict] | None = None,
     seed_projection: Callable[[CoupledRANS, jnp.ndarray, ReynoldsPoint], jnp.ndarray] | None = None,
     **solve_kwargs: object,
@@ -326,22 +332,19 @@ def solve_reynolds_continuation(
         ends the continuation. Pass :class:`AdaptiveReynoldsSchedule` to have a rung that fails
         **retreat onto a gentler step** and carry on from the rungs already converged, instead of
         discarding them and asking for a re-run at a larger ``n_points``.
-    intermediate_rtol : float or None
-        The relative residual tolerance for the **lower-Re** points, overriding ``rtol`` from
-        ``solve_kwargs`` for those solves only (the target solve always uses the caller's ``rtol``).
-        The intermediate solutions are only initial guesses for the next Reynolds number, so converging
-        them to the tight target tolerance is wasted work -- a loose value develops the field enough to
-        seed the next point at a fraction of the cost. Default ``1e-2``. Pass ``None`` to converge every
-        point to the caller's ``rtol`` (no loosening).
-    intermediate_atol : float or None
-        The **absolute** residual tolerance for the lower-Re points, overriding ``atol`` for those solves
-        only. The stopping test is ``‖R‖ <= atol + rtol·‖R₀‖``, so pairing this with ``rtol=0`` converges
-        each seed point to a fixed level rather than to a fraction of its own starting residual. Prefer it
-        for a self-normalizing residual measure (the default row-equilibrated one already reports a
-        fractional change per equation): every point re-bases its own ``‖R₀‖``, and a Reynolds jump makes
-        the inherited field a *worse* seed, so a purely relative bar can let a later point stop at a worse
-        absolute residual than an earlier point already reached. ``None`` (default) leaves ``atol``
-        untouched.
+    intermediate : Convergence or None
+        The stopping test for the **lower-Re** points, with every field it leaves unset taken from the
+        target's ``convergence`` in ``solve_kwargs``; the target solve always uses the caller's own. The
+        intermediate solutions are only initial guesses for the next Reynolds number, so converging them
+        to the tight target tolerance is wasted work -- a loose one develops the field enough to seed the
+        next point at a fraction of the cost. Default ``Convergence(rtol=1e-2)``. ``None`` converges every
+        point to the caller's own test (no loosening).
+
+        Prefer an **absolute** bar, ``Convergence(rtol=0, atol=...)``, for a self-normalizing measure
+        (the default row-scaled one already reports a fractional change per equation): every point
+        re-bases its own initial residual, and a Reynolds jump makes the inherited field a *worse* seed,
+        so a purely relative bar can let a later point stop at a worse absolute residual than an earlier
+        point already reached.
     point_setup : callable, optional
         ``(companion, seed_state, point) -> dict``, a **per-Reynolds-point** builder of extra ``solve_coupled``
         keyword arguments (merged over ``solve_kwargs`` for that point). It exists for settings that vary
@@ -452,18 +455,15 @@ def solve_reynolds_continuation(
         else {key: value for key, value in solve_kwargs.items() if key in _SOLVE_ONLY}
     )
     # The lower-Re points are only seeds for the next Reynolds number, so converge them loosely --
-    # over-converging them to the target tolerance is wasted work.
-    if intermediate_rtol is not None:
-        ramp_kwargs["rtol"] = intermediate_rtol
-    # The absolute counterpart. The stopping test is ``‖R‖ <= atol + rtol·‖R₀‖``, so a purely ABSOLUTE
-    # target is ``rtol=0`` with ``atol`` the level to reach -- which is the meaningful form for a
-    # self-normalizing residual measure (the default row-equilibrated one already reports a fractional
-    # change per equation, so dividing it again by ‖R₀‖ makes the bar a property of the initial guess).
-    # It matters most here: every point re-bases its own ‖R₀‖, and a Reynolds jump makes the inherited
-    # field a WORSE seed, so a relative bar lets a later point stop at a worse absolute residual than an
-    # earlier one already reached.
-    if intermediate_atol is not None:
-        ramp_kwargs["atol"] = intermediate_atol
+    # over-converging them to the target tolerance is wasted work. What the intermediate test leaves
+    # unset is the target's, so a caller's measure reaches every point.
+    if intermediate is not None:
+        target_convergence = solve_kwargs.get("convergence")
+        ramp_kwargs["convergence"] = (
+            intermediate
+            if target_convergence is None
+            else intermediate.filled_from(target_convergence)
+        )
     # One session for every point, for a materialized preconditioner: the inverse and its hooks ride in
     # static fields of the step, so a point building its own would recompile the whole coupled solve.
     # Opened on the stopped copy; each point re-points it at its own companion before solving.
@@ -939,7 +939,7 @@ def solve_reynolds_ramp(
         two cannot disagree about what problem the march opens on.
     **solve_kwargs
         The ladder's options. Keywords the ladder owns and :func:`solve_coupled` does not
-        (``schedule``, ``intermediate_rtol`` / ``intermediate_atol``, ``seed_projection``, ``n_points``)
+        (``schedule``, ``intermediate``, ``seed_projection``, ``n_points``)
         are dropped, so one options dict can drive either arm; the rest are forwarded.
 
     Returns

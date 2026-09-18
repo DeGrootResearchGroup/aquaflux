@@ -19,6 +19,7 @@ import lineax as lx
 import pytest
 from aquaflux.solve import (
     ConstantRelaxation,
+    Convergence,
     DivergenceGuard,
     DualTimeStep,
     MonotoneLineSearch,
@@ -126,7 +127,9 @@ def test_a_row_relaxation_reaches_the_SHIFTED_OPERATOR_not_just_the_policy() -> 
 
     def march(policy):
         step = PseudoTransientStep(policy, relaxation_schedule=ConstantRelaxation(beta=2.0))
-        solver = RootSolver(rtol=1e-10, atol=1e-10, max_steps=200, strategy=step)
+        solver = RootSolver(
+            convergence=Convergence(rtol=1e-10, atol=1e-10), max_steps=200, strategy=step
+        )
         return solver.solve(_residual, jnp.ones_like(theta), theta)
 
     by_row = march(_BlockDampedShiftPolicy(ratio=4.0))
@@ -146,7 +149,9 @@ def test_pseudo_transient_engine_runs_without_flow() -> None:
     step = PseudoTransientStep(
         UniformShiftPolicy(strength=1.0), relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0)
     )
-    solver = RootSolver(rtol=1e-10, atol=1e-10, max_steps=200, strategy=step)
+    solver = RootSolver(
+        convergence=Convergence(rtol=1e-10, atol=1e-10), max_steps=200, strategy=step
+    )
 
     phi = solver.solve(_residual, jnp.ones_like(theta), theta)
 
@@ -160,7 +165,9 @@ def test_pseudo_transient_engine_is_differentiable() -> None:
     step = PseudoTransientStep(
         UniformShiftPolicy(strength=1.0), relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0)
     )
-    solver = RootSolver(rtol=1e-10, atol=1e-10, max_steps=200, strategy=step)
+    solver = RootSolver(
+        convergence=Convergence(rtol=1e-10, atol=1e-10), max_steps=200, strategy=step
+    )
 
     def solved_sum(t: jnp.ndarray) -> jnp.ndarray:
         return jnp.sum(solver.solve(_residual, jnp.ones_like(t), t))
@@ -212,8 +219,7 @@ def test_a_stand_in_jacobian_leaves_the_root_where_the_residual_puts_it() -> Non
     """
     theta = jnp.array([8.0, 27.0, 64.0])
     solver = RootSolver(
-        rtol=1e-10,
-        atol=1e-10,
+        convergence=Convergence(rtol=1e-10, atol=1e-10),
         max_steps=400,
         strategy=_jacobian_narrowed_step(
             jacobian_residual=lambda p: _scaled_slope_residual(p, theta)
@@ -273,7 +279,9 @@ def test_a_stand_in_jacobian_leaves_the_adjoint_exact() -> None:
     theta = jnp.array([8.0])
 
     def solved_sum(t: jnp.ndarray, step: PseudoTransientStep) -> jnp.ndarray:
-        solver = RootSolver(rtol=1e-10, atol=1e-10, max_steps=400, strategy=step)
+        solver = RootSolver(
+            convergence=Convergence(rtol=1e-10, atol=1e-10), max_steps=400, strategy=step
+        )
         return jnp.sum(solver.solve(_residual, jnp.ones_like(t), t))
 
     exact_step = _jacobian_narrowed_step()
@@ -301,7 +309,9 @@ def test_the_dual_time_step_carries_a_stand_in_jacobian_too() -> None:
         inner_tol=1e-2,
         jacobian_residual=lambda p: _scaled_slope_residual(p, theta),
     )
-    solver = RootSolver(rtol=1e-10, atol=1e-10, max_steps=400, strategy=step)
+    solver = RootSolver(
+        convergence=Convergence(rtol=1e-10, atol=1e-10), max_steps=400, strategy=step
+    )
 
     phi = solver.solve(_residual, jnp.ones_like(theta), theta)
 
@@ -349,7 +359,9 @@ def test_injected_acceptance_policy_is_honoured() -> None:
         relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
         acceptance=RejectFirstAttempt(),
     )
-    solver = RootSolver(rtol=1e-10, atol=1e-10, max_steps=200, strategy=step)
+    solver = RootSolver(
+        convergence=Convergence(rtol=1e-10, atol=1e-10), max_steps=200, strategy=step
+    )
 
     phi = solver.solve(_residual, jnp.ones_like(theta), theta)
 
@@ -399,8 +411,7 @@ def test_line_search_recovers_an_overshooting_step_without_escalation() -> None:
     policy = UniformShiftPolicy(strength=1.0)
 
     searched = RootSolver(
-        rtol=1e-8,
-        atol=1e-10,
+        convergence=Convergence(rtol=1e-8, atol=1e-10),
         max_steps=200,
         strategy=PseudoTransientStep(
             policy,
@@ -414,8 +425,7 @@ def test_line_search_recovers_an_overshooting_step_without_escalation() -> None:
 
     # No line search and no escalation: the overshoot is never tamed, so the solve cannot converge.
     unsearched = RootSolver(
-        rtol=1e-8,
-        atol=1e-10,
+        convergence=Convergence(rtol=1e-8, atol=1e-10),
         max_steps=50,
         strategy=PseudoTransientStep(
             policy,

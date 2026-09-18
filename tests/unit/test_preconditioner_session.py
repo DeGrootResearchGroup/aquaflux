@@ -34,14 +34,12 @@ def case():
     return coupled, _healthy_state(mesh, coupled)
 
 
-def test_a_block_session_refresh_carries_the_measure_and_the_flow_block(case) -> None:
-    """A refresh re-derives the scalar blocks on the reused coarsening and carries the rest over."""
+def test_a_block_session_refresh_carries_the_flow_block(case) -> None:
+    """A refresh re-derives the scalar blocks on the reused coarsening and carries the flow block over."""
     coupled, state = case
     session = open_session(BlockDiagonal(), coupled)
     first = session.build(state, dual_time=DualTimeLoop(inner_steps=3))
-    measure = first.norm()
-    refreshed = session.refresh(state * 1.01, first, measure, dual_time=DualTimeLoop(inner_steps=3))
-    assert refreshed.residual_norm is measure
+    refreshed = session.refresh(state * 1.01, first, dual_time=DualTimeLoop(inner_steps=3))
     assert refreshed.shift_policy.flow_preconditioner is first.shift_policy.flow_preconditioner
 
 

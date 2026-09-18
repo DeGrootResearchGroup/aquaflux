@@ -58,7 +58,7 @@ SUBPACKAGE_GROUPS = {
             ],
         ),
         ("Observing and checkpointing a march", ["march_log", "checkpoint", "refresh_timing"]),
-        ("Linear solves and residual measures", ["linear", "norm", "shift_basis"]),
+        ("Linear solves and residual measures", ["linear", "norm", "convergence", "shift_basis"]),
         (
             "Preconditioners",
             [

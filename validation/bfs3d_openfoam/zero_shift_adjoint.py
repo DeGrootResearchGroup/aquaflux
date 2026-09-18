@@ -95,7 +95,7 @@ def load_state(coupled, seed, path: Path):
     it, so "this state belongs to this case" has to be checked rather than assumed.
 
     ⚠️ **Do not gate against the checkpoint's recorded ``residual_norm``.** That number is whatever
-    measure the march was steered by, and this case marches with ``scaled_norm=True`` -- a
+    measure the march was steered by, and this case marches in the row-scaled measure -- a
     row-equilibrated norm, not a Euclidean one. Comparing the two rejects a perfectly good checkpoint:
     ``state-00069`` records ``2.64e-06`` and computes ``1.04e-03`` here, a factor of 395 that is
     entirely the change of measure. Comparing a state against the SELF-START in whichever single norm

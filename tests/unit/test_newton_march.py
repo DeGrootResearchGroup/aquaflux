@@ -544,7 +544,9 @@ def test_the_march_rebuilds_the_measure_each_outer_iteration_and_holds_it_within
     """
     asked = []
 
-    def norm_builder(state):
+    def norm_builder(step, state):
+        # Handed the step the iteration runs, for a measure that reads its scales from the step's shift.
+        assert isinstance(step, DampedNewtonStep)
         asked.append(jnp.asarray(state))
         # A measure that varies with the state, so a per-trial-step rebuild would be observable.
         scale = float(jnp.maximum(jnp.mean(jnp.abs(state)), 1e-12))

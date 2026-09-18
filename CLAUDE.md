@@ -760,13 +760,16 @@ cleanly and does **nothing**, which is the same silent-no-op shape the setting e
   ⚠️ **And such a test has to make the two paths genuinely differ, or it compares a configuration
   against itself.** Raising a `max_steps` **cap** a converged solve never reaches changes nothing:
   the march is bit-identical, so the gradients agree for a reason that has nothing to do with the
-  adjoint. Vary something that moves the path — `inner_steps` is the lever both
-  `test_dual_time_gradient_is_iteration_count_independent` and
-  `test_the_coupled_adjoint_is_independent_of_the_forward_iteration_count` use — and **assert the
-  step counts differ**, measured in separate runs with an observer (which changes nothing about the
-  march). On the coupled RANS channel that was 17 outer steps against 20, with gradients agreeing to
-  eleven significant figures — measured before 2026-09-15, when the unobserved solve still ran a
-  different (traced) march; the counts will have moved.
+  adjoint. Vary something that moves the path — `inner_steps` in
+  `test_dual_time_gradient_is_iteration_count_independent`, the shift strength `beta0` in
+  `test_the_coupled_adjoint_is_independent_of_the_forward_iteration_count` — and **assert the step
+  counts differ**, measured in separate runs with an observer (which changes nothing about the march).
+  ⚠️ **A lever that moves the path need not move the step count, and the guard is what notices.** The
+  coupled test used `inner_steps` too until #370 made its row-scaled measure rebuild every outer
+  iteration: after that, inner steps of 1, 2, 3, 4 and 5 all took **20** outer steps on that channel
+  while their inner-iteration counts differed, and the guard refused to run. `beta0` 2.0 against 0.5
+  takes 20 against **9** (measured 2026-09-16 on the coupled RANS channel, block-diagonal
+  `ScalarTwoLevel` + `ConvectionTwoLevel`, default `Convergence`).
 - **x64:** `assert jax.config.x64_enabled`.
 
 ---

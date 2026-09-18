@@ -46,7 +46,10 @@ Many entries below are dated history written against the old API. Read them thro
 | `coupled_amg_continuation(..., smoother_fill_levels=…, amg_beta=b)` | `MaterializedJacobian(MonolithicVCycle(smoother_fill_levels=…), build_beta=b)` |
 | `coupled_amg_continuation(..., field_split=True, leading_inverse=L, trailing_inverse=T)` | `MaterializedJacobian(FieldSplit(L, T))` — `L`/`T` are `solve.BlockInverse` values |
 | `probe=` / `preconditioner=` shared across rungs, `amg_beta_tracking_refresh(..., beta_floor=f, observer=o)`, `lu_beta_tracking_refresh` | one session: `open_session(MaterializedJacobian(..., beta_floor=f), coupled, observer=o)`, passed as `solve_coupled(preconditioner=session)`; its `refresh_preconditioner` / `rebind` replace the hooks' |
-| `reuse=previous.shift_policy, residual_norm=m` | `session.refresh(state, previous, m, **march)` |
+| `reuse=previous.shift_policy, residual_norm=m` | `session.refresh(state, previous, **march)` — since #370 the measure is not passed; the march hands every step its own |
+| `solve_coupled(rtol=, atol=, scaled_norm=)`, `solve_coupled_mass_flow(rtol=, atol=)` | `convergence=Convergence(measure=…, rtol=…, atol=…)` (#370); `scaled_norm` is gone because the row-scaled measure is now always rebuilt |
+| `coupled_step(block_scaled_norm=True)` / `(residual_norm=m)`, the same on `mass_flow_coupled_continuation` | nothing on the builder: `solve_coupled(convergence=Convergence(measure=BlockScaled()))` (#370) |
+| `solve_reynolds_continuation(intermediate_rtol=…, intermediate_atol=…)` | `intermediate=Convergence(rtol=…, atol=…)`, unset fields from the target's `convergence`; `None` = no loosening (#370) |
 | `solve_coupled(method=M, velocity=…)` | `solve_coupled(preconditioner=BlockDiagonal(scalar=S, velocity=…))` |
 | `mass_flow_coupled_continuation(..., method=M, **flow_opts)`, `solve_coupled_mass_flow(method=M, **flow_opts)` | the same keyword, `preconditioner=BlockDiagonal(scalar=S, **flow_opts)`; a `MaterializedJacobian` is refused there |
 | `BlockDiagonal(velocity="convection")`, `"smoothed"`, `"convection-air"` (and the same strings on `BlockPreconditioner.build`, `momentum_continuation`, `reused_flow_solve`) | `ConvectionTwoLevel()`, `ViscousMultilevel()`, `ConvectionAir()` from `aquaflux.flow` (#390); a string is refused |
@@ -237,7 +240,7 @@ Many entries below are dated history written against the old API. Read them thro
     2026-08-20).** `solve_coupled` needs a continuation twice — the initial build and every refresh —
     and those were written as two independent two-way branches (`refresh.builder` vs the default
     `coupled_continuation`), one at the build and one inside the refresh loop. `_ContinuationSource`
-    (`build(state)` / `refresh(state, previous, residual_norm)`) makes it one decision, with
+    (`build(state)` / `refresh(state, previous)`) makes it one decision, with
     `_CallerBuiltContinuation`, `_DefaultContinuation` and `_FinishedContinuation` as its three cases.
     That is the shape #282 had just been fixed for one level down; here it also carried a live defect.
     - **⚠️ `preconditioner` / `reference_state` / `**strategy_kwargs` are REFUSED where they cannot be
@@ -316,7 +319,7 @@ Many entries below are dated history written against the old API. Read them thro
   - **✅ `open_session` / `PreconditionerSession` / `coupled_step` — the ONE coupled builder, and what
     `solve_coupled`, both Reynolds drivers and both flagship cases run on (#371, 2026-09-14).**
     `_BlockSession` and `_MaterializedSession` are `_ContinuationSource` promoted: `build(state,
-    **march)`, `refresh(state, previous, residual_norm, **march)`, `refresh_preconditioner`, `rebind`.
+    **march)`, `refresh(state, previous, **march)`, `refresh_preconditioner`, `rebind`.
     `coupled_step` is the one frozen-step builder and opens a private session. The new path was proven
     **array-identical** to the old builders first (`test_preconditioner_session.py` for block / LU /
     field split, `test_coupled_amg.py` for the V-cycle), then wired:
@@ -377,9 +380,8 @@ Many entries below are dated history written against the old API. Read them thro
       (fixed 2026-09-14, #392).** It was blind to `coupled_step` for the life of #371 — the call
       `session._build(...)` names a method four classes define, and the tool dropped it — so the coupled
       family was absent from the report, which reads as clean. It now resolves the method on the classes
-      `open_session` returns. 22 shared parameters; `only here` is `residual_norm` on `coupled_step`
-      (the mass-flow path supplies its own constraint-aware measure) and `flow_direction` on the
-      mass-flow builder — both deliberate. `test_sibling_builders.py` pins the pair, and
+      `open_session` returns. Since #370 `only here` is `flow_direction` on the mass-flow builder alone
+      (deliberate); `residual_norm` left `coupled_step` with the measure's move to the solve. `test_sibling_builders.py` pins the pair, and
       `test_every_continuation_builder_installs_the_same_globalization` still pins the two surfaces.
       It is the only pair the fix added; the mechanism, and the six invented pairs its first version
       reported before review, are in `CLAUDE.md`'s sibling-builder item.
@@ -1262,8 +1264,10 @@ Many entries below are dated history written against the old API. Read them thro
       live.
   - **⚠️ THE FORWARD SOLVE'S STOPPING MEASURE IS `_coupled_step`'s, NOT A BUILDER'S (binding, #282,
     2026-08-20) — and the surfaces above `_coupled_step` had drifted TWICE MORE after the tail was
-    extracted.** `_coupled_step` builds the default forward solver from `residual_norm` — the march's own
-    progress measure — so the solve is steered by and judged by one definition. What is per-family is a
+    extracted.** `_coupled_step` builds the default forward solver with `norm=None`, which each step binds
+    to the progress measure the march hands it (#370; before, it captured the step's build-time
+    `residual_norm`, which a rebuilt measure then left behind) — so the solve is steered by and judged by
+    one definition. What is per-family is a
     `_LinearSolveRegime` (rtol, restart, cap), and the coupled builders take it as one value,
     `linear_solve=LinearSolveSettings(...)` (#388 — the `forward_*` keywords are gone). **Move it through that value,
     never by passing a whole solver as `linear_solve`, which replaces the measure too.**
@@ -1314,24 +1318,25 @@ Many entries below are dated history written against the old API. Read them thro
     the current default. See the `krylov_solver` bullet in `.claude/rules/solve-globalization.md` for the mechanism
     (`lineax`'s componentwise stop plus the near-zero-right-hand-side ω wall-fixation rows pinned it to
     the absolute `atol=1e-10` floor, ~9 orders past the requested 1e-3) and the two-arm refutation.
-  - **The march's default residual measure is the row-equilibrated `RowScaledNorm` (`coupled_scaled_norm`),
-    NOT the plain Euclidean ‖R‖.** The Euclidean coupled residual is dominated by the `ω` block (`ω` O(1e5),
-    `k` O(1e-3)), so it barely moves while the flow develops and *mis-ranks* states — a converged field can
-    score worse than a badly wrong one, and a step collapsing `k` is accepted (see the mis-ranking warning
-    in `.claude/notes/solve-globalization-log.md`). `RowScaledNorm` divides each row by its own diagonal and each block by its
-    field magnitude, reporting a fractional change per equation, so steering and the stopping test judge
-    every block comparably. `coupled_continuation` / `coupled_lu_continuation` build it by default;
-    `block_scaled_norm=True` selects the coarser one-scale-per-block `BlockScaledNorm` (`_coupled_residual_norm`),
-    and `residual_norm=jnp.linalg.norm` recovers the plain Euclidean measure. (`mass_flow_coupled_continuation`
-    still defaults to Euclidean — its bordered `[flow, k, ω, β]` state needs a constraint-aware row-scaled
-    variant not yet built; a follow-up.) **This does not *fix* the forward stall** — the pitzDaily march is
-    globalization-bound and plateaus under any measure (the row-scaled measure is the honest signal of that,
-    where the Euclidean fall was a `β×travel` + `ω`-magnitude artifact). It makes the measure honest, and it
-    is REQUIRED for the case to be judged correctly. **When a march refreshes, the measure is held fixed at
-    the initial state** — `solve_coupled` passes `coupled_continuation(residual_norm=base_norm)` on every
-    refresh rather than rebuilding it at the developed state, or the self-normalising scales would re-base and
-    the convergence test become unreachable (#156 seam 4; see `.claude/notes/solve-globalization-log.md`). `scaled_norm=True`
-    opts the *observed* march into rebuilding the row scales per outer step (finer, more expensive).
+  - **The coupled solve's default residual measure is the row-equilibrated `RowScaledNorm`
+    (`coupled_scaled_norm`), REBUILT at every outer iteration, NOT the plain Euclidean ‖R‖.** The Euclidean
+    coupled residual is dominated by the `ω` block (`ω` O(1e5), `k` O(1e-3)), so it barely moves while the
+    flow develops and *mis-ranks* states — a converged field can score worse than a badly wrong one, and a
+    step collapsing `k` is accepted (see the mis-ranking warning in `.claude/notes/solve-globalization-log.md`).
+    `RowScaledNorm` divides each row by its own diagonal and each block by its field magnitude, reporting a
+    fractional change per equation, so steering and the stopping test judge every block comparably.
+    **Since #370 (2026-09-16) the measure is the solve's, not the step's:** `solve_coupled(convergence=
+    Convergence(measure=…))` names it (`RowScaled()` unset; `BlockScaled()` for the coarser one-scale-per-block
+    `BlockScaledNorm`, held at the initial state across refreshes — #156 seam 4; `Euclidean()` for the plain
+    norm), the march builds it from `_CoupledMeasures` at each iteration's starting state and hands it to the
+    step, and the step's default linear solve stops in it (`relative_residual_gmres(norm=None)`). The builders
+    take no measure keyword. **The frozen-at-build-state form, the old default, is deleted** — measured cheap to
+    rebuild and needed by nothing; the evidence is in `solve.md`'s `convergence.py` entry.
+    (`solve_coupled_mass_flow` defaults to `Euclidean()`; its bordered `[flow, k, ω, β]` state has no
+    row-scaled form, which `_MassFlowMeasures` refuses by name.) **This does not *fix* the forward stall** —
+    the pitzDaily march is globalization-bound and plateaus under any measure (the row-scaled measure is the
+    honest signal of that, where the Euclidean fall was a `β×travel` + `ω`-magnitude artifact). It makes the
+    measure honest, and it is REQUIRED for the case to be judged correctly.
   - **`beta_floor` (SER lower bound) is available but off by default (a measured wash).** ⚠️ It is a
     field of the shared `Globalization` now, not a builder keyword —
     `coupled_continuation(globalization=Globalization(beta_floor=…))`, which keeps the coupled line
@@ -2477,14 +2482,15 @@ tuning follow-up noted above.
     `solve_coupled` — the continuation changes only the path. Pinned: `n_points=2` reaches the direct
     solve's fields to `1e-6`, and `n_points=0` is bit-identical to a direct solve
     (`tests/integration/test_reynolds_continuation.py`).
-  - **Intermediate points converge LOOSELY (`intermediate_rtol=1e-2` default).** A lower-Re point is
-    only an initial guess for the next Reynolds number, so converging it to the target `rtol` is wasted
-    work — it overrides `rtol` for the lower-Re solves only (the target keeps the caller's `rtol`);
+  - **Intermediate points converge LOOSELY (`intermediate=Convergence(rtol=1e-2)` default).** A lower-Re
+    point is only an initial guess for the next Reynolds number, so converging it to the target `rtol` is
+    wasted work — the `intermediate` test applies to the lower-Re solves only, its unset fields (the
+    measure, and here `atol`) taken from the target's `convergence`; the target keeps the caller's own.
     `None` disables the loosening. Measured necessary on pitzDaily: the wall-resolved 12k-cell mesh is
     stiff *independent of Re* (Re continuation removes the convective nonlinearity, not the mesh-induced
     linear stiffness), so an anchor converged to `1e-6` grinds for many iterations for no benefit to the
-    seed. Pinned by a monkeypatched-`solve_coupled` unit test that the lower-Re points receive
-    `intermediate_rtol` and the target receives `rtol`.
+    seed. Pinned by monkeypatched-`solve_coupled` unit tests that the lower-Re points receive the
+    intermediate test, the target its own, and that the intermediate one inherits the target's measure.
   - **`point_setup` — a PER-POINT continuation/precondition seam for a per-companion, per-state
     preconditioner (BUILT).** The single `strategy`/`reference_state` is dropped for the ramp rungs
     (target-specific), so it cannot express a preconditioner that must be rebuilt at *each* rung's own
@@ -2515,13 +2521,14 @@ tuning follow-up noted above.
       at that rung. `point_setup` is still the right seam; what it should vary per rung is the
       *residual assembler and the row scales*, which are ordinary data and cost nothing. See the
       per-rung-recompile entry under `amg_beta_tracking_refresh` for all three causes.
-  - **`intermediate_atol` — stop every rung at one PHYSICAL standard (BUILT), and prefer it over the
-    relative bar on a row-scaled measure.** `intermediate_rtol` sets each rung's bar as a fraction of
+  - **An absolute intermediate bar, `intermediate=Convergence(atol=…)` with the target at `rtol=0` — stop
+    every rung at one PHYSICAL standard, and prefer it over the relative bar on a row-scaled measure.** A
+    relative intermediate `rtol` sets each rung's bar as a fraction of
     *that rung's own* starting residual, and under continuation every rung **re-bases `‖R₀‖`** — so a
     later rung, starting from a better seed, stops at a *looser absolute* residual than an earlier one
     already achieved. Worse, the row-scaled measure is already a fractional per-equation change, so
     dividing it again by `‖R₀‖` makes the bar a property of the initial guess rather than of the physics.
-    `intermediate_atol` (with `rtol=0`) gives every rung the same absolute bar.
+    An absolute intermediate `atol` (with `rtol=0`) gives every rung the same absolute bar.
     **Measured on the 3D backward-facing step**, where the case metric is the reattachment length:
     under the relative bar, rung 1 stopped at `‖R‖ = 6.3e-3` with the bubble **still moving**; under an
     absolute `1e-4` it ran 5 more steps to `6.3e-5` and the bubble was **bit-identical for the last five
