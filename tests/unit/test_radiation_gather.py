@@ -375,5 +375,57 @@ def test_passing_the_whole_surface_set_as_a_traced_argument_says_why_it_cannot_w
     place; the message names the fix instead."""
     surfaces = point_source([0.0, 0.0, 0.0])
     probes = jnp.asarray([[1.0, 0.0, 0.0]])
-    with pytest.raises(TypeError, match="must be concrete"):
+    with pytest.raises(TypeError, match="profile index must be concrete"):
         jax.jit(lambda s, p: fluence_rate(s, p))(surfaces, probes)
+
+
+def test_a_source_can_be_moved_under_a_gradient():
+    """Where a lamp should go is the question a design study asks, and the answer is a
+    derivative with respect to its position.
+
+    This is what separating the point-source label from the area buys. With the kind of a
+    source inferred from its area, a traced vertex made the area a tracer and the partition
+    unavailable, so the gradient could not be taken at all -- not wrong, unbuildable.
+    """
+    facet = rectangle_triangles([0.0, 0.0, 0.0], [0.05, 0.0, 0.0], [0.0, 0.05, 0.0])
+    surfaces = Surfaces.from_triangles(facet, emission=100.0)
+    probe = np.array([[0.02, 0.01, 0.3]])
+
+    def total(lift):
+        moved = surfaces.with_geometry(jnp.asarray(facet) + jnp.asarray([0.0, 0.0, 1.0]) * lift)
+        return jnp.sum(fluence_rate(moved, probe))
+
+    step = 1e-7
+    finite_difference = (float(total(jnp.asarray(step))) - float(total(jnp.asarray(-step)))) / (
+        2.0 * step
+    )
+    assert float(jax.grad(total)(jnp.asarray(0.0))) == pytest.approx(finite_difference, rel=1e-7)
+
+
+def test_a_point_source_can_be_moved_under_a_gradient():
+    """The same for a lamp modelled as a point, where the position is all there is to move."""
+    source = point_source([0.0, 0.0, 0.0], power=50.0)
+    probe = np.array([[0.0, 0.0, 2.0]])
+
+    def total(lift):
+        moved = source.with_geometry(jnp.zeros((1, 3, 3)) + jnp.asarray([0.0, 0.0, 1.0]) * lift)
+        return jnp.sum(fluence_rate(moved, probe))
+
+    step = 1e-7
+    finite_difference = (float(total(jnp.asarray(step))) - float(total(jnp.asarray(-step)))) / (
+        2.0 * step
+    )
+    assert float(jax.grad(total)(jnp.asarray(0.0))) == pytest.approx(finite_difference, rel=1e-7)
+
+
+def test_the_gradient_reaches_every_vertex_of_every_facet():
+    """A per-vertex jacobian, not one scalar knob -- a shape optimizer moves each one."""
+    facet = rectangle_triangles([0.0, 0.0, 0.0], [0.05, 0.0, 0.0], [0.0, 0.05, 0.0])
+    surfaces = Surfaces.from_triangles(facet, emission=100.0)
+    probe = np.array([[0.02, 0.01, 0.3]])
+    jacobian = jax.grad(
+        lambda vertices: jnp.sum(fluence_rate(surfaces.with_geometry(vertices), probe))
+    )(jnp.asarray(facet))
+    assert jacobian.shape == facet.shape
+    assert bool(jnp.all(jnp.isfinite(jacobian)))
+    assert float(jnp.min(jnp.abs(jacobian).sum(axis=(1, 2)))) > 0.0

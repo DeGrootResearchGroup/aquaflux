@@ -208,6 +208,43 @@ like a physics error, so it is the failure mode least likely to be noticed.
 A convex emitting body needs no occluder: the clamp *is* its visibility condition, exactly. The
 cylinder case tests that and **does not test occlusion**.
 
+## ⚠️ A SOURCE'S KIND IS A LABEL, NOT ITS AREA
+
+`Surfaces.point_source_index` records which facets are point sources. It is static metadata and
+everything that needs the distinction reads `Surfaces.is_point_source`; nothing infers it from
+`area > 0`. The two agree when a set is built, which is exactly why conflating them is tempting.
+
+**The area is a quantity a gradient flows through; the kind decides a code path.** Tie them
+together and the knot shows up the first time someone differentiates with respect to vertex
+positions — moving a lamp, which is the question a design study asks. The area becomes a traced
+quantity, the host-side partition can no longer read it, and the gradient is not wrong but
+*unbuildable*. Separated, it works: `dG/dz` for an areal facet and for a point source both match
+a central difference to 1e-10, and the full per-vertex jacobian is finite and non-zero.
+
+Note that `area` is never used numerically in the gather at all — the solid angle already
+carries the area-over-`r^2` geometry, and point sources carry power. It was purely a
+discriminator, which is what made the conflation invisible.
+
+**Move a set with `Surfaces.with_geometry`, never by substituting `vertices` alone.** Centroid,
+normal and area all derive from the vertices; `tree_at` on `vertices` leaves all three
+describing the old shape, silently, because nothing downstream can tell a stale normal from a
+fresh one. `with_geometry` recomputes them and carries the labels and optics across.
+
+## ⚠️ INSIDE A TRACE, `jnp` STAGES EVERYTHING — EVEN ON CONCRETE INPUTS
+
+A build-time validation written with `jnp` works perfectly until the object is first rebuilt
+inside a traced function, and then fails on an input that *is* concrete:
+
+```
+jax.jit(lambda x: int(jnp.max(concrete_int_array)))   # ConcretizationTypeError
+```
+
+`jnp.max` on a concrete array returns a **tracer** when a trace is active, because every `jnp`
+operation encountered during tracing is staged out regardless of its inputs. `np.max` on the
+same array does not. So a range check on an index array — `solid_id`, `profile_index` — must be
+written in numpy, and skipped outright when the array itself is traced. This cost an afternoon
+to find because the isinstance check said "not a tracer" while the very next line disagreed.
+
 ## ⚠️ GEOMETRY IS CLOSED OVER, VALUES ARE PASSED
 
 The gather partitions facets by angular distribution and by areal-versus-point **on the host**,
@@ -216,6 +253,9 @@ no branch on facet kind. That partition decides the program's *shape*, so `area`
 `profile_index` cannot themselves be traced. `jit(lambda s, p: fluence_rate(s, p))` over a whole
 `Surfaces` raises with an explanation; close over the set and substitute values through
 `with_optics` instead. This is the boundary the built model will formalize.
+
+Only `profile_index` is structural in this sense. **Vertices are not** — see the label rule
+above — so a source's position is free to move under a gradient.
 
 ## What the analytic cases actually pin, and what they cannot
 

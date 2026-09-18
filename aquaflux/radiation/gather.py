@@ -44,22 +44,26 @@ def _groups(surfaces: Surfaces) -> list[tuple[object, np.ndarray, np.ndarray]]:
     each group's profile is a concrete object whose methods inline, so the traced program holds
     no branch on facet kind and no gather through a profile table.
     """
-    if any(isinstance(field, jax.core.Tracer) for field in (surfaces.profile_index, surfaces.area)):
+    if isinstance(surfaces.profile_index, jax.core.Tracer):
         msg = (
-            "the surface set's geometry must be concrete here: which facets are point sources "
-            "and which angular distribution each one uses decides the shape of the traced "
-            "program, so it cannot itself be traced. Close over the surface set and pass only "
-            "the values that vary -- jit(lambda emission: fluence_rate(surfaces.with_optics("
-            "emission=emission), points)) -- rather than passing the whole set as an argument."
+            "the surface set's profile index must be concrete here: which angular distribution "
+            "each facet emits with decides the shape of the traced program, so it cannot itself "
+            "be traced. Close over the surface set and pass only the values that vary -- "
+            "jit(lambda emission: fluence_rate(surfaces.with_optics(emission=emission), points)) "
+            "-- rather than passing the whole set as an argument. Vertices may be traced: "
+            "substitute them with Surfaces.with_geometry, which keeps the labels."
         )
         raise TypeError(msg)
     index = np.asarray(surfaces.profile_index)
-    area = np.asarray(surfaces.area)
+    # The kind of a source is read from its label and never from its area. The two agree, but
+    # the area is a quantity a gradient may flow through, and reading a code path off a traced
+    # quantity is what would stop a lamp from being able to move.
+    is_point = surfaces.is_point_source
     partition = []
     for kind, profile in enumerate(surfaces.profiles):
         selected = index == kind
-        areal = np.flatnonzero(selected & (area > 0.0))
-        point = np.flatnonzero(selected & (area <= 0.0))
+        areal = np.flatnonzero(selected & ~is_point)
+        point = np.flatnonzero(selected & is_point)
         if len(areal) or len(point):
             partition.append((profile, areal, point))
     return partition

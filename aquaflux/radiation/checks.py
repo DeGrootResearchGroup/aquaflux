@@ -224,27 +224,29 @@ def check_profiles(surfaces) -> None:
     """
     from aquaflux.radiation.profiles import Isotropic
 
-    area = np.asarray(surfaces.area)
+    # The kind of a source is read from its label, never from its area: the area is a quantity
+    # a gradient may flow through, and the label is what decides a code path.
+    is_point = surfaces.is_point_source
     index = np.asarray(surfaces.profile_index)
     for kind, profile in enumerate(surfaces.profiles):
         selected = index == kind
         isotropic = isinstance(profile, Isotropic)
         offenders = (
-            np.flatnonzero(selected & (area > 0.0))
+            np.flatnonzero(selected & ~is_point)
             if isotropic
-            else np.flatnonzero(selected & (area <= 0.0))
+            else np.flatnonzero(selected & is_point)
         )
         if len(offenders) == 0:
             continue
         if isotropic:
             msg = (
-                f"{len(offenders)} facet(s) with area carry an Isotropic profile "
+                f"{len(offenders)} surface facet(s) carry an Isotropic profile "
                 f"(first few: {offenders[:8].tolist()}). Isotropic describes a point source; "
                 "give an emitting surface Lambertian or CosinePower."
             )
         else:
             msg = (
-                f"{len(offenders)} zero-area facet(s) carry a "
+                f"{len(offenders)} point source(s) carry a "
                 f"{type(profile).__name__} profile (first few: {offenders[:8].tolist()}). A "
                 "point source has no normal for a directional distribution to be measured "
                 "against, and would silently contribute nothing; use Isotropic."
