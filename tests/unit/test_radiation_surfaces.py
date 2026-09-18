@@ -97,7 +97,7 @@ def test_replacing_the_optics_leaves_the_geometry_identical():
         ({"vertices": np.zeros((2, 3))}, "shape"),
         ({"vertices": np.zeros((2, 4, 3))}, "shape"),
         ({"vertices": np.zeros((2, 3, 3)), "solid_id": [0]}, "solid_id must have shape"),
-        ({"vertices": np.zeros((2, 3, 3)), "solid_id": [0, 5]}, "only 1 name"),
+        ({"vertices": np.zeros((2, 3, 3)), "solid_id": [0, 5]}, "solid_id selects body 5"),
     ],
 )
 def test_an_inconsistent_construction_is_refused(kwargs, message):
@@ -123,3 +123,77 @@ def test_the_body_names_are_static_metadata_and_not_an_array_leaf():
     leaves = jax.tree_util.tree_leaves(surfaces)
     assert all(not isinstance(leaf, str) for leaf in leaves)
     assert surfaces.solid_names == ("wall",)
+
+
+def test_point_sources_are_labelled_explicitly_and_not_inferred_from_the_area():
+    """The label and the area agree when a set is built; they must still be separate things.
+
+    The area is a number a gradient may flow through; the kind is a decision about which code
+    path a facet takes, which has to be known before anything is traced. Deriving the second
+    from the first ties them together, and the knot only shows up when someone differentiates
+    with respect to vertex positions.
+    """
+    vertices = np.concatenate([RIGHT_TRIANGLE, np.zeros((1, 3, 3))])
+    surfaces = Surfaces.from_triangles(vertices, power=[0.0, 35.0])
+    assert surfaces.point_source_index == (1,)
+    np.testing.assert_array_equal(surfaces.is_point_source, [False, True])
+
+
+def test_the_point_source_labels_can_be_given_explicitly():
+    surfaces = Surfaces.from_triangles(np.zeros((2, 3, 3)), point_sources=[0])
+    np.testing.assert_array_equal(surfaces.is_point_source, [True, False])
+
+
+def test_a_label_outside_the_set_is_refused():
+    with pytest.raises(ValueError, match="outside the set"):
+        Surfaces.from_triangles(RIGHT_TRIANGLE, point_sources=[3])
+
+
+def test_moving_the_vertices_recomputes_everything_derived_from_them():
+    """Substituting the vertices alone would leave centroid, normal and area describing the old
+    shape, silently -- nothing downstream can tell a stale normal from a fresh one."""
+    surfaces = Surfaces.from_triangles(RIGHT_TRIANGLE, emission=4.0, reflectance=0.3)
+    doubled = surfaces.with_geometry(np.asarray(RIGHT_TRIANGLE) * 2.0)
+    assert float(doubled.area[0]) == pytest.approx(4.0 * float(surfaces.area[0]))
+    np.testing.assert_allclose(doubled.centroid[0], np.asarray(surfaces.centroid[0]) * 2.0)
+    np.testing.assert_allclose(doubled.normal, surfaces.normal)
+
+
+def test_moving_the_vertices_keeps_the_optics_and_the_labels():
+    vertices = np.concatenate([RIGHT_TRIANGLE, np.zeros((1, 3, 3))])
+    surfaces = Surfaces.from_triangles(
+        vertices,
+        solid_id=[0, 1],
+        solid_names=("wall", "lamp"),
+        emission=[7.0, 0.0],
+        power=[0.0, 35.0],
+        reflectance=0.4,
+    )
+    moved = surfaces.with_geometry(np.asarray(vertices) + np.array([0.0, 0.0, 1.0]))
+    np.testing.assert_allclose(moved.emission, surfaces.emission)
+    np.testing.assert_allclose(moved.power, surfaces.power)
+    np.testing.assert_array_equal(moved.solid_id, surfaces.solid_id)
+    assert moved.solid_names == surfaces.solid_names
+    assert moved.point_source_index == surfaces.point_source_index
+
+
+def test_moving_the_vertices_refuses_a_different_number_of_triangles():
+    surfaces = Surfaces.from_triangles(RIGHT_TRIANGLE)
+    with pytest.raises(ValueError, match="expected 1 triangles to move"):
+        surfaces.with_geometry(np.repeat(RIGHT_TRIANGLE, 2, axis=0))
+
+
+def test_the_vertices_may_be_traced_so_a_source_can_move_under_a_gradient():
+    """The capability the explicit label unlocks.
+
+    With the kind inferred from the area, a traced vertex made the area a tracer and the kind
+    unavailable, so this could not be built at all.
+    """
+    surfaces = Surfaces.from_triangles(RIGHT_TRIANGLE, emission=1.0)
+
+    def area_of(shift):
+        moved = surfaces.with_geometry(jnp.asarray(RIGHT_TRIANGLE) * shift)
+        return jnp.sum(moved.area)
+
+    assert float(jax.jit(area_of)(jnp.asarray(2.0))) == pytest.approx(12.0)
+    assert float(jax.grad(area_of)(jnp.asarray(1.0))) == pytest.approx(6.0)

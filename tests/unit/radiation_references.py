@@ -117,3 +117,75 @@ def box_enclosure(divisions: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
                     normals += [inward, inward]
     vertices = np.array(triangles)
     return vertices, np.array(normals), vertices.mean(axis=1)
+
+
+def disc_triangles(radius: float, rings: int = 24, sectors: int = 64, height: float = 0.0):
+    """A flat disc in the ``z = height`` plane, triangulated and wound counter-clockwise.
+
+    Built vectorized rather than by looping over cells: the fixtures here run in the always-on
+    gate, and a Python loop over a few thousand triangles costs more than the gather it feeds.
+    """
+    radii = np.linspace(0.0, radius, rings + 1)
+    angles = np.linspace(0.0, 2.0 * np.pi, sectors + 1)
+    inner, outer = radii[:-1, None], radii[1:, None]
+    start, end = angles[None, :-1], angles[None, 1:]
+
+    def corner(r, a):
+        return np.stack(
+            [
+                r * np.cos(a) * np.ones_like(a * r),
+                r * np.sin(a) * np.ones_like(a * r),
+                np.full(np.broadcast(r, a).shape, height),
+            ],
+            axis=-1,
+        )
+
+    a = corner(inner, start)
+    b = corner(outer, start)
+    c = corner(outer, end)
+    d = corner(inner, end)
+    lower = np.stack([a, b, c], axis=-2).reshape(-1, 3, 3)
+    upper = np.stack([a, c, d], axis=-2).reshape(-1, 3, 3)
+    return np.concatenate([lower, upper])
+
+
+def cylinder_triangles(radius: float, half_length: float, sectors: int = 160, slices: int = 160):
+    """A tube of the given radius about the z axis, outward-facing, without end caps.
+
+    A cylinder is convex, so from any outside point the facets a receiver can see are exactly
+    those whose outward normal faces it — which makes this the fixture that tests the
+    source-side clamp without needing an occluder.
+    """
+    angles = np.linspace(0.0, 2.0 * np.pi, sectors + 1)
+    heights = np.linspace(-half_length, half_length, slices + 1)
+    start, end = angles[:-1, None], angles[1:, None]
+    low, high = heights[None, :-1], heights[None, 1:]
+
+    def corner(a, z):
+        shape = np.broadcast(a, z).shape
+        return np.stack(
+            [
+                np.broadcast_to(radius * np.cos(a), shape),
+                np.broadcast_to(radius * np.sin(a), shape),
+                np.broadcast_to(z, shape),
+            ],
+            axis=-1,
+        )
+
+    a = corner(start, low)
+    b = corner(end, low)
+    c = corner(end, high)
+    d = corner(start, high)
+    lower = np.stack([a, b, c], axis=-2).reshape(-1, 3, 3)
+    upper = np.stack([a, c, d], axis=-2).reshape(-1, 3, 3)
+    return np.concatenate([lower, upper])
+
+
+def finite_line_fluence_rate(power_per_length: float, half_length: float, radius: float) -> float:
+    """Closed form for a finite isotropic line source at perpendicular distance ``radius``.
+
+    ``G = P' (alpha_2 - alpha_1) / (4 pi r)`` with ``alpha = arctan(z / r)``, measured at the
+    line's mid-plane so the two angles are symmetric. The infinite limit is ``P' / (4 r)``.
+    """
+    alpha = np.arctan(half_length / radius)
+    return power_per_length * (2.0 * alpha) / (4.0 * np.pi * radius)

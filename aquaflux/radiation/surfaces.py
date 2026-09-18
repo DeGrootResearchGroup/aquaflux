@@ -17,14 +17,25 @@ the second call with a different array.
 represented as a zero-area facet carrying radiant power in watts; an areal facet carries
 emission in watts per square metre and no power. Guarding against a zero-area triangle would
 therefore delete the point sources, which is why :meth:`Surfaces.from_triangles` does not.
+
+**Which facets are point sources is recorded explicitly, not inferred from the area.** The two
+say the same thing when a set is first built, and they must not be conflated all the same: the
+area is a number the solver may differentiate through, while the kind is a *label* that decides
+which code path a facet takes and therefore has to be known before anything is traced. Deriving
+the label from the number ties them together, and the knot shows up the first time someone
+differentiates with respect to vertex positions -- moving a lamp -- at which point the area
+becomes a traced quantity and the label becomes unavailable. Keeping them apart costs one
+static tuple and leaves the geometry free to move.
 """
 
 from __future__ import annotations
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 
+from aquaflux.radiation.profiles import Lambertian, Profile
 from aquaflux.vectors import dot
 
 __all__ = ["Surfaces"]
@@ -58,6 +69,19 @@ class Surfaces(eqx.Module):
         Diffuse reflectance ``rho`` in ``[0, 1]``. Differentiable.
     solid_names : tuple of str
         Body names in :attr:`solid_id` order (static metadata, not a leaf).
+    profiles : tuple of Profile
+        The distinct angular distributions present in the set. A **collection** rather than one
+        profile for the whole set, because each facet emits with its own: a lamp sleeve and a
+        reflector in the same geometry are different sources, and the transfer of *emitted*
+        light needs each facet's own distribution even though every *reflected* ray leaves
+        Lambertian. The host-side partition this induces is also what lets the gather resolve
+        the distribution once per kind at trace time rather than branching per facet.
+    profile_index : jnp.ndarray of int, shape ``(n_facets,)``
+        Which entry of :attr:`profiles` each facet emits with.
+    point_source_index : tuple of int
+        Which facets are point sources rather than emitting surfaces — static metadata, not a
+        leaf, because it selects a code path. Stored as the indices rather than a mask so that
+        the usual case, a handful of lamps among many facets, costs almost nothing to carry.
     """
 
     vertices: jnp.ndarray
@@ -68,7 +92,10 @@ class Surfaces(eqx.Module):
     emission: jnp.ndarray
     power: jnp.ndarray
     reflectance: jnp.ndarray
+    profile_index: jnp.ndarray
     solid_names: tuple[str, ...] = eqx.field(static=True)
+    profiles: tuple[Profile, ...] = ()
+    point_source_index: tuple[int, ...] = eqx.field(static=True, default=())
 
     @classmethod
     def from_triangles(
@@ -80,6 +107,9 @@ class Surfaces(eqx.Module):
         emission=0.0,
         power=0.0,
         reflectance=0.0,
+        profiles=None,
+        profile_index=None,
+        point_sources=None,
     ) -> Surfaces:
         """Build a surface set from triangle vertices, deriving all of its geometry.
 
@@ -93,6 +123,16 @@ class Surfaces(eqx.Module):
             Body names in ``solid_id`` order.
         emission, power, reflectance : float or array_like, shape ``(n_facets,)``, optional
             Per-facet optical properties; a scalar is broadcast to every facet.
+        profiles : tuple of Profile, optional
+            The distinct angular distributions present. Defaults to a single
+            :class:`~aquaflux.radiation.profiles.Lambertian`, which is what a diffuse surface
+            emits with and what every reflected ray leaves by.
+        profile_index : array_like of int, shape ``(n_facets,)``, optional
+            Which profile each facet uses. Defaults to all zeros.
+        point_sources : sequence of int, optional
+            Indices of the facets that are point sources. Defaults to every facet whose
+            triangle has no area, which is what they are built as — pass it explicitly only to
+            record a different set, never to work around a geometry that came out degenerate.
 
         Returns
         -------
@@ -113,6 +153,27 @@ class Surfaces(eqx.Module):
         degenerate = twice_area == 0.0
         normal = twice_vector_area / jnp.where(degenerate, 1.0, twice_area)[:, None]
 
+        def in_range(indices, limit, name, what):
+            """Check an index array against a table size, when the values are available.
+
+            Skipped for a traced array rather than forced concrete: the same surface set gets
+            rebuilt inside a traced function whenever its vertices move, and a validation that
+            reads a value would turn a range check into a tracer leak. The indices do not
+            change when geometry does, so the check has already run on the way in.
+
+            ⚠️ The comparison is done in numpy and **not** with ``jnp``. Inside a trace, every
+            ``jnp`` operation is staged out whether or not its inputs are concrete, so
+            ``int(jnp.max(concrete_array))`` raises there while ``int(np.max(...))`` does not.
+            A build-time check written with ``jnp`` works perfectly until the first time the
+            object is rebuilt inside a traced function.
+            """
+            if isinstance(indices, jax.core.Tracer):
+                return
+            largest = int(np.max(np.asarray(indices), initial=-1))
+            if largest >= limit:
+                msg = f"{name} selects {what} {largest} but only {limit} were given"
+                raise ValueError(msg)
+
         def spread(value, name):
             spread_value = jnp.broadcast_to(jnp.asarray(value, dtype=float), (n_facets,))
             if spread_value.shape != (n_facets,):  # pragma: no cover - broadcast_to raises first
@@ -127,12 +188,38 @@ class Surfaces(eqx.Module):
             if solid_id.shape != (n_facets,):
                 msg = f"solid_id must have shape ({n_facets},); got {solid_id.shape}"
                 raise ValueError(msg)
-            if int(jnp.max(solid_id, initial=-1)) >= len(solid_names):
-                msg = (
-                    f"solid_id indexes body {int(jnp.max(solid_id))} but only "
-                    f"{len(solid_names)} name(s) were given"
-                )
+            in_range(solid_id, len(solid_names), "solid_id", "body")
+
+        if profiles is None:
+            profiles = (Lambertian(),)
+        profiles = tuple(profiles)
+        if not profiles:
+            msg = "profiles must contain at least one Profile"
+            raise ValueError(msg)
+        if profile_index is None:
+            profile_index = jnp.zeros(n_facets, dtype=jnp.int32)
+        else:
+            profile_index = jnp.asarray(profile_index, dtype=jnp.int32)
+            if profile_index.shape != (n_facets,):
+                msg = f"profile_index must have shape ({n_facets},); got {profile_index.shape}"
                 raise ValueError(msg)
+            in_range(profile_index, len(profiles), "profile_index", "profile")
+
+        if point_sources is None:
+            if isinstance(twice_area, jax.core.Tracer):
+                msg = (
+                    "point_sources must be given when the vertices are traced: which facets "
+                    "are point sources is a label that decides a code path, so it cannot be "
+                    "read off a traced area. Use Surfaces.with_geometry to move a set, which "
+                    "carries the labels across."
+                )
+                raise TypeError(msg)
+            point_sources = np.flatnonzero(np.asarray(twice_area) == 0.0)
+        point_sources = tuple(int(index) for index in point_sources)
+        out_of_range = [index for index in point_sources if not 0 <= index < n_facets]
+        if out_of_range:
+            msg = f"point_sources indexes facets outside the set: {out_of_range[:8]}"
+            raise ValueError(msg)
 
         return cls(
             vertices=vertices,
@@ -143,13 +230,59 @@ class Surfaces(eqx.Module):
             emission=spread(emission, "emission"),
             power=spread(power, "power"),
             reflectance=spread(reflectance, "reflectance"),
+            profile_index=profile_index,
             solid_names=tuple(solid_names),
+            profiles=profiles,
+            point_source_index=point_sources,
         )
 
     @property
     def n_facets(self) -> int:
         """Number of facets in the set."""
         return int(self.vertices.shape[0])
+
+    @property
+    def is_point_source(self) -> np.ndarray:
+        """Boolean mask of the point sources, shape ``(n_facets,)``.
+
+        Built from :attr:`point_source_index` rather than from the area, and returned as a
+        plain array because it is known before anything is traced. Everything that has to
+        distinguish the two kinds of source reads this, so there is one answer to the question.
+        """
+        mask = np.zeros(self.n_facets, dtype=bool)
+        mask[list(self.point_source_index)] = True
+        return mask
+
+    def with_geometry(self, vertices) -> Surfaces:
+        """A copy on moved vertices, with the derived geometry recomputed and the labels kept.
+
+        This is how a lamp moves. The centroid, normal and area all follow the vertices and are
+        recomputed here rather than carried over, because substituting the vertices alone would
+        leave the three of them describing the old shape — silently, since nothing downstream
+        can tell. The optical properties and the point-source labels are preserved, so the
+        result is the same surface set in a new position.
+
+        The vertices may be traced, which is the point: it is what lets a gradient reach a
+        source's position.
+        """
+        vertices = jnp.asarray(vertices, dtype=float)
+        if vertices.shape[0] != self.n_facets:
+            msg = (
+                f"expected {self.n_facets} triangles to move, got {vertices.shape[0]}; "
+                "with_geometry moves a surface set, it does not rebuild one"
+            )
+            raise ValueError(msg)
+        return Surfaces.from_triangles(
+            vertices,
+            solid_id=self.solid_id,
+            solid_names=self.solid_names,
+            emission=self.emission,
+            power=self.power,
+            reflectance=self.reflectance,
+            profiles=self.profiles,
+            profile_index=self.profile_index,
+            point_sources=self.point_source_index,
+        )
 
     def per_facet(self, by_solid: dict[str, float], default: float | None = None):
         """Expand a per-body mapping to a per-facet array.

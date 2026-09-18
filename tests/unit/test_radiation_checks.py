@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from aquaflux.radiation.checks import check_winding, stored_normal_disagreement, winding_report
+from aquaflux.radiation.checks import (
+    check_profiles,
+    check_winding,
+    stored_normal_disagreement,
+    winding_report,
+)
 
 #: Two triangles covering the unit square, consistently wound counter-clockwise.
 SQUARE = np.array(
@@ -128,3 +133,37 @@ def test_a_recorded_normal_that_agrees_but_is_unnormalized_is_not_reported():
     """The format does not require a unit normal, so length must not be read as direction."""
     stored = np.array([[0.0, 0.0, 17.0], [0.0, 0.0, 0.004]])
     assert len(stored_normal_disagreement(SQUARE, stored)) == 0
+
+
+def _surfaces(vertices, **kwargs):
+    from aquaflux.radiation.surfaces import Surfaces
+
+    return Surfaces.from_triangles(vertices, **kwargs)
+
+
+def test_an_isotropic_profile_on_an_emitting_surface_is_refused():
+    """Isotropic describes a point source. On a surface it has no radiance to give."""
+    from aquaflux.radiation.profiles import Isotropic
+
+    with pytest.raises(ValueError, match="Isotropic profile"):
+        check_profiles(_surfaces(SQUARE, profiles=(Isotropic(),)))
+
+
+def test_a_directional_profile_on_a_point_source_is_refused():
+    """The silent one: a zero normal reads as a right angle, so the source contributes nothing
+    and simply never appears in the field."""
+    from aquaflux.radiation.profiles import CosinePower
+
+    with pytest.raises(ValueError, match="point source"):
+        check_profiles(_surfaces(np.zeros((1, 3, 3)), profiles=(CosinePower(2.0),)))
+
+
+def test_a_set_pairing_each_kind_with_its_own_profile_passes():
+    from aquaflux.radiation.profiles import Isotropic, Lambertian
+
+    mixed = _surfaces(
+        np.concatenate([SQUARE, np.zeros((1, 3, 3))]),
+        profiles=(Lambertian(), Isotropic()),
+        profile_index=[0, 0, 1],
+    )
+    check_profiles(mixed)
