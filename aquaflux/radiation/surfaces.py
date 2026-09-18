@@ -25,6 +25,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 
+from aquaflux.radiation.profiles import Lambertian, Profile
 from aquaflux.vectors import dot
 
 __all__ = ["Surfaces"]
@@ -58,6 +59,15 @@ class Surfaces(eqx.Module):
         Diffuse reflectance ``rho`` in ``[0, 1]``. Differentiable.
     solid_names : tuple of str
         Body names in :attr:`solid_id` order (static metadata, not a leaf).
+    profiles : tuple of Profile
+        The distinct angular distributions present in the set. A **collection** rather than one
+        profile for the whole set, because each facet emits with its own: a lamp sleeve and a
+        reflector in the same geometry are different sources, and the transfer of *emitted*
+        light needs each facet's own distribution even though every *reflected* ray leaves
+        Lambertian. The host-side partition this induces is also what lets the gather resolve
+        the distribution once per kind at trace time rather than branching per facet.
+    profile_index : jnp.ndarray of int, shape ``(n_facets,)``
+        Which entry of :attr:`profiles` each facet emits with.
     """
 
     vertices: jnp.ndarray
@@ -68,7 +78,9 @@ class Surfaces(eqx.Module):
     emission: jnp.ndarray
     power: jnp.ndarray
     reflectance: jnp.ndarray
+    profile_index: jnp.ndarray
     solid_names: tuple[str, ...] = eqx.field(static=True)
+    profiles: tuple[Profile, ...] = ()
 
     @classmethod
     def from_triangles(
@@ -80,6 +92,8 @@ class Surfaces(eqx.Module):
         emission=0.0,
         power=0.0,
         reflectance=0.0,
+        profiles=None,
+        profile_index=None,
     ) -> Surfaces:
         """Build a surface set from triangle vertices, deriving all of its geometry.
 
@@ -93,6 +107,12 @@ class Surfaces(eqx.Module):
             Body names in ``solid_id`` order.
         emission, power, reflectance : float or array_like, shape ``(n_facets,)``, optional
             Per-facet optical properties; a scalar is broadcast to every facet.
+        profiles : tuple of Profile, optional
+            The distinct angular distributions present. Defaults to a single
+            :class:`~aquaflux.radiation.profiles.Lambertian`, which is what a diffuse surface
+            emits with and what every reflected ray leaves by.
+        profile_index : array_like of int, shape ``(n_facets,)``, optional
+            Which profile each facet uses. Defaults to all zeros.
 
         Returns
         -------
@@ -134,6 +154,26 @@ class Surfaces(eqx.Module):
                 )
                 raise ValueError(msg)
 
+        if profiles is None:
+            profiles = (Lambertian(),)
+        profiles = tuple(profiles)
+        if not profiles:
+            msg = "profiles must contain at least one Profile"
+            raise ValueError(msg)
+        if profile_index is None:
+            profile_index = jnp.zeros(n_facets, dtype=jnp.int32)
+        else:
+            profile_index = jnp.asarray(profile_index, dtype=jnp.int32)
+            if profile_index.shape != (n_facets,):
+                msg = f"profile_index must have shape ({n_facets},); got {profile_index.shape}"
+                raise ValueError(msg)
+            if int(jnp.max(profile_index, initial=-1)) >= len(profiles):
+                msg = (
+                    f"profile_index selects profile {int(jnp.max(profile_index))} but only "
+                    f"{len(profiles)} were given"
+                )
+                raise ValueError(msg)
+
         return cls(
             vertices=vertices,
             centroid=jnp.mean(vertices, axis=1),
@@ -143,7 +183,9 @@ class Surfaces(eqx.Module):
             emission=spread(emission, "emission"),
             power=spread(power, "power"),
             reflectance=spread(reflectance, "reflectance"),
+            profile_index=profile_index,
             solid_names=tuple(solid_names),
+            profiles=profiles,
         )
 
     @property

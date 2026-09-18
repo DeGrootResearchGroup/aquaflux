@@ -19,7 +19,13 @@ import dataclasses
 
 import numpy as np
 
-__all__ = ["WindingReport", "check_winding", "stored_normal_disagreement", "winding_report"]
+__all__ = [
+    "WindingReport",
+    "check_profiles",
+    "check_winding",
+    "stored_normal_disagreement",
+    "winding_report",
+]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -191,3 +197,56 @@ def stored_normal_disagreement(vertices, stored_normal, *, cosine_tolerance: flo
         twice_vector_area[comparable] * stored_normal[comparable], axis=1
     ) / (derived_length[comparable] * stored_length[comparable])
     return np.flatnonzero(comparable & (cosine < 1.0 - cosine_tolerance))
+
+
+def check_profiles(surfaces) -> None:
+    """Raise unless every facet's angular distribution suits the kind of source it is.
+
+    The two kinds of source in a surface set are distinguished by area, and each admits only
+    one family of distribution:
+
+    * A **point source** is a zero-area facet carrying radiant power. It has no surface and so
+      no normal, which means no direction-dependent distribution has anything to measure an
+      angle against; it must be isotropic.
+    * An **areal facet** carries an exitance over a surface that does have a normal, and an
+      isotropic distribution on one is not a surface emitter — asked for a radiance it would
+      divide by a vanishing cosine at grazing incidence.
+
+    Both mismatches are silent if they are let through. A directional profile on a point source
+    reads a zero normal as a right angle and returns zero intensity, so the source simply does
+    not appear in the field. Checked here, at build time, where the profile is a concrete object
+    and the message can name the facet.
+
+    Raises
+    ------
+    ValueError
+        If any facet carries a distribution that does not suit its kind.
+    """
+    from aquaflux.radiation.profiles import Isotropic
+
+    area = np.asarray(surfaces.area)
+    index = np.asarray(surfaces.profile_index)
+    for kind, profile in enumerate(surfaces.profiles):
+        selected = index == kind
+        isotropic = isinstance(profile, Isotropic)
+        offenders = (
+            np.flatnonzero(selected & (area > 0.0))
+            if isotropic
+            else np.flatnonzero(selected & (area <= 0.0))
+        )
+        if len(offenders) == 0:
+            continue
+        if isotropic:
+            msg = (
+                f"{len(offenders)} facet(s) with area carry an Isotropic profile "
+                f"(first few: {offenders[:8].tolist()}). Isotropic describes a point source; "
+                "give an emitting surface Lambertian or CosinePower."
+            )
+        else:
+            msg = (
+                f"{len(offenders)} zero-area facet(s) carry a "
+                f"{type(profile).__name__} profile (first few: {offenders[:8].tolist()}). A "
+                "point source has no normal for a directional distribution to be measured "
+                "against, and would silently contribute nothing; use Isotropic."
+            )
+        raise ValueError(msg)

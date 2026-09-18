@@ -10,28 +10,42 @@ Built so far: the geometric kernels every later stage composes — the exact clo
 angle of a triangle at a point, in the two forms the two receiver kinds need — together with the
 surface set itself, read from an STL file, checked for the winding defects that would silently
 delete part of a source, and refined until each facet is small compared with its distance to the
-nearest receiver.
+nearest receiver; the angular distributions a source emits with; and the vacuum gather that sums
+every source at every receiver to give the fluence rate and the irradiance.
+
+Still to come: absorption along each path, occlusion by the geometry, and the reflection system
+that closes diffuse interreflection between surfaces.
 """
 
 from __future__ import annotations
 
 from aquaflux.radiation.checks import (
     WindingReport,
+    check_profiles,
     check_winding,
     stored_normal_disagreement,
     winding_report,
 )
+from aquaflux.radiation.gather import fluence_rate, irradiance
+from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian, Profile
 from aquaflux.radiation.solid_angle import projected_solid_angle, solid_angle
 from aquaflux.radiation.stl import TriangleSoup, read_stl
 from aquaflux.radiation.subdivide import Subdivision, refine_for_receivers, subdivide_to_width
 from aquaflux.radiation.surfaces import Surfaces
 
 __all__ = [
+    "CosinePower",
+    "Isotropic",
+    "Lambertian",
+    "Profile",
     "Subdivision",
     "Surfaces",
     "TriangleSoup",
     "WindingReport",
+    "check_profiles",
     "check_winding",
+    "fluence_rate",
+    "irradiance",
     "projected_solid_angle",
     "read_stl",
     "refine_for_receivers",

@@ -21,8 +21,8 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `surfaces.py` — the `Surfaces` value object | **BUILT** |
 | `checks.py` — build-time geometry checks | **BUILT** |
 | `subdivide.py` — the width-over-distance refinement | **BUILT** |
-| `Profile` strategy family (Lambertian, cosine-power) | Not yet built — lands with the gather, its only consumer |
-| the chunked gather, point and line sources | Not yet built |
+| `profiles.py` — `Isotropic`, `Lambertian`, `CosinePower` | **BUILT** |
+| `gather.py` — the vacuum `fluence_rate` and `irradiance` | **BUILT** |
 | the radiosity system | Not yet built |
 | Beer–Lambert optical depth, voxel-grid traversal | Not yet built |
 | occlusion against the surface triangles | Not yet built |
@@ -169,6 +169,75 @@ Two details:
 
 Splitting at edge midpoints into four *similar* triangles preserves shape quality where
 repeated bisection of one edge would not, and conserves area exactly.
+## A profile is a normalized INTENSITY distribution, and it has two views
+
+`integral over 4 pi of f = 1`, so a source of power `P` has intensity `P f(omega)`. Power is
+carried separately, which is the illumination-design convention and is what lets one object
+describe both a point source (`G = P f / r^2`) and a surface.
+
+**Each profile supplies `intensity_fraction` and `radiance_per_exitance`, and the pair must
+satisfy `radiance_per_exitance(c) * c == intensity_fraction(c)`.** The second is not derived
+from the first at run time because the derivation divides by `c`, and Lambertian — the default,
+and the distribution every reflected ray leaves by — is `0/0` at grazing. Written out, it is the
+constant `1/pi` with nothing to cancel.
+
+- `CosinePower(n)` is `(n+1) max(cos,0)^n / (2 pi)`. **The constant is over `2 pi`, not `pi`**,
+  because the normalization is hemispherical; `n = 1` must reduce exactly to Lambertian's
+  `cos/pi`, and that reduction is the test that catches the slip. `n < 1` is refused: the
+  radiance would be unbounded at grazing, which no surface emitter is.
+- **`Isotropic` is a point-source profile and raises from `radiance_per_exitance`.** A zero-area
+  facet has no normal, so no directional distribution has anything to measure against.
+  `check_profiles` refuses isotropic-on-areal and directional-on-point; the latter is silent
+  otherwise, since a zero normal reads as a right angle and the source contributes nothing.
+
+## The clamp is a GATE, not a factor — and the difference is a factor of two or a zero
+
+A facet cannot illuminate what is behind it. Measured on a Lambertian tube at `d/R = 2`, where
+the closed form is `G = (4B/pi) arcsin(R/d) = 2`:
+
+| formulation | result |
+|---|---|
+| clamp as a gate (what is built) | **1.99978** |
+| absolute value of the cosine | 3.99941 — exactly double |
+| no clamp at all | 3.99941 — same, because the gate is what was removed |
+| signed cosine as a *multiplier* | **1.5e-4** — the two sides cancel |
+
+The last row is why the sign is a gate. A near-zero field looks like an empty scene rather than
+like a physics error, so it is the failure mode least likely to be noticed.
+
+A convex emitting body needs no occluder: the clamp *is* its visibility condition, exactly. The
+cylinder case tests that and **does not test occlusion**.
+
+## ⚠️ GEOMETRY IS CLOSED OVER, VALUES ARE PASSED
+
+The gather partitions facets by angular distribution and by areal-versus-point **on the host**,
+so each group's profile is a concrete object whose methods inline and the traced program holds
+no branch on facet kind. That partition decides the program's *shape*, so `area` and
+`profile_index` cannot themselves be traced. `jit(lambda s, p: fluence_rate(s, p))` over a whole
+`Surfaces` raises with an explanation; close over the set and substitute values through
+`with_optics` instead. This is the boundary the built model will formalize.
+
+## What the analytic cases actually pin, and what they cannot
+
+- **Sweep the distance.** One radius cannot separate an `r`-versus-`r^2` error from a
+  `pi`-versus-`4 pi` one.
+- **Sweep the angle.** At normal incidence a missing receiver cosine passes. The geometry for
+  `E = G cos` is a *fixed radius with a tilted normal*; on a plane at fixed perpendicular
+  distance the published result is `cos^3`, because the slant range grows too.
+- **`E = G cos` is a single-source identity.** Two opposed sources make fluence rates add while
+  irradiances oppose. There is a test asserting it fails, so nobody re-derives it as general.
+- **The disc is the strongest single case**: `G = 2B[1 - h/sqrt(a^2+h^2)]` and
+  `E = B a^2/(a^2+h^2)` separate the two kernels on one geometry, and the infinite limits give
+  `G/E -> 2` as a measurable statement rather than a tolerance.
+- **A summed line source is a midpoint rule, so assert the RATE.** It is second order — but only
+  once the segment spacing is below the receiver's distance from the line. At a spacing of 0.08
+  against a distance of 0.05 a doubling improves the error 54-fold, which is not a rate. This is
+  why a lamp needs hundreds of segments to be accurate at its own sleeve and far fewer across
+  the reactor.
+- **Relative error is second order in facet width over distance; absolute error is fourth.**
+  Same statement, and an easy one to quote by mistake — the first version of that test asserted
+  the second-order ratio against absolute errors and failed.
+
 ## Documentation
 
 The package is **deliberately absent from `docs/conf.py`'s `PUBLIC_SUBPACKAGES`.** Listing a

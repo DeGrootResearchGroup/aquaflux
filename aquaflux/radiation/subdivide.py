@@ -232,5 +232,7 @@ def refine_for_receivers(
         solid_names=surfaces.solid_names,
         emission=np.asarray(surfaces.emission)[inherited],
         reflectance=np.asarray(surfaces.reflectance)[inherited],
+        profiles=surfaces.profiles,
+        profile_index=np.asarray(surfaces.profile_index)[inherited],
     )
     return refined, division
