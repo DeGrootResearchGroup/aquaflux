@@ -52,6 +52,7 @@ Checklist still governs).
 | `.claude/rules/io.md` | `aquaflux/io/**` | mesh import **and field export**: the `MeshReader` strategy + the OpenFOAM polyMesh reader (ASCII); parse→assemble→collapse seams, empty-patch 2D collapse (a `mesh/` transform), reserved-name guard; the OpenFOAM field writer that inherits dimensions and `boundaryField` from a template so its output restarts; the VTK XML `.vtu`/`.pvd` writer (arbitrary polygon/polyhedron cells, appended-binary) and why its face winding is re-derived rather than taken as stored |
 | `.claude/rules/validation.md` | `validation/**` | the scientific cases and study harnesses: why no test tier drives them, the obligation to check an API change against them, what the static guard catches and what it cannot, and the harness traps that have produced wrong results |
 | `.claude/rules/parallel.md` | `aquaflux/parallel/**` | distributed memory: graph partitioners, the `PartitionedMesh` owned+halo decomposition, uniform-shape padding, and the `shard_map` residual that runs an *injected* assembler per device (never a re-implementation) |
+| `.claude/rules/radiation.md` | `aquaflux/radiation/**` | ultraviolet fluence rate `G` by a deterministic backward gather over surface facets: the two closed-form solid-angle kernels and why they are not interchangeable, the `arctan2`/clip/magnitude/safe-root details that are load-bearing, and the `F_ii = 0` convention callers must honour |
 
 ---
 
