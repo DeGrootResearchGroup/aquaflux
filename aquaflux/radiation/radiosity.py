@@ -213,6 +213,10 @@ def build_transfer(
             occluders,
             surfaces,
             centroid,
+            # The receivers here ARE the facets, so each ray ends on the one it is aimed at and
+            # must be told to ignore it. Without this every mutually visible pair reads as
+            # blocked and a closed enclosure loses its interreflection entirely.
+            receiver_facet=np.arange(surfaces.n_facets),
             self_occlusion=self_occlusion,
             **visibility_options,
         ),

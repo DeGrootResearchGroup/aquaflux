@@ -116,6 +116,7 @@ def build_visibility(
     surfaces,
     points,
     *,
+    receiver_facet=None,
     self_occlusion: bool = True,
     offset_scale: float = 1e-6,
     chunk_size: int = 4096,
@@ -136,6 +137,16 @@ def build_visibility(
         The emitting set; segments start at facet centroids.
     points : array_like, shape ``(n_receivers, 3)``
         Receiver positions.
+    receiver_facet : array_like of int, shape ``(n_receivers,)``, optional
+        When each receiver point is itself the centroid of one of ``surfaces``' facets, that
+        facet's index. ⚠️ **Omitting it where it applies blocks every pair of facets that can
+        see each other**, because the segment then ends exactly in the target facet's plane and
+        the self-occlusion test reads that as a hit. There is no distance margin at the far end
+        of a segment to absorb it, the way ``offset_scale`` absorbs the same thing at the near
+        end, and the result is not a near miss: a closed enclosure comes back fully shadowed,
+        its interreflection silently switched off. Use ``-1`` for a receiver that is not on a
+        facet, and omit the argument entirely for receivers in the volume, which is the case it
+        does not apply to.
     offset_scale : float, optional
         How far along each segment to start looking for hits, as a fraction of the facet's own
         size -- specifically of the square root of its area. **Relative rather than absolute**,
@@ -187,6 +198,16 @@ def build_visibility(
     near = offset_scale * jnp.sqrt(surfaces.area)
 
     facet_index = jnp.arange(n_facets)
+    # Every ray must ignore the facet it leaves; a ray aimed at a facet centroid must ignore
+    # that facet too, or it is blocked by its own destination.
+    source_of = jnp.broadcast_to(facet_index[None, :], (n_receivers, n_facets))
+    if receiver_facet is None:
+        exclusions = source_of[..., None]
+    else:
+        target_of = jnp.broadcast_to(
+            jnp.asarray(receiver_facet, dtype=int)[:, None], (n_receivers, n_facets)
+        )
+        exclusions = jnp.stack([source_of, target_of], axis=-1)
 
     primitive_rows, geometry_rows = [], []
     for start in range(0, n_receivers, chunk_size):
@@ -208,19 +229,25 @@ def build_visibility(
                     jnp.broadcast_to(target, (rays, n_facets, 3)).reshape(flat),
                     surfaces.vertices,
                     jnp.broadcast_to(near, (rays, n_facets)).reshape(-1),
-                    exclude=jnp.broadcast_to(facet_index, (rays, n_facets)).reshape(-1),
+                    exclude=exclusions[start : start + chunk_size].reshape(
+                        -1, exclusions.shape[-1]
+                    ),
                     work_limit=work_limit,
                 ).reshape(rays, n_facets)
             )
 
+    # The fallbacks turn on whether any row was produced, not on whether one was asked for: a
+    # set with no receivers at all -- a surface-only study, which is a legal thing to build --
+    # runs no chunks, so the lists are empty however the flags are set, and concatenating
+    # nothing raises rather than giving back an empty array.
     blocked = (
         jnp.concatenate(primitive_rows, axis=1)
-        if occluders
-        else jnp.zeros((0, n_receivers, n_facets), dtype=bool)
+        if primitive_rows
+        else jnp.zeros((len(occluders), n_receivers, n_facets), dtype=bool)
     )
     by_geometry = (
         jnp.concatenate(geometry_rows, axis=0)
-        if self_occlusion
+        if geometry_rows
         else jnp.zeros((n_receivers, n_facets), dtype=bool)
     )
     return Visibility(blocked=blocked, receivers=points, blocked_by_geometry=by_geometry)

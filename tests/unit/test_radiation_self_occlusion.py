@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.radiation.gather import fluence_rate
+from aquaflux.radiation.occluders import Cylinder
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.triangles import segment_is_cut
 from aquaflux.radiation.visibility import build_visibility
@@ -240,3 +241,120 @@ def test_a_bent_duct_does_not_light_its_own_far_leg():
         )
         > 0.0
     )
+
+
+# ---------------------------------------------------------------------------------------
+# Receivers that are themselves facets
+# ---------------------------------------------------------------------------------------
+
+
+def _facing_plates(*heights, half=0.5):
+    """Square plates stacked along z, two triangles each, all in their own plane."""
+    return Surfaces.from_triangles(
+        np.concatenate(
+            [
+                rectangle_triangles([0.0, 0.0, z], [half, 0.0, 0.0], [0.0, half, 0.0])
+                for z in heights
+            ]
+        )
+    )
+
+
+def test_a_ray_aimed_at_a_facet_is_not_blocked_by_that_facet():
+    """The whole point of ``receiver_facet``, and the defect it closes.
+
+    A segment between two facet centroids ends *exactly* in the target facet's plane, and a hit
+    at the far endpoint counts. ``offset_scale`` guards the near end and there is nothing
+    guarding the far one, so without the target's index every pair of facets that can see each
+    other reads as blocked. Two plates facing one another across empty space: there is nothing
+    between them, and the answer must be no shadow anywhere.
+    """
+    surfaces = _facing_plates(-1.0, 1.0)
+    centroids = np.asarray(surfaces.centroid)
+    mask = build_visibility(
+        [],
+        surfaces,
+        centroids,
+        receiver_facet=np.arange(surfaces.n_facets),
+        self_occlusion=True,
+    )
+    assert not bool(jnp.any(mask.blocked_by_geometry)), np.asarray(mask.blocked_by_geometry)
+
+
+def test_without_the_target_index_the_same_scene_is_entirely_shadowed():
+    """The failure this guards against, pinned so the parameter cannot be quietly dropped.
+
+    Recorded as a *property of omitting it* rather than as a bug: omitting ``receiver_facet``
+    is right for receivers out in the volume, and this is what it does when the receivers are
+    facets instead.
+    """
+    surfaces = _facing_plates(-1.0, 1.0)
+    mask = build_visibility(
+        [], surfaces, np.asarray(surfaces.centroid), self_occlusion=True
+    ).blocked_by_geometry
+    cross = np.asarray(mask)[2:, :2]
+    assert cross.all(), "the endpoint hit should shadow every cross pair"
+
+
+def test_a_facet_genuinely_behind_another_is_still_blocked():
+    """Excluding the target must not disable self-occlusion, only stop it misfiring.
+
+    Three parallel plates, the middle one four times the width of the others: the outer two
+    cannot see each other through it, while each of them can see the middle one directly.
+    """
+    surfaces = Surfaces.from_triangles(
+        np.concatenate(
+            [
+                rectangle_triangles([0.0, 0.0, -1.0], [0.5, 0.0, 0.0], [0.0, 0.5, 0.0]),
+                rectangle_triangles([0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]),
+                rectangle_triangles([0.0, 0.0, 1.0], [0.5, 0.0, 0.0], [0.0, 0.5, 0.0]),
+            ]
+        )
+    )
+    mask = np.asarray(
+        build_visibility(
+            [],
+            surfaces,
+            np.asarray(surfaces.centroid),
+            receiver_facet=np.arange(6),
+            self_occlusion=True,
+        ).blocked_by_geometry
+    )
+    assert mask[4:, :2].all(), "the middle plate must hide the outer two from each other"
+    assert mask[:2, 4:].all(), "and symmetrically"
+    assert not mask[2:4, :2].any(), "the middle plate is directly visible from the lower one"
+    assert not mask[:2, 2:4].any()
+
+
+def test_a_two_column_exclusion_ignores_both_triangles():
+    """``segment_is_cut`` takes one index per ray or several; a ray between two facets needs
+    two, and a one-column exclusion is the same thing it always was."""
+    surfaces = _facing_plates(-1.0, 1.0)
+    centroids = np.asarray(surfaces.centroid)
+    origin = np.repeat(centroids[:2], 2, axis=0)
+    target = np.tile(centroids[2:], (2, 1))
+    source = np.repeat(np.arange(2), 2)
+    receiver = np.tile(np.arange(2, 4), 2)
+    near = np.full(4, 1e-9)
+
+    both = segment_is_cut(
+        origin, target, surfaces.vertices, near, exclude=np.stack([source, receiver], axis=-1)
+    )
+    only_source = segment_is_cut(origin, target, surfaces.vertices, near, exclude=source)
+    assert not bool(jnp.any(both)), "nothing stands between the plates"
+    assert bool(jnp.all(only_source)), "the target facet is hit at the far endpoint"
+
+
+@pytest.mark.parametrize("occluders", [[], [Cylinder([0, 0, 0], [1, 0, 0], 0.1, 4.0)]])
+def test_a_visibility_with_no_receivers_at_all_builds(occluders):
+    """A surface-only study asks for no receivers, and the chunk loop then runs no passes —
+    which used to leave nothing to concatenate and raise rather than return an empty mask.
+
+    Parametrized over having a body and not because the two arrays are guarded separately, and
+    a fixture with no occluder leaves the analytic one's guard unexercised: that gap survived
+    the first version of this test and was found by mutation, not by reading it.
+    """
+    surfaces = _facing_plates(-1.0, 1.0)
+    mask = build_visibility(occluders, surfaces, np.zeros((0, 3)), self_occlusion=True)
+    assert mask.blocked_by_geometry.shape == (0, 4)
+    assert mask.blocked.shape == (len(occluders), 0, 4)

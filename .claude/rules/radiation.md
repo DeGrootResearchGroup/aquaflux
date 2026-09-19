@@ -411,6 +411,45 @@ facet is always hit at zero distance. Excluding its whole *solid* would be wrong
 exactly the case this is for, and there the blocking wall belongs to the same body as the emitter.
 Edge-adjacent neighbours are handled by the same near-origin exclusion the primitives use.
 
+## ⚠️ A RAY BETWEEN TWO FACETS NEEDS **TWO** EXCLUSIONS, AND THE MISSING ONE SHIPPED
+
+`segment_is_cut` excluded only the **source** facet. The far end of a segment has no margin —
+`offset_scale` guards the origin, nothing guards the target — so a ray aimed at a *facet centroid*
+ends exactly in that facet's plane and the hit at `distance == 1` counted. `build_transfer`'s
+receivers **are** the facet centroids, so at the shipped default `self_occlusion=True` every
+mutually visible pair read as blocked: measured on a closed box, **120 of 132 off-diagonal pairs**,
+and on two bare plates facing each other across empty space, all of them. A closed enclosure came
+back with `B = M` — ten times too dark at `rho = 0.9`, and shaped like a field rather than an
+error. `exclude` now takes `(n_rays,)` or `(n_rays, k)`, and `build_visibility` takes
+`receiver_facet` for the case where each receiver sits on a facet.
+
+**Three separate reasons nothing caught it, all worth keeping:**
+
+- **Every transfer and radiosity fixture passed `self_occlusion=False`**, so the default was never
+  executed by any test. The tests that *are* about self-occlusion all use receivers out in the
+  volume, where a ray ends on nothing and the bug cannot arise. The one path with no coverage was
+  the one every user gets.
+- **⚠️ `row_sum_error` is blind to this by construction and cannot be made to see it.** The mask is
+  applied live in `_live_transfer`; `geometric` is the raw geometry. So the gate reads 1e-15 while
+  the matrix it reports on is being zeroed downstream. The subsystem's strongest invariant does not
+  cover its visibility at all — do not read a green row sum as evidence about the mask.
+- The defect is **invisible in the sign of the answer**: less light everywhere is what an absorbing
+  medium, a dirty lamp or a low reflectance also look like.
+
+`test_a_closed_box_reaches_its_closed_form_AT_THE_DEFAULT_SETTINGS` is the regression, and it is
+deliberately the one test in that file that does *not* switch the mask off.
+
+**The mask must change no number on a convex enclosure, and that is asserted bit-identically.**
+Re-measured after the fix on boxes of 12, 48 and 192 facets: row-sum error, reciprocity residual
+and the solved `B` agree to the last bit with `self_occlusion` on and off. That is what licenses
+every other measurement in the subsystem, all of which were taken with it off.
+
+⚠️ **A mutation pass that restores files with `mv` can report a false RED.** `mv` preserves the
+source's mtime and `.pyc` validation is mtime-and-size with **one-second** granularity, so a fast
+mutate-test-restore cycle can leave the *mutated* bytecode in play for the next run. That produced
+ten spurious failures here and cost an hour chasing a bug that was not in the code. Run mutation
+passes with `PYTHONDONTWRITEBYTECODE=1`.
+
 **The consistency check that validates both halves at once:** on a convex emitter the source-side
 cosine clamp *is* the exact visibility test, so tracing the body's own triangles must change
 nothing. Measured on a 4608-facet cylinder, the two answers are **bit-identical**, and both match
