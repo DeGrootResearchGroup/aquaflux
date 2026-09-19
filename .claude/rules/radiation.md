@@ -22,13 +22,14 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `checks.py` — build-time geometry checks | **BUILT** |
 | `subdivide.py` — the width-over-distance refinement | **BUILT** |
 | `profiles.py` — `Isotropic`, `Lambertian`, `CosinePower` | **BUILT** |
-| `gather.py` — `fluence_rate` and `irradiance` | **BUILT** |
+| `gather.py` — `direct_fluence_rate` and `direct_irradiance` | **BUILT** |
 | `absorption.py` — `UniformAbsorption`, `VoxelAbsorption` | **BUILT** |
 | `occluders.py` — `Cylinder`, `HalfSpace` | **BUILT** |
 | `visibility.py` — the frozen shadow mask | **BUILT** |
 | `triangles.py` — watertight ray-triangle intersection | **BUILT** |
-| `radiosity.py` — the surface interreflection system | **BUILT** |
+| `transfer.py` — the frozen facet-to-facet geometry | **BUILT** |
 | `quadrature.py` — symmetric triangle rules for the receiving facet | **BUILT** |
+| `model.py` — the assembled model and the three public entry points | **BUILT** |
 
 | Beer–Lambert optical depth, voxel-grid traversal | Not yet built |
 
@@ -256,9 +257,10 @@ to find because the isinstance check said "not a tracer" while the very next lin
 The gather partitions facets by angular distribution and by areal-versus-point **on the host**,
 so each group's profile is a concrete object whose methods inline and the traced program holds
 no branch on facet kind. That partition decides the program's *shape*, so `area` and
-`profile_index` cannot themselves be traced. `jit(lambda s, p: fluence_rate(s, p))` over a whole
+`profile_index` cannot themselves be traced. `jit(lambda s, p: direct_fluence_rate(s, p))` over a whole
 `Surfaces` raises with an explanation; close over the set and substitute values through
-`with_optics` instead. This is the boundary the built model will formalize.
+`with_optics` instead. `RadiationModel` formalizes that boundary: it holds the frozen
+geometry and every entry point takes the surface set again, reading only its optics.
 
 Only `profile_index` is structural in this sense. **Vertices are not** — see the label rule
 above — so a source's position is free to move under a gradient.
@@ -431,7 +433,7 @@ error. `exclude` now takes `(n_rays,)` or `(n_rays, k)`, and `build_visibility` 
   volume, where a ray ends on nothing and the bug cannot arise. The one path with no coverage was
   the one every user gets.
 - **⚠️ `row_sum_error` is blind to this by construction and cannot be made to see it.** The mask is
-  applied live in `_live_transfer`; `geometric` is the raw geometry. So the gate reads 1e-15 while
+  applied live in `TransferMatrix.assemble`; `geometric` is the raw geometry. So the gate reads 1e-15 while
   the matrix it reports on is being zeroed downstream. The subsystem's strongest invariant does not
   cover its visibility at all — do not read a green row sum as evidence about the mask.
 - The defect is **invisible in the sign of the answer**: less light everywhere is what an absorbing
@@ -635,11 +637,85 @@ length — 2 against 120 gives 47 cycles against 3 on the same problem — and a
 gradients agree to 1e-8. The step counts are asserted to differ, or the test compares a
 configuration against itself.
 
+## The public surface: `model.py`, and the four assembly steps that are easy to omit
+
+`build_radiation_model(receivers, surfaces, occluders=..., settings=...)` freezes everything a
+scene's *shape* decides — the `n^2` transfer, its facet-side shadow mask, and a second mask for
+the receivers — and the three entry points read off it:
+
+```
+B, cycles = radiosity(model, surfaces)            # what each facet sends out   (n_facets,)
+H, cycles = surface_irradiance(model, surfaces)   # what lands on each facet    (n_facets,)
+G, cycles = fluence_rate(model, surfaces)         # the volume field            (n_receivers,)
+```
+
+Each returns the solver's restart-cycle count alongside its field: a field is not evidence of
+anything until the solve behind it is known to have converged.
+
+**It takes an array of receiver positions, not a `Mesh`.** Nothing here reads anything else from
+one, and keeping the fence one-way is what stops radiation from growing a dependency on cells,
+fluxes or residuals. Injecting `G` into a transport equation is the *consumer's* job, through the
+transport package's own volume-source seam.
+
+Four steps the assembly does that are each invisible when left out:
+
+1. **Point sources are fed in as an arrival, not through the transfer matrix.** A zero-area facet
+   has no area to emit from and no surface to receive on, so it is absent from `F` entirely. Omit
+   the extra gather and a lamp-lit enclosure comes back dark — which is a field, not an error.
+2. **The reflected part is re-gathered as LAMBERTIAN**, whatever the source emitted like, because
+   that is what diffuse reflection means. Re-gathering it with the source's own distribution is
+   wrong by a quarter to nearly a factor of two on a cosine-power-8 box, and destroys the
+   uniformity the enclosure should have.
+3. **The facets' own emission is subtracted before that second gather** — `outgoing - emission`,
+   not `outgoing` — or every source radiates twice.
+4. **Both shadow masks are built against the same bodies, in one call.** Built separately, the
+   volume is lit through a sleeve the surface solve correctly treated as opaque.
+
+**`RadiationSettings` fields are all `None` by default, and unset means ABSENT rather than
+copied.** `_passed` drops them so each default stays written down once, beside its own reasoning.
+A settings object carrying its own copy of a default silently keeps using the old number the day
+the real one moves. Membership test: a setting whose reason can be stated without naming a lamp,
+a wall or a medium belongs here; anything else is physics and belongs on `Surfaces` or an
+`Absorption`.
+
+## `G = 4B` — the closed form that pins the whole assembly at once
+
+A closed Lambertian enclosure at uniform radiosity `B` has radiance `B/pi` in every direction, so
+at **any** interior point `G = 4 pi (B/pi) = 4B`, with no dependence on position. Two fixtures use
+it, and between them they cover every step above:
+
+- uniform emission `M` and reflectance `rho`: `B = M/(1-rho)`, so `G = 4M/(1-rho)` — exact to
+  1e-12 at `rho = 0`, 0.5 and 0.9. Drop the reflected gather and it returns `4M`, a tenth of the
+  answer at 0.9.
+- **cosine-power sources with zero emission, lit only by an `external_irradiance` `E`**: every
+  watt present has been reflected once, so the enclosure is Lambertian again whatever its
+  emitters are, `B = rho E/(1-rho)` and `G = 4B` still holds exactly. This is the fixture that
+  catches step 2, and it is the only one that can: with Lambertian emitters the two distributions
+  coincide and the bug is invisible.
+
+**A point source in a dark box conserves energy only approximately, and the number is the
+source-side one-point error again** — the lamp's direction to each wall facet is evaluated at
+that facet's centroid. Absorbed over emitted, lamp at the centre of `inward_box(d)`, reflectance
+0.9 on the walls: **1.413436 / 1.030131 / 1.010384 / 1.004639** at 12 / 48 / 192 / 432 wall
+facets. It shrinks with refinement, unlike the reciprocity error, because refining samples more
+directions. With `rho = 0` the same fixture gives `G = P/(4 pi r^2)` exactly.
+
+⚠️ **Two mutations of `model.py` and `gather.py` survive and were dismissed rather than covered:**
+
+- Removing `power=jnp.zeros(...)` from the reflected set does nothing, because the `Lambertian`
+  profile imposed on the same object returns **zero** intensity along a point source's zero
+  normal. The two guards overlap today; both stay, because the overlap is a property of
+  `Lambertian` and not of the function, and the comment in `model.py` says so.
+- Transposing `_chunked`'s reshape from `(n_chunks, chunk_size)` to `(chunk_size, n_chunks)` is
+  inert: the padded array is flattened again in the same order whichever way it is factored, so
+  only the chunk partition changes. What *is* covered is losing a receiver off the padded end,
+  which needs a chunk size that does not divide the receiver count to show up at all.
+
 ## Documentation
 
-The package is **deliberately absent from `docs/conf.py`'s `PUBLIC_SUBPACKAGES`.** Listing a
-subpackage publishes the whole of its `__all__`, and the user-facing surface — `fluence_rate`,
-`radiosity`, `surface_irradiance` — does not exist yet. Adding it now would put two internal
-geometry helpers on the published site and force a re-cut later. Add it in the change that
-introduces the public entry points, together with a `SUBPACKAGE_GROUPS` entry keyed on the
-modules those names are *defined* in.
+The package **is** in `docs/conf.py`'s `PUBLIC_SUBPACKAGES`, with a `SUBPACKAGE_GROUPS` entry
+keyed on the modules its names are *defined* in — `model` first, then the pieces it composes.
+Listing a subpackage publishes the whole of its `__all__`, so that list is the editorial
+decision. It was reviewed at this point and kept entire: every export is something a user can
+legitimately reach for, including the two solid-angle kernels, whose warning that they are **not
+interchangeable** is worth publishing rather than hiding.

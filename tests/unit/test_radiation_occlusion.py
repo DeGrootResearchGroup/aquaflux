@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.radiation.gather import fluence_rate
+from aquaflux.radiation.gather import direct_fluence_rate
 from aquaflux.radiation.occluders import Cylinder, HalfSpace
 from aquaflux.radiation.profiles import Isotropic
 from aquaflux.radiation.surfaces import Surfaces
@@ -142,7 +142,7 @@ def test_the_shadow_boundary_lands_where_the_tangent_says_it_should():
     probes = np.stack([np.full_like(offsets, probe_x), offsets, np.zeros_like(offsets)], axis=1)
 
     mask = build_visibility([body], source, probes)
-    field = np.asarray(fluence_rate(source, probes, visibility=mask, transmittance=[0.0]))
+    field = np.asarray(direct_fluence_rate(source, probes, visibility=mask, transmittance=[0.0]))
 
     lit = np.flatnonzero(field > 0.0)
     assert len(lit) > 0
@@ -157,15 +157,17 @@ def test_an_opaque_body_removes_the_source_entirely():
     source = point_source()
     probes = np.array([[4.0, 0.0, 0.0]])
     mask = build_visibility([sleeve()], source, probes)
-    assert float(fluence_rate(source, probes, visibility=mask, transmittance=[0.0])[0]) == 0.0
+    assert (
+        float(direct_fluence_rate(source, probes, visibility=mask, transmittance=[0.0])[0]) == 0.0
+    )
 
 
 def test_a_perfectly_transmitting_body_changes_nothing():
     source = point_source()
     probes = np.array([[4.0, 0.0, 0.0]])
     mask = build_visibility([sleeve()], source, probes)
-    assert float(fluence_rate(source, probes, visibility=mask, transmittance=[1.0])[0]) == (
-        pytest.approx(float(fluence_rate(source, probes)[0]), rel=1e-15)
+    assert float(direct_fluence_rate(source, probes, visibility=mask, transmittance=[1.0])[0]) == (
+        pytest.approx(float(direct_fluence_rate(source, probes)[0]), rel=1e-15)
     )
 
 
@@ -175,8 +177,10 @@ def test_overlapping_bodies_multiply():
     probes = np.array([[6.0, 0.0, 0.0]])
     bodies = [sleeve(centre=(2.0, 0.0, 0.0)), sleeve(centre=(4.0, 0.0, 0.0))]
     mask = build_visibility(bodies, source, probes)
-    clear = float(fluence_rate(source, probes)[0])
-    through = float(fluence_rate(source, probes, visibility=mask, transmittance=[0.5, 0.25])[0])
+    clear = float(direct_fluence_rate(source, probes)[0])
+    through = float(
+        direct_fluence_rate(source, probes, visibility=mask, transmittance=[0.5, 0.25])[0]
+    )
     assert through == pytest.approx(clear * 0.5 * 0.25, rel=1e-14)
 
 
@@ -185,8 +189,8 @@ def test_a_mask_with_no_bodies_blocks_nothing():
     probes = np.array([[4.0, 0.0, 0.0], [0.0, 3.0, 0.0]])
     mask = build_visibility([], source, probes)
     np.testing.assert_allclose(
-        np.asarray(fluence_rate(source, probes, visibility=mask)),
-        np.asarray(fluence_rate(source, probes)),
+        np.asarray(direct_fluence_rate(source, probes, visibility=mask)),
+        np.asarray(direct_fluence_rate(source, probes)),
         rtol=1e-15,
     )
 
@@ -197,7 +201,7 @@ def test_a_mask_defaults_to_opaque_rather_than_to_clear():
     source = point_source()
     probes = np.array([[4.0, 0.0, 0.0]])
     mask = build_visibility([sleeve()], source, probes)
-    assert float(fluence_rate(source, probes, visibility=mask)[0]) == 0.0
+    assert float(direct_fluence_rate(source, probes, visibility=mask)[0]) == 0.0
 
 
 def test_a_mask_built_for_other_receivers_is_refused():
@@ -206,12 +210,14 @@ def test_a_mask_built_for_other_receivers_is_refused():
     source = point_source()
     mask = build_visibility([sleeve()], source, np.array([[4.0, 0.0, 0.0]]))
     with pytest.raises(ValueError, match="built for different receivers"):
-        fluence_rate(source, np.array([[4.0, 1.0, 0.0]]), visibility=mask, transmittance=[0.0])
+        direct_fluence_rate(
+            source, np.array([[4.0, 1.0, 0.0]]), visibility=mask, transmittance=[0.0]
+        )
 
 
 def test_transmittance_without_a_mask_is_refused():
     with pytest.raises(ValueError, match="without a visibility mask"):
-        fluence_rate(point_source(), np.array([[4.0, 0.0, 0.0]]), transmittance=[0.5])
+        direct_fluence_rate(point_source(), np.array([[4.0, 0.0, 0.0]]), transmittance=[0.5])
 
 
 @pytest.mark.parametrize("what", ["facet", "receiver"])
@@ -236,7 +242,9 @@ def test_the_gradient_reaches_a_body_s_transmittance():
     mask = build_visibility([sleeve(half_length=9.0)], source, probes)
 
     def total(transmittance):
-        return jnp.sum(fluence_rate(source, probes, visibility=mask, transmittance=transmittance))
+        return jnp.sum(
+            direct_fluence_rate(source, probes, visibility=mask, transmittance=transmittance)
+        )
 
     step = 1e-6
     base = jnp.asarray([0.4])
@@ -264,7 +272,7 @@ def test_the_gradient_with_respect_to_a_body_s_GEOMETRY_is_exactly_zero():
     def total(radius):
         body = Cylinder(centre=[2.0, 0.0, 0.0], axis=[0, 0, 1], radius=radius, half_length=9.0)
         mask = build_visibility([body], source, probes)
-        return jnp.sum(fluence_rate(source, probes, visibility=mask, transmittance=[0.2]))
+        return jnp.sum(direct_fluence_rate(source, probes, visibility=mask, transmittance=[0.2]))
 
     assert float(jax.grad(total)(jnp.asarray(0.5))) == 0.0
     # And it is a staircase, not a constant: the value does move, in steps, as the body grows.

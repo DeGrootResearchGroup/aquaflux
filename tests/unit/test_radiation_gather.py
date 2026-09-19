@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.radiation.absorption import UniformAbsorption, VoxelAbsorption
-from aquaflux.radiation.gather import fluence_rate, irradiance
+from aquaflux.radiation.gather import direct_fluence_rate, direct_irradiance
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian
 from aquaflux.radiation.subdivide import refine_for_receivers
 from aquaflux.radiation.surfaces import Surfaces
@@ -46,7 +46,7 @@ def test_a_point_source_falls_off_as_the_inverse_square_of_distance():
     ``4 pi`` must each turn it red — one radius alone could not separate them."""
     radii = np.array([0.5, 1.0, 2.0, 7.0])
     points = np.stack([radii, np.zeros_like(radii), np.zeros_like(radii)], axis=1)
-    measured = np.asarray(fluence_rate(point_source([0.0, 0.0, 0.0]), points))
+    measured = np.asarray(direct_fluence_rate(point_source([0.0, 0.0, 0.0]), points))
     np.testing.assert_allclose(measured, POWER / (4.0 * np.pi * radii**2), rtol=1e-14)
 
 
@@ -55,8 +55,9 @@ def test_point_sources_add():
     left, right = point_source([-1.0, 0.0, 0.0]), point_source([1.0, 0.0, 0.0])
     both = point_source([[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
     probe = np.array([[0.3, 0.4, 0.0]])
-    assert float(fluence_rate(both, probe)[0]) == pytest.approx(
-        float(fluence_rate(left, probe)[0]) + float(fluence_rate(right, probe)[0]), rel=1e-14
+    assert float(direct_fluence_rate(both, probe)[0]) == pytest.approx(
+        float(direct_fluence_rate(left, probe)[0]) + float(direct_fluence_rate(right, probe)[0]),
+        rel=1e-14,
     )
 
 
@@ -71,15 +72,15 @@ def test_irradiance_is_the_fluence_rate_times_the_receiver_cosine_for_one_source
     source = point_source([0.0, 0.0, 0.0])
     probe = np.array([[1.0, 0.0, 0.0]])
     normal = np.array([[-np.cos(angle), -np.sin(angle), 0.0]])
-    assert float(irradiance(source, probe, normal)[0]) == pytest.approx(
-        float(fluence_rate(source, probe)[0]) * np.cos(angle), rel=1e-13
+    assert float(direct_irradiance(source, probe, normal)[0]) == pytest.approx(
+        float(direct_fluence_rate(source, probe)[0]) * np.cos(angle), rel=1e-13
     )
 
 
 def test_a_receiver_facing_away_from_a_point_source_is_not_illuminated():
     source = point_source([0.0, 0.0, 0.0])
     probe = np.array([[1.0, 0.0, 0.0]])
-    assert float(irradiance(source, probe, np.array([[1.0, 0.0, 0.0]]))[0]) == 0.0
+    assert float(direct_irradiance(source, probe, np.array([[1.0, 0.0, 0.0]]))[0]) == 0.0
 
 
 def test_the_cosine_identity_fails_once_there_is_more_than_one_source():
@@ -90,8 +91,8 @@ def test_the_cosine_identity_fails_once_there_is_more_than_one_source():
     """
     both = point_source([[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
     probe, normal = np.array([[0.0, 0.0, 0.0]]), np.array([[1.0, 0.0, 0.0]])
-    total_fluence = float(fluence_rate(both, probe)[0])
-    total_irradiance = float(irradiance(both, probe, normal)[0])
+    total_fluence = float(direct_fluence_rate(both, probe)[0])
+    total_irradiance = float(direct_irradiance(both, probe, normal)[0])
     assert total_fluence == pytest.approx(2.0 * POWER / (4.0 * np.pi), rel=1e-14)
     assert total_irradiance == pytest.approx(POWER / (4.0 * np.pi), rel=1e-14)
 
@@ -122,7 +123,9 @@ def test_a_summed_line_source_converges_on_the_closed_form_at_second_order():
     errors = []
     for count in (40, 80, 160, 320):
         measured = float(
-            fluence_rate(_line_source(half_length, 1.0, count), np.array([[radius, 0.0, 0.0]]))[0]
+            direct_fluence_rate(
+                _line_source(half_length, 1.0, count), np.array([[radius, 0.0, 0.0]])
+            )[0]
         )
         errors.append(abs(measured - reference) / reference)
     ratios = [errors[i] / errors[i + 1] for i in range(len(errors) - 1)]
@@ -145,7 +148,9 @@ def test_a_summed_line_source_is_not_second_order_until_its_segments_resolve_the
 
     def error(count):
         measured = float(
-            fluence_rate(_line_source(half_length, 1.0, count), np.array([[radius, 0.0, 0.0]]))[0]
+            direct_fluence_rate(
+                _line_source(half_length, 1.0, count), np.array([[radius, 0.0, 0.0]])
+            )[0]
         )
         return abs(measured - reference) / reference
 
@@ -158,7 +163,7 @@ def test_a_long_summed_line_source_approaches_the_infinite_limit():
     on by a factor of ``pi / 2``."""
     radius = 0.05
     measured = float(
-        fluence_rate(_line_source(50.0, 1.0, 20000), np.array([[radius, 0.0, 0.0]]))[0]
+        direct_fluence_rate(_line_source(50.0, 1.0, 20000), np.array([[radius, 0.0, 0.0]]))[0]
     )
     assert measured == pytest.approx(1.0 / (4.0 * radius), rel=2e-3)
 
@@ -180,7 +185,7 @@ def test_a_small_lambertian_facet_approaches_the_inverse_square_law_at_second_or
     errors = []
     for distance in (0.05, 0.5, 5.0):
         far_field = exitance * area / (np.pi * distance**2)
-        measured = float(fluence_rate(surfaces, np.array([[0.0, 0.0, distance]]))[0])
+        measured = float(direct_fluence_rate(surfaces, np.array([[0.0, 0.0, distance]]))[0])
         errors.append(abs(measured - far_field) / far_field)
     # The relative error is second order in facet width over distance, so a tenfold increase
     # in distance divides it by a hundred. Measured against the *absolute* error the rate is
@@ -195,8 +200,8 @@ def test_a_facet_cannot_illuminate_what_is_behind_it():
     front and every enclosure is twice as bright as it should be."""
     facet = rectangle_triangles([0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [0.0, 0.5, 0.0])
     surfaces = Surfaces.from_triangles(facet, emission=1.0)
-    in_front = float(fluence_rate(surfaces, np.array([[0.0, 0.0, 1.0]]))[0])
-    behind = float(fluence_rate(surfaces, np.array([[0.0, 0.0, -1.0]]))[0])
+    in_front = float(direct_fluence_rate(surfaces, np.array([[0.0, 0.0, 1.0]]))[0])
+    behind = float(direct_fluence_rate(surfaces, np.array([[0.0, 0.0, -1.0]]))[0])
     assert in_front > 0.0
     assert behind == 0.0
 
@@ -216,8 +221,10 @@ def test_a_lambertian_disc_reproduces_its_closed_form_on_axis(radius, height):
     facing = np.array([[0.0, 0.0, -1.0]])
     expected_fluence = 2.0 * exitance * (1.0 - height / np.sqrt(radius**2 + height**2))
     expected_irradiance = exitance * radius**2 / (radius**2 + height**2)
-    assert float(fluence_rate(surfaces, probe)[0]) == pytest.approx(expected_fluence, rel=2e-3)
-    assert float(irradiance(surfaces, probe, facing)[0]) == pytest.approx(
+    assert float(direct_fluence_rate(surfaces, probe)[0]) == pytest.approx(
+        expected_fluence, rel=2e-3
+    )
+    assert float(direct_irradiance(surfaces, probe, facing)[0]) == pytest.approx(
         expected_irradiance, rel=2e-3
     )
 
@@ -231,7 +238,7 @@ def test_refining_the_disc_reduces_the_discretization_error():
         surfaces = Surfaces.from_triangles(
             disc_triangles(radius, rings=12, sectors=sectors), emission=exitance
         )
-        measured = float(fluence_rate(surfaces, np.array([[0.0, 0.0, height]]))[0])
+        measured = float(direct_fluence_rate(surfaces, np.array([[0.0, 0.0, height]]))[0])
         errors.append(abs(measured - expected))
     assert errors[0] > errors[1] > errors[2]
 
@@ -244,8 +251,8 @@ def test_a_large_disc_reaches_the_infinite_plane_limits():
         disc_triangles(400.0, rings=200, sectors=256), emission=exitance
     )
     probe, facing = np.array([[0.0, 0.0, 1.0]]), np.array([[0.0, 0.0, -1.0]])
-    measured_fluence = float(fluence_rate(surfaces, probe)[0])
-    measured_irradiance = float(irradiance(surfaces, probe, facing)[0])
+    measured_fluence = float(direct_fluence_rate(surfaces, probe)[0])
+    measured_irradiance = float(direct_irradiance(surfaces, probe, facing)[0])
     assert measured_fluence == pytest.approx(2.0 * exitance, rel=5e-3)
     assert measured_irradiance == pytest.approx(exitance, rel=5e-3)
     assert measured_fluence / measured_irradiance == pytest.approx(2.0, rel=5e-3)
@@ -273,7 +280,7 @@ def test_an_emitting_cylinder_reproduces_its_closed_form(ratio):
     surfaces = Surfaces.from_triangles(
         cylinder_triangles(radius, half_length=200.0), emission=exitance
     )
-    measured = float(fluence_rate(surfaces, np.array([[ratio * radius, 0.0, 0.0]]))[0])
+    measured = float(direct_fluence_rate(surfaces, np.array([[ratio * radius, 0.0, 0.0]]))[0])
     expected = (4.0 * exitance / np.pi) * np.arcsin(1.0 / ratio)
     assert measured == pytest.approx(expected, rel=2e-3)
 
@@ -284,8 +291,12 @@ def test_a_narrower_beam_puts_more_on_axis_and_less_to_the_side_at_equal_exitanc
     on_axis, off_axis = np.array([[0.0, 0.0, 1.0]]), np.array([[1.0, 0.0, 1.0]])
     diffuse = Surfaces.from_triangles(facet, emission=1.0, profiles=(Lambertian(),))
     narrow = Surfaces.from_triangles(facet, emission=1.0, profiles=(CosinePower(8.0),))
-    assert float(fluence_rate(narrow, on_axis)[0]) > float(fluence_rate(diffuse, on_axis)[0])
-    assert float(fluence_rate(narrow, off_axis)[0]) < float(fluence_rate(diffuse, off_axis)[0])
+    assert float(direct_fluence_rate(narrow, on_axis)[0]) > float(
+        direct_fluence_rate(diffuse, on_axis)[0]
+    )
+    assert float(direct_fluence_rate(narrow, off_axis)[0]) < float(
+        direct_fluence_rate(diffuse, off_axis)[0]
+    )
 
 
 def test_sources_of_different_kinds_are_all_summed():
@@ -301,8 +312,8 @@ def test_sources_of_different_kinds_are_all_summed():
     )
     areal = Surfaces.from_triangles(facet, emission=1.0, profiles=(CosinePower(3.0),))
     probe = np.array([[0.0, 0.0, 1.0]])
-    assert float(fluence_rate(mixed, probe)[0]) == pytest.approx(
-        float(fluence_rate(areal, probe)[0]) + POWER / (4.0 * np.pi), rel=1e-13
+    assert float(direct_fluence_rate(mixed, probe)[0]) == pytest.approx(
+        float(direct_fluence_rate(areal, probe)[0]) + POWER / (4.0 * np.pi), rel=1e-13
     )
 
 
@@ -322,14 +333,29 @@ def test_chunking_changes_nothing_about_the_answer(chunk_size):
     rng = np.random.default_rng(0)
     probes = rng.uniform(0.5, 2.0, (37, 3))
     surfaces = point_source([[0.0, 0.0, 0.0], [0.1, 0.2, 0.3]])
-    reference = np.asarray(fluence_rate(surfaces, probes, chunk_size=1_000_000))
+    reference = np.asarray(direct_fluence_rate(surfaces, probes, chunk_size=1_000_000))
     np.testing.assert_allclose(
-        np.asarray(fluence_rate(surfaces, probes, chunk_size=chunk_size)), reference, rtol=1e-15
+        np.asarray(direct_fluence_rate(surfaces, probes, chunk_size=chunk_size)),
+        reference,
+        rtol=1e-15,
     )
 
 
+@pytest.mark.parametrize("chunk_size", [0, -1])
+def test_a_chunk_of_no_receivers_is_refused(chunk_size):
+    """Zero divides the receiver count into an infinite number of chunks, so the unguarded
+    version raises a ``ZeroDivisionError`` from inside the padding arithmetic — an error that
+    names nothing the caller passed."""
+    probes = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    surfaces = point_source([[0.0, 0.0, 0.0]])
+    with pytest.raises(ValueError, match="chunk_size must be at least 1 receiver"):
+        direct_fluence_rate(surfaces, probes, chunk_size=chunk_size)
+    with pytest.raises(ValueError, match="chunk_size must be at least 1 receiver"):
+        direct_irradiance(surfaces, probes, probes, chunk_size=chunk_size)
+
+
 def test_no_receivers_gives_no_answers():
-    assert fluence_rate(point_source([0.0, 0.0, 0.0]), np.zeros((0, 3))).shape == (0,)
+    assert direct_fluence_rate(point_source([0.0, 0.0, 0.0]), np.zeros((0, 3))).shape == (0,)
 
 
 def test_the_gather_is_differentiable_in_emission_and_in_power():
@@ -351,7 +377,7 @@ def test_the_gather_is_differentiable_in_emission_and_in_power():
             emission=jnp.asarray(surfaces.emission) * scale,
             power=jnp.asarray(surfaces.power) * scale,
         )
-        return jnp.sum(fluence_rate(scaled, probe))
+        return jnp.sum(direct_fluence_rate(scaled, probe))
 
     step = 1e-6
     finite_difference = (float(total(1.0 + step)) - float(total(1.0 - step))) / (2.0 * step)
@@ -367,10 +393,12 @@ def test_the_gather_compiles_with_the_geometry_closed_over():
     """
     surfaces = point_source([0.0, 0.0, 0.0])
     probes = jnp.asarray([[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
-    compiled = jax.jit(lambda power: fluence_rate(surfaces.with_optics(power=power), probes))(
-        jnp.asarray(POWER)
+    compiled = jax.jit(
+        lambda power: direct_fluence_rate(surfaces.with_optics(power=power), probes)
+    )(jnp.asarray(POWER))
+    np.testing.assert_allclose(
+        np.asarray(compiled), np.asarray(direct_fluence_rate(surfaces, probes))
     )
-    np.testing.assert_allclose(np.asarray(compiled), np.asarray(fluence_rate(surfaces, probes)))
 
 
 def test_passing_the_whole_surface_set_as_a_traced_argument_says_why_it_cannot_work():
@@ -379,7 +407,7 @@ def test_passing_the_whole_surface_set_as_a_traced_argument_says_why_it_cannot_w
     surfaces = point_source([0.0, 0.0, 0.0])
     probes = jnp.asarray([[1.0, 0.0, 0.0]])
     with pytest.raises(TypeError, match="profile index must be concrete"):
-        jax.jit(lambda s, p: fluence_rate(s, p))(surfaces, probes)
+        jax.jit(lambda s, p: direct_fluence_rate(s, p))(surfaces, probes)
 
 
 def test_a_source_can_be_moved_under_a_gradient():
@@ -396,7 +424,7 @@ def test_a_source_can_be_moved_under_a_gradient():
 
     def total(lift):
         moved = surfaces.with_geometry(jnp.asarray(facet) + jnp.asarray([0.0, 0.0, 1.0]) * lift)
-        return jnp.sum(fluence_rate(moved, probe))
+        return jnp.sum(direct_fluence_rate(moved, probe))
 
     step = 1e-7
     finite_difference = (float(total(jnp.asarray(step))) - float(total(jnp.asarray(-step)))) / (
@@ -412,7 +440,7 @@ def test_a_point_source_can_be_moved_under_a_gradient():
 
     def total(lift):
         moved = source.with_geometry(jnp.zeros((1, 3, 3)) + jnp.asarray([0.0, 0.0, 1.0]) * lift)
-        return jnp.sum(fluence_rate(moved, probe))
+        return jnp.sum(direct_fluence_rate(moved, probe))
 
     step = 1e-7
     finite_difference = (float(total(jnp.asarray(step))) - float(total(jnp.asarray(-step)))) / (
@@ -427,7 +455,7 @@ def test_the_gradient_reaches_every_vertex_of_every_facet():
     surfaces = Surfaces.from_triangles(facet, emission=100.0)
     probe = np.array([[0.02, 0.01, 0.3]])
     jacobian = jax.grad(
-        lambda vertices: jnp.sum(fluence_rate(surfaces.with_geometry(vertices), probe))
+        lambda vertices: jnp.sum(direct_fluence_rate(surfaces.with_geometry(vertices), probe))
     )(jnp.asarray(facet))
     assert jacobian.shape == facet.shape
     assert bool(jnp.all(jnp.isfinite(jacobian)))
@@ -444,7 +472,7 @@ def test_a_uniform_medium_attenuates_a_point_source_exactly():
     points = np.stack([radii, np.zeros_like(radii), np.zeros_like(radii)], axis=1)
     coefficient = 0.7
     measured = np.asarray(
-        fluence_rate(
+        direct_fluence_rate(
             point_source([0.0, 0.0, 0.0]), points, absorption=UniformAbsorption(coefficient)
         )
     )
@@ -457,8 +485,8 @@ def test_a_transparent_medium_is_the_vacuum_field():
     probes = np.array([[1.0, 0.5, 0.25], [2.0, 0.0, 0.0]])
     source = point_source([0.0, 0.0, 0.0])
     np.testing.assert_allclose(
-        np.asarray(fluence_rate(source, probes, absorption=UniformAbsorption(0.0))),
-        np.asarray(fluence_rate(source, probes)),
+        np.asarray(direct_fluence_rate(source, probes, absorption=UniformAbsorption(0.0))),
+        np.asarray(direct_fluence_rate(source, probes)),
         rtol=1e-15,
     )
 
@@ -473,8 +501,8 @@ def test_a_constant_graded_medium_agrees_with_the_closed_form_one_through_the_ga
         np.full((5, 5, 5), coefficient), origin=[-3.0, -3.0, -3.0], spacing=[1.5, 1.5, 1.5]
     )
     np.testing.assert_allclose(
-        np.asarray(fluence_rate(source, probes, absorption=graded)),
-        np.asarray(fluence_rate(source, probes, absorption=UniformAbsorption(coefficient))),
+        np.asarray(direct_fluence_rate(source, probes, absorption=graded)),
+        np.asarray(direct_fluence_rate(source, probes, absorption=UniformAbsorption(coefficient))),
         rtol=1e-12,
     )
 
@@ -503,9 +531,9 @@ def test_a_diffuse_wall_in_an_absorbing_medium_gives_the_exponential_integrals(d
     wall, _ = refine_for_receivers(coarse, probe, max_ratio=0.25, max_levels=7)
     medium = UniformAbsorption(coefficient)
 
-    measured_fluence = float(fluence_rate(wall, probe, absorption=medium)[0])
+    measured_fluence = float(direct_fluence_rate(wall, probe, absorption=medium)[0])
     measured_irradiance = float(
-        irradiance(wall, probe, np.array([[0.0, 0.0, -1.0]]), absorption=medium)[0]
+        direct_irradiance(wall, probe, np.array([[0.0, 0.0, -1.0]]), absorption=medium)[0]
     )
     assert measured_fluence == pytest.approx(2.0 * exitance * expn(2, depth), rel=3e-3)
     assert measured_irradiance == pytest.approx(2.0 * exitance * expn(3, depth), rel=3e-3)
@@ -534,7 +562,9 @@ def test_the_gather_is_differentiable_in_a_uniform_absorption_coefficient():
     probes = np.array([[1.0, 0.0, 0.0], [2.0, 0.5, 0.0]])
 
     def total(coefficient):
-        return jnp.sum(fluence_rate(source, probes, absorption=UniformAbsorption(coefficient)))
+        return jnp.sum(
+            direct_fluence_rate(source, probes, absorption=UniformAbsorption(coefficient))
+        )
 
     step = 1e-6
     finite_difference = (float(total(0.5 + step)) - float(total(0.5 - step))) / (2.0 * step)
@@ -550,7 +580,7 @@ def test_the_gather_is_differentiable_in_a_graded_absorbance_field():
 
     def total(coefficient):
         medium = VoxelAbsorption(coefficient, origin, spacing)
-        return jnp.sum(fluence_rate(source, probes, absorption=medium))
+        return jnp.sum(direct_fluence_rate(source, probes, absorption=medium))
 
     jacobian = jax.grad(total)(jnp.asarray(base))
     assert jacobian.shape == (5, 5, 5)

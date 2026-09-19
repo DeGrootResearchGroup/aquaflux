@@ -36,7 +36,7 @@ from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.visibility import Visibility
 from aquaflux.vectors import dot
 
-__all__ = ["fluence_rate", "irradiance"]
+__all__ = ["direct_fluence_rate", "direct_irradiance"]
 
 _DEFAULT_CHUNK = 4096
 
@@ -53,8 +53,9 @@ def _groups(surfaces: Surfaces) -> list[tuple[object, np.ndarray, np.ndarray]]:
             "the surface set's profile index must be concrete here: which angular distribution "
             "each facet emits with decides the shape of the traced program, so it cannot itself "
             "be traced. Close over the surface set and pass only the values that vary -- "
-            "jit(lambda emission: fluence_rate(surfaces.with_optics(emission=emission), points)) "
-            "-- rather than passing the whole set as an argument. Vertices may be traced: "
+            "jit(lambda emission: direct_fluence_rate(surfaces.with_optics(emission=emission), "
+            "points)) -- rather than passing the whole set as an argument. Vertices may be "
+            "traced: "
             "substitute them with Surfaces.with_geometry, which keeps the labels."
         )
         raise TypeError(msg)
@@ -86,6 +87,9 @@ def _chunked(arrays, chunk_size: int, body):
     the chunk rather than to the problem, at no cost in arithmetic. The last chunk is padded
     rather than made smaller, so the traced body is compiled once.
     """
+    if chunk_size < 1:
+        msg = f"chunk_size must be at least 1 receiver; got {chunk_size}"
+        raise ValueError(msg)
     arrays = [jnp.asarray(array) for array in arrays]
     n_points = arrays[0].shape[0]
     if n_points == 0:
@@ -156,7 +160,7 @@ def _emitter_cosine(surfaces: Surfaces, facets: np.ndarray, receivers: jnp.ndarr
     return dot(offset, normal[None, :, :]) / distance, distance_squared
 
 
-def fluence_rate(
+def direct_fluence_rate(
     surfaces: Surfaces,
     points,
     *,
@@ -169,7 +173,7 @@ def fluence_rate(
 
     The zeroth angular moment of radiance over the whole sphere: the radiant power crossing a
     point from every direction, per unit area, in W/m². It carries **no receiver cosine** — see
-    :func:`irradiance` for the quantity that does.
+    :func:`direct_irradiance` for the quantity that does.
 
     An areal facet contributes its radiance times the solid angle it subtends, exactly, with the
     solid angle in closed form rather than approximated by an inverse square. A facet whose
@@ -191,13 +195,6 @@ def fluence_rate(
         receiver positions and checked against them here.
     transmittance : array_like, shape ``(n_occluders,)``, optional
         What fraction each body lets through, in ``[0, 1]``. Differentiable, and defaulting to
-        zero -- opaque -- so that a mask supplied without one blocks rather than passes. Omitted, the field is the
-        vacuum one.
-    visibility : Visibility, optional
-        Which bodies lie between which sources and which receivers, built once for these exact
-        receiver positions and checked against them here.
-    transmittance : array_like, shape ``(n_occluders,)``, optional
-        What fraction each body lets through, in ``[0, 1]``. Differentiable, and defaulting to
         zero -- opaque -- so that a mask supplied without one blocks rather than passes.
     chunk_size : int, optional
         Receivers per traced chunk. Trades peak memory against nothing; the arithmetic is the
@@ -207,6 +204,12 @@ def fluence_rate(
     -------
     jnp.ndarray, shape ``(n_points,)``
         Fluence rate in W/m².
+
+    Raises
+    ------
+    ValueError
+        If ``chunk_size`` is less than one receiver, or if the visibility mask was built for a
+        different set of receivers than the points given here.
     """
     points = jnp.asarray(points, dtype=float)
     partition = _groups(surfaces)
@@ -242,7 +245,7 @@ def fluence_rate(
     return _chunked((points, surviving_rows), chunk_size, at)
 
 
-def irradiance(
+def direct_irradiance(
     surfaces: Surfaces,
     points,
     normals,
@@ -256,7 +259,7 @@ def irradiance(
 
     The first angular moment of radiance over the receiver's hemisphere: power per unit area of
     a surface facing a given way, in W/m². Directions arriving obliquely count for less, which
-    is the whole difference from :func:`fluence_rate`.
+    is the whole difference from :func:`direct_fluence_rate`.
 
     ⚠️ **``E = G cos(theta)`` is a single-source identity**, true for one point source and a
     receiver facing it. It fails for several sources at once, which is exactly when this
@@ -272,6 +275,12 @@ def irradiance(
         Unit outward normal of the receiving surface at each point.
     absorption : Absorption, optional
         The absorbing medium between the sources and the receivers.
+    visibility : Visibility, optional
+        Which bodies lie between which sources and which receivers, built once for these exact
+        receiver positions and checked against them here.
+    transmittance : array_like, shape ``(n_occluders,)``, optional
+        What fraction each body lets through, in ``[0, 1]``. Differentiable, and defaulting to
+        zero -- opaque -- so that a mask supplied without one blocks rather than passes.
     chunk_size : int, optional
         Receivers per traced chunk.
 
@@ -279,6 +288,12 @@ def irradiance(
     -------
     jnp.ndarray, shape ``(n_points,)``
         Irradiance in W/m².
+
+    Raises
+    ------
+    ValueError
+        If ``normals`` and ``points`` disagree in shape, if ``chunk_size`` is less than one
+        receiver, or if the visibility mask was built for a different set of receivers.
     """
     points = jnp.asarray(points, dtype=float)
     normals = jnp.asarray(normals, dtype=float)

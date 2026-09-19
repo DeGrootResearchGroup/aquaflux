@@ -1,32 +1,9 @@
-"""Light bouncing between surfaces, resolved to convergence rather than truncated.
+"""The transfer matrix: what fraction of what leaves each facet reaches every other one.
 
-A wall lit by a lamp re-emits, and what it re-emits lights every other wall, including the
-ones that lit it. The ultraviolet-reactor literature usually stops short of solving that:
-reflection is neglected, or replaced by mirror images of the source, or a Monte Carlo run is
-capped at a handful of bounces. Measured against those treatments, ordinary stainless walls
-account for errors of up to a third, and the uniformity of the field depends strongly on the
-*diffuse* part of the wall's reflectance.
-
-Here it is a linear system, so **the number of bounces is not a parameter**: the inverse of
-``I - diag(rho) F`` is the infinite bounce sum, and solving it costs no more than a few dozen
-matrix-vector products.
-
-    H = F^M M + F (B - M) + H_external          irradiance on each facet
-    B = M + rho * H                             what each facet sends back out
-
-with ``F_ij`` the fraction of what leaves facet ``i`` that lands on facet ``j``, which is also
-the weight with which ``j``'s radiosity lights ``i`` — one number, not two related by
-reciprocity. Eliminating ``H`` gives
-``(I - diag(rho) F) B = M + rho * ((F^M - F) M + H_external)``, which is what is actually solved.
-
-⚠️ **Reflection here is purely DIFFUSE, and a scalar reflectance does not say that.** A wall
-described only by the number 0.95 could scatter that light in every direction or send it off
-like a mirror, and the two are not close: Hassanpour et al. (2023) measure a **10-47% spread in
-log reduction between fully specular and fully diffuse walls at the same reflectivity of 0.95**.
-Diffuse is the right default rather than merely the convenient one — Li et al. (2017) find that
-diffuse reflection raises the reduction-equivalent fluence above specular, and the measurement
-literature emphasizes it — but the assumption belongs beside the number, because a reflectance
-supplied without it is an under-specified input.
+Pure geometry. Nothing here knows what any surface emits, how much it reflects, or what the
+water between them absorbs — those are supplied per call to the solve in
+:mod:`aquaflux.radiation.model`, which is what lets a design study pay this ``n^2`` build once
+and sweep the optics against it with the derivatives intact.
 
 **Both facets of every pair are integrated over, and they are integrated differently.** A
 transfer factor is a double area integral. The sending facet is exact — the projected solid angle
@@ -96,17 +73,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from aquaflux.radiation.absorption import Absorption, UniformAbsorption
+from aquaflux.radiation.absorption import UniformAbsorption
 from aquaflux.radiation.profiles import Lambertian
 from aquaflux.radiation.quadrature import TriangleQuadrature, triangle_quadrature
 from aquaflux.radiation.solid_angle import projected_solid_angle
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.visibility import Visibility, build_visibility
-from aquaflux.solve import relative_residual_gmres, solve_linear
 from aquaflux.vectors import dot
-
-#: Relative residual the default solve stops at.
-_DEFAULT_RTOL = 1e-10
 
 #: Points per receiving facet in the default transfer build. Six is where the measured
 #: cost/accuracy frontier turns over -- see :func:`build_transfer`.
@@ -115,10 +88,8 @@ _DEFAULT_RECEIVER_POINTS = 6
 __all__ = [
     "TransferMatrix",
     "build_transfer",
-    "radiosity",
     "reciprocity_residual",
     "row_sum_error",
-    "surface_irradiance",
 ]
 
 
@@ -160,6 +131,76 @@ class TransferMatrix(eqx.Module):
     def n_facets(self) -> int:
         """Number of facets."""
         return int(self.geometric.shape[0])
+
+    def assemble(self, surfaces, absorption=None, transmittance=None):
+        """The reflected and emitted transfer matrices, for one set of optical values.
+
+        Both are elementwise products against the frozen arrays, which is what keeps a
+        derivative with respect to transmittance or absorbance from needing the ``n^2`` build
+        again. They are the same array object whenever every areal source is Lambertian, which
+        is the reduction that pins the profile constants.
+
+        Parameters
+        ----------
+        surfaces : Surfaces
+            Read only for its angular distributions and, for a non-uniform medium, its
+            centroids. Its geometry is not consulted; that was frozen at the build.
+        absorption : Absorption, optional
+            The medium between facets. A uniform coefficient goes through the frozen
+            separations in closed form; anything else re-walks every pair.
+        transmittance : array_like, shape ``(n_occluders,)``, optional
+            What each analytic body lets through. Defaults to opaque.
+
+        Returns
+        -------
+        tuple of (jnp.ndarray, jnp.ndarray)
+            ``F`` and ``F^M``, each ``(n_facets, n_facets)``: the weight carrying a facet's
+            *reflected* output, which leaves Lambertian, and the weight carrying its own
+            *emission*, which leaves with its own distribution.
+        """
+        surviving = self.visibility.surviving(
+            jnp.zeros(self.visibility.n_occluders) if transmittance is None else transmittance
+        )
+        if absorption is None:
+            through = 1.0
+        elif isinstance(absorption, UniformAbsorption):
+            # Closed form off the frozen separation: no geometry is revisited, and the derivative
+            # with respect to the coefficient is exact.
+            through = jnp.exp(-absorption.coefficient * self.separation)
+        else:
+            through = jnp.exp(
+                absorption.optical_depth(
+                    surfaces.centroid[None, :, :], surfaces.centroid[:, None, :]
+                )
+                * -1.0
+            )
+        common = self.geometric * surviving * through
+
+        # The emitted component leaves with each source's own distribution; the reflected component
+        # leaves Lambertian by assumption. For a Lambertian source the two coincide exactly, which
+        # is worth keeping as the reduction that pins the profile constants.
+        lambertian = all(
+            isinstance(profile, Lambertian)
+            for kind, profile in enumerate(surfaces.profiles)
+            if np.any((np.asarray(surfaces.profile_index) == kind) & ~surfaces.is_point_source)
+        )
+        if lambertian:
+            return common, common
+        index = np.asarray(surfaces.profile_index)
+        # Point sources are already absent from the transfer, and asking one for a radiance is a
+        # category error it refuses rather than answers — so they are skipped here too, or a scene
+        # with a point lamp in it could not assemble at all.
+        areal = ~surfaces.is_point_source
+        relative = jnp.zeros_like(common)
+        for kind, profile in enumerate(surfaces.profiles):
+            sources = np.flatnonzero((index == kind) & areal)
+            if not len(sources):
+                continue
+            weight = jnp.pi * profile.radiance_per_exitance(
+                jnp.take(self.source_cosine, sources, axis=1)
+            )
+            relative = relative.at[:, sources].set(weight)
+        return common, common * relative
 
 
 def build_transfer(
@@ -329,155 +370,6 @@ def build_transfer(
             **visibility_options,
         ),
     )
-
-
-def _live_transfer(transfer, surfaces, absorption, transmittance):
-    """Assemble ``F`` and ``F^M`` from the frozen geometry and the values that vary.
-
-    Both are elementwise products against frozen arrays, which is what keeps a derivative with
-    respect to transmittance or absorbance from needing the ``n^2`` build again.
-    """
-    surviving = transfer.visibility.surviving(
-        jnp.zeros(transfer.visibility.n_occluders) if transmittance is None else transmittance
-    )
-    if absorption is None:
-        through = 1.0
-    elif isinstance(absorption, UniformAbsorption):
-        # Closed form off the frozen separation: no geometry is revisited, and the derivative
-        # with respect to the coefficient is exact.
-        through = jnp.exp(-absorption.coefficient * transfer.separation)
-    else:
-        through = jnp.exp(
-            absorption.optical_depth(surfaces.centroid[None, :, :], surfaces.centroid[:, None, :])
-            * -1.0
-        )
-    common = transfer.geometric * surviving * through
-
-    # The emitted component leaves with each source's own distribution; the reflected component
-    # leaves Lambertian by assumption. For a Lambertian source the two coincide exactly, which
-    # is worth keeping as the reduction that pins the profile constants.
-    lambertian = all(
-        isinstance(profile, Lambertian)
-        for kind, profile in enumerate(surfaces.profiles)
-        if np.any((np.asarray(surfaces.profile_index) == kind) & ~surfaces.is_point_source)
-    )
-    if lambertian:
-        return common, common
-    index = np.asarray(surfaces.profile_index)
-    # Point sources are already absent from the transfer, and asking one for a radiance is a
-    # category error it refuses rather than answers — so they are skipped here too, or a scene
-    # with a point lamp in it could not assemble at all.
-    areal = ~surfaces.is_point_source
-    relative = jnp.zeros_like(common)
-    for kind, profile in enumerate(surfaces.profiles):
-        sources = np.flatnonzero((index == kind) & areal)
-        if not len(sources):
-            continue
-        weight = jnp.pi * profile.radiance_per_exitance(
-            jnp.take(transfer.source_cosine, sources, axis=1)
-        )
-        relative = relative.at[:, sources].set(weight)
-    return common, common * relative
-
-
-def radiosity(
-    transfer: TransferMatrix,
-    surfaces: Surfaces,
-    *,
-    absorption: Absorption | None = None,
-    transmittance=None,
-    external_irradiance=None,
-    solver=None,
-):
-    """Solve for the radiosity of every facet — what it sends out, emission plus reflection.
-
-    Parameters
-    ----------
-    transfer : TransferMatrix
-        The frozen geometry, built for these facets.
-    surfaces : Surfaces
-        Supplies the live optical properties: emission, reflectance and profile parameters. Its
-        geometry is not read here; that was frozen into ``transfer``.
-    absorption : Absorption, optional
-        The medium between facets. A uniform coefficient is applied in closed form against the
-        frozen separations; any other kind re-walks the geometry for every pair on every call,
-        which is correct but costs the ``n^2`` build again.
-    transmittance : array_like, shape ``(n_occluders,)``, optional
-        What each analytic body lets through. Defaults to opaque.
-    external_irradiance : array_like, shape ``(n_facets,)``, optional
-        Irradiance on the facets from sources outside the surface system — point sources, which
-        have no area to participate in the transfer. Obtain it from the ordinary gather.
-    solver : lineax.AbstractLinearSolver, optional
-        How to solve the system. The default is a matrix-free generalized minimal residual
-        method stopping at a **global relative** residual of 1e-10. Supply your own to change
-        the tolerance or the restart length.
-
-    Returns
-    -------
-    tuple of (jnp.ndarray, jnp.ndarray)
-        The radiosity per facet in W/m², and the solver's restart-cycle count.
-
-    Notes
-    -----
-    The solve is matrix-free and stops on a **global relative** residual. The stock componentwise
-    test is wrong for this system: most facets do not emit, so most rows of the right-hand side
-    are zero, which turns a relative tolerance into an absolute one and stalls the solve.
-
-    The system is not symmetrized to use a conjugate-gradient method. Doing so needs a left scale
-    by ``1/(rho A)``, and zero reflectance is both the default and the value on every non-lamp
-    surface of a real reactor.
-    """
-    emission = jnp.asarray(surfaces.emission, dtype=float)
-    reflectance = jnp.asarray(surfaces.reflectance, dtype=float)
-    reflected, emitted = _live_transfer(transfer, surfaces, absorption, transmittance)
-
-    source = emission + reflectance * ((emitted - reflected) @ emission)
-    if external_irradiance is not None:
-        source = source + reflectance * jnp.asarray(external_irradiance, dtype=float)
-
-    def matvec(x):
-        return x - reflectance * (reflected @ x)
-
-    return solve_linear(matvec, source, solver=solver or relative_residual_gmres(_DEFAULT_RTOL))
-
-
-def surface_irradiance(
-    transfer: TransferMatrix,
-    surfaces: Surfaces,
-    *,
-    absorption: Absorption | None = None,
-    transmittance=None,
-    external_irradiance=None,
-    solver=None,
-):
-    """Irradiance landing on each facet, from the solved radiosity.
-
-    Returned as the solve already forms it — ``F^M M + F (B - M) + H_external`` — rather than as
-    a second expression. Writing it as ``F B`` would be wrong wherever a source is not
-    Lambertian, and would drift from the system actually solved.
-
-    Point-source facets get ``NaN``: they have no surface for an irradiance to land on, and a
-    zero there would read as a shadowed surface rather than as a category error.
-
-    Returns
-    -------
-    tuple of (jnp.ndarray, jnp.ndarray)
-        Irradiance per facet in W/m², and the solver's restart-cycle count.
-    """
-    emission = jnp.asarray(surfaces.emission, dtype=float)
-    reflected, emitted = _live_transfer(transfer, surfaces, absorption, transmittance)
-    outgoing, steps = radiosity(
-        transfer,
-        surfaces,
-        absorption=absorption,
-        transmittance=transmittance,
-        external_irradiance=external_irradiance,
-        solver=solver,
-    )
-    landing = emitted @ emission + reflected @ (outgoing - emission)
-    if external_irradiance is not None:
-        landing = landing + jnp.asarray(external_irradiance, dtype=float)
-    return jnp.where(jnp.asarray(surfaces.is_point_source), jnp.nan, landing), steps
 
 
 def row_sum_error(transfer: TransferMatrix) -> float:
