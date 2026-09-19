@@ -89,9 +89,17 @@ def segment_is_cut(origin, target, vertices, min_distance, *, exclude=None, work
         The blocking triangles.
     min_distance : jnp.ndarray, shape ``(n_rays,)``
         How far from ``origin`` a hit must be before it counts, in length units.
-    exclude : jnp.ndarray of int, shape ``(n_rays,)``, optional
-        One triangle per ray to ignore — the source facet itself, which every ray leaving its
-        centroid hits at zero distance. Pass ``-1`` to exclude nothing for that ray.
+    exclude : jnp.ndarray of int, shape ``(n_rays,)`` or ``(n_rays, k)``, optional
+        Triangles each ray must ignore. Pass ``-1`` in a slot to exclude nothing there.
+
+        There are two of them whenever a ray runs between two facets, and leaving either out
+        blocks the pair outright rather than approximately:
+
+        - the **source** facet, which every ray leaving its centroid hits at zero distance —
+          guarded from the origin end by ``min_distance`` as well;
+        - the **target** facet, when the ray is aimed at a point lying on one. There is no
+          margin at the far end to lean on: the segment ends exactly in that facet's plane, and
+          a hit at ``distance == 1`` counts.
     work_limit : int, optional
         How many ray-by-triangle entries one pass may form. **This is the only tuning knob that
         matters, and it matters a great deal**: the intermediate is the whole memory cost of the
@@ -115,7 +123,9 @@ def segment_is_cut(origin, target, vertices, min_distance, *, exclude=None, work
     near = jnp.asarray(min_distance) / jnp.where(length == 0.0, 1.0, length)
 
     vertices = jnp.asarray(vertices, dtype=float)
-    exclude = None if exclude is None else jnp.asarray(exclude)
+    if exclude is not None:
+        exclude = jnp.asarray(exclude)
+        exclude = exclude[:, None] if exclude.ndim == 1 else exclude
     n_rays, n_triangles = origin.shape[0], vertices.shape[0]
     if n_rays == 0 or n_triangles == 0:
         return jnp.zeros(n_rays, dtype=bool)
@@ -135,7 +145,7 @@ def segment_is_cut(origin, target, vertices, min_distance, *, exclude=None, work
             hit = meets & (distance > near[rays][:, None]) & (distance <= 1.0)
             if exclude is not None:
                 indices = jnp.arange(start, start + block.shape[0])
-                hit = hit & (indices[None, :] != exclude[rays][:, None])
+                hit = hit & jnp.all(indices[None, :, None] != exclude[rays][:, None, :], axis=-1)
             cut = cut | jnp.any(hit, axis=-1)
         pieces.append(cut)
     return jnp.concatenate(pieces)

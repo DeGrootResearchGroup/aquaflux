@@ -123,6 +123,47 @@ def test_a_uniform_closed_box_reaches_its_closed_form(reflectance, divisions):
     np.testing.assert_allclose(np.asarray(outgoing), exitance / (1.0 - reflectance), rtol=1e-12)
 
 
+def test_a_closed_box_reaches_its_closed_form_AT_THE_DEFAULT_SETTINGS():
+    """Every other test in this file switches self-occlusion off, and that hid a bug.
+
+    ``build_transfer``'s receivers are the facet centroids themselves, so each self-occlusion
+    ray ends on the facet it is aimed at — which counted as a hit. The default therefore
+    reported every mutually visible pair as blocked, and a closed box came back with ``B = M``:
+    at a reflectance of 0.9 that is ten times too dark, and it looks like a field rather than an
+    error. No test could see it, because every fixture passed ``self_occlusion=False``, and the
+    self-occlusion tests all use receivers out in the volume where the ray ends on nothing.
+
+    ⚠️ **``row_sum_error`` is blind to this by construction** and cannot be made to catch it:
+    the mask is applied live in ``_live_transfer``, not baked into ``geometric``, so the gate
+    reads 1e-15 while the matrix it is reporting on is being zeroed downstream.
+    """
+    exitance, reflectance = 3.0, 0.9
+    surfaces = box(2, emission=exitance, reflectance=reflectance)
+    outgoing, _ = radiosity(build_transfer(surfaces), surfaces)
+    np.testing.assert_allclose(np.asarray(outgoing), exitance / (1.0 - reflectance), rtol=1e-12)
+
+
+def test_a_convex_enclosure_measures_the_same_with_self_occlusion_on_and_off():
+    """A box is convex, so its facets shadow nothing and the mask must change no number at all.
+
+    Bit-identical rather than merely close: the mask multiplies the transfer elementwise, so an
+    all-clear mask multiplies by exactly one. Anything less than exact equality means it is not
+    all-clear. This is also what licenses every other measurement in this file, all of which are
+    taken with the mask off.
+    """
+    surfaces = box(2, emission=3.0, reflectance=0.9)
+    area = np.asarray(surfaces.area)
+    with_mask = build_transfer(surfaces, self_occlusion=True)
+    without = build_transfer(surfaces, self_occlusion=False)
+    assert not bool(np.any(np.asarray(with_mask.visibility.blocked_by_geometry)))
+    assert row_sum_error(with_mask) == row_sum_error(without)
+    assert reciprocity_residual(with_mask, area) == reciprocity_residual(without, area)
+    np.testing.assert_array_equal(
+        np.asarray(radiosity(with_mask, surfaces)[0]),
+        np.asarray(radiosity(without, surfaces)[0]),
+    )
+
+
 def test_the_irradiance_matches_what_the_radiosity_implies():
     """``B = M + rho H`` must hold facet by facet, or the two are computing different systems."""
     exitance, reflectance = 3.0, 0.7
