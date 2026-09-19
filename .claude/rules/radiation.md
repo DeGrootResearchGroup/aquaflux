@@ -556,7 +556,9 @@ absorption, the source cosine carrying a non-Lambertian profile, and the occlusi
 multiply the geometric term elementwise so they can stay live and differentiable; moving them
 inside the quadrature would put them back in the frozen `n^2` build. In a scene with partial
 shadowing, or a medium absorbing appreciably over a facet's own width, those are the coarse
-approximations — not the receiver rule.
+approximations — not the receiver rule. Tracked as
+<https://github.com/DeGrootResearchGroup/aquaflux/issues/447>, which carries the measured
+cosine-power numbers and says what has to be measured before the occlusion half is designed.
 
 ## ⚠️ THE STOPPING RULE IS CHOSEN, NOT DEFAULTED
 
