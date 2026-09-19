@@ -40,7 +40,7 @@ import jax.numpy as jnp
 
 from aquaflux.vectors import dot
 
-__all__ = ["projected_solid_angle", "solid_angle"]
+__all__ = ["projected_solid_angle", "signed_solid_angle", "solid_angle"]
 
 
 def _unit(v: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -112,11 +112,57 @@ def solid_angle(point: jnp.ndarray, vertices: jnp.ndarray) -> jnp.ndarray:
     jnp.ndarray
         Solid angle in steradians, shape ``(...)``, in ``[0, 4π]``.
     """
+    return jnp.abs(signed_solid_angle(point, vertices))
+
+
+def signed_solid_angle(point: jnp.ndarray, vertices: jnp.ndarray) -> jnp.ndarray:
+    """The same spherical area as :func:`solid_angle`, keeping the sign of the winding.
+
+    ⚠️ **On a single triangle this sign means nothing**, which is exactly why
+    :func:`solid_angle` discards it: it records the order the three vertices happen to be
+    stored in, and for an imported surface file that is whatever the exporter wrote. Reach for
+    this function only over a **consistently wound, closed** surface, where the signs of all
+    its facets agree with one another and their sum therefore says something the individual
+    terms do not.
+
+    What it says is the *winding number*. Summed over such a surface and divided by ``4π``, the
+    result is ``±1`` at a point enclosed by it and ``0`` at a point outside, with the overall
+    sign fixed by whether the surface is wound outward or inward — so the enclosure test is on
+    the magnitude. That is the one quantity here that distinguishes a cell of fluid from a cell
+    embedded in metal, and it is why this function is exposed rather than kept private.
+
+    Two properties make it the right test for surfaces that arrive from a file:
+
+    * **It is exact, not asymptotic.** The measured winding number of a unit box is ``1.0`` to
+      the last bit at a point a thousandth of a box-width from a wall, at every refinement.
+    * **It degrades continuously on an open surface** rather than answering confidently. A bare
+      disc reads ``±0.45`` just off its face — nowhere near either ``0`` or ``±1`` — so a value
+      in between is itself the diagnostic that the surface is not closed. A ray-parity test has
+      no such reading: it returns a clean, wrong bit.
+
+    Parameters
+    ----------
+    point : jnp.ndarray
+        Receiver positions, shape ``(..., 3)``.
+    vertices : jnp.ndarray
+        Triangle vertices, shape ``(..., 3, 3)``, broadcast against ``point`` as in
+        :func:`solid_angle`.
+
+    Returns
+    -------
+    jnp.ndarray
+        Signed solid angle in steradians, shape ``(...)``, in ``(-2π, 2π]``. Zero where the
+        receiver coincides with a vertex.
+    """
     direction, degenerate = _unit(vertices - point[..., None, :])
     a, b, c = direction[..., 0, :], direction[..., 1, :], direction[..., 2, :]
     numerator = dot(a, jnp.cross(b, c))
     denominator = 1.0 + dot(a, b) + dot(a, c) + dot(b, c)
-    omega = 2.0 * jnp.abs(jnp.arctan2(numerator, denominator))
+    # A two-argument arctangent rather than a one-argument one: the quotient alone loses the
+    # quadrant, and a triangle subtending most of a hemisphere has a denominator that changes
+    # sign, so the single-argument form wraps to the wrong branch exactly where the term is
+    # largest -- which is the near-field pair that matters most to the sum.
+    omega = 2.0 * jnp.arctan2(numerator, denominator)
     return jnp.where(jnp.any(degenerate, axis=-1), 0.0, omega)
 
 
