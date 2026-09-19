@@ -79,7 +79,7 @@ from aquaflux.solve import (
     SimpleSmoothed,
 )
 from aquaflux.turbulence import (
-    CoupledJacobianProbe,
+    coupled_jacobian_probe,
     FieldSplit,
     JacobianProbeSpec,
     MaterializedJacobian,
@@ -470,7 +470,7 @@ def _probe_count(reach):
     the sweep demonstrates its own knob has teeth: if this did not move with the reach, flat cycles
     would mean the setting was ignored rather than that it does not matter.
     """
-    plan = CoupledJacobianProbe.build(
+    plan = coupled_jacobian_probe(
         compare.build_case()["coupled"], stencil_reach=reach, column_reach=COLUMN_REACH
     ).plan
     n = plan.n_probes

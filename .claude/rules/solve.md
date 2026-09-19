@@ -417,6 +417,8 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   - **`solve/` imports nothing outside itself** (`tests/unit/test_layering.py`, always-on): it is the layer
     that lets every residual run on this machinery.
 
+- **`jacobian_probe.py` + `monolithic_policy.py` — MOVED HERE 2026-09-19 (#450 stage 1).** `JacobianProbe(plan, structure, narrowing)` and `jacobian_probe_plan(face_cells, n_cells, n_fields, …)` are the coloured-probe plan and de-compression map, which depend on the cell graph and reaches alone; `narrowing` (`assembler -> assembler`, compared by value) is the one residual-specific part — a stand-in whose Jacobian is materialized. `MonolithicFactorShiftPolicy(base, preconditioner)` pairs any base `ShiftPolicy`'s shift diagonal with a frozen monolithic inverse, and `FrozenTransposeFactory` is its value-equal transposed apply (equality is what keeps a rung's engine rebuild a compile-cache hit). Their coupled-RANS builders are `turbulence.coupled_jacobian_probe` and `_CoupledNarrowing`.
+
 - **`linear.py` — BUILT.** `solve_linear(matvec, b, solver, preconditioner=None)` is a
   matrix-free wrapper over `lineax` (default restarted GMRES); `lineax` supplies the
   **implicit-diff of the linear solve** (the Krylov loop is not taped). This is the load-bearing

@@ -67,6 +67,7 @@ SUBPACKAGE_GROUPS = {
                 "host_preconditioner",
                 "amg_preconditioner",
                 "lu_preconditioner",
+                "monolithic_policy",
                 "field_split",
                 "block_inverse",
                 "settings_value",
@@ -76,7 +77,7 @@ SUBPACKAGE_GROUPS = {
             ],
         ),
         ("Multigrid hierarchies", ["multigrid", "frozen_operator"]),
-        ("Sparse Jacobians", ["sparse_jacobian"]),
+        ("Sparse Jacobians", ["sparse_jacobian", "jacobian_probe"]),
     ],
     "flow": [
         ("The momentum-continuity system", ["momentum", "rhie_chow", "source"]),

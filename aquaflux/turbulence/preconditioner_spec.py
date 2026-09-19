@@ -67,7 +67,7 @@ __all__ = [
 class JacobianProbeSpec(SettingsValue):
     """How the coupled Jacobian is materialized by coloured directional-derivative probing.
 
-    Each field is the keyword of the same name on :meth:`~aquaflux.turbulence.CoupledJacobianProbe.build`
+    Each field is the keyword of the same name on :func:`~aquaflux.turbulence.coupled_jacobian_probe`
     (see it for the meaning and default of each). Two settings of that builder are deliberately not
     here: which field-pair blocks to skip follows from the inverse (a field split never reads one
     triangle), and whether the production viscosity is frozen follows from the operator the march

@@ -61,7 +61,7 @@ from aquaflux.solve import (  # noqa: E402
     block_stencil_gather_map,
     materialize_block_jacobian,
 )
-from aquaflux.turbulence import CoupledJacobianProbe, hybrid_initialize  # noqa: E402
+from aquaflux.turbulence import coupled_jacobian_probe, hybrid_initialize  # noqa: E402
 
 OUT = CASE / "checkpoints"
 TRAILING_NPZ = OUT / "trailing_scoped_probe_full.npz"
@@ -88,7 +88,7 @@ def batched_from(matvec):
 
 def full_arm(coupled, state, n_cells, n_fields):
     print("[full] building the shipped six-field probe (BFS3D_COLUMN_REACH)", flush=True)
-    probe = CoupledJacobianProbe.build(coupled, column_reach=compare.COLUMN_REACH)
+    probe = coupled_jacobian_probe(coupled, column_reach=compare.COLUMN_REACH)
     plan = probe.plan
     print(
         f"[full] {plan.n_probes} probes total; colours per column field "

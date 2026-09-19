@@ -558,7 +558,7 @@ monolithic `AmgVCycle` is unchanged.
     `nnz`, the retained `ProbeGather`, and the gather map's own construction cost, not only in the values.
     `FieldGroups.active_rows()` (`solve/field_split.py`) derives the table straight from the
     partition a `BlockTriangularFieldSplit` already carries: `True` everywhere except the one triangle
-    the split's `apply()` never reads. `CoupledJacobianProbe.build(..., active_rows=…)` and
+    the split's `apply()` never reads. `coupled_jacobian_probe(..., active_rows=…)` and
     `_coupled_jacobian_plan` thread it through; `coupled_amg_continuation` derives it (`groups.active_rows()`) whenever it builds its own probe
     under `field_split=True`, and
     `validation/bfs3d_openfoam/compare.py`'s shared, once-built `probe` does the same when
@@ -577,7 +577,7 @@ monolithic `AmgVCycle` is unchanged.
     triangle silently. With one ordering left, the dropped triangle and the retained one are one fact.
 
     **Confirmed end to end on `bfs3d`, on the real mesh, through the real production call
-    (`CoupledJacobianProbe.build` → `FieldSplitAmgPreconditioner.build`), not a standalone probe script:**
+    (`coupled_jacobian_probe` → `FieldSplitAmgPreconditioner.build`), not a standalone probe script:**
     structural `nnz` fell **47.209M → 36.718M, a 22.2 % reduction**, matching the measurement below to
     three figures, and the resulting preconditioner's `apply()` — **forward and transpose** — is
     `0.000e+00` different from the unrestricted build's, on a random right-hand side. The adjoint path
@@ -739,7 +739,7 @@ monolithic `AmgVCycle` is unchanged.
 **Deepening either block's own hierarchy does not fix this on its own, and it may dominate memory at a
 1M-cell target regardless of how deep either goes.** `FieldSplitAmgPreconditioner.build` /
 `refresh_in_place` (`aquaflux/solve/amg_preconditioner.py`, driven from `aquaflux/turbulence/coupled.py`'s
-`_monolithic_shift_source` / `CoupledJacobianProbe`) materialize the coupled Jacobian with **one**
+`_monolithic_shift_source` / `JacobianProbe`) materialize the coupled Jacobian with **one**
 coloured-probe pass over all `dim+3` fields at reach 3, and `build_block_triangular_field_split` slices
 the field-pair blocks out of that one matrix. This is what field-split costs regardless of either block's
 own coarsening depth (see the trailing hierarchy's own scalability note in `solve-amg-multigrid.md`,

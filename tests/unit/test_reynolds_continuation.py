@@ -1093,12 +1093,9 @@ def test_the_residual_taper_survives_the_MONOLITHIC_WRAPPER_the_cases_actually_r
     per-row multiplier on the way out -- in silence, so the march ran and the taper simply never
     happened. Asserting on the base policy alone cannot see that; this drives the wrapper.
     """
+    from aquaflux.solve import MonolithicFactorShiftPolicy
     from aquaflux.turbulence import ResidualTaperedDamping, turbulence_residual_norm
-    from aquaflux.turbulence.coupled import (
-        _DEFAULT_SHIFT_BASIS,
-        MonolithicFactorShiftPolicy,
-        _monolithic_shift_source,
-    )
+    from aquaflux.turbulence.coupled import _DEFAULT_SHIFT_BASIS, _monolithic_shift_source
 
     coupled = _tiny_coupled()
     state = _seeded_state(coupled)
