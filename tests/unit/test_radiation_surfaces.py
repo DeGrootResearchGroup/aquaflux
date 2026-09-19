@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian
 from aquaflux.radiation.surfaces import Surfaces
 
 RIGHT_TRIANGLE = np.array([[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 3.0, 0.0]]])
@@ -89,6 +90,53 @@ def test_replacing_the_optics_leaves_the_geometry_identical():
     np.testing.assert_allclose(updated.emission, surfaces.emission)
     np.testing.assert_array_equal(np.asarray(updated.vertices), np.asarray(surfaces.vertices))
     np.testing.assert_array_equal(np.asarray(updated.normal), np.asarray(surfaces.normal))
+
+
+def test_one_profile_without_an_index_is_given_to_every_facet():
+    """How a set is re-read as purely diffuse, which is what every *reflected* ray leaves by
+    whatever the source emitted like."""
+    pair = np.repeat(RIGHT_TRIANGLE, 2, axis=0)
+    surfaces = Surfaces.from_triangles(
+        pair, profiles=(CosinePower(4.0), Isotropic()), profile_index=[0, 1]
+    )
+    diffuse = surfaces.with_optics(profiles=(Lambertian(),))
+    assert diffuse.profiles == (Lambertian(),)
+    np.testing.assert_array_equal(np.asarray(diffuse.profile_index), [0, 0])
+    np.testing.assert_array_equal(np.asarray(diffuse.vertices), np.asarray(surfaces.vertices))
+
+
+def test_a_new_catalogue_can_be_given_with_its_own_index():
+    pair = np.repeat(RIGHT_TRIANGLE, 2, axis=0)
+    surfaces = Surfaces.from_triangles(pair)
+    relabelled = surfaces.with_optics(
+        profiles=(Lambertian(), CosinePower(4.0)), profile_index=[1, 0]
+    )
+    assert relabelled.profiles == (Lambertian(), CosinePower(4.0))
+    np.testing.assert_array_equal(np.asarray(relabelled.profile_index), [1, 0])
+
+
+def test_a_longer_catalogue_without_an_index_is_refused():
+    """The existing indices would point into a catalogue that has changed under them, which is
+    a silent relabelling of which facet emits how rather than an error anywhere later."""
+    pair = np.repeat(RIGHT_TRIANGLE, 2, axis=0)
+    surfaces = Surfaces.from_triangles(pair)
+    with pytest.raises(ValueError, match="no profile_index was given"):
+        surfaces.with_optics(profiles=(Lambertian(), Isotropic()))
+
+
+@pytest.mark.parametrize(
+    ("index", "message"),
+    [
+        ([0], r"profile_index must be \(2,\)"),
+        ([0, 0, 0], r"profile_index must be \(2,\)"),
+        ([0, 3], "outside the 1 profiles given"),
+        ([-1, 0], "outside the 1 profiles given"),
+    ],
+)
+def test_an_index_that_does_not_fit_the_catalogue_is_refused(index, message):
+    surfaces = Surfaces.from_triangles(np.repeat(RIGHT_TRIANGLE, 2, axis=0))
+    with pytest.raises(ValueError, match=message):
+        surfaces.with_optics(profile_index=index)
 
 
 @pytest.mark.parametrize(
