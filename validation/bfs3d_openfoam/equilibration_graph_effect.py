@@ -53,11 +53,7 @@ from aquaflux.solve.multigrid import (  # noqa: E402
     _mis_aggregate,
 )
 from aquaflux.turbulence import hybrid_initialize  # noqa: E402
-from aquaflux.turbulence.coupled import (  # noqa: E402
-    _PROBE_BATCH_SIZE,
-    _batched_jacobian_matvec,
-    _jacobian_matvec,
-)
+from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec
 
 REACH = 3
 #: The aggregation's default: keep the full graph, so a weight-zero edge counts as a connection.
@@ -144,13 +140,13 @@ def main():
     structure = block_stencil_gather_map(plan)
 
     def matvec(v):
-        return _jacobian_matvec(coupled, state, v)
+        return jacobian_matvec(coupled, state, v)
 
     def batched(seeds):
-        return _batched_jacobian_matvec(coupled, state, seeds)
+        return batched_jacobian_matvec(coupled, state, seeds)
 
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
-        matvec, plan, batched, _PROBE_BATCH_SIZE, structure
+        matvec, plan, batched, PROBE_BATCH_SIZE, structure
     )
     groups = FieldGroups.by_counts(n_cells=n, n_leading_fields=n_fields - 2, n_trailing_fields=2)
     a_ll, _, _, a_tt = groups.blocks(jacobian)

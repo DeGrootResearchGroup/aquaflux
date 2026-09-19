@@ -68,13 +68,8 @@ import aquaflux  # noqa: F401  (enables x64 at import)
 import compare
 import numpy as np
 from aquaflux.solve import Convergence, DualTimeControl, DualTimeLoop
-from aquaflux.turbulence import (
-    CompleteLu,
-    GeometricReynoldsSchedule,
-    MaterializedJacobian,
-    open_session,
-    solve_reynolds_continuation,
-)
+from aquaflux.turbulence import GeometricReynoldsSchedule, open_session, solve_reynolds_continuation
+from aquaflux.solve import CompleteLu, MaterializedJacobian
 
 # The Reynolds ramp: 2 lower-Re rungs before the target -> viscosity scales (100, 10, 1) -> Re ~ 250,
 # 2500, 25000. The rest of the march budget is the working configuration for this case.

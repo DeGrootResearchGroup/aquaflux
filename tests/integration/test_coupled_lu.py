@@ -32,12 +32,10 @@ from aquaflux.flow import (
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import DualTimeLoop
+from aquaflux.solve import CompleteLu, DualTimeLoop, MaterializedJacobian
 from aquaflux.turbulence import (
     BlockDiagonal,
-    CompleteLu,
     CoupledRANS,
-    MaterializedJacobian,
     ScalarTwoLevel,
     SSTModel,
     SSTTurbulence,

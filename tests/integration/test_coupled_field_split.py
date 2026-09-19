@@ -26,27 +26,21 @@ pytest.importorskip("petsc4py")
 
 from aquaflux.solve import (
     FieldGroups,
+    FieldSplit,
     JacobiSmoothed,
+    MaterializedJacobian,
     MonolithicAmgPreconditioner,
+    MonolithicVCycle,
     SimpleSmoothed,
     build_amg_vcycle,
     build_block_triangular_field_split,
+    jacobian_matvec,
     relative_residual_gmres,
     restart_cycles,
     solve_linear,
 )
-from aquaflux.turbulence import (
-    CoupledRANS,
-    FieldSplit,
-    MaterializedJacobian,
-    MonolithicVCycle,
-    coupled_step,
-    hybrid_initialize,
-)
-from aquaflux.turbulence.coupled import (
-    _coupled_jacobian_plan,
-    _jacobian_matvec,
-)
+from aquaflux.turbulence import CoupledRANS, coupled_step, hybrid_initialize
+from aquaflux.turbulence.coupled import _coupled_jacobian_plan
 
 from tests.integration.test_coupled_lu import _channel
 
@@ -60,7 +54,7 @@ def case():
     state = coupled.pack_state(flow, k, omega)
     n_fields = coupled.layout.n_fields
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
-        lambda v: _jacobian_matvec(coupled, state, v),
+        lambda v: jacobian_matvec(coupled, state, v),
         _coupled_jacobian_plan(coupled, 3),
     )
     groups = FieldGroups.split_before(coupled.layout, "k")
@@ -227,7 +221,7 @@ def test_the_split_refreshes_in_place_onto_the_same_object(case):
     plan = _coupled_jacobian_plan(coupled, 3)
 
     def matvec(v):
-        return _jacobian_matvec(coupled, state, v)
+        return jacobian_matvec(coupled, state, v)
 
     shift = np.full(groups.n_dofs, 0.5)
     pc = FieldSplitAmgPreconditioner.build(

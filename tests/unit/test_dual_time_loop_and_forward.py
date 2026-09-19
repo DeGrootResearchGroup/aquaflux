@@ -15,21 +15,16 @@ import inspect
 import aquaflux  # noqa: F401  (enables x64)
 import pytest
 from aquaflux.solve import (
+    CompleteLu,
     DualTimeLoop,
     DualTimeStep,
     LinearSolveSettings,
+    MaterializedJacobian,
     PseudoTransientStep,
     relative_residual_gmres,
     resolve_linear_solve,
 )
-from aquaflux.turbulence import (
-    BlockDiagonal,
-    CompleteLu,
-    MaterializedJacobian,
-    UnpreconditionedScalars,
-    coupled_step,
-    open_session,
-)
+from aquaflux.turbulence import BlockDiagonal, UnpreconditionedScalars, coupled_step, open_session
 from aquaflux.turbulence.coupled import (
     _BLOCK_LINEAR_SOLVE,
     _CONSTRAINED_LINEAR_SOLVE,

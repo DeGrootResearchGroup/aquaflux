@@ -33,6 +33,7 @@ import jax.numpy as jnp
 
 from .convergence import Convergence, ResidualMeasures
 from .march import ResidualHomotopy, newton_march
+from .materialized_session import PreconditionerSession
 from .refresh import RefreshPolicy
 from .retry import NO_RETRIES, RetryPolicy
 from .step_control import default_dual_time_control
@@ -42,6 +43,7 @@ __all__ = [
     "CallerBuiltSource",
     "ContinuationSource",
     "FinishedSource",
+    "SessionSource",
     "StagedResult",
     "explicit_source",
     "refuse_unforwardable_settings",
@@ -91,6 +93,39 @@ class CallerBuiltSource:
     def refresh(self, state: jnp.ndarray, previous: NewtonStrategy) -> NewtonStrategy:
         del previous  # the builder re-derives everything from the state
         return self.builder(state)
+
+
+@dataclasses.dataclass(frozen=True)
+class SessionSource:
+    """A strategy a preconditioner session builds and re-freezes -- the source that has configuration.
+
+    The preconditioner chose the session, and the march keywords are handed to every build and refresh
+    the session makes. The session's own per-step refresh hook, if it has one, rides with it.
+
+    Attributes
+    ----------
+    session : PreconditionerSession
+        Builds each step and keeps its preconditioner current.
+    reference_state : jnp.ndarray or None
+        The state the first build is frozen at, or ``None`` for the state the march starts from.
+    march : dict
+        The march keywords handed to every build and refresh.
+    """
+
+    session: PreconditionerSession
+    reference_state: jnp.ndarray | None
+    march: dict
+
+    @property
+    def refresh_preconditioner(self) -> Callable[[NewtonStrategy, jnp.ndarray], None] | None:
+        return self.session.refresh_preconditioner
+
+    def build(self, state: jnp.ndarray) -> NewtonStrategy:
+        reference = state if self.reference_state is None else self.reference_state
+        return self.session.build(reference, **self.march)
+
+    def refresh(self, state: jnp.ndarray, previous: NewtonStrategy) -> NewtonStrategy:
+        return self.session.refresh(state, previous, **self.march)
 
 
 @dataclasses.dataclass(frozen=True)

@@ -15,10 +15,12 @@ block-SIMPLE preconditioner), the measures of the flow residual, and the potenti
 from __future__ import annotations
 
 import dataclasses
+import inspect
 from collections.abc import Callable, Mapping
 
 import jax.numpy as jnp
 import lineax as lx
+import numpy as np
 
 from aquaflux.schemes import narrow_gradient_sweeps
 from aquaflux.solve import (
@@ -27,14 +29,22 @@ from aquaflux.solve import (
     NO_RETRIES,
     Convergence,
     DualTimeLoop,
+    FieldGroups,
     Globalization,
+    JacobianProbe,
     LinearSolveRegime,
     LinearSolveSettings,
+    MaterializedJacobian,
+    MaterializedProblem,
+    MaterializedSession,
+    MonolithicFactorShiftPolicy,
     NewtonStrategy,
+    PreconditionerSession,
     RefreshPolicy,
     ResidualHomotopy,
     RetryPolicy,
     RowScaled,
+    SessionSource,
     ShiftBasis,
     StepControl,
     StepReport,
@@ -48,12 +58,12 @@ from aquaflux.solve import (
     stop_array_gradients,
 )
 
-from .continuation import momentum_shift_policy
+from .continuation import momentum_shift_only_policy, momentum_shift_policy
 from .initialization import potential_flow
 from .measures import FlowMeasures
 from .momentum import MomentumContinuity
 
-__all__ = ["flow_march_step", "solve_flow_march"]
+__all__ = ["flow_march_step", "open_flow_session", "solve_flow_march"]
 
 #: The flow march's default stopping test: row-scaled, because the Euclidean norm of a ``(u, p)`` residual
 #: is dominated by whichever block is largest and judges nothing else.
@@ -126,14 +136,47 @@ def flow_march_step(
         reference_state=reference_state,
         **dict(preconditioner_options or {}),
     )
-    regime, krylov_solver = resolve_linear_solve(linear_solve, _FLOW_LINEAR_SOLVE)
+    return _flow_shifted_step(
+        momentum,
+        policy,
+        policy.preconditioner.factory(),
+        base_regime=_FLOW_LINEAR_SOLVE,
+        globalization=globalization,
+        dual_time=dual_time,
+        linear_solve=linear_solve,
+        inner_observer=inner_observer,
+        inner_refresh=inner_refresh,
+        jacobian_gradient_sweeps=jacobian_gradient_sweeps,
+    )
+
+
+def _flow_shifted_step(
+    momentum: MomentumContinuity,
+    policy: object,
+    adjoint_preconditioner_factory: Callable,
+    *,
+    base_regime: LinearSolveRegime,
+    globalization: Globalization,
+    dual_time: DualTimeLoop | None,
+    linear_solve: LinearSolveSettings | lx.AbstractLinearSolver | None,
+    inner_observer: Callable[..., None] | None,
+    inner_refresh: Callable[[jnp.ndarray], None] | None,
+    jacobian_gradient_sweeps: int | None,
+) -> NewtonStrategy:
+    """The flow's step around a composed policy: what every flow preconditioner shares.
+
+    The block-SIMPLE step and the materialized-Jacobian step differ in the policy, the adjoint
+    preconditioner and the family's default Krylov regime; the regime override, the Jacobian stand-in
+    and the step tail are this function's.
+    """
+    regime, krylov_solver = resolve_linear_solve(linear_solve, base_regime)
     return shifted_step(
         policy,
         globalization=globalization,
         dual_time=dual_time,
         regime=regime,
         krylov_solver=krylov_solver,
-        adjoint_preconditioner_factory=policy.preconditioner.factory(),
+        adjoint_preconditioner_factory=adjoint_preconditioner_factory,
         inner_observer=inner_observer,
         inner_refresh=inner_refresh,
         jacobian_residual=(
@@ -141,6 +184,160 @@ def flow_march_step(
             if jacobian_gradient_sweeps is None
             else narrow_gradient_sweeps(momentum, jacobian_gradient_sweeps).residual
         ),
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class _GradientSweepCap:
+    """The assembler stand-in a flow Jacobian probe differentiates: gradient sweeps capped, as a value."""
+
+    sweeps: int
+
+    def __call__(self, momentum: MomentumContinuity) -> MomentumContinuity:
+        return narrow_gradient_sweeps(momentum, self.sweeps)
+
+
+#: The march settings a flow session builds a step from: the keywords of :func:`flow_march_step`, less the
+#: three that belong to the block-SIMPLE preconditioner it builds itself.
+_SESSION_NOT_MARCH = ("momentum", "reference_state", "preconditioner_options")
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class _FlowProblem(MaterializedProblem):
+    """The laminar flow residual as a :class:`~aquaflux.solve.MaterializedProblem`.
+
+    What a materialized-Jacobian session asks of a residual, answered for ``(u, p)``: the assembler, its
+    mesh graph and layout, no field groups (a single group of fields has nothing to split), the
+    shift-only momentum policy the inverse is fitted against, and the flow step around the fitted inverse.
+
+    Attributes
+    ----------
+    momentum : MomentumContinuity
+        The assembler the session builds on until it is re-pointed with ``rebind``.
+    """
+
+    momentum: MomentumContinuity
+
+    @property
+    def assembler(self) -> MomentumContinuity:
+        return self.momentum
+
+    @property
+    def layout(self):
+        return self.momentum.layout
+
+    def with_assembler(self, assembler: MomentumContinuity) -> _FlowProblem:
+        return dataclasses.replace(self, momentum=assembler)
+
+    def probe(self, settings: dict, active_rows: np.ndarray | None) -> JacobianProbe:
+        settings = dict(settings)
+        sweeps = settings.pop("gradient_sweeps", None)
+        return JacobianProbe.build(
+            self.momentum.mesh.face_cells,
+            self.momentum.mesh.n_cells,
+            self.momentum.layout.n_fields,
+            **settings,
+            active_rows=active_rows,
+            narrowing=None if sweeps is None else _GradientSweepCap(sweeps),
+        )
+
+    def groups(self) -> FieldGroups | None:
+        return None
+
+    def bind_march(self, march: dict) -> dict:
+        signature = inspect.signature(flow_march_step)
+        unknown = sorted(set(march) - (set(signature.parameters) - set(_SESSION_NOT_MARCH)))
+        if unknown:
+            raise TypeError(
+                f"{unknown} are not march settings of a materialized-Jacobian flow march. A "
+                "preconditioner setting belongs on the MaterializedJacobian spec; the block-SIMPLE "
+                "`preconditioner_options` do not apply to it."
+            )
+        bound = signature.bind(None, None, **march)
+        bound.apply_defaults()
+        arguments = dict(bound.arguments)
+        for name in _SESSION_NOT_MARCH:
+            arguments.pop(name)
+        return arguments
+
+    def shift_source(self, state: jnp.ndarray, march: dict):
+        return momentum_shift_only_policy(self.momentum, march["shift_basis"])
+
+    def build_step(
+        self,
+        state: jnp.ndarray,
+        base,
+        preconditioner: object,
+        march: dict,
+        base_regime: LinearSolveRegime,
+    ) -> NewtonStrategy:
+        policy = MonolithicFactorShiftPolicy(base, preconditioner)
+        return _flow_shifted_step(
+            self.momentum,
+            policy,
+            policy.adjoint_factory(),
+            base_regime=base_regime,
+            globalization=march["globalization"],
+            dual_time=march["dual_time"],
+            linear_solve=march["linear_solve"],
+            inner_observer=march["inner_observer"],
+            inner_refresh=march["inner_refresh"],
+            jacobian_gradient_sweeps=march["jacobian_gradient_sweeps"],
+        )
+
+
+def open_flow_session(
+    preconditioner: MaterializedJacobian,
+    momentum: MomentumContinuity,
+    *,
+    observer: Callable | None = None,
+    on_build: Callable[[NewtonStrategy], NewtonStrategy] | None = None,
+    precondition_wrapper: Callable[[Callable], Callable] | None = None,
+) -> PreconditionerSession:
+    """Open a materialized-Jacobian preconditioner session for a laminar flow, doing no array work yet.
+
+    The flow counterpart of :func:`~aquaflux.turbulence.open_session`. Pass the session as
+    ``solve_flow_march(preconditioner=session)`` to share one inverse and its refresh hook across several
+    solves, such as the rungs of a viscosity continuation.
+
+    Parameters
+    ----------
+    preconditioner : MaterializedJacobian
+        Which inverse and how it is probed. A :class:`~aquaflux.solve.CompleteLu` or
+        :class:`~aquaflux.solve.MonolithicVCycle`; a :class:`~aquaflux.solve.FieldSplit` is refused,
+        because a ``(u, p)`` state is a single group of fields and has nothing to split.
+    momentum : MomentumContinuity
+        The assembler the session builds on until it is re-pointed with ``rebind``.
+    observer : callable, optional
+        ``(timing: RefreshTiming) -> None``, told what each refresh did and what it cost.
+    on_build : callable, optional
+        ``step -> step``, applied to every step the session builds, for instrumenting a driver.
+    precondition_wrapper : callable, optional
+        ``hook -> hook``, wrapping the per-step refresh hook once.
+
+    Returns
+    -------
+    PreconditionerSession
+        The session.
+
+    Raises
+    ------
+    TypeError
+        If ``preconditioner`` is not a :class:`~aquaflux.solve.MaterializedJacobian`, or asks for a field
+        split.
+    """
+    if not isinstance(preconditioner, MaterializedJacobian):
+        raise TypeError(
+            "a flow session is opened for a MaterializedJacobian(...); the block-SIMPLE "
+            "preconditioner is built by the march itself. Got "
+            f"{type(preconditioner).__name__}."
+        )
+    return MaterializedSession(
+        preconditioner,
+        _FlowProblem(momentum),
+        observer=observer,
+        on_build=on_build,
+        precondition_wrapper=precondition_wrapper,
     )
 
 
@@ -176,12 +373,48 @@ class _FlowSource:
         )
 
 
+def _flow_source(
+    momentum: MomentumContinuity,
+    preconditioner: MaterializedJacobian | PreconditionerSession | None,
+    preconditioner_options: Mapping[str, object] | None,
+    reference_state: jnp.ndarray | None,
+    refresh: RefreshPolicy,
+    march: dict,
+):
+    """The continuation source for a solve that builds its own step: a session, or block-SIMPLE.
+
+    Refuses configuration the chosen family cannot receive, rather than dropping it: the block-SIMPLE
+    settings beside a materialized preconditioner reach nothing, and two refresh hooks re-fitting one
+    inverse would disagree.
+    """
+    if preconditioner is None:
+        return _FlowSource(momentum, reference_state, preconditioner_options, march)
+    if preconditioner_options is not None:
+        raise TypeError(
+            "preconditioner_options configure the block-SIMPLE preconditioner, and a materialized-"
+            "Jacobian preconditioner was given, which has no such settings. Configure it on the "
+            "MaterializedJacobian spec."
+        )
+    session = (
+        open_flow_session(preconditioner, momentum)
+        if isinstance(preconditioner, MaterializedJacobian)
+        else preconditioner
+    )
+    if refresh.refresh_preconditioner is not None and session.refresh_preconditioner is not None:
+        raise TypeError(
+            "RefreshPolicy(refresh_preconditioner=...) was given beside a materialized-Jacobian "
+            "preconditioner, whose session already re-fits its inverse. Drop one."
+        )
+    return SessionSource(session, reference_state, march)
+
+
 def solve_flow_march(
     momentum: MomentumContinuity,
     state: jnp.ndarray | None = None,
     *,
     strategy: NewtonStrategy | None = None,
     reference_state: jnp.ndarray | None = None,
+    preconditioner: MaterializedJacobian | PreconditionerSession | None = None,
     preconditioner_options: Mapping[str, object] | None = None,
     max_steps: int = 60,
     convergence: Convergence | None = None,
@@ -220,8 +453,17 @@ def solve_flow_march(
         A pre-built step (from :func:`flow_march_step`); ``None`` builds one from the initial state.
     reference_state : jnp.ndarray or None
         The state to freeze the internally built preconditioner at; defaults to the initial state.
+    preconditioner : MaterializedJacobian, PreconditionerSession or None
+        What preconditions the internally built step. ``None`` (default) is the block-SIMPLE
+        preconditioner, configured by ``preconditioner_options``. A
+        :class:`~aquaflux.solve.MaterializedJacobian` spec opens a session private to this solve, inverting
+        the materialized Jacobian by a complete LU or a multigrid V-cycle (a field split is refused: a
+        ``(u, p)`` state has nothing to split); pass a session from :func:`open_flow_session` to share one
+        inverse across several solves. Like ``preconditioner_options`` it is refused beside a ``strategy``
+        or a ``RefreshPolicy(builder=...)``.
     preconditioner_options : mapping, optional
-        The block-SIMPLE preconditioner's settings; see :func:`flow_march_step`.
+        The block-SIMPLE preconditioner's settings; see :func:`flow_march_step`. Refused with a
+        materialized-Jacobian ``preconditioner``, which has no such settings.
     max_steps : int
         Outer-step cap for **each** march segment.
     convergence : Convergence or None
@@ -262,12 +504,19 @@ def solve_flow_march(
     given = dict(march)
     if preconditioner_options is not None:
         given["preconditioner_options"] = preconditioner_options
+    if preconditioner is not None:
+        given["preconditioner"] = preconditioner
     if reference_state is not None:
         given["reference_state"] = reference_state
     source = explicit_source(strategy, refresh, given, caller="solve_flow_march")
     if source is None:
-        source = _FlowSource(
-            frozen, stop_array_gradients(reference_state), preconditioner_options, march
+        source = _flow_source(
+            frozen,
+            preconditioner,
+            preconditioner_options,
+            stop_array_gradients(reference_state),
+            refresh,
+            march,
         )
     state = potential_flow(frozen) if state is None else stop_array_gradients(state)
     staged = staged_march(

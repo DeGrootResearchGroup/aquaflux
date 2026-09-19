@@ -396,7 +396,7 @@ def solve_reynolds_continuation(
         its own viscosity. The split runs the other way too: ``preconditioner`` and every march keyword
         bound for :func:`~aquaflux.turbulence.coupled_step` describe a continuation *this function
         builds*, so when ``strategy`` is supplied they reach the **ramp** only — the target is not
-        building one. A :class:`~aquaflux.turbulence.MaterializedJacobian` ``preconditioner`` is opened
+        building one. A :class:`~aquaflux.solve.MaterializedJacobian` ``preconditioner`` is opened
         as **one** session shared by every point and re-pointed at each point's companion, so every
         rung glues in the same inverse and refresh hook rather than recompiling the coupled solve; a
         :class:`~aquaflux.turbulence.BlockDiagonal` one is built per point at its own viscosity. ⚠️ A ``point_setup`` that returns a ``strategy`` supplies one to **every** point, which

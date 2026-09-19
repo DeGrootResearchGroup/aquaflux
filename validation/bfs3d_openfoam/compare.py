@@ -91,25 +91,8 @@ from aquaflux.solve import (
     combine_observers,
     relative_residual_gmres,
 )
-from aquaflux.turbulence import (
-    CoupledRANS,
-    FieldSplit,
-    GeometricReynoldsSchedule,
-    JacobianProbeSpec,
-    LogScalars,
-    MaterializedJacobian,
-    MonolithicVCycle,
-    ShiftSettings,
-    SSTModel,
-    SSTTurbulence,
-    coupled_fields,
-    coupled_residuals,
-    open_session,
-    scale_both_blocks,
-    scale_momentum_only,
-    solve_reynolds_continuation,
-    solve_reynolds_ramp,
-)
+from aquaflux.turbulence import CoupledRANS, GeometricReynoldsSchedule, LogScalars, ShiftSettings, SSTModel, SSTTurbulence, coupled_fields, coupled_residuals, open_session, scale_both_blocks, scale_momentum_only, solve_reynolds_continuation, solve_reynolds_ramp
+from aquaflux.solve import FieldSplit, JacobianProbeSpec, MaterializedJacobian, MonolithicVCycle
 
 HERE = Path(__file__).resolve().parent
 RUNS = HERE / "runs" / "kwsst"  # steady run: the mesh + 3D cell centres (geometry)

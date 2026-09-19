@@ -14,12 +14,10 @@ import inspect
 
 import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
-from aquaflux.solve import LocalCourantBasis
+from aquaflux.solve import CompleteLu, LocalCourantBasis, MaterializedJacobian
 from aquaflux.turbulence import (
     BlockDiagonal,
-    CompleteLu,
     ConstantDamping,
-    MaterializedJacobian,
     ShiftSettings,
     UnpreconditionedScalars,
     coupled_step,

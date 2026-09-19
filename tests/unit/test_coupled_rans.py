@@ -27,9 +27,11 @@ from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss, CorrectedGreenGauss, SweptGradientSolve
 from aquaflux.solve import (
+    FACTORIZATION_LINEAR_SOLVE,
     NO_REFRESH,
     BlockScaled,
     BlockScaledNorm,
+    CompleteLu,
     Convergence,
     CycleGrowthTrigger,
     DualTimeLoop,
@@ -37,19 +39,19 @@ from aquaflux.solve import (
     Globalization,
     JacobianProbe,
     LinearSolveSettings,
+    MaterializedJacobian,
+    MonolithicVCycle,
     PseudoTransientStep,
     RefreshPolicy,
     RowScaledNorm,
+    SessionSource,
     ShiftTerm,
 )
 from aquaflux.solve import driver as driver_module
 from aquaflux.turbulence import (
     BlockDiagonal,
-    CompleteLu,
     DirectScalars,
     LogScalars,
-    MaterializedJacobian,
-    MonolithicVCycle,
     ScalarAir,
     ScalarTwoLevel,
     ShiftSettings,
@@ -69,7 +71,6 @@ from aquaflux.turbulence import (
 from aquaflux.turbulence import coupled as coupled_module
 from aquaflux.turbulence.coupled import (
     _BLOCK_LINEAR_SOLVE,
-    _FACTORIZATION_LINEAR_SOLVE,
     CoupledRANS,
     LiveViscosityVelocityParts,
     _k_positivity_guards,
@@ -207,7 +208,7 @@ def test_lu_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None
     inverse, so the 1% stop is reached within a handful of vectors and it uses a small restart; the
     block-triangular preconditioner needs a large subspace per cycle. The two must not share a default.
     """
-    assert _FACTORIZATION_LINEAR_SOLVE.restart == 10
+    assert FACTORIZATION_LINEAR_SOLVE.restart == 10
     assert _BLOCK_LINEAR_SOLVE.restart == 120
 
     mesh, coupled = _cavity()
@@ -512,7 +513,7 @@ def test_the_settings_are_still_accepted_where_the_solve_does_build_the_continua
             reference_state=state,
             kwargs={"dual_time": DualTimeLoop(inner_steps=2)},
         )
-        assert isinstance(source, coupled_module._SessionContinuation)
+        assert isinstance(source, SessionSource)
         # ...and it carries them, rather than accepting and then dropping them one layer down.
         assert source.march == {"dual_time": DualTimeLoop(inner_steps=2)}
         assert source.reference_state is state
@@ -1416,7 +1417,7 @@ def test_the_jacobian_probe_is_a_cache_hit_across_reynolds_rungs() -> None:
     assembler as an argument instead. A rung differs only in leaf values (pinned by the test above), so
     a probe that takes the assembler as an argument is a hit.
     """
-    from aquaflux.turbulence.coupled import _batched_jacobian_matvec, _jacobian_matvec
+    from aquaflux.solve import batched_jacobian_matvec, jacobian_matvec
 
     state = jnp.linspace(1.0, 2.0, 29)  # a unique size; the compilation cache is process-global
     tangent = jnp.ones_like(state)
@@ -1424,15 +1425,15 @@ def test_the_jacobian_probe_is_a_cache_hit_across_reynolds_rungs() -> None:
 
     _PROBE_TRACES.clear()
     first = _CountingResidual(gain=jnp.asarray(1.0))
-    _jacobian_matvec(first, state, tangent)
-    _batched_jacobian_matvec(first, state, seeds)
+    jacobian_matvec(first, state, tangent)
+    batched_jacobian_matvec(first, state, seeds)
     compiled = len(_PROBE_TRACES)
     assert compiled > 0  # sanity: the stub really is being traced
 
     for scale in (0.1, 0.01):  # two further rungs of a Reynolds ramp
         rung = _CountingResidual(gain=jnp.asarray(scale))
-        _jacobian_matvec(rung, state, tangent)
-        _batched_jacobian_matvec(rung, state, seeds)
+        jacobian_matvec(rung, state, tangent)
+        batched_jacobian_matvec(rung, state, seeds)
 
     assert len(_PROBE_TRACES) == compiled
 
@@ -1692,12 +1693,12 @@ def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> Non
     """
 
     import numpy as np
-    from aquaflux.turbulence.coupled import _beta_tracking_refresh
+    from aquaflux.solve import beta_tracking_refresh
 
     state = jnp.linspace(1.0, 2.0, 5)
     diagonal = jnp.full(5, 2.0)
     tangent = jnp.ones(5)
-    # The real probe (its plan and gather map are unused here), not a lookalike: `_beta_tracking_refresh`
+    # The real probe (its plan and gather map are unused here), not a lookalike: `beta_tracking_refresh`
     # asks it which assembler to differentiate, which only the class itself can answer.
     probe = JacobianProbe(plan=object(), structure=object())
 
@@ -1705,9 +1706,7 @@ def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> Non
     step = _stub_step(pc, beta=0.5, diagonal=diagonal)
     # The multigrid cadence: a full rebuild on the first call and after a rebind, none otherwise --
     # between those only the dual-time loop's cost trigger rebuilds the V-cycle.
-    refresh = _beta_tracking_refresh(
-        _ScalarRans(gain=jnp.asarray(3.0)), stencil_reach=2, probe=probe, every_step=False
-    )
+    refresh = beta_tracking_refresh(_ScalarRans(gain=jnp.asarray(3.0)), probe, every_step=False)
 
     refresh(step, state)  # the initializing call
     assert len(pc.calls) == 1
@@ -1729,15 +1728,14 @@ def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> Non
 def test_the_factorization_cadence_rebuilds_on_every_step() -> None:
     """``every_step=True`` is the complete-LU cadence: an exact factorization is cheap, and exact only
     at the shift it was built at, so it is re-factored before every step rather than on a rebind."""
-    from aquaflux.turbulence.coupled import _beta_tracking_refresh
+    from aquaflux.solve import beta_tracking_refresh
 
     state = jnp.linspace(1.0, 2.0, 5)
     diagonal = jnp.full(5, 2.0)
     pc = _RecordingPreconditioner()
-    refresh = _beta_tracking_refresh(
+    refresh = beta_tracking_refresh(
         _ScalarRans(gain=jnp.asarray(3.0)),
-        stencil_reach=2,
-        probe=JacobianProbe(plan=object(), structure=object()),
+        JacobianProbe(plan=object(), structure=object()),
         every_step=True,
     )
 

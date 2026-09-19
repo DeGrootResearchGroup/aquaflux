@@ -48,11 +48,7 @@ from aquaflux.solve import (  # noqa: E402
     equilibrate_cell_major,  # noqa: E402
 )
 from aquaflux.turbulence import hybrid_initialize  # noqa: E402
-from aquaflux.turbulence.coupled import (  # noqa: E402
-    _PROBE_BATCH_SIZE,
-    _batched_jacobian_matvec,
-    _jacobian_matvec,
-)
+from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec
 
 REACH = 3
 #: The arm under test against the uniform control.
@@ -64,13 +60,13 @@ def assembled(coupled, state, plan, n_fields):
     structure = block_stencil_gather_map(plan)
 
     def matvec(v):
-        return _jacobian_matvec(coupled, state, v)
+        return jacobian_matvec(coupled, state, v)
 
     def batched(seeds):
-        return _batched_jacobian_matvec(coupled, state, seeds)
+        return batched_jacobian_matvec(coupled, state, seeds)
 
     return MonolithicAmgPreconditioner._materialize_jacobian(
-        matvec, plan, batched, _PROBE_BATCH_SIZE, structure
+        matvec, plan, batched, PROBE_BATCH_SIZE, structure
     )
 
 

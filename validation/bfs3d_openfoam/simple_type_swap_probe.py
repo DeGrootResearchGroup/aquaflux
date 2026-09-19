@@ -182,12 +182,12 @@ def main() -> None:
     ):
         print(f"\n{'=' * 100}\noperator at {beta_label}\n{'=' * 100}", flush=True)
         pc_beta = max(beta, fsp.FLOOR) if beta > 0 else 0.0
-        op_shift = fsp._frozen_shift_diagonal(base, beta, state) if beta > 0 else 0.0
+        op_shift = fsp.frozen_shift_diagonal(base, beta, state) if beta > 0 else 0.0
 
         t0 = time.time()
         jacobian = fsp.materialize(coupled, state, plan, structure, n_fields)
         pc_shift = (
-            fsp._frozen_shift_diagonal(base, pc_beta, state)
+            fsp.frozen_shift_diagonal(base, pc_beta, state)
             if pc_beta > 0
             else np.zeros(groups.n_dofs)
         )

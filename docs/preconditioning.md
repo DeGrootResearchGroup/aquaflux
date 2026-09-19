@@ -6,7 +6,7 @@ converge, how to choose between the options, and how to keep one healthy over a 
 
 If you only want the short answer: build
 {class}`~aquaflux.flow.BlockPreconditioner` for a pressure–velocity solve, pass
-{class}`~aquaflux.turbulence.MaterializedJacobian` as the `preconditioner` of a coupled
+{class}`~aquaflux.solve.MaterializedJacobian` as the `preconditioner` of a coupled
 flow-plus-turbulence solve, and read the rest of this page when one of them stops converging.
 
 ```{note}
@@ -84,8 +84,8 @@ inside.
 | --- | --- | --- |
 | A scalar transport or diffusion equation | {func}`~aquaflux.turbulence.scalar_transport_preconditioner` | [Scalar transport](#scalar-transport) |
 | Pressure–velocity flow, on its own | {class}`~aquaflux.flow.BlockPreconditioner` | [Pressure–velocity flow](#pressurevelocity-flow) |
-| Coupled flow and turbulence (`u, v, w, p, k, ω`) | {class}`~aquaflux.turbulence.MaterializedJacobian` with a {class}`~aquaflux.turbulence.FieldSplit` | [Coupled flow and turbulence](#coupled-flow-and-turbulence) |
-| The same coupled system, on a moderate 2D mesh | {class}`~aquaflux.turbulence.MaterializedJacobian` with a {class}`~aquaflux.turbulence.CompleteLu` | [A complete factorization](#a-complete-factorization) |
+| Coupled flow and turbulence (`u, v, w, p, k, ω`) | {class}`~aquaflux.solve.MaterializedJacobian` with a {class}`~aquaflux.solve.FieldSplit` | [Coupled flow and turbulence](#coupled-flow-and-turbulence) |
+| The same coupled system, on a moderate 2D mesh | {class}`~aquaflux.solve.MaterializedJacobian` with a {class}`~aquaflux.solve.CompleteLu` | [A complete factorization](#a-complete-factorization) |
 | Your own linear system | {func}`~aquaflux.solve.solve_linear` | [Using one directly](#using-one-directly) |
 
 ## Scalar transport
@@ -279,8 +279,15 @@ The preconditioner is described by a value and handed to the solve, which builds
 with the pseudo-transient march that uses it and keeps it current as the march moves:
 
 ```python
-from aquaflux.solve import DualTimeLoop, JacobiSmoothed, SimpleSmoothed
-from aquaflux.turbulence import FieldSplit, JacobianProbeSpec, MaterializedJacobian, solve_coupled
+from aquaflux.solve import (
+    DualTimeLoop,
+    FieldSplit,
+    JacobiSmoothed,
+    JacobianProbeSpec,
+    MaterializedJacobian,
+    SimpleSmoothed,
+)
+from aquaflux.turbulence import solve_coupled
 
 preconditioner = MaterializedJacobian(
     FieldSplit(SimpleSmoothed(), JacobiSmoothed()),
@@ -291,10 +298,10 @@ flow, k, omega = solve_coupled(
 )
 ```
 
-A {class}`~aquaflux.turbulence.MaterializedJacobian` settles everything the inverses share:
+A {class}`~aquaflux.solve.MaterializedJacobian` settles everything the inverses share:
 
 - `probe` — how far the probing recovers the Jacobian across the cell graph
-  ({class}`~aquaflux.turbulence.JacobianProbeSpec`). The coupled flow Jacobian is intrinsically
+  ({class}`~aquaflux.solve.JacobianProbeSpec`). The coupled flow Jacobian is intrinsically
   distance-2, because Rhie–Chow damping couples pressure to the neighbour-of-a-neighbour
   ring, so a reach of 3 is the working value. Shortening it does not merely drop small terms: a
   colouring is collision-free only for the pattern it was built at, so an under-reaching probe
@@ -306,11 +313,11 @@ A {class}`~aquaflux.turbulence.MaterializedJacobian` settles everything the inve
   solving at its own.
 
 and its `inverse` chooses how the materialized matrix is inverted: a single
-{class}`~aquaflux.turbulence.MonolithicVCycle` over all six fields
+{class}`~aquaflux.solve.MonolithicVCycle` over all six fields
 ({class}`~aquaflux.solve.MonolithicAmgPreconditioner`, equilibrated and reordered cell-major
 so each cell's six unknowns are adjacent, and taking the incomplete-factorization smoother's
-fill and sweeps), a {class}`~aquaflux.turbulence.FieldSplit`, or a
-{class}`~aquaflux.turbulence.CompleteLu`. To share one preconditioner across several solves —
+fill and sweeps), a {class}`~aquaflux.solve.FieldSplit`, or a
+{class}`~aquaflux.solve.CompleteLu`. To share one preconditioner across several solves —
 the rungs of a Reynolds continuation, say — open a session with
 {func}`~aquaflux.turbulence.open_session` and pass that instead; for a differentiated solve,
 build a frozen step with {func}`~aquaflux.turbulence.coupled_step` and pass it as
@@ -363,7 +370,7 @@ configuration values.
 ### Splitting the fields
 
 The flow saddle and the transported turbulence pair are different kinds of operator, and a
-single hierarchy over both has to compromise. A {class}`~aquaflux.turbulence.FieldSplit`
+single hierarchy over both has to compromise. A {class}`~aquaflux.solve.FieldSplit`
 inverse instead builds a {class}`~aquaflux.solve.FieldSplitAmgPreconditioner`, wrapping a
 {class}`~aquaflux.solve.BlockTriangularFieldSplit`: one inverse for the leading
 `[u, v, w, p]` group, another for the trailing `[k, ω]` group, and one retained coupling
@@ -417,7 +424,7 @@ far more strongly than the reverse, so that is the direction to keep.
 
 ### A complete factorization
 
-A {class}`~aquaflux.turbulence.CompleteLu` inverse builds a
+A {class}`~aquaflux.solve.CompleteLu` inverse builds a
 {class}`~aquaflux.solve.MonolithicLuPreconditioner` instead — a **complete** sparse LU of
 the coupled matrix. On a moderate 2D mesh this is the strongest option available and often
 the fastest overall, because it converges the linear solve in very few iterations. It does
@@ -470,7 +477,7 @@ past a multiple of its early baseline — the direct symptom of a stale precondi
 gates on the residual as well, because the cycle count also rises as the pseudo-transient
 shift falls, and that rise is not staleness.
 
-A {class}`~aquaflux.turbulence.MaterializedJacobian` preconditioner keeps itself current
+A {class}`~aquaflux.solve.MaterializedJacobian` preconditioner keeps itself current
 without a policy. Its session re-preconditions **in place**, so the compiled solve is reused
 rather than retraced: before the first step, after being pointed at a new case with `rebind`,
 before every step for a complete LU, and — once a single inner solve costs `refresh_on_cycles`
@@ -489,6 +496,13 @@ flow, k, omega = solve_coupled(
 )
 ```
 
+
+A laminar flow takes the same preconditioner. {func}`~aquaflux.flow.solve_flow_march` accepts a
+{class}`~aquaflux.solve.MaterializedJacobian` as its `preconditioner` (or a session from
+{func}`~aquaflux.flow.open_flow_session`), inverted by a
+{class}`~aquaflux.solve.CompleteLu` or a {class}`~aquaflux.solve.MonolithicVCycle`. A
+{class}`~aquaflux.solve.FieldSplit` is refused there: a `(u, p)` state is a single group of
+fields, with nothing to split.
 
 {data}`~aquaflux.solve.NO_REFRESH` is the do-nothing policy, and the default.
 

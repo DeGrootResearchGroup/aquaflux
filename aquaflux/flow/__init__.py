@@ -21,10 +21,11 @@ from .continuation import (
     FrozenViscosityVelocityParts,
     MomentumShiftPolicy,
     momentum_continuation,
+    momentum_shift_only_policy,
     momentum_shift_policy,
     reused_flow_solve,
 )
-from .march import flow_march_step, solve_flow_march
+from .march import flow_march_step, open_flow_session, solve_flow_march
 from .measures import FlowMeasures, flow_row_scales
 from .initialization import bernoulli_pressure, laplace_field, potential_flow
 from .mean_velocity import bulk_velocity_flow_solve
@@ -66,7 +67,9 @@ __all__ = [
     "laplace_field",
     "momentum_continuation",
     "momentum_diagonal",
+    "momentum_shift_only_policy",
     "momentum_shift_policy",
+    "open_flow_session",
     "potential_flow",
     "pressure_schur_laplacian",
     "reused_flow_solve",

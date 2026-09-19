@@ -38,10 +38,12 @@ from aquaflux.flow import flow_march_step, momentum_continuation, reused_flow_so
 from aquaflux.flow.block_preconditioner import BlockPreconditioner
 from aquaflux.solve import (
     DEFAULT_GLOBALIZATION,
+    CompleteLu,
     DivergenceGuard,
     DualTimeLoop,
     DualTimeStep,
     Globalization,
+    MaterializedJacobian,
     MonotoneLineSearch,
     PseudoTransientStep,
     RelaxedFarFromRoot,
@@ -49,8 +51,6 @@ from aquaflux.solve import (
 )
 from aquaflux.turbulence import (
     BlockDiagonal,
-    CompleteLu,
-    MaterializedJacobian,
     ScalarShiftPolicy,
     UnpreconditionedScalars,
     coupled_step,

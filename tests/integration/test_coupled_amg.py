@@ -25,12 +25,16 @@ import pytest
 
 pytest.importorskip("petsc4py")
 
-from aquaflux.solve import DualTimeLoop, DualTimeStep, PseudoTransientStep
+from aquaflux.solve import (
+    DualTimeLoop,
+    DualTimeStep,
+    MaterializedJacobian,
+    MonolithicVCycle,
+    PseudoTransientStep,
+)
 from aquaflux.turbulence import (
     BlockDiagonal,
     CoupledRANS,
-    MaterializedJacobian,
-    MonolithicVCycle,
     ScalarTwoLevel,
     coupled_step,
     open_session,

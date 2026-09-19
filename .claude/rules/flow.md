@@ -623,10 +623,7 @@ a control for a solver question: the control had to run on a weaker driver.
   continuity block starts ~0 and every later step reads as an enormous relative increase. Measured
   2026-09-19 on the 24 x 16 channel at Re 200 (`FirstOrderUpwind`, `CompactGreenGauss`, block-SIMPLE
   defaults): from rest it converges in 10 steps. The default `RowScaled()` has no such sensitivity.
-- **Not built, and blocked on `turbulence/coupled.py` still holding generic code** (`turbulence.md`, "Generic
-  machinery does NOT live here"): a laminar **`MaterializedJacobian`** march (complete LU, monolithic
-  V-cycle, field split) — the sessions and the coloured probe take a `CoupledRANS`. `solve_flow_march`
-  supports the block-SIMPLE preconditioner only, and has no `mass_flow` (bulk-velocity) form.
+- **`MaterializedJacobian` march — BUILT 2026-09-19 (#450 stage 2).** `solve_flow_march(preconditioner=MaterializedJacobian(CompleteLu()|MonolithicVCycle()))`, or a session from `open_flow_session`, marches on a monolithic inverse of the materialized `(u, p)` Jacobian. `_FlowProblem` (in `flow/march.py`) supplies the assembler, the graph probe (gradient-sweep cap as `_GradientSweepCap`; default stencil reach 3 — over-reach is exact, only costlier; **the laminar reach was not measured**), **no field groups** (so `FieldSplit` is refused: a `(u, p)` state is one group), the shift-only `momentum_shift_only_policy` (no block preconditioner ⇒ no value-dependent multigrid hierarchy to recompile per rung) and the flow step. `MomentumShiftPolicy` now takes the assembler first and an optional block preconditioner. **Only `CompleteLu` is tested** (CI has no `petsc4py`, which `MonolithicVCycle` needs). `solve_flow_march` still has no `mass_flow` (bulk-velocity) form.
 - The issue's motivating case (the Re_Dh 50 tetrahedral duct that did not converge under a hand-rolled
   `newton_march`) has **not** been re-run on this march — that harness was never committed. Whether that
   failure was the flow-only path's configuration or a genuine gap is still open; this change makes it

@@ -94,14 +94,8 @@ def main() -> None:
     import jax.numpy as jnp
     from aquaflux.solve import MonolithicAmgPreconditioner, block_stencil_gather_map
     from aquaflux.turbulence import hybrid_initialize
-    from aquaflux.turbulence.coupled import (
-        _PROBE_BATCH_SIZE,
-        _batched_jacobian_matvec,
-        _coupled_jacobian_plan,
-        _coupled_shift_policy,
-        _jacobian_matvec,
-        coupled_scaled_norm,
-    )
+    from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy, coupled_scaled_norm
+    from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec
 
     coupled = compare.build_case()["coupled"].with_scaled_molecular_viscosity(scale)
     flow, k, omega = hybrid_initialize(coupled.momentum, coupled.turbulence)
@@ -124,10 +118,10 @@ def main() -> None:
     plan = _coupled_jacobian_plan(coupled, REACH)
     structure = block_stencil_gather_map(plan)
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
-        lambda v: _jacobian_matvec(coupled, state, v),
+        lambda v: jacobian_matvec(coupled, state, v),
         plan,
-        lambda seeds: _batched_jacobian_matvec(coupled, state, seeds),
-        _PROBE_BATCH_SIZE,
+        lambda seeds: batched_jacobian_matvec(coupled, state, seeds),
+        PROBE_BATCH_SIZE,
         structure,
     )
     csr, r = jacobian.tocsr(), np.asarray(residual)

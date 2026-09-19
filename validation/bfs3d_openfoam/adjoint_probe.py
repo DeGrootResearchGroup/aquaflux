@@ -54,13 +54,8 @@ sys.path.insert(0, str(CASE.parents[1]))
 
 import compare  # noqa: E402
 from aquaflux.solve import LinearSolveSettings, Convergence, relative_residual_gmres  # noqa: E402
-from aquaflux.turbulence import (
-    FieldSplit,
-    JacobianProbeSpec,
-    MaterializedJacobian,
-    coupled_step,
-    solve_coupled,
-)
+from aquaflux.turbulence import coupled_step, solve_coupled
+from aquaflux.solve import FieldSplit, JacobianProbeSpec, MaterializedJacobian
 from field_split_probe import STATES, load_state  # noqa: E402
 
 #: Newton steps allowed per objective evaluation. ⚠️ NOT "one or two": from a converged root at beta = 0

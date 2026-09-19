@@ -57,11 +57,8 @@ from aquaflux.solve import (  # noqa: E402
     symmetrically_equilibrate,
 )
 from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
-from aquaflux.turbulence.coupled import (  # noqa: E402
-    _coupled_jacobian_plan,
-    _coupled_shift_policy,
-    _frozen_shift_diagonal,
-)
+from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy
+from aquaflux.solve import frozen_shift_diagonal
 from field_split_probe import FLOOR, STATES, load_state, materialize  # noqa: E402
 from jax.experimental.sparse import BCOO  # noqa: E402
 
@@ -404,7 +401,7 @@ def main() -> None:
     structure = block_stencil_gather_map(plan)
     base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     jacobian = materialize(coupled, state, plan, structure, n_fields)
-    shift = _frozen_shift_diagonal(base, pc_beta, state) if pc_beta > 0 else np.zeros(groups.n_dofs)
+    shift = frozen_shift_diagonal(base, pc_beta, state) if pc_beta > 0 else np.zeros(groups.n_dofs)
     block = trailing_block(MonolithicAmgPreconditioner._shifted(jacobian, shift), groups)
     del jacobian
     gc.collect()
