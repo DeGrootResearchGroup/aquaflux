@@ -12,9 +12,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from aquaflux.radiation.absorption import UniformAbsorption, VoxelAbsorption
 from aquaflux.radiation.gather import fluence_rate, irradiance
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian
+from aquaflux.radiation.subdivide import refine_for_receivers
 from aquaflux.radiation.surfaces import Surfaces
+from scipy.special import expn
 
 from tests.unit.radiation_references import (
     cylinder_triangles,
@@ -429,3 +432,129 @@ def test_the_gradient_reaches_every_vertex_of_every_facet():
     assert jacobian.shape == facet.shape
     assert bool(jnp.all(jnp.isfinite(jacobian)))
     assert float(jnp.min(jnp.abs(jacobian).sum(axis=(1, 2)))) > 0.0
+
+
+# ---------------------------------------------------------------------------------------
+# Absorbing media
+# ---------------------------------------------------------------------------------------
+
+
+def test_a_uniform_medium_attenuates_a_point_source_exactly():
+    radii = np.array([0.5, 1.0, 3.0])
+    points = np.stack([radii, np.zeros_like(radii), np.zeros_like(radii)], axis=1)
+    coefficient = 0.7
+    measured = np.asarray(
+        fluence_rate(
+            point_source([0.0, 0.0, 0.0]), points, absorption=UniformAbsorption(coefficient)
+        )
+    )
+    expected = POWER / (4.0 * np.pi * radii**2) * np.exp(-coefficient * radii)
+    np.testing.assert_allclose(measured, expected, rtol=1e-14)
+
+
+def test_a_transparent_medium_is_the_vacuum_field():
+    """A zero coefficient must reproduce the vacuum answer exactly, not merely closely."""
+    probes = np.array([[1.0, 0.5, 0.25], [2.0, 0.0, 0.0]])
+    source = point_source([0.0, 0.0, 0.0])
+    np.testing.assert_allclose(
+        np.asarray(fluence_rate(source, probes, absorption=UniformAbsorption(0.0))),
+        np.asarray(fluence_rate(source, probes)),
+        rtol=1e-15,
+    )
+
+
+def test_a_constant_graded_medium_agrees_with_the_closed_form_one_through_the_gather():
+    """The two strategies are interchangeable where they describe the same medium, so a
+    bookkeeping error in the expensive one shows up against the cheap one."""
+    probes = np.array([[1.0, 0.5, 0.25], [2.0, 0.0, 0.0]])
+    source = point_source([0.0, 0.0, 0.0])
+    coefficient = 0.9
+    graded = VoxelAbsorption(
+        np.full((5, 5, 5), coefficient), origin=[-3.0, -3.0, -3.0], spacing=[1.5, 1.5, 1.5]
+    )
+    np.testing.assert_allclose(
+        np.asarray(fluence_rate(source, probes, absorption=graded)),
+        np.asarray(fluence_rate(source, probes, absorption=UniformAbsorption(coefficient))),
+        rtol=1e-12,
+    )
+
+
+@pytest.mark.parametrize("depth", [0.2, 0.5, 2.0])
+def test_a_diffuse_wall_in_an_absorbing_medium_gives_the_exponential_integrals(depth):
+    """Case 5, and the case whose two answers are most often swapped.
+
+    A Lambertian wall of exitance ``M`` seen through an absorbing medium gives
+    ``G = 2 M E_2(kappa x)`` and ``E = 2 M E_3(kappa x)``. ⚠️ **It is not**
+    ``exp(-kappa x)``: that is the collimated result, and quoting it for a diffuse wall is the
+    standard error, because every ray but the axial one travels a longer slant path.
+
+    One probe is at ``kappa x = 2`` deliberately. At small optical depth
+    ``exp(-t) ~ 1 - t`` and the exponential integrals are close to it, so a shallow sweep
+    cannot tell the two apart.
+
+    The disc is refined against the probes before the gather rather than built fine: near the
+    axis a uniform disc has facets wider than their distance to the receiver, and no amount of
+    extra radius fixes that. Refining brings the error from 2% to below 2e-3, which is also a
+    demonstration that the criterion does what it claims.
+    """
+    exitance, coefficient = 3.0, 2.0
+    probe = np.array([[0.0, 0.0, depth / coefficient]])
+    coarse = Surfaces.from_triangles(disc_triangles(6.0, rings=60, sectors=96), emission=exitance)
+    wall, _ = refine_for_receivers(coarse, probe, max_ratio=0.25, max_levels=7)
+    medium = UniformAbsorption(coefficient)
+
+    measured_fluence = float(fluence_rate(wall, probe, absorption=medium)[0])
+    measured_irradiance = float(
+        irradiance(wall, probe, np.array([[0.0, 0.0, -1.0]]), absorption=medium)[0]
+    )
+    assert measured_fluence == pytest.approx(2.0 * exitance * expn(2, depth), rel=3e-3)
+    assert measured_irradiance == pytest.approx(2.0 * exitance * expn(3, depth), rel=3e-3)
+
+
+@pytest.mark.parametrize(
+    ("depth", "fluence_ratio", "irradiance_ratio"), [(0.1, 0.80, 0.920), (2.0, 0.28, 0.445)]
+)
+def test_the_diffuse_and_collimated_answers_differ_by_a_published_ratio(
+    depth, fluence_ratio, irradiance_ratio
+):
+    """Pins which quantity each published ratio belongs to.
+
+    Against the collimated ``exp(-kappa x)``, the diffuse wall's fluence rate is 0.80 of it at
+    an optical depth of 0.1 and 0.28 at 2 — while the *irradiance* ratios at the same depths
+    are 0.920 and 0.445. Quoting one set for the other is a factor of one and a half at depth,
+    and both numbers look plausible.
+    """
+    assert expn(2, depth) / np.exp(-depth) == pytest.approx(fluence_ratio, abs=5e-3)
+    assert 2.0 * expn(3, depth) / np.exp(-depth) == pytest.approx(irradiance_ratio, abs=5e-3)
+
+
+def test_the_gather_is_differentiable_in_a_uniform_absorption_coefficient():
+    """The sensitivity of a dose to water quality, which is a question a plant operator asks."""
+    source = point_source([0.0, 0.0, 0.0])
+    probes = np.array([[1.0, 0.0, 0.0], [2.0, 0.5, 0.0]])
+
+    def total(coefficient):
+        return jnp.sum(fluence_rate(source, probes, absorption=UniformAbsorption(coefficient)))
+
+    step = 1e-6
+    finite_difference = (float(total(0.5 + step)) - float(total(0.5 - step))) / (2.0 * step)
+    assert float(jax.grad(total)(jnp.asarray(0.5))) == pytest.approx(finite_difference, rel=1e-7)
+
+
+def test_the_gather_is_differentiable_in_a_graded_absorbance_field():
+    """Cell by cell, which is what an inverse problem for water quality needs."""
+    source = point_source([0.0, 0.0, 0.0])
+    probes = np.array([[1.0, 0.0, 0.0]])
+    origin, spacing = [-3.0, -3.0, -3.0], [1.5, 1.5, 1.5]
+    base = np.full((5, 5, 5), 0.6)
+
+    def total(coefficient):
+        medium = VoxelAbsorption(coefficient, origin, spacing)
+        return jnp.sum(fluence_rate(source, probes, absorption=medium))
+
+    jacobian = jax.grad(total)(jnp.asarray(base))
+    assert jacobian.shape == (5, 5, 5)
+    assert bool(jnp.all(jnp.isfinite(jacobian)))
+    # Every cell the ray crosses must show a negative sensitivity: more absorbance, less light.
+    assert float(jnp.min(jacobian)) < 0.0
+    assert float(jnp.max(jacobian)) <= 0.0

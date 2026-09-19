@@ -22,7 +22,8 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `checks.py` — build-time geometry checks | **BUILT** |
 | `subdivide.py` — the width-over-distance refinement | **BUILT** |
 | `profiles.py` — `Isotropic`, `Lambertian`, `CosinePower` | **BUILT** |
-| `gather.py` — the vacuum `fluence_rate` and `irradiance` | **BUILT** |
+| `gather.py` — `fluence_rate` and `irradiance` | **BUILT** |
+| `absorption.py` — `UniformAbsorption`, `VoxelAbsorption` | **BUILT** |
 | the radiosity system | Not yet built |
 | Beer–Lambert optical depth, voxel-grid traversal | Not yet built |
 | occlusion against the surface triangles | Not yet built |
@@ -277,6 +278,66 @@ above — so a source's position is free to move under a gradient.
 - **Relative error is second order in facet width over distance; absolute error is fourth.**
   Same statement, and an easy one to quote by mistake — the first version of that test asserted
   the second-order ratio against absolute errors and failed.
+
+## Optical depth: exact, not marched — and three details make it so
+
+`UniformAbsorption` is `tau = a r`, which is the field's own standard treatment rather than a
+simplification. `VoxelAbsorption` carries a graded coefficient and walks the grid.
+
+**Walking the cells is not ray marching.** Marching takes fixed steps and holds the coefficient
+constant across each, which systematically overestimates the surviving fraction by Jensen's
+inequality and shrinks only as the step does. Walking the real boundaries finds every crossing,
+leaving only the field's own representation error — and it deletes a convergence parameter,
+since there is no step size to choose.
+
+Three details, each of which cost a debugging round to find:
+
+1. **⚠️ CUT ON THE SAMPLE PLANES, NOT THE CELL FACES.** They are half a cell apart. The
+   interpolated field is a separate cubic between neighbouring samples, so a piece that
+   straddles a sample plane straddles a kink and no quadrature rule saves it. Measured on a
+   linear field with a known closed form: **0.43% wrong** cutting on faces, **exact** cutting on
+   sample planes. That size of error is the worst kind — large enough to matter, small enough to
+   read as discretization.
+2. **⚠️ GENERATE CUTS ONLY AT PLANES THAT CARRY SAMPLES, AT BOTH ENDS.** Beyond the outermost
+   sample the field is clamped and has no further kinks. Cutting on the infinite lattice spends
+   the fixed step budget outside the grid, and a segment reaching well past the grid exhausts it
+   and **silently loses its tail** — which reads as weaker absorption, not as a bug. Both ends
+   matter: a segment starting far outside meets its first real plane a long way in.
+3. **Simpson's rule per piece, and it is exact.** A trilinear field along a straight line is a
+   cubic in the path parameter, and Simpson integrates cubics exactly. So the optical depth is
+   the exact integral of the interpolated field, not a quadrature of it — verified to 1e-12
+   against fine quadrature of the same interpolant, for segments inside, straddling, outside,
+   axis-aligned, reversed and degenerate.
+
+**Interpolate, never nearest-cell.** A nearest-cell lookup is piecewise constant in position, so
+its derivative is zero almost everywhere and undefined on the faces — a staircase in a path the
+module promises gradients through. Outside the samples the value is **clamped**, so a segment
+straying past the edge attenuates like the water at the edge rather than like vacuum.
+
+**No clamp on the optical depth.** In double precision `exp(-tau)` reaches zero near `tau = 745`,
+where zero is correct and is what is returned. A clamp would buy nothing and would flatten
+`dG/da` across a whole region.
+
+**The absorbance grid need not match the flow mesh, and usually should not.** A segment's cost is
+the fixed `nx + ny + nz + 1` steps, so a coarse absorbance grid over a fine flow mesh is cheaper
+and no less accurate — absorbance varies far more smoothly than velocity.
+
+⚠️ **Attenuation is taken along the facet CENTROID's path.** A facet wide enough for its far
+corner to sit at a different optical depth is attenuated as though it were not. Same remedy as
+for the emission assumption: the refinement criterion. On the Beer–Lambert slab a uniform disc is
+**2% wrong** near the axis and no extra radius fixes it; refining against the probes brings it
+under 2e-3.
+
+## The slab case pins which exponential integral is which
+
+A Lambertian wall through an absorbing medium gives `G = 2 M E_2(kappa x)` and
+`E = 2 M E_3(kappa x)` — **not** `exp(-kappa x)`, which is the collimated result. Against
+collimated, the *fluence-rate* ratios are 0.80 at `kappa x = 0.1` and 0.28 at 2; the *irradiance*
+ratios at the same depths are 0.920 and 0.445. Quoting one set for the other is a factor of one
+and a half at depth and both look plausible, so the test pins each to its quantity.
+
+Sweep to `kappa x >= 2`. At small optical depth `exp(-t) ~ 1 - t` and the exponential integrals
+sit close to it, so a shallow sweep cannot separate them.
 
 ## Documentation
 
