@@ -27,7 +27,8 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `occluders.py` — `Cylinder`, `HalfSpace` | **BUILT** |
 | `visibility.py` — the frozen shadow mask | **BUILT** |
 | `triangles.py` — watertight ray-triangle intersection | **BUILT** |
-| the radiosity system | Not yet built |
+| `radiosity.py` — the surface interreflection system | **BUILT** |
+
 | Beer–Lambert optical depth, voxel-grid traversal | Not yet built |
 
 
@@ -448,6 +449,83 @@ moves no distance by more than 0.0. It is needed when the determinant's sign dri
 culling; this module culls with the facet normal instead. It was carried at first, and its mutation
 was the one that came back green — the right conclusion there was to delete the code, not to add a
 test for behaviour that does not exist.
+
+## The surface system: what is exact, what is not, and by how much
+
+`(I - diag(rho) F) B = M + rho * ((F^M - F) M + H_external)`, solved matrix-free. **The bounce
+count is not a parameter** — the inverse is the infinite bounce sum. Verified against an explicit
+Neumann series: 200 terms agree to 1e-10, one term is wrong by more than 100%.
+
+**Exact, and gate on these:**
+
+- **Row sums are 1 to about 1e-15** at every refinement. That is what bounds `spec(rho F)` by the
+  largest reflectance and makes the system well conditioned. `row_sum_error` reports it.
+- **`B = M/(1-rho)` on a uniform closed box, to 1e-12, at rho = 0.9** — where a single bounce
+  gives 1.9 against 10, so nothing that truncates can pass.
+- **A Lambertian source's energy balances exactly** — total landing equals total leaving,
+  1.000000 at every refinement.
+
+⚠️ **NOT exact, and neither of these converges — say the number rather than the assumption:**
+
+- **Reciprocity.** The source is integrated exactly; the *receiver* is evaluated at its centroid.
+  That one-point rule leaves `reciprocity_residual` at **0.2421 on a closed box at 12, 48, 192,
+  432 and 768 facets alike** — refinement does not help, because shrinking facets bring their
+  neighbours proportionally closer and the geometry stays self-similar. It is a **diagnostic, not
+  a gate**.
+- **Global energy conservation follows reciprocity, so it is not exact either — but it is far
+  better than the per-pair figure suggests.** Per column, `sum_i A_i F_ij = A_j` is violated by up
+  to **8.9%**; summed over an enclosure those errors carry mixed signs and cancel, giving
+  absorbed/emitted of 1.000000 / 0.999868 / 1.000112 / 1.000083 / 1.000062 on the same boxes. So
+  the field is conservative to about **one part in ten thousand** while any single nearby pair may
+  exchange a quarter more or less than it should.
+- **A non-Lambertian source's energy does not balance**, because its profile is evaluated at the
+  centroid direction too: a cosine-power exponent of 8 gives 1.145 / 0.970 / 0.970 / 0.981 at 12 /
+  48 / 192 / 768 facets, an exponent of 2 gives 1.069 / 1.007 / 0.995 / 0.995. This one *does*
+  shrink with refinement, since more directions get sampled.
+
+Fixing the first two needs quadrature over the receiving facet as well, which costs another factor
+in the `n^2` build. That is the open trade.
+
+⚠️ **`reciprocity_residual` is normalized by the LARGEST entry, not per pair.** Two facets of the
+same flat wall transfer nothing and hold values around 1e-18; a per-pair relative measure turns
+that rounding noise into a residual of 0.97 while those pairs carry, measured, 0.0000 of the total
+transfer. The first version did exactly that and reported ~1.0 on a healthy matrix.
+
+## ⚠️ THE STOPPING RULE IS CHOSEN, NOT DEFAULTED
+
+A componentwise relative test asks every residual entry to fall below `rtol` times *its own*
+right-hand side. Most facets do not emit — a lamp is a handful among walls — so most of that side
+is exactly zero and the demand becomes unsatisfiable. Measured on a lamp-in-a-dark-box fixture:
+stock `lx.GMRES(rtol=1e-10, atol=0.0)` **fails outright**, while the global relative test
+converges in 3 restart cycles.
+
+⚠️ What that does *not* show: the same stock solver with a **non-zero** `atol` agrees to 4e-14 on
+the same scene. The componentwise rule is then quietly an absolute tolerance — wrong in a way that
+scales with the problem rather than one that raises. Only the degenerate case is pinned.
+
+**Every fixture that emits everywhere is the wrong shape for this class of question.** The
+lamp-in-a-dark-box fixture exists because the all-emitting boxes could not see the defect at all.
+
+## The frozen/live split, and the two ways it has been got wrong
+
+Frozen at build: the projected solid angles, the source-side cosines, the centroid separations,
+the occlusion mask — all `n^2`. Live per call: reflectance, emission, power, profile parameters,
+occluder transmittance, absorption coefficient.
+
+Both failures leave a finite, plausible number behind rather than a NaN or a zero:
+
+- freezing the whole of `F` costs a few percent of `dG/da`;
+- freezing the visibility inside the geometry term costs about two thirds of `dG/dt`.
+
+The rule: **anything promised a gradient is computed OUTSIDE the frozen arrays**, as an
+elementwise multiply against them. A uniform absorption coefficient goes through
+`exp(-a * frozen_separation)` in closed form, so no geometry is revisited; any other `Absorption`
+re-walks every pair on every call, which is correct and costs the `n^2` build again.
+
+**The adjoint is an implicit solve, not the iteration replayed.** Pinned by varying the restart
+length — 2 against 120 gives 47 cycles against 3 on the same problem — and asserting the
+gradients agree to 1e-8. The step counts are asserted to differ, or the test compares a
+configuration against itself.
 
 ## Documentation
 

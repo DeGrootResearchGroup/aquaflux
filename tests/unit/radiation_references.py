@@ -189,3 +189,19 @@ def finite_line_fluence_rate(power_per_length: float, half_length: float, radius
     """
     alpha = np.arctan(half_length / radius)
     return power_per_length * (2.0 * alpha) / (4.0 * np.pi * radius)
+
+
+def inward_box(divisions: int = 2) -> np.ndarray:
+    """A closed unit box triangulated ``divisions`` per face, wound to face **inward**.
+
+    :func:`box_enclosure` deliberately leaves its windings inconsistent, which is what makes it
+    a good fixture for a kernel that must not depend on them. A surface set derives its normals
+    *from* the winding, so anything that reasons about which way a facet faces needs this
+    version instead: every triangle's right-hand-rule normal points into the box.
+    """
+    vertices, inward, _ = box_enclosure(divisions)
+    derived = np.cross(vertices[:, 1] - vertices[:, 0], vertices[:, 2] - vertices[:, 0])
+    facing_out = np.sum(derived * inward, axis=1) < 0.0
+    corrected = vertices.copy()
+    corrected[facing_out] = corrected[facing_out][:, ::-1, :]
+    return corrected
