@@ -14,9 +14,9 @@ nearest receiver; the angular distributions a source emits with; the gather that
 at every receiver to give the fluence rate and the irradiance; and the absorbing medium between
 them, uniform in closed form or graded on a grid and integrated exactly along each path; and the
 solid bodies that stand in the way — analytic primitives whose transmittance stays live, and the
-emitting surface's own triangles, which let a bent duct shadow itself.
-
-Still to come: the reflection system that closes diffuse interreflection between surfaces.
+emitting surface's own triangles, which let a bent duct shadow itself; and the surface system
+that closes diffuse interreflection between facets to convergence, so the number of bounces is
+not a parameter.
 """
 
 from __future__ import annotations
@@ -32,6 +32,14 @@ from aquaflux.radiation.checks import (
 from aquaflux.radiation.gather import fluence_rate, irradiance
 from aquaflux.radiation.occluders import Cylinder, HalfSpace, Occluder
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian, Profile
+from aquaflux.radiation.radiosity import (
+    TransferMatrix,
+    build_transfer,
+    radiosity,
+    reciprocity_residual,
+    row_sum_error,
+    surface_irradiance,
+)
 from aquaflux.radiation.solid_angle import projected_solid_angle, solid_angle
 from aquaflux.radiation.stl import TriangleSoup, read_stl
 from aquaflux.radiation.subdivide import Subdivision, refine_for_receivers, subdivide_to_width
@@ -50,22 +58,28 @@ __all__ = [
     "Profile",
     "Subdivision",
     "Surfaces",
+    "TransferMatrix",
     "TriangleSoup",
     "UniformAbsorption",
     "Visibility",
     "VoxelAbsorption",
     "WindingReport",
+    "build_transfer",
     "build_visibility",
     "check_profiles",
     "check_winding",
     "fluence_rate",
     "irradiance",
     "projected_solid_angle",
+    "radiosity",
     "read_stl",
+    "reciprocity_residual",
     "refine_for_receivers",
+    "row_sum_error",
     "segment_is_cut",
     "solid_angle",
     "stored_normal_disagreement",
     "subdivide_to_width",
+    "surface_irradiance",
     "winding_report",
 ]
