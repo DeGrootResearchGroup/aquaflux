@@ -3,6 +3,12 @@
 Occlusion enters the gather as one more factor on each source-receiver term, and it is built in
 two halves because the halves behave completely differently.
 
+The bodies are of two kinds, stored separately. **Analytic primitives** — a sleeve, a baffle —
+each carry their own transmittance, so each needs its own layer of the mask. **The emitting
+surface's own triangles** are the reactor's walls and are opaque, so they collapse into one layer
+with no transmittance to carry. That second kind is what lets a bent duct shadow itself, which no
+primitive can express because the geometry doing the blocking *is* the emitting surface.
+
 **Whether a body lies across a segment is a hard yes or no, fixed by geometry.** It is computed
 once, when the model is built, and stored. It has no derivative worth having: move an occluder
 by a hair and nothing changes until a shadow edge sweeps past a receiver, at which point the
@@ -30,6 +36,8 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 
+from aquaflux.radiation.triangles import segment_is_cut
+
 __all__ = ["Visibility", "build_visibility"]
 
 
@@ -42,6 +50,11 @@ class Visibility(eqx.Module):
         Whether each body lies across the segment from each facet to each receiver.
     receivers : jnp.ndarray, shape ``(n_receivers, 3)``
         The receiver positions this mask was built for.
+    blocked_by_geometry : jnp.ndarray of bool, shape ``(n_receivers, n_facets)``
+        Whether the emitting surface's **own triangles** stand between each facet and each
+        receiver. Kept apart from :attr:`blocked` because it carries no transmittance: the
+        surface set is the reactor's walls and bodies, and those are opaque. A partly
+        transmitting body belongs in :attr:`blocked`, as an analytic primitive.
 
     Notes
     -----
@@ -53,6 +66,7 @@ class Visibility(eqx.Module):
 
     blocked: jnp.ndarray
     receivers: jnp.ndarray
+    blocked_by_geometry: jnp.ndarray
 
     @property
     def n_occluders(self) -> int:
@@ -75,7 +89,7 @@ class Visibility(eqx.Module):
             jnp.asarray(transmittance, dtype=float), (self.n_occluders,)
         )
         attenuation = 1.0 - self.blocked * (1.0 - transmittance[:, None, None])
-        return jnp.prod(attenuation, axis=0)
+        return jnp.prod(attenuation, axis=0) * ~self.blocked_by_geometry
 
     def for_receivers(self, points) -> jnp.ndarray:
         """Check that ``points`` are the receivers this mask was built for, and return it.
@@ -102,8 +116,10 @@ def build_visibility(
     surfaces,
     points,
     *,
+    self_occlusion: bool = True,
     offset_scale: float = 1e-6,
     chunk_size: int = 4096,
+    work_limit: int = 4_000_000,
 ) -> Visibility:
     """Work out, once, which bodies lie between which sources and which receivers.
 
@@ -114,7 +130,8 @@ def build_visibility(
     Parameters
     ----------
     occluders : sequence of Occluder
-        The bodies. An empty sequence gives a mask that blocks nothing.
+        The analytic bodies. An empty sequence is fine; the surface's own triangles are handled
+        separately.
     surfaces : Surfaces
         The emitting set; segments start at facet centroids.
     points : array_like, shape ``(n_receivers, 3)``
@@ -126,8 +143,17 @@ def build_visibility(
         same thing on a reactor in metres and a lamp in millimetres. A fixed epsilon fails at
         both ends: too small and a facet shadows itself, too large and light leaks past a body
         that should stop it.
+    self_occlusion : bool, optional
+        Whether the emitting surface's own triangles block light. **On by default**: a surface
+        that does not shadow itself is the defect this module exists to fix, and a mask silently
+        missing it looks exactly like one that includes it. Turn it off only for a scene known
+        to be convex, where the source-side cosine clamp is already the exact visibility test
+        and is cheaper.
     chunk_size : int, optional
         Receivers per pass, bounding the peak memory of the build.
+    work_limit : int, optional
+        Ray-by-triangle entries per pass of the self-occlusion test, which is what bounds its
+        memory and, through that, its speed.
 
     Returns
     -------
@@ -143,11 +169,6 @@ def build_visibility(
     points = jnp.asarray(points, dtype=float)
     occluders = tuple(occluders)
     n_receivers, n_facets = points.shape[0], surfaces.n_facets
-
-    if not occluders:
-        return Visibility(
-            blocked=jnp.zeros((0, n_receivers, n_facets), dtype=bool), receivers=points
-        )
 
     for index, body in enumerate(occluders):
         for name, position in (("facet", surfaces.centroid), ("receiver", points)):
@@ -165,12 +186,41 @@ def build_visibility(
     # area and no surface to shadow itself with, so it needs no exclusion.
     near = offset_scale * jnp.sqrt(surfaces.area)
 
-    rows = []
+    facet_index = jnp.arange(n_facets)
+
+    primitive_rows, geometry_rows = [], []
     for start in range(0, n_receivers, chunk_size):
         receivers = points[start : start + chunk_size]
+        rays = receivers.shape[0]
         origin = surfaces.centroid[None, :, :]
         target = receivers[:, None, :]
-        rows.append(
-            jnp.stack([body.blocks(origin, target, near[None, :]) for body in occluders], axis=0)
-        )
-    return Visibility(blocked=jnp.concatenate(rows, axis=1), receivers=points)
+        if occluders:
+            primitive_rows.append(
+                jnp.stack(
+                    [body.blocks(origin, target, near[None, :]) for body in occluders], axis=0
+                )
+            )
+        if self_occlusion:
+            flat = (rays * n_facets, 3)
+            geometry_rows.append(
+                segment_is_cut(
+                    jnp.broadcast_to(origin, (rays, n_facets, 3)).reshape(flat),
+                    jnp.broadcast_to(target, (rays, n_facets, 3)).reshape(flat),
+                    surfaces.vertices,
+                    jnp.broadcast_to(near, (rays, n_facets)).reshape(-1),
+                    exclude=jnp.broadcast_to(facet_index, (rays, n_facets)).reshape(-1),
+                    work_limit=work_limit,
+                ).reshape(rays, n_facets)
+            )
+
+    blocked = (
+        jnp.concatenate(primitive_rows, axis=1)
+        if occluders
+        else jnp.zeros((0, n_receivers, n_facets), dtype=bool)
+    )
+    by_geometry = (
+        jnp.concatenate(geometry_rows, axis=0)
+        if self_occlusion
+        else jnp.zeros((n_receivers, n_facets), dtype=bool)
+    )
+    return Visibility(blocked=blocked, receivers=points, blocked_by_geometry=by_geometry)
