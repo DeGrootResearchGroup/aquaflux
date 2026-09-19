@@ -30,6 +30,8 @@ static tuple and leaves the geometry free to move.
 
 from __future__ import annotations
 
+import dataclasses
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -321,12 +323,33 @@ class Surfaces(eqx.Module):
         values = np.array([by_solid.get(name, default) for name in self.solid_names], dtype=float)
         return jnp.asarray(values)[self.solid_id]
 
-    def with_optics(self, *, emission=None, power=None, reflectance=None) -> Surfaces:
+    def with_optics(
+        self, *, emission=None, power=None, reflectance=None, profiles=None, profile_index=None
+    ) -> Surfaces:
         """A copy carrying different optical properties and the same geometry.
 
         The geometry is what a build freezes and the optics are what a study varies, so
         replacing the latter is the common edit. Substituting only the fields given keeps the
         derived geometry consistent by never touching it.
+
+        Parameters
+        ----------
+        emission, power, reflectance : array_like, optional
+            Per-facet values, broadcast to ``(n_facets,)``.
+        profiles : tuple of Profile, optional
+            A new catalogue of angular distributions. Supplying one without ``profile_index``
+            is only meaningful when it holds a single profile, which is then given to every
+            facet — that is how a set is re-read as purely Lambertian, which is what the
+            *reflected* part of a radiosity solution leaves with whatever the source emitted
+            like.
+        profile_index : array_like of int, optional
+            Which entry of ``profiles`` each facet uses.
+
+        Raises
+        ------
+        ValueError
+            If ``profiles`` is given without ``profile_index`` and holds more than one entry,
+            leaving the existing indices pointing into a catalogue that has changed under them.
         """
         replacements = {
             "emission": emission,
@@ -339,4 +362,28 @@ class Surfaces(eqx.Module):
                 continue
             spread = jnp.broadcast_to(jnp.asarray(value, dtype=float), (self.n_facets,))
             updated = eqx.tree_at(lambda s, n=name: getattr(s, n), updated, spread)
-        return updated
+        if profiles is None and profile_index is None:
+            return updated
+        if profiles is not None and profile_index is None:
+            if len(profiles) != 1:
+                msg = (
+                    f"profiles has {len(profiles)} entries and no profile_index was given; the "
+                    "existing indices would point into a different catalogue. Pass both."
+                )
+                raise ValueError(msg)
+            profile_index = np.zeros(self.n_facets, dtype=int)
+        index = np.asarray(profile_index, dtype=int)
+        catalogue = self.profiles if profiles is None else tuple(profiles)
+        if index.shape != (self.n_facets,):
+            msg = f"profile_index must be ({self.n_facets},); got {index.shape}"
+            raise ValueError(msg)
+        if len(catalogue) and (index.min() < 0 or index.max() >= len(catalogue)):
+            msg = (
+                f"profile_index runs from {index.min()} to {index.max()}, outside the "
+                f"{len(catalogue)} profiles given"
+            )
+            raise ValueError(msg)
+        # Replacing the catalogue changes the pytree's structure when its length changes, which
+        # is past what tree_at substitutes, so the whole record is rebuilt instead. Every other
+        # field is carried across by reference, so the geometry is shared rather than recomputed.
+        return dataclasses.replace(updated, profiles=catalogue, profile_index=jnp.asarray(index))

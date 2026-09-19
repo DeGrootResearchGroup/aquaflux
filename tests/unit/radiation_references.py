@@ -9,6 +9,7 @@ implementation whose values are recorded rather than imported, for the reason gi
 from __future__ import annotations
 
 import numpy as np
+from aquaflux.radiation.surfaces import Surfaces
 
 #: View factors between two identical, directly opposed, parallel unit squares, computed by
 #: **pyviewfactor 1.1.0** (MIT licence) on 2026-09-18, mapping separation ``d/L`` to ``F``.
@@ -205,3 +206,19 @@ def inward_box(divisions: int = 2) -> np.ndarray:
     corrected = vertices.copy()
     corrected[facing_out] = corrected[facing_out][:, ::-1, :]
     return corrected
+
+
+def box(divisions: int = 2, **optics) -> Surfaces:
+    """A closed unit box as a surface set, inward-facing."""
+    return Surfaces.from_triangles(inward_box(divisions), **optics)
+
+
+def stretched_box(divisions: int = 2, **optics) -> Surfaces:
+    """A closed box whose facets do **not** all have the same area.
+
+    Stretching the unit box along one axis is affine and positive, so it stays closed and stays
+    consistently wound, but its long walls carry triangles three times the area of its ends.
+    Every equal-area fixture is blind to which index of the transfer matrix an area belongs on,
+    because both choices are then the same expression.
+    """
+    return Surfaces.from_triangles(inward_box(divisions) * np.array([1.0, 1.0, 3.0]), **optics)

@@ -103,7 +103,7 @@ class TriangleQuadrature(eqx.Module):
 
         ⚠️ **Not the factor it multiplies a transfer build by** — that is much smaller, because
         the extra points reuse geometry the build has already loaded. See
-        :func:`~aquaflux.radiation.radiosity.build_transfer` for the measured figures.
+        :func:`~aquaflux.radiation.transfer.build_transfer` for the measured figures.
         """
         return len(self.weight)
 

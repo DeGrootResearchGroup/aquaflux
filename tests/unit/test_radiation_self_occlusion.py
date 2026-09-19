@@ -5,7 +5,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.radiation.gather import fluence_rate
+from aquaflux.radiation.gather import direct_fluence_rate
 from aquaflux.radiation.occluders import Cylinder
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.triangles import segment_is_cut
@@ -142,17 +142,17 @@ def test_a_panel_of_the_same_surface_shadows_what_is_behind_it():
 
     shadowed = build_visibility([], surfaces, behind)
     clear = build_visibility([], surfaces, past_the_edge)
-    assert float(fluence_rate(surfaces, behind, visibility=shadowed)[0]) == 0.0
-    assert float(fluence_rate(surfaces, past_the_edge, visibility=clear)[0]) > 0.0
-    assert float(fluence_rate(surfaces, behind)[0]) > 0.0, "unoccluded, it is lit"
+    assert float(direct_fluence_rate(surfaces, behind, visibility=shadowed)[0]) == 0.0
+    assert float(direct_fluence_rate(surfaces, past_the_edge, visibility=clear)[0]) > 0.0
+    assert float(direct_fluence_rate(surfaces, behind)[0]) > 0.0, "unoccluded, it is lit"
 
 
 def test_turning_self_occlusion_off_puts_the_light_back():
     surfaces = _emitter_and_panel()
     behind = np.array([[2.0, 0.0, 0.0]])
     ignored = build_visibility([], surfaces, behind, self_occlusion=False)
-    assert float(fluence_rate(surfaces, behind, visibility=ignored)[0]) == pytest.approx(
-        float(fluence_rate(surfaces, behind)[0]), rel=1e-15
+    assert float(direct_fluence_rate(surfaces, behind, visibility=ignored)[0]) == pytest.approx(
+        float(direct_fluence_rate(surfaces, behind)[0]), rel=1e-15
     )
 
 
@@ -162,7 +162,7 @@ def test_the_surface_s_own_geometry_is_opaque_whatever_transmittance_is_given():
     surfaces = _emitter_and_panel()
     behind = np.array([[2.0, 0.0, 0.0]])
     mask = build_visibility([], surfaces, behind)
-    assert float(fluence_rate(surfaces, behind, visibility=mask, transmittance=[])[0]) == 0.0
+    assert float(direct_fluence_rate(surfaces, behind, visibility=mask, transmittance=[])[0]) == 0.0
 
 
 def test_a_convex_body_is_completely_unaffected_by_tracing_its_own_triangles():
@@ -181,8 +181,8 @@ def test_a_convex_body_is_completely_unaffected_by_tracing_its_own_triangles():
     probe = np.array([[distance, 0.0, 0.0]])
     mask = build_visibility([], surfaces, probe)
 
-    clamp_only = float(fluence_rate(surfaces, probe)[0])
-    with_tracing = float(fluence_rate(surfaces, probe, visibility=mask)[0])
+    clamp_only = float(direct_fluence_rate(surfaces, probe)[0])
+    with_tracing = float(direct_fluence_rate(surfaces, probe, visibility=mask)[0])
     closed_form = (4.0 * exitance / np.pi) * np.arcsin(radius / distance)
 
     assert with_tracing == clamp_only
@@ -206,8 +206,8 @@ def test_a_flat_plate_does_not_shadow_itself():
     surfaces = Surfaces.from_triangles(plate, emission=100.0)
     probe = np.array([[0.0, 0.0, 1.0]])
     mask = build_visibility([], surfaces, probe)
-    assert float(fluence_rate(surfaces, probe, visibility=mask)[0]) == pytest.approx(
-        float(fluence_rate(surfaces, probe)[0]), rel=1e-15
+    assert float(direct_fluence_rate(surfaces, probe, visibility=mask)[0]) == pytest.approx(
+        float(direct_fluence_rate(surfaces, probe)[0]), rel=1e-15
     )
 
 
@@ -232,12 +232,18 @@ def test_a_bent_duct_does_not_light_its_own_far_leg():
     visible = np.array([[0.5, 0.0, 1.0]])
 
     assert (
-        float(fluence_rate(surfaces, hidden, visibility=build_visibility([], surfaces, hidden))[0])
+        float(
+            direct_fluence_rate(
+                surfaces, hidden, visibility=build_visibility([], surfaces, hidden)
+            )[0]
+        )
         == 0.0
     )
     assert (
         float(
-            fluence_rate(surfaces, visible, visibility=build_visibility([], surfaces, visible))[0]
+            direct_fluence_rate(
+                surfaces, visible, visibility=build_visibility([], surfaces, visible)
+            )[0]
         )
         > 0.0
     )

@@ -1,7 +1,7 @@
 """Quadrature rules on a triangle.
 
 Everything here is a property of the tables themselves. What they buy on the integral they
-exist for — the transfer between two facets — is measured in ``test_radiation_radiosity.py``,
+exist for — the transfer between two facets — is measured in ``test_radiation_transfer.py``,
 because that needs the kernel and not just the points.
 """
 
