@@ -71,6 +71,7 @@ from aquaflux.schemes import (  # noqa: E402
     SweptGradientSolve,
 )
 from aquaflux.solve import (
+    LinearSolveSettings,
     Convergence,
     DualTimeLoop,
     JacobiSmoothed,
@@ -81,7 +82,6 @@ from aquaflux.turbulence import (
     CoupledJacobianProbe,
     FieldSplit,
     JacobianProbeSpec,
-    LinearSolveSettings,
     MaterializedJacobian,
     coupled_fields,
     open_session,

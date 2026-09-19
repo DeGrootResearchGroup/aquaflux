@@ -97,6 +97,7 @@ from aquaflux.schemes import (  # noqa: E402
 )
 from aquaflux.schemes.interpolation import non_orthogonal_correction  # noqa: E402
 from aquaflux.solve import (
+    LinearSolveSettings,
     Convergence,
     DualTimeLoop,
     MarchLogger,
@@ -104,7 +105,6 @@ from aquaflux.solve import (
 )
 from aquaflux.solve.implicit import backtracking_line_search  # noqa: E402
 from aquaflux.turbulence import (
-    LinearSolveSettings,
     coupled_fields,
     coupled_step,
     omega_wall,

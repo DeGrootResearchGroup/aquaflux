@@ -53,11 +53,10 @@ sys.path.insert(0, str(CASE))
 sys.path.insert(0, str(CASE.parents[1]))
 
 import compare  # noqa: E402
-from aquaflux.solve import Convergence, relative_residual_gmres  # noqa: E402
+from aquaflux.solve import LinearSolveSettings, Convergence, relative_residual_gmres  # noqa: E402
 from aquaflux.turbulence import (
     FieldSplit,
     JacobianProbeSpec,
-    LinearSolveSettings,
     MaterializedJacobian,
     coupled_step,
     solve_coupled,

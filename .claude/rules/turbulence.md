@@ -35,6 +35,30 @@ the AMG smoother fill (the validated `bfs3d` bundle is **ILU(0) × 4 sweeps**; t
 to ILU(1) × 2) and the aggregation (**plain**, not smoothed). Any AMG-adjacent number written before
 those moves is un-adjudicable — treat it as a lead, not a fact.
 
+## ⚠️ Generic machinery does NOT live here (2026-09-19, #448 / #277) — read before adding to `coupled.py`
+
+`coupled.py` used to hold the whole robust march, and a laminar flow problem could not reach any of it
+(#448). The residual-agnostic parts now live in `aquaflux/solve/`, and the flow-only solve
+(`aquaflux.flow.solve_flow_march`) runs on the same ones. **What moved, and where it is now:**
+
+| was in `turbulence/coupled.py` | is | note |
+|---|---|---|
+| the segment loop, the once-measured stopping target, the last-segment-without-trigger rule, the non-root refusal in `solve_coupled` | `solve.staged_march` (`solve/driver.py`) | `solve_coupled` now supplies the residual, `_CoupledMeasures`, the `eddy_viscosity_drift` measure and a source |
+| `_ContinuationSource`, `_CallerBuiltContinuation`, `_FinishedContinuation` | `solve.ContinuationSource`, `CallerBuiltSource`, `FinishedSource` | `_SessionContinuation` stays: it wraps a coupled session |
+| `_refuse` and the strategy/builder branch of `_continuation_source` | `solve.explicit_source`, `solve.refuse_unforwardable_settings` | the raise now names the caller passed in |
+| the tail of `_coupled_step` (dual-time vs single step, the hook and refresh refusals, the default `relative_residual_gmres(norm=None)`) | `solve.shifted_step` (`solve/shifted_step.py`) | `_coupled_step` keeps only the coupled operator stand-in and passes `line_search=_COUPLED_LINE_SEARCH` |
+| `_LinearSolveRegime`, `_resolved_regime`, `_resolved_linear_solve`, and `LinearSolveSettings` from `march_settings.py` | `solve.LinearSolveRegime`, `solve.resolve_linear_solve`, `solve.LinearSolveSettings` | `aquaflux.turbulence.LinearSolveSettings` no longer exists; the per-family regime constants (`_BLOCK_LINEAR_SOLVE`, …) stay here because they are calibrations of *these* preconditioners |
+| the flow rows of `coupled_scaled_norm`, and the per-block reference scales | `flow.flow_row_scales`, `solve.block_reference_scales` | `coupled_scaled_norm` appends its `k`/`ω` rows to the flow's |
+
+**Still here and still generic — the next candidates to move**: the preconditioner sessions
+(`open_session`, `_BlockSession`, `_MaterializedSession`, `PreconditionerSession`), the coloured probe
+(`CoupledJacobianProbe`, `_coupled_jacobian_plan`), `MonolithicFactorShiftPolicy`, `_beta_tracking_refresh`,
+and the mass-flow border. They take a `CoupledRANS` only for its residual and layout, so a laminar
+`MaterializedJacobian` march is blocked on them: `solve_flow_march` supports the block-SIMPLE
+preconditioner only. The size ratchet in `tests/unit/test_layering.py` is what to lower as they move.
+⚠️ **Do not add a capability to the march here without checking `solve_flow_march` can reach it** — that is
+the drift this section exists to prevent (root `CLAUDE.md`, Principle 3.6).
+
 ## ⚠️ The coupled builders were unified (2026-09-14, #371) — these names no longer exist
 
 Many entries below are dated history written against the old API. Read them through this table:
@@ -239,9 +263,10 @@ Many entries below are dated history written against the old API. Read them thro
   - **Which continuation a solve runs is ONE injected source, not two parallel branches (binding, #278,
     2026-08-20).** `solve_coupled` needs a continuation twice — the initial build and every refresh —
     and those were written as two independent two-way branches (`refresh.builder` vs the default
-    `coupled_continuation`), one at the build and one inside the refresh loop. `_ContinuationSource`
+    `coupled_continuation`), one at the build and one inside the refresh loop. `solve.ContinuationSource`
     (`build(state)` / `refresh(state, previous)`) makes it one decision, with
-    `_CallerBuiltContinuation`, `_DefaultContinuation` and `_FinishedContinuation` as its three cases.
+    `CallerBuiltSource`, `_SessionContinuation` and `FinishedSource` as its three cases (the first and last
+    moved to `solve/driver.py`).
     That is the shape #282 had just been fixed for one level down; here it also carried a live defect.
     - **⚠️ `preconditioner` / `reference_state` / `**strategy_kwargs` are REFUSED where they cannot be
       forwarded, not dropped.** They configure the continuation `solve_coupled` builds. On the two paths
@@ -318,7 +343,7 @@ Many entries below are dated history written against the old API. Read them thro
       build-record sink is attached where the session is opened rather than bound into the inverse.
   - **✅ `open_session` / `PreconditionerSession` / `coupled_step` — the ONE coupled builder, and what
     `solve_coupled`, both Reynolds drivers and both flagship cases run on (#371, 2026-09-14).**
-    `_BlockSession` and `_MaterializedSession` are `_ContinuationSource` promoted: `build(state,
+    `_BlockSession` and `_MaterializedSession` are `ContinuationSource` promoted: `build(state,
     **march)`, `refresh(state, previous, **march)`, `refresh_preconditioner`, `rebind`.
     `coupled_step` is the one frozen-step builder and opens a private session. The new path was proven
     **array-identical** to the old builders first (`test_preconditioner_session.py` for block / LU /
@@ -339,7 +364,7 @@ Many entries below are dated history written against the old API. Read them thro
       table at the top of this file). Both flagship drivers and every harness open a session or build a
       spec; the drivers' inert monolithic smoother settings under the field split (D1) went with them,
       and `bfs3d` now exposes its preconditioner as `compare.PRECONDITIONER`. The array-identity tests
-      that pinned the new path to the old builders were deleted with the builders. `_CallerBuiltContinuation`
+      that pinned the new path to the old builders were deleted with the builders. `CallerBuiltSource`
       stays: a `RefreshPolicy(builder=...)` is still a supported way to rebuild a caller's own step.
     - **The mass-flow sibling takes a spec too.** `mass_flow_coupled_continuation` and
       `solve_coupled_mass_flow` take `preconditioner: BlockDiagonal | None` in place of `method` +
@@ -1268,7 +1293,7 @@ Many entries below are dated history written against the old API. Read them thro
     to the progress measure the march hands it (#370; before, it captured the step's build-time
     `residual_norm`, which a rebuilt measure then left behind) — so the solve is steered by and judged by
     one definition. What is per-family is a
-    `_LinearSolveRegime` (rtol, restart, cap), and the coupled builders take it as one value,
+    `solve.LinearSolveRegime` (rtol, restart, cap), and the coupled builders take it as one value,
     `linear_solve=LinearSolveSettings(...)` (#388 — the `forward_*` keywords are gone). **Move it through that value,
     never by passing a whole solver as `linear_solve`, which replaces the measure too.**
     Two things this changed that a reader of an older measurement needs:

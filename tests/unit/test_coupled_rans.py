@@ -35,16 +35,17 @@ from aquaflux.solve import (
     DualTimeLoop,
     Euclidean,
     Globalization,
+    LinearSolveSettings,
     PseudoTransientStep,
     RefreshPolicy,
     RowScaledNorm,
     ShiftTerm,
 )
+from aquaflux.solve import driver as driver_module
 from aquaflux.turbulence import (
     BlockDiagonal,
     CompleteLu,
     DirectScalars,
-    LinearSolveSettings,
     LogScalars,
     MaterializedJacobian,
     MonolithicVCycle,
@@ -797,7 +798,7 @@ def test_the_march_is_handed_the_homotopy_and_the_same_arguments_whether_or_not_
         calls.append(kwargs)
         return MarchResult(state, (), True, False, None)
 
-    monkeypatch.setattr(coupled_module, "newton_march", recording_march)
+    monkeypatch.setattr(driver_module, "newton_march", recording_march)
     homotopy = object()
     # A target no state can miss, so the recorded march's untouched state is accepted as the root; a
     # pre-built step and the plain Euclidean measure keep the test to the wiring.
@@ -842,7 +843,7 @@ def test_a_march_that_ends_short_of_a_root_is_refused_rather_than_returned(
     mesh, coupled = _cavity()
     flow, k, omega = coupled.physical_fields(_healthy_state(mesh, coupled))
     monkeypatch.setattr(
-        coupled_module,
+        driver_module,
         "newton_march",
         lambda step, residual_fn, state, **kwargs: MarchResult(state, (), converged, False, None),
     )
@@ -877,7 +878,7 @@ def test_the_last_refresh_segment_marches_without_the_trigger(monkeypatch) -> No
         triggers.append(kwargs["trigger"])
         return MarchResult(state, (), True, kwargs["trigger"] is not None, None)
 
-    monkeypatch.setattr(coupled_module, "newton_march", recording_march)
+    monkeypatch.setattr(driver_module, "newton_march", recording_march)
     trigger = object()
     step = _single_step()
     solve_coupled(
@@ -992,7 +993,7 @@ def _recorded_measure_builders(
             raise _Recorded
         return MarchResult(at, (), True, kwargs["trigger"] is not None, None)
 
-    monkeypatch.setattr(coupled_module, "newton_march", recording_march)
+    monkeypatch.setattr(driver_module, "newton_march", recording_march)
     step = coupled_step(
         coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
     )

@@ -35,7 +35,7 @@ import inspect
 import math
 import time
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, NamedTuple, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import equinox as eqx
 import jax
@@ -44,7 +44,12 @@ import lineax as lx
 import numpy as np
 
 from aquaflux.discretization import DifferenceRow, FixationRow, LogRatioRow
-from aquaflux.flow import BlockPreconditioner, ConvectionTwoLevel, frozen_momentum_diagonal_parts
+from aquaflux.flow import (
+    BlockPreconditioner,
+    ConvectionTwoLevel,
+    flow_row_scales,
+    frozen_momentum_diagonal_parts,
+)
 
 # The mass-flow-constraint primitives (a body force that is a solve unknown enforcing a bulk velocity)
 # are shared with the flow-block solve `aquaflux.flow.bulk_velocity_flow_solve`: the border column/row,
@@ -63,6 +68,7 @@ from aquaflux.solve import (
     BlockScaledNorm,
     CellFields,
     ColumnProbePlan,
+    ContinuationSource,
     Convergence,
     DualTimeLoop,
     Euclidean,
@@ -71,6 +77,8 @@ from aquaflux.solve import (
     FieldSplitAmgPreconditioner,
     GlobalDofs,
     Globalization,
+    LinearSolveRegime,
+    LinearSolveSettings,
     LocalCourantBasis,
     MaterializedJacobianPreconditioner,
     MonolithicAmgPreconditioner,
@@ -94,21 +102,24 @@ from aquaflux.solve import (
     TransposedPreconditioner,
     VelocityShiftParts,
     assembler_residual,
+    block_reference_scales,
     block_stencil_colouring,
     block_stencil_gather_map,
     column_probe_plan,
-    default_dual_time_control,
-    newton_march,
+    explicit_source,
     positive_block_limit,
     positive_block_projection,
     refuse_a_transform_the_march_cannot_run_in,
-    relative_residual_gmres,
+    refuse_unforwardable_settings,
+    resolve_linear_solve,
     root_adjoint,
+    shifted_step,
+    staged_march,
     stop_array_gradients,
 )
 
 from .initialization import hybrid_initialize, wall_consistent_omega
-from .march_settings import LinearSolveSettings, ShiftSettings
+from .march_settings import ShiftSettings
 from .preconditioner import (
     ScalarBlock,
     ScalarTransportPreconditioner,
@@ -1236,32 +1247,11 @@ def _reparametrized_preconditioner(
 #
 # THE RESTART LENGTH (per family). A restarted GMRES tests its stop only at each restart boundary, so
 # the subspace should match how many vectors the preconditioner actually needs.
-class _LinearSolveRegime(NamedTuple):
-    """One preconditioner family's default Krylov regime for the shifted forward solve.
-
-    Attributes
-    ----------
-    rtol : float
-        Relative tolerance, **in the progress measure the march hands the step** (the solve's
-        :class:`~aquaflux.solve.Convergence` measure). The same number is a different tightness under a
-        different measure, so each regime's value is set for the measure its path defaults to.
-    restart : int
-        Arnoldi restart length.
-    max_restarts : int
-        Restart-cycle cap -- the only bound on a single running solve, since ``cycle_budget`` and the
-        march's abort threshold are tested *between* inner iterations.
-    """
-
-    rtol: float
-    restart: int
-    max_restarts: int
-
-
 #: The block-diagonal preconditioner (flow block-SIMPLE + the two scalar AMGs). The coupled turbulent
 #: saddle is stiff enough that a 40-vector restart -- the shared lineax default -- discards too much
 #: Arnoldi history and needs hundreds of restart cycles, while a 120-vector subspace reaches the same
 #: solution in far fewer.
-_BLOCK_LINEAR_SOLVE = _LinearSolveRegime(rtol=0.3, restart=120, max_restarts=15)
+_BLOCK_LINEAR_SOLVE = LinearSolveRegime(rtol=0.3, restart=120, max_restarts=15)
 
 #: A monolithic complete-LU factorization. It factors the whole coupled saddle exactly, so the
 #: preconditioned operator's spectrum collapses to a single point at the state and shift it was factored
@@ -1270,7 +1260,7 @@ _BLOCK_LINEAR_SOLVE = _LinearSolveRegime(rtol=0.3, restart=120, max_restarts=15)
 #: matrix-vector products (each paying the factorization's triangular back-solve) before it could stop.
 #: `max_restarts` is kept generous so a transiently harder (e.g. drifted-reference) solve still completes
 #: before the next refactor.
-_FACTORIZATION_LINEAR_SOLVE = _LinearSolveRegime(rtol=0.3, restart=10, max_restarts=40)
+_FACTORIZATION_LINEAR_SOLVE = LinearSolveRegime(rtol=0.3, restart=10, max_restarts=40)
 
 #: A monolithic multigrid V-cycle. Restart 15 is the measured sweet spot for a one-V-cycle
 #: preconditioner: enough Arnoldi history for its convergence while checking the stop often enough not to
@@ -1285,7 +1275,7 @@ _FACTORIZATION_LINEAR_SOLVE = _LinearSolveRegime(rtol=0.3, restart=10, max_resta
 #: retry.abort_above_cycles``, so a cap landing exactly on the threshold does not trip the redo, and the
 #: step accepts the truncated, non-converged direction instead of re-running it on a fresh
 #: preconditioner.
-_VCYCLE_LINEAR_SOLVE = _LinearSolveRegime(rtol=0.3, restart=15, max_restarts=60)
+_VCYCLE_LINEAR_SOLVE = LinearSolveRegime(rtol=0.3, restart=15, max_restarts=60)
 
 #: The mass-flow-constrained (bordered) system. Its restart regime is the block-diagonal one -- it wraps
 #: that preconditioner -- but its **tolerance is a Euclidean one**, because the bordered march has no
@@ -1293,7 +1283,7 @@ _VCYCLE_LINEAR_SOLVE = _LinearSolveRegime(rtol=0.3, restart=15, max_restarts=60)
 #: applying it would scale the border row by a diagonal it does not have. So this is a genuinely
 #: different path rather than a surface that drifted, and the tolerance differs because the *measure*
 #: does. Re-unify it with :data:`_BLOCK_LINEAR_SOLVE` the day the measure gains a constraint-aware form.
-_CONSTRAINED_LINEAR_SOLVE = _LinearSolveRegime(rtol=1e-2, restart=120, max_restarts=15)
+_CONSTRAINED_LINEAR_SOLVE = LinearSolveRegime(rtol=1e-2, restart=120, max_restarts=15)
 
 
 # How many coloured tangents share one vmapped jvp pass when materializing the AMG Jacobian. Larger
@@ -1332,8 +1322,7 @@ _COUPLED_LINE_SEARCH = 10
 def _coupled_block_scales(coupled: CoupledRANS, reference_state: jnp.ndarray) -> tuple[float, ...]:
     """The per-field reference residual magnitudes ``(‖R_flow‖, ‖R_k‖, ‖R_omega‖)`` at
     ``reference_state``, each floored positive so it can divide a block norm."""
-    parts = coupled.layout.unpack(coupled.residual(reference_state))
-    return tuple(max(float(jnp.linalg.norm(part)), 1e-30) for part in parts)
+    return block_reference_scales(coupled.layout, coupled.residual(reference_state))
 
 
 def _coupled_residual_norm(coupled: CoupledRANS, reference_state: jnp.ndarray) -> BlockScaledNorm:
@@ -1611,13 +1600,9 @@ def coupled_scaled_norm(
 
     diagonal = jax.lax.stop_gradient(shift_policy.shift_term(state).diagonal)
     flow_diag, k_diag, omega_diag = layout.unpack(diagonal)
-    velocity_diag, _pressure_diag = coupled.momentum.unpack(flow_diag)
 
     flow, k, omega = coupled.physical_fields(state)
-    velocity, _pressure = coupled.momentum.unpack(flow)
-    # Continuity's stand-in diagonal: the convective bucket is the per-cell mass throughput, in the
-    # same units as the mass imbalance the row measures.
-    throughput, _dissipative = coupled.momentum.momentum_matrix_diagonal_parts(velocity)
+    flow_row_scale, flow_field_scale = flow_row_scales(coupled.momentum, flow_diag, flow)
 
     k_chain = coupled.k_transform.jacobian_scale(k)
     omega_chain = coupled.omega_transform.jacobian_scale(omega)
@@ -1629,17 +1614,10 @@ def coupled_scaled_norm(
         k_diag > 0.0, k_diag, coupled.k_transform.fixation_row().jacobian_scale(k, k_chain)
     )
 
-    row_scale = layout.pack(
-        coupled.momentum.pack(jnp.abs(velocity_diag) + tiny, jnp.abs(throughput) + tiny),
-        jnp.abs(k_rows) + tiny,
-        jnp.abs(omega_rows) + tiny,
-    )
-    velocity_scale = jnp.mean(jnp.abs(velocity))
+    row_scale = layout.pack(flow_row_scale, jnp.abs(k_rows) + tiny, jnp.abs(omega_rows) + tiny)
     field_scale = jnp.concatenate(
         [
-            jnp.full((dim,), velocity_scale),
-            # Continuity is already dimensionless once divided by the mass throughput.
-            jnp.ones((1,)),
+            flow_field_scale,
             # phi / (dphi/dw) converts a change in the solved unknown into a fractional change in the
             # physical field: mean|phi| for a directly-solved field, exactly one for a log-solved one.
             jnp.mean(jnp.abs(k) / jnp.maximum(k_chain, tiny))[None],
@@ -2256,7 +2234,7 @@ def _coupled_step(
     reference_state: jnp.ndarray,
     policy: ShiftPolicy,
     *,
-    regime: _LinearSolveRegime,
+    regime: LinearSolveRegime,
     globalization: Globalization,
     dual_time: DualTimeLoop | None,
     krylov_solver: lx.AbstractLinearSolver | None,
@@ -2296,7 +2274,7 @@ def _coupled_step(
     policy : ShiftPolicy
         The composed shift-and-preconditioner policy — a :class:`CoupledShiftPolicy` for the
         block-diagonal path, a :class:`MonolithicFactorShiftPolicy` for a materialized one.
-    regime : _LinearSolveRegime
+    regime : LinearSolveRegime
         The Krylov tolerance and restart regime for the default forward solve, used when
         ``krylov_solver`` is ``None``. Only the *regime* is per-family (a near-exact factorization
         needs a far smaller Arnoldi subspace than a block-diagonal preconditioner); the tolerance is
@@ -2367,74 +2345,25 @@ def _coupled_step(
         if jacobian_gradient_sweeps is None and not jacobian_production_viscosity
         else jacobian_operator.residual
     )
-    # The linear solve stops in the measure the march is judging the step by at that moment (`norm=None`),
-    # so a solve cannot converge in a quantity the march does not read -- including after the march has
-    # rebuilt the measure at a new state. That is the shared half of the decision; only the restart
-    # regime differs per preconditioner family (see `_LinearSolveRegime`).
-    solver = (
-        krylov_solver
-        if krylov_solver is not None
-        else relative_residual_gmres(
-            regime.rtol,
-            norm=None,
-            restart=regime.restart,
-            stagnation_iters=40,
-            max_restarts=regime.max_restarts,
-        )
-    )
     # The coupled march line-searches unless its caller said otherwise: an unset `line_search` takes
     # this residual's base, an explicit one -- including 0 -- is kept, and everything else the
-    # globalization leaves unset falls through to the step class's own default.
-    globalization = globalization.with_defaults(line_search=_COUPLED_LINE_SEARCH)
-    if dual_time is None:
-        hooks = sorted(
-            name
-            for name, hook in (("inner_observer", inner_observer), ("inner_refresh", inner_refresh))
-            if hook is not None
-        )
-        if hooks:
-            raise TypeError(
-                f"{hooks} are hooks of the dual-time inner loop, and this march has none: the single "
-                "shifted step runs no inner iterations to observe or refresh. Give "
-                "dual_time=DualTimeLoop(...) to march in dual time, or leave them unset."
-            )
-    elif dual_time.refresh_on_cycles is not None and inner_refresh is None:
-        raise TypeError(
-            f"DualTimeLoop(refresh_on_cycles={dual_time.refresh_on_cycles}) has nothing to fire: no "
-            "inner_refresh was given, and only a materialized-Jacobian preconditioner's session supplies "
-            "one of its own -- a frozen step and a block-diagonal session do not. Open a session for a "
-            "MaterializedJacobian, pass inner_refresh, or leave refresh_on_cycles unset."
-        )
-    if dual_time is not None:
-        # Dual-time (backward-Euler) march: an inner Newton loop per outer timestep on the transient
-        # residual, so the measured steady residual is the honest discrete time derivative rather than
-        # beta x travel, and a larger pseudo-timestep (smaller beta, driven by a step control) stays
-        # stable. The inner loop replaces the escalation ladder, so `dual_time_step` refuses the
-        # escalation/acceptance settings and the line search's growth rung and rule rather than
-        # dropping them.
-        return globalization.dual_time_step(
-            policy,
-            **dual_time.settings(),
-            krylov_solver=solver,
-            adjoint_preconditioner_factory=policy.adjoint_factory(),
-            inner_observer=inner_observer,
-            inner_refresh=inner_refresh,
-            step_limit=step_limit,
-            step_projection=step_projection,
-            jacobian_residual=jacobian_residual,
-        )
-    # The positivity guard is passed on BOTH branches, and the single-step one needs it as much: its
-    # escalation ladder is no substitute, because the divergence guard fires on a non-finite residual,
-    # which is already the poisoned state -- one cell's `k` through zero has by then NaN'd `sqrt(k)` and
-    # the whole eddy viscosity with it. Historically only the monolithic path's dual-time branch carried
-    # it, which is drift rather than design.
-    return globalization.step(
+    # globalization leaves unset falls through to the step class's own default. The positivity guard
+    # reaches both step classes: the escalation ladder is no substitute for it, because the divergence
+    # guard fires on a non-finite residual, which is already the poisoned state -- one cell's `k`
+    # through zero has by then NaN'd `sqrt(k)` and the whole eddy viscosity with it.
+    return shifted_step(
         policy,
-        krylov_solver=solver,
+        globalization=globalization,
+        dual_time=dual_time,
+        regime=regime,
+        krylov_solver=krylov_solver,
         adjoint_preconditioner_factory=policy.adjoint_factory(),
+        inner_observer=inner_observer,
+        inner_refresh=inner_refresh,
         step_limit=step_limit,
         step_projection=step_projection,
         jacobian_residual=jacobian_residual,
+        line_search=_COUPLED_LINE_SEARCH,
     )
 
 
@@ -2447,7 +2376,7 @@ def _monolithic_factor_step(
     globalization: Globalization,
     dual_time: DualTimeLoop | None,
     krylov_solver: lx.AbstractLinearSolver | None,
-    regime: _LinearSolveRegime,
+    regime: LinearSolveRegime,
     inner_observer: Callable[..., None] | None = None,
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     step_limit: Callable[..., jnp.ndarray] | None = None,
@@ -2754,20 +2683,6 @@ class PreconditionerSession(Protocol):
         ...
 
 
-def _resolved_regime(
-    base: _LinearSolveRegime,
-    rtol: float | None,
-    restart: int | None,
-    max_restarts: int | None,
-) -> _LinearSolveRegime:
-    """A family's forward-solve regime with any explicitly given setting in place of its default."""
-    return _LinearSolveRegime(
-        base.rtol if rtol is None else rtol,
-        base.restart if restart is None else restart,
-        base.max_restarts if max_restarts is None else max_restarts,
-    )
-
-
 def _resolved_shift(
     shift: ShiftSettings | None,
 ) -> tuple[ShiftBasis, VelocityShiftParts | None, TurbulenceDamping | float]:
@@ -2792,36 +2707,6 @@ def _resolved_shift(
         shift.velocity_parts,
         1.0 if shift.turbulence_damping is None else shift.turbulence_damping,
     )
-
-
-def _resolved_linear_solve(
-    linear_solve: LinearSolveSettings | lx.AbstractLinearSolver | None, base: _LinearSolveRegime
-) -> tuple[_LinearSolveRegime, lx.AbstractLinearSolver | None]:
-    """The forward solve's regime and explicit solver, from a builder's ``linear_solve``.
-
-    Parameters
-    ----------
-    linear_solve : LinearSolveSettings, lineax.AbstractLinearSolver or None
-        A regime whose unset fields take ``base``; a whole solver, which replaces the regime; or
-        ``None`` for ``base`` itself.
-    base : _LinearSolveRegime
-        The chosen preconditioner family's own regime.
-
-    Returns
-    -------
-    tuple
-        ``(regime, krylov_solver)``, the solver ``None`` unless one was given.
-    """
-    if linear_solve is None:
-        return base, None
-    if isinstance(linear_solve, LinearSolveSettings):
-        return (
-            _resolved_regime(
-                base, linear_solve.rtol, linear_solve.restart, linear_solve.max_restarts
-            ),
-            None,
-        )
-    return base, linear_solve
 
 
 def _march_keywords(march: dict) -> dict:
@@ -2911,7 +2796,7 @@ class _BlockSession:
             *_resolved_shift(keywords.pop("shift")),
             **self._spec.flow_block_options(),
         )
-        regime, krylov_solver = _resolved_linear_solve(
+        regime, krylov_solver = resolve_linear_solve(
             keywords.pop("linear_solve"), _BLOCK_LINEAR_SOLVE
         )
         dual_time = keywords.pop("dual_time")
@@ -3026,7 +2911,7 @@ class _MaterializedSession:
         base = _monolithic_shift_source(coupled, state, *_resolved_shift(keywords.pop("shift")))
         if self._preconditioner is None:
             self._preconditioner = self._fit(coupled, state, base)
-        regime, krylov_solver = _resolved_linear_solve(
+        regime, krylov_solver = resolve_linear_solve(
             keywords.pop("linear_solve"),
             _FACTORIZATION_LINEAR_SOLVE
             if isinstance(self._spec.inverse, CompleteLu)
@@ -3415,93 +3300,6 @@ def _reject_a_root_the_frozen_cap_invalidates(
     )
 
 
-class _ContinuationSource(Protocol):
-    """Where the coupled march's :class:`~aquaflux.solve.NewtonStrategy` comes from, and how it re-freezes.
-
-    :func:`solve_coupled` needs a continuation twice: once at the start, and again at each refresh, from
-    a developed state. Those are one decision — *which* continuation this solve runs — and they were
-    written as two independent two-way branches, one at the initial build and one inside the refresh
-    loop. That is the shape that drifts: a change to how the continuation is built has to be made in two
-    places and, when it is made in one, nothing fails. Behind this interface it is made once.
-
-    Three implementations: the caller supplies the builder (:class:`_CallerBuiltContinuation`); a
-    preconditioner session builds it (:class:`_SessionContinuation`, including the default
-    block-diagonal one when nothing is named); or the caller finished the step and nothing will rebuild
-    it (:class:`_FinishedContinuation`).
-
-    Private because it is a decomposition, not an extension point: a caller who wants a different
-    continuation passes a preconditioner, a session, the step, or a builder.
-
-    Attributes
-    ----------
-    refresh_preconditioner : callable or None
-        The per-step refresh hook this source brings with it -- a materialized session's -- or ``None``.
-    """
-
-    refresh_preconditioner: Callable[[NewtonStrategy, jnp.ndarray], None] | None
-
-    def build(self, state: jnp.ndarray) -> NewtonStrategy:
-        """The continuation to start the march with, frozen at ``state``."""
-        ...
-
-    def refresh(self, state: jnp.ndarray, previous: NewtonStrategy) -> NewtonStrategy:
-        """Re-freeze at the developed ``state``.
-
-        ``previous`` is the step being replaced, for an implementation that can reuse part of it. The
-        residual measure is not the step's to keep: the march hands its own to every step it runs.
-        """
-        ...
-
-
-@dataclasses.dataclass(frozen=True)
-class _CallerBuiltContinuation:
-    """A continuation the caller builds from the state, and rebuilds the same way at every refresh.
-
-    The builder constructs it however it likes -- a complete-LU continuation materialized off the jit
-    path, say -- so ``solve_coupled`` never learns how it is built, and an off-jit preconditioner can
-    re-freeze without that knowledge leaking here. It follows that the builder owns the whole
-    configuration: there is no keyword ``solve_coupled`` could forward into a closure it does not
-    construct, which is why passing one alongside is refused rather than dropped.
-    """
-
-    builder: Callable[[jnp.ndarray], NewtonStrategy]
-    #: A caller-built step brings its own refresh hook, if any, on its ``RefreshPolicy``.
-    refresh_preconditioner = None
-
-    def build(self, state: jnp.ndarray) -> NewtonStrategy:
-        return self.builder(state)
-
-    def refresh(self, state: jnp.ndarray, previous: NewtonStrategy) -> NewtonStrategy:
-        del previous  # the builder re-derives everything from the state
-        return self.builder(state)
-
-
-@dataclasses.dataclass(frozen=True)
-class _FinishedContinuation:
-    """The caller handed over a finished step and no builder, so nothing here can re-freeze it.
-
-    :meth:`~aquaflux.solve.RefreshPolicy.require_rebuildable` already refuses that combination when a
-    refresh would run, so :meth:`refresh` is unreachable through the driver. It exists so the source is
-    never ``None`` -- an optional strategy that three call sites must remember not to dereference is the
-    kind of seam that eventually is -- and so that if it ever *is* reached, it says what is missing
-    rather than raising ``AttributeError`` on ``None``.
-    """
-
-    refresh_preconditioner = None
-
-    def build(self, state: jnp.ndarray) -> NewtonStrategy:
-        raise TypeError(
-            "no strategy to build: `solve_coupled` was given a finished `strategy`. This is a "
-            "driver bug -- the supplied step should have been used directly."
-        )
-
-    def refresh(self, state: jnp.ndarray, previous: NewtonStrategy) -> NewtonStrategy:
-        raise TypeError(
-            "a refresh triggered but the explicit `strategy` cannot be rebuilt: pass "
-            "`RefreshPolicy(builder=...)` so the solve can re-freeze it at each developed state."
-        )
-
-
 @dataclasses.dataclass(frozen=True)
 class _SessionContinuation:
     """A continuation a preconditioner session builds and re-freezes -- the source that has configuration.
@@ -3534,7 +3332,7 @@ def _continuation_source(
     preconditioner: BlockDiagonal | MaterializedJacobian | PreconditionerSession | None,
     reference_state: jnp.ndarray | None,
     kwargs: dict,
-) -> _ContinuationSource:
+) -> ContinuationSource:
     """Pick the source, after refusing configuration whichever one is chosen cannot receive.
 
     **Why this refuses rather than ignores.** ``preconditioner`` / ``reference_state`` /
@@ -3555,14 +3353,9 @@ def _continuation_source(
         given["preconditioner"] = preconditioner
     if reference_state is not None:
         given["reference_state"] = reference_state
-    if strategy is not None:
-        _refuse(given, "`strategy`", "the step you passed already carries them")
-        if refresh.builder is None:
-            return _FinishedContinuation()
-        return _CallerBuiltContinuation(refresh.builder)
-    if refresh.builder is not None:
-        _refuse(given, "`RefreshPolicy(builder=...)`", "the builder owns its own configuration")
-        return _CallerBuiltContinuation(refresh.builder)
+    explicit = explicit_source(strategy, refresh, given, caller="solve_coupled")
+    if explicit is not None:
+        return explicit
     march = dict(kwargs)
     production = march.pop("jacobian_production_viscosity", None)
     if preconditioner is None or isinstance(preconditioner, BlockDiagonal | MaterializedJacobian):
@@ -3584,17 +3377,6 @@ def _continuation_source(
             "preconditioner, whose session already re-fits its inverse before every step. Drop one."
         )
     return _SessionContinuation(session, reference_state, march)
-
-
-def _refuse(given: dict, owner: str, why: str, solver: str = "solve_coupled") -> None:
-    """Raise if any continuation setting was passed to a solve that cannot forward it."""
-    if not given:
-        return
-    raise TypeError(
-        f"{sorted(given)} configure the continuation `{solver}` builds, and {owner} was given, so "
-        f"{why}. These would have been dropped silently. Pass them where the continuation is built "
-        f"instead, or drop {owner}."
-    )
 
 
 #: The stopping test of a coupled solve given no :class:`~aquaflux.solve.Convergence`, and the base an
@@ -3853,101 +3635,44 @@ def solve_coupled(
         stop_array_gradients(reference_state),
         strategy_kwargs,
     )
-    # A materialized session re-fits its inverse before every step; a caller-built step brings its own.
-    refresh_preconditioner = refresh.refresh_preconditioner or source.refresh_preconditioner
     if flow is None or k is None or omega is None:
         flow, k, omega = hybrid_initialize(frozen.momentum, frozen.turbulence)
     # `flow, k, omega` are the physical initial condition; map into the solved-variable space (the
     # identity for DirectScalars, log for LogScalars) so the march iterates on the right unknown.
     state = frozen.state_from_physical(*stop_array_gradients((flow, k, omega)))
-    # A refresh rebuilds the step; a caller-supplied step with no builder leaves it nothing to rebuild
-    # WITH, so the refresh would silently never happen. The policy owns that check.
-    refresh.require_rebuildable(strategy)
-    if strategy is None:
-        strategy = source.build(state)
-
-    # A dual-time march with no caller control defaults to the Courant ramp (see the helper): it grows
-    # the pseudo-timestep while the inner loop stays comfortable, carried across the refreshes below,
-    # reaching a developed recirculation in far fewer outer steps than the residual-keyed schedule.
-    step_control = default_dual_time_control(step_control, strategy)
-
-    # The measure is built once per outer iteration by the march, from the one builder made here, and
-    # the global progress reference is taken in it at the initial state. A `BlockScaled` builder holds
-    # the initial state's scales for the whole solve, so a refresh cannot re-base it (which would put the
-    # target, measured once here, out of reach); a `RowScaled` one re-reads the step it is handed, so a
-    # refreshed step's diagonals are used. `frozen.residual` is passed as a bound method (a pytree), not
-    # a lambda, so its arrays ride as dynamic leaves and every step within a segment is a
-    # compilation-cache hit.
-    convergence = (
-        _COUPLED_CONVERGENCE
-        if convergence is None
-        else convergence.filled_from(_COUPLED_CONVERGENCE)
+    # `frozen.residual` is passed as a bound method (a pytree), not a lambda, so its arrays ride as
+    # dynamic leaves and every step within a segment is a compilation-cache hit.
+    staged = staged_march(
+        frozen.residual,
+        state,
+        strategy=strategy,
+        source=source,
+        refresh=refresh,
+        convergence=(
+            _COUPLED_CONVERGENCE
+            if convergence is None
+            else convergence.filled_from(_COUPLED_CONVERGENCE)
+        ),
+        measures=_CoupledMeasures(frozen),
+        # Re-based every segment, against the state this segment's preconditioner was frozen at.
+        drift_measure=lambda segment_start: eddy_viscosity_drift(frozen, segment_start),
+        max_steps=max_steps,
+        step_control=step_control,
+        on_step=on_step,
+        on_checkpoint=on_checkpoint,
+        retry=retry,
+        on_retry=on_retry,
+        homotopy=homotopy,
+        station_step=station_step,
+        caller="solve_coupled",
     )
-    norm_builder = convergence.measure._builder(_CoupledMeasures(frozen), state)
-    reference_norm = float(norm_builder(strategy, state)(frozen.residual(state)))
-    # `refresh.limit` refreshes means `refresh.segments` segments: the segment *after* the last refresh
-    # must still be marched, or the newly-refreshed preconditioner would never be used.
-    control_state: object = None
-    for segment in range(refresh.segments):
-        result = newton_march(
-            strategy,
-            frozen.residual,
-            state,
-            max_steps=max_steps,
-            rtol=convergence.rtol,
-            atol=convergence.atol,
-            reference_norm=reference_norm,
-            # The last segment has no refresh left to spend, so it marches to convergence or to
-            # `max_steps` rather than stopping where the trigger fires -- with no second solve after
-            # the march, a segment stopped there would end the solve short of the root.
-            trigger=None if refresh.is_last_segment(segment) else refresh.trigger,
-            step_control=step_control,
-            # Threaded across segments so a stateful control (the alpha-targeting shift climb)
-            # continues past each refresh rather than restarting -- the same global-lifetime carry
-            # as `reference_norm`, unlike the per-segment damping reference and drift measure.
-            control_state=control_state,
-            observer=on_step,
-            checkpoint=on_checkpoint,
-            # Re-based every segment, against the state this segment's preconditioner was frozen
-            # at -- which is the segment's own starting state, since a refresh re-freezes at the
-            # state it stopped on. Carrying one measure across segments would keep reporting the
-            # drift a refresh had just absorbed, and re-fire immediately.
-            drift_measure=eddy_viscosity_drift(frozen, state),
-            norm_builder=norm_builder,
-            refresh_preconditioner=refresh_preconditioner,
-            retry=retry,
-            on_retry=on_retry,
-            homotopy=homotopy,
-            station_step=station_step,
-        )
-        state = result.state
-        control_state = result.control_state
-        if not result.triggered or refresh.is_last_segment(segment):
-            break
-        # Re-freeze at the developed state -- how the re-freeze is done is the source's, and is the same
-        # choice made at the initial build above rather than a second one made here.
-        strategy = source.refresh(state, strategy)
-
-    # Judge convergence in the measure the march steered by, built at the state reached.
-    residual_norm = float(norm_builder(strategy, state)(frozen.residual(state)))
-    target = convergence.atol + convergence.rtol * reference_norm
-    arrived = homotopy is None or result.converged
-    if not (math.isfinite(residual_norm) and residual_norm <= target and arrived):
-        raise eqx.EquinoxRuntimeError(
-            f"solve_coupled did not converge: the march ended at residual {residual_norm:.3e} against "
-            f"a target of {target:.3e} (atol + rtol*||R0||)"
-            + ("" if arrived else ", and its homotopy never reached the target problem")
-            + ". The implicit-function-theorem adjoint is only valid at a converged root, so the fields "
-            "and any gradient built on them would be silently wrong. Raise max_steps, loosen the "
-            "tolerances, or strengthen the globalization (a dual-time loop, a retry policy)."
-        )
-    root = _reject_a_root_the_frozen_cap_invalidates(frozen, state)
+    root = _reject_a_root_the_frozen_cap_invalidates(frozen, staged.state)
     root = root_adjoint(
         assembler_residual,
         root,
         coupled,
         adjoint_solver=adjoint_solver,
-        adjoint_preconditioner=strategy.adjoint_preconditioner(),
+        adjoint_preconditioner=staged.strategy.adjoint_preconditioner(),
     )
     return coupled.physical_fields(root)
 
@@ -4089,7 +3814,7 @@ def mass_flow_coupled_continuation(
     )
     force, average = _coupled_constraint_vectors(coupled, flow_direction)
     bordered = _MassFlowBorderedPolicy(policy, force, average)
-    regime, krylov_solver = _resolved_linear_solve(linear_solve, _CONSTRAINED_LINEAR_SOLVE)
+    regime, krylov_solver = resolve_linear_solve(linear_solve, _CONSTRAINED_LINEAR_SOLVE)
     return _coupled_step(
         coupled,
         reference_state,
@@ -4220,11 +3945,11 @@ def solve_coupled_mass_flow(
     if reference_state is not None:
         given["reference_state"] = reference_state
     if strategy is not None:
-        _refuse(
+        refuse_unforwardable_settings(
             given,
             "`strategy`",
             "the step you passed already carries them",
-            solver="solve_coupled_mass_flow",
+            "solve_coupled_mass_flow",
         )
     if flow is None or k is None or omega is None:
         flow, k, omega = hybrid_initialize(coupled.momentum, coupled.turbulence)

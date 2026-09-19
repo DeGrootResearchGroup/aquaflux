@@ -92,6 +92,7 @@ from aquaflux.schemes import (
     VenkatakrishnanLimiter,
 )
 from aquaflux.solve import (
+    LinearSolveSettings,
     CflResidualDualTimeControl,
     Convergence,
     DualTimeLoop,
@@ -108,7 +109,6 @@ from aquaflux.turbulence import (
     ConstantDamping,
     CoupledRANS,
     FieldSplit,
-    LinearSolveSettings,
     GeometricReynoldsSchedule,
     JacobianProbeSpec,
     LogScalars,

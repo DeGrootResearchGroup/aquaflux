@@ -34,7 +34,7 @@ import inspect
 import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
 import pytest
-from aquaflux.flow import momentum_continuation, reused_flow_solve
+from aquaflux.flow import flow_march_step, momentum_continuation, reused_flow_solve
 from aquaflux.flow.block_preconditioner import BlockPreconditioner
 from aquaflux.solve import (
     DEFAULT_GLOBALIZATION,
@@ -96,6 +96,7 @@ COUPLED_LINE_SEARCH = 10
 
 BUILDERS = (
     momentum_continuation,
+    flow_march_step,
     reused_flow_solve,
     scalar_pseudo_transient_solve,
     coupled_step,
@@ -233,6 +234,29 @@ def test_one_override_changes_one_setting_and_each_builder_keeps_its_own_base(ca
         globalization=Globalization(line_search=0),
     )
     assert opted_out.line_search == 0
+
+
+def test_the_flow_march_builder_forwards_every_field_on_both_step_classes(case) -> None:
+    """``flow_march_step`` is the flow's builder for the staged march, and takes the whole globalization.
+
+    Both step classes are checked: the single shifted step carries the ladder's settings, the dual-time
+    step has no field for them and carries the schedule and the line search.
+    """
+    coupled, state = case
+    momentum = coupled.momentum
+    flow_state = momentum.initial_state()
+    del state
+    single = flow_march_step(momentum, flow_state, globalization=ASKED)
+    assert isinstance(single, PseudoTransientStep)
+    _assert_carries(single, ASKED)
+    dual = flow_march_step(
+        momentum,
+        flow_state,
+        globalization=DUAL_TIME_ASKED,
+        dual_time=DualTimeLoop(inner_steps=3),
+    )
+    assert isinstance(dual, DualTimeStep)
+    _assert_carries(dual, DUAL_TIME_ASKED, dual_time=True)
 
 
 def test_the_flow_block_builder_forwards_every_field(case) -> None:

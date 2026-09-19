@@ -51,6 +51,8 @@ SUBPACKAGE_GROUPS = {
             [
                 "continuation",
                 "march",
+                "driver",
+                "shifted_step",
                 "strategy",
                 "step_control",
                 "relaxation",
@@ -79,7 +81,8 @@ SUBPACKAGE_GROUPS = {
     "flow": [
         ("The momentum-continuity system", ["momentum", "rhie_chow", "source"]),
         ("Boundary conditions", ["boundary"]),
-        ("Solving a flow", ["continuation", "mean_velocity"]),
+        ("Solving a flow", ["continuation", "march", "mean_velocity"]),
+        ("Measuring the flow residual", ["measures"]),
         ("Preconditioners", ["block_preconditioner", "preconditioner"]),
         ("Initialization and flow scales", ["initialization", "scales"]),
     ],
