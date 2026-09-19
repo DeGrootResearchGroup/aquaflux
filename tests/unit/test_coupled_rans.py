@@ -35,6 +35,7 @@ from aquaflux.solve import (
     DualTimeLoop,
     Euclidean,
     Globalization,
+    JacobianProbe,
     LinearSolveSettings,
     PseudoTransientStep,
     RefreshPolicy,
@@ -69,11 +70,11 @@ from aquaflux.turbulence import coupled as coupled_module
 from aquaflux.turbulence.coupled import (
     _BLOCK_LINEAR_SOLVE,
     _FACTORIZATION_LINEAR_SOLVE,
-    CoupledJacobianProbe,
     CoupledRANS,
     LiveViscosityVelocityParts,
     _k_positivity_guards,
     _row_jacobian_scale,
+    coupled_jacobian_probe,
     coupled_rans_layout,
     coupled_scaled_norm,
     frozen_production_viscosity,
@@ -1444,8 +1445,7 @@ def test_the_adjoint_transpose_factory_compares_by_the_preconditioner_it_wraps()
     rebuilt its engine recompiled the whole coupled solve even when it was reusing the very same
     preconditioner -- defeating the point of reusing it.
     """
-    from aquaflux.solve import TransposedPreconditioner
-    from aquaflux.turbulence.coupled import FrozenTransposeFactory
+    from aquaflux.solve import FrozenTransposeFactory, TransposedPreconditioner
 
     class _Pc:
         def matvec(self, *, transpose: bool = False):
@@ -1466,7 +1466,7 @@ def test_the_adjoint_transpose_factory_compares_by_the_preconditioner_it_wraps()
 def test_the_frozen_transpose_factory_ignores_the_state_it_is_given() -> None:
     """The factorization is frozen, so the same transpose serves every state -- which is what lets this
     be a value object at all."""
-    from aquaflux.turbulence.coupled import FrozenTransposeFactory
+    from aquaflux.solve import FrozenTransposeFactory
 
     class _Pc:
         def __init__(self):
@@ -1625,17 +1625,16 @@ def test_the_inert_combination_is_the_only_thing_refused(builder) -> None:
 def test_the_probe_is_the_same_for_every_reynolds_rung() -> None:
     """The colouring plan and its de-compression map depend on the MESH, never on the viscosity.
 
-    That is the whole licence for building one :class:`CoupledJacobianProbe` and handing it to every
+    That is the whole licence for building one :class:`JacobianProbe` and handing it to every
     continuation rung's step and to the refresh hook beside it. Without it a three-rung ramp built six
     copies of the largest allocation a three-dimensional case makes, and the assertion that they would
     all have been identical was never checked.
     """
     import numpy as np
-    from aquaflux.turbulence import CoupledJacobianProbe
 
     _, coupled = _cavity()
-    probe = CoupledJacobianProbe.build(coupled, stencil_reach=2)
-    scaled = CoupledJacobianProbe.build(coupled.with_scaled_molecular_viscosity(100.0), 2)
+    probe = coupled_jacobian_probe(coupled, stencil_reach=2)
+    scaled = coupled_jacobian_probe(coupled.with_scaled_molecular_viscosity(100.0), 2)
 
     assert probe.plan.n_probes == scaled.plan.n_probes
     assert probe.plan.n_fields == scaled.plan.n_fields
@@ -1700,7 +1699,7 @@ def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> Non
     tangent = jnp.ones(5)
     # The real probe (its plan and gather map are unused here), not a lookalike: `_beta_tracking_refresh`
     # asks it which assembler to differentiate, which only the class itself can answer.
-    probe = CoupledJacobianProbe(plan=object(), structure=object())
+    probe = JacobianProbe(plan=object(), structure=object())
 
     pc = _RecordingPreconditioner()
     step = _stub_step(pc, beta=0.5, diagonal=diagonal)
@@ -1738,7 +1737,7 @@ def test_the_factorization_cadence_rebuilds_on_every_step() -> None:
     refresh = _beta_tracking_refresh(
         _ScalarRans(gain=jnp.asarray(3.0)),
         stencil_reach=2,
-        probe=CoupledJacobianProbe(plan=object(), structure=object()),
+        probe=JacobianProbe(plan=object(), structure=object()),
         every_step=True,
     )
 
@@ -1915,7 +1914,7 @@ def test_every_continuation_builder_defaults_to_the_per_entry_positivity_project
 def test_the_probe_materializes_the_operator_the_solve_applies() -> None:
     """A preconditioner must be assembled from the matrix the Krylov iteration applies, not another.
 
-    ``CoupledJacobianProbe.narrow`` is the single place that decides which assembler gets
+    ``JacobianProbe.narrow`` is the single place that decides which assembler gets
     materialized, and every consumer routes through it -- the initial build, the refresh hook, and the
     rebind across a Reynolds-continuation rung. So the stand-in belongs on the probe, and this pins
     that it lands there rather than on the colouring plan.
@@ -1926,8 +1925,8 @@ def test_the_probe_materializes_the_operator_the_solve_applies() -> None:
     which is invisible except as a cycle count.
     """
     _, coupled = _cavity(4)
-    plain = CoupledJacobianProbe.build(coupled, 3)
-    frozen = CoupledJacobianProbe.build(coupled, 3, production_viscosity_frozen=True)
+    plain = coupled_jacobian_probe(coupled, 3)
+    frozen = coupled_jacobian_probe(coupled, 3, production_viscosity_frozen=True)
 
     # The colouring and its de-compression are untouched -- this axis is about values, not structure.
     assert np.array_equal(np.asarray(plain.structure.indices), np.asarray(frozen.structure.indices))
@@ -2009,15 +2008,15 @@ def _skewed_corrected_cavity(n=6, sweeps=4):
 def test_an_uncapped_probe_differentiates_the_assembler_itself() -> None:
     """The default is the residual as it stands -- returned by identity, so nothing downstream moves."""
     _, coupled = _skewed_corrected_cavity()
-    probe = CoupledJacobianProbe.build(coupled, stencil_reach=2)
-    assert probe.gradient_sweeps is None
+    probe = coupled_jacobian_probe(coupled, stencil_reach=2)
+    assert probe.narrowing.gradient_sweeps is None
     assert probe.narrow(coupled) is coupled
 
 
 def test_a_capped_probe_narrows_every_gradient_solve_in_the_case() -> None:
     """Both blocks reconstruct gradients, and the cap has to reach the momentum block and the closure."""
     _, coupled = _skewed_corrected_cavity(sweeps=4)
-    probed = CoupledJacobianProbe.build(coupled, stencil_reach=2, gradient_sweeps=2).narrow(coupled)
+    probed = coupled_jacobian_probe(coupled, stencil_reach=2, gradient_sweeps=2).narrow(coupled)
     assert coupled.momentum.gradient_scheme.solver.sweeps == 4  # the case itself is untouched
     assert probed.momentum.gradient_scheme.solver.sweeps == 2
     assert probed.turbulence.gradient_scheme.solver.sweeps == 2
@@ -2034,7 +2033,7 @@ def test_capping_the_probe_shrinks_the_reach_of_the_jacobian_it_materializes() -
     """
     mesh, coupled = _skewed_corrected_cavity(sweeps=4)
     state = _healthy_state(mesh, coupled)
-    probed = CoupledJacobianProbe.build(coupled, stencil_reach=4, gradient_sweeps=2).narrow(coupled)
+    probed = coupled_jacobian_probe(coupled, stencil_reach=4, gradient_sweeps=2).narrow(coupled)
     distance = _cell_graph_distance(mesh)
 
     def reach(case):
@@ -2051,7 +2050,7 @@ def test_the_cap_leaves_the_residual_itself_alone() -> None:
     """It is the preconditioner's stand-in, so the solved equations must not move."""
     mesh, coupled = _skewed_corrected_cavity(sweeps=4)
     state = _healthy_state(mesh, coupled)
-    probed = CoupledJacobianProbe.build(coupled, stencil_reach=3, gradient_sweeps=2).narrow(coupled)
+    probed = coupled_jacobian_probe(coupled, stencil_reach=3, gradient_sweeps=2).narrow(coupled)
     assert not bool(jnp.array_equal(coupled.residual(state), probed.residual(state)))  # arms differ
     np.testing.assert_array_equal(
         np.asarray(coupled.residual(state)),

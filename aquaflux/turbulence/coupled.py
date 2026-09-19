@@ -67,7 +67,6 @@ from aquaflux.solve import (
     NO_RETRIES,
     BlockScaledNorm,
     CellFields,
-    ColumnProbePlan,
     ContinuationSource,
     Convergence,
     DualTimeLoop,
@@ -77,14 +76,15 @@ from aquaflux.solve import (
     FieldSplitAmgPreconditioner,
     GlobalDofs,
     Globalization,
+    JacobianProbe,
     LinearSolveRegime,
     LinearSolveSettings,
     LocalCourantBasis,
     MaterializedJacobianPreconditioner,
     MonolithicAmgPreconditioner,
+    MonolithicFactorShiftPolicy,
     MonolithicLuPreconditioner,
     NewtonStrategy,
-    ProbeGather,
     PseudoTransientStep,
     RefreshPolicy,
     RefreshTiming,
@@ -99,14 +99,11 @@ from aquaflux.solve import (
     StepControl,
     StepReport,
     SubLayout,
-    TransposedPreconditioner,
     VelocityShiftParts,
     assembler_residual,
     block_reference_scales,
-    block_stencil_colouring,
-    block_stencil_gather_map,
-    column_probe_plan,
     explicit_source,
+    jacobian_probe_plan,
     positive_block_limit,
     positive_block_projection,
     refuse_a_transform_the_march_cannot_run_in,
@@ -1854,272 +1851,115 @@ def _is_traced(pytree: object) -> bool:
     return any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(pytree))
 
 
-class MonolithicFactorShiftPolicy(eqx.Module):
-    """A coupled :class:`~aquaflux.solve.ShiftPolicy` that preconditions the whole ``[flow, k, omega]``
-    saddle with one monolithic inverse of the assembled coupled Jacobian, in place of the
-    block-diagonal composition.
-
-    Reuses :class:`CoupledShiftPolicy`'s pseudo-transient shift diagonal -- the physics, the same
-    velocity ``a_P`` and k/omega transport diagonals -- but replaces its block-diagonal preconditioner
-    with a single monolithic inverse of the assembled coupled Jacobian, which forms the true
-    pressure Schur coupling rather than approximating it. That inverse is a complete LU
-    (:class:`~aquaflux.solve.MonolithicLuPreconditioner`, exact, one cycle), or a multigrid V-cycle
-    (:class:`~aquaflux.solve.MonolithicAmgPreconditioner`, bounded memory on a large three-dimensional
-    mesh) -- this policy is agnostic to which, needing only the shared callback-matvec interface. On a
-    convection-dominated collocated Rhie--Chow RANS saddle either reaches the forward tolerance
-    where the block-triangular preconditioner needs hundreds of cycles.
-
-    The inverse is frozen at a reference state and shift (built off the jit path by a
-    :class:`~aquaflux.turbulence.MaterializedJacobian` session). Unlike the block
-    preconditioner's live ``a_P`` rescaling it does not track the developing state; being a far stronger
-    preconditioner it tolerates that freezing at a cost of a few extra cycles, and the shift vanishes at
-    the root so the frozen inverse never changes the converged solution or its adjoint. Because it
-    is a host object (``scipy`` / UMFPACK / PETSc) it rides as a **static** field rather than a traced
-    pytree leaf, and is applied inside the jitted Krylov solve through the callback matvec.
-
-    Attributes
-    ----------
-    base : CoupledShiftPolicy
-        The block policy supplying the pseudo-transient shift diagonal.
-    preconditioner : MonolithicLuPreconditioner or MonolithicAmgPreconditioner
-        The frozen coupled inverse (a static field). Any object exposing the ``matvec`` /
-        ``matvec(transpose=True)`` callback interface works.
-    """
-
-    base: CoupledShiftPolicy
-    preconditioner: MonolithicLuPreconditioner | MonolithicAmgPreconditioner = eqx.field(
-        static=True
-    )
-
-    def shift_term(self, phi: jnp.ndarray, residual: jnp.ndarray | None = None) -> ShiftTerm:
-        """The block policy's shift diagonal, glued to the frozen factorization preconditioner.
-
-        The preconditioner is a single frozen apply, and the step solves the shifted system with the
-        JAX-side Krylov.
-
-        Parameters
-        ----------
-        phi : jnp.ndarray
-            The flat coupled state ``[flow..., k, omega]``, shape ``((dim + 3) n_cells,)``.
-        """
-        # ⚠️ Forward BOTH of the base term's β-dependent parts. A wrapper that rebuilds a `ShiftTerm`
-        # from only `.diagonal` silently discards whatever else the base put there, and the loss is
-        # invisible: the march runs, and the dropped behaviour simply never happens. That is exactly how
-        # an earlier per-block damping measured as a no-op on this path.
-        base = self.base.shift_term(phi, residual)
-        diagonal = base.diagonal
-        apply = self.preconditioner.matvec()
-        # The factorization is frozen, so the preconditioner does not depend on the shift strength.
-        return ShiftTerm(diagonal, lambda relaxation: apply, base.row_relaxation)
-
-    def adjoint_factory(self) -> TransposedPreconditioner:
-        """The ``state -> M^T`` factory for the adjoint transpose solve.
-
-        The converged-state adjoint preconditions the (unshifted) transposed coupled Jacobian with the
-        frozen factorization's transpose -- the same factors applied with a transposed triangular solve.
-        Wrapped in a :class:`~aquaflux.solve.TransposedPreconditioner` because it
-        already returns ``M^T``: the generic adjoint machinery derives the transpose with
-        :func:`jax.linear_transpose`, which cannot handle the host-callback factorization, so it is
-        applied directly instead.
-        """
-        return TransposedPreconditioner(FrozenTransposeFactory(self.preconditioner))
-
-
-@dataclasses.dataclass(frozen=True)
-class FrozenTransposeFactory:
-    """``state -> M^T`` for a frozen monolithic factorization, as a value object rather than a closure.
-
-    The transpose is state-independent -- the factorization is frozen, so the same ``M^T`` serves every
-    state -- which is exactly why this can be a value whose equality is the preconditioner's identity.
-
-    That matters because it ends up in a strategy's ``adjoint_preconditioner_factory``, a *static*
-    field and hence part of the compiled step's cache key. As a lambda it compared by identity, so a
-    Reynolds-continuation rung that rebuilt its engine got a fresh key and recompiled the coupled solve
-    even when it was reusing the very same preconditioner. As a value object, two engines sharing one
-    preconditioner produce equal factories and the rebuild is a cache hit.
-
-    Attributes
-    ----------
-    preconditioner : object
-        The frozen factorization, supplying ``matvec(transpose=True)``. Compared by identity, which is
-        the intended meaning: the same preconditioner object *is* the same operator, and two distinct
-        objects generally are not.
-    """
-
-    preconditioner: object
-
-    def __call__(self, state: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
-        del state  # frozen: the transpose does not depend on where the adjoint is taken
-        return self.preconditioner.matvec(transpose=True)
-
-
 def _coupled_jacobian_plan(
     coupled: CoupledRANS,
     stencil_reach: int,
     column_reach: Sequence[int] | None = None,
     active_rows: np.ndarray | None = None,
 ):
-    """The probing plan for materializing the coupled Jacobian (a mesh-fixed quantity).
+    """The probing plan for ``coupled``: its mesh graph and layout handed to the generic plan.
 
-    Shared by every monolithic-factorization builder (the initial factorization) and by each in-place
-    refresh, so all of them probe the Jacobian the same way.
-
-    ``column_reach`` gives each column field its own reach while keeping the assembly pattern at
-    ``stencil_reach``, so the materialized sparsity is unchanged. It is a property of the *case*: which
-    columns close inside a shorter reach follows from the schemes the residual was assembled with, so
-    it must be measured for a given case rather than assumed. ``None`` (default) probes every column at
-    ``stencil_reach``.
-
-    ``active_rows`` excludes field-pair blocks from the pattern entirely, for a caller that already
-    knows some sub-block of the materialized Jacobian will never be read -- see
-    :meth:`~aquaflux.solve.FieldGroups.active_rows`. ``None`` (default) wants every block.
+    The one place the coupled residual's cell graph and field count meet
+    :func:`~aquaflux.solve.jacobian_probe_plan`; the probe and the factorization builders both read it.
     """
-    n_cells = coupled.momentum.mesh.n_cells
-    owner, nb, _ = coupled.momentum.mesh.face_cells.interior_edges()
-    owner, nb = np.asarray(owner), np.asarray(nb)
-    if column_reach is None:
-        return ColumnProbePlan.uniform(
-            block_stencil_colouring(owner, nb, n_cells, stencil_reach),
-            coupled.layout.n_fields,
-            active_rows=active_rows,
-        )
-    return column_probe_plan(
-        owner, nb, n_cells, column_reach, stencil_reach, active_rows=active_rows
+    return jacobian_probe_plan(
+        coupled.momentum.mesh.face_cells,
+        coupled.momentum.mesh.n_cells,
+        coupled.layout.n_fields,
+        stencil_reach,
+        column_reach,
+        active_rows,
     )
 
 
 @dataclasses.dataclass(frozen=True)
-class CoupledJacobianProbe:
-    """How the coupled Jacobian is materialized: the colouring plan and its fixed de-compression map.
+class _CoupledNarrowing:
+    """The assembler stand-in a coupled Jacobian probe differentiates, as a value.
 
-    Both are functions of the cell graph and the stencil / per-column reaches alone -- never of the
-    state, and never of the molecular viscosity. So **one is valid for a whole Reynolds continuation**
-    and for the refresh hook running beside it, and they are one object rather than two arguments
-    threaded in parallel because they are built together and consumed together at every call site (the
-    initial build, and every in-place refresh).
+    Two independent axes, both applied by :meth:`JacobianProbe.narrow` so that every consumer -- the
+    initial build, the refresh hook, and the rebind across a Reynolds rung -- materializes the same
+    operator the Krylov solve applies, without any of them knowing there are two:
 
-    Building them is not free. The colouring is a graph pass over the whole mesh, and on a
-    three-dimensional coupled case the gather map is the single largest allocation the case makes -- so
-    a driver that builds one engine per continuation rung with a refresh hook beside it would otherwise
-    build both twice per rung, for six identical copies over a three-rung ramp. A preconditioner
-    session (:func:`open_session`) builds exactly one and hands it to every consumer.
+    * ``gradient_sweeps`` caps the corrected-gradient reconstruction's Richardson sweeps. The colouring
+      recovers couplings out to ``stencil_reach`` and no further, and a residual that reaches beyond it
+      has its far entries **folded onto near ones** rather than dropped, so each sweep -- which couples
+      one further ring wherever the mesh is skewed -- is capped for the probe alone. That leaves the
+      matrix exact for the residual it was taken from, a stated approximation of the operator rather than
+      a corrupted matrix. Choose the cap from the case, measuring the whole stencil rather than the sweep
+      count alone: in the coupled RANS residual the eddy viscosity's strain-rate dependence spends a ring
+      of its own. The narrowed copy reaches the preconditioner only, so neither the converged state nor
+      its adjoint moves; on an orthogonal mesh it is a no-op in value as well as reach.
+    * ``production_viscosity_frozen`` follows an operator that has *already* changed: the solve runs
+      with ``jacobian_production_viscosity`` and the preconditioner must be assembled from the matrix
+      the Krylov iteration applies (:func:`frozen_production_viscosity`). ⚠️ Not the same axis as the
+      cap, which narrows the probe while the operator stays exact. Setting the wrong one leaves a
+      preconditioner built for a matrix nobody solves: measured on the pitzDaily target rung at 18--28
+      restart cycles a step against 4--14.
 
     Attributes
     ----------
-    plan : ColumnProbePlan
-        The collision-free colouring and per-column reach the coloured directional-derivative probe
-        runs, which is what fixes how many probes a materialize costs.
-    structure : ProbeGather
-        The fixed compressed-sparse-row (CSR) structure -- a row-pointer array plus a flat column-index
-        array -- together with the ordering that scatters the probe responses into it, so a materialize
-        de-compresses by one gather rather than a scatter loop and a re-sort.
+    gradient_sweeps : int or None
+        The sweep cap, or ``None`` to probe the residual as it stands.
+    production_viscosity_frozen : bool
+        Materialize the frozen-production stand-in instead of the assembler itself.
     """
 
-    plan: ColumnProbePlan
-    structure: ProbeGather
     gradient_sweeps: int | None = None
-    production_viscosity_frozen: bool = eqx.field(static=True, default=False)
+    production_viscosity_frozen: bool = False
 
-    @classmethod
-    def build(
-        cls,
-        coupled: CoupledRANS,
-        stencil_reach: int = 3,
-        column_reach: Sequence[int] | None = None,
-        gradient_sweeps: int | None = None,
-        *,
-        active_rows: np.ndarray | None = None,
-        production_viscosity_frozen: bool = False,
-    ) -> CoupledJacobianProbe:
-        """Colour the cell graph at these reaches and precompute the de-compression for it.
-
-        Parameters
-        ----------
-        coupled : CoupledRANS
-            The assembled case, read for its mesh graph and block layout only -- so any companion of
-            the same case (a Reynolds-continuation rung at a scaled viscosity) gives the same probe.
-        stencil_reach : int
-            The cell-graph distance the assembled sparsity covers (coupled RANS reaches distance ``3``).
-        column_reach : sequence of int, optional
-            A shorter reach per **column field**, in the flat layout's order ``[u, ..., p, k, omega]``,
-            while the assembled pattern stays at ``stencil_reach``. Exact only for a column that
-            genuinely carries nothing further out; measure it for the case rather than assuming it.
-            ``None`` (default) probes every column at ``stencil_reach``.
-        gradient_sweeps : int, optional
-            Probe a copy of the residual whose corrected-gradient solve is capped at this many
-            Richardson sweeps, rather than the residual itself. See :meth:`narrow`. ``None`` (default)
-            probes the residual as it stands.
-        production_viscosity_frozen : bool
-            Materialize the Jacobian of the **frozen-production** copy
-            (:func:`frozen_production_viscosity`) rather than of ``coupled`` itself. Set it whenever
-            the solve runs with ``jacobian_production_viscosity``: the preconditioner must be
-            assembled from the operator the Krylov iteration APPLIES, and those two differ by a term
-            the size of the k row's own diagonal. ``False`` (default) is byte-identical.
-
-            ⚠️ **This is not the same axis as ``gradient_sweeps`` even though both go through**
-            :meth:`narrow`. That one narrows the probe while the operator stays exact — its purpose is
-            to make the colouring collision-free. This one follows an operator that has already
-            changed. Setting the wrong one leaves a preconditioner built for a matrix nobody solves:
-            measured on the pitzDaily target rung at 18--28 restart cycles a step against 4--14.
-        active_rows : np.ndarray, optional
-            Exclude field-pair blocks from the materialized pattern entirely -- for a probe built
-            specifically to feed one consumer that is known never to read some sub-block of the
-            Jacobian, such as a :class:`~aquaflux.solve.BlockTriangularFieldSplit`'s dropped triangle
-            (:meth:`~aquaflux.solve.FieldGroups.active_rows`). ``None`` (default, and the only sound
-            choice for a probe that might be shared with a monolithic consumer) wants every block, and
-            is byte-identical to a probe built without this argument.
-
-        Returns
-        -------
-        CoupledJacobianProbe
-            The shared probe.
-        """
-        plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach, active_rows)
-        return cls(
-            plan, block_stencil_gather_map(plan), gradient_sweeps, production_viscosity_frozen
-        )
-
-    def narrow(self, coupled: CoupledRANS) -> CoupledRANS:
-        """The assembler this probe differentiates -- ``coupled``, or a reduced-sweep copy of it.
-
-        The colouring recovers couplings out to ``stencil_reach`` and no further, and a residual that
-        reaches beyond it has its far entries **folded onto near ones** rather than dropped (a
-        colouring is collision-free only for the pattern it was built at). A corrected-gradient
-        reconstruction is the term most able to reach past a fixed distance: each of its Richardson
-        sweeps couples one further ring wherever the mesh is skewed, so ``n`` sweeps put the residual's
-        stencil at ``n + 1`` (the reconstruction reads ``n`` cells out, and a face flux gathers the
-        gradient of the cells on both sides). Capping the sweeps for the probe alone leaves the matrix exact
-        for the residual it was taken from, which is a stated approximation of the operator rather than
-        a corrupted matrix.
-
-        Choose the cap from the case: it is the *whole* stencil that has to fit inside
-        ``stencil_reach``, and the gradient is only one of the terms feeding it (in the coupled RANS
-        residual the eddy viscosity's strain-rate dependence spends a ring of its own). Measure the
-        reach rather than deriving it from the sweep count alone.
-
-        The narrowed copy reaches the **preconditioner only** -- the solve's operator stays the exact
-        Jacobian--vector product of ``coupled`` -- so neither the converged state nor its adjoint moves.
-        On an orthogonal mesh the skewness correction vanishes identically and this is a no-op in value
-        as well as in reach.
-
-        Parameters
-        ----------
-        coupled : CoupledRANS
-            The assembler whose Jacobian is being materialized. Passed per call rather than held,
-            because a refresh hook is rebound across Reynolds-continuation rungs.
-
-        Returns
-        -------
-        CoupledRANS
-            The narrowed copy, or ``coupled`` itself when no cap was asked for.
-        """
+    def __call__(self, coupled: CoupledRANS) -> CoupledRANS:
         narrowed = _probed_assembler(coupled, self.gradient_sweeps)
-        # Both stand-ins land here, which is what keeps every consumer -- the initial build, the
-        # refresh hook, and the rebind across a Reynolds rung -- materializing the same operator the
-        # Krylov solve applies, without any of them knowing there are two axes.
         return (
             frozen_production_viscosity(narrowed) if self.production_viscosity_frozen else narrowed
         )
+
+
+def coupled_jacobian_probe(
+    coupled: CoupledRANS,
+    stencil_reach: int = 3,
+    column_reach: Sequence[int] | None = None,
+    gradient_sweeps: int | None = None,
+    *,
+    active_rows: np.ndarray | None = None,
+    production_viscosity_frozen: bool = False,
+) -> JacobianProbe:
+    """The coupled RANS Jacobian's coloured probe: its mesh graph, its layout and its stand-in.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The assembled case, read for its mesh graph and block layout only -- so any companion of the
+        same case (a Reynolds-continuation rung at a scaled viscosity) gives the same probe.
+    stencil_reach : int
+        The cell-graph distance the assembled sparsity covers (coupled RANS reaches distance ``3``).
+    column_reach : sequence of int, optional
+        A shorter reach per **column field**, in the flat layout's order ``[u, ..., p, k, omega]``.
+        See :meth:`~aquaflux.solve.JacobianProbe.build`.
+    gradient_sweeps : int, optional
+        Probe a copy of the residual whose corrected-gradient solve is capped at this many Richardson
+        sweeps, rather than the residual itself. ``None`` (default) probes the residual as it stands.
+    active_rows : np.ndarray, optional
+        Exclude field-pair blocks from the materialized pattern; see
+        :meth:`~aquaflux.solve.JacobianProbe.build`.
+    production_viscosity_frozen : bool
+        Materialize the Jacobian of the **frozen-production** copy
+        (:func:`frozen_production_viscosity`) rather than of ``coupled`` itself. Set it whenever the
+        solve runs with ``jacobian_production_viscosity``. ``False`` (default) is byte-identical.
+
+    Returns
+    -------
+    JacobianProbe
+        The shared probe, carrying a :class:`_CoupledNarrowing` as its ``narrowing``.
+    """
+    return JacobianProbe.build(
+        coupled.momentum.mesh.face_cells,
+        coupled.momentum.mesh.n_cells,
+        coupled.layout.n_fields,
+        stencil_reach,
+        column_reach,
+        active_rows=active_rows,
+        narrowing=_CoupledNarrowing(gradient_sweeps, production_viscosity_frozen),
+    )
 
 
 def frozen_production_viscosity(coupled: CoupledRANS) -> CoupledRANS:
@@ -2158,7 +1998,7 @@ def frozen_production_viscosity(coupled: CoupledRANS) -> CoupledRANS:
 def _probed_assembler(coupled: CoupledRANS, gradient_sweeps: int | None) -> CoupledRANS:
     """``coupled``, or the reduced-sweep copy a preconditioner's coloured probe differentiates.
 
-    Shared by :meth:`CoupledJacobianProbe.narrow` and by the factorization builders, which materialize
+    Shared by :class:`_CoupledNarrowing` and by the factorization builders, which materialize
     the same Jacobian without needing the probe's de-compression map. See that method for what the cap
     is for and how to choose it.
     """
@@ -2418,7 +2258,7 @@ def _beta_tracking_refresh(
     every_step: bool,
     beta_floor: float = 0.0,
     observer: Callable[[RefreshTiming], None] | None = None,
-    probe: CoupledJacobianProbe | None = None,
+    probe: JacobianProbe | None = None,
 ) -> Callable[[NewtonStrategy, jnp.ndarray], None]:
     """Shared skeleton for the β-tracking ``refresh_preconditioner`` hooks (complete-LU and algebraic multigrid).
 
@@ -2449,7 +2289,7 @@ def _beta_tracking_refresh(
     probe_gradient_sweeps : int, optional
         Materialize the preconditioner's Jacobian from a copy of the residual whose corrected-gradient
         solve is capped at this many Richardson sweeps, so its stencil fits inside the reach the
-        colouring recovers -- see :meth:`CoupledJacobianProbe.narrow`. The solve's own operator is
+        colouring recovers -- see :meth:`~aquaflux.solve.JacobianProbe.narrow`. The solve's own operator is
         unchanged, so the converged state and its adjoint are too. ``None`` (default) probes the
         residual as it stands.
     every_step : bool
@@ -2462,9 +2302,9 @@ def _beta_tracking_refresh(
     observer : callable, optional
         ``(timing: RefreshTiming) -> None``, called on each refresh with which branch ran, its total
         seconds, and its per-phase costs. ``None`` (default) elides the call.
-    probe : CoupledJacobianProbe, optional
+    probe : JacobianProbe, optional
         A shared colouring plan and de-compression map, when the caller already has one -- see
-        :class:`CoupledJacobianProbe`. ``None`` (default) builds one from
+        :class:`~aquaflux.solve.JacobianProbe`. ``None`` (default) builds one from
         ``stencil_reach`` / ``column_reach``, which are then ignored if a ``probe`` is given.
 
     Returns
@@ -2474,9 +2314,7 @@ def _beta_tracking_refresh(
         and ``rebind`` (point it at another companion of the same case -- see below).
     """
     if probe is None:
-        probe = CoupledJacobianProbe.build(
-            coupled, stencil_reach, column_reach, probe_gradient_sweeps
-        )
+        probe = coupled_jacobian_probe(coupled, stencil_reach, column_reach, probe_gradient_sweeps)
     plan, structure = probe.plan, probe.structure
 
     # WHICH case this hook currently refreshes for, in a mutable binding rather than closed over, so
@@ -2487,7 +2325,7 @@ def _beta_tracking_refresh(
     # Both probes below take the assembler as an argument to a module-level jitted function, so swapping
     # it changes no compilation key of theirs either.
     # `"probed"` is what the coloured probe differentiates, which is the assembler itself unless the probe
-    # asks for a reduced-sweep copy (`CoupledJacobianProbe.narrow`). It is stored beside the companion
+    # asks for a reduced-sweep copy (`JacobianProbe.narrow`). It is stored beside the companion
     # rather than derived per call so a rebind narrows once; the drift measure below deliberately reads
     # `"coupled"`, since it reports the real case's eddy viscosity and not the preconditioner's stand-in.
     bound: dict[str, CoupledRANS] = {"coupled": coupled, "probed": probe.narrow(coupled)}
@@ -2847,7 +2685,7 @@ class _MaterializedSession:
         self._reports = reports
         self._on_build = on_build
         self._inverse_wrapper = inverse_wrapper
-        self._probe: CoupledJacobianProbe | None = None
+        self._probe: JacobianProbe | None = None
         self._hook: Callable | None = None
         self._preconditioner: object | None = None
 
@@ -2944,9 +2782,9 @@ class _MaterializedSession:
         # `[u, v, w, p]` (the saddle) leads, `[k, omega]` (the transported scalars) trail.
         return FieldGroups.split_before(self._coupled.layout, "k")
 
-    def _probe_for(self) -> CoupledJacobianProbe:
+    def _probe_for(self) -> JacobianProbe:
         if self._probe is None:
-            self._probe = CoupledJacobianProbe.build(
+            self._probe = coupled_jacobian_probe(
                 self._coupled,
                 **self._spec.probe.settings(),
                 # A split never reads the flow-by-[k, omega] triangle, so its probe need not store it.

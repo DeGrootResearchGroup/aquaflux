@@ -3192,7 +3192,7 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
 - **✅ NARROWING THE PROBE BEATS LENGTHENING IT — measured 2026-08-21, and it is the largest single
   saving found on this case.** The long reach a long-stencil reconstruction seems to demand is paying
   to *tolerate folding*, not to capture coupling the preconditioner needs. Cap the gradient's sweeps
-  **for the probe copy only** (`CoupledJacobianProbe.build(gradient_sweeps=…)` /
+  **for the probe copy only** (`coupled_jacobian_probe(gradient_sweeps=…)` /
   `narrow_gradient_sweeps`) and the residual's stencil genuinely shortens, so the colouring is
   collision-free and the recovered matrix is **exact for the narrowed residual** instead of corrupted
   for the true one. Full `pitzdaily_gradient_ab` marches, Betchen arm at outer/inner swept-5:
@@ -3318,7 +3318,7 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     **Why a cap rather than an exact solve:** a coloured probe recovers the Jacobian to a fixed distance
     and *folds* whatever lies beyond onto near entries, so probing a narrowed residual gives a matrix that
     is **exact for the residual it was taken from** — a stated approximation of the operator instead of a
-    corrupted one. Consumed through `CoupledJacobianProbe(gradient_sweeps=…)` / the coupled builders'
+    corrupted one. Consumed through `JacobianProbe(gradient_sweeps=…)` / the coupled builders'
     `probe_gradient_sweeps=`; see `.claude/rules/turbulence.md` and `.claude/rules/solve-direct-preconditioners.md`. **Default
     `None` everywhere is byte-identical.**
     ⚠️⚠️ **IT IS LATENT ON `bfs3d` AND LIVE ON pitzDaily — an earlier version of this entry said "latent

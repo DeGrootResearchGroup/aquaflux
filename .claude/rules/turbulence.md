@@ -48,12 +48,13 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
 | `_refuse` and the strategy/builder branch of `_continuation_source` | `solve.explicit_source`, `solve.refuse_unforwardable_settings` | the raise now names the caller passed in |
 | the tail of `_coupled_step` (dual-time vs single step, the hook and refresh refusals, the default `relative_residual_gmres(norm=None)`) | `solve.shifted_step` (`solve/shifted_step.py`) | `_coupled_step` keeps only the coupled operator stand-in and passes `line_search=_COUPLED_LINE_SEARCH` |
 | `_LinearSolveRegime`, `_resolved_regime`, `_resolved_linear_solve`, and `LinearSolveSettings` from `march_settings.py` | `solve.LinearSolveRegime`, `solve.resolve_linear_solve`, `solve.LinearSolveSettings` | `aquaflux.turbulence.LinearSolveSettings` no longer exists; the per-family regime constants (`_BLOCK_LINEAR_SOLVE`, …) stay here because they are calibrations of *these* preconditioners |
+| `CoupledJacobianProbe` (plan + gather map), `_coupled_jacobian_plan`'s graph logic | `solve.JacobianProbe`, `solve.jacobian_probe_plan` (`solve/jacobian_probe.py`) | the probe holds a `narrowing` callable for the assembler stand-in; `coupled_jacobian_probe(coupled, …)` builds one with `_CoupledNarrowing(gradient_sweeps, production_viscosity_frozen)`. `probe.gradient_sweeps` is now `probe.narrowing.gradient_sweeps`. `_coupled_jacobian_plan` stays as the coupled adapter (mesh graph + layout) |
+| `MonolithicFactorShiftPolicy`, `FrozenTransposeFactory` | `solve.MonolithicFactorShiftPolicy`, `solve.FrozenTransposeFactory` (`solve/monolithic_policy.py`) | `base` is any `ShiftPolicy`; no longer exported from `aquaflux.turbulence` |
 | the flow rows of `coupled_scaled_norm`, and the per-block reference scales | `flow.flow_row_scales`, `solve.block_reference_scales` | `coupled_scaled_norm` appends its `k`/`ω` rows to the flow's |
 
 **Still here and still generic — the next candidates to move**: the preconditioner sessions
-(`open_session`, `_BlockSession`, `_MaterializedSession`, `PreconditionerSession`), the coloured probe
-(`CoupledJacobianProbe`, `_coupled_jacobian_plan`), `MonolithicFactorShiftPolicy`, `_beta_tracking_refresh`,
-and the mass-flow border. They take a `CoupledRANS` only for its residual and layout, so a laminar
+(`open_session`, `_BlockSession`, `_MaterializedSession`, `PreconditionerSession`), `_beta_tracking_refresh`,
+and the mass-flow border (the probe and the monolithic shift policy have moved to `solve/`). They take a `CoupledRANS` only for its residual and layout, so a laminar
 `MaterializedJacobian` march is blocked on them: `solve_flow_march` supports the block-SIMPLE
 preconditioner only. The size ratchet in `tests/unit/test_layering.py` is what to lower as they move.
 ⚠️ **Do not add a capability to the march here without checking `solve_flow_march` can reach it** — that is
@@ -337,7 +338,7 @@ Many entries below are dated history written against the old API. Read them thro
       accepted it and silently ignored it.
     - **Each spec's field set is pinned to the constructor it feeds** (`test_preconditioner_spec.py`):
       `BlockDiagonal` to `BlockPreconditioner.build` minus `reference_state`, `JacobianProbeSpec` to
-      `CoupledJacobianProbe.build`'s free settings (not `active_rows`, which follows from the inverse, nor
+      `coupled_jacobian_probe`'s free settings (not `active_rows`, which follows from the inverse, nor
       `production_viscosity_frozen`, which follows from the operator), `MonolithicVCycle` and `CompleteLu`
       to their `build`. `FieldSplit` requires `solve.BlockInverse` values, never a factory closure, so a
       build-record sink is attached where the session is opened rather than bound into the inverse.
@@ -1550,10 +1551,10 @@ Many entries below are dated history written against the old API. Read them thro
       Jacobian *goes*. `CorrectedGreenGauss` couples one further ring per Richardson sweep, so on a skewed
       mesh the shipped `sweeps=4` puts the coupled residual at reach **6** against a `stencil_reach` of 3 —
       and a residual reaching past the pattern aliases in **every** column, which no `column_reach` choice
-      fixes and `jacobian_relative_error` cannot see. `CoupledJacobianProbe(gradient_sweeps=n)` (and the
+      fixes and `jacobian_relative_error` cannot see. `JacobianProbe(gradient_sweeps=n)` (and the
       `probe_gradient_sweeps=n` keyword on `coupled_amg_continuation`, `amg_beta_tracking_refresh` and the
       LU builders) materializes the preconditioner from a copy of the residual whose gradient
-      solve is capped at `n` sweeps — `CoupledJacobianProbe.narrow` is the one place that decides it, and
+      solve is capped at `n` sweeps — `JacobianProbe.narrow` is the one place that decides it, and
       the refresh hook re-narrows on `rebind` so a Reynolds rung's companion is capped too. The forward
       matvec keeps the exact `coupled`, so the root and the adjoint are unmoved. **`None` (default) is
       byte-identical, and this is INERT on `bfs3d`**, whose mesh is skew-free to round-off (0 of 66368
@@ -1621,7 +1622,7 @@ Many entries below are dated history written against the old API. Read them thro
          argument above wholesale. The case now builds `Constant(jnp.asarray(RHO * NU))`; the library
          still does not force it (`.claude/rules/properties.md` carries the rule and both halves are
          pinned).
-      Also removed while sharing: the probe plan and its gather map (`CoupledJacobianProbe`, mesh-fixed
+      Also removed while sharing: the probe plan and its gather map (`JacobianProbe`, mesh-fixed
       — a three-rung march built the largest allocation the case makes **six** times, once per rung per
       consumer), the per-rung `combine_observers` closure (a static field, so a fresh one is its own
       recompile), and the per-rung engine's V-cycle fit itself.

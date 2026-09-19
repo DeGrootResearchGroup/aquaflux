@@ -16,7 +16,6 @@ from aquaflux.solve import (
 from aquaflux.turbulence import (
     BlockDiagonal,
     CompleteLu,
-    CoupledJacobianProbe,
     FieldSplit,
     JacobianProbeSpec,
     MaterializedJacobian,
@@ -24,6 +23,7 @@ from aquaflux.turbulence import (
     ScalarAir,
     ScalarTwoLevel,
     UnpreconditionedScalars,
+    coupled_jacobian_probe,
 )
 
 
@@ -46,7 +46,7 @@ def test_the_block_diagonal_spec_names_the_flow_block_settings_and_the_scalar_bl
 
 def test_the_probe_spec_names_the_probe_builders_free_settings() -> None:
     """The skipped blocks and the production-viscosity stand-in follow from other choices."""
-    expected = _parameters(CoupledJacobianProbe.build, inspect.Parameter.POSITIONAL_OR_KEYWORD) - {
+    expected = _parameters(coupled_jacobian_probe, inspect.Parameter.POSITIONAL_OR_KEYWORD) - {
         "coupled"
     }
     assert _fields(JacobianProbeSpec) == expected
