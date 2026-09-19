@@ -169,7 +169,7 @@ from .multigrid import (
     smoothed_multigrid_solve,
 )
 from .newton import newton_step
-from .norm import BlockScaledNorm, ResidualNorm, RowScaledNorm
+from .norm import BlockScaledNorm, ResidualNorm, RowScaledNorm, block_reference_scales
 from .convergence import (
     PLAIN_RESIDUAL,
     BlockScaled,
@@ -182,6 +182,16 @@ from .convergence import (
 )
 from .relaxation import ConstantRelaxation, RelaxationSchedule, SwitchedEvolutionRelaxation
 from .refresh import NO_REFRESH, RefreshPolicy
+from .driver import (
+    CallerBuiltSource,
+    ContinuationSource,
+    FinishedSource,
+    StagedResult,
+    explicit_source,
+    refuse_unforwardable_settings,
+    staged_march,
+)
+from .shifted_step import LinearSolveRegime, LinearSolveSettings, resolve_linear_solve, shifted_step
 from .retry import ESCALATING_REASONS, NO_RETRIES, RetryPolicy
 from .shift_basis import LocalCourantBasis, ShiftBasis, VelocityShiftParts
 from .sparse_jacobian import (
@@ -217,11 +227,13 @@ __all__ = [
     "BlockScaled",
     "BlockScaledNorm",
     "BlockTriangularFieldSplit",
+    "CallerBuiltSource",
     "CellFields",
     "CflResidualDualTimeControl",
     "CoefficientDriftTrigger",
     "ColumnProbePlan",
     "ConstantRelaxation",
+    "ContinuationSource",
     "Convergence",
     "CycleGrowthTrigger",
     "DampedNewtonStep",
@@ -233,6 +245,7 @@ __all__ = [
     "FieldGroups",
     "FieldLayout",
     "FieldSplitAmgPreconditioner",
+    "FinishedSource",
     "GlobalDofs",
     "Globalization",
     "HierarchyBlockInverse",
@@ -242,6 +255,8 @@ __all__ = [
     "JacobiSmoothed",
     "JacobiSmoothedInverse",
     "LineSearchGrowth",
+    "LinearSolveRegime",
+    "LinearSolveSettings",
     "LocalCourantBasis",
     "MarchLogger",
     "MarchResult",
@@ -281,6 +296,7 @@ __all__ = [
     "SimpleSmoothed",
     "SimpleSmoothedInverse",
     "SmoothedHierarchy",
+    "StagedResult",
     "StateBlock",
     "StateCheckpointer",
     "StepAcceptance",
@@ -294,6 +310,7 @@ __all__ = [
     "air_multigrid_solve",
     "assembler_residual",
     "block_approximate_inverse",
+    "block_reference_scales",
     "block_stencil_colouring",
     "block_stencil_gather_map",
     "build_air_hierarchy",
@@ -311,6 +328,7 @@ __all__ = [
     "default_dual_time_control",
     "default_linear_solver",
     "equilibrate_cell_major",
+    "explicit_source",
     "field_change_metrics",
     "filled_from",
     "in_progress_measure",
@@ -322,12 +340,16 @@ __all__ = [
     "positive_block_projection",
     "refresh_air_hierarchy",
     "refuse_a_transform_the_march_cannot_run_in",
+    "refuse_unforwardable_settings",
     "relative_residual_gmres",
+    "resolve_linear_solve",
     "restart_cycles",
     "root_adjoint",
     "shifted_jacobian",
+    "shifted_step",
     "smoothed_multigrid_solve",
     "solve_linear",
+    "staged_march",
     "stop_array_gradients",
     "symmetrically_equilibrate",
 ]

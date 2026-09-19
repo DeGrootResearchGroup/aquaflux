@@ -127,7 +127,7 @@ archived march logs and any private notes still use the left column).
 | `PseudoTransientStep.forward_solver=` | `krylov_solver=` | the caller's override for the inner linear solve; `linear_solver()` is the method that resolves it |
 | `coupled_step(forward=)`, `ForwardSolve` | `linear_solve=`, `LinearSolveSettings` | the Krylov settings, which are neither forward-mode nor the march |
 | `precondition_step` | `refresh_preconditioner` | a per-step hook, not a step |
-| `_ForwardSolveRegime`, `_BLOCK_FORWARD`, … | `_LinearSolveRegime`, `_BLOCK_LINEAR_SOLVE`, … | private regimes of the same inner solve |
+| `_ForwardSolveRegime`, `_BLOCK_FORWARD`, … | `LinearSolveRegime` (public, `solve/shifted_step.py`; was `_LinearSolveRegime` in `turbulence/coupled.py` until 2026-09-19), `_BLOCK_LINEAR_SOLVE`, … | the regimes of the same inner solve; the per-family constants stay in `turbulence/coupled.py` |
 | `RootSolver(rtol=, atol=)`, `solve_coupled(rtol=, atol=, scaled_norm=)`, `solve_coupled_mass_flow(rtol=, atol=)` | `convergence=Convergence(measure=…, rtol=…, atol=…)` (#370, 2026-09-16) | the measure and its tolerances as one value; `RootSolver` also takes `measures=` for a structured residual |
 
 **Deliberately NOT renamed**, so do not "finish the job":
@@ -264,7 +264,7 @@ halves of the decision are now separated:
   tolerance is therefore only meaningful beside its measure** — `0.3` row-scaled and `1e-2` Euclidean
   are not comparable numbers.
 * **The restart regime is per preconditioner family**, which is the part that genuinely differs, as
-  `_LinearSolveRegime` values in `turbulence/coupled.py`:
+  `LinearSolveRegime` values in `turbulence/coupled.py`:
 
 | regime | preconditioner (`coupled_step` / a session) | rtol | restart | max_restarts |
 |---|---|---|---|---|
@@ -383,6 +383,40 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     per step, **194 → 202 in total (+4 %)** — the inner Krylov stop now reading the rebuilt measure
     instead of the one the step was built with. Wall clock is not quotable: another session loaded the
     machine during the arm (1-minute load ~10).
+- **`driver.py` + `shifted_step.py` — BUILT 2026-09-19 (#448, #277): the robust march is residual-agnostic,
+  and lives HERE (root `CLAUDE.md`, Principle 3.6).** Both were `turbulence/coupled.py` internals until a
+  laminar flow problem found it could not reach them. **`solve.staged_march(residual_fn, state, *, strategy,
+  source, refresh, convergence, measures, drift_measure, max_steps, step_control, …, caller)`** is the
+  segment loop and every rule the sequence obeys: the stopping target `atol + rtol * reference` measured
+  **once** at the initial state in the measure `convergence` names and held across segments; the measure
+  builder made once and handed to every segment; the **last segment marched without the trigger** (there
+  is no second solve, so a segment stopped where its trigger fires would end short of a root); the step
+  control threaded across segments while the damping reference and `drift_measure` restart per segment
+  (`drift_measure` is `state -> drift(state)` so the caller re-bases it at each segment's start); the
+  final state judged in the measure it was steered by and **refused with `EquinoxRuntimeError` if not a
+  root** (the adjoint is valid only at one). It returns `StagedResult(state, strategy)`; attaching
+  `root_adjoint` stays the caller's, because only the caller holds the differentiable parameter pytree.
+  `solve.explicit_source` picks `FinishedSource` / `CallerBuiltSource` when the caller gave a strategy or
+  a `RefreshPolicy(builder=…)` and **refuses** (`refuse_unforwardable_settings`) any step-configuring
+  setting beside them rather than dropping it. **`solve.shifted_step(policy, *, globalization, dual_time,
+  regime, krylov_solver, adjoint_preconditioner_factory, …, line_search)`** is the tail every builder
+  ends in: single shifted step vs dual-time loop, the refusal of inner-loop hooks with no loop and of a
+  `refresh_on_cycles` with nothing to fire, and the default `relative_residual_gmres(norm=None)` built
+  from a `LinearSolveRegime` (`regime=None` leaves the step class's own solve — what
+  `momentum_continuation` wants). `LinearSolveSettings`, `LinearSolveRegime` and `resolve_linear_solve`
+  moved here with it: nothing in them names a preconditioner or a residual.
+  - Callers: `turbulence.solve_coupled` (`_CoupledMeasures`, `eddy_viscosity_drift`, a session source),
+    `flow.solve_flow_march` (`flow.FlowMeasures`, no drift measure, `_FlowSource`), and
+    `flow.momentum_continuation` for `shifted_step`. A residual with a coefficient to watch drift on
+    supplies `drift_measure`; one without (constant-viscosity laminar flow) passes `None` and uses a cost
+    trigger.
+  - `tests/unit/test_coupled_rans.py` monkeypatches `newton_march` **on `solve.driver`**, where the loop
+    now calls it.
+  - `block_reference_scales(layout, residual)` (`norm.py`) is the per-block scale a `BlockScaledNorm` is
+    built from — one home for what `_coupled_block_scales` and the flow measure both need.
+  - **`solve/` imports nothing outside itself** (`tests/unit/test_layering.py`, always-on): it is the layer
+    that lets every residual run on this machinery.
+
 - **`linear.py` — BUILT.** `solve_linear(matvec, b, solver, preconditioner=None)` is a
   matrix-free wrapper over `lineax` (default restarted GMRES); `lineax` supplies the
   **implicit-diff of the linear solve** (the Krylov loop is not taped). This is the load-bearing

@@ -58,7 +58,7 @@ from .coupled import (
 )
 from .driver import bulk_velocity, solve_segregated
 from .initialization import hybrid_initialize, wall_consistent_omega
-from .march_settings import LinearSolveSettings, ShiftSettings
+from .march_settings import ShiftSettings
 from .preconditioner import (
     AirAmgPreconditioner,
     ConvectionAmgPreconditioner,
@@ -122,7 +122,6 @@ __all__ = [
     "JacobianProbeSpec",
     "KDestruction",
     "KProduction",
-    "LinearSolveSettings",
     "LiveViscosityVelocityParts",
     "LogScalars",
     "MaterializedJacobian",

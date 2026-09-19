@@ -24,6 +24,8 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 
+from .state import FieldLayout
+
 # A residual norm maps a flat residual vector to a non-negative scalar. The default everywhere is the
 # plain Euclidean norm; a heterogeneous block system injects :class:`BlockScaledNorm` instead.
 ResidualNorm = Callable[[jnp.ndarray], jnp.ndarray]
@@ -51,6 +53,27 @@ def block_two_norms(vector: jnp.ndarray, sizes: tuple[int, ...]) -> jnp.ndarray:
     """
     split_points = tuple(int(p) for p in np.cumsum(sizes)[:-1])
     return jnp.stack([jnp.linalg.norm(block) for block in jnp.split(vector, split_points)])
+
+
+def block_reference_scales(layout: FieldLayout, residual: jnp.ndarray) -> tuple[float, ...]:
+    """The per-block residual magnitudes of ``residual``, each floored positive so it can divide a norm.
+
+    The reference scales :class:`BlockScaledNorm` is built from: each block of the layout contributes its
+    own Euclidean norm at the state ``residual`` was taken at.
+
+    Parameters
+    ----------
+    layout : FieldLayout
+        The state layout whose blocks the residual is split into.
+    residual : jnp.ndarray
+        The flat residual at the reference state, shape ``(layout.size,)``.
+
+    Returns
+    -------
+    tuple of float
+        One scale per block, in layout order.
+    """
+    return tuple(max(float(jnp.linalg.norm(part)), 1e-30) for part in layout.unpack(residual))
 
 
 class BlockScaledNorm(eqx.Module):

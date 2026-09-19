@@ -594,6 +594,44 @@ Engineering Principles.
   / `damped_jacobi_solve` remain in `preconditioner.py` (still directly unit-tested); the composed Stage-1
   strategy is gone.
 
+## The flow march — `solve_flow_march` / `flow_march_step` / `FlowMeasures` (BUILT 2026-09-19, #448)
+
+A laminar problem runs on the **same staged march as the turbulent one** (`solve.staged_march`,
+`solve.shifted_step`; see `solve.md`) — dual-time, `RetryPolicy`, a row-equilibrated measure rebuilt every
+outer iteration, a between-segment preconditioner refresh, a step control, a homotopy, per-step
+observation — configured the same way and meaning the same thing. Previously the only flow-only builder
+was `momentum_continuation`, a bare `PseudoTransientStep` for `RootSolver`, so a laminar case could not be
+a control for a solver question: the control had to run on a weaker driver.
+- **`solve_flow_march(momentum, state=None, *, strategy, reference_state, preconditioner_options, …,
+  **march)`** starts from `potential_flow` when given no state, marches on `stop_gradient` copies, and
+  attaches `root_adjoint` at the converged root (so `jax.grad` is one transpose solve whatever path the
+  march took; pinned against finite differences and single-step vs dual-time in
+  `tests/integration/test_flow_march.py`). **`flow_march_step`** builds the step: `momentum_shift_policy`
+  (block-SIMPLE preconditioner + the velocity `a_P` shift, shared with `momentum_continuation`) into
+  `shifted_step`. Its Krylov regime is `_FLOW_LINEAR_SOLVE` = rtol 0.3 / restart 120 / max_restarts 15,
+  **carried from the coupled block-diagonal family and not re-measured on a flow-only residual**.
+  `tools/sibling_builders.py` pairs `flow_march_step` with `coupled_step`; what differs is genuine (the
+  coupled `positivity_*` are `k`'s) **except `shift_basis`**, which is spelled directly here and as
+  `ShiftSettings.basis` there — unify when `ShiftSettings` splits into a flow part and a turbulence part.
+  `jacobian_gradient_sweeps` is on both, being a property of the residual and not of the closure.
+- **`FlowMeasures`** supplies `RowScaled` / `BlockScaled` for the `(u, p)` residual: momentum rows by the
+  shift's base diagonal, **continuity by the cell's mass throughput** (it has no diagonal), field scales the
+  mean speed and one. `flow_row_scales` is that flow part, shared with `turbulence.coupled_scaled_norm`,
+  which appends its `k`/`ω` rows — so the flow rows of the two measures cannot drift.
+- ⚠️ **`BlockScaled()` stalls (0 cycles, every step rejected) from the default `potential_flow` start**: it takes
+  each block's scale from the start state's own residual, and potential flow is divergence-free, so the
+  continuity block starts ~0 and every later step reads as an enormous relative increase. Measured
+  2026-09-19 on the 24 x 16 channel at Re 200 (`FirstOrderUpwind`, `CompactGreenGauss`, block-SIMPLE
+  defaults): from rest it converges in 10 steps. The default `RowScaled()` has no such sensitivity.
+- **Not built, and blocked on `turbulence/coupled.py` still holding generic code** (`turbulence.md`, "Generic
+  machinery does NOT live here"): a laminar **`MaterializedJacobian`** march (complete LU, monolithic
+  V-cycle, field split) — the sessions and the coloured probe take a `CoupledRANS`. `solve_flow_march`
+  supports the block-SIMPLE preconditioner only, and has no `mass_flow` (bulk-velocity) form.
+- The issue's motivating case (the Re_Dh 50 tetrahedral duct that did not converge under a hand-rolled
+  `newton_march`) has **not** been re-run on this march — that harness was never committed. Whether that
+  failure was the flow-only path's configuration or a genuine gap is still open; this change makes it
+  answerable.
+
 ## Binding decisions
 - **`a_P` (momentum diagonal) is DIFFERENTIATED in the residual; only the PRECONDITIONER freezes it
   (binding — do not describe `a_P` as a lagged/`stop_gradient`-ed coefficient).** It is computed from

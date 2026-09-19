@@ -76,6 +76,7 @@ from aquaflux.io import read_openfoam
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, VenkatakrishnanLimiter
 from aquaflux.solve import (
+    LinearSolveSettings,
     AirReduction,
     CflResidualDualTimeControl,
     Convergence,
@@ -93,7 +94,6 @@ from aquaflux.solve import (
 from aquaflux.turbulence import (
     CoupledRANS,
     FieldSplit,
-    LinearSolveSettings,
     GeometricReynoldsSchedule,
     JacobianProbeSpec,
     LogScalars,

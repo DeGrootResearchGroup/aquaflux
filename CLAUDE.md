@@ -45,7 +45,7 @@ Checklist still governs).
 | `.claude/rules/schemes.md` | `aquaflux/schemes/**` | first-class swappable numerics: face interpolation, gradient reconstruction, non-orthogonal correction |
 | `.claude/rules/boundary.md` | `aquaflux/boundary/**` | weak boundary-face-value closures (BC = special face interpolator); the shared per-patch fold |
 | `.claude/rules/properties.md` | `aquaflux/properties/**` | physical property model (density/viscosity/conductivity): `Property` (constant / per-zone / calculated) collected in a `PropertyModel`, decoupled from the numerics |
-| `.claude/rules/solve.md` | `aquaflux/solve/**` | Newton on the residual, linear solve with implicit differentiation / `custom_vjp`, the preconditioner risk. Split by subsystem into narrower-scoped siblings (`solve-direct-preconditioners.md`, `solve-amg-multigrid.md`, `solve-flow-block.md`, `solve-field-split.md`, `solve-globalization.md`, `solve-march.md`, plus reference-only `-log.md`/`solve-refuted-directions.md` files in `.claude/notes/`) — see `solve.md`'s own "Index — where the detail lives" |
+| `.claude/rules/solve.md` | `aquaflux/solve/**` | **the residual-agnostic layer every residual runs on** (Principle 3.6): the staged driver, the shifted-step assembly, measures, Newton on the residual, linear solve with implicit differentiation / `custom_vjp`, the preconditioner risk. Split by subsystem into narrower-scoped siblings (`solve-direct-preconditioners.md`, `solve-amg-multigrid.md`, `solve-flow-block.md`, `solve-field-split.md`, `solve-globalization.md`, `solve-march.md`, plus reference-only `-log.md`/`solve-refuted-directions.md` files in `.claude/notes/`) — see `solve.md`'s own "Index — where the detail lives" |
 | `.claude/rules/flow.md` | `aquaflux/flow/**` | coupled p–U block: momentum (reusing advection/diffusion) + Rhie–Chow continuity, differentiated `a_P` (frozen only in the preconditioner), monolithic AD-Jacobian solve |
 | `.claude/rules/turbulence.md` | `aquaflux/turbulence/**` | k–ω SST closure + the segregated flow–turbulence loop: segregated forward / coupled adjoint, outer-loop globalization, positivity-floor adjoint honesty |
 | `.claude/rules/transport.md` | `aquaflux/transport/**` | scalar transport by a converged flow (species, temperature, tracers): why a concentration rides the *volumetric* flux, the effective-diffusivity convention, sub-patch injection without a mesh change — the aquakin reaction seam |
@@ -344,6 +344,50 @@ Concretely:
   different. If only part of the agreed work is finished, say which part is missing, in the summary,
   not only in a tracked issue. (Task #29 was closed with half of it — the row-equilibrated measure —
   never built; that gap survived unnoticed until it was needed.)
+
+### 3.6 Layering — generic machinery goes in the generic layer, not the first physics package that needed it (binding)
+
+The observed failure: the staged solve driver (segments, refresh, convergence check), the preconditioner
+sessions, the shifted-step assembly, the residual measures and the Krylov-regime settings were all
+written for the k–ω SST solve, **inside `turbulence/coupled.py`**, because turbulence was the first
+thing that needed a robust march. None of them mentions turbulence. The consequence was not tidiness: a
+**laminar** flow problem had only a bare pseudo-transient step, so it could not be marched by the
+dual-time / retry / row-scaled-norm / refresh machinery the turbulent case runs on, and a control
+experiment ("does this solver behaviour need turbulence?") had to be run on a weaker driver that did
+not isolate the variable (#448). The problem had been filed as #277 weeks earlier; the file was ~4000
+lines by the time anything moved out of it, and nothing measured that it was growing.
+
+- **The placement test, applied when you write the code and not later.** Describe the function in one
+  sentence. If the sentence needs a physics word — `k`, `ω`, `ν_t`, a closure, a wall function, "coupled
+  RANS" — it is physics. If its body would be identical for any other residual (a loop over segments, a
+  step assembled from a shift policy, a norm built from a layout, a settings value for a Krylov solve), it
+  is **generic and belongs in `solve/`** (or another residual-agnostic module) *the first time*. "Only
+  turbulence uses it so far" is exactly how it ended up in the wrong place; the first consumer is not a
+  reason.
+- **Physics packages compose; they do not own loops.** A physics package supplies a residual, a shift
+  policy, a `ResidualMeasures`, a drift measure and a `ContinuationSource` to the generic driver. If a
+  physics module is growing a `for segment in ...` loop, a step-assembly tail, a retry rule or a settings
+  value that names no physics, that code is in the wrong package.
+- **A capability must be reachable from every residual, or its absence is a defect.** Before adding to the
+  march (a trigger, a control, a retry, a guard), ask which residuals can reach it: flow-only, scalar,
+  coupled. "Exists on one path only" is Principle 2's sibling-builder defect at package scale, and it is
+  invisible to a diff-scoped check for the same reason. A laminar solve is the same machinery configured
+  differently — never a weaker parallel path; if a control experiment needs a weaker driver, that is the
+  finding.
+- **Names that carry the first consumer are the smell to grep for.** `coupled_step`, `_coupled_step`,
+  `solve_coupled`, `_CoupledMeasures` describe *one* residual. When the machinery underneath them turns out
+  to be generic, the generic part takes a neutral name in `solve/` and the specific one becomes a thin
+  configuration of it.
+- **Two mechanical guards, both in `tests/unit/test_layering.py`, both in the always-on gate.** `solve/`
+  imports nothing outside itself (it holds no mesh, field or physics import — that is what lets every
+  residual run on it); and a module in `flow/`, `turbulence/`, `transport/` or `radiation/` past 1500
+  lines needs a ratchet entry that only ever goes down. **Tripping the size guard is a prompt to sort the
+  file's contents into generic and physics — not to split it by topic**, which moves the problem into
+  smaller files without moving it to the right package.
+- **Concrete trigger:** *if the docstring of what you are about to add to a physics package cannot be
+  written without that package's vocabulary, it is physics and stays; if it can, stop and put it in
+  `solve/`. And if you are writing a second, simpler path for a residual because the robust one "needs
+  turbulence", the robust one has the wrong dependency.*
 
 ### 4. No compatibility shims before release (pre-release policy — remove this principle at 1.0)
 
@@ -1205,7 +1249,10 @@ Do not evaluate the code *within* the existing structure — question the struct
 - **Placement / cohesion.** Is each type/function in the right module? Does each module have one
   responsibility? *Smell:* a type used mainly by module B but living in module A because that is
   where it was first written (a shared interface/bundle that accreted into the first concrete
-  implementation — e.g. a face-flux state/interface living in `diffusion.py`).
+  implementation — e.g. a face-flux state/interface living in `diffusion.py`). **Sharpest form: generic
+  machinery in a physics package** — a driver, step assembly, measure or settings value whose description
+  names no physics, living in `turbulence/` because turbulence was first (Principle 3.6; this left a
+  laminar solve unable to reach the robust march).
 - **God-objects / union bundles.** Any data structure that is the union of every consumer's needs —
   so unrelated consumers are coupled, it grows with each new operator, and it needs placeholder
   defaults (`psi = ones`) for the fields a given consumer does not use? Any "context/state" object
@@ -1304,6 +1351,9 @@ After **every code change**, before considering the task complete, review and ac
      take a whole `Mesh` where `face_cells` would do, add a forwarding property or a second
      spelling of one value, duck-type a lookalike of a real class, inline a formula/scatter that
      has a home, or grow a `# step N` god-method? Fix the seam *now* — reach for the object/helper.
+   - **Layering (Principle 3.6):** did you put code in a physics package whose one-sentence description
+     needs no physics word (a driver, a step assembly, a measure, a settings value)? Move it to `solve/`
+     now, and check every residual can reach the capability you added.
    - **Maintainability (Principle 0):** if you took a quick-to-ship shortcut as an
      intermediate step, refactor it before marking the task done.
    - **Scope (Principle 3.5):** did you build what was actually agreed? If you narrowed the design,

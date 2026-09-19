@@ -21,8 +21,11 @@ from .continuation import (
     FrozenViscosityVelocityParts,
     MomentumShiftPolicy,
     momentum_continuation,
+    momentum_shift_policy,
     reused_flow_solve,
 )
+from .march import flow_march_step, solve_flow_march
+from .measures import FlowMeasures, flow_row_scales
 from .initialization import bernoulli_pressure, laplace_field, potential_flow
 from .mean_velocity import bulk_velocity_flow_solve
 from .scales import body_force_velocity, characteristic_velocity
@@ -37,6 +40,7 @@ __all__ = [
     "ConvectionTwoLevel",
     "FlowBoundary",
     "FlowFields",
+    "FlowMeasures",
     "FrozenViscosityVelocityParts",
     "MomentumContinuity",
     "MomentumShiftPolicy",
@@ -55,13 +59,17 @@ __all__ = [
     "bulk_velocity_flow_solve",
     "characteristic_velocity",
     "damped_jacobi_solve",
+    "flow_march_step",
+    "flow_row_scales",
     "frozen_momentum_diagonal_parts",
     "interior_mass_flux",
     "laplace_field",
     "momentum_continuation",
     "momentum_diagonal",
+    "momentum_shift_policy",
     "potential_flow",
     "pressure_schur_laplacian",
     "reused_flow_solve",
+    "solve_flow_march",
     "volume_flux",
 ]

@@ -69,6 +69,7 @@ from aquaflux.solve import (
     ShiftTerm,
     VelocityShiftParts,
     assembler_residual,
+    shifted_step,
 )
 
 from .block_preconditioner import BlockPreconditioner
@@ -190,6 +191,39 @@ class MomentumShiftPolicy(eqx.Module):
         return ShiftTerm(diagonal, make_preconditioner)
 
 
+def momentum_shift_policy(
+    assembler: MomentumContinuity,
+    shift_basis: ShiftBasis | None = None,
+    **preconditioner_kwargs: object,
+) -> MomentumShiftPolicy:
+    """The flow shift policy over a block-SIMPLE preconditioner built for ``assembler``.
+
+    The one place the flow's preconditioner and its shift policy are assembled, shared by every builder
+    of a flow step.
+
+    Parameters
+    ----------
+    assembler : MomentumContinuity
+        The coupled flow residual assembler.
+    shift_basis : ShiftBasis, optional
+        How the velocity shift diagonal is built from the momentum diagonal's parts. ``None`` keeps
+        :class:`MomentumShiftPolicy`'s own default, the full ``a_P``.
+    **preconditioner_kwargs
+        Forwarded to :meth:`BlockPreconditioner.build`.
+
+    Returns
+    -------
+    MomentumShiftPolicy
+        The policy, holding the built preconditioner.
+    """
+    preconditioner = BlockPreconditioner.build(assembler, **preconditioner_kwargs)
+    return (
+        MomentumShiftPolicy(preconditioner)
+        if shift_basis is None
+        else MomentumShiftPolicy(preconditioner, shift_basis)
+    )
+
+
 def momentum_continuation(
     assembler: MomentumContinuity,
     *,
@@ -236,13 +270,15 @@ def momentum_continuation(
     PseudoTransientStep
         The configured continuation, ready to pass as ``RootSolver(strategy=...)``.
     """
-    preconditioner = BlockPreconditioner.build(assembler, **preconditioner_kwargs)
-    policy = (
-        MomentumShiftPolicy(preconditioner)
-        if shift_basis is None
-        else MomentumShiftPolicy(preconditioner, shift_basis)
+    policy = momentum_shift_policy(assembler, shift_basis, **preconditioner_kwargs)
+    return shifted_step(
+        policy,
+        globalization=globalization,
+        dual_time=None,
+        regime=None,
+        krylov_solver=None,
+        adjoint_preconditioner_factory=policy.preconditioner.factory(),
     )
-    return globalization.step(policy, adjoint_preconditioner_factory=preconditioner.factory())
 
 
 def reused_flow_solve(

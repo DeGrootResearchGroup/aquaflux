@@ -36,11 +36,11 @@ from aquaflux.flow.mean_velocity import _with_body_force
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
+from aquaflux.solve import relative_residual_gmres
 from aquaflux.turbulence import BlockDiagonal, ScalarAir, ScalarTwoLevel, SSTModel, SSTTurbulence
 from aquaflux.turbulence.coupled import (
     CoupledRANS,
     mass_flow_coupled_continuation,
-    relative_residual_gmres,
     solve_coupled_mass_flow,
 )
 

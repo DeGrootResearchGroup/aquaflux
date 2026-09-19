@@ -14,11 +14,17 @@ import inspect
 
 import aquaflux  # noqa: F401  (enables x64)
 import pytest
-from aquaflux.solve import DualTimeLoop, DualTimeStep, PseudoTransientStep, relative_residual_gmres
+from aquaflux.solve import (
+    DualTimeLoop,
+    DualTimeStep,
+    LinearSolveSettings,
+    PseudoTransientStep,
+    relative_residual_gmres,
+    resolve_linear_solve,
+)
 from aquaflux.turbulence import (
     BlockDiagonal,
     CompleteLu,
-    LinearSolveSettings,
     MaterializedJacobian,
     UnpreconditionedScalars,
     coupled_step,
@@ -27,7 +33,6 @@ from aquaflux.turbulence import (
 from aquaflux.turbulence.coupled import (
     _BLOCK_LINEAR_SOLVE,
     _CONSTRAINED_LINEAR_SOLVE,
-    _resolved_linear_solve,
     mass_flow_coupled_continuation,
 )
 from aquaflux.turbulence.march_settings import merged_march_options
@@ -82,15 +87,15 @@ def test_a_loop_of_fewer_than_two_inner_steps_is_refused_and_points_at_the_singl
     "fields", [{}, {"restart": 15}, {"rtol": 0.1, "restart": 30, "max_restarts": 9}], ids=str
 )
 def test_a_forward_value_resolves_each_unset_field_to_the_family_s_regime(base, fields) -> None:
-    regime, solver = _resolved_linear_solve(LinearSolveSettings(**fields), base)
+    regime, solver = resolve_linear_solve(LinearSolveSettings(**fields), base)
     assert regime == base._replace(**fields)
     assert solver is None
-    assert _resolved_linear_solve(None, base) == (base, None)
+    assert resolve_linear_solve(None, base) == (base, None)
 
 
 def test_a_solver_given_as_the_forward_value_replaces_the_regime() -> None:
     solver = relative_residual_gmres(1e-4)
-    assert _resolved_linear_solve(solver, _BLOCK_LINEAR_SOLVE) == (_BLOCK_LINEAR_SOLVE, solver)
+    assert resolve_linear_solve(solver, _BLOCK_LINEAR_SOLVE) == (_BLOCK_LINEAR_SOLVE, solver)
 
 
 def test_the_loop_selects_the_step_shape_and_reaches_its_fields(case) -> None:
