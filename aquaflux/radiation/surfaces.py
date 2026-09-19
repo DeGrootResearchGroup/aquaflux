@@ -323,6 +323,30 @@ class Surfaces(eqx.Module):
         values = np.array([by_solid.get(name, default) for name in self.solid_names], dtype=float)
         return jnp.asarray(values)[self.solid_id]
 
+    def area_by_solid(self) -> dict[str, float]:
+        """Total facet area of each named body, in the order of :attr:`solid_names`.
+
+        The counterpart of :meth:`per_facet`, which goes the other way. A body's area is the
+        sum of its triangles and **not** whatever closed form the shape was drawn from: an
+        inscribed triangulation of a cylinder undershoots ``pi d L`` by 2.5% at eight sectors
+        and 0.16% at thirty-two, so a rated power divided by the analytic area radiates
+        measurably less than the rating once it reaches these facets. Dividing by this instead
+        makes the two agree exactly at any refinement.
+
+        A body of point sources totals zero, which is not an error — it has no area for an
+        exitance to be defined on, and carries radiant power instead.
+
+        Returns
+        -------
+        dict of str to float
+        """
+        totals = np.bincount(
+            np.asarray(self.solid_id),
+            weights=np.asarray(self.area),
+            minlength=len(self.solid_names),
+        )
+        return {name: float(total) for name, total in zip(self.solid_names, totals, strict=True)}
+
     def with_optics(
         self, *, emission=None, power=None, reflectance=None, profiles=None, profile_index=None
     ) -> Surfaces:

@@ -16,10 +16,10 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 
 | piece | state |
 |---|---|
-| `solid_angle.py` — the two geometric kernels | **BUILT** |
+| `solid_angle.py` — the two geometric kernels, plus the signed form | **BUILT** |
 | `stl.py` — ASCII and binary STL reading | **BUILT** |
 | `surfaces.py` — the `Surfaces` value object | **BUILT** |
-| `checks.py` — build-time geometry checks | **BUILT** |
+| `checks.py` — build-time geometry checks, including the cell-in-the-metal test | **BUILT** |
 | `subdivide.py` — the width-over-distance refinement | **BUILT** |
 | `profiles.py` — `Isotropic`, `Lambertian`, `CosinePower` | **BUILT** |
 | `gather.py` — `direct_fluence_rate` and `direct_irradiance` | **BUILT** |
@@ -30,6 +30,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `transfer.py` — the frozen facet-to-facet geometry | **BUILT** |
 | `quadrature.py` — symmetric triangle rules for the receiving facet | **BUILT** |
 | `model.py` — the assembled model and the three public entry points | **BUILT** |
+| `units.py` — lamp watts to exitance, ultraviolet transmittance to absorbance | **BUILT** |
 
 | Beer–Lambert optical depth, voxel-grid traversal | Not yet built |
 
@@ -44,7 +45,15 @@ wrong answer is *clean* rather than noisy.
 - `projected_solid_angle` — `∫cos θ dω`. For **irradiance** and for every surface-to-surface
   transfer factor, because an oblique surface intercepts less.
 
-No scalar converts one into the other: the obliquity varies across the emitter. Used in the
+**There is a third NAME and it is not a third quantity.** `signed_solid_angle` is the same
+integral as `solid_angle` with the sign of the vertex winding kept instead of discarded, and
+`solid_angle` is now literally its magnitude. On a single triangle that sign is meaningless — it
+records the order an exporter happened to write three vertices in — which is exactly why the
+public kernel drops it. It means something only summed over a **consistently wound, closed**
+surface, where it gives the winding number; see the enclosure section below. Do not reach for it
+anywhere else.
+
+No scalar converts the two quantities into one another: the obliquity varies across the emitter. Used in the
 wrong place, `Ω/π` makes every row of a transfer matrix sum to **exactly 2.000000000000** at
 every refinement, so the spectral radius of a reflection system becomes `2ρ` — the Neumann
 series diverges above `ρ = 0.5` and `I − ρF` is indefinite at 0.9. That reads as a different
@@ -76,6 +85,22 @@ refinement** — non-convergence, not size, is what identifies a wrong kernel.
    selection. Write `sqrt(where(zero, 1, sq))`. Zero-length edges are the *normal* case here,
    not a degenerate one — the clip manufactures three of them for every fully visible triangle
    — so this is on the main path, and the whole project is gradients.
+
+## ⚠️ THE VERTEX-DEGENERACY GUARD IS FOR THE GRADIENT; THE VALUE NEEDS NO HELP
+
+`solid_angle` ends with `where(any(degenerate), 0.0, omega)` for a receiver sitting exactly on a
+vertex. **A mutation deleting that line passed the whole suite**, and the reason is instructive:
+with one direction zeroed the numerator is zero and the denominator is `1 + b·c`, which for unit
+vectors cannot be negative, so `arctan2(0, non-negative)` is zero and the forward value is right
+either way. The test that existed read only the value.
+
+The derivative is not right either way. Unguarded, `d/dp` of that zero comes back **(0, 0, −2)** —
+finite, plausible, and fictitious. That is strictly worse than a NaN, which at least announces
+itself, and the gather is differentiated with respect to vertex positions whenever a study moves a
+lamp, so one degenerate pair anywhere in a scene contributes a spurious term to the whole
+derivative. `test_the_vertex_guard_is_there_for_the_GRADIENT_the_value_needs_no_help` pins both
+kernels. This is the same lesson as the `sqrt`-guard detail above, arriving from the other side:
+there, guarding after the root left a NaN gradient; here, not guarding at all leaves a *clean* one.
 
 ## A convention callers must honour: `F_ii = 0`
 
@@ -719,3 +744,68 @@ Listing a subpackage publishes the whole of its `__all__`, so that list is the e
 decision. It was reviewed at this point and kept entire: every export is something a user can
 legitimately reach for, including the two solid-angle kernels, whose warning that they are **not
 interchangeable** is worth publishing rather than hiding.
+
+
+## The winding number answers "is this cell inside the metal", and it is exact
+
+`enclosure_winding(vertices, points)` sums the **signed** solid angle of every facet at each point
+and divides by `4π`. On a closed, consistently wound surface that is `±1` inside and `0` outside,
+the overall sign set by whether the file is wound outward or inward — so `check_points_outside`
+tests the **magnitude** against 0.5, a threshold with nothing behind it to tune because the
+quantity it cuts takes only two values.
+
+Measured on a unit box at 12, 48 and 192 facets: `1.0` to the last bit at a point a thousandth of
+a box-width from a wall, and `~1e-16` just outside. There is no near-field regime where it
+degrades, which is what disqualifies the two obvious alternatives:
+
+| test | why not |
+|---|---|
+| ray parity (odd crossings = inside) | only meaningful on a genuinely **closed** surface, and this package deliberately does not require watertightness. On an open one it returns a clean, wrong bit. |
+| nearest-triangle signed distance | the pseudonormal problem — unreliable near edges and creases, which is what a reactor corner is made of. |
+| **winding number** | exact, and on an open surface it lands *between* the two answers rather than guessing. |
+
+⚠️ **An open surface reads ~0.45 just off a bare disc, and that is the feature.** Open surfaces are
+legal here, so `check_points_outside` **warns** rather than raising when nothing is enclosed but
+the largest winding is above 0.01: a clean pass from a surface with no inside establishes less than
+it reads as, and refusing would reject a geometry the rest of the package accepts.
+
+⚠️ **An inconsistently wound closed surface is NOT detected as such — it reads as an open one.** A
+capped cylinder with one cap reversed measures **0.858 and 0.951 at two interior points**: not 1,
+not 0, and *different at each point*, which is the tell, since a real winding number is constant
+over a region. Run `check_winding` first; this check cannot substitute for it and does not try.
+
+**Cost is `n_points × n_facets`**, the same product the receiver visibility build already pays, so
+it is affordable but not free — which is why `build_radiation_model` does **not** call it. Analytic
+occluder bodies do refuse interior points at the visibility build, because `Occluder.contains` is
+O(1) per point; a triangle soup has no such shortcut. Wiring it into the model by default would
+change a shipped behaviour and roughly double that build, so it is an explicit call.
+
+## The two engineering-unit conversions, and the numbers that make them worth having
+
+`units.py` exists because both conversions were being done by hand at every call site and both are
+wrong in ways that produce a plausible field.
+
+**`absorption_from_uvt(uvt)` — ultraviolet transmittance (%, through 1 cm) to a NAPIERIAN
+coefficient per METRE.** That is what `exp(-a r)` and metres-based geometry want. Two other
+conventions are in circulation and both are silently wrong here: a *decadic* coefficient (paired
+with `10^(-A r)`) is smaller by `ln 10`, and a per-*centimetre* one by a hundred. A 95% UVT water
+is **5.129 /m** napierian, **2.228 /m** decadic, **0.05129 /cm**.
+
+⚠️ **A fraction passed as a percentage is refused, and it is the one mistake a range check cannot
+catch** — `0.95` is a legal percentage. Read as written it gives **466 /m** against 95% UVT's
+**5.13**, ninety times apart, and the field is dark rather than erroneous. The cost is that a
+genuine sub-1% water cannot be expressed; that is outside the range ultraviolet reactors are built
+for, and Beer's law inverts in one line by hand. Note the guard is over the **whole array**, since
+a single fraction hidden among percentages is how this arrives.
+
+**`lamp_exitance(surfaces, {"lamp": watts})` divides by the TRIANGULATION's area, not the shape's.**
+`sum(M A)` over the body then equals its rating exactly at any refinement, because the same areas
+appear on both sides. Dividing by the analytic `π d L` does not: an inscribed triangulation of a
+0.0115 m × 0.4 m sleeve undershoots it by **2.55% / 0.64% / 0.16% / 0.04%** at 8 / 16 / 32 / 64
+sectors, so a hand-computed exitance makes the model radiate that much less than the lamp — always
+in the same direction, and reported nowhere. `Surfaces.area_by_solid` is the one home for the
+per-body total, so a helper and a user's own report cannot disagree about how big the lamp is.
+
+⚠️ **Which body gets the rating is a modelling decision no signature can make.** A lamp is rated at
+its envelope; the geometry in a model is usually the quartz sleeve, which is larger. Both readings
+are legal and they differ by the area ratio.

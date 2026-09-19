@@ -14,7 +14,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.radiation import projected_solid_angle, solid_angle
+from aquaflux.radiation import projected_solid_angle, signed_solid_angle, solid_angle
 
 from tests.unit.radiation_references import (
     PYVIEWFACTOR_PARALLEL_SQUARES,
@@ -259,6 +259,25 @@ def test_a_receiver_sitting_on_a_vertex_returns_zero_rather_than_a_nan():
     """One degenerate pair must not turn a whole gather into NaN."""
     triangle = jnp.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
     assert float(solid_angle(jnp.zeros(3), triangle)) == 0.0
+
+
+def test_the_vertex_guard_is_there_for_the_GRADIENT_the_value_needs_no_help():
+    """The half of that guard the value cannot show, and the half that actually matters.
+
+    With the receiver on a vertex the numerator is zero and the denominator ``1 + b·c``, which
+    for unit vectors cannot be negative — so the forward value is zero whether or not the
+    degenerate entry is selected away, and a test that only reads the value passes either way.
+    The derivative does not: unguarded it comes back ``(0, 0, -2)``, a finite, plausible, wrong
+    sensitivity to moving the receiver, which is worse than a NaN because nothing flags it.
+
+    This is the case the project's rule about NaNs being the floor is written for — the gather
+    is differentiated with respect to vertex positions whenever a lamp moves, so a degenerate
+    pair anywhere in a scene would contribute a fictitious term to that whole derivative.
+    """
+    triangle = jnp.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    for kernel in (solid_angle, signed_solid_angle):
+        gradient = jax.grad(lambda point, k=kernel: jnp.sum(k(point, triangle)))(jnp.zeros(3))
+        np.testing.assert_array_equal(np.asarray(gradient), 0.0)
 
 
 # --------------------------------------------------------------------------------------

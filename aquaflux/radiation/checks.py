@@ -16,16 +16,32 @@ emits less than it should, over whatever patch happens to be reversed, with no e
 from __future__ import annotations
 
 import dataclasses
+import warnings
 
+import jax.numpy as jnp
 import numpy as np
+
+from aquaflux.radiation.solid_angle import signed_solid_angle
 
 __all__ = [
     "WindingReport",
+    "check_points_outside",
     "check_profiles",
     "check_winding",
+    "enclosure_winding",
     "stored_normal_disagreement",
     "winding_report",
 ]
+
+#: Point-by-facet entries one pass may form, matching the intersection test's own budget in
+#: :mod:`aquaflux.radiation.triangles` — the same product, formed for the same reason, so the
+#: same bound applies.
+_WORK_LIMIT = 4_000_000
+
+#: Largest winding number, in magnitude, that a closed surface plausibly reports at a point it
+#: does not enclose. A closed box measures around 1e-16 there; a bare disc measures 0.45, which
+#: is what this is set to catch. Nothing in between is expected, so the value is not delicate.
+_OPEN_SURFACE = 0.01
 
 
 @dataclasses.dataclass(frozen=True)
@@ -252,3 +268,134 @@ def check_profiles(surfaces) -> None:
                 "against, and would silently contribute nothing; use Isotropic."
             )
         raise ValueError(msg)
+
+
+def enclosure_winding(vertices, points, *, work_limit: int = _WORK_LIMIT) -> np.ndarray:
+    """Winding number of a closed triangulated surface about each point.
+
+    The signed solid angles of every facet, summed at a point and divided by ``4 pi``. For a
+    closed, consistently wound surface that sum is ``±1`` at a point the surface encloses and
+    ``0`` at one outside it, the overall sign fixed by whether the surface is wound outward or
+    inward — so it is the **magnitude** that answers the question.
+
+    Exact rather than asymptotic: on a unit box it reads ``1.0`` to the last bit a thousandth of
+    a box-width from a wall, at every refinement, with no tolerance to tune.
+
+    **On an open surface it reads somewhere in between, and that is the useful behaviour.** A
+    bare disc measures ``±0.45`` just off its face. Open surfaces are legal here — a gather
+    never has to decide which side of one it is on — so a test that answered a confident bit
+    would be answering a question the geometry has not got. A value far from both ``0`` and
+    ``±1`` means the surface is not closed, and that is worth reporting rather than rounding.
+
+    Parameters
+    ----------
+    vertices : array_like, shape ``(n_facets, 3, 3)``
+        The surface's triangles.
+    points : array_like, shape ``(n_points, 3)``
+        Where to ask — cell centres, usually.
+    work_limit : int, optional
+        Point-by-facet entries per pass. The product is the whole memory cost, so it is cut
+        into chunks of points; the arithmetic is identical either way.
+
+    Returns
+    -------
+    numpy.ndarray, shape ``(n_points,)``
+
+    Notes
+    -----
+    The chunking here is a plain host-side loop, deliberately **not** the padded
+    :func:`~aquaflux.radiation.gather` scan: that one exists so a traced body compiles once for
+    a gather that runs on every solve, while this runs once, outside any trace, where the
+    padding would be cost with nothing to buy.
+    """
+    vertices = jnp.asarray(vertices, dtype=float)
+    points = jnp.asarray(points, dtype=float)
+    if points.ndim != 2 or points.shape[1] != 3:
+        msg = f"points must be (n_points, 3); got {tuple(points.shape)}"
+        raise ValueError(msg)
+    n_points, n_facets = points.shape[0], vertices.shape[0]
+    if n_points == 0 or n_facets == 0:
+        return np.zeros(n_points)
+
+    chunk = max(1, work_limit // max(1, n_facets))
+    totals = [
+        np.asarray(
+            jnp.sum(
+                signed_solid_angle(points[first : first + chunk, None, :], vertices[None, ...]),
+                axis=-1,
+            )
+        )
+        for first in range(0, n_points, chunk)
+    ]
+    return np.concatenate(totals) / (4.0 * np.pi)
+
+
+def check_points_outside(vertices, points, *, work_limit: int = _WORK_LIMIT) -> np.ndarray:
+    """Refuse points the surface encloses — a cell centre embedded in the solid.
+
+    A receiver inside the metal is a meshing error, not a dark corner: it is not shadowed by
+    the geometry, it is *in* it, and the fluence rate computed there is a number with no
+    physical referent. It reads as a plausible dim value, which is why this is a check rather
+    than something a reader would notice in the output.
+
+    The test is ``|winding| > 0.5`` — a threshold with nothing to tune behind it, since the
+    quantity it cuts takes the values ``0`` and ``1`` and, on a closed surface, nothing in
+    between.
+
+    An **open** surface cannot answer the question, and this does not pretend otherwise. Open
+    surfaces are legal here, so one is warned about rather than refused: a clean pass from a
+    surface with no inside is a weaker statement than it reads as, and silence is how that goes
+    unnoticed. Run :func:`check_winding` first — a surface whose facets disagree about which way
+    is out has no consistent inside for this to find.
+
+    Parameters
+    ----------
+    vertices : array_like, shape ``(n_facets, 3, 3)``
+        The surface's triangles.
+    points : array_like, shape ``(n_points, 3)``
+        Where the field is wanted.
+    work_limit : int, optional
+        Passed through to :func:`enclosure_winding`.
+
+    Returns
+    -------
+    numpy.ndarray, shape ``(n_points,)``
+        The winding numbers, so a caller that wants to look rather than raise can.
+
+    Raises
+    ------
+    ValueError
+        If any point is enclosed by the surface.
+
+    Warns
+    -----
+    UserWarning
+        If nothing is enclosed but the surface does not appear to be closed, so the pass
+        establishes less than it seems to.
+    """
+    winding = enclosure_winding(vertices, points, work_limit=work_limit)
+    inside = np.flatnonzero(np.abs(winding) > 0.5)
+    if len(inside):
+        msg = (
+            f"{len(inside)} of {len(winding)} point(s) lie inside the surface "
+            f"(first few: {inside[:8].tolist()}, winding "
+            f"{np.round(winding[inside[:8]], 3).tolist()}). A point inside the solid is "
+            "embedded in it, not shadowed by it, and the fluence rate there means nothing. "
+            "Move the points, or check that the surface is the one you meant."
+        )
+        raise ValueError(msg)
+    worst = float(np.max(np.abs(winding), initial=0.0))
+    if worst > _OPEN_SURFACE:
+        # Warned, not raised. An open surface is legal here -- a gather never has to decide
+        # which side of one it is on -- so refusing would reject a geometry the rest of the
+        # package accepts. But a clean pass on a surface with no inside is a weaker statement
+        # than it reads as, and silence is how that goes unnoticed.
+        warnings.warn(
+            f"no point is enclosed, but the largest winding number is {worst:.3f} rather than "
+            "about 0, so this surface does not appear to be closed. That is legal, and it means "
+            "this check found nothing because there was nothing to find, not because the points "
+            "are known to be clear. Read enclosure_winding directly if you need the numbers.",
+            UserWarning,
+            stacklevel=2,
+        )
+    return winding

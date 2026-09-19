@@ -37,8 +37,10 @@ from __future__ import annotations
 from aquaflux.radiation.absorption import Absorption, UniformAbsorption, VoxelAbsorption
 from aquaflux.radiation.checks import (
     WindingReport,
+    check_points_outside,
     check_profiles,
     check_winding,
+    enclosure_winding,
     stored_normal_disagreement,
     winding_report,
 )
@@ -54,7 +56,11 @@ from aquaflux.radiation.model import (
 from aquaflux.radiation.occluders import Cylinder, HalfSpace, Occluder
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian, Profile
 from aquaflux.radiation.quadrature import TriangleQuadrature, triangle_quadrature
-from aquaflux.radiation.solid_angle import projected_solid_angle, solid_angle
+from aquaflux.radiation.solid_angle import (
+    projected_solid_angle,
+    signed_solid_angle,
+    solid_angle,
+)
 from aquaflux.radiation.stl import TriangleSoup, read_stl
 from aquaflux.radiation.subdivide import Subdivision, refine_for_receivers, subdivide_to_width
 from aquaflux.radiation.surfaces import Surfaces
@@ -65,6 +71,7 @@ from aquaflux.radiation.transfer import (
     row_sum_error,
 )
 from aquaflux.radiation.triangles import segment_is_cut
+from aquaflux.radiation.units import absorption_from_uvt, lamp_exitance
 from aquaflux.radiation.visibility import Visibility, build_visibility
 
 __all__ = [
@@ -87,14 +94,18 @@ __all__ = [
     "Visibility",
     "VoxelAbsorption",
     "WindingReport",
+    "absorption_from_uvt",
     "build_radiation_model",
     "build_transfer",
     "build_visibility",
+    "check_points_outside",
     "check_profiles",
     "check_winding",
     "direct_fluence_rate",
     "direct_irradiance",
+    "enclosure_winding",
     "fluence_rate",
+    "lamp_exitance",
     "projected_solid_angle",
     "radiosity",
     "read_stl",
@@ -102,6 +113,7 @@ __all__ = [
     "refine_for_receivers",
     "row_sum_error",
     "segment_is_cut",
+    "signed_solid_angle",
     "solid_angle",
     "stored_normal_disagreement",
     "subdivide_to_width",
