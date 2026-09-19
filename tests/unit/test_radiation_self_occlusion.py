@@ -1,0 +1,242 @@
+"""The emitting surface shadowing itself — the case no analytic body can express."""
+
+from __future__ import annotations
+
+import jax.numpy as jnp
+import numpy as np
+import pytest
+from aquaflux.radiation.gather import fluence_rate
+from aquaflux.radiation.surfaces import Surfaces
+from aquaflux.radiation.triangles import segment_is_cut
+from aquaflux.radiation.visibility import build_visibility
+from scipy.spatial import ConvexHull
+
+from tests.unit.radiation_references import cylinder_triangles, rectangle_triangles
+
+ONE_TRIANGLE = jnp.asarray([[[-1.0, -1.0, 1.0], [1.0, -1.0, 1.0], [0.0, 1.0, 1.0]]])
+NO_OFFSET = jnp.zeros(1)
+
+
+def _emitter_and_panel():
+    """A small emitter at the origin and, in the same surface set, a panel in its way."""
+    emitter = rectangle_triangles([0.0, 0.0, 0.0], [0.0, 0.02, 0.0], [0.0, 0.0, 0.02])
+    panel = rectangle_triangles([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0])
+    # The emitter faces +x; the panel's own emission is zero, it is only in the way.
+    vertices = np.concatenate([emitter, panel])
+    return Surfaces.from_triangles(vertices, emission=[1000.0, 1000.0, 0.0, 0.0])
+
+
+# ---------------------------------------------------------------------------------------
+# The intersection test
+# ---------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("start", "finish", "expected", "what"),
+    [
+        ((0.0, 0.0, 0.0), (0.0, 0.0, 3.0), True, "straight through"),
+        ((0.0, 0.0, 0.0), (3.0, 0.0, 0.0), False, "parallel to it"),
+        ((0.0, 0.0, 0.0), (0.0, 0.0, 0.5), False, "stops short"),
+        ((0.0, 0.0, 2.0), (0.0, 0.0, 3.0), False, "starts past it"),
+        ((0.0, 0.0, 0.0), (0.0, 5.0, 3.0), False, "outside the edge"),
+        ((0.0, 0.0, 3.0), (0.0, 0.0, 0.0), True, "the other way round"),
+    ],
+)
+def test_a_triangle_cuts_what_passes_through_it(start, finish, expected, what):
+    cut = segment_is_cut(jnp.asarray([start]), jnp.asarray([finish]), ONE_TRIANGLE, NO_OFFSET)
+    assert bool(cut[0]) is expected, what
+
+
+@pytest.mark.parametrize("work_limit", [1, 97, 4_000_000])
+def test_the_answer_does_not_depend_on_how_the_work_is_split(work_limit):
+    """The split is a memory strategy and must not be a numerical one.
+
+    Both axes are cut to honour the limit — the rays as well as the triangles — so a limit of
+    one puts a single ray against a single triangle per pass, and the accumulated result has to
+    be identical to forming the whole thing at once. The limit is worth getting right: measured
+    on 2048 triangles in double precision, throughput is flat at 42-57 Mtest/s from a 0.5 MB
+    intermediate up to 134 MB and then collapses to **2.4** at 537 MB, so a split that is too
+    coarse is twenty times slower rather than slightly.
+    """
+    rng = np.random.default_rng(2)
+    triangles = jnp.asarray(rng.normal(size=(40, 3, 3)))
+    origins = jnp.asarray(rng.normal(size=(23, 3)))
+    targets = jnp.asarray(rng.normal(size=(23, 3)) * 2.0)
+    reference = segment_is_cut(origins, targets, triangles, jnp.zeros(23))
+    split = segment_is_cut(origins, targets, triangles, jnp.zeros(23), work_limit=work_limit)
+    np.testing.assert_array_equal(np.asarray(split), np.asarray(reference))
+    assert int(np.count_nonzero(np.asarray(reference))) > 0, "the fixture blocks nothing"
+
+
+def test_a_facet_is_excluded_from_cutting_its_own_rays_by_index():
+    """Every ray leaves its facet's centroid, so the facet is always hit, at zero distance.
+
+    By index rather than by tolerance: a tolerance large enough to cover this would also
+    swallow a genuine blocker a short way off, and there is no need to guess when the identity
+    of the facet is known.
+    """
+    start, finish = jnp.asarray([[0.0, 0.0, 0.0]]), jnp.asarray([[0.0, 0.0, 3.0]])
+    assert bool(segment_is_cut(start, finish, ONE_TRIANGLE, NO_OFFSET)[0]) is True
+    excluded = segment_is_cut(start, finish, ONE_TRIANGLE, NO_OFFSET, exclude=jnp.asarray([0]))
+    assert bool(excluded[0]) is False
+
+
+def test_the_intersection_is_watertight_where_the_usual_test_leaks():
+    """Rays aimed at the vertices and edges of a **closed** mesh must not escape it.
+
+    This is what the watertight formulation buys, and it is measured rather than asserted. From
+    a point inside a closed hull, every ray must cross the boundary; a ray aimed exactly at a
+    vertex or an edge midpoint is where an ordinary test can report a hit on neither of the two
+    triangles sharing that feature, which is a pinhole through a closed surface.
+
+    Möller-Trumbore, implemented here for the comparison, leaks on several of these. The test
+    used by the module leaks on none.
+    """
+    rng = np.random.default_rng(11)
+    points = rng.normal(size=(40, 3))
+    points /= np.linalg.norm(points, axis=1, keepdims=True)
+    hull = ConvexHull(points)
+    triangles = points[hull.simplices]
+
+    aims = [points[i] for i in range(len(points))]
+    for simplex in hull.simplices:
+        for corner in range(3):
+            aims.append(0.5 * (points[simplex[corner]] + points[simplex[(corner + 1) % 3]]))
+    aims = np.array(aims)
+    origins = np.zeros_like(aims)
+
+    def moller_trumbore_leaks():
+        first = triangles[:, 0]
+        edge_a, edge_b = triangles[:, 1] - first, triangles[:, 2] - first
+        direction = aims * 3.0
+        perpendicular = np.cross(direction[:, None, :], edge_b[None, :, :])
+        determinant = np.sum(edge_a[None, :, :] * perpendicular, axis=-1)
+        inverse = 1.0 / np.where(determinant != 0, determinant, np.inf)
+        offset = origins[:, None, :] - first[None, :, :]
+        u = np.sum(offset * perpendicular, axis=-1) * inverse
+        cross = np.cross(offset, edge_a[None, :, :])
+        v = np.sum(direction[:, None, :] * cross, axis=-1) * inverse
+        distance = np.sum(edge_b[None, :, :] * cross, axis=-1) * inverse
+        hit = (determinant != 0) & (u >= 0) & (v >= 0) & (u + v <= 1) & (distance > 0)
+        return int((~np.any(hit & (distance <= 1), axis=-1)).sum())
+
+    watertight = segment_is_cut(
+        jnp.asarray(origins), jnp.asarray(aims * 3.0), jnp.asarray(triangles), jnp.zeros(len(aims))
+    )
+    assert int(np.count_nonzero(~np.asarray(watertight))) == 0
+    assert moller_trumbore_leaks() > 0, "the fixture no longer separates the two formulations"
+
+
+# ---------------------------------------------------------------------------------------
+# Through the gather
+# ---------------------------------------------------------------------------------------
+
+
+def test_a_panel_of_the_same_surface_shadows_what_is_behind_it():
+    """The capability. An analytic body cannot express this, because the geometry doing the
+    blocking *is* the emitting surface."""
+    surfaces = _emitter_and_panel()
+    behind = np.array([[2.0, 0.0, 0.0]])
+    past_the_edge = np.array([[2.0, 5.0, 0.0]])
+
+    shadowed = build_visibility([], surfaces, behind)
+    clear = build_visibility([], surfaces, past_the_edge)
+    assert float(fluence_rate(surfaces, behind, visibility=shadowed)[0]) == 0.0
+    assert float(fluence_rate(surfaces, past_the_edge, visibility=clear)[0]) > 0.0
+    assert float(fluence_rate(surfaces, behind)[0]) > 0.0, "unoccluded, it is lit"
+
+
+def test_turning_self_occlusion_off_puts_the_light_back():
+    surfaces = _emitter_and_panel()
+    behind = np.array([[2.0, 0.0, 0.0]])
+    ignored = build_visibility([], surfaces, behind, self_occlusion=False)
+    assert float(fluence_rate(surfaces, behind, visibility=ignored)[0]) == pytest.approx(
+        float(fluence_rate(surfaces, behind)[0]), rel=1e-15
+    )
+
+
+def test_the_surface_s_own_geometry_is_opaque_whatever_transmittance_is_given():
+    """Walls and bodies of the emitting set carry no transmittance. A partly transmitting body
+    is an analytic primitive instead, and this keeps the two from being confused."""
+    surfaces = _emitter_and_panel()
+    behind = np.array([[2.0, 0.0, 0.0]])
+    mask = build_visibility([], surfaces, behind)
+    assert float(fluence_rate(surfaces, behind, visibility=mask, transmittance=[])[0]) == 0.0
+
+
+def test_a_convex_body_is_completely_unaffected_by_tracing_its_own_triangles():
+    """The consistency check that validates both halves at once.
+
+    For a convex emitter the source-side cosine clamp *is* the exact visibility test, so tracing
+    the body's own triangles must change nothing at all. It does not: the two answers are
+    **bit-identical**, and both reproduce the closed form ``G = (4B/pi) arcsin(R/d)`` to the
+    discretization of the fixture. Had the tracer produced spurious self-hits — acne on facets
+    adjacent to the source — this is where they would show.
+    """
+    exitance, radius, distance = 3.0, 1.0, 2.0
+    surfaces = Surfaces.from_triangles(
+        cylinder_triangles(radius, half_length=20.0, sectors=48, slices=48), emission=exitance
+    )
+    probe = np.array([[distance, 0.0, 0.0]])
+    mask = build_visibility([], surfaces, probe)
+
+    clamp_only = float(fluence_rate(surfaces, probe)[0])
+    with_tracing = float(fluence_rate(surfaces, probe, visibility=mask)[0])
+    closed_form = (4.0 * exitance / np.pi) * np.arcsin(radius / distance)
+
+    assert with_tracing == clamp_only
+    assert clamp_only == pytest.approx(closed_form, rel=3e-3)
+
+
+def test_a_flat_plate_does_not_shadow_itself():
+    """Acne: neighbouring facets sharing an edge with the source must not block it.
+
+    A plate seen from in front is entirely visible. If the near-origin exclusion were missing,
+    or the self-exclusion were by tolerance rather than by index, a fraction of the facets would
+    drop out and the plate would simply be dimmer, with nothing to say so.
+    """
+    plate = np.concatenate(
+        [
+            rectangle_triangles([x, y, 0.0], [0.05, 0.0, 0.0], [0.0, 0.05, 0.0])
+            for x in np.linspace(-0.4, 0.4, 9)
+            for y in np.linspace(-0.4, 0.4, 9)
+        ]
+    )
+    surfaces = Surfaces.from_triangles(plate, emission=100.0)
+    probe = np.array([[0.0, 0.0, 1.0]])
+    mask = build_visibility([], surfaces, probe)
+    assert float(fluence_rate(surfaces, probe, visibility=mask)[0]) == pytest.approx(
+        float(fluence_rate(surfaces, probe)[0]), rel=1e-15
+    )
+
+
+def test_a_bent_duct_does_not_light_its_own_far_leg():
+    """The shape the headline reactor has, and the reason self-occlusion is not optional.
+
+    Two panels meeting at a right angle, with an emitter on the inside of one. A receiver
+    tucked behind the second panel is out of sight of the emitter even though nothing but the
+    duct's own wall is between them — exactly the shadowing the summation and view-factor models
+    are unable to represent.
+    """
+    # The floor of the bend, with a small emitter sitting on it facing up, and the outer wall
+    # rising from the corner. Floor and wall are one body; so is the emitter.
+    emitter = rectangle_triangles([0.0, 0.0, 0.0], [0.05, 0.0, 0.0], [0.0, 0.05, 0.0])
+    floor = rectangle_triangles([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
+    wall = rectangle_triangles([1.0, 0.0, 1.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0])
+    surfaces = Surfaces.from_triangles(
+        np.concatenate([emitter, floor, wall]),
+        emission=[500.0, 500.0] + [0.0] * 4,
+    )
+    hidden = np.array([[2.0, 0.0, 1.0]])
+    visible = np.array([[0.5, 0.0, 1.0]])
+
+    assert (
+        float(fluence_rate(surfaces, hidden, visibility=build_visibility([], surfaces, hidden))[0])
+        == 0.0
+    )
+    assert (
+        float(
+            fluence_rate(surfaces, visible, visibility=build_visibility([], surfaces, visible))[0]
+        )
+        > 0.0
+    )

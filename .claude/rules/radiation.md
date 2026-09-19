@@ -26,9 +26,10 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `absorption.py` — `UniformAbsorption`, `VoxelAbsorption` | **BUILT** |
 | `occluders.py` — `Cylinder`, `HalfSpace` | **BUILT** |
 | `visibility.py` — the frozen shadow mask | **BUILT** |
+| `triangles.py` — watertight ray-triangle intersection | **BUILT** |
 | the radiosity system | Not yet built |
 | Beer–Lambert optical depth, voxel-grid traversal | Not yet built |
-| occlusion against the emitting geometry's own triangles | Not yet built |
+
 
 ## ⚠️ THERE ARE TWO SOLID-ANGLE KERNELS AND THEY ARE NOT INTERCHANGEABLE
 
@@ -393,6 +394,60 @@ and nothing computed there means anything. Both facets and receivers are checked
 **Do not represent a body twice.** A sleeve that is already an emitting surface must not also be
 an occluder: every ray would leave a facet lying exactly on an occluder, and the emitter's own
 convexity already makes the source-side clamp an exact visibility test for it.
+
+## The emitting surface occludes too, and that half is opaque
+
+`Visibility` keeps two kinds apart. **Analytic primitives** each carry their own transmittance,
+so each needs its own layer. **The surface's own triangles** are the reactor's walls — opaque —
+so they collapse into one layer with nothing to carry. That second kind is what lets a bent duct
+shadow itself, which no primitive can express because the geometry doing the blocking *is* the
+emitting surface. `self_occlusion=True` is the default: a surface that does not shadow itself is
+the defect the module exists to fix, and a mask silently missing it looks exactly like one that
+includes it.
+
+**Exclusion is by index, never by tolerance.** Every ray leaves its facet's centroid, so the
+facet is always hit at zero distance. Excluding its whole *solid* would be wrong — a bent duct is
+exactly the case this is for, and there the blocking wall belongs to the same body as the emitter.
+Edge-adjacent neighbours are handled by the same near-origin exclusion the primitives use.
+
+**The consistency check that validates both halves at once:** on a convex emitter the source-side
+cosine clamp *is* the exact visibility test, so tracing the body's own triangles must change
+nothing. Measured on a 4608-facet cylinder, the two answers are **bit-identical**, and both match
+`G = (4B/pi) arcsin(R/d)`. Acne on facets adjacent to the source would show here.
+
+## ⚠️ THE MEMORY OF ONE PASS IS THE WHOLE PERFORMANCE STORY
+
+The ray-by-triangle intermediate is the cost of the intersection test, and throughput does not
+degrade gracefully — it falls off a cliff. Measured on 2048 triangles, f64, 11 cores, 19 GB:
+
+| intermediate | Mtest/s |
+|---|---|
+| 0.5 - 134 MB | **42 - 57** |
+| 537 MB | **2.4** |
+
+So `work_limit` (entries per pass) is the only knob that matters, and **both axes must be cut to
+honour it**. Blocking only the triangles is not enough: the ray count is itself receivers times
+facets, so it reaches the millions on its own and would blow the limit at a block size of one.
+Getting this wrong cost 13.4 Mtest/s against 31.0 on the same build — and the naive fix, a
+*larger* triangle block, made it **ten times worse**, which is the opposite of the usual
+dispatch-bound instinct.
+
+## Watertight intersection, and one piece of the published algorithm deliberately dropped
+
+Woop, Benthin & Wald (*JCGT* 2(1), 2013) rather than Möller-Trumbore. Measured on a closed hull
+with rays from inside aimed at every vertex and edge midpoint: **Möller-Trumbore leaks 6 of 268,
+the watertight form leaks 0.** A leak is a pinhole through a closed surface — the ray escapes
+because neither of the two triangles sharing the feature claims it.
+
+⚠️ **The published swap of `kx`/`ky` when the chosen axis is negative is omitted on purpose, and
+this was measured, not assumed.** It keeps the coordinate system right-handed; flipping handedness
+negates `u`, `v`, `w` and the determinant *together*, and both places they are used here are
+invariant to that — the inside test accepts all-non-negative or all-non-positive, and the distance
+divides by the same determinant. Over 20000 rays against 300 triangles the swap changes no hit and
+moves no distance by more than 0.0. It is needed when the determinant's sign drives back-face
+culling; this module culls with the facet normal instead. It was carried at first, and its mutation
+was the one that came back green — the right conclusion there was to delete the code, not to add a
+test for behaviour that does not exist.
 
 ## Documentation
 

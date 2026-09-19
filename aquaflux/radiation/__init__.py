@@ -13,11 +13,10 @@ delete part of a source, and refined until each facet is small compared with its
 nearest receiver; the angular distributions a source emits with; the gather that sums every source
 at every receiver to give the fluence rate and the irradiance; and the absorbing medium between
 them, uniform in closed form or graded on a grid and integrated exactly along each path; and the
-solid bodies that stand in the way, whose shadows are frozen when the model is built while their
-transmittance stays a live, differentiable number.
+solid bodies that stand in the way — analytic primitives whose transmittance stays live, and the
+emitting surface's own triangles, which let a bent duct shadow itself.
 
-Still to come: occlusion by the emitting geometry's own triangles, and the reflection system that
-closes diffuse interreflection between surfaces.
+Still to come: the reflection system that closes diffuse interreflection between surfaces.
 """
 
 from __future__ import annotations
@@ -37,6 +36,7 @@ from aquaflux.radiation.solid_angle import projected_solid_angle, solid_angle
 from aquaflux.radiation.stl import TriangleSoup, read_stl
 from aquaflux.radiation.subdivide import Subdivision, refine_for_receivers, subdivide_to_width
 from aquaflux.radiation.surfaces import Surfaces
+from aquaflux.radiation.triangles import segment_is_cut
 from aquaflux.radiation.visibility import Visibility, build_visibility
 
 __all__ = [
@@ -63,6 +63,7 @@ __all__ = [
     "projected_solid_angle",
     "read_stl",
     "refine_for_receivers",
+    "segment_is_cut",
     "solid_angle",
     "stored_normal_disagreement",
     "subdivide_to_width",
