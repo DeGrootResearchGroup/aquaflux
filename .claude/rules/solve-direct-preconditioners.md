@@ -435,7 +435,7 @@ complete LU and the AMG's coloured probe both still depend on it.
         collapse-over-row-fields blindness recorded throughout this section.
       - **The fix is to probe a NARROWED residual, not to widen the reach** (the colour count climbs
         11 → 39 → 94 from reach 1 → 3 on `bfs3d`, so reach 6 is not purchasable):
-        `CoupledJacobianProbe(gradient_sweeps=n)` / the coupled builders' `probe_gradient_sweeps=n` cap
+        `JacobianProbe(gradient_sweeps=n)` / the coupled builders' `probe_gradient_sweeps=n` cap
         the sweeps **for the coloured probe only**, leaving the Krylov matvec the exact jvp of the full
         residual — so the recovered matrix is exact for what it was taken from, and the converged state
         and its adjoint are untouched. `None` (default) is byte-identical. See
@@ -603,7 +603,7 @@ complete LU and the AMG's coloured probe both still depend on it.
         squarely in the regime where Elman's bound bites, and pitzDaily's recirculation is exactly the
         opposite-signed case with the tighter `2+√3` limit. **The experiment this suggests is cheap and
         architecturally free: probe a FIRST-ORDER-UPWIND variant of the residual for the preconditioner
-        only** — the identical seam `probe_gradient_sweeps` uses (`CoupledJacobianProbe.narrow`), with the
+        only** — the identical seam `probe_gradient_sweeps` uses (`JacobianProbe.narrow`), with the
         Krylov matvec still the exact jvp, so the root and the adjoint are untouched. **Not yet run.** Note
         it also predicts the case split: whichever case sits at higher cell Péclet in its probed operator is
         the one whose zero-fill factorization goes unstable.

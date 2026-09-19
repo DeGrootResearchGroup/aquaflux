@@ -191,6 +191,8 @@ from .driver import (
     refuse_unforwardable_settings,
     staged_march,
 )
+from .jacobian_probe import JacobianProbe, jacobian_probe_plan
+from .monolithic_policy import FrozenTransposeFactory, MonolithicFactorShiftPolicy
 from .shifted_step import LinearSolveRegime, LinearSolveSettings, resolve_linear_solve, shifted_step
 from .retry import ESCALATING_REASONS, NO_RETRIES, RetryPolicy
 from .shift_basis import LocalCourantBasis, ShiftBasis, VelocityShiftParts
@@ -246,6 +248,7 @@ __all__ = [
     "FieldLayout",
     "FieldSplitAmgPreconditioner",
     "FinishedSource",
+    "FrozenTransposeFactory",
     "GlobalDofs",
     "Globalization",
     "HierarchyBlockInverse",
@@ -254,6 +257,7 @@ __all__ = [
     "InnerIterateCheckpointer",
     "JacobiSmoothed",
     "JacobiSmoothedInverse",
+    "JacobianProbe",
     "LineSearchGrowth",
     "LinearSolveRegime",
     "LinearSolveSettings",
@@ -263,6 +267,7 @@ __all__ = [
     "MaterializedJacobianPreconditioner",
     "MeasureBuilder",
     "MonolithicAmgPreconditioner",
+    "MonolithicFactorShiftPolicy",
     "MonolithicLuPreconditioner",
     "MonotoneLineSearch",
     "NewtonStrategy",
@@ -332,6 +337,7 @@ __all__ = [
     "field_change_metrics",
     "filled_from",
     "in_progress_measure",
+    "jacobian_probe_plan",
     "jacobian_relative_error",
     "materialize_block_jacobian",
     "newton_march",

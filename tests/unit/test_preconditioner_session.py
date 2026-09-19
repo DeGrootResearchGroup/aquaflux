@@ -74,7 +74,7 @@ def test_the_session_probe_follows_the_operator_stand_in(case) -> None:
     )
     session.build(state, dual_time=DualTimeLoop(inner_steps=3))
     probe = session._probe_for()
-    assert probe.production_viscosity_frozen
+    assert probe.narrowing.production_viscosity_frozen
 
 
 def test_a_probe_spec_reaches_the_probe(case) -> None:
@@ -82,7 +82,7 @@ def test_a_probe_spec_reaches_the_probe(case) -> None:
     session = open_session(
         MaterializedJacobian(CompleteLu(), probe=JacobianProbeSpec(gradient_sweeps=1)), coupled
     )
-    assert session._probe_for().gradient_sweeps == 1
+    assert session._probe_for().narrowing.gradient_sweeps == 1
 
 
 def test_reports_and_the_inverse_wrapper_reach_the_field_split_blocks(case) -> None:
