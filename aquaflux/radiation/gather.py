@@ -6,8 +6,9 @@ sources, the opposite of tracing photons forward, and it is deterministic: the a
 point is a sum, not a sample, so it carries neither stochastic noise nor the bias that comes
 from scoring a photon's path length through a finite cell.
 
-This module computes the vacuum field — no absorption along the way, and no occlusion. Those
-multiply each term by a transmittance and a visibility, and they attach to the same sum.
+Each term may be attenuated by the water it crosses, through an ``Absorption`` supplied by the
+caller; with none, the field is the vacuum one, which is what every analytic reference case is
+stated in. Occlusion multiplies the same terms by a visibility and attaches the same way.
 
 **Two quantities, two kernels, and the difference is not a convention.** The fluence rate
 ``G`` counts power arriving from every direction with no regard to which, because the thing it
@@ -28,6 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import lax
 
+from aquaflux.radiation.absorption import Absorption
 from aquaflux.radiation.solid_angle import projected_solid_angle, solid_angle
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.vectors import dot
@@ -91,6 +93,24 @@ def _chunked(points: jnp.ndarray, chunk_size: int, body):
     return out.reshape(-1)[:n_points]
 
 
+def _transmittance(absorption, source: jnp.ndarray, receivers: jnp.ndarray) -> jnp.ndarray:
+    """Surviving fraction along each source-to-receiver segment, or one in vacuum.
+
+    ⚠️ **The path is taken from the facet's centroid**, so a facet large enough for its far
+    corner to sit at a noticeably different optical depth is attenuated as though it did not.
+    That is the field's standard per-segment treatment, and it is another reason the refinement
+    criterion exists: the facet width that makes the emission assumption hold makes this one
+    hold too.
+
+    There is no clamp on the optical depth. In double precision ``exp(-tau)`` reaches zero near
+    ``tau = 745``, where zero is the right answer and is what is returned; a clamp would buy
+    nothing and would flatten the sensitivity to absorbance across a whole region.
+    """
+    if absorption is None:
+        return jnp.asarray(1.0)
+    return jnp.exp(-absorption.optical_depth(source[None, :, :], receivers[:, None, :]))
+
+
 def _emitter_cosine(surfaces: Surfaces, facets: np.ndarray, receivers: jnp.ndarray):
     """Cosine at each emitting facet of the angle to each receiver, and the separation.
 
@@ -106,7 +126,13 @@ def _emitter_cosine(surfaces: Surfaces, facets: np.ndarray, receivers: jnp.ndarr
     return dot(offset, normal[None, :, :]) / distance, distance_squared
 
 
-def fluence_rate(surfaces: Surfaces, points, *, chunk_size: int = _DEFAULT_CHUNK):
+def fluence_rate(
+    surfaces: Surfaces,
+    points,
+    *,
+    absorption: Absorption | None = None,
+    chunk_size: int = _DEFAULT_CHUNK,
+):
     """Fluence rate at each receiver point, in vacuum.
 
     The zeroth angular moment of radiance over the whole sphere: the radiant power crossing a
@@ -126,6 +152,9 @@ def fluence_rate(surfaces: Surfaces, points, *, chunk_size: int = _DEFAULT_CHUNK
         The emitting set. Facets with zero area are point sources and carry radiant power.
     points : array_like, shape ``(n_points, 3)``
         Receiver positions — cell centres, probes, anywhere.
+    absorption : Absorption, optional
+        The absorbing medium between the sources and the receivers. Omitted, the field is the
+        vacuum one.
     chunk_size : int, optional
         Receivers per traced chunk. Trades peak memory against nothing; the arithmetic is the
         same either way.
@@ -149,19 +178,33 @@ def fluence_rate(surfaces: Surfaces, points, *, chunk_size: int = _DEFAULT_CHUNK
                 omega = solid_angle(
                     receivers[:, None, :], jnp.take(surfaces.vertices, areal, axis=0)[None, ...]
                 )
-                total = total + jnp.sum(radiance * omega, axis=1)
+                surviving = _transmittance(
+                    absorption, jnp.take(surfaces.centroid, areal, axis=0), receivers
+                )
+                total = total + jnp.sum(radiance * omega * surviving, axis=1)
             if len(point):
                 cosine, distance_squared = _emitter_cosine(surfaces, point, receivers)
                 fraction = profile.intensity_fraction(cosine)
+                surviving = _transmittance(
+                    absorption, jnp.take(surfaces.centroid, point, axis=0), receivers
+                )
                 total = total + jnp.sum(
-                    jnp.take(surfaces.power, point) * fraction / distance_squared, axis=1
+                    jnp.take(surfaces.power, point) * fraction * surviving / distance_squared,
+                    axis=1,
                 )
         return total
 
     return _chunked(points, chunk_size, at)
 
 
-def irradiance(surfaces: Surfaces, points, normals, *, chunk_size: int = _DEFAULT_CHUNK):
+def irradiance(
+    surfaces: Surfaces,
+    points,
+    normals,
+    *,
+    absorption: Absorption | None = None,
+    chunk_size: int = _DEFAULT_CHUNK,
+):
     """Irradiance on an oriented receiving surface at each point, in vacuum.
 
     The first angular moment of radiance over the receiver's hemisphere: power per unit area of
@@ -180,6 +223,8 @@ def irradiance(surfaces: Surfaces, points, normals, *, chunk_size: int = _DEFAUL
         Receiver positions.
     normals : array_like, shape ``(n_points, 3)``
         Unit outward normal of the receiving surface at each point.
+    absorption : Absorption, optional
+        The absorbing medium between the sources and the receivers.
     chunk_size : int, optional
         Receivers per traced chunk.
 
@@ -210,7 +255,10 @@ def irradiance(surfaces: Surfaces, points, normals, *, chunk_size: int = _DEFAUL
                     jnp.broadcast_to(receiver_normal[:, None, :], (*cosine.shape, 3)),
                     jnp.take(surfaces.vertices, areal, axis=0)[None, ...],
                 )
-                total = total + jnp.sum(radiance * projected, axis=1)
+                surviving = _transmittance(
+                    absorption, jnp.take(surfaces.centroid, areal, axis=0), receivers
+                )
+                total = total + jnp.sum(radiance * projected * surviving, axis=1)
             if len(point):
                 centroid = jnp.take(surfaces.centroid, point, axis=0)
                 offset = receivers[:, None, :] - centroid[None, :, :]
@@ -221,8 +269,13 @@ def irradiance(surfaces: Surfaces, points, normals, *, chunk_size: int = _DEFAUL
                     -dot(offset, receiver_normal[:, None, :]) / distance, 0.0
                 )
                 fraction = profile.intensity_fraction(source_cosine / distance)
+                surviving = _transmittance(absorption, centroid, receivers)
                 total = total + jnp.sum(
-                    jnp.take(surfaces.power, point) * fraction * receiver_cosine / distance_squared,
+                    jnp.take(surfaces.power, point)
+                    * fraction
+                    * receiver_cosine
+                    * surviving
+                    / distance_squared,
                     axis=1,
                 )
         return total
