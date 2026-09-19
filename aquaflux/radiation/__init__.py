@@ -16,7 +16,8 @@ them, uniform in closed form or graded on a grid and integrated exactly along ea
 solid bodies that stand in the way — analytic primitives whose transmittance stays live, and the
 emitting surface's own triangles, which let a bent duct shadow itself; and the surface system
 that closes diffuse interreflection between facets to convergence, so the number of bounces is
-not a parameter.
+not a parameter, integrating over both facets of every pair rather than sampling the receiver
+at a point.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from aquaflux.radiation.checks import (
 from aquaflux.radiation.gather import fluence_rate, irradiance
 from aquaflux.radiation.occluders import Cylinder, HalfSpace, Occluder
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian, Profile
+from aquaflux.radiation.quadrature import TriangleQuadrature, triangle_quadrature
 from aquaflux.radiation.radiosity import (
     TransferMatrix,
     build_transfer,
@@ -59,6 +61,7 @@ __all__ = [
     "Subdivision",
     "Surfaces",
     "TransferMatrix",
+    "TriangleQuadrature",
     "TriangleSoup",
     "UniformAbsorption",
     "Visibility",
@@ -81,5 +84,6 @@ __all__ = [
     "stored_normal_disagreement",
     "subdivide_to_width",
     "surface_irradiance",
+    "triangle_quadrature",
     "winding_report",
 ]

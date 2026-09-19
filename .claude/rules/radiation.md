@@ -28,6 +28,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `visibility.py` — the frozen shadow mask | **BUILT** |
 | `triangles.py` — watertight ray-triangle intersection | **BUILT** |
 | `radiosity.py` — the surface interreflection system | **BUILT** |
+| `quadrature.py` — symmetric triangle rules for the receiving facet | **BUILT** |
 
 | Beer–Lambert optical depth, voxel-grid traversal | Not yet built |
 
@@ -465,31 +466,97 @@ Neumann series: 200 terms agree to 1e-10, one term is wrong by more than 100%.
 - **A Lambertian source's energy balances exactly** — total landing equals total leaving,
   1.000000 at every refinement.
 
-⚠️ **NOT exact, and neither of these converges — say the number rather than the assumption:**
+⚠️ **NOT exact — say the number rather than the assumption. None of these converges under mesh
+REFINEMENT; the first two converge in the receiver QUADRATURE, which is the knob that exists.**
 
-- **Reciprocity.** The source is integrated exactly; the *receiver* is evaluated at its centroid.
-  That one-point rule leaves `reciprocity_residual` at **0.2421 on a closed box at 12, 48, 192,
-  432 and 768 facets alike** — refinement does not help, because shrinking facets bring their
-  neighbours proportionally closer and the geometry stays self-similar. It is a **diagnostic, not
-  a gate**.
-- **Global energy conservation follows reciprocity, so it is not exact either — but it is far
-  better than the per-pair figure suggests.** Per column, `sum_i A_i F_ij = A_j` is violated by up
-  to **8.9%**; summed over an enclosure those errors carry mixed signs and cancel, giving
-  absorbed/emitted of 1.000000 / 0.999868 / 1.000112 / 1.000083 / 1.000062 on the same boxes. So
-  the field is conservative to about **one part in ten thousand** while any single nearby pair may
-  exchange a quarter more or less than it should.
-- **A non-Lambertian source's energy does not balance**, because its profile is evaluated at the
-  centroid direction too: a cosine-power exponent of 8 gives 1.145 / 0.970 / 0.970 / 0.981 at 12 /
-  48 / 192 / 768 facets, an exponent of 2 gives 1.069 / 1.007 / 0.995 / 0.995. This one *does*
-  shrink with refinement, since more directions get sampled.
-
-Fixing the first two needs quadrature over the receiving facet as well, which costs another factor
-in the `n^2` build. That is the open trade.
+- **Reciprocity** is the quadrature error on the receiving facet, and nothing else. Refinement
+  does not touch it: shrinking a closed box's facets brings their neighbours proportionally
+  closer, so the ratio the error depends on never changes and `reciprocity_residual` reads the
+  same at 12, 48, 192 and 432 facets. It falls with the point count instead — **0.2421 / 0.0281 /
+  0.0078 / 0.0045 at 1 / 3 / 6 / 12 points**, the same four numbers at every refinement. Six is
+  the shipped default. Still a **diagnostic, not a gate**.
+- **Global energy conservation follows reciprocity, and at one point per receiver it GETS WORSE
+  as the mesh is refined.** On a small lamp in a large box (4 emitting facets of `inward_box(d)`,
+  reflectance 0.9) absorbed/emitted measures 1.000000 / 0.999868 / **0.982769 / 0.975625 /
+  0.973077** at 12 / 48 / 192 / 432 / 768 facets: 2.7% of the lamp's output lost and still
+  growing, because the facets nearest the lamp close in on it while staying the same size
+  relative to their separation. At six points the same scene gives 1.000000 / 1.000212 /
+  1.000171 / 1.000120 / 1.000102, improving. Per column, `sum_i A_i F_ij = A_j` is violated by
+  **8.8% / 1.5% / 0.38% / 0.18%** at 1 / 3 / 6 / 12 points.
+  ⚠️ **The earlier record here — "1.000112 / 1.000083 / 1.000062 … conservative to one part in ten
+  thousand" at the centroid rule — is DELETED, not corrected: it does not reproduce and its
+  fixture was not written down.** The measurement above is the lamp-in-a-dark-box fixture, whose
+  first two entries match it exactly and whose remainder does not. The likely reason is the one
+  already on record two sections down: **a box in which every facet emits balances to 1.000000 at
+  every mesh and every rule**, because each facet's error is its neighbour's and they cancel
+  identically — so an all-emitting fixture cannot see this defect at all.
+- **A non-Lambertian source's energy still does not balance, and the receiver quadrature does not
+  help** — the error is source-side, its profile being evaluated at the single centroid-to-centroid
+  direction, which must stay outside the frozen build to keep its parameters differentiable. At
+  six points a cosine-power exponent of 8 gives 1.086 / 0.978 / 0.982 / 0.987 at 12 / 48 / 192 /
+  432 facets against 1.145 / 0.970 / 0.970 / 0.977 at one point, and the two agree to three
+  figures from three points upward. This one *does* shrink with refinement, since more directions
+  get sampled.
 
 ⚠️ **`reciprocity_residual` is normalized by the LARGEST entry, not per pair.** Two facets of the
 same flat wall transfer nothing and hold values around 1e-18; a per-pair relative measure turns
 that rounding noise into a residual of 0.97 while those pairs carry, measured, 0.0000 of the total
 transfer. The first version did exactly that and reported ~1.0 on a healthy matrix.
+
+## ⚠️ `geometric[i, j]` IS THE FORM FACTOR *FROM* `i` *TO* `j`, SO THE AREA MULTIPLIES THE ROW
+
+`build_transfer` evaluates `projected_solid_angle` over facet `j` from points on facet `i`, which
+is `F_{i->j}`. It is used as the weight with which `j`'s radiosity lights `i` — and that is the
+same number, not a second one reached through reciprocity: the irradiance at a point `x` is
+`sum_j B_j F_{dA_x -> A_j}` by definition. Reciprocity pairs `A_i F_ij` with `A_j F_ji`.
+
+**The shipped `reciprocity_residual` weighted the COLUMN, and no test could see it**, because
+every fixture in the suite was a subdivided cube, where all facets share one area and the two
+expressions are identical. Measured once a fixture had unequal areas: on a box stretched to
+1x1x3, the row weighting reads 0.2124 / 0.0930 / 0.0318 / 0.0072 across the four rules while the
+column weighting reads 0.9596 / 0.9179 / 0.8983 / 0.8912 — large and flat. On two squares of area
+1 and 100 a hundred widths apart, 0.0022 against 0.9999. `stretched_box` in the tests exists for
+this; reach for it whenever a claim involves an area.
+
+## The receiver quadrature: why ONE side of the double integral is exact and the other is not
+
+A transfer factor is a double area integral. The source half is closed form
+(`projected_solid_angle`); the receiver half is quadrature (`quadrature.py`, six points by
+default). That asymmetry is deliberate and is the better of the two available trades:
+
+- **Source exact + receiver quadrature** — row sums exact to 1e-15 at every rule, reciprocity
+  O(quadrature error). Each quadrature point sees a whole closed enclosure so its own row sums to
+  one, and the weights sum to one.
+- **Both by the same quadrature** — reciprocity exact *by construction* (the double sum is
+  manifestly symmetric), row sums only approximate.
+
+The row sum is what bounds `spec(rho F)` and what catches a wrong kernel, so it is the one to keep
+exact. Do not "finish the job" by quadraturing the source too.
+
+⚠️ **A FINER RULE COSTS FAR LESS THAN ITS POINT COUNT — 6 points is 1.15-1.72x, not 6x.** The build
+is limited by moving geometry through memory, not by evaluating the kernel, and the extra points
+reuse triangles already loaded. Median of five warm `build_transfer` calls on closed boxes, JAX
+0.10.2, CPU, x64, macOS arm64, 11 cores, default `chunk_size=256`: at 192 / 768 / 1728 / 3072
+facets the one-point build takes 0.18 / 0.54 / 1.32 / 2.54 s, and six points costs 1.15 / 1.31 /
+1.37 / 1.72x of that (twelve points 1.09 / 1.60 / 2.03 / 3.63x). Wall clock on a shared desktop
+carries ~20% spread, so read the shape and not two figures. **The first measurement of this said
+6-13x and was wrong**: the probe vmapped all receivers and all quadrature points at once, so it
+measured a 287 MB intermediate rather than the shipped path, which scans the quadrature points
+inside each chunk precisely so `chunk_size` keeps meaning what it meant at one point per facet.
+
+⚠️ **Polynomial degree does not order the rules by accuracy here.** The integrand goes like
+`1/r^2` and is nearly singular between facets sharing an edge, which is where the error lives and
+what a polynomial rule is worst at. The 7-point degree-5 rule measures **0.0169 against the
+6-point degree-4 rule's 0.0078** — it spends nearly a quarter of its weight at the centroid — so
+it is deleted from the catalogue rather than offered. The 4-point degree-3 rule is absent too: its
+centroid weight is negative, which can drive a transfer factor below zero.
+
+**Not integrated over the receiver, and necessarily so:** the centroid separation carrying
+absorption, the source cosine carrying a non-Lambertian profile, and the occlusion mask. All three
+multiply the geometric term elementwise so they can stay live and differentiable; moving them
+inside the quadrature would put them back in the frozen `n^2` build. In a scene with partial
+shadowing, or a medium absorbing appreciably over a facet's own width, those are the coarse
+approximations — not the receiver rule.
 
 ## ⚠️ THE STOPPING RULE IS CHOSEN, NOT DEFAULTED
 

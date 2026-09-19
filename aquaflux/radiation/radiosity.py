@@ -14,9 +14,10 @@ matrix-vector products.
     H = F^M M + F (B - M) + H_external          irradiance on each facet
     B = M + rho * H                             what each facet sends back out
 
-with ``F_ij`` the fraction of what leaves facet ``j`` that lands on facet ``i``. Eliminating
-``H`` gives ``(I - diag(rho) F) B = M + rho * ((F^M - F) M + H_external)``, which is what is
-actually solved.
+with ``F_ij`` the fraction of what leaves facet ``i`` that lands on facet ``j``, which is also
+the weight with which ``j``'s radiosity lights ``i`` — one number, not two related by
+reciprocity. Eliminating ``H`` gives
+``(I - diag(rho) F) B = M + rho * ((F^M - F) M + H_external)``, which is what is actually solved.
 
 ⚠️ **Reflection here is purely DIFFUSE, and a scalar reflectance does not say that.** A wall
 described only by the number 0.95 could scatter that light in every direction or send it off
@@ -27,31 +28,42 @@ diffuse reflection raises the reduction-equivalent fluence above specular, and t
 literature emphasizes it — but the assumption belongs beside the number, because a reflectance
 supplied without it is an under-specified input.
 
-⚠️ **The SOURCE's angular distribution is evaluated at the centroid direction too**, which
-matters only when it is not Lambertian. A Lambertian source's emitted transfer conserves energy
-exactly — the total landing on a closed box equals the total leaving, to 1.000000 at every
-refinement — because its distribution cancels against the projected solid angle. A cosine-power
-source's does not: on the same boxes, an exponent of 8 balances at 1.145, 0.970, 0.970 and 0.981
-at 12, 48, 192 and 768 facets, and an exponent of 2 at 1.069, 1.007, 0.995 and 0.995. The error
-shrinks as the receiving facets shrink and more directions are sampled, but it is a few percent
-at usable resolutions. Subdivide a narrow source's surroundings, or read its result as carrying
-that much slack.
+**Both facets of every pair are integrated over, and they are integrated differently.** A
+transfer factor is a double area integral. The sending facet is exact — the projected solid angle
+is a closed form — and the receiving facet is quadrature, six points by default. Keeping the
+source exact is what makes the row sums exact at every rule, and the row sums are what bound the
+conditioning; integrating both by quadrature would trade that for exact reciprocity, which is the
+worse way round. See :func:`build_transfer` for the point counts on offer and what each costs.
 
-⚠️ **The receiver is evaluated at one point — its centroid — and that is the model's remaining
-approximation here.** The emitting facet is integrated exactly, so the row sums are exact to
-about 1e-15 and the conditioning bound they give is real. Reciprocity is not: it sits around
-24% on a closed box and **does not improve with refinement**, because shrinking the facets
-brings their neighbours proportionally closer. Near-neighbour transfer is therefore apportioned
-slightly differently from a fully integrated form factor, while the total leaving each facet is
-exact. See :func:`reciprocity_residual`.
+⚠️ **Refining the mesh does not improve reciprocity; only the quadrature does.** Shrinking the
+facets of a closed box brings each one's neighbours proportionally closer, so the ratio the
+quadrature error depends on never changes: ``reciprocity_residual`` measures 0.2421, 0.0281,
+0.0078 and 0.0045 at 1, 3, 6 and 12 points per receiver, and the same four numbers again at every
+refinement from 12 to 432 facets. It is a diagnostic and not a gate.
 
-**What that costs in practice is much less than it sounds.** Global energy conservation — all the
-light a lamp emits being absorbed somewhere — needs reciprocity, and per column the identity
-``sum_i A_i F_ij = A_j`` is violated by up to 8.9%. But those column errors carry mixed signs and
-very nearly cancel when summed over an enclosure: measured on closed boxes of 12, 48, 192, 432 and
-768 facets, absorbed over emitted comes to 1.000000, 0.999868, 1.000112, 1.000083 and 1.000062.
-So the field is conservative to about one part in ten thousand while any single pair of nearby
-facets may exchange a quarter more or less than it should.
+⚠️ **Global energy conservation follows reciprocity, and at one point per receiver it DEGRADES
+under refinement.** For a small lamp in a large box, absorbed over emitted measures 1.000000,
+0.999868, 0.982769, 0.975625 and 0.973077 at 12, 48, 192, 432 and 768 facets — 2.7% of the lamp's
+output unaccounted for and still growing, because the facets nearest the lamp close in on it
+while staying the same size relative to their separation. At the six-point default the same scene
+gives 1.000000, 1.000212, 1.000171, 1.000120 and 1.000102, improving instead. ⚠️ A box in which
+*every* facet emits balances to 1.000000 at every mesh and every rule, so it cannot see any of
+this: each facet's error is its neighbour's and they cancel identically.
+
+⚠️ **The SOURCE's angular distribution is still evaluated at ONE direction**, from its centroid to
+the receiver's, and the receiver quadrature does not fix that. It matters only when the source is
+not Lambertian — a Lambertian distribution cancels against the projected solid angle and balances
+exactly at every refinement. A cosine-power source of exponent 8 balances at 1.086, 0.978, 0.982
+and 0.987 at 12, 48, 192 and 432 facets, against 1.145, 0.970, 0.970 and 0.977 at one point per
+receiver: the two agree to three figures from three points upward, because this error is not the
+receiver's. What shrinks it is refining the mesh, which samples more directions. Subdivide a
+narrow source's surroundings, or read its result as carrying a few percent of slack.
+
+The same applies to the other three quantities that multiply the geometric term elementwise — the
+centroid separation carrying absorption, the source cosine above, and the occlusion mask. All
+three are one-point, necessarily: they are live and differentiable, so they cannot move inside the
+frozen build. In a scene where a facet is partly shadowed, or the medium absorbs appreciably over
+a facet's own width, those are the coarse approximations and not the receiver quadrature.
 
 **``F`` is built from the PROJECTED solid angle.** A receiving facet is a surface, so light
 arriving obliquely counts for less; the plain solid angle is the fluence-rate kernel and using
@@ -86,6 +98,7 @@ import numpy as np
 
 from aquaflux.radiation.absorption import Absorption, UniformAbsorption
 from aquaflux.radiation.profiles import Lambertian
+from aquaflux.radiation.quadrature import TriangleQuadrature, triangle_quadrature
 from aquaflux.radiation.solid_angle import projected_solid_angle
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.visibility import Visibility, build_visibility
@@ -94,6 +107,10 @@ from aquaflux.vectors import dot
 
 #: Relative residual the default solve stops at.
 _DEFAULT_RTOL = 1e-10
+
+#: Points per receiving facet in the default transfer build. Six is where the measured
+#: cost/accuracy frontier turns over -- see :func:`build_transfer`.
+_DEFAULT_RECEIVER_POINTS = 6
 
 __all__ = [
     "TransferMatrix",
@@ -116,9 +133,13 @@ class TransferMatrix(eqx.Module):
     Attributes
     ----------
     geometric : jnp.ndarray, shape ``(n_facets, n_facets)``
-        ``Omega_proj_ij / pi`` — the fraction of a *Lambertian* facet ``j``'s output reaching
-        facet ``i``, before any blocking or absorption, with the diagonal zeroed. Row ``i`` is
-        the receiver.
+        The form factor from facet ``i`` to facet ``j`` — the fraction of what leaves ``i``
+        Lambertian that lands on ``j``, before any blocking or absorption, with the diagonal
+        zeroed. Equivalently, and this is how the solve reads it, the weight with which ``j``'s
+        radiosity contributes to the irradiance on ``i``: those are the same number, not two
+        related by reciprocity. **The area therefore belongs to the ROW index** — ``A_i``
+        multiplies row ``i`` — which is what :func:`reciprocity_residual` weights by, and what
+        an equal-area fixture cannot distinguish from the transpose.
     source_cosine : jnp.ndarray, shape ``(n_facets, n_facets)``
         Cosine, at source ``j``, of the angle between its normal and the direction to receiver
         ``i``. Needed only to evaluate a non-Lambertian source's own angular distribution, which
@@ -146,6 +167,7 @@ def build_transfer(
     *,
     occluders=(),
     self_occlusion: bool = True,
+    receiver_quadrature: TriangleQuadrature | int | None = None,
     chunk_size: int = 256,
     **visibility_options,
 ) -> TransferMatrix:
@@ -159,8 +181,15 @@ def build_transfer(
         Analytic bodies between facets.
     self_occlusion : bool, optional
         Whether the facets block one another, which for a non-convex body they do.
+    receiver_quadrature : TriangleQuadrature or int, optional
+        How finely to integrate over each *receiving* facet. An integer is a point count passed
+        to :func:`~aquaflux.radiation.quadrature.triangle_quadrature`. Defaults to six points.
+        It is the only knob that improves reciprocity, and it costs far less than its point
+        count suggests — see the tables below.
     chunk_size : int, optional
-        Receiving facets per pass of the solid-angle build, bounding its peak memory.
+        Receiving facets per pass of the solid-angle build, bounding its peak memory. Its
+        meaning is unchanged by the quadrature: the points are accumulated one at a time within
+        a pass, so a finer rule costs time and not memory.
     **visibility_options
         Passed through to the visibility build.
 
@@ -170,29 +199,108 @@ def build_transfer(
 
     Notes
     -----
+    A transfer factor is a double area integral, over the sending facet and over the receiving
+    one. The sending half is exact — :func:`~aquaflux.radiation.solid_angle.projected_solid_angle`
+    is a closed form — so the receiving half is the whole of the discretization error, and the
+    quadrature above is what controls it. Two consequences of keeping the source exact are worth
+    stating, because they are what make a one-sided rule the right shape here rather than a
+    half-finished one:
+
+    - **The row sums stay exact at every point count.** Each quadrature point sees a closed
+      enclosure, so its own row sums to one; the weights sum to one, so the average does too.
+      Measured at 1e-15 for every rule. Integrating *both* facets by quadrature would instead
+      give exact reciprocity and approximate row sums — the worse trade, since the row sum is
+      what bounds the conditioning and what catches a wrong kernel.
+    - **Reciprocity converges in the point count, not in the mesh.** Refining a closed box
+      brings each facet's neighbours proportionally closer, so the ratio the error depends on
+      does not change and the residual sits flat under refinement. Measured on boxes of 12 to
+      432 facets, identically at each:
+
+      ======  ======  ====================  ==========================================
+      points  degree  reciprocity residual  worst column, ``sum_i A_i F_ij / A_j - 1``
+      ======  ======  ====================  ==========================================
+      1       1       0.2421                8.8%
+      3       2       0.0281                1.5%
+      6       4       0.0078                0.38%
+      12      6       0.0045                0.18%
+      ======  ======  ====================  ==========================================
+
+    ⚠️ **A finer rule costs far less than its point count**, which is why six is the default
+    rather than one. The build is limited by moving geometry through memory, not by evaluating
+    the kernel, and every extra point on a receiver reuses the same triangles. Against the
+    one-point build, measured as the median of five warm calls on closed boxes of 192 to 3072
+    facets at the default ``chunk_size``, on a CPU backend with x64 on (JAX 0.10.2, macOS arm64,
+    11 cores):
+
+    ========  ==========  ==========  ===========  ===========
+    facets    1 point     3 points    6 points     12 points
+    ========  ==========  ==========  ===========  ===========
+    192       0.18 s      1.01x       1.15x        1.09x
+    768       0.54 s      1.00x       1.31x        1.60x
+    1728      1.32 s      1.18x       1.37x        2.03x
+    3072      2.54 s      1.27x       1.72x        3.63x
+    ========  ==========  ==========  ===========  ===========
+
+    Read those ratios as the shape and not to two figures: wall clock on a shared desktop
+    carries a spread of about 20% run to run, which is wider than the gap between neighbouring
+    columns at the small sizes.
+
+    What is *not* integrated over the receiver: the centroid separation that carries absorption,
+    the source-side cosine that carries a non-Lambertian profile, and the occlusion mask. All
+    three multiply the geometric term elementwise so that they can stay live and differentiable,
+    and moving them inside the quadrature would put them back inside the frozen ``n^2`` build.
+    They remain one-point quantities, which is the coarser approximation in any scene where a
+    facet is partly shadowed or the medium is strongly absorbing over a facet's own width.
+
     The build is ``n^2`` in both time and memory: a thousand facets is a million entries per
     array and four such arrays, which is megabytes; ten thousand is a hundred million, which is
     gigabytes. The facet count, not the cell count, is what limits the surface system.
     """
+    if receiver_quadrature is None:
+        receiver_quadrature = _DEFAULT_RECEIVER_POINTS
+    if not isinstance(receiver_quadrature, TriangleQuadrature):
+        receiver_quadrature = triangle_quadrature(int(receiver_quadrature))
+
     vertices = surfaces.vertices
     centroid = surfaces.centroid
     normal = surfaces.normal
     n_facets = surfaces.n_facets
 
+    # (n_facets, n_points, 3) -- where on each receiving facet the transfer is sampled.
+    sample = receiver_quadrature.points(vertices)
+    weight = jnp.asarray(receiver_quadrature.weight)
+
     def solid_angles(receiver_slice):
-        return jax.vmap(
-            lambda point, facing: jax.vmap(
-                lambda triangle: projected_solid_angle(point, facing, triangle)
-            )(vertices)
-        )(centroid[receiver_slice], normal[receiver_slice])
+        facing = normal[receiver_slice]
+
+        def accumulate(total, sampled):
+            weight_q, point_q = sampled
+            at_point = jax.vmap(
+                lambda point, facing_i: jax.vmap(
+                    lambda triangle: projected_solid_angle(point, facing_i, triangle)
+                )(vertices)
+            )(point_q, facing)
+            return total + weight_q * at_point, None
+
+        # Scanned rather than vmapped over the quadrature points so the live intermediate stays
+        # (receivers, n_facets) whatever the rule costs, which is what lets ``chunk_size`` keep
+        # meaning the same thing it did with a single point per facet.
+        rows, _ = jax.lax.scan(
+            accumulate,
+            jnp.zeros((facing.shape[0], n_facets)),
+            (weight, jnp.swapaxes(sample[receiver_slice], 0, 1)),
+        )
+        return rows
 
     rows = [
         solid_angles(slice(start, start + chunk_size)) for start in range(0, n_facets, chunk_size)
     ]
     geometric = jnp.concatenate(rows, axis=0) / jnp.pi
 
-    # A facet cannot transfer to itself: its centroid lies in its own plane, where the contour
-    # integral returns a whole hemisphere. Left in, every row sum is exactly one too large.
+    # A facet cannot transfer to itself: every quadrature point lies in its own plane, where the
+    # contour integral returns a whole hemisphere. Left in, every row sum is exactly one too
+    # large. A planar triangle really does see none of itself, so this is the exact value and
+    # not a repair.
     geometric = geometric * ~jnp.eye(n_facets, dtype=bool)
     # A point source has no surface to receive on and no area to emit from; it reaches the
     # facets through the ordinary gather instead, as an external irradiance.
@@ -383,29 +491,34 @@ def row_sum_error(transfer: TransferMatrix) -> float:
 
 
 def reciprocity_residual(transfer: TransferMatrix, area) -> float:
-    """How far ``A_j F_ij`` sits from ``A_i F_ji``, against the largest entry of the matrix.
+    """How far ``A_i F_ij`` sits from ``A_j F_ji``, against the largest entry of the matrix.
 
-    ⚠️ **This is a diagnostic, not a gate, and it does not converge.** Reciprocity is exact for
-    the double-area-integral form factor, where both facets are integrated over. This matrix
-    evaluates the *receiver* at a single point — its centroid — and that one-point rule breaks
-    reciprocity by an amount that refinement does not reduce: on a closed box it sits at
-    **0.2421 at 12, 48, 192, 432 and 768 facets alike**, because shrinking the facets brings
-    their neighbours proportionally closer and the geometry stays self-similar.
+    ⚠️ **This is a diagnostic, not a gate.** Reciprocity is exact for the double-area-integral
+    form factor, where both facets are integrated over. This matrix integrates the *source*
+    exactly and the *receiver* by quadrature, so the residual here is that quadrature's error:
+    it falls with the point count, and stays flat under mesh refinement, because refining a
+    closed box brings each facet's neighbours proportionally closer and the geometry stays
+    self-similar. On boxes of 12 to 432 facets it measures 0.2421, 0.0281, 0.0078 and 0.0045 at
+    1, 3, 6 and 12 points per receiver, the same at every refinement.
 
-    So a large value here says the near-neighbour entries are apportioned differently from a
-    fully-integrated form factor, not that the matrix is wrong. What *is* exact, and what the
-    solve's conditioning actually rests on, is the row sum — see :func:`row_sum_error`, which
-    holds to about 1e-15 on the same boxes. Reducing this one needs quadrature over the
-    receiving facet as well, which costs another factor in the build.
+    So a value here says how differently the near-neighbour entries are apportioned from a fully
+    integrated form factor, not whether the matrix is wrong. What is exact at every point count,
+    and what the solve's conditioning actually rests on, is the row sum — see
+    :func:`row_sum_error`.
+
+    ⚠️ **The area multiplies the ROW index.** ``transfer.geometric[i, j]`` is the form factor
+    *from* ``i`` *to* ``j``, so reciprocity pairs ``A_i F_ij`` with ``A_j F_ji`` — the transpose
+    of ``area[:, None] * geometric``. Weighting the column instead is the same expression on any
+    fixture whose facets share one area, which every closed box built by subdividing a cube
+    does; on two squares of area 1 and 100 it reports 0.9999 where the correct pairing reports
+    0.0022.
 
     The comparison is against the largest entry rather than each pair's own magnitude. Pairs
     that transfer nothing — two facets of the same flat wall — hold values around 1e-18, and a
     per-pair relative measure turns that rounding noise into a residual near one while those
     pairs carry, measurably, 0.0000 of the total transfer.
     """
-    # F[i, j] is what reaches receiver i from source j, so the emitting area sits on the
-    # COLUMN index: A_j F[i, j] is compared with A_i F[j, i].
     area = jnp.asarray(area, dtype=float)
-    weighted = area[None, :] * transfer.geometric
+    weighted = area[:, None] * transfer.geometric
     largest = jnp.max(jnp.abs(weighted))
     return float(jnp.max(jnp.abs(weighted - weighted.T)) / jnp.where(largest == 0.0, 1.0, largest))

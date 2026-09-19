@@ -28,6 +28,17 @@ def box(divisions=2, **optics):
     return Surfaces.from_triangles(inward_box(divisions), **optics)
 
 
+def stretched_box(divisions=2, **optics):
+    """A closed box whose facets do **not** all have the same area.
+
+    Stretching the unit box along one axis is affine and positive, so it stays closed and stays
+    consistently wound, but its long walls carry triangles three times the area of its ends.
+    Every equal-area fixture is blind to which index of the transfer matrix an area belongs on,
+    because both choices are then the same expression — see the reciprocity tests below.
+    """
+    return Surfaces.from_triangles(inward_box(divisions) * np.array([1.0, 1.0, 3.0]), **optics)
+
+
 # ---------------------------------------------------------------------------------------
 # The transfer matrix
 # ---------------------------------------------------------------------------------------
@@ -40,11 +51,38 @@ def test_every_row_of_the_transfer_matrix_sums_to_one_in_a_closed_box(divisions)
     All the light leaving a facet inside a closed enclosure lands somewhere. That bounds the
     spectral radius of ``diag(rho) F`` by the largest reflectance, which is what makes the system
     well conditioned at any reflectance below one. Substituting the *plain* solid angle for the
-    projected one doubles every row sum, and the centroid approximation pins the maximum near
-    1.2 under every refinement; both are visible here immediately.
+    projected one doubles every row sum, and an elementary ``A cos(theta) / r^2`` kernel in place
+    of the closed form pins the maximum near 1.2 under every refinement; both are visible here
+    immediately.
     """
     transfer = build_transfer(box(divisions), self_occlusion=False)
     assert row_sum_error(transfer) < 1e-12
+
+
+@pytest.mark.parametrize("n_points", [1, 3, 6, 12])
+def test_the_row_sums_stay_exact_however_finely_the_receiver_is_integrated(n_points):
+    """The reason the *source* is left in closed form rather than also being sampled.
+
+    Each quadrature point of a receiver sees a whole closed enclosure, so its own row sums to
+    one; the weights sum to one, so their average does too — at every rule, on both a cube and
+    an enclosure whose facets differ in area. Integrating both facets by quadrature would buy
+    exact reciprocity and give this up, which is the worse trade: this is what bounds the
+    conditioning, and what catches a wrong kernel.
+    """
+    for surfaces in (box(2), stretched_box(2)):
+        transfer = build_transfer(surfaces, self_occlusion=False, receiver_quadrature=n_points)
+        assert row_sum_error(transfer) < 1e-12
+
+
+def test_the_default_build_integrates_the_receiver_over_six_points():
+    """A default worth pinning: it is the point at which the measured cost/accuracy frontier
+    turns over, and it is what every other test in this file is measured under."""
+    surfaces = box(2)
+    default = build_transfer(surfaces, self_occlusion=False)
+    six = build_transfer(surfaces, self_occlusion=False, receiver_quadrature=6)
+    one = build_transfer(surfaces, self_occlusion=False, receiver_quadrature=1)
+    np.testing.assert_array_equal(np.asarray(default.geometric), np.asarray(six.geometric))
+    assert not np.allclose(np.asarray(default.geometric), np.asarray(one.geometric))
 
 
 def test_a_facet_does_not_transfer_to_itself():
@@ -52,21 +90,89 @@ def test_a_facet_does_not_transfer_to_itself():
     np.testing.assert_allclose(np.diag(np.asarray(transfer.geometric)), 0.0, atol=0.0)
 
 
-def test_reciprocity_is_violated_by_a_fixed_amount_that_refinement_does_not_reduce():
-    """A documented limitation, pinned so it is not mistaken for a gate.
+def test_reciprocity_converges_in_the_number_of_points_on_the_receiver():
+    """The knob that fixes it, and the only one that does.
 
-    Reciprocity is exact for the double-area-integral form factor. This matrix integrates the
-    *source* exactly and evaluates the *receiver* at its centroid, and that one-point rule breaks
-    reciprocity by an amount refinement leaves alone — shrinking the facets brings their
-    neighbours proportionally closer, so the geometry stays self-similar. The row sums are exact
-    regardless, which is what the conditioning actually needs.
+    Reciprocity is exact for the double-area-integral form factor. Integrating the source exactly
+    and sampling the receiver at one point breaks it; integrating the receiver too restores it, in
+    the point count. Measured on a cube: 0.2421, 0.0281, 0.0078, 0.0045 at 1, 3, 6 and 12 points.
     """
+    surfaces = box(2)
     residuals = [
-        reciprocity_residual(build_transfer(box(n), self_occlusion=False), box(n).area)
+        reciprocity_residual(
+            build_transfer(surfaces, self_occlusion=False, receiver_quadrature=n), surfaces.area
+        )
+        for n in (1, 3, 6, 12)
+    ]
+    assert residuals == sorted(residuals, reverse=True), residuals
+    assert residuals[0] > 0.2, "the one-point rule should still be the bad one"
+    assert residuals[-1] < 0.01, residuals
+    assert residuals[0] / residuals[-1] > 20.0, residuals
+
+
+@pytest.mark.parametrize("n_points", [1, 3, 6, 12])
+def test_refining_the_mesh_does_not_improve_reciprocity_at_any_rule(n_points):
+    """The counterintuitive half, and the reason the quadrature is the fix rather than a finer
+    mesh: refining a closed box brings each facet's neighbours proportionally closer, so the
+    ratio the quadrature error depends on never changes and the residual sits flat."""
+    residuals = [
+        reciprocity_residual(
+            build_transfer(box(n), self_occlusion=False, receiver_quadrature=n_points), box(n).area
+        )
         for n in (1, 2, 4)
     ]
-    assert all(0.2 < value < 0.3 for value in residuals), residuals
-    assert max(residuals) - min(residuals) < 1e-6, "it converged; the docstring is now wrong"
+    assert max(residuals) - min(residuals) < 1e-6, residuals
+
+
+def test_the_area_weighting_of_reciprocity_multiplies_the_row_not_the_column():
+    """``geometric[i, j]`` is the form factor *from* ``i`` *to* ``j``, so reciprocity pairs
+    ``A_i F_ij`` with ``A_j F_ji``.
+
+    Putting the area on the column index is the identical expression on any fixture whose facets
+    share one area — which every box built by subdividing a cube does, so the cube tests above
+    cannot see the difference at all. On an enclosure stretched to three times its length the
+    correct pairing converges with the quadrature while the transposed one sits near 0.9 at every
+    rule; that gap is what this test is for.
+    """
+    surfaces = stretched_box(2)
+    area = np.asarray(surfaces.area)
+    assert len(np.unique(np.round(area, 12))) > 1, "the fixture must have unequal areas"
+
+    residuals = [
+        reciprocity_residual(
+            build_transfer(surfaces, self_occlusion=False, receiver_quadrature=n), area
+        )
+        for n in (1, 3, 6, 12)
+    ]
+    assert residuals == sorted(residuals, reverse=True), residuals
+    assert residuals[-1] < 0.02, residuals
+
+    # What the transposed weighting would report on the same matrices: near 0.9 throughout, and
+    # flat, so it is distinguishable both by size and by its refusal to converge.
+    matrix = np.asarray(build_transfer(surfaces, self_occlusion=False).geometric)
+    transposed = area[None, :] * matrix
+    mismatch = np.max(np.abs(transposed - transposed.T)) / np.max(np.abs(transposed))
+    assert mismatch > 0.5, mismatch
+
+
+def test_reciprocity_is_near_exact_between_two_facets_far_apart():
+    """Separating the two error sources: with the facets a hundred widths apart the transfer
+    integrand barely varies over either of them, so the quadrature is not the limitation and what
+    is left is the weighting. Unequal areas — 1 against 100 — make a wrong index unmissable.
+    """
+    corners = np.array([[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]])
+
+    def square(half, height, facing_up):
+        plane = np.concatenate([corners * 2.0 * half, np.full((4, 1), height)], axis=1)
+        triangles = np.array([plane[[0, 1, 2]], plane[[0, 2, 3]]])
+        return triangles if facing_up else triangles[:, ::-1, :]
+
+    surfaces = Surfaces.from_triangles(
+        np.concatenate([square(0.5, 0.0, True), square(5.0, 100.0, False)])
+    )
+    area = np.asarray(surfaces.area)
+    np.testing.assert_allclose(np.sort(area), [0.5, 0.5, 50.0, 50.0])
+    assert reciprocity_residual(build_transfer(surfaces, self_occlusion=False), area) < 1e-6
 
 
 def test_point_sources_take_no_part_in_the_transfer():
@@ -219,12 +325,15 @@ def test_a_narrow_source_sends_its_emission_somewhere_different():
 def test_only_a_lambertian_source_balances_its_energy_exactly(exponent):
     """A limitation with a number on it, rather than an assumption left implicit.
 
-    The source's own distribution is evaluated at the centroid direction, the same one-point rule
-    the receiver gets. For a Lambertian source it cancels against the projected solid angle and
-    the total landing on a closed box equals the total leaving, exactly, at every refinement. For
-    a cosine-power source it does not: measured balances are 1.145 / 0.970 / 0.970 / 0.981 at 12,
-    48, 192 and 768 facets for an exponent of 8, and 1.069 / 1.007 / 0.995 / 0.995 for an
-    exponent of 2. It shrinks as the receiving facets shrink and more directions are sampled.
+    The source's own distribution is still evaluated at **one** direction — from the source's
+    centroid to the receiver's — because it has to stay outside the frozen build to keep its
+    parameters differentiable. Quadrature over the receiver therefore does not fix this one, and
+    measurably does not: at the six-point default the balance is 1.086 / 0.978 / 0.982 / 0.987 at
+    12, 48, 192 and 432 facets for an exponent of 8, against 1.145 / 0.970 / 0.970 / 0.977 at one
+    point, and the two agree to three figures from three points upward. For a Lambertian source
+    the distribution cancels against the projected solid angle and the balance is exact at every
+    refinement and every rule. What does shrink this error is refining the mesh, which samples
+    more directions.
     """
     surfaces = box(1, emission=1.0, reflectance=0.0, profiles=(CosinePower(exponent),))
     fine = box(4, emission=1.0, reflectance=0.0, profiles=(CosinePower(exponent),))
@@ -418,17 +527,50 @@ def test_a_lamp_among_dark_walls_lights_all_of_them():
     outgoing, _ = radiosity(build_transfer(surfaces, self_occlusion=False), surfaces)
     assert float(jnp.min(outgoing)) > 0.0, "reflection reaches every facet"
     assert float(jnp.max(outgoing)) > float(jnp.min(outgoing))
-    # What the lamp emits is what the walls swallow, and the closeness of that balance is
-    # worth a number rather than a tolerance pulled from the air. It is NOT exact, because
-    # global conservation needs reciprocity and this matrix evaluates the receiver at a point:
-    # per column the identity ``sum_i A_i F_ij = A_j`` is violated by up to 8.9%. Summed over
-    # a whole enclosure those column errors cancel almost entirely, leaving a balance measured
-    # at 1.000000 / 0.999868 / 1.000112 / 1.000083 / 1.000062 on boxes of 12 to 768 facets.
+    # What the lamp emits is what the walls swallow. Global conservation needs reciprocity, so
+    # it is not exact, but at the default six-point rule it is close: absorbed over emitted
+    # measures 1.000000 / 1.000212 / 1.000171 / 1.000120 / 1.000102 on boxes of 12, 48, 192, 432
+    # and 768 facets, with this scene's four emitting facets and reflectance 0.9 throughout.
     area = np.asarray(surfaces.area)
     landing, _ = surface_irradiance(build_transfer(surfaces, self_occlusion=False), surfaces)
     emitted = float(np.sum(area * np.asarray(surfaces.emission)))
     absorbed = float(np.sum(area * (1.0 - 0.9) * np.asarray(landing)))
     assert absorbed == pytest.approx(emitted, rel=1e-3)
+
+
+def _absorbed_over_emitted(surfaces, n_points):
+    area = np.asarray(surfaces.area)
+    transfer = build_transfer(surfaces, self_occlusion=False, receiver_quadrature=n_points)
+    landing, _ = surface_irradiance(transfer, surfaces)
+    absorbed = float(np.sum(area * (1.0 - 0.9) * np.asarray(landing)))
+    return absorbed / float(np.sum(area * np.asarray(surfaces.emission)))
+
+
+def test_integrating_the_receiver_is_what_keeps_a_fine_mesh_conservative():
+    """The defect the quadrature was added for, in the form a user would meet it.
+
+    Sampling the receiver at its centroid does not merely cost a fixed amount of conservation —
+    on a small lamp in a large box it gets **worse** as the mesh is refined, because the facets
+    nearest the lamp close in on it while staying the same size relative to their separation.
+    Measured on this scene at one point per receiver: 1.000000, 0.999868, 0.982769, 0.975625 and
+    0.973077 at 12, 48, 192, 432 and 768 facets — 2.7% of the lamp's output unaccounted for, and
+    still growing. At the six-point default the same series is 1.000000, 1.000212, 1.000171,
+    1.000120 and 1.000102, improving rather than degrading.
+
+    Note which fixture cannot see any of this: a box where *every* facet emits balances to
+    1.000000 at every mesh and every rule, because then each facet's error is its neighbour's and
+    they cancel identically. That is the same blindness the lamp-in-a-dark-box fixture exists for.
+    """
+    vertices = inward_box(4)
+    emission = np.zeros(len(vertices))
+    emission[:4] = 100.0
+    surfaces = Surfaces.from_triangles(vertices, emission=emission, reflectance=0.9)
+
+    assert _absorbed_over_emitted(surfaces, 6) == pytest.approx(1.0, rel=1e-3)
+    assert abs(_absorbed_over_emitted(surfaces, 1) - 1.0) > 1e-2, "the one-point rule was fine?"
+
+    everywhere = Surfaces.from_triangles(vertices, emission=np.ones(len(vertices)), reflectance=0.9)
+    assert _absorbed_over_emitted(everywhere, 1) == pytest.approx(1.0, rel=1e-9)
 
 
 def test_a_componentwise_stopping_rule_cannot_solve_this_and_a_global_one_can():
