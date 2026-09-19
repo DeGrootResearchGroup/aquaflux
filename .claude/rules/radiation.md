@@ -24,9 +24,11 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `profiles.py` — `Isotropic`, `Lambertian`, `CosinePower` | **BUILT** |
 | `gather.py` — `fluence_rate` and `irradiance` | **BUILT** |
 | `absorption.py` — `UniformAbsorption`, `VoxelAbsorption` | **BUILT** |
+| `occluders.py` — `Cylinder`, `HalfSpace` | **BUILT** |
+| `visibility.py` — the frozen shadow mask | **BUILT** |
 | the radiosity system | Not yet built |
 | Beer–Lambert optical depth, voxel-grid traversal | Not yet built |
-| occlusion against the surface triangles | Not yet built |
+| occlusion against the emitting geometry's own triangles | Not yet built |
 
 ## ⚠️ THERE ARE TWO SOLID-ANGLE KERNELS AND THEY ARE NOT INTERCHANGEABLE
 
@@ -338,6 +340,59 @@ and a half at depth and both look plausible, so the test pins each to its quanti
 
 Sweep to `kappa x >= 2`. At small optical depth `exp(-t) ~ 1 - t` and the exponential integrals
 sit close to it, so a shallow sweep cannot separate them.
+
+## Occlusion splits into a frozen half and a live half
+
+`blocked` — does this body lie across this segment — is a hard yes or no fixed by geometry,
+computed once at build and stored. `transmittance` — how much it lets through — is a number
+supplied at every call and differentiated with respect to.
+
+```
+surviving = product over bodies of [ 1 - blocked * (1 - transmittance) ]
+```
+
+**Freezing the mask costs nothing, because the frozen thing is a staircase.** Move a body by a
+hair and nothing changes until a shadow edge sweeps past a receiver, then the answer jumps. So
+`dG/d(occluder geometry)` is **exactly zero, by construction**, and the test says so as a
+contract rather than discovering it. `dG/d(transmittance)` is exact and matches a finite
+difference.
+
+⚠️ **The mask is indexed by receiver**, so one built for one set of points and used with another
+puts every shadow in the wrong place and raises nothing of its own. `Visibility` carries its
+receivers and the gather checks them.
+
+⚠️ **A mask supplied without transmittances defaults to OPAQUE.** Defaulting the other way makes
+a forgotten argument look like a working occlusion model that happens to do nothing.
+
+**Memory:** the mask is `(n_occluders, n_receivers, n_facets)` — a hundred million entries per
+body at production size, stored as bytes. Packing to bits is the obvious eightfold saving if it
+ever matters.
+
+## ⚠️ FORM THE CYLINDER'S DISCRIMINANT AS `a(r^2 - h^2)`, NEVER AS `b^2 - a c`
+
+The naive form subtracts two nearly equal numbers exactly when a ray almost grazes the surface,
+which at *any* precision throws away most of the significant digits. Measured over eighteen
+near-tangential cases — three source distances, offsets a few parts in `1e9` to `1e13` either
+side of the radius — the naive form misclassifies **eight**, and every one in the dangerous
+direction: it reports a discriminant of exactly zero for a ray that does pass inside, so **light
+leaks through a body that should stop it**. The reformulation, which builds the closest-approach
+distance as a vector difference, gets all eighteen right.
+
+This is the ordinary geometry here, not a corner case: a sleeve sits at essentially the radius of
+the lamp facets it surrounds.
+
+Three more pieces of hygiene, each pinned by a mutation: clamp the hit to the segment (a body
+beyond the receiver does not occlude), exclude a sliver next to the source **sized as a fraction
+of the facet's own `sqrt(area)`** rather than absolutely (one length scale in the module; a fixed
+epsilon gives self-shadowing when small and light leaks when large), and clip the cylinder to its
+flat ends.
+
+**A point inside a body is refused at build.** It is embedded in the solid, not shadowed by it,
+and nothing computed there means anything. Both facets and receivers are checked.
+
+**Do not represent a body twice.** A sleeve that is already an emitting surface must not also be
+an occluder: every ray would leave a facet lying exactly on an occluder, and the emitter's own
+convexity already makes the source-side clamp an exact visibility test for it.
 
 ## Documentation
 
