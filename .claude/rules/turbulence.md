@@ -1824,7 +1824,7 @@ Many entries below are dated history written against the old API. Read them thro
 
 ## Initialization, diagnostics, Reynolds continuation
 
-- **`initialization.py` — `hybrid_initialize` (cold-start, the reason `solve_coupled` self-starts).**
+- **`initialization.py` — `sst_initial_fields`, registered as `hybrid_initialize(coupled)`'s initializer (cold-start, the reason `solve_coupled` self-starts).** ⚠️ **`hybrid_initialize` is no longer turbulence's (2026-09-19): it is `aquaflux.initialization.hybrid_initialize`, a `functools.singledispatch` on the problem's type, and this module's function is the SST body under the name `sst_initial_fields(momentum, turbulence, *, k_floor, omega_floor, length_scale_factor)`.** `CoupledRANS` is registered in `coupled.py` (settings pass through); `aquaflux.turbulence.hybrid_initialize` no longer exists. Every entry below that says `hybrid_initialize(momentum, turbulence)` describes `sst_initial_fields`; `hybrid_initialize(coupled)` is the call.
   ⚠️ **It takes NO `gradient_scheme` argument (#361, 2026-09-16).** k and omega are smoothed with
   `turbulence.gradient_scheme` and the flow through `potential_flow`, which reads
   `momentum.gradient_scheme` — each field's initial condition reconstructed the way its own residual

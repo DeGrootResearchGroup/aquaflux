@@ -55,13 +55,14 @@ sys.path.insert(0, str(CASE))
 sys.path.insert(0, str(CASE.parents[1]))
 
 import compare  # noqa: E402
+from aquaflux.initialization import hybrid_initialize
 from aquaflux.solve import (  # noqa: E402
     ColumnProbePlan,
     block_stencil_colouring,
     block_stencil_gather_map,
     materialize_block_jacobian,
 )
-from aquaflux.turbulence import coupled_jacobian_probe, hybrid_initialize  # noqa: E402
+from aquaflux.turbulence import coupled_jacobian_probe  # noqa: E402
 
 OUT = CASE / "checkpoints"
 TRAILING_NPZ = OUT / "trailing_scoped_probe_full.npz"
@@ -77,7 +78,7 @@ def peak_bytes() -> int:
 
 def cold_state(coupled):
     """The hybrid initial field at this case's own viscosity -- no march, seconds not minutes."""
-    flow, k, omega = hybrid_initialize(coupled.momentum, coupled.turbulence)
+    flow, k, omega = hybrid_initialize(coupled)
     return np.asarray(coupled.state_from_physical(flow, k, omega), dtype=np.float64)
 
 

@@ -25,6 +25,7 @@ import numpy as np
 
 from aquaflux.boundary import BoundaryConditions, Dirichlet, Neumann, ZeroGradient
 from aquaflux.discretization import DiffusionFlux, FixedValueCells, ResidualAssembler
+from aquaflux.initialization import hybrid_initialize
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.solve import (
     build_smoothed_hierarchy,
@@ -36,13 +37,12 @@ from aquaflux.solve import (
 from aquaflux.vectors import dot
 
 from .boundary import PressureOutlet, VelocityInlet
+from .momentum import MomentumContinuity
 from .scales import body_force_velocity
 
 if TYPE_CHECKING:
     from aquaflux.mesh import Mesh, MeshGeometry
     from aquaflux.schemes import GradientScheme
-
-    from .momentum import MomentumContinuity
 
 
 def _laplace_preconditioner(
@@ -125,7 +125,7 @@ def laplace_field(
     gradient_scheme : GradientScheme or None
         Injected so the returned assembler can reconstruct the cell gradient; ``None`` disables the
         non-orthogonal correction in the operator. Pass the scheme the field's own residual uses --
-        :func:`potential_flow` and :func:`~aquaflux.turbulence.hybrid_initialize` both read it off
+        :func:`potential_flow` and ``aquaflux.initialization.hybrid_initialize`` both read it off
         the assembler they are initializing for exactly that reason.
     fixed_cells, fixed_values : jnp.ndarray or None
         Optional cell-value fixation (e.g. a datum cell when there is no Dirichlet patch, or near-wall
@@ -305,3 +305,14 @@ def potential_flow(momentum: MomentumContinuity) -> jnp.ndarray:
     # datum; a body-force / closed domain returned above, and its varying pressure is nearly uniform.
     pressure = bernoulli_pressure(momentum, velocity)
     return momentum.pack(velocity, pressure)
+
+
+@hybrid_initialize.register(MomentumContinuity)
+def _initialize_flow(momentum: MomentumContinuity, **settings: object) -> jnp.ndarray:
+    """The flow's hybrid initial state: :func:`potential_flow`, which takes no settings."""
+    if settings:
+        raise TypeError(
+            f"the flow initializer takes no settings, got {sorted(settings)}. Potential flow reads "
+            "everything it needs from the assembler."
+        )
+    return potential_flow(momentum)

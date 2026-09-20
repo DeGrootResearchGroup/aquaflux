@@ -49,6 +49,7 @@ sys.path.insert(0, str(CASE))
 import compare  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
+from aquaflux.initialization import hybrid_initialize
 from aquaflux.solve import (  # noqa: E402
     FieldGroups,
     MonolithicAmgPreconditioner,
@@ -59,7 +60,6 @@ from aquaflux.solve import (  # noqa: E402
     restart_cycles,
     solve_linear,
 )
-from aquaflux.turbulence import hybrid_initialize  # noqa: E402
 from aquaflux.turbulence.coupled import _coupled_jacobian_plan  # noqa: E402
 from field_split_probe import STATES, load_state, materialize  # noqa: E402
 from jax.experimental.sparse import BCOO  # noqa: E402
@@ -217,7 +217,7 @@ def main() -> None:
             f"GMRES to rtol {RTOL:.0e} on the TRUE residual (restart 15)\n{'=' * 118}",
             flush=True,
         )
-        flow, k, omega = hybrid_initialize(coupled.momentum, coupled.turbulence)
+        flow, k, omega = hybrid_initialize(coupled)
         state = coupled.state_from_physical(flow, k, omega)
 
     residual0 = float(jnp.linalg.norm(coupled.residual(state)))

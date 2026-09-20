@@ -31,9 +31,9 @@ from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
     bulk_velocity,
-    hybrid_initialize,
     scalar_pseudo_transient_solve,
     solve_segregated,
+    sst_initial_fields,
 )
 
 # The scalar march's cap is a backstop, not a cost: the solver exits on tolerance, so a generous
@@ -89,7 +89,7 @@ def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=100):
     # A uniform k leaves the first sweep's residual essentially unchanged for ~30 pseudo-transient
     # steps, so the SER schedule's beta never relaxes and the march exhausts its budget before the
     # residual moves. The hybrid IC descends from the first step (>200 steps -> 37 here).
-    flow0, k0, omega0 = hybrid_initialize(momentum, turbulence)
+    flow0, k0, omega0 = sst_initial_fields(momentum, turbulence)
     flow, k, omega = solve_segregated(
         momentum,
         turbulence,

@@ -49,8 +49,8 @@ CASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
+from aquaflux.initialization import hybrid_initialize
 from aquaflux.solve import block_stencil_colouring  # noqa: E402
-from aquaflux.turbulence import hybrid_initialize  # noqa: E402
 from column_reach_probe import graph_distance  # noqa: E402
 
 #: Field order of the coupled state.
@@ -131,7 +131,7 @@ def rung_states(case, scales):
     frozen = jax.lax.stop_gradient(coupled)
     for scale in scales:
         companion = frozen.with_scaled_molecular_viscosity(scale)
-        flow, k, omega = hybrid_initialize(companion.momentum, companion.turbulence)
+        flow, k, omega = hybrid_initialize(companion)
         label = "target Re" if scale == 1.0 else f"Re/{scale:g}"
         yield label, companion, np.asarray(companion.state_from_physical(flow, k, omega))
 

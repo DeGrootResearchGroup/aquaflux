@@ -15,6 +15,7 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
 import pytest
+from aquaflux.initialization import hybrid_initialize
 from aquaflux.solve import Convergence
 from aquaflux.turbulence import (
     BlockDiagonal,
@@ -131,6 +132,5 @@ def test_adjoint_matches_a_direct_solve_and_is_point_count_independent(channel) 
 
 
 def _hybrid(coupled):
-    from aquaflux.turbulence import hybrid_initialize
 
-    return hybrid_initialize(coupled.momentum, coupled.turbulence)
+    return hybrid_initialize(coupled)

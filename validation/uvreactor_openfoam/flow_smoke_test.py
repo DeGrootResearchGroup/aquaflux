@@ -34,6 +34,7 @@ sys.path.insert(0, str(HERE.parents[1]))
 
 import aquaflux  # noqa: E402,F401  (enables x64)
 import jax.numpy as jnp  # noqa: E402
+from aquaflux.turbulence import sst_initial_fields
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient  # noqa: E402
 from aquaflux.discretization import FirstOrderUpwind, LimitedUpwind  # noqa: E402
 from aquaflux.flow import (  # noqa: E402
@@ -52,7 +53,6 @@ from aquaflux.turbulence import (  # noqa: E402
     SSTModel,
     SSTTurbulence,
     coupled_fields,
-    hybrid_initialize,
     solve_coupled,
 )
 
@@ -146,7 +146,7 @@ def main() -> None:
         flush=True,
     )
 
-    flow, k, omega = hybrid_initialize(momentum, turbulence)
+    flow, k, omega = sst_initial_fields(momentum, turbulence)
     state = coupled.state_from_physical(flow, k, omega)
 
     r0 = coupled.residual(state)

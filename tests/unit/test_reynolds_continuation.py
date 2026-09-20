@@ -19,6 +19,7 @@ import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, VelocityInlet
+from aquaflux.initialization import hybrid_initialize
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
@@ -433,7 +434,7 @@ def test_point_setup_builds_per_point_kwargs_and_materializes_the_first_seed(mon
 
     monkeypatch.setattr(reynolds, "solve_coupled", fake_solve_coupled)
     # Stub the hybrid start so the test stays structural (no real Laplace solve).
-    monkeypatch.setattr(reynolds, "hybrid_initialize", lambda momentum, turbulence: fields)
+    monkeypatch.setattr(reynolds, "hybrid_initialize", lambda assembler: fields)
 
     setups = []
 
@@ -478,7 +479,7 @@ def test_point_setup_receives_the_points_position_in_the_ramp(monkeypatch) -> No
     fields = (jnp.zeros((dim + 1) * n), jnp.full(n, 0.5), jnp.full(n, 100.0))
 
     monkeypatch.setattr(reynolds, "solve_coupled", lambda c, *a, **k: fields)
-    monkeypatch.setattr(reynolds, "hybrid_initialize", lambda momentum, turbulence: fields)
+    monkeypatch.setattr(reynolds, "hybrid_initialize", lambda assembler: fields)
 
     seen = []
 
@@ -519,7 +520,7 @@ def test_seed_projection_replaces_the_state_the_point_actually_solves_from(monke
         return fields
 
     monkeypatch.setattr(reynolds, "solve_coupled", fake_solve_coupled)
-    monkeypatch.setattr(reynolds, "hybrid_initialize", lambda momentum, turbulence: fields)
+    monkeypatch.setattr(reynolds, "hybrid_initialize", lambda assembler: fields)
 
     def seed_projection(companion, state, point):
         return state.at[0].set(float(point.index))  # a marker only a projection could put there
@@ -574,7 +575,7 @@ def test_a_projection_that_declines_a_point_leaves_that_point_untouched(monkeypa
         return fields
 
     monkeypatch.setattr(reynolds, "solve_coupled", fake_solve_coupled)
-    monkeypatch.setattr(reynolds, "hybrid_initialize", lambda momentum, turbulence: fields)
+    monkeypatch.setattr(reynolds, "hybrid_initialize", lambda assembler: fields)
 
     solve_reynolds_continuation(
         coupled,
@@ -828,9 +829,8 @@ def _shift(coupled, state, damping, beta=0.5):
 
 
 def _seeded_state(coupled):
-    from aquaflux.turbulence import hybrid_initialize
 
-    return coupled.state_from_physical(*hybrid_initialize(coupled.momentum, coupled.turbulence))
+    return coupled.state_from_physical(*hybrid_initialize(coupled))
 
 
 def test_turbulence_damping_scales_the_closures_rows_and_leaves_the_flow_rows_alone() -> None:
@@ -1280,24 +1280,20 @@ def test_scaling_momentum_only_makes_the_anchor_and_target_hybrid_starts_IDENTIC
     viscosity ratio -- the whole reason the ramp arm has to be explicit about which one it opens from.
     Leaving the closure alone makes the two seeds the same fields, so the question cannot be got wrong.
     """
-    from aquaflux.turbulence import hybrid_initialize, scale_both_blocks, scale_momentum_only
+    from aquaflux.turbulence import scale_both_blocks, scale_momentum_only
 
     coupled = _tiny_coupled()
-    target = hybrid_initialize(coupled.momentum, coupled.turbulence)
+    target = hybrid_initialize(coupled)
 
     momentum_only = scale_momentum_only(coupled, 100.0)
-    for mine, theirs in zip(
-        hybrid_initialize(momentum_only.momentum, momentum_only.turbulence), target, strict=True
-    ):
+    for mine, theirs in zip(hybrid_initialize(momentum_only), target, strict=True):
         assert jnp.allclose(mine, theirs)
 
     # The contrast that makes the point: scaling both blocks moves the seed.
     both = scale_both_blocks(coupled, 100.0)
     assert not all(
         jnp.allclose(mine, theirs)
-        for mine, theirs in zip(
-            hybrid_initialize(both.momentum, both.turbulence), target, strict=True
-        )
+        for mine, theirs in zip(hybrid_initialize(both), target, strict=True)
     )
 
 
@@ -1338,7 +1334,7 @@ def _ramp_arm_fixtures(monkeypatch):
         return fields
 
     monkeypatch.setattr(reynolds, "solve_coupled", fake_solve_coupled)
-    monkeypatch.setattr(reynolds, "hybrid_initialize", lambda momentum, turbulence: fields)
+    monkeypatch.setattr(reynolds, "hybrid_initialize", lambda assembler: fields)
     return coupled, calls, fields
 
 
@@ -1429,7 +1425,8 @@ def test_the_ramp_arm_seeds_the_hybrid_start_from_the_anchor_not_from_the_target
     coupled, _, fields = _ramp_arm_fixtures(monkeypatch)
     seeded_with: list[float] = []
 
-    def recording_hybrid_initialize(momentum, turbulence):
+    def recording_hybrid_initialize(assembler):
+        momentum = assembler.momentum
         seeded_with.append(float(momentum.properties.properties["viscosity"].value / (RHO * NU)))
         return fields
 

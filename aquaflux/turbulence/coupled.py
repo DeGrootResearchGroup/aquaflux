@@ -59,6 +59,7 @@ from aquaflux.flow.mean_velocity import (
     _constraint_vectors,
     _with_body_force,
 )
+from aquaflux.initialization import hybrid_initialize
 from aquaflux.schemes import narrow_gradient_sweeps
 from aquaflux.solve import (
     DEFAULT_GLOBALIZATION,
@@ -118,7 +119,7 @@ from aquaflux.solve import (
     stop_array_gradients,
 )
 
-from .initialization import hybrid_initialize, wall_consistent_omega
+from .initialization import wall_consistent_omega
 from .march_settings import CoupledShiftSettings
 from .preconditioner import (
     ScalarBlock,
@@ -129,8 +130,7 @@ from .preconditioner import (
 from .preconditioner_spec import BlockDiagonal
 from .sources import production_and_limit
 
-# The default pseudo-time shift basis (full operator diagonal = uniform under-relaxation), held as a
-# module singleton so it is not reconstructed in each function's argument defaults.
+# The default pseudo-time shift basis (full operator diagonal = uniform under-relaxation), a singleton.
 _DEFAULT_SHIFT_BASIS = LocalCourantBasis()
 
 if TYPE_CHECKING:
@@ -2954,7 +2954,7 @@ def solve_coupled(
         strategy_kwargs,
     )
     if flow is None or k is None or omega is None:
-        flow, k, omega = hybrid_initialize(frozen.momentum, frozen.turbulence)
+        flow, k, omega = hybrid_initialize(frozen)
     # `flow, k, omega` are the physical initial condition; map into the solved-variable space (the
     # identity for DirectScalars, log for LogScalars) so the march iterates on the right unknown.
     state = frozen.state_from_physical(*stop_array_gradients((flow, k, omega)))
@@ -3270,7 +3270,7 @@ def solve_coupled_mass_flow(
             "solve_coupled_mass_flow",
         )
     if flow is None or k is None or omega is None:
-        flow, k, omega = hybrid_initialize(coupled.momentum, coupled.turbulence)
+        flow, k, omega = hybrid_initialize(coupled)
     # Map the physical initial condition into the solved-variable space (identity for DirectScalars,
     # log for LogScalars) so the constrained Newton march iterates on the right scalar unknown.
     state = coupled.state_from_physical(flow, k, omega)

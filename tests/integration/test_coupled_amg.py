@@ -39,6 +39,7 @@ from aquaflux.turbulence import (
     coupled_step,
     open_session,
     solve_coupled,
+    sst_initial_fields,
 )
 
 from tests.integration.test_coupled_lu import PRECONDITIONER, _channel
@@ -68,9 +69,8 @@ SMOOTHER_FILL = 2
 def case():
     momentum, turbulence = _channel()
     coupled = CoupledRANS.build(momentum, turbulence)
-    from aquaflux.turbulence import hybrid_initialize
 
-    start = hybrid_initialize(momentum, turbulence)
+    start = sst_initial_fields(momentum, turbulence)
     return {"coupled": coupled, "start": start}
 
 
@@ -304,12 +304,11 @@ def test_sharing_one_preconditioner_makes_a_new_rung_a_march_step_cache_hit() ->
     the viscosity must be an array rather than a float (see :func:`_continuation_ready`).
     """
     from aquaflux.solve.march import _march_step
-    from aquaflux.turbulence import hybrid_initialize
 
     momentum, turbulence = _channel()
     momentum = _continuation_ready(momentum)
     coupled = CoupledRANS.build(momentum, turbulence)
-    state = coupled.pack_state(*hybrid_initialize(momentum, turbulence))
+    state = coupled.pack_state(*sst_initial_fields(momentum, turbulence))
     # The next rung of a ramp: the same case at a tenth of the Reynolds number.
     companion = coupled.with_scaled_molecular_viscosity(10.0)
     spec = MaterializedJacobian(MonolithicVCycle())

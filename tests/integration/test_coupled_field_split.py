@@ -39,7 +39,7 @@ from aquaflux.solve import (
     restart_cycles,
     solve_linear,
 )
-from aquaflux.turbulence import CoupledRANS, coupled_step, hybrid_initialize
+from aquaflux.turbulence import CoupledRANS, coupled_step, sst_initial_fields
 from aquaflux.turbulence.coupled import _coupled_jacobian_plan
 
 from tests.integration.test_coupled_lu import _channel
@@ -50,7 +50,7 @@ def case():
     """A small turbulent channel, its cold state, and the assembled coupled Jacobian there."""
     momentum, turbulence = _channel()
     coupled = CoupledRANS.build(momentum, turbulence)
-    flow, k, omega = hybrid_initialize(momentum, turbulence)
+    flow, k, omega = sst_initial_fields(momentum, turbulence)
     state = coupled.pack_state(flow, k, omega)
     n_fields = coupled.layout.n_fields
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
@@ -181,7 +181,7 @@ def test_the_split_continuation_converges_to_the_monolithic_fixed_point():
 
     momentum, turbulence = _channel()
     coupled = CoupledRANS.build(momentum, turbulence)
-    flow, k, omega = hybrid_initialize(momentum, turbulence)
+    flow, k, omega = sst_initial_fields(momentum, turbulence)
     reference = coupled.pack_state(flow, k, omega)
 
     # The monolithic arm takes the fixture's extra level of smoother fill, for the reason recorded at

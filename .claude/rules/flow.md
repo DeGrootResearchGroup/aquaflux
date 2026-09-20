@@ -594,6 +594,22 @@ Engineering Principles.
   / `damped_jacobi_solve` remain in `preconditioner.py` (still directly unit-tested); the composed Stage-1
   strategy is gone.
 
+## Hybrid initialization is generic (2026-09-19) — `aquaflux.initialization.hybrid_initialize`
+
+`hybrid_initialize(problem, **settings)` is a `functools.singledispatch` in a neutral top-level module that
+imports no physics; each package registers the types it owns beside them (**`flow/initialization.py`
+registers `MomentumContinuity` → `potential_flow`**, taking no settings; `transport/initialization.py`
+registers `ScalarTransport` → the harmonic interpolant of its Dirichlet boundary values, zero when nothing
+is prescribed; `turbulence/coupled.py` registers `CoupledRANS` → `sst_initial_fields`). It used to be the SST
+initializer under a general name — `(momentum, turbulence)` → `(flow, k, omega)` — so a laminar flow or a
+species could not use it. **A new problem type registers its own; do not add a branch to a central
+function.** An unregistered type raises `TypeError` naming it. `solve_flow_march(state=None)` starts from
+`potential_flow`, i.e. the same initializer. ⚠️ **On the tetrahedral duct
+(`validation/tetrahedral_gradient_ab`) potential flow is reported to stagnate** (the reconstruction
+Jacobian's condition number ~3e19, measured for a scalar Laplace problem in `compare.py`) — that is a
+solver problem on that mesh and this dispatch does not change it; whether the laminar `potential_flow`
+itself fails there has **not** been tested.
+
 ## The flow march — `solve_flow_march` / `flow_march_step` / `FlowMeasures` (BUILT 2026-09-19, #448)
 
 A laminar problem runs on the **same staged march as the turbulent one** (`solve.staged_march`,

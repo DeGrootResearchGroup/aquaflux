@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
+from aquaflux.initialization import hybrid_initialize
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import (
@@ -59,7 +60,6 @@ from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
     coupled_step,
-    hybrid_initialize,
     inlet_k,
     inlet_omega,
     solve_coupled,
@@ -167,7 +167,7 @@ def cap_activity(coupled, flow, k, omega):
 def solve(nu, *, explicit_limiter, state=None):
     """Converge the coupled channel; returns the physical fields."""
     coupled = build_case(nu, explicit_limiter=explicit_limiter)
-    f0, k0, o0 = hybrid_initialize(coupled.momentum, coupled.turbulence) if state is None else state
+    f0, k0, o0 = hybrid_initialize(coupled) if state is None else state
     return coupled, solve_coupled(
         coupled,
         f0,
@@ -250,7 +250,7 @@ def main() -> None:
         "\n[3] gradient through the converged solve, against central finite differences ...",
         flush=True,
     )
-    seed = hybrid_initialize(coupled_on.momentum, coupled_on.turbulence)
+    seed = hybrid_initialize(coupled_on)
     h = NU * 1e-3
     exact_fn = objective(NU, explicit_limiter=False, seed=seed)
     fd = (float(exact_fn(NU + h)) - float(exact_fn(NU - h))) / (2 * h)
