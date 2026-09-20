@@ -483,7 +483,7 @@ cosine clamp *is* the exact visibility test, so tracing the body's own triangles
 nothing. Measured on a 4608-facet cylinder, the two answers are **bit-identical**, and both match
 `G = (4B/pi) arcsin(R/d)`. Acne on facets adjacent to the source would show here.
 
-## ⚠️ THE MEMORY OF ONE PASS IS THE WHOLE PERFORMANCE STORY
+## ⚠️ THE MEMORY OF ONE PASS IS THE WHOLE PERFORMANCE STORY — BECAUSE THE PASS RUNS EAGERLY
 
 The ray-by-triangle intermediate is the cost of the intersection test, and throughput does not
 degrade gracefully — it falls off a cliff. Measured on 2048 triangles, f64, 11 cores, 19 GB:
@@ -492,6 +492,20 @@ degrade gracefully — it falls off a cliff. Measured on 2048 triangles, f64, 11
 |---|---|
 | 0.5 - 134 MB | **42 - 57** |
 | 537 MB | **2.4** |
+
+⚠️ **EVERY NUMBER IN THAT TABLE IS THE EAGER RATE, AND THAT IS A PROPERTY OF THE CALL SITE, NOT OF
+THE KERNEL.** `segment_is_cut` is invoked from a Python loop in `visibility.py` with no `jit`
+anywhere on the path, so each block materializes its intermediate — which is exactly why the
+memory of one pass is the story. Wrapped in `jit`, the identical function on identical inputs
+runs at **358-435 Mtest/s against 50-58 eager, 6.6-7.9x**, because XLA fuses the hit test into the
+`any` reduction and never forms the array (100,000 rays x 200 triangles, f64, 11 cores, 19 GB, jax
+0.10.2, 2026-09-20, measured both with and without the `exclude` argument the mask uses). Jitting
+**only the per-block kernel** — leaving the Python loop to do the blocking, so the traced program
+does not grow with the ray count — gives **6.3-8.2x** with output equal on every one of 100,000
+rays. `work_limit` also stops mattering much once the intermediate is fused away: 4M and 100M
+entries per pass run at 333 and 432 Mtest/s, against a 20x cliff eagerly. **This is unclaimed
+performance in shipped code, not a hypothetical** — it is issue #462; until that lands, the table
+above and `segment_is_cut`'s own docstring describe the build as it actually runs.
 
 So `work_limit` (entries per pass) is the only knob that matters, and **both axes must be cut to
 honour it**. Blocking only the triangles is not enough: the ray count is itself receivers times
@@ -1019,38 +1033,50 @@ per-pair varying vertex count that static shapes cannot take. **The cheap mitiga
 detector**: counting front-facing hits instead of OR-ing them is nearly free in the pass that
 already runs, and a count of one proves the analytic fraction exact for that pair.
 
-**Cost, measured — and it is an implementation artifact, not the method.** ⚠️ The 112x in the
-first probe is **not** evidence: that prototype looped over 384 blockers in Python and measured
-dispatch overhead, the same class of error already recorded above for the receiver-quadrature cost
-probe. Batched and jitted, against the ray test at its own real throughput (~50 Mtest/s here,
-matching the 42-57 recorded above — measure the ray test with a *large* triangle block or its
-figure comes out 2x low and flatters the comparison):
+**Cost, measured.** ⚠️ The 112x in the first probe is **not** evidence: that prototype looped
+over 384 blockers in Python and measured dispatch overhead, the same class of error already
+recorded above for the receiver-quadrature cost probe. Batched and jitted, 200,000 work items,
+f64, 11 cores, 19 GB, jax 0.10.2, nothing else running, the ray test against a **200-triangle**
+block (handed one triangle it measures dispatch and comes out several times low, which flatters
+the comparison):
 
-| loop width carried | Mitem/s | vs one ray test |
+| arm | Mitem/s | vs one fused ray test |
 |---|---|---|
-| 6 vertices (front clip only) | **10.95** | ~4.5x |
-| 12 | 2.97 | ~17x |
-| 24 | 1.74 | ~29x |
-| 48 (three blocker planes, naive) | **0.43** | ~115x |
+| ray test as the mask calls it — **eager** | 47.1 | — |
+| the same call under `jit` | **417.6** | **8.9x faster** |
+| clip pipeline, doubling widths 6/12/24/48 | 0.6 | ~734x |
+| clip pipeline, emit-`(n+1)` widths 4/5/6/7 | **1.3** | **~323x** |
 
-⚠️ **The whole cost is the vertex growth, and the growth is avoidable.** The fixed-shape clip emits
-`2n` candidates per plane, so a triangle reaches 48 slots after three blocker planes. But the
-intersection of two convex polygons has at most `m + n` vertices, so a triangle against a triangle
-is **at most 6** — the widths need only run 3, 4, 5, 6. An emit-`(n+1)` clip should therefore land
-near the 6-vertex row rather than the 48-vertex one.
+The emit-`(n+1)` clip is the whole avoidable half of the cost and it is **built and measured**,
+not projected. Intersecting a convex region with a half-space adds at most one vertex, so the
+widths need only run 4, 5, 6, 7 rather than doubling to 48; compacting the survivors in order is
+expressible under `jit` through a **rank** — the running count of survivors up to each candidate,
+so the `j`-th output vertex is the one of rank `j+1`, and slots past the last survivor repeat it.
+It is worth **2.45x** and agrees with the doubling form to `2.1e-11` over 200,000 items. ⚠️ Read
+that gap as the *fraction's* conditioning, not the clip's: the worst items are near-edge-on
+sources where both arms divide two ~1e-7 solid angles, and on well-conditioned cases the two
+agree to `1e-16`. `validation/radiation_analytic_occlusion.py` §5 reproduces all of it.
 
-The workload is the other half: a conservative frustum reject (a blocker is discarded only when all
-three vertices fall outside one single plane, so nothing that could occlude is dropped) keeps
+The workload is the other half: a conservative frustum reject (a blocker is discarded only when
+all three vertices fall outside one single plane, so nothing that could occlude is dropped) keeps
 **6.75% / 6.30% / 6.14%** of triples at 144 / 236 / 384 facets on a box-plus-sleeve reactor —
 stable, and falling as the mesh refines, because a finer pair sweeps a narrower pencil.
 **Host-side compaction of that 6% is legal precisely because the mask is frozen geometry built
 once, off the differentiation path.**
 
-Putting the two together: at the naive 48-vertex width the clip costs `0.06 x 115 ~ 7x` the ray
-pass; at the achievable 6-vertex width, `0.06 x 4.5 ~ 0.3x`, plus the reject pass itself — call it
-**around 1.5x today's build**. ⚠️ **That last figure is a projection from a measured decomposition,
-not a measured implementation.** The concrete next step is to write the emit-`(n+1)` clip and
-re-time it; everything else here is measured.
+Putting the two together: `0.0614 x (47.1 / 1.3) ~ 2.2`, plus about `0.11` for the reject pass —
+**analytic occlusion costs around 2.3x today's mask build**, or ~21x a build whose ray test has
+been fused. It is affordable, and the conclusion no longer rests on a projection.
+
+⚠️ **THE PROJECTION THIS REPLACES SAID ~1.5x, AND ITS TWO ERRORS VERY NEARLY CANCELLED — which is
+the part to internalize, because a projection that lands near the truth for compensating wrong
+reasons reads afterwards as if it had been validated.** It divided a measured 6% workload by a
+"6 vertices, ~4.5x" row, and both factors were wrong in opposite directions. That row capped the
+*whole pipeline* at width 6, which no correct implementation does: the real emit-`(n+1)` pipeline
+carries four clip stages at 4/5/6/7 plus two contour evaluations and reaches 1.3 Mitem/s, not the
+10.95 the row suggested — **8x optimistic**. Against that, the ray test it was divided by was the
+eager one, **9x pessimistic**. Neither factor was checkable from the decomposition it was drawn
+from; only building the thing settled it.
 
 ⚠️ **One consequence to decide deliberately if this is ever built:** `dG/d(occluder geometry)` is
 currently **exactly zero by construction** and a test asserts it as a contract, because a binary

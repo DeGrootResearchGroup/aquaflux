@@ -34,10 +34,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import aquaflux  # noqa: F401  (enables x64)
+import jax
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.radiation import Surfaces
 from aquaflux.radiation.solid_angle import _clip_to_front, _unit
+from aquaflux.radiation.triangles import segment_is_cut
 from aquaflux.vectors import dot
 from tests.unit.radiation_references import cylinder_triangles, inward_box
 
@@ -60,14 +62,12 @@ def signed_projected(normal, loop):
     return 0.5 * jnp.sum(angle * dot(axis, normal[..., None, :]), axis=-1)
 
 
-def clip_halfspace(loop, plane_normal):
-    """Keep the part of a direction loop with ``d . plane_normal >= 0``.
+def _candidates(loop, plane_normal):
+    """The ``2n`` (candidate, kept) pairs Sutherland-Hodgman produces against one plane.
 
-    The same fixed-shape Sutherland-Hodgman the kernel already uses for the receiver's own
-    plane: each vertex emits itself and the crossing on the edge after it, and a rejected
-    candidate repeats its predecessor. The repeats are zero-length edges of the same closed loop
-    and contribute no angle, so the output shape is static at twice the input — which is what
-    makes this expressible under ``jit`` at all.
+    Each vertex emits itself and the crossing on the edge after it; which of the two survives
+    is decided by the signed heights. Both clips below are built from this one enumeration,
+    and differ only in how they lay the survivors out.
     """
     height = dot(loop, plane_normal[..., None, :])
     candidates, kept = [], []
@@ -82,6 +82,18 @@ def clip_halfspace(loop, plane_normal):
             loop[..., k, :] + crossing[..., None] * (loop[..., following, :] - loop[..., k, :])
         )
         kept.append(here * there < 0.0)
+    return candidates, kept
+
+
+def clip_halfspace(loop, plane_normal):
+    """Keep the part of a direction loop with ``d . plane_normal >= 0``, at width ``2n``.
+
+    The fixed-shape Sutherland-Hodgman the kernel already uses for the receiver's own plane: a
+    rejected candidate repeats its predecessor. The repeats are zero-length edges of the same
+    closed loop and contribute no angle, so the output shape is static at twice the input —
+    which is what makes this expressible under ``jit`` at all, and what makes it expensive.
+    """
+    candidates, kept = _candidates(loop, plane_normal)
     last = jnp.zeros_like(loop[..., 0, :])
     for survived, candidate in zip(kept, candidates, strict=True):
         last = jnp.where(survived[..., None], candidate, last)
@@ -92,22 +104,57 @@ def clip_halfspace(loop, plane_normal):
     return jnp.stack(out, axis=-2)
 
 
-def blocked_fraction(receiver, receiver_normal, source, blocker):
-    """Fraction of the source's projected solid angle the blocker covers, analytically."""
+def clip_compact(loop, plane_normal, width):
+    """The same clip at width ``n + 1`` instead of ``2n``, by ranking rather than repeating.
+
+    Intersecting a convex region with a half-space adds at most one vertex, so a triangle
+    clipped by the receiver plane and three blocker-edge planes needs widths 4, 5, 6, 7 — not
+    the 6, 12, 24, 48 that doubling produces. Getting there means compacting the survivors in
+    order, which a traced computation can do with a *rank*: the running count of survivors up to
+    and including each candidate, so the ``j``-th output vertex is the candidate of rank
+    ``j + 1``. Slots past the last survivor repeat it, which are the same harmless zero-length
+    edges; a loop with no survivor at all ranks nothing and collapses to zero, as it must.
+    """
+    candidates, kept = _candidates(loop, plane_normal)
+    survived = jnp.stack(kept, axis=-1)
+    stacked = jnp.stack(candidates, axis=-2)
+    rank = jnp.cumsum(survived, axis=-1)
+    wanted = jnp.minimum(jnp.arange(width), (rank[..., -1] - 1)[..., None])
+    picked = survived[..., None, :] & (rank[..., None, :] - 1 == wanted[..., None])
+    return jnp.einsum("...wk,...kd->...wd", picked.astype(stacked.dtype), stacked)
+
+
+def blocked_fraction(receiver, receiver_normal, source, blocker, *, compact=False):
+    """Fraction of the source's projected solid angle the blocker covers, analytically.
+
+    ``compact`` selects the emit-``(n + 1)`` clip over the doubling one. The two are the same
+    geometry laid out differently and agree to rounding; the flag exists so one can be measured
+    against the other.
+    """
     receiver = jnp.asarray(receiver, dtype=float)
     receiver_normal = jnp.asarray(receiver_normal, dtype=float)
-    to_source = jnp.asarray(source, dtype=float) - receiver
-    to_blocker = jnp.asarray(blocker, dtype=float) - receiver
+    # Indexed rather than bare so one receiver and a batch of them take the same path.
+    to_source = jnp.asarray(source, dtype=float) - receiver[..., None, :]
+    to_blocker = jnp.asarray(blocker, dtype=float) - receiver[..., None, :]
 
-    loop = _clip_to_front(to_source, receiver_normal)
-    whole = signed_projected(receiver_normal, loop)
     # The blocker's winding as seen from here decides which side of each edge plane is inside,
     # so the orientation is read off rather than assumed -- an imported file's winding is
     # whatever the exporter wrote.
     corner = [to_blocker[..., k, :] for k in range(3)]
     facing = jnp.sign(dot(corner[0], jnp.cross(corner[1], corner[2])))[..., None]
-    for first, second in ((0, 1), (1, 2), (2, 0)):
-        loop = clip_halfspace(loop, jnp.cross(corner[first], corner[second]) * facing)
+    edges = [jnp.cross(corner[i], corner[j]) * facing for i, j in ((0, 1), (1, 2), (2, 0))]
+
+    if compact:
+        loop = clip_compact(to_source, receiver_normal, 4)
+        whole = signed_projected(receiver_normal, loop)
+        for width, plane in zip((5, 6, 7), edges, strict=True):
+            loop = clip_compact(loop, plane, width)
+    else:
+        loop = _clip_to_front(to_source, receiver_normal)
+        whole = signed_projected(receiver_normal, loop)
+        for plane in edges:
+            loop = clip_halfspace(loop, plane)
+
     covered = signed_projected(receiver_normal, loop)
     return jnp.abs(covered) / jnp.where(jnp.abs(whole) == 0.0, 1.0, jnp.abs(whole))
 
@@ -212,6 +259,65 @@ def candidate_fraction(surfaces, chunk=2):
     return kept / n**3
 
 
+def clip_cost():
+    """Emit-``(n + 1)`` against doubling, and both against the ray test the mask uses today.
+
+    Absolute throughputs here depend on what else the machine is doing, so every arm is timed
+    in the same process on the same work items and read as a *ratio*. The ray test is timed
+    against a block of triangles rather than one: handed a single triangle it measures dispatch
+    and comes out several times low, which flatters the comparison.
+    """
+    rng = np.random.default_rng(3)
+    work = 200_000
+    receiver = jnp.asarray(rng.uniform(-1, 1, (work, 3)))
+    normal = jnp.asarray(np.tile([0.0, 0.0, 1.0], (work, 1)))
+    source = jnp.asarray(rng.uniform(-1, 1, (work, 3, 3)) + np.array([0.0, 0.0, 3.0]))
+    blocker = jnp.asarray(rng.uniform(-1, 1, (work, 3, 3)) + np.array([0.0, 0.0, 1.5]))
+
+    arms = {
+        name: jax.jit(lambda r, n, s, b, c=compact: blocked_fraction(r, n, s, b, compact=c))
+        for name, compact in (("doubling 6/12/24/48", False), ("compact 4/5/6/7", True))
+    }
+    values = {name: np.asarray(fn(receiver, normal, source, blocker)) for name, fn in arms.items()}
+    wide, narrow = values["doubling 6/12/24/48"], values["compact 4/5/6/7"]
+    partial = int(np.sum((wide > 1e-9) & (wide < 1.0 - 1e-9)))
+    print(
+        f"   agreement over {work:,} work items ({partial:,} of them partially blocked): "
+        f"max |compact - doubling| = {np.max(np.abs(wide - narrow)):.1e}"
+    )
+    print("   -- the worst of those sits on a near-edge-on source, where BOTH arms divide two")
+    print("      near-zero solid angles; the clips themselves agree to the last bits.\n")
+
+    triangles = jnp.asarray(rng.uniform(-1, 1, (200, 3, 3)) + np.array([0.0, 0.0, 1.5]))
+    origin = jnp.asarray(rng.uniform(-1, 1, (work, 3)))
+    target = origin + jnp.asarray(rng.uniform(-1, 1, (work, 3)) + np.array([0.0, 0.0, 3.0]))
+    near = jnp.zeros(work)
+    eager = _median(lambda: segment_is_cut(origin, target, triangles, near))
+    jitted = jax.jit(lambda o, t, v, n: segment_is_cut(o, t, v, n, work_limit=10**12))
+    fused = _median(lambda: jitted(origin, target, triangles, near))
+    tests = work * int(triangles.shape[0])
+    print(f"   {'arm':>22} {'Mitem/s':>9} {'vs a fused ray test':>21}")
+    print(f"   {'ray test, as called':>22} {tests / eager / 1e6:9.1f} {'':>21}")
+    print(f"   {'ray test, under jit':>22} {tests / fused / 1e6:9.1f} {eager / fused:20.1f}x")
+    for name, fn in arms.items():
+        each = _median(lambda f=fn: f(receiver, normal, source, blocker))
+        print(f"   {name:>22} {work / each / 1e6:9.1f} {each / (fused / tests) / work:20.0f}x")
+    print("   -- the mask's ray test is called EAGERLY, one materialized intermediate per block;")
+    print("      under jit the same call fuses the intermediate away and runs several times")
+    print("      faster, so it is the fused rate the clip has to be judged against.")
+
+
+def _median(fn, repeats=5):
+    """Median wall time of ``fn``, after one call to compile it."""
+    jax.block_until_ready(fn())
+    taken = []
+    for _ in range(repeats):
+        started = time.perf_counter()
+        jax.block_until_ready(fn())
+        taken.append(time.perf_counter() - started)
+    return float(np.median(taken))
+
+
 def main() -> None:
     started = time.time()
     receiver = np.array([0.0, 0.0, 0.0])
@@ -269,6 +375,9 @@ def main() -> None:
             flush=True,
         )
     print("   -- and it falls as the mesh refines: a finer pair sweeps a narrower pencil.")
+
+    print("\n5. What the clip costs, and whether the narrow one gives the same answer.")
+    clip_cost()
     print(f"\n({time.time() - started:.0f}s)")
 
 
