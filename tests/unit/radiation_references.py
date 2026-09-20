@@ -222,3 +222,73 @@ def stretched_box(divisions: int = 2, **optics) -> Surfaces:
     because both choices are then the same expression.
     """
     return Surfaces.from_triangles(inward_box(divisions) * np.array([1.0, 1.0, 3.0]), **optics)
+
+
+def facing_plates(n: int, *, half: float = 1.0, gap: float = 1.0) -> np.ndarray:
+    """Two square plates facing each other, each meshed ``n x n`` quads of two triangles.
+
+    The fixture for partial occlusion: put a body between them and some facet pairs are half
+    shadowed, which is the one configuration the closed boxes elsewhere in this module cannot
+    produce — a box has nothing in the way.
+
+    Facet order is plate-major, then row-major over the quads, then the **two triangles of a
+    quad adjacent to one another**. :func:`area_average_onto` depends on that last part, and
+    getting it wrong still leaves every coarse patch owning two facets of the right plate, so
+    an ownership check passes and only a control measurement catches it.
+    """
+    edges = np.linspace(-half, half, n + 1)
+    corners = np.array(
+        [
+            [
+                [edges[i], edges[j], 0.0],
+                [edges[i + 1], edges[j], 0.0],
+                [edges[i + 1], edges[j + 1], 0.0],
+                [edges[i], edges[j + 1], 0.0],
+            ]
+            for i in range(n)
+            for j in range(n)
+        ]
+    )
+    flat = np.concatenate([corners[:, [0, 1, 2]], corners[:, [0, 2, 3]]], axis=1)
+    flat = flat.reshape(-1, 2, 3, 3).reshape(-1, 3, 3)
+    lower, upper = flat.copy(), flat.copy()
+    lower[:, :, 2] = -gap
+    upper[:, :, 2] = gap
+    return np.concatenate([lower, upper[:, ::-1, :]])
+
+
+def quad_of_facet(n: int, n_coarse: int) -> np.ndarray:
+    """Which coarse quad each facet of :func:`facing_plates` belongs to."""
+    step = n // n_coarse
+    row, column = np.divmod(np.arange(n * n), n)
+    per_plate = np.repeat((row // step) * n_coarse + (column // step), 2)
+    return np.concatenate([per_plate, per_plate + n_coarse**2])
+
+
+def area_average_onto(matrix, area, n: int, n_coarse: int) -> np.ndarray:
+    """Area-average a facet-by-facet transfer onto the coarse quads it refines.
+
+    This *is* the coarse form factor: the source index is averaged over its patch weighted by
+    area, because a patch's form factor is the area-weighted mean of its parts'; the receiver
+    index is summed, because what lands on a patch is what lands on all of it. So a refined
+    transfer aggregated this way is the right thing to compare a coarse one against, rather
+    than a finer answer to a different question.
+
+    ⚠️ **Two things here are inert on the plate fixture and are written for correctness rather
+    than because a test would catch them.** Every triangle of :func:`facing_plates` is congruent,
+    so the area weighting is the same as a plain mean; and a coarse patch and its fine cover have
+    the same total area by construction, so dividing by it scales both sides of any comparison
+    equally and cancels under a normalized metric. Both matter the moment this is pointed at a
+    mesh whose facets differ in size.
+    """
+    matrix, area = np.asarray(matrix), np.asarray(area)
+    owner = quad_of_facet(n, n_coarse)
+    n_quads = 2 * n_coarse**2
+    columns = np.zeros((len(owner), n_quads))
+    for quad in range(n_quads):
+        columns[:, quad] = matrix[:, owner == quad].sum(axis=1)
+    weighted = np.zeros((n_quads, n_quads))
+    total = np.zeros(n_quads)
+    np.add.at(weighted, owner, area[:, None] * columns)
+    np.add.at(total, owner, area)
+    return weighted / total[:, None]
