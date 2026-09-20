@@ -368,11 +368,12 @@ class Corrections(eqx.Module):
     m1 : jnp.ndarray
         ``M1``, shape ``(n_cells, dim, dim)`` -- what the raw Green--Gauss sum returns for a linear
         field of unit gradient in each coordinate direction. Carried as well as its inverse because
-        :meth:`MultipleCorrectionGradient.reconstruct`'s boundary extrapolation adds a per-cell term
-        to it, and *which* patches that term covers is a property of the field being reconstructed
-        rather than of the geometry -- so it cannot be folded in here.
+        :meth:`MultipleCorrectionGradient.reconstruct` subtracts a per-cell boundary-condition term
+        from it, and that term depends on the field's boundary conditions rather than on the geometry
+        alone -- so it cannot be folded in here.
     m1_inverse : jnp.ndarray
-        ``M1^-1``, shape ``(n_cells, dim, dim)``; used directly when no extrapolation is asked for.
+        ``M1^-1``, shape ``(n_cells, dim, dim)``; used directly when no boundary-condition weight is
+        given, and by the second pass always.
     m2_inverse : jnp.ndarray
         ``M2^-1``, shape ``(n_cells, n_sym, n_sym)``. ``M2`` is what the doubly-applied 1-exact
         operator returns for each quadratic basis field.
@@ -460,7 +461,7 @@ class MultipleCorrectionGradient(GradientScheme):
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         imposed: ImposedGradient | None = None,
         boundary_values_at: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
-        boundary_chain: jnp.ndarray | None = None,
+        boundary_gradient_weight: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         if operator_hook is not None:
             raise NotImplementedError(
@@ -477,7 +478,7 @@ class MultipleCorrectionGradient(GradientScheme):
             boundary_values,
             imposed=imposed,
             boundary_values_at=boundary_values_at,
-            boundary_chain=boundary_chain,
+            boundary_gradient_weight=boundary_gradient_weight,
         )[0]
 
     def reconstruct(
@@ -489,7 +490,7 @@ class MultipleCorrectionGradient(GradientScheme):
         *,
         imposed: ImposedGradient | None = None,
         boundary_values_at: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
-        boundary_chain: jnp.ndarray | None = None,
+        boundary_gradient_weight: jnp.ndarray | None = None,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         """Both reconstructed quantities: the gradient and the Hessian.
 
@@ -512,21 +513,26 @@ class MultipleCorrectionGradient(GradientScheme):
             and on the boundary faces those cells own -- so the Hessian is built from the imposed
             gradient rather than from the estimate it replaces. That ordering is the whole reason
             this is an argument to the reconstruction and not a correction applied to its result.
-        boundary_chain : jnp.ndarray, optional
-            ``d(boundary value)/d(phi_owner)`` per face, shape ``(n_faces,)`` -- one on a patch whose
-            value is derived from the owner cell (zero-gradient, Neumann, Robin), zero on a prescribed
-            one. **Supply it whenever any patch is not a prescribed value.** The first pass then reads
-            the value consistent with the cell's own field on those patches instead of one asserting a
-            normal derivative the iterate does not yet have, which is otherwise a **linear**-order
-            error the correction matrices cannot remove -- 57--62 % of the boundary-cell gradient,
-            independently of mesh spacing, with a Hessian that doubles on every refinement. See
-            :func:`_extrapolated_first_pass`; it costs one per-cell inverse and no extra pass.
-            ``None`` (default) is byte-identical to not passing it.
+        boundary_gradient_weight : jnp.ndarray, optional
+            ``d(boundary value)/d(grad phi_owner)`` per face, shape ``(n_faces, dim)`` -- zero on a
+            prescribed patch, and the tangential offset ``d - (d.n) n`` (scaled, for a Robin condition)
+            on a zero-gradient, Neumann or Robin one. **Supply it whenever any patch is not a
+            prescribed value**, together with ``boundary_values`` evaluated at zero gradient. Every
+            boundary closure is affine in the owner gradient, so the face value its condition defines
+            is exactly ``boundary_values + w . grad phi_owner``; the first pass solves for the gradient
+            with that dependence moved to the left-hand side (see
+            :func:`_boundary_condition_first_pass`), at the cost of one per-cell inverse and no extra
+            pass. ``None`` (default) is byte-identical to not passing it.
+
+            Without it the first pass reads the zero-gradient values, which drop the tangential
+            correction and so do not satisfy the discrete boundary condition either: on a skewed
+            boundary cell that is an error of order the correction, which the correction matrices
+            (probed on exact face values) do not remove.
 
             ⚠️ It reaches the **first pass only**. ``M2`` and the gradient defect are still probed
-            against exact face values, so a quadratic keeps a second-order inconsistency there --
-            measured at 1.6 % of the boundary-cell gradient at 8 cells across and falling as ``h``
-            (0.76 %, 0.37 % at 16 and 32), against the 58 % that does *not* fall without this.
+            against exact face values, and a zero-gradient face value is only first-order accurate for
+            a curved field (its tangential correction is a linear extrapolation), so a quadratic keeps
+            a second-order inconsistency at boundary cells.
         boundary_values_at : callable, optional
             ``gradient -> boundary_values``: the caller's boundary closures re-evaluated at a
             reconstructed gradient. **Supply this whenever the boundary values passed in were
@@ -566,38 +572,29 @@ class MultipleCorrectionGradient(GradientScheme):
         factor = interpolation_factor(face_cells, geometry)
         area = scale(geometry.face.normal, geometry.face.area)
 
-        # The first pass reads boundary VALUES, so a value asserting a normal derivative the iterate
-        # does not have is a linear-order error here -- before any closure is consulted, and in every
-        # closure alike. `boundary_chain` is what lets it read the cell's own extrapolation instead.
-        m1_inverse, first_values = (
-            (prepared.m1_inverse, boundary_values)
-            if boundary_chain is None
-            else _extrapolated_first_pass(
-                prepared.m1, boundary_chain, field, boundary_values, face_cells, geometry
+        # The first pass reads boundary VALUES. On a patch whose condition involves the gradient
+        # (zero-gradient, Neumann, Robin) the value it defines depends on the very gradient being
+        # reconstructed; that dependence is affine, so it moves to the left-hand side exactly.
+        m1_inverse = (
+            prepared.m1_inverse
+            if boundary_gradient_weight is None
+            else _boundary_condition_first_pass(
+                prepared.m1, boundary_gradient_weight, face_cells, geometry
             )
         )
-        first = _one_exact(field, first_values, m1_inverse, factor, face_cells, area, geometry)
-        # The closure DIFFERENTIATES a boundary value, so it needs the corrected one: a
-        # gradient-type condition carries its whole content in a correction that a zero-gradient
-        # evaluation throws away, leaving the face value equal to the owner's and the closure
-        # subtracting a term nothing added. The first pass above deliberately keeps the values as
-        # given -- there the error is a value of order the correction, not one divided by `d.n`.
-        # Skipped entirely for a closure that reads no boundary value: the re-evaluation is a
-        # scatter over every boundary face, and `OwnerGradient` would discard the result.
-        needs_correcting = boundary_values_at is not None and closure.reads_boundary_values
-        closure_values = boundary_values_at(first) if needs_correcting else boundary_values
-        if boundary_chain is not None and closure.reads_boundary_values:
-            # The closure gets the SAME extrapolation the first pass got, for the same reason and
-            # with a sharper consequence. Differencing a value that asserts a normal derivative the
-            # iterate does not have makes the closure report that asserted derivative rather than the
-            # field's: on a zero-gradient patch it returns the owner gradient with its normal
-            # component replaced by a hard zero. Fed `phi_P + grad phi . d` instead, the difference is
-            # `(grad phi . n)(d . n)` and the closure returns the owner gradient entire -- linear-exact,
-            # which is the one property this module states a closure may not do without.
-            chain = jnp.where(face_cells.interior, 0.0, boundary_chain)
-            displacement = geometry.face.centroid - geometry.cell.centroid[face_cells.owner]
-            extrapolated = field[face_cells.owner] + dot(first[face_cells.owner], displacement)
-            closure_values = chain * extrapolated + (1.0 - chain) * closure_values
+        first = _one_exact(field, boundary_values, m1_inverse, factor, face_cells, area, geometry)
+        # The closure DIFFERENTIATES a boundary value, so it needs the one the boundary condition
+        # defines at this gradient, not the zero-gradient one: a gradient-type condition carries its
+        # whole content in a correction that a zero-gradient evaluation throws away, leaving the face
+        # value equal to the owner's and the closure subtracting a term nothing added. Skipped
+        # entirely for a closure that reads no boundary value: `OwnerGradient` would discard it.
+        closure_values = boundary_values
+        if closure.reads_boundary_values and boundary_values_at is not None:
+            closure_values = boundary_values_at(first)
+        elif closure.reads_boundary_values and boundary_gradient_weight is not None:
+            closure_values = boundary_values + dot(
+                boundary_gradient_weight, first[face_cells.owner]
+            )
         face_gradient = closure.face_gradient(first, field, closure_values, face_cells, geometry)
         if imposed is not None:
             # Before the second pass, not after it. That pass differentiates `first` and closes the
@@ -605,10 +602,11 @@ class MultipleCorrectionGradient(GradientScheme):
             # both of its consumers had already read the estimate it replaces.
             first = imposed.impose(first)
             face_gradient = imposed.impose_on_faces(face_gradient, face_cells)
-        # The geometry's own `M1^-1` here, NOT the extrapolated one: `M2` and the gradient defect were
-        # probed through this operator, and correcting an operator nobody evaluates is the mistake this
-        # module warns about. The extrapolation is a statement about the FIELD's boundary values; the
-        # second pass differentiates a gradient, whose boundary faces the closure supplies.
+        # The geometry's own `M1^-1` here, NOT the boundary-condition one: `M2` and the gradient defect
+        # were probed through this operator, and correcting an operator nobody evaluates is the mistake
+        # this module warns about. The boundary-condition term is a statement about the FIELD's
+        # boundary values; the second pass differentiates a gradient, whose boundary faces the closure
+        # supplies.
         raw = _one_exact(
             first, face_gradient, prepared.m1_inverse, factor, face_cells, area, geometry
         )
@@ -648,73 +646,61 @@ class MultipleCorrectionGradient(GradientScheme):
 DEFAULT_GRADIENT_SCHEME = MultipleCorrectionGradient()
 
 
-def _extrapolated_first_pass(
+def _boundary_condition_first_pass(
     m1: jnp.ndarray,
-    boundary_chain: jnp.ndarray,
-    field: jnp.ndarray,
-    boundary_values: jnp.ndarray,
+    boundary_gradient_weight: jnp.ndarray,
     face_cells: FaceCellConnectivity,
     geometry: MeshGeometry,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """``(M1 - B)^-1`` and the boundary values that go with it, for the extrapolated first pass.
+) -> jnp.ndarray:
+    """``(M1 - B)^-1``: the first pass with each boundary face at the value its condition defines.
 
-    **Why the first pass needs anything at all.** A reconstruction is handed the field's boundary
-    values, and on a patch whose value is derived from the owner cell -- zero-gradient, and any
-    Neumann or Robin condition -- that value asserts a normal derivative the *iterate* does not have.
-    An iterate does not satisfy its own boundary conditions until it has converged, so the value and
-    the interior field disagree, the Green--Gauss sum averages the two, and the cell gradient comes
-    out wrong at **linear** order. Measured on a linear field over a zero-gradient patch, the
-    reconstructed boundary-cell gradient is wrong by 57 % under
-    :class:`OwnerGradient` and 62 % under :class:`SkewCorrectedGradient`, **independently of mesh
-    spacing**, while the Hessian the sum reports *doubles with every refinement* -- it is faithfully
-    reporting an ever-sharper kink that the field does not have.
+    **Why the first pass needs anything at all.** In a finite-volume discretization a boundary
+    condition is imposed through the boundary face value, and it holds at every iterate: a
+    zero-gradient face carries ``phi_P + grad phi_P . (d - (d.n) n)``, the discrete statement that the
+    normal derivative there is zero, and a Neumann face subtracts its prescribed flux on top. That value
+    depends on the owner gradient -- the quantity being reconstructed. A reconstruction handed the
+    value evaluated at zero gradient is therefore handed ``phi_P`` on a zero-gradient face, which is
+    *not* the boundary condition on a skewed boundary cell, and the Green--Gauss sum is wrong there by
+    a term of the size of the dropped correction.
 
-    The repair is to give the first pass the value consistent with the cell's own field,
-    ``phi_P + grad phi . d``, on exactly those patches, and to leave a prescribed value alone. That is
-    the correction the boundary condition would carry if the iterate satisfied it, and the two agree
-    at convergence -- the condition is still imposed, by the flux, which is where it belongs.
+    **Why it costs nothing.** Every boundary closure is affine in the owner gradient, so the face value
+    is exactly ``phi_given + w . grad phi_P`` with ``w = d(boundary value)/d(grad phi_P)``. Each such
+    face adds ``(w . grad phi_P) A_f / V`` to the sum, i.e. ``B_P grad phi_P`` for a per-cell matrix,
+    so the pass is ``(M1 - B) grad phi = raw`` -- one per-cell inverse, exactly what ``M1`` already was.
 
-    **Why it costs nothing.** That value depends on the gradient being reconstructed, so read
-    literally it is a fixed point. But it is *linear* in the gradient: each such face contributes
-    ``(grad phi_P . d) A_f`` to the sum, i.e. ``B_P grad phi_P`` for a per-cell matrix. So it moves to
-    the other side, and the pass is ``(M1 - B) grad phi = raw`` -- one per-cell inverse, exactly what
-    ``M1`` already was. Iterating it instead converges at a mesh-independent 0.571 per pass and would
-    need eight or ten of them.
+    **Why the weight is the tangential offset and not the whole displacement ``d``.** An earlier form
+    used ``w = d`` -- the owner's full linear extrapolation to the face. That reads no information from
+    the boundary condition at all: the face value simply follows whatever gradient the cell has,
+    normal component included. On a cell whose interior faces do not span every direction -- a
+    tetrahedron owning two such boundary faces has only two interior faces for three gradient
+    components -- the system is then singular: measured ``cond(M1 - B)`` up to ``4e18`` on every such
+    cell of a real tetrahedral mesh, and ``1e16`` on some cells owning only one. With the boundary
+    condition's own weight the same cells are at most ``2.5`` and ``8.3``, because the condition
+    supplies exactly the normal direction the interior faces lack.
 
     Parameters
     ----------
     m1 : jnp.ndarray
         The geometry's ``M1``, shape ``(n_cells, dim, dim)``.
-    boundary_chain : jnp.ndarray
-        ``d(boundary value)/d(phi_owner)`` per face, shape ``(n_faces,)`` -- one on a patch whose
-        value is derived from the owner cell, zero on a prescribed one, and in between for a Robin
-        condition, which is then blended in the same proportion. Interior entries are ignored.
-    field : jnp.ndarray
-        Cell values, shape ``(n_cells,)``.
-    boundary_values : jnp.ndarray
-        The field's boundary values as the caller formed them, shape ``(n_faces,)``.
+    boundary_gradient_weight : jnp.ndarray
+        ``d(boundary value)/d(grad phi_owner)`` per face, shape ``(n_faces, dim)``: zero on a
+        prescribed patch. Interior entries are ignored.
     face_cells, geometry
         The connectivity and metrics.
 
     Returns
     -------
-    inverse : jnp.ndarray
+    jnp.ndarray
         ``(M1 - B)^-1``, shape ``(n_cells, dim, dim)``.
-    values : jnp.ndarray
-        The gradient-independent part of the extrapolated boundary values, shape ``(n_faces,)`` --
-        the rest of the extrapolation is what ``B`` accounts for.
     """
-    chain = jnp.where(face_cells.interior, 0.0, boundary_chain)
-    displacement = geometry.face.centroid - geometry.cell.centroid[face_cells.owner]
+    weight = jnp.where(face_cells.interior[:, None], 0.0, boundary_gradient_weight)
     area = scale(geometry.face.normal, geometry.face.area)
-    # B_P = sum over the cell's own boundary faces of chain * (A_f (x) d) / V, scattered to the owner.
+    # B_P = sum over the cell's own boundary faces of (A_f (x) w_f) / V, scattered to the owner.
     # `scatter_conservative` is the same accumulation the sum itself uses, so the two cannot disagree
     # about which faces belong to which cell.
-    outer = displacement[:, :, None] * area[:, None, :]
-    b = face_cells.scatter_conservative(chain[:, None, None] * outer)
+    b = face_cells.scatter_conservative(weight[:, :, None] * area[:, None, :])
     b = jnp.swapaxes(b, 1, 2) / geometry.cell.volume[:, None, None]
-    values = chain * field[face_cells.owner] + (1.0 - chain) * boundary_values
-    return jnp.linalg.inv(m1 - b), values
+    return jnp.linalg.inv(m1 - b)
 
 
 def _symmetrize(tensor: jnp.ndarray) -> jnp.ndarray:

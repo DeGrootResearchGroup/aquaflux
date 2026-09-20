@@ -701,42 +701,45 @@ production, hence the `k` correction -- which the fixation row then hands to `om
 **global** positivity cap that scaled the whole step by the worst cell's `k` correction, so one
 numerically-dead cell throttled every degree of freedom and then ratcheted; clipping each cell's own
 correction instead (now the default) lets this closure march the case to the same answer, and makes
-the default closure faster too. And the reconstruction was reading a boundary value that asserts a
-normal derivative an unconverged iterate does not have — see the note below, which restores linear
-exactness at those patches for both closures.
+the default closure faster too. And the reconstruction was reading boundary values evaluated at zero
+gradient, which on a zero-gradient or Neumann patch are not the values the boundary condition defines
+— see the note below.
 
 Prefer the default closure anyway; it is the better-tested one on the cases this project runs.
 ```
 
-### Boundary values on a patch that follows the owner cell
+### Boundary values on a patch whose condition involves the gradient
 
-A reconstruction is handed the field's boundary values, and on a patch whose value is derived from the
-owner cell — zero-gradient, and any Neumann or Robin condition — that value asserts a normal derivative
-the **iterate does not have**, because a field does not satisfy its own boundary conditions until it has
-converged. The Green–Gauss sum then averages the interior field against a boundary that contradicts it,
-and the error is at **linear** order, which is exactly what a correction calibrated on quadratics cannot
-remove. Measured on a linear field, whose true Hessian is identically zero:
+In a finite-volume discretization a boundary condition is imposed through the boundary face value, and
+it holds at every iterate, not only at convergence. A zero-gradient face carries
+`phi_P + grad phi_P . (d - (d.n) n)` — the owner value plus a tangential correction, which is the
+discrete statement that the normal derivative there is zero — and a Neumann face subtracts its
+prescribed flux on top. That face value depends on the owner's gradient, the very quantity being
+reconstructed, so a residual evaluates its boundary values at zero gradient and hands those to the
+reconstruction. On a zero-gradient patch that is just `phi_P`, which is **not** the boundary condition
+on a skewed boundary cell: it drops the tangential correction, and the Green–Gauss sum is wrong there by
+a term of that size.
 
-| boundary values | cells across | spurious Hessian | boundary-cell gradient error |
-|---|---|---|---|
-| prescribed (Dirichlet) | 8 → 32 | ~1e-15 | **0.00%** |
-| the condition's own value | 8 | 7.77 | 57% |
-| | 16 | 15.5 | 57% |
-| | 32 | 31.1 | 57% |
+{class}`~aquaflux.schemes.MultipleCorrectionGradient` therefore reconstructs against the face value the
+boundary condition actually defines. Every boundary closure is affine in the owner gradient, so that
+value is exactly `phi_given + w . grad phi_P`, with `w` read off your boundary conditions by
+differentiating them — zero on a prescribed patch, the tangential offset on a zero-gradient or Neumann
+one. The gradient-dependent part folds into the same per-cell matrix the scheme already inverts, so it
+costs nothing and needs no iteration, and a linear field that satisfies its boundary conditions is
+reconstructed to roundoff under both closures.
 
-The Hessian **doubles with every refinement** and the gradient error does not move at all — the sum is
-faithfully reporting an ever-sharper kink the field does not have. The prescribed row is the control:
-where the value does not contradict the field, the reconstruction is exact.
+It also settles the directions a cell's interior faces cannot. A tetrahedron owning two such boundary
+faces has only two interior faces for three gradient components; its boundary conditions supply the
+normal directions it is missing. Reading those faces as the owner's own linear extrapolation instead —
+letting the face value follow whatever normal gradient the cell has — takes no information from the
+condition, and the per-cell matrix is singular on every such cell. Measured on a 2462-cell tetrahedral
+duct with gradient-type conditions on every boundary face, its largest condition number:
 
-{class}`~aquaflux.schemes.MultipleCorrectionGradient` therefore reads the value consistent with the
-cell's own field, `phi_P + grad phi . d`, on exactly those patches, and leaves a prescribed value
-alone. The condition is still imposed — by the flux, which is where it belongs — and the two agree at
-convergence. Both closures then reconstruct a linear field to roundoff. It costs nothing: the value
-depends on the gradient being reconstructed, but only linearly, so it folds into the same per-cell
-matrix the scheme already inverts rather than needing an iteration.
-
-Which patches those are is read off your boundary conditions by differentiating them, so nothing needs
-declaring and it cannot disagree with the conditions themselves.
+| cells | extrapolated face value | the boundary condition's face value |
+|---|---|---|
+| no boundary face (1374) | 15 | 15 |
+| one boundary face (912) | 1.3e16 | 8.3 |
+| two boundary faces (176) | 4.1e18 | 2.5 |
 
 **You do not have to choose one closure for the whole mesh, and you do not have to repair every cell
 the same way.** Pass `fallback=`{class}`~aquaflux.schemes.SkewCorrectedGradient` `()` and, when the

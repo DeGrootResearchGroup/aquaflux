@@ -405,37 +405,39 @@ class ResidualAssembler(eqx.Module):
             # gradient throws away. This lets such a scheme ask for the corrected values at its own
             # reconstructed gradient; the ones passed above stay leading-order for everything else.
             boundary_values_at=lambda g: self.boundary_values(phi, g, properties),
-            # Which patches derive their value from the owner cell, read off the closures themselves
-            # rather than declared: one where the boundary value follows `phi_P`, zero where it is
-            # prescribed, and in between for a Robin condition. A scheme uses it to give its first
-            # pass the value consistent with the cell's own field there, instead of one asserting a
-            # normal derivative an unconverged iterate does not have -- a linear-order error no
-            # correction calibrated on quadratics can remove.
-            boundary_chain=self._boundary_chain(phi, zero_grad, properties),
+            # How each boundary face value depends on its owner's gradient, read off the closures
+            # themselves rather than declared: zero where the value is prescribed, the tangential
+            # offset where a zero-gradient or Neumann condition carries its correction. It lets a
+            # scheme reconstruct against the face values the boundary conditions actually define.
+            boundary_gradient_weight=self._boundary_gradient_weight(phi, zero_grad, properties),
         )
         return gradient, self.boundary_values(phi, gradient, properties)
 
-    def _boundary_chain(
+    def _boundary_gradient_weight(
         self,
         phi: jnp.ndarray,
         gradient: jnp.ndarray,
         properties: dict[str, jnp.ndarray],
     ) -> jnp.ndarray:
-        """``d(boundary value)/d(phi_owner)`` per face, shape ``(n_faces,)``.
+        """``d(boundary value)/d(grad phi_owner)`` per face, shape ``(n_faces, dim)``.
 
-        Differentiated from the closures rather than declared, so it cannot disagree with them and
-        needs no new information from a boundary condition: a prescribed value does not move with the
-        owner and returns zero, a zero-gradient or Neumann one follows it exactly and returns one, and
-        a Robin condition returns the fraction it actually carries.
-
-        The gradient is held fixed, so this is the derivative through the *value* alone -- the
-        gradient's own contribution is what the scheme is folding in.
+        Differentiated from the closures rather than declared, so it cannot disagree with them: a
+        prescribed value does not move with the gradient and returns zero, and a zero-gradient,
+        Neumann or Robin condition returns the offset its face value carries. A face value reads only
+        its own owner's gradient, so one directional derivative per gradient component, seeded in
+        every cell at once, resolves every face.
         """
-        return jax.jvp(
-            lambda p: self.boundary_values(p, gradient, properties),
-            (phi,),
-            (jnp.ones_like(phi),),
-        )[1]
+        return jnp.stack(
+            [
+                jax.jvp(
+                    lambda g: self.boundary_values(phi, g, properties),
+                    (gradient,),
+                    (jnp.zeros_like(gradient).at[:, k].set(1.0),),
+                )[1]
+                for k in range(gradient.shape[1])
+            ],
+            axis=-1,
+        )
 
     def gradient(
         self, phi: jnp.ndarray, *, fields: Mapping[str, jnp.ndarray] | None = None
