@@ -40,7 +40,41 @@ second half is the expected, currently-unresolved state, not a result about the 
 
 - **Not a physics-validated case.** No OpenFOAM reference is run; the mesh is coarse and the duct
   short, deliberately, to keep the march cheap once it can run at all.
-- **Not (yet) a marched case.** See #435.
+- **Marched for laminar flow, not yet for coupled RANS.** `laminar_duct_march.py` marches the same mesh
+  as a laminar duct (below); the coupled RANS march is still blocked, see #435.
+
+## The laminar march (issue #448)
+
+`laminar_duct_march.py` marches the same mesh as a laminar duct (Re_Dh 50: unit density, mu 5e-4, inlet
+speed 1 m/s, 0.025 m hydraulic diameter, first-order-upwind advection) with the flow-only path's
+robustness machinery, to separate the flow-only path's configuration from the case itself. Arms:
+`bare` (`newton_march` over `momentum_continuation`), `staged` (`solve_flow_march`, one shifted step),
+`lu` and `simple` (`solve_flow_march` with `DualTimeLoop(inner_steps=3)` and a `MaterializedJacobian`
+whose inverse is a complete LU or `SimpleSmoothed`). One run per row, 2462 tetrahedra, `CorrectedGreenGauss`
+unless a row says otherwise, 60-step cap. Steps to convergence, or `failed` with the last residual
+(Euclidean norm unless noted):
+
+| start | measure | `bare` | `staged` | `lu` | `simple` |
+|---|---|---|---|---|---|
+| uniform plug | row-scaled (`bare`: Euclidean) | 12 | 15 | 17 | 17 |
+| rest | Euclidean | failed, 1.7e-3 | failed, 1.6e-3 | 13 | 13 |
+| rest | row-scaled | failed, 1.7e-3 | NaN at step 0 | NaN at step 0 | NaN at step 0 |
+
+- From a plug every arm converges, so the mesh, the case and the gradient reconstruction can be marched;
+  the reported failure was the single-step pseudo-transient march from rest, which fails with or without
+  the staged driver. Dual time plus a materialized-Jacobian inverse converges it from rest in 13 steps,
+  and `SimpleSmoothed` does so without PETSc.
+- The row-scaled measure divides by the mean speed and the mass throughput, both zero at rest, so it is
+  NaN there (issue #459). Use `LAM_MEASURE=euclid` from rest.
+- With `LAM_SCHEME=multiple` (`MultipleCorrectionGradient` with the corner-cell fallback), the `lu` arm
+  from rest with the Euclidean measure does not converge, before or after the boundary first pass was
+  reweighted by the boundary condition's own dependence on the owner gradient (#463). Before that
+  change the march stalled at 4.79e-2 with the linear solve at its cycle cap every step (a singular
+  per-cell inverse made the compiled and eager residuals differ); on a working commit carrying it, the
+  march diverges slowly instead (7.6e2 at step 59, one run). The investigation of #435 found the same
+  duct converging with that scheme on an orthogonal hexahedral mesh and with its first pass alone, so
+  the second pass on tetrahedra is where it breaks. That is #435's open question, not a property of
+  the flow-only path.
 
 ## Layout
 
@@ -53,6 +87,7 @@ second half is the expected, currently-unresolved state, not a result about the 
 - `of_case/constant/polyMesh/` — the OpenFOAM mesh `gmshToFoam` writes; not tracked (regenerable, see
   below).
 - `compare.py` — the M2 conditioning report and the march attempt.
+- `laminar_duct_march.py` — the laminar march above; settings are `LAM_*` environment variables.
 
 ## Regenerating the mesh
 

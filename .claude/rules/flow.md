@@ -600,7 +600,7 @@ Engineering Principles.
 imports no physics; each package registers the types it owns beside them (**`flow/initialization.py`
 registers `MomentumContinuity` → `potential_flow`**, taking no settings; `transport/initialization.py`
 registers `ScalarTransport` → the harmonic interpolant of its Dirichlet boundary values, zero when nothing
-is prescribed; `turbulence/coupled.py` registers `CoupledRANS` → `sst_initial_fields`). It used to be the SST
+is prescribed; `turbulence/coupled_initialization.py` registers `CoupledRANS` → `sst_initial_fields`). It used to be the SST
 initializer under a general name — `(momentum, turbulence)` → `(flow, k, omega)` — so a laminar flow or a
 species could not use it. **A new problem type registers its own; do not add a branch to a central
 function.** An unregistered type raises `TypeError` naming it. `solve_flow_march(state=None)` starts from
@@ -639,10 +639,21 @@ a control for a solver question: the control had to run on a weaker driver.
   2026-09-19 on the 24 x 16 channel at Re 200 (`FirstOrderUpwind`, `CompactGreenGauss`, block-SIMPLE
   defaults): from rest it converges in 10 steps. The default `RowScaled()` has no such sensitivity.
 - **`MaterializedJacobian` march — BUILT 2026-09-19 (#450 stage 2), with a PETSc-free inverse (stage 4).** `solve_flow_march(preconditioner=MaterializedJacobian(SimpleSmoothed() | CompleteLu() | MonolithicVCycle()))`, or a session from `open_flow_session`. **Use `SimpleSmoothed`**: the traced JAX pressure-velocity hierarchy over the whole `(u, p)` state (`solve.MaterializedBlockPreconditioner`, `solve/block_preconditioner.py`), which needs no optional dependency — `MonolithicVCycle` is PETSc GAMG and needs `petsc4py`, which is what the traced hierarchies exist to avoid (GPU). `_FlowProblem` (in `flow/march.py`) supplies the assembler, the graph probe (gradient-sweep cap as `_GradientSweepCap`; default stencil reach 3 — over-reach is exact, only costlier; **the laminar reach was not measured**), **no field groups** (so `FieldSplit` is refused and a bare block inverse is allowed — the mirror of the coupled problem, which refuses the bare block), the shift-only `momentum_shift_only_policy` (no block preconditioner ⇒ no value-dependent multigrid hierarchy to recompile per rung) and the flow step. `MomentumShiftPolicy` takes the assembler first and an optional block preconditioner. **Measured 2026-09-19** on the 24 x 16 plane channel, Re 200 (`mu` 5e-3, `FirstOrderUpwind`, `CompactGreenGauss`), dual-time `inner_steps=3`, `RowScaled`, `rtol=0, atol=1e-9`, CPU, default `SimpleSmoothed()` settings, one run each: block-SIMPLE 17 steps / 51 restart cycles / 11.1 s; `CompleteLu(scipy)` 17 / 51 / 5.6 s; `SimpleSmoothed` **17 / 61 / 6.1 s** — the same trajectory, ~20 % more cycles than an exact factorization, on a 384-cell mesh where the wall clock says little. **Not measured**: a larger or 3D laminar case, or a low-shift state; `MonolithicVCycle` is untested (CI has no `petsc4py`). `solve_flow_march` still has no `mass_flow` (bulk-velocity) form.
-- The issue's motivating case (the Re_Dh 50 tetrahedral duct that did not converge under a hand-rolled
-  `newton_march`) has **not** been re-run on this march — that harness was never committed. Whether that
-  failure was the flow-only path's configuration or a genuine gap is still open; this change makes it
-  answerable.
+- **The issue's motivating case (the Re_Dh 50 tetrahedral duct), re-run 2026-09-20 on this march**
+  (`validation/tetrahedral_gradient_ab/laminar_duct_march.py`; 2462 tetrahedra, unit density and inlet
+  speed, mu 5e-4, `FirstOrderUpwind`, `CorrectedGreenGauss` at its default sweeps, one run per arm, 60-step
+  cap). **From a uniform plug every arm converges** (`newton_march` over `momentum_continuation` 12 steps,
+  `solve_flow_march` single step 15, dual-time with a complete-LU or `SimpleSmoothed` materialized inverse
+  17 and 17). **From rest the single-step arms fail** (`|R|` ~1.6e-3 after 60 steps, bare or staged) **and
+  `DualTimeLoop(inner_steps=3)` with `MaterializedJacobian(CompleteLu())` or `(SimpleSmoothed())`
+  converges in 13 steps** (Euclidean measure, 5.4e-9 and 5.8e-9). So the failure the issue reported is the
+  single-step pseudo-transient march from rest — a configuration, not the mesh or the gradient scheme —
+  and this march reaches the configuration that fixes it. **Not established:** the start state and
+  tolerance of the issue's original run were never recorded, so rest is a stand-in for it. ⚠️ The
+  default `RowScaled()` measure gives NaN from rest, because it divides by the mean speed and the mass
+  throughput (#459); use `Euclidean()` there. `MultipleCorrectionGradient` (with the corner-cell
+  fallback) does **not** converge on this duct with the same settings — an open question of #435, not of
+  the flow-only path; its record is in `validation/tetrahedral_gradient_ab/README.md`.
 
 ## Binding decisions
 - **`a_P` (momentum diagonal) is DIFFERENTIATED in the residual; only the PRECONDITIONER freezes it
