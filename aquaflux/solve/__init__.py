@@ -193,6 +193,7 @@ from .driver import (
     staged_march,
 )
 from .jacobian_probe import JacobianProbe, jacobian_probe_plan
+from .block_preconditioner import MaterializedBlockPreconditioner
 from .materialized_session import (
     BUILD_BETA,
     FACTORIZATION_LINEAR_SOLVE,
@@ -296,6 +297,7 @@ __all__ = [
     "LocalCourantBasis",
     "MarchLogger",
     "MarchResult",
+    "MaterializedBlockPreconditioner",
     "MaterializedJacobian",
     "MaterializedJacobianPreconditioner",
     "MaterializedProblem",

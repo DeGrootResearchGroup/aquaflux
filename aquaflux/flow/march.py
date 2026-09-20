@@ -305,9 +305,11 @@ def open_flow_session(
     Parameters
     ----------
     preconditioner : MaterializedJacobian
-        Which inverse and how it is probed. A :class:`~aquaflux.solve.CompleteLu` or
-        :class:`~aquaflux.solve.MonolithicVCycle`; a :class:`~aquaflux.solve.FieldSplit` is refused,
-        because a ``(u, p)`` state is a single group of fields and has nothing to split.
+        Which inverse and how it is probed. A :class:`~aquaflux.solve.SimpleSmoothed` (or another block
+        inverse) over the whole ``(u, p)`` saddle, which is traced and needs no optional dependency; a
+        :class:`~aquaflux.solve.CompleteLu`; or a :class:`~aquaflux.solve.MonolithicVCycle`, which needs
+        ``petsc4py``. A :class:`~aquaflux.solve.FieldSplit` is refused, because a ``(u, p)`` state is a
+        single group of fields and has nothing to split.
     momentum : MomentumContinuity
         The assembler the session builds on until it is re-pointed with ``rebind``.
     observer : callable, optional
@@ -459,8 +461,8 @@ def solve_flow_march(
         What preconditions the internally built step. ``None`` (default) is the block-SIMPLE
         preconditioner, configured by ``preconditioner_options``. A
         :class:`~aquaflux.solve.MaterializedJacobian` spec opens a session private to this solve, inverting
-        the materialized Jacobian by a complete LU or a multigrid V-cycle (a field split is refused: a
-        ``(u, p)`` state has nothing to split); pass a session from :func:`open_flow_session` to share one
+        the materialized Jacobian by a block inverse over the whole saddle (``SimpleSmoothed``), a complete
+        LU, or PETSc's multigrid V-cycle (a field split is refused: a ``(u, p)`` state has nothing to split); pass a session from :func:`open_flow_session` to share one
         inverse across several solves. Like ``preconditioner_options`` it is refused beside a ``strategy``
         or a ``RefreshPolicy(builder=...)``.
     preconditioner_options : mapping, optional

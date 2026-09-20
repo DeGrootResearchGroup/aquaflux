@@ -303,3 +303,17 @@ def test_the_coupled_registry_extends_the_solve_one_rather_than_restating_it() -
     from aquaflux.solve import MATERIALIZED_MAPPING
 
     assert set(MATERIALIZED_MAPPING.kinds) < set(_SPEC_MAPPING.kinds)
+
+
+def test_a_bare_block_inverse_spec_round_trips_through_the_solve_registry() -> None:
+    from aquaflux.solve import (
+        MaterializedJacobian,
+        SimpleSmoothed,
+        materialized_spec_from_mapping,
+        materialized_spec_to_mapping,
+    )
+
+    spec = MaterializedJacobian(SimpleSmoothed(sweeps=2, cycles=1))
+    mapping = materialized_spec_to_mapping(spec)
+    assert mapping["inverse"]["kind"] == "SimpleSmoothed"
+    assert materialized_spec_from_mapping(mapping) == spec

@@ -107,9 +107,13 @@ def test_a_field_split_refuses_an_inverse_that_is_not_a_value() -> None:
         FieldSplit(SimpleSmoothed(), lambda block, n_fields: None)
 
 
-def test_a_bare_block_inverse_is_refused_with_a_pointer_to_the_split() -> None:
-    with pytest.raises(TypeError, match="wrap two of them in FieldSplit"):
-        MaterializedJacobian(SimpleSmoothed())
+def test_a_bare_block_inverse_is_a_materialized_inverse_for_a_single_group_of_fields() -> None:
+    """The spec accepts it; whether the problem can use it is the session's decision.
+
+    A bare block inverse is fitted to the whole state, so it belongs to a problem with one group of
+    fields (a laminar flow). The refusal for a two-group problem lives where the groups are known.
+    """
+    assert MaterializedJacobian(SimpleSmoothed()).inverse == SimpleSmoothed()
 
 
 def test_the_block_diagonal_family_is_not_a_materialized_inverse() -> None:

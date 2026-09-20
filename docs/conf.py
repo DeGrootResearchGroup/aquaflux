@@ -80,6 +80,7 @@ SUBPACKAGE_GROUPS = {
                 "materialized_session",
                 "field_split",
                 "block_inverse",
+                "block_preconditioner",
                 "settings_value",
                 "settings_mapping",
                 "hierarchy_inverse",

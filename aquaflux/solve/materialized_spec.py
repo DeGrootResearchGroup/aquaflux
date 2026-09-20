@@ -146,9 +146,12 @@ class MaterializedJacobian:
 
     Attributes
     ----------
-    inverse : CompleteLu, MonolithicVCycle or FieldSplit
+    inverse : CompleteLu, MonolithicVCycle, FieldSplit or BlockInverse
         How the materialized, shifted Jacobian is inverted. Its type also decides how often the inverse
-        is refitted during a march and which Krylov restart regime the forward solve defaults to.
+        is refitted during a march and which Krylov restart regime the forward solve defaults to. A bare
+        :class:`~aquaflux.solve.BlockInverse` (a :class:`~aquaflux.solve.SimpleSmoothed`, say) inverts the
+        **whole** state, so it is for a problem whose fields form a single group -- a laminar flow -- and
+        needs no optional dependency; a problem with two groups takes a :class:`FieldSplit` instead.
     probe : JacobianProbeSpec
         How the Jacobian is probed. The default probes every column at the builder's own reach.
     build_beta : float or None
@@ -164,22 +167,16 @@ class MaterializedJacobian:
         If ``inverse`` or ``probe`` is not one of the accepted values.
     """
 
-    inverse: CompleteLu | MonolithicVCycle | FieldSplit
+    inverse: CompleteLu | MonolithicVCycle | FieldSplit | BlockInverse
     probe: JacobianProbeSpec = JacobianProbeSpec()
     build_beta: float | None = None
     beta_floor: float | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.inverse, CompleteLu | MonolithicVCycle | FieldSplit):
-            hint = (
-                " A single block inverse inverts one block of a field split; wrap two of them in "
-                "FieldSplit(leading=..., trailing=...)."
-                if isinstance(self.inverse, BlockInverse)
-                else ""
-            )
+        if not isinstance(self.inverse, CompleteLu | MonolithicVCycle | FieldSplit | BlockInverse):
             raise TypeError(
-                "MaterializedJacobian.inverse must be CompleteLu(), MonolithicVCycle() or "
-                f"FieldSplit(...), got {type(self.inverse).__name__}.{hint}"
+                "MaterializedJacobian.inverse must be CompleteLu(), MonolithicVCycle(), FieldSplit(...) "
+                f"or a block inverse such as SimpleSmoothed(), got {type(self.inverse).__name__}."
             )
         if not isinstance(self.probe, JacobianProbeSpec):
             raise TypeError(
