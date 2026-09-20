@@ -54,6 +54,7 @@ from pathlib import Path
 
 import numpy as np
 import scipy.sparse as sp
+from aquaflux.initialization import hybrid_initialize
 from aquaflux.turbulence import UnpreconditionedScalars
 
 VALIDATION = Path(__file__).resolve().parent
@@ -93,12 +94,16 @@ def main() -> None:
 
     import jax.numpy as jnp
     from aquaflux.solve import MonolithicAmgPreconditioner, block_stencil_gather_map
-    from aquaflux.turbulence import hybrid_initialize
-    from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy, coupled_scaled_norm
+    from aquaflux.initialization import hybrid_initialize
+    from aquaflux.turbulence.coupled import (
+        _coupled_jacobian_plan,
+        _coupled_shift_policy,
+        coupled_scaled_norm,
+    )
     from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec
 
     coupled = compare.build_case()["coupled"].with_scaled_molecular_viscosity(scale)
-    flow, k, omega = hybrid_initialize(coupled.momentum, coupled.turbulence)
+    flow, k, omega = hybrid_initialize(coupled)
     state = coupled.state_from_physical(flow, k, omega)
 
     policy = _coupled_shift_policy(

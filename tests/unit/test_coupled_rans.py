@@ -23,6 +23,7 @@ from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import DifferenceRow, FirstOrderUpwind, LogRatioRow
 from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall, ViscousMultilevel
 from aquaflux.flow.state import flow_state_layout
+from aquaflux.initialization import hybrid_initialize
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss, CorrectedGreenGauss, SweptGradientSolve
@@ -63,7 +64,6 @@ from aquaflux.turbulence import (
     coupled_residuals,
     coupled_step,
     eddy_viscosity_drift,
-    hybrid_initialize,
     open_session,
     production_and_limit,
     production_cap_active,
@@ -1875,7 +1875,7 @@ def test_freezing_the_production_viscosity_changes_the_operator_and_not_the_resi
     assert frozen.turbulence.explicit_production_viscosity is True
     assert exact.turbulence.explicit_production_viscosity is False  # the original is not mutated
 
-    flow, k, omega = hybrid_initialize(exact.momentum, exact.turbulence)
+    flow, k, omega = hybrid_initialize(exact)
     state = exact.state_from_physical(flow, k, omega)
     tangent = jax.random.normal(jax.random.PRNGKey(3), state.shape, dtype=state.dtype)
 
@@ -1954,7 +1954,7 @@ def test_a_root_the_frozen_cap_invalidates_is_refused() -> None:
         exact,
         turbulence=dataclasses.replace(exact.turbulence, explicit_production_limiter=True),
     )
-    flow, k, omega = hybrid_initialize(exact.momentum, exact.turbulence)
+    flow, k, omega = hybrid_initialize(exact)
     quiet = exact.state_from_physical(flow, k, omega)
     # Shrinking omega raises S/omega, which is what the cap actually keys on -- the ratio must clear
     # sqrt(10 beta*) = 0.949 against an equilibrium value of 0.3, so a hundredfold is what it takes.
@@ -1980,7 +1980,7 @@ def test_the_cap_predicate_is_the_one_the_residual_uses() -> None:
     they really do agree, rather than trusting the shared call.
     """
     _, coupled = _cavity(4)
-    state = coupled.state_from_physical(*hybrid_initialize(coupled.momentum, coupled.turbulence))
+    state = coupled.state_from_physical(*hybrid_initialize(coupled))
     flow, k, omega = coupled.physical_fields(state)
     closure = coupled.turbulence.closure_fields(coupled.momentum.velocity_fields(flow), k, omega)
 

@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "validation" / "pitzdaily_openfoam"))
 
 import jax.numpy as jnp  # noqa: E402
+from aquaflux.initialization import hybrid_initialize
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient  # noqa: E402
 from aquaflux.discretization import FirstOrderUpwind, LimitedUpwind  # noqa: E402
 from aquaflux.flow import (  # noqa: E402
@@ -54,7 +55,6 @@ from aquaflux.turbulence import (  # noqa: E402
     ScalarTwoLevel,  # noqa: E402
     SSTModel,
     SSTTurbulence,
-    hybrid_initialize,
     inlet_k,
     inlet_omega,
 )
@@ -229,7 +229,7 @@ def cell_aspect_ratio(coupled):
 
 
 def seed_state(coupled):
-    flow, k, omega = hybrid_initialize(coupled.momentum, coupled.turbulence)
+    flow, k, omega = hybrid_initialize(coupled)
     state = coupled.state_from_physical(flow, k, omega)
     residual = coupled.residual(state)
     assert bool(jnp.all(jnp.isfinite(residual))), "the seed state's residual is NOT finite"

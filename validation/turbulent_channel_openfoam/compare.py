@@ -43,6 +43,7 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
 import lineax as lx
 import numpy as np
+from aquaflux.turbulence import sst_initial_fields
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind, LimitedUpwind
 from aquaflux.flow import MomentumContinuity, NoSlipWall, bulk_velocity_flow_solve
@@ -52,7 +53,6 @@ from aquaflux.schemes import CompactGreenGauss
 from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
-    hybrid_initialize,
     scalar_pseudo_transient_solve,
     solve_segregated,
 )
@@ -168,7 +168,7 @@ def solve_aquaflux(nu_of, ny, growth):
     # Seed from the hybrid IC. A uniform k leaves the first sweep's residual essentially unchanged
     # for ~30 pseudo-transient steps, so the SER schedule's beta never relaxes and the scalar march
     # burns its budget before the residual moves; the hybrid start descends from the first step.
-    flow0, k0, omega0 = hybrid_initialize(momentum, turbulence)
+    flow0, k0, omega0 = sst_initial_fields(momentum, turbulence)
     sweeps = 90 if ny < 150 else 140
     flow, k, omega = solve_segregated(
         momentum,

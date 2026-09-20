@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     from .transport import SSTTurbulence
 
 
-def hybrid_initialize(
+def sst_initial_fields(
     momentum: MomentumContinuity,
     turbulence: SSTTurbulence,
     *,
@@ -73,6 +73,11 @@ def hybrid_initialize(
     length_scale_factor: float = 0.09,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Build a hybrid initial ``(flow, k, omega)`` that lets the coupled RANS solve self-start.
+
+    The k--omega SST initializer behind ``hybrid_initialize(coupled)``
+    (``aquaflux.initialization.hybrid_initialize``), callable directly on a momentum assembler and a
+    closure when there is no :class:`~aquaflux.turbulence.CoupledRANS` to hand it (the segregated driver's
+    tests, a harness assembling the pieces itself).
 
     Parameters
     ----------

@@ -41,11 +41,11 @@ from aquaflux.turbulence import (
     SSTTurbulence,
     UnpreconditionedScalars,
     coupled_step,
-    hybrid_initialize,
     inlet_k,
     inlet_omega,
     open_session,
     solve_coupled,
+    sst_initial_fields,
 )
 
 BACKEND = "scipy"  # always available; exact, so backend-independent correctness
@@ -111,7 +111,7 @@ def _channel(nx=20, ny=14, growth=1.2):
 def case():
     momentum, turbulence = _channel()
     coupled = CoupledRANS.build(momentum, turbulence)
-    start = hybrid_initialize(momentum, turbulence)
+    start = sst_initial_fields(momentum, turbulence)
     return {"coupled": coupled, "start": start}
 
 

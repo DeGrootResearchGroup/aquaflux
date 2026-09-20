@@ -40,11 +40,11 @@ from aquaflux.transport import ScalarTransport
 from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
-    hybrid_initialize,
     inlet_k,
     inlet_omega,
     omega_wall,
     omega_wall_value,
+    sst_initial_fields,
 )
 
 from tests.support.meshes import perturbed_grid_2d
@@ -238,7 +238,7 @@ def test_hybrid_initialize_is_positive_with_analytical_wall_omega() -> None:
     omega_in = float(inlet_omega(jnp.array(k_in), 0.07, model))
     turbulence = _turbulence(mesh, geometry, k_in, omega_in)
 
-    flow, k, omega = hybrid_initialize(momentum, turbulence)
+    flow, k, omega = sst_initial_fields(momentum, turbulence)
 
     assert flow.shape == (momentum.mesh.n_cells * (mesh.dim + 1),)
     assert bool(jnp.all(jnp.isfinite(flow)))
@@ -284,7 +284,7 @@ def test_hybrid_initialize_omega_is_a_smooth_ramp_in_log_space() -> None:
     omega_in = float(inlet_omega(jnp.array(k_in), 0.07, model))
     turbulence = _turbulence(mesh, geometry, k_in, omega_in)
 
-    _, _, omega = hybrid_initialize(momentum, turbulence)
+    _, _, omega = sst_initial_fields(momentum, turbulence)
 
     w = jnp.log(omega)
     owner, neighbour = mesh.face_cells.owner, mesh.face_cells.neighbour
@@ -332,7 +332,7 @@ def test_hybrid_initialize_floors_inlet_driven_k_at_the_turbulent_level() -> Non
     )
     assert float(jnp.median(raw)) < 0.01 * k_in
 
-    _, k, _ = hybrid_initialize(momentum, turbulence)
+    _, k, _ = sst_initial_fields(momentum, turbulence)
     # The floor lifts the whole interior to the inlet level: even the least cell is turbulent, not ~0.
     assert float(jnp.min(k)) >= 0.5 * k_in
     assert float(jnp.median(k)) >= 0.5 * k_in
@@ -380,7 +380,7 @@ def test_hybrid_initialize_starts_a_body_force_channel_in_the_turbulent_regime()
     guess but the *laminar* problem. The equilibrium level from the friction velocity replaces it.
     """
     _, momentum, turbulence = _periodic_channel(beta=0.0035)
-    _, k, omega = hybrid_initialize(momentum, turbulence)
+    _, k, omega = sst_initial_fields(momentum, turbulence)
 
     u_tau = (0.0035 * 1.0 / RHO) ** 0.5  # h = V/A_wall = 1 for this ly = 2 channel
     assert float(jnp.min(k)) == pytest.approx(u_tau**2 / SSTModel().beta_star ** 0.5)
@@ -394,7 +394,7 @@ def test_hybrid_initialize_gives_a_developed_channel_eddy_viscosity() -> None:
     its floor is enormous, so both come from the same friction velocity.
     """
     _, momentum, turbulence = _periodic_channel(beta=0.0035)
-    flow, k, omega = hybrid_initialize(momentum, turbulence)
+    flow, k, omega = sst_initial_fields(momentum, turbulence)
     nu_t = turbulence.eddy_viscosity(momentum.velocity_fields(flow).gradient, k, omega)
 
     u_tau = (0.0035 * 1.0 / RHO) ** 0.5
@@ -430,7 +430,7 @@ def test_hybrid_initialize_seeds_the_wall_closure_the_residual_imposes() -> None
     omega_in = float(inlet_omega(jnp.array(k_in), 0.07, model))
     turbulence = _turbulence(mesh, geometry, k_in, omega_in, nu=high_reynolds_nu)
 
-    _, k, omega = hybrid_initialize(momentum, turbulence)
+    _, k, omega = sst_initial_fields(momentum, turbulence)
 
     imposed = omega_wall(turbulence.molecular_viscosity, turbulence.wall_distance, k, model)
     viscous_only = omega_wall_value(turbulence.molecular_viscosity, turbulence.wall_distance, model)
@@ -546,7 +546,7 @@ def test_the_hybrid_initializer_reconstructs_each_field_with_that_fields_own_sch
     # holds however the initializer behaves -- the shape of a test that cannot fail. It was one:
     # pointing `hybrid_initialize` at the flow's scheme left this green until the clear was added.
     _RECONSTRUCTED_WITH.clear()
-    hybrid_initialize(momentum, turbulence)
+    sst_initial_fields(momentum, turbulence)
 
     assert "turbulence-scheme" in _RECONSTRUCTED_WITH  # the k and omega Laplace solves
     assert "flow-scheme" in _RECONSTRUCTED_WITH  # the potential flow underneath them
@@ -592,7 +592,7 @@ def test_no_initializer_names_a_gradient_scheme_of_its_own() -> None:
         expected = None if build in optional else DEFAULT_GRADIENT_SCHEME
         assert parameter.default is expected, build.__qualname__
 
-    for initializer in (potential_flow, hybrid_initialize):
+    for initializer in (potential_flow, sst_initial_fields):
         assert "gradient_scheme" not in inspect.signature(initializer).parameters, (
             f"{initializer.__qualname__} takes a gradient scheme again -- it can then disagree with "
             "the assembler it is initializing, which is the defect this policy removes"

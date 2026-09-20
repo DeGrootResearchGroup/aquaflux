@@ -25,10 +25,10 @@ from typing import TYPE_CHECKING, Protocol
 import equinox as eqx
 import jax
 
+from aquaflux.initialization import hybrid_initialize
 from aquaflux.solve import Convergence
 
 from .coupled import open_session, solve_coupled
-from .initialization import hybrid_initialize
 from .march_settings import merged_march_options
 from .preconditioner_spec import BlockDiagonal, MaterializedJacobian
 
@@ -354,7 +354,7 @@ def solve_reynolds_continuation(
         the continuation shares and re-points it itself. It is called for **every** point (lower-Re and
         target) with that point's companion assembler and its **packed seed coupled state**
         (:meth:`~aquaflux.turbulence.CoupledRANS.state_from_physical` of the seed fields; the lowest
-        point's seed is materialized from :func:`~aquaflux.turbulence.hybrid_initialize` here, so anything
+        point's seed is materialized from ``aquaflux.initialization.hybrid_initialize`` here, so anything
         built from it starts where the solve starts). Typical use::
 
             point_setup=lambda comp, state, point: {
@@ -482,7 +482,7 @@ def solve_reynolds_continuation(
         if point_setup is None and seed_projection is None:
             return solve_coupled(assembler, *seed_fields, **base_kwargs)
         if seed_fields[0] is None:
-            seed_fields = hybrid_initialize(assembler.momentum, assembler.turbulence)
+            seed_fields = hybrid_initialize(assembler)
         packed = assembler.state_from_physical(*seed_fields)
         # The projection runs BEFORE `point_setup`, so a per-point continuation is frozen at the state
         # the solve will actually begin from rather than at the one it was handed. The two hooks would
@@ -961,7 +961,7 @@ def solve_reynolds_ramp(
     # against 3.29e-01 from its own seed, collapsing the line search to alpha 0.016 and costing two
     # discarded attempts and a shift escalation to 4.0 before the march could begin.
     first = companion(coupled, anchor)
-    seed_fields = hybrid_initialize(first.momentum, first.turbulence)
+    seed_fields = hybrid_initialize(first)
     state = first.state_from_physical(*seed_fields)
     extra = point_setup(first, state, ReynoldsPoint(1, 1, float(anchor)))
     passed = {key: value for key, value in solve_kwargs.items() if key not in _LADDER_ONLY}

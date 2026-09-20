@@ -48,11 +48,11 @@ from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
     coupled_step,
-    hybrid_initialize,
     inlet_k,
     inlet_omega,
     scalar_pseudo_transient_solve,
     solve_segregated,
+    sst_initial_fields,
 )
 from aquaflux.turbulence.coupled import CoupledRANS, solve_coupled
 
@@ -146,7 +146,7 @@ def case():
     solve_flow = reused_flow_solve(
         momentum.with_eddy_viscosity(reference_nu_t), max_steps=FLOW_MAX_STEPS, **PRECONDITIONER
     )
-    hybrid = hybrid_initialize(momentum, turbulence)
+    hybrid = sst_initial_fields(momentum, turbulence)
     _, k0, omega0 = hybrid
     return {
         "mesh": mesh,

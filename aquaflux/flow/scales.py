@@ -72,7 +72,7 @@ def friction_velocity(assembler: MomentumContinuity) -> jnp.ndarray:
     This follows from the force balance alone — no viscous or turbulence assumption — which makes it
     the one velocity scale a body-force-driven wall-bounded flow always has, laminar or turbulent. It
     sets the turbulent branch of :func:`body_force_speed`, and the equilibrium turbulence levels a
-    :func:`~aquaflux.turbulence.hybrid_initialize` starts such a domain from.
+    ``aquaflux.initialization.hybrid_initialize`` starts such a domain from.
 
     Parameters
     ----------

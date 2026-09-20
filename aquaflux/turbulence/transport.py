@@ -323,7 +323,7 @@ class SSTTurbulence(eqx.Module):
             takes :data:`~aquaflux.schemes.DEFAULT_GRADIENT_SCHEME`, which is where that choice is
             written down. It is carried on the built assembler, so an initializer for these fields
             reads it from there rather than choosing again
-            (:func:`~aquaflux.turbulence.hybrid_initialize`).
+            (``aquaflux.initialization.hybrid_initialize``).
         explicit_production_limiter : bool
             Linearization of the k-production limiter for the forward solve (see the class
             attribute); ``False`` (default) is the exact operator. ``True`` is the robust choice for a

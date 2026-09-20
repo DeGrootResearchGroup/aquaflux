@@ -59,6 +59,7 @@ import compare  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse.linalg as spla  # noqa: E402
+from aquaflux.turbulence import sst_initial_fields
 from aquaflux.solve import (  # noqa: E402
     jacobian_matvec,
     DualTimeLoop,
@@ -66,7 +67,7 @@ from aquaflux.solve import (  # noqa: E402
     materialize_block_jacobian,
     shifted_jacobian,
 )
-from aquaflux.turbulence import coupled_step, hybrid_initialize
+from aquaflux.turbulence import coupled_step
 from aquaflux.solve import CompleteLu, FieldSplit, JacobianProbeSpec, MaterializedJacobian
 
 #: Far past the march's inexact-Newton stop, so arms separate rather than tie, and modest in restarts
@@ -179,7 +180,7 @@ def main() -> None:
     path = Path(named) if named else None
     case = compare.build_case()
     coupled = case["coupled"]
-    seed = coupled.state_from_physical(*hybrid_initialize(case["momentum"], case["turbulence"]))
+    seed = coupled.state_from_physical(*sst_initial_fields(case["momentum"], case["turbulence"]))
     state = load_state(coupled, seed, path)
     if not bool(jnp.all(jnp.isfinite(coupled.residual(state)))):
         raise SystemExit("starting residual not finite -- nothing below would mean anything")

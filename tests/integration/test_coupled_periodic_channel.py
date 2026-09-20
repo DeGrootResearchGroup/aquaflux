@@ -44,7 +44,7 @@ from aquaflux.turbulence import (
     ScalarTwoLevel,
     SSTModel,
     SSTTurbulence,
-    hybrid_initialize,
+    sst_initial_fields,
 )
 from aquaflux.turbulence.coupled import CoupledRANS, solve_coupled
 
@@ -95,7 +95,7 @@ def case():
     coupled = CoupledRANS.build(momentum, turbulence)
     # The hybrid IC is the exactly-symmetric uniform plug (u_y == 0): no perturbation is applied,
     # so this exercises the guarded-sqrt strain fix directly.
-    flow0, k0, omega0 = hybrid_initialize(momentum, turbulence)
+    flow0, k0, omega0 = sst_initial_fields(momentum, turbulence)
     flow, k, omega = solve_coupled(
         coupled,
         flow0,

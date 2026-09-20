@@ -38,6 +38,7 @@ CASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
+from aquaflux.initialization import hybrid_initialize
 from aquaflux.solve import (  # noqa: E402
     ColumnProbePlan,
     FieldGroups,
@@ -47,7 +48,6 @@ from aquaflux.solve import (  # noqa: E402
     column_probe_plan,
     equilibrate_cell_major,  # noqa: E402
 )
-from aquaflux.turbulence import hybrid_initialize  # noqa: E402
 from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec
 
 REACH = 3
@@ -95,7 +95,7 @@ def main():
     owner, nb, _ = mesh.face_cells.interior_edges()
     owner, nb = np.asarray(owner), np.asarray(nb)
 
-    flow, k, omega = hybrid_initialize(coupled.momentum, coupled.turbulence)
+    flow, k, omega = hybrid_initialize(coupled)
     state = np.asarray(coupled.state_from_physical(flow, k, omega))
     print("[state] the target-Re cold initial field -- where the divergence occurs", flush=True)
 

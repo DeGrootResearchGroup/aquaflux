@@ -55,7 +55,8 @@ from .coupled import (
     solve_coupled,
 )
 from .driver import bulk_velocity, solve_segregated
-from .initialization import hybrid_initialize, wall_consistent_omega
+from . import coupled_initialization as _coupled_initialization  # noqa: F401  (registers CoupledRANS)
+from .initialization import sst_initial_fields, wall_consistent_omega
 from .march_settings import CoupledShiftSettings
 from .preconditioner import (
     AirAmgPreconditioner,
@@ -144,7 +145,6 @@ __all__ = [
     "coupled_step",
     "eddy_viscosity_drift",
     "equilibrium_k",
-    "hybrid_initialize",
     "inlet_k",
     "inlet_omega",
     "k_wall_production",
@@ -169,6 +169,7 @@ __all__ = [
     "solve_reynolds_continuation",
     "solve_reynolds_ramp",
     "solve_segregated",
+    "sst_initial_fields",
     "strain_rate_magnitude",
     "turbulence_residual_norm",
     "wall_consistent_omega",

@@ -39,7 +39,8 @@ sys.path.insert(0, str(ROOT))  # import aquaflux from the working tree, as compa
 sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
-from aquaflux.turbulence import hybrid_initialize, turbulence_residual_norm  # noqa: E402
+from aquaflux.initialization import hybrid_initialize
+from aquaflux.turbulence import turbulence_residual_norm  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _DEFAULT_SHIFT_BASIS,
     _monolithic_shift_source,
@@ -66,7 +67,7 @@ def main() -> int:
     # The reference the case takes: |R_turb| at the state the march opens from. The checkpointer
     # writes AFTER a step, so the first checkpoint is already one step in -- the true reference is the
     # hybrid start, rebuilt here the way `solve_reynolds_ramp` builds it.
-    seed = coupled.state_from_physical(*hybrid_initialize(coupled.momentum, coupled.turbulence))
+    seed = coupled.state_from_physical(*hybrid_initialize(coupled))
     # The row scales the march itself steers by, frozen at the seed so every step is reported in
     # ONE measure -- a per-state rebuild would mix progress with a change of measure.
     shift_policy = _monolithic_shift_source(coupled, seed, _DEFAULT_SHIFT_BASIS)

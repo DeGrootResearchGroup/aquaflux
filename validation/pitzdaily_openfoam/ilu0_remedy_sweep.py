@@ -87,6 +87,7 @@ sys.path.insert(0, str(CASE))
 import compare  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
+from aquaflux.initialization import hybrid_initialize
 from aquaflux.solve import (  # noqa: E402
     AmgVCycle,
     MonolithicAmgPreconditioner,
@@ -97,7 +98,6 @@ from aquaflux.solve import (  # noqa: E402
     solve_linear,
 )
 from aquaflux.solve.amg_preconditioner import ShiftedCellMajorOperator  # noqa: E402
-from aquaflux.turbulence import hybrid_initialize  # noqa: E402
 from aquaflux.turbulence.coupled import _DEFAULT_SHIFT_BASIS, _coupled_jacobian_plan, _monolithic_shift_source
 from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, frozen_shift_diagonal, jacobian_matvec
 
@@ -282,7 +282,7 @@ def load_state(coupled, path: Path | None):
     if path is not None:
         state = jnp.asarray(np.load(path)["state"])
     else:
-        flow, k, omega = hybrid_initialize(coupled.momentum, coupled.turbulence)
+        flow, k, omega = hybrid_initialize(coupled)
         state = coupled.state_from_physical(flow, k, omega)
         np.savez(cache, state=np.asarray(state))
         path = cache

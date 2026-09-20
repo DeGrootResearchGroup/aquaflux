@@ -67,6 +67,16 @@ contaminant does in a reactor — solved on the flow the coupled block produces.
     `injected_value` is still a **plain function**, which is accepted but held static, so its
     geometry is not a parameter until it is rewritten as a module.
 
+## Initial condition — `hybrid_initialize(transport)` (2026-09-19)
+
+`transport/initialization.py` registers `ScalarTransport` with `aquaflux.initialization.hybrid_initialize`:
+the harmonic interpolant (`flow.laplace_field`) of the scalar's boundary values, reconstructed with the
+scalar's OWN `gradient_scheme`, so by the maximum principle it stays inside the prescribed boundary range.
+A scalar with no `Dirichlet` / `DirichletField` patch starts at **zero** rather than through a singular
+pure-Neumann solve (a prescribed flux makes that solve return a meaningless field; pinned by a test that
+uses one). It is deliberately the cheap, flow-independent start; a better one — the linear transport solve
+on the potential-flow flux — is not built.
+
 ## Testability seam
 
 `tests/integration/test_scalar_transport.py` — order of accuracy against the 1-D

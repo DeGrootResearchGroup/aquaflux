@@ -127,7 +127,7 @@ cfd/                                  # repo root
 │   │   ├── driver.py                 #   solve_segregated: the segregated outer loop coupling the flow solve to the closure
 │   │   ├── continuation.py           #   pseudo-transient continuation for the (k, ω) scalar transport solves
 │   │   ├── reynolds.py               #   solve_reynolds_continuation: reach a high-Reynolds root through easier lower-Re ones
-│   │   ├── initialization.py         #   hybrid_initialize: potential velocity + smoothed turbulence initial condition
+│   │   ├── initialization.py         #   sst_initial_fields: potential velocity + smoothed turbulence initial condition (registered as CoupledRANS's hybrid_initialize)
 │   │   ├── preconditioner.py         #   convection-diffusion AMG for the scalar transport solves; the coupled *_continuation builders (AMG / LU)
 │   │   └── diagnostics.py            #   named physical fields of a coupled state, for march-log reporting
 │   │
