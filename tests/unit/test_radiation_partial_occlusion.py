@@ -103,6 +103,18 @@ def test_the_aggregation_pairs_each_coarse_patch_with_its_own_two_triangles():
             np.testing.assert_allclose(pair.mean(axis=0)[:2], [middle[row], middle[column]])
 
 
+@pytest.mark.parametrize(("fine", "coarse"), [(18, 4), (8, 3), (4, 0), (4, -1)])
+def test_a_coarse_grid_that_does_not_divide_the_fine_one_is_refused(fine, coarse):
+    """A trap the aggregation walked into: 18 does not divide by 4.
+
+    Integer division then runs the owner index off the end of the coarse grid, and the failure
+    surfaces as an out-of-range scatter deep inside ``area_average_onto`` — a message about
+    numpy's internals rather than about the two meshes being incompatible.
+    """
+    with pytest.raises(ValueError, match="must divide"):
+        quad_of_facet(fine, coarse)
+
+
 @pytest.mark.parametrize("radius", [0.15, 0.6])
 def test_a_body_of_any_size_leaves_the_mask_error_above_the_floor(radius):
     """Both regimes the harness sweeps: a rod thinner than a facet and one wider than several.
