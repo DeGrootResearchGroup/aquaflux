@@ -258,7 +258,18 @@ def facing_plates(n: int, *, half: float = 1.0, gap: float = 1.0) -> np.ndarray:
 
 
 def quad_of_facet(n: int, n_coarse: int) -> np.ndarray:
-    """Which coarse quad each facet of :func:`facing_plates` belongs to."""
+    """Which coarse quad each facet of :func:`facing_plates` belongs to.
+
+    Raises
+    ------
+    ValueError
+        If ``n_coarse`` does not divide ``n``. Integer division would otherwise run the owner
+        index off the end of the coarse grid, which surfaces as an out-of-range scatter deep
+        inside :func:`area_average_onto` rather than as a statement about the two meshes.
+    """
+    if n_coarse <= 0 or n % n_coarse:
+        msg = f"the coarse grid must divide the fine one; {n_coarse} does not divide {n}"
+        raise ValueError(msg)
     step = n // n_coarse
     row, column = np.divmod(np.arange(n * n), n)
     per_plate = np.repeat((row // step) * n_coarse + (column // step), 2)
