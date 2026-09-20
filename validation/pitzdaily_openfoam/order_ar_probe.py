@@ -26,10 +26,8 @@ sys.path.insert(0, str(HERE))
 
 import scipy.sparse as sp  # noqa: E402
 from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
-from aquaflux.turbulence.coupled import (  # noqa: E402
-    _coupled_shift_policy,
-    _frozen_shift_diagonal,
-)
+from aquaflux.turbulence.coupled import _coupled_shift_policy
+from aquaflux.solve import frozen_shift_diagonal
 from ilu_fill_probe import (  # noqa: E402
     FIELDS2,
     FIELDS3,
@@ -106,7 +104,7 @@ def run(name, coupled, betas, arms=("ilu0", "ilu1"), reach=3):
     order_set = orderings(coupled)
 
     for beta in betas:
-        shift = _frozen_shift_diagonal(base, beta, state) if beta > 0 else np.zeros(n_fields * n)
+        shift = frozen_shift_diagonal(base, beta, state) if beta > 0 else np.zeros(n_fields * n)
         cell_major, scaling, perm = assemble(jacobian, np.asarray(shift), n_fields)
         rhs_eq = (np.asarray(scaling) * rhs)[perm]
         print(f"\n  -- beta {beta}", flush=True)

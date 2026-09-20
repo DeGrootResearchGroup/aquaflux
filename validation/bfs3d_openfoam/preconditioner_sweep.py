@@ -74,15 +74,8 @@ from aquaflux.solve import (  # noqa: E402
 )
 from aquaflux.solve.amg_preconditioner import ShiftedCellMajorOperator  # noqa: E402
 from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
-from aquaflux.turbulence.coupled import (  # noqa: E402
-    _PROBE_BATCH_SIZE,
-    _batched_jacobian_matvec,
-    _coupled_jacobian_plan,
-    _coupled_shift_policy,
-    _frozen_shift_diagonal,
-    _jacobian_matvec,
-    coupled_scaled_norm,
-)
+from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy, coupled_scaled_norm
+from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, frozen_shift_diagonal, jacobian_matvec
 
 
 def march_solver(coupled, policy, state):
@@ -290,10 +283,10 @@ def materialize(coupled, state, plan, structure, n_fields, pc_shift):
     which is safe here because the V-cycle copies the arrays it keeps.
     """
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
-        lambda v: _jacobian_matvec(coupled, state, v),
+        lambda v: jacobian_matvec(coupled, state, v),
         plan,
-        lambda seeds: _batched_jacobian_matvec(coupled, state, seeds),
-        _PROBE_BATCH_SIZE,
+        lambda seeds: batched_jacobian_matvec(coupled, state, seeds),
+        PROBE_BATCH_SIZE,
         structure,
     )
     indptr, indices, _ = structure
@@ -320,7 +313,7 @@ def arm(label, coupled, state, rhs, op_shift, assembled, n_fields, options, solv
     build_s = time.time() - t0
 
     def operator(v):
-        return _jacobian_matvec(coupled, state, v) + op_shift * v
+        return jacobian_matvec(coupled, state, v) + op_shift * v
 
     t1 = time.time()
     x, raw = solve_linear(
@@ -345,8 +338,8 @@ def probe_state(coupled, state, march_beta, label, plan, structure, n_fields):
     """Run every arm at one state, reporting each and surviving any that fails."""
     base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     self_check = march_solver(coupled, base, state)
-    op_shift = _frozen_shift_diagonal(base, march_beta, state)
-    pc_shift = _frozen_shift_diagonal(base, max(march_beta, FLOOR), state)
+    op_shift = frozen_shift_diagonal(base, march_beta, state)
+    pc_shift = frozen_shift_diagonal(base, max(march_beta, FLOOR), state)
     rhs = -coupled.residual(state)
     print(
         f"\n{'=' * 90}\n{label}\n  operator beta {march_beta}, V-cycle beta "

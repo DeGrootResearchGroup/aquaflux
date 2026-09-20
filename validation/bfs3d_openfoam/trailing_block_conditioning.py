@@ -50,11 +50,8 @@ from aquaflux.solve import (  # noqa: E402
     build_convection_hierarchy,
 )
 from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
-from aquaflux.turbulence.coupled import (  # noqa: E402
-    _coupled_jacobian_plan,
-    _coupled_shift_policy,
-    _frozen_shift_diagonal,
-)
+from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy
+from aquaflux.solve import frozen_shift_diagonal
 from field_split_probe import FLOOR, STATES, load_state, materialize  # noqa: E402
 
 #: Below this the 2x2 is called singular. The blocks are compared on their own scale (the determinant
@@ -148,7 +145,7 @@ def main() -> None:
         ("march shift", march_beta),
         ("preconditioner floor -- the shipped build", max(march_beta, FLOOR)),
     ):
-        shift = _frozen_shift_diagonal(base, beta, state) if beta > 0 else np.zeros(groups.n_dofs)
+        shift = frozen_shift_diagonal(base, beta, state) if beta > 0 else np.zeros(groups.n_dofs)
         shifted = MonolithicAmgPreconditioner._shifted(jacobian, shift)
         trailing = sp.csr_matrix(shifted[groups.trailing, :][:, groups.trailing])
         report(cell_blocks(trailing, n_cells), f"[k, omega] slice, {label} (beta {beta:g})")

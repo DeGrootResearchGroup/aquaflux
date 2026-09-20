@@ -8,18 +8,18 @@ import inspect
 import pytest
 from aquaflux.flow import BlockPreconditioner
 from aquaflux.solve import (
+    CompleteLu,
+    FieldSplit,
+    JacobianProbeSpec,
     JacobiSmoothed,
+    MaterializedJacobian,
     MonolithicAmgPreconditioner,
     MonolithicLuPreconditioner,
+    MonolithicVCycle,
     SimpleSmoothed,
 )
 from aquaflux.turbulence import (
     BlockDiagonal,
-    CompleteLu,
-    FieldSplit,
-    JacobianProbeSpec,
-    MaterializedJacobian,
-    MonolithicVCycle,
     ScalarAir,
     ScalarTwoLevel,
     UnpreconditionedScalars,

@@ -393,7 +393,7 @@ def test_a_materialized_preconditioner_is_one_session_shared_by_every_point(monk
     now owns, so it no longer travels beside it -- and each point is handed that session, re-pointed at
     its own companion.
     """
-    from aquaflux.turbulence import CompleteLu, MaterializedJacobian
+    from aquaflux.solve import CompleteLu, MaterializedJacobian
 
     calls = _record_solves(monkeypatch)
     solve_reynolds_continuation(
@@ -408,7 +408,7 @@ def test_a_materialized_preconditioner_is_one_session_shared_by_every_point(monk
     assert target["kwargs"]["preconditioner"] is session
     assert "jacobian_production_viscosity" not in ramp["kwargs"]
     assert "jacobian_production_viscosity" not in target["kwargs"]
-    assert session._production_viscosity is True
+    assert session.problem.production_viscosity is True
 
 
 def test_point_setup_builds_per_point_kwargs_and_materializes_the_first_seed(monkeypatch) -> None:
@@ -1522,7 +1522,8 @@ def test_the_ladder_only_keywords_are_derived_from_the_two_signatures() -> None:
 
 def test_the_ramp_opens_a_materialized_session_on_the_anchor_and_re_points_it(monkeypatch) -> None:
     """The first step is fitted to the anchor it solves, and every station change re-points the session."""
-    from aquaflux.turbulence import CompleteLu, MaterializedJacobian, solve_reynolds_ramp
+    from aquaflux.solve import CompleteLu, MaterializedJacobian
+    from aquaflux.turbulence import solve_reynolds_ramp
 
     coupled, calls, _ = _ramp_arm_fixtures(monkeypatch)
     solve_reynolds_ramp(
@@ -1536,10 +1537,10 @@ def test_the_ramp_opens_a_materialized_session_on_the_anchor_and_re_points_it(mo
     session = calls[0]["kwargs"]["preconditioner"]
     homotopy = calls[0]["kwargs"]["homotopy"]
     assert homotopy.rebind == session.rebind
-    bound = session._coupled.momentum.properties.properties["viscosity"].value
+    bound = session.problem.coupled.momentum.properties.properties["viscosity"].value
     assert float(bound / (RHO * NU)) == pytest.approx(100.0)
     homotopy.enter(2)  # the target station
-    assert session._coupled is coupled
+    assert session.problem.coupled is coupled
 
 
 def test_no_refresh_at_all_is_not_an_error(monkeypatch) -> None:

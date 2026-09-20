@@ -52,11 +52,7 @@ from aquaflux.solve import (  # noqa: E402
     block_stencil_colouring,
     block_stencil_gather_map,
 )
-from aquaflux.turbulence.coupled import (  # noqa: E402
-    _PROBE_BATCH_SIZE,
-    _batched_jacobian_matvec,
-    _jacobian_matvec,
-)
+from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec
 
 #: Field order of the coupled state, and the two groups a block-triangular split cuts it into.
 FIELDS = ("u", "v", "w", "p", "k", "omega")
@@ -205,10 +201,10 @@ def main():
     structure = block_stencil_gather_map(ColumnProbePlan.uniform(colouring, n_fields))
     started = time.time()
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
-        lambda v: _jacobian_matvec(coupled, state, v),
+        lambda v: jacobian_matvec(coupled, state, v),
         ColumnProbePlan.uniform(colouring, n_fields),
-        lambda seeds: _batched_jacobian_matvec(coupled, state, seeds),
-        _PROBE_BATCH_SIZE,
+        lambda seeds: batched_jacobian_matvec(coupled, state, seeds),
+        PROBE_BATCH_SIZE,
         structure,
     )
     print(

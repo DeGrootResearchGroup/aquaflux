@@ -33,9 +33,8 @@ import abc
 import dataclasses
 import inspect
 import math
-import time
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 import equinox as eqx
 import jax
@@ -73,18 +72,21 @@ from aquaflux.solve import (
     Euclidean,
     FieldGroups,
     FieldLayout,
-    FieldSplitAmgPreconditioner,
+    FieldSplit,
     GlobalDofs,
     Globalization,
     JacobianProbe,
     LinearSolveRegime,
     LinearSolveSettings,
     LocalCourantBasis,
-    MaterializedJacobianPreconditioner,
+    MaterializedJacobian,
+    MaterializedProblem,
+    MaterializedSession,
     MonolithicAmgPreconditioner,
     MonolithicFactorShiftPolicy,
     MonolithicLuPreconditioner,
     NewtonStrategy,
+    PreconditionerSession,
     PseudoTransientStep,
     RefreshPolicy,
     RefreshTiming,
@@ -93,6 +95,7 @@ from aquaflux.solve import (
     RootSolver,
     RowScaled,
     RowScaledNorm,
+    SessionSource,
     ShiftBasis,
     ShiftPolicy,
     ShiftTerm,
@@ -123,13 +126,7 @@ from .preconditioner import (
     ScaledScalarPreconditioner,
     UnpreconditionedScalars,
 )
-from .preconditioner_spec import (
-    BlockDiagonal,
-    CompleteLu,
-    FieldSplit,
-    MaterializedJacobian,
-    MonolithicVCycle,
-)
+from .preconditioner_spec import BlockDiagonal
 from .sources import production_and_limit
 
 # The default pseudo-time shift basis (full operator diagonal = uniform under-relaxation), held as a
@@ -1113,32 +1110,6 @@ def eddy_viscosity_drift(
 
 
 @eqx.filter_jit
-def _jacobian_matvec(coupled: CoupledRANS, state: jnp.ndarray, tangent: jnp.ndarray) -> jnp.ndarray:
-    """``J(state) @ tangent`` -- the matrix-free coupled Jacobian-vector product, compiled once.
-
-    Everything it needs is an **argument**, including the assembler. A locally-defined ``jax.jit``
-    closure over ``coupled`` is a fresh cache entry per closure, so each Reynolds-continuation rung --
-    which rebuilds the assembler at its own viscosity -- would recompile the probe from scratch, even
-    though a scaled viscosity changes only two leaf *values* and leaves the pytree structure identical.
-    As an argument the assembler's arrays are ordinary traced leaves and every rung is a cache hit.
-    """
-    return jax.jvp(coupled.residual, (state,), (tangent,))[1]
-
-
-@eqx.filter_jit
-def _batched_jacobian_matvec(
-    coupled: CoupledRANS, state: jnp.ndarray, tangents: jnp.ndarray
-) -> jnp.ndarray:
-    """``J(state) @ tangents`` for a stack of tangents -- the batched form the coloured probe uses.
-
-    The same directional derivative as :func:`_jacobian_matvec` applied to each row, so the responses
-    are bit-identical to a per-tangent loop; running them as a few fused passes only amortizes dispatch.
-    Takes the assembler as an argument for the same reason.
-    """
-    return jax.vmap(lambda tangent: jax.jvp(coupled.residual, (state,), (tangent,))[1])(tangents)
-
-
-@eqx.filter_jit
 def _eddy_viscosity_drift(
     coupled: CoupledRANS,
     state: jnp.ndarray,
@@ -1250,30 +1221,6 @@ def _reparametrized_preconditioner(
 #: solution in far fewer.
 _BLOCK_LINEAR_SOLVE = LinearSolveRegime(rtol=0.3, restart=120, max_restarts=15)
 
-#: A monolithic complete-LU factorization. It factors the whole coupled saddle exactly, so the
-#: preconditioned operator's spectrum collapses to a single point at the state and shift it was factored
-#: at -- the Krylov solve stops within a handful of vectors there, and the large subspace the
-#: block-triangular preconditioner needs is pure waste: with `restart = 120` it would build ~120
-#: matrix-vector products (each paying the factorization's triangular back-solve) before it could stop.
-#: `max_restarts` is kept generous so a transiently harder (e.g. drifted-reference) solve still completes
-#: before the next refactor.
-_FACTORIZATION_LINEAR_SOLVE = LinearSolveRegime(rtol=0.3, restart=10, max_restarts=40)
-
-#: A monolithic multigrid V-cycle. Restart 15 is the measured sweet spot for a one-V-cycle
-#: preconditioner: enough Arnoldi history for its convergence while checking the stop often enough not to
-#: overshoot the loose tolerance deep into the next cycle (a larger restart costs ~2x the expensive host
-#: V-cycle applies for the same trajectory).
-#:
-#: ⚠️ Two constraints bind `max_restarts` against the march's retry threshold, and both bite silently.
-#: It is in raw ``lineax`` restarts, which carry a fixed ``+2`` per solve, while
-#: ``retry.abort_above_cycles`` is in corrected cycles (:func:`~aquaflux.solve.restart_cycles`), so a
-#: corrected cap of ``c`` is ``max_restarts = c + 2``. And the corrected count must stay **strictly
-#: above** ``retry.abort_above_cycles``: the march's test is ``max_inner_cycles >
-#: retry.abort_above_cycles``, so a cap landing exactly on the threshold does not trip the redo, and the
-#: step accepts the truncated, non-converged direction instead of re-running it on a fresh
-#: preconditioner.
-_VCYCLE_LINEAR_SOLVE = LinearSolveRegime(rtol=0.3, restart=15, max_restarts=60)
-
 #: The mass-flow-constrained (bordered) system. Its restart regime is the block-diagonal one -- it wraps
 #: that preconditioner -- but its **tolerance is a Euclidean one**, because the bordered march has no
 #: row-scaled measure to stop in: the row-equilibrated measure has no constraint-aware form yet, and
@@ -1282,28 +1229,6 @@ _VCYCLE_LINEAR_SOLVE = LinearSolveRegime(rtol=0.3, restart=15, max_restarts=60)
 #: does. Re-unify it with :data:`_BLOCK_LINEAR_SOLVE` the day the measure gains a constraint-aware form.
 _CONSTRAINED_LINEAR_SOLVE = LinearSolveRegime(rtol=1e-2, restart=120, max_restarts=15)
 
-
-# How many coloured tangents share one vmapped jvp pass when materializing the AMG Jacobian. Larger
-# amortizes dispatch over more probes; the coloured probes run in ceil(n_probes / this) fused passes
-# instead of an n_probes-call Python loop.
-#
-# Measured on the 3D backward-facing step (399 probes; 47.2M structural nonzeros in the fixed sparsity
-# pattern, of which ~38.7-39.0M are live at any one state), wall / peak against the batch:
-#
-#     batch      1      2      4      8     16     32
-#     wall    11.7    8.4    6.7    5.9    5.8    6.5   s
-#     peak     380    383    388    399    419    460   MB
-#
-# Two things decide the eight. The curve has an interior optimum and **turns** -- 32 is slower than 16 --
-# so this is not "as large as memory allows"; and the memory it costs is ~2.5 MB per unit of batch, which
-# is nothing against the matrix being built, so the peak is not what picks the value. Eight is where the
-# processor time bottoms; sixteen is a hair faster in wall and slower in processor time, which on a shared
-# machine is the less trustworthy of the two.
-#
-# An earlier default of four came from a measurement -- "16 vs 4: ~2.2 GB against ~0.7 GB" -- taken when
-# the seed set and the response array dominated the peak, and NEITHER of those ever scaled with the batch.
-# Both are built a chunk at a time now, so that trade no longer exists.
-_PROBE_BATCH_SIZE = 8
 
 # Backtracking rungs for the shifted step. The full coupled Newton step from the hybrid initial
 # condition overshoots violently (the residual blows up many orders of magnitude), so the step length
@@ -1830,27 +1755,6 @@ def _coupled_shift_policy(
     )
 
 
-def _is_traced(pytree: object) -> bool:
-    """Whether any array leaf of ``pytree`` is a JAX tracer (i.e. we are inside a JAX transform).
-
-    ``solve_coupled`` orchestrates the march eagerly (the scalar-block AMG hierarchies are assembled
-    off the jit path as ``scipy.sparse`` matrices, so the whole solve cannot be traced), so a tracer
-    leaf means the caller has wrapped the solve in ``jax.grad`` / ``jvp`` / ``vmap``. Used to reject the
-    forward-only preconditioner refresh under differentiation with a clear error.
-
-    Parameters
-    ----------
-    pytree : object
-        Any pytree (here the ``(coupled, flow, k, omega)`` inputs), possibly containing ``None`` leaves.
-
-    Returns
-    -------
-    bool
-        ``True`` if at least one leaf is a :class:`jax.core.Tracer`.
-    """
-    return any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(pytree))
-
-
 def _coupled_jacobian_plan(
     coupled: CoupledRANS,
     stencil_reach: int,
@@ -2053,22 +1957,6 @@ def _monolithic_shift_source(
     )
 
 
-def _frozen_shift_diagonal(base: CoupledShiftPolicy, beta: float, state: jnp.ndarray) -> np.ndarray:
-    """The frozen pseudo-transient shift diagonal the factorization is built against, at ``state``.
-
-    ``beta`` scales the base policy's shift diagonal; the ``stop_gradient`` keeps the frozen
-    factorization off the differentiation path. Shared by the initial build and every in-place refresh,
-    for the complete-LU and multigrid preconditioners alike.
-
-    It asks the term for the shift at ``beta`` rather than scaling the diagonal itself, so a policy
-    that runs a block at its own pseudo-timestep (:attr:`CoupledShiftPolicy.turbulence_damping`)
-    preconditions the operator it actually forms. Open-coding ``beta * diagonal`` here would drop that
-    factor silently -- the march would run, and the preconditioner would simply be fitted to a
-    different operator than the one being solved.
-    """
-    return np.asarray(jax.lax.stop_gradient(base.shift_term(state).shift(beta)))
-
-
 def _coupled_step(
     coupled: CoupledRANS,
     reference_state: jnp.ndarray,
@@ -2249,276 +2137,9 @@ def _monolithic_factor_step(
     )
 
 
-def _beta_tracking_refresh(
-    coupled: CoupledRANS,
-    stencil_reach: int,
-    column_reach: Sequence[int] | None = None,
-    probe_gradient_sweeps: int | None = None,
-    *,
-    every_step: bool,
-    beta_floor: float = 0.0,
-    observer: Callable[[RefreshTiming], None] | None = None,
-    probe: JacobianProbe | None = None,
-) -> Callable[[NewtonStrategy, jnp.ndarray], None]:
-    """Shared skeleton for the β-tracking ``refresh_preconditioner`` hooks (complete-LU and algebraic multigrid).
-
-    Returns a ``refresh_preconditioner(active_step, state)`` that reads ``β`` from the step's
-    :class:`~aquaflux.solve.ConstantRelaxation` schedule and re-factors the step's
-    :class:`MonolithicFactorShiftPolicy` preconditioner in place at ``J(state) + β·d(state)``. With
-    ``every_step`` it does so on every step (the cheap exact-LU cadence); without, only on its first call
-    and after each ``rebind`` -- a multigrid re-materialize is too expensive to pay every step, so between
-    those the rebuild is left to the dual-time loop's cost trigger, through ``refresh_at``.
-
-    Parameters
-    ----------
-    coupled : CoupledRANS
-        The coupled residual assembler (supplies the Jacobian-vector product and the shift diagonal).
-    stencil_reach : int
-        The cell-graph distance the Jacobian's sparsity is probed to (coupled RANS reaches distance ``3``).
-    column_reach : sequence of int, optional
-        A stencil reach per **column field**, in the flat layout's order ``[u, ..., p, k, omega]``, while
-        the assembled sparsity stays at ``stencil_reach``. The probe costs one directional derivative per
-        (colour, column field) and the colour count falls steeply with the reach, so a column whose
-        couplings all close inside a shorter reach can be probed far more cheaply and assembled
-        unchanged. It is **exact only for a column that genuinely carries nothing further out** -- a
-        column with far couplings is corrupted rather than truncated, because the short colouring folds
-        them onto near entries. Which columns qualify follows from the schemes the residual was
-        assembled with, so measure it for the case rather than assuming it
-        (``validation/bfs3d_openfoam/probe_reach_audit.py`` reports it per column). ``None`` (default)
-        probes every column at ``stencil_reach``.
-    probe_gradient_sweeps : int, optional
-        Materialize the preconditioner's Jacobian from a copy of the residual whose corrected-gradient
-        solve is capped at this many Richardson sweeps, so its stencil fits inside the reach the
-        colouring recovers -- see :meth:`~aquaflux.solve.JacobianProbe.narrow`. The solve's own operator is
-        unchanged, so the converged state and its adjoint are too. ``None`` (default) probes the
-        residual as it stands.
-    every_step : bool
-        Re-factor on every step (``True``), or only on the first call and after each ``rebind``
-        (``False``).
-    beta_floor : float
-        A lower bound on the shift strength the **preconditioner** is refreshed at: it is built at
-        ``max(beta, beta_floor)`` while the march keeps solving at its own ``beta``. ``0.0`` (default)
-        tracks ``beta`` exactly.
-    observer : callable, optional
-        ``(timing: RefreshTiming) -> None``, called on each refresh with which branch ran, its total
-        seconds, and its per-phase costs. ``None`` (default) elides the call.
-    probe : JacobianProbe, optional
-        A shared colouring plan and de-compression map, when the caller already has one -- see
-        :class:`~aquaflux.solve.JacobianProbe`. ``None`` (default) builds one from
-        ``stencil_reach`` / ``column_reach``, which are then ignored if a ``probe`` is given.
-
-    Returns
-    -------
-    callable
-        ``refresh_preconditioner(active_step, state) -> None``, carrying ``refresh_at`` (the inner-loop hook)
-        and ``rebind`` (point it at another companion of the same case -- see below).
-    """
-    if probe is None:
-        probe = coupled_jacobian_probe(coupled, stencil_reach, column_reach, probe_gradient_sweeps)
-    plan, structure = probe.plan, probe.structure
-
-    # WHICH case this hook currently refreshes for, in a mutable binding rather than closed over, so
-    # `rebind` can point it at another companion of the same case. A Reynolds continuation solves a
-    # sequence of companions that differ only in their molecular viscosity, and rebinding one hook lets
-    # them all share ONE preconditioner -- which is what keeps the compiled coupled step a cache hit
-    # across a rung boundary, since the preconditioner rides in a static field compared by identity.
-    # Both probes below take the assembler as an argument to a module-level jitted function, so swapping
-    # it changes no compilation key of theirs either.
-    # `"probed"` is what the coloured probe differentiates, which is the assembler itself unless the probe
-    # asks for a reduced-sweep copy (`JacobianProbe.narrow`). It is stored beside the companion
-    # rather than derived per call so a rebind narrows once; the drift measure below deliberately reads
-    # `"coupled"`, since it reports the real case's eddy viscosity and not the preconditioner's stand-in.
-    bound: dict[str, CoupledRANS] = {"coupled": coupled, "probed": probe.narrow(coupled)}
-
-    # `frozen` a traced argument (not closed over) so the jvp-matvec compiles once and every refactor
-    # reuses it, rather than a fresh lambda recompiling each step.
-    def matvec_at(frozen, v):
-        return _jacobian_matvec(bound["probed"], frozen, v)
-
-    # Batched form (vmapped over the tangent) so the coloured probes of a full materialize run as a few
-    # fused passes rather than a Python loop of separate calls. Built once (state-independent, `frozen` a
-    # traced argument) so it compiles a single time and every materialize reuses it. Used only by the AMG
-    # preconditioner's `refresh_in_place`.
-    def batched_matvec_at(frozen, seeds):
-        return _batched_jacobian_matvec(bound["probed"], frozen, seeds)
-
-    # Pending on the first call -- the build froze the preconditioner at its own shift, not the march's --
-    # and again after `rebind`, since the standing preconditioner then describes the PREVIOUS companion.
-    forced_full = {"pending": True}
-
-    def _report_refresh(
-        kind: str, started: float, phases: tuple[tuple[str, float], ...] | None = None
-    ) -> None:
-        """Tell an injected observer which branch ran and what each part of it cost.
-
-        The total alone cannot be acted on: a refresh dominated by the coloured jvp probe and one
-        dominated by the multigrid setup take the same wall time and call for opposite fixes.
-        """
-        if observer is not None:
-            observer(RefreshTiming(kind, time.perf_counter() - started, tuple(phases or ())))
-
-    # Which step the inner-loop hook is refreshing, kept current by `refresh_preconditioner` below.
-    bound_step: dict[str, NewtonStrategy] = {}
-
-    def refresh_preconditioner(active_step: NewtonStrategy, state: jnp.ndarray) -> None:
-        # The march calls this immediately before every step and again on every retry, always with the
-        # CURRENT step -- so this is also where the inner-loop hook learns which step it is refreshing.
-        # Binding once at construction cannot work: the step the builder returns still carries the
-        # default schedule, and the march replaces it each iteration with one the control has set β on.
-        bound_step["step"] = active_step
-        schedule = active_step.relaxation_schedule
-        beta = getattr(schedule, "beta", None)
-        if beta is None:
-            raise ValueError(
-                "a β-tracking refresh needs the step's shift strength as a readable constant -- pair it "
-                "with a DualTimeControl (which sets a ConstantRelaxation β), not the default "
-                f"switched-evolution schedule ({type(schedule).__name__})."
-            )
-        beta = float(beta)
-        started = time.perf_counter()
-        # The preconditioner's shift is floored independently of the march's own beta. As beta -> 0 the
-        # shift's diagonal dominance vanishes and the frozen V-cycle degrades, but the OPERATOR must keep
-        # the small beta to make pseudo-transient progress. Flooring only the preconditioner's copy keeps
-        # the V-cycle in a regime it inverts well while the solved system is untouched, so the converged
-        # root and its adjoint are unchanged. The resulting mismatch SATURATES at `beta_floor * d` rather
-        # than growing without bound the way a stale (never-refreshed) preconditioner's does.
-        pc_beta = max(beta, beta_floor)
-        policy = active_step.shift_policy
-        pc = policy.preconditioner
-        if not (every_step or forced_full["pending"]):
-            _report_refresh("none", started)
-            return
-        forced_full["pending"] = False
-        frozen = jax.lax.stop_gradient(state)
-        shift = np.asarray(jax.lax.stop_gradient(policy.base.shift_term(state).shift(pc_beta)))
-        _report_refresh("full", started, _materialize_at(pc, frozen, shift))
-
-    def _materialize_at(pc, frozen, shift) -> tuple[tuple[str, float], ...]:
-        """Re-materialize the preconditioner at ``frozen`` with shift diagonal ``shift``.
-
-        The AMG preconditioner materializes via the coloured probe and takes the batched form; the
-        complete-LU preconditioner does not, so pass it only on the AMG path.
-        """
-        extra = (
-            {
-                "batched_matvec": lambda seeds: batched_matvec_at(frozen, seeds),
-                "probe_batch_size": _PROBE_BATCH_SIZE,
-                "structure": structure,
-            }
-            if isinstance(pc, MaterializedJacobianPreconditioner)
-            else {}
-        )
-        return pc.refresh_in_place(lambda v: matvec_at(frozen, v), plan, shift, **extra) or ()
-
-    def refresh_at(iterate) -> None:
-        """``inner_refresh`` hook: rebuild the preconditioner at this mid-step iterate.
-
-        *When* to fire is decided by the dual-time loop (``DualTimeStep.refresh_on_cycles``), not here,
-        so that the rule which triggers the refresh is the same one that forgives the abort it would
-        otherwise be discarded by.
-
-        The march's expensive inner solves are **stale-preconditioner** effects, not hard operators: at
-        the hardest solve of a three-dimensional coupled march a preconditioner rebuilt at that very
-        iterate converged in an order of magnitude fewer cycles than the march's own. Refreshing here —
-        between inner iterations, after the line search and before the next solve — keeps the step's
-        progress, where the alternative reaction (abort the step and escalate β) discards both the work
-        and the pseudo-timestep.
-
-        Reacting is also what makes this worth doing as a *replacement* for a scheduled refresh rather
-        than an addition to one: a fixed cadence pays on every step to protect the minority that needs
-        it, and the right interval is regime-dependent in a way no fixed cadence can track (one step of
-        staleness is nearly free at a large shift and dominates the solve at a small one).
-        """
-        if "step" not in bound_step:
-            return
-        started = time.perf_counter()
-        pc = bound_step["step"].shift_policy.preconditioner
-        beta = max(float(bound_step["step"].relaxation_schedule.beta), beta_floor)
-        frozen = jax.lax.stop_gradient(jnp.asarray(iterate))
-        shift = np.asarray(
-            jax.lax.stop_gradient(
-                bound_step["step"].shift_policy.base.shift_term(frozen).shift(beta)
-            )
-        )
-        _report_refresh(
-            "inner",
-            started,
-            _materialize_at(pc, frozen, shift),
-        )
-
-    def rebind(companion: CoupledRANS) -> None:
-        """Point this hook at another companion of the same case, and force the next refresh to be full.
-
-        A Reynolds continuation solves a sequence of companions differing only in their molecular
-        viscosity. Each is a separate ``solve_coupled`` segment, and rebuilding a preconditioner per
-        segment recompiles the whole coupled solve, because the preconditioner rides in a *static* field
-        of the Newton step and is compared by identity. Rebinding one hook instead lets every segment
-        share a single preconditioner object -- so the compiled step is a cache hit across a rung
-        boundary -- while each segment's V-cycle is still fitted to its own problem, at its own state and
-        shift, by the refresh the march runs before that segment's first step.
-
-        The standing preconditioner describes the previous companion, so the next refresh is forced to a **full** re-materialize at the new one.
-
-        Forward-only, like everything else on this hook. The companion must be the same case -- same
-        mesh, same layout, same schemes -- since the colouring plan and the gather map are not rebuilt.
-
-        Parameters
-        ----------
-        companion : CoupledRANS
-            The assembler the following segment solves.
-        """
-        bound["coupled"] = companion
-        bound["probed"] = probe.narrow(companion)
-        forced_full["pending"] = True
-
-    refresh_preconditioner.refresh_at = refresh_at
-    refresh_preconditioner.rebind = rebind
-    return refresh_preconditioner
-
-
-#: The shift strength a materialized preconditioner's first build is fitted at when its spec leaves
-#: ``build_beta`` unset. A frozen coarse space is chosen at that build and reused by every later refit, so
-#: this is not only the first step's operator.
-_BUILD_BETA = 2.0
-
 #: The march keywords a session owns rather than receives per build: the preconditioner is what the
 #: session was opened with, and the operator stand-in must match the probe the session built for it.
 _SESSION_OWNED = frozenset({"preconditioner", "jacobian_production_viscosity"})
-
-
-class PreconditionerSession(Protocol):
-    """One coupled preconditioner, kept current across every step it serves.
-
-    A session is what a march holds on to between its steps: the frozen inverse, the colouring probe it
-    was materialized with, and the per-step refresh hook. Those must outlive a single Newton step -- a
-    Reynolds continuation builds a step per rung, a refresh builds one per segment -- and must be the
-    *same objects* each time, because the inverse and the hooks ride in static fields of the step and a
-    new object recompiles the whole coupled solve.
-
-    Open one with :func:`open_session`.
-
-    Attributes
-    ----------
-    refresh_preconditioner : callable or None
-        ``(step, state) -> None``, called by the march before every step to re-fit the inverse at that
-        step's shift; ``None`` for a family with nothing to re-fit.
-    """
-
-    refresh_preconditioner: Callable[[NewtonStrategy, jnp.ndarray], None] | None
-
-    def build(self, state: jnp.ndarray, **march: object) -> NewtonStrategy:
-        """The Newton step at ``state``, configured by the march keywords of :func:`coupled_step`."""
-        ...
-
-    def refresh(
-        self, state: jnp.ndarray, previous: NewtonStrategy, **march: object
-    ) -> NewtonStrategy:
-        """Re-freeze at the developed ``state``; ``previous`` is the step it replaces."""
-        ...
-
-    def rebind(self, coupled: CoupledRANS) -> None:
-        """Point the session at another companion of the same case, such as the next Reynolds rung."""
-        ...
 
 
 def _resolved_shift(
@@ -2655,203 +2276,88 @@ class _BlockSession:
         return step if self._on_build is None else self._on_build(step)
 
 
-class _MaterializedSession:
-    """The materialized-Jacobian family's session: one probe, one inverse and one refresh hook.
+@dataclasses.dataclass(frozen=True, eq=False)
+class _CoupledProblem(MaterializedProblem):
+    """The coupled RANS residual as a :class:`~aquaflux.solve.MaterializedProblem`.
 
-    Everything expensive or identity-bearing is created at most once. The probe (a colouring plan and
-    its de-compression map, the largest allocation a three-dimensional case makes) and the refresh hook
-    are created on first use; the inverse is fitted on the first :meth:`build`, at that build's
-    assembler, state and ``build_beta``, and every later build glues that same object in. The two
-    callables handed to the march -- :attr:`refresh_preconditioner` and the mid-step refresh -- are created
-    when the session is opened, so every step built from it carries the identical objects.
+    What a materialized-Jacobian session asks of a residual, answered for ``[flow, k, omega]``: the
+    assembler, its mesh graph and layout, the leading ``[u, v, w, p]`` / trailing ``[k, omega]`` cut a
+    field split needs, the shift the inverse is fitted against, and the coupled step the fitted inverse
+    is glued into.
+
+    Attributes
+    ----------
+    coupled : CoupledRANS
+        The assembler the session builds on until it is re-pointed with ``rebind``.
+    production_viscosity : bool
+        Whether the steps this problem builds differentiate the frozen-production stand-in of the
+        residual (see :func:`frozen_production_viscosity`). The probe is built from the same stand-in,
+        which is why it is fixed here rather than chosen per build: a preconditioner assembled from a
+        different matrix than the one the Krylov solve applies preconditions the wrong problem.
     """
 
-    def __init__(
-        self,
-        spec: MaterializedJacobian,
-        coupled: CoupledRANS,
-        *,
-        jacobian_production_viscosity: bool,
-        observer: Callable[[RefreshTiming], None] | None,
-        reports: dict[str, Callable[[str], None]],
-        on_build: Callable[[NewtonStrategy], NewtonStrategy] | None,
-        precondition_wrapper: Callable[[Callable], Callable] | None,
-        inverse_wrapper: Callable[[str, Callable], Callable] | None,
-    ) -> None:
-        self._spec = spec
-        self._coupled = coupled
-        self._production_viscosity = jacobian_production_viscosity
-        self._observer = observer
-        self._reports = reports
-        self._on_build = on_build
-        self._inverse_wrapper = inverse_wrapper
-        self._probe: JacobianProbe | None = None
-        self._hook: Callable | None = None
-        self._preconditioner: object | None = None
+    coupled: CoupledRANS
+    production_viscosity: bool
 
-        def refresh_preconditioner(active_step: NewtonStrategy, state: jnp.ndarray) -> None:
-            self._refresh_hook()(active_step, state)
+    @property
+    def assembler(self) -> CoupledRANS:
+        return self.coupled
 
-        def refresh_at(iterate: jnp.ndarray) -> None:
-            self._refresh_hook().refresh_at(iterate)
+    @property
+    def layout(self):
+        return self.coupled.layout
 
-        self._refresh_at = refresh_at
-        self.refresh_preconditioner = (
-            refresh_preconditioner
-            if precondition_wrapper is None
-            else precondition_wrapper(refresh_preconditioner)
+    def with_assembler(self, assembler: CoupledRANS) -> _CoupledProblem:
+        return dataclasses.replace(self, coupled=assembler)
+
+    def probe(self, settings: dict, active_rows: np.ndarray | None) -> JacobianProbe:
+        return coupled_jacobian_probe(
+            self.coupled,
+            **settings,
+            active_rows=active_rows,
+            # The preconditioner must be assembled from the operator the Krylov solve applies.
+            production_viscosity_frozen=self.production_viscosity,
         )
 
-    def build(self, state: jnp.ndarray, **march: object) -> NewtonStrategy:
-        return self._build(state, march, track=True)
+    def groups(self) -> FieldGroups:
+        # `[u, v, w, p]` (the saddle) leads, `[k, omega]` (the transported scalars) trail.
+        return FieldGroups.split_before(self.coupled.layout, "k")
 
-    def refresh(
-        self, state: jnp.ndarray, previous: NewtonStrategy, **march: object
-    ) -> NewtonStrategy:
-        del previous  # the shared inverse is re-fitted in place, not re-derived from the old step
-        step = self._build(state, march, track=True)
-        if self._hook is not None:
-            # The standing inverse was fitted before the march moved; force the next refresh to be full.
-            self._hook.rebind(self._coupled)
-        return step
-
-    def rebind(self, coupled: CoupledRANS) -> None:
-        current = self._coupled
-        if (
-            coupled.layout.size != current.layout.size
-            or coupled.layout.n_fields != current.layout.n_fields
-        ):
-            raise ValueError(
-                "a session can only be re-pointed at another companion of the SAME case: its colouring "
-                f"probe was built for a {current.layout.n_fields}-field state of size "
-                f"{current.layout.size}, and this assembler has {coupled.layout.n_fields} fields and "
-                f"size {coupled.layout.size}."
-            )
-        self._coupled = coupled
-        if self._hook is not None:
-            self._hook.rebind(coupled)
-
-    def _build(self, state: jnp.ndarray, march: dict, *, track: bool) -> NewtonStrategy:
+    def bind_march(self, march: dict) -> dict:
         keywords = _march_keywords(march)
-        if _is_traced((self._coupled, state)):
-            raise ValueError(
-                "a materialized-Jacobian preconditioner is assembled off the jit path from concrete "
-                "arrays, so it cannot be built under jax.grad (or any JAX transform). Build the step "
-                "with concrete parameters outside the transform and pass it as `strategy`; the "
-                "adjoint reuses the same frozen inverse, so the gradient is unchanged."
-            )
-        coupled = self._coupled
         # Before any inverse is fitted: a misconfigured floor is a caller mistake, and the multigrid
         # families import an optional dependency the check must not wait on.
-        step_limit, step_projection = _k_positivity_guards(
-            coupled, keywords.pop("positivity_floor"), keywords.pop("positivity_projection")
+        keywords["step_limit"], keywords["step_projection"] = _k_positivity_guards(
+            self.coupled, keywords.pop("positivity_floor"), keywords.pop("positivity_projection")
         )
-        base = _monolithic_shift_source(coupled, state, *_resolved_shift(keywords.pop("shift")))
-        if self._preconditioner is None:
-            self._preconditioner = self._fit(coupled, state, base)
-        regime, krylov_solver = resolve_linear_solve(
-            keywords.pop("linear_solve"),
-            _FACTORIZATION_LINEAR_SOLVE
-            if isinstance(self._spec.inverse, CompleteLu)
-            else _VCYCLE_LINEAR_SOLVE,
-        )
+        return keywords
+
+    def shift_source(self, state: jnp.ndarray, march: dict) -> CoupledShiftPolicy:
+        return _monolithic_shift_source(self.coupled, state, *_resolved_shift(march["shift"]))
+
+    def build_step(
+        self,
+        state: jnp.ndarray,
+        base: CoupledShiftPolicy,
+        preconditioner: object,
+        march: dict,
+        base_regime: LinearSolveRegime,
+    ) -> NewtonStrategy:
+        keywords = dict(march)
+        keywords.pop("shift")
+        regime, krylov_solver = resolve_linear_solve(keywords.pop("linear_solve"), base_regime)
         dual_time = keywords.pop("dual_time")
-        if (
-            track
-            and dual_time is not None
-            and dual_time.refresh_on_cycles is not None
-            and keywords["inner_refresh"] is None
-        ):
-            keywords["inner_refresh"] = self._refresh_at
-        step = _monolithic_factor_step(
-            coupled,
+        return _monolithic_factor_step(
+            self.coupled,
             state,
             base,
-            self._preconditioner,
+            preconditioner,
             regime=regime,
             krylov_solver=krylov_solver,
             dual_time=dual_time,
-            step_limit=step_limit,
-            step_projection=step_projection,
-            jacobian_production_viscosity=self._production_viscosity,
+            jacobian_production_viscosity=self.production_viscosity,
             **keywords,
         )
-        return step if self._on_build is None else self._on_build(step)
-
-    def _groups(self) -> FieldGroups:
-        # `[u, v, w, p]` (the saddle) leads, `[k, omega]` (the transported scalars) trail.
-        return FieldGroups.split_before(self._coupled.layout, "k")
-
-    def _probe_for(self) -> JacobianProbe:
-        if self._probe is None:
-            self._probe = coupled_jacobian_probe(
-                self._coupled,
-                **self._spec.probe.settings(),
-                # A split never reads the flow-by-[k, omega] triangle, so its probe need not store it.
-                active_rows=(
-                    self._groups().active_rows()
-                    if isinstance(self._spec.inverse, FieldSplit)
-                    else None
-                ),
-                # The preconditioner must be assembled from the operator the Krylov solve applies.
-                production_viscosity_frozen=self._production_viscosity,
-            )
-        return self._probe
-
-    def _refresh_hook(self) -> Callable:
-        if self._hook is None:
-            beta_floor = self._spec.beta_floor
-            self._hook = _beta_tracking_refresh(
-                self._coupled,
-                # The reach settings are read from the probe passed below; these are not consulted.
-                stencil_reach=3,
-                every_step=isinstance(self._spec.inverse, CompleteLu),
-                observer=self._observer,
-                probe=self._probe_for(),
-                **({} if beta_floor is None else {"beta_floor": beta_floor}),
-            )
-        return self._hook
-
-    def _fit(self, coupled: CoupledRANS, state: jnp.ndarray, base: CoupledShiftPolicy) -> object:
-        probe = self._probe_for()
-        probed = probe.narrow(coupled)
-        frozen = jax.lax.stop_gradient(state)
-
-        def matvec(v):
-            return _jacobian_matvec(probed, frozen, v)
-
-        build_beta = _BUILD_BETA if self._spec.build_beta is None else self._spec.build_beta
-        shift = _frozen_shift_diagonal(base, build_beta, state)
-        inverse = self._spec.inverse
-        if isinstance(inverse, CompleteLu):
-            return MonolithicLuPreconditioner.build(matvec, probe.plan, shift, **inverse.settings())
-
-        def batched_matvec(seeds):
-            return _batched_jacobian_matvec(probed, frozen, seeds)
-
-        probing = {
-            "batched_matvec": batched_matvec,
-            "probe_batch_size": _PROBE_BATCH_SIZE,
-            "structure": probe.structure,
-        }
-        if isinstance(inverse, MonolithicVCycle):
-            return MonolithicAmgPreconditioner.build(
-                matvec, probe.plan, shift, **inverse.settings(), **probing
-            )
-        return FieldSplitAmgPreconditioner.build(
-            matvec,
-            probe.plan,
-            shift,
-            self._groups(),
-            leading_inverse=self._block_inverse("leading"),
-            trailing_inverse=self._block_inverse("trailing"),
-            **probing,
-        )
-
-    def _block_inverse(self, role: str) -> Callable:
-        spec = getattr(self._spec.inverse, role)
-        factory = spec.bound(report=self._reports[role]) if role in self._reports else spec
-        return factory if self._inverse_wrapper is None else self._inverse_wrapper(role, factory)
 
 
 def open_session(
@@ -2942,10 +2448,9 @@ def open_session(
         raise TypeError(f"reports are keyed 'leading' / 'trailing', got {unknown}.")
     for role, sink in reports.items():
         getattr(spec.inverse, role).bound(report=sink)  # refuse a family with no record now
-    return _MaterializedSession(
+    return MaterializedSession(
         spec,
-        coupled,
-        jacobian_production_viscosity=jacobian_production_viscosity,
+        _CoupledProblem(coupled, jacobian_production_viscosity),
         observer=observer,
         reports=reports,
         on_build=on_build,
@@ -3138,31 +2643,6 @@ def _reject_a_root_the_frozen_cap_invalidates(
     )
 
 
-@dataclasses.dataclass(frozen=True)
-class _SessionContinuation:
-    """A continuation a preconditioner session builds and re-freezes -- the source that has configuration.
-
-    It is the one source ``solve_coupled``'s ``preconditioner`` / ``reference_state`` /
-    ``**strategy_kwargs`` describe: the preconditioner chose the session, and the march keywords are
-    handed to every build and refresh the session makes.
-    """
-
-    session: PreconditionerSession
-    reference_state: jnp.ndarray | None
-    march: dict
-
-    @property
-    def refresh_preconditioner(self) -> Callable[[NewtonStrategy, jnp.ndarray], None] | None:
-        return self.session.refresh_preconditioner
-
-    def build(self, state: jnp.ndarray) -> NewtonStrategy:
-        reference = state if self.reference_state is None else self.reference_state
-        return self.session.build(reference, **self.march)
-
-    def refresh(self, state: jnp.ndarray, previous: NewtonStrategy) -> NewtonStrategy:
-        return self.session.refresh(state, previous, **self.march)
-
-
 def _continuation_source(
     coupled: CoupledRANS,
     strategy: NewtonStrategy | None,
@@ -3214,7 +2694,7 @@ def _continuation_source(
             "RefreshPolicy(refresh_preconditioner=...) was given beside a materialized-Jacobian "
             "preconditioner, whose session already re-fits its inverse before every step. Drop one."
         )
-    return _SessionContinuation(session, reference_state, march)
+    return SessionSource(session, reference_state, march)
 
 
 #: The stopping test of a coupled solve given no :class:`~aquaflux.solve.Convergence`, and the base an
@@ -3618,7 +3098,7 @@ def mass_flow_coupled_continuation(
 
     ``preconditioner`` must be a :class:`~aquaflux.turbulence.BlockDiagonal` (``None`` takes
     ``BlockDiagonal()``). The constraint borders a block-diagonal policy, whose composed preconditioner
-    the Schur elimination of ``beta`` wraps; a :class:`~aquaflux.turbulence.MaterializedJacobian` inverts
+    the Schur elimination of ``beta`` wraps; a :class:`~aquaflux.solve.MaterializedJacobian` inverts
     a Jacobian that has no border row, so it is refused rather than applied to the wrong system.
 
     Raises

@@ -98,15 +98,8 @@ from aquaflux.solve import (  # noqa: E402
 )
 from aquaflux.solve.amg_preconditioner import ShiftedCellMajorOperator  # noqa: E402
 from aquaflux.turbulence import hybrid_initialize  # noqa: E402
-from aquaflux.turbulence.coupled import (  # noqa: E402
-    _DEFAULT_SHIFT_BASIS,
-    _PROBE_BATCH_SIZE,
-    _batched_jacobian_matvec,
-    _coupled_jacobian_plan,
-    _frozen_shift_diagonal,
-    _jacobian_matvec,
-    _monolithic_shift_source,
-)
+from aquaflux.turbulence.coupled import _DEFAULT_SHIFT_BASIS, _coupled_jacobian_plan, _monolithic_shift_source
+from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, frozen_shift_diagonal, jacobian_matvec
 
 #: The pseudo-transient shifts to probe, largest first. ``0.0`` is the adjoint's own operator: there is
 #: no shift to make the diagonal dominant, so a factorization that only works because of the shift is
@@ -330,10 +323,10 @@ def jacobian(coupled, state, reach, cache):
         plan = _coupled_jacobian_plan(coupled, reach)
         structure = block_stencil_gather_map(plan)
         matrix = MonolithicAmgPreconditioner._materialize_jacobian(
-            lambda v: _jacobian_matvec(coupled, state, v),
+            lambda v: jacobian_matvec(coupled, state, v),
             plan,
-            lambda seeds: _batched_jacobian_matvec(coupled, state, seeds),
-            _PROBE_BATCH_SIZE,
+            lambda seeds: batched_jacobian_matvec(coupled, state, seeds),
+            PROBE_BATCH_SIZE,
             structure,
         )
         cache[reach] = (matrix, structure)
@@ -433,7 +426,7 @@ def run_arm(coupled, state, arm: Arm, shift: np.ndarray, rhs, n_fields: int, cac
     preconditioner = MonolithicAmgPreconditioner(vcycle)
 
     def operator(v):
-        return _jacobian_matvec(coupled, state, v) + jnp.asarray(shift) * v
+        return jacobian_matvec(coupled, state, v) + jnp.asarray(shift) * v
 
     t1 = time.time()
     if CONDEST_ONLY:
@@ -494,7 +487,7 @@ def main():
     base = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS)
     rhs = -coupled.residual(state)
     for beta in BETAS:
-        shift = _frozen_shift_diagonal(base, beta, state)
+        shift = frozen_shift_diagonal(base, beta, state)
         print(
             f"\n{'=' * 118}\nbeta {beta} (operator AND V-cycle -- matched, no preconditioner-only "
             f"floor), reach {REACH} unless stated, |rhs| {float(jnp.linalg.norm(rhs)):.4e}",

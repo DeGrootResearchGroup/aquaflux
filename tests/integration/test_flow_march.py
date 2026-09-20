@@ -18,21 +18,28 @@ from aquaflux.flow import (
     FlowMeasures,
     flow_march_step,
     momentum_continuation,
+    open_flow_session,
     solve_flow_march,
 )
 from aquaflux.flow import march as flow_march_module
 from aquaflux.solve import (
     BlockScaled,
+    CompleteLu,
     Convergence,
     DualTimeLoop,
     DualTimeStep,
     Euclidean,
+    FieldSplit,
     Globalization,
+    JacobiSmoothed,
+    MaterializedJacobian,
+    MonolithicFactorShiftPolicy,
     PseudoTransientStep,
     RefreshPolicy,
     RetryPolicy,
     RootSolver,
     RowScaled,
+    SimpleSmoothed,
     assembler_residual,
 )
 
@@ -254,3 +261,57 @@ def test_the_jacobian_gradient_sweeps_reach_the_step_and_only_the_step() -> None
     assert narrowed is not None
     # A channel is orthogonal, so narrowing is free in value: the copy's residual is the same function.
     assert jnp.allclose(narrowed(state + 0.1), assembler.residual(state + 0.1), rtol=1e-12)
+
+
+def test_a_complete_lu_march_reaches_the_root_the_block_simple_march_reaches(channel) -> None:
+    """A laminar flow accepts the materialized-Jacobian preconditioner and lands on the same root.
+
+    The complete LU is exact at the state and shift it was factored at, so this exercises the whole
+    session -- probe, factorization, per-step re-fit under a dual-time march -- against the block-SIMPLE
+    path's root, not against a transcription of it.
+    """
+    assembler, root = channel
+    built = []
+    session = open_flow_session(
+        MaterializedJacobian(CompleteLu(backend="scipy")),
+        assembler,
+        on_build=lambda step: built.append(step) or step,
+    )
+    state = solve_flow_march(
+        assembler,
+        preconditioner=session,
+        convergence=TIGHT,
+        max_steps=150,
+        dual_time=DualTimeLoop(inner_steps=3),
+    )
+    # The march ran on the materialized inverse, not on a block-SIMPLE step that happened to converge.
+    assert built and isinstance(built[0].shift_policy, MonolithicFactorShiftPolicy)
+    assert float(jnp.linalg.norm(state - root) / jnp.linalg.norm(root)) < 1e-6
+
+
+def test_a_field_split_is_refused_for_a_flow_with_nothing_to_split(channel) -> None:
+    assembler, _ = channel
+    split = MaterializedJacobian(FieldSplit(leading=SimpleSmoothed(), trailing=JacobiSmoothed()))
+    with pytest.raises(TypeError, match="single group"):
+        open_flow_session(split, assembler)
+
+
+def test_block_simple_settings_are_refused_beside_a_materialized_preconditioner(channel) -> None:
+    assembler, _ = channel
+    with pytest.raises(TypeError, match="no such settings"):
+        solve_flow_march(
+            assembler,
+            preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
+            preconditioner_options={"schur_scaling": "msimple"},
+        )
+
+
+def test_a_preconditioner_is_refused_beside_a_finished_step(channel) -> None:
+    assembler, _ = channel
+    finished = flow_march_step(assembler, assembler.initial_state())
+    with pytest.raises(TypeError, match=r"preconditioner.*already carries them"):
+        solve_flow_march(
+            assembler,
+            strategy=finished,
+            preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
+        )

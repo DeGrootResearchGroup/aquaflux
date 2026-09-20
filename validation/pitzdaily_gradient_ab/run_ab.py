@@ -78,15 +78,8 @@ from aquaflux.solve import (
     MarchLogger,
     SimpleSmoothed,
 )
-from aquaflux.turbulence import (
-    coupled_jacobian_probe,
-    FieldSplit,
-    JacobianProbeSpec,
-    MaterializedJacobian,
-    coupled_fields,
-    open_session,
-    solve_reynolds_continuation,
-)
+from aquaflux.turbulence import coupled_jacobian_probe, coupled_fields, open_session, solve_reynolds_continuation
+from aquaflux.solve import FieldSplit, JacobianProbeSpec, MaterializedJacobian
 
 #: Both arms probe at the same reach. Raising it for one arm alone would compare two preconditioners.
 #:

@@ -58,14 +58,8 @@ from aquaflux.turbulence import (  # noqa: E402
     inlet_k,
     inlet_omega,
 )
-from aquaflux.turbulence.coupled import (  # noqa: E402
-    _PROBE_BATCH_SIZE,
-    _batched_jacobian_matvec,
-    _coupled_jacobian_plan,
-    _coupled_shift_policy,
-    _frozen_shift_diagonal,
-    _jacobian_matvec,
-)
+from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy
+from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, frozen_shift_diagonal, jacobian_matvec
 from aquaflux.vectors import scale  # noqa: E402
 
 FIELDS2 = ("u", "v", "p", "k", "omega")
@@ -247,10 +241,10 @@ def materialize(coupled, state, reach):
     structure = block_stencil_gather_map(plan)
     started = time.time()
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
-        lambda v: _jacobian_matvec(coupled, state, v),
+        lambda v: jacobian_matvec(coupled, state, v),
         plan,
-        lambda seeds: _batched_jacobian_matvec(coupled, state, seeds),
-        _PROBE_BATCH_SIZE,
+        lambda seeds: batched_jacobian_matvec(coupled, state, seeds),
+        PROBE_BATCH_SIZE,
         structure,
     )
     print(
@@ -274,7 +268,7 @@ def block_jacobian_error(coupled, state, jacobian, n_fields, seed=0):
     for col in range(n_fields):
         v = np.zeros(n_fields * n)
         v[col * n : (col + 1) * n] = rng.standard_normal(n)
-        exact = np.asarray(_jacobian_matvec(coupled, state, jnp.asarray(v)))
+        exact = np.asarray(jacobian_matvec(coupled, state, jnp.asarray(v)))
         got = jacobian @ v
         for row in range(n_fields):
             sl = slice(row * n, (row + 1) * n)
@@ -431,7 +425,7 @@ def run_case(name, coupled, betas, reach=3, arms=ARMS, localize=False):
     base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     results = {}
     for beta in betas:
-        shift = _frozen_shift_diagonal(base, beta, state) if beta > 0 else np.zeros(n_fields * n)
+        shift = frozen_shift_diagonal(base, beta, state) if beta > 0 else np.zeros(n_fields * n)
         cell_major, scaling, perm = assemble(jacobian, np.asarray(shift), n_fields)
         rhs_eq = (np.asarray(scaling) * rhs)[perm]
         print(f"\n  -- beta {beta}: nnz {cell_major.nnz / 1e6:.2f}M", flush=True)

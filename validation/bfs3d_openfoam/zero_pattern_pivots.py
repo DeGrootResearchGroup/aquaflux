@@ -124,11 +124,8 @@ from aquaflux.solve import (  # noqa: E402
 )
 from aquaflux.solve.frozen_operator import equilibration_scale  # noqa: E402
 from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
-from aquaflux.turbulence.coupled import (  # noqa: E402
-    _coupled_jacobian_plan,
-    _coupled_shift_policy,
-    _frozen_shift_diagonal,
-)
+from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy
+from aquaflux.solve import frozen_shift_diagonal
 from field_split_probe import FLOOR, RTOL, SOLVER, materialize, run_arm  # noqa: E402
 
 
@@ -536,8 +533,8 @@ def main():
 
     base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     rhs = -coupled.residual(state)
-    op_shift = _frozen_shift_diagonal(base, march_beta, state) if march_beta > 0 else 0.0
-    shift = _frozen_shift_diagonal(base, pc_beta, state) if pc_beta > 0 else np.zeros(n_dofs)
+    op_shift = frozen_shift_diagonal(base, march_beta, state) if march_beta > 0 else 0.0
+    shift = frozen_shift_diagonal(base, pc_beta, state) if pc_beta > 0 else np.zeros(n_dofs)
     print(f"  right-hand side |R| {float(jnp.linalg.norm(rhs)):.4e}", flush=True)
 
     # One reach's Jacobian and one arm's operator live at a time: the Jacobian is ~0.6 GB, each cell-major

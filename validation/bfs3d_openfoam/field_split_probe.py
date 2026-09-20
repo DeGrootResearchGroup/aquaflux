@@ -101,15 +101,8 @@ from aquaflux.solve import (  # noqa: E402
     solve_linear,
 )
 from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
-from aquaflux.turbulence.coupled import (  # noqa: E402
-    _PROBE_BATCH_SIZE,
-    _batched_jacobian_matvec,
-    _coupled_jacobian_plan,
-    _coupled_shift_policy,
-    _frozen_shift_diagonal,
-    _jacobian_matvec,
-    coupled_scaled_norm,
-)
+from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy, coupled_scaled_norm
+from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, frozen_shift_diagonal, jacobian_matvec
 
 #: Adjoint-grade, far past the march's own 30 % inexact-Newton stop, so arms separate rather than tie.
 RTOL = 1e-8
@@ -320,10 +313,10 @@ def materialize(coupled, state, plan, structure, n_fields) -> sp.csr_matrix:
     """
     started = time.time()
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
-        lambda v: _jacobian_matvec(coupled, state, v),
+        lambda v: jacobian_matvec(coupled, state, v),
         plan,
-        lambda seeds: _batched_jacobian_matvec(coupled, state, seeds),
-        _PROBE_BATCH_SIZE,
+        lambda seeds: batched_jacobian_matvec(coupled, state, seeds),
+        PROBE_BATCH_SIZE,
         structure,
     )
     print(
@@ -362,7 +355,7 @@ def run_arm(label, preconditioner, built, coupled, state, rhs, op_shift, solver)
     """Solve the REAL system with one already-built preconditioner; report cycles and the TRUE residual."""
 
     def operator(v):
-        return _jacobian_matvec(coupled, state, v) + op_shift * v
+        return jacobian_matvec(coupled, state, v) + op_shift * v
 
     # Time the two halves of a Krylov iteration SEPARATELY before attributing cost to either. Both the
     # incumbent and every candidate pay the same exact matrix-free Jacobian product; only the
@@ -605,7 +598,7 @@ def main():
     structure = block_stencil_gather_map(plan)
     base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     rhs = -coupled.residual(state)
-    op_shift = _frozen_shift_diagonal(base, march_beta, state) if march_beta > 0 else 0.0
+    op_shift = frozen_shift_diagonal(base, march_beta, state) if march_beta > 0 else 0.0
     # Report both norms, so the run records the one way it departs from the march: the march solved for
     # the step's dual-time residual G, this solves for the steady residual R, and on an inner iterate
     # those are different right-hand sides over the same operator.
@@ -622,7 +615,7 @@ def main():
         pc_state, pc_base = state, base
     jacobian = materialize(coupled, pc_state, plan, structure, n_fields)
     pc_shift = (
-        _frozen_shift_diagonal(pc_base, pc_beta, pc_state)
+        frozen_shift_diagonal(pc_base, pc_beta, pc_state)
         if pc_beta > 0
         else np.zeros(groups.n_dofs)
     )

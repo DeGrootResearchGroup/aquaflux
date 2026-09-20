@@ -43,11 +43,8 @@ sys.path.insert(0, str(ROOT / "validation" / "pitzdaily_openfoam"))
 import compare  # noqa: E402
 import ilu0_remedy_sweep as sweep  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
-from aquaflux.turbulence.coupled import (  # noqa: E402
-    _DEFAULT_SHIFT_BASIS,
-    _frozen_shift_diagonal,
-    _monolithic_shift_source,
-)
+from aquaflux.turbulence.coupled import _DEFAULT_SHIFT_BASIS, _monolithic_shift_source
+from aquaflux.solve import frozen_shift_diagonal
 from ilu_fill_probe import FIELDS2, FIELDS3  # noqa: E402
 
 
@@ -105,7 +102,7 @@ def main():
         flush=True,
     )
     for beta in sweep.BETAS:
-        shift = _frozen_shift_diagonal(base, beta, state)
+        shift = frozen_shift_diagonal(base, beta, state)
         arm = sweep.Arm("precheck")
         cell_major, _scale, _perm = sweep.assemble(coupled, state, arm, shift, n_fields)
         print(

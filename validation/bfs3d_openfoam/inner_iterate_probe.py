@@ -76,21 +76,10 @@ from aquaflux.solve import (  # noqa: E402  # noqa: E402
     solve_linear,
 )
 from aquaflux.solve.amg_preconditioner import ShiftedCellMajorOperator  # noqa: E402
-from aquaflux.turbulence import (
-    MaterializedJacobian,
-    MonolithicVCycle,
-    ScalarTwoLevel,  # noqa: E402
-    coupled_step,
-)
-from aquaflux.turbulence.coupled import (  # noqa: E402
-    _PROBE_BATCH_SIZE,
-    _batched_jacobian_matvec,
-    _coupled_jacobian_plan,
-    _coupled_shift_policy,
-    _frozen_shift_diagonal,
-    _jacobian_matvec,
-    coupled_scaled_norm,
-)
+from aquaflux.turbulence import ScalarTwoLevel, coupled_step
+from aquaflux.solve import MaterializedJacobian, MonolithicVCycle
+from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy, coupled_scaled_norm
+from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, frozen_shift_diagonal, jacobian_matvec
 
 FLOOR = compare.PC_BETA_FLOOR
 
@@ -164,14 +153,14 @@ def capture_inner_iterates(coupled, state, beta, seed_state):
 def solve_with(label, coupled, state, pc_state, beta, plan, structure, n_fields):
     """Solve the shifted system at ``state`` with the preconditioner built at ``pc_state``."""
     base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
-    op_shift = _frozen_shift_diagonal(base, beta, state)
+    op_shift = frozen_shift_diagonal(base, beta, state)
     pc_base = _coupled_shift_policy(coupled, pc_state, ScalarTwoLevel())
-    pc_shift = _frozen_shift_diagonal(pc_base, max(beta, FLOOR), pc_state)
+    pc_shift = frozen_shift_diagonal(pc_base, max(beta, FLOOR), pc_state)
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
-        lambda v: _jacobian_matvec(coupled, pc_state, v),
+        lambda v: jacobian_matvec(coupled, pc_state, v),
         plan,
-        lambda seeds: _batched_jacobian_matvec(coupled, pc_state, seeds),
-        _PROBE_BATCH_SIZE,
+        lambda seeds: batched_jacobian_matvec(coupled, pc_state, seeds),
+        PROBE_BATCH_SIZE,
         structure,
     )
     indptr, indices, _ = structure
@@ -191,7 +180,7 @@ def solve_with(label, coupled, state, pc_state, beta, plan, structure, n_fields)
     )
 
     def operator(v):
-        return _jacobian_matvec(coupled, state, v) + op_shift * v
+        return jacobian_matvec(coupled, state, v) + op_shift * v
 
     # The march's own inner loop solves G(p) = R(p) + beta d (p - reference); at the probed iterate the
     # right-hand side is that transient residual, not the steady one.

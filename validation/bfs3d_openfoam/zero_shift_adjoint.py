@@ -62,19 +62,14 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse.linalg as spla  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
+    jacobian_matvec,
     DualTimeLoop,
     JacobiSmoothed,
     materialize_block_jacobian,
     shifted_jacobian,
 )
-from aquaflux.turbulence import (
-    FieldSplit,
-    JacobianProbeSpec,
-    MaterializedJacobian,
-    MonolithicVCycle,
-    coupled_step,
-    hybrid_initialize,
-)
+from aquaflux.turbulence import coupled_step, hybrid_initialize
+from aquaflux.solve import FieldSplit, JacobianProbeSpec, MaterializedJacobian, MonolithicVCycle
 
 #: Far past the march's inexact-Newton stop so arms separate rather than tie; modest in restarts
 #: because a failing arm is identified by its true residual long before it would converge.
@@ -173,7 +168,7 @@ def main() -> None:
     plan = C._coupled_jacobian_plan(coupled, REACH, None)
     frozen = jnp.asarray(state)
     a = shifted_jacobian(
-        materialize_block_jacobian(lambda v: C._jacobian_matvec(coupled, frozen, v), plan).tocsr(),
+        materialize_block_jacobian(lambda v: jacobian_matvec(coupled, frozen, v), plan).tocsr(),
         np.zeros(int(state.shape[0])),
     )
     # ⚠️ The leading inverse is named because it MOVED under this harness (`petsc`, then `hostilu`, now

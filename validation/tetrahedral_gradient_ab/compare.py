@@ -67,16 +67,8 @@ from aquaflux.schemes import (
     SkewCorrectedGradient,
 )
 from aquaflux.solve import DualTimeLoop, RetryPolicy
-from aquaflux.turbulence import (
-    CompleteLu,
-    CoupledRANS,
-    MaterializedJacobian,
-    SSTModel,
-    SSTTurbulence,
-    inlet_k,
-    inlet_omega,
-    solve_coupled,
-)
+from aquaflux.turbulence import CoupledRANS, SSTModel, SSTTurbulence, inlet_k, inlet_omega, solve_coupled
+from aquaflux.solve import CompleteLu, MaterializedJacobian
 
 HERE = Path(__file__).resolve().parent
 POLYMESH = HERE / "of_case" / "constant" / "polyMesh"

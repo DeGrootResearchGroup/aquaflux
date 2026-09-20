@@ -36,7 +36,7 @@ class MonolithicFactorShiftPolicy(eqx.Module):
     where the block-triangular preconditioner needs hundreds of cycles.
 
     The inverse is frozen at a reference state and shift (built off the jit path by a
-    :class:`~aquaflux.turbulence.MaterializedJacobian` session). Unlike the block
+    :class:`~aquaflux.solve.MaterializedJacobian` session). Unlike the block
     preconditioner's live ``a_P`` rescaling it does not track the developing state; being a far stronger
     preconditioner it tolerates that freezing at a cost of a few extra cycles, and the shift vanishes at
     the root so the frozen inverse never changes the converged solution or its adjoint. Because it

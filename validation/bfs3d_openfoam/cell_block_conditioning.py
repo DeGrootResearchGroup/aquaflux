@@ -58,14 +58,8 @@ from aquaflux.solve import (  # noqa: E402
 )
 from aquaflux.solve.amg_preconditioner import ShiftedCellMajorOperator  # noqa: E402
 from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
-from aquaflux.turbulence.coupled import (  # noqa: E402
-    _PROBE_BATCH_SIZE,
-    _batched_jacobian_matvec,
-    _coupled_jacobian_plan,
-    _coupled_shift_policy,
-    _frozen_shift_diagonal,
-    _jacobian_matvec,
-)
+from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy
+from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, frozen_shift_diagonal, jacobian_matvec
 
 #: Field order of the coupled state, for labelling the null direction.
 FIELDS = ("u", "v", "w", "p", "k", "omega")
@@ -106,10 +100,10 @@ def main():
     structure = block_stencil_gather_map(plan)
     policy = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
-        lambda v: _jacobian_matvec(coupled, state, v),
+        lambda v: jacobian_matvec(coupled, state, v),
         plan,
-        lambda seeds: _batched_jacobian_matvec(coupled, state, seeds),
-        _PROBE_BATCH_SIZE,
+        lambda seeds: batched_jacobian_matvec(coupled, state, seeds),
+        PROBE_BATCH_SIZE,
         structure,
     )
     indptr, indices, _ = structure
@@ -123,7 +117,7 @@ def main():
     first = None
     for beta in shifts:
         diagonal = (
-            _frozen_shift_diagonal(policy, beta, state) if beta else np.zeros(n_cells * n_fields)
+            frozen_shift_diagonal(policy, beta, state) if beta else np.zeros(n_cells * n_fields)
         )
         cell_major, _, _ = assembler.assemble(jacobian.data, diagonal)
         blocks = diagonal_blocks(cell_major, n_fields, n_cells)

@@ -72,7 +72,7 @@ from aquaflux.solve import (
     shifted_step,
 )
 
-from .block_preconditioner import BlockPreconditioner
+from .block_preconditioner import BlockPreconditioner, frozen_momentum_diagonal_parts
 
 if TYPE_CHECKING:
     from .momentum import MomentumContinuity
@@ -123,9 +123,15 @@ class MomentumShiftPolicy(eqx.Module):
 
     Attributes
     ----------
-    preconditioner : BlockPreconditioner
-        The block-SIMPLE preconditioner, applied at the shifted diagonal ``a_P + β d`` each step, and
-        the source of the frozen ``a_P`` (and its convective/dissipative parts) the shift is formed from.
+    assembler : MomentumContinuity
+        The flow residual assembler, the source of the frozen ``a_P`` (and its convective/dissipative
+        parts) the shift is formed from.
+    preconditioner : BlockPreconditioner or None
+        The block-SIMPLE preconditioner, applied at the shifted diagonal ``a_P + β d`` each step. ``None``
+        makes a **shift-only** policy, for a step preconditioned by a monolithic inverse of its own
+        (:class:`~aquaflux.solve.MonolithicFactorShiftPolicy` reads only the shift diagonal); it builds no
+        multigrid hierarchy, whose value-dependent coarsening would otherwise recompile the solve at every
+        continuation rung, and refuses to supply a preconditioner.
     shift_basis : ShiftBasis
         How the base velocity shift diagonal ``d`` is built from the momentum diagonal's convective and
         dissipative buckets. The default :class:`~aquaflux.solve.LocalCourantBasis` (weight ``1``) is
@@ -142,7 +148,8 @@ class MomentumShiftPolicy(eqx.Module):
         variable-viscosity flow rather than to change today's behaviour.
     """
 
-    preconditioner: BlockPreconditioner
+    assembler: MomentumContinuity
+    preconditioner: BlockPreconditioner | None = None
     shift_basis: ShiftBasis = LocalCourantBasis()
     velocity_shift_parts: VelocityShiftParts | None = None
 
@@ -162,18 +169,18 @@ class MomentumShiftPolicy(eqx.Module):
             returns the block preconditioner at the shifted diagonal ``a_P + β d``.
         """
         block = self.preconditioner
+        assembler = self.assembler
         # `a_P` is a PRECONDITIONER quantity (what the velocity block inverts), always the frozen
         # diagonal. The SHIFT's buckets are a separate concern with their own lifetime, so their source
         # is injected (:class:`FrozenViscosityVelocityParts` is its explicit default spelling); `None`
-        # reuses the preconditioner's frozen parts inline, keeping the default path bit-identical.
-        convective, dissipative = block.frozen_momentum_diagonal_parts(phi)
+        # reuses the assembler's frozen parts inline, keeping the default path bit-identical.
+        convective, dissipative = frozen_momentum_diagonal_parts(assembler, phi)
         a_p = convective + dissipative  # the isotropic frozen a_P the velocity block inverts at
         if self.velocity_shift_parts is not None:
             convective, dissipative = self.velocity_shift_parts.parts(phi)
         d = self.shift_basis.local_diagonal(
             convective, dissipative
         )  # base shift diagonal (n_cells,)
-        assembler = block.assembler
         n_cells = assembler.mesh.n_cells
         # d on every velocity component, zero on pressure — the full-state base shift. The engine
         # scales it by β and adds β·d to the Jacobian diagonal (velocity DOFs only).
@@ -186,6 +193,11 @@ class MomentumShiftPolicy(eqx.Module):
         ) -> Callable[[jnp.ndarray], jnp.ndarray]:
             # Invert the same shifted diagonal a_P + β·d the shift adds to the Jacobian, so the
             # preconditioner matches the shifted operator. Frozen: the coefficient is detached.
+            if block is None:
+                raise TypeError(
+                    "this shift policy has no block preconditioner: it supplies only the shift "
+                    "diagonal, for a step whose inverse is a monolithic factorization."
+                )
             return block.apply_at(phi, jax.lax.stop_gradient(a_p + relaxation * d))
 
         return ShiftTerm(diagonal, make_preconditioner)
@@ -218,9 +230,33 @@ def momentum_shift_policy(
     """
     preconditioner = BlockPreconditioner.build(assembler, **preconditioner_kwargs)
     return (
-        MomentumShiftPolicy(preconditioner)
+        MomentumShiftPolicy(assembler, preconditioner)
         if shift_basis is None
-        else MomentumShiftPolicy(preconditioner, shift_basis)
+        else MomentumShiftPolicy(assembler, preconditioner, shift_basis)
+    )
+
+
+def momentum_shift_only_policy(
+    assembler: MomentumContinuity, shift_basis: ShiftBasis | None = None
+) -> MomentumShiftPolicy:
+    """The flow shift policy with **no** preconditioner, for a step preconditioned by a monolithic inverse.
+
+    Parameters
+    ----------
+    assembler : MomentumContinuity
+        The coupled flow residual assembler.
+    shift_basis : ShiftBasis, optional
+        How the velocity shift diagonal is built; ``None`` keeps the full ``a_P``.
+
+    Returns
+    -------
+    MomentumShiftPolicy
+        A policy holding no block preconditioner (see :class:`MomentumShiftPolicy`).
+    """
+    return (
+        MomentumShiftPolicy(assembler)
+        if shift_basis is None
+        else MomentumShiftPolicy(assembler, None, shift_basis)
     )
 
 

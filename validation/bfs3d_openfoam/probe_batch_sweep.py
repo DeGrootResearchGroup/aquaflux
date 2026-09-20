@@ -42,11 +42,8 @@ from aquaflux.solve import (
     MonolithicAmgPreconditioner,  # noqa: E402
     block_stencil_gather_map,  # noqa: E402
 )
-from aquaflux.turbulence.coupled import (  # noqa: E402
-    _batched_jacobian_matvec,
-    _coupled_jacobian_plan,
-    _jacobian_matvec,
-)
+from aquaflux.turbulence.coupled import _coupled_jacobian_plan
+from aquaflux.solve import batched_jacobian_matvec, jacobian_matvec
 
 #: Chunk sizes to sweep. Kept modest at the top end deliberately: a materialize of a three-dimensional
 #: coupled Jacobian is already the largest allocation in the process, and the point of the sweep is to
@@ -108,9 +105,9 @@ def main():
 
     def materialize(batch):
         return MonolithicAmgPreconditioner._materialize_jacobian(
-            lambda v: _jacobian_matvec(coupled, state, v),
+            lambda v: jacobian_matvec(coupled, state, v),
             plan,
-            lambda seeds: _batched_jacobian_matvec(coupled, state, seeds),
+            lambda seeds: batched_jacobian_matvec(coupled, state, seeds),
             batch,
             structure,
         )

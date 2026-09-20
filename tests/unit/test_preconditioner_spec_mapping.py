@@ -16,14 +16,19 @@ import aquaflux
 import numpy as np
 import pytest
 from aquaflux.flow import ConvectionAir, ConvectionTwoLevel, VelocityBlock, ViscousMultilevel
-from aquaflux.solve import AirReduction, BlockInverse, JacobiSmoothed, SimpleSmoothed
-from aquaflux.turbulence import (
-    BlockDiagonal,
+from aquaflux.solve import (
+    AirReduction,
+    BlockInverse,
     CompleteLu,
     FieldSplit,
     JacobianProbeSpec,
+    JacobiSmoothed,
     MaterializedJacobian,
     MonolithicVCycle,
+    SimpleSmoothed,
+)
+from aquaflux.turbulence import (
+    BlockDiagonal,
     ScalarAir,
     ScalarBlock,
     ScalarTwoLevel,
@@ -261,3 +266,40 @@ def test_the_outermost_kind_must_be_one_of_the_two_families(mapping) -> None:
 def test_only_a_spec_family_is_written() -> None:
     with pytest.raises(TypeError, match="BlockDiagonal or MaterializedJacobian"):
         preconditioner_spec_to_mapping(CompleteLu())  # type: ignore[arg-type]
+
+
+def test_the_solve_registry_round_trips_a_materialized_spec_without_the_turbulence_package() -> (
+    None
+):
+    """A laminar case file loads its spec from ``aquaflux.solve`` alone, and the schema is unchanged."""
+    from aquaflux.solve import (
+        FieldSplit,
+        JacobiSmoothed,
+        MaterializedJacobian,
+        SimpleSmoothed,
+        materialized_spec_from_mapping,
+        materialized_spec_to_mapping,
+    )
+
+    spec = MaterializedJacobian(
+        FieldSplit(SimpleSmoothed(sweeps=2), JacobiSmoothed()), beta_floor=0.05
+    )
+    mapping = materialized_spec_to_mapping(spec)
+    assert mapping["kind"] == "MaterializedJacobian"
+    assert materialized_spec_from_mapping(mapping) == spec
+    # ...and the coupled registry, which extends it, reads the very same mapping to the very same value.
+    assert preconditioner_spec_from_mapping(mapping) == spec
+
+
+def test_the_solve_registry_does_not_know_the_turbulence_only_kinds() -> None:
+    """``BlockDiagonal`` is a coupled-RANS family: naming it in a laminar spec file is an unknown kind."""
+    from aquaflux.solve import materialized_spec_from_mapping
+
+    with pytest.raises(ValueError, match="BlockDiagonal"):
+        materialized_spec_from_mapping({"kind": "BlockDiagonal"})
+
+
+def test_the_coupled_registry_extends_the_solve_one_rather_than_restating_it() -> None:
+    from aquaflux.solve import MATERIALIZED_MAPPING
+
+    assert set(MATERIALIZED_MAPPING.kinds) < set(_SPEC_MAPPING.kinds)

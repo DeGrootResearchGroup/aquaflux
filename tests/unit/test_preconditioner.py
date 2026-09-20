@@ -377,9 +377,11 @@ def test_momentum_shift_policy_injects_its_velocity_parts_source() -> None:
     velocity = jnp.zeros((asm.mesh.n_cells, asm.mesh.dim)).at[:, 0].set(1.0)
     phi = asm.pack(velocity, jnp.zeros(asm.mesh.n_cells))
 
-    default = MomentumShiftPolicy(block).shift_term(phi).diagonal
+    default = MomentumShiftPolicy(block.assembler, block).shift_term(phi).diagonal
     explicit = (
-        MomentumShiftPolicy(block, velocity_shift_parts=FrozenViscosityVelocityParts(block))
+        MomentumShiftPolicy(
+            block.assembler, block, velocity_shift_parts=FrozenViscosityVelocityParts(block)
+        )
         .shift_term(phi)
         .diagonal
     )
@@ -390,7 +392,11 @@ def test_momentum_shift_policy_injects_its_velocity_parts_source() -> None:
             convective, dissipative = block.frozen_momentum_diagonal_parts(flow)
             return 2.0 * convective, 2.0 * dissipative
 
-    injected = MomentumShiftPolicy(block, velocity_shift_parts=_Doubled()).shift_term(phi).diagonal
+    injected = (
+        MomentumShiftPolicy(block.assembler, block, velocity_shift_parts=_Doubled())
+        .shift_term(phi)
+        .diagonal
+    )
     assert not jnp.allclose(injected, default)
 
 

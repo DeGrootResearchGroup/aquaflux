@@ -60,19 +60,14 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse.linalg as spla  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
+    jacobian_matvec,
     DualTimeLoop,
     JacobiSmoothed,
     materialize_block_jacobian,
     shifted_jacobian,
 )
-from aquaflux.turbulence import (
-    CompleteLu,
-    FieldSplit,
-    JacobianProbeSpec,
-    MaterializedJacobian,
-    coupled_step,
-    hybrid_initialize,
-)
+from aquaflux.turbulence import coupled_step, hybrid_initialize
+from aquaflux.solve import CompleteLu, FieldSplit, JacobianProbeSpec, MaterializedJacobian
 
 #: Far past the march's inexact-Newton stop, so arms separate rather than tie, and modest in restarts
 #: because a failing arm is identified by its true residual long before it would converge.
@@ -89,7 +84,7 @@ def build_operator(coupled, state, reach):
     frozen = jnp.asarray(state)
     zero = np.zeros(int(state.shape[0]))
     return shifted_jacobian(
-        materialize_block_jacobian(lambda v: C._jacobian_matvec(coupled, frozen, v), plan).tocsr(),
+        materialize_block_jacobian(lambda v: jacobian_matvec(coupled, frozen, v), plan).tocsr(),
         zero,
     )
 

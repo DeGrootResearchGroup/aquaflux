@@ -52,13 +52,8 @@ sys.path.insert(0, str(ROOT))  # import aquaflux from the working tree, as compa
 sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
-from aquaflux.turbulence.coupled import (  # noqa: E402
-    _DEFAULT_SHIFT_BASIS,
-    _frozen_shift_diagonal,
-    _monolithic_shift_source,
-    coupled_scaled_norm,
-    wall_consistent_state,
-)
+from aquaflux.turbulence.coupled import _DEFAULT_SHIFT_BASIS, _monolithic_shift_source, coupled_scaled_norm, wall_consistent_state
+from aquaflux.solve import frozen_shift_diagonal
 
 #: The state to examine: the converged root of the middle Reynolds rung, which is verbatim the seed the
 #: target rung begins from. That handover is the event this probe exists to measure.
@@ -99,7 +94,7 @@ def measure_at(coupled, state, scale):
     companion = coupled.with_scaled_molecular_viscosity(scale)
     residual = jax.lax.stop_gradient(companion.residual(state))
     base = _monolithic_shift_source(companion, state, _DEFAULT_SHIFT_BASIS)
-    diagonal = np.asarray(_frozen_shift_diagonal(base, 1.0, state), dtype=np.float64)
+    diagonal = np.asarray(frozen_shift_diagonal(base, 1.0, state), dtype=np.float64)
     return companion, residual, coupled_scaled_norm(companion, base, state), diagonal
 
 

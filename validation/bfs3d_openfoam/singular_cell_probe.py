@@ -52,12 +52,8 @@ from aquaflux.solve import (  # noqa: E402
     block_stencil_gather_map,
 )
 from aquaflux.turbulence import ScalarTwoLevel, positive_k_limit  # noqa: E402
-from aquaflux.turbulence.coupled import (  # noqa: E402
-    _coupled_jacobian_plan,
-    _coupled_shift_policy,
-    _frozen_shift_diagonal,
-    _jacobian_matvec,
-)
+from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy
+from aquaflux.solve import frozen_shift_diagonal, jacobian_matvec
 from cell_block_scaling import block_diagnostics, cell_blocks  # noqa: E402
 
 N_TRAILING = 2
@@ -188,7 +184,7 @@ def main() -> None:
     structure = block_stencil_gather_map(plan)
     base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
-        lambda v: _jacobian_matvec(coupled, state, v), plan, None, None, structure
+        lambda v: jacobian_matvec(coupled, state, v), plan, None, None, structure
     )
     # SWEEP the shift rather than probing one value. The block is `J + beta d`, so beta props up the
     # very diagonal that makes each cell block invertible -- and the refresh that failed happens at the
@@ -205,7 +201,7 @@ def main() -> None:
         probe = sp.csr_matrix(
             MonolithicAmgPreconditioner._shifted(
                 jacobian,
-                _frozen_shift_diagonal(base, beta, state) if beta > 0 else np.zeros(groups.n_dofs),
+                frozen_shift_diagonal(base, beta, state) if beta > 0 else np.zeros(groups.n_dofs),
             )[groups.trailing, :][:, groups.trailing]
         )
         b = cell_blocks(probe, N_TRAILING)
@@ -227,7 +223,7 @@ def main() -> None:
     print(f"\n  studying beta {beta_used:.4g}\n")
     shifted = MonolithicAmgPreconditioner._shifted(
         jacobian,
-        _frozen_shift_diagonal(base, beta_used, state)
+        frozen_shift_diagonal(base, beta_used, state)
         if beta_used > 0
         else np.zeros(groups.n_dofs),
     )

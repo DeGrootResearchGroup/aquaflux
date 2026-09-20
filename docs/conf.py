@@ -76,6 +76,8 @@ SUBPACKAGE_GROUPS = {
                 "amg_preconditioner",
                 "lu_preconditioner",
                 "monolithic_policy",
+                "materialized_spec",
+                "materialized_session",
                 "field_split",
                 "block_inverse",
                 "settings_value",
