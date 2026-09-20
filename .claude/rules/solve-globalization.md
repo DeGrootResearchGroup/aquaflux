@@ -238,7 +238,7 @@ What to take from it, none of which is specific to that mechanism:
       fields. Nor can it for the per-family Krylov restart regime or the progress measure's default.
       **Decided (#387, 2026-09-14):** `shift_basis`, the velocity shift parts and `turbulence_damping`
       pass the test but describe how the *shift* is formed rather than how the march damps, so they are
-      their own value, `turbulence.ShiftSettings`, on the coupled builders — kept off this object also
+      their own value, `turbulence.CoupledShiftSettings`, on the coupled builders — kept off this object also
       because the damping strategies and the live velocity parts carry state. **Still open:** `divergence_cap` and `line_search_growth.basin`
       are residual ratios read in a measure the object excludes (#370); and `acceptance` and the schedule
       are flattened to scalars, so a non-`DivergenceGuard` rule or a non-SER schedule reaches a step only
@@ -310,7 +310,7 @@ What to take from it, none of which is specific to that mechanism:
     diagonal to rounding. **Consequence for the preconditioner (binding):** with a non-`a_P` basis the
     shifted diagonal is `a_P + β d`, *not* `a_P(1+β)`, so `make_preconditioner` must invert `a_P + β d` —
     the velocity block's `apply_at` is fed exactly that (was `a_P(1+β)`; identical when `w=1`). Threaded
-    through `momentum_continuation`/`coupled_continuation`/`solve_coupled(shift=ShiftSettings(basis=…))`
+    through `momentum_continuation`/`coupled_continuation`/`solve_coupled(shift=CoupledShiftSettings(basis=…))`
     (the coupled builders' loose `shift_basis=` keyword is gone, #387) and the k/ω
     shift policies; **pressure keeps zero shift regardless** (elliptic), which is why a *local* basis is
     defensible on this coupled solver where Fluent uses a global time scale for its coupled path.

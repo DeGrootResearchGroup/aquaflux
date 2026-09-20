@@ -611,8 +611,7 @@ a control for a solver question: the control had to run on a weaker driver.
   `shifted_step`. Its Krylov regime is `_FLOW_LINEAR_SOLVE` = rtol 0.3 / restart 120 / max_restarts 15,
   **carried from the coupled block-diagonal family and not re-measured on a flow-only residual**.
   `tools/sibling_builders.py` pairs `flow_march_step` with `coupled_step`; what differs is genuine (the
-  coupled `positivity_*` are `k`'s) **except `shift_basis`**, which is spelled directly here and as
-  `ShiftSettings.basis` there — unify when `ShiftSettings` splits into a flow part and a turbulence part.
+  coupled `positivity_*` are `k`'s) and `shift` is the same value on both: `solve.ShiftSettings(basis, velocity_parts)` here, its subclass `CoupledShiftSettings` (adding `turbulence_damping`) there (#450 stage 3). `momentum_continuation` and `momentum_shift_policy` take it too; the old `shift_basis=` keyword is gone.
   `jacobian_gradient_sweeps` is on both, being a property of the residual and not of the closure.
 - **`FlowMeasures`** supplies `RowScaled` / `BlockScaled` for the `(u, p)` residual: momentum rows by the
   shift's base diagonal, **continuity by the cell's mass throughput** (it has no diagonal), field scales the

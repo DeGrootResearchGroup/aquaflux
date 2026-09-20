@@ -50,11 +50,11 @@ from aquaflux.solve import (
 from aquaflux.solve import driver as driver_module
 from aquaflux.turbulence import (
     BlockDiagonal,
+    CoupledShiftSettings,
     DirectScalars,
     LogScalars,
     ScalarAir,
     ScalarTwoLevel,
-    ShiftSettings,
     SSTModel,
     SSTTurbulence,
     UnpreconditionedScalars,
@@ -421,7 +421,7 @@ def test_a_monolithic_builder_takes_the_injected_velocity_shift_source() -> None
         coupled,
         state,
         preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
-        shift=ShiftSettings(velocity_parts=live),
+        shift=CoupledShiftSettings(velocity_parts=live),
     )
     assert step.shift_policy.base.velocity_shift_parts is live
     # ...and it is genuinely live: away from the state the assembler was frozen at, the shift it

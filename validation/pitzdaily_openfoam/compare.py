@@ -104,7 +104,7 @@ from aquaflux.solve import (
     combine_observers,
     relative_residual_gmres,
 )
-from aquaflux.turbulence import BetaTaperedDamping, ConstantDamping, CoupledRANS, GeometricReynoldsSchedule, LogScalars, ResidualTaperedDamping, ShiftSettings, SSTModel, SSTTurbulence, coupled_fields, open_session, scale_both_blocks, scale_momentum_only, solve_reynolds_continuation, solve_reynolds_ramp, turbulence_residual_norm, wall_consistent_state
+from aquaflux.turbulence import BetaTaperedDamping, ConstantDamping, CoupledRANS, GeometricReynoldsSchedule, LogScalars, ResidualTaperedDamping, CoupledShiftSettings, SSTModel, SSTTurbulence, coupled_fields, open_session, scale_both_blocks, scale_momentum_only, solve_reynolds_continuation, solve_reynolds_ramp, turbulence_residual_norm, wall_consistent_state
 from aquaflux.solve import FieldSplit, JacobianProbeSpec, MaterializedJacobian, MonolithicVCycle
 
 HERE = Path(__file__).resolve().parent
@@ -1194,7 +1194,7 @@ def solve_aquaflux(
         # for that reason -- see `BETA_START_WARM`. With the environment unset the two are equal and
         # this is the same control the solve would have used anyway.
         return dict(
-            shift=ShiftSettings(turbulence_damping=_damping(companion, seed_state, beta_start)),
+            shift=CoupledShiftSettings(turbulence_damping=_damping(companion, seed_state, beta_start)),
             step_control=dual_time_control(beta_start),
         )
 

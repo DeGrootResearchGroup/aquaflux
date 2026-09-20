@@ -315,3 +315,42 @@ def test_a_preconditioner_is_refused_beside_a_finished_step(channel) -> None:
             strategy=finished,
             preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
         )
+
+
+def test_the_shift_settings_reach_the_flow_policy_field_for_field() -> None:
+    """``shift`` carries both of its fields into the policy, and a field left unset keeps the default.
+
+    Distinct sentinel values, so a swapped or dropped field shows up as the wrong object rather than
+    coinciding with a default.
+    """
+    from aquaflux.solve import LocalCourantBasis, ShiftSettings
+
+    assembler = _channel(8, 6, MU)
+    state = assembler.initial_state()
+    basis = LocalCourantBasis(dissipative_weight=0.0)
+    parts = object()  # only stored here, never called
+
+    both = flow_march_step(assembler, state, shift=ShiftSettings(basis=basis, velocity_parts=parts))
+    assert both.shift_policy.shift_basis is basis
+    assert both.shift_policy.velocity_shift_parts is parts
+
+    only_basis = flow_march_step(assembler, state, shift=ShiftSettings(basis=basis))
+    assert only_basis.shift_policy.shift_basis is basis
+    assert only_basis.shift_policy.velocity_shift_parts is None
+
+    unset = flow_march_step(assembler, state)
+    assert unset.shift_policy.shift_basis == LocalCourantBasis()
+
+
+def test_the_coupled_shift_settings_are_the_flow_ones_plus_the_closures_damping() -> None:
+    """One flow part, defined once: the coupled value IS a ``ShiftSettings`` with one more field."""
+    import dataclasses
+
+    from aquaflux.solve import ShiftSettings
+    from aquaflux.turbulence import CoupledShiftSettings
+
+    assert issubclass(CoupledShiftSettings, ShiftSettings)
+    flow_fields = {f.name for f in dataclasses.fields(ShiftSettings)}
+    assert {f.name for f in dataclasses.fields(CoupledShiftSettings)} == flow_fields | {
+        "turbulence_damping"
+    }
