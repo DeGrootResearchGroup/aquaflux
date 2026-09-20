@@ -549,6 +549,41 @@ Three things about this are worth carrying to any other exact-arithmetic predica
   `test_the_edge_function_survives_being_compiled`, which also asserts the plain difference still
   *fails*, so the fixture cannot quietly stop proving anything.
 
+**How far the fix goes, swept rather than argued (`validation/radiation_watertight_sweep.py`).**
+Seven bodies closed to the last bit — convex hulls at 24/40/60/90 points, closed drums at 16 and
+48 sectors, and an L-prism with a reflex edge — with rays from inside aimed at every vertex, edge
+midpoint and face centroid. **8,764 rays, 0 leaks, eager and traced.** The same sweep on the plain
+difference leaks **124**, all of them only once compiled. The other two candidates in the module
+were checked and are **not** hazards:
+
+| site | exact cancellation needed? | measured |
+|---|---|---|
+| inside test `sign(u), sign(v), sign(w)` | yes — picks which triangle claims a ray | broke; fixed |
+| the shear `ox - shear * oz` | no — the same numbers go in, so the same come out | 0 disagreements |
+| contour form `jnp.cross` (tiling additivity) | no | 2e-16 traced and eager |
+
+⚠️ **THE DISCRIMINATOR IS WHETHER THE CANCELLATION FEEDS A DISCRETE PREDICATE.** The contour form
+is built on the same difference of products, but a last-bit change there moves an *angle* by a
+last bit. The inside test feeds it to a sign test that decides which of two triangles claims a
+ray, and a discrete predicate has no small errors — it is right or it is a pinhole. Apply this
+test before assuming the next exact-arithmetic site here is safe or unsafe.
+
+Three traps met while measuring this, each of which produced a confidently wrong answer first:
+
+- **Aim points snapped to a tolerance make the sweep blind.** The first version rounded the
+  vertices and midpoints to 12 decimals before deduplicating them, which moves them off the
+  feature. Its control came back **clean**, which is the only reason the mistake surfaced — a
+  tightness sweep with no control arm is worth nothing.
+- **`cylinder_triangles` does not close**, so a capped one leaks 13 rays eagerly with any edge
+  function. Its angles run `linspace(0, 2*pi, n+1)` and the last sector ends at `2*pi`, whose sine
+  is `-2.4e-16` rather than zero. Those 13 were briefly read as residual FMA sensitivity. Build a
+  closed body from one vertex table (`closed_prism` / `closed_drum`), not from trigonometry
+  evaluated twice.
+- **Swapping a module global does not invalidate a compiled version that read it.** `jit` keys its
+  cache on the function object, so the second arm of an in-process A/B silently replays the
+  first's program. Here that made the fixed arm reproduce the control's leak counts *exactly*,
+  which is the only tell. `jax.clear_caches()` between arms, or separate processes.
+
 ⚠️ **The published swap of `kx`/`ky` when the chosen axis is negative is omitted on purpose, and
 this was measured, not assumed.** It keeps the coordinate system right-handed; flipping handedness
 negates `u`, `v`, `w` and the determinant *together*, and both places they are used here are

@@ -13,7 +13,13 @@ from aquaflux.radiation.triangles import _edge_function, segment_is_cut
 from aquaflux.radiation.visibility import build_visibility
 from scipy.spatial import ConvexHull
 
-from tests.unit.radiation_references import cylinder_triangles, rectangle_triangles
+from tests.unit.radiation_references import (
+    L_OUTLINE,
+    closed_drum,
+    closed_prism,
+    cylinder_triangles,
+    rectangle_triangles,
+)
 
 ONE_TRIANGLE = jnp.asarray([[[-1.0, -1.0, 1.0], [1.0, -1.0, 1.0], [0.0, 1.0, 1.0]]])
 NO_OFFSET = jnp.zeros(1)
@@ -136,6 +142,63 @@ def test_the_intersection_is_watertight_where_the_usual_test_leaks():
     compiled = jax.jit(lambda *a: segment_is_cut(*a))
     assert int(np.count_nonzero(~np.asarray(compiled(*arguments)))) == 0
     assert moller_trumbore_leaks() > 0, "the fixture no longer separates the two formulations"
+
+
+def _features(triangles):
+    """Every vertex, edge midpoint and face centroid of a triangulation — exactly.
+
+    ⚠️ Not rounded and not deduplicated. These aims are useful only because they land on a
+    feature *exactly*; snapping them to a tolerance moves them off it, and a sweep built that way
+    reports no leaks whatever the intersection test does.
+    """
+    midpoints = [0.5 * (triangles[:, k] + triangles[:, (k + 1) % 3]) for k in range(3)]
+    return np.concatenate([triangles.reshape(-1, 3), *midpoints, triangles.mean(axis=1)])
+
+
+def _escaping_rays(body, interior, *, nested):
+    """How many rays from inside ``body`` at its own features are not stopped by it.
+
+    ``nested`` wraps the call in a further trace. Note that the unnested arm is **not** an eager
+    one: the per-block kernel is traced either way, so what this varies is whether there is an
+    outer trace around it, not whether the arithmetic is compiled.
+    """
+    cut = jax.jit(lambda *a: segment_is_cut(*a)) if nested else segment_is_cut
+    aims = _features(body)
+    escaped = 0
+    for point in interior:
+        target = point + (aims - point) * 3.0
+        origin = np.broadcast_to(point, target.shape)
+        blocked = cut(
+            jnp.asarray(origin), jnp.asarray(target), jnp.asarray(body), jnp.zeros(len(aims))
+        )
+        escaped += int(np.count_nonzero(~np.asarray(blocked)))
+    return escaped
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["direct", "inside an outer trace"])
+@pytest.mark.parametrize(
+    "body, interior",
+    [
+        (closed_prism(L_OUTLINE, 1.0), [[0.4, 0.4, 0.0], [1.5, 0.4, 0.3], [0.4, 1.5, -0.4]]),
+        (closed_drum(48), [[0.0, 0.0, 0.0], [0.4, -0.2, 0.5], [-0.3, 0.35, -0.7]]),
+    ],
+    ids=["L-prism", "drum"],
+)
+def test_no_ray_escapes_a_closed_body(body, interior, nested):
+    """The watertight guarantee on bodies the convex-hull fixture does not reach.
+
+    Two features it adds. The L-prism has a **reflex** edge, where an interior ray leaves
+    through a corner the surface turns inward at; the drum has a **curved seam that actually
+    meets itself**, built by index from one vertex table rather than from trigonometry evaluated
+    twice — a seam assembled the other way is short of closing by a few last bits, and then the
+    rays that escape through the slit get blamed on the intersection test.
+
+    Written as a plain difference of products the edge function loses its exact antisymmetry
+    once compiled, and these two bodies then leak 6 and 76 rays. Both arms here go through the
+    traced block kernel; the second only adds an outer trace around it, which is the shape a
+    caller who wraps the whole build in ``jit`` produces.
+    """
+    assert _escaping_rays(np.asarray(body), np.asarray(interior), nested=nested) == 0
 
 
 def test_the_edge_function_survives_being_compiled():

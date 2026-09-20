@@ -156,6 +156,14 @@ def cylinder_triangles(radius: float, half_length: float, sectors: int = 160, sl
     A cylinder is convex, so from any outside point the facets a receiver can see are exactly
     those whose outward normal faces it — which makes this the fixture that tests the
     source-side clamp without needing an occluder.
+
+    ⚠️ **Its seam does not close, so capping it does not give a watertight body.** The angles
+    run ``linspace(0, 2 * pi, sectors + 1)``, and the last sector ends at ``2 * pi``, whose sine
+    is ``-2.4e-16`` rather than zero — so the first and last columns of vertices differ in the
+    last bits and the surface has a hair-width slit down it. That is invisible to everything
+    this fixture is used for, and fatal to a ray-tightness sweep: rays aimed at the seam escape
+    through it whatever the intersection test does. Use :func:`closed_prism` when the body has
+    to be closed.
     """
     angles = np.linspace(0.0, 2.0 * np.pi, sectors + 1)
     heights = np.linspace(-half_length, half_length, slices + 1)
@@ -303,3 +311,53 @@ def area_average_onto(matrix, area, n: int, n_coarse: int) -> np.ndarray:
     np.add.at(weighted, owner, area[:, None] * columns)
     np.add.at(total, owner, area)
     return weighted / total[:, None]
+
+
+def closed_prism(outline: np.ndarray, half_height: float) -> np.ndarray:
+    """A closed, inward-sealed prism over a 2D ``outline``, built from one vertex table.
+
+    Every vertex is written once and reused by index, so two faces meeting at an edge carry
+    *the same numbers* rather than numbers that agree to a tolerance. That is what a
+    ray-tightness sweep needs and what a body assembled from independently evaluated
+    trigonometry cannot offer (see :func:`cylinder_triangles`): a seam whose two sides differ in
+    the last bits is a real pinhole, and it will be blamed on the intersection test.
+
+    Parameters
+    ----------
+    outline : np.ndarray, shape ``(n, 2)``
+        The cross-section, in order. It may be non-convex — an L gives a reflex edge, which is
+        where an interior ray can graze two faces at once.
+    half_height : float
+        Half the extrusion along z; the prism spans ``-half_height`` to ``+half_height``.
+
+    Returns
+    -------
+    np.ndarray, shape ``(4 * n, 3, 3)``
+        Two triangles per side wall plus one per cap sector.
+    """
+    outline = np.asarray(outline, dtype=float)
+    count = len(outline)
+    low = np.column_stack([outline, np.full(count, -half_height)])
+    high = np.column_stack([outline, np.full(count, half_height)])
+    centre_low = np.array([*outline.mean(axis=0), -half_height])
+    centre_high = np.array([*outline.mean(axis=0), half_height])
+
+    faces = []
+    for k in range(count):
+        following = (k + 1) % count
+        faces.append([low[k], low[following], high[following]])
+        faces.append([low[k], high[following], high[k]])
+        faces.append([centre_low, low[following], low[k]])
+        faces.append([centre_high, high[k], high[following]])
+    return np.array(faces)
+
+
+def closed_drum(sectors: int, radius: float = 1.0, half_height: float = 1.0) -> np.ndarray:
+    """A closed circular prism — a curved seam that actually meets itself."""
+    angle = np.linspace(0.0, 2.0 * np.pi, sectors, endpoint=False)
+    return closed_prism(radius * np.column_stack([np.cos(angle), np.sin(angle)]), half_height)
+
+
+#: A non-convex cross-section: the reflex corner at (0.8, 0.8) is the feature a closed-body
+#: tightness sweep wants, because an interior ray can leave through two faces that meet there.
+L_OUTLINE = np.array([[0.0, 0.0], [2.0, 0.0], [2.0, 0.8], [0.8, 0.8], [0.8, 2.0], [0.0, 2.0]])
