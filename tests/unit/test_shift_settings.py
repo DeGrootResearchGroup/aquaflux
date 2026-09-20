@@ -18,7 +18,7 @@ from aquaflux.solve import CompleteLu, LocalCourantBasis, MaterializedJacobian
 from aquaflux.turbulence import (
     BlockDiagonal,
     ConstantDamping,
-    ShiftSettings,
+    CoupledShiftSettings,
     UnpreconditionedScalars,
     coupled_step,
     open_session,
@@ -40,7 +40,7 @@ _RETIRED = ("shift_basis", "velocity_shift_parts", "turbulence_damping")
 
 
 def test_every_coupled_builder_takes_the_value_and_none_of_the_keywords_it_replaced() -> None:
-    assert {field.name for field in dataclasses.fields(ShiftSettings)} == {
+    assert {field.name for field in dataclasses.fields(CoupledShiftSettings)} == {
         "basis",
         "velocity_parts",
         "turbulence_damping",
@@ -56,13 +56,13 @@ def test_an_unset_shift_resolves_to_the_builders_defaults() -> None:
     assert basis is _DEFAULT_SHIFT_BASIS
     assert parts is None
     assert damping == 1.0
-    assert _resolved_shift(ShiftSettings()) == _resolved_shift(None)
+    assert _resolved_shift(CoupledShiftSettings()) == _resolved_shift(None)
 
 
 def test_a_set_field_passes_through_as_the_very_object_given() -> None:
     damping = ConstantDamping(3.0)
     basis, parts, resolved = _resolved_shift(
-        ShiftSettings(basis=_BASIS, turbulence_damping=damping)
+        CoupledShiftSettings(basis=_BASIS, turbulence_damping=damping)
     )
     assert basis is _BASIS
     assert parts is None
@@ -72,7 +72,7 @@ def test_a_set_field_passes_through_as_the_very_object_given() -> None:
 def test_the_damping_reaches_the_policy_of_every_family_and_the_mass_flow_builder() -> None:
     mesh, coupled = _cavity(4)
     state = _healthy_state(mesh, coupled)
-    shift = ShiftSettings(basis=_BASIS, turbulence_damping=2.0)
+    shift = CoupledShiftSettings(basis=_BASIS, turbulence_damping=2.0)
     relaxation = jnp.asarray(0.5)
 
     block = coupled_step(
@@ -92,8 +92,8 @@ def test_the_damping_reaches_the_policy_of_every_family_and_the_mass_flow_builde
 
 
 def test_a_point_s_shift_value_is_merged_field_by_field_over_the_shared_one() -> None:
-    base = {"shift": ShiftSettings(basis=_BASIS, turbulence_damping=3.0), "rtol": 1e-6}
-    override = {"shift": ShiftSettings(turbulence_damping=2.0), "rtol": 1e-8}
+    base = {"shift": CoupledShiftSettings(basis=_BASIS, turbulence_damping=3.0), "rtol": 1e-6}
+    override = {"shift": CoupledShiftSettings(turbulence_damping=2.0), "rtol": 1e-8}
     merged = merged_march_options(base, override)
     assert merged["shift"].basis is _BASIS  # kept from the shared value
     assert merged["shift"].turbulence_damping == 2.0  # the point's own wins where it sets one
@@ -106,9 +106,9 @@ def test_the_reynolds_continuation_merges_a_point_s_shift_over_the_shared_one(mo
     solve_reynolds_continuation(
         _tiny_coupled(),
         n_points=0,
-        shift=ShiftSettings(basis=_BASIS),
+        shift=CoupledShiftSettings(basis=_BASIS),
         point_setup=lambda companion, state, point: {
-            "shift": ShiftSettings(turbulence_damping=2.0)
+            "shift": CoupledShiftSettings(turbulence_damping=2.0)
         },
     )
     (call,) = calls

@@ -45,7 +45,7 @@ from aquaflux.solve import (
     RetryPolicy,
     RowScaled,
     SessionSource,
-    ShiftBasis,
+    ShiftSettings,
     StepControl,
     StepReport,
     assembler_residual,
@@ -83,7 +83,7 @@ def flow_march_step(
     globalization: Globalization = DEFAULT_GLOBALIZATION,
     dual_time: DualTimeLoop | None = None,
     linear_solve: LinearSolveSettings | lx.AbstractLinearSolver | None = None,
-    shift_basis: ShiftBasis | None = None,
+    shift: ShiftSettings | None = None,
     inner_observer: Callable[..., None] | None = None,
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     jacobian_gradient_sweeps: int | None = None,
@@ -111,9 +111,11 @@ def flow_march_step(
         The shifted solve: a regime whose unset fields take ``rtol 0.3, restart 120, max_restarts 15``
         (measured in the march's progress measure, not the Euclidean norm), or a whole solver, which
         replaces the regime **and** the stopping measure.
-    shift_basis : ShiftBasis, optional
-        How the velocity shift diagonal is built from the momentum diagonal's parts (see
-        :class:`~aquaflux.flow.MomentumShiftPolicy`).
+    shift : ShiftSettings, optional
+        How the velocity shift diagonal is formed -- its basis and where its buckets come from, the same
+        value :func:`~aquaflux.turbulence.coupled_step` takes (as :class:`~aquaflux.turbulence.CoupledShiftSettings`,
+        which adds the closure's damping). Unset fields keep the full ``a_P`` from the frozen momentum
+        diagonal.
     inner_observer, inner_refresh : callable, optional
         The dual-time loop's per-inner-iteration hook and mid-step rebuild. Forward-only, and refused
         without ``dual_time``.
@@ -132,7 +134,7 @@ def flow_march_step(
     """
     policy = momentum_shift_policy(
         momentum,
-        shift_basis,
+        shift,
         reference_state=reference_state,
         **dict(preconditioner_options or {}),
     )
@@ -261,7 +263,7 @@ class _FlowProblem(MaterializedProblem):
         return arguments
 
     def shift_source(self, state: jnp.ndarray, march: dict):
-        return momentum_shift_only_policy(self.momentum, march["shift_basis"])
+        return momentum_shift_only_policy(self.momentum, march["shift"])
 
     def build_step(
         self,
@@ -481,7 +483,7 @@ def solve_flow_march(
         defaults to the Courant ramp.
     **march
         The settings of :func:`flow_march_step` (``globalization``, ``dual_time``, ``linear_solve``,
-        ``shift_basis``, ...), handed to every build and refresh; an unknown keyword raises.
+        ``shift``, ...), handed to every build and refresh; an unknown keyword raises.
         ⚠️ Like ``preconditioner_options`` and ``reference_state`` they are accepted only when this
         function builds the step, and are refused beside a ``strategy`` or a ``RefreshPolicy(builder=...)``.
 

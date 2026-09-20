@@ -56,7 +56,7 @@ from .coupled import (
 )
 from .driver import bulk_velocity, solve_segregated
 from .initialization import hybrid_initialize, wall_consistent_omega
-from .march_settings import ShiftSettings
+from .march_settings import CoupledShiftSettings
 from .preconditioner import (
     AirAmgPreconditioner,
     ConvectionAmgPreconditioner,
@@ -107,6 +107,7 @@ __all__ = [
     "ConvectionAmgPreconditioner",
     "CoupledRANS",
     "CoupledShiftPolicy",
+    "CoupledShiftSettings",
     "DirectScalars",
     "GeometricReynoldsSchedule",
     "KDestruction",
@@ -130,7 +131,6 @@ __all__ = [
     "ScalarTwoLevel",
     "ScalarVariableTransform",
     "ScaledScalarPreconditioner",
-    "ShiftSettings",
     "TurbulenceDamping",
     "UnpreconditionedScalars",
     "ViscosityRampHomotopy",

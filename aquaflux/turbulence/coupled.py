@@ -119,7 +119,7 @@ from aquaflux.solve import (
 )
 
 from .initialization import hybrid_initialize, wall_consistent_omega
-from .march_settings import ShiftSettings
+from .march_settings import CoupledShiftSettings
 from .preconditioner import (
     ScalarBlock,
     ScalarTransportPreconditioner,
@@ -2143,7 +2143,7 @@ _SESSION_OWNED = frozenset({"preconditioner", "jacobian_production_viscosity"})
 
 
 def _resolved_shift(
-    shift: ShiftSettings | None,
+    shift: CoupledShiftSettings | None,
 ) -> tuple[ShiftBasis, VelocityShiftParts | None, TurbulenceDamping | float]:
     """The shift's basis, velocity parts and damping, with what ``shift`` leaves unset resolved.
 
@@ -2152,7 +2152,7 @@ def _resolved_shift(
 
     Parameters
     ----------
-    shift : ShiftSettings or None
+    shift : CoupledShiftSettings or None
         The shift settings a builder was given; ``None`` sets nothing.
 
     Returns
@@ -2160,7 +2160,7 @@ def _resolved_shift(
     tuple
         ``(basis, velocity_parts, turbulence_damping)``.
     """
-    shift = ShiftSettings() if shift is None else shift
+    shift = CoupledShiftSettings() if shift is None else shift
     return (
         _DEFAULT_SHIFT_BASIS if shift.basis is None else shift.basis,
         shift.velocity_parts,
@@ -2190,7 +2190,7 @@ def _march_keywords(march: dict) -> dict:
             "MaterializedJacobian(...)); a setting of how the march damps, such as beta0 or "
             "line_search, belongs on globalization=Globalization(...); the inner loop, the forward solve "
             "and the shift are dual_time=DualTimeLoop(...), linear_solve=LinearSolveSettings(...) and "
-            "shift=ShiftSettings(...)."
+            "shift=CoupledShiftSettings(...)."
         )
     bound = signature.bind(None, None, **march)
     bound.apply_defaults()
@@ -2468,7 +2468,7 @@ def coupled_step(
     globalization: Globalization = DEFAULT_GLOBALIZATION,
     dual_time: DualTimeLoop | None = None,
     linear_solve: LinearSolveSettings | lx.AbstractLinearSolver | None = None,
-    shift: ShiftSettings | None = None,
+    shift: CoupledShiftSettings | None = None,
     inner_observer: Callable[..., None] | None = None,
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     positivity_floor: float = 0.0,
@@ -2521,10 +2521,10 @@ def coupled_step(
         count strictly above ``retry.abort_above_cycles``, or a truncated solve is accepted instead of
         redone. A whole solver replaces the regime **and** the stopping measure, which is a larger
         change than it looks.
-    shift : ShiftSettings or None
+    shift : CoupledShiftSettings or None
         How the pseudo-time shift diagonal is formed: its basis, where the velocity shift's parts come
         from, and how much harder the closure's rows are damped than the flow's (see
-        :class:`ShiftSettings`). Unset, the full operator diagonal, damped uniformly. It changes only
+        :class:`CoupledShiftSettings`). Unset, the full operator diagonal, damped uniformly. It changes only
         the path: the shift vanishes at the root.
     inner_observer : callable or None
         A per-inner-iteration hook forwarded to the dual-time step. Forward-only.
@@ -3072,7 +3072,7 @@ def mass_flow_coupled_continuation(
     globalization: Globalization = DEFAULT_GLOBALIZATION,
     dual_time: DualTimeLoop | None = None,
     linear_solve: LinearSolveSettings | lx.AbstractLinearSolver | None = None,
-    shift: ShiftSettings | None = None,
+    shift: CoupledShiftSettings | None = None,
     inner_observer: Callable[..., None] | None = None,
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     positivity_floor: float = 0.0,

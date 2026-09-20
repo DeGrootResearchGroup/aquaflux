@@ -14,54 +14,36 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import equinox as eqx
-
-from aquaflux.solve import filled_from
+from aquaflux.solve import ShiftSettings
 
 if TYPE_CHECKING:
-    from aquaflux.solve import ShiftBasis, VelocityShiftParts
-
     from .coupled import TurbulenceDamping
 
-__all__ = ["ShiftSettings", "merged_march_options"]
+__all__ = ["CoupledShiftSettings", "merged_march_options"]
 
 
-class ShiftSettings(eqx.Module):
-    """How the pseudo-time shift diagonal is formed, for every coupled builder.
+class CoupledShiftSettings(ShiftSettings):
+    """How the pseudo-time shift diagonal is formed for the coupled flow-turbulence march.
 
-    The three settings describe the *shift* -- how much each row is damped per unit of the shift
-    strength ``beta`` -- and nothing about the preconditioner or the march's schedule, which is why
-    they are a value of their own rather than fields of either. Unset, the shift is the full operator
-    diagonal on every row with the flow and closure damped alike.
+    The flow's part -- ``basis`` and ``velocity_parts`` -- is :class:`~aquaflux.solve.ShiftSettings`,
+    the same value a laminar flow march takes; this adds the one setting that belongs to the closure.
+    Unset, the shift is the full operator diagonal on every row with the flow and closure damped alike.
 
-    ⚠️ **Two of the fields may be bound to a state, so this is not plain configuration.** A
+    ⚠️ **The fields may be bound to a state, so this is not plain configuration.** A
     :class:`~aquaflux.turbulence.LiveViscosityVelocityParts` holds the assemblers it reads the viscosity
     from, and a :class:`~aquaflux.turbulence.ResidualTaperedDamping` holds a reference residual taken at
     one state. A value carrying either and shared across the points of a Reynolds continuation carries
-    that state to every point -- exactly as the same objects passed as separate keywords would. Only
-    ``basis`` is a plain setting.
+    that state to every point -- exactly as the same objects passed as separate keywords would.
 
     Attributes
     ----------
-    basis : ShiftBasis or None
-        How each block's shift diagonal is combined from its convective and dissipative parts. Unset,
-        :class:`~aquaflux.solve.LocalCourantBasis` with its defaults: the full operator diagonal.
-    velocity_parts : VelocityShiftParts or None
-        Where the velocity shift's two diagonal buckets come from. Unset, the flow assembler's frozen
-        momentum diagonal at the reference state.
     turbulence_damping : TurbulenceDamping, float or None
         A multiplier on the shift strength of the ``k`` and ``omega`` rows only. A plain number is a
         constant ratio. Unset, ``1``: the closure damped like the flow. It changes only the path -- the
         shift vanishes at the root.
     """
 
-    basis: ShiftBasis | None = None
-    velocity_parts: VelocityShiftParts | None = None
     turbulence_damping: TurbulenceDamping | float | None = None
-
-    def filled_from(self, base: ShiftSettings) -> ShiftSettings:
-        """These settings, with each field left unset taken from ``base`` (see :func:`~aquaflux.solve.filled_from`)."""
-        return filled_from(self, base)
 
 
 def merged_march_options(base: dict[str, object], override: dict[str, object]) -> dict[str, object]:
@@ -69,17 +51,17 @@ def merged_march_options(base: dict[str, object], override: dict[str, object]) -
 
     A continuation merges its shared options with each point's own. For a loose keyword the point's
     value simply wins, as a dictionary merge gives. For a settings value that would be wrong: shared
-    options carrying ``ShiftSettings(basis=...)`` and a point returning
-    ``ShiftSettings(turbulence_damping=...)`` would lose the basis without a word, where the same two
+    options carrying ``CoupledShiftSettings(basis=...)`` and a point returning
+    ``CoupledShiftSettings(turbulence_damping=...)`` would lose the basis without a word, where the same two
     settings as separate keywords combine. So when both sides give the same key a value of the same
-    settings type -- a :class:`ShiftSettings`, :class:`~aquaflux.solve.LinearSolveSettings`,
+    settings type -- a :class:`CoupledShiftSettings`, :class:`~aquaflux.solve.LinearSolveSettings`,
     :class:`~aquaflux.solve.Convergence`, :class:`~aquaflux.solve.DualTimeLoop` or
     :class:`~aquaflux.solve.Globalization` -- the point's value
     keeps the fields it sets and takes the rest from the shared one (:func:`~aquaflux.solve.filled_from`).
 
     ⚠️ **A point cannot reset a shared field to its default through a value.** Leaving the field unset
     takes the shared setting. Write the default out where it is a number; where the default is ``None``
-    itself -- ``ShiftSettings.velocity_parts``, say -- keep that setting out of the shared options and set
+    itself -- ``CoupledShiftSettings.velocity_parts``, say -- keep that setting out of the shared options and set
     it per point instead.
 
     Parameters

@@ -66,6 +66,7 @@ from aquaflux.solve import (
     PseudoTransientStep,
     RootSolver,
     ShiftBasis,
+    ShiftSettings,
     ShiftTerm,
     VelocityShiftParts,
     assembler_residual,
@@ -203,9 +204,26 @@ class MomentumShiftPolicy(eqx.Module):
         return ShiftTerm(diagonal, make_preconditioner)
 
 
+def _shift_fields(shift: ShiftSettings | None) -> dict[str, object]:
+    """The :class:`MomentumShiftPolicy` fields a :class:`~aquaflux.solve.ShiftSettings` sets.
+
+    Only the fields that are set, so an unset one keeps the policy's own default.
+    """
+    if shift is None:
+        return {}
+    return {
+        name: value
+        for name, value in (
+            ("shift_basis", shift.basis),
+            ("velocity_shift_parts", shift.velocity_parts),
+        )
+        if value is not None
+    }
+
+
 def momentum_shift_policy(
     assembler: MomentumContinuity,
-    shift_basis: ShiftBasis | None = None,
+    shift: ShiftSettings | None = None,
     **preconditioner_kwargs: object,
 ) -> MomentumShiftPolicy:
     """The flow shift policy over a block-SIMPLE preconditioner built for ``assembler``.
@@ -217,9 +235,9 @@ def momentum_shift_policy(
     ----------
     assembler : MomentumContinuity
         The coupled flow residual assembler.
-    shift_basis : ShiftBasis, optional
-        How the velocity shift diagonal is built from the momentum diagonal's parts. ``None`` keeps
-        :class:`MomentumShiftPolicy`'s own default, the full ``a_P``.
+    shift : ShiftSettings, optional
+        How the velocity shift diagonal is formed. Unset fields keep :class:`MomentumShiftPolicy`'s own
+        defaults: the full ``a_P``, from the frozen momentum diagonal.
     **preconditioner_kwargs
         Forwarded to :meth:`BlockPreconditioner.build`.
 
@@ -229,15 +247,11 @@ def momentum_shift_policy(
         The policy, holding the built preconditioner.
     """
     preconditioner = BlockPreconditioner.build(assembler, **preconditioner_kwargs)
-    return (
-        MomentumShiftPolicy(assembler, preconditioner)
-        if shift_basis is None
-        else MomentumShiftPolicy(assembler, preconditioner, shift_basis)
-    )
+    return MomentumShiftPolicy(assembler, preconditioner, **_shift_fields(shift))
 
 
 def momentum_shift_only_policy(
-    assembler: MomentumContinuity, shift_basis: ShiftBasis | None = None
+    assembler: MomentumContinuity, shift: ShiftSettings | None = None
 ) -> MomentumShiftPolicy:
     """The flow shift policy with **no** preconditioner, for a step preconditioned by a monolithic inverse.
 
@@ -245,26 +259,22 @@ def momentum_shift_only_policy(
     ----------
     assembler : MomentumContinuity
         The coupled flow residual assembler.
-    shift_basis : ShiftBasis, optional
-        How the velocity shift diagonal is built; ``None`` keeps the full ``a_P``.
+    shift : ShiftSettings, optional
+        How the velocity shift diagonal is formed; unset fields keep the full ``a_P``.
 
     Returns
     -------
     MomentumShiftPolicy
         A policy holding no block preconditioner (see :class:`MomentumShiftPolicy`).
     """
-    return (
-        MomentumShiftPolicy(assembler)
-        if shift_basis is None
-        else MomentumShiftPolicy(assembler, None, shift_basis)
-    )
+    return MomentumShiftPolicy(assembler, **_shift_fields(shift))
 
 
 def momentum_continuation(
     assembler: MomentumContinuity,
     *,
     globalization: Globalization = DEFAULT_GLOBALIZATION,
-    shift_basis: ShiftBasis | None = None,
+    shift: ShiftSettings | None = None,
     **preconditioner_kwargs: object,
 ) -> PseudoTransientStep:
     """The pseudo-transient continuation ``NewtonStrategy`` for the coupled flow solve.
@@ -291,12 +301,12 @@ def momentum_continuation(
         regime from a cold start (it is what lifts the Reynolds floor this module exists for). That is
         a default, not a restriction — the coupled RANS residual, whose full step overshoots by orders
         of magnitude, line-searches instead, and this path can be given the same.
-    shift_basis : ShiftBasis, optional
-        How the velocity shift diagonal is built from the momentum diagonal's convective/dissipative
-        parts (see :class:`MomentumShiftPolicy`). Defaults to
-        :class:`~aquaflux.solve.LocalCourantBasis` — the full ``a_P`` (uniform under-relaxation),
-        unchanged from the historical shift. Pass ``LocalCourantBasis(dissipative_weight=0.0)`` for a
-        local convective time step.
+    shift : ShiftSettings, optional
+        How the velocity shift diagonal is formed from the momentum diagonal's convective/dissipative
+        parts (see :class:`MomentumShiftPolicy`). Unset fields keep the full ``a_P`` -- uniform
+        under-relaxation, unchanged from the historical shift. Pass
+        ``ShiftSettings(basis=LocalCourantBasis(dissipative_weight=0.0))`` for a local convective time
+        step.
     **preconditioner_kwargs
         Forwarded to :meth:`BlockPreconditioner.build` (e.g. ``schur_scaling``, ``composition``,
         ``velocity``).
@@ -306,7 +316,7 @@ def momentum_continuation(
     PseudoTransientStep
         The configured continuation, ready to pass as ``RootSolver(strategy=...)``.
     """
-    policy = momentum_shift_policy(assembler, shift_basis, **preconditioner_kwargs)
+    policy = momentum_shift_policy(assembler, shift, **preconditioner_kwargs)
     return shifted_step(
         policy,
         globalization=globalization,

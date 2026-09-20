@@ -31,6 +31,8 @@ from typing import Protocol
 import equinox as eqx
 import jax.numpy as jnp
 
+from .settings_value import filled_from
+
 
 class ShiftBasis(Protocol):
     """Combine a cell's convective and dissipative diagonal buckets into the base shift ``d``.
@@ -125,3 +127,35 @@ class VelocityShiftParts(Protocol):
             physical field). Extra context only a coupled, viscosity-tracking implementation needs; a
             flow-only or frozen-viscosity source ignores them, so they default to ``None``.
         """
+
+
+class ShiftSettings(eqx.Module):
+    """How the velocity pseudo-time shift diagonal is formed, for every march that shifts a flow.
+
+    The settings describe the *shift* -- how much each velocity row is damped per unit of the shift
+    strength ``beta`` -- and nothing about the preconditioner or the march's schedule, which is why they
+    are a value of their own rather than fields of either. Every field defaults to ``None``, meaning "not
+    set here": the builder handed the value resolves it, so each default is written once, beside the code
+    that applies it. A march with more to shift (a transported closure) subclasses this and adds its own
+    fields, so the flow's part is defined once and is the same on every builder.
+
+    ⚠️ **``velocity_parts`` may be bound to a state, so this is not plain configuration.** A value
+    carrying one and shared across the points of a continuation carries that state to every point --
+    exactly as the same object passed as a separate keyword would. Only ``basis`` is a plain setting.
+
+    Attributes
+    ----------
+    basis : ShiftBasis or None
+        How each block's shift diagonal is combined from its convective and dissipative parts. Unset,
+        :class:`LocalCourantBasis` with its defaults: the full operator diagonal.
+    velocity_parts : VelocityShiftParts or None
+        Where the velocity shift's two diagonal buckets come from. Unset, the flow assembler's frozen
+        momentum diagonal at the reference state.
+    """
+
+    basis: ShiftBasis | None = None
+    velocity_parts: VelocityShiftParts | None = None
+
+    def filled_from(self, base):
+        """These settings, with each field left unset taken from ``base`` (see :func:`~aquaflux.solve.filled_from`)."""
+        return filled_from(self, base)

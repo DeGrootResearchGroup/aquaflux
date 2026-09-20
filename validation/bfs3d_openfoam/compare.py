@@ -91,7 +91,7 @@ from aquaflux.solve import (
     combine_observers,
     relative_residual_gmres,
 )
-from aquaflux.turbulence import CoupledRANS, GeometricReynoldsSchedule, LogScalars, ShiftSettings, SSTModel, SSTTurbulence, coupled_fields, coupled_residuals, open_session, scale_both_blocks, scale_momentum_only, solve_reynolds_continuation, solve_reynolds_ramp
+from aquaflux.turbulence import CoupledRANS, GeometricReynoldsSchedule, LogScalars, CoupledShiftSettings, SSTModel, SSTTurbulence, coupled_fields, coupled_residuals, open_session, scale_both_blocks, scale_momentum_only, solve_reynolds_continuation, solve_reynolds_ramp
 from aquaflux.solve import FieldSplit, JacobianProbeSpec, MaterializedJacobian, MonolithicVCycle
 
 HERE = Path(__file__).resolve().parent
@@ -1426,7 +1426,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
     options = (
         dict(
             preconditioner=session,
-            shift=ShiftSettings(turbulence_damping=TURB_DAMPING),
+            shift=CoupledShiftSettings(turbulence_damping=TURB_DAMPING),
             dual_time=DualTimeLoop(
                 inner_steps=INNER_STEPS,
                 inner_tol=INNER_TOL,

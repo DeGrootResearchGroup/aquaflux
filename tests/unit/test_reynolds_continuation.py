@@ -1379,11 +1379,11 @@ def test_the_ramp_arm_merges_a_point_s_settings_value_field_by_field_over_the_sh
 ) -> None:
     """The anchor's ``point_setup`` value keeps the shared fields it leaves unset, as on the ladder.
 
-    A plain dictionary merge would replace the shared ``ShiftSettings`` whole and drop its basis, with
-    nothing to say so -- and a flagship case passes a per-point ``ShiftSettings`` through this arm.
+    A plain dictionary merge would replace the shared ``CoupledShiftSettings`` whole and drop its basis, with
+    nothing to say so -- and a flagship case passes a per-point ``CoupledShiftSettings`` through this arm.
     """
     from aquaflux.solve import Globalization, LocalCourantBasis
-    from aquaflux.turbulence import ShiftSettings, solve_reynolds_ramp
+    from aquaflux.turbulence import CoupledShiftSettings, solve_reynolds_ramp
 
     coupled, calls, _ = _ramp_arm_fixtures(monkeypatch)
     basis = LocalCourantBasis(dissipative_weight=0.0)
@@ -1393,10 +1393,10 @@ def test_the_ramp_arm_merges_a_point_s_settings_value_field_by_field_over_the_sh
         anchor=100.0,
         stations=4,
         steps_per_station=1,
-        shift=ShiftSettings(basis=basis),
+        shift=CoupledShiftSettings(basis=basis),
         globalization=Globalization(beta0=2.0),
         point_setup=lambda companion, state, point: {
-            "shift": ShiftSettings(turbulence_damping=2.0),
+            "shift": CoupledShiftSettings(turbulence_damping=2.0),
             "globalization": Globalization(line_search=3),
         },
     )
