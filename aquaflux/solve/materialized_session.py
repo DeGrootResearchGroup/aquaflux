@@ -28,6 +28,7 @@ import numpy as np
 
 from .amg_preconditioner import MaterializedJacobianPreconditioner, MonolithicAmgPreconditioner
 from .block_inverse import BlockInverse
+from .block_preconditioner import MaterializedBlockPreconditioner
 from .field_split import FieldGroups, FieldSplitAmgPreconditioner
 from .jacobian_probe import JacobianProbe
 from .lu_preconditioner import MonolithicLuPreconditioner
@@ -525,7 +526,15 @@ class MaterializedSession:
         if isinstance(spec.inverse, FieldSplit) and problem.groups() is None:
             raise TypeError(
                 "a FieldSplit inverse needs a leading and a trailing group of fields, and this problem "
-                "has a single group -- there is nothing to split. Use CompleteLu() or MonolithicVCycle()."
+                "has a single group -- there is nothing to split. Use a block inverse such as "
+                "SimpleSmoothed() over the whole state, or CompleteLu() / MonolithicVCycle()."
+            )
+        if isinstance(spec.inverse, BlockInverse) and problem.groups() is not None:
+            raise TypeError(
+                "a bare block inverse is fitted to the WHOLE state, which is only meaningful when the "
+                "fields form a single group (a laminar flow); this problem has a leading and a trailing "
+                "group. Wrap block inverses in FieldSplit(leading=..., trailing=...), or use CompleteLu() "
+                "/ MonolithicVCycle()."
             )
         self._spec = spec
         self._problem = problem
@@ -662,6 +671,15 @@ class MaterializedSession:
         if isinstance(inverse, MonolithicVCycle):
             return MonolithicAmgPreconditioner.build(
                 matvec, probe.plan, shift, **inverse.settings(), **probing
+            )
+        if isinstance(inverse, BlockInverse):
+            return MaterializedBlockPreconditioner.build(
+                matvec,
+                probe.plan,
+                shift,
+                inverse=inverse,
+                n_fields=self._problem.layout.n_fields,
+                **probing,
             )
         return FieldSplitAmgPreconditioner.build(
             matvec,

@@ -499,10 +499,12 @@ flow, k, omega = solve_coupled(
 
 A laminar flow takes the same preconditioner. {func}`~aquaflux.flow.solve_flow_march` accepts a
 {class}`~aquaflux.solve.MaterializedJacobian` as its `preconditioner` (or a session from
-{func}`~aquaflux.flow.open_flow_session`), inverted by a
-{class}`~aquaflux.solve.CompleteLu` or a {class}`~aquaflux.solve.MonolithicVCycle`. A
-{class}`~aquaflux.solve.FieldSplit` is refused there: a `(u, p)` state is a single group of
-fields, with nothing to split.
+{func}`~aquaflux.flow.open_flow_session`). A `(u, p)` state is a single group of fields, so the
+pressure-velocity hierarchy {class}`~aquaflux.solve.SimpleSmoothed` inverts **the whole state** directly
+-- traced JAX, no optional dependency, and the same inverse a field split uses for its saddle. A
+{class}`~aquaflux.solve.CompleteLu` also works, and a {class}`~aquaflux.solve.MonolithicVCycle` if PETSc
+is installed. A {class}`~aquaflux.solve.FieldSplit` is refused there, since there is nothing to split;
+conversely a bare block inverse is refused for the coupled turbulence solve, which has two groups.
 
 {data}`~aquaflux.solve.NO_REFRESH` is the do-nothing policy, and the default.
 

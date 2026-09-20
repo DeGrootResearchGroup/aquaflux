@@ -354,3 +354,76 @@ def test_the_coupled_shift_settings_are_the_flow_ones_plus_the_closures_damping(
     assert {f.name for f in dataclasses.fields(CoupledShiftSettings)} == flow_fields | {
         "turbulence_damping"
     }
+
+
+def test_a_simple_smoothed_march_needs_no_petsc_and_reaches_the_same_root(channel) -> None:
+    """A laminar flow takes the traced ``SimpleSmoothed`` hierarchy over its whole ``(u, p)`` saddle.
+
+    This is the inverse the field split uses for the saddle, with no optional dependency, so it runs in
+    CI. The refresh observer is the evidence the in-place refit ran (a solve that never refit would still
+    converge on the state it was first fitted at), and the isinstance check that the march ran on it.
+    """
+    from aquaflux.solve import MaterializedBlockPreconditioner
+
+    assembler, root = channel
+    built, timings = [], []
+    session = open_flow_session(
+        MaterializedJacobian(SimpleSmoothed()),
+        assembler,
+        on_build=lambda step: built.append(step) or step,
+        observer=timings.append,
+    )
+    state = solve_flow_march(
+        assembler,
+        preconditioner=session,
+        convergence=TIGHT,
+        max_steps=150,
+        dual_time=DualTimeLoop(inner_steps=3),
+    )
+    assert built and isinstance(
+        built[0].shift_policy.preconditioner, MaterializedBlockPreconditioner
+    )
+    assert any(
+        t.kind == "full" and any(name == "refactor" for name, _ in t.phases) for t in timings
+    )
+    assert float(jnp.linalg.norm(state - root) / jnp.linalg.norm(root)) < 1e-6
+
+
+def test_the_block_preconditioner_is_an_approximate_inverse_and_transposes_exactly() -> None:
+    """``M`` inverts the shifted Jacobian it was fitted to, and ``M^T`` is its exact transpose.
+
+    The adjoint's transpose solve applies ``M^T`` and a non-flexible Krylov solve needs ``M`` fixed and
+    linear, so both are properties of the object and not of any one march. Judged against the operator
+    itself (``M (J + D) v`` should return ``v`` up to the approximation of a one-cycle hierarchy),
+    which a preconditioner fitted to the wrong matrix -- unshifted, say -- would not do.
+    """
+    import numpy as np
+    from aquaflux.solve import (
+        MaterializedBlockPreconditioner,
+        jacobian_matvec,
+        jacobian_probe_plan,
+    )
+
+    assembler = _channel(8, 6, MU)
+    state = assembler.initial_state() + 0.05
+    plan = jacobian_probe_plan(
+        assembler.mesh.face_cells, assembler.mesh.n_cells, assembler.layout.n_fields, 3
+    )
+    shift = np.full(
+        state.shape, 2.0
+    )  # a strong pseudo-time shift keeps the saddle well conditioned
+    pc = MaterializedBlockPreconditioner.build(
+        lambda v: jacobian_matvec(assembler, state, v),
+        plan,
+        shift,
+        inverse=SimpleSmoothed(),
+        n_fields=assembler.layout.n_fields,
+    )
+    rng = np.random.default_rng(0)
+    x, y = (jnp.asarray(rng.standard_normal(state.shape)) for _ in range(2))
+    apply, apply_t = pc.matvec(), pc.matvec(transpose=True)
+    assert float(jnp.vdot(y, apply(x))) == pytest.approx(float(jnp.vdot(apply_t(y), x)), rel=1e-9)
+
+    v = jnp.asarray(rng.standard_normal(state.shape))
+    shifted_v = jacobian_matvec(assembler, state, v) + jnp.asarray(shift) * v
+    assert float(jnp.linalg.norm(apply(shifted_v) - v) / jnp.linalg.norm(v)) < 0.7

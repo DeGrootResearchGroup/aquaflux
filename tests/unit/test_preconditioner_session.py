@@ -172,3 +172,14 @@ def test_a_materialized_build_refuses_a_traced_state(case) -> None:
 
     with pytest.raises(ValueError, match=r"cannot be built under jax\.grad"):
         jax.grad(objective)(state)
+
+
+def test_a_bare_block_inverse_is_refused_for_a_problem_with_two_groups(case) -> None:
+    """A bare block inverse is fitted to the whole state, which is only meaningful for one group of fields.
+
+    Coupled RANS has a leading saddle and trailing scalars, so a saddle hierarchy over all six fields
+    would be fitted to the wrong operator; it must be wrapped in a FieldSplit.
+    """
+    coupled, _ = case
+    with pytest.raises(TypeError, match="single group"):
+        open_session(MaterializedJacobian(SimpleSmoothed()), coupled)
