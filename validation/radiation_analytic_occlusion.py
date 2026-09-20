@@ -292,19 +292,18 @@ def clip_cost():
     origin = jnp.asarray(rng.uniform(-1, 1, (work, 3)))
     target = origin + jnp.asarray(rng.uniform(-1, 1, (work, 3)) + np.array([0.0, 0.0, 3.0]))
     near = jnp.zeros(work)
-    eager = _median(lambda: segment_is_cut(origin, target, triangles, near))
-    jitted = jax.jit(lambda o, t, v, n: segment_is_cut(o, t, v, n, work_limit=10**12))
-    fused = _median(lambda: jitted(origin, target, triangles, near))
+    ray = _median(lambda: segment_is_cut(origin, target, triangles, near))
     tests = work * int(triangles.shape[0])
-    print(f"   {'arm':>22} {'Mitem/s':>9} {'vs a fused ray test':>21}")
-    print(f"   {'ray test, as called':>22} {tests / eager / 1e6:9.1f} {'':>21}")
-    print(f"   {'ray test, under jit':>22} {tests / fused / 1e6:9.1f} {eager / fused:20.1f}x")
+    per_test = ray / tests
+    print(f"   {'arm':>22} {'Mitem/s':>9} {'vs one ray test':>17}")
+    print(f"   {'ray test, as shipped':>22} {tests / ray / 1e6:9.1f} {'':>17}")
     for name, fn in arms.items():
         each = _median(lambda f=fn: f(receiver, normal, source, blocker))
-        print(f"   {name:>22} {work / each / 1e6:9.1f} {each / (fused / tests) / work:20.0f}x")
-    print("   -- the mask's ray test is called EAGERLY, one materialized intermediate per block;")
-    print("      under jit the same call fuses the intermediate away and runs several times")
-    print("      faster, so it is the fused rate the clip has to be judged against.")
+        print(f"   {name:>22} {work / each / 1e6:9.1f} {each / per_test / work:16.0f}x")
+    print("   -- the ray test's own kernel is traced, so the clip is judged against a much")
+    print("      harder baseline than the eager call that preceded it: about three hundred ray")
+    print("      tests where the same clip measured forty. The clip did not change; the")
+    print("      denominator did.")
 
 
 def _median(fn, repeats=5):

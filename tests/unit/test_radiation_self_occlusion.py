@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.radiation.gather import direct_fluence_rate
 from aquaflux.radiation.occluders import Cylinder
 from aquaflux.radiation.surfaces import Surfaces
-from aquaflux.radiation.triangles import segment_is_cut
+from aquaflux.radiation.triangles import _edge_function, segment_is_cut
 from aquaflux.radiation.visibility import build_visibility
 from scipy.spatial import ConvexHull
 
-from tests.unit.radiation_references import cylinder_triangles, rectangle_triangles
+from tests.unit.radiation_references import (
+    L_OUTLINE,
+    closed_drum,
+    closed_prism,
+    cylinder_triangles,
+    rectangle_triangles,
+)
 
 ONE_TRIANGLE = jnp.asarray([[[-1.0, -1.0, 1.0], [1.0, -1.0, 1.0], [0.0, 1.0, 1.0]]])
 NO_OFFSET = jnp.zeros(1)
@@ -121,11 +128,106 @@ def test_the_intersection_is_watertight_where_the_usual_test_leaks():
         hit = (determinant != 0) & (u >= 0) & (v >= 0) & (u + v <= 1) & (distance > 0)
         return int((~np.any(hit & (distance <= 1), axis=-1)).sum())
 
-    watertight = segment_is_cut(
-        jnp.asarray(origins), jnp.asarray(aims * 3.0), jnp.asarray(triangles), jnp.zeros(len(aims))
+    arguments = (
+        jnp.asarray(origins),
+        jnp.asarray(aims * 3.0),
+        jnp.asarray(triangles),
+        jnp.zeros(len(aims)),
     )
-    assert int(np.count_nonzero(~np.asarray(watertight))) == 0
+    assert int(np.count_nonzero(~np.asarray(segment_is_cut(*arguments)))) == 0
+    # And under an outer trace as well. The guarantee rests on two triangles sharing an edge
+    # computing exactly opposite edge functions, which a compiler that fuses a multiply into a
+    # subtraction destroys -- this fixture leaks six of its rays if the edge function is written
+    # as a plain difference of products.
+    compiled = jax.jit(lambda *a: segment_is_cut(*a))
+    assert int(np.count_nonzero(~np.asarray(compiled(*arguments)))) == 0
     assert moller_trumbore_leaks() > 0, "the fixture no longer separates the two formulations"
+
+
+def _features(triangles):
+    """Every vertex, edge midpoint and face centroid of a triangulation — exactly.
+
+    ⚠️ Not rounded and not deduplicated. These aims are useful only because they land on a
+    feature *exactly*; snapping them to a tolerance moves them off it, and a sweep built that way
+    reports no leaks whatever the intersection test does.
+    """
+    midpoints = [0.5 * (triangles[:, k] + triangles[:, (k + 1) % 3]) for k in range(3)]
+    return np.concatenate([triangles.reshape(-1, 3), *midpoints, triangles.mean(axis=1)])
+
+
+def _escaping_rays(body, interior, *, nested):
+    """How many rays from inside ``body`` at its own features are not stopped by it.
+
+    ``nested`` wraps the call in a further trace. Note that the unnested arm is **not** an eager
+    one: the per-block kernel is traced either way, so what this varies is whether there is an
+    outer trace around it, not whether the arithmetic is compiled.
+    """
+    cut = jax.jit(lambda *a: segment_is_cut(*a)) if nested else segment_is_cut
+    aims = _features(body)
+    escaped = 0
+    for point in interior:
+        target = point + (aims - point) * 3.0
+        origin = np.broadcast_to(point, target.shape)
+        blocked = cut(
+            jnp.asarray(origin), jnp.asarray(target), jnp.asarray(body), jnp.zeros(len(aims))
+        )
+        escaped += int(np.count_nonzero(~np.asarray(blocked)))
+    return escaped
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["direct", "inside an outer trace"])
+@pytest.mark.parametrize(
+    "body, interior",
+    [
+        (closed_prism(L_OUTLINE, 1.0), [[0.4, 0.4, 0.0], [1.5, 0.4, 0.3], [0.4, 1.5, -0.4]]),
+        (closed_drum(48), [[0.0, 0.0, 0.0], [0.4, -0.2, 0.5], [-0.3, 0.35, -0.7]]),
+    ],
+    ids=["L-prism", "drum"],
+)
+def test_no_ray_escapes_a_closed_body(body, interior, nested):
+    """The watertight guarantee on bodies the convex-hull fixture does not reach.
+
+    Two features it adds. The L-prism has a **reflex** edge, where an interior ray leaves
+    through a corner the surface turns inward at; the drum has a **curved seam that actually
+    meets itself**, built by index from one vertex table rather than from trigonometry evaluated
+    twice — a seam assembled the other way is short of closing by a few last bits, and then the
+    rays that escape through the slit get blamed on the intersection test.
+
+    Written as a plain difference of products the edge function loses its exact antisymmetry
+    once compiled, and these two bodies then leak 6 and 76 rays. Both arms here go through the
+    traced block kernel; the second only adds an outer trace around it, which is the shape a
+    caller who wraps the whole build in ``jit`` produces.
+    """
+    assert _escaping_rays(np.asarray(body), np.asarray(interior), nested=nested) == 0
+
+
+def test_the_edge_function_survives_being_compiled():
+    """Woop's inside test needs neighbouring triangles to disagree by an exact sign.
+
+    Two triangles sharing an edge evaluate the same edge function with the two operand pairs
+    swapped. Every ray through that edge is claimed by exactly one of them only while the two
+    results are exact negatives — and written as ``a * b - c * d`` that stops being true the
+    moment a compiler fuses one of the multiplies into the subtraction, because the two
+    triangles then keep different products at full precision. The second assertion below is
+    what keeps this test honest: it fails if the plain difference has stopped being able to
+    break, which would mean this fixture no longer exercises the thing being pinned.
+    """
+    rng = np.random.default_rng(5)
+    first, second, third, fourth = (jnp.asarray(rng.normal(size=20_000)) for _ in range(4))
+
+    compiled = jax.jit(_edge_function)
+    forward = np.asarray(compiled(first, second, third, fourth))
+    # The operand order the triangle on the other side of the edge sees.
+    backward = np.asarray(compiled(third, fourth, first, second))
+    assert np.array_equal(forward, -backward)
+    # Compiling it must not move the value either, or every distance shifts under tracing.
+    assert np.array_equal(forward, np.asarray(_edge_function(first, second, third, fourth)))
+
+    plain = jax.jit(lambda a, b, c, d: a * b - c * d)
+    assert not np.array_equal(
+        np.asarray(plain(first, second, third, fourth)),
+        -np.asarray(plain(third, fourth, first, second)),
+    ), "the compiler no longer fuses the difference of products, so this fixture proves nothing"
 
 
 # ---------------------------------------------------------------------------------------

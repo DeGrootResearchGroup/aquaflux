@@ -483,36 +483,34 @@ cosine clamp *is* the exact visibility test, so tracing the body's own triangles
 nothing. Measured on a 4608-facet cylinder, the two answers are **bit-identical**, and both match
 `G = (4B/pi) arcsin(R/d)`. Acne on facets adjacent to the source would show here.
 
-## ⚠️ THE MEMORY OF ONE PASS IS THE WHOLE PERFORMANCE STORY — BECAUSE THE PASS RUNS EAGERLY
+## ⚠️ THE MEMORY OF ONE PASS WAS THE WHOLE PERFORMANCE STORY, BECAUSE THE PASS RAN EAGERLY
 
-The ray-by-triangle intermediate is the cost of the intersection test, and throughput does not
-degrade gracefully — it falls off a cliff. Measured on 2048 triangles, f64, 11 cores, 19 GB:
+The ray-by-triangle intermediate used to be the cost of the intersection test, and throughput did
+not degrade gracefully — it fell off a cliff. Measured on 2048 triangles, f64, 11 cores, 19 GB:
 
 | intermediate | Mtest/s |
 |---|---|
 | 0.5 - 134 MB | **42 - 57** |
 | 537 MB | **2.4** |
 
-⚠️ **EVERY NUMBER IN THAT TABLE IS THE EAGER RATE, AND THAT IS A PROPERTY OF THE CALL SITE, NOT OF
-THE KERNEL.** `segment_is_cut` is invoked from a Python loop in `visibility.py` with no `jit`
-anywhere on the path, so each block materializes its intermediate — which is exactly why the
-memory of one pass is the story. Wrapped in `jit`, the identical function on identical inputs
-runs at **358-435 Mtest/s against 50-58 eager, 6.6-7.9x**, because XLA fuses the hit test into the
-`any` reduction and never forms the array (100,000 rays x 200 triangles, f64, 11 cores, 19 GB, jax
-0.10.2, 2026-09-20, measured both with and without the `exclude` argument the mask uses). Jitting
-**only the per-block kernel** — leaving the Python loop to do the blocking, so the traced program
-does not grow with the ray count — gives **6.3-8.2x** with output equal on every one of 100,000
-rays. `work_limit` also stops mattering much once the intermediate is fused away: 4M and 100M
-entries per pass run at 333 and 432 Mtest/s, against a 20x cliff eagerly. **This is unclaimed
-performance in shipped code, not a hypothetical** — it is issue #462; until that lands, the table
-above and `segment_is_cut`'s own docstring describe the build as it actually runs.
+⚠️ **EVERY NUMBER IN THAT TABLE WAS A PROPERTY OF THE CALL SITE, NOT OF THE KERNEL** — and that is
+the lesson to keep, because nothing in the profile said so. `segment_is_cut` was invoked from a
+Python loop with no `jit` anywhere on the path, so each block materialized its intermediate, which
+is exactly why the memory of one pass was the story. The per-block kernel is now `_block_is_cut`,
+traced: the compiler fuses the edge test, the distance window and the exclusion straight into the
+`any` reduction and never forms the array. **6.6-8.3x, bit-identical output** (100,000 rays x 200
+triangles, f64, 11 cores, 19 GB, jax 0.10.2, 2026-09-20, with and without the `exclude` argument;
+54.0 -> 362.4 and 57.8 -> 430.2 Mtest/s at `work_limit` 4M and 20M). Issue #462.
 
-So `work_limit` (entries per pass) is the only knob that matters, and **both axes must be cut to
-honour it**. Blocking only the triangles is not enough: the ray count is itself receivers times
-facets, so it reaches the millions on its own and would blow the limit at a block size of one.
-Getting this wrong cost 13.4 Mtest/s against 31.0 on the same build — and the naive fix, a
-*larger* triangle block, made it **ten times worse**, which is the opposite of the usual
-dispatch-bound instinct.
+**`work_limit` survives as a bound, not as a tuning knob**, and deliberately so: fused, it buys
+about 30% between 4M and 100M entries (333 / 421 / 432 Mtest/s) against a 20x cliff eagerly, and
+what it still guarantees is a bounded working set whatever the compiler decides to do with a given
+shape. Both axes are cut to honour it. Blocking only the triangles is not enough: the ray count is
+itself receivers times facets, so it reaches the millions on its own and would blow the limit at a
+block size of one. Getting this wrong cost 13.4 Mtest/s against 31.0 on the same build — and the
+naive fix, a *larger* triangle block, made it **ten times worse**, which is the opposite of the
+usual dispatch-bound instinct. Each distinct block shape compiles once, so an uneven division
+costs one extra small program for the remainder, not one per block.
 
 ## Watertight intersection, and one piece of the published algorithm deliberately dropped
 
@@ -520,6 +518,71 @@ Woop, Benthin & Wald (*JCGT* 2(1), 2013) rather than Möller-Trumbore. Measured 
 with rays from inside aimed at every vertex and edge midpoint: **Möller-Trumbore leaks 6 of 268,
 the watertight form leaks 0.** A leak is a pinhole through a closed surface — the ray escapes
 because neither of the two triangles sharing the feature claims it.
+
+⚠️ **THE WATERTIGHT GUARANTEE RESTS ON EXACT ARITHMETIC THAT A COMPILER IS FREE TO BREAK, AND IT
+DID.** Two triangles sharing an edge evaluate the same edge function with the two operand pairs
+swapped, and a ray through that edge is claimed by exactly one of them only while the two results
+are **exact negatives**. Written as `a * b - c * d` that holds one operation at a time — floating
+multiplication commutes bit for bit, so the two are `fl(P) - fl(Q)` and `fl(Q) - fl(P)`. It does
+**not** hold once the expression is compiled: XLA contracts it into a fused multiply-add, which
+keeps one product at full precision and rounds the other, so the two triangles keep *different*
+products exact. Measured on 200,000 random operand quadruples, the plain difference and its swap
+are not exact negatives on **a third** of them — and tracing the ray-test kernel on that form
+reopened **6 of 268** leaks on the closed-hull fixture, which is precisely the Möller-Trumbore
+failure count the watertight form exists to beat.
+
+Three things about this are worth carrying to any other exact-arithmetic predicate here:
+
+- **It is invisible in the source and invisible eagerly.** The shipped code was watertight only
+  because nothing had traced it; the guarantee was an accident of the call site, exactly like the
+  throughput above. A caller wrapping the build in `jit` would have silently lost it.
+- **Neither an XLA flag nor `lax.optimization_barrier` prevents it.** `xla_allow_excess_precision`
+  and `xla_cpu_enable_fast_math` change nothing in either direction, and the barrier does not
+  survive compilation — `fma` is still in the compiled HLO and the violation count is unchanged to
+  the last item. Do not reach for a flag; fix the arithmetic.
+- **The fix is to average the expression with the negation of its own swap**
+  (`_edge_function`): whatever the compiler does to `a - b` it does to `b - a` up to an exact sign,
+  because IEEE subtraction is antisymmetric however its operands were formed. That is exactly
+  antisymmetric compiled *and* bit-identical to the one-operation-at-a-time value, for two extra
+  multiplies and a subtraction per edge — which does not show up against the edge test at all
+  (6.6-8.3x still, measured with it in place). Pinned by
+  `test_the_edge_function_survives_being_compiled`, which also asserts the plain difference still
+  *fails*, so the fixture cannot quietly stop proving anything.
+
+**How far the fix goes, swept rather than argued (`validation/radiation_watertight_sweep.py`).**
+Seven bodies closed to the last bit — convex hulls at 24/40/60/90 points, closed drums at 16 and
+48 sectors, and an L-prism with a reflex edge — with rays from inside aimed at every vertex, edge
+midpoint and face centroid. **8,764 rays, 0 leaks, eager and traced.** The same sweep on the plain
+difference leaks **124**, all of them only once compiled. The other two candidates in the module
+were checked and are **not** hazards:
+
+| site | exact cancellation needed? | measured |
+|---|---|---|
+| inside test `sign(u), sign(v), sign(w)` | yes — picks which triangle claims a ray | broke; fixed |
+| the shear `ox - shear * oz` | no — the same numbers go in, so the same come out | 0 disagreements |
+| contour form `jnp.cross` (tiling additivity) | no | 2e-16 traced and eager |
+
+⚠️ **THE DISCRIMINATOR IS WHETHER THE CANCELLATION FEEDS A DISCRETE PREDICATE.** The contour form
+is built on the same difference of products, but a last-bit change there moves an *angle* by a
+last bit. The inside test feeds it to a sign test that decides which of two triangles claims a
+ray, and a discrete predicate has no small errors — it is right or it is a pinhole. Apply this
+test before assuming the next exact-arithmetic site here is safe or unsafe.
+
+Three traps met while measuring this, each of which produced a confidently wrong answer first:
+
+- **Aim points snapped to a tolerance make the sweep blind.** The first version rounded the
+  vertices and midpoints to 12 decimals before deduplicating them, which moves them off the
+  feature. Its control came back **clean**, which is the only reason the mistake surfaced — a
+  tightness sweep with no control arm is worth nothing.
+- **`cylinder_triangles` does not close**, so a capped one leaks 13 rays eagerly with any edge
+  function. Its angles run `linspace(0, 2*pi, n+1)` and the last sector ends at `2*pi`, whose sine
+  is `-2.4e-16` rather than zero. Those 13 were briefly read as residual FMA sensitivity. Build a
+  closed body from one vertex table (`closed_prism` / `closed_drum`), not from trigonometry
+  evaluated twice.
+- **Swapping a module global does not invalidate a compiled version that read it.** `jit` keys its
+  cache on the function object, so the second arm of an in-process A/B silently replays the
+  first's program. Here that made the fixed arm reproduce the control's leak counts *exactly*,
+  which is the only tell. `jax.clear_caches()` between arms, or separate processes.
 
 ⚠️ **The published swap of `kx`/`ky` when the chosen axis is negative is omitted on purpose, and
 this was measured, not assumed.** It keeps the coordinate system right-handed; flipping handedness
@@ -1040,12 +1103,15 @@ f64, 11 cores, 19 GB, jax 0.10.2, nothing else running, the ray test against a *
 block (handed one triangle it measures dispatch and comes out several times low, which flatters
 the comparison):
 
-| arm | Mitem/s | vs one fused ray test |
+| arm | Mitem/s | vs one ray test |
 |---|---|---|
-| ray test as the mask calls it — **eager** | 47.1 | — |
-| the same call under `jit` | **417.6** | **8.9x faster** |
-| clip pipeline, doubling widths 6/12/24/48 | 0.6 | ~734x |
-| clip pipeline, emit-`(n+1)` widths 4/5/6/7 | **1.3** | **~323x** |
+| ray test, eager — how the mask called it before #462 | 47.1 | — |
+| ray test as the mask calls it now, default `work_limit` | **~330** | — |
+| clip pipeline, doubling widths 6/12/24/48 | 0.6 | ~540x |
+| clip pipeline, emit-`(n+1)` widths 4/5/6/7 | **~1.4** | **~230x** |
+
+(The ray test reaches ~430 Mtest/s at a larger `work_limit`, which makes the clip ~300x instead —
+the ratio moves with the denominator, so read it as a band, not a figure.)
 
 The emit-`(n+1)` clip is the whole avoidable half of the cost and it is **built and measured**,
 not projected. Intersecting a convex region with a half-space adds at most one vertex, so the
@@ -1064,9 +1130,15 @@ stable, and falling as the mesh refines, because a finer pair sweeps a narrower 
 **Host-side compaction of that 6% is legal precisely because the mask is frozen geometry built
 once, off the differentiation path.**
 
-Putting the two together: `0.0614 x (47.1 / 1.3) ~ 2.2`, plus about `0.11` for the reject pass —
-**analytic occlusion costs around 2.3x today's mask build**, or ~21x a build whose ray test has
-been fused. It is affordable, and the conclusion no longer rests on a projection.
+Putting the two together, against the build as it now runs: `0.0614 x ~230 ~ 14`, plus one reject
+pass — **analytic occlusion costs somewhere around 15-20x the mask build**, the spread being the
+`work_limit` the ray test runs at. ⚠️ **That headline moved because the DENOMINATOR moved, not
+because anything here got slower**: against the eager build the same clip measurements read
+`0.0614 x (47.1 / 1.4) ~ 2`, and the absolute cost of the clip is identical to the last digit.
+Tracing the ray test (#462) took a factor of seven off the thing analytic occlusion is compared
+to, so it is now the expensive option by a wide margin rather than a near-neighbour — one frozen
+build of roughly fifteen to twenty times the current one, still off the differentiation path.
+Whether that is affordable is a judgement about build time, not a projection any more.
 
 ⚠️ **THE PROJECTION THIS REPLACES SAID ~1.5x, AND ITS TWO ERRORS VERY NEARLY CANCELLED — which is
 the part to internalize, because a projection that lands near the truth for compensating wrong
