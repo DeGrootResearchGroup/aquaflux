@@ -2277,15 +2277,18 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     preconditioner returns a materially worse `delta` at the same reported cycle count. **Candidate,
     not measured.** It is what makes the failure permanent rather than a one-step stumble.
 
-  **✅✅ BUILT (2026-08-25): `boundary_chain` — THE FIRST PASS AND THE CLOSURE READ THE CELL'S OWN
-  EXTRAPOLATION ON A PATCH WHOSE VALUE FOLLOWS THE OWNER. Both closures become LINEAR-EXACT there.**
+  **✅✅ BUILT (2026-08-25, weight corrected since): `boundary_gradient_weight` — THE FIRST PASS AND THE
+  CLOSURE READ THE FACE VALUE THE BOUNDARY CONDITION DEFINES ON A PATCH WHOSE VALUE FOLLOWS THE OWNER. Both
+  closures become LINEAR-EXACT there.**
 
   The defect it repairs is upstream of every closure and was missed by every probe in this entry. A
   reconstruction is handed the field's boundary values, and on a gradient-type patch that value
-  asserts a normal derivative the **iterate does not have** -- an iterate does not satisfy its own
-  boundary conditions until it converges. The Green--Gauss sum then averages the interior field
-  against a boundary that contradicts it, and the result is wrong at **linear** order, which is
-  exactly the error the correction matrices (calibrated on quadratics) cannot remove.
+  is the value evaluated at ZERO gradient, which on a skewed boundary cell is not the value the
+  boundary condition defines (a zero-gradient face carries `phi_P + grad phi_P . (d - (d.n) n)`; the
+  condition holds at every iterate, and that value depends on the gradient being reconstructed). The
+  Green--Gauss sum then averages the interior field against a boundary that contradicts it, and the
+  result is wrong at **linear** order, which is exactly the error the correction matrices (calibrated
+  on quadratics) cannot remove.
 
   Measured on a linear field over an all-zero-gradient boundary, true Hessian identically zero:
 
@@ -2301,10 +2304,11 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   boundary *rule*, not the scheme. And note it is **not closure-specific** — the owner closure fails
   too, because the *first pass* reads boundary values before any closure is consulted.
 
-  **The repair** (proposed by the project owner): feed the reconstruction `phi_P + grad phi . d` on
-  those patches — the value consistent with the cell's own field — and leave a prescribed value alone.
-  The condition is still imposed, by the flux, which is where it belongs; the two agree at
-  convergence. Through the real assembler, same field and meshes:
+  **The repair** (proposed by the project owner): feed the reconstruction the value the boundary
+  condition defines, as a function of the owner gradient, and leave a prescribed value alone. Through
+  the real assembler, same field and meshes (measured with the first form of the weight, the owner's
+  full displacement `d`; the tangential weight below gives the same linear exactness, pinned by
+  `test_a_field_satisfying_its_boundary_conditions_reconstructs_exactly`):
 
   | N | owner | skew |
   |---|---|---|
@@ -2314,19 +2318,29 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
 
   **It costs nothing.** Read literally the value is a fixed point (it needs the gradient it is
   reconstructing), and iterating it converges at a **mesh-independent 0.571 per pass** — eight or ten
-  passes. But it is *linear* in the gradient: each such face contributes `(grad phi_P . d) A_f` to the
+  passes. But it is *affine* in the gradient: each such face contributes `(w . grad phi_P) A_f` to the
   sum, i.e. `B_P grad phi_P` for a per-cell matrix, so it moves to the other side and the pass is
   `(M1 - B) grad phi = raw` — one per-cell inverse, which is what `M1` already was. Verified against
   the 40-pass iteration: `1.6e-15` direct against `9.1e-13` iterated.
 
-  **The seam is `boundary_chain`** = `d(boundary value)/d(phi_owner)` per face, **differentiated from
-  the closures rather than declared**, so it cannot disagree with them and needs nothing new from a
-  boundary condition: one on an owner-derived patch, zero on a prescribed one, and the fraction a
-  Robin condition actually carries, with the value blended in the same proportion. Supplied by
-  `ResidualAssembler._gradient` and by `MomentumContinuity` (per velocity **component** — a patch may
-  treat them differently, and a single tangent of ones would sum them). The gradient is held fixed
-  while it is differentiated, so this is the derivative through the *value* alone — the gradient's own
-  contribution is what the scheme folds in. (Until #313 this was the **only** boundary-consistency
+  **The seam is `boundary_gradient_weight`** = `d(boundary value)/d(grad phi_owner)` per face, shape
+  `(n_faces, dim)`, **differentiated from the closures rather than declared** (one JVP per gradient
+  component), so it cannot disagree with them and needs nothing new from a boundary condition: zero on
+  a prescribed patch, the tangential offset on a zero-gradient or Neumann one, and what a Robin
+  condition actually carries. Supplied by `ResidualAssembler._gradient` and by `MomentumContinuity`
+  (per velocity **component** — a patch may treat them differently).
+
+  ⚠️ **THE FIRST FORM OF THIS WEIGHT WAS WRONG ON TETRAHEDRA, and the name it had (`boundary_chain`,
+  `d(value)/d(phi_owner)`, equal to the owner's full extrapolation `w = d`) is deleted.** It reads no
+  information from the boundary condition: the face value simply follows whatever gradient the cell has,
+  normal component included. On a cell whose interior faces do not span every direction -- a tetrahedron
+  owning two such boundary faces has two interior faces for three gradient components -- `M1 - B` is then
+  singular. Measured on the 2462-cell tetrahedral duct of `validation/tetrahedral_gradient_ab`:
+  `cond(M1 - B)` up to `4e18` on every such cell and `1e16` on some owning one, against at most `2.5` and
+  `8.3` with the condition's own weight. `inv` of a singular 3x3 returns rounding-dependent values, so
+  the compiled and the eager residual disagreed (a `3e-1` gap in the `jvp` on the full scheme). After the
+  fix compiled and eager agree to about `1e-16`. Hexahedral meshes never showed it: their boundary
+  cells' interior faces span all three directions. (Until #313 this was the **only** boundary-consistency
   repair the flow block could take, because its closures accepted no gradient; they take one now, so
   it passes `boundary_values_at` as well.)
 
@@ -2337,14 +2351,15 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   |---|---|---|---|---|
   | skew closure, before either change | — | — | **stalls at the target rung** | — |
   | skew + positivity projection | 660.4 s | 467 | 67 | 8.069 |
-  | **skew + projection + `boundary_chain`** | **707.6 s** | **456** | **68** | **8.069** |
+  | **skew + projection + the first-form weight (`w = d`)** | **707.6 s** | **456** | **68** | **8.069** |
 
-  Same reattachment length to four figures, 2 % fewer Krylov cycles, one more outer step. ⚠️ The +7 %
+  Same reattachment length to four figures, 2 % fewer Krylov cycles, one more outer step. ⚠️ Measured
+  with the first form of the weight, not re-run with the tangential one. The +7 %
   wall is **one run**, and this case has no measured march-level noise floor -- read it as neutral,
   not as a cost, until a repeat says otherwise.
 
   ⚠️ **Scope, stated because "standard treatment" over-describes what is built.** Only
-  `MultipleCorrectionGradient` acts on `boundary_chain`; `CorrectedGreenGauss` and
+  `MultipleCorrectionGradient` acts on `boundary_gradient_weight`; `CorrectedGreenGauss` and
   `HessianCorrectedGradient` accept and ignore it. Since pitzDaily's shipped scheme is corrected
   Green--Gauss, **the main validation case is unaffected by this change today.** Extending it to the
   other two means folding `B` into an iterated operator rather than a per-cell matrix — a bigger

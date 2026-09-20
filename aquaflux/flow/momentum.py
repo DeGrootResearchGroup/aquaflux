@@ -612,7 +612,9 @@ class MomentumContinuity(eqx.Module):
                 self.geometry,
                 leading[:, i],
                 boundary_values_at=lambda g, i=i: self._boundary_velocity_component(velocity, i, g),
-                boundary_chain=self._velocity_boundary_chain(velocity, i, zero_gradient),
+                boundary_gradient_weight=self._velocity_boundary_gradient_weight(
+                    velocity, i, zero_gradient
+                ),
             )
             for i in range(self.mesh.dim)
         ]
@@ -651,42 +653,53 @@ class MomentumContinuity(eqx.Module):
             self.geometry,
             leading,
             boundary_values_at=lambda g: self._boundary_pressure(pressure, g),
-            boundary_chain=self._pressure_boundary_chain(pressure, zero_gradient),
+            boundary_gradient_weight=self._pressure_boundary_gradient_weight(
+                pressure, zero_gradient
+            ),
         )
         return gradient, self._boundary_pressure(pressure, gradient)
 
-    def _velocity_boundary_chain(
+    def _velocity_boundary_gradient_weight(
         self, velocity: jnp.ndarray, component: int, grad_velocity: jnp.ndarray
     ) -> jnp.ndarray:
-        """``d(boundary velocity_i)/d(velocity_i)`` per face, shape ``(n_faces,)``.
+        """``d(boundary velocity_i)/d(grad velocity_i)`` per face, shape ``(n_faces, dim)``.
 
-        Per **component**, and one directional derivative each: a no-slip wall prescribes all of them
-        while a pressure outlet leaves all of them following the owner, but a patch may treat them
-        differently, and a single tangent of ones would sum the components rather than resolve one.
+        Per **component**, since a patch may treat the components differently, and one directional
+        derivative per gradient direction: component ``i``'s closure reads only row ``i`` of the
+        gradient tensor, and a face value reads only its own owner's gradient, so a seed set in every
+        cell resolves every face.
 
         Differentiated from the closures rather than declared, so it cannot disagree with them: a
-        prescribed value does not move with the owner and gives zero, a zero-gradient one follows it
-        exactly and gives one.
-
-        The gradient is held fixed, so this is the derivative through the *value* alone -- the
-        gradient's own contribution is what the scheme is folding in.
+        prescribed velocity does not move with the gradient and gives zero, and a zero-gradient one
+        gives the tangential offset its face value carries.
         """
-        seed = jnp.zeros_like(velocity).at[:, component].set(1.0)
-        return jax.jvp(
-            lambda u: self._boundary_velocity(u, grad_velocity)[:, component],
-            (velocity,),
-            (seed,),
-        )[1]
+        return jnp.stack(
+            [
+                jax.jvp(
+                    lambda g: self._boundary_velocity(velocity, g)[:, component],
+                    (grad_velocity,),
+                    (jnp.zeros_like(grad_velocity).at[:, component, k].set(1.0),),
+                )[1]
+                for k in range(grad_velocity.shape[2])
+            ],
+            axis=-1,
+        )
 
-    def _pressure_boundary_chain(
+    def _pressure_boundary_gradient_weight(
         self, pressure: jnp.ndarray, grad_pressure: jnp.ndarray
     ) -> jnp.ndarray:
-        """``d(boundary pressure)/d(pressure)`` per face, shape ``(n_faces,)`` -- see the velocity twin."""
-        return jax.jvp(
-            lambda q: self._boundary_pressure(q, grad_pressure),
-            (pressure,),
-            (jnp.ones_like(pressure),),
-        )[1]
+        """``d(boundary pressure)/d(grad pressure)`` per face, shape ``(n_faces, dim)`` -- see the velocity twin."""
+        return jnp.stack(
+            [
+                jax.jvp(
+                    lambda g: self._boundary_pressure(pressure, g),
+                    (grad_pressure,),
+                    (jnp.zeros_like(grad_pressure).at[:, k].set(1.0),),
+                )[1]
+                for k in range(grad_pressure.shape[1])
+            ],
+            axis=-1,
+        )
 
     def _mass_flux(
         self,

@@ -431,10 +431,21 @@ def _corrected_flow_pressure_gradient(built, state) -> None:
     chain = jax.jvp(
         lambda p: boundary_pressure(p, zero_gradient), (pressure,), (jnp.ones_like(pressure),)
     )[1]
+    weight = jnp.stack(
+        [
+            jax.jvp(
+                lambda g: boundary_pressure(pressure, g),
+                (zero_gradient,),
+                (jnp.zeros_like(zero_gradient).at[:, k].set(1.0),),
+            )[1]
+            for k in range(mesh.dim)
+        ],
+        axis=-1,
+    )
     # The leading-order arm the shipped two-pass fold replaced: the same first pass, but with the
     # closures never re-read at the gradient it produces.
     uncorrected = momentum.gradient_scheme.gradients(
-        pressure, mesh, geometry, leading, boundary_chain=chain
+        pressure, mesh, geometry, leading, boundary_gradient_weight=weight
     )
     print(
         f"  d(p_face)/d(p_owner) is 1 on {int(jnp.sum(chain > 0.5))} boundary faces "
