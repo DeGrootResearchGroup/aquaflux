@@ -809,3 +809,79 @@ per-body total, so a helper and a user's own report cannot disagree about how bi
 ⚠️ **Which body gets the rating is a modelling decision no signature can make.** A lamp is rated at
 its envelope; the geometry in a model is usually the quartz sleeve, which is larger. Both readings
 are legal and they differ by the area ratio.
+## MEASURED: what the binary per-pair occlusion mask costs (issue #447 item 2)
+
+`build_visibility` casts one ray per facet pair, centroid to centroid, so a half-shadowed pair
+is recorded wholly blocked or wholly clear. With the source exact and the receiver on six points
+this is the only all-or-nothing term left in the transfer. It is now measured;
+`validation/radiation_partial_occlusion.py` is the instrument and re-runs in ~90 s.
+
+**Configuration for every number below.** Two 2 m square plates facing each other across a 2 m
+gap, emission 1, reflectance 0, `self_occlusion=False`, default six-point receiver quadrature,
+an opaque `Cylinder` on the axis between them. Reference: the same plates at 36 quads per side
+(5184 facets), area-averaged back onto the coarse patches — which *is* the coarse form factor,
+not a finer answer to a different question. JAX 0.10.2, CPU, x64, macOS arm64, 2026-09-19.
+
+**The control is what makes it a measurement.** With the cylinder removed the same comparison
+reads **5.673e-07**. That is the instrument's floor — six quadrature points on one large
+receiving triangle against six on each of many small ones — so everything above it is the mask.
+
+Error in the transfer, normalized by the largest reference entry:
+
+| quads/plate | r=0.15 max / mean | r=0.30 max / mean | r=0.60 max / mean |
+|---|---|---|---|
+| 2x2 | 0.3317 / 0.0828 | 0.2383 / 0.0715 | 0.1515 / 0.0339 |
+| 3x3 | 0.2989 / 0.0405 | 0.1648 / 0.0310 | 0.1272 / 0.0129 |
+| 4x4 | 0.1876 / 0.0196 | 0.1466 / 0.0217 | 0.1378 / 0.0184 |
+| 6x6 | 0.1659 / 0.0145 | 0.0836 / 0.0048 | 0.2042 / 0.0117 |
+| 9x9 | 0.1835 / 0.0128 | 0.1144 / 0.0053 | 0.1529 / 0.0069 |
+| 12x12 | 0.1212 / 0.0043 | 0.1646 / 0.0052 | 0.0833 / 0.0023 |
+
+⚠️ **REFINEMENT FIXES THE MEAN AND NOT THE MAXIMUM, AND THAT IS STRUCTURAL.** The mean falls by
+roughly twenty-fold from 2x2 to 12x12; the maximum sits in **0.08-0.33 at every mesh, with no
+trend**. Refining reduces how *many* pairs straddle the shadow edge and never how *wrong* a
+straddling pair is — a pair the edge crosses is wrong by up to the whole of its own value at any
+resolution. So a mesh study cannot retire this and a quadrature-style fix is the only thing that
+can. It is the opposite of item 1 of the same issue — a non-Lambertian source's profile evaluated at
+one direction — which mesh refinement does shrink, because that samples more directions.
+
+**A thin body is worse than a fat one**, by about a factor of two in the mean at every mesh
+(0.0828 against 0.0339 at 2x2; 0.0043 against 0.0023 at 12x12). A rod narrower than a facet
+either falls between two ray endpoints and vanishes, or lands on one and blocks the whole pair.
+That is the lamp-sleeve and baffle regime, which is what the package is for.
+
+**Row sums drift by up to 0.037** relative to the reference — a facet's total output misrouted
+by up to 3.7 percentage points. Note the mask legitimately removes energy (an opaque body
+absorbs it); this is the error in *how much*, not the removal itself.
+
+**What a user reads.** Fluence rate on a line at z = 0.5 m, radius 0.30 m, against the 36-per-side
+reference:
+
+| quads/plate | worst, of the field | worst, of the shadow being modelled | mean, of the field |
+|---|---|---|---|
+| 2x2 | 4.44% | **58.4%** | 2.07% |
+| 4x4 | 2.50% | **35.9%** | 1.17% |
+| 8x8 | 0.88% | **12.5%** | 0.34% |
+
+⚠️ **Quote the second column when sizing a fix.** As a fraction of the field the error looks
+like a few percent; as a fraction of *the shadow the occluder exists to cast* it is a third at a
+perfectly ordinary mesh. Those are the same numbers, and the first framing is the one that makes
+this look ignorable.
+
+⚠️ **Two traps this measurement walked into, both worth keeping.**
+
+- **The aggregation map was wrong and every ownership check passed.** The two triangles of a quad
+  are *adjacent* in the facet order, not in two blocks; the wrong map still gave every coarse
+  patch exactly two facets on the correct plate. Only the control caught it, reading **0.398**
+  where it should read 5.7e-07. A control that should be ~0 is worth more than any assertion
+  about the structure of the thing being measured.
+- **The plate fixture half-fails silently.** The second plate must be reversed or its normal
+  points away and the source clamp deletes every transfer into it — the matrix is half zeros, and
+  the comparison still passes, being perfectly consistent about a quantity that no longer exists
+  (1.5986 one way, exactly 0.0 the other). `test_the_two_plates_actually_face_each_other` guards it.
+
+`tests/unit/test_radiation_partial_occlusion.py` carries the cheap half in the fast tier: the
+control, that the mask error is orders above it, and both fixture guards. Six of seven mutations
+go red; the survivor — dividing by the patch area in `area_average_onto` — is inert because a
+coarse patch and its fine cover have the same total area, so the factor cancels on both sides of
+a normalized comparison.
