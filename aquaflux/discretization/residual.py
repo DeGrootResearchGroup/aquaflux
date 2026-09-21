@@ -46,6 +46,7 @@ to the differentiable residual.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
@@ -211,6 +212,7 @@ class ResidualAssembler(eqx.Module):
         transient: TransientTerm | None = None,
         source_operators: tuple[VolumeSource, ...] = (),
         gradient_scheme: GradientScheme | None = None,
+        boundary_gradient_weight: jnp.ndarray | None = None,
         imposed_gradient: ImposedGradient | None = None,
     ) -> ResidualAssembler:
         """Build an assembler from injected operators, schemes, and boundary closures.
@@ -279,7 +281,7 @@ class ResidualAssembler(eqx.Module):
                     "gradient_scheme was given -- with none, context.gradient is exactly zero "
                     "everywhere, which silently degrades such an operator rather than failing"
                 )
-        return cls(
+        assembled = cls(
             mesh=mesh,
             geometry=geometry,
             properties=properties,
@@ -299,6 +301,49 @@ class ResidualAssembler(eqx.Module):
             boundary=boundary.resolve(mesh.face_patches, mesh.face_cells),
             imposed_gradient=imposed_gradient,
         )
+        if gradient_scheme is None:
+            return assembled
+        # Bind the scheme AGAINST the conditions, not merely against the geometry. A gradient-type
+        # condition folds its own dependence on the owner gradient into the first pass, so a scheme
+        # that prepares work from that operator must be prepared from the same one -- otherwise it
+        # corrects an operator nobody evaluates and stops reproducing a quadratic.
+        weight = (
+            assembled._build_time_boundary_gradient_weight()
+            if boundary_gradient_weight is None
+            else boundary_gradient_weight
+        )
+        return dataclasses.replace(
+            assembled, gradient_scheme=gradient_scheme.bind(mesh, geometry, weight)
+        )
+
+    def _build_time_boundary_gradient_weight(self) -> jnp.ndarray:
+        """``d(boundary value)/d(grad phi_owner)`` per face, evaluated without a state.
+
+        The weight is a property of the conditions and the geometry, not of the field: measured on a
+        perturbed grid carrying zero-gradient, Neumann, Dirichlet and convective patches at once, it
+        is **bit-identical** across a zero state, a random state and one offset by 5.0, at zero and
+        at a random gradient. So evaluating it here, once, is exact rather than an approximation --
+        pinned by ``test_the_boundary_gradient_weight_does_not_depend_on_the_state``.
+
+        It is *not* independent of the properties: a convective condition blends the coefficient into
+        its face value, so its gradient coefficient carries ``Gamma``. A property that cannot be
+        evaluated without a field therefore cannot give a weight here, and this raises rather than
+        quietly using the zero default ``boundary_values`` falls back to -- a silently wrong weight is
+        the very defect binding against the conditions exists to remove.
+        """
+        try:
+            properties = self.properties.evaluate(self.mesh.cell_zones, {})
+        except (KeyError, ValueError) as error:
+            raise ValueError(
+                "ResidualAssembler.build: the gradient scheme is bound against the boundary "
+                "conditions, whose weight needs the properties evaluated, and a calculated property "
+                f"cannot be evaluated before a field exists ({error}). Pass the weight yourself as "
+                "`boundary_gradient_weight=` -- `d(boundary value)/d(grad phi_owner)` per face, "
+                "shape (n_faces, dim)."
+            ) from error
+        zero_field = jnp.zeros(self.mesh.n_cells)
+        zero_gradient = jnp.zeros((self.mesh.n_cells, self.mesh.dim))
+        return self._boundary_gradient_weight(zero_field, zero_gradient, properties)
 
     def boundary_values(
         self, phi: jnp.ndarray, gradient: jnp.ndarray, properties: dict[str, jnp.ndarray]

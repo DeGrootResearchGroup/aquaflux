@@ -27,6 +27,7 @@ the Jacobian of the whole coupled residual comes from AD.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING, NamedTuple
 
 import equinox as eqx
@@ -186,8 +187,19 @@ class MomentumContinuity(eqx.Module):
         :meth:`with_eddy_viscosity`; it overrides the momentum wall-face diffusion coefficient with
         ``mu + rho nu_t,wall`` (see :meth:`_wall_boundary_viscosity`).
     gradient_scheme : GradientScheme
-        Reconstruction for the velocity and pressure gradients, bound to this geometry by
-        :meth:`build`.
+        The reconstruction this flow is configured with, prepared for this geometry by
+        :meth:`build`. It is **not** what the residual applies: each solved field carries its own
+        boundary conditions, so each gets its own binding (:attr:`velocity_gradient_schemes`,
+        :attr:`pressure_gradient_scheme`). This one is the condition-free form, for an initializer
+        that solves a *different* equation on this mesh and re-binds it against that equation's
+        conditions (:func:`~aquaflux.flow.potential_flow`).
+    velocity_gradient_schemes : tuple of GradientScheme
+        One reconstruction per velocity component, each bound against that component's boundary
+        conditions as well as the geometry, in the state layout's component order. This is what
+        the velocity-gradient reconstruction applies.
+    pressure_gradient_scheme : GradientScheme
+        The reconstruction for the pressure gradient, bound against the pressure boundary
+        conditions as well as the geometry; what the pressure-gradient reconstruction applies.
     advection_scheme : AdvectionScheme or None
         Momentum convection scheme; ``None`` gives Stokes flow (no convection). A limited scheme
         (``LimitedUpwind``) carries its own slope limiter.
@@ -222,6 +234,8 @@ class MomentumContinuity(eqx.Module):
     geometry: MeshGeometry
     properties: PropertyModel
     gradient_scheme: GradientScheme
+    velocity_gradient_schemes: tuple[GradientScheme, ...]
+    pressure_gradient_scheme: GradientScheme
     advection_scheme: AdvectionScheme | None
     boundary: BoundaryConditions
     interp_factor: jnp.ndarray
@@ -257,7 +271,10 @@ class MomentumContinuity(eqx.Module):
         without; omitting it takes :data:`~aquaflux.schemes.DEFAULT_GRADIENT_SCHEME`, which is where
         that choice is written down. Whatever it ends up being is carried on the built assembler, so
         an initializer for this flow reads it from there rather than choosing again
-        (:func:`~aquaflux.flow.potential_flow`).
+        (:func:`~aquaflux.flow.potential_flow`). It is bound here once per **solved field** --
+        each velocity component and the pressure -- because a scheme that prepares work from the
+        reconstruction's first pass has to be prepared from the operator that pass actually applies,
+        and the boundary conditions enter that operator differently for each of them.
 
         ``pressure_pin`` fixes the pressure at one cell (its continuity equation is replaced by
         ``p = pressure_pin_value``) — required for a closed domain (all-wall, no pressure outlet, e.g.
@@ -287,16 +304,21 @@ class MomentumContinuity(eqx.Module):
             dot(d, face_geometry.normal),
             dot(x_ip - x_p, face_geometry.normal),
         )
-        return cls(
+        # Prepared for this geometry, alongside the face interpolation factors above and for the
+        # same reason: it is work that depends on the mesh and not on the state, and the residual is
+        # evaluated once per field per Krylov matvec. Binding here rather than at the call site is
+        # also what makes it safe -- this assembler owns the geometry and the scheme together, so
+        # the two cannot be paired with a mismatched mesh later.
+        bound = gradient_scheme.bind(mesh, geometry)
+        assembled = cls(
             mesh=mesh,
             geometry=geometry,
             properties=properties,
-            # Prepared for this geometry, alongside the face interpolation factors above and for the
-            # same reason: it is work that depends on the mesh and not on the state, and the residual
-            # is evaluated once per field per Krylov matvec. Binding here rather than at the call
-            # site is also what makes it safe -- this assembler owns the geometry and the scheme
-            # together, so the two cannot be paired with a mismatched mesh later.
-            gradient_scheme=gradient_scheme.bind(mesh, geometry),
+            gradient_scheme=bound,
+            # Placeholders: the per-field bindings need the boundary weights, which are read off
+            # this assembler's own closures, so they are filled in once it exists.
+            velocity_gradient_schemes=(bound,) * mesh.dim,
+            pressure_gradient_scheme=bound,
             advection_scheme=advection_scheme,
             boundary=boundary.resolve(mesh.face_patches, mesh.face_cells),
             interp_factor=interp_factor,
@@ -305,6 +327,50 @@ class MomentumContinuity(eqx.Module):
             pressure_pin=pressure_pin,
             pressure_pin_value=pressure_pin_value,
             sources=sources,
+        )
+        # Bind each field AGAINST its own conditions, not merely against the geometry. A
+        # gradient-type condition folds its own dependence on the owner gradient into the
+        # reconstruction's first pass, so a scheme that prepares work from that operator must be
+        # prepared from the same one -- otherwise it corrects an operator nobody evaluates and stops
+        # reproducing a quadratic. One binding cannot serve the whole flow state: the velocity and
+        # the pressure carry different conditions on the same patch (an outlet prescribes the
+        # pressure and leaves the velocity to extrapolate; a wall does the reverse).
+        return dataclasses.replace(
+            assembled,
+            velocity_gradient_schemes=tuple(
+                gradient_scheme.bind(mesh, geometry, weight)
+                for weight in assembled._build_time_velocity_gradient_weights()
+            ),
+            pressure_gradient_scheme=gradient_scheme.bind(
+                mesh, geometry, assembled._build_time_pressure_gradient_weight()
+            ),
+        )
+
+    def _build_time_velocity_gradient_weights(self) -> tuple[jnp.ndarray, ...]:
+        """Each velocity component's boundary gradient weight, evaluated without a state.
+
+        One ``(n_faces, dim)`` array per component, as :meth:`_velocity_boundary_gradient_weight`
+        returns at a given state -- here at rest and at a zero gradient, because the weight is a
+        property of the closures and the geometry and not of the field. Every flow closure is affine
+        in the gradient it is handed (a prescribed value ignores it; an extrapolating one adds the
+        tangential offset ``grad . d_t``), so the derivative at rest is the derivative everywhere --
+        pinned by ``test_the_flow_boundary_gradient_weights_do_not_depend_on_the_state``.
+
+        Unlike the scalar twin on a residual assembler, no property is evaluated on the way: the
+        flow closures read the state and the face geometry only, so this cannot fail on a property
+        that needs a field.
+        """
+        velocity = jnp.zeros((self.mesh.n_cells, self.mesh.dim))
+        gradient = jnp.zeros((self.mesh.n_cells, self.mesh.dim, self.mesh.dim))
+        return tuple(
+            self._velocity_boundary_gradient_weight(velocity, component, gradient)
+            for component in range(self.mesh.dim)
+        )
+
+    def _build_time_pressure_gradient_weight(self) -> jnp.ndarray:
+        """The pressure boundary gradient weight, evaluated without a state -- see the velocity twin."""
+        return self._pressure_boundary_gradient_weight(
+            jnp.zeros(self.mesh.n_cells), jnp.zeros((self.mesh.n_cells, self.mesh.dim))
         )
 
     # --- state layout ------------------------------------------------------------------
@@ -606,7 +672,7 @@ class MomentumContinuity(eqx.Module):
         zero_gradient = jnp.zeros((self.mesh.n_cells, self.mesh.dim, self.mesh.dim))
         leading = self._boundary_velocity(velocity, zero_gradient)
         columns = [
-            self.gradient_scheme.gradients(
+            self.velocity_gradient_schemes[i].gradients(
                 velocity[:, i],
                 self.mesh,
                 self.geometry,
@@ -647,7 +713,7 @@ class MomentumContinuity(eqx.Module):
         """
         zero_gradient = jnp.zeros((self.mesh.n_cells, self.mesh.dim))
         leading = self._boundary_pressure(pressure, zero_gradient)
-        gradient = self.gradient_scheme.gradients(
+        gradient = self.pressure_gradient_scheme.gradients(
             pressure,
             self.mesh,
             self.geometry,

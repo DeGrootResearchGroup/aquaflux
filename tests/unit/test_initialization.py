@@ -473,8 +473,10 @@ class _RecordingGradient(GradientScheme):
     inner: GradientScheme
     label: str = eqx.field(static=True)
 
-    def bind(self, mesh, geometry):
-        return _RecordingGradient(inner=self.inner.bind(mesh, geometry), label=self.label)
+    def bind(self, mesh, geometry, boundary_gradient_weight=None):
+        return _RecordingGradient(
+            inner=self.inner.bind(mesh, geometry, boundary_gradient_weight), label=self.label
+        )
 
     def _reconstruct_gradient(self, field, mesh, geometry, boundary_values, **kwargs):
         # The reconstruction hook rather than the public `gradients`, so the base class keeps

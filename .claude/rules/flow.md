@@ -161,6 +161,41 @@ Engineering Principles.
   *with* the velocity as the momentum `interp(ρu)·n` (density rides with velocity; the correction/
   Schur term uses `interp(ρ)`). Constant density is bit-for-bit unchanged; variable-density physics
   is not yet validated.
+  - ⚠️ **THE GRADIENT SCHEME IS BOUND ONCE PER SOLVED FIELD, NOT ONCE (#467).** `build` carries
+    `velocity_gradient_schemes` (one per component, in the state layout's order) and
+    `pressure_gradient_scheme`, each `gradient_scheme.bind(mesh, geometry, weight)` against **that
+    field's** `d(boundary value)/d(grad phi_owner)`; `_velocity_gradient` and `_pressure_gradient`
+    apply those, never `gradient_scheme`. A gradient-type condition folds its dependence on the owner
+    gradient into the reconstruction's first pass, which then inverts `M1 − B`, so a scheme whose
+    corrections were probed on `M1⁻¹` corrects an operator nobody evaluates. **One binding cannot
+    serve the flow state**: the patches treat the fields oppositely — a `PressureOutlet` prescribes
+    the pressure and extrapolates the velocity, a wall does the reverse — so the two weights are
+    nonzero on *disjoint* patches. Measured on an 8×8 perturbed quad grid (perturb 0.3, seed 3,
+    `MultipleCorrectionGradient` + `SkewCorrectedGradient` fallback, pressure prescribed on both
+    x-normal patches and velocity on both walls): quadratics reproduced to ~4e-15 per field, against
+    4.4e-3 of the pressure gradient and 3.1e-3 of the velocity gradient on the single geometry-only
+    binding this replaced. Pinned by `test_the_flow_assembler_binds_a_scheme_per_solved_field` and
+    `test_the_velocity_and_pressure_weights_differ_on_the_same_patch`.
+    The weights are read off the closures by `jax.jvp` at **rest**, which is exact rather than
+    approximate: every flow closure is affine in the gradient it is handed (a prescribed value
+    ignores it, an extrapolating one adds `grad·d_t`), so the derivative at rest is the derivative
+    everywhere — `test_the_flow_boundary_gradient_weights_do_not_depend_on_the_state`. Unlike the
+    scalar twin on `ResidualAssembler`, no property is evaluated on the way, so there is no
+    calculated-property failure mode here. `build` is therefore **two-phase**: construct with the
+    geometry-only binding in every slot, then `dataclasses.replace` once the closures exist to read
+    the weights from.
+    ⚠️ **`momentum.gradient_scheme` survives and now means the CONDITION-FREE form** — the
+    reconstruction this flow is configured with, prepared for the geometry alone. It is what an
+    initializer solving a *different* equation on this mesh reads and re-binds against that
+    equation's own conditions (`potential_flow` → `laplace_field` → `ResidualAssembler.build`); it is
+    **not** what the residual applies, and reconstructing a flow field with it directly returns the
+    inexact answer above.
+    ⚠️ **Exactness needs the field to satisfy a zero-gradient patch IDENTICALLY, not just at the
+    wall.** The closure builds its face value from the *owner* cell's gradient, so a quadratic whose
+    normal derivative vanishes on the wall but not one cell behind it gives boundary data no binding
+    can reproduce (5.8e-1 on that same grid, unmoved by either binding). That is why the test fixture
+    uses two prescribed-pressure x-normal patches and two prescribed-velocity walls — do not
+    "simplify" it to an inlet/outlet/wall case, where no non-trivial quadratic pressure exists.
 - **`rhie_chow.py` — `interior_mass_flux` + `momentum_diagonal`.** The Rhie–Chow face flux
   `mdot_f = ρ(u_ip·n − d̂[(p_N−p_P) − ∇̄p·d]/(d·n))A` couples pressure implicitly and kills
   checkerboarding; it reduces to the interpolated velocity flux where pressure is smooth. **Skewness-
@@ -461,7 +496,10 @@ Engineering Principles.
   state (or pin `pressure_pin`). Usable to warm-start **any** solve (flow-only, segregated, coupled).
   ⚠️ **It takes NO `gradient_scheme` argument and must not be given one back (#361).** It
   reconstructs `grad phi` with `momentum.gradient_scheme` — the scheme that assembler will be solved
-  with. It used to substitute `CompactGreenGauss()` instead, and since every caller in the repository
+  with, in its condition-free form, which the potential's own `ResidualAssembler` then re-binds
+  against the Laplace problem's conditions (see the per-field binding bullet under
+  `MomentumContinuity.build`; binding against the *momentum* pressure conditions would be the wrong
+  operator here). It used to substitute `CompactGreenGauss()` instead, and since every caller in the repository
   omitted the argument, every case initialized on one discretization and solved on another. Taking the
   scheme from the assembler is what makes that unrepresentable rather than merely discouraged; see
   `.claude/rules/schemes.md` for the default and the test census that pins the policy.

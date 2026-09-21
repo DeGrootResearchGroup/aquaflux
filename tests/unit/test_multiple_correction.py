@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 
 import aquaflux  # noqa: F401  (enables x64)
@@ -9,9 +10,17 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.boundary import BoundaryConditions, DirichletField, Neumann, ZeroGradient
+from aquaflux.boundary import (
+    BoundaryConditions,
+    Convective,
+    Dirichlet,
+    DirichletField,
+    Neumann,
+    ZeroGradient,
+)
 from aquaflux.discretization import DiffusionFlux, ResidualAssembler
-from aquaflux.properties import Constant, PropertyModel
+from aquaflux.flow import MomentumContinuity, MovingWall, PressureOutlet
+from aquaflux.properties import Constant, Property, PropertyModel
 from aquaflux.schemes import (
     CellwiseFallback,
     CompactGreenGauss,
@@ -635,6 +644,266 @@ def test_binding_against_a_boundary_condition_restores_quadratic_exactness() -> 
         # And the blind binding is inexact by far more than roundoff, so the assertion above is
         # measuring the repair rather than a case that was never broken.
         assert errors["blind"] > 1e-6 * scale_of, f"{type(closure).__name__}: {errors['blind']:.3e}"
+
+
+def _zero_gradient_quadratic_case():
+    """A quadratic with a zero-gradient wall pair it satisfies exactly, and its assembler's inputs."""
+    curvature = 1.7  # phi = curvature * y^2 / 2, so dphi/dx = 0 on every x-normal face
+    mesh = perturbed_grid_2d(8, 8, perturb=0.3, seed=3, named_boundaries=True)
+    geometry = mesh.geometry()
+
+    def quadratic(x):
+        return 0.5 * curvature * x[..., 1] ** 2
+
+    boundary = {
+        "left": ZeroGradient(),
+        "right": ZeroGradient(),
+        "bottom": DirichletField(field_fn=quadratic),
+        "top": DirichletField(field_fn=quadratic),
+    }
+    exact = jnp.stack([jnp.zeros(mesh.n_cells), curvature * geometry.cell.centroid[:, 1]], axis=-1)
+    return mesh, geometry, quadratic, boundary, exact
+
+
+def test_the_assembler_binds_the_scheme_against_its_boundary_conditions() -> None:
+    """The end of the chain: a real assembler reproduces a quadratic on a gradient-type patch.
+
+    ``ResidualAssembler`` hands the scheme a ``boundary_gradient_weight`` on every reconstruction, so
+    its first pass inverts ``M1 - B``. Binding the scheme against the geometry alone leaves the
+    corrections built for ``M1^-1``, and the assembler's gradient is then wrong by 2.0e-3 of the
+    gradient on this case -- the wrong answer this catches, and what shipped until the weight reached
+    ``bind``. Exactness here is not a property of the scheme alone; it is a property of the scheme
+    being prepared against the conditions it will run under.
+    """
+    mesh, geometry, quadratic, boundary, exact = _zero_gradient_quadratic_case()
+    field = quadratic(geometry.cell.centroid)
+    scale_of = float(jnp.max(jnp.linalg.norm(exact, axis=-1)))
+
+    for closure in (OwnerGradient(), SkewCorrectedGradient()):
+        assembler = ResidualAssembler.build(
+            mesh,
+            geometry,
+            PropertyModel({"diffusivity": Constant(1.0)}),
+            (DiffusionFlux(),),
+            BoundaryConditions(boundary),
+            gradient_scheme=MultipleCorrectionGradient(boundary_closure=closure, fallback=None),
+        )
+        error = float(jnp.max(jnp.linalg.norm(assembler.gradient(field) - exact, axis=-1)))
+        assert error < 1e-12 * scale_of, f"{type(closure).__name__}: {error:.3e}"
+
+
+def test_the_boundary_gradient_weight_does_not_depend_on_the_state() -> None:
+    """Why evaluating the weight once at build time is exact rather than an approximation.
+
+    The weight is ``d(boundary value)/d(grad phi_owner)``, which for every shipped condition is a
+    property of the condition and the geometry -- the tangential offset a face value carries, or zero
+    where the value is prescribed. Nothing about it moves with the field or with the gradient it is
+    evaluated at, so binding the scheme against it before any field exists cannot be stale.
+
+    Catches a condition (or a future one) whose gradient dependence varies with the state, which
+    would make that build-time binding silently wrong rather than merely approximate.
+    """
+    mesh = perturbed_grid_2d(6, 6, perturb=0.3, seed=5, named_boundaries=True)
+    geometry = mesh.geometry()
+    assembler = ResidualAssembler.build(
+        mesh,
+        geometry,
+        PropertyModel({"diffusivity": Constant(1.0)}),
+        (DiffusionFlux(),),
+        BoundaryConditions(
+            {
+                "left": ZeroGradient(),
+                "right": Neumann(flux=0.7),
+                "bottom": Dirichlet(value=1.0),
+                "top": Convective(h=2.0, t_inf=0.5),
+            }
+        ),
+    )
+    properties = assembler.properties.evaluate(mesh.cell_zones, {})
+    key = jax.random.PRNGKey(3)
+    reference = assembler._boundary_gradient_weight(
+        jnp.zeros(mesh.n_cells), jnp.zeros((mesh.n_cells, mesh.dim)), properties
+    )
+    assert float(jnp.max(jnp.abs(reference))) > 1e-6  # not trivially zero everywhere
+
+    for field in (
+        jnp.zeros(mesh.n_cells),
+        jax.random.normal(key, (mesh.n_cells,)),
+        5.0 + jax.random.normal(key, (mesh.n_cells,)),
+    ):
+        for gradient in (
+            jnp.zeros((mesh.n_cells, mesh.dim)),
+            jax.random.normal(key, (mesh.n_cells, mesh.dim)),
+        ):
+            moved = assembler._boundary_gradient_weight(field, gradient, properties)
+            assert np.array_equal(np.asarray(moved), np.asarray(reference))
+
+
+def test_a_property_needing_a_field_asks_the_caller_for_the_weight() -> None:
+    """A property that cannot be evaluated before a field exists cannot give a weight either.
+
+    ``boundary_values`` falls back to a zero coefficient when the properties lack one, and a
+    convective condition blends that coefficient into its face value -- so computing the weight
+    against that fallback would hand ``bind`` a silently wrong operator, which is the defect binding
+    against the conditions exists to remove. Refuse instead, and name the way out.
+    """
+
+    class NeedsAField(Property):
+        """A property whose value is read from a field, as the interface allows."""
+
+        def evaluate(self, cell_zones, fields):
+            return fields["temperature"]
+
+        def scaled(self, factor):
+            return self
+
+    mesh, geometry, _quadratic, boundary, _exact = _zero_gradient_quadratic_case()
+    with pytest.raises(ValueError, match="boundary_gradient_weight"):
+        ResidualAssembler.build(
+            mesh,
+            geometry,
+            PropertyModel({"diffusivity": NeedsAField()}),
+            (DiffusionFlux(),),
+            BoundaryConditions(boundary),
+            gradient_scheme=MultipleCorrectionGradient(fallback=None),
+        )
+
+
+def _flow_quadratic_case():
+    """A flow assembler whose quadratic velocity and pressure satisfy its own closures exactly.
+
+    Both fields have to satisfy their gradient-type patches **identically**, not merely at the wall:
+    a zero-gradient closure builds its face value from the *owner* cell's gradient, so a quadratic
+    whose normal derivative vanishes on the wall but not a cell behind it gives boundary data no
+    reconstruction can reproduce (measured at 5.8e-1, unchanged by any binding). That is what fixes
+    the geometry here. Pressure is prescribed on the two x-normal patches and zero-gradient on the
+    y-normal walls, so it may vary only with ``x``; velocity is the reverse -- prescribed on the
+    walls, extrapolated at both x-normal patches -- so it may vary only with ``y``. Each still
+    carries genuine curvature, which is what a 1-exact reconstruction would miss.
+    """
+    pressure_of = lambda x: 1.7 * x**2 - 0.9 * x + 0.4  # noqa: E731
+    profiles = ((1.3, -0.4, 0.2), (-0.7, 0.9, -0.3))  # u_i = a y^2 + b y + c
+
+    def velocity_of(centroid):
+        y = centroid[..., 1]
+        return jnp.stack([a * y**2 + b * y + c for a, b, c in profiles], axis=-1)
+
+    mesh = perturbed_grid_2d(8, 8, perturb=0.3, seed=3, named_boundaries=True)
+    geometry = mesh.geometry()
+    inflow = geometry.face.centroid[mesh.face_patches.indices("left")]
+    assembler = MomentumContinuity.build(
+        mesh,
+        geometry,
+        PropertyModel({"viscosity": Constant(0.1), "density": Constant(1.0)}),
+        BoundaryConditions(
+            {
+                "left": PressureOutlet(pressure=pressure_of(inflow[:, 0])),
+                "right": PressureOutlet(pressure=pressure_of(1.0)),
+                "bottom": MovingWall(velocity=velocity_of),
+                "top": MovingWall(velocity=velocity_of),
+            }
+        ),
+        gradient_scheme=MultipleCorrectionGradient(fallback=SkewCorrectedGradient()),
+    )
+    centroid = geometry.cell.centroid
+    x, y = centroid[:, 0], centroid[:, 1]
+    zero = jnp.zeros(mesh.n_cells)
+    exact_pressure = jnp.stack([2 * 1.7 * x - 0.9, zero], axis=-1)
+    exact_velocity = jnp.stack(
+        [jnp.stack([zero, 2 * a * y + b], axis=-1) for a, b, _ in profiles], axis=1
+    )
+    return assembler, pressure_of(x), velocity_of(centroid), exact_pressure, exact_velocity
+
+
+def _bound_blind(assembler: MomentumContinuity) -> MomentumContinuity:
+    """``assembler`` with every field back on the geometry-only binding -- what shipped before."""
+    return dataclasses.replace(
+        assembler,
+        velocity_gradient_schemes=(assembler.gradient_scheme,) * assembler.mesh.dim,
+        pressure_gradient_scheme=assembler.gradient_scheme,
+    )
+
+
+def test_the_flow_assembler_binds_a_scheme_per_solved_field() -> None:
+    """The coupled flow's four fields do not share one binding, and could not.
+
+    ``MomentumContinuity`` reconstructs each velocity component and the pressure, and the patches
+    treat them oppositely -- an outlet prescribes the pressure and leaves the velocity to
+    extrapolate, a wall does the reverse. So each field's first pass inverts a *different*
+    ``M1 - B``, and one binding cannot be right for all of them.
+
+    Both halves are pinned: the per-field bindings reproduce these quadratics to roundoff, and the
+    single geometry-only binding this replaced does not (4.4e-3 of the pressure gradient, 3.1e-3 of
+    the velocity gradient on this case) -- the wrong answer the split catches.
+    """
+    assembler, pressure, velocity, exact_pressure, exact_velocity = _flow_quadratic_case()
+    scale_of = float(jnp.max(jnp.abs(exact_velocity)))
+
+    def errors(case):
+        return (
+            float(jnp.max(jnp.abs(case._pressure_gradient(pressure)[0] - exact_pressure))),
+            float(jnp.max(jnp.abs(case._velocity_gradient(velocity)[0] - exact_velocity))),
+        )
+
+    per_field = errors(assembler)
+    assert max(per_field) < 1e-12 * scale_of, f"per field: {per_field}"
+    blind = errors(_bound_blind(assembler))
+    assert min(blind) > 1e-4 * scale_of, f"geometry-only binding is already exact: {blind}"
+
+
+def test_the_velocity_and_pressure_weights_differ_on_the_same_patch() -> None:
+    """Why the split is needed at all, stated as the quantity the bindings are built from.
+
+    Were the weights equal, ``dim + 1`` bindings would be ``dim + 1`` copies of one. They are not:
+    on this case the velocity's weight is nonzero exactly on the two prescribed-pressure patches and
+    the pressure's exactly on the two walls, so neither is a rescaling of the other.
+    """
+    assembler = _flow_quadratic_case()[0]
+    velocity_weights = assembler._build_time_velocity_gradient_weights()
+    pressure_weight = assembler._build_time_pressure_gradient_weight()
+    assert len(velocity_weights) == assembler.mesh.dim
+
+    live = {
+        name: (
+            float(jnp.max(jnp.abs(velocity_weights[0][faces]))),
+            float(jnp.max(jnp.abs(pressure_weight[faces]))),
+        )
+        for name in ("left", "right", "bottom", "top")
+        for faces in (assembler.mesh.face_patches.indices(name),)
+    }
+    for name in ("left", "right"):
+        assert live[name][0] > 1e-6 and live[name][1] == 0.0, f"{name}: {live[name]}"
+    for name in ("bottom", "top"):
+        assert live[name][0] == 0.0 and live[name][1] > 1e-6, f"{name}: {live[name]}"
+
+
+def test_the_flow_boundary_gradient_weights_do_not_depend_on_the_state() -> None:
+    """Why evaluating the flow's weights once at build time is exact -- the twin of the scalar check.
+
+    Every flow closure is affine in the gradient it is handed: a prescribed value ignores it, an
+    extrapolating one adds the tangential offset ``grad . d_t``. So the derivative at rest is the
+    derivative everywhere, and binding before any state exists cannot be stale. Catches a closure
+    (or a future one) whose gradient dependence moves with the flow, which would make that
+    build-time binding silently wrong rather than merely approximate.
+    """
+    assembler = _flow_quadratic_case()[0]
+    mesh = assembler.mesh
+    key = jax.random.PRNGKey(7)
+    reference_velocity = assembler._build_time_velocity_gradient_weights()
+    reference_pressure = assembler._build_time_pressure_gradient_weight()
+    assert float(jnp.max(jnp.abs(reference_pressure))) > 1e-6  # not trivially zero everywhere
+    assert float(jnp.max(jnp.abs(reference_velocity[0]))) > 1e-6
+
+    for scale_of in (1.0, 5.0):
+        velocity = scale_of * jax.random.normal(key, (mesh.n_cells, mesh.dim))
+        pressure = scale_of * jax.random.normal(key, (mesh.n_cells,))
+        grad_velocity = scale_of * jax.random.normal(key, (mesh.n_cells, mesh.dim, mesh.dim))
+        grad_pressure = scale_of * jax.random.normal(key, (mesh.n_cells, mesh.dim))
+        for component in range(mesh.dim):
+            moved = assembler._velocity_boundary_gradient_weight(velocity, component, grad_velocity)
+            assert np.array_equal(np.asarray(moved), np.asarray(reference_velocity[component]))
+        moved = assembler._pressure_boundary_gradient_weight(pressure, grad_pressure)
+        assert np.array_equal(np.asarray(moved), np.asarray(reference_pressure))
 
 
 def test_a_differentiating_closure_gets_boundary_values_at_its_own_gradient() -> None:

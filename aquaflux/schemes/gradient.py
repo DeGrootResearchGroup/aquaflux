@@ -185,7 +185,12 @@ class ImposedGradient(eqx.Module):
 class GradientScheme(eqx.Module):
     """Strategy interface: reconstruct cell gradients from a cell field."""
 
-    def bind(self, mesh: Mesh, geometry: MeshGeometry) -> GradientScheme:
+    def bind(
+        self,
+        mesh: Mesh,
+        geometry: MeshGeometry,
+        boundary_gradient_weight: jnp.ndarray | None = None,
+    ) -> GradientScheme:
         """Return this scheme prepared for one geometry, ready to reconstruct on it repeatedly.
 
         A reconstruction may do work that depends only on the geometry, and a solver calls it over
@@ -204,6 +209,11 @@ class GradientScheme(eqx.Module):
             The mesh to prepare for.
         geometry : MeshGeometry
             That mesh's face and cell metrics.
+        boundary_gradient_weight : jnp.ndarray, optional
+            ``d(boundary value)/d(grad phi_owner)`` per face, shape ``(n_faces, dim)`` -- the same
+            array the caller will pass to the reconstruction, for a scheme whose prepared work
+            depends on it. Ignored by default, since a reconstruction that does not fold a
+            gradient-type condition into its own operator has nothing to prepare against it.
 
         Returns
         -------
@@ -2703,7 +2713,12 @@ class HessianCorrectedGradient(GradientScheme):
             local_schur_block=self.local_schur_block,
         )
 
-    def bind(self, mesh: Mesh, geometry: MeshGeometry) -> HessianCorrectedGradient:
+    def bind(
+        self,
+        mesh: Mesh,
+        geometry: MeshGeometry,
+        boundary_gradient_weight: jnp.ndarray | None = None,
+    ) -> HessianCorrectedGradient:
         """This scheme carrying the outer preconditioner it would otherwise rebuild every call.
 
         The outer preconditioner is geometry-only, yet it is rebuilt on every reconstruction --
@@ -2724,6 +2739,9 @@ class HessianCorrectedGradient(GradientScheme):
             The mesh to bind to; its geometry must be concrete.
         geometry : MeshGeometry
             That mesh's face and cell metrics.
+        boundary_gradient_weight : jnp.ndarray, optional
+            Unused: this scheme's outer preconditioner is geometry-only. Accepted so every scheme
+            binds through one signature.
 
         Returns
         -------

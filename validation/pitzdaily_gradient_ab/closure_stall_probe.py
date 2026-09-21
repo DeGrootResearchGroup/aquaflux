@@ -444,7 +444,7 @@ def _corrected_flow_pressure_gradient(built, state) -> None:
     )
     # The leading-order arm the shipped two-pass fold replaced: the same first pass, but with the
     # closures never re-read at the gradient it produces.
-    uncorrected = momentum.gradient_scheme.gradients(
+    uncorrected = momentum.pressure_gradient_scheme.gradients(
         pressure, mesh, geometry, leading, boundary_gradient_weight=weight
     )
     print(

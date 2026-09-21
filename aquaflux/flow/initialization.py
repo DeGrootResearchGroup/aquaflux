@@ -247,7 +247,9 @@ def potential_flow(momentum: MomentumContinuity) -> jnp.ndarray:
         solve. Taking the scheme from it rather than accepting one is what keeps the initial
         condition and the residual on a single reconstruction: a caller who names one here could
         name a different one there, and the run would carry two discretizations with nothing
-        reporting it.
+        reporting it. :attr:`~aquaflux.flow.MomentumContinuity.gradient_scheme` is the condition-free
+        form of that choice, which is what this needs: the potential solves a different equation,
+        with its own boundary conditions, and its assembler binds the scheme against *those*.
 
     Returns
     -------
