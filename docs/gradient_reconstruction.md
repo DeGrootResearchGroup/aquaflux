@@ -617,12 +617,27 @@ the gradient's remaining first-order error is a fixed linear function of that He
 subtracting it lifts the gradient to second order.
 
 The result is **two passes over the faces and three per-cell matrix products**, with no system to
-solve, no sweep count, and no per-mesh calibration:
+solve, no sweep count, and no per-mesh calibration (a boundary condition whose face value follows the
+owner's gradient adds a fourth product and a per-cell inverse with it):
 
 ```python
 scheme = MultipleCorrectionGradient().bind(mesh, geometry)
 gradient, hessian = scheme.reconstruct(field, mesh, geometry, boundary_values)
 ```
+
+When the field carries a **gradient-type** boundary condition -- zero-gradient, Neumann, Robin --
+give `bind` the same per-face weight the reconstruction will receive:
+
+```python
+scheme = MultipleCorrectionGradient().bind(mesh, geometry, boundary_gradient_weight)
+```
+
+The first pass inverts `M1 - B` rather than `M1` in that case, so corrections built on `M1^-1` would
+be correcting an operator nobody evaluates, and the scheme stops reproducing a quadratic -- measured
+at 2.0e-3 of the gradient on an 8x8 perturbed quadrilateral grid with one zero-gradient pair of
+walls, against roundoff once the weight is passed. The price is that such a binding is valid for
+those boundary conditions as well as for that geometry, so a field whose conditions differ needs its
+own.
 
 Every correction matrix is obtained by running the operators on coordinate monomials, so there are
 no derived geometric formulas and no volume moments to compute. The reconstruction stays exactly

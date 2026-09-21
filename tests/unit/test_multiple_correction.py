@@ -507,6 +507,136 @@ def test_a_prescribed_patch_is_left_alone_by_the_boundary_condition_weight() -> 
     assert not jnp.allclose(derived, plain)
 
 
+def test_the_second_pass_reads_the_geometrys_own_first_pass_operator() -> None:
+    """The second pass must differentiate through the operator its corrections were probed with.
+
+    ``M2`` and the gradient defect are built by applying the *geometry's* one-exact operator
+    ``M1^-1`` to the quadratic probes. A boundary condition whose face value follows the owner's
+    gradient moves that dependence onto the left-hand side of the FIRST pass, which then inverts
+    ``M1 - B`` instead -- a different operator, and the right one there, because the dependence is a
+    statement about the field's boundary values. Handing that boundary-condition operator to the
+    second pass as well corrects an operator nobody evaluates.
+
+    The wrong answer this catches: ``_one_exact(first, face_gradient, m1_inverse, ...)`` in place of
+    ``prepared.m1_inverse`` in the second pass. That mutation passes every other test in this file.
+    Measured here, it takes the Hessian error from 1.0e-2 to 6.8e-2 of ``|H|`` (and 1.8e-2 to 1.0e-1
+    at 16x16, 1.3e-2 to 1.0e-1 at 32x32), so the threshold below clears both sides by about 2x.
+
+    The scheme is bound **without** the weight here, which is the regime where the two operators
+    differ, and so the one this mutation is visible in. The loss of quadratic exactness that binding
+    blind causes, and its repair, are pinned separately by
+    ``test_binding_against_a_boundary_condition_restores_quadratic_exactness``. With the boundary
+    values prescribed (``B = 0``) the same field comes back exact either way, which the second
+    assertion pins.
+    """
+    curvature = 1.7  # phi = curvature * y^2 / 2, so dphi/dx = 0 on every x-normal face
+    mesh = perturbed_grid_2d(8, 8, perturb=0.3, seed=3, named_boundaries=True)
+    geometry = mesh.geometry()
+    face_cells = mesh.face_cells
+    centroid, face_centroid = geometry.cell.centroid, geometry.face.centroid
+    normal = geometry.face.normal
+
+    field = 0.5 * curvature * centroid[:, 1] ** 2
+    exact_hessian = jnp.tile(jnp.asarray([0.0, 0.0, curvature]), (mesh.n_cells, 1))
+    displacement = face_centroid - centroid[face_cells.owner]
+    tangential = displacement - scale(normal, dot(displacement, normal))
+    # The zero-gradient patch: the walls whose normal is x, where this field's normal derivative is
+    # exactly zero. Its face value is the owner's, carried along the tangential offset.
+    follows_owner = (~face_cells.interior) & (jnp.abs(normal[:, 0]) > 0.5)
+    prescribed = 0.5 * curvature * face_centroid[:, 1] ** 2
+
+    def boundary_values_at(cell_gradient):
+        follow = field[face_cells.owner] + dot(cell_gradient[face_cells.owner], tangential)
+        return jnp.where(follows_owner, follow, prescribed)
+
+    weight = jnp.where(follows_owner[:, None], tangential, 0.0)
+    leading = boundary_values_at(jnp.zeros((mesh.n_cells, mesh.dim)))
+
+    for closure in (OwnerGradient(), SkewCorrectedGradient()):
+        scheme = MultipleCorrectionGradient(boundary_closure=closure, fallback=None).bind(
+            mesh, geometry
+        )
+        _, hessian = scheme.reconstruct(
+            field,
+            mesh,
+            geometry,
+            leading,
+            boundary_values_at=boundary_values_at,
+            boundary_gradient_weight=weight,
+        )
+        error = float(jnp.max(jnp.abs(hessian - exact_hessian))) / curvature
+        assert error < 3e-2, f"{type(closure).__name__}: {error:.3e}"
+
+        # The control: prescribe every boundary value and the same field is exact, so the residue
+        # above belongs to `M1 - B` and not to the quadratic reconstruction itself.
+        _, exact = scheme.reconstruct(field, mesh, geometry, prescribed)
+        assert float(jnp.max(jnp.abs(exact - exact_hessian))) < 1e-11 * curvature
+
+
+def test_binding_against_a_boundary_condition_restores_quadratic_exactness() -> None:
+    """Probe the corrections through the first pass the reconstruction will actually apply.
+
+    Given ``boundary_gradient_weight`` the first pass inverts ``M1 - B`` rather than ``M1``. Probing
+    the corrections on ``M1^-1`` and applying them to that leaves them correcting an operator nobody
+    evaluates -- the mistake :func:`_build_corrections` is written to avoid -- and the scheme stops
+    reproducing a quadratic: measured here at 2.0e-3 of the gradient, against 2e-15 when every
+    boundary value is prescribed, so the residue is the condition's operator and not the
+    reconstruction. Handing the same weight to ``bind`` recovers roundoff.
+
+    Both halves of the repair are needed and this pins both. Probing the first pass through
+    ``(M1 - B)^-1`` while still handing the closure the exact face value repairs
+    :class:`OwnerGradient` and makes :class:`SkewCorrectedGradient` about five times *worse* (1.4e-1
+    against 2.1e-3), because a value-reading closure is then itself corrected for an operator nobody
+    evaluates. The closure has to get the condition re-evaluated at the probe's own first-pass
+    gradient, which is what ``reconstruct`` gives it.
+    """
+    curvature = 1.7  # phi = curvature * y^2 / 2, so dphi/dx = 0 on every x-normal face
+    mesh = perturbed_grid_2d(8, 8, perturb=0.3, seed=3, named_boundaries=True)
+    geometry = mesh.geometry()
+    face_cells = mesh.face_cells
+    centroid, face_centroid = geometry.cell.centroid, geometry.face.centroid
+    normal = geometry.face.normal
+
+    field = 0.5 * curvature * centroid[:, 1] ** 2
+    exact_gradient = jnp.stack([jnp.zeros(mesh.n_cells), curvature * centroid[:, 1]], axis=-1)
+    displacement = face_centroid - centroid[face_cells.owner]
+    tangential = displacement - scale(normal, dot(displacement, normal))
+    follows_owner = (~face_cells.interior) & (jnp.abs(normal[:, 0]) > 0.5)
+    prescribed = 0.5 * curvature * face_centroid[:, 1] ** 2
+
+    def boundary_values_at(cell_gradient):
+        follow = field[face_cells.owner] + dot(cell_gradient[face_cells.owner], tangential)
+        return jnp.where(follows_owner, follow, prescribed)
+
+    weight = jnp.where(follows_owner[:, None], tangential, 0.0)
+    leading = boundary_values_at(jnp.zeros((mesh.n_cells, mesh.dim)))
+    scale_of = float(jnp.max(jnp.linalg.norm(exact_gradient, axis=-1)))
+
+    for closure in (OwnerGradient(), SkewCorrectedGradient()):
+        unbound = MultipleCorrectionGradient(boundary_closure=closure, fallback=None)
+        errors = {}
+        for label, scheme in (
+            ("blind", unbound.bind(mesh, geometry)),
+            ("against the condition", unbound.bind(mesh, geometry, weight)),
+        ):
+            gradient, _ = scheme.reconstruct(
+                field,
+                mesh,
+                geometry,
+                leading,
+                boundary_values_at=boundary_values_at,
+                boundary_gradient_weight=weight,
+            )
+            errors[label] = float(jnp.max(jnp.linalg.norm(gradient - exact_gradient, axis=-1)))
+
+        assert errors["against the condition"] < 1e-12 * scale_of, (
+            f"{type(closure).__name__}: {errors['against the condition']:.3e}"
+        )
+        # And the blind binding is inexact by far more than roundoff, so the assertion above is
+        # measuring the repair rather than a case that was never broken.
+        assert errors["blind"] > 1e-6 * scale_of, f"{type(closure).__name__}: {errors['blind']:.3e}"
+
+
 def test_a_differentiating_closure_gets_boundary_values_at_its_own_gradient() -> None:
     """The seam that makes a one-sided closure legal on a gradient-type patch.
 
@@ -517,22 +647,35 @@ def test_a_differentiating_closure_gets_boundary_values_at_its_own_gradient() ->
     returns the correction, and the difference collapses to the zero normal derivative the condition
     asserts.
 
+    Read what the SCHEME handed the closure, through a recording closure, rather than what the test
+    can recompute for itself: an earlier version of this test evaluated ``boundary_values_at`` on the
+    returned gradient and measured the rise against that same gradient, which is zero by
+    construction whatever ``reconstruct`` did with the argument. It passed against a ``reconstruct``
+    that ignored ``boundary_values_at`` outright -- the one wrong answer it names.
+
     The Dirichlet arm is the control: a prescribed value does not depend on the gradient, so it must
-    come back unchanged. A fix that merely suppressed the term would flatten that one too.
+    reach the closure unchanged. A fix that merely re-evaluated everything would flatten that one.
     """
     mesh = perturbed_grid_2d(6, 6, perturb=0.30, seed=11)
     geometry = mesh.geometry()
     face_cells = mesh.face_cells
-    scheme = MultipleCorrectionGradient(boundary_closure=SkewCorrectedGradient()).bind(
-        mesh, geometry
-    )
-    owner = np.asarray(face_cells.owner)
     boundary = np.where(~np.asarray(face_cells.interior))[0]
     field = jax.random.normal(jax.random.PRNGKey(12), (mesh.n_cells,))
-
     displacement = geometry.face.centroid - geometry.cell.centroid[face_cells.owner]
     normal = geometry.face.normal
-    along = np.asarray(dot(displacement, normal))
+
+    seen: list[np.ndarray] = []
+
+    class RecordingClosure(multiple_correction.GradientBoundaryClosure):
+        """Records the boundary values it is handed, then defers to the closure under test."""
+
+        reads_boundary_values = True
+
+        def face_gradient(self, gradient, field, boundary_values, face_cells, geometry):
+            seen.append(np.asarray(boundary_values))
+            return SkewCorrectedGradient().face_gradient(
+                gradient, field, boundary_values, face_cells, geometry
+            )
 
     def zero_gradient(cell_gradient):
         """A zero-gradient patch: the owner value plus the correction the cell gradient supplies."""
@@ -540,34 +683,34 @@ def test_a_differentiating_closure_gets_boundary_values_at_its_own_gradient() ->
             cell_gradient[face_cells.owner], displacement, normal
         )
 
-    def normal_derivative(boundary_values, boundary_values_at):
+    scheme = MultipleCorrectionGradient(boundary_closure=RecordingClosure()).bind(mesh, geometry)
+    leading = zero_gradient(jnp.zeros((mesh.n_cells, mesh.dim)))
+
+    def values_reaching_the_closure(boundary_values, boundary_values_at):
+        seen.clear()  # drop the probe-time calls `bind` already made
         gradient = scheme.reconstruct(
             field, mesh, geometry, boundary_values, boundary_values_at=boundary_values_at
         )[0]
-        values = boundary_values if boundary_values_at is None else boundary_values_at(gradient)
-        rise = (
-            np.asarray(values)
-            - np.asarray(field)[owner]
-            - np.asarray(
-                non_orthogonal_correction(gradient[face_cells.owner], displacement, normal)
-            )
-        )
-        return np.abs(rise[boundary] / along[boundary]).max()
+        assert seen, "the closure was never called"
+        return seen[-1], gradient
 
-    leading = zero_gradient(jnp.zeros((mesh.n_cells, mesh.dim)))
-    uncorrected = normal_derivative(leading, None)
-    corrected = normal_derivative(leading, zero_gradient)
-    assert corrected < 1e-8 * max(uncorrected, 1.0)  # collapses to roundoff
-    assert uncorrected > 1.0  # and was not small to begin with
+    given, reconstructed = values_reaching_the_closure(leading, zero_gradient)
+    withheld, _ = values_reaching_the_closure(leading, None)
 
-    # The control: a prescribed value does not depend on the gradient, so re-evaluating changes
-    # nothing, and the closure's difference against it must survive untouched.
+    # Withheld, the closure gets exactly what the caller passed. Given, it gets the condition
+    # evaluated at the scheme's own gradient -- so it lands far closer to that than to the
+    # zero-gradient values it was handed. (Not identical to either: the closure is called with the
+    # FIRST pass's gradient, which the second-order correction then moves.)
+    assert np.array_equal(withheld, np.asarray(leading))
+    at_own_gradient = np.abs(given - np.asarray(zero_gradient(reconstructed)))[boundary].max()
+    at_zero_gradient = np.abs(given - np.asarray(leading))[boundary].max()
+    assert at_own_gradient < 0.2 * at_zero_gradient, f"{at_own_gradient:.3e} {at_zero_gradient:.3e}"
+
+    # The control: a prescribed value does not depend on the gradient, so it must arrive unchanged
+    # whether or not the scheme re-evaluates it.
     prescribed = jax.random.normal(jax.random.PRNGKey(13), (mesh.n_faces,))
-    assert np.isclose(
-        normal_derivative(prescribed, None),
-        normal_derivative(prescribed, lambda _g: prescribed),
-        rtol=1e-12,
-    )
+    unchanged, _ = values_reaching_the_closure(prescribed, lambda _g: prescribed)
+    assert np.array_equal(unchanged, np.asarray(prescribed))
 
 
 @pytest.mark.parametrize(

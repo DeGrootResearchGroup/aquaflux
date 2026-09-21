@@ -20,7 +20,10 @@ Finally ``D1`` on a quadratic carries a first-order error which is a fixed linea
 Hessian, so subtracting it lifts the gradient to second order.
 
 The sequence is therefore ``phi -> g1 -> H -> g``: **two passes over the faces and three per-cell
-matrix products**, against the coupled scheme's twelve to fifteen sweeps of two passes. Every
+matrix products** -- a fourth, and a per-cell inverse with it, whenever a caller supplies
+``boundary_gradient_weight``, which every residual assembler does (see
+:func:`_boundary_condition_first_pass`) -- against the coupled scheme's twelve to fifteen sweeps of
+two passes. Every
 correction matrix is obtained by running the operators on coordinate monomials, so there are no
 hand-derived geometric formulas here and no volume moments to compute — the same probe-the-operator
 device :func:`~aquaflux.schemes.cell_diagonal_block` already uses to recover per-cell blocks.
@@ -34,10 +37,14 @@ merely fast:
   :class:`~aquaflux.schemes.ImposedGradient` it becomes *affine* rather than linear, the imposed
   values being an added constant; the tangent is still that same unrolled apply, which is the half
   of the property a differentiated solve depends on.
-* **The matrices it inverts are small, local and well conditioned.** Measured on perturbed
-  tetrahedra, ``cond(M1) <= 4.8`` and ``cond(M2) <= 10``, where the coupled scheme's own per-cell
-  Hessian block under an owner boundary closure is ``1e18``. That is why no iteration is needed:
-  there is no globally coupled system to converge.
+* **The matrices it inverts are small and local**, which is why no iteration is needed: there is no
+  globally coupled system to converge. That is structural, and it is the part to rely on. Their
+  *conditioning* is not uniform and should be read per mesh. On the perturbed tetrahedral fixture
+  ``tetrahedral_grid_3d(3, perturb=0.25, seed=6)``: ``cond(M1)`` at most 4.84, ``cond(M2)`` median
+  11, rising to 3.6e17 at the corner tetrahedra an owner closure cannot determine and falling to 118
+  once the fallback repairs them. On a real 2462-cell tetrahedral duct the same figures are
+  ``cond(M1)`` at most 15, ``cond(M2)`` median 7.9 with a 99th percentile of 586 after repair. The
+  coupled scheme's own per-cell Hessian block under an owner boundary closure is ``1e18``.
 * **Its data exchange is one ring per pass**, so unlike the coupled scheme it is not structurally
   barred from running domain-decomposed (see :meth:`MultipleCorrectionGradient.gradients`).
 
@@ -181,9 +188,12 @@ class OwnerGradient(GradientBoundaryClosure):
     merely a tet at a boundary. A boundary face closed with the owner's own gradient carries no
     direction the cell did not already have, so such a cell is left with two informative faces
     against six Hessian components and ``M2`` is singular to working precision. Measured on a
-    perturbed tetrahedral mesh, resolved by boundary-face count: cells with **0 or 1** boundary face
-    reconstruct a quadratic to ``7e-15`` with ``max |M2^-1|`` of 2--4.5; the eighteen cells with
-    **2** are wrong by **173 %** at ``1.6e16``. No other cell is affected.
+    perturbed tetrahedral mesh (``tetrahedral_grid_3d(3, perturb=0.25, seed=6)``), resolved by
+    boundary-face count: cells with **0 or 1** boundary face reconstruct a quadratic to ``7e-15``
+    with ``max |M2^-1|`` of 2--4.5; the eighteen cells with **2** are wrong by **173 %** at
+    ``1.6e16``. No other cell is affected. ⚠️ The 2--4.5 is that fixture's, not the method's: the
+    same two populations reach 56.9 and 82 on a real 2462-cell tetrahedral duct mesh. What carries
+    over is the separation from the undetermined cells, not the magnitude.
 
     That distinction is worth keeping, because the common case is on the safe side of it: on the
     1.6M-cell snappyHexMesh reactor **all 3,063 four-faced cells have exactly one boundary face**,
@@ -323,7 +333,12 @@ class CellwiseFallback(GradientBoundaryClosure):
     exact everywhere else, while :class:`SkewCorrectedGradient` supplies the missing direction but
     reads a boundary value, which is the thing a coupled RANS march is measured to stall under.
     Since the cells that need the second one can be identified -- by measuring the correction the
-    first produces, not by counting faces -- neither has to be chosen for the whole mesh.
+    first produces, not by inferring it from cell shape -- neither has to be chosen for the whole
+    mesh. ⚠️ On both tetrahedral meshes this has been measured on (the perturbed fixture and a
+    2462-cell duct) the set that measurement selects is *exactly* the set of cells owning two or more
+    boundary faces, so on those meshes it is indistinguishable from the face count it is meant to
+    improve on. The argument for measuring rather than counting is that a face count over-predicts on
+    hexahedral meshes, not that the two have been observed to differ on a tetrahedral one.
 
     Built by :meth:`MultipleCorrectionGradient.bind` when it finds cells its closure cannot
     determine, so it is not usually constructed directly. On a mesh with no such cells nothing is
@@ -436,19 +451,51 @@ class MultipleCorrectionGradient(GradientScheme):
     fallback: GradientBoundaryClosure | None = None
     prepared: Corrections | None = None
 
-    def bind(self, mesh: Mesh, geometry: MeshGeometry) -> MultipleCorrectionGradient:
+    def bind(
+        self,
+        mesh: Mesh,
+        geometry: MeshGeometry,
+        boundary_gradient_weight: jnp.ndarray | None = None,
+    ) -> MultipleCorrectionGradient:
         """This scheme carrying the correction matrices it would otherwise rebuild every call.
 
-        They depend only on the geometry, so this is pure bookkeeping: a bound scheme returns the
-        same reconstruction bit for bit. See
+        Without ``boundary_gradient_weight`` the corrections depend only on the geometry and this is
+        pure bookkeeping: a bound scheme returns the same reconstruction bit for bit. See
         :meth:`~aquaflux.schemes.HessianCorrectedGradient.bind` for the staleness warning, which
         applies here identically — a binding is valid for the geometry it was made against and no
         other.
+
+        **Give it the weight when the field has a gradient-type boundary condition.** The first pass
+        then inverts ``M1 - B`` rather than ``M1``, so corrections probed on ``M1^-1`` would be
+        correcting an operator nobody evaluates, and the scheme stops reproducing a quadratic —
+        measured at 2.0e-3 of the gradient on an 8x8 perturbed quadrilateral grid with one
+        zero-gradient pair of walls, against roundoff once the weight is passed here. A binding made
+        with a weight is valid for those conditions as well as for that geometry, which is the price:
+        it is no longer geometry-only, and a field whose conditions differ needs its own binding.
+
+        Parameters
+        ----------
+        mesh : Mesh
+            Provides owner/neighbour connectivity.
+        geometry : MeshGeometry
+            Face and cell metrics the corrections are built from.
+        boundary_gradient_weight : jnp.ndarray, optional
+            ``d(boundary value)/d(grad phi_owner)`` per face, shape ``(n_faces, dim)`` — the same
+            array the caller will pass to the reconstruction. ``None`` (default) builds the
+            geometry-only corrections, which are exact for a quadratic only where every boundary
+            value is prescribed.
+
+        Returns
+        -------
+        MultipleCorrectionGradient
+            This scheme carrying its correction matrices.
         """
         return MultipleCorrectionGradient(
             boundary_closure=self.boundary_closure,
             fallback=self.fallback,
-            prepared=_build_corrections(mesh, geometry, self.boundary_closure, self.fallback),
+            prepared=_build_corrections(
+                mesh, geometry, self.boundary_closure, self.fallback, boundary_gradient_weight
+            ),
         )
 
     def _reconstruct_gradient(
@@ -632,6 +679,13 @@ class MultipleCorrectionGradient(GradientScheme):
 #: across the range probed, where the swept scheme's grows with skew. And it has no sweep count to
 #: calibrate per mesh -- a default that needs calibrating is not one.
 #:
+#: ⚠️ All three were measured on quadrilateral and hexahedral meshes. On **tetrahedra** the second
+#: pass is not a small correction to the first: on a 2462-cell tetrahedral duct the correction is
+#: about half the size of the gradient it corrects at the median interior cell, against a machine-zero
+#: correction on an orthogonal hexahedral mesh of the same duct, and a laminar coupled march that
+#: converges there under the first pass alone does not converge under the full scheme. A caller on a
+#: tetrahedral mesh should treat the second pass as unproven rather than free.
+#:
 #: Two limits a caller may have to name a different scheme for, neither silent:
 #:
 #: * It cannot yet run domain-decomposed -- the reconstruction needs its intermediate gradient
@@ -709,6 +763,11 @@ def _symmetrize(tensor: jnp.ndarray) -> jnp.ndarray:
     The numerical cross-derivatives do not satisfy the equality of mixed partials to machine
     accuracy on an irregular grid — differentiating in one order and then the other traverses
     different cells — so the two halves are averaged before the symmetric components are read off.
+
+    ⚠️ Both present call sites hand the result straight to :func:`contract_symmetric`, which sums
+    ``T[i, j] + T[j, i]`` and so annihilates the antisymmetric part on its own: there this averaging
+    is a **bit-identical no-op** (verified in two and three dimensions). It states the convention and
+    is what a caller reading the tensor itself would need, but nothing currently depends on it.
     """
     return 0.5 * (tensor + jnp.swapaxes(tensor, -1, -2))
 
@@ -749,10 +808,17 @@ def _one_exact(
 
 
 #: Above this, a cell's Hessian correction is amplifying rather than repairing. The matrices are
-#: probed on quadratic monomials of order the cell size, so a healthy inverse is order one --
-#: measured at 2--19 across quadrilateral, hexahedral and tetrahedral meshes, and 1.86e+01 on a
-#: 1.6M-cell snappyHexMesh mesh. A cell left underdetermined runs to 1e16 instead, so anything in
-#: between is a wide margin rather than a tuned threshold.
+#: probed on quadratic monomials of order the cell size, so a healthy inverse is order one on a
+#: well-shaped mesh -- measured at 2--19 across the quadrilateral, hexahedral and tetrahedral
+#: fixtures, and 1.86e+01 on a 1.6M-cell snappyHexMesh mesh. A cell left underdetermined runs to
+#: 1e16 instead, so anything in between is a wide margin rather than a tuned threshold.
+#:
+#: ⚠️ The gap is real but narrower than those fixtures suggest, and the healthy end of it is not
+#: order one on a demanding mesh. On a 2462-cell tetrahedral duct, cells with no boundary face reach
+#: 56.9 and cells with one reach 82, while the corner cells the fallback has already repaired sit at
+#: 8.4e3 -- four orders below this threshold, and so correctly unflagged, but four orders above
+#: "order one". Read this constant as separating *undetermined* from *determined*, which it does on
+#: every mesh measured, and not as a bound on a healthy correction.
 _UNDETERMINED_CORRECTION = 1e8
 
 _FALLBACK_WARNED = False
@@ -823,6 +889,7 @@ def _build_corrections(
     geometry: MeshGeometry,
     closure: GradientBoundaryClosure,
     fallback: GradientBoundaryClosure | None = None,
+    boundary_gradient_weight: jnp.ndarray | None = None,
 ) -> Corrections:
     """Recover the three correction matrices by running the operators on coordinate monomials.
 
@@ -831,10 +898,15 @@ def _build_corrections(
     for each quadratic basis field — so the corrections cannot drift from the operators they
     correct, in the way a separately-derived expression could.
 
-    ⚠️ **The probes run through the same boundary closure the reconstruction will use.** Building a
-    correction with exact boundary data and applying it with a real closure corrects an operator
-    nobody evaluates; the mismatch reads as the closure destroying exactness, which is a
-    considerably more alarming symptom than its cause.
+    ⚠️ **The probes run through the same boundary closure the reconstruction will use, and through
+    the same first pass.** Building a correction with exact boundary data and applying it with a real
+    closure corrects an operator nobody evaluates; the mismatch reads as the closure destroying
+    exactness, which is a considerably more alarming symptom than its cause. ``boundary_gradient_weight``
+    is the second half of that rule: given one, the reconstruction's first pass inverts ``M1 - B``, so
+    the probes are driven through that same inverse and with the value the condition gives the probe
+    field — the owner's own value where the weight is nonzero, prescribed where it is zero — and the
+    closure is then handed the condition re-evaluated at the probe's first-pass gradient. Doing only
+    the first half repairs :class:`OwnerGradient` and makes :class:`SkewCorrectedGradient` worse.
 
     The coordinates are centred on the mesh before the monomials are formed. The raw sum annihilates
     constants, so this cannot change any correction — it only keeps the monomial magnitudes
@@ -858,9 +930,24 @@ def _build_corrections(
     # direction probed, its rows by the gradient component returned.
     m1 = jnp.stack([raw(cell_x[:, i], face_x[:, i]) for i in range(dim)], axis=-1)
     m1_inverse = jnp.linalg.inv(m1)
+    # The first pass the reconstruction will actually apply. Given a weight it inverts `M1 - B`, so
+    # the probes must too: correcting `M1^-1` and applying `(M1 - B)^-1` is the mismatch this
+    # function's own contract forbids, and it costs exactness on every gradient-type patch.
+    first_pass_inverse = (
+        m1_inverse
+        if boundary_gradient_weight is None
+        else _boundary_condition_first_pass(m1, boundary_gradient_weight, face_cells, geometry)
+    )
+    # Where the weight is nonzero the face value follows the owner rather than being prescribed, so
+    # that is what the probe must be driven with -- the condition's own value for the probe field.
+    follows_owner = (
+        None
+        if boundary_gradient_weight is None
+        else (~face_cells.interior) & jnp.any(boundary_gradient_weight != 0.0, axis=-1)
+    )
 
-    def one_exact(cell_values, face_values):
-        return jnp.einsum("nij,n...j->n...i", m1_inverse, raw(cell_values, face_values))
+    def one_exact(cell_values, face_values, inverse):
+        return jnp.einsum("nij,n...j->n...i", inverse, raw(cell_values, face_values))
 
     basis = expand_symmetric(jnp.eye(n_sym), dim)  # (n_sym, dim, dim)
     defect_columns, m2_columns = [], []
@@ -868,10 +955,28 @@ def _build_corrections(
         # psi(x) = 1/2 x . E . x, whose exact gradient is E x and whose exact Hessian is E.
         psi_cell = 0.5 * jnp.einsum("ni,ij,nj->n", cell_x, component, cell_x)
         psi_face = 0.5 * jnp.einsum("ni,ij,nj->n", face_x, component, face_x)
-        first = one_exact(psi_cell, psi_face)
+        driving = (
+            psi_face
+            if follows_owner is None
+            else jnp.where(follows_owner, psi_cell[face_cells.owner], psi_face)
+        )
+        first = one_exact(psi_cell, driving, first_pass_inverse)
         defect_columns.append(first - cell_x @ component.T)
-        face_gradient = closure.face_gradient(first, psi_cell, psi_face, face_cells, geometry)
-        second = one_exact(first, face_gradient)
+        # And the closure gets what `reconstruct` gives it: the condition re-evaluated at the probe's
+        # OWN first-pass gradient. Driving the probe correctly and then handing the closure the exact
+        # face value leaves a value-reading closure corrected for an operator nobody evaluates -- it
+        # makes `SkewCorrectedGradient` worse than doing neither.
+        closure_values = (
+            psi_face
+            if follows_owner is None
+            else jnp.where(
+                follows_owner,
+                psi_cell[face_cells.owner] + dot(boundary_gradient_weight, first[face_cells.owner]),
+                psi_face,
+            )
+        )
+        face_gradient = closure.face_gradient(first, psi_cell, closure_values, face_cells, geometry)
+        second = one_exact(first, face_gradient, m1_inverse)
         m2_columns.append(contract_symmetric(_symmetrize(second), dim))
 
     m2_inverse = jnp.linalg.inv(jnp.stack(m2_columns, axis=-1))
@@ -886,7 +991,11 @@ def _build_corrections(
         else:
             _warn_repaired(undetermined, closure, fallback, mesh.n_cells)
             return _build_corrections(
-                mesh, geometry, CellwiseFallback(undetermined, closure, fallback)
+                mesh,
+                geometry,
+                CellwiseFallback(undetermined, closure, fallback),
+                None,
+                boundary_gradient_weight,
             )
 
     return Corrections(

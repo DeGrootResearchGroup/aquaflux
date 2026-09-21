@@ -1373,7 +1373,20 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   default configuration was not the largest item after the largest lever was spent.
 
   **✅ `GradientScheme.bind(mesh, geometry)` IS BUILT (2026-08-23) — geometry-only reconstruction
-  work hoisted out of the per-call path, bit-for-bit identical answers.** The base implementation is
+  work hoisted out of the per-call path, bit-for-bit identical answers.** ⚠️ **`MultipleCorrectionGradient`
+  now takes an optional third argument, `boundary_gradient_weight`, and with it the binding is NO LONGER
+  geometry-only** (2026-09-20). Its first pass inverts `M1 - B` whenever a caller supplies that weight —
+  which every residual assembler does — so probing the corrections on `M1^-1` corrects an operator nobody
+  evaluates and costs quadratic exactness: 2.0e-3 of the gradient on an 8x8 perturbed quadrilateral grid
+  with one zero-gradient wall pair, against 2e-15 with every boundary value prescribed, and roundoff once
+  the weight reaches `bind`. Both halves of the repair are load-bearing and pinned separately
+  (`test_binding_against_a_boundary_condition_restores_quadratic_exactness`): probe the first pass through
+  `(M1 - B)^-1`, **and** hand the closure the condition re-evaluated at the probe's own first-pass
+  gradient. Doing only the first repairs `OwnerGradient` and makes `SkewCorrectedGradient` ~5x worse.
+  ⚠️ **THE SHIPPED ASSEMBLERS DO NOT YET PASS IT**, so `ResidualAssembler` and `MomentumContinuity` still
+  bind blind and remain inexact on gradient-type patches — tracked separately; `MomentumContinuity` is the
+  harder one, since it binds one scheme for `u`, `v`, `w` and `p`, whose weights differ per field, so it
+  needs a binding per field rather than one. The base implementation is
   the **identity**, which is the honest answer for a single-pass sum or a swept solve whose
   preconditioner is a per-cell scalar; `HessianCorrectedGradient` overrides it to carry the outer
   preconditioner, threaded at the single place that is constructed (`_systems(..., prepared_outer=...)`)
@@ -1687,8 +1700,9 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   linear-exact. Apply `D1` twice for an inconsistent Hessian, recover `M2` as what that returns for
   each quadratic basis field, and `M2⁻¹` repairs it. `D1`'s own first-order error on a quadratic is
   a fixed linear function of the Hessian, so subtracting it lifts the gradient to second order.
-  **Two face passes and three per-cell matrix products**, against the coupled sweep's 12--15 sweeps
-  of two passes on the reactor.
+  **Two face passes and three per-cell matrix products** — a fourth, and a per-cell inverse with it,
+  whenever a caller supplies `boundary_gradient_weight`, which every residual assembler does — against
+  the coupled sweep's 12--15 sweeps of two passes on the reactor.
 
   **Every correction matrix is PROBED, not derived** — the operators run on coordinate monomials,
   the same device `cell_diagonal_block` uses. So there are no geometric formulas to port, no volume
@@ -1703,8 +1717,13 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   | `cond(M1)` / `cond(M2)` | 2.2 / 2.9 | 2.0 / 2.9 | 4.8 / 6.9e2 |
 
   Compare `cond(A_HH)` = **1.01e18** for the coupled scheme on tetrahedra under `OwnerHessian`. The
-  matrices this scheme inverts are small, local and well conditioned, which is *why* it needs no
-  iteration. Order of accuracy on a smooth non-polynomial field reproduces Pont's Figs. 10 and 11 —
+  matrices this scheme inverts are small and local, which is *why* it needs no iteration — that part
+  is structural and holds everywhere. ⚠️ **Their conditioning is NOT uniform, and the row above is its
+  own fixture's.** Re-measured 2026-09-20 on `tetrahedral_grid_3d(3, perturb=0.25, seed=6)`:
+  `cond(M1)` max 4.84 but `cond(M2)` **median 11**, max 3.6e17 at the corner cells an owner closure
+  cannot determine, 118 once the fallback repairs them. On the real 2462-cell tetrahedral duct
+  (`validation/tetrahedral_gradient_ab`): `cond(M1)` max **15**, `cond(M2)` median 7.9, p99 586 after
+  repair. So quote conditioning per mesh; do not carry "well conditioned" as a property of the method. Order of accuracy on a smooth non-polynomial field reproduces Pont's Figs. 10 and 11 —
   gradient → 2, Hessian → 1 — and an uncorrected control fails by 12--97 % and 1.4--8.5x, which is
   what makes the exactness result mean something.
 
@@ -1777,6 +1796,9 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   than the two-pass answer at high skew: **the sweeps converge faithfully to a worse answer**, and every
   sweep past ~2 buys no accuracy while pushing the stencil one more ring out. The two-pass error is also
   near skew-independent (7.11e-3 → 7.77e-3 over an 8x skew range) where corrected Green–Gauss degrades 3x.
+  ⚠️ **On two-dimensional quadrilaterals.** On tetrahedra the second pass is not a small correction at
+  all: measured 2026-09-20 on the 2462-cell duct, it is ~half the size of the gradient it corrects at the
+  median *interior* cell, against machine-zero on an orthogonal hexahedral mesh of the same duct.
 
   *Configuration:* pitzDaily 12225 cells, `N_POINTS=2`, `beta_start` 0.5, `CflResidualDualTimeControl`
   defaults, stop `(0.0, 1e-5)`, `simplesmooth` leading inverse, compiled ILU(0) live; `PITZ_GRADIENT` and
