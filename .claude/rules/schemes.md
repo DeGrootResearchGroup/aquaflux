@@ -1404,6 +1404,15 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   wrong rather than slow (below). An assembler owns the geometry and the scheme together, so it cannot
   create that pairing. It also must **not** go in `__post_init__`: pytree unflattening runs at every
   jit boundary crossing, so the prologue would be rebuilt there rather than hoisted.
+  ⚠️ **Both now bind against the CONDITIONS as well as the geometry, and the flow binds once per
+  solved field (#467/#468/#469).** `ResidualAssembler.build` passes its own
+  `boundary_gradient_weight`, evaluated at a zero state; `MomentumContinuity.build` carries
+  `velocity_gradient_schemes` (one per component) and `pressure_gradient_scheme` because a patch
+  treats the velocity and the pressure oppositely, so their weights are nonzero on disjoint patches.
+  Both are two-phase builds — construct, then `dataclasses.replace` once the closures exist to read
+  the weights from. `momentum.gradient_scheme` survives as the condition-free form for an initializer
+  that re-binds it against a different equation's conditions; it is **not** what the flow residual
+  applies. See `.claude/rules/flow.md` for the measured numbers and the fixture trap.
   ⚠️ Nothing about the numbers fails if the `bind` call is dropped from a factory — the residual just
   quietly goes back to rebuilding it per matvec — so it is pinned by
   `test_an_assembler_prepares_its_gradient_scheme_for_its_own_geometry`, and the identity default by

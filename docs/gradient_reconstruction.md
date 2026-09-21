@@ -639,6 +639,16 @@ walls, against roundoff once the weight is passed. The price is that such a bind
 those boundary conditions as well as for that geometry, so a field whose conditions differ needs its
 own.
 
+The assemblers do this for you, and the coupled flow shows why the price matters:
+{meth}`~aquaflux.discretization.ResidualAssembler.build` solves one field and binds once, while
+{meth}`~aquaflux.flow.MomentumContinuity.build` binds **once per solved field** — each velocity
+component and the pressure — because the patches treat them oppositely. A pressure outlet prescribes
+the pressure and leaves the velocity to extrapolate; a wall does the reverse, so their weights are
+nonzero on disjoint patches and no single binding is right for both.
+{attr}`~aquaflux.flow.MomentumContinuity.gradient_scheme` stays the condition-free form, for an
+initializer that solves a different equation on the same mesh and re-binds it against that
+equation's own conditions.
+
 Every correction matrix is obtained by running the operators on coordinate monomials, so there are
 no derived geometric formulas and no volume moments to compute. The reconstruction stays exactly
 linear in the field -- a fixed sequence of fixed linear maps -- so its tangent is that same sequence
