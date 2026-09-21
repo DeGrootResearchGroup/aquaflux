@@ -36,6 +36,16 @@ before either arm reaches a converged state, for reasons independent of the corn
 `compare.py` to report the M2 numbers above cleanly and then both march attempts as `FAILED` — that
 second half is the expected, currently-unresolved state, not a result about the gradient closure.
 
+⚠️ **For a while it failed for a different reason and said the same thing.** `run_march_ab` called
+`solve_coupled` with `rtol=`/`atol=` after those keywords had moved onto `Convergence`, and caught
+*every* exception, so the resulting `TypeError` (raised in 0.1 s, before a single step) was reported
+as the expected #435 failure. It now passes `convergence=Convergence(...)` and catches only
+`EquinoxRuntimeError`, the march's own non-convergence guard, so an API break raises instead. With
+the march actually running (anchor rung, dual time, complete LU, both closures), measured 2026-09-21
+on a commit carrying the per-field binding and its corner-cell repair: `owner` diverges to `inf` at
+step 1 (step 0 at 40 cycles); `repaired` takes four steps at 3–4 cycles each with `|R|` near 2.5 and
+diverges at step 5.
+
 ## Status
 
 - **Not a physics-validated case.** No OpenFOAM reference is run; the mesh is coarse and the duct
@@ -75,6 +85,21 @@ unless a row says otherwise, 60-step cap. Steps to convergence, or `failed` with
   duct converging with that scheme on an orthogonal hexahedral mesh and with its first pass alone, so
   the second pass on tetrahedra is where it breaks. That is #435's open question, not a property of
   the flow-only path.
+- **Binding the scheme against each field's boundary conditions (#467) first made this worse, and the
+  repair restored it.** One run per row, same settings (`LAM_SCHEME=multiple LAM_START=rest
+  LAM_MEASURE=euclid LAM_ARMS=lu`), 2026-09-21:
+
+  | commit | step 9 | step 29 | step 59 | cycles per step |
+  |---|---|---|---|---|
+  | before the per-field binding (`9f33eca`) | 1.24e-2 | 4.70e-1 | 7.64e2 | 7–83 |
+  | per-field binding as first merged | 1.78e-4 | 1.78e-4 | 1.78e-4 | 120 (the cap), every step |
+  | with the corner-cell repair | 1.40e-2 | 8.83 | 3.12e1 | 13–85 |
+
+  The middle row did not move at all: binding against the pressure's zero-gradient walls left 94
+  corner tetrahedra with a singular Hessian correction (`max|M2^-1|` 3.1e16), and the linear solve
+  could not make progress past it. Those cells now keep the geometry-only correction. From a uniform
+  plug (row-scaled measure) the first two commits both diverge to `inf` at step 1; the repaired one
+  was not run from a plug.
 
 ## Layout
 
