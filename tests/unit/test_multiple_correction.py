@@ -9,9 +9,16 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.boundary import BoundaryConditions, DirichletField, Neumann, ZeroGradient
+from aquaflux.boundary import (
+    BoundaryConditions,
+    Convective,
+    Dirichlet,
+    DirichletField,
+    Neumann,
+    ZeroGradient,
+)
 from aquaflux.discretization import DiffusionFlux, ResidualAssembler
-from aquaflux.properties import Constant, PropertyModel
+from aquaflux.properties import Constant, Property, PropertyModel
 from aquaflux.schemes import (
     CellwiseFallback,
     CompactGreenGauss,
@@ -635,6 +642,129 @@ def test_binding_against_a_boundary_condition_restores_quadratic_exactness() -> 
         # And the blind binding is inexact by far more than roundoff, so the assertion above is
         # measuring the repair rather than a case that was never broken.
         assert errors["blind"] > 1e-6 * scale_of, f"{type(closure).__name__}: {errors['blind']:.3e}"
+
+
+def _zero_gradient_quadratic_case():
+    """A quadratic with a zero-gradient wall pair it satisfies exactly, and its assembler's inputs."""
+    curvature = 1.7  # phi = curvature * y^2 / 2, so dphi/dx = 0 on every x-normal face
+    mesh = perturbed_grid_2d(8, 8, perturb=0.3, seed=3, named_boundaries=True)
+    geometry = mesh.geometry()
+
+    def quadratic(x):
+        return 0.5 * curvature * x[..., 1] ** 2
+
+    boundary = {
+        "left": ZeroGradient(),
+        "right": ZeroGradient(),
+        "bottom": DirichletField(field_fn=quadratic),
+        "top": DirichletField(field_fn=quadratic),
+    }
+    exact = jnp.stack([jnp.zeros(mesh.n_cells), curvature * geometry.cell.centroid[:, 1]], axis=-1)
+    return mesh, geometry, quadratic, boundary, exact
+
+
+def test_the_assembler_binds_the_scheme_against_its_boundary_conditions() -> None:
+    """The end of the chain: a real assembler reproduces a quadratic on a gradient-type patch.
+
+    ``ResidualAssembler`` hands the scheme a ``boundary_gradient_weight`` on every reconstruction, so
+    its first pass inverts ``M1 - B``. Binding the scheme against the geometry alone leaves the
+    corrections built for ``M1^-1``, and the assembler's gradient is then wrong by 2.0e-3 of the
+    gradient on this case -- the wrong answer this catches, and what shipped until the weight reached
+    ``bind``. Exactness here is not a property of the scheme alone; it is a property of the scheme
+    being prepared against the conditions it will run under.
+    """
+    mesh, geometry, quadratic, boundary, exact = _zero_gradient_quadratic_case()
+    field = quadratic(geometry.cell.centroid)
+    scale_of = float(jnp.max(jnp.linalg.norm(exact, axis=-1)))
+
+    for closure in (OwnerGradient(), SkewCorrectedGradient()):
+        assembler = ResidualAssembler.build(
+            mesh,
+            geometry,
+            PropertyModel({"diffusivity": Constant(1.0)}),
+            (DiffusionFlux(),),
+            BoundaryConditions(boundary),
+            gradient_scheme=MultipleCorrectionGradient(boundary_closure=closure, fallback=None),
+        )
+        error = float(jnp.max(jnp.linalg.norm(assembler.gradient(field) - exact, axis=-1)))
+        assert error < 1e-12 * scale_of, f"{type(closure).__name__}: {error:.3e}"
+
+
+def test_the_boundary_gradient_weight_does_not_depend_on_the_state() -> None:
+    """Why evaluating the weight once at build time is exact rather than an approximation.
+
+    The weight is ``d(boundary value)/d(grad phi_owner)``, which for every shipped condition is a
+    property of the condition and the geometry -- the tangential offset a face value carries, or zero
+    where the value is prescribed. Nothing about it moves with the field or with the gradient it is
+    evaluated at, so binding the scheme against it before any field exists cannot be stale.
+
+    Catches a condition (or a future one) whose gradient dependence varies with the state, which
+    would make that build-time binding silently wrong rather than merely approximate.
+    """
+    mesh = perturbed_grid_2d(6, 6, perturb=0.3, seed=5, named_boundaries=True)
+    geometry = mesh.geometry()
+    assembler = ResidualAssembler.build(
+        mesh,
+        geometry,
+        PropertyModel({"diffusivity": Constant(1.0)}),
+        (DiffusionFlux(),),
+        BoundaryConditions(
+            {
+                "left": ZeroGradient(),
+                "right": Neumann(flux=0.7),
+                "bottom": Dirichlet(value=1.0),
+                "top": Convective(h=2.0, t_inf=0.5),
+            }
+        ),
+    )
+    properties = assembler.properties.evaluate(mesh.cell_zones, {})
+    key = jax.random.PRNGKey(3)
+    reference = assembler._boundary_gradient_weight(
+        jnp.zeros(mesh.n_cells), jnp.zeros((mesh.n_cells, mesh.dim)), properties
+    )
+    assert float(jnp.max(jnp.abs(reference))) > 1e-6  # not trivially zero everywhere
+
+    for field in (
+        jnp.zeros(mesh.n_cells),
+        jax.random.normal(key, (mesh.n_cells,)),
+        5.0 + jax.random.normal(key, (mesh.n_cells,)),
+    ):
+        for gradient in (
+            jnp.zeros((mesh.n_cells, mesh.dim)),
+            jax.random.normal(key, (mesh.n_cells, mesh.dim)),
+        ):
+            moved = assembler._boundary_gradient_weight(field, gradient, properties)
+            assert np.array_equal(np.asarray(moved), np.asarray(reference))
+
+
+def test_a_property_needing_a_field_asks_the_caller_for_the_weight() -> None:
+    """A property that cannot be evaluated before a field exists cannot give a weight either.
+
+    ``boundary_values`` falls back to a zero coefficient when the properties lack one, and a
+    convective condition blends that coefficient into its face value -- so computing the weight
+    against that fallback would hand ``bind`` a silently wrong operator, which is the defect binding
+    against the conditions exists to remove. Refuse instead, and name the way out.
+    """
+
+    class NeedsAField(Property):
+        """A property whose value is read from a field, as the interface allows."""
+
+        def evaluate(self, cell_zones, fields):
+            return fields["temperature"]
+
+        def scaled(self, factor):
+            return self
+
+    mesh, geometry, _quadratic, boundary, _exact = _zero_gradient_quadratic_case()
+    with pytest.raises(ValueError, match="boundary_gradient_weight"):
+        ResidualAssembler.build(
+            mesh,
+            geometry,
+            PropertyModel({"diffusivity": NeedsAField()}),
+            (DiffusionFlux(),),
+            BoundaryConditions(boundary),
+            gradient_scheme=MultipleCorrectionGradient(fallback=None),
+        )
 
 
 def test_a_differentiating_closure_gets_boundary_values_at_its_own_gradient() -> None:

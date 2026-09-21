@@ -1383,10 +1383,15 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   (`test_binding_against_a_boundary_condition_restores_quadratic_exactness`): probe the first pass through
   `(M1 - B)^-1`, **and** hand the closure the condition re-evaluated at the probe's own first-pass
   gradient. Doing only the first repairs `OwnerGradient` and makes `SkewCorrectedGradient` ~5x worse.
-  ⚠️ **THE SHIPPED ASSEMBLERS DO NOT YET PASS IT**, so `ResidualAssembler` and `MomentumContinuity` still
-  bind blind and remain inexact on gradient-type patches — tracked separately; `MomentumContinuity` is the
-  harder one, since it binds one scheme for `u`, `v`, `w` and `p`, whose weights differ per field, so it
-  needs a binding per field rather than one. The base implementation is
+  **`ResidualAssembler` passes it (#467), so the scalar path is exact** — `build` evaluates the weight once,
+  before any field exists, which is exact rather than approximate because the weight is bit-identical across
+  states (pinned by `test_the_boundary_gradient_weight_does_not_depend_on_the_state`). It is *not* independent
+  of the **properties**: a convective condition blends `Gamma` into its face value, so a property that cannot be
+  evaluated without a field makes `build` **raise** and name `boundary_gradient_weight=` rather than compute a
+  weight against the zero coefficient `boundary_values` falls back to — a silently wrong weight is the defect
+  this removes. ⚠️ **`MomentumContinuity` STILL BINDS BLIND**, so the flow path remains inexact on gradient-type
+  patches: it binds one scheme for `u`, `v`, `w` and `p`, whose weights differ per field, so it needs a binding
+  per field rather than one. Tracked in #467. The base implementation is
   the **identity**, which is the honest answer for a single-pass sum or a swept solve whose
   preconditioner is a per-cell scalar; `HessianCorrectedGradient` overrides it to carry the outer
   preconditioner, threaded at the single place that is constructed (`_systems(..., prepared_outer=...)`)
