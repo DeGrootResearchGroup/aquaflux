@@ -906,6 +906,89 @@ def test_the_flow_boundary_gradient_weights_do_not_depend_on_the_state() -> None
         assert np.array_equal(np.asarray(moved), np.asarray(reference_pressure))
 
 
+def _zero_gradient_tetrahedra():
+    """The tetrahedral fixture with its whole boundary zero-gradient, and that condition's weight.
+
+    18 of its 162 cells have two boundary faces, and those are the ones this condition leaves
+    undetermined under either closure -- see the test below.
+    """
+    mesh = QUADRATIC_MESHES[2]
+    geometry = mesh.geometry()
+    weight = ResidualAssembler.build(
+        mesh,
+        geometry,
+        PropertyModel({"diffusivity": Constant(1.0)}),
+        (DiffusionFlux(),),
+        BoundaryConditions({"boundary": ZeroGradient()}),
+    )._build_time_boundary_gradient_weight()
+    return mesh, geometry, weight
+
+
+def _worst_correction(corrections):
+    return np.max(np.abs(np.asarray(corrections.m2_inverse)), axis=(1, 2))
+
+
+def test_cells_a_condition_leaves_undetermined_keep_their_geometry_only_correction() -> None:
+    """The third repair tier: where no closure can determine a cell under the conditions.
+
+    A zero-gradient face's value is the owner's own value carried along the tangential offset, so it
+    tells a value-reading fallback nothing the owner's gradient did not. On a tetrahedron with two
+    such faces neither closure then determines the Hessian, and binding against the condition left
+    ``max|M2^-1|`` near 1e16 there -- on a real tetrahedral duct, 94 pressure cells, and a laminar
+    march whose every linear solve then ran to its cycle cap without the residual moving.
+
+    Pinned three ways, each of which a plausible wrong repair fails: no cell is left singular; the
+    cells the condition leaves undetermined carry exactly the geometry-only correction (not some
+    other well-conditioned matrix); and every other cell carries exactly the condition-aware one, so
+    the repair is local and exactness is kept wherever the condition allows it.
+    """
+    mesh, geometry, weight = _zero_gradient_tetrahedra()
+    closure = CellwiseFallback(
+        multiple_correction._undetermined_cells(
+            multiple_correction._probe_corrections(
+                mesh, geometry, OwnerGradient(), weight
+            ).m2_inverse
+        ),
+        OwnerGradient(),
+        SkewCorrectedGradient(),
+    )
+    conditioned = multiple_correction._probe_corrections(mesh, geometry, closure, weight)
+    geometric = multiple_correction._probe_corrections(mesh, geometry, closure, None)
+    stuck = _worst_correction(conditioned) > multiple_correction._UNDETERMINED_CORRECTION
+    assert stuck.sum() == 18  # the fixture still exhibits the defect this repairs
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        bound = MultipleCorrectionGradient(fallback=SkewCorrectedGradient()).bind(
+            mesh, geometry, weight
+        )
+    assert _worst_correction(bound.prepared).max() < multiple_correction._UNDETERMINED_CORRECTION
+    for name in ("m2_inverse", "gradient_defect"):
+        held = np.asarray(getattr(bound.prepared, name))
+        np.testing.assert_array_equal(held[stuck], np.asarray(getattr(geometric, name))[stuck])
+        np.testing.assert_array_equal(held[~stuck], np.asarray(getattr(conditioned, name))[~stuck])
+
+
+def test_a_repair_report_does_not_silence_a_later_graver_one() -> None:
+    """Each repair warning is emitted once per process, and independently of the others.
+
+    A scheme is bound once per field, and on a tetrahedral mesh the first binding reports a repair.
+    When all three warnings shared one flag, that report swallowed the later one saying the
+    correction had been left singular -- which is how a stalled march on a real duct printed nothing.
+    """
+    mesh, geometry, weight = _zero_gradient_tetrahedra()
+    multiple_correction._WARNED.clear()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        MultipleCorrectionGradient(fallback=SkewCorrectedGradient()).bind(mesh, geometry)
+        MultipleCorrectionGradient(fallback=SkewCorrectedGradient()).bind(mesh, geometry, weight)
+        MultipleCorrectionGradient(fallback=None).bind(mesh, geometry)
+    messages = [str(w.message) for w in caught]
+    assert sum("is used on those cells' boundary faces" in m for m in messages) == 1
+    assert sum("once the boundary conditions are accounted for" in m for m in messages) == 1
+    assert sum("no fallback closure was given" in m for m in messages) == 1
+
+
 def test_a_differentiating_closure_gets_boundary_values_at_its_own_gradient() -> None:
     """The seam that makes a one-sided closure legal on a gradient-type patch.
 
@@ -1002,7 +1085,7 @@ def test_it_warns_when_the_mesh_and_closure_leave_the_hessian_underdetermined(
     only the pair discriminates: a detector that fired on every tetrahedral mesh, or on every owner
     closure, would be useless -- it is the combination that is broken.
     """
-    multiple_correction._FALLBACK_WARNED = False
+    multiple_correction._WARNED.clear()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         MultipleCorrectionGradient(boundary_closure=closure, fallback=None).bind(
@@ -1017,7 +1100,7 @@ def test_it_warns_when_the_mesh_and_closure_leave_the_hessian_underdetermined(
 def test_the_underdetermined_warning_is_emitted_once_per_process() -> None:
     """It reports a fixed property of the geometry, and a scheme is bound on every assembler."""
     mesh = QUADRATIC_MESHES[2]
-    multiple_correction._FALLBACK_WARNED = False
+    multiple_correction._WARNED.clear()
     scheme = MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None)
     counts = []
     for _ in range(2):
@@ -1110,7 +1193,7 @@ def test_the_repair_is_exact_where_it_fires_and_absent_where_it_need_not() -> No
 
 def test_the_repair_says_so_rather_than_silently_changing_the_closure() -> None:
     """Asking for the repair and getting a different closure on some cells has to be visible."""
-    multiple_correction._FALLBACK_WARNED = False
+    multiple_correction._WARNED.clear()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         MultipleCorrectionGradient(fallback=SkewCorrectedGradient()).bind(
@@ -1132,7 +1215,7 @@ def test_the_default_leaves_undetermined_cells_unrepaired_and_names_the_opt_in()
     mesh with a corner tetrahedron. The warning is what makes the unrepaired state visible and names
     the opt-in, rather than requiring a reader to already know it exists.
     """
-    multiple_correction._FALLBACK_WARNED = False
+    multiple_correction._WARNED.clear()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         scheme = MultipleCorrectionGradient().bind(  # fallback=None, the default
