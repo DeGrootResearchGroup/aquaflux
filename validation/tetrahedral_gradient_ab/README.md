@@ -88,6 +88,10 @@ unless a row says otherwise, 60-step cap. Steps to convergence, or `failed` with
   below).
 - `compare.py` — the M2 conditioning report and the march attempt.
 - `laminar_duct_march.py` — the laminar march above; settings are `LAM_*` environment variables.
+- `rhie_chow_sign_probe.py` — assembles the Rhie–Chow pressure operator from geometry alone for the
+  multiple-correction gradient with its second pass withheld on chosen cells, and reports where the damping's
+  sign flips (`TET_POLYMESH` is not read; it uses the case mesh). It orders the laminar march's outcomes
+  (the march converges only with the second pass withheld out to ring 3).
 
 ## Regenerating the mesh
 

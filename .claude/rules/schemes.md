@@ -2585,6 +2585,29 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   So: **the corner-cell defect and its local fix are as well-evidenced now as the M2 arithmetic can make
   them; whether the fix is safe under a real march remains open, blocked on #435.**
 
+  **THE SECOND PASS FLIPS THE SIGN OF THE RHIE-CHOW DAMPING ON TETRAHEDRA, AND THE FLIPS REPRODUCE A
+  LAMINAR MARCH LADDER FROM GEOMETRY ALONE (#435, `validation/tetrahedral_gradient_ab/rhie_chow_sign_probe.py`).**
+  The pressure block of the flow residual holds, per interior face, the cancelling difference
+  `(p_N - p_P) - interp(grad p) . d` weighted by `A / (d . n)`. With no flow state (unit weights,
+  Dirichlet-zero boundary values), `OwnerGradient` + `SkewCorrectedGradient` fallback, the 2462-tet duct,
+  x64 CPU, the assembled operator's diagonal is negative (damping) everywhere under the first pass
+  alone and positive (anti-damping) in **117 cells** under the full scheme, whose largest eigenvalue
+  is `+11.93` against `+6.5e-4` (18300x). Withholding the second pass (first pass only) on the
+  wall-owning cells and each ring out to `k` (graph distance from a boundary-owning cell; populations
+  [1088, 739, 408, 193, 34]): `k = 0` 8 flipped, `+0.267` (410x); `k = 1` 0 flipped, `+1.55e-2` (24x);
+  `k = 2` `+1.17e-2` (18x); **`k = 3` `+8.3e-4` (1.28x)**; `k = 4` is the first pass. Laminar-duct marches
+  (Re_Dh 50, flow residual only, `solve_flow_march`, complete-LU, original tets) fail on the full scheme
+  and on `k` = 0, 1, 2, and converge on `k` = 3 and on the first pass: every failing configuration
+  is at least 18x the first pass's anti-damping eigenvalue and the only converging one short of it is
+  1.28x. The interventions that also failed leave `max|M2^-1| > 10` withheld 59x, the 176 corner cells
+  withheld 413x and exactly the flipped cells withheld 734x with 9 new flips (the mode migrates). The
+  anti-damping mode of the full operator is concentrated (top cell 72 %, top five 99.9 %) with a
+  Spearman correlation of -0.035 against `max|M2^-1|`. What this does NOT show: that the anti-damping
+  eigenvalue causes the march's failure (only that it orders the outcomes correctly in this ladder);
+  the flow residual's own diagonals (this operator has unit weights and Dirichlet-zero boundary values, so
+  its 117 corroborates the flow residual's ~103 negative pressure diagonals rather than matching them);
+  one mesh.
+
   ⚠️ **A design defect found by writing the fallback, and worth remembering: a defaulted `eqx.field`
   on an abstract base makes every subclass field defaulted too.** `reads_boundary_values` was
   declared that way and `CellwiseFallback` — the first closure needing *required* state — could not
