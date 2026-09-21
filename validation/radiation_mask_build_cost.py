@@ -16,9 +16,10 @@ Four things it establishes:
    n_triangles`` intersection tests whatever the geometry is doing. The harness checks this
    rather than asserting it, by timing two scenes of equal facet count and very different
    occlusion structure.
-3. **What ``work_limit`` is worth now that the pass is traced.** The record notes ~330 Mtest/s at
-   the shipped default against ~430 at a larger bound, and that the analytic ratio moves with the
-   denominator. Both ends are measured here so the projection can be quoted as a band.
+3. **What ``work_limit`` is worth now that the pass is traced.** The bound caps rays times
+   triangles per compiled call, and the call takes triangles first, so a larger bound means a
+   larger ray chunk per call. Two middle rungs are timed at a much larger bound to show which way
+   that moves the build.
 4. **What the analytic strategy actually costs**, measured rather than projected:
    ``silhouette_ladder`` times ``SilhouetteOcclusion`` beside ``RayCastOcclusion`` on the same scenes
    in the same run. This supersedes the ratio-times-seconds columns of the ray ladder, which apply
@@ -54,12 +55,10 @@ from tests.unit.radiation_references import closed_drum, inward_box
 #: The ratio band on record for analytic silhouette occlusion: clip throughput against ray-test
 #: throughput, times the surviving fraction of the conservative frustum reject.
 #:
-#: ⚠️ **Both of its throughputs were measured at 200,000 work items**, which is four orders below
-#: a real build, and the ladder below shows the ray test's own throughput falling by a factor of
-#: three across the range a user would mesh. Applying this band to the seconds measured here is
-#: therefore an extrapolation, not a projection, and the columns that do so are labelled as such.
-#: The scale-matched version of the ratio is measured in
-#: ``validation/radiation_analytic_occlusion.py``, and that is the one to quote.
+#: ⚠️ **Both of its throughputs were measured at 200,000 work items**, four orders below a real
+#: build, and on a ray test whose call shape has since changed. Applying this band to the seconds
+#: measured here is an extrapolation, not a projection, and the columns that do so are labelled as
+#: such. The measured ratio is ``silhouette_ladder``'s, and that is the one to quote.
 ANALYTIC_RATIO = (15.0, 20.0)
 
 
@@ -223,10 +222,13 @@ def geometry_independence(divisions: int, sectors: int, work_limit: int) -> None
 def throughput_against_ray_count(n_triangles: int, work_limit: int) -> None:
     """Does the pass slow down because there is more work, or because there are more RAYS?
 
-    The ladder shows throughput falling steeply as the mesh grows, which the record's figures --
-    taken on a small block -- do not predict. Two explanations fit the ladder equally well and
-    they have opposite consequences for what an exact mask would cost, so they have to be told
-    apart rather than guessed between.
+    Written when the ladder showed throughput falling steeply as the mesh grew. Two explanations
+    fit the ladder equally well and they have opposite consequences for what an exact mask would
+    cost, so they have to be told apart rather than guessed between.
+
+    **Answered, and by neither of the two below:** the sweep did fall with the ray count, and the
+    cause was ``segment_is_cut`` giving the rays the whole call budget and leaving a one-triangle
+    block. With triangles first the sweep is flat -- which is what this now checks stays true.
 
     * **Total work.** Some fixed overhead is being amortized differently, or the cache is
       spilling as the output grows. Nothing to be done; the cost is the cost.
@@ -293,10 +295,9 @@ if __name__ == "__main__":
     # The full range at the SHIPPED default, which is the number a user actually pays.
     ladder(cases, 4_000_000)
 
-    # The other end of the band on two middle rungs only. `work_limit` bounds the pass's
-    # memory and, through that, its speed; the record has ~330 Mtest/s at the default against
-    # ~430 at a larger bound, and the analytic projection moves with that denominator. Two
-    # rungs are enough to say whether the band is real without paying the cube twice.
+    # A much larger bound on two middle rungs only: it bounds the pass's memory, and through the
+    # size of each call, its speed. Two rungs are enough to see which way it moves the build
+    # without paying the cube twice.
     ladder(cases[2:4], 100_000_000)
 
     # The measured replacement for the extrapolated columns above. Run to the same top rung.
