@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from aquaflux.radiation.profiles import Isotropic, Lambertian
+from aquaflux.radiation.self_occlusion import NoOcclusion, RayCastOcclusion
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.transfer import build_transfer, reciprocity_residual, row_sum_error
 
@@ -26,7 +27,7 @@ def test_every_row_of_the_transfer_matrix_sums_to_one_in_a_closed_box(divisions)
     of the closed form pins the maximum near 1.2 under every refinement; both are visible here
     immediately.
     """
-    transfer = build_transfer(box(divisions), self_occlusion=False)
+    transfer = build_transfer(box(divisions), self_occlusion=NoOcclusion())
     assert row_sum_error(transfer) < 1e-12
 
 
@@ -41,7 +42,9 @@ def test_the_row_sums_stay_exact_however_finely_the_receiver_is_integrated(n_poi
     conditioning, and what catches a wrong kernel.
     """
     for surfaces in (box(2), stretched_box(2)):
-        transfer = build_transfer(surfaces, self_occlusion=False, receiver_quadrature=n_points)
+        transfer = build_transfer(
+            surfaces, self_occlusion=NoOcclusion(), receiver_quadrature=n_points
+        )
         assert row_sum_error(transfer) < 1e-12
 
 
@@ -49,9 +52,9 @@ def test_the_default_build_integrates_the_receiver_over_six_points():
     """A default worth pinning: it is the point at which the measured cost/accuracy frontier
     turns over, and it is what every other test in this file is measured under."""
     surfaces = box(2)
-    default = build_transfer(surfaces, self_occlusion=False)
-    six = build_transfer(surfaces, self_occlusion=False, receiver_quadrature=6)
-    one = build_transfer(surfaces, self_occlusion=False, receiver_quadrature=1)
+    default = build_transfer(surfaces, self_occlusion=NoOcclusion())
+    six = build_transfer(surfaces, self_occlusion=NoOcclusion(), receiver_quadrature=6)
+    one = build_transfer(surfaces, self_occlusion=NoOcclusion(), receiver_quadrature=1)
     np.testing.assert_array_equal(np.asarray(default.geometric), np.asarray(six.geometric))
     assert not np.allclose(np.asarray(default.geometric), np.asarray(one.geometric))
 
@@ -68,15 +71,15 @@ def test_a_convex_enclosure_builds_the_same_matrix_with_self_occlusion_on_and_of
     """
     surfaces = box(2)
     area = np.asarray(surfaces.area)
-    with_mask = build_transfer(surfaces, self_occlusion=True)
-    without = build_transfer(surfaces, self_occlusion=False)
-    assert not bool(np.any(np.asarray(with_mask.visibility.blocked_by_geometry)))
+    with_mask = build_transfer(surfaces, self_occlusion=RayCastOcclusion())
+    without = build_transfer(surfaces, self_occlusion=NoOcclusion())
+    assert not bool(np.any(np.asarray(with_mask.visibility.hidden_by_geometry)))
     assert row_sum_error(with_mask) == row_sum_error(without)
     assert reciprocity_residual(with_mask, area) == reciprocity_residual(without, area)
 
 
 def test_a_facet_does_not_transfer_to_itself():
-    transfer = build_transfer(box(1), self_occlusion=False)
+    transfer = build_transfer(box(1), self_occlusion=NoOcclusion())
     np.testing.assert_allclose(np.diag(np.asarray(transfer.geometric)), 0.0, atol=0.0)
 
 
@@ -90,7 +93,8 @@ def test_reciprocity_converges_in_the_number_of_points_on_the_receiver():
     surfaces = box(2)
     residuals = [
         reciprocity_residual(
-            build_transfer(surfaces, self_occlusion=False, receiver_quadrature=n), surfaces.area
+            build_transfer(surfaces, self_occlusion=NoOcclusion(), receiver_quadrature=n),
+            surfaces.area,
         )
         for n in (1, 3, 6, 12)
     ]
@@ -107,7 +111,8 @@ def test_refining_the_mesh_does_not_improve_reciprocity_at_any_rule(n_points):
     ratio the quadrature error depends on never changes and the residual sits flat."""
     residuals = [
         reciprocity_residual(
-            build_transfer(box(n), self_occlusion=False, receiver_quadrature=n_points), box(n).area
+            build_transfer(box(n), self_occlusion=NoOcclusion(), receiver_quadrature=n_points),
+            box(n).area,
         )
         for n in (1, 2, 4)
     ]
@@ -130,7 +135,7 @@ def test_the_area_weighting_of_reciprocity_multiplies_the_row_not_the_column():
 
     residuals = [
         reciprocity_residual(
-            build_transfer(surfaces, self_occlusion=False, receiver_quadrature=n), area
+            build_transfer(surfaces, self_occlusion=NoOcclusion(), receiver_quadrature=n), area
         )
         for n in (1, 3, 6, 12)
     ]
@@ -139,7 +144,7 @@ def test_the_area_weighting_of_reciprocity_multiplies_the_row_not_the_column():
 
     # What the transposed weighting would report on the same matrices: near 0.9 throughout, and
     # flat, so it is distinguishable both by size and by its refusal to converge.
-    matrix = np.asarray(build_transfer(surfaces, self_occlusion=False).geometric)
+    matrix = np.asarray(build_transfer(surfaces, self_occlusion=NoOcclusion()).geometric)
     transposed = area[None, :] * matrix
     mismatch = np.max(np.abs(transposed - transposed.T)) / np.max(np.abs(transposed))
     assert mismatch > 0.5, mismatch
@@ -162,7 +167,7 @@ def test_reciprocity_is_near_exact_between_two_facets_far_apart():
     )
     area = np.asarray(surfaces.area)
     np.testing.assert_allclose(np.sort(area), [0.5, 0.5, 50.0, 50.0])
-    assert reciprocity_residual(build_transfer(surfaces, self_occlusion=False), area) < 1e-6
+    assert reciprocity_residual(build_transfer(surfaces, self_occlusion=NoOcclusion()), area) < 1e-6
 
 
 def test_point_sources_take_no_part_in_the_transfer():
@@ -172,7 +177,7 @@ def test_point_sources_take_no_part_in_the_transfer():
     surfaces = Surfaces.from_triangles(
         vertices, profiles=(Lambertian(), Isotropic()), profile_index=[0] * 12 + [1]
     )
-    transfer = build_transfer(surfaces, self_occlusion=False)
+    transfer = build_transfer(surfaces, self_occlusion=NoOcclusion())
     matrix = np.asarray(transfer.geometric)
     np.testing.assert_allclose(matrix[-1, :], 0.0, atol=0.0)
     np.testing.assert_allclose(matrix[:, -1], 0.0, atol=0.0)

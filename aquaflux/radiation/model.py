@@ -76,6 +76,7 @@ from aquaflux.radiation.absorption import Absorption
 from aquaflux.radiation.gather import direct_fluence_rate, direct_irradiance
 from aquaflux.radiation.profiles import Lambertian
 from aquaflux.radiation.quadrature import TriangleQuadrature
+from aquaflux.radiation.self_occlusion import SelfOcclusion
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.transfer import TransferMatrix, build_transfer
 from aquaflux.radiation.visibility import Visibility, build_visibility
@@ -121,16 +122,18 @@ class RadiationSettings(eqx.Module):
         from the one above because the two loops are over different things — facets against
         facets, and receivers against facets — and a scene may have far more of one than the
         other.
-    self_occlusion : bool or None
-        Whether the emitting facets shadow one another, which for any non-convex body they do.
-        Unset, they do. Switching it off is a statement that the surface is convex, and it is
-        the single largest saving available in the build.
+    self_occlusion : SelfOcclusion or None
+        How the emitting facets are tested for shadowing one another, which for any non-convex
+        body they do. Unset, one ray is cast per pair. Pass
+        :class:`~aquaflux.radiation.self_occlusion.SilhouetteOcclusion` to clip exact fractions
+        instead, which resolves a partly shadowed pair rather than rounding it to the nearer
+        answer, at a cost that rises steeply with facet count.
     """
 
     receiver_quadrature: int | TriangleQuadrature | None = eqx.field(static=True, default=None)
     transfer_chunk_size: int | None = eqx.field(static=True, default=None)
     gather_chunk_size: int | None = eqx.field(static=True, default=None)
-    self_occlusion: bool | None = eqx.field(static=True, default=None)
+    self_occlusion: SelfOcclusion | None = eqx.field(static=True, default=None)
 
     def _passed(self, **named):
         """Drop the unset entries, so each reaches its own default rather than a copy of it."""

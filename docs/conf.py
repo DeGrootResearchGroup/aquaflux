@@ -112,7 +112,7 @@ SUBPACKAGE_GROUPS = {
         ("Emitting surfaces", ["surfaces", "profiles", "stl", "subdivide", "checks"]),
         ("Direct gathers and the medium between", ["gather", "absorption"]),
         ("Surface-to-surface transfer", ["transfer", "quadrature"]),
-        ("What stands in the way", ["occluders", "visibility", "triangles"]),
+        ("What stands in the way", ["occluders", "visibility", "self_occlusion", "triangles"]),
         ("Solid-angle kernels", ["solid_angle"]),
     ],
     "turbulence": [

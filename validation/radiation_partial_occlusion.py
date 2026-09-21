@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import aquaflux  # noqa: F401  (enables x64)
 import numpy as np
+from aquaflux.radiation.self_occlusion import NoOcclusion
 from aquaflux.radiation import (
     Cylinder,
     RadiationSettings,
@@ -77,7 +78,7 @@ def cylinder(radius: float) -> Cylinder:
 def effective_transfer(n: int, occluders) -> tuple[np.ndarray, np.ndarray]:
     """The transfer a solve actually uses: frozen geometry times the live mask, fully opaque."""
     surfaces = plates(n)
-    transfer = build_transfer(surfaces, occluders=occluders, self_occlusion=False)
+    transfer = build_transfer(surfaces, occluders=occluders, self_occlusion=NoOcclusion())
     reflected, _ = transfer.assemble(
         surfaces, transmittance=np.zeros(len(occluders)) if occluders else None
     )
@@ -101,7 +102,7 @@ def field_on_a_line(n: int, occluders, probes: np.ndarray) -> np.ndarray:
     """Fluence rate at ``probes`` from the plates, with whatever mask the mesh produced."""
     surfaces = plates(n)
     model = build_radiation_model(
-        probes, surfaces, occluders=occluders, settings=RadiationSettings(self_occlusion=False)
+        probes, surfaces, occluders=occluders, settings=RadiationSettings(self_occlusion=NoOcclusion())
     )
     value, _ = fluence_rate(
         model, surfaces, transmittance=np.zeros(len(occluders)) if occluders else None

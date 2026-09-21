@@ -76,6 +76,7 @@ import numpy as np
 from aquaflux.radiation.absorption import UniformAbsorption
 from aquaflux.radiation.profiles import Lambertian
 from aquaflux.radiation.quadrature import TriangleQuadrature, triangle_quadrature
+from aquaflux.radiation.self_occlusion import SelfOcclusion
 from aquaflux.radiation.solid_angle import projected_solid_angle
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.visibility import Visibility, build_visibility
@@ -207,7 +208,7 @@ def build_transfer(
     surfaces: Surfaces,
     *,
     occluders=(),
-    self_occlusion: bool = True,
+    self_occlusion: SelfOcclusion | None = None,
     receiver_quadrature: TriangleQuadrature | int | None = None,
     chunk_size: int = 256,
     **visibility_options,
@@ -220,8 +221,12 @@ def build_transfer(
         The facets. Only their geometry is read; the optical properties are supplied per call.
     occluders : sequence of Occluder, optional
         Analytic bodies between facets.
-    self_occlusion : bool, optional
-        Whether the facets block one another, which for a non-convex body they do.
+    self_occlusion : SelfOcclusion or None, optional
+        How the facets are tested for blocking one another, which for a non-convex body they do.
+        Defaults to one ray per pair; pass
+        :class:`~aquaflux.radiation.self_occlusion.SilhouetteOcclusion` for an exact fraction.
+        ``None`` here means "use the default", not "switch it off" -- to switch it off, build
+        the mask yourself with :func:`~aquaflux.radiation.visibility.build_visibility`.
     receiver_quadrature : TriangleQuadrature or int, optional
         How finely to integrate over each *receiving* facet. An integer is a point count passed
         to :func:`~aquaflux.radiation.quadrature.triangle_quadrature`. Defaults to six points.
@@ -290,8 +295,35 @@ def build_transfer(
     the source-side cosine that carries a non-Lambertian profile, and the occlusion mask. All
     three multiply the geometric term elementwise so that they can stay live and differentiable,
     and moving them inside the quadrature would put them back inside the frozen ``n^2`` build.
-    They remain one-point quantities, which is the coarser approximation in any scene where a
-    facet is partly shadowed or the medium is strongly absorbing over a facet's own width.
+    They remain one-point quantities, and each carries its own rule of thumb for how fine a
+    mesh it needs.
+
+    **Absorption: keep ``a * w`` small**, where ``w`` is a facet's own length scale, the square
+    root of its area. The stored separation is one centroid-to-centroid distance, while the
+    factor it stands for is the average of ``exp(-a r)`` over the pair under the pair's own
+    transfer kernel. To leading order the relative error is ``-a * (mean r - centroid r)``, so it
+    is **first** order in ``a * w`` -- not the second-order convexity correction on ``exp``, which
+    is swamped. For facets squarely facing one another that excess falls like ``w**2 / (4 d)`` at
+    separation ``d``, making the error worst between neighbours, where it reaches about
+    ``0.15 * a * w``. At ``a * w = 0.1`` that is under 2%; by ``a * w = 1`` it is past 10% and the
+    closed form has stopped describing the scene. Water at 95% ultraviolet transmittance absorbs
+    at 5.13 per metre, so 20 mm facets in it sit at ``a * w = 0.1``.
+
+    **A non-Lambertian profile: keep ``(n - 1) * (w / d)**2`` small.** The profile is evaluated
+    once per pair, source centroid to receiver centroid, while the solid angle it weights is
+    integrated exactly; the mismatch is **second** order in the facet's angular width, about
+    ``0.13 * (n - 1) * (w / d)**2`` for a cosine-power source of exponent ``n``. It is
+    identically zero for a Lambertian source at every geometry and every distance, so nothing
+    pays it unless a non-Lambertian *areal* source is in the scene, and it never touches the
+    reflected component, which leaves Lambertian by assumption.
+
+    ⚠️ **Neither error has a fixed sign.** Both run one way for near-axial pairs and the other
+    way for oblique ones -- for absorption because the ``1 / r**2`` weighting concentrates on a
+    slid-apart pair's facing near corners, until the separation it effectively averages drops
+    *below* the centroid-to-centroid one. The two therefore partly cancel in a total over many
+    pairs while cancelling not at all in a single local transfer, so a mesh should be sized
+    against the per-pair figures above and not against an energy balance, which is much the more
+    flattering of the two.
 
     The build is ``n^2`` in both time and memory: a thousand facets is a million entries per
     array and four such arrays, which is megabytes; ten thousand is a hundred million, which is

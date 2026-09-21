@@ -27,7 +27,9 @@ nearest receiver; the angular distributions a source emits with; the direct gath
 every source at every receiver to give the fluence rate and the irradiance; the absorbing medium
 between them, uniform in closed form or graded on a grid and integrated exactly along each path;
 the solid bodies that stand in the way — analytic primitives whose transmittance stays live, and
-the emitting surface's own triangles, which let a bent duct shadow itself; and the surface
+the emitting surface's own triangles, which let a bent duct shadow itself, tested either by one ray
+per pair or by clipping each source against each blocker's silhouette for the exact covered share;
+and the surface
 transfer system that closes diffuse interreflection between facets to convergence, so the number
 of bounces is not a parameter.
 """
@@ -55,6 +57,13 @@ from aquaflux.radiation.model import (
 )
 from aquaflux.radiation.occluders import Cylinder, HalfSpace, Occluder
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian, Profile
+from aquaflux.radiation.self_occlusion import (
+    NoOcclusion,
+    OcclusionField,
+    RayCastOcclusion,
+    SelfOcclusion,
+    SilhouetteOcclusion,
+)
 from aquaflux.radiation.quadrature import TriangleQuadrature, triangle_quadrature
 from aquaflux.radiation.solid_angle import (
     projected_solid_angle,
@@ -81,10 +90,15 @@ __all__ = [
     "HalfSpace",
     "Isotropic",
     "Lambertian",
+    "NoOcclusion",
     "Occluder",
+    "OcclusionField",
     "Profile",
     "RadiationModel",
     "RadiationSettings",
+    "RayCastOcclusion",
+    "SelfOcclusion",
+    "SilhouetteOcclusion",
     "Subdivision",
     "Surfaces",
     "TransferMatrix",

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from aquaflux.radiation.clipping import clip_to_halfspace, decidable_heights
 from aquaflux.vectors import dot
 
 __all__ = ["projected_solid_angle", "signed_solid_angle", "solid_angle"]
@@ -177,40 +178,14 @@ def _clip_to_front(relative: jnp.ndarray, normal: jnp.ndarray) -> jnp.ndarray:
     closed enclosure those cancel to approximately zero, which looks like a broken mesh
     rather than a missing clip.
 
-    Sutherland and Hodgman's algorithm against the single plane emits between zero and four
-    vertices, which a traced computation cannot express as a varying shape. It is written
-    here as a fixed loop of six candidates — each vertex, then each edge crossing — in which
-    a candidate that the clip rejects repeats the last surviving one. The repeats are
-    zero-length edges of the same closed loop and contribute no angle, so the fixed shape
-    costs accuracy nothing. A triangle lying wholly behind the plane keeps no candidate at
-    all and collapses to the zero loop, which likewise contributes nothing.
+    Cutting a convex region with one half-space adds at most one vertex, so four slots hold a
+    clipped triangle exactly; a triangle wholly behind the plane keeps nothing and collapses to
+    the zero loop. Both the cut and the sign tests under it are shared with the occlusion clip
+    -- see :mod:`aquaflux.radiation.clipping`, whose heights are filtered so that a vertex lying
+    *in* the receiver's own tangent plane, which every triangle sharing that facet does, is
+    judged by the exact zero it mathematically is rather than by the sign of its rounding.
     """
-    height = dot(relative, normal[..., None, :])
-    candidates, kept = [], []
-    for k in range(3):
-        following = (k + 1) % 3
-        here, there = height[..., k], height[..., following]
-        candidates.append(relative[..., k, :])
-        kept.append(here >= 0.0)
-        gap = here - there
-        crossing = jnp.clip(here / jnp.where(gap == 0.0, 1.0, gap), 0.0, 1.0)
-        candidates.append(
-            relative[..., k, :]
-            + crossing[..., None] * (relative[..., following, :] - relative[..., k, :])
-        )
-        kept.append(here * there < 0.0)
-
-    # Two passes: the first finds the candidate the loop wraps back to, the second fills
-    # every gap forward from it. One pass alone would leave the leading rejected candidates
-    # pointing at nothing.
-    last = jnp.zeros_like(relative[..., 0, :])
-    for survived, candidate in zip(kept, candidates, strict=True):
-        last = jnp.where(survived[..., None], candidate, last)
-    loop = []
-    for survived, candidate in zip(kept, candidates, strict=True):
-        last = jnp.where(survived[..., None], candidate, last)
-        loop.append(last)
-    return jnp.stack(loop, axis=-2)
+    return clip_to_halfspace(relative, decidable_heights(relative, normal), 4)
 
 
 def projected_solid_angle(
@@ -264,7 +239,38 @@ def projected_solid_angle(
     jnp.ndarray
         Projected solid angle, shape ``(...)``, in ``[0, π]``.
     """
-    loop = _clip_to_front(vertices - point[..., None, :], normal)
+    return jnp.abs(
+        _signed_loop_solid_angle(normal, _clip_to_front(vertices - point[..., None, :], normal))
+    )
+
+
+def _signed_loop_solid_angle(normal: jnp.ndarray, loop: jnp.ndarray) -> jnp.ndarray:
+    """The contour form of the projected solid angle of a closed loop of directions, **signed**.
+
+    Split out of :func:`projected_solid_angle`, which is its magnitude, because two properties
+    are lost the moment the magnitude is taken and both are load-bearing elsewhere:
+
+    * **It is additive over a partition.** Cut a region into pieces and the signed values sum to
+      the whole, exactly -- so a region can be built as a difference without ever constructing
+      it. That is what lets an occluded source be evaluated as *whole minus covered*.
+    * **It negates with the winding**, so a loop traversed the other way subtracts.
+
+    Parameters
+    ----------
+    normal : jnp.ndarray, shape ``(..., 3)``
+        Unit normal of the receiving surface. Only the half-space it points into contributes,
+        and the loop is assumed already clipped to that half-space.
+    loop : jnp.ndarray, shape ``(..., n, 3)``
+        Directions from the receiver to each vertex in order, not necessarily unit length. A
+        clipped loop repeats vertices wherever the clip dropped a candidate; such zero-length
+        edges subtend no angle and contribute nothing, which is what makes a fixed-width loop a
+        legal representation of a shorter one.
+
+    Returns
+    -------
+    jnp.ndarray, shape ``(...)``
+        The signed projected solid angle, in ``[-pi, pi]``.
+    """
     direction, _ = _unit(loop)
     following = jnp.roll(direction, -1, axis=-2)
     edge_normal = jnp.cross(direction, following)
@@ -277,4 +283,4 @@ def projected_solid_angle(
     axis = edge_normal / span[..., None]
     span = jnp.where(flat, 0.0, span)
     angle = jnp.arctan2(span, dot(direction, following))
-    return 0.5 * jnp.abs(jnp.sum(angle * dot(axis, normal[..., None, :]), axis=-1))
+    return 0.5 * jnp.sum(angle * dot(axis, normal[..., None, :]), axis=-1)

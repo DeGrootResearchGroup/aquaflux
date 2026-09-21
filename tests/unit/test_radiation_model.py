@@ -19,6 +19,7 @@ from aquaflux.radiation.model import (
 )
 from aquaflux.radiation.occluders import Cylinder
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian
+from aquaflux.radiation.self_occlusion import NoOcclusion, RayCastOcclusion
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.solve import relative_residual_gmres
 
@@ -32,7 +33,7 @@ def surface_model(surfaces, *, occluders=(), **settings):
     are all mutually visible, and tracing rays between every pair of them to rediscover that
     costs the whole suite for nothing. The tests that are *about* occlusion pass it back in.
     """
-    settings.setdefault("self_occlusion", False)
+    settings.setdefault("self_occlusion", NoOcclusion())
     return build_radiation_model(
         np.zeros((0, 3)), surfaces, occluders=occluders, settings=RadiationSettings(**settings)
     )
@@ -65,7 +66,7 @@ def test_a_closed_box_reaches_its_closed_form_AT_THE_DEFAULT_SETTINGS():
     ray ends on the facet it is aimed at — which counted as a hit. The default therefore
     reported every mutually visible pair as blocked, and a closed box came back with ``B = M``:
     at a reflectance of 0.9 that is ten times too dark, and it looks like a field rather than an
-    error. No test could see it, because every fixture passed ``self_occlusion=False``, and the
+    error. No test could see it, because every fixture passed ``self_occlusion=NoOcclusion()``, and the
     self-occlusion tests all use receivers out in the volume where the ray ends on nothing.
 
     ⚠️ **``row_sum_error`` is blind to this by construction** and cannot be made to catch it:
@@ -86,7 +87,7 @@ def test_the_radiosity_of_a_convex_enclosure_ignores_the_shadow_mask():
     """The other side of the same fact, one layer up: a box shadows nothing, so switching the
     mask on must move the solved radiosity by exactly zero rather than merely by a little."""
     surfaces = box(2, emission=3.0, reflectance=0.9)
-    shadowed, _ = radiosity(surface_model(surfaces, self_occlusion=True), surfaces)
+    shadowed, _ = radiosity(surface_model(surfaces, self_occlusion=RayCastOcclusion()), surfaces)
     clear, _ = radiosity(surface_model(surfaces), surfaces)
     np.testing.assert_array_equal(np.asarray(shadowed), np.asarray(clear))
 
@@ -498,9 +499,9 @@ def test_an_unset_setting_is_not_passed_on_at_all():
     assert RadiationSettings(gather_chunk_size=8).transfer_options() == {}
     assert RadiationSettings(gather_chunk_size=8).gather_options() == {"chunk_size": 8}
     # The two shadow masks are built from one mapping, so self-occlusion reaches both of them.
-    shadowed = RadiationSettings(self_occlusion=True)
-    assert shadowed.visibility_options() == {"self_occlusion": True}
-    assert shadowed.transfer_options() == {"self_occlusion": True}
+    shadowed = RadiationSettings(self_occlusion=RayCastOcclusion())
+    assert shadowed.visibility_options() == {"self_occlusion": RayCastOcclusion()}
+    assert shadowed.transfer_options() == {"self_occlusion": RayCastOcclusion()}
 
 
 def test_a_setting_reaches_the_transfer_build():
@@ -552,7 +553,7 @@ def test_the_two_masks_are_built_against_the_same_bodies():
 
 
 def _volume_model(surfaces, points, *, occluders=(), **settings):
-    settings.setdefault("self_occlusion", False)
+    settings.setdefault("self_occlusion", NoOcclusion())
     return build_radiation_model(
         points, surfaces, occluders=occluders, settings=RadiationSettings(**settings)
     )

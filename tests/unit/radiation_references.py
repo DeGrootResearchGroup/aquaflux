@@ -325,8 +325,16 @@ def closed_prism(outline: np.ndarray, half_height: float) -> np.ndarray:
     Parameters
     ----------
     outline : np.ndarray, shape ``(n, 2)``
-        The cross-section, in order. It may be non-convex — an L gives a reflex edge, which is
-        where an interior ray can graze two faces at once.
+        The cross-section, in order.
+
+        ⚠️ **A non-convex outline gives OVERLAPPING CAP TRIANGLES, and the body is then closed
+        but not a valid surface.** The caps are fanned from the outline's mean point, which only
+        tiles a convex outline; on :data:`L_OUTLINE` two cap triangles overlap over 76% of one
+        of them. That is harmless for a ray-tightness sweep, where all that matters is that no
+        ray escapes — which is what this fixture was built for, and an L does give the reflex
+        edge that sweep wants. It is *not* harmless for anything integrating over the surface: a
+        radiosity or occlusion fixture built on it has two coplanar triangles genuinely hiding
+        one another, which no real surface does.
     half_height : float
         Half the extrusion along z; the prism spans ``-half_height`` to ``+half_height``.
 
@@ -361,3 +369,272 @@ def closed_drum(sectors: int, radius: float = 1.0, half_height: float = 1.0) -> 
 #: A non-convex cross-section: the reflex corner at (0.8, 0.8) is the feature a closed-body
 #: tightness sweep wants, because an interior ray can leave through two faces that meet there.
 L_OUTLINE = np.array([[0.0, 0.0], [2.0, 0.0], [2.0, 0.8], [0.8, 0.8], [0.8, 2.0], [0.0, 2.0]])
+
+
+# ---------------------------------------------------------------------------------------------
+# Dense reference integrals for the factors the transfer evaluates at ONE point per pair.
+#
+# ``build_transfer`` integrates the geometric term over the receiving facet but multiplies it by
+# absorption and by a source's angular profile evaluated at a single centroid-to-centroid
+# direction. Both are therefore biased by however much the factor varies across a facet, and
+# both biases are second order in that variation. These integrate the same quantities densely,
+# so the bias can be measured rather than argued about.
+# ---------------------------------------------------------------------------------------------
+
+#: Sub-triangles per edge when a facet is integrated densely. Convergence in this number is
+#: checked rather than assumed -- a reference that is still moving judges nothing.
+DENSE_SUBDIVISIONS = 24
+
+
+def uniform_samples(triangle: np.ndarray, subdivisions: int = DENSE_SUBDIVISIONS):
+    """Equal-area sample points over one triangle, with the area each stands for.
+
+    Splitting every edge into ``k`` parts cuts the triangle into ``k**2`` sub-triangles of
+    exactly equal area, so each centroid carries the same weight and no quadrature rule's own
+    bias enters a reference built from them.
+
+    Parameters
+    ----------
+    triangle : np.ndarray, shape ``(3, 3)``
+        The corners.
+    subdivisions : int, optional
+        Parts per edge, ``k``.
+
+    Returns
+    -------
+    tuple of (np.ndarray of shape ``(k**2, 3)``, float)
+        The sample points, and the area per sample.
+    """
+    first, second, third = np.asarray(triangle, dtype=float)
+    edge_a, edge_b = second - first, third - first
+    k = int(subdivisions)
+    offsets = []
+    for i in range(k):
+        for j in range(k - i):
+            # The upward sub-triangle of each lattice cell, plus the downward one that
+            # completes the rhombus where there is room for it.
+            offsets.append(((3 * i + 1) * edge_a + (3 * j + 1) * edge_b) / (3.0 * k))
+            if i + j < k - 1:
+                offsets.append(((3 * i + 2) * edge_a + (3 * j + 2) * edge_b) / (3.0 * k))
+    area = 0.5 * float(np.linalg.norm(np.cross(edge_a, edge_b)))
+    return first + np.array(offsets), area / k**2
+
+
+def unit_facet(centre, edge: float, facing_down: bool = False) -> np.ndarray:
+    """A right triangle of area exactly ``edge**2``, centred on ``centre``, normal along z.
+
+    Its length scale ``sqrt(area)`` is exactly ``edge``, so a sweep over separation or
+    absorbance reads directly against ``a * w`` or ``w / r`` with no shape factor in the way.
+    ``facing_down`` reverses the winding, and with it the normal, for the far side of a pair.
+    """
+    along, across = np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
+    if facing_down:
+        along, across = across, along
+    corners = np.array(
+        [
+            -edge * (along + across) / 2.0,
+            edge * (along - across) / 2.0,
+            edge * (3.0 * across - along) / 2.0,
+        ]
+    )
+    # Shifted so ``centre`` is the CENTROID rather than an arbitrary reference point. Without
+    # it the two facets of a "facing" pair sit laterally offset from one another, and a sweep
+    # labelled by separation is quietly measuring an oblique geometry.
+    return np.asarray(centre, dtype=float) + corners - corners.mean(axis=0)
+
+
+def _geometry(triangle: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Centroid and unit normal, taken from the shipped surface geometry rather than re-derived.
+
+    A reference that derived its own normal could differ from the code under test in winding
+    convention and measure that difference instead of the thing being asked about.
+    """
+    surfaces = Surfaces.from_triangles(np.asarray(triangle, dtype=float)[None, ...])
+    return np.asarray(surfaces.centroid)[0], np.asarray(surfaces.normal)[0]
+
+
+def _pair_kernel(source, receiver, subdivisions):
+    """Sample-by-sample transfer kernel over a facet pair, and each sample pair's separation.
+
+    The kernel is ``cos_s cos_r / (pi r**2)`` times the two sample areas -- the integrand of the
+    pair's transfer, with the absorption and the profile left out so either can be weighted by
+    it. Sample pairs turned away from one another carry nothing between them and are clamped to
+    zero rather than dropped, so the array shape does not depend on the geometry.
+    """
+    points_s, area_s = uniform_samples(source, subdivisions)
+    points_r, area_r = uniform_samples(receiver, subdivisions)
+    _, normal_s = _geometry(source)
+    _, normal_r = _geometry(receiver)
+
+    offset = points_r[None, :, :] - points_s[:, None, :]
+    distance = np.linalg.norm(offset, axis=-1)
+    cos_s = np.einsum("srd,d->sr", offset, normal_s) / distance
+    cos_r = -np.einsum("srd,d->sr", offset, normal_r) / distance
+    kernel = np.clip(cos_s, 0.0, None) * np.clip(cos_r, 0.0, None) / (np.pi * distance**2)
+    return kernel * area_s * area_r, distance
+
+
+def centroid_separation(source, receiver) -> float:
+    """Centroid-to-centroid distance -- the one number the shipped build carries per pair."""
+    centroid_s, _ = _geometry(source)
+    centroid_r, _ = _geometry(receiver)
+    return float(np.linalg.norm(centroid_r - centroid_s))
+
+
+def mean_separation_excess(source, receiver, subdivisions=DENSE_SUBDIVISIONS) -> float:
+    """``<r> - r_centroid``: how far the centroid separation sits from the mean path length.
+
+    The mean is weighted by the pair's own transfer kernel, because that is the weighting the
+    absorption factor is averaged under. This quantity is the whole of the absorption bias to
+    first order -- the bias is ``-a`` times it, at every geometry.
+
+    ⚠️ **It is NOT always positive, and assuming it was cost a wrong claim in three files.**
+    Jensen's inequality on the norm says the distance between two mean positions cannot exceed
+    the mean of the distances, which is true and is about the *kernel-weighted* mean positions,
+    not the geometric centroids the build actually stores. Head-on the two nearly coincide and
+    the excess is positive; slide the pair sideways and the kernel -- which goes like
+    ``1 / r**2`` -- concentrates on the facing near corners until the typical separation it
+    weights falls *below* the centroid-to-centroid distance. That sign change is exactly the
+    sign change in the absorption bias.
+    """
+    kernel, distance = _pair_kernel(source, receiver, subdivisions)
+    mean = float(np.sum(kernel * distance) / np.sum(kernel))
+    return mean - centroid_separation(source, receiver)
+
+
+def absorption_bias(source, receiver, coefficient: float, subdivisions=DENSE_SUBDIVISIONS):
+    """Exact absorbed transfer over the closed form taken at the centroid separation.
+
+    The build multiplies a pair's geometric term by ``exp(-a * r_centroid)``; the honest factor
+    is the kernel-weighted average of ``exp(-a * r)`` over both facets. This returns their
+    ratio, so **below one means the shipped form transmits too much**.
+
+    ⚠️ The leading term is *first* order in ``a * w``, not the second-order Jensen correction on
+    ``exp``, and its sign is not fixed across geometries. Both facts come from
+    :func:`mean_separation_excess`, which predicts this to four figures wherever it is checked.
+    """
+    kernel, distance = _pair_kernel(source, receiver, subdivisions)
+    exact = float(np.sum(kernel * np.exp(-coefficient * distance)))
+    gap = centroid_separation(source, receiver)
+    return exact / (float(np.sum(kernel)) * float(np.exp(-coefficient * gap)))
+
+
+def _source_samples(source, receiver_point, subdivisions):
+    """Per-sample source cosines and the solid angle each sample subtends at the receiver."""
+    points, area = uniform_samples(source, subdivisions)
+    _, normal = _geometry(source)
+    offset = np.asarray(receiver_point, dtype=float)[None, :] - points
+    distance = np.linalg.norm(offset, axis=-1)
+    cosine = np.clip(np.einsum("sd,d->s", offset, normal) / distance, 0.0, None)
+    return cosine, cosine * area / distance**2
+
+
+def profile_bias(source, receiver_point, exponent: float, subdivisions=DENSE_SUBDIVISIONS):
+    """Exact emitted transfer over the closed form taken at the centroid direction.
+
+    The solid angle a source facet subtends is integrated exactly, but the profile weighting it
+    is evaluated once, at the centroid direction. This returns the ratio of the honest integral
+    to that product, so **above one means the shipped form is too dark**. It is exactly one for
+    a Lambertian source at every geometry, which is the control the sweep needs.
+    """
+    from aquaflux.radiation.profiles import CosinePower
+
+    profile = CosinePower(exponent)
+    cosine, omega = _source_samples(source, receiver_point, subdivisions)
+    centroid, normal = _geometry(source)
+    to_receiver = np.asarray(receiver_point, dtype=float) - centroid
+    at_centroid = float(np.dot(to_receiver, normal) / np.linalg.norm(to_receiver))
+
+    exact = float(np.sum(np.asarray(profile.radiance_per_exitance(cosine)) * omega))
+    return exact / (float(profile.radiance_per_exitance(at_centroid)) * float(np.sum(omega)))
+
+
+def profile_cumulant_bias(source, receiver_point, exponent: float, subdivisions=DENSE_SUBDIVISIONS):
+    """What is left of the profile bias under a two-moment frozen/live split.
+
+    Freezing a *set* of directions per pair and evaluating the profile at each would multiply
+    the frozen ``n**2`` array by the sample count. There is a cheaper split: the profile is
+    ``c**(n - 1)`` up to constants, so with ``l = log c`` the solid-angle-weighted average is
+    ``<exp((n - 1) l)>``, whose cumulant expansion is
+
+        exp( (n - 1) <l>  +  (n - 1)**2 Var(l) / 2  +  ... )
+
+    Truncating after the variance needs **two** frozen numbers per pair instead of one per
+    sample, and leaves the exponent outside them, whole and differentiable. Both correction
+    terms vanish at ``n = 1`` along with the error itself.
+
+    Returns the residual ratio after that correction, to be read against
+    :func:`profile_bias`'s.
+    """
+    cosine, omega = _source_samples(source, receiver_point, subdivisions)
+    lit = cosine > 0.0
+    share = omega[lit] / np.sum(omega[lit])
+    log_cosine = np.log(cosine[lit])
+    mean = float(np.sum(share * log_cosine))
+    variance = float(np.sum(share * (log_cosine - mean) ** 2))
+
+    power = float(exponent) - 1.0
+    exact = float(np.sum(cosine[lit] ** power * omega[lit]) / np.sum(omega[lit]))
+    return exact / float(np.exp(power * mean + 0.5 * power**2 * variance))
+
+
+def sampled_fraction(receiver, receiver_normal, source, blockers, samples=200_000, seed=0):
+    """Brute force: area-sample the source, weight by the projected solid angle, ray-test.
+
+    The independent reference for the analytic silhouette clip -- a different algorithm
+    entirely, so agreement between them is evidence rather than a tautology. It converges like
+    ``1 / sqrt(samples)``, so a disagreement is only meaningful once it stops shrinking as the
+    sample count rises.
+
+    ⚠️ **The weight is the PROJECTED SOLID ANGLE measure, not area.** Area-uniform samples
+    weighted by the receiver cosine alone answer a different question, and the gap does not
+    vanish with more samples -- it plateaus, which reads exactly like a real discrepancy in
+    whatever is being judged. Both source and receiver cosines and the inverse square are
+    needed.
+
+    Parameters
+    ----------
+    receiver : array_like, shape ``(3,)``
+    receiver_normal : array_like, shape ``(3,)``
+    source : array_like, shape ``(3, 3)``
+    blockers : array_like, shape ``(3, 3)`` or ``(n, 3, 3)``
+    samples : int, optional
+    seed : int, optional
+
+    Returns
+    -------
+    float
+        The blocked share of the source's projected solid angle, in ``[0, 1]``.
+    """
+    rng = np.random.default_rng(seed)
+    a, b, c = np.asarray(source, dtype=float)
+    u, v = rng.random(samples), rng.random(samples)
+    outside = u + v > 1.0
+    u, v = np.where(outside, 1 - u, u), np.where(outside, 1 - v, v)
+    points = a + u[:, None] * (b - a) + v[:, None] * (c - a)
+
+    receiver = np.asarray(receiver, dtype=float)
+    offset = points - receiver
+    squared = np.sum(offset * offset, axis=1)
+    unit = offset / np.sqrt(squared)[:, None]
+    source_normal = np.cross(b - a, c - a)
+    source_normal /= np.linalg.norm(source_normal)
+    weight = np.abs(unit @ np.asarray(receiver_normal)) * np.abs(unit @ source_normal) / squared
+
+    blocked = np.zeros(samples, dtype=bool)
+    for p0, p1, p2 in np.atleast_3d(np.asarray(blockers, dtype=float)).reshape(-1, 3, 3):
+        e1, e2 = p1 - p0, p2 - p0
+        h = np.cross(unit, e2)
+        det = e1 @ h.T
+        ok = np.abs(det) > 1e-14
+        inv = np.where(ok, 1.0 / np.where(ok, det, 1.0), 0.0)
+        s = receiver - p0
+        bu = inv * (s @ h.T)
+        q = np.cross(s, e1)
+        bv = inv * (unit @ q)
+        t = inv * (e2 @ q)
+        inside = ok & (bu >= 0) & (bu <= 1) & (bv >= 0) & (bu + bv <= 1)
+        # Strictly between the receiver and the sample: a triangle beyond the source does not
+        # occlude it, and one at the origin is the receiver's own facet.
+        blocked |= inside & (t > 1e-12) & (t < np.sqrt(squared))
+    return float(np.sum(weight * blocked) / np.sum(weight))
