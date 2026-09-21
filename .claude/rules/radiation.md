@@ -27,6 +27,9 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `occluders.py` — `Cylinder`, `HalfSpace` | **BUILT** |
 | `visibility.py` — the frozen shadow mask | **BUILT** |
 | `triangles.py` — watertight ray-triangle intersection | **BUILT** |
+| `self_occlusion.py` — the `SelfOcclusion` strategies: ray cast, silhouette clip, none | **BUILT** |
+| `silhouette.py` — the exact covered fraction of a source, and the conservative cone cull | **BUILT** |
+| `clipping.py` — convex clipping with filtered (decidable) sign tests, shared with `solid_angle.py` | **BUILT** |
 | `transfer.py` — the frozen facet-to-facet geometry | **BUILT** |
 | `quadrature.py` — symmetric triangle rules for the receiving facet | **BUILT** |
 | `model.py` — the assembled model and the three public entry points | **BUILT** |
@@ -428,11 +431,16 @@ convexity already makes the source-side clamp an exact visibility test for it.
 
 `Visibility` keeps two kinds apart. **Analytic primitives** each carry their own transmittance,
 so each needs its own layer. **The surface's own triangles** are the reactor's walls — opaque —
-so they collapse into one layer with nothing to carry. That second kind is what lets a bent duct
-shadow itself, which no primitive can express because the geometry doing the blocking *is* the
-emitting surface. `self_occlusion=True` is the default: a surface that does not shadow itself is
-the defect the module exists to fix, and a mask silently missing it looks exactly like one that
-includes it.
+so they collapse into one layer, `Visibility.hidden_by_geometry` — a **fraction** of each source,
+beside a boolean `overlapping` — rather than one per body. That second kind is what lets a bent
+duct shadow itself, which no primitive can express because the geometry doing the blocking *is*
+the emitting surface. **How** it is computed is an injected `SelfOcclusion` strategy
+(`self_occlusion.py`): `RayCastOcclusion` (one ray per pair, a 0/1 fraction — **the default**, what
+`self_occlusion=None` resolves to), `SilhouetteOcclusion` (the exact clipped fraction, below), or
+`NoOcclusion`. ⚠️ **"Off" is `NoOcclusion()`, never `None`**: `RadiationSettings` drops `None`
+fields so they fall through to defaults, so a `None` meaning "off" would silently switch the ray
+mask back *on*. A surface that does not shadow itself is the defect the module exists to fix, and
+a mask silently missing it looks exactly like one that includes it.
 
 **Exclusion is by index, never by tolerance.** Every ray leaves its facet's centroid, so the
 facet is always hit at zero distance. Excluding its whole *solid* would be wrong — a bent duct is
@@ -444,7 +452,7 @@ Edge-adjacent neighbours are handled by the same near-origin exclusion the primi
 `segment_is_cut` excluded only the **source** facet. The far end of a segment has no margin —
 `offset_scale` guards the origin, nothing guards the target — so a ray aimed at a *facet centroid*
 ends exactly in that facet's plane and the hit at `distance == 1` counted. `build_transfer`'s
-receivers **are** the facet centroids, so at the shipped default `self_occlusion=True` every
+receivers **are** the facet centroids, so at the shipped default (the ray mask on) every
 mutually visible pair read as blocked: measured on a closed box, **120 of 132 off-diagonal pairs**,
 and on two bare plates facing each other across empty space, all of them. A closed enclosure came
 back with `B = M` — ten times too dark at `rho = 0.9`, and shaped like a field rather than an
@@ -453,7 +461,8 @@ error. `exclude` now takes `(n_rays,)` or `(n_rays, k)`, and `build_visibility` 
 
 **Three separate reasons nothing caught it, all worth keeping:**
 
-- **Every transfer and radiosity fixture passed `self_occlusion=False`**, so the default was never
+- **Every transfer and radiosity fixture switched the mask off** (then `self_occlusion=False`, now
+  `self_occlusion=NoOcclusion()`), so the default was never
   executed by any test. The tests that *are* about self-occlusion all use receivers out in the
   volume, where a ray ends on nothing and the bug cannot arise. The one path with no coverage was
   the one every user gets.
@@ -500,12 +509,18 @@ is exactly why the memory of one pass was the story. The per-block kernel is now
 traced: the compiler fuses the edge test, the distance window and the exclusion straight into the
 `any` reduction and never forms the array. **6.6-8.3x, bit-identical output** (100,000 rays x 200
 triangles, f64, 11 cores, 19 GB, jax 0.10.2, 2026-09-20, with and without the `exclude` argument;
-54.0 -> 362.4 and 57.8 -> 430.2 Mtest/s at `work_limit` 4M and 20M). Issue #462.
+54.0 -> 362.4 and 57.8 -> 430.2 Mtest/s at `work_limit` 4M and 20M). Issue #462. ⚠️ Those are
+**small-block** absolute rates; a whole build at 3184 facets runs at 74.9 Mtest/s, and the ratio
+between the two arms has not been re-measured there. Read the speedup, not the throughputs.
 
-**`work_limit` survives as a bound, not as a tuning knob**, and deliberately so: fused, it buys
-about 30% between 4M and 100M entries (333 / 421 / 432 Mtest/s) against a 20x cliff eagerly, and
-what it still guarantees is a bounded working set whatever the compiler decides to do with a given
-shape. Both axes are cut to honour it. Blocking only the triangles is not enough: the ray count is
+**`work_limit` survives as a bound, not as a tuning knob**, and deliberately so. On a small
+block, raising it looked worth about 30% (333 / 421 / 432 Mtest/s from 4M to 100M entries)
+against a 20x cliff eagerly. ⚠️ **That 30% is a small-block artifact and does not survive on a
+real build**: measured on whole `build_visibility` calls, 100M against the default 4M reads
+**102.5 against 242.2 Mtest/s at 832 facets** — less than half the speed — and 119.2 against
+114.3 at 1532, inside the run-to-run spread. Raising the bound makes the working set larger,
+which is the thing it exists to stop. What it guarantees is a bounded working set whatever the
+compiler decides to do with a given shape, and that is the whole of its job. Both axes are cut to honour it. Blocking only the triangles is not enough: the ray count is
 itself receivers times facets, so it reaches the millions on its own and would blow the limit at a
 block size of one. Getting this wrong cost 13.4 Mtest/s against 31.0 on the same build — and the
 naive fix, a *larger* triangle block, made it **ten times worse**, which is the opposite of the
@@ -730,7 +745,13 @@ Both failures leave a finite, plausible number behind rather than a NaN or a zer
 - freezing the visibility inside the geometry term costs about two thirds of `dG/dt`.
 
 The rule: **anything promised a gradient is computed OUTSIDE the frozen arrays**, as an
-elementwise multiply against them. A uniform absorption coefficient goes through
+elementwise multiply against them. ⚠️ **That rule is what makes the one-point factors one-point,
+and it does not force the frozen side to be a single number.** A frozen array may hold whatever
+*geometry* a live factor needs, so long as the live parameter stays outside it — which is how a
+non-Lambertian profile's bias could be removed by freezing two moments of `log cos` per pair
+instead of one cosine, with the exponent still live. Measured and decided against building, for
+reasons recorded in the one-point-factors section below; the point here is that "live" constrains
+what the frozen array may *depend on*, not how wide it may be. A uniform absorption coefficient goes through
 `exp(-a * frozen_separation)` in closed form, so no geometry is revisited; any other `Absorption`
 re-walks every pair on every call, which is correct and costs the `n^2` build again.
 
@@ -894,7 +915,7 @@ this is the only all-or-nothing term left in the transfer. It is now measured;
 `validation/radiation_partial_occlusion.py` is the instrument and re-runs in ~90 s.
 
 **Configuration for every number below.** Two 2 m square plates facing each other across a 2 m
-gap, emission 1, reflectance 0, `self_occlusion=False`, default six-point receiver quadrature,
+gap, emission 1, reflectance 0, self-occlusion off (`NoOcclusion()`), default six-point receiver quadrature,
 an opaque `Cylinder` on the axis between them. Reference: the same plates at 36 quads per side
 (5184 facets), area-averaged back onto the coarse patches — which *is* the coarse form factor,
 not a finer answer to a different question. JAX 0.10.2, CPU, x64, macOS arm64, 2026-09-19.
@@ -1028,130 +1049,427 @@ and nothing in the row sums — only rays. That is a genuinely attractive proper
 enough to make the technique pay here.
 
 
-## ANALYTIC OCCLUSION: the mask can be made EXACT, and the cost is the open question
+## MEASURED AND DECIDED: the two OTHER one-point factors (issue #447 items 1 and 3)
 
-Neither sampling treatment above moves the worst pair, because both sample a step function.
-A third option does not sample at all: clip the source's angular extent against the blocker's
-silhouette and subtract. This is the classical analytic form-factor treatment — Nishita and
-Nakamae (1983), then Baum, Rushmeier and Winget (*Computer Graphics* 23(3), 1989), who project
-blockers onto the source's supporting plane and clip away the occluded part.
-`validation/radiation_analytic_occlusion.py` is the harness; it reproduces everything below in
-about 100 s.
+`build_transfer` integrates the geometric term over the receiving facet, then multiplies it
+elementwise by three factors evaluated at **one point per pair**, because all three are live and
+differentiable and folding them into the quadrature would freeze them. The occlusion mask is the
+third and is priced above. The other two are absorption and a non-Lambertian source's angular
+profile, and both are now measured against a dense integral of the same quantity.
+`validation/radiation_one_point_factors.py` is the instrument (~40 s);
+`tests/unit/test_radiation_one_point_factors.py` carries the controls, the mechanism and the
+orders in the fast tier.
 
-**What makes it expressible here at all** is a property of the existing kernel: the contour form
-of the projected solid angle is **signed and additive over loops**, and the magnitude is taken
-only at the very end of `projected_solid_angle`. Measured: a triangle split four ways sums to the
-whole at **0.00e+00**, a reversed loop negates exactly, and whole-minus-interior equals the sum of
-the remaining pieces. So the *visible* region never has to be constructed — it is the whole minus
-the covered part, and the covered part is an intersection of two convex regions, hence convex with
-a **statically bounded vertex count**, which is what a traced program needs. Working in direction
-space rather than on the source's plane avoids the perspective divide, so a blocker straddling
-that plane raises no infinity.
+**Configuration.** Two right triangles of unit area, so `w = sqrt(area) = 1` exactly and the
+sweeps read directly against `a * w` and `w / d`; dense reference at 24 sub-triangles per edge
+(converged — 12 and 36 agree to the figures quoted). JAX 0.10.2, CPU, x64, macOS arm64,
+2026-09-20.
 
-**Measured (2026-09-20, JAX 0.10.2, CPU, x64, macOS arm64):**
+**Both controls read EXACTLY zero**: `a = 0` for absorption, and Lambertian `n = 1` for the
+profile at every distance and angle tested. That is what makes the rest attributable to the
+factor under test rather than to the sampling or the fixture.
 
-- ⚠️ **It is EXACT, not merely better.** Against a brute-force sampler the gap tracks the
-  *sampler's* own floor down — 8.6e-04 / 2.2e-03 / 1.3e-03 / 5.3e-04 / **2.9e-05** at 25k / 100k /
-  400k / 1.6M / 6.4M samples. The analytic value is the reference; the Monte Carlo is the
-  uncertain one.
-- **On the plate fixture at 2x2 it is the only treatment that moves the MAXIMUM.** Against the
-  same method at a 12-point receiver rule: binary mask mean 0.0561 / max 0.4773; analytic at the
-  centroid 0.0316 / 0.1684; analytic at six receiver points **0.0032 / 0.0212** — 17x the mean and
-  **22x the maximum**. Every sampling treatment left the maximum where it was.
+### Absorption is FIRST order in `a * w` — and the obvious argument gives the wrong order
 
-⚠️ **STL GEOMETRY IS NOT A BARRIER, AND THE n^3 OBJECTION WAS WRONG.** Self-occlusion already
-costs `n_receivers x n_facets x n_triangles` in shipped code: `segment_is_cut` is handed
-`rays x n_facets` rays and tests every one against **every** triangle. The analytic treatment is
-the same asymptotics with a dearer inner kernel, not a new order of growth. Two measurements make
-STL work:
+Relative error in a pair's transfer, axial pairs, against `a * w`:
 
-- **A tiling sums exactly.** A blocker split into 4, 16, 64 triangles sums to the single-triangle
-  answer at **1e-16**. A triangulated surface *is* a tiling, and tilings do not overlap in
-  projection, so per-triangle fractions simply add — no union algorithm between blockers.
-- **Sum only FRONT-FACING triangles.** On a 384-triangle closed tube: front-facing gives
-  **1.33e-15** against dense truth when fully blocked and ~1e-4 (the sampler's floor) when
-  partially blocked, while summing *every* triangle gives exactly **2.0** — it counts the far wall
-  too. For a wetted surface wound inward, a sight line that leaves the fluid and re-enters crosses
-  front-facing exactly once.
+| `a * w` | d=1w | d=2w | d=4w | d=8w |
+|---|---|---|---|---|
+| 0.03 | -0.44% | -0.33% | -0.19% | -0.10% |
+| 0.10 | -1.46% | -1.08% | -0.64% | -0.34% |
+| 0.30 | -4.27% | -3.18% | -1.90% | -1.01% |
+| 1.00 | -13.04% | -9.90% | -6.08% | -3.29% |
+
+⚠️ **THE FIRST VERSION OF THIS FINDING SAID SECOND ORDER, FROM REASONING THAT IS SOUND AND IS NOT
+THE LEADING TERM.** `exp` is convex, so the average of `exp(-a r)` over a pair exceeds
+`exp(-a <r>)` — true, second order, and swamped. The leading term is that the centroid separation
+is not the separation the factor is actually averaged over, and that gap is *first* order in the
+facet's extent. The bias is `-a * (<r> - r_centroid)` with `<r>` weighted by the pair's own
+transfer kernel, and the prediction holds **at every geometry tested**, to four figures:
+
+| d / w | `(<r> - r_c) / w` | measured slope |
+|---|---|---|
+| 1 | 0.1483 | -0.1481 |
+| 2 | 0.1091 | -0.1090 |
+| 4 | 0.0645 | -0.0644 |
+| 8 | 0.0340 | -0.0340 |
+
+For squarely facing pairs `<r> - r_centroid` falls like `w^2 / (4 d)`, so the bias is
+`(a w) * (w / 4d)` — worst between **neighbours**, where `d ~ w` and it reaches about
+**`0.15 * a * w`**.
+
+⚠️ **A SECOND WRONG CLAIM CAME OUT OF THE SAME REASONING AND A TEST CAUGHT IT: `<r> - r_centroid`
+IS NOT ALWAYS POSITIVE.** Jensen on the norm says the distance between two mean positions cannot
+exceed the mean of the distances — true, and about the **kernel-weighted** mean positions, not
+the geometric centroids the build stores. Slide a pair sideways and the `1 / r^2` weighting
+concentrates on the facing near corners until the separation it effectively averages falls
+*below* the centroid-to-centroid one, and the excess goes negative. Measured at `d = 1w`:
+`+0.148` head-on, `+0.055` at half a width of offset, `-0.099` at one width, `-0.241` at two.
+**That sign change is precisely the sign change in the bias** — one mechanism explains both the
+magnitude and the flip, which the earlier hand-waving ("the geometry turns it the other way")
+did not. Pinned over the whole offset family, including the negative arm, because a prediction
+checked only on the axial corner is a prediction checked where it cannot fail. The rule of thumb now in
+`build_transfer`'s docstring: at `a * w = 0.1` the error is under 2%; by `a * w = 1` it is past
+10% and the closed form has stopped describing the scene. Water at 95% ultraviolet transmittance
+absorbs at 5.13 /m, so 20 mm facets in it sit at `a * w = 0.1`. **This closes issue #447 item 3.**
+
+### A non-Lambertian profile is SECOND order in the angular width
+
+Bias against `(n - 1) * (w / d)^2`, collapsing onto a slope near -0.13 while that parameter is
+small and saturating once it is not. Right-hand column is the two-moment split described below:
+
+| d / w | n | bias | after two frozen moments |
+|---|---|---|---|
+| 1 | 2 | -8.29% | -0.012% |
+| 1 | 8 | -39.70% | -3.316% |
+| 1 | 16 | -59.27% | -23.363% |
+| 2 | 2 | -2.90% | -0.001% |
+| 2 | 8 | -17.41% | -0.213% |
+| 2 | 16 | -31.26% | -1.850% |
+| 4 | 8 | -5.50% | -0.006% |
+| 8 | 8 | -1.48% | -0.000% |
+
+### ⚠️ NEITHER BIAS HAS A FIXED SIGN, SO NEITHER IS A CORRECTION
+
+Both run one way near the axis and the other way off it, **inside a single enclosure**. Absorption
+at `a * w = 0.3`, `d = 1w`: -4.27% head-on, +3.28% at one facet width of lateral offset, +8.14% at
+two. The profile at `n = 8`, `d = 1w`: -39.7% on the axis, -10.4% at 30°, **+46.5% at 45°** and
++368% at 75°. On the axis the centroid direction sits at the profile's *peak*, so the one-point
+value is an extreme rather than an average; past about 35° the profile is convex across the
+facet's angular span and it goes the other way.
+
+Two consequences, and the second is the one that matters when sizing a mesh:
+
+- **They partly cancel in a total and not at all in a local transfer.** This is why a global
+  energy balance on a closed box reads 1-3% while individual pairs are wrong by tens of percent.
+  Both numbers are real; they answer different questions, and the aggregate is much the more
+  flattering. Size a mesh against the per-pair figure. (The same lesson as "quote the second
+  column when sizing a fix", recorded above for occlusion.)
+- **The huge grazing percentages are relative errors on nearly nothing.** `cos^7` at 75° is
+  8e-5, so a +368% error there moves far less light than -39.7% on the axis. Do not read the
+  grazing column as the dominant term; read it as the reason the sign is not fixed.
+
+### ⚠️ A RATIO-SHAPED CONTROL IS BLIND TO ITS OWN WEIGHTING, AND ONLY MUTATION TESTING SHOWED IT
+
+Every measurement above is a ratio — exact integral over closed form — and the sampling weight
+appears on **both sides of it**. So the two controls that read *exactly* zero, and the mechanism
+identity that holds to four figures, are all blind to that weight being the wrong weight. Dropping
+the inverse-square from the pair kernel, or the cosine from the per-sample solid angle, leaves the
+whole suite green: the controls still read exactly zero, because a constant factor cancels, and
+the slope still equals the excess, because both are computed from the same wrong weight.
+
+Caught by a nine-mutation pass, 3 of which went undetected on the first suite. A wrong weight would
+have moved every absolute figure in this section in the same direction while every check designed
+to catch exactly that kind of error stayed silent. The repair is to pin each weight against the
+**shipped** kernel it mirrors — the per-sample solid angles against `solid_angle`, the pair kernel
+against `geometric[i, j] * A_i`, agreeing to 2e-4 and 4.4e-4 at 24 subdivisions. The third
+undetected mutation was the same shape of blindness in the fixtures rather than the maths: every
+fixture put the source at the origin, where its centroid is the zero vector and
+`centroid_r - centroid_s` cannot be told from `centroid_r`.
+
+**The general form, worth carrying beyond this subsystem: a control that is a ratio proves the two
+sides agree, not that either is right.** Where the quantity is an integral, pin the measure too.
+
+### DECIDED (issue #447 item 1): documented, NOT built — and the split a fix would use
+
+**Documented as a limitation.** Four grounds:
+
+1. **It is exactly zero for the case that carries most of the light.** A Lambertian radiance is
+   constant over direction, so evaluating it at the centroid direction is evaluating a constant —
+   not an approximation at all, at any geometry or distance. The *reflected* component leaves
+   Lambertian by assumption in every scene, so this can only ever touch the **emitted** transfer
+   of a **non-Lambertian areal** source. Point and line sources are untouched as well: they have
+   no extent, and the gather evaluates `intensity_fraction` at the true direction with the true
+   `r^2`.
+2. **Where it is not zero it is second order in the angular width**, so refinement reaches it —
+   halving the mesh quarters it. The occlusion maximum, by contrast, refinement does not reach.
+3. **It has no fixed sign**, so it does not accumulate across a scene the way a one-way bias would.
+4. **It is the smaller problem next to item 2**, which buys 22x on a maximum no sampling treatment
+   moves.
+
+**The frozen/live split a fix would use, recorded because the issue asks for it either way.** The
+route the issue anticipated — freeze a *set* of `Q` directions per pair and evaluate the profile
+at each — multiplies the frozen `n^2` array by `Q`, and is not necessary. The profile is
+`c^(n-1)` up to constants, so with `l = log c` the solid-angle-weighted average the transfer wants
+is `<exp((n-1) l)>`, whose cumulant expansion is
+
+    exp( (n-1)<l>  +  (n-1)^2 Var(l) / 2  +  ... )
+
+Truncating after the variance needs **two** frozen numbers per pair where the build stores one
+today — `source_cosine` becomes a mean and a variance of `log cos` — and leaves the exponent
+entirely outside them, live and differentiable, which is the constraint that made the obvious
+route expensive. Measured above: two to three orders off the bias in the practical regime,
+degrading only where the bias is already large. ⚠️ **It is exact at `n = 1`**, both correction
+terms vanishing with the error itself, so adding it cannot disturb the Lambertian path — the
+reduction that pins the profile constants.
+
+What building it would cost: one extra frozen `n^2` array (75 MB at 3072 facets, on ~225 MB the
+frozen arrays already hold), and a build pass that samples each source facet to form the two
+moments — which the **contour-form** solid angle does not currently do, so it is a new pass and
+not a cheaper use of an existing one. That build cost, not the storage, is the real price.
+
+## MEASURED: what the mask build costs in SECONDS, and why its throughput falls with the mesh
+
+Every cost ratio in this subsystem divides by the mask build, and until now nothing recorded what
+it costs on its own. `validation/radiation_mask_build_cost.py` is the instrument.
+
+**Configuration.** Closed box plus a lamp sleeve down its axis, one self-occluding surface set,
+receivers at the facet centroids with `receiver_facet` supplied — that is, the transfer build's
+own case, where `n_receivers == n_facets == n_triangles` and the pass is **`n^3`**. Default
+`work_limit`, median of three warm calls (two above 2000 facets). JAX 0.10.2, CPU, x64, macOS
+arm64, 11 cores, 19 GB, 2026-09-20.
+
+| facets | tests | seconds | Mtest/s |
+|---|---|---|---|
+| 224 | 1.12e7 | 0.03 | 348.3 |
+| 480 | 1.11e8 | 0.34 | 324.1 |
+| 832 | 5.76e8 | 2.38 | 242.2 |
+| 1532 | 3.60e9 | 31.46 | 114.3 |
+| 2448 | 1.47e10 | 151.56 | 96.8 |
+| 3184 | 3.23e10 | 431.23 | **74.9** |
+
+**A realistic reactor mesh costs minutes, and the cube is the whole story** — doubling the mesh
+is eight times the build. 3184 facets is 7.2 minutes.
+
+⚠️ **THROUGHPUT FALLS 4.6x ACROSS THAT RANGE, AND EVERY FIGURE TAKEN ON A SMALL BLOCK IS
+THEREFORE AN OVER-ESTIMATE OF WHAT THE PASS ACHIEVES.** This is the single most load-bearing
+correction in this file's cost arithmetic: the ~330 Mtest/s that several ratios divide by is the
+**small-block** number, and a real build runs at 75.
+
+**It is the RAY COUNT, not the total work.** Holding the triangle count fixed at 1532 and sweeping
+only the rays, at comparable total tests:
+
+| rays | Mtest/s |
+|---|---|
+| 50,000 | 424.8 |
+| 200,000 | 334.9 |
+| 800,000 | 262.4 |
+| 3,200,000 | 116.5 |
+
+The ladder's rays are `n^2`, so this is the same effect seen through the mesh. **The cause inside
+the pass is not established** and should not be guessed at: the obvious suspect is that
+`build_visibility` hands `segment_is_cut` a flattened outer product —
+`broadcast_to(origin, (rays, n_facets, 3)).reshape(...)` materializes one origin and one target
+per (receiver, facet) pair, some 810 MB at 3184 facets holding only 3184 distinct values of each —
+but the sweep above passes *already materialized* ray arrays and still degrades, so whatever it
+is lives in `segment_is_cut`'s handling of many rays and not only in the caller's broadcast.
+Raising `work_limit` does not recover it (it is worse; see the bound's own section). **There is a
+factor of three or so available here to whoever finds it**, and it would come straight off every
+mask build and every ratio measured against one.
+
+**The cost is geometry-independent, which is why one ladder settles it for every scene.** The
+pass tests every ray against every triangle with no early exit, so what the rays *hit* cannot
+change what it costs. Checked rather than asserted: the sleeve scene and an otherwise identical
+scene with the sleeve moved outside the box differ by **2.65x in blocked pairs** (463,936 against
+174,912) and by **1.11x in wall clock**, inside the ~20% spread this machine carries. A future
+change that gave the pass an early exit would break this, and the check is what would notice.
+
+## ANALYTIC OCCLUSION: BUILT as `SilhouetteOcclusion` — exact per blocker, once six defects were out
+
+Neither sampling treatment above moves the worst pair, because both sample a step function. The
+clip does not sample: it cuts the source's angular extent by the blocker's silhouette and takes the
+covered share in closed form — the classical analytic form factor, Nishita and Nakamae (1983), then
+Baum, Rushmeier and Winget (*Computer Graphics* 23(3), 1989). It is **selectable beside the ray
+mask, not a replacement for it** (`RadiationSettings(self_occlusion=SilhouetteOcclusion())`), and
+the ray mask stays the default: neither dominates, because the clip over-counts overlapping
+silhouettes (below) and costs more.
+
+**What makes it expressible as a traced program**, each property load-bearing:
+
+- **The contour form is signed and additive over loops** (`_signed_loop_solid_angle`; the magnitude
+  is taken only at the end of `projected_solid_angle`). A triangle split four ways sums to the whole
+  at 0.00e+00, so the visible region is *whole minus covered* and is never constructed.
+- **The covered region is convex, so its vertex count is static.** Cutting by one half-space adds
+  at most one vertex; compaction is by a **rank** (the running survivor count), so widths run
+  `4, 5, 6, 7, 8` — the blocker is first cut to the near side of the source's plane, which can
+  make it a quadrilateral and adds the fourth edge.
+- **Direction space**, not the source's plane: no perspective divide, no infinity for a straddler.
+- **Every sign read is decidable** — `clipping.py`, below. Without it the answer depended on the
+  compiler.
+
+**Two measured facts make STL geometry work:** a tiling sums exactly (a blocker split 4/16/64 ways
+matches the whole at 1e-16 — a triangulated surface *is* a tiling), and **only front-facing
+triangles are summed** (on a closed 384-triangle tube, summing every triangle gives exactly 2.0 —
+the far wall counted too; front-facing gives 1.33e-15 against dense truth).
+
+⚠️ **EVERY RECEIVER MUST SIT ON A FACET.** The fraction is of a *projected* solid angle, which needs
+the receiver's normal; a volume point has none, and the unprojected measure a volume gather uses is
+a different quantity. `SilhouetteOcclusion.field` raises for `receiver_facet=None` and for any
+`-1`, naming `RayCastOcclusion` — an error, because silently falling back would be the plausible
+brighter field this subsystem keeps warning about.
 
 ⚠️ **WHERE IT OVER-COUNTS, STATED EXACTLY: the angular overlap between two front-facing
-silhouettes.** The method adds *areas*, and `0.54 + 0.54 = 1.08` where a ray test's `blocked OR
-blocked` is idempotent — nothing in the formulation knows the two areas are the same directions,
-because each blocker is clipped against the **source**, not against what is still unblocked.
-Measured on two blockers occupying the same cone: 0.5415 each, true union 0.5421, sum **1.083**.
-Moved apart so the cones are disjoint, the sum is exact.
+silhouettes.** Each blocker is clipped against the *source*, not against what is still unblocked,
+so areas add: `0.54 + 0.54 = 1.08` where a ray's `OR` is idempotent (measured, two blockers in one
+cone: 0.5415 each, true union 0.5421, sum 1.083). It errs **dark**, and only here:
 
 | geometry | front-facing crossings | result |
 |---|---|---|
 | one sleeve, baffle or wall between two facets | 1 | **exact** |
-| **bent duct / elbow** — the case `triangles.py` advertises | 1 (leaves the fluid, re-enters) | **exact** |
+| **bent duct / elbow** | 1 (leaves the fluid, re-enters) | **exact** |
 | convex vessel, no internals | 0 | **exact**, nothing blocks |
 | sleeves side by side, cones disjoint | >=2, no overlap | **exact** |
 | **multi-lamp bundle, one sleeve behind another** | >=2, overlapping | **over-counts, errs dark** |
 | serpentine channel, sight line across two walls | >=2 | over-counts |
 
-The correct repair is to clip each blocker against the *remaining unblocked* region rather than
-the source — depth-sorted and progressive, which is the hidden-surface algorithm and which has a
-per-pair varying vertex count that static shapes cannot take. **The cheap mitigation is a
-detector**: counting front-facing hits instead of OR-ing them is nearly free in the pass that
-already runs, and a count of one proves the analytic fraction exact for that pair.
+The exact repair is progressive, depth-sorted clipping against the remaining unblocked region — the
+hidden-surface algorithm, whose per-pair vertex count is not static. The field reports
+`overlapping` (more than one blocker contributed, so areas were *added* and **may** be double
+counted; a tiling of one wall adds without overlapping, so this is "possibly", honestly) and a
+count of one proves a pair exact. Nearly free: it is a count in the pass that already runs.
 
-**Cost, measured.** ⚠️ The 112x in the first probe is **not** evidence: that prototype looped
-over 384 blockers in Python and measured dispatch overhead, the same class of error already
-recorded above for the receiver-quadrature cost probe. Batched and jitted, 200,000 work items,
-f64, 11 cores, 19 GB, jax 0.10.2, nothing else running, the ray test against a **200-triangle**
-block (handed one triangle it measures dispatch and comes out several times low, which flatters
-the comparison):
+### ⚠️ "IT IS EXACT" WAS MEASURED ON ISOLATED, NON-DEGENERATE PAIRS — ON A MESH, SIX DEFECTS HID THERE
 
-| arm | Mitem/s | vs one ray test |
-|---|---|---|
-| ray test, eager — how the mask called it before #462 | 47.1 | — |
-| ray test as the mask calls it now, default `work_limit` | **~330** | — |
-| clip pipeline, doubling widths 6/12/24/48 | 0.6 | ~540x |
-| clip pipeline, emit-`(n+1)` widths 4/5/6/7 | **~1.4** | **~230x** |
+The prototype's sweep called the method exact, and per blocker it now is — but on a real mesh
+degenerate configurations are the **norm** (shared vertices and edges, coplanar triangles of one
+wall, a receiver in the plane of every triangle on its facet), and every defect below produced a
+**confident wrong number, not a failure**. Each is pinned by a test that was mutation-checked.
 
-(The ray test reaches ~430 Mtest/s at a larger `work_limit`, which makes the clip ~300x instead —
-the ratio moves with the denominator, so read it as a band, not a figure.)
+1. **No depth cut.** The clip has no notion of depth, so a blocker straddling the source's plane
+   occluded with all of itself: **1.0000 against a sampled 0.6396**. Fixed by cutting the blocker to
+   the near side of the source's supporting plane first (the extra clip stage).
+2. **The cull's source-plane test omitted its offset**, testing a parallel plane through the
+   receiver — which rejects blockers *in front of* the source. Not merely optimistic but
+   unconservative, and it is what the prototype's **6.14% workload** figure measured; the correct
+   figure was 16.3% (12.6% with front-facing only). The same bug was written a second time when
+   building this — caught only because a blocker known to block fully came back rejected.
+   `decidable_heights(..., through=)` is the one place the offset lives now.
+3. **A degenerate depth cut inverted the no-op.** A cut to a sliver makes every edge plane zero, so
+   no stage removes anything and the source reads *wholly covered*: **1.0 against a sampled 0.0**.
+   Fixed by clamping the covered part to the blocker's own projected extent, which holds
+   geometrically and is a no-op wherever the clip was already right.
+4. **The cone cull dropped 4,941 real occluders** on a 480-facet reactor — degenerate axes, and caps
+   at or past a right angle (a receiver near the triangle's plane). `angular_cone` flags those
+   `unusable`, and **an unusable cone overlaps everything**. The cull's invariant is asserted
+   exhaustively (`DROPPED == 0` over every pair of a closed box), not argued.
+5. **Coplanar and edge-on blockers** have every height or the triple product mathematically zero;
+   before the `in_front` / `edge_on` guards, 119 of 2304 pairs of a closed box moved with the chunk
+   size alone, one by the whole of its value.
+6. **A source seen edge-on reported a ratio of two roundings.** Its projected solid angle is dust
+   (~2e-16), the covered part is dust too, and their quotient is anything in `[0, 1]`: **13
+   coplanar sleeve pairs read 0.06 to 1.0**, where the truth is that they exchange no light.
+   `_EXTENT_FLOOR` (1e-12 sr, far above the contour sum's dust of a few parts in 1e15 of pi).
+   ⚠️ This one was latent — the old noisy clip happened to collapse such loops — and surfaced only
+   when the filters below made the coplanar loop *correct*. **A fix that makes an intermediate right
+   can expose a downstream quantity that was only ever right by accident.** A clean hand-built
+   fixture lands on an exact 0.0, which the old `== 0` guard handled, so the test is a property sweep
+   over the reactor's coplanar pairs rather than a placed triangle.
 
-The emit-`(n+1)` clip is the whole avoidable half of the cost and it is **built and measured**,
-not projected. Intersecting a convex region with a half-space adds at most one vertex, so the
-widths need only run 4, 5, 6, 7 rather than doubling to 48; compacting the survivors in order is
-expressible under `jit` through a **rank** — the running count of survivors up to each candidate,
-so the `j`-th output vertex is the one of rank `j+1`, and slots past the last survivor repeat it.
-It is worth **2.45x** and agrees with the doubling form to `2.1e-11` over 200,000 items. ⚠️ Read
-that gap as the *fraction's* conditioning, not the clip's: the worst items are near-edge-on
-sources where both arms divide two ~1e-7 solid angles, and on well-conditioned cases the two
-agree to `1e-16`. `validation/radiation_analytic_occlusion.py` §5 reproduces all of it.
+### ⚠️ THE SIGN TESTS: TWO FILTERS, EACH LOAD-BEARING, AND THE SMALL FIXTURE COULD NOT TELL
 
-The workload is the other half: a conservative frustum reject (a blocker is discarded only when
-all three vertices fall outside one single plane, so nothing that could occlude is dropped) keeps
-**6.75% / 6.30% / 6.14%** of triples at 144 / 236 / 384 facets on a box-plus-sleeve reactor —
-stable, and falling as the mesh refines, because a finer pair sweeps a narrower pencil.
-**Host-side compaction of that 6% is legal precisely because the mask is frozen geometry built
-once, off the differentiation path.**
+After the six, 4 of the 80-facet reactor's 6400 pairs still moved with the chunk size, by up to
+0.21. The cause: a height zero in exact arithmetic computes as ~1e-19 of noise whose **sign is set by
+how XLA fuses the multiplies and adds** — which changes with batch shape, with whether the code is
+compiled at all, and **with the presence of an arithmetically dead term**: adding `0.0 * bound` to
+the unfiltered return made a lost occluder reappear in every context. Without the filters, whether
+a real shadow is found depends on incidental compiler decisions.
 
-Putting the two together, against the build as it now runs: `0.0614 x ~230 ~ 14`, plus one reject
-pass — **analytic occlusion costs somewhere around 15-20x the mask build**, the spread being the
-`work_limit` the ray test runs at. ⚠️ **That headline moved because the DENOMINATOR moved, not
-because anything here got slower**: against the eager build the same clip measurements read
-`0.0614 x (47.1 / 1.4) ~ 2`, and the absolute cost of the clip is identical to the last digit.
-Tracing the ray test (#462) took a factor of seven off the thing analytic occlusion is compared
-to, so it is now the expensive option by a wide margin rather than a near-neighbour — one frozen
-build of roughly fifteen to twenty times the current one, still off the differentiation path.
-Whether that is affordable is a judgement about build time, not a projection any more.
+`clipping.py` holds two filters, each the first stage of a Shewchuk (1997) filtered predicate
+(bound the rounding error from the magnitudes summed, `_SLACK = 16` units of roundoff; trust the
+sign only outside it):
 
-⚠️ **THE PROJECTION THIS REPLACES SAID ~1.5x, AND ITS TWO ERRORS VERY NEARLY CANCELLED — which is
-the part to internalize, because a projection that lands near the truth for compensating wrong
-reasons reads afterwards as if it had been validated.** It divided a measured 6% workload by a
-"6 vertices, ~4.5x" row, and both factors were wrong in opposite directions. That row capped the
-*whole pipeline* at width 6, which no correct implementation does: the real emit-`(n+1)` pipeline
-carries four clip stages at 4/5/6/7 plus two contour evaluations and reaches 1.3 Mitem/s, not the
-10.95 the row suggested — **8x optimistic**. Against that, the ray test it was divided by was the
-eager one, **9x pessimistic**. Neither factor was checkable from the decomposition it was drawn
-from; only building the thing settled it.
+- **`decidable_heights`** snaps an undecidable height to **exactly zero** — and **no exact
+  arithmetic stage is needed**, which is what makes it cheap: zero is a *correct and consistent*
+  answer for a clip (the kept half-space is closed; an edge with a zero at one end does not cross,
+  its crossing *is* that endpoint). A triangulation must pick a side; a clip need not.
+- **`spanning_plane`** snaps a plane through two directions indistinguishable in direction to the
+  zero vector, making that stage the no-op it should be. It replaced an exact-equality test on the
+  two corners (`corner[k] == corner[k+1]`), which cannot see a crossing computed at the end of its
+  edge as `a + 1.0 * (b - a)` — `b` to within a rounding, not bit for bit.
 
-⚠️ **One consequence to decide deliberately if this is ever built:** `dG/d(occluder geometry)` is
-currently **exactly zero by construction** and a test asserts it as a contract, because a binary
-mask is a staircase. A continuous fraction makes it smooth and non-zero — which breaks that
-contract and makes **baffle and sleeve placement differentiable**, a design-study capability no
-sampling-based fix can offer.
+**Measured truth table** — sleeved box `inward_box(5)` + `closed_drum(16, radius=0.15,
+half_height=0.3)` at its centre, **364 facets**, receivers at facet centroids, every blocker of the
+worst pairs adjudicated against the brute-force sampler at 200k samples; JAX 0.10.2, CPU, x64,
+macOS arm64, 11 cores, 2026-09-21:
+
+| heights | repeat guard | chunk-invariant | wrong pairs | failure |
+|---|---|---|---|---|
+| raw | exact-equality mask | **no** | — | the starting point |
+| filtered | exact-equality mask | yes | **25** | a triangle covering 0.37 of a source read as covering nothing |
+| raw | `spanning_plane` | yes | **1** | a blocker covering 0.0020 read that eagerly and **0.0 under `jit`** |
+| filtered | `spanning_plane` | yes | **0** | every blocker matches the sampler |
+
+⚠️ **At 80 and at 156 facets all three filtered rows were identical** — same occluded-pair counts,
+same sums, chunk-invariant. A fixture too small to contain the degeneracy says nothing about which
+fix can go; this project nearly deleted the height filter as "dominated" on that evidence. **And
+chunk invariance was the wrong acceptance test on its own**: every row but the first passes it,
+because each compiled shape gets the *same* wrong answer. Only the sampler, and an eager-vs-`jit`
+comparison, expose the wrong rows. Both are now tests on the 364-facet body
+(`test_a_real_occluder_is_not_emptied_by_the_plane_through_a_near_repeated_corner`,
+`test_a_real_occluder_reads_the_same_whether_or_not_the_clip_is_compiled`).
+
+**Per call site** (clean mutations — never a `+ 0.0 * x` keep-alive, which perturbs the fusion under
+test and here *rescued* the bug): the height filter is individually load-bearing only at the
+**edge-plane** cuts of the source, where a sign selects which part of the source every later cut
+sees. At the source-view and extent cuts the loop goes straight into the contour integral and its
+edges never become planes, so a near-repeat adds a zero-length edge worth nothing; at the depth cut
+the plane filter repairs what a flip produces. Those three are recorded as dismissed, not gaps, and
+the filter is **kept uniform anyway**: stripping it would create a second, unfiltered way to make
+heights, and uniformity is what protects the next call site by default.
+
+⚠️ **The ray test's remedy — the antisymmetric edge function — is NOT needed here, and was deleted.**
+Under `jit`, `jnp.cross(v, v)` is exactly zero (the nonzero value appears only eagerly), and with the
+two filters in place swapping the antisymmetric cross for `jnp.cross` changed no bit on either
+reactor; its test could not fail. The difference in kind: the ray test *consumes* the edge function's
+sign directly, while here every sign consumed is a filtered height. Protecting the consumed predicate
+is stronger than making each quantity that feeds it reproducible. (It stays load-bearing in
+`triangles.py`, above.)
+
+What remains between chunk sizes is **~1e-13**, identical between chunks 1000 and 262144 and between
+3, 7 and 64 — two compiled behaviours of the continuous contour sum, not a sign flip. The chunk test
+holds it to 1e-9.
+
+**The shipped `projected_solid_angle` now clips through `clipping.py` too** — its private
+Sutherland–Hodgman (6 slots, repeat-last) was a second copy of the same algorithm. It moved by at
+most **8.9e-16 sr per pair and 1.8e-15 sr per row sum** (80- and 364-facet enclosures facet to facet,
+and 200k random straddling triangles against the `a6ec6a2` version); not bit-identical (20-63% of
+values equal), no test pinned the old bits — the same category as the `dot` rewrite in `CLAUDE.md`.
+
+⚠️ **`validation/radiation_analytic_occlusion.py` still carries the PROTOTYPE clip** (its doubling
+and rank arms): no depth cut, no filters, no extent clamp. Its arm-against-arm throughput comparison
+stands; its "exact" conclusion does not transfer to a mesh, and it is not the production path.
+
+**`dG/d(occluder geometry)` is still exactly zero** with either strategy: the fraction is computed
+on the host and frozen, off the tape. A continuous fraction *could* make baffle and sleeve placement
+differentiable, but only by putting the clip live on the tape — not built, and its cost would be the
+whole build per gradient.
+
+### Cost, MEASURED end to end — not projected
+
+Both strategies timed by `validation/radiation_mask_build_cost.py` (`silhouette_ladder`) on the same
+box-plus-sleeve reactor, same receivers (facet centroids), same run, median of warmed builds (three;
+two above 2000 facets). JAX 0.10.2, CPU, x64, macOS arm64, 11 cores, 19 GB, nothing else running,
+2026-09-21, uncommitted tree on `radiation/close-447` (base `a6ec6a2`), default `work_limit` and
+`work_chunk`, both filters and all six fixes in place:
+
+| facets | ray mask (s) | silhouette (s) | ratio |
+|---|---|---|---|
+| 224 | 0.04 | 1.85 | 46.6x |
+| 480 | 0.36 | 10.75 | 30.1x |
+| 832 | 7.10 | 63.58 | 9.0x |
+| 1,532 | 30.80 | 115.65 | 3.8x |
+| 2,448 | 154.81 | 390.38 | 2.5x |
+| 3,184 | 335.50 | **647.67 (11 min)** | **1.9x** |
+
+**The ratio falls with the mesh, and that is the structural fact to keep.** The ray mask is a dense
+`n^3` with a throughput that itself degrades (above); the clip's cone cull discards a share of
+candidate pairs that *grows* as the mesh refines, because a finer pair sweeps a narrower pencil. So
+the clip is dear on a small mesh — where its per-receiver host loop and compile dominate, and where
+nobody minds seconds — and near-parity on a large one. ⚠️ The ray arm here reads **335.5 s** at 3184
+facets where the section above has **431 s** on the same scene and settings, a day earlier: that is
+the run-to-run spread of wall clock on a shared desktop. Quote the *ratio* from one run with both
+arms, never a ratio across runs.
+
+⚠️ **EVERY EARLIER COST FIGURE FOR THIS METHOD WAS WRONG, AND ALL IN THE SAME WAY — each timed or
+projected one piece rather than the whole build.** The record's first headline was 15-20x (a ray
+test timed at 200,000 items, four orders below a build); an early projection said ~1.5x (two wrong
+factors that cancelled); the corrected projection said ~4x / 27 min (a 6.14% workload from the
+unconservative cull, times a per-item rate extrapolated 600x); the cone cull's projection said
+1.6x / 12 min (before bucketing, the guards and both filters). The measured answer, 1.9x / 11 min,
+landed near the last of them — which is **not** evidence the projection was sound, only that its
+errors roughly cancelled again. **Time the whole build, both arms, at the size the answer is for.**
+
+**Power-of-two chunk padding** (`_bucket`): padding every chunk to `work_chunk` compiled one program
+and clipped a quarter of a million pairs for a receiver with sixty candidates; padding to the next
+power of two wastes at most half a chunk and compiles a couple of dozen shapes. It took the
+silhouette tests from 110 s to 19 s and is in every figure above.

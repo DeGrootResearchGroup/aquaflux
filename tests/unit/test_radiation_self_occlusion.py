@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from aquaflux.radiation.gather import direct_fluence_rate
 from aquaflux.radiation.occluders import Cylinder
+from aquaflux.radiation.self_occlusion import NoOcclusion, RayCastOcclusion
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.triangles import _edge_function, segment_is_cut
 from aquaflux.radiation.visibility import build_visibility
@@ -252,7 +253,7 @@ def test_a_panel_of_the_same_surface_shadows_what_is_behind_it():
 def test_turning_self_occlusion_off_puts_the_light_back():
     surfaces = _emitter_and_panel()
     behind = np.array([[2.0, 0.0, 0.0]])
-    ignored = build_visibility([], surfaces, behind, self_occlusion=False)
+    ignored = build_visibility([], surfaces, behind, self_occlusion=NoOcclusion())
     assert float(direct_fluence_rate(surfaces, behind, visibility=ignored)[0]) == pytest.approx(
         float(direct_fluence_rate(surfaces, behind)[0]), rel=1e-15
     )
@@ -384,9 +385,9 @@ def test_a_ray_aimed_at_a_facet_is_not_blocked_by_that_facet():
         surfaces,
         centroids,
         receiver_facet=np.arange(surfaces.n_facets),
-        self_occlusion=True,
+        self_occlusion=RayCastOcclusion(),
     )
-    assert not bool(jnp.any(mask.blocked_by_geometry)), np.asarray(mask.blocked_by_geometry)
+    assert not bool(jnp.any(mask.hidden_by_geometry)), np.asarray(mask.hidden_by_geometry)
 
 
 def test_without_the_target_index_the_same_scene_is_entirely_shadowed():
@@ -398,8 +399,8 @@ def test_without_the_target_index_the_same_scene_is_entirely_shadowed():
     """
     surfaces = _facing_plates(-1.0, 1.0)
     mask = build_visibility(
-        [], surfaces, np.asarray(surfaces.centroid), self_occlusion=True
-    ).blocked_by_geometry
+        [], surfaces, np.asarray(surfaces.centroid), self_occlusion=RayCastOcclusion()
+    ).hidden_by_geometry
     cross = np.asarray(mask)[2:, :2]
     assert cross.all(), "the endpoint hit should shadow every cross pair"
 
@@ -425,8 +426,8 @@ def test_a_facet_genuinely_behind_another_is_still_blocked():
             surfaces,
             np.asarray(surfaces.centroid),
             receiver_facet=np.arange(6),
-            self_occlusion=True,
-        ).blocked_by_geometry
+            self_occlusion=RayCastOcclusion(),
+        ).hidden_by_geometry
     )
     assert mask[4:, :2].all(), "the middle plate must hide the outer two from each other"
     assert mask[:2, 4:].all(), "and symmetrically"
@@ -463,6 +464,8 @@ def test_a_visibility_with_no_receivers_at_all_builds(occluders):
     the first version of this test and was found by mutation, not by reading it.
     """
     surfaces = _facing_plates(-1.0, 1.0)
-    mask = build_visibility(occluders, surfaces, np.zeros((0, 3)), self_occlusion=True)
-    assert mask.blocked_by_geometry.shape == (0, 4)
+    mask = build_visibility(
+        occluders, surfaces, np.zeros((0, 3)), self_occlusion=RayCastOcclusion()
+    )
+    assert mask.hidden_by_geometry.shape == (0, 4)
     assert mask.blocked.shape == (len(occluders), 0, 4)

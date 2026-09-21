@@ -41,7 +41,11 @@ from aquaflux.radiation import Surfaces
 from aquaflux.radiation.solid_angle import _clip_to_front, _unit
 from aquaflux.radiation.triangles import segment_is_cut
 from aquaflux.vectors import dot
-from tests.unit.radiation_references import cylinder_triangles, inward_box
+from tests.unit.radiation_references import (
+    cylinder_triangles,
+    inward_box,
+    sampled_fraction,
+)
 
 #: Samples for the brute-force reference. Its noise floor is about ``1/sqrt(SAMPLES)``, which is
 #: what the analytic answer is eventually compared against rather than to zero.
@@ -159,42 +163,6 @@ def blocked_fraction(receiver, receiver_normal, source, blocker, *, compact=Fals
     return jnp.abs(covered) / jnp.where(jnp.abs(whole) == 0.0, 1.0, jnp.abs(whole))
 
 
-def sampled_fraction(receiver, receiver_normal, source, blockers, samples=SAMPLES, seed=0):
-    """Brute force: area-sample the source, weight by the projected solid angle, ray-test."""
-    rng = np.random.default_rng(seed)
-    a, b, c = np.asarray(source, dtype=float)
-    u, v = rng.random(samples), rng.random(samples)
-    outside = u + v > 1.0
-    u, v = np.where(outside, 1 - u, u), np.where(outside, 1 - v, v)
-    points = a + u[:, None] * (b - a) + v[:, None] * (c - a)
-
-    receiver = np.asarray(receiver, dtype=float)
-    offset = points - receiver
-    squared = np.sum(offset * offset, axis=1)
-    unit = offset / np.sqrt(squared)[:, None]
-    source_normal = np.cross(b - a, c - a)
-    source_normal /= np.linalg.norm(source_normal)
-    weight = np.abs(unit @ np.asarray(receiver_normal)) * np.abs(unit @ source_normal) / squared
-
-    blocked = np.zeros(samples, dtype=bool)
-    for p0, p1, p2 in np.atleast_3d(np.asarray(blockers, dtype=float)).reshape(-1, 3, 3):
-        e1, e2 = p1 - p0, p2 - p0
-        h = np.cross(unit, e2)
-        det = e1 @ h.T
-        ok = np.abs(det) > 1e-14
-        inv = np.where(ok, 1.0 / np.where(ok, det, 1.0), 0.0)
-        s = receiver - p0
-        bu = inv * (s @ h.T)
-        q = np.cross(s, e1)
-        bv = inv * (unit @ q)
-        t = inv * (e2 @ q)
-        inside = ok & (bu >= 0) & (bu <= 1) & (bv >= 0) & (bu + bv <= 1)
-        # Strictly between the receiver and the sample: a triangle beyond the source does not
-        # occlude it, and one at the origin is the receiver's own facet.
-        blocked |= inside & (t > 1e-12) & (t < np.sqrt(squared))
-    return float(np.sum(weight * blocked) / np.sum(weight))
-
-
 def split_once(triangle):
     """Midpoint split into four similar triangles, windings kept with the parent."""
     a, b, c = np.asarray(triangle, dtype=float)
@@ -304,6 +272,49 @@ def clip_cost():
     print("      harder baseline than the eager call that preceded it: about three hundred ray")
     print("      tests where the same clip measured forty. The clip did not change; the")
     print("      denominator did.")
+    _cost_against_scale()
+
+
+def _cost_against_scale():
+    """⚠️ Does that ratio survive at the scale a real build runs at? It does not.
+
+    Everything above is timed at 200,000 work items, which is a rounding error against a real
+    mask build: at 3000 facets the self-occlusion pass is ``n**3``, some 3e10 intersection
+    tests. A ratio measured small and applied large is exactly the error this file already
+    records twice -- once for the Python-loop prototype and once for the receiver-quadrature
+    probe -- so it is measured here rather than extrapolated.
+
+    Both arms are swept over the same range of work items. If they degrade together the ratio
+    holds and the recorded headline stands; if only one does, the headline moves by however
+    much they separate.
+    """
+    print("\n   cost against scale -- both arms over the same work items\n")
+    rng = np.random.default_rng(17)
+    triangles = jnp.asarray(rng.uniform(-1, 1, (200, 3, 3)) + np.array([0.0, 0.0, 1.5]))
+    clip = jax.jit(lambda r, n, s, b: blocked_fraction(r, n, s, b, compact=True))
+
+    print(f"   {'work items':>11} {'ray Mtest/s':>12} {'clip Mitem/s':>13} {'ratio':>9}")
+    for work in (200_000, 800_000, 3_200_000):
+        receiver = jnp.asarray(rng.uniform(-1, 1, (work, 3)))
+        normal = jnp.asarray(np.tile([0.0, 0.0, 1.0], (work, 1)))
+        source = jnp.asarray(rng.uniform(-1, 1, (work, 3, 3)) + np.array([0.0, 0.0, 3.0]))
+        blocker = jnp.asarray(rng.uniform(-1, 1, (work, 3, 3)) + np.array([0.0, 0.0, 1.5]))
+        origin = jnp.asarray(rng.uniform(-1, 1, (work, 3)))
+        target = origin + jnp.asarray(rng.uniform(-1, 1, (work, 3)) + np.array([0.0, 0.0, 3.0]))
+        near = jnp.zeros(work)
+
+        ray = _median(
+            lambda o=origin, t=target, nr=near: segment_is_cut(o, t, triangles, nr), repeats=3
+        )
+        each = _median(
+            lambda r=receiver, n=normal, s=source, b=blocker: clip(r, n, s, b), repeats=3
+        )
+        tests = work * int(triangles.shape[0])
+        per_test = ray / tests
+        print(
+            f"   {work:11,} {tests / ray / 1e6:12.1f} {work / each / 1e6:13.2f} "
+            f"{each / per_test / work:8.0f}x"
+        )
 
 
 def _median(fn, repeats=5):

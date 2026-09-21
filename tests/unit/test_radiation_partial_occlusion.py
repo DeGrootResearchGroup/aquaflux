@@ -10,6 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from aquaflux.radiation.occluders import Cylinder
+from aquaflux.radiation.self_occlusion import NoOcclusion
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.transfer import build_transfer
 
@@ -21,7 +22,7 @@ ROD = Cylinder(centre=[0, 0, 0], axis=[0, 1, 0], radius=0.3, half_length=4.0)
 def _effective(n: int, occluders) -> tuple[np.ndarray, np.ndarray]:
     """The transfer a solve uses: frozen geometry times the live mask, bodies fully opaque."""
     surfaces = Surfaces.from_triangles(facing_plates(n), emission=1.0, reflectance=0.0)
-    transfer = build_transfer(surfaces, occluders=occluders, self_occlusion=False)
+    transfer = build_transfer(surfaces, occluders=occluders, self_occlusion=NoOcclusion())
     reflected, _ = transfer.assemble(
         surfaces, transmittance=np.zeros(len(occluders)) if occluders else None
     )
@@ -75,7 +76,7 @@ def test_the_two_plates_actually_face_each_other():
     exactly 0.0 the other.
     """
     surfaces = Surfaces.from_triangles(facing_plates(2))
-    transfer = np.asarray(build_transfer(surfaces, self_occlusion=False).geometric)
+    transfer = np.asarray(build_transfer(surfaces, self_occlusion=NoOcclusion()).geometric)
     half = surfaces.n_facets // 2
     assert float(transfer[:half, half:].sum()) > 0.1
     assert float(transfer[half:, :half].sum()) > 0.1
