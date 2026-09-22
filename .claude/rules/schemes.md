@@ -2517,8 +2517,24 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
 
   **Two live comparisons had the same defect and are fixed:**
   - `_undetermined_cells` selected with `worst > limit`, so a NaN correction would **not** be
-    detected and the repair would silently decline to fire on exactly the cells that need it. Now
-    `~(worst <= limit)`.
+    detected and the repair would silently decline to fire on exactly the cells that need it.
+    ⚠️ **The first fix, `~(worst <= limit)`, was STILL blind to it (found 2026-09-21), because
+    `worst = max|M2⁻¹|` had already lost the NaN.** XLA's CPU max-reduction does not reliably propagate
+    one: jax 0.10.2, macOS arm64, an all-NaN row reduces to NaN in a 4-cell array and to **-inf** in a
+    1000-cell one, and to -inf on the 162-cell `tetrahedral_grid_3d(3, perturb=0.25, seed=6)` fixture —
+    which then passes `worst <= limit` as determined. Now each entry is compared and the booleans
+    reduced: `~jnp.all(|M2⁻¹| <= limit, axis=(1, 2))`. **A reduction that could see a NaN must never
+    come before the comparison that is meant to catch it.** Pinned by
+    `test_a_non_finite_correction_counts_as_undetermined_at_any_mesh_size`, whose 4- and 1000-cell arms
+    fail the plain `>` form and the reduce-then-negate form respectively (mutation-checked).
+    **It surfaced as a CI flake** (`assert 16 == 18` in
+    `test_cells_a_condition_leaves_undetermined_keep_their_geometry_only_correction`, some runners and not
+    others): that test thresholded `np.max(...) > limit` itself, so two NaN cells dropped out of its
+    count. It now takes the stuck set structurally (cells owning ≥2 boundary faces) and asserts
+    `_undetermined_cells` flags exactly that set. Injecting NaN into two of the 18 inverses
+    reproduces the CI count of 16 under the old test and fails the old production guard under the new one. ⚠️ Why only some
+    runners produce a NaN was **not established** — a NaN from an exactly-zero pivot on some BLAS
+    kernel paths is the consistent reading; the CI log records no CPU model.
   - `fastest_boundary_closure` compared `rate < best_rate`, so a closure whose rate came back
     non-finite lost *by accident* rather than on its merits. Non-finite now maps to infinity, making
     the ordering total.

@@ -19,11 +19,17 @@ from aquaflux.radiation.model import (
 )
 from aquaflux.radiation.occluders import Cylinder
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian
-from aquaflux.radiation.self_occlusion import NoOcclusion, RayCastOcclusion
+from aquaflux.radiation.self_occlusion import NoOcclusion, RayCastOcclusion, SilhouetteOcclusion
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.solve import relative_residual_gmres
 
-from tests.unit.radiation_references import box, inward_box, rectangle_triangles, stretched_box
+from tests.unit.radiation_references import (
+    box,
+    closed_drum,
+    inward_box,
+    rectangle_triangles,
+    stretched_box,
+)
 
 
 def surface_model(surfaces, *, occluders=(), **settings):
@@ -575,15 +581,75 @@ def test_an_unset_setting_is_not_passed_on_at_all():
     value that function would have chosen: a second copy drifts the day the first one moves, and
     nothing fails when it does — the build simply keeps using the stale number.
     """
-    for options in ("transfer_options", "gather_options", "visibility_options"):
+    for options in (
+        "transfer_options",
+        "gather_options",
+        "visibility_options",
+        "receiver_visibility_options",
+    ):
         assert getattr(RadiationSettings(), options)() == {}, options
     assert RadiationSettings(receiver_quadrature=3).transfer_options() == {"receiver_quadrature": 3}
     assert RadiationSettings(gather_chunk_size=8).transfer_options() == {}
     assert RadiationSettings(gather_chunk_size=8).gather_options() == {"chunk_size": 8}
-    # The two shadow masks are built from one mapping, so self-occlusion reaches both of them.
     shadowed = RadiationSettings(self_occlusion=RayCastOcclusion())
     assert shadowed.visibility_options() == {"self_occlusion": RayCastOcclusion()}
     assert shadowed.transfer_options() == {"self_occlusion": RayCastOcclusion()}
+
+
+@pytest.mark.parametrize("strategy", [RayCastOcclusion(), NoOcclusion()])
+def test_self_occlusion_reaches_both_masks_when_it_can_serve_both(strategy):
+    """Switching self-occlusion off, or choosing the ray test, must apply to both masks alike.
+
+    Built from separate choices, the facet mask and the receiver mask disagree about whether the
+    surface shadows itself, and nothing in either mask shows it: a field lit through a sleeve the
+    surface solve treated as opaque looks like any other field.
+    """
+    settings = RadiationSettings(self_occlusion=strategy)
+    assert settings.receiver_visibility_options() == {"self_occlusion": strategy}
+
+
+def test_a_strategy_that_cannot_serve_a_point_in_the_fluid_leaves_the_receivers_to_their_default():
+    """The silhouette clip needs a receiver normal, so the volume mask must not be handed it.
+
+    It is dropped rather than replaced, so the volume mask reaches its own default instead of a
+    second copy of that default written in the settings.
+    """
+    settings = RadiationSettings(self_occlusion=SilhouetteOcclusion())
+    assert settings.visibility_options() == {"self_occlusion": SilhouetteOcclusion()}
+    assert settings.receiver_visibility_options() == {}
+
+
+def test_an_explicit_receiver_strategy_wins():
+    """``receiver_occlusion`` is the override, whatever the facets use."""
+    settings = RadiationSettings(
+        self_occlusion=SilhouetteOcclusion(), receiver_occlusion=NoOcclusion()
+    )
+    assert settings.receiver_visibility_options() == {"self_occlusion": NoOcclusion()}
+    assert settings.visibility_options() == {"self_occlusion": SilhouetteOcclusion()}
+
+
+def test_a_model_can_be_built_with_the_silhouette_strategy():
+    """The documented way to select the strategy must build a model, with each mask served right.
+
+    Before ``receiver_occlusion`` existed this raised: the model handed one strategy to both
+    masks, and the silhouette clip refuses the volume receivers. The fixture is non-convex, so
+    the facet mask must hold fractions strictly between nought and one -- which only the clip
+    produces -- while the receiver mask holds only noughts and ones, some of them ones: the ray
+    test, and not self-occlusion switched off.
+    """
+    sleeve = closed_drum(8, radius=0.15, half_height=0.3) + np.array([0.5, 0.5, 0.5])
+    surfaces = Surfaces.from_triangles(
+        np.concatenate([inward_box(2), sleeve]), emission=1.0, reflectance=0.5
+    )
+    receivers = np.array([[0.2, 0.5, 0.5], [0.8, 0.5, 0.5], [0.5, 0.2, 0.3], [0.5, 0.8, 0.7]])
+    model = build_radiation_model(
+        receivers, surfaces, settings=RadiationSettings(self_occlusion=SilhouetteOcclusion())
+    )
+    facets = np.asarray(model.transfer.visibility.hidden_by_geometry)
+    assert np.any((facets > 1e-6) & (facets < 1.0 - 1e-6)), "the facet mask is not the clip's"
+    volume = np.asarray(model.receiver_visibility.hidden_by_geometry)
+    assert np.all((volume == 0.0) | (volume == 1.0)), "the receiver mask is not the ray test's"
+    assert volume.any(), "the receiver mask shadows nothing, so self-occlusion was switched off"
 
 
 def test_a_setting_reaches_the_transfer_build():

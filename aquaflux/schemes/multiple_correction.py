@@ -867,12 +867,18 @@ def _undetermined_cells(m2_inverse: jnp.ndarray) -> jnp.ndarray | None:
     """
     if isinstance(jnp.asarray(m2_inverse), jax.core.Tracer):
         return None
-    worst = jnp.max(jnp.abs(m2_inverse), axis=(1, 2))
-    # ⚠️ NOT `worst > limit`: a singular inverse is large on one platform and NON-FINITE on another
+    # ⚠️ A singular inverse is large under one linear-algebra library and NON-FINITE under another
     # (measured -- the same tetrahedral mesh gives 1e16 under macOS Accelerate and NaN under the
-    # BLAS on CI), and `NaN > limit` is False. Testing the negation catches both, where the obvious
-    # comparison would silently decline to repair exactly the cells that need it most.
-    cells = jnp.flatnonzero(~(worst <= _UNDETERMINED_CORRECTION))
+    # library on CI), so a NaN has to count as undetermined. Two obvious spellings silently decline
+    # to repair exactly those cells. `max|M2^-1| > limit` fails because `NaN > limit` is False. And
+    # reducing to `max|M2^-1|` first fails however the comparison is written, because the CPU
+    # backend's max-reduction does not reliably propagate a NaN: with jax 0.10.2 on macOS arm64 an
+    # all-NaN row reduces to NaN in a 4-cell array but to -inf in a 1000-cell one, and to -inf on
+    # this module's own 162-cell tetrahedral test mesh -- which then passes `worst <= limit`. So
+    # compare every entry and reduce the booleans: `NaN <= limit` is False entry by entry, and a
+    # boolean reduction has no NaN to lose.
+    determined = jnp.all(jnp.abs(m2_inverse) <= _UNDETERMINED_CORRECTION, axis=(1, 2))
+    cells = jnp.flatnonzero(~determined)
     return cells if cells.size else None
 
 
