@@ -34,7 +34,9 @@ against what is still unblocked, so the method adds *areas*: two blockers coveri
 contribute ``0.54 + 0.54 = 1.08`` where a ray test's ``blocked or blocked`` is idempotent. A
 tiling of one surface is safe -- its pieces do not overlap in projection, so per-triangle
 fractions simply add -- and so is any sight line crossing front-facing geometry once, which
-covers a sleeve, a baffle, a wall, and the bent duct this package exists for. It errs **dark**,
+covers a sleeve, a wall, and the bent duct this package exists for, and a zero-thickness baffle
+once it is declared two-sided (see
+:class:`~aquaflux.radiation.self_occlusion.SilhouetteOcclusion`). It errs **dark**,
 and only where two *separate* front-facing silhouettes overlap in angle: one sleeve behind
 another in a multi-lamp bundle, or a serpentine channel seen across two walls. The exact repair
 is to clip each blocker against the remaining unblocked region, depth-sorted and progressive --

@@ -11,8 +11,8 @@ injected rather than one being chosen here:
   every pair whose shadow edge it does not land on.
 * :class:`SilhouetteOcclusion` clips the source's angular extent against each blocker's
   silhouette and returns the covered fraction. Exact for a sight line crossing front-facing
-  geometry once -- a sleeve, a baffle, a wall, a bent duct -- and the only treatment that moves
-  the *worst* pair rather than the average. It **errs dark** where two separate front-facing
+  geometry once -- a sleeve, a wall, a bent duct, a baffle declared two-sided -- and the only
+  treatment that moves the *worst* pair rather than the average. It **errs dark** where two separate front-facing
   silhouettes overlap in angle, because it adds areas rather than unioning them, so it reports
   a count alongside the fraction and a count of one proves that pair exact.
 
@@ -27,6 +27,7 @@ every gradient.
 from __future__ import annotations
 
 import abc
+import warnings
 from typing import ClassVar
 
 import equinox as eqx
@@ -34,6 +35,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from aquaflux.radiation.checks import open_facets
 from aquaflux.radiation.silhouette import (
     angular_cone,
     beyond_source_plane,
@@ -231,11 +233,28 @@ class SilhouetteOcclusion(SelfOcclusion):
     survivors. The cull's survival falls as the mesh refines -- a finer pair sweeps a narrower
     pencil -- which is what keeps this from costing ``n**3``.
 
+    **Which blockers count, and why it has to be declared.** A blocker counts only from the
+    side it faces, unless its body is named in :attr:`two_sided`. On a closed, consistently
+    wound surface that is exact: a blocked sight line leaves the medium through one face and
+    re-enters through another, and only the first faces the receiver, so counting back faces too
+    would add the same shadow twice. A zero-thickness sheet -- a baffle given as one layer of
+    triangles -- has the medium on both sides and is crossed once from either, so seen from
+    behind it would hide nothing: light passes straight through it. Topology cannot settle this
+    alone (see :func:`~aquaflux.radiation.checks.open_facets`): a sheet welded to a wall all the
+    way round looks closed, and a duct exported without its end caps looks like a sheet. So the
+    sheets are named, and any open piece of surface left undeclared is **warned about** when the
+    field is built rather than silently leaking light. The ray test has no such distinction to
+    make -- it asks only whether a segment crosses a triangle -- which is why it needs none.
+
     Attributes
     ----------
     work_chunk : int
         The largest number of surviving (source, blocker) pairs clipped per compiled call, which
         is what bounds this pass's memory.
+    two_sided : tuple of str
+        Bodies, by their name in :attr:`~aquaflux.radiation.surfaces.Surfaces.solid_names`, that
+        block from both sides: zero-thickness sheets. Empty by default. Naming a closed body here
+        makes it block twice, which errs dark.
 
         Chunks are padded up to a **power of two** rather than to this length. Padding every
         chunk to the cap compiles exactly one program, which sounds like the thing to want and
@@ -248,6 +267,7 @@ class SilhouetteOcclusion(SelfOcclusion):
     serves_volume_receivers: ClassVar[bool] = False
 
     work_chunk: int = 262_144
+    two_sided: tuple[str, ...] = ()
 
     def field(self, surfaces, points, near, receiver_facet) -> OcclusionField:
         """Clip the survivors. See :meth:`SelfOcclusion.field`."""
@@ -275,12 +295,13 @@ class SilhouetteOcclusion(SelfOcclusion):
         n_facets = int(surfaces.n_facets)
         n_receivers = int(points.shape[0])
         index = np.arange(n_facets)
+        either_side = self._either_side(surfaces)
 
         fraction = np.zeros((n_receivers, n_facets))
         blockers = np.zeros((n_receivers, n_facets), dtype=np.int32)
         for row in range(n_receivers):
             source, blocker = self._candidates(
-                points[row], normal[facet_of[row]], vertices, centroid, normal, near
+                points[row], normal[facet_of[row]], vertices, centroid, normal, near, either_side
             )
             # A facet never blocks itself, and never blocks the facet the receiver sits on.
             legal = (source != blocker) & (blocker != facet_of[row]) & (source != facet_of[row])
@@ -300,9 +321,36 @@ class SilhouetteOcclusion(SelfOcclusion):
             overlapping=jnp.asarray(blockers > 1),
         )
 
+    def _either_side(self, surfaces) -> np.ndarray:
+        """Which facets block from both sides, warning about open pieces nobody declared."""
+        names = tuple(surfaces.solid_names)
+        unknown = sorted(set(self.two_sided) - set(names))
+        if unknown:
+            msg = (
+                f"two_sided names no body in this surface set: {unknown}; have {list(names)}. "
+                "A misspelt sheet would otherwise be counted from one side only, and let light "
+                "through from behind without any error."
+            )
+            raise ValueError(msg)
+        solid = np.asarray(surfaces.solid_id)
+        declared = np.isin(solid, [names.index(name) for name in self.two_sided])
+        undeclared = open_facets(np.asarray(surfaces.vertices)) & ~declared
+        if np.any(undeclared):
+            bodies = sorted({names[k] for k in np.unique(solid[undeclared])})
+            warnings.warn(
+                f"SilhouetteOcclusion: {int(np.count_nonzero(undeclared))} facet(s) of "
+                f"{bodies} belong to pieces of surface with a free edge, and are counted as "
+                "blocking only from the side they face -- right for a solid whose surface was "
+                "left open, wrong for a zero-thickness sheet, which then lets light straight "
+                "through from behind. Name the sheets in `two_sided`, close the surface, or use "
+                "RayCastOcclusion.",
+                stacklevel=3,
+            )
+        return declared
+
     @staticmethod
     @jax.jit
-    def _survivors(receiver, receiver_normal, vertices, centroid, normal, near):
+    def _survivors(receiver, receiver_normal, vertices, centroid, normal, near, either_side):
         """Which (source, blocker) pairs could possibly matter, as a dense mask."""
         relative = vertices - receiver
         cone = angular_cone(relative)
@@ -317,17 +365,20 @@ class SilhouetteOcclusion(SelfOcclusion):
         # A blocker entirely behind the receiver's own tangent plane blocks nothing in front.
         keep &= ~jnp.all(jnp.sum(relative * receiver_normal, axis=-1) < 0.0, axis=-1)[None, :]
         # Front-facing only: a sight line leaving a wetted surface and re-entering crosses
-        # front-facing geometry exactly once, so the back faces would double the count.
-        facing = jnp.sum(normal * (receiver - centroid), axis=-1) > 0.0
+        # front-facing geometry exactly once, so the back faces would double the count. A
+        # declared sheet is crossed once from either side, so it counts from both.
+        facing = (jnp.sum(normal * (receiver - centroid), axis=-1) > 0.0) | either_side
         # The near margin keeps a facet from shadowing its own immediate neighbourhood, the same
         # role it plays for the ray test.
         far_enough = jnp.linalg.norm(receiver - centroid, axis=-1) > near
         return keep & (facing & far_enough)[None, :]
 
-    def _candidates(self, receiver, receiver_normal, vertices, centroid, normal, near):
+    def _candidates(self, receiver, receiver_normal, vertices, centroid, normal, near, either_side):
         """The surviving pairs, compacted on the host -- legal because the mask is frozen."""
         keep = np.asarray(
-            self._survivors(receiver, receiver_normal, vertices, centroid, normal, near)
+            self._survivors(
+                receiver, receiver_normal, vertices, centroid, normal, near, either_side
+            )
         )
         return np.nonzero(keep)
 

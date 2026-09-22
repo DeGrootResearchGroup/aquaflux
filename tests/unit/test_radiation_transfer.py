@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 from aquaflux.radiation.profiles import Isotropic, Lambertian
@@ -200,18 +202,24 @@ def test_point_sources_take_no_part_in_the_transfer():
 #: Gauss-Legendre quadrature, where the blocker's shadow is a square wholly inside the second.
 WALTON_OBSTRUCTED_SQUARES = 0.11562061
 
+#: The two bodies of the obstructed pair, both zero-thickness sheets.
+SHEETS = ("plates", "blocker")
+
 
 def _obstructed_squares(n: int, strategy) -> tuple[float, float]:
     """``F_12`` and ``F_21`` for Walton's obstructed pair, each plate meshed ``n x n``.
 
-    The blocker is **two-sided** -- its two triangles, and the same two wound the other way.
-    The silhouette clip counts only blockers facing the receiver, which is exact on a closed,
-    consistently wound surface; a lone one-sided sheet is invisible to it from behind, so a
-    single copy would test that convention rather than the view factor.
+    The blocker is a single one-sided sheet, as a baffle usually is in a surface file. The
+    plates and the blocker are all zero-thickness sheets, and named so, which the silhouette
+    clip needs in order to count a sheet seen from behind.
     """
     blocker = rectangle_triangles([0.0, 0.0, 0.25], [0.25, 0.0, 0.0], [0.0, 0.25, 0.0])
-    vertices = np.concatenate([facing_plates(n, half=0.5, gap=0.5), blocker, blocker[:, ::-1, :]])
-    surfaces = Surfaces.from_triangles(vertices, reflectance=0.0)
+    surfaces = Surfaces.from_triangles(
+        np.concatenate([facing_plates(n, half=0.5, gap=0.5), blocker]),
+        reflectance=0.0,
+        solid_id=[0] * (4 * n * n) + [1] * len(blocker),
+        solid_names=SHEETS,
+    )
     matrix, _ = build_transfer(surfaces, self_occlusion=strategy).assemble(surfaces)
     matrix, area = np.asarray(matrix), np.asarray(surfaces.area)
     lower, upper = slice(0, 2 * n * n), slice(2 * n * n, 4 * n * n)
@@ -223,7 +231,9 @@ def _obstructed_squares(n: int, strategy) -> tuple[float, float]:
 
 
 @pytest.mark.parametrize(
-    "strategy", [RayCastOcclusion(), SilhouetteOcclusion()], ids=["ray", "silhouette"]
+    "strategy",
+    [RayCastOcclusion(), SilhouetteOcclusion(two_sided=SHEETS)],
+    ids=["ray", "silhouette"],
 )
 def test_an_obstructed_pair_converges_on_the_published_view_factor(strategy):
     """Case 8c: an exact answer for occlusion between areas, in closed form.
@@ -247,3 +257,29 @@ def test_an_obstructed_pair_converges_on_the_published_view_factor(strategy):
     rates = np.abs(errors[0] / errors[1])
     assert np.all((rates > 3.5) & (rates < 4.8)), f"not second order: {rates}"
     assert np.all(np.abs(errors[1]) < 3e-4), f"errors at 12 plates a side: {errors[1]}"
+
+
+def test_an_undeclared_sheet_is_warned_about_and_hides_nothing_from_behind():
+    """The failure the declaration exists for, pinned so it cannot come back quietly.
+
+    Counted only from the side it faces, the one-sided blocker hides nothing from the plate
+    behind it -- that plate sees the unobstructed 0.1998 -- while still shadowing the plate it
+    faces. So the build must say so, naming the bodies whose pieces have a free edge.
+    """
+    with pytest.warns(UserWarning, match=r"free edge.*two_sided") as caught:
+        behind, facing = _obstructed_squares(6, SilhouetteOcclusion())
+    assert "'blocker'" in str(caught[0].message) and "'plates'" in str(caught[0].message)
+    clear, _ = _obstructed_squares(6, NoOcclusion())
+    assert behind == pytest.approx(clear, rel=1e-12)
+    assert facing == pytest.approx(WALTON_OBSTRUCTED_SQUARES, abs=2e-3)
+
+
+def test_declaring_every_sheet_silences_the_warning():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _obstructed_squares(2, SilhouetteOcclusion(two_sided=SHEETS))
+
+
+def test_a_misspelt_sheet_is_refused_rather_than_left_one_sided():
+    with pytest.raises(ValueError, match=r"two_sided names no body.*\['blokcer'\]"):
+        _obstructed_squares(2, SilhouetteOcclusion(two_sided=("plates", "blokcer")))
