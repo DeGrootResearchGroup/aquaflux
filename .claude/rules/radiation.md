@@ -442,6 +442,21 @@ fields so they fall through to defaults, so a `None` meaning "off" would silentl
 mask back *on*. A surface that does not shadow itself is the defect the module exists to fix, and
 a mask silently missing it looks exactly like one that includes it.
 
+**A model builds TWO masks — facet to facet, and facet to volume receiver — and they are routed
+separately** (`RadiationSettings.visibility_options()` for the first,
+`receiver_visibility_options()` for the second). `receiver_occlusion` overrides the second; unset,
+it follows `self_occlusion` wherever that strategy declares `serves_volume_receivers` (the ray test
+and `NoOcclusion` do), so "off" and "ray test" still apply to both masks alike. A strategy that
+cannot serve a point in the fluid (`SilhouetteOcclusion`) is *not passed on*, so the volume mask
+reaches `build_visibility`'s own default — the ray test — rather than a second copy of it. ⚠️ **Until
+this split, `build_radiation_model` RAISED with the silhouette strategy selected** (#471 shipped it
+that way): one strategy went to both masks and the clip correctly refuses volume receivers. Nothing
+caught it because every silhouette test called `build_transfer` or the strategy directly and none
+built a model; `test_a_model_can_be_built_with_the_silhouette_strategy` does now. ⚠️ **So with the
+silhouette selected, the fluence rate in the fluid is still all-or-nothing per pair** — only the
+surface transfer gets the exact fraction. Teaching the clip the unprojected (volume) measure is
+the real fix and is a separate piece of work.
+
 **Exclusion is by index, never by tolerance.** Every ray leaves its facet's centroid, so the
 facet is always hit at zero distance. Excluding its whole *solid* would be wrong — a bent duct is
 exactly the case this is for, and there the blocking wall belongs to the same body as the emitter.
@@ -1308,8 +1323,9 @@ the far wall counted too; front-facing gives 1.33e-15 against dense truth).
 ⚠️ **EVERY RECEIVER MUST SIT ON A FACET.** The fraction is of a *projected* solid angle, which needs
 the receiver's normal; a volume point has none, and the unprojected measure a volume gather uses is
 a different quantity. `SilhouetteOcclusion.field` raises for `receiver_facet=None` and for any
-`-1`, naming `RayCastOcclusion` — an error, because silently falling back would be the plausible
-brighter field this subsystem keeps warning about.
+`-1`, naming `RayCastOcclusion` — an error, because silently falling back inside the strategy
+would be the plausible brighter field this subsystem keeps warning about. The model does the
+routing instead, openly: see `receiver_occlusion` above.
 
 ⚠️ **WHERE IT OVER-COUNTS, STATED EXACTLY: the angular overlap between two front-facing
 silhouettes.** Each blocker is clipped against the *source*, not against what is still unblocked,
