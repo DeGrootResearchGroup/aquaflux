@@ -973,7 +973,9 @@ waiter waits on itself forever. A hand-rolled `sphinx-build` that skips deleting
 `run_case.sh` puts in one place everything the surrounding rules used to ask you to remember:
 unbuffered output **redirected, never piped**, to a timestamped log; the machine held awake; a
 free-memory and load pre-flight; a refusal to start a second case; and a run-file recording pid,
-worktree, branch, commit and case settings. Its most valuable output is not the log — it is that
+worktree, branch, commit and case settings; and, under `--wait`, the case's **own** exit status
+(written beside the log by a launch wrapper — before 2026-09-22 both `--wait` forms exited `0` for a
+crashed case). Its most valuable output is not the log — it is that
 **"is this run mine, and what is it testing?" has a written answer**, a question that has been got
 wrong from the process table alone.
 

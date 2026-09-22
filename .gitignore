@@ -59,6 +59,7 @@ docs/api.md
 
 # Case-runner logs: one per run, timestamped; artifacts of a measurement, not sources.
 validation/**/run-*.log
+validation/**/run-*.exit
 
 # States and march logs a probe writes for its own later runs. They are recomputable from the case
 # (one ramp, minutes) and a checkpoint is a snapshot of a measurement rather than a source.

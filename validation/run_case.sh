@@ -13,7 +13,10 @@
 #     numbers could not be compared against anything;
 #   * two sessions started a case in the same working tree at once, each believing the other's process
 #     was its own, on a machine with barely enough memory for one;
-#   * a waiter looking for the run with `pgrep -f compare.py` matched ITSELF and waited forever.
+#   * a waiter looking for the run with `pgrep -f compare.py` matched ITSELF and waited forever;
+#   * `--wait` exited 0 for a case that had died -- of a `ModuleNotFoundError`, and of an out-of-memory
+#     kill that left no traceback at all -- because the case ran detached and nothing collected its
+#     status, so `run_case.sh ... --wait && next-step` went on to the next step after a crash.
 #
 # None of those are knowledge problems, so this script exists to make them unavailable rather than
 # documented. It runs the case unbuffered, redirects (never pipes) to a timestamped log, holds the
@@ -26,10 +29,11 @@
 #
 # Usage
 #   validation/run_case.sh <script.py>          launch, print how to watch, return immediately
-#   validation/run_case.sh <script.py> --wait   launch and block until it exits
+#   validation/run_case.sh <script.py> --wait   launch, block until it exits, exit with ITS status
 #   validation/run_case.sh --status             what is running, since when, under what settings
 #   validation/run_case.sh --running            exit 0 and print the pid if a case is live, else 1
-#   validation/run_case.sh --wait               block on whatever is already running
+#   validation/run_case.sh --wait               block on whatever is already running, and exit
+#                                               with its status
 #   validation/run_case.sh <script.py> --force  start even if the health pre-flight objects
 #
 # Case settings are passed as environment, and are recorded in the run-file verbatim:
@@ -40,6 +44,9 @@ set -euo pipefail
 RUN_FILE="${TMPDIR:-/tmp}/aquaflux-case-run"
 MIN_FREE_GB="${AQUAFLUX_MIN_FREE_GB:-5}"
 MAX_LOAD="${AQUAFLUX_MAX_LOAD:-8}"
+# How often a waiter polls the case's pid. Twenty seconds is nothing against a 30-60 minute march; the
+# override exists so a test of the waiter does not spend twenty seconds per case.
+POLL_SECONDS="${AQUAFLUX_CASE_POLL_SECONDS:-20}"
 
 die() { printf 'run_case: %s\n' "$1" >&2; exit 1; }
 
@@ -126,17 +133,60 @@ show_status() {
   echo "  elapsed: $(ps -o etime= -p "$pid" | tr -d ' ')"
 }
 
-# Block until the recorded run exits. Polls the recorded PID, so it cannot match itself.
+# Appended to the run's OWN log, not only printed, so the warning travels with the artifact it
+# invalidates -- a log read months later carries its own provenance.
+report_sleep() {
+  local started="$1" log="$2" n secs
+  read -r n secs <<< "$(sleep_since "$started")"
+  if [ "${n:-0}" -gt 0 ] 2>/dev/null && [ "${secs:-0}" -gt 60 ] 2>/dev/null; then
+    {
+      echo
+      echo "[!] THIS RUN SPANNED $n MACHINE SLEEP(S), ~$((secs / 60)) MIN TOTAL."
+      echo "[!] Its wall-clock columns counted that as compute and are VOID for cost comparison."
+      echo "[!] Step counts, cycle counts and residuals are unaffected -- use those."
+    } | tee -a "$log"
+  fi
+}
+
+# Where the case's exit status is written: beside its log, named after it, so a waiter that knows the
+# log knows where to look. Not in the run-file, which `live_pid` deletes the moment the pid is gone --
+# i.e. exactly when the status is wanted, and possibly by some other caller's `--status`.
+status_file_for() { printf '%s' "${1%.log}.exit"; }
+
+# Block until the case with this pid exits, then report how it went and RETURN ITS EXIT STATUS.
+#
+# Polls `kill -0` on the recorded pid, so it cannot match itself the way a `pgrep -f` does. The pid is
+# the launch wrapper's, which writes the status file before it exits -- so once `kill -0` fails the
+# status is already on disk, and there is no window in which a finished case reads as "no status".
+#
+# A missing status file is reported as a failure, not as success: it means the wrapper itself was
+# killed (or the run was launched by a version of this script that did not record one), and "we do not
+# know how it ended" is not a result anything should proceed on.
+await_case() {
+  local pid="$1" log="$2" started="$3" status_file status
+  while kill -0 "$pid" 2>/dev/null; do sleep "$POLL_SECONDS"; done
+  echo "case exited"
+  [ -n "$log" ] && [ -f "$log" ] && tail -5 "$log"
+  [ -n "$started" ] && [ -n "$log" ] && [ -f "$log" ] && report_sleep "$started" "$log"
+  status_file=$(status_file_for "$log")
+  status=$(cat "$status_file" 2>/dev/null || true)
+  if ! [[ "$status" =~ ^[0-9]+$ ]]; then
+    echo "run_case: NO exit status was recorded (expected $status_file) -- treating the run as failed." >&2
+    return 1
+  fi
+  echo "exit status: $status"
+  return "$status"
+}
+
+# `--wait` with no script: block on whatever the run-file names.
 wait_for_run() {
-  local pid log
+  local pid log started
   pid=$(live_pid)
   if [ -z "$pid" ]; then echo "no case is running"; return 0; fi
   log=$(sed -n 's/^log=//p' "$RUN_FILE")
+  started=$(sed -n 's/^started=//p' "$RUN_FILE")
   echo "waiting on pid $pid; log: $log"
-  while kill -0 "$pid" 2>/dev/null; do sleep 20; done
-  echo "case exited"
-  [ -n "$log" ] && [ -f "$log" ] && tail -5 "$log"
-  return 0
+  await_case "$pid" "$log" "$started"
 }
 
 WANT_WAIT=0
@@ -156,7 +206,7 @@ for arg in "$@"; do
 done
 
 if [ -z "$SCRIPT" ]; then
-  [ "$WANT_WAIT" -eq 1 ] && { wait_for_run; exit 0; }
+  if [ "$WANT_WAIT" -eq 1 ]; then status=0; wait_for_run || status=$?; exit "$status"; fi
   die "no script given (try --status)"
 fi
 [ -f "$SCRIPT" ] || die "no such script: $SCRIPT"
@@ -176,9 +226,11 @@ if [ -n "$EXISTING" ]; then
 fi
 
 # --- health pre-flight ----------------------------------------------------------------------------
-FREE=$(free_gb)
-LOAD=$(load_1min)
+# Measured only when it will be judged: `free_gb` reads `vm_stat`, which exists only on macOS, so taking
+# the reading unconditionally made `--force` fail there too, on a number it was about to ignore.
 if [ "$FORCE" -eq 0 ]; then
+  FREE=$(free_gb)
+  LOAD=$(load_1min)
   if [ "$FREE" -lt "$MIN_FREE_GB" ]; then
     die "only ${FREE} GB free (want >= ${MIN_FREE_GB}). Wait, or --force."
   fi
@@ -192,19 +244,56 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 STARTED_AT=$(date "+%Y-%m-%d %H:%M:%S")
 LOG="$(cd "$(dirname "$SCRIPT")" && pwd)/run-${STAMP}.log"
 
-# `caffeinate -ims` holds the machine awake for the run's lifetime. A march that spans a sleep keeps
-# converging correctly but its per-step wall-clock silently absorbs the sleep, which makes the log
-# useless for the cost comparison it was run for -- and nothing in the log says so. Absent elsewhere
-# than macOS, so it is optional rather than required.
-HOLD_AWAKE=""
-command -v caffeinate >/dev/null 2>&1 && HOLD_AWAKE="caffeinate -ims"
+STATUS_FILE=$(status_file_for "$LOG")
 
+# The case runs inside a wrapper that outlives it by exactly one line: the one recording its exit
+# status. The case is detached -- it must survive this script, and `--wait` on an already-running case
+# is not its parent -- so no waiter can `wait` for it, and without the wrapper its status went nowhere
+# and every `--wait` exited 0 however the case ended.
+#
+#   * `pid=` in the run-file is the WRAPPER's. It is alive exactly as long as the case plus the status
+#     write, so `kill -0` on it stays the liveness test and a finished case always has its status on
+#     disk by the time a waiter notices it has gone.
+#   * The case runs as the wrapper's background child and the wrapper `wait`s on it, so a signal sent
+#     to the recorded pid (`kill <pid>`, the advice this script gives) is FORWARDED rather than killing
+#     the wrapper and orphaning a case that would then run on unseen. `wait` returns early when a
+#     trapped signal lands, hence the loop: it waits again until the case itself is gone.
+#   * A death by signal is recorded as 128+N, the shell's own convention -- so an out-of-memory SIGKILL,
+#     which leaves no traceback in the log, still reads as 137 rather than as nothing.
+#   * The status also goes at the foot of the log, so the artifact read months later says how it ended.
+#   * The wrapper's own stdio is detached. It would otherwise hold the caller's stdout open for the
+#     case's whole lifetime, so a caller capturing this script's output -- `$(run_case.sh x.py)`, or a
+#     test -- would block until the case ended even without `--wait`.
+#
 # Unbuffered, and REDIRECTED rather than piped. A pipe through `tail`/`head` buffers to EOF, so the
 # run is invisible while it matters and the exit status read afterwards belongs to the pipe's last
 # stage rather than to the case.
-# shellcheck disable=SC2086
-$HOLD_AWAKE python3 -u "$SCRIPT" > "$LOG" 2>&1 &
+(
+  set +e
+  python3 -u "$SCRIPT" > "$LOG" 2>&1 &
+  case_pid=$!
+  trap 'kill -TERM "$case_pid" 2>/dev/null' TERM
+  trap 'kill -HUP "$case_pid" 2>/dev/null' HUP
+  wait "$case_pid"
+  status=$?
+  while kill -0 "$case_pid" 2>/dev/null; do
+    wait "$case_pid"
+    status=$?
+  done
+  if [ "$status" -gt 128 ]; then how=" (killed by signal $((status - 128)))"; else how=""; fi
+  printf '\n[run_case] the case exited with status %s%s\n' "$status" "$how" >> "$LOG"
+  printf '%s\n' "$status" > "$STATUS_FILE"
+) < /dev/null > /dev/null 2>&1 &
 PID=$!
+
+# `caffeinate` holds the machine awake for as long as the run's pid lives. A march that spans a sleep
+# keeps converging correctly but its per-step wall-clock silently absorbs the sleep, which makes the log
+# useless for the cost comparison it was run for -- and nothing in the log says so. It watches the pid
+# (`-w`) rather than wrapping the case, so it stays out of the path the exit status travels. Absent
+# elsewhere than macOS, so it is optional rather than required.
+if command -v caffeinate >/dev/null 2>&1; then
+  caffeinate -ims -w "$PID" < /dev/null > /dev/null 2>&1 &
+fi
 
 {
   echo "pid=$PID"
@@ -226,21 +315,6 @@ PID=$!
   env | grep -E '^(BFS3D|PITZ|UV|AQUAFLUX|ILU0_SWEEP|PROBE|PROFILE|CONSISTENCY|FLOW|TAPER|LAM|TET)_' | sort | sed 's/^/env: /' || true
 } > "$RUN_FILE"
 
-# Appended to the run's OWN log, not only printed, so the warning travels with the artifact it
-# invalidates -- a log read months later carries its own provenance.
-report_sleep() {
-  local started="$1" log="$2" n secs
-  read -r n secs <<< "$(sleep_since "$started")"
-  if [ "${n:-0}" -gt 0 ] 2>/dev/null && [ "${secs:-0}" -gt 60 ] 2>/dev/null; then
-    {
-      echo
-      echo "[!] THIS RUN SPANNED $n MACHINE SLEEP(S), ~$((secs / 60)) MIN TOTAL."
-      echo "[!] Its wall-clock columns counted that as compute and are VOID for cost comparison."
-      echo "[!] Step counts, cycle counts and residuals are unaffected -- use those."
-    } | tee -a "$log"
-  fi
-}
-
 echo "launched pid $PID"
 sed 's/^/  /' "$RUN_FILE"
 echo
@@ -248,8 +322,7 @@ echo "  watch:  tail -f $LOG"
 echo "  status: validation/run_case.sh --status"
 
 if [ "$WANT_WAIT" -eq 1 ]; then
-  while kill -0 "$PID" 2>/dev/null; do sleep 20; done
-  echo "case exited"
-  tail -5 "$LOG"
-  report_sleep "$STARTED_AT" "$LOG"
+  status=0
+  await_case "$PID" "$LOG" "$STARTED_AT" || status=$?
+  exit "$status"
 fi
