@@ -49,12 +49,16 @@ is by when the value is needed rather than by what it describes: the shadow mask
 ``n^2`` geometry, and there is no later point in the data flow at which it could be frozen, while
 what each body lets through is a number a study varies and a gradient must reach.
 
-**The surface set is passed again at call time, and only its OPTICS are read.** Its geometry was
-frozen into the model and is not consulted — which is what makes ``surfaces.with_optics(...)``
-the cheap way to sweep emission or reflectance, and what makes moving a lamp with
-``with_geometry`` require a *new model*. Nothing detects a moved surface set handed to an old
-model; the transfer matrix would simply be the one built for the old position. The same contract
-already governs the transfer matrix itself, and this is where it becomes user-visible.
+**The surface set is passed again at call time, and it must be the geometry the model was built
+for.** The transfer matrix and both shadow masks were frozen from the build-time geometry, while
+the direct gather reads the call-time vertices live -- so a moved surface set would give a field
+lit from the new position through shadows cast from the old one, plausible and wrong. The model
+therefore records a fingerprint of the geometry it was built for, and every call **refuses** a
+surface set whose concrete geometry differs: ``surfaces.with_optics(...)`` is the cheap way to
+sweep emission or reflectance, and moving a lamp with ``with_geometry`` needs a *new model*. The
+one exception is geometry under tracing -- a gradient with respect to a lamp's position -- which
+cannot be inspected and is what the live gather exists for: that derivative is taken with the
+shadows frozen, as every other frozen quantity here is.
 
 ⚠️ **``G`` is a bare ``(n_receivers,)`` array in the receivers' own order**, because a cell field
 is a bare array in every other signature in this library. There is no field type to wrap it in
@@ -69,8 +73,12 @@ nothing about cells, fluxes or residuals. Keeping that fence one-way is why
 
 from __future__ import annotations
 
+import hashlib
+
 import equinox as eqx
+import jax
 import jax.numpy as jnp
+import numpy as np
 
 from aquaflux.radiation.absorption import Absorption
 from aquaflux.radiation.gather import direct_fluence_rate, direct_irradiance
@@ -203,12 +211,17 @@ class RadiationModel(eqx.Module):
     settings : RadiationSettings
         What the build was told, kept so a later call chunks the gather the same way and so a
         result can say what produced it.
+    geometry : str
+        A fingerprint of the surface set's vertices and of which facets are point sources, the
+        two things the frozen arrays were built from. Every call checks the surface set it is
+        given against it.
     """
 
     receivers: jnp.ndarray
     transfer: TransferMatrix
     receiver_visibility: Visibility
     settings: RadiationSettings
+    geometry: str = eqx.field(static=True)
 
     @property
     def n_facets(self) -> int:
@@ -288,7 +301,38 @@ def build_radiation_model(
         transfer=transfer,
         receiver_visibility=receiver_visibility,
         settings=settings,
+        geometry=_geometry_fingerprint(surfaces),
     )
+
+
+def _geometry_fingerprint(surfaces: Surfaces) -> str | None:
+    """A digest of what the frozen arrays depend on, or ``None`` if the geometry is traced.
+
+    Exact rather than toleranced: :meth:`~aquaflux.radiation.surfaces.Surfaces.with_optics`
+    carries the same vertex array over, so a legitimate call matches bit for bit, and a surface
+    set that differs by any amount was not the one the shadows were cast from.
+    """
+    if isinstance(surfaces.vertices, jax.core.Tracer):
+        return None
+    digest = hashlib.sha256(np.ascontiguousarray(surfaces.vertices, dtype=float).tobytes())
+    digest.update(surfaces.is_point_source.tobytes())
+    return digest.hexdigest()
+
+
+def _check_geometry(model: RadiationModel, surfaces: Surfaces) -> None:
+    """Refuse a surface set whose concrete geometry is not the one the model was built for."""
+    found = _geometry_fingerprint(surfaces)
+    if found is None or found == model.geometry:
+        return
+    msg = (
+        f"this surface set's geometry is not the one the model was built for "
+        f"({surfaces.n_facets} facets given, {model.n_facets} built). The transfer matrix and "
+        "the shadow masks are frozen from the build-time geometry while the gather reads the "
+        "vertices given here, so the field would be lit from one geometry through the shadows "
+        "of another. To change optics, pass `surfaces.with_optics(...)` of the set the model was "
+        "built from; to change geometry, build a new model."
+    )
+    raise ValueError(msg)
 
 
 def radiosity(
@@ -308,7 +352,8 @@ def radiosity(
         The frozen geometry, built for these facets.
     surfaces : Surfaces
         Supplies the live optical properties: emission, reflectance and profile parameters. Its
-        geometry is not read here; that was frozen into ``model``.
+        geometry must be the one ``model`` was built from, and a different one is refused: the
+        point-source arrivals read it live, while the transfer and its mask are frozen.
     absorption : Absorption, optional
         The medium between facets. A uniform coefficient is applied in closed form against the
         frozen separations; any other kind re-walks the geometry for every pair on every call,
@@ -344,6 +389,7 @@ def radiosity(
     by ``1/(rho A)``, and zero reflectance is both the default and the value on every non-lamp
     surface of a real reactor.
     """
+    _check_geometry(model, surfaces)
     emission = jnp.asarray(surfaces.emission, dtype=float)
     reflectance = jnp.asarray(surfaces.reflectance, dtype=float)
     reflected, emitted = model.transfer.assemble(surfaces, absorption, transmittance)
@@ -469,7 +515,8 @@ def fluence_rate(
     model : RadiationModel
         The frozen geometry, built for these facets and these receivers.
     surfaces : Surfaces
-        Supplies the live optics. Its geometry is not read; that was frozen into ``model``.
+        Supplies the live optics. Its geometry must be the one ``model`` was built from, and a
+        different one is refused: the direct gather reads it live, while the shadows are frozen.
     absorption : Absorption, optional
         The medium. Applied both between facets and between facets and receivers.
     transmittance : array_like, shape ``(n_occluders,)``, optional

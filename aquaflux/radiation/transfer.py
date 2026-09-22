@@ -144,8 +144,8 @@ class TransferMatrix(eqx.Module):
         Parameters
         ----------
         surfaces : Surfaces
-            Read only for its angular distributions and, for a non-uniform medium, its
-            centroids. Its geometry is not consulted; that was frozen at the build.
+            Read for its angular distributions and, for a non-uniform medium, its centroids --
+            which must therefore be the ones the matrix was built from.
         absorption : Absorption, optional
             The medium between facets. A uniform coefficient goes through the frozen
             separations in closed form; anything else re-walks every pair.
