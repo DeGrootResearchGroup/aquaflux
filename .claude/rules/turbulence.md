@@ -19,6 +19,30 @@ the adjoint of the **unfrozen coupled residual**. Governed by the root `CLAUDE.m
 Principles; the flow block it feeds is `.claude/rules/flow.md`, and the Newton / linear-solve
 adjoint machinery it must reuse is `.claude/rules/solve.md`.
 
+## The gradient scheme is bound PER FIELD, at build (2026-09-22)
+
+`SSTTurbulence.build` binds the injected scheme twice — `k_gradient_scheme` and
+`omega_gradient_scheme` — against each field's own conditions, the shape `MomentumContinuity` has
+carried since #469. Two reasons, either sufficient:
+
+- **The conditions differ.** A wall prescribes `k` and lets `omega` extrapolate, so the linearization
+  a scheme prepares itself from is not the same for the two equations; one binding applied to both is
+  wrong for one of them, silently (both still reconstruct).
+- **`_assembler` runs inside the residual.** Every k/omega assembler is built per evaluation, so a
+  scheme bound there is bound against a **traced** mesh. A scheme whose preparation reads the
+  connectivity (`ProjectedStencilGradient`) cannot be, and raises; binding at build is what lets the
+  turbulence closure use one at all. `ResidualAssembler.build(..., bind_gradient_scheme=False)` is
+  how the pre-bound scheme is passed through.
+
+⚠️ **Storing the bindings is half of it — each equation must READ its own**, and that half is what a
+test looking at the stored schemes cannot see. `tests/unit/test_sst_transport.py` pins it by
+substitution (a stub scheme reconstructing zero), which needs two things to discriminate: a **frozen**
+closure, because the blending function reads both gradients and would otherwise carry one field's
+swap into the other's equation through the physics; and a **perturbed** mesh, because on an
+orthogonal one the diffusion's non-orthogonal correction vanishes and the k equation never reads its
+gradient at all. Mutation-verified four ways.
+
+
 ## How to read this file (read this before grepping it)
 
 Same three rules as `.claude/rules/solve.md`: **every entry sits under a `##` section** (scan up to the

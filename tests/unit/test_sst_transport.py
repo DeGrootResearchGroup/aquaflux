@@ -11,13 +11,20 @@ import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
-from aquaflux.discretization import FirstOrderUpwind
+from aquaflux.discretization import FirstOrderUpwind, ResidualAssembler
 from aquaflux.flow import VelocityFields
 from aquaflux.mesh import CellZones, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel, ZoneConstant
-from aquaflux.schemes import CorrectedGreenGauss, GradientScheme, ImposedGradient
+from aquaflux.schemes import (
+    CorrectedGreenGauss,
+    GradientScheme,
+    ImposedGradient,
+    MultipleCorrectionGradient,
+    ProjectedStencilGradient,
+)
 from aquaflux.solve import RootSolver
 from aquaflux.turbulence import (
     SSTClosureFields,
@@ -28,6 +35,8 @@ from aquaflux.turbulence import (
     omega_wall_gradient,
     production_and_limit,
 )
+
+from tests.support.meshes import perturbed_grid_2d
 
 NU = 1e-3
 
@@ -93,6 +102,167 @@ def _velocity(mesh, gradient):
         velocity=jnp.zeros((mesh.n_cells, mesh.dim)),
         boundary_velocity=jnp.zeros((mesh.n_faces, mesh.dim)),
         gradient=gradient,
+    )
+
+
+def _skewed_turbulence(gradient_scheme):
+    """The same model on a perturbed grid, where the gradient reaches the diffusion flux."""
+    mesh = perturbed_grid_2d(6, 4, lx=3.0, ly=1.0, perturb=0.25, seed=4, named_boundaries=True)
+    geometry = mesh.geometry()
+    return SSTTurbulence.build(
+        SSTModel(),
+        mesh,
+        geometry,
+        FirstOrderUpwind(),
+        PropertyModel({"viscosity": Constant(NU), "density": Constant(1.0)}),
+        gradient_scheme=gradient_scheme,
+        wall_patches=["bottom", "top"],
+        k_boundary=BoundaryConditions(
+            {
+                "left": Dirichlet(0.01),
+                "right": ZeroGradient(),
+                "bottom": Dirichlet(0.0),
+                "top": Dirichlet(0.0),
+            }
+        ),
+        omega_boundary=BoundaryConditions(
+            {
+                "left": Dirichlet(100.0),
+                "right": ZeroGradient(),
+                "bottom": ZeroGradient(),
+                "top": ZeroGradient(),
+            }
+        ),
+    )
+
+
+class _ZeroGradientScheme(GradientScheme):
+    """A stub reconstruction that returns zero, to show which equation reads which binding."""
+
+    def bind(self, mesh, geometry, boundary_linearization=None):
+        return self
+
+    def _reconstruct_gradient(
+        self,
+        field,
+        mesh,
+        geometry,
+        boundary_values,
+        *,
+        operator_hook=None,
+        imposed=None,
+        boundary_values_at=None,
+        boundary_gradient_weight=None,
+    ):
+        return jnp.zeros((mesh.n_cells, mesh.dim))
+
+
+def test_k_and_omega_bind_their_gradient_scheme_against_their_OWN_conditions() -> None:
+    """Each field's scheme is prepared from the operator it will apply, and the two differ.
+
+    A wall prescribes ``k`` and leaves ``omega`` to extrapolate, so a scheme that prepares itself
+    against the conditions -- the multiple-correction scheme probes its corrections through them --
+    comes out different for the two fields. Sharing one binding would apply ``k``'s corrections to
+    ``omega`` wherever the conditions differ, which is silent: both reconstruct, one is wrong.
+    """
+    _, turb = _turbulence(gradient_scheme=MultipleCorrectionGradient())
+    k_scheme, omega_scheme = turb.k_gradient_scheme, turb.omega_gradient_scheme
+    assert k_scheme is not None and omega_scheme is not None
+
+    def defect(scheme):
+        return jnp.asarray(scheme.prepared.gradient_defect)
+
+    assert float(jnp.max(jnp.abs(defect(k_scheme) - defect(omega_scheme)))) > 1e-8
+
+    # and each one is the binding against its own conditions, not the other's
+    def bound_against(boundary):
+        assembler = ResidualAssembler.build(
+            turb.mesh,
+            turb.geometry,
+            PropertyModel({}),
+            (),
+            boundary,
+            gradient_scheme=MultipleCorrectionGradient(),
+            bind_gradient_scheme=False,
+        )
+        return MultipleCorrectionGradient().bind(
+            turb.mesh, turb.geometry, assembler._build_time_boundary_linearization()
+        )
+
+    for scheme, boundary in ((k_scheme, turb.k_boundary), (omega_scheme, turb.omega_boundary)):
+        np.testing.assert_allclose(
+            np.asarray(defect(scheme)), np.asarray(defect(bound_against(boundary))), atol=1e-12
+        )
+
+
+def test_each_equation_reconstructs_with_its_own_field_s_bound_scheme() -> None:
+    """Storing a binding per field is only half of it -- each equation must also *use* its own.
+
+    Pinned by substitution: replacing one field's stored scheme with a stub that reconstructs zero
+    must move that equation's residual and leave the other's alone. Wiring both equations to the same
+    binding passes every check that looks only at what is stored.
+    """
+    # A PERTURBED mesh: on an orthogonal one the diffusion's non-orthogonal correction vanishes and
+    # the k equation does not read its gradient at all, so no substitution could show which binding
+    # it used.
+    turb = _skewed_turbulence(MultipleCorrectionGradient())
+    mdot = jnp.zeros(turb.mesh.n_faces)
+    # Fields that VARY, or every reconstruction is zero and the substitution moves nothing.
+    centroid = turb.geometry.cell.centroid
+    k = 0.02 + 0.01 * centroid[:, 0] + 0.004 * centroid[:, 1]
+    omega = 80.0 + 12.0 * centroid[:, 1] - 5.0 * centroid[:, 0]
+    velocity = VelocityFields(
+        velocity=jnp.zeros((turb.mesh.n_cells, 2)),
+        boundary_velocity=jnp.zeros((turb.mesh.n_faces, 2)),
+        gradient=_shear(turb.mesh.n_cells),
+    )
+
+    # ONE frozen closure for every arm: the blending function reads both gradients, so letting each
+    # arm rebuild it would let a swap of one field's scheme move the other's equation through the
+    # physics rather than through the wiring, and no substitution would isolate anything.
+    closure = turb.closure_fields(velocity, k, omega)
+
+    def equations(model):
+        return model.k_residual(mdot, closure)(k), model.omega_residual(mdot, closure)(omega)
+
+    base_k, base_omega = equations(turb)
+    stub = _ZeroGradientScheme()
+    stub_k, omega_with_k_stubbed = equations(eqx.tree_at(lambda m: m.k_gradient_scheme, turb, stub))
+    k_with_omega_stubbed, stub_omega = equations(
+        eqx.tree_at(lambda m: m.omega_gradient_scheme, turb, stub)
+    )
+    # each equation follows its own field's binding ...
+    assert float(jnp.max(jnp.abs(stub_k - base_k))) > 1e-12
+    assert float(jnp.max(jnp.abs(stub_omega - base_omega))) > 1e-12
+    # ... and only its own
+    np.testing.assert_allclose(np.asarray(k_with_omega_stubbed), np.asarray(base_k), rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(omega_with_k_stubbed), np.asarray(base_omega), rtol=1e-12)
+
+
+def test_a_scheme_that_cannot_bind_under_tracing_still_serves_k_and_omega() -> None:
+    """The binding happens once, at build, not inside each residual evaluation.
+
+    ``ProjectedStencilGradient`` builds a stencil from the connectivity and cannot be bound against a
+    traced mesh at all; it raises. So it reconstructs ``k`` and ``omega`` only if their schemes were
+    bound while the mesh was still concrete -- which is what this pins, by tracing the closure with
+    the model itself as the traced argument, as a materialized Jacobian does.
+    """
+    _, turb = _turbulence(gradient_scheme=ProjectedStencilGradient())
+    turb = turb.resolve_boundaries()  # as a solve does, so patch lookups stay off the traced path
+    velocity = VelocityFields(
+        velocity=jnp.zeros((turb.mesh.n_cells, 2)),
+        boundary_velocity=jnp.zeros((turb.mesh.n_faces, 2)),
+        gradient=jnp.zeros((turb.mesh.n_cells, 2, 2)),
+    )
+    k = jnp.full(turb.mesh.n_cells, 0.01)
+    omega = jnp.full(turb.mesh.n_cells, 100.0)
+
+    def closure_of(model, fields, k, omega):
+        return model.closure_fields(fields, k, omega).nu_t
+
+    traced = eqx.filter_jit(closure_of)(turb, velocity, k, omega)
+    np.testing.assert_allclose(
+        np.asarray(traced), np.asarray(closure_of(turb, velocity, k, omega)), rtol=1e-10
     )
 
 

@@ -39,6 +39,7 @@ Run:
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -63,13 +64,22 @@ from aquaflux.io import read_openfoam
 from aquaflux.mesh import distance_to_patches
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import (
+    AveragedNeighbourHessian,
+    HessianCorrectedGradient,
     MultipleCorrectionGradient,
     OwnerGradient,
+    ProjectedStencilGradient,
     SkewCorrectedGradient,
 )
-from aquaflux.solve import Convergence, DualTimeLoop, RetryPolicy
-from aquaflux.turbulence import CoupledRANS, SSTModel, SSTTurbulence, inlet_k, inlet_omega, solve_coupled
-from aquaflux.solve import CompleteLu, MaterializedJacobian
+from aquaflux.solve import CompleteLu, Convergence, DualTimeLoop, MaterializedJacobian, RetryPolicy
+from aquaflux.turbulence import (
+    CoupledRANS,
+    SSTModel,
+    SSTTurbulence,
+    inlet_k,
+    inlet_omega,
+    solve_coupled,
+)
 
 HERE = Path(__file__).resolve().parent
 POLYMESH = HERE / "of_case" / "constant" / "polyMesh"
@@ -85,7 +95,7 @@ INTENSITY, LENGTH_SCALE = 0.05, 0.07 * 0.025
 #: shipped this march does not converge (issue #435), so a large cap only spends more wall time
 #: reaching the same "alpha = 0 every step" failure this case already reports at ~15 steps.
 #: Raise it if #435 is fixed and this case should actually try to converge.
-MAX_STEPS = 15
+MAX_STEPS = int(os.environ.get("TET_MAX_STEPS", "15"))
 RTOL, ATOL = 0.0, 1e-5  # the target rung's stop
 ANCHOR_RTOL = 0.01  # the anchor rung only needs to be a good enough seed for the target
 RATIO = 10.0  # anchor viscosity = target x RATIO (Reynolds number / RATIO)
@@ -98,6 +108,20 @@ BACKEND = "scipy"  # always available (no petsc4py needed); exact regardless of 
 #: then repeats identically forever (measured: 60 steps, bit-identical |R|, no retry) rather than
 #: recovering. Matches PITZ_RETRY_ON_CYCLES-style values elsewhere in validation/.
 RETRY = RetryPolicy(on_alpha=0.01, beta_factor=2.0)
+
+#: The march arms, selected by ``TET_ARMS`` (comma-separated, default ``owner,repaired``). ``hessian``
+#: is the coupled gradient and Hessian reconstruction of Betchen and Straatman (2010) with the
+#: neighbour-averaged Hessian boundary closure -- the closure under which it damps correctly on this
+#: mesh (its owner closure diverges here).
+MARCH_ARMS = {
+    "owner": lambda: MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None),
+    "repaired": lambda: MultipleCorrectionGradient(
+        boundary_closure=OwnerGradient(), fallback=SkewCorrectedGradient()
+    ),
+    "hessian": lambda: HessianCorrectedGradient(boundary_closure=AveragedNeighbourHessian()),
+    "projected": lambda: ProjectedStencilGradient(blend=float(os.environ.get("TET_BLEND", "0.75"))),
+}
+ARMS = os.environ.get("TET_ARMS", "owner,repaired").split(",")
 
 
 def build_case(gradient_scheme) -> CoupledRANS:
@@ -360,23 +384,14 @@ def main() -> None:
         f"{owner_worst / max(repaired_worst, 1e-300):.1e}x improvement\n"
     )
 
-    # Part 2: whether that fix is safe on a real march -- currently blocked, see issue #435.
-    print("=== march attempt (issue #435 -- expect FAILED; see run_march_ab's docstring) ===\n")
-    owner_arm = run_march_ab(
-        "owner",
-        MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None),
-    )
-
-    print("\n=== arm 2: fallback=SkewCorrectedGradient() (repairs the corner cells locally) ===\n")
-    repaired_arm = run_march_ab(
-        "repaired",
-        MultipleCorrectionGradient(
-            boundary_closure=OwnerGradient(), fallback=SkewCorrectedGradient()
-        ),
-    )
+    # Part 2: the march, one arm per TET_ARMS entry.
+    arms = {}
+    for name in ARMS:
+        print(f"\n=== march arm: {name} ===\n")
+        arms[name] = run_march_ab(name, MARCH_ARMS[name]())
 
     print("\n=== summary ===")
-    for arm in (owner_arm, repaired_arm):
+    for arm in arms.values():
         if arm["failed"]:
             print(f"  {arm['name']:<10} FAILED: {arm['error']}")
         else:
@@ -385,6 +400,9 @@ def main() -> None:
                 f"|R| {arm['residual_norm']:.3e}"
             )
 
+    owner_arm, repaired_arm = arms.get("owner"), arms.get("repaired")
+    if owner_arm is None or repaired_arm is None:
+        return
     if not owner_arm["failed"] and not repaired_arm["failed"]:
         du = _relative_l2(repaired_arm["flow"], owner_arm["flow"])
         dk = _relative_l2(repaired_arm["k"], owner_arm["k"])

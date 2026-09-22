@@ -33,8 +33,13 @@ Settings (environment):
 * ``LAM_START`` = ``plug`` (default) or ``rest`` (zero velocity and pressure);
 * ``LAM_MEASURE`` = ``rowscaled`` (default) or ``euclid``. Use ``euclid`` from rest: the row-scaled
   measure divides by the mean speed, which is zero there, and reports NaN at step 0;
-* ``LAM_SCHEME`` = ``corrected`` (default, ``CorrectedGreenGauss``) or ``multiple``
-  (``MultipleCorrectionGradient`` with the corner-cell fallback);
+* ``LAM_SCHEME`` = ``corrected`` (default, ``CorrectedGreenGauss``), ``multiple``
+  (``MultipleCorrectionGradient`` with the corner-cell fallback) or ``hessian``
+  (``HessianCorrectedGradient``, the coupled gradient and Hessian reconstruction, at its default
+  sweeps; ``LAM_HESSIAN_CLOSURE`` = ``owner`` (default), ``neighbour`` or ``interior`` picks its
+  Hessian boundary closure) or ``projected`` (``ProjectedStencilGradient``: per-cell weights on the
+  two-hop stencil, exact for quadratics and nearest to ``LAM_BLEND`` (default 0.75) times its
+  reference reconstruction -- ``LAM_BLEND=0`` is the minimum-norm, least-squares end of that family);
 * ``LAM_ARMS`` = a comma list of ``bare,staged,lu,simple``;
 * ``LAM_MAX_STEPS`` (default 60).
 """
@@ -65,7 +70,16 @@ from aquaflux.flow import (
 )
 from aquaflux.io import read_openfoam
 from aquaflux.properties import Constant, PropertyModel
-from aquaflux.schemes import CorrectedGreenGauss, MultipleCorrectionGradient, SkewCorrectedGradient
+from aquaflux.schemes import (
+    AveragedInteriorHessian,
+    AveragedNeighbourHessian,
+    CorrectedGreenGauss,
+    HessianCorrectedGradient,
+    MultipleCorrectionGradient,
+    OwnerHessian,
+    ProjectedStencilGradient,
+    SkewCorrectedGradient,
+)
 from aquaflux.solve import (
     CompleteLu,
     Convergence,
@@ -83,6 +97,13 @@ POLYMESH = HERE / "of_case" / "constant" / "polyMesh"
 RHO, MU, U_IN = 1.0, 5e-4, 1.0
 MAX_STEPS = int(os.environ.get("LAM_MAX_STEPS", "60"))
 SCHEME = os.environ.get("LAM_SCHEME", "corrected")
+HESSIAN_CLOSURES = {
+    "owner": OwnerHessian,
+    "neighbour": AveragedNeighbourHessian,
+    "interior": AveragedInteriorHessian,
+}
+HESSIAN_CLOSURE = os.environ.get("LAM_HESSIAN_CLOSURE", "owner")
+BLEND = float(os.environ.get("LAM_BLEND", "0.75"))
 START = os.environ.get("LAM_START", "plug")
 MEASURE = os.environ.get("LAM_MEASURE", "rowscaled")
 ARMS = os.environ.get("LAM_ARMS", "bare,staged,lu,simple").split(",")
@@ -93,11 +114,15 @@ BARE_TARGET = 1.7e-10  # the Euclidean target the issue quoted for the bare arm
 def build_case() -> MomentumContinuity:
     """The duct's laminar flow assembler, with the chosen gradient reconstruction."""
     mesh = read_openfoam(POLYMESH)
-    scheme = (
-        CorrectedGreenGauss()
-        if SCHEME == "corrected"
-        else MultipleCorrectionGradient(fallback=SkewCorrectedGradient())
-    )
+    schemes = {
+        "corrected": CorrectedGreenGauss,
+        "multiple": lambda: MultipleCorrectionGradient(fallback=SkewCorrectedGradient()),
+        "hessian": lambda: HessianCorrectedGradient(
+            boundary_closure=HESSIAN_CLOSURES[HESSIAN_CLOSURE]()
+        ),
+        "projected": lambda: ProjectedStencilGradient(blend=BLEND),
+    }
+    scheme = schemes[SCHEME]()
     return MomentumContinuity.build(
         mesh,
         mesh.geometry(),
