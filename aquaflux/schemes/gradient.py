@@ -182,6 +182,35 @@ class ImposedGradient(eqx.Module):
         return jnp.where(take[:, None], values[owner], face_gradient)
 
 
+class BoundaryLinearization(eqx.Module):
+    """How each boundary face's value depends on its owner cell: the boundary conditions, linearized.
+
+    Every boundary condition here gives a face value affine in its owner's value and gradient, so two
+    per-face derivatives describe completely how it responds to the field. A reconstruction that
+    prepares work from its own operator has to know both, because the conditions are part of that
+    operator: a prescribed value does not follow the field at all, a zero-gradient or Neumann value
+    follows the owner exactly, and a Robin value follows it only in part.
+
+    Read off the conditions by differentiation rather than declared, so it cannot disagree with them.
+    Neither derivative depends on the field for any shipped condition, so an assembler evaluates
+    this once, when it is built.
+
+    Attributes
+    ----------
+    value_weight : jnp.ndarray
+        ``d(boundary value)/d(phi_owner)`` per face, shape ``(n_faces,)``: zero where the condition
+        prescribes the value, one where it prescribes a normal derivative, and between the two for a
+        Robin condition. Interior entries are unused.
+    gradient_weight : jnp.ndarray
+        ``d(boundary value)/d(grad phi_owner)`` per face, shape ``(n_faces, dim)``: the tangential
+        offset a derivative-type condition carries its value along, scaled as ``value_weight`` is.
+        Interior entries are unused.
+    """
+
+    value_weight: jnp.ndarray
+    gradient_weight: jnp.ndarray
+
+
 class GradientScheme(eqx.Module):
     """Strategy interface: reconstruct cell gradients from a cell field."""
 
@@ -189,7 +218,7 @@ class GradientScheme(eqx.Module):
         self,
         mesh: Mesh,
         geometry: MeshGeometry,
-        boundary_gradient_weight: jnp.ndarray | None = None,
+        boundary_linearization: BoundaryLinearization | None = None,
     ) -> GradientScheme:
         """Return this scheme prepared for one geometry, ready to reconstruct on it repeatedly.
 
@@ -209,11 +238,11 @@ class GradientScheme(eqx.Module):
             The mesh to prepare for.
         geometry : MeshGeometry
             That mesh's face and cell metrics.
-        boundary_gradient_weight : jnp.ndarray, optional
-            ``d(boundary value)/d(grad phi_owner)`` per face, shape ``(n_faces, dim)`` -- the same
-            array the caller will pass to the reconstruction, for a scheme whose prepared work
-            depends on it. Ignored by default, since a reconstruction that does not fold a
-            gradient-type condition into its own operator has nothing to prepare against it.
+        boundary_linearization : BoundaryLinearization, optional
+            How the field's boundary values depend on their owner cells, for a scheme whose
+            prepared work depends on the conditions it will run under. Ignored by default, since a
+            reconstruction that does not fold the conditions into its own operator has nothing to
+            prepare against them.
 
         Returns
         -------
@@ -2717,7 +2746,7 @@ class HessianCorrectedGradient(GradientScheme):
         self,
         mesh: Mesh,
         geometry: MeshGeometry,
-        boundary_gradient_weight: jnp.ndarray | None = None,
+        boundary_linearization: BoundaryLinearization | None = None,
     ) -> HessianCorrectedGradient:
         """This scheme carrying the outer preconditioner it would otherwise rebuild every call.
 
@@ -2739,7 +2768,7 @@ class HessianCorrectedGradient(GradientScheme):
             The mesh to bind to; its geometry must be concrete.
         geometry : MeshGeometry
             That mesh's face and cell metrics.
-        boundary_gradient_weight : jnp.ndarray, optional
+        boundary_linearization : BoundaryLinearization, optional
             Unused: this scheme's outer preconditioner is geometry-only. Accepted so every scheme
             binds through one signature.
 

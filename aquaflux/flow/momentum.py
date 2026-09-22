@@ -44,7 +44,7 @@ from aquaflux.discretization import (
     FixedValueCells,
 )
 from aquaflux.properties import PropertyModel
-from aquaflux.schemes import DEFAULT_GRADIENT_SCHEME
+from aquaflux.schemes import DEFAULT_GRADIENT_SCHEME, BoundaryLinearization
 from aquaflux.schemes.interpolation import (
     interpolate_to_face,
     interpolation_factor,
@@ -338,23 +338,24 @@ class MomentumContinuity(eqx.Module):
         return dataclasses.replace(
             assembled,
             velocity_gradient_schemes=tuple(
-                gradient_scheme.bind(mesh, geometry, weight)
-                for weight in assembled._build_time_velocity_gradient_weights()
+                gradient_scheme.bind(mesh, geometry, linearization)
+                for linearization in assembled._build_time_velocity_linearizations()
             ),
             pressure_gradient_scheme=gradient_scheme.bind(
-                mesh, geometry, assembled._build_time_pressure_gradient_weight()
+                mesh, geometry, assembled._build_time_pressure_linearization()
             ),
         )
 
-    def _build_time_velocity_gradient_weights(self) -> tuple[jnp.ndarray, ...]:
-        """Each velocity component's boundary gradient weight, evaluated without a state.
+    def _build_time_velocity_linearizations(self) -> tuple[BoundaryLinearization, ...]:
+        """Each velocity component's boundary linearization, evaluated without a state.
 
-        One ``(n_faces, dim)`` array per component, as :meth:`_velocity_boundary_gradient_weight`
-        returns at a given state -- here at rest and at a zero gradient, because the weight is a
-        property of the closures and the geometry and not of the field. Every flow closure is affine
-        in the gradient it is handed (a prescribed value ignores it; an extrapolating one adds the
-        tangential offset ``grad . d_t``), so the derivative at rest is the derivative everywhere --
-        pinned by ``test_the_flow_boundary_gradient_weights_do_not_depend_on_the_state``.
+        One per component, from :meth:`_velocity_boundary_value_weight` and
+        :meth:`_velocity_boundary_gradient_weight` at rest and at a zero gradient, because both are
+        properties of the closures and the geometry and not of the field. Every flow closure is
+        affine in the owner's value and gradient (a prescribed value ignores both; an extrapolating
+        one follows the value and adds the tangential offset ``grad . d_t``), so the derivatives at
+        rest are the derivatives everywhere -- pinned by
+        ``test_the_flow_boundary_linearizations_do_not_depend_on_the_state``.
 
         Unlike the scalar twin on a residual assembler, no property is evaluated on the way: the
         flow closures read the state and the face geometry only, so this cannot fail on a property
@@ -363,14 +364,22 @@ class MomentumContinuity(eqx.Module):
         velocity = jnp.zeros((self.mesh.n_cells, self.mesh.dim))
         gradient = jnp.zeros((self.mesh.n_cells, self.mesh.dim, self.mesh.dim))
         return tuple(
-            self._velocity_boundary_gradient_weight(velocity, component, gradient)
+            BoundaryLinearization(
+                value_weight=self._velocity_boundary_value_weight(velocity, component, gradient),
+                gradient_weight=self._velocity_boundary_gradient_weight(
+                    velocity, component, gradient
+                ),
+            )
             for component in range(self.mesh.dim)
         )
 
-    def _build_time_pressure_gradient_weight(self) -> jnp.ndarray:
-        """The pressure boundary gradient weight, evaluated without a state -- see the velocity twin."""
-        return self._pressure_boundary_gradient_weight(
-            jnp.zeros(self.mesh.n_cells), jnp.zeros((self.mesh.n_cells, self.mesh.dim))
+    def _build_time_pressure_linearization(self) -> BoundaryLinearization:
+        """The pressure boundary linearization, evaluated without a state -- see the velocity twin."""
+        pressure = jnp.zeros(self.mesh.n_cells)
+        gradient = jnp.zeros((self.mesh.n_cells, self.mesh.dim))
+        return BoundaryLinearization(
+            value_weight=self._pressure_boundary_value_weight(pressure, gradient),
+            gradient_weight=self._pressure_boundary_gradient_weight(pressure, gradient),
         )
 
     # --- state layout ------------------------------------------------------------------
@@ -724,6 +733,31 @@ class MomentumContinuity(eqx.Module):
             ),
         )
         return gradient, self._boundary_pressure(pressure, gradient)
+
+    def _velocity_boundary_value_weight(
+        self, velocity: jnp.ndarray, component: int, grad_velocity: jnp.ndarray
+    ) -> jnp.ndarray:
+        """``d(boundary velocity_i)/d(velocity_i owner)`` per face, shape ``(n_faces,)``.
+
+        Differentiated from the closures, as the gradient weight is: zero where the component is
+        prescribed, one where it extrapolates. A face value reads only its own owner, so one
+        directional derivative seeded in every cell resolves every face.
+        """
+        return jax.jvp(
+            lambda v: self._boundary_velocity(v, grad_velocity)[:, component],
+            (velocity,),
+            (jnp.zeros_like(velocity).at[:, component].set(1.0),),
+        )[1]
+
+    def _pressure_boundary_value_weight(
+        self, pressure: jnp.ndarray, grad_pressure: jnp.ndarray
+    ) -> jnp.ndarray:
+        """``d(boundary pressure)/d(pressure owner)`` per face, shape ``(n_faces,)`` -- see the velocity twin."""
+        return jax.jvp(
+            lambda p: self._boundary_pressure(p, grad_pressure),
+            (pressure,),
+            (jnp.ones_like(pressure),),
+        )[1]
 
     def _velocity_boundary_gradient_weight(
         self, velocity: jnp.ndarray, component: int, grad_velocity: jnp.ndarray

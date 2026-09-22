@@ -163,8 +163,8 @@ Engineering Principles.
   is not yet validated.
   - ⚠️ **THE GRADIENT SCHEME IS BOUND ONCE PER SOLVED FIELD, NOT ONCE (#467).** `build` carries
     `velocity_gradient_schemes` (one per component, in the state layout's order) and
-    `pressure_gradient_scheme`, each `gradient_scheme.bind(mesh, geometry, weight)` against **that
-    field's** `d(boundary value)/d(grad phi_owner)`; `_velocity_gradient` and `_pressure_gradient`
+    `pressure_gradient_scheme`, each `gradient_scheme.bind(mesh, geometry, linearization)` against **that
+    field's** `BoundaryLinearization`; `_velocity_gradient` and `_pressure_gradient`
     apply those, never `gradient_scheme`. A gradient-type condition folds its dependence on the owner
     gradient into the reconstruction's first pass, which then inverts `M1 − B`, so a scheme whose
     corrections were probed on `M1⁻¹` corrects an operator nobody evaluates. **One binding cannot
@@ -175,16 +175,16 @@ Engineering Principles.
     x-normal patches and velocity on both walls): quadratics reproduced to ~4e-15 per field, against
     4.4e-3 of the pressure gradient and 3.1e-3 of the velocity gradient on the single geometry-only
     binding this replaced. Pinned by `test_the_flow_assembler_binds_a_scheme_per_solved_field` and
-    `test_the_velocity_and_pressure_weights_differ_on_the_same_patch`.
-    ⚠️ **On tetrahedra this first shipped a singular pressure correction** (94 cells at `max|M2⁻¹|`
-    3.1e16 on the 2462-cell duct, whose walls are zero-gradient for pressure), and the laminar march
-    from rest froze. A tetrahedron with two gradient-type faces cannot be determined from the
-    condition by either closure; such cells now keep the geometry-only correction — see the ⚠️⚠️ note
-    beside the `bind` entry in `.claude/rules/schemes.md` for the mechanism, numbers and tests.
-    The weights are read off the closures by `jax.jvp` at **rest**, which is exact rather than
+    `test_the_velocity_and_pressure_linearizations_differ_on_the_same_patch`.
+    ⚠️ **On tetrahedra the first version shipped a singular pressure correction** (94 cells at
+    `max|M2⁻¹|` 3.1e16 on the 2462-cell duct) and froze the laminar march; the cause was the probe,
+    not the per-field split — see the ⚠️⚠️ note beside the `bind` entry in `.claude/rules/schemes.md`.
+    Each binding now takes a `BoundaryLinearization` (value weight and gradient weight per face),
+    built by `_build_time_velocity_linearizations` / `_build_time_pressure_linearization`.
+    Both weights are read off the closures by `jax.jvp` at **rest**, which is exact rather than
     approximate: every flow closure is affine in the gradient it is handed (a prescribed value
     ignores it, an extrapolating one adds `grad·d_t`), so the derivative at rest is the derivative
-    everywhere — `test_the_flow_boundary_gradient_weights_do_not_depend_on_the_state`. Unlike the
+    everywhere — `test_the_flow_boundary_linearizations_do_not_depend_on_the_state`. Unlike the
     scalar twin on `ResidualAssembler`, no property is evaluated on the way, so there is no
     calculated-property failure mode here. `build` is therefore **two-phase**: construct with the
     geometry-only binding in every slot, then `dataclasses.replace` once the closures exist to read
@@ -195,12 +195,11 @@ Engineering Principles.
     equation's own conditions (`potential_flow` → `laplace_field` → `ResidualAssembler.build`); it is
     **not** what the residual applies, and reconstructing a flow field with it directly returns the
     inexact answer above.
-    ⚠️ **Exactness needs the field to satisfy a zero-gradient patch IDENTICALLY, not just at the
-    wall.** The closure builds its face value from the *owner* cell's gradient, so a quadratic whose
-    normal derivative vanishes on the wall but not one cell behind it gives boundary data no binding
-    can reproduce (5.8e-1 on that same grid, unmoved by either binding). That is why the test fixture
-    uses two prescribed-pressure x-normal patches and two prescribed-velocity walls — do not
-    "simplify" it to an inlet/outlet/wall case, where no non-trivial quadratic pressure exists.
+    Exactness now needs a field to satisfy its conditions only **at the boundary faces**, so the
+    ordinary inlet/outlet/wall layout is testable with a pressure varying along the duct
+    (`test_the_flow_is_exact_on_an_inlet_outlet_wall_duct`). There is no such thing as the "must
+    satisfy a zero-gradient patch identically" trap an earlier version of this note described: that
+    was the probe telling every basis field a zero-gradient face had zero normal derivative.
 - **`rhie_chow.py` — `interior_mass_flux` + `momentum_diagonal`.** The Rhie–Chow face flux
   `mdot_f = ρ(u_ip·n − d̂[(p_N−p_P) − ∇̄p·d]/(d·n))A` couples pressure implicitly and kills
   checkerboarding; it reduces to the interpolated velocity flux where pressure is smooth. **Skewness-

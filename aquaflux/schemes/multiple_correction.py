@@ -66,15 +66,17 @@ non-orthogonal correction anyway has corrected twice, and dividing the residue b
 distance turns it into a large spurious derivative. ``boundary_values_at`` is the seam that repairs
 that, by asking the caller to re-evaluate its closures at the reconstruction's own gradient.
 
-⚠️ **Repairing it does not make such a closure safe on a gradient-type patch, and the reason is
-structural.** Once the boundary value carries its correction the one-sided difference is exactly
-zero, so the closure replaces that face's **normal** gradient component with a hard zero -- and a cell
-owning two boundary faces has two independent normal directions replaced, over-constraining the very
-Hessian :class:`OwnerGradient` leaves *under*-constrained at such a cell for the opposite reason.
-Neither the corrections nor the check on them can see it, because both are probed against exact face
-values rather than the boundary conditions'. See :class:`SkewCorrectedGradient` for what that costs on
-a real march, and why :class:`OwnerGradient` is the safe choice on any mesh whose patches are not all
-Dirichlet.
+⚠️ **Once the value carries its correction, the one-sided difference IS the condition's normal
+derivative** -- zero on a zero-gradient face, ``-flux / Gamma`` on a Neumann one -- so on a
+gradient-type patch such a closure supplies the one piece of boundary data the condition actually
+prescribes. That is correct only if the corrections were probed the same way, and for a time they
+were not: geometry-only corrections probe every face with an exact value, and a first attempt at
+binding against the conditions told every basis field its normal derivative there was zero. Both
+made the probed operator differ from the applied one on exactly the gradient-type patches, which is
+the setting in which :class:`SkewCorrectedGradient` was measured to lose a coupled march (see its
+docstring). Bound against a :class:`BoundaryLinearization`, each probe gets its own normal
+derivative, and the reconstruction is exact for any quadratic satisfying its conditions at the
+boundary faces -- see :meth:`MultipleCorrectionGradient.bind`.
 
 Separately: some cells' gradient is not to be closed at all but *known*, the near-wall ``omega`` of a
 k--omega closure being the standing case. The seam for that is
@@ -96,6 +98,7 @@ import jax.numpy as jnp
 from aquaflux.vectors import dot, scale
 
 from .gradient import (
+    BoundaryLinearization,
     GradientScheme,
     ImposedGradient,
     contract_symmetric,
@@ -272,10 +275,11 @@ class SkewCorrectedGradient(GradientBoundaryClosure):
     gradient-type patch, replacing that face's normal component with a hard zero. A cell owning two
     boundary faces has two independent normal directions so replaced.
 
-    ⚠️ :func:`_undetermined_cells` cannot see any of this: ``M2`` is probed with the exact quadratic
-    evaluated at face centroids on every patch, i.e. face values carrying real nonzero normal
-    derivatives, so the probed operator and the applied one differ on exactly the gradient-type
-    patches.
+    ⚠️ **The table above was measured with the corrections bound to the geometry alone**, which
+    probes every patch with exact face values while the reconstruction applies the conditions -- so
+    on a gradient-type patch the probed operator and the applied one differed, invisibly to
+    :func:`_undetermined_cells`. An assembler now binds against the conditions, which removes that
+    mismatch; the march comparison has not been repeated under it.
 
     Use :class:`OwnerGradient`, which is the default, unless the mesh has boundary **tetrahedra**,
     where the owner closure leaves the Hessian underdetermined and this is the only shipped
@@ -377,10 +381,9 @@ class Corrections(eqx.Module):
     boundary conditions.
 
     They are the whole of what :meth:`MultipleCorrectionGradient.bind` holds. Bound without a
-    boundary-condition weight they depend on the geometry alone; bound with one, ``m2_inverse`` and
-    ``gradient_defect`` are probed through the first pass those conditions produce -- except on any
-    cell the conditions leave undetermined, which keeps its geometry-only pair (see
-    :func:`_build_corrections`).
+    :class:`BoundaryLinearization` they depend on the geometry alone; bound with one,
+    ``m2_inverse`` and ``gradient_defect`` are probed through the operator those conditions produce
+    (see :func:`_probe_corrections`).
 
     Attributes
     ----------
@@ -459,30 +462,35 @@ class MultipleCorrectionGradient(GradientScheme):
         self,
         mesh: Mesh,
         geometry: MeshGeometry,
-        boundary_gradient_weight: jnp.ndarray | None = None,
+        boundary_linearization: BoundaryLinearization | None = None,
     ) -> MultipleCorrectionGradient:
         """This scheme carrying the correction matrices it would otherwise rebuild every call.
 
-        Without ``boundary_gradient_weight`` the corrections depend only on the geometry and this is
+        Without ``boundary_linearization`` the corrections depend only on the geometry and this is
         pure bookkeeping: a bound scheme returns the same reconstruction bit for bit. See
         :meth:`~aquaflux.schemes.HessianCorrectedGradient.bind` for the staleness warning, which
         applies here identically — a binding is valid for the geometry it was made against and no
         other.
 
-        **Give it the weight when the field has a gradient-type boundary condition.** The first pass
-        then inverts ``M1 - B`` rather than ``M1``, so corrections probed on ``M1^-1`` would be
-        correcting an operator nobody evaluates, and the scheme stops reproducing a quadratic —
-        measured at 2.0e-3 of the gradient on an 8x8 perturbed quadrilateral grid with one
-        zero-gradient pair of walls, against roundoff once the weight is passed here. A binding made
-        with a weight is valid for those conditions as well as for that geometry, which is the price:
-        it is no longer geometry-only, and a field whose conditions differ needs its own binding.
+        **Give it the linearization whenever the field has a boundary condition that is not a
+        prescribed value.** The corrections are probed on quadratic fields, and on a boundary face
+        each probe has to be given what the field's own condition would give it. Geometry-only
+        probing hands every face the probe's exact value, which is right for a prescribed value and
+        wrong for a zero-gradient, Neumann or Robin face, whose value the condition builds from the
+        owner and a normal derivative. With the linearization, each such face is probed with the
+        condition's own construction and *the probe's own normal derivative* -- the data a quadratic
+        would carry if it satisfied that condition -- so the reconstruction is exact for every
+        quadratic that satisfies its conditions **at the boundary faces**. Measured on an 8x8
+        perturbed quadrilateral grid with a quadratic whose normal derivative vanishes on a
+        zero-gradient wall but not one cell behind it: 2.1 of the gradient geometry-only, 7e-15 with
+        the linearization.
 
-        The condition cannot determine every cell. A gradient-type face's value is the owner's own
-        value carried along the tangential offset, so a tetrahedron with two such faces has too
-        little information for either closure to fix its Hessian; probed honestly, its correction is
-        singular. Such a cell keeps its geometry-only correction -- well conditioned, not exact for
-        quadratics under the condition -- and a warning says how many there are. Every other cell
-        is exact.
+        That same data is what determines the corner cells. A tetrahedron with two boundary faces
+        has too few interior faces to fix its Hessian, and :class:`SkewCorrectedGradient` supplies
+        the missing direction from each boundary face's normal derivative -- which a condition
+        prescribes whatever kind it is. A binding made with a linearization is valid for those
+        conditions as well as for that geometry, which is the price: a field whose conditions
+        differ needs its own binding.
 
         Parameters
         ----------
@@ -490,11 +498,10 @@ class MultipleCorrectionGradient(GradientScheme):
             Provides owner/neighbour connectivity.
         geometry : MeshGeometry
             Face and cell metrics the corrections are built from.
-        boundary_gradient_weight : jnp.ndarray, optional
-            ``d(boundary value)/d(grad phi_owner)`` per face, shape ``(n_faces, dim)`` — the same
-            array the caller will pass to the reconstruction. ``None`` (default) builds the
-            geometry-only corrections, which are exact for a quadratic only where every boundary
-            value is prescribed.
+        boundary_linearization : BoundaryLinearization, optional
+            How the field's boundary values depend on their owner cells -- the same conditions the
+            reconstruction will run under. ``None`` (default) builds the geometry-only corrections,
+            which treat every boundary value as prescribed.
 
         Returns
         -------
@@ -505,7 +512,7 @@ class MultipleCorrectionGradient(GradientScheme):
             boundary_closure=self.boundary_closure,
             fallback=self.fallback,
             prepared=_build_corrections(
-                mesh, geometry, self.boundary_closure, self.fallback, boundary_gradient_weight
+                mesh, geometry, self.boundary_closure, self.fallback, boundary_linearization
             ),
         )
 
@@ -894,19 +901,6 @@ def _warn_repaired(cells: jnp.ndarray, primary, secondary, total: int) -> None:
     )
 
 
-def _warn_condition_limited(cells: jnp.ndarray, total: int) -> None:
-    """Say once that the boundary conditions left some cells on the geometry-only correction."""
-    _warn_once(
-        "condition-limited",
-        f"MultipleCorrectionGradient: {cells.size} of {total} cells leave the Hessian "
-        f"underdetermined once the boundary conditions are accounted for -- a cell with two or more "
-        f"faces on a gradient-type patch (zero-gradient, Neumann, Robin) is the usual cause, since "
-        f"such a condition supplies no value the owner's own gradient did not. Those cells use the "
-        f"correction built from the geometry alone: well conditioned, but not exact for quadratic "
-        f"fields under those conditions. Every other cell is exact.",
-    )
-
-
 def _warn_unrepairable(cells: jnp.ndarray, closure, fallback, total: int) -> None:
     """Say once that the correction is singular and nothing here repaired it."""
     reason = (
@@ -931,42 +925,32 @@ def _build_corrections(
     geometry: MeshGeometry,
     closure: GradientBoundaryClosure,
     fallback: GradientBoundaryClosure | None = None,
-    boundary_gradient_weight: jnp.ndarray | None = None,
+    boundary_linearization: BoundaryLinearization | None = None,
 ) -> Corrections:
     """The correction matrices, with every cell the probes cannot determine repaired or reported.
 
     Repair, rather than merely report: the cells whose Hessian correction is singular are
-    identifiable, so no choice has to be made for the whole mesh. Nothing is rebuilt when nothing is
-    wrong, which is the common case -- so a healthy mesh pays one comparison, not a second build.
-    Three tiers, each reached only by the cells the one before could not determine:
+    identifiable, so no closure has to be chosen for the whole mesh. The requested closure is probed
+    on every cell; ``fallback`` then replaces it on the cells it leaves undetermined -- a tetrahedron
+    with two boundary faces under :class:`OwnerGradient`, typically -- and whatever is still
+    undetermined is reported rather than repaired. Nothing is rebuilt when nothing is wrong, which is
+    the common case, so a healthy mesh pays one comparison, not a second build.
 
-    1. The requested closure, on every cell.
-    2. ``fallback`` on the cells the closure leaves undetermined -- a tetrahedron with two boundary
-       faces under :class:`OwnerGradient`, typically.
-    3. **Where a boundary condition's weight was given, the geometry-only correction** on the cells
-       that are still undetermined. A value-reading fallback determines such a cell from the values
-       on its boundary faces, but a gradient-type condition's value is the owner's own value carried
-       along the tangential offset -- nothing the owner's gradient did not already supply. So on a
-       tetrahedron with two such faces no closure can determine the Hessian from the condition, and
-       probing honestly through it leaves ``M2`` singular (measured: ``max|M2^-1|`` ~8e15 on a
-       tetrahedral cube with a zero-gradient boundary, against 19 with the boundary prescribed).
-       Those cells keep the correction built from the geometry alone, which is well conditioned but
-       not exact for quadratics under the condition; every other cell keeps the exact one.
-
-    Whatever is still undetermined after that is reported rather than repaired.
+    The fallback determines those cells whatever the boundary conditions are, because
+    :func:`_probe_corrections` gives each boundary face the probe's own normal derivative and
+    :class:`SkewCorrectedGradient` reads exactly that. ⚠️ It did not while the probe told every basis
+    field that a zero-gradient face had zero normal derivative: the fallback then learned nothing on
+    such a face, 94 pressure cells of a tetrahedral duct were left at ``max|M2^-1|`` 3.1e16, and the
+    laminar march there stopped moving. There is no tier beyond the fallback, deliberately: a
+    geometry-only correction was tried as one and never helped -- wherever it was reached, the
+    geometry-only correction was just as singular.
     """
-    corrections = _probe_corrections(mesh, geometry, closure, boundary_gradient_weight)
+    corrections = _probe_corrections(mesh, geometry, closure, boundary_linearization)
     undetermined = _undetermined_cells(corrections.m2_inverse)
     if undetermined is not None and fallback is not None and type(fallback) is not type(closure):
         _warn_repaired(undetermined, closure, fallback, mesh.n_cells)
         closure = CellwiseFallback(undetermined, closure, fallback)
-        corrections = _probe_corrections(mesh, geometry, closure, boundary_gradient_weight)
-        undetermined = _undetermined_cells(corrections.m2_inverse)
-    if undetermined is not None and boundary_gradient_weight is not None:
-        _warn_condition_limited(undetermined, mesh.n_cells)
-        corrections = _keep_geometric_where(
-            undetermined, corrections, _probe_corrections(mesh, geometry, closure, None)
-        )
+        corrections = _probe_corrections(mesh, geometry, closure, boundary_linearization)
         undetermined = _undetermined_cells(corrections.m2_inverse)
     if undetermined is not None:
         _warn_unrepairable(undetermined, closure, fallback, mesh.n_cells)
@@ -977,7 +961,7 @@ def _probe_corrections(
     mesh: Mesh,
     geometry: MeshGeometry,
     closure: GradientBoundaryClosure,
-    boundary_gradient_weight: jnp.ndarray | None,
+    boundary_linearization: BoundaryLinearization | None,
 ) -> Corrections:
     """Recover the three correction matrices by running the operators on coordinate monomials.
 
@@ -986,15 +970,29 @@ def _probe_corrections(
     for each quadratic basis field — so the corrections cannot drift from the operators they
     correct, in the way a separately-derived expression could.
 
-    ⚠️ **The probes run through the same boundary closure the reconstruction will use, and through
-    the same first pass.** Building a correction with exact boundary data and applying it with a real
-    closure corrects an operator nobody evaluates; the mismatch reads as the closure destroying
-    exactness, which is a considerably more alarming symptom than its cause. ``boundary_gradient_weight``
-    is the second half of that rule: given one, the reconstruction's first pass inverts ``M1 - B``, so
-    the probes are driven through that same inverse and with the value the condition gives the probe
-    field — the owner's own value where the weight is nonzero, prescribed where it is zero — and the
-    closure is then handed the condition re-evaluated at the probe's first-pass gradient. Doing only
-    the first half repairs :class:`OwnerGradient` and makes :class:`SkewCorrectedGradient` worse.
+    ⚠️ **The probes run through the same boundary closure and the same first pass the reconstruction
+    will use, and each is given the boundary data a field satisfying its conditions would carry.**
+    Building a correction with one boundary operator and applying it with another corrects an
+    operator nobody evaluates; the mismatch reads as the closure destroying exactness, which is a
+    considerably more alarming symptom than its cause. Every condition here builds its face value
+    from the owner and a *normal derivative* at the face -- prescribed outright (zero-gradient,
+    Neumann), in part (Robin), or not at all (a prescribed value) -- so with ``a`` the face's
+    ``value_weight``, a probe field ``psi`` is given
+
+        a (psi_P + w . g1) + (1 - a) psi_f + a (d . n) dpsi/dn(x_f)
+
+    where ``w`` is the gradient weight and ``g1`` the probe's own first-pass gradient: the
+    condition's construction, fed the probe's own value and normal derivative at the face. The
+    ``w . g1`` term is folded into the first pass (which then inverts ``M1 - B``) and re-evaluated
+    for the closure, exactly as the reconstruction does. ⚠️ **Feeding the probe the condition's own
+    data instead** -- a zero normal derivative on a zero-gradient face, whatever the probe's is --
+    tells every basis field the same thing about that face, so the face contributes nothing to
+    ``M2``. That was the shipped rule for a time: it made the reconstruction exact only for fields
+    satisfying their conditions *identically* (2.1 of the gradient otherwise, against 7e-15 now), and
+    it left a tetrahedron with two such faces undetermined under every closure.
+
+    With no linearization every face is treated as prescribed (``a = 0``, ``w = 0``), which is the
+    geometry-only build, through the same formula.
 
     The coordinates are centred on the mesh before the monomials are formed. The raw sum annihilates
     constants, so this cannot change any correction — it only keeps the monomial magnitudes
@@ -1003,13 +1001,17 @@ def _probe_corrections(
     dim = mesh.dim
     n_sym = symmetric_components(dim)
     face_cells = mesh.face_cells
+    owner = face_cells.owner
+    boundary = ~face_cells.interior
+    normal = geometry.face.normal
     factor = interpolation_factor(face_cells, geometry)
-    area = scale(geometry.face.normal, geometry.face.area)
+    area = scale(normal, geometry.face.area)
 
     centroid = geometry.cell.centroid
     origin = jnp.mean(centroid, axis=0)
     cell_x = centroid - origin
     face_x = geometry.face.centroid - origin
+    along = dot(geometry.face.centroid - centroid[owner], normal)
 
     def raw(cell_values, face_values):
         return _green_gauss(cell_values, face_values, factor, face_cells, area, geometry)
@@ -1018,21 +1020,18 @@ def _probe_corrections(
     # direction probed, its rows by the gradient component returned.
     m1 = jnp.stack([raw(cell_x[:, i], face_x[:, i]) for i in range(dim)], axis=-1)
     m1_inverse = jnp.linalg.inv(m1)
-    # The first pass the reconstruction will actually apply. Given a weight it inverts `M1 - B`, so
-    # the probes must too: correcting `M1^-1` and applying `(M1 - B)^-1` is the mismatch this
-    # function's own contract forbids, and it costs exactness on every gradient-type patch.
-    first_pass_inverse = (
-        m1_inverse
-        if boundary_gradient_weight is None
-        else _boundary_condition_first_pass(m1, boundary_gradient_weight, face_cells, geometry)
-    )
-    # Where the weight is nonzero the face value follows the owner rather than being prescribed, so
-    # that is what the probe must be driven with -- the condition's own value for the probe field.
-    follows_owner = (
-        None
-        if boundary_gradient_weight is None
-        else (~face_cells.interior) & jnp.any(boundary_gradient_weight != 0.0, axis=-1)
-    )
+    if boundary_linearization is None:
+        first_pass_inverse = m1_inverse
+        value_weight = jnp.zeros(face_cells.n_faces)
+        gradient_weight = jnp.zeros((face_cells.n_faces, dim))
+    else:
+        # The first pass the reconstruction will actually apply: given a gradient weight it inverts
+        # `M1 - B`, so the probes must too.
+        gradient_weight = jnp.where(boundary[:, None], boundary_linearization.gradient_weight, 0.0)
+        value_weight = jnp.where(boundary, boundary_linearization.value_weight, 0.0)
+        first_pass_inverse = _boundary_condition_first_pass(
+            m1, gradient_weight, face_cells, geometry
+        )
 
     def one_exact(cell_values, face_values, inverse):
         return jnp.einsum("nij,n...j->n...i", inverse, raw(cell_values, face_values))
@@ -1043,25 +1042,21 @@ def _probe_corrections(
         # psi(x) = 1/2 x . E . x, whose exact gradient is E x and whose exact Hessian is E.
         psi_cell = 0.5 * jnp.einsum("ni,ij,nj->n", cell_x, component, cell_x)
         psi_face = 0.5 * jnp.einsum("ni,ij,nj->n", face_x, component, face_x)
-        driving = (
-            psi_face
-            if follows_owner is None
-            else jnp.where(follows_owner, psi_cell[face_cells.owner], psi_face)
+        normal_derivative = dot(normal, face_x @ component.T)
+        # What the condition gives this probe at zero gradient, from the probe's own face data --
+        # the reconstruction's `boundary_values`. Interior entries are ignored by the raw sum.
+        leading = (
+            value_weight * (psi_cell[owner] + along * normal_derivative)
+            + (1.0 - value_weight) * psi_face
         )
-        first = one_exact(psi_cell, driving, first_pass_inverse)
+        first = one_exact(psi_cell, leading, first_pass_inverse)
         defect_columns.append(first - cell_x @ component.T)
         # And the closure gets what `reconstruct` gives it: the condition re-evaluated at the probe's
-        # OWN first-pass gradient. Driving the probe correctly and then handing the closure the exact
-        # face value leaves a value-reading closure corrected for an operator nobody evaluates -- it
-        # makes `SkewCorrectedGradient` worse than doing neither.
+        # OWN first-pass gradient.
         closure_values = (
-            psi_face
-            if follows_owner is None
-            else jnp.where(
-                follows_owner,
-                psi_cell[face_cells.owner] + dot(boundary_gradient_weight, first[face_cells.owner]),
-                psi_face,
-            )
+            leading
+            if boundary_linearization is None
+            else leading + dot(gradient_weight, first[owner])
         )
         face_gradient = closure.face_gradient(first, psi_cell, closure_values, face_cells, geometry)
         second = one_exact(first, face_gradient, m1_inverse)
@@ -1073,23 +1068,4 @@ def _probe_corrections(
         m2_inverse=jnp.linalg.inv(jnp.stack(m2_columns, axis=-1)),
         gradient_defect=jnp.stack(defect_columns, axis=-1),
         closure=closure,
-    )
-
-
-def _keep_geometric_where(
-    cells: jnp.ndarray, conditioned: Corrections, geometric: Corrections
-) -> Corrections:
-    """``conditioned``, with ``geometric``'s Hessian correction on ``cells`` and nowhere else.
-
-    Both were probed through the same closure, so they share ``M1`` and differ only in what the
-    boundary conditions did to the probes; only the two matrices that depend on that are exchanged.
-    """
-    take = jnp.zeros(conditioned.m1.shape[0], dtype=bool).at[cells].set(True)[:, None, None]
-    return eqx.tree_at(
-        lambda c: (c.m2_inverse, c.gradient_defect),
-        conditioned,
-        (
-            jnp.where(take, geometric.m2_inverse, conditioned.m2_inverse),
-            jnp.where(take, geometric.gradient_defect, conditioned.gradient_defect),
-        ),
     )
