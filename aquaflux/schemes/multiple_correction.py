@@ -373,10 +373,14 @@ class CellwiseFallback(GradientBoundaryClosure):
 
 
 class Corrections(eqx.Module):
-    """The per-cell correction matrices, built once for one geometry.
+    """The per-cell correction matrices, built once for one geometry and, optionally, one set of
+    boundary conditions.
 
-    All three are geometry-only, so they are the whole of what
-    :meth:`MultipleCorrectionGradient.bind` holds.
+    They are the whole of what :meth:`MultipleCorrectionGradient.bind` holds. Bound without a
+    boundary-condition weight they depend on the geometry alone; bound with one, ``m2_inverse`` and
+    ``gradient_defect`` are probed through the first pass those conditions produce -- except on any
+    cell the conditions leave undetermined, which keeps its geometry-only pair (see
+    :func:`_build_corrections`).
 
     Attributes
     ----------
@@ -472,6 +476,13 @@ class MultipleCorrectionGradient(GradientScheme):
         zero-gradient pair of walls, against roundoff once the weight is passed here. A binding made
         with a weight is valid for those conditions as well as for that geometry, which is the price:
         it is no longer geometry-only, and a field whose conditions differ needs its own binding.
+
+        The condition cannot determine every cell. A gradient-type face's value is the owner's own
+        value carried along the tangential offset, so a tetrahedron with two such faces has too
+        little information for either closure to fix its Hessian; probed honestly, its correction is
+        singular. Such a cell keeps its geometry-only correction -- well conditioned, not exact for
+        quadratics under the condition -- and a warning says how many there are. Every other cell
+        is exact.
 
         Parameters
         ----------
@@ -821,7 +832,23 @@ def _one_exact(
 #: every mesh measured, and not as a bound on a healthy correction.
 _UNDETERMINED_CORRECTION = 1e8
 
-_FALLBACK_WARNED = False
+#: Which of the repair warnings below have been emitted in this process. One flag per warning, not
+#: one for all of them: a scheme is bound once per field, and the first binding on a tetrahedral mesh
+#: typically reports a repair, so a shared flag let that report silence a later, graver one -- a
+#: correction left singular, on a duct whose march then stalled with no warning printed at all.
+_WARNED: set[str] = set()
+
+
+def _warn_once(kind: str, message: str) -> None:
+    """Emit ``message`` the first time a warning of this ``kind`` is raised in this process.
+
+    Each reports a fixed property of a mesh and its conditions, and a scheme is bound on every
+    assembler, so repeating it would only bury it.
+    """
+    if kind in _WARNED:
+        return
+    _WARNED.add(kind)
+    warnings.warn(message, stacklevel=3)
 
 
 def _undetermined_cells(m2_inverse: jnp.ndarray) -> jnp.ndarray | None:
@@ -851,36 +878,45 @@ def _undetermined_cells(m2_inverse: jnp.ndarray) -> jnp.ndarray | None:
 
 def _warn_repaired(cells: jnp.ndarray, primary, secondary, total: int) -> None:
     """Say once that the closure was repaired, since it is not what the caller asked for."""
-    global _FALLBACK_WARNED
-    if _FALLBACK_WARNED:
-        return
-    _FALLBACK_WARNED = True
-    warnings.warn(
+    _warn_once(
+        "repaired",
         f"MultipleCorrectionGradient: {cells.size} of {total} cells leave the Hessian "
         f"underdetermined under {type(primary).__name__} -- a tetrahedron with two or more boundary "
         f"faces is the usual cause -- so {type(secondary).__name__} is used on those cells' boundary "
         f"faces and the correction rebuilt. Every other cell is unchanged. Pass `fallback=None` to "
         f"get the unrepaired reconstruction and this warning instead.",
-        stacklevel=2,
     )
 
 
-def _warn_unrepairable(cells: jnp.ndarray, closure, total: int) -> None:
-    """Say once that the correction is singular and nothing here can repair it."""
-    global _FALLBACK_WARNED
-    if _FALLBACK_WARNED:
-        return
-    _FALLBACK_WARNED = True
-    warnings.warn(
+def _warn_condition_limited(cells: jnp.ndarray, total: int) -> None:
+    """Say once that the boundary conditions left some cells on the geometry-only correction."""
+    _warn_once(
+        "condition-limited",
+        f"MultipleCorrectionGradient: {cells.size} of {total} cells leave the Hessian "
+        f"underdetermined once the boundary conditions are accounted for -- a cell with two or more "
+        f"faces on a gradient-type patch (zero-gradient, Neumann, Robin) is the usual cause, since "
+        f"such a condition supplies no value the owner's own gradient did not. Those cells use the "
+        f"correction built from the geometry alone: well conditioned, but not exact for quadratic "
+        f"fields under those conditions. Every other cell is exact.",
+    )
+
+
+def _warn_unrepairable(cells: jnp.ndarray, closure, fallback, total: int) -> None:
+    """Say once that the correction is singular and nothing here repaired it."""
+    reason = (
+        "no fallback closure was given (or the fallback is the same closure)"
+        if fallback is None or type(fallback) is type(closure)
+        else f"the fallback {type(fallback).__name__} does not determine them either"
+    )
+    _warn_once(
+        "unrepairable",
         f"MultipleCorrectionGradient: {cells.size} of {total} cells leave the Hessian "
         f"underdetermined under {type(closure).__name__} (a tetrahedron with two or more boundary "
-        f"faces is the usual cause), and no fallback closure was given (or the fallback is the same "
-        f"closure). The reconstruction amplifies in those cells instead of being exact for "
-        f"quadratics there. Passing `fallback=SkewCorrectedGradient()` repairs it, at the cost of "
-        f"reading a boundary value on those cells' faces -- which SkewCorrectedGradient's own "
-        f"docstring documents destabilizing a coupled march at an unconverged iterate, so weigh that "
-        f"before opting in.",
-        stacklevel=2,
+        f"faces is the usual cause), and {reason}. The reconstruction amplifies in those cells "
+        f"instead of being exact for quadratics there. Passing `fallback=SkewCorrectedGradient()` "
+        f"repairs it where the boundary values determine the cell, at the cost of reading a boundary "
+        f"value on those cells' faces -- which SkewCorrectedGradient's own docstring documents "
+        f"destabilizing a coupled march at an unconverged iterate, so weigh that before opting in.",
     )
 
 
@@ -890,6 +926,52 @@ def _build_corrections(
     closure: GradientBoundaryClosure,
     fallback: GradientBoundaryClosure | None = None,
     boundary_gradient_weight: jnp.ndarray | None = None,
+) -> Corrections:
+    """The correction matrices, with every cell the probes cannot determine repaired or reported.
+
+    Repair, rather than merely report: the cells whose Hessian correction is singular are
+    identifiable, so no choice has to be made for the whole mesh. Nothing is rebuilt when nothing is
+    wrong, which is the common case -- so a healthy mesh pays one comparison, not a second build.
+    Three tiers, each reached only by the cells the one before could not determine:
+
+    1. The requested closure, on every cell.
+    2. ``fallback`` on the cells the closure leaves undetermined -- a tetrahedron with two boundary
+       faces under :class:`OwnerGradient`, typically.
+    3. **Where a boundary condition's weight was given, the geometry-only correction** on the cells
+       that are still undetermined. A value-reading fallback determines such a cell from the values
+       on its boundary faces, but a gradient-type condition's value is the owner's own value carried
+       along the tangential offset -- nothing the owner's gradient did not already supply. So on a
+       tetrahedron with two such faces no closure can determine the Hessian from the condition, and
+       probing honestly through it leaves ``M2`` singular (measured: ``max|M2^-1|`` ~8e15 on a
+       tetrahedral cube with a zero-gradient boundary, against 19 with the boundary prescribed).
+       Those cells keep the correction built from the geometry alone, which is well conditioned but
+       not exact for quadratics under the condition; every other cell keeps the exact one.
+
+    Whatever is still undetermined after that is reported rather than repaired.
+    """
+    corrections = _probe_corrections(mesh, geometry, closure, boundary_gradient_weight)
+    undetermined = _undetermined_cells(corrections.m2_inverse)
+    if undetermined is not None and fallback is not None and type(fallback) is not type(closure):
+        _warn_repaired(undetermined, closure, fallback, mesh.n_cells)
+        closure = CellwiseFallback(undetermined, closure, fallback)
+        corrections = _probe_corrections(mesh, geometry, closure, boundary_gradient_weight)
+        undetermined = _undetermined_cells(corrections.m2_inverse)
+    if undetermined is not None and boundary_gradient_weight is not None:
+        _warn_condition_limited(undetermined, mesh.n_cells)
+        corrections = _keep_geometric_where(
+            undetermined, corrections, _probe_corrections(mesh, geometry, closure, None)
+        )
+        undetermined = _undetermined_cells(corrections.m2_inverse)
+    if undetermined is not None:
+        _warn_unrepairable(undetermined, closure, fallback, mesh.n_cells)
+    return corrections
+
+
+def _probe_corrections(
+    mesh: Mesh,
+    geometry: MeshGeometry,
+    closure: GradientBoundaryClosure,
+    boundary_gradient_weight: jnp.ndarray | None,
 ) -> Corrections:
     """Recover the three correction matrices by running the operators on coordinate monomials.
 
@@ -979,29 +1061,29 @@ def _build_corrections(
         second = one_exact(first, face_gradient, m1_inverse)
         m2_columns.append(contract_symmetric(_symmetrize(second), dim))
 
-    m2_inverse = jnp.linalg.inv(jnp.stack(m2_columns, axis=-1))
-
-    # Repair, rather than merely report: the cells a closure cannot determine are identifiable, so
-    # neither closure has to be chosen for the whole mesh. Nothing is rebuilt when nothing is wrong,
-    # which is the common case -- so a healthy mesh pays one comparison, not a second build.
-    undetermined = _undetermined_cells(m2_inverse)
-    if undetermined is not None:
-        if fallback is None or type(fallback) is type(closure):
-            _warn_unrepairable(undetermined, closure, mesh.n_cells)
-        else:
-            _warn_repaired(undetermined, closure, fallback, mesh.n_cells)
-            return _build_corrections(
-                mesh,
-                geometry,
-                CellwiseFallback(undetermined, closure, fallback),
-                None,
-                boundary_gradient_weight,
-            )
-
     return Corrections(
         m1=m1,
         m1_inverse=m1_inverse,
-        m2_inverse=m2_inverse,
+        m2_inverse=jnp.linalg.inv(jnp.stack(m2_columns, axis=-1)),
         gradient_defect=jnp.stack(defect_columns, axis=-1),
         closure=closure,
+    )
+
+
+def _keep_geometric_where(
+    cells: jnp.ndarray, conditioned: Corrections, geometric: Corrections
+) -> Corrections:
+    """``conditioned``, with ``geometric``'s Hessian correction on ``cells`` and nowhere else.
+
+    Both were probed through the same closure, so they share ``M1`` and differ only in what the
+    boundary conditions did to the probes; only the two matrices that depend on that are exchanged.
+    """
+    take = jnp.zeros(conditioned.m1.shape[0], dtype=bool).at[cells].set(True)[:, None, None]
+    return eqx.tree_at(
+        lambda c: (c.m2_inverse, c.gradient_defect),
+        conditioned,
+        (
+            jnp.where(take, geometric.m2_inverse, conditioned.m2_inverse),
+            jnp.where(take, geometric.gradient_defect, conditioned.gradient_defect),
+        ),
     )

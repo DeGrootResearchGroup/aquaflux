@@ -1413,6 +1413,42 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   the weights from. `momentum.gradient_scheme` survives as the condition-free form for an initializer
   that re-binds it against a different equation's conditions; it is **not** what the flow residual
   applies. See `.claude/rules/flow.md` for the measured numbers and the fixture trap.
+  ⚠️⚠️ **BINDING AGAINST THE CONDITIONS SHIPPED A SINGULAR CORRECTION ON TETRAHEDRA, AND THE WARNING
+  THAT SHOULD HAVE SAID SO WAS SWALLOWED (fixed after #469).** A gradient-type face's value is
+  `owner + w·g_owner` — nothing the owner's gradient did not already supply — so on a tetrahedron with
+  **two** such faces *neither* closure determines the Hessian once the probes honour the condition.
+  `SkewCorrectedGradient`, the fallback that repairs exactly those cells geometry-only, reads that
+  value and so learns nothing either. Measured on `tetrahedral_grid_3d(3, perturb=0.25, seed=6)` with
+  its whole boundary `ZeroGradient`: under `OwnerGradient` 18 cells undetermined with or without the
+  weight; under `SkewCorrectedGradient` **0 geometry-only, 18 with the weight** — all 18 are the cells
+  with two boundary faces, `max|M2⁻¹|` ~8e15 against 19 with the boundary prescribed. On the 2462-cell
+  tetrahedral duct (`validation/tetrahedral_gradient_ab`, `MultipleCorrectionGradient` +
+  `SkewCorrectedGradient` fallback) the per-field bindings reached `max|M2⁻¹|` 2.0e13 (velocity, 2
+  cells) and **3.1e16 (pressure, 94 cells)**, against 8.4e3 geometry-only, and the laminar march from
+  rest (`LAM_START=rest LAM_MEASURE=euclid LAM_ARMS=lu`) stopped moving entirely: `|R|` 1.782e-4 on all
+  60 steps, every linear solve at the 120-cycle cap, where before #469 it moved (and diverged to
+  7.637e2). **Remedy — a third repair tier in `_build_corrections`:** a cell still undetermined after
+  the fallback, when a weight was given, keeps its **geometry-only** `m2_inverse`/`gradient_defect`
+  (`_keep_geometric_where`); every other cell keeps the condition-aware pair. Those cells are
+  therefore well conditioned but not quadratic-exact under the condition — a stated trade, reported
+  by its own warning. After it, every duct binding peaks at `max|M2⁻¹|` ≤ 8.4e3. Pinned by
+  `test_cells_a_condition_leaves_undetermined_keep_their_geometry_only_correction`, which checks the
+  cell set exactly in both directions (mutation-verified: dropping the tier, swapping only `M2`, and
+  swapping every cell each fail it).
+  **Why it was silent:** the "repaired", "condition-limited" and "unrepairable" warnings shared one
+  `_FALLBACK_WARNED` flag. There is no such flag now — `_WARNED` is a set keyed per warning, via
+  `_warn_once`. A scheme is bound once per field and the first binding on a tetrahedral mesh reports
+  a repair, so the shared flag let that report swallow the graver one; pinned by
+  `test_a_repair_report_does_not_silence_a_later_graver_one`.
+  **The principled alternative, not built:** a closure that uses the condition's *prescribed normal
+  derivative* (zero for zero-gradient, the flux for Neumann) as the face gradient's normal component.
+  That is real information about the Hessian at those faces and would determine these cells rather
+  than falling back — but it needs the condition to hand the closure a normal derivative, a seam the
+  closure interface (`face_gradient(..., closure_values, ...)`) does not have.
+  ⚠️ **The unit tier missed this because no fixture binding with a weight had a cell with TWO
+  gradient-type faces.** All three were 8×8 quadrilateral grids whose gradient-type patches were one
+  opposed pair, so every corner cell had one gradient-type face and one prescribed. Test a
+  condition-aware binding on a mesh and patch layout where some cell has two.
   ⚠️ Nothing about the numbers fails if the `bind` call is dropped from a factory — the residual just
   quietly goes back to rebuilding it per matvec — so it is pinned by
   `test_an_assembler_prepares_its_gradient_scheme_for_its_own_geometry`, and the identity default by

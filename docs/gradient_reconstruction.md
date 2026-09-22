@@ -639,6 +639,14 @@ walls, against roundoff once the weight is passed. The price is that such a bind
 those boundary conditions as well as for that geometry, so a field whose conditions differ needs its
 own.
 
+A condition does not determine every cell. A gradient-type face's value is the owner's own value
+carried along the tangential offset, so it tells the reconstruction nothing the owner's gradient did
+not; a tetrahedron with **two** such faces is then left with too little information to fix its
+Hessian, under either boundary closure. Such cells keep the correction built from the geometry
+alone — well conditioned, but not exact for quadratics under that condition — and a warning reports
+how many there are. Every other cell stays exact. On a tetrahedral cube whose whole boundary is
+zero-gradient, that is the 18 cells of 162 that have two boundary faces.
+
 The assemblers do this for you, and the coupled flow shows why the price matters:
 {meth}`~aquaflux.discretization.ResidualAssembler.build` solves one field and binds once, while
 {meth}`~aquaflux.flow.MomentumContinuity.build` binds **once per solved field** — each velocity

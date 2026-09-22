@@ -176,6 +176,11 @@ Engineering Principles.
     4.4e-3 of the pressure gradient and 3.1e-3 of the velocity gradient on the single geometry-only
     binding this replaced. Pinned by `test_the_flow_assembler_binds_a_scheme_per_solved_field` and
     `test_the_velocity_and_pressure_weights_differ_on_the_same_patch`.
+    ⚠️ **On tetrahedra this first shipped a singular pressure correction** (94 cells at `max|M2⁻¹|`
+    3.1e16 on the 2462-cell duct, whose walls are zero-gradient for pressure), and the laminar march
+    from rest froze. A tetrahedron with two gradient-type faces cannot be determined from the
+    condition by either closure; such cells now keep the geometry-only correction — see the ⚠️⚠️ note
+    beside the `bind` entry in `.claude/rules/schemes.md` for the mechanism, numbers and tests.
     The weights are read off the closures by `jax.jvp` at **rest**, which is exact rather than
     approximate: every flow closure is affine in the gradient it is handed (a prescribed value
     ignores it, an extrapolating one adds `grad·d_t`), so the derivative at rest is the derivative

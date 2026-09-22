@@ -48,6 +48,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
@@ -66,7 +67,7 @@ from aquaflux.schemes import (
     OwnerGradient,
     SkewCorrectedGradient,
 )
-from aquaflux.solve import DualTimeLoop, RetryPolicy
+from aquaflux.solve import Convergence, DualTimeLoop, RetryPolicy
 from aquaflux.turbulence import CoupledRANS, SSTModel, SSTTurbulence, inlet_k, inlet_omega, solve_coupled
 from aquaflux.solve import CompleteLu, MaterializedJacobian
 
@@ -279,8 +280,7 @@ def run_march_ab(name: str, gradient_scheme) -> dict:
             preconditioner=preconditioner,
             dual_time=dual_time,
             max_steps=MAX_STEPS,
-            rtol=ANCHOR_RTOL,
-            atol=0.0,
+            convergence=Convergence(rtol=ANCHOR_RTOL, atol=0.0),
             positivity_projection=True,
             retry=RETRY,
             on_step=lambda r: on_step(r, rung="anchor"),
@@ -293,15 +293,16 @@ def run_march_ab(name: str, gradient_scheme) -> dict:
             preconditioner=preconditioner,
             dual_time=dual_time,
             max_steps=MAX_STEPS,
-            rtol=RTOL,
-            atol=ATOL,
+            convergence=Convergence(rtol=RTOL, atol=ATOL),
             positivity_projection=True,
             retry=RETRY,
             on_step=lambda r: on_step(r, rung="target"),
         )
-    except (
-        Exception
-    ) as exc:  # the march's own guard raises on non-convergence/non-finite -- report it
+    # Only the march's own guard is an expected outcome here: it raises this on non-convergence or a
+    # non-finite residual. Catching everything once reported a TypeError -- the harness calling a
+    # keyword the solve had since dropped -- as "the expected #435 failure", so the march had not
+    # actually run for some time and nothing said so.
+    except eqx.EquinoxRuntimeError as exc:
         elapsed = time.perf_counter() - started
         print(f"[{name}] FAILED after {elapsed:.1f}s: {type(exc).__name__}: {exc}", flush=True)
         return {
