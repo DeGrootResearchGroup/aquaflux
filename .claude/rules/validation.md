@@ -400,6 +400,48 @@ unavailable rather than better documented — teach the gate to consult the mach
 refuse or warn — and this entry's job is to stop the wall-clock numbers being trusted, never to stand in
 for that. Read it as a record of what happened and what the measurements are worth, not as the remedy.
 
+## ⚠️ `run_case.sh --wait` exited 0 for crashed cases until 2026-09-22 — it now exits with the case's status
+
+**Both `--wait` forms used to exit `0` however the case ended**, because the case runs detached and
+nothing collected its status. Observed 2026-09-22 on `validation/sozzi_radiation/compare_fluence.py`: one
+run died of a `ModuleNotFoundError` (traceback in its log) and another was killed mid-script with **no
+traceback at all** (almost certainly out of memory) — both returned `0`, so `run_case.sh … --wait &&
+next-step` went on after a crash. That is the silent-success class the script exists to remove, sitting
+in the script itself. **Any `--wait` status read before this fix says nothing about the run; read the
+log.**
+
+How it works now, and what not to undo:
+
+- **The case runs inside a wrapper subshell that writes `run-<stamp>.exit` beside the log** (and a
+  `[run_case] the case exited with status N` line at the foot of the log) when the case ends. A signal
+  death is `128+N` — an out-of-memory SIGKILL reads `137 (killed by signal 9)`, the only record such a
+  run leaves. Both waiters print `exit status: N` and exit with it; **a missing `.exit` file is reported
+  as failure**, since "we do not know how it ended" is not success (the wrapper was killed, or the run was
+  launched by the old script).
+- **The status lives in a sibling file, not the run-file**, because `live_pid` deletes the run-file the
+  moment the pid is dead — exactly when a waiter wants the status, and possibly from some other caller's
+  `--status`.
+- **`pid=` in the run-file is now the WRAPPER's pid, not python's.** `kill -0` on it is still the
+  liveness test (a waiter never matches itself), and the wrapper outlives the case by exactly the status
+  write, so a waiter that sees it gone always finds the status on disk. `kill <pid>` still stops the run:
+  the wrapper traps TERM/HUP and **forwards** them to the case, then re-`wait`s until the case itself has
+  exited — `wait` returns early (143) when a trapped signal lands, so without the loop the status of a
+  case that shuts down on SIGTERM with its own code would be misreported. **`kill -9 <pid>` now kills
+  only the wrapper and orphans the case** (and `--status` then reports nothing running); stop a run with a
+  plain `kill`.
+- **`caffeinate` watches the wrapper's pid (`-w`) instead of wrapping the case**, so it is out of the path
+  the status travels. The wrapper's stdio is detached so a caller capturing the launch output does not
+  block for the case's lifetime.
+- **`--force` now skips taking the memory/load readings, not only judging them** — `free_gb` reads
+  `vm_stat`, which exists only on macOS, so the old code failed on Linux (and in CI) even when forced.
+- `AQUAFLUX_CASE_POLL_SECONDS` (default 20) sets the waiter's poll interval; it exists for the tests. `run-*.exit` is gitignored beside `run-*.log`.
+
+Pinned by `tests/unit/test_run_case.py` (fast tier): exit 3, an uncaught exception, a self-SIGKILL
+(137), a success (0), `--wait` attached to an already-running case, `kill <recorded pid>` reaching a
+case that exits 7 on SIGTERM, and a SIGKILLed wrapper reporting failure. Mutation-checked 2026-09-22:
+restoring the always-0 return in each `--wait` form, dropping the TERM forward, dropping the re-`wait`
+loop, and treating a missing status as success each turn at least one test red.
+
 ## ⚠️ A report about a run is not the run's own record (the evening's actual lesson)
 
 **Every correction in the section above was an account being preferred to a record that was already on
