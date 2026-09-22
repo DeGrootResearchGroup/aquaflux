@@ -35,7 +35,8 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `model.py` — the assembled model and the three public entry points | **BUILT** |
 | `units.py` — lamp watts to exitance, ultraviolet transmittance to absorbance | **BUILT** |
 
-| Beer–Lambert optical depth, voxel-grid traversal | Not yet built |
+There is no separate optical-depth piece to build: the voxel-grid traversal is `VoxelAbsorption` in
+`absorption.py`, exact along each segment (trilinear field, Simpson per cell).
 
 
 ## ⚠️ THERE ARE TWO SOLID-ANGLE KERNELS AND THEY ARE NOT INTERCHANGEABLE
@@ -776,6 +777,56 @@ re-walks every pair on every call, which is correct and costs the `n^2` build ag
 length — 2 against 120 gives 47 cycles against 3 on the same problem — and asserting the
 gradients agree to 1e-8. The step counts are asserted to differ, or the test compares a
 configuration against itself.
+
+## Four closed-form checks added after the fact, and what each one found (2026-09-21)
+
+Written to close gaps against the design specification's analytic cases. **None found a defect in
+a computed value**, which is worth stating rather than implying; two found things worth knowing,
+and all four were mutation-checked (seven one-line mutations, each red on its own assertion).
+
+- **Case 6 in absorbing water** (`test_an_infinite_line_in_an_absorbing_medium_gives_the_bickley_functions`):
+  `G = P'/(2 pi r) Ki_1(a r)`, `E = P'/(2 pi r) Ki_2(a r)`. A summed line of isotropic points,
+  spacing `r/50`, optical half-length 35, reproduces both to **<1e-11 at `a r` = 0.5 and 2** —
+  far better than the nominal second order, because a midpoint sum of a smooth integrand decaying
+  along an effectively infinite line converges spectrally. So the tolerance (1e-9) is set by the
+  reference quadrature: `scipy.integrate.quad`'s default `epsabs` of 1.5e-8 would have been the weak
+  link, and the test passes `epsabs=0, epsrel=1e-13`.
+- **Case 8c, Walton's obstructed squares** (`test_an_obstructed_pair_converges_on_the_published_view_factor`):
+  `F = 0.11562061`, the geometry confirmed independently to 0.1156206021 (blocker 0.5 x 0.5,
+  centred, **0.75 from the first plate**; midway gives ~0.0995). Both strategies converge at second
+  order in plate spacing. Errors at 6 / 12 / 24 plates a side, six-point receiver rule: silhouette
+  with the blocker near the source **-1.6e-4 / -4.0e-5 / -1.0e-5**; one ray per pair **1.06e-3 /
+  2.6e-4 / 6.4e-5**. ⚠️ With the blocker near the *receiver* the two strategies agree to 1e-16: the
+  shadow is scaled by 4 and triangle centroids sit at thirds of a cell, so every shadow edge lands on
+  a facet edge and every pair is wholly hidden or wholly clear. A fixture can make the silhouette
+  look binary.
+- **Case 11, the emission transfer** (`test_a_narrow_source_sends_its_emission_where_its_profile_says`):
+  replaced a test that asserted only *not equal to Lambertian*. Against
+  `M A f(theta_e) cos(theta_r)/r^2` summed per triangle pair, **1.8e-7 at width 1e-3, second order,
+  identical at n = 1 and 50**. ⚠️ The reference must be per pair: under a `CosinePower(50)` beam
+  the two receiving triangles of one square differ by 12% at width 1e-2, which a reference at the
+  square's middle reads as a first-order error in the code. ⚠️ A profile carries its constant in
+  **two** methods — the gather reads `intensity_fraction`, the transfer `radiance_per_exitance` — so a
+  mutation of one is invisible to a test of the other path. The contract between them is pinned in
+  `test_radiation_profiles.py`.
+- **Conservation of light through the adjoint** (`test_the_adjoint_conserves_light_through_every_facet`):
+  in a closed box of uniform `rho`, every row of `d(B, H, G)/dM` sums to `1/(1-rho)` (times 4 for
+  `G`), to 1e-14 at `rho = 0.9` — a check on the adjoint with no finite difference. ⚠️ **The
+  per-facet form is NOT exact**: `d(sum A H)/dM_k = A_k/(1-rho)` needs reciprocity, and with the
+  receiver on quadrature and the source in closed form the rows are exact at the columns' expense.
+  On `stretched_box(2)` the column sums are off by up to **4.8%** (reciprocity residual 3.2%),
+  and that per-facet gradient misses by exactly that. Not an adjoint error; do not "fix" the test
+  toward it.
+
+⚠️ **FOUND, NOT FIXED: the silhouette strategy ignores a ONE-SIDED sheet from behind.** It counts
+only blockers facing the receiver (`facing` in `SilhouetteOcclusion._survivors`), which is exact
+on a closed, consistently wound surface — every blocked sight line enters it through a front face
+— and is why back faces are excluded (they would double the count). A lone open sheet, though, is
+invisible to it from its back side: Walton's pair with a one-sided blocker gives the **unobstructed
+0.1998** from one plate. The ray test is two-sided, so the two strategies disagree on such input,
+and `self_occlusion.py` / `silhouette.py` describe the silhouette as exact for "a baffle", which
+is false for a zero-thickness single-sheet baffle. The case 8c test uses a two-sided blocker for
+this reason.
 
 ## The public surface: `model.py`, and the four assembly steps that are easy to omit
 

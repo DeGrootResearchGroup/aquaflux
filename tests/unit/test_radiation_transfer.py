@@ -5,11 +5,21 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from aquaflux.radiation.profiles import Isotropic, Lambertian
-from aquaflux.radiation.self_occlusion import NoOcclusion, RayCastOcclusion
+from aquaflux.radiation.self_occlusion import (
+    NoOcclusion,
+    RayCastOcclusion,
+    SilhouetteOcclusion,
+)
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.transfer import build_transfer, reciprocity_residual, row_sum_error
 
-from tests.unit.radiation_references import box, inward_box, stretched_box
+from tests.unit.radiation_references import (
+    box,
+    facing_plates,
+    inward_box,
+    rectangle_triangles,
+    stretched_box,
+)
 
 # ---------------------------------------------------------------------------------------
 # The transfer matrix
@@ -181,3 +191,59 @@ def test_point_sources_take_no_part_in_the_transfer():
     matrix = np.asarray(transfer.geometric)
     np.testing.assert_allclose(matrix[-1, :], 0.0, atol=0.0)
     np.testing.assert_allclose(matrix[:, -1], 0.0, atol=0.0)
+
+
+#: Walton's obstructed view factor: two directly opposed unit squares one unit apart, with a
+#: centred 0.5 x 0.5 square blocker parallel to them, three quarters of the way from the first
+#: to the second (Walton, NISTIR 6925, the "Shapiro" test). Reproduced independently to
+#: 0.1156206021 by integrating point-to-rectangle view factors over the first square with
+#: Gauss-Legendre quadrature, where the blocker's shadow is a square wholly inside the second.
+WALTON_OBSTRUCTED_SQUARES = 0.11562061
+
+
+def _obstructed_squares(n: int, strategy) -> tuple[float, float]:
+    """``F_12`` and ``F_21`` for Walton's obstructed pair, each plate meshed ``n x n``.
+
+    The blocker is **two-sided** -- its two triangles, and the same two wound the other way.
+    The silhouette clip counts only blockers facing the receiver, which is exact on a closed,
+    consistently wound surface; a lone one-sided sheet is invisible to it from behind, so a
+    single copy would test that convention rather than the view factor.
+    """
+    blocker = rectangle_triangles([0.0, 0.0, 0.25], [0.25, 0.0, 0.0], [0.0, 0.25, 0.0])
+    vertices = np.concatenate([facing_plates(n, half=0.5, gap=0.5), blocker, blocker[:, ::-1, :]])
+    surfaces = Surfaces.from_triangles(vertices, reflectance=0.0)
+    matrix, _ = build_transfer(surfaces, self_occlusion=strategy).assemble(surfaces)
+    matrix, area = np.asarray(matrix), np.asarray(surfaces.area)
+    lower, upper = slice(0, 2 * n * n), slice(2 * n * n, 4 * n * n)
+
+    def plate_to_plate(receiver, source):
+        return float(area[receiver] @ matrix[receiver, source].sum(axis=1) / area[receiver].sum())
+
+    return plate_to_plate(lower, upper), plate_to_plate(upper, lower)
+
+
+@pytest.mark.parametrize(
+    "strategy", [RayCastOcclusion(), SilhouetteOcclusion()], ids=["ray", "silhouette"]
+)
+def test_an_obstructed_pair_converges_on_the_published_view_factor(strategy):
+    """Case 8c: an exact answer for occlusion between areas, in closed form.
+
+    The analytic-body tests pin *where* a shadow falls; this pins how much of a view factor it
+    removes once both areas are integrated, and so exercises the mask, the receiver quadrature
+    and the area weighting together. Both directions are checked, since the pair is not
+    symmetric -- the blocker is three times nearer one plate -- while the view factor is,
+    the two plates having equal areas.
+
+    Unobstructed, the pair's view factor is 0.1998; the blocker takes away 42% of it. Both
+    strategies converge on the published value at second order in the plate spacing. With the
+    blocker near the source (the lower plate receiving) the silhouette is six times more
+    accurate than one ray per pair, at 1.6e-4 and 4.0e-5 at 6 and 12 plates a side; with it
+    near the receiver every shadow edge of this fixture lands on a facet edge, so there the two
+    strategies agree exactly.
+    """
+    errors = np.array(
+        [np.subtract(_obstructed_squares(n, strategy), WALTON_OBSTRUCTED_SQUARES) for n in (6, 12)]
+    )
+    rates = np.abs(errors[0] / errors[1])
+    assert np.all((rates > 3.5) & (rates < 4.8)), f"not second order: {rates}"
+    assert np.all(np.abs(errors[1]) < 3e-4), f"errors at 12 plates a side: {errors[1]}"
