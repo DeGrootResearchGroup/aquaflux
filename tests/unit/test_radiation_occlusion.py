@@ -287,3 +287,80 @@ def test_the_mask_is_a_frozen_array_and_not_recomputed_per_call():
     assert mask.blocked.dtype == jnp.bool_
     assert mask.blocked.shape == (1, 1, 1)
     assert mask.n_occluders == 1
+
+
+# ---------------------------------------------------------------------------------------
+# Streaming the mask instead of holding it
+# ---------------------------------------------------------------------------------------
+
+
+def _probe_line(n: int) -> np.ndarray:
+    """Receivers strung past the sleeve, so most of them are shadowed and some are not."""
+    return np.stack([np.full(n, 4.0), np.linspace(-1.5, 1.5, n), np.zeros(n)], axis=1)
+
+
+@pytest.mark.parametrize("transmittance", [None, [0.25]])
+def test_streaming_the_bodies_gives_what_a_built_mask_gives(transmittance):
+    """The same arithmetic either way: streaming changes when the mask exists, not what it says."""
+    source, probes = point_source(), _probe_line(37)
+    built = build_visibility([sleeve()], source, probes)
+    held = direct_fluence_rate(source, probes, visibility=built, transmittance=transmittance)
+    streamed = direct_fluence_rate(
+        source, probes, occluders=[sleeve()], transmittance=transmittance, chunk_size=8
+    )
+    np.testing.assert_array_equal(np.asarray(streamed), np.asarray(held))
+    assert float(np.asarray(held).min()) < float(np.asarray(held).max()), "nothing is shadowed"
+
+
+def test_streaming_never_builds_a_mask_wider_than_a_chunk(monkeypatch):
+    """The memory claim, pinned mechanically rather than by timing or by peak RSS.
+
+    A mask is ``receivers x facets`` per body, so what bounds it is the number of receivers each
+    build is handed. At mesh scale that is the difference between tens of gigabytes and a few
+    hundred megabytes, and it is invisible in the answer -- which is why this checks the calls
+    rather than the field.
+    """
+    from aquaflux.radiation import gather
+
+    handed = []
+    real = gather.build_visibility
+
+    def watched(occluders, surfaces, points, **options):
+        handed.append(np.asarray(points).shape[0])
+        return real(occluders, surfaces, points, **options)
+
+    monkeypatch.setattr(gather, "build_visibility", watched)
+    source, probes = point_source(), _probe_line(37)
+    direct_fluence_rate(source, probes, occluders=[sleeve()], chunk_size=8)
+    assert handed == [8, 8, 8, 8, 5], handed
+
+
+def test_streaming_with_no_bodies_still_streams_the_surface_s_own_shadowing():
+    """An empty sequence is a scene with nothing but the emitting surface in it, which shadows
+    itself -- not a scene with the mask switched off."""
+    from aquaflux.radiation.self_occlusion import NoOcclusion
+
+    panel = Surfaces.from_triangles(
+        np.concatenate(
+            [
+                np.array([[[0.0, -0.2, -0.2], [0.0, 0.2, -0.2], [0.0, 0.0, 0.2]]]),
+                np.array([[[1.0, -1.0, -1.0], [1.0, 1.0, -1.0], [1.0, 0.0, 1.0]]]),
+            ]
+        ),
+        emission=[1000.0, 0.0],
+    )
+    probes = np.array([[3.0, 0.0, 0.0], [3.0, 2.0, 0.0]])
+    shadowed = direct_fluence_rate(panel, probes, occluders=[], chunk_size=1)
+    clear = direct_fluence_rate(panel, probes, occluders=[], self_occlusion=NoOcclusion())
+    assert float(shadowed[0]) == 0.0, "the panel in the way should hide the emitter"
+    assert float(clear[0]) > 0.0, "with self-occlusion off the emitter is visible again"
+    np.testing.assert_allclose(shadowed[1], clear[1], rtol=1e-12)
+
+
+def test_a_built_mask_and_the_bodies_together_are_refused():
+    source, probes = point_source(), _probe_line(4)
+    with pytest.raises(ValueError, match="not both"):
+        direct_fluence_rate(
+            source, probes, visibility=build_visibility([sleeve()], source, probes),
+            occluders=[sleeve()],
+        )  # fmt: skip

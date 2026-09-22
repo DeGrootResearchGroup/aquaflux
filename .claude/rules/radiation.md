@@ -400,7 +400,16 @@ a forgotten argument look like a working occlusion model that happens to do noth
 
 **Memory:** the mask is `(n_occluders, n_receivers, n_facets)` — a hundred million entries per
 body at production size, stored as bytes. Packing to bits is the obvious eightfold saving if it
-ever matters.
+ever matters. ⚠️ **At MESH scale it cannot be held at all**: 1.6M cells against 7,516 lamp facets
+is **12 GB per body**, so a real case could not be built through the model. `direct_fluence_rate`
+therefore also takes `occluders=` (and `self_occlusion=`) **instead of** a built mask: it then
+builds each chunk's mask, gathers, and drops it, so peak memory is the chunk's
+(`chunk_size x n_facets`, a few hundred MB at the 4096 default) rather than the problem's. The two
+are mutually exclusive and giving both raises — with both, the mask doing the work would silently
+be the streamed one. **Streaming rebuilds the mask every call**, so a sweep over one frozen scene
+still wants the model's frozen mask, which is also what carries `dG/dt` for a body's
+transmittance. ⚠️ `build_radiation_model` does **not** stream yet (#489): a mesh-scale field goes
+through the gather directly, as `validation/sozzi_radiation/compare_fluence.py` does.
 
 ## ⚠️ FORM THE CYLINDER'S DISCRIMINANT AS `a(r^2 - h^2)`, NEVER AS `b^2 - a c`
 

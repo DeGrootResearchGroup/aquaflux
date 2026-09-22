@@ -33,7 +33,7 @@ from jax import lax
 from aquaflux.radiation.absorption import Absorption
 from aquaflux.radiation.solid_angle import projected_solid_angle, solid_angle
 from aquaflux.radiation.surfaces import Surfaces
-from aquaflux.radiation.visibility import Visibility
+from aquaflux.radiation.visibility import Visibility, build_visibility
 from aquaflux.vectors import dot
 
 __all__ = ["direct_fluence_rate", "direct_irradiance"]
@@ -160,12 +160,47 @@ def _emitter_cosine(surfaces: Surfaces, facets: np.ndarray, receivers: jnp.ndarr
     return dot(offset, normal[None, :, :]) / distance, distance_squared
 
 
+def _streamed(
+    surfaces, points, *, occluders, self_occlusion, absorption, transmittance, chunk_size
+):
+    """Gather chunk by chunk, building each chunk's visibility and letting it go.
+
+    The chunk loop is on the host rather than traced, because building a mask is host work --
+    it compacts candidate pairs and refuses receivers inside a body -- and a traced loop could
+    not call it. Each chunk's gather is the ordinary traced one.
+    """
+    points = jnp.asarray(points, dtype=float)
+    if chunk_size < 1:
+        msg = f"chunk_size must be at least 1 receiver; got {chunk_size}"
+        raise ValueError(msg)
+    if points.shape[0] == 0:
+        return jnp.zeros(0)
+    pieces = []
+    for start in range(0, points.shape[0], chunk_size):
+        chunk = points[start : start + chunk_size]
+        mask = build_visibility(occluders, surfaces, chunk, self_occlusion=self_occlusion)
+        pieces.append(
+            direct_fluence_rate(
+                surfaces,
+                chunk,
+                absorption=absorption,
+                visibility=mask,
+                transmittance=transmittance,
+                chunk_size=chunk_size,
+            )
+        )
+        del mask
+    return jnp.concatenate(pieces)
+
+
 def direct_fluence_rate(
     surfaces: Surfaces,
     points,
     *,
     absorption: Absorption | None = None,
     visibility: Visibility | None = None,
+    occluders=None,
+    self_occlusion=None,
     transmittance=None,
     chunk_size: int = _DEFAULT_CHUNK,
 ):
@@ -192,13 +227,24 @@ def direct_fluence_rate(
         The absorbing medium between the sources and the receivers.
     visibility : Visibility, optional
         Which bodies lie between which sources and which receivers, built once for these exact
-        receiver positions and checked against them here.
+        receiver positions and checked against them here. Mutually exclusive with ``occluders``
+        and ``self_occlusion``.
+    occluders : sequence of Occluder, optional
+        The bodies themselves, instead of a mask built from them. Each chunk's mask is then
+        built here and **dropped when that chunk is done**, so peak memory is set by the chunk
+        rather than by the receiver count -- which is what makes a mesh-scale field computable
+        at all: a mask over a million cells and a few thousand facets is tens of gigabytes per
+        body, while the chunks are a few hundred megabytes. An empty sequence is meaningful:
+        it streams the emitting surface's own shadowing with no other body present.
+    self_occlusion : SelfOcclusion, optional
+        How the surface shadows itself while streaming, as in
+        :func:`~aquaflux.radiation.visibility.build_visibility`. Passing it implies streaming.
     transmittance : array_like, shape ``(n_occluders,)``, optional
         What fraction each body lets through, in ``[0, 1]``. Differentiable, and defaulting to
         zero -- opaque -- so that a mask supplied without one blocks rather than passes.
     chunk_size : int, optional
-        Receivers per traced chunk. Trades peak memory against nothing; the arithmetic is the
-        same either way.
+        Receivers per traced chunk, and per streamed mask. Trades peak memory against nothing;
+        the arithmetic is the same either way.
 
     Returns
     -------
@@ -208,9 +254,34 @@ def direct_fluence_rate(
     Raises
     ------
     ValueError
-        If ``chunk_size`` is less than one receiver, or if the visibility mask was built for a
-        different set of receivers than the points given here.
+        If ``chunk_size`` is less than one receiver, if the visibility mask was built for a
+        different set of receivers than the points given here, or if a mask is given together
+        with the bodies to build one from.
+
+    Notes
+    -----
+    Streaming rebuilds each chunk's mask on every call, so a study that sweeps optics over one
+    frozen scene is better served by building the mask once -- which is what
+    :func:`~aquaflux.radiation.model.build_radiation_model` does, and why the frozen mask is
+    what carries the derivative with respect to a body's transmittance.
     """
+    if occluders is not None or self_occlusion is not None:
+        if visibility is not None:
+            msg = (
+                "give either a built visibility mask or the bodies to build one from, not both: "
+                "with both, the mask that decides the shadows would be silently the one built "
+                "here from `occluders`, and the one passed in would do nothing."
+            )
+            raise ValueError(msg)
+        return _streamed(
+            surfaces,
+            points,
+            occluders=() if occluders is None else occluders,
+            self_occlusion=self_occlusion,
+            absorption=absorption,
+            transmittance=transmittance,
+            chunk_size=chunk_size,
+        )
     points = jnp.asarray(points, dtype=float)
     partition = _groups(surfaces)
     surviving_rows = _surviving_rows(visibility, transmittance, points, surfaces.n_facets)
