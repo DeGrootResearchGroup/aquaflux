@@ -1374,24 +1374,16 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
 
   **✅ `GradientScheme.bind(mesh, geometry)` IS BUILT (2026-08-23) — geometry-only reconstruction
   work hoisted out of the per-call path, bit-for-bit identical answers.** ⚠️ **`MultipleCorrectionGradient`
-  now takes an optional third argument, `boundary_gradient_weight`, and with it the binding is NO LONGER
-  geometry-only** (2026-09-20). Its first pass inverts `M1 - B` whenever a caller supplies that weight —
-  which every residual assembler does — so probing the corrections on `M1^-1` corrects an operator nobody
-  evaluates and costs quadratic exactness: 2.0e-3 of the gradient on an 8x8 perturbed quadrilateral grid
-  with one zero-gradient wall pair, against 2e-15 with every boundary value prescribed, and roundoff once
-  the weight reaches `bind`. Both halves of the repair are load-bearing and pinned separately
-  (`test_binding_against_a_boundary_condition_restores_quadratic_exactness`): probe the first pass through
-  `(M1 - B)^-1`, **and** hand the closure the condition re-evaluated at the probe's own first-pass
-  gradient. Doing only the first repairs `OwnerGradient` and makes `SkewCorrectedGradient` ~5x worse.
-  **`ResidualAssembler` passes it (#467), so the scalar path is exact** — `build` evaluates the weight once,
-  before any field exists, which is exact rather than approximate because the weight is bit-identical across
-  states (pinned by `test_the_boundary_gradient_weight_does_not_depend_on_the_state`). It is *not* independent
-  of the **properties**: a convective condition blends `Gamma` into its face value, so a property that cannot be
-  evaluated without a field makes `build` **raise** and name `boundary_gradient_weight=` rather than compute a
-  weight against the zero coefficient `boundary_values` falls back to — a silently wrong weight is the defect
-  this removes. ⚠️ **`MomentumContinuity` STILL BINDS BLIND**, so the flow path remains inexact on gradient-type
-  patches: it binds one scheme for `u`, `v`, `w` and `p`, whose weights differ per field, so it needs a binding
-  per field rather than one. Tracked in #467. The base implementation is
+  takes an optional third argument, a `BoundaryLinearization`, and with it the binding is NO LONGER
+  geometry-only.** Its corrections are probed through the operator the boundary conditions produce —
+  see the ⚠️⚠️ note below for the probe rule, its two wrong predecessors and the measurements.
+  **Both assemblers pass it**: `ResidualAssembler.build` evaluates it once, before any field exists, which is
+  exact rather than approximate because both derivatives are bit-identical across states (pinned by
+  `test_the_boundary_linearization_does_not_depend_on_the_state`). It is *not* independent of the
+  **properties**: a convective condition blends `Gamma` into its face value, so a property that cannot be
+  evaluated without a field makes `build` **raise** and name `boundary_linearization=` rather than linearize
+  against the zero coefficient `boundary_values` falls back to — a silently wrong linearization is the defect
+  this removes. `MomentumContinuity.build` binds once per solved field (see `.claude/rules/flow.md`). The base implementation is
   the **identity**, which is the honest answer for a single-pass sum or a swept solve whose
   preconditioner is a per-cell scalar; `HessianCorrectedGradient` overrides it to carry the outer
   preconditioner, threaded at the single place that is constructed (`_systems(..., prepared_outer=...)`)

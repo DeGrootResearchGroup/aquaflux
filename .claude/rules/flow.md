@@ -163,8 +163,8 @@ Engineering Principles.
   is not yet validated.
   - ⚠️ **THE GRADIENT SCHEME IS BOUND ONCE PER SOLVED FIELD, NOT ONCE (#467).** `build` carries
     `velocity_gradient_schemes` (one per component, in the state layout's order) and
-    `pressure_gradient_scheme`, each `gradient_scheme.bind(mesh, geometry, weight)` against **that
-    field's** `d(boundary value)/d(grad phi_owner)`; `_velocity_gradient` and `_pressure_gradient`
+    `pressure_gradient_scheme`, each `gradient_scheme.bind(mesh, geometry, linearization)` against **that
+    field's** `BoundaryLinearization`; `_velocity_gradient` and `_pressure_gradient`
     apply those, never `gradient_scheme`. A gradient-type condition folds its dependence on the owner
     gradient into the reconstruction's first pass, which then inverts `M1 − B`, so a scheme whose
     corrections were probed on `M1⁻¹` corrects an operator nobody evaluates. **One binding cannot
@@ -175,7 +175,7 @@ Engineering Principles.
     x-normal patches and velocity on both walls): quadratics reproduced to ~4e-15 per field, against
     4.4e-3 of the pressure gradient and 3.1e-3 of the velocity gradient on the single geometry-only
     binding this replaced. Pinned by `test_the_flow_assembler_binds_a_scheme_per_solved_field` and
-    `test_the_velocity_and_pressure_weights_differ_on_the_same_patch`.
+    `test_the_velocity_and_pressure_linearizations_differ_on_the_same_patch`.
     ⚠️ **On tetrahedra the first version shipped a singular pressure correction** (94 cells at
     `max|M2⁻¹|` 3.1e16 on the 2462-cell duct) and froze the laminar march; the cause was the probe,
     not the per-field split — see the ⚠️⚠️ note beside the `bind` entry in `.claude/rules/schemes.md`.
@@ -184,7 +184,7 @@ Engineering Principles.
     Both weights are read off the closures by `jax.jvp` at **rest**, which is exact rather than
     approximate: every flow closure is affine in the gradient it is handed (a prescribed value
     ignores it, an extrapolating one adds `grad·d_t`), so the derivative at rest is the derivative
-    everywhere — `test_the_flow_boundary_gradient_weights_do_not_depend_on_the_state`. Unlike the
+    everywhere — `test_the_flow_boundary_linearizations_do_not_depend_on_the_state`. Unlike the
     scalar twin on `ResidualAssembler`, no property is evaluated on the way, so there is no
     calculated-property failure mode here. `build` is therefore **two-phase**: construct with the
     geometry-only binding in every slot, then `dataclasses.replace` once the closures exist to read
