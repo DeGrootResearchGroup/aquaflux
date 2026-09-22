@@ -127,26 +127,45 @@ class RadiationSettings(eqx.Module):
         body they do. Unset, one ray is cast per pair. Pass
         :class:`~aquaflux.radiation.self_occlusion.SilhouetteOcclusion` to clip exact fractions
         instead, which resolves a partly shadowed pair rather than rounding it to the nearer
-        answer, at a cost that rises steeply with facet count.
+        answer, at a cost that rises steeply with facet count. It also governs the volume
+        receivers unless ``receiver_occlusion`` says otherwise -- see there.
+    receiver_occlusion : SelfOcclusion or None
+        How the facets are tested for shadowing the volume receivers. Unset, the receivers
+        follow ``self_occlusion`` wherever that strategy can serve a point in the fluid, so
+        switching self-occlusion off, or choosing the ray test, applies to both masks alike.
+        Where it cannot -- the silhouette clip takes a share of a *projected* solid angle and
+        needs a receiver normal that a point in the fluid does not have -- the receivers fall
+        to the volume mask's own default, one ray per pair. Set this to choose differently.
     """
 
     receiver_quadrature: int | TriangleQuadrature | None = eqx.field(static=True, default=None)
     transfer_chunk_size: int | None = eqx.field(static=True, default=None)
     gather_chunk_size: int | None = eqx.field(static=True, default=None)
     self_occlusion: SelfOcclusion | None = eqx.field(static=True, default=None)
+    receiver_occlusion: SelfOcclusion | None = eqx.field(static=True, default=None)
 
     def _passed(self, **named):
         """Drop the unset entries, so each reaches its own default rather than a copy of it."""
         return {name: value for name, value in named.items() if value is not None}
 
     def visibility_options(self) -> dict:
-        """The subset a shadow-mask build reads.
-
-        Both masks a model holds are built from this one mapping. Spelling it out twice is how
-        the facet mask and the receiver mask come to disagree about whether the surface shadows
-        itself, which is not visible in either of them on its own.
-        """
+        """The subset the facet-to-facet shadow mask reads."""
         return self._passed(self_occlusion=self.self_occlusion)
+
+    def receiver_visibility_options(self) -> dict:
+        """The subset the volume-receiver shadow mask reads.
+
+        Derived from ``self_occlusion`` unless ``receiver_occlusion`` is set, because building
+        the two masks from separate choices is how they come to disagree about whether the
+        surface shadows itself -- which is not visible in either mask on its own. A strategy
+        that cannot serve a point in the fluid is not passed on at all, so the volume mask
+        reaches its own default rather than a second copy of it written here.
+        """
+        if self.receiver_occlusion is not None:
+            return {"self_occlusion": self.receiver_occlusion}
+        if self.self_occlusion is None or not self.self_occlusion.serves_volume_receivers:
+            return {}
+        return {"self_occlusion": self.self_occlusion}
 
     def transfer_options(self) -> dict:
         """The subset :func:`~aquaflux.radiation.transfer.build_transfer` reads."""
@@ -258,7 +277,11 @@ def build_radiation_model(
         surfaces, occluders=occluders, **settings.transfer_options(), **visibility_options
     )
     receiver_visibility = build_visibility(
-        occluders, surfaces, receivers, **settings.visibility_options(), **visibility_options
+        occluders,
+        surfaces,
+        receivers,
+        **settings.receiver_visibility_options(),
+        **visibility_options,
     )
     return RadiationModel(
         receivers=receivers,

@@ -443,6 +443,21 @@ fields so they fall through to defaults, so a `None` meaning "off" would silentl
 mask back *on*. A surface that does not shadow itself is the defect the module exists to fix, and
 a mask silently missing it looks exactly like one that includes it.
 
+**A model builds TWO masks — facet to facet, and facet to volume receiver — and they are routed
+separately** (`RadiationSettings.visibility_options()` for the first,
+`receiver_visibility_options()` for the second). `receiver_occlusion` overrides the second; unset,
+it follows `self_occlusion` wherever that strategy declares `serves_volume_receivers` (the ray test
+and `NoOcclusion` do), so "off" and "ray test" still apply to both masks alike. A strategy that
+cannot serve a point in the fluid (`SilhouetteOcclusion`) is *not passed on*, so the volume mask
+reaches `build_visibility`'s own default — the ray test — rather than a second copy of it. ⚠️ **Until
+this split, `build_radiation_model` RAISED with the silhouette strategy selected** (#471 shipped it
+that way): one strategy went to both masks and the clip correctly refuses volume receivers. Nothing
+caught it because every silhouette test called `build_transfer` or the strategy directly and none
+built a model; `test_a_model_can_be_built_with_the_silhouette_strategy` does now. ⚠️ **So with the
+silhouette selected, the fluence rate in the fluid is still all-or-nothing per pair** — only the
+surface transfer gets the exact fraction. Teaching the clip the unprojected (volume) measure is
+the real fix and is a separate piece of work.
+
 **Exclusion is by index, never by tolerance.** Every ray leaves its facet's centroid, so the
 facet is always hit at zero distance. Excluding its whole *solid* would be wrong — a bent duct is
 exactly the case this is for, and there the blocking wall belongs to the same body as the emitter.
@@ -1359,8 +1374,9 @@ the far wall counted too; front-facing gives 1.33e-15 against dense truth).
 ⚠️ **EVERY RECEIVER MUST SIT ON A FACET.** The fraction is of a *projected* solid angle, which needs
 the receiver's normal; a volume point has none, and the unprojected measure a volume gather uses is
 a different quantity. `SilhouetteOcclusion.field` raises for `receiver_facet=None` and for any
-`-1`, naming `RayCastOcclusion` — an error, because silently falling back would be the plausible
-brighter field this subsystem keeps warning about.
+`-1`, naming `RayCastOcclusion` — an error, because silently falling back inside the strategy
+would be the plausible brighter field this subsystem keeps warning about. The model does the
+routing instead, openly: see `receiver_occlusion` above.
 
 ⚠️ **WHERE IT OVER-COUNTS, STATED EXACTLY: the angular overlap between two front-facing
 silhouettes.** Each blocker is clipped against the *source*, not against what is still unblocked,
@@ -1381,6 +1397,51 @@ hidden-surface algorithm, whose per-pair vertex count is not static. The field r
 `overlapping` (more than one blocker contributed, so areas were *added* and **may** be double
 counted; a tiling of one wall adds without overlapping, so this is "possibly", honestly) and a
 count of one proves a pair exact. Nearly free: it is a count in the pass that already runs.
+
+### MEASURED (#472): the over-count on a two-lamp reactor is rare and small — and `overlapping` is nearly useless
+
+`validation/radiation_overlap_overcount.py`. Box plus **two sleeves side by side along x** (radius
+0.1, half-height 0.3, at x = 0.35 and 0.65), so from the end walls one stands behind the other;
+sleeves emit 1, walls reflect 0.5. Reference: for each (receiver, source) pair, 4096 samples over
+the source weighted by `max(cos_r, 0) |cos_s| / d^2`, blocked if `segment_is_cut` finds ANY
+triangle across the segment (the union, so nothing is counted twice); cross-checked against the
+independent brute-force sampler on six pairs per mesh, every gap inside 3 sigma. A gap is real past
+3 standard errors + 0.001. JAX 0.10.2, CPU, x64, macOS arm64, 2026-09-21.
+
+| mesh | flagged pairs | real over-counts | mean over | worst over | one-contributor control | unhidden control |
+|---|---|---|---|---|---|---|
+| 288 facets, all flagged pairs | 22,376 | **335 (1.5%)** | 0.136 | **0.318** | 1,053 / 1,053 exact | 2,000 / 2,000 |
+| 560 facets, random 20,000 | 20,000 | **192 (1.0%)** | 0.139 | **0.336** | 2,000 / 2,000 exact | 2,000 / 2,000 |
+
+- **The error runs one way only**: zero under-counts in any group, as the mechanism predicts. A
+  random 40 of the 335 re-checked at 65,536 samples all stayed over-counts (mean gap 0.131, 3 sigma
+  at most 0.006).
+- **It is rare because clipping at 1 makes the common case exact.** Most sleeve-behind-sleeve pairs
+  are hidden *completely* by the nearer sleeve (15,277 of the 288-facet mesh's hidden pairs read 1),
+  and a sum clipped at 1 is then right. It bites only where two sleeves each hide *part* of a source.
+- **As a receiver sees it**: the share of its hemisphere wrongly reported dark is mean 0.12%, worst
+  **1.6%** (288 facets; the 560-facet figure is from a subset and understates it).
+- **On the field it is smaller than the ray mask's error by ~8x.** Wall irradiance against the field
+  with every flagged pair corrected: silhouette mean 0.14% / worst **0.96%**, ray mask mean 1.1% /
+  worst **5.8%** (288 facets). The "corrected" field carries the reference's own sampling noise.
+
+⚠️ **`overlapping` IS 1-1.5% PRECISE ON A MESHED BODY — it flags nearly every hidden pair.** It
+means "more than one blocker contributed", and a sleeve is a tiling, so any pair a sleeve hides is
+covered by several of its triangles: 22,376 of 23,429 hidden pairs flagged, of which 98.5% are exact
+tilings. As a detector for the over-count it says almost nothing, which the claim that "a count of
+one proves a pair exact" does not reveal — that claim is true and rarely applicable. A precise
+detector needs to know when two contributors can overlap: a tiling of one convex front-facing sheet
+cannot, so "contributors from two or more connected front-facing sheets" is the candidate.
+
+**DECIDED (#472): documented, not fixed — the precise detector and the correction are #477.** The
+error is one-sided, rare, and on this geometry an order smaller than the ray mask's own; the flag's
+imprecision is the more pressing defect, because it leaves a user no way to tell which pairs to
+distrust.
+
+⚠️ **A binomial error bar is ZERO at a share of exactly 0 or 1, however few samples carried the
+weight** — the harness first reported a single-blocker pair as a 26-sigma over-count (reference
+0.0000 +/- 0.0000 at 4096 samples; 0.036 +/- 0.03 at 65,536; the clip at 0.026, correct). It uses
+the Agresti-Coull interval now. Any sampled reference whose weights concentrate needs the same.
 
 ### ⚠️ "IT IS EXACT" WAS MEASURED ON ISOLATED, NON-DEGENERATE PAIRS — ON A MESH, SIX DEFECTS HID THERE
 
