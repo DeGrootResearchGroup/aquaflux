@@ -17,6 +17,7 @@ from aquaflux.radiation.gather import direct_fluence_rate, direct_irradiance
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian
 from aquaflux.radiation.subdivide import refine_for_receivers
 from aquaflux.radiation.surfaces import Surfaces
+from scipy.integrate import quad
 from scipy.special import expn
 
 from tests.unit.radiation_references import (
@@ -166,6 +167,58 @@ def test_a_long_summed_line_source_approaches_the_infinite_limit():
         direct_fluence_rate(_line_source(50.0, 1.0, 20000), np.array([[radius, 0.0, 0.0]]))[0]
     )
     assert measured == pytest.approx(1.0 / (4.0 * radius), rel=2e-3)
+
+
+def _bickley(order, x):
+    """The Bickley-Naylor function ``Ki_n(x) = int_0^(pi/2) exp(-x / cos t) cos^(n-1) t dt``.
+
+    What the exponential integral is to a plane, this is to a line: the attenuation integrated
+    over every slant path from an infinite line to a point beside it.
+    """
+    value, _ = quad(
+        lambda t: np.exp(-x / np.cos(t)) * np.cos(t) ** (order - 1),
+        0.0,
+        np.pi / 2,
+        epsabs=0.0,
+        epsrel=1e-13,
+    )
+    return value
+
+
+@pytest.mark.parametrize("optical_radius", [0.5, 2.0])
+def test_an_infinite_line_in_an_absorbing_medium_gives_the_bickley_functions(optical_radius):
+    """Case 6 in absorbing water, where the lamp models are usually compared.
+
+    An infinite line of isotropic sources, ``P'`` per length, gives at distance ``r``::
+
+        G = P' / (2 pi r) Ki_1(a r)          E_radial = P' / (2 pi r) Ki_2(a r)
+
+    Both are gated, because each catches what the other cannot. At ``a = 0`` the irradiance is
+    ``P' / (2 pi r)``, which is **numerically identical to the radial lamp model** -- so a code
+    comparing its irradiance against that model agrees to machine precision while its fluence
+    rate is ``pi / 2`` off. And attenuating every slant path by the perpendicular one,
+    ``P' / (4 r) exp(-a r)``, overstates the fluence rate by 1.48 at ``a r = 0.5`` and 2.19 at
+    ``a r = 2``, which is why one probe sits that deep.
+
+    The line runs to an optical half-length of 35, so what it leaves out is below ``e^-35``,
+    with points a fiftieth of the distance apart. Measured, that reproduces both functions to
+    better than 1e-11: a midpoint sum of a smooth integrand decaying along an effectively
+    infinite line converges far faster than its nominal second order, so the tolerance here is
+    set by the quadrature of the reference, not by the sum.
+    """
+    radius = 0.05
+    coefficient = optical_radius / radius
+    half_length = 35.0 / coefficient
+    count = int(np.ceil(2.0 * half_length / (radius / 50.0)))
+    line = _line_source(half_length, 1.0, count)
+    probe, facing_the_line = np.array([[radius, 0.0, 0.0]]), np.array([[-1.0, 0.0, 0.0]])
+    medium = UniformAbsorption(coefficient)
+
+    fluence = float(direct_fluence_rate(line, probe, absorption=medium)[0])
+    irradiance = float(direct_irradiance(line, probe, facing_the_line, absorption=medium)[0])
+    scale = 1.0 / (2.0 * np.pi * radius)
+    assert fluence == pytest.approx(scale * _bickley(1, optical_radius), rel=1e-9)
+    assert irradiance == pytest.approx(scale * _bickley(2, optical_radius), rel=1e-9)
 
 
 # ---------------------------------------------------------------------------------------
