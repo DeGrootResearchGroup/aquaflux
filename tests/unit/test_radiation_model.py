@@ -23,7 +23,13 @@ from aquaflux.radiation.self_occlusion import NoOcclusion, RayCastOcclusion, Sil
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.solve import relative_residual_gmres
 
-from tests.unit.radiation_references import box, closed_drum, inward_box, rectangle_triangles
+from tests.unit.radiation_references import (
+    box,
+    closed_drum,
+    inward_box,
+    rectangle_triangles,
+    stretched_box,
+)
 
 
 def surface_model(surfaces, *, occluders=(), **settings):
@@ -185,21 +191,61 @@ def test_a_lambertian_source_transfers_its_emission_exactly_as_it_transfers_a_re
     assert reflected is emitted
 
 
-def test_a_narrow_source_sends_its_emission_somewhere_different():
-    """Otherwise the profile reaches the surface system normalized and unused.
+@pytest.mark.parametrize("exponent", [1.0, 50.0])
+def test_a_narrow_source_sends_its_emission_where_its_profile_says(exponent):
+    """Case 11: the emission transfer, against its closed form.
 
-    A cosine-power source concentrates its emission along its own normal, so the facet it faces
-    across the box receives more than it would from a Lambertian source of the same exitance,
-    and the facets off to the side receive less.
+    Two small facet pairs a unit apart, tilted so the emitter sees the receiver 0.4 rad off its
+    normal and the receiver sees the emitter 1.0 rad off its own. Far from a small source the
+    irradiance it delivers is ``M A f(theta_e) cos(theta_r) / r^2``, with
+    ``f = (n + 1) cos^n / (2 pi)``, summed here over each (emitting, receiving) triangle pair
+    from centroid to centroid -- which is what the transfer evaluates the profile at, so what
+    is left is the receiver's solid angle against a point, 1.8e-7 at this width and second
+    order in it, at either exponent.
+
+    The two angles differ so that a profile evaluated at the receiver's angle instead of the
+    emitter's is off by a factor of 1e-12 at ``n = 50``, and ``(n + 1) / pi`` in place of the
+    constant is off by two. The steep exponent is also where the transfer has to follow the
+    profile rather than the Lambertian one it carries for reflected light, which is 2.2 times
+    brighter at this angle. And the per-pair reference is not a nicety: at a width of a
+    hundredth the two receiving triangles differ by 12% under the beam's steep fall-off, which
+    a reference taken at the middle of the pair would read as a first-order error in the code.
     """
-    exitance = 1.0
-    diffuse = box(2, emission=exitance, reflectance=0.0, profiles=(Lambertian(),))
-    narrow = box(2, emission=exitance, reflectance=0.0, profiles=(CosinePower(8.0),))
-    model = surface_model(diffuse)
+    width, exitance = 1e-3, 3.0
+    facing, sideways = (
+        np.array([np.cos(0.4), np.sin(0.4), 0.0]),
+        np.array([-np.cos(1.0), 0.0, np.sin(1.0)]),
+    )
+    up, across = np.array([0.0, 0.0, 1.0]), np.array([0.0, 1.0, 0.0])
+    emitter = rectangle_triangles([0.0, 0.0, 0.0], width * up, width * np.cross(facing, up))
+    receiver = rectangle_triangles(
+        [1.0, 0.0, 0.0], width * across, width * np.cross(sideways, across)
+    )
+    surfaces = Surfaces.from_triangles(
+        np.concatenate([emitter, receiver]),
+        emission=[exitance, exitance, 0.0, 0.0],
+        reflectance=0.0,
+        profiles=(CosinePower(exponent),),
+    )
+    np.testing.assert_allclose(np.asarray(surfaces.normal)[[0, 2]], [facing, sideways], atol=1e-12)
 
-    facing, _ = surface_irradiance(model, diffuse)
-    beamed, _ = surface_irradiance(model, narrow)
-    assert not np.allclose(np.asarray(facing), np.asarray(beamed))
+    landing, _ = surface_irradiance(surface_model(surfaces), surfaces)
+    centroid, area, normal = (
+        np.asarray(x) for x in (surfaces.centroid, surfaces.area, surfaces.normal)
+    )
+    expected = []
+    for target in (2, 3):
+        total = 0.0
+        for source in (0, 1):
+            offset = centroid[target] - centroid[source]
+            distance = np.linalg.norm(offset)
+            direction = offset / distance
+            intensity = (exponent + 1.0) * (direction @ normal[source]) ** exponent / (2.0 * np.pi)
+            total += (
+                exitance * area[source] * intensity * (-direction @ normal[target]) / distance**2
+            )
+        expected.append(total)
+    np.testing.assert_allclose(np.asarray(landing)[2:], expected, rtol=1e-6)
 
 
 @pytest.mark.parametrize("exponent", [1.0, 2.0, 8.0])
@@ -282,6 +328,48 @@ def test_the_gradient_in_emission_is_exact():
     assert float(jax.grad(total)(jnp.asarray(1.0))) == pytest.approx(
         _central_difference(total, 1.0), rel=1e-6
     )
+
+
+@pytest.mark.parametrize("field", ["radiosity", "irradiance", "fluence rate"])
+def test_the_adjoint_conserves_light_through_every_facet(field):
+    """A check on the adjoint that needs no finite difference, after de Koning et al.
+
+    Inside a closed enclosure of uniform reflectance ``rho`` the transfer rows sum to one, so
+    raising every facet's emission by the same amount raises every radiosity and every
+    irradiance by ``1 / (1 - rho)`` of it, and the fluence rate at any interior point by four
+    times that (``G = 4 B``). So each row of the Jacobian with respect to the emission must sum
+    to exactly that, and the reverse-mode Jacobian builds each row from its own transposed
+    solve: a mis-scaled or partly severed adjoint shows up in every row, with no reference
+    derivative to tune a tolerance against. At ``rho = 0.9`` a one-bounce truncation is off by
+    a factor of five.
+
+    ⚠️ **The per-facet version of this is NOT exact, and is not tested.** The total power
+    landing on the walls, ``sum(A H)``, would have gradient ``A_k / (1 - rho)`` with respect to
+    each facet's emission if the transfer were exactly reciprocal. It is not -- the receiver
+    is integrated by quadrature and the source in closed form, which keeps the rows exact at
+    the cost of the columns -- and on this stretched box the column sums are off by up to 4.8%,
+    which is exactly how far that gradient misses. That is the known reciprocity residual, not
+    an adjoint error.
+    """
+    reflectance = 0.9
+    emission = np.random.default_rng(1).uniform(0.0, 2.0, 48)
+    surfaces = stretched_box(2, emission=emission, reflectance=reflectance)
+    interior = np.array([[0.3, 0.4, 0.5], [0.7, 0.2, 1.7], [0.5, 0.5, 2.8]])  # box is 1 x 1 x 3
+    model = build_radiation_model(
+        interior, surfaces, settings=RadiationSettings(self_occlusion=NoOcclusion())
+    )
+    solve, scale = {
+        "radiosity": (radiosity, 1.0),
+        "irradiance": (surface_irradiance, 1.0),
+        "fluence rate": (fluence_rate, 4.0),
+    }[field]
+
+    def response(values):
+        result, _ = solve(model, surfaces.with_optics(emission=values))
+        return result
+
+    jacobian = np.asarray(jax.jacrev(response)(jnp.asarray(emission)))
+    np.testing.assert_allclose(jacobian.sum(axis=1), scale / (1.0 - reflectance), rtol=1e-12)
 
 
 def test_the_gradient_reaches_an_occluder_s_transmittance_through_the_solve():
