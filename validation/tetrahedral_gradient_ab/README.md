@@ -41,10 +41,11 @@ second half is the expected, currently-unresolved state, not a result about the 
 *every* exception, so the resulting `TypeError` (raised in 0.1 s, before a single step) was reported
 as the expected #435 failure. It now passes `convergence=Convergence(...)` and catches only
 `EquinoxRuntimeError`, the march's own non-convergence guard, so an API break raises instead. With
-the march actually running (anchor rung, dual time, complete LU, both closures), measured 2026-09-21
-on a commit carrying the per-field binding and its corner-cell repair: `owner` diverges to `inf` at
-step 1 (step 0 at 40 cycles); `repaired` takes four steps at 3–4 cycles each with `|R|` near 2.5 and
-diverges at step 5.
+the march actually running (anchor rung, dual time, complete LU, both closures), measured 2026-09-21:
+with each probe given its own boundary data, both arms diverge to `inf` at step 3 (`owner` from
+`|R|` 1.08 at 40 cycles, `repaired` from 5.9 at 43); under the geometry-only corner-cell tier that
+preceded it, `owner` failed at step 1 and `repaired` took four steps at 3–4 cycles before failing
+at step 5.
 
 ## Status
 
@@ -94,12 +95,15 @@ unless a row says otherwise, 60-step cap. Steps to convergence, or `failed` with
   | before the per-field binding (`9f33eca`) | 1.24e-2 | 4.70e-1 | 7.64e2 | 7–83 |
   | per-field binding as first merged | 1.78e-4 | 1.78e-4 | 1.78e-4 | 120 (the cap), every step |
   | with the corner-cell repair | 1.40e-2 | 8.83 | 3.12e1 | 13–85 |
+  | each probe given its own boundary data | 7.43e-3 | 2.16e1 | 3.80e2 | 9–84 |
 
-  The middle row did not move at all: binding against the pressure's zero-gradient walls left 94
+  The second row did not move at all: binding against the pressure's zero-gradient walls left 94
   corner tetrahedra with a singular Hessian correction (`max|M2^-1|` 3.1e16), and the linear solve
-  could not make progress past it. Those cells now keep the geometry-only correction. From a uniform
-  plug (row-scaled measure) the first two commits both diverge to `inf` at step 1; the repaired one
-  was not run from a plug.
+  could not make progress past it. The third row kept the geometry-only correction on those cells;
+  the fourth is what ships, and determines them instead (pressure binding `max|M2^-1|` 7.8e2), by
+  probing each quadratic with its own normal derivative on a zero-gradient face rather than zero.
+  None of the four converges -- that is #435. From a uniform plug (row-scaled measure) the first,
+  second and fourth diverge to `inf` at step 1; the third was not run from a plug.
 
 ## Layout
 

@@ -19,9 +19,10 @@ from aquaflux.boundary import (
     ZeroGradient,
 )
 from aquaflux.discretization import DiffusionFlux, ResidualAssembler
-from aquaflux.flow import MomentumContinuity, MovingWall, PressureOutlet
+from aquaflux.flow import MomentumContinuity, MovingWall, PressureOutlet, VelocityInlet
 from aquaflux.properties import Constant, Property, PropertyModel
 from aquaflux.schemes import (
+    BoundaryLinearization,
     CellwiseFallback,
     CompactGreenGauss,
     CorrectedGreenGauss,
@@ -60,6 +61,11 @@ QUADRATIC_CASES = list(
         strict=True,
     )
 )
+
+
+def _with_scheme(assembler, scheme):
+    """``assembler`` reconstructing with ``scheme`` instead of its own binding."""
+    return dataclasses.replace(assembler, gradient_scheme=scheme)
 
 
 def _quadratic(mesh, seed=0):
@@ -582,21 +588,18 @@ def test_the_second_pass_reads_the_geometrys_own_first_pass_operator() -> None:
 
 
 def test_binding_against_a_boundary_condition_restores_quadratic_exactness() -> None:
-    """Probe the corrections through the first pass the reconstruction will actually apply.
+    """Probe the corrections through the operator the reconstruction will actually apply.
 
-    Given ``boundary_gradient_weight`` the first pass inverts ``M1 - B`` rather than ``M1``. Probing
-    the corrections on ``M1^-1`` and applying them to that leaves them correcting an operator nobody
-    evaluates -- the mistake :func:`_build_corrections` is written to avoid -- and the scheme stops
-    reproducing a quadratic: measured here at 2.0e-3 of the gradient, against 2e-15 when every
-    boundary value is prescribed, so the residue is the condition's operator and not the
-    reconstruction. Handing the same weight to ``bind`` recovers roundoff.
+    Given ``boundary_gradient_weight`` the first pass inverts ``M1 - B`` rather than ``M1``, and a
+    zero-gradient face's value follows the owner instead of being prescribed. Corrections probed
+    geometry-only correct an operator nobody evaluates, and the scheme stops reproducing a quadratic:
+    measured here at 2.0e-3 of the gradient, against 2e-15 when every boundary value is prescribed,
+    so the residue is the condition's operator and not the reconstruction. Binding against the
+    condition's :class:`BoundaryLinearization` recovers roundoff under both closures.
 
-    Both halves of the repair are needed and this pins both. Probing the first pass through
-    ``(M1 - B)^-1`` while still handing the closure the exact face value repairs
-    :class:`OwnerGradient` and makes :class:`SkewCorrectedGradient` about five times *worse* (1.4e-1
-    against 2.1e-3), because a value-reading closure is then itself corrected for an operator nobody
-    evaluates. The closure has to get the condition re-evaluated at the probe's own first-pass
-    gradient, which is what ``reconstruct`` gives it.
+    This field satisfies its condition identically, so it pins the binding and not the probe's
+    boundary data; exactness for fields that satisfy their conditions only at the wall is pinned by
+    ``test_every_condition_is_exact_for_a_quadratic_satisfying_it_at_the_wall``.
     """
     curvature = 1.7  # phi = curvature * y^2 / 2, so dphi/dx = 0 on every x-normal face
     mesh = perturbed_grid_2d(8, 8, perturb=0.3, seed=3, named_boundaries=True)
@@ -625,7 +628,16 @@ def test_binding_against_a_boundary_condition_restores_quadratic_exactness() -> 
         errors = {}
         for label, scheme in (
             ("blind", unbound.bind(mesh, geometry)),
-            ("against the condition", unbound.bind(mesh, geometry, weight)),
+            (
+                "against the condition",
+                unbound.bind(
+                    mesh,
+                    geometry,
+                    BoundaryLinearization(
+                        value_weight=jnp.where(follows_owner, 1.0, 0.0), gradient_weight=weight
+                    ),
+                ),
+            ),
         ):
             gradient, _ = scheme.reconstruct(
                 field,
@@ -670,7 +682,7 @@ def test_the_assembler_binds_the_scheme_against_its_boundary_conditions() -> Non
     ``ResidualAssembler`` hands the scheme a ``boundary_gradient_weight`` on every reconstruction, so
     its first pass inverts ``M1 - B``. Binding the scheme against the geometry alone leaves the
     corrections built for ``M1^-1``, and the assembler's gradient is then wrong by 2.0e-3 of the
-    gradient on this case -- the wrong answer this catches, and what shipped until the weight reached
+    gradient on this case -- the wrong answer this catches, and what shipped until the conditions reached
     ``bind``. Exactness here is not a property of the scheme alone; it is a property of the scheme
     being prepared against the conditions it will run under.
     """
@@ -691,8 +703,8 @@ def test_the_assembler_binds_the_scheme_against_its_boundary_conditions() -> Non
         assert error < 1e-12 * scale_of, f"{type(closure).__name__}: {error:.3e}"
 
 
-def test_the_boundary_gradient_weight_does_not_depend_on_the_state() -> None:
-    """Why evaluating the weight once at build time is exact rather than an approximation.
+def test_the_boundary_linearization_does_not_depend_on_the_state() -> None:
+    """Why evaluating the linearization once at build time is exact rather than an approximation.
 
     The weight is ``d(boundary value)/d(grad phi_owner)``, which for every shipped condition is a
     property of the condition and the geometry -- the tangential offset a face value carries, or zero
@@ -720,10 +732,15 @@ def test_the_boundary_gradient_weight_does_not_depend_on_the_state() -> None:
     )
     properties = assembler.properties.evaluate(mesh.cell_zones, {})
     key = jax.random.PRNGKey(3)
-    reference = assembler._boundary_gradient_weight(
-        jnp.zeros(mesh.n_cells), jnp.zeros((mesh.n_cells, mesh.dim)), properties
-    )
+    at_rest = (jnp.zeros(mesh.n_cells), jnp.zeros((mesh.n_cells, mesh.dim)), properties)
+    reference = assembler._boundary_gradient_weight(*at_rest)
+    reference_value = assembler._boundary_value_weight(*at_rest)
     assert float(jnp.max(jnp.abs(reference))) > 1e-6  # not trivially zero everywhere
+    # ...and the value weight takes all three regimes: prescribed, followed, and in between (Robin).
+    assert {0.0, 1.0} <= set(
+        np.round(np.asarray(reference_value)[~np.asarray(mesh.face_cells.interior)], 12)
+    )
+    assert np.any((np.asarray(reference_value) > 1e-6) & (np.asarray(reference_value) < 1 - 1e-6))
 
     for field in (
         jnp.zeros(mesh.n_cells),
@@ -736,14 +753,16 @@ def test_the_boundary_gradient_weight_does_not_depend_on_the_state() -> None:
         ):
             moved = assembler._boundary_gradient_weight(field, gradient, properties)
             assert np.array_equal(np.asarray(moved), np.asarray(reference))
+            moved = assembler._boundary_value_weight(field, gradient, properties)
+            assert np.array_equal(np.asarray(moved), np.asarray(reference_value))
 
 
-def test_a_property_needing_a_field_asks_the_caller_for_the_weight() -> None:
-    """A property that cannot be evaluated before a field exists cannot give a weight either.
+def test_a_property_needing_a_field_asks_the_caller_for_the_linearization() -> None:
+    """A property that cannot be evaluated before a field exists cannot give a linearization either.
 
     ``boundary_values`` falls back to a zero coefficient when the properties lack one, and a
-    convective condition blends that coefficient into its face value -- so computing the weight
-    against that fallback would hand ``bind`` a silently wrong operator, which is the defect binding
+    convective condition blends that coefficient into its face value -- so linearizing it against
+    that fallback would hand ``bind`` a silently wrong operator, which is the defect binding
     against the conditions exists to remove. Refuse instead, and name the way out.
     """
 
@@ -757,7 +776,7 @@ def test_a_property_needing_a_field_asks_the_caller_for_the_weight() -> None:
             return self
 
     mesh, geometry, _quadratic, boundary, _exact = _zero_gradient_quadratic_case()
-    with pytest.raises(ValueError, match="boundary_gradient_weight"):
+    with pytest.raises(ValueError, match="boundary_linearization="):
         ResidualAssembler.build(
             mesh,
             geometry,
@@ -850,48 +869,53 @@ def test_the_flow_assembler_binds_a_scheme_per_solved_field() -> None:
     assert min(blind) > 1e-4 * scale_of, f"geometry-only binding is already exact: {blind}"
 
 
-def test_the_velocity_and_pressure_weights_differ_on_the_same_patch() -> None:
+def test_the_velocity_and_pressure_linearizations_differ_on_the_same_patch() -> None:
     """Why the split is needed at all, stated as the quantity the bindings are built from.
 
-    Were the weights equal, ``dim + 1`` bindings would be ``dim + 1`` copies of one. They are not:
-    on this case the velocity's weight is nonzero exactly on the two prescribed-pressure patches and
-    the pressure's exactly on the two walls, so neither is a rescaling of the other.
+    Were the linearizations equal, ``dim + 1`` bindings would be ``dim + 1`` copies of one. They are
+    not: on this case each velocity component follows its owner (value weight one, a nonzero
+    tangential offset) exactly on the two prescribed-pressure patches and is prescribed on the walls,
+    and the pressure is the reverse. The value weight states it without depending on how skewed a
+    face is, which the gradient weight -- zero on a face whose offset is purely normal -- cannot.
     """
     assembler = _flow_quadratic_case()[0]
-    velocity_weights = assembler._build_time_velocity_gradient_weights()
-    pressure_weight = assembler._build_time_pressure_gradient_weight()
-    assert len(velocity_weights) == assembler.mesh.dim
+    velocity = assembler._build_time_velocity_linearizations()
+    pressure = assembler._build_time_pressure_linearization()
+    assert len(velocity) == assembler.mesh.dim
 
-    live = {
-        name: (
-            float(jnp.max(jnp.abs(velocity_weights[0][faces]))),
-            float(jnp.max(jnp.abs(pressure_weight[faces]))),
-        )
-        for name in ("left", "right", "bottom", "top")
-        for faces in (assembler.mesh.face_patches.indices(name),)
-    }
-    for name in ("left", "right"):
-        assert live[name][0] > 1e-6 and live[name][1] == 0.0, f"{name}: {live[name]}"
-    for name in ("bottom", "top"):
-        assert live[name][0] == 0.0 and live[name][1] > 1e-6, f"{name}: {live[name]}"
+    for name, follows in (
+        ("left", "velocity"),
+        ("right", "velocity"),
+        ("bottom", "pressure"),
+        ("top", "pressure"),
+    ):
+        faces = assembler.mesh.face_patches.indices(name)
+        for field, linearization in (
+            *((f"vel_{i}", v) for i, v in enumerate(velocity)),
+            ("p", pressure),
+        ):
+            expected = 1.0 if (field == "p") == (follows == "pressure") else 0.0
+            np.testing.assert_array_equal(np.asarray(linearization.value_weight[faces]), expected)
+            offset = float(jnp.max(jnp.abs(linearization.gradient_weight[faces])))
+            assert (offset > 1e-6) if expected else (offset == 0.0), f"{name} {field}: {offset}"
 
 
-def test_the_flow_boundary_gradient_weights_do_not_depend_on_the_state() -> None:
-    """Why evaluating the flow's weights once at build time is exact -- the twin of the scalar check.
+def test_the_flow_boundary_linearizations_do_not_depend_on_the_state() -> None:
+    """Why evaluating the flow's linearizations once at build time is exact -- the scalar check's twin.
 
-    Every flow closure is affine in the gradient it is handed: a prescribed value ignores it, an
-    extrapolating one adds the tangential offset ``grad . d_t``. So the derivative at rest is the
-    derivative everywhere, and binding before any state exists cannot be stale. Catches a closure
-    (or a future one) whose gradient dependence moves with the flow, which would make that
-    build-time binding silently wrong rather than merely approximate.
+    Every flow closure is affine in the owner's value and gradient: a prescribed value ignores both,
+    an extrapolating one follows the value and adds the tangential offset ``grad . d_t``. So the
+    derivatives at rest are the derivatives everywhere, and binding before any state exists cannot be
+    stale. Catches a closure (or a future one) whose dependence moves with the flow, which would make
+    that build-time binding silently wrong rather than merely approximate.
     """
     assembler = _flow_quadratic_case()[0]
     mesh = assembler.mesh
     key = jax.random.PRNGKey(7)
-    reference_velocity = assembler._build_time_velocity_gradient_weights()
-    reference_pressure = assembler._build_time_pressure_gradient_weight()
-    assert float(jnp.max(jnp.abs(reference_pressure))) > 1e-6  # not trivially zero everywhere
-    assert float(jnp.max(jnp.abs(reference_velocity[0]))) > 1e-6
+    reference_velocity = assembler._build_time_velocity_linearizations()
+    reference_pressure = assembler._build_time_pressure_linearization()
+    assert float(jnp.max(jnp.abs(reference_pressure.gradient_weight))) > 1e-6
+    assert float(jnp.max(jnp.abs(reference_velocity[0].gradient_weight))) > 1e-6
 
     for scale_of in (1.0, 5.0):
         velocity = scale_of * jax.random.normal(key, (mesh.n_cells, mesh.dim))
@@ -899,28 +923,254 @@ def test_the_flow_boundary_gradient_weights_do_not_depend_on_the_state() -> None
         grad_velocity = scale_of * jax.random.normal(key, (mesh.n_cells, mesh.dim, mesh.dim))
         grad_pressure = scale_of * jax.random.normal(key, (mesh.n_cells, mesh.dim))
         for component in range(mesh.dim):
-            moved = assembler._velocity_boundary_gradient_weight(velocity, component, grad_velocity)
-            assert np.array_equal(np.asarray(moved), np.asarray(reference_velocity[component]))
-        moved = assembler._pressure_boundary_gradient_weight(pressure, grad_pressure)
-        assert np.array_equal(np.asarray(moved), np.asarray(reference_pressure))
+            for moved, held in (
+                (
+                    assembler._velocity_boundary_gradient_weight(
+                        velocity, component, grad_velocity
+                    ),
+                    reference_velocity[component].gradient_weight,
+                ),
+                (
+                    assembler._velocity_boundary_value_weight(velocity, component, grad_velocity),
+                    reference_velocity[component].value_weight,
+                ),
+            ):
+                assert np.array_equal(np.asarray(moved), np.asarray(held))
+        for moved, held in (
+            (
+                assembler._pressure_boundary_gradient_weight(pressure, grad_pressure),
+                reference_pressure.gradient_weight,
+            ),
+            (
+                assembler._pressure_boundary_value_weight(pressure, grad_pressure),
+                reference_pressure.value_weight,
+            ),
+        ):
+            assert np.array_equal(np.asarray(moved), np.asarray(held))
+
+
+# --- every boundary condition, exact from its own data at the wall -------------------------------
+
+#: The Robin exchange coefficient and diffusivity the convective and Neumann cases run at. Neither is
+#: one, so a closure that dropped either from its face value would be caught.
+_EXCHANGE, _DIFFUSIVITY = 2.5, 1.3
+
+
+def _quadratic_field(dim, *, zero_normal_derivative_on=()):
+    """A quadratic, its gradient, and the data each condition needs to be satisfied by it.
+
+    ``zero_normal_derivative_on`` names the unit-cube walls (``"x-"`` for ``x = 0``, ``"y-"`` for
+    ``y = 0``) a zero-gradient case applies to; the quadratic then drops the terms whose derivative
+    normal to those walls does not vanish ON the wall. It still varies along that normal, so its
+    normal derivative is nonzero one cell behind the wall -- the case the probe once got wrong.
+    """
+    rng = np.random.default_rng(11)
+    hessian = rng.standard_normal((dim, dim))
+    hessian = hessian + hessian.T
+    linear = rng.standard_normal(dim)
+    for wall in zero_normal_derivative_on:
+        axis = "xyz".index(wall[0])
+        # d(phi)/d(x_axis) = (H x)_axis + linear_axis must vanish wherever x_axis = 0.
+        hessian[axis, :] = 0.0
+        hessian[:, axis] = 0.0
+        linear[axis] = 0.0
+        hessian[axis, axis] = rng.standard_normal() + 2.0  # curvature along the normal remains
+
+    def value(points):
+        return 0.5 * jnp.einsum("...i,ij,...j->...", points, hessian, points) + points @ linear
+
+    def gradient(points):
+        return points @ hessian + linear
+
+    return value, gradient
+
+
+def _condition(kind, faces, geometry, value, gradient):
+    """``kind`` on ``faces``, holding the data the quadratic ``value`` carries there."""
+    centroid = geometry.face.centroid[faces]
+    normal_derivative = dot(gradient(centroid), geometry.face.normal[faces])
+    return {
+        "Dirichlet": lambda: Dirichlet(value=value(centroid)),
+        "DirichletField": lambda: DirichletField(field_fn=value),
+        "ZeroGradient": lambda: ZeroGradient(),
+        # -Gamma dphi/dn is the outward flux.
+        "Neumann": lambda: Neumann(flux=-_DIFFUSIVITY * normal_derivative),
+        # Gamma dphi/dn = h (Tinf - phi), so Tinf = phi + (Gamma / h) dphi/dn.
+        "Convective": lambda: Convective(
+            h=_EXCHANGE, t_inf=value(centroid) + _DIFFUSIVITY / _EXCHANGE * normal_derivative
+        ),
+    }[kind]()
+
+
+def _scalar_case(mesh, kind, patches, closure, zero_normal_derivative_on=()):
+    """A diffusion assembler with ``kind`` on ``patches`` and the exact value everywhere else."""
+    geometry = mesh.geometry()
+    value, gradient = _quadratic_field(
+        mesh.dim, zero_normal_derivative_on=zero_normal_derivative_on
+    )
+    conditions = {
+        name: _condition(
+            kind if name in patches else "Dirichlet",
+            mesh.face_patches.indices(name),
+            geometry,
+            value,
+            gradient,
+        )
+        for name in mesh.face_patches.names
+        if name not in ("interior", "boundary") or name in patches
+    }
+    assembler = ResidualAssembler.build(
+        mesh,
+        geometry,
+        PropertyModel({"diffusivity": Constant(_DIFFUSIVITY)}),
+        (DiffusionFlux(),),
+        BoundaryConditions(conditions),
+        gradient_scheme=MultipleCorrectionGradient(
+            boundary_closure=closure, fallback=SkewCorrectedGradient()
+        ),
+    )
+    centroid = geometry.cell.centroid
+    return assembler, value(centroid), gradient(centroid)
+
+
+_ALL_CONDITIONS = ["Dirichlet", "DirichletField", "ZeroGradient", "Neumann", "Convective"]
+_PRESCRIBED = {"Dirichlet", "DirichletField"}
+
+
+@pytest.mark.parametrize(
+    "closure", [OwnerGradient(), SkewCorrectedGradient()], ids=["owner", "skew"]
+)
+@pytest.mark.parametrize("perturb", [0.3, 0.0], ids=["skewed", "orthogonal"])
+@pytest.mark.parametrize("kind", _ALL_CONDITIONS)
+def test_every_condition_is_exact_for_a_quadratic_satisfying_it_at_the_wall(
+    kind, perturb, closure
+) -> None:
+    """Every boundary condition type, applied where two of its faces meet at a corner cell.
+
+    Each quadratic satisfies its condition AT the boundary faces and nowhere else in particular: a
+    Neumann or Robin field has a nonzero normal derivative that the condition's data matches, and a
+    zero-gradient field's normal derivative vanishes on the wall but not one cell in. Bound against
+    the conditions' :class:`BoundaryLinearization`, the reconstruction must return the gradient to
+    roundoff under both closures.
+
+    The wrong answers this catches: probing a gradient-type face with the condition's own data rather
+    than the probe's (2.1 of the gradient on this grid); dropping the normal-derivative term from the
+    probe's face value; ignoring the value weight, which a Robin condition sets between zero and one;
+    and deciding which faces follow their owner from the gradient weight, which is exactly zero on an
+    orthogonal face -- that is what the orthogonal grid is for. And it pins the other direction too:
+    bound to the geometry alone, every condition that is not a prescribed value comes back inexact,
+    so exactness here is the binding's doing and not the field's.
+    """
+    mesh = perturbed_grid_2d(8, 8, perturb=perturb, seed=3, named_boundaries=True)
+    walls = {"left": "x-", "bottom": "y-"}
+    assembler, field, exact = _scalar_case(
+        mesh,
+        kind,
+        set(walls),
+        closure,
+        zero_normal_derivative_on=walls.values() if kind == "ZeroGradient" else (),
+    )
+    scale_of = float(jnp.max(jnp.abs(exact)))
+    error = float(jnp.max(jnp.abs(assembler.gradient(field) - exact)))
+    assert error < 1e-12 * scale_of, f"{kind}: {error:.3e}"
+
+    geometric = _with_scheme(assembler, assembler.gradient_scheme.bind(mesh, mesh.geometry()))
+    blind = float(jnp.max(jnp.abs(geometric.gradient(field) - exact)))
+    if kind in _PRESCRIBED:
+        assert blind < 1e-12 * scale_of, f"{kind} geometry-only: {blind:.3e}"
+    else:
+        assert blind > 1e-6 * scale_of, f"{kind} geometry-only is already exact: {blind:.3e}"
+
+
+@pytest.mark.parametrize("kind", ["Dirichlet", "Neumann", "Convective"])
+def test_every_condition_is_exact_on_tetrahedra_with_two_boundary_faces(kind) -> None:
+    """The three-dimensional case, on the cells the fallback exists for.
+
+    The whole boundary of the tetrahedral cube carries the condition, so its 18 cells with two
+    boundary faces each have two faces of it -- the cells a zero-derivative probe left singular.
+    Zero-gradient is absent only because no nonconstant quadratic has a vanishing normal derivative
+    on every face of a cube; Neumann is the same construction with data.
+    """
+    mesh = QUADRATIC_MESHES[2]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assembler, field, exact = _scalar_case(mesh, kind, {"boundary"}, OwnerGradient())
+    scale_of = float(jnp.max(jnp.abs(exact)))
+    error = float(jnp.max(jnp.abs(assembler.gradient(field) - exact)))
+    assert error < 1e-11 * scale_of, f"{kind}: {error:.3e}"
+
+
+def test_the_flow_is_exact_on_an_inlet_outlet_wall_duct() -> None:
+    """The coupled flow on the patch layout every duct has, with fields meeting it only at the wall.
+
+    Velocity is prescribed at the inlet and walls and extrapolated at the outlet; pressure the
+    reverse. Each field satisfies its extrapolating patches at the faces only -- the velocity's
+    streamwise derivative vanishes at the outlet but not a cell upstream, the pressure's normal
+    derivative at the inlet and walls likewise -- which the probe once could not represent, so that a
+    test of this layout needed fields satisfying their conditions identically and so could not have a
+    pressure varying across the duct at all.
+    """
+    curvature, level = 1.7, 0.4
+    profiles = ((0.8, 1.3, -0.4, 0.2), (-1.1, -0.7, 0.9, -0.3))  # a (x-1)^2 + b y^2 + c y + d
+
+    def velocity_of(centroid):
+        x, y = centroid[..., 0], centroid[..., 1]
+        return jnp.stack(
+            [a * (x - 1.0) ** 2 + b * y**2 + c * y + d for a, b, c, d in profiles], axis=-1
+        )
+
+    def pressure_of(centroid):
+        return curvature * centroid[..., 0] ** 2 + level
+
+    mesh = perturbed_grid_2d(8, 8, perturb=0.3, seed=3, named_boundaries=True)
+    geometry = mesh.geometry()
+    assembler = MomentumContinuity.build(
+        mesh,
+        geometry,
+        PropertyModel({"viscosity": Constant(0.1), "density": Constant(1.0)}),
+        BoundaryConditions(
+            {
+                "left": VelocityInlet(velocity=velocity_of),
+                "right": PressureOutlet(pressure=curvature + level),
+                "bottom": MovingWall(velocity=velocity_of),
+                "top": MovingWall(velocity=velocity_of),
+            }
+        ),
+        gradient_scheme=MultipleCorrectionGradient(fallback=SkewCorrectedGradient()),
+    )
+    centroid = geometry.cell.centroid
+    x, y = centroid[:, 0], centroid[:, 1]
+    zero = jnp.zeros(mesh.n_cells)
+    exact_velocity = jnp.stack(
+        [jnp.stack([2 * a * (x - 1.0), 2 * b * y + c], axis=-1) for a, b, c, _ in profiles], axis=1
+    )
+    exact_pressure = jnp.stack([2 * curvature * x, zero], axis=-1)
+
+    velocity_error = float(
+        jnp.max(jnp.abs(assembler._velocity_gradient(velocity_of(centroid))[0] - exact_velocity))
+    )
+    pressure_error = float(
+        jnp.max(jnp.abs(assembler._pressure_gradient(pressure_of(centroid))[0] - exact_pressure))
+    )
+    assert velocity_error < 1e-12 * float(jnp.max(jnp.abs(exact_velocity))), velocity_error
+    assert pressure_error < 1e-12 * float(jnp.max(jnp.abs(exact_pressure))), pressure_error
 
 
 def _zero_gradient_tetrahedra():
-    """The tetrahedral fixture with its whole boundary zero-gradient, and that condition's weight.
+    """The tetrahedral fixture with its whole boundary zero-gradient, and that condition's linearization.
 
-    18 of its 162 cells have two boundary faces, and those are the ones this condition leaves
-    undetermined under either closure -- see the test below.
+    18 of its 162 cells have two boundary faces, which :class:`OwnerGradient` cannot determine.
     """
     mesh = QUADRATIC_MESHES[2]
     geometry = mesh.geometry()
-    weight = ResidualAssembler.build(
+    linearization = ResidualAssembler.build(
         mesh,
         geometry,
         PropertyModel({"diffusivity": Constant(1.0)}),
         (DiffusionFlux(),),
         BoundaryConditions({"boundary": ZeroGradient()}),
-    )._build_time_boundary_gradient_weight()
-    return mesh, geometry, weight
+    )._build_time_boundary_linearization()
+    return mesh, geometry, linearization
 
 
 def _boundary_face_count(mesh) -> np.ndarray:
@@ -949,70 +1199,59 @@ def test_a_non_finite_correction_counts_as_undetermined_at_any_mesh_size() -> No
         np.testing.assert_array_equal(np.asarray(cells), [1, 2, 3], err_msg=f"{n_cells} cells")
 
 
-def test_cells_a_condition_leaves_undetermined_keep_their_geometry_only_correction() -> None:
-    """The third repair tier: where no closure can determine a cell under the conditions.
+def test_the_fallback_determines_the_corner_cells_under_their_own_conditions() -> None:
+    """A condition's normal derivative is what determines a tetrahedron with two boundary faces.
 
-    A zero-gradient face's value is the owner's own value carried along the tangential offset, so it
-    tells a value-reading fallback nothing the owner's gradient did not. On a tetrahedron with two
-    such faces neither closure then determines the Hessian, and binding against the condition left
-    ``max|M2^-1|`` near 1e16 there -- on a real tetrahedral duct, 94 pressure cells, and a laminar
-    march whose every linear solve then ran to its cycle cap without the residual moving.
+    Such a cell has two interior faces, which leave one Hessian curvature free. The fallback closure
+    supplies it from each boundary face's normal derivative -- which every condition prescribes, zero
+    on this one -- provided the probes give each basis field *its own* normal derivative there. When
+    they gave every basis field the condition's zero instead, the face told the probes nothing, the
+    fallback could not determine the cell either, and a tetrahedral duct's pressure binding was left
+    with 94 cells at ``max|M2^-1|`` 3.1e16 and a march that stopped moving.
 
-    Pinned three ways, each of which a plausible wrong repair fails: no cell is left singular; the
-    cells the condition leaves undetermined carry exactly the geometry-only correction (not some
-    other well-conditioned matrix); and every other cell carries exactly the condition-aware one, so
-    the repair is local and exactness is kept wherever the condition allows it.
+    Pinned both ways: under their own conditions no cell is left undetermined and the worst cell is
+    well conditioned; and the owner closure alone still fails on exactly the 18 two-face cells, so the
+    fixture has the cells this is about.
     """
-    mesh, geometry, weight = _zero_gradient_tetrahedra()
-    closure = CellwiseFallback(
-        multiple_correction._undetermined_cells(
-            multiple_correction._probe_corrections(
-                mesh, geometry, OwnerGradient(), weight
-            ).m2_inverse
-        ),
-        OwnerGradient(),
-        SkewCorrectedGradient(),
+    mesh, geometry, linearization = _zero_gradient_tetrahedra()
+    owner_only = multiple_correction._probe_corrections(
+        mesh, geometry, OwnerGradient(), linearization
     )
-    conditioned = multiple_correction._probe_corrections(mesh, geometry, closure, weight)
-    geometric = multiple_correction._probe_corrections(mesh, geometry, closure, None)
     # Which cells are stuck is decided by the mesh, not by thresholding the singular inverse: there
     # ``max|M2^-1|`` is rounding noise that is ~1e16 under one BLAS and NaN under another, and a NaN
     # fails ``> limit`` -- which dropped two of the 18 on some CI runners and not others.
     stuck = _boundary_face_count(mesh) >= 2
     assert stuck.sum() == 18  # the fixture still exhibits the defect this repairs
-    flagged = multiple_correction._undetermined_cells(conditioned.m2_inverse)
+    flagged = multiple_correction._undetermined_cells(owner_only.m2_inverse)
     assert flagged is not None
     np.testing.assert_array_equal(np.asarray(flagged), np.flatnonzero(stuck))
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         bound = MultipleCorrectionGradient(fallback=SkewCorrectedGradient()).bind(
-            mesh, geometry, weight
+            mesh, geometry, linearization
         )
-    assert _worst_correction(bound.prepared).max() < multiple_correction._UNDETERMINED_CORRECTION
-    for name in ("m2_inverse", "gradient_defect"):
-        held = np.asarray(getattr(bound.prepared, name))
-        np.testing.assert_array_equal(held[stuck], np.asarray(getattr(geometric, name))[stuck])
-        np.testing.assert_array_equal(held[~stuck], np.asarray(getattr(conditioned, name))[~stuck])
+    assert _worst_correction(bound.prepared).max() < 1e3
 
 
 def test_a_repair_report_does_not_silence_a_later_graver_one() -> None:
-    """Each repair warning is emitted once per process, and independently of the others.
+    """Each repair warning is emitted once per process, and independently of the other.
 
-    A scheme is bound once per field, and on a tetrahedral mesh the first binding reports a repair.
-    When all three warnings shared one flag, that report swallowed the later one saying the
+    A scheme is bound once per field, and on a tetrahedral mesh the first binding typically reports
+    a repair. When both warnings shared one flag, that report swallowed a later one saying a
     correction had been left singular -- which is how a stalled march on a real duct printed nothing.
     """
-    mesh, geometry, weight = _zero_gradient_tetrahedra()
+    mesh, geometry, linearization = _zero_gradient_tetrahedra()
     multiple_correction._WARNED.clear()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         MultipleCorrectionGradient(fallback=SkewCorrectedGradient()).bind(mesh, geometry)
-        MultipleCorrectionGradient(fallback=SkewCorrectedGradient()).bind(mesh, geometry, weight)
-        MultipleCorrectionGradient(fallback=None).bind(mesh, geometry)
+        MultipleCorrectionGradient(fallback=SkewCorrectedGradient()).bind(
+            mesh, geometry, linearization
+        )
+        MultipleCorrectionGradient(fallback=None).bind(mesh, geometry, linearization)
     messages = [str(w.message) for w in caught]
     assert sum("is used on those cells' boundary faces" in m for m in messages) == 1
-    assert sum("once the boundary conditions are accounted for" in m for m in messages) == 1
     assert sum("no fallback closure was given" in m for m in messages) == 1
 
 

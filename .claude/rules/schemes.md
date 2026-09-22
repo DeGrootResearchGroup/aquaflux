@@ -1413,42 +1413,53 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   the weights from. `momentum.gradient_scheme` survives as the condition-free form for an initializer
   that re-binds it against a different equation's conditions; it is **not** what the flow residual
   applies. See `.claude/rules/flow.md` for the measured numbers and the fixture trap.
-  ⚠️⚠️ **BINDING AGAINST THE CONDITIONS SHIPPED A SINGULAR CORRECTION ON TETRAHEDRA, AND THE WARNING
-  THAT SHOULD HAVE SAID SO WAS SWALLOWED (fixed after #469).** A gradient-type face's value is
-  `owner + w·g_owner` — nothing the owner's gradient did not already supply — so on a tetrahedron with
-  **two** such faces *neither* closure determines the Hessian once the probes honour the condition.
-  `SkewCorrectedGradient`, the fallback that repairs exactly those cells geometry-only, reads that
-  value and so learns nothing either. Measured on `tetrahedral_grid_3d(3, perturb=0.25, seed=6)` with
-  its whole boundary `ZeroGradient`: under `OwnerGradient` 18 cells undetermined with or without the
-  weight; under `SkewCorrectedGradient` **0 geometry-only, 18 with the weight** — all 18 are the cells
-  with two boundary faces, `max|M2⁻¹|` ~8e15 against 19 with the boundary prescribed. On the 2462-cell
-  tetrahedral duct (`validation/tetrahedral_gradient_ab`, `MultipleCorrectionGradient` +
-  `SkewCorrectedGradient` fallback) the per-field bindings reached `max|M2⁻¹|` 2.0e13 (velocity, 2
-  cells) and **3.1e16 (pressure, 94 cells)**, against 8.4e3 geometry-only, and the laminar march from
-  rest (`LAM_START=rest LAM_MEASURE=euclid LAM_ARMS=lu`) stopped moving entirely: `|R|` 1.782e-4 on all
-  60 steps, every linear solve at the 120-cycle cap, where before #469 it moved (and diverged to
-  7.637e2). **Remedy — a third repair tier in `_build_corrections`:** a cell still undetermined after
-  the fallback, when a weight was given, keeps its **geometry-only** `m2_inverse`/`gradient_defect`
-  (`_keep_geometric_where`); every other cell keeps the condition-aware pair. Those cells are
-  therefore well conditioned but not quadratic-exact under the condition — a stated trade, reported
-  by its own warning. After it, every duct binding peaks at `max|M2⁻¹|` ≤ 8.4e3. Pinned by
-  `test_cells_a_condition_leaves_undetermined_keep_their_geometry_only_correction`, which checks the
-  cell set exactly in both directions (mutation-verified: dropping the tier, swapping only `M2`, and
-  swapping every cell each fail it).
-  **Why it was silent:** the "repaired", "condition-limited" and "unrepairable" warnings shared one
-  `_FALLBACK_WARNED` flag. There is no such flag now — `_WARNED` is a set keyed per warning, via
-  `_warn_once`. A scheme is bound once per field and the first binding on a tetrahedral mesh reports
-  a repair, so the shared flag let that report swallow the graver one; pinned by
+  ⚠️⚠️ **THE PROBE GIVES EACH BASIS FIELD ITS OWN BOUNDARY DATA — AND TWO EARLIER RULES DID NOT.**
+  `bind` takes a `BoundaryLinearization` (`value_weight` = ∂φ_f/∂φ_owner, `gradient_weight` =
+  ∂φ_f/∂∇φ_owner, both read off the closures by `jax.jvp` at rest; `schemes/gradient.py`), and
+  `_probe_corrections` drives a boundary face with `a(ψ_P + w·g₁) + (1−a)ψ_f + a(d·n)∂ₙψ(x_f)` —
+  the condition's own construction fed **the probe's own value and normal derivative**. Every
+  shipped condition builds its face value from the owner and a one-sided normal derivative (`a = 0`
+  Dirichlet, `1` zero-gradient/Neumann, `1/(1+β)` Robin), so this is exact for them all, and with
+  no linearization it reduces to the geometry-only build (`a = 0`, `w = 0`). The two rules it
+  replaced, both wrong: *(i)* **geometry-only** — every face probed with the exact value — wrong for
+  every derivative-type condition (2.0e-3 on the #467 fixture); *(ii)* **the condition's own data**
+  (#468/#469: "the owner's value where the weight is nonzero") — which told every basis field its
+  normal derivative on a zero-gradient face was **zero**, so the face contributed nothing to `M2`.
+  Rule (ii) had two consequences, both measured. **Exactness needed fields satisfying their
+  conditions IDENTICALLY**, not at the wall: 2.1 of the gradient on an 8×8 perturbed quad grid for
+  a quadratic whose normal derivative vanishes on a zero-gradient wall but not one cell in, 7e-15
+  under the current rule. **And a tetrahedron with two such faces was undetermined under every
+  closure**, because `SkewCorrectedGradient` supplies the missing curvature from exactly that normal
+  derivative: on `tetrahedral_grid_3d(3, perturb=0.25, seed=6)` with its whole boundary
+  `ZeroGradient`, 18 two-face cells at `max|M2⁻¹|` ~8e15; on the 2462-cell tetrahedral duct the
+  pressure binding reached **3.1e16 in 94 cells** and the laminar march from rest froze (`|R|`
+  1.782e-4 on all 60 steps, every linear solve at the 120-cycle cap). Under the current rule every
+  cell of both is determined (duct pressure peaks at 7.8e2) and the march moves again.
+  ⚠️ **Rule (ii) also misclassified orthogonal faces**: it decided "follows the owner" from
+  `gradient_weight != 0`, which is exactly zero on a face whose offset is purely normal, so a
+  zero-gradient face on an orthogonal grid was probed as prescribed. `value_weight` does not have
+  that blind spot, which is why it exists rather than being inferred from the gradient weight.
+  **A geometry-only per-cell fallback was tried as a third repair tier (#475) and deleted**: under
+  the current rule it was reached only with `OwnerGradient` and no fallback, where the geometry-only
+  correction is just as singular, so it only ever added a warning falsely calling the cells well
+  conditioned. The three repair warnings' shared once-per-process flag, which hid the duct's
+  singular binding, is gone too: `_WARNED` is a set keyed per warning (`_warn_once`), pinned by
   `test_a_repair_report_does_not_silence_a_later_graver_one`.
-  **The principled alternative, not built:** a closure that uses the condition's *prescribed normal
-  derivative* (zero for zero-gradient, the flux for Neumann) as the face gradient's normal component.
-  That is real information about the Hessian at those faces and would determine these cells rather
-  than falling back — but it needs the condition to hand the closure a normal derivative, a seam the
-  closure interface (`face_gradient(..., closure_values, ...)`) does not have.
-  ⚠️ **The unit tier missed this because no fixture binding with a weight had a cell with TWO
-  gradient-type faces.** All three were 8×8 quadrilateral grids whose gradient-type patches were one
-  opposed pair, so every corner cell had one gradient-type face and one prescribed. Test a
-  condition-aware binding on a mesh and patch layout where some cell has two.
+  **Tests** (all mutation-verified): `test_every_condition_is_exact_for_a_quadratic_satisfying_it_at_the_wall`
+  (Dirichlet, DirichletField, ZeroGradient, Neumann, Convective × both closures × skewed and
+  orthogonal 8×8 quads, the condition on two adjacent walls so a corner cell carries two, plus the
+  converse that the geometry-only binding is inexact for every non-prescribed type);
+  `test_every_condition_is_exact_on_tetrahedra_with_two_boundary_faces`;
+  `test_the_flow_is_exact_on_an_inlet_outlet_wall_duct`;
+  `test_the_fallback_determines_the_corner_cells_under_their_own_conditions`. Breaking the probe
+  five ways (the old rule, dropping the normal-derivative term, classifying by gradient weight,
+  rounding the value weight to 0/1, dropping the prescribed term) and the flow's value weights two
+  ways each turns at least one red; classifying by gradient weight is caught **only** by the
+  orthogonal parametrization. ⚠️ The unit tier missed rule (ii) because every condition-aware
+  fixture used a field satisfying its conditions identically and no cell with two gradient-type
+  faces — test the at-the-wall case.
+  **Still open:** the `SkewCorrectedGradient` march-loss table was measured with geometry-only
+  binding and has not been repeated under this rule.
   ⚠️ Nothing about the numbers fails if the `bind` call is dropped from a factory — the residual just
   quietly goes back to rebuilding it per matvec — so it is pinned by
   `test_an_assembler_prepares_its_gradient_scheme_for_its_own_geometry`, and the identity default by
@@ -2530,8 +2541,10 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     **It surfaced as a CI flake** (`assert 16 == 18` in
     `test_cells_a_condition_leaves_undetermined_keep_their_geometry_only_correction`, some runners and not
     others): that test thresholded `np.max(...) > limit` itself, so two NaN cells dropped out of its
-    count. It now takes the stuck set structurally (cells owning ≥2 boundary faces) and asserts
-    `_undetermined_cells` flags exactly that set. Injecting NaN into two of the 18 inverses
+    count. That test went with the third tier it pinned (#483); its successor,
+    `test_the_fallback_determines_the_corner_cells_under_their_own_conditions`, takes the stuck set
+    structurally (cells owning ≥2 boundary faces) and asserts `_undetermined_cells` flags exactly that
+    set under the owner closure alone. Injecting NaN into two of the 18 inverses
     reproduces the CI count of 16 under the old test and fails the old production guard under the new one. ⚠️ Why only some
     runners produce a NaN was **not established** — a NaN from an exactly-zero pivot on some BLAS
     kernel paths is the consistent reading; the CI log records no CPU model.

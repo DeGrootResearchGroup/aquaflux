@@ -56,6 +56,7 @@ import jax.numpy as jnp
 
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.context import FieldContext, MeshContext
+from aquaflux.schemes import BoundaryLinearization
 
 if TYPE_CHECKING:
     from aquaflux.mesh import Mesh, MeshGeometry
@@ -212,7 +213,7 @@ class ResidualAssembler(eqx.Module):
         transient: TransientTerm | None = None,
         source_operators: tuple[VolumeSource, ...] = (),
         gradient_scheme: GradientScheme | None = None,
-        boundary_gradient_weight: jnp.ndarray | None = None,
+        boundary_linearization: BoundaryLinearization | None = None,
         imposed_gradient: ImposedGradient | None = None,
     ) -> ResidualAssembler:
         """Build an assembler from injected operators, schemes, and boundary closures.
@@ -253,6 +254,10 @@ class ResidualAssembler(eqx.Module):
             to reconstruct -- a near-wall ``omega``, whose value is itself imposed, is the standing
             case. Given here rather than per call so that every reconstruction this assembler makes
             honours it.
+        boundary_linearization : BoundaryLinearization, optional
+            How each boundary value depends on its owner cell, which the gradient scheme is bound
+            against. Read off the conditions when omitted; supply it only when a calculated property
+            makes that impossible before a field exists.
 
         Raises
         ------
@@ -303,47 +308,51 @@ class ResidualAssembler(eqx.Module):
         )
         if gradient_scheme is None:
             return assembled
-        # Bind the scheme AGAINST the conditions, not merely against the geometry. A gradient-type
-        # condition folds its own dependence on the owner gradient into the first pass, so a scheme
-        # that prepares work from that operator must be prepared from the same one -- otherwise it
-        # corrects an operator nobody evaluates and stops reproducing a quadratic.
-        weight = (
-            assembled._build_time_boundary_gradient_weight()
-            if boundary_gradient_weight is None
-            else boundary_gradient_weight
+        # Bind the scheme AGAINST the conditions, not merely against the geometry. A scheme that
+        # prepares work from its own operator must be prepared from the one it will apply, and the
+        # boundary conditions are part of that operator -- otherwise it corrects an operator nobody
+        # evaluates and stops reproducing a quadratic.
+        linearization = (
+            assembled._build_time_boundary_linearization()
+            if boundary_linearization is None
+            else boundary_linearization
         )
         return dataclasses.replace(
-            assembled, gradient_scheme=gradient_scheme.bind(mesh, geometry, weight)
+            assembled, gradient_scheme=gradient_scheme.bind(mesh, geometry, linearization)
         )
 
-    def _build_time_boundary_gradient_weight(self) -> jnp.ndarray:
-        """``d(boundary value)/d(grad phi_owner)`` per face, evaluated without a state.
+    def _build_time_boundary_linearization(self) -> BoundaryLinearization:
+        """How each boundary value depends on its owner cell, evaluated without a state.
 
-        The weight is a property of the conditions and the geometry, not of the field: measured on a
-        perturbed grid carrying zero-gradient, Neumann, Dirichlet and convective patches at once, it
-        is **bit-identical** across a zero state, a random state and one offset by 5.0, at zero and
-        at a random gradient. So evaluating it here, once, is exact rather than an approximation --
-        pinned by ``test_the_boundary_gradient_weight_does_not_depend_on_the_state``.
+        Both derivatives are properties of the conditions and the geometry, not of the field: every
+        condition here is affine in its owner's value and gradient. Measured on a perturbed grid
+        carrying zero-gradient, Neumann, Dirichlet and convective patches at once, both are
+        **bit-identical** across a zero state, a random state and one offset by 5.0, at zero and at a
+        random gradient. So evaluating them here, once, is exact rather than an approximation --
+        pinned by ``test_the_boundary_linearization_does_not_depend_on_the_state``.
 
-        It is *not* independent of the properties: a convective condition blends the coefficient into
-        its face value, so its gradient coefficient carries ``Gamma``. A property that cannot be
-        evaluated without a field therefore cannot give a weight here, and this raises rather than
-        quietly using the zero default ``boundary_values`` falls back to -- a silently wrong weight is
-        the very defect binding against the conditions exists to remove.
+        They are *not* independent of the properties: a convective condition blends the coefficient
+        into its face value, so both of its derivatives carry ``Gamma``. A property that cannot be
+        evaluated without a field therefore cannot give them here, and this raises rather than
+        quietly using the zero default ``boundary_values`` falls back to -- a silently wrong
+        linearization is the very defect binding against the conditions exists to remove.
         """
         try:
             properties = self.properties.evaluate(self.mesh.cell_zones, {})
         except (KeyError, ValueError) as error:
             raise ValueError(
                 "ResidualAssembler.build: the gradient scheme is bound against the boundary "
-                "conditions, whose weight needs the properties evaluated, and a calculated property "
-                f"cannot be evaluated before a field exists ({error}). Pass the weight yourself as "
-                "`boundary_gradient_weight=` -- `d(boundary value)/d(grad phi_owner)` per face, "
-                "shape (n_faces, dim)."
+                "conditions, whose linearization needs the properties evaluated, and a calculated "
+                f"property cannot be evaluated before a field exists ({error}). Pass it yourself as "
+                "`boundary_linearization=` -- a BoundaryLinearization holding "
+                "`d(boundary value)/d(phi_owner)` and `d(boundary value)/d(grad phi_owner)` per face."
             ) from error
         zero_field = jnp.zeros(self.mesh.n_cells)
         zero_gradient = jnp.zeros((self.mesh.n_cells, self.mesh.dim))
-        return self._boundary_gradient_weight(zero_field, zero_gradient, properties)
+        return BoundaryLinearization(
+            value_weight=self._boundary_value_weight(zero_field, zero_gradient, properties),
+            gradient_weight=self._boundary_gradient_weight(zero_field, zero_gradient, properties),
+        )
 
     def boundary_values(
         self, phi: jnp.ndarray, gradient: jnp.ndarray, properties: dict[str, jnp.ndarray]
@@ -457,6 +466,25 @@ class ResidualAssembler(eqx.Module):
             boundary_gradient_weight=self._boundary_gradient_weight(phi, zero_grad, properties),
         )
         return gradient, self.boundary_values(phi, gradient, properties)
+
+    def _boundary_value_weight(
+        self,
+        phi: jnp.ndarray,
+        gradient: jnp.ndarray,
+        properties: dict[str, jnp.ndarray],
+    ) -> jnp.ndarray:
+        """``d(boundary value)/d(phi_owner)`` per face, shape ``(n_faces,)``.
+
+        Differentiated from the closures, as the gradient weight is: zero where the value is
+        prescribed, one where a normal derivative is, and between the two for a Robin condition. A
+        face value reads only its own owner, so one directional derivative seeded in every cell
+        resolves every face.
+        """
+        return jax.jvp(
+            lambda field: self.boundary_values(field, gradient, properties),
+            (phi,),
+            (jnp.ones_like(phi),),
+        )[1]
 
     def _boundary_gradient_weight(
         self,

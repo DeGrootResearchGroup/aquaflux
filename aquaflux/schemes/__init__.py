@@ -11,6 +11,7 @@ from __future__ import annotations
 from .gradient import (
     AveragedInteriorHessian,
     AveragedNeighbourHessian,
+    BoundaryLinearization,
     CellBlockJacobi,
     CellPreconditioner,
     CoupledBlockSweep,
@@ -61,6 +62,7 @@ __all__ = [
     "DEFAULT_GRADIENT_SCHEME",
     "AveragedInteriorHessian",
     "AveragedNeighbourHessian",
+    "BoundaryLinearization",
     "CellBlockJacobi",
     "CellPreconditioner",
     "CellwiseFallback",

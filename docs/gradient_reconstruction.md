@@ -625,34 +625,40 @@ scheme = MultipleCorrectionGradient().bind(mesh, geometry)
 gradient, hessian = scheme.reconstruct(field, mesh, geometry, boundary_values)
 ```
 
-When the field carries a **gradient-type** boundary condition -- zero-gradient, Neumann, Robin --
-give `bind` the same per-face weight the reconstruction will receive:
+When the field has any boundary condition that is not a prescribed value -- zero-gradient,
+Neumann, Robin -- bind against that condition's {class}`~aquaflux.schemes.BoundaryLinearization`:
+how each boundary face's value depends on its owner cell's value and gradient.
 
 ```python
-scheme = MultipleCorrectionGradient().bind(mesh, geometry, boundary_gradient_weight)
+scheme = MultipleCorrectionGradient().bind(mesh, geometry, boundary_linearization)
 ```
 
-The first pass inverts `M1 - B` rather than `M1` in that case, so corrections built on `M1^-1` would
-be correcting an operator nobody evaluates, and the scheme stops reproducing a quadratic -- measured
-at 2.0e-3 of the gradient on an 8x8 perturbed quadrilateral grid with one zero-gradient pair of
-walls, against roundoff once the weight is passed. The price is that such a binding is valid for
-those boundary conditions as well as for that geometry, so a field whose conditions differ needs its
-own.
+The corrections are found by running the reconstruction on quadratic fields, and on a boundary face
+each of those has to be given what its condition would give it. Bound to the geometry alone, every
+face is given the quadratic's exact value, which is right for a prescribed value and wrong for the
+others: a zero-gradient, Neumann or Robin condition builds its face value from the owner cell and a
+**normal derivative**. With the linearization, each such face is given the condition's own
+construction fed the probe field's own normal derivative -- the data a quadratic would carry if it
+satisfied that condition. The reconstruction is then exact for any quadratic that satisfies its
+conditions **at the boundary faces**. On an 8x8 perturbed quadrilateral grid, a quadratic whose
+normal derivative vanishes on a zero-gradient wall but not one cell behind it comes back wrong by
+2.1 of the gradient bound to the geometry alone, and to roundoff bound against the condition. The
+price is that such a binding is valid for those conditions as well as for that geometry, so a field
+whose conditions differ needs its own.
 
-A condition does not determine every cell. A gradient-type face's value is the owner's own value
-carried along the tangential offset, so it tells the reconstruction nothing the owner's gradient did
-not; a tetrahedron with **two** such faces is then left with too little information to fix its
-Hessian, under either boundary closure. Such cells keep the correction built from the geometry
-alone — well conditioned, but not exact for quadratics under that condition — and a warning reports
-how many there are. Every other cell stays exact. On a tetrahedral cube whose whole boundary is
-zero-gradient, that is the 18 cells of 162 that have two boundary faces.
+The same data is what determines a tetrahedron with **two** boundary faces. Its two interior faces
+leave one Hessian curvature free, and
+{class}`~aquaflux.schemes.SkewCorrectedGradient` -- the closure the default fallback repairs such
+cells with -- supplies it from each boundary face's normal derivative, which every condition
+prescribes. On a tetrahedral cube whose whole boundary is zero-gradient, all 162 cells are
+determined this way, the 18 with two boundary faces included.
 
 The assemblers do this for you, and the coupled flow shows why the price matters:
 {meth}`~aquaflux.discretization.ResidualAssembler.build` solves one field and binds once, while
 {meth}`~aquaflux.flow.MomentumContinuity.build` binds **once per solved field** — each velocity
 component and the pressure — because the patches treat them oppositely. A pressure outlet prescribes
-the pressure and leaves the velocity to extrapolate; a wall does the reverse, so their weights are
-nonzero on disjoint patches and no single binding is right for both.
+the pressure and leaves the velocity to extrapolate; a wall does the reverse, so their
+linearizations differ on every patch and no single binding is right for both.
 {attr}`~aquaflux.flow.MomentumContinuity.gradient_scheme` stays the condition-free form, for an
 initializer that solves a different equation on the same mesh and re-binds it against that
 equation's own conditions.

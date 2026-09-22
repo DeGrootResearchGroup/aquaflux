@@ -473,9 +473,9 @@ class _RecordingGradient(GradientScheme):
     inner: GradientScheme
     label: str = eqx.field(static=True)
 
-    def bind(self, mesh, geometry, boundary_gradient_weight=None):
+    def bind(self, mesh, geometry, boundary_linearization=None):
         return _RecordingGradient(
-            inner=self.inner.bind(mesh, geometry, boundary_gradient_weight), label=self.label
+            inner=self.inner.bind(mesh, geometry, boundary_linearization), label=self.label
         )
 
     def _reconstruct_gradient(self, field, mesh, geometry, boundary_values, **kwargs):
