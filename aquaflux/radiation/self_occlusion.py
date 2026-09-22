@@ -27,6 +27,7 @@ every gradient.
 from __future__ import annotations
 
 import abc
+from typing import ClassVar
 
 import equinox as eqx
 import jax
@@ -82,6 +83,12 @@ class OcclusionField(eqx.Module):
 
 class SelfOcclusion(eqx.Module):
     """How a surface's own triangles are tested for standing in the light."""
+
+    #: Whether this strategy can answer for receivers lying on no facet -- points in the fluid,
+    #: which have no surface normal. A model builds two masks, one between facets and one from
+    #: facets to its volume receivers, and reads this to decide whether the strategy that
+    #: serves the first can serve the second too.
+    serves_volume_receivers: ClassVar[bool] = True
 
     @abc.abstractmethod
     def field(self, surfaces, points, near, receiver_facet) -> OcclusionField:
@@ -206,9 +213,10 @@ class SilhouetteOcclusion(SelfOcclusion):
     it needs the receiver's own normal to project onto, and a point in the fluid has none. That
     is not a limitation of the clip but of the quantity: a volume gather weights sources by
     their unprojected solid angle, which is a different measure and would need a different
-    kernel. Use :class:`RayCastOcclusion` for volume receivers. The surface-to-surface build,
-    where this applies, is where partial shadowing matters most in any case -- it is what
-    carries the interreflection.
+    kernel. A model selected with this strategy therefore serves its volume receivers with the
+    ray test (see :class:`~aquaflux.radiation.model.RadiationSettings`, ``receiver_occlusion``),
+    so the fluence rate in the fluid still sees each sleeve as all or nothing per pair; the
+    exact fraction reaches the surface-to-surface transfer, which carries the interreflection.
 
     **Three passes per receiver**, and the middle one is what makes the cost bearable: build
     each triangle's bounding cone and each source's clipped view (both ``n`` per receiver, not
@@ -229,6 +237,8 @@ class SilhouetteOcclusion(SelfOcclusion):
         wastes at most half a chunk and costs a couple of dozen compiled shapes across any
         conceivable range, each of which is reused by every receiver that lands in its bucket.
     """
+
+    serves_volume_receivers: ClassVar[bool] = False
 
     work_chunk: int = 262_144
 
