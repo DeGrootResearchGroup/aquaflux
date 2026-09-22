@@ -130,6 +130,30 @@ def _block_is_cut(origin, direction, near, block, first, exclude):
     return jnp.any(hit & jnp.all(index[None, :, None] != exclude[:, None, :], axis=-1), axis=-1)
 
 
+def _call_shape(n_rays: int, n_triangles: int, work_limit: int) -> tuple[int, int]:
+    """How many rays and how many triangles one compiled call covers: ``(ray_chunk, block)``.
+
+    **Triangles take the budget first, and rays take what is left.** The product never exceeds
+    ``work_limit`` (unless one axis alone is larger than it, when that axis is split to single
+    items), so the working set of a call stays bounded either way. What the order decides is how
+    often each ray's data is reused: a call streams its rays' origins, directions, margins and
+    exclusions once and tests each against every triangle of the block, so the block is the
+    reuse factor.
+
+    ⚠️ **Rays first was the old order, and it made the pass slower the more rays it had.** The
+    ray count is receivers times facets, so it reaches the millions and took the whole budget,
+    leaving a block of **one** triangle: each call then streamed millions of rays to test a single
+    triangle. Measured with the identical kernel, 1532 triangles, 3.2 million rays, double
+    precision, eleven cores: 120.5 million tests per second rays-first against 465.4 with the
+    whole triangle set per call, bit-identical output -- and at 200,000 rays, 350.5 against
+    464.1. Triangles-first makes the throughput flat in the ray count, which is what a pass whose
+    cost is its tests should be.
+    """
+    block = max(1, min(n_triangles, work_limit))
+    ray_chunk = max(1, min(n_rays, work_limit // block))
+    return ray_chunk, block
+
+
 def segment_is_cut(origin, target, vertices, min_distance, *, exclude=None, work_limit=4_000_000):
     """Whether any triangle lies across the segment from ``origin`` to ``target``.
 
@@ -161,15 +185,14 @@ def segment_is_cut(origin, target, vertices, min_distance, *, exclude=None, work
         0.5 MB through 134 MB of intermediate, against **2.4** at 537 MB, twenty times slower
         (2048 triangles, double precision, an eleven-core machine with 19 GB). Now that the
         block is a traced kernel the compiler fuses the intermediate away, so the cliff is not
-        reached and the knob mostly sets how much is recompiled: on the same machine, 100000
-        rays against 200 triangles run at 333, 421 and 432 Mtest/s at limits of 4 million, 20
-        million and 100 million entries. **The bound is kept as a bound**, not tuned for that
-        last 30 %: it is what guarantees a working set whatever the compiler decides to do with
-        a given shape.
+        reached. **The bound is kept as a bound**, not as a tuning knob: it is what guarantees a
+        working set whatever the compiler decides to do with a given shape.
 
-        Both axes are cut to honour it. Blocking only the triangles is not enough: the ray count
-        is itself the product of receivers and facets, so it reaches the millions on its own and
-        would blow the limit at a block size of one.
+        Both axes are cut to honour it, **triangles first**: each call takes as many triangles
+        as the bound allows -- the whole set, for any mesh this pass can afford -- and as many
+        rays as then fit. The order matters because the triangle block is how often each ray's
+        data is reused, and cutting the rays first left a block of one triangle at the ray
+        counts a transfer build reaches, which made the pass about four times slower there.
 
         Each distinct block shape is compiled once, so a ray count or triangle count that does
         not divide evenly costs one extra compilation for its remainder — a few small programs,
@@ -197,8 +220,7 @@ def segment_is_cut(origin, target, vertices, min_distance, *, exclude=None, work
     if n_rays == 0 or n_triangles == 0:
         return jnp.zeros(n_rays, dtype=bool)
 
-    ray_chunk = max(1, min(n_rays, work_limit))
-    block_size = max(1, min(n_triangles, work_limit // ray_chunk))
+    ray_chunk, block_size = _call_shape(n_rays, n_triangles, work_limit)
 
     pieces = []
     for first in range(0, n_rays, ray_chunk):

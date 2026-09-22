@@ -510,22 +510,39 @@ traced: the compiler fuses the edge test, the distance window and the exclusion 
 `any` reduction and never forms the array. **6.6-8.3x, bit-identical output** (100,000 rays x 200
 triangles, f64, 11 cores, 19 GB, jax 0.10.2, 2026-09-20, with and without the `exclude` argument;
 54.0 -> 362.4 and 57.8 -> 430.2 Mtest/s at `work_limit` 4M and 20M). Issue #462. ⚠️ Those are
-**small-block** absolute rates; a whole build at 3184 facets runs at 74.9 Mtest/s, and the ratio
-between the two arms has not been re-measured there. Read the speedup, not the throughputs.
+**small-block** absolute rates, taken under the old rays-first call shape below; read the speedup,
+not the throughputs. A whole build at 3184 facets now runs at ~420 Mtest/s.
 
-**`work_limit` survives as a bound, not as a tuning knob**, and deliberately so. On a small
-block, raising it looked worth about 30% (333 / 421 / 432 Mtest/s from 4M to 100M entries)
-against a 20x cliff eagerly. ⚠️ **That 30% is a small-block artifact and does not survive on a
-real build**: measured on whole `build_visibility` calls, 100M against the default 4M reads
-**102.5 against 242.2 Mtest/s at 832 facets** — less than half the speed — and 119.2 against
-114.3 at 1532, inside the run-to-run spread. Raising the bound makes the working set larger,
-which is the thing it exists to stop. What it guarantees is a bounded working set whatever the
-compiler decides to do with a given shape, and that is the whole of its job. Both axes are cut to honour it. Blocking only the triangles is not enough: the ray count is
-itself receivers times facets, so it reaches the millions on its own and would blow the limit at a
-block size of one. Getting this wrong cost 13.4 Mtest/s against 31.0 on the same build — and the
-naive fix, a *larger* triangle block, made it **ten times worse**, which is the opposite of the
-usual dispatch-bound instinct. Each distinct block shape compiles once, so an uneven division
-costs one extra small program for the remainder, not one per block.
+**`work_limit` bounds rays x triangles per compiled call, and the call takes TRIANGLES FIRST**
+(`_call_shape` in `triangles.py`): as many triangles as the bound allows — the whole set, for any
+mesh this pass can afford — and as many rays as then fit. The triangle block is the reuse factor
+(each ray's origin, direction, margin and exclusions are streamed once per call and tested against
+every triangle in it), so the order is not cosmetic.
+
+⚠️ **RAYS FIRST WAS THE SHIPPED ORDER, AND IT WAS THE WHOLE OF THE "THROUGHPUT FALLS WITH THE MESH"
+FINDING BELOW.** A transfer build's ray count is receivers x facets, millions, so rays took the
+entire budget and left a block of **one** triangle: every call streamed millions of rays to test a
+single triangle. Same kernel, same rays, bit-identical output, 1532 triangles, jax 0.10.2, CPU, x64,
+11 cores, 2026-09-21: **120.5 Mtest/s rays-first against 465.4 with the whole set per call at 3.2M
+rays** (350.5 against 464.1 at 200k). Block sizes 16 / 64 / 256 / 1532 gave 333 / 434 / 447 / 465 —
+monotone, so bigger is better all the way to the full set. `test_the_triangle_block_does_not_shrink_as_the_rays_grow`
+pins the order; reverting it fails there and passes every correctness test, which is why the test
+exists.
+
+⚠️ **The record used to say the opposite — "a *larger* triangle block made it ten times worse" (13.4
+against 31.0 Mtest/s).** That was measured when the pass ran **eagerly** and each call materialized
+its rays x block intermediate, so a big block meant a big array. Tracing (#462) fused the
+intermediate away and reversed the trade-off, and the blocking rule was never revisited. **A rule
+tuned under one execution model is a hypothesis under the next.**
+
+**The bound is still load-bearing for speed, not only memory — and now in the other direction.**
+With triangles first, raising it only enlarges the ray chunk per call, and whole builds get
+*slower*: 100M against the default 4M reads **156.1 against 443.8 Mtest/s at 832 facets** and
+**202.6 against 463.5 at 1532** (same run as the ladder below). The ~30% a larger bound once seemed
+to buy was a rays-first, small-block artifact. ⚠️ **Not measured: whether a bound *below* 4M is
+faster still** — the trend suggests smaller ray chunks help, and nothing has checked where it
+turns. Each distinct call shape compiles once, so an uneven division costs one extra small program
+for the remainder, not one per block.
 
 ## Watertight intersection, and one piece of the published algorithm deliberately dropped
 
@@ -1208,7 +1225,7 @@ frozen arrays already hold), and a build pass that samples each source facet to 
 moments — which the **contour-form** solid angle does not currently do, so it is a new pass and
 not a cheaper use of an existing one. That build cost, not the storage, is the real price.
 
-## MEASURED: what the mask build costs in SECONDS, and why its throughput falls with the mesh
+## MEASURED: what the mask build costs in SECONDS — and why its throughput USED TO fall with the mesh
 
 Every cost ratio in this subsystem divides by the mask build, and until now nothing recorded what
 it costs on its own. `validation/radiation_mask_build_cost.py` is the instrument.
@@ -1217,45 +1234,41 @@ it costs on its own. `validation/radiation_mask_build_cost.py` is the instrument
 receivers at the facet centroids with `receiver_facet` supplied — that is, the transfer build's
 own case, where `n_receivers == n_facets == n_triangles` and the pass is **`n^3`**. Default
 `work_limit`, median of three warm calls (two above 2000 facets). JAX 0.10.2, CPU, x64, macOS
-arm64, 11 cores, 19 GB, 2026-09-20.
+arm64, 11 cores, 19 GB. "Before" is 2026-09-20 with the rays-first call shape; "after" is
+2026-09-21 with triangles first (`_call_shape`), one run of the whole harness:
 
-| facets | tests | seconds | Mtest/s |
-|---|---|---|---|
-| 224 | 1.12e7 | 0.03 | 348.3 |
-| 480 | 1.11e8 | 0.34 | 324.1 |
-| 832 | 5.76e8 | 2.38 | 242.2 |
-| 1532 | 3.60e9 | 31.46 | 114.3 |
-| 2448 | 1.47e10 | 151.56 | 96.8 |
-| 3184 | 3.23e10 | 431.23 | **74.9** |
+| facets | tests | before s | before Mtest/s | **after s** | **after Mtest/s** |
+|---|---|---|---|---|---|
+| 224 | 1.12e7 | 0.03 | 348.3 | 0.03 | 424.3 |
+| 480 | 1.11e8 | 0.34 | 324.1 | 0.24 | 453.9 |
+| 832 | 5.76e8 | 2.38 | 242.2 | 1.30 | 443.8 |
+| 1532 | 3.60e9 | 31.46 | 114.3 | 7.76 | 463.5 |
+| 2448 | 1.47e10 | 151.56 | 96.8 | 34.19 | 429.1 |
+| 3184 | 3.23e10 | 431.23 | 74.9 | **76.83** | **420.2** |
 
-**A realistic reactor mesh costs minutes, and the cube is the whole story** — doubling the mesh
-is eight times the build. 3184 facets is 7.2 minutes.
+**A realistic reactor mesh now costs about a minute, and the cube is the whole story** — doubling
+the mesh is eight times the build. 3184 facets is 77 s, down from 7.2 min. ⚠️ A second "before" run
+of the same scene read 335.5 s at 3184 facets (in the silhouette comparison, below), so the gain
+there is **4.4-5.6x** depending on which before is taken; quote the smaller. The blocked-pair counts
+of the geometry-independence check (463,936 and 174,912) are identical before and after, so the
+whole build's answer is unchanged, not only the unit fixtures'.
 
-⚠️ **THROUGHPUT FALLS 4.6x ACROSS THAT RANGE, AND EVERY FIGURE TAKEN ON A SMALL BLOCK IS
-THEREFORE AN OVER-ESTIMATE OF WHAT THE PASS ACHIEVES.** This is the single most load-bearing
-correction in this file's cost arithmetic: the ~330 Mtest/s that several ratios divide by is the
-**small-block** number, and a real build runs at 75.
+**Throughput is now flat in the ray count** — holding the triangle count at 1532 and sweeping the
+rays at a fixed test count per call:
 
-**It is the RAY COUNT, not the total work.** Holding the triangle count fixed at 1532 and sweeping
-only the rays, at comparable total tests:
+| rays | before Mtest/s | after Mtest/s |
+|---|---|---|
+| 50,000 | 424.8 | 464.1 |
+| 200,000 | 334.9 | 465.3 |
+| 800,000 | 262.4 | 465.6 |
+| 3,200,000 | 116.5 | 465.6 |
 
-| rays | Mtest/s |
-|---|---|
-| 50,000 | 424.8 |
-| 200,000 | 334.9 |
-| 800,000 | 262.4 |
-| 3,200,000 | 116.5 |
-
-The ladder's rays are `n^2`, so this is the same effect seen through the mesh. **The cause inside
-the pass is not established** and should not be guessed at: the obvious suspect is that
-`build_visibility` hands `segment_is_cut` a flattened outer product —
-`broadcast_to(origin, (rays, n_facets, 3)).reshape(...)` materializes one origin and one target
-per (receiver, facet) pair, some 810 MB at 3184 facets holding only 3184 distinct values of each —
-but the sweep above passes *already materialized* ray arrays and still degrades, so whatever it
-is lives in `segment_is_cut`'s handling of many rays and not only in the caller's broadcast.
-Raising `work_limit` does not recover it (it is worse; see the bound's own section). **There is a
-factor of three or so available here to whoever finds it**, and it would come straight off every
-mask build and every ratio measured against one.
+**Cause, found and fixed: the call shape, not the caller's broadcast.** The record left this open,
+naming the caller's flattened outer product (~810 MB of broadcast origins and targets at 3184
+facets) as the obvious suspect while noting the sweep ruled it out as the whole story. It was
+`segment_is_cut` cutting the rays first and leaving a one-triangle block; see the `work_limit`
+section above. The broadcast is still there and still costs memory, but with the call shape fixed
+the whole build reaches the kernel's own throughput, so it is no longer where the time goes.
 
 **The cost is geometry-independent, which is why one ladder settles it for every scene.** The
 pass tests every ray against every triangle with no early exit, so what the rays *hit* cannot
@@ -1439,35 +1452,39 @@ whole build per gradient.
 Both strategies timed by `validation/radiation_mask_build_cost.py` (`silhouette_ladder`) on the same
 box-plus-sleeve reactor, same receivers (facet centroids), same run, median of warmed builds (three;
 two above 2000 facets). JAX 0.10.2, CPU, x64, macOS arm64, 11 cores, 19 GB, nothing else running,
-2026-09-21, uncommitted tree on `radiation/close-447` (base `a6ec6a2`), default `work_limit` and
-`work_chunk`, both filters and all six fixes in place:
+default `work_limit` and `work_chunk`. Two runs, and **the ratio moved because the denominator did**:
+the ray mask's call shape was fixed between them (triangles first; see the `work_limit` section).
 
-| facets | ray mask (s) | silhouette (s) | ratio |
-|---|---|---|---|
-| 224 | 0.04 | 1.85 | 46.6x |
-| 480 | 0.36 | 10.75 | 30.1x |
-| 832 | 7.10 | 63.58 | 9.0x |
-| 1,532 | 30.80 | 115.65 | 3.8x |
-| 2,448 | 154.81 | 390.38 | 2.5x |
-| 3,184 | 335.50 | **647.67 (11 min)** | **1.9x** |
+| facets | ray, rays-first (09-20) | ray, triangles-first (09-21) | silhouette (09-20 / 09-21) | ratio now |
+|---|---|---|---|---|
+| 224 | 0.04 | 0.03 | 1.85 / 1.78 | 66.7x |
+| 480 | 0.36 | 0.24 | 10.75 / 8.17 | 33.4x |
+| 832 | 7.10 | 1.30 | 63.58 / **27.70** | 21.3x |
+| 1,532 | 30.80 | 7.76 | 115.65 / 108.98 | 14.0x |
+| 2,448 | 154.81 | 34.55 | 390.38 / 375.10 | 10.9x |
+| 3,184 | 335.50 | 75.30 | 647.67 / **638.77 (11 min)** | **8.5x** |
 
-**The ratio falls with the mesh, and that is the structural fact to keep.** The ray mask is a dense
-`n^3` with a throughput that itself degrades (above); the clip's cone cull discards a share of
-candidate pairs that *grows* as the mesh refines, because a finer pair sweeps a narrower pencil. So
-the clip is dear on a small mesh — where its per-receiver host loop and compile dominate, and where
-nobody minds seconds — and near-parity on a large one. ⚠️ The ray arm here reads **335.5 s** at 3184
-facets where the section above has **431 s** on the same scene and settings, a day earlier: that is
-the run-to-run spread of wall clock on a shared desktop. Quote the *ratio* from one run with both
-arms, never a ratio across runs.
+**The silhouette strategy costs about 11 minutes at 3184 facets, and 8.5x the ray mask.** It was
+recorded as 1.9x for one day, against a ray mask that was four times slower than it had to be; that
+figure is dead. The clip itself did not change between the runs and reproduces to 1-6% at every
+rung but one. ⚠️ **At 832 facets it read 63.58 s one day and 27.70 s the next, 2.3x apart, and that
+is unexplained** — far outside this machine's ~20% spread, and not seen at any other rung. Do not
+quote the 832 clip figure until it has been re-run.
+
+**The ratio still falls with the mesh**, for the reason it always did: the ray mask is a dense
+`n^3`, while the clip's cone cull discards a share of candidates that grows as the mesh refines. It
+now falls from 67x to 8.5x rather than to 1.9x, because the ray mask no longer degrades with it.
 
 ⚠️ **EVERY EARLIER COST FIGURE FOR THIS METHOD WAS WRONG, AND ALL IN THE SAME WAY — each timed or
 projected one piece rather than the whole build.** The record's first headline was 15-20x (a ray
 test timed at 200,000 items, four orders below a build); an early projection said ~1.5x (two wrong
 factors that cancelled); the corrected projection said ~4x / 27 min (a 6.14% workload from the
 unconservative cull, times a per-item rate extrapolated 600x); the cone cull's projection said
-1.6x / 12 min (before bucketing, the guards and both filters). The measured answer, 1.9x / 11 min,
-landed near the last of them — which is **not** evidence the projection was sound, only that its
-errors roughly cancelled again. **Time the whole build, both arms, at the size the answer is for.**
+1.6x / 12 min (before bucketing, the guards and both filters); and the first measured answer, 1.9x /
+11 min, divided by a ray mask that was itself four times slower than it needed to be. The clip's
+11 minutes has held; every *ratio* has not. **A ratio inherits every defect in its denominator — time
+the whole build, both arms, at the size the answer is for, and re-time the ratio whenever either arm
+changes.**
 
 **Power-of-two chunk padding** (`_bucket`): padding every chunk to `work_chunk` compiled one program
 and clipped a quarter of a million pairs for a receiver with sixty candidates; padding to the next

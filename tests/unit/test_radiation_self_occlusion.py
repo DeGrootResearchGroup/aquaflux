@@ -10,7 +10,7 @@ from aquaflux.radiation.gather import direct_fluence_rate
 from aquaflux.radiation.occluders import Cylinder
 from aquaflux.radiation.self_occlusion import NoOcclusion, RayCastOcclusion
 from aquaflux.radiation.surfaces import Surfaces
-from aquaflux.radiation.triangles import _edge_function, segment_is_cut
+from aquaflux.radiation.triangles import _call_shape, _edge_function, segment_is_cut
 from aquaflux.radiation.visibility import build_visibility
 from scipy.spatial import ConvexHull
 
@@ -56,16 +56,14 @@ def test_a_triangle_cuts_what_passes_through_it(start, finish, expected, what):
     assert bool(cut[0]) is expected, what
 
 
-@pytest.mark.parametrize("work_limit", [1, 97, 4_000_000])
+@pytest.mark.parametrize("work_limit", [1, 17, 97, 4_000_000])
 def test_the_answer_does_not_depend_on_how_the_work_is_split(work_limit):
     """The split is a memory strategy and must not be a numerical one.
 
-    Both axes are cut to honour the limit — the rays as well as the triangles — so a limit of
-    one puts a single ray against a single triangle per pass, and the accumulated result has to
-    be identical to forming the whole thing at once. The limit is worth getting right: measured
-    on 2048 triangles in double precision, throughput is flat at 42-57 Mtest/s from a 0.5 MB
-    intermediate up to 134 MB and then collapses to **2.4** at 537 MB, so a split that is too
-    coarse is twenty times slower rather than slightly.
+    Both axes are cut to honour the limit, so a limit of one puts a single ray against a single
+    triangle per pass, and the accumulated result has to be identical to forming the whole thing
+    at once. Seventeen splits the forty triangles unevenly, leaving a remainder block, which is
+    the one shape the others do not reach.
     """
     rng = np.random.default_rng(2)
     triangles = jnp.asarray(rng.normal(size=(40, 3, 3)))
@@ -75,6 +73,26 @@ def test_the_answer_does_not_depend_on_how_the_work_is_split(work_limit):
     split = segment_is_cut(origins, targets, triangles, jnp.zeros(23), work_limit=work_limit)
     np.testing.assert_array_equal(np.asarray(split), np.asarray(reference))
     assert int(np.count_nonzero(np.asarray(reference))) > 0, "the fixture blocks nothing"
+
+
+def test_the_triangle_block_does_not_shrink_as_the_rays_grow():
+    """Triangles take the call's budget first; rays take what is left.
+
+    The order is invisible to every correctness test -- the answer is bit-identical either way,
+    which the test above checks -- and it is worth a factor of four. With rays first, the ray
+    count of a transfer build (receivers times facets, millions) took the whole budget and left a
+    block of ONE triangle, so each call streamed millions of rays to test a single triangle.
+    Measured with the identical kernel on 1532 triangles and 3.2 million rays: 120.5 million
+    tests per second rays-first against 465.4 with the whole set per call.
+    """
+    limit = 4_000_000
+    for rays in (1_000, 200_000, 3_200_000, 10_137_856):
+        ray_chunk, block = _call_shape(rays, 1532, limit)
+        assert block == 1532, f"{rays:,} rays shrank the triangle block to {block}"
+        assert ray_chunk * block <= limit, "the call exceeds the bound it exists to keep"
+        assert ray_chunk >= 1
+    # A triangle set larger than the bound on its own is split, one ray per call.
+    assert _call_shape(10, 5_000_000, limit) == (1, limit)
 
 
 def test_a_facet_is_excluded_from_cutting_its_own_rays_by_index():
