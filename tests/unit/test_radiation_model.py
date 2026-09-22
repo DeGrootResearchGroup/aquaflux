@@ -811,3 +811,84 @@ def test_the_gradient_of_the_field_in_reflectance_is_exact():
     gradient = float(jax.grad(total)(jnp.asarray(0.6)))
     assert gradient == pytest.approx(_central_difference(total, 0.6), rel=1e-6)
     assert gradient > 0.0
+
+
+# ---------------------------------------------------------------------------------------
+# The geometry a model was built for
+# ---------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("call", [radiosity, surface_irradiance, fluence_rate])
+def test_a_surface_set_moved_after_the_build_is_refused(call):
+    """The frozen arrays and the live gather must see one geometry.
+
+    The transfer matrix and both shadow masks come from the build; the direct gather reads the
+    vertices it is given. Handed a moved set, the model would light the receivers from the new
+    position through the shadows of the old one -- a plausible field, and wrong -- so every
+    entry point refuses it, and says what to do instead. A move of one part in a million is
+    refused as surely as a large one: the comparison is exact, because a legitimate call carries
+    the build's own vertex array.
+    """
+    surfaces = box(2, emission=1.0, reflectance=0.5)
+    model = build_radiation_model(
+        np.array([[0.4, 0.5, 0.6]]),
+        surfaces,
+        settings=RadiationSettings(self_occlusion=NoOcclusion()),
+    )
+    moved = surfaces.with_geometry(np.asarray(surfaces.vertices) * (1.0 + 1e-6))
+    with pytest.raises(ValueError, match=r"not the one the model was built for.*build a new model"):
+        call(model, moved)
+
+
+@pytest.mark.parametrize("call", [radiosity, surface_irradiance, fluence_rate])
+def test_a_surface_set_of_another_size_is_refused_with_the_same_explanation(call):
+    """A different facet count is reported as the wrong geometry, by every entry point, rather
+    than surfacing as a shape error from somewhere inside the solve."""
+    model = surface_model(box(2, emission=1.0, reflectance=0.5))
+    with pytest.raises(ValueError, match=r"\(108 facets given, 48 built\)"):
+        call(model, box(3, emission=1.0, reflectance=0.5))
+
+
+def test_new_optics_on_the_build_geometry_are_accepted():
+    """The cheap path the refusal points at: same vertex array, different emission."""
+    surfaces = box(2, emission=1.0, reflectance=0.5)
+    model = surface_model(surfaces)
+    brighter, _ = radiosity(
+        model, surfaces.with_optics(emission=2.0 * jnp.asarray(surfaces.emission))
+    )
+    np.testing.assert_allclose(np.asarray(brighter), 2.0 / (1.0 - 0.5), rtol=1e-12)
+
+
+def test_relabelling_which_facets_are_point_sources_is_refused():
+    """The same vertices with a different point source are a different scene: point sources
+    are left out of the transfer matrix when it is built, so the labels are geometry too."""
+    lamps = np.array([[[0.3, 0.5, 0.5]] * 3, [[0.7, 0.5, 0.5]] * 3])
+    vertices = np.concatenate([inward_box(1), lamps])
+    built = Surfaces.from_triangles(vertices, power=10.0, point_sources=[12])
+    relabelled = Surfaces.from_triangles(vertices, power=10.0, point_sources=[13])
+    model = surface_model(built)
+    radiosity(model, built)
+    with pytest.raises(ValueError, match="not the one the model was built for"):
+        radiosity(model, relabelled)
+
+
+def test_a_traced_geometry_is_let_through_so_a_lamp_can_be_moved_under_a_gradient():
+    """The exception, and the reason for it: under tracing the geometry cannot be inspected,
+    and moving a source under a gradient is what the live gather is for. The derivative is taken
+    with the shadows frozen, like every other frozen quantity."""
+    surfaces = box(2, emission=1.0, reflectance=0.5)
+    model = build_radiation_model(
+        np.array([[0.4, 0.5, 0.6]]),
+        surfaces,
+        settings=RadiationSettings(self_occlusion=NoOcclusion()),
+    )
+    base = jnp.asarray(surfaces.vertices)
+
+    def total(shift):
+        field, _ = fluence_rate(
+            model, surfaces.with_geometry(base + shift * jnp.array([0.0, 0.0, 1.0]))
+        )
+        return field[0]
+
+    gradient = float(jax.grad(total)(jnp.asarray(0.0)))
+    assert np.isfinite(gradient) and gradient != 0.0

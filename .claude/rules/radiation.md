@@ -289,7 +289,9 @@ no branch on facet kind. That partition decides the program's *shape*, so `area`
 `profile_index` cannot themselves be traced. `jit(lambda s, p: direct_fluence_rate(s, p))` over a whole
 `Surfaces` raises with an explanation; close over the set and substitute values through
 `with_optics` instead. `RadiationModel` formalizes that boundary: it holds the frozen
-geometry and every entry point takes the surface set again, reading only its optics.
+geometry and every entry point takes the surface set again — for its optics, but its geometry is
+read live too (the direct gather, the point-source arrivals), so it must be the build's; every call
+checks (`RadiationModel.geometry`, below).
 
 Only `profile_index` is structural in this sense. **Vertices are not** — see the label rule
 above — so a source's position is free to move under a gradient.
@@ -881,6 +883,21 @@ A settings object carrying its own copy of a default silently keeps using the ol
 the real one moves. Membership test: a setting whose reason can be stated without naming a lamp,
 a wall or a medium belongs here; anything else is physics and belongs on `Surfaces` or an
 `Absorption`.
+
+⚠️ **The surface set passed at call time must be the build's geometry, and every call now checks.**
+`model.py`'s docstring used to say the call-time set's "geometry … is not consulted". **False**:
+the direct gather and the point-source arrivals read its vertices, centroids and normals live,
+while the transfer matrix and both masks are the build's — so a moved set gave a field lit from
+the new position through shadows cast from the old one, with no error. `RadiationModel.geometry`
+is now a SHA-256 of the vertices plus the point-source labels (the labels decide which facets
+the transfer leaves out, so they are geometry too); `radiosity` checks it, and
+`surface_irradiance` / `fluence_rate` reach it through `radiosity`. **Exact, not toleranced**:
+`with_optics` carries the build's own vertex array, so a legitimate call matches bit for bit; a
+1e-6 move is refused. **Traced geometry passes unchecked** — it cannot be inspected, and a
+gradient with respect to a lamp's position is what the live gather is for (taken with the
+shadows frozen). Mutation-checked; a separate check at the top of `surface_irradiance` was
+**dominated and deleted** — with a wrong-sized set `assemble` completes and `radiosity` refuses
+with the same message, so the extra check changed nothing any test could see.
 
 ## `G = 4B` — the closed form that pins the whole assembly at once
 
