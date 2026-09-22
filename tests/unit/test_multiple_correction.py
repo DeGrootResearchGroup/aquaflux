@@ -455,9 +455,8 @@ def test_corner_tetrahedra_are_determined_by_their_boundary_conditions() -> None
     mesh = tetrahedral_grid_3d(3, perturb=0.25, seed=6)
     geometry = mesh.geometry()
     face_cells = mesh.face_cells
-    owner = np.asarray(face_cells.owner)
     boundary = ~np.asarray(face_cells.interior)
-    owned = np.bincount(owner[boundary], minlength=mesh.n_cells)
+    owned = _boundary_face_count(mesh)
     assert (owned >= 2).any()  # the fixture really has the cells this is about
 
     gradient = jnp.array([2.3, 0.0, 0.0])
@@ -924,8 +923,30 @@ def _zero_gradient_tetrahedra():
     return mesh, geometry, weight
 
 
+def _boundary_face_count(mesh) -> np.ndarray:
+    """How many boundary faces each cell owns, shape ``(n_cells,)``."""
+    face_cells = mesh.face_cells
+    return np.bincount(
+        np.asarray(face_cells.owner)[~np.asarray(face_cells.interior)], minlength=mesh.n_cells
+    )
+
+
 def _worst_correction(corrections):
     return np.max(np.abs(np.asarray(corrections.m2_inverse)), axis=(1, 2))
+
+
+def test_a_non_finite_correction_counts_as_undetermined_at_any_mesh_size() -> None:
+    """A singular inverse comes back NaN under some linear-algebra libraries, and must be repaired.
+
+    Reducing to ``max|M2^-1|`` before comparing loses it: the CPU backend's max-reduction returns a
+    NaN on a short array but ``-inf`` on a long one, which then passes as determined. The sizes
+    bracket that switch, so the obvious reduce-then-compare version fails the long one.
+    """
+    for n_cells in (4, 1000):
+        inverse = jnp.ones((n_cells, 6, 6))
+        inverse = inverse.at[1].set(jnp.nan).at[2, 0, 3].set(jnp.nan).at[3, 5, 5].set(1e16)
+        cells = multiple_correction._undetermined_cells(inverse)
+        np.testing.assert_array_equal(np.asarray(cells), [1, 2, 3], err_msg=f"{n_cells} cells")
 
 
 def test_cells_a_condition_leaves_undetermined_keep_their_geometry_only_correction() -> None:
@@ -954,8 +975,14 @@ def test_cells_a_condition_leaves_undetermined_keep_their_geometry_only_correcti
     )
     conditioned = multiple_correction._probe_corrections(mesh, geometry, closure, weight)
     geometric = multiple_correction._probe_corrections(mesh, geometry, closure, None)
-    stuck = _worst_correction(conditioned) > multiple_correction._UNDETERMINED_CORRECTION
+    # Which cells are stuck is decided by the mesh, not by thresholding the singular inverse: there
+    # ``max|M2^-1|`` is rounding noise that is ~1e16 under one BLAS and NaN under another, and a NaN
+    # fails ``> limit`` -- which dropped two of the 18 on some CI runners and not others.
+    stuck = _boundary_face_count(mesh) >= 2
     assert stuck.sum() == 18  # the fixture still exhibits the defect this repairs
+    flagged = multiple_correction._undetermined_cells(conditioned.m2_inverse)
+    assert flagged is not None
+    np.testing.assert_array_equal(np.asarray(flagged), np.flatnonzero(stuck))
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -1123,10 +1150,7 @@ def test_the_owner_closure_fails_only_where_a_cell_has_two_boundary_faces() -> N
     """
     mesh = tetrahedral_grid_3d(3, perturb=0.25, seed=6)
     geometry = mesh.geometry()
-    face_cells = mesh.face_cells
-    boundary_faces = np.bincount(
-        np.asarray(face_cells.owner)[~np.asarray(face_cells.interior)], minlength=mesh.n_cells
-    )
+    boundary_faces = _boundary_face_count(mesh)
     case = _quadratic(mesh)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
