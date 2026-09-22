@@ -818,15 +818,28 @@ and all four were mutation-checked (seven one-line mutations, each red on its ow
   and that per-facet gradient misses by exactly that. Not an adjoint error; do not "fix" the test
   toward it.
 
-⚠️ **FOUND, NOT FIXED: the silhouette strategy ignores a ONE-SIDED sheet from behind.** It counts
-only blockers facing the receiver (`facing` in `SilhouetteOcclusion._survivors`), which is exact
-on a closed, consistently wound surface — every blocked sight line enters it through a front face
-— and is why back faces are excluded (they would double the count). A lone open sheet, though, is
-invisible to it from its back side: Walton's pair with a one-sided blocker gives the **unobstructed
-0.1998** from one plate. The ray test is two-sided, so the two strategies disagree on such input,
-and `self_occlusion.py` / `silhouette.py` describe the silhouette as exact for "a baffle", which
-is false for a zero-thickness single-sheet baffle. The case 8c test uses a two-sided blocker for
-this reason.
+⚠️ **FIXED BY DECLARATION: the silhouette strategy used to ignore a ONE-SIDED sheet from behind.**
+It counts only blockers facing the receiver (`facing` in `SilhouetteOcclusion._survivors`), which
+is exact on a closed, consistently wound surface — a blocked sight line enters it through exactly
+one front face — and back faces are excluded because they would double the count. A lone
+zero-thickness sheet, though, has the medium on both sides: seen from behind it hid nothing, and
+Walton's pair with a one-sided blocker read the **unobstructed 0.1998** from one plate, silently.
+The ray test is two-sided and never had the problem. Now `SilhouetteOcclusion(two_sided=(names,))`
+counts the named bodies (by `Surfaces.solid_names`) from both sides; a misspelt name **raises**
+(it would otherwise leak light with no error); and any **open piece left undeclared is warned
+about** at build, naming its bodies. With the blocker declared, the one-sided Walton pair converges
+exactly as a two-sided copy did (−1.6e-4 / −4.0e-5 at 6 / 12 plates a side).
+
+**Why a declaration and not topology** (decided by the user, 2026-09-21, over "automatic by
+topology" and "refuse open surfaces"): `checks.open_facets` marks facets on a connected piece with
+a free edge (pieces joined only across edges used exactly twice), and it is wrong both ways on
+real input. **A sheet welded to the wall all the way round has no free edge** — each rim edge is
+used three times, which neither joins nor opens it — so it reads closed (pinned:
+`test_a_sheet_welded_in_all_the_way_round_reads_as_closed`, 8 non-manifold edges). **A duct
+exported without its end caps reads as a sheet**, and counting its wall from both sides would count
+every exit-and-re-entry twice. So topology drives only the *warning*; the counting follows the
+declaration. Naming a closed body two-sided makes it block twice and errs dark — not detectable,
+because a welded sheet looks closed too.
 
 ## The public surface: `model.py`, and the four assembly steps that are easy to omit
 
@@ -1369,7 +1382,7 @@ cone: 0.5415 each, true union 0.5421, sum 1.083). It errs **dark**, and only her
 
 | geometry | front-facing crossings | result |
 |---|---|---|
-| one sleeve, baffle or wall between two facets | 1 | **exact** |
+| one sleeve, wall, or baffle (a sheet declared `two_sided`) between two facets | 1 | **exact** |
 | **bent duct / elbow** | 1 (leaves the fluid, re-enters) | **exact** |
 | convex vessel, no internals | 0 | **exact**, nothing blocks |
 | sleeves side by side, cones disjoint | >=2, no overlap | **exact** |

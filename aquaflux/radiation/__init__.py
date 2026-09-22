@@ -43,6 +43,7 @@ from aquaflux.radiation.checks import (
     check_profiles,
     check_winding,
     enclosure_winding,
+    open_facets,
     stored_normal_disagreement,
     winding_report,
 )
@@ -120,6 +121,7 @@ __all__ = [
     "enclosure_winding",
     "fluence_rate",
     "lamp_exitance",
+    "open_facets",
     "projected_solid_angle",
     "radiosity",
     "read_stl",

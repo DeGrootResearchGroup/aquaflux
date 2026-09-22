@@ -7,9 +7,12 @@ import pytest
 from aquaflux.radiation.checks import (
     check_profiles,
     check_winding,
+    open_facets,
     stored_normal_disagreement,
     winding_report,
 )
+
+from tests.unit.radiation_references import closed_prism, inward_box
 
 #: Two triangles covering the unit square, consistently wound counter-clockwise.
 SQUARE = np.array(
@@ -167,3 +170,74 @@ def test_a_set_pairing_each_kind_with_its_own_profile_passes():
         profile_index=[0, 0, 1],
     )
     check_profiles(mixed)
+
+
+# ---------------------------------------------------------------------------------------
+# Open pieces of surface
+# ---------------------------------------------------------------------------------------
+
+
+def _mid_box_sheet(divisions: int, *, span: float) -> np.ndarray:
+    """A sheet across the unit box at ``x = 0.5``, meshed ``divisions`` a side over ``span``.
+
+    With ``span`` 1 its rim lies on grid lines of :func:`inward_box` of the same divisions, so
+    every rim edge is shared with a wall: a sheet welded in all the way round.
+    """
+    edges = np.linspace(0.5 - span / 2, 0.5 + span / 2, divisions + 1)
+    triangles = []
+    for i in range(divisions):
+        for j in range(divisions):
+            a, b = edges[i], edges[i + 1]
+            c, d = edges[j], edges[j + 1]
+            triangles.append([[0.5, a, c], [0.5, b, c], [0.5, b, d]])
+            triangles.append([[0.5, a, c], [0.5, b, d], [0.5, a, d]])
+    return np.array(triangles)
+
+
+def test_a_single_sheet_is_open_and_a_closed_body_is_not():
+    assert open_facets(SQUARE).all()
+    assert not open_facets(tetrahedron()).any()
+    assert not open_facets(inward_box(3)).any()
+
+
+def test_a_free_sheet_inside_a_closed_body_is_told_apart_from_it():
+    """Openness is a property of each connected piece, not of the whole file: a baffle floating
+    inside a closed box is open, and the box around it stays closed."""
+    box = inward_box(2)
+    sheet = _mid_box_sheet(2, span=0.6)
+    found = open_facets(np.concatenate([box, sheet]))
+    assert not found[: len(box)].any()
+    assert found[len(box) :].all()
+
+
+def test_every_triangle_of_an_open_piece_is_open_not_only_those_on_its_rim():
+    """The interior triangles of a sheet share every edge they have, and are just as one-sided
+    as its rim -- which is why openness is decided per piece and not per edge."""
+    sheet = _mid_box_sheet(4, span=0.6)
+    report = winding_report(sheet)
+    assert report.boundary_edges == 16  # the rim alone, 4 a side
+    assert open_facets(sheet).all()
+
+
+def test_a_duct_whose_end_caps_were_not_exported_reads_as_open():
+    """Documented, because it is where the reading is wrong in the other direction: the wall
+    of a solid, left open by an export, looks exactly like a sheet."""
+    prism = closed_prism(np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]), 2.0)
+    assert not open_facets(prism).any()
+    walls = prism[np.arange(len(prism)) % 4 < 2]
+    assert open_facets(walls).all()
+
+
+def test_a_sheet_welded_in_all_the_way_round_reads_as_closed():
+    """Documented, because it is where topology cannot see a sheet at all: each rim edge is used
+    by the sheet and by the two wall triangles either side of it, three uses, which neither
+    joins the sheet to the wall nor marks it open. This is why a sheet has to be named rather
+    than inferred."""
+    box = inward_box(2)
+    sheet = _mid_box_sheet(2, span=1.0)
+    assert winding_report(np.concatenate([box, sheet])).nonmanifold_edges == 8
+    assert not open_facets(np.concatenate([box, sheet])).any()
+
+
+def test_no_facets_have_no_open_pieces():
+    assert open_facets(np.zeros((0, 3, 3))).shape == (0,)

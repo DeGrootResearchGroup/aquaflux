@@ -20,6 +20,8 @@ import warnings
 
 import jax.numpy as jnp
 import numpy as np
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 
 from aquaflux.radiation.solid_angle import signed_solid_angle
 
@@ -29,6 +31,7 @@ __all__ = [
     "check_profiles",
     "check_winding",
     "enclosure_winding",
+    "open_facets",
     "stored_normal_disagreement",
     "winding_report",
 ]
@@ -103,6 +106,71 @@ def _merge_vertices(vertices: np.ndarray, tolerance: float | None) -> tuple[np.n
     return labels.reshape(-1, 3), int(labels.max(initial=-1) + 1)
 
 
+@dataclasses.dataclass(frozen=True)
+class _EdgeUses:
+    """Every undirected edge of a triangle set, and which triangles use it in which direction.
+
+    Attributes
+    ----------
+    pairs : np.ndarray of int, shape ``(n_edges, 2)``
+        Unique-vertex index pairs, lower index first.
+    edge_of_use : np.ndarray of int, shape ``(3 * n_facets,)``
+        For each directed edge of each triangle, in facet-major order, the undirected edge it is.
+    direction : np.ndarray of int, shape ``(3 * n_facets,)``
+        ``+1`` where that triangle traverses its edge from the lower index to the higher.
+    uses : np.ndarray of int, shape ``(n_edges,)``
+        How many triangles use each edge.
+    degenerate : np.ndarray of bool, shape ``(n_edges,)``
+        Edges whose two endpoints merged into one vertex, which have no direction to disagree
+        about and bound nothing.
+    merged_vertices : int
+        Distinct vertex positions after merging.
+    """
+
+    pairs: np.ndarray
+    edge_of_use: np.ndarray
+    direction: np.ndarray
+    uses: np.ndarray
+    degenerate: np.ndarray
+    merged_vertices: int
+
+    @property
+    def facet_of_use(self) -> np.ndarray:
+        """The triangle each directed edge belongs to."""
+        return np.repeat(np.arange(len(self.edge_of_use) // 3), 3)
+
+    @property
+    def boundary(self) -> np.ndarray:
+        """Edges used by exactly one triangle -- a free edge, the rim of an open piece."""
+        return (self.uses == 1) & ~self.degenerate
+
+
+def _edge_uses(vertices: np.ndarray, tolerance: float | None) -> _EdgeUses:
+    """Match the triangles' edges to one another through their merged vertices."""
+    labels, merged = _merge_vertices(vertices, tolerance)
+    # Every triangle contributes its three directed edges. An undirected edge is the sorted
+    # pair; the sign says which way round that triangle traversed it. Two triangles sharing an
+    # edge correctly traverse it in opposite directions, so their signs cancel.
+    starts = labels
+    ends = np.roll(labels, -1, axis=1)
+    low = np.minimum(starts, ends).ravel()
+    high = np.maximum(starts, ends).ravel()
+    pairs, inverse, uses = np.unique(
+        np.stack([low, high], axis=1).reshape(-1, 2),
+        axis=0,
+        return_inverse=True,
+        return_counts=True,
+    )
+    return _EdgeUses(
+        pairs=pairs,
+        edge_of_use=inverse.reshape(-1),
+        direction=np.where(starts.ravel() < ends.ravel(), 1, -1),
+        uses=uses,
+        degenerate=pairs[:, 0] == pairs[:, 1],
+        merged_vertices=merged,
+    )
+
+
 def winding_report(vertices, *, tolerance: float | None = None) -> WindingReport:
     """Examine a triangle set's edge topology without raising.
 
@@ -118,40 +186,63 @@ def winding_report(vertices, *, tolerance: float | None = None) -> WindingReport
     -------
     WindingReport
     """
-    vertices = np.asarray(vertices, dtype=float)
-    labels, merged = _merge_vertices(vertices, tolerance)
-    n_facets = len(labels)
-
-    # Every triangle contributes its three directed edges. An undirected edge is the sorted
-    # pair; the sign says which way round that triangle traversed it. Two triangles sharing an
-    # edge correctly traverse it in opposite directions, so their signs cancel.
-    starts = labels
-    ends = np.roll(labels, -1, axis=1)
-    low = np.minimum(starts, ends).ravel()
-    high = np.maximum(starts, ends).ravel()
-    sign = np.where(starts.ravel() < ends.ravel(), 1, -1)
-    facet_of_edge = np.repeat(np.arange(n_facets), 3)
-
-    pairs = np.stack([low, high], axis=1)
-    unique_pairs, inverse, counts = np.unique(
-        pairs, axis=0, return_inverse=True, return_counts=True
-    )
-    inverse = inverse.reshape(-1)
-    net = np.bincount(inverse, weights=sign, minlength=len(unique_pairs))
-
-    # A degenerate edge (both endpoints merged to one vertex) has no direction to disagree
-    # about, so it is excluded rather than counted as a conflict.
-    degenerate = unique_pairs[:, 0] == unique_pairs[:, 1]
-    conflicted = (counts == 2) & (net != 0) & ~degenerate
-    involved = np.unique(facet_of_edge[conflicted[inverse]])
+    edges = _edge_uses(np.asarray(vertices, dtype=float), tolerance)
+    net = np.bincount(edges.edge_of_use, weights=edges.direction, minlength=len(edges.pairs))
+    conflicted = (edges.uses == 2) & (net != 0) & ~edges.degenerate
+    involved = np.unique(edges.facet_of_use[conflicted[edges.edge_of_use]])
 
     return WindingReport(
-        conflicting_edges=unique_pairs[conflicted],
+        conflicting_edges=edges.pairs[conflicted],
         conflicting_facets=involved,
-        boundary_edges=int(np.count_nonzero((counts == 1) & ~degenerate)),
-        nonmanifold_edges=int(np.count_nonzero((counts > 2) & ~degenerate)),
-        merged_vertices=merged,
+        boundary_edges=int(np.count_nonzero(edges.boundary)),
+        nonmanifold_edges=int(np.count_nonzero((edges.uses > 2) & ~edges.degenerate)),
+        merged_vertices=edges.merged_vertices,
     )
+
+
+def open_facets(vertices, *, tolerance: float | None = None) -> np.ndarray:
+    """Which facets belong to a connected piece of surface that has a free edge.
+
+    A piece is the set of triangles reachable from one another across edges shared by exactly
+    two triangles, and it is **open** if any edge of it is used by only one. A closed piece
+    bounds a solid, so a sight line blocked by it crosses it twice -- in through one face and
+    out through another -- whereas an open one is a sheet with the same medium on both sides,
+    crossed once.
+
+    ⚠️ Topology cannot see every sheet. A sheet whose rim is welded to another surface all the
+    way round has no free edge: its rim edges are used three times, which neither joins it to
+    the surface it is welded to nor marks it open, so it reads as closed. And a surface left open
+    by accident -- a duct whose inlet and outlet caps were not exported -- reads as a sheet.
+
+    Parameters
+    ----------
+    vertices : array_like, shape ``(n_facets, 3, 3)``
+        Triangle vertices.
+    tolerance : float, optional
+        Distance within which two vertex positions are the same point. Defaults to ``1e-9`` of
+        the model's overall extent.
+
+    Returns
+    -------
+    np.ndarray of bool, shape ``(n_facets,)``
+    """
+    vertices = np.asarray(vertices, dtype=float)
+    n_facets = len(vertices)
+    if n_facets == 0:
+        return np.zeros(0, dtype=bool)
+    edges = _edge_uses(vertices, tolerance)
+    facet = edges.facet_of_use
+    shared = (edges.uses == 2)[edges.edge_of_use]
+    # The two triangles on each two-use edge, found by sorting the uses of those edges by edge.
+    order = np.argsort(edges.edge_of_use[shared], kind="stable")
+    ends = facet[shared][order].reshape(-1, 2)
+    links = coo_matrix((np.ones(len(ends)), (ends[:, 0], ends[:, 1])), shape=(n_facets, n_facets))
+    _, piece = connected_components(links, directed=False)
+    on_rim = np.zeros(n_facets, dtype=bool)
+    on_rim[facet[edges.boundary[edges.edge_of_use]]] = True
+    open_piece = np.zeros(int(piece.max()) + 1, dtype=bool)
+    open_piece[piece[on_rim]] = True
+    return open_piece[piece]
 
 
 def check_winding(vertices, *, tolerance: float | None = None) -> WindingReport:
