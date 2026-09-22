@@ -1,0 +1,4 @@
+# Regenerable: the compiled solver, the meshed case and every DOM run live here.
+work/
+__pycache__/
+run-*.log

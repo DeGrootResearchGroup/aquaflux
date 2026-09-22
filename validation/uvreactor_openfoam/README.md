@@ -15,8 +15,9 @@ Geometry, mesh settings, and the flow operating point are taken from
 `uvReactorSozzi2006` tutorial: water at 20 °C, 25 GPM through a 19.1 mm pipe (Re ≈ 1.05e5),
 realizable k-epsilon RAS. Only the flow-relevant subset of that tutorial is kept here — mesh
 generation, boundary conditions, the operating point. The source case's own radiation-transport
-physics and post-processing are not part of this directory; aquaflux does not model radiation
-transport. `of_case/` is otherwise the untouched case (the only edit is `system/controlDict`'s
+physics and post-processing are not part of this directory: the fluence-rate comparison against
+that tutorial's discrete-ordinates solution lives in `../sozzi_radiation/`, on the tutorial's own
+mesh (the same 1.6M-cell `snappyHexMesh` output as this one). `of_case/` is otherwise the untouched case (the only edit is `system/controlDict`'s
 `writeFormat`, `binary` → `ascii`, since aquaflux's OpenFOAM reader is ASCII-only).
 
 ## Known status

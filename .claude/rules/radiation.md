@@ -858,6 +858,33 @@ every exit-and-re-entry twice. So topology drives only the *warning*; the counti
 declaration. Naming a closed body two-sided makes it block twice and errs dark — not detectable,
 because a welded sheet looks closed too.
 
+## MEASURED: aquaflux against discrete ordinates on the Sozzi reactor (2026-09-22)
+
+Instrument: `validation/sozzi_radiation/` (`generate_dom_reference.py` runs of-optical-radiation's
+DOM on its `uvReactorSozzi2006-DOM` tutorial in Docker; `compare_fluence.py` computes aquaflux's `G`
+on the same 1,635,909-cell mesh and writes a VTU + plots). Full numbers and configuration in its
+`README.md`; the headline, so it is findable from here:
+
+- **Whole-reactor volume-mean G agrees to 0.09%** (133.28 aquaflux, 133.16 DOM-256, 131.67 DOM-64).
+- **DOM converges on aquaflux**: DOM/aquaflux p10-p90 over lit cells 0.36-1.65 at 64 directions,
+  0.886-1.076 at 256. The spread is DOM's ray effect — at mid-lamp the true field is axisymmetric
+  and aquaflux gives one curve per radius, while DOM scatters with angle. In the pipes DOM is wrong
+  by orders of magnitude (only a narrow cone of directions reaches down a 19 mm pipe).
+- **aquaflux's own discretization error** near the lamp (4 mm facets, against a 9x-refined lamp):
+  median 0.44%, p99 4.1%.
+- **Cost**: 557 s for all 1.6M cells, 11 cores; DOM 1035 s (64 directions) and 4193 s (256), one
+  core in a Docker VM, 15 outer sweeps each — not a like-for-like timing.
+
+⚠️ **How it stayed affordable, and why the stock build could not.** With black walls there is no
+interreflection, so the field is the direct gather from the lamp alone (7,516 facets) — building a
+model would have formed a 61k-facet transfer and a ~6e14-test wall mask. Visibility is exact and
+O(receivers x facets): the fluid is three convex cylinders, so a pipe cell sees a lamp point exactly
+when the segment passes that pipe's opening (a custom `Occluder` in the harness, checked against
+brute-force sampling: 0 disagreements in 8000). And `build_visibility`'s dense
+(occluders x receivers x facets) mask is ~12 GB per occluder at this size, so the harness gathers in
+20k-receiver chunks. **A user-facing driver needs all three of these for a real reactor** — the
+wall mask in particular has no general cheap form yet.
+
 ## The public surface: `model.py`, and the four assembly steps that are easy to omit
 
 `build_radiation_model(receivers, surfaces, occluders=..., settings=...)` freezes everything a
