@@ -72,8 +72,11 @@ class OcclusionField(eqx.Module):
     overlapping : jnp.ndarray of bool, shape ``(n_receivers, n_facets)``
         Whether more than one blocker covered part of this pair, so their fractions were added
         and **may** have been double counted. Always ``False`` from a ray test, whose ``or`` is
-        idempotent. This is the honest report of the one case the silhouette treatment gets
-        wrong, and it is nearly free: it is a count taken in the pass that already runs.
+        idempotent. It proves a pair exact where it is ``False``; where it is ``True`` it proves
+        nothing, and on a meshed body it is ``True`` for nearly every hidden pair, because a
+        tiled blocker covers a pair with several of its triangles without any of them
+        overlapping. It is a count taken in the pass that already runs, so it costs nothing,
+        but it is not a detector for the over-count.
     """
 
     fraction: jnp.ndarray
@@ -199,8 +202,12 @@ class SilhouetteOcclusion(SelfOcclusion):
 
     No sampling anywhere, so a pair the shadow edge crosses is right rather than rounded to the
     nearer bit. See :mod:`aquaflux.radiation.silhouette` for the geometry and for the one case
-    it gets wrong -- overlapping front-facing silhouettes, which it reports through
-    :attr:`OcclusionField.overlapping` rather than hiding.
+    it gets wrong: overlapping front-facing silhouettes, whose covered shares are added and so
+    err dark. That is rare where a nearer body hides a source completely, since the sum is
+    clipped at one; it bites where two bodies each hide part of one source.
+    :attr:`OcclusionField.overlapping` marks every pair where more than one blocker
+    contributed, which includes every tiling, so it proves pairs exact rather than finding the
+    wrong ones.
 
     ⚠️ **Every receiver must sit on a facet.** The fraction is of a *projected* solid angle, so
     it needs the receiver's own normal to project onto, and a point in the fluid has none. That
