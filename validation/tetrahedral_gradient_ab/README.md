@@ -122,6 +122,57 @@ unless a row says otherwise, 60-step cap. Steps to convergence, or `failed` with
   sign flips (`TET_POLYMESH` is not read; it uses the case mesh). It orders the laminar march's outcomes
   (the march converges only with the second pass withheld out to ring 3).
 
+### Investigation-only probes (issue #435)
+
+The rest of the scripts here are single-purpose harnesses from the investigation into why the coupled
+march does not start on this mesh, kept for a re-adjudication rather than removed. They are a
+point-in-time snapshot — see the module docstring of each for its own configuration, and read one before
+trusting its output against a checkout that has moved on.
+
+- `diagnose_435.py` — reconstruction exactness on this mesh and where a plug state's residual lives.
+- `diffusion_operator_probe.py` — a scalar Laplace operator split into its orthogonal part and its
+  non-orthogonal correction, across gradient schemes and on control meshes; also the schemes used to
+  withhold or cap the second pass on chosen cells or fields (`FirstPassOnly`, `FirstPassOnCells`,
+  `FirstPassWhereIllConditioned`, `CorrectionCapped`).
+- `coupled_operator_probe.py` — the coupled Jacobian at a plug state: probe accuracy, an exact-LU Newton
+  solve, and non-positive omega diagonals.
+- `laminar_duct_probe.py` — the laminar control: the flow residual alone through `solve_flow_march`,
+  four gradient schemes on three meshes (`TET_MESHES`, `TET_LAMINAR_RE`, `TET_STEPS`); the full
+  multiple-correction scheme fails on both tetrahedral meshes and converges on the orthogonal hex, so
+  the failure needs no turbulence. `TET_ARMS` also selects arms that withhold the second pass on cell
+  subsets, from one field's gradient only, that cap it, or that give the first-pass gradient to the
+  Rhie-Chow damping and/or the viscous flux only, or hand the full gradient to one consumer of an
+  otherwise first-pass residual (mixed configurations, so not attribution).
+- `seed_state_probe.py`, `warm_start_probe.py`, `mixed_scheme_probe.py`, `limited_hessian_march_probe.py`
+  — the same questions at a smooth state converged with corrected Green–Gauss, with the scheme split
+  between the velocity and k/omega blocks, or with the Hessian correction withheld on chosen cells.
+- `wall_velocity_gradient_probe.py` — imposes a wall-model velocity gradient at wall cells (the
+  velocity analogue of omega's `ImposedGradient` wall treatment), optionally combined with withholding
+  the Hessian correction on ring 1, and marches the result.
+- `divergence_diagnosis_probe.py` — checkpoints a diverging march step by step and decomposes the
+  residual by field block and by distance from the wall at a spread of the states it actually visits,
+  rather than only at the seed.
+- `scheme_march_comparison_probe.py` — marches the same converged seed under several different
+  gradient schemes, to separate what is specific to `MultipleCorrectionGradient` from what every
+  scheme shares.
+- `gradient_difference_probe.py` — every scheme's gradients, strain rate and `grad k`/`grad omega` at
+  one converged state, compared per cell with `CorrectedGreenGauss` and grouped by wall ring, boundary
+  faces owned, `max|M2^-1|`, non-orthogonality and streamwise position, plus each scheme's error
+  against an exact analytic gradient.
+- `exact_function_probe.py` — every scheme's gradient of constant, linear, quadratic, cubic and smooth
+  fields with exact values, per cell group, to test whether the reconstruction itself is correct.
+- `mesh_quality_probe.py` — non-orthogonality, skewness, neighbour-volume ratio and cells-across-duct
+  compared against `pitzdaily_openfoam`'s mesh, to judge whether this mesh is realistically coarse or
+  unrepresentative.
+- `of_case/make_hex_mesh.py` — the same duct as an orthogonal structured hexahedral mesh, the control
+  for the tetrahedral mesh's cell shape.
+- `of_case/make_mesh.py` also takes `TET_MESH_OPTIMIZE=netgen`, an opt-in control mesh with no corner cells.
+- `of_case/perturb_mesh.py` — moves the nodes of the hexahedral duct by a fraction of a cell without
+  changing the boundary, to add controlled skew.
+- `own_anchor_march_probe.py` — marches each scheme's own low-Re anchor from the plug, never
+  warm-starting from another scheme's converged state, to separate a warm-start artifact from a
+  property intrinsic to the scheme on this mesh.
+
 ## Regenerating the mesh
 
 `of_case/duct.msh` and `of_case/constant/polyMesh/` are not committed (regenerable). Rebuild with a

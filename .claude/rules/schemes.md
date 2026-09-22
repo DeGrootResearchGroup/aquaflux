@@ -2650,13 +2650,20 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
 
   | | `fallback=None` | `fallback=SkewCorrectedGradient()` |
   |---|---|---|
-  | worst corner cell's `max\|M2⁻¹\|` | **3.29e16** | **10.1** |
-  | cells above the 1e4 threshold | 176 | **0** |
+  | worst corner cell's `max\|M2⁻¹\|` | **3.29e16** | **8.43e3** |
+  | cells above 1e4 | 176 | **0** |
 
-  Fifteen orders of magnitude at the single worst cell, on a real mesh with an inlet, an outlet, and
-  boundary conditions attached — not the synthetic `tetrahedral_grid_3d` unit fixture or a perturbed-tet
-  probe every prior number in this section was measured on. The repair does exactly what it is supposed
-  to, at the level it operates on.
+  (1e4 is this report's own reporting threshold, `UNDETERMINED_THRESHOLD` in `compare.py`; the scheme
+  itself repairs a cell only above `_UNDETERMINED_CORRECTION = 1e8`, so a cell between the two is counted
+  here and left unrepaired there. An unreproduced measurement from a review of the #435 investigation
+  below adds that the repair is a TRADE, not a pure gain: the composite correction gain, not `max|M2^-1|`,
+  moves the other way, with cells of gain > 3 going 101 -> 204 and the worst 3.9 -> 3051.)
+
+  ⚠️ **The repaired figure was first recorded here as `10.1`; the run log prints `worst cell 2163 at
+  8.432e+03`.** Twelve orders better than unrepaired, but only just under the 1e4 reporting threshold
+  above, and three orders above the order-unity of a healthy cell — and that residual conditioning is not
+  harmless, per the investigation log linked below. "The repair does exactly what it is supposed to" was
+  true of singularity and false of health.
 
   ⚠️ **What is still NOT answered: the march itself.** This case cannot currently get a coupled RANS
   solve started at all, under *either* arm, for reasons that measure out as independent of the defect
@@ -2677,6 +2684,12 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
 
   So: **the corner-cell defect and its local fix are as well-evidenced now as the M2 arithmetic can make
   them; whether the fix is safe under a real march remains open, blocked on #435.**
+
+  ⚠️ **A full investigation into why the march still fails after this fix is logged in
+  `.claude/notes/schemes-435-tetrahedral-gradient-log.md`** — a point-in-time snapshot (based on a
+  commit before the per-field boundary binding of #467/#468/#469 and a `compare.py` harness fix
+  unrelated to this scheme), not reconciled with `main` since. Read its own header before trusting
+  anything in it as current.
 
   **THE SECOND PASS FLIPS THE SIGN OF THE RHIE-CHOW DAMPING ON TETRAHEDRA, AND THE FLIPS REPRODUCE A
   LAMINAR MARCH LADDER FROM GEOMETRY ALONE (#435, `validation/tetrahedral_gradient_ab/rhie_chow_sign_probe.py`).**
