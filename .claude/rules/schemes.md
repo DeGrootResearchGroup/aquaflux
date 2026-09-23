@@ -324,6 +324,18 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     right answer here, so the threshold reports rather than refuses; what is **not** measured is
     whether a larger `reach` or a blend nearer 0 (smaller weights) is the right answer on a stretched
     mesh. Read the warning as a real property of that mesh, not noise.
+    **✅ SWEPT, AND THE BLEND IS A MARGIN THERE RATHER THAN A CLIFF**
+    (`validation/bfs3d_openfoam/gradient_weight_probe.py`, one run, 2026-09-22): the flagged set is
+    the same 1056 cells at every blend -- the fit is the **stencil's**, not the aim's, so no blend
+    changes the conditioning -- and **no blend flips a damping diagonal**. What moves is the worst
+    retention of the compact two-point difference: `0.933` at blend 0, `0.898` at 0.25, `0.848` at
+    0.5, **`0.792` at the default 0.75**, `0.735` at 1. So the guard is informative on a graded mesh
+    and the default is comfortable; blend 0.25 is the cheap extra margin if one is wanted, and 0 is
+    the least accurate end on non-polynomial fields. Left at 0.75.
+    ⚠️ **Do not compare weight MAGNITUDES across meshes**: a weight carries units of 1/length, so this
+    mesh's hundreds and the tetrahedral duct's ~1 are the cell sizes, not a difference in behaviour.
+    The scale-free quantity is the retention (or the ratio to a reference reconstruction's own
+    weights, which is what the duct's `2900x` is).
   - **Not under domain decomposition** (two hops past a one-deep halo; raises), and the weights are
     constants after binding, so binding inside a *geometry* differentiation gives a wrong shape
     derivative — the same caveat `HessianCorrectedGradient.bind` carries.
