@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Mapping
+from typing import Literal
 
 from .block_inverse import AirReduction, BlockInverse, JacobiSmoothed, SimpleSmoothed
 from .settings_mapping import SettingsMapping
@@ -79,7 +80,7 @@ class CompleteLu(SettingsValue):
         The factorization backend -- see :meth:`~aquaflux.solve.MonolithicLuPreconditioner.build`.
     """
 
-    backend: str | None = None
+    backend: Literal["auto", "umfpack", "scipy"] | None = None
 
 
 @dataclasses.dataclass(frozen=True)

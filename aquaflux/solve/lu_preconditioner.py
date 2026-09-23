@@ -164,6 +164,11 @@ def _umfpack_available() -> bool:
         return False
 
 
+#: The factorization backends `factorize_lu` accepts. `CompleteLu.backend` spells the same three in a
+#: ``Literal``, so a spec file's value is checked where it is read; a test pins the two lists equal.
+LU_BACKENDS = ("auto", "umfpack", "scipy")
+
+
 def _make_backend(matrix: sp.spmatrix, backend: str) -> _LuBackend:
     if backend == "scipy":
         return _ScipyLuBackend(matrix)
@@ -172,7 +177,7 @@ def _make_backend(matrix: sp.spmatrix, backend: str) -> _LuBackend:
     if backend == "auto":
         return _PetscUmfpackBackend(matrix) if _umfpack_available() else _ScipyLuBackend(matrix)
     raise ValueError(
-        f"factorize_lu: unknown backend {backend!r} (want 'auto', 'umfpack', or 'scipy')."
+        f"factorize_lu: unknown backend {backend!r} (want {', '.join(map(repr, LU_BACKENDS))})."
     )
 
 

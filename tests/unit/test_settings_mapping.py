@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
+from typing import Literal
 
 import numpy as np
 import pytest
@@ -168,3 +170,133 @@ def test_a_kind_must_be_a_dataclass_with_a_distinct_name() -> None:
 
     with pytest.raises(ValueError, match="share the name '_Smoother'"):
         SettingsMapping([globals()["_Smoother"], _Smoother])
+
+
+# --- what may appear in each field -------------------------------------------------------------
+#
+# Until 2026-09-23 a mapping checked the `kind` and the field NAMES and nothing about the values, so a
+# misspelt setting loaded and failed much later where the value is consumed -- or never, if the
+# consumer ignored it (issue #424). The rules come from the fields' own annotations, so there is no
+# second table of them to drift from the dataclass.
+
+
+@dataclasses.dataclass(frozen=True)
+class _Typed:
+    """One field of each form the rules are read from."""
+
+    count: int | None = None
+    scale: float | None = None
+    name: str | None = None
+    flag: bool | None = None
+    mode: Literal["fast", "slow"] | None = None
+    reach: tuple[int, ...] | None = None
+    smoother: _Smoother | None = None
+
+
+_TYPED = SettingsMapping([_Typed, _Smoother])
+
+
+@pytest.mark.parametrize(
+    ("mapping", "match"),
+    [
+        ({"count": True}, r"True at 'count' is not accepted there"),
+        ({"count": "3"}, r"'3' at 'count' is not accepted there"),
+        ({"count": 2.5}, r"2.5 at 'count' is not accepted there"),
+        ({"flag": 1}, r"1 at 'flag' is not accepted there"),
+        ({"scale": True}, r"True at 'scale' is not accepted there"),
+        ({"name": 3}, r"3 at 'name' is not accepted there"),
+        ({"mode": "quick"}, r"'quick' at 'mode' is not accepted there"),
+        ({"reach": [1, "2"]}, r"at 'reach' is not accepted there"),
+        ({"smoother": 2}, r"2 at 'smoother' is not accepted there"),
+        ({"count": {"kind": "_Smoother"}}, r"at 'count' is not accepted there"),
+    ],
+    ids=[
+        "bool-for-int",
+        "string-for-int",
+        "fraction-for-int",
+        "int-for-bool",
+        "bool-for-float",
+        "int-for-string",
+        "value-outside-a-literal",
+        "string-inside-an-int-list",
+        "number-for-a-nested-value",
+        "nested-value-for-a-number",
+    ],
+)
+def test_a_setting_of_the_wrong_form_is_refused_where_it_appears(mapping, match) -> None:
+    """Named by path, with what that field takes -- the half that was missing.
+
+    ``bool`` is a subclass of ``int`` in Python, so a boolean passes an ``isinstance`` check for a
+    count; that is why the two are pinned in both directions here.
+    """
+    with pytest.raises(ValueError, match=match):
+        _TYPED.from_mapping({"kind": "_Typed", **mapping})
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [
+        {"count": 3},
+        {"count": 3.0},  # a parser may hand back a whole number as a float
+        {"scale": 2},  # ... and an integer where a number is wanted
+        {"scale": 2.5},
+        {"flag": False},
+        {"mode": "slow"},
+        {"reach": [3, 2]},
+        {"smoother": {"kind": "_Smoother", "sweeps": 2}},
+        {"count": None, "smoother": None},  # an explicit null is the same as leaving a key out
+    ],
+    ids=[
+        "int",
+        "whole-float-for-int",
+        "int-for-float",
+        "float",
+        "bool",
+        "literal",
+        "list",
+        "nested",
+        "null",
+    ],
+)
+def test_a_setting_of_the_right_form_still_loads(mapping) -> None:
+    """The other half: the check must not refuse what a file legitimately says.
+
+    The whole-float case is load-bearing rather than incidental -- a probe's per-column reach is
+    written by this package's own writer and read back through a JSON round trip.
+    """
+    assert _TYPED.from_mapping({"kind": "_Typed", **mapping}) is not None
+
+
+def test_the_message_names_what_the_field_takes() -> None:
+    """A refusal that says only 'no' leaves the reader to find the choices in the source."""
+    with pytest.raises(ValueError, match=r"_Typed.mode takes one of 'fast', 'slow' or null"):
+        _TYPED.from_mapping({"kind": "_Typed", "mode": "quick"})
+    with pytest.raises(ValueError, match=r"_Typed.smoother takes one of '_Smoother' or null"):
+        _TYPED.from_mapping({"kind": "_Typed", "smoother": 2})
+
+
+def test_an_unknown_kind_is_reported_as_unknown_not_as_misplaced() -> None:
+    """A kind nothing knows is misspelt, not in the wrong place, and the message should say so.
+
+    Both are refusals, so it would be easy to let the position check answer first; it would then
+    report what belongs in the field and leave the reader looking for a class that does not exist.
+    """
+    with pytest.raises(ValueError, match=r"unknown kind 'Chebyshev' at 'smoother'"):
+        _TYPED.from_mapping({"kind": "_Typed", "smoother": {"kind": "Chebyshev"}})
+
+
+def test_a_field_whose_annotation_cannot_be_checked_fails_when_the_mapping_is_built() -> None:
+    """Not when a file is read -- and deliberately not by skipping it.
+
+    A field the rules cannot express would otherwise load unchecked, which is the silence this whole
+    check exists to remove, and it would be invisible: a mapping that validates nothing looks exactly
+    like a mapping whose values are all valid. The mappings in this package are module-level
+    constants, so this refusal fires at import rather than at the first load.
+    """
+
+    @dataclasses.dataclass(frozen=True)
+    class _Opaque:
+        callback: Callable[[int], int] | None = None
+
+    with pytest.raises(TypeError, match=r"_Opaque.callback is annotated .* cannot check"):
+        SettingsMapping([_Opaque])

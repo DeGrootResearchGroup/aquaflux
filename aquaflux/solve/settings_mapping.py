@@ -8,6 +8,13 @@ mapping back reproduces the value exactly, and a mapping that omits a field leav
 default of the class that consumes it. Everything else in it is plain data -- strings, numbers,
 booleans, ``None`` and lists of them -- so any YAML or JSON writer can store it.
 
+Reading one is checked: a mapping must name a class this accepts, every key must be a field of it, and
+every setting must be something that field can hold -- a number where a number belongs, one of a fixed
+set of names where the field offers a choice, a nested value of a kind usable in that position. What
+each field takes is read from its own annotation, so the rule is stated once, where the field is
+declared. A setting that fails is refused with the path to it, rather than loading and failing wherever
+it is eventually consumed -- or being ignored, which is indistinguishable from never having written it.
+
 Nothing here parses a file. It works on the mapping a parser produces, so it adds no parsing dependency
 and does not care which format the mapping came from.
 """
@@ -15,6 +22,8 @@ and does not care which format the mapping came from.
 from __future__ import annotations
 
 import dataclasses
+import types
+import typing
 from collections.abc import Iterable, Mapping
 
 __all__ = ["SettingsMapping"]
@@ -39,7 +48,8 @@ class SettingsMapping:
     Raises
     ------
     TypeError
-        If a kind is not a dataclass.
+        If a kind is not a dataclass, or if one of its fields is annotated with a form the per-position
+        rules cannot express (see :func:`_atoms`) -- which would otherwise load unchecked.
     ValueError
         If two kinds share a class name.
 
@@ -65,6 +75,17 @@ class SettingsMapping:
                 raise ValueError(f"two settings kinds share the name {kind.__name__!r}.")
             by_name[kind.__name__] = kind
         self._by_name = by_name
+        # Read every field's annotation now, so a field this cannot check stops the mapping being
+        # built rather than loading unvalidated (see `_atoms`).
+        self._accepts = {
+            name: {
+                field.name: _atoms(hints[field.name], name, field.name)
+                for field in dataclasses.fields(kind)
+                if field.init
+            }
+            for name, kind in by_name.items()
+            for hints in (typing.get_type_hints(kind),)
+        }
 
     @property
     def kinds(self) -> tuple[type, ...]:
@@ -113,10 +134,24 @@ class SettingsMapping:
         Raises
         ------
         ValueError
-            If a mapping names no kind, an unknown kind, or a field its kind does not have. The message
-            gives the path to the offending entry.
+            If a mapping names no kind, an unknown kind, a field its kind does not have, or a setting
+            that field cannot hold -- a misspelt choice, a boolean where a count belongs, a nested value
+            where a string belongs, or a value of a kind that is not usable in that position. The
+            message gives the path to the offending entry and what that field takes.
         """
         return self._decode_value(mapping, path="")
+
+    def _names_no_known_kind(self, setting: object) -> bool:
+        """Whether ``setting`` holds a nested mapping whose ``kind`` this mapping has never heard of.
+
+        A list is searched too, so an unknown kind inside one is reported as the misspelling it is
+        rather than as the whole list being unacceptable.
+        """
+        if isinstance(setting, Mapping):
+            return setting.get(KIND) not in self._by_name
+        if isinstance(setting, list | tuple):
+            return any(self._names_no_known_kind(item) for item in setting)
+        return False
 
     def _to_mapping(self, value: object, path: str) -> dict[str, object]:
         if self._by_name.get(type(value).__name__) is not type(value):
@@ -173,12 +208,195 @@ class SettingsMapping:
                 f"{name}{where} has no field {', '.join(repr(u) for u in unknown)}; its fields are "
                 f"{sorted(fields)}."
             )
+        accepts = self._accepts[name]
+        for key, setting in mapping.items():
+            if key == KIND:
+                continue
+            atoms = accepts[key]
+            if self._names_no_known_kind(setting):
+                # A mapping naming a kind nothing knows is misspelt, not misplaced. Decoding it reports
+                # exactly that, with the same path, which is more use than a list of what belongs here.
+                continue
+            if not any(atom.accepts(setting, self._by_name) for atom in atoms):
+                raise ValueError(
+                    f"{setting!r}{_where(_join(path, key))} is not accepted there; {name}.{key} takes "
+                    f"{_describe(atoms, self._by_name)}."
+                )
         settings = {
             key: self._decode(setting, _join(path, key))
             for key, setting in mapping.items()
             if key != KIND
         }
         return kind(**settings)
+
+
+# --- what may appear in one field, read off its annotation ------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class _Null:
+    """``None`` is accepted: the field is optional, and an absent key means the same thing."""
+
+    def accepts(self, setting: object, kinds: Mapping[str, type]) -> bool:
+        del kinds
+        return setting is None
+
+    def describe(self, kinds: Mapping[str, type]) -> str:
+        del kinds
+        return "null"
+
+
+@dataclasses.dataclass(frozen=True)
+class _Choice:
+    """One of a fixed set of values, from a ``Literal`` annotation."""
+
+    values: tuple[object, ...]
+
+    def accepts(self, setting: object, kinds: Mapping[str, type]) -> bool:
+        del kinds
+        # `==` alone would let `True` match a `1`, since `True == 1` in Python.
+        return any(setting == value and type(setting) is type(value) for value in self.values)
+
+    def describe(self, kinds: Mapping[str, type]) -> str:
+        del kinds
+        return "one of " + ", ".join(repr(value) for value in self.values)
+
+
+@dataclasses.dataclass(frozen=True)
+class _Scalar:
+    """A number, string or boolean.
+
+    ⚠️ **``bool`` is a subclass of ``int`` in Python**, so ``True`` would pass an ``isinstance`` test
+    for a count — which is the misreading this check exists to catch (``smoother_sweeps: true`` reached
+    the multigrid builder as ``1``). A boolean is therefore accepted only where a boolean is asked for.
+    An ``int`` position also accepts a whole-numbered ``float``, because a parser may hand back ``3.0``
+    where a file says ``3.0``, and the values that take one already round it (a probe's per-column
+    reach).
+    """
+
+    type: type
+
+    def accepts(self, setting: object, kinds: Mapping[str, type]) -> bool:
+        del kinds
+        if isinstance(setting, bool):
+            return self.type is bool
+        if self.type is float:
+            return isinstance(setting, int | float)
+        if self.type is int:
+            return isinstance(setting, int) or (isinstance(setting, float) and setting.is_integer())
+        return isinstance(setting, self.type)
+
+    def describe(self, kinds: Mapping[str, type]) -> str:
+        del kinds
+        return {bool: "a boolean", int: "a whole number", float: "a number", str: "a string"}[
+            self.type
+        ]
+
+
+@dataclasses.dataclass(frozen=True)
+class _Nested:
+    """A nested value: a mapping whose ``kind`` names a class usable in this position.
+
+    ``base`` may be an abstract family base (a block inverse, say), in which case every registered kind
+    deriving from it is accepted there and no other.
+    """
+
+    base: type
+
+    def accepts(self, setting: object, kinds: Mapping[str, type]) -> bool:
+        if not isinstance(setting, Mapping):
+            return False
+        name = setting.get(KIND)
+        kind = kinds.get(name) if isinstance(name, str) else None
+        return kind is not None and issubclass(kind, self.base)
+
+    def usable(self, kinds: Mapping[str, type]) -> list[str]:
+        """The registered kinds that may appear in this position."""
+        return sorted(name for name, kind in kinds.items() if issubclass(kind, self.base))
+
+    def describe(self, kinds: Mapping[str, type]) -> str:
+        usable = self.usable(kinds)
+        return f"one of {', '.join(repr(name) for name in usable)}" if usable else "no known kind"
+
+
+@dataclasses.dataclass(frozen=True)
+class _Sequence:
+    """A list (read back as a tuple) whose entries are each accepted by ``atoms``."""
+
+    atoms: tuple[object, ...]
+
+    def accepts(self, setting: object, kinds: Mapping[str, type]) -> bool:
+        return isinstance(setting, list | tuple) and all(
+            any(atom.accepts(item, kinds) for atom in self.atoms) for item in setting
+        )
+
+    def describe(self, kinds: Mapping[str, type]) -> str:
+        return f"a list of ({_describe(self.atoms, kinds)})"
+
+
+def _atoms(annotation: object, owner: str, field: str) -> tuple[object, ...]:
+    """What ``annotation`` permits, as the alternatives a setting may satisfy.
+
+    Read once, when a :class:`SettingsMapping` is built, so a field whose annotation this cannot
+    express fails **there** rather than loading unchecked. That is deliberate: the mappings are
+    module-level constants, so an annotation nothing can validate stops the package importing rather
+    than opening a hole nobody sees. If one is ever wanted, widen this function.
+
+    Parameters
+    ----------
+    annotation : object
+        The resolved type hint of one field.
+    owner, field : str
+        The class and field the annotation belongs to, for the refusal's message.
+
+    Returns
+    -------
+    tuple
+        The alternatives, each with ``accepts`` and ``describe``.
+
+    Raises
+    ------
+    TypeError
+        If the annotation is not one of the forms above.
+    """
+    origin = typing.get_origin(annotation)
+    if origin in (types.UnionType, typing.Union):
+        return tuple(
+            atom for arm in typing.get_args(annotation) for atom in _atoms(arm, owner, field)
+        )
+    if annotation is type(None):
+        return (_Null(),)
+    if origin is typing.Literal:
+        return (_Choice(typing.get_args(annotation)),)
+    if origin is tuple:
+        args = [arg for arg in typing.get_args(annotation) if arg is not Ellipsis]
+        return (_Sequence(tuple(atom for arg in args for atom in _atoms(arg, owner, field))),)
+    if annotation in (bool, int, float, str):
+        return (_Scalar(annotation),)
+    if isinstance(annotation, type) and dataclasses.is_dataclass(annotation):
+        return (_Nested(annotation),)
+    raise TypeError(
+        f"{owner}.{field} is annotated {annotation!r}, which a settings mapping cannot check. A field "
+        "is a number, string, boolean, Literal, nested settings value, tuple of those, or a union with "
+        "None."
+    )
+
+
+def _describe(atoms: Iterable[object], kinds: Mapping[str, type]) -> str:
+    """What the alternatives accept, for the message naming what a rejected setting should have been.
+
+    The nested-value alternatives are merged into one list of kinds. A field annotated with a union of
+    four value families has four of them, and describing each separately reads as four rules rather
+    than as the one choice it is.
+    """
+    atoms = tuple(atoms)
+    nested = sorted(
+        {name for atom in atoms if isinstance(atom, _Nested) for name in atom.usable(kinds)}
+    )
+    parts = [atom.describe(kinds) for atom in atoms if not isinstance(atom, _Nested)]
+    if nested:
+        parts.insert(0, "one of " + ", ".join(repr(name) for name in nested))
+    return " or ".join(parts)
 
 
 def _join(path: str, key: str) -> str:

@@ -11,12 +11,15 @@ import importlib
 import inspect
 import json
 import pkgutil
+import typing
 
 import aquaflux
 import numpy as np
 import pytest
 from aquaflux.flow import ConvectionAir, ConvectionTwoLevel, VelocityBlock, ViscousMultilevel
+from aquaflux.flow.block_preconditioner import _COMPOSITIONS, SCHUR_SCALINGS
 from aquaflux.solve import (
+    MATERIALIZED_MAPPING,
     AirReduction,
     BlockInverse,
     CompleteLu,
@@ -25,8 +28,11 @@ from aquaflux.solve import (
     JacobiSmoothed,
     MaterializedJacobian,
     MonolithicVCycle,
+    SettingsMapping,
     SimpleSmoothed,
 )
+from aquaflux.solve.lu_preconditioner import LU_BACKENDS
+from aquaflux.solve.multigrid import _PROLONGATION_SMOOTHING
 from aquaflux.turbulence import (
     BlockDiagonal,
     ScalarAir,
@@ -61,7 +67,7 @@ _SPECS = [
     MaterializedJacobian(
         FieldSplit(
             SimpleSmoothed(sweeps=2, strength_threshold=0.25, frozen_coarsening=True),
-            JacobiSmoothed(max_coarse=200, prolongation_smoothing="jacobi"),
+            JacobiSmoothed(max_coarse=200, prolongation_smoothing="symmetric-part"),
         ),
         probe=JacobianProbeSpec(column_reach=(3, 3, 3, 3, 2, 2), gradient_sweeps=2),
         refit_beta_floor=0.05,
@@ -218,7 +224,10 @@ def test_unpreconditioned_scalar_blocks_are_a_kind_and_a_null_scalar_is_the_defa
             },
             "SimpleSmoothed at 'inverse.leading' has no field 'smoother_sweeps'",
         ),
-        ({"kind": "BlockDiagonal", "velocity": "convection"}, None),
+        (
+            {"kind": "BlockDiagonal", "velocity": "convection"},
+            "'convection' at 'velocity' is not accepted there",
+        ),
         ({"inverse": {"kind": "CompleteLu"}}, "names no 'kind'"),
     ],
     ids=[
@@ -230,27 +239,31 @@ def test_unpreconditioned_scalar_blocks_are_a_kind_and_a_null_scalar_is_the_defa
     ],
 )
 def test_a_malformed_spec_file_is_refused_by_name(mapping, match) -> None:
-    if match is None:
-        # A retired velocity string reaches the value's own refusal, which names the values instead.
-        with pytest.raises(TypeError, match="must be a velocity-block value"):
-            preconditioner_spec_from_mapping(mapping)
-        return
     with pytest.raises(ValueError, match=match):
         preconditioner_spec_from_mapping(mapping)
 
 
-def test_a_nested_value_of_the_wrong_kind_reaches_that_value_s_own_refusal() -> None:
+def test_a_nested_value_of_the_wrong_kind_is_refused_where_it_appears() -> None:
+    """A known kind in a position that cannot take it: named by path, with what belongs there.
+
+    It used to load as far as ``FieldSplit``'s own constructor refusal, which says what a field split
+    takes but not where in the file the offending entry is -- and a value family whose constructor
+    happens not to check would not have been refused at all.
+    """
+    spec = {
+        "kind": "MaterializedJacobian",
+        "inverse": {
+            "kind": "FieldSplit",
+            "leading": {"kind": "SimpleSmoothed"},
+            "trailing": {"kind": "ConvectionAir"},
+        },
+    }
+    with pytest.raises(ValueError, match=r"at 'inverse.trailing' is not accepted there"):
+        preconditioner_spec_from_mapping(spec)
+    # The same value written in code still meets the constructor's own refusal, which is the other
+    # route to the same conclusion and is deliberately unchanged (issue #424 is about the file).
     with pytest.raises(TypeError, match=r"FieldSplit\.trailing must be a block-inverse value"):
-        preconditioner_spec_from_mapping(
-            {
-                "kind": "MaterializedJacobian",
-                "inverse": {
-                    "kind": "FieldSplit",
-                    "leading": {"kind": "SimpleSmoothed"},
-                    "trailing": {"kind": "ConvectionAir"},
-                },
-            }
-        )
+        FieldSplit(SimpleSmoothed(), ConvectionAir())
 
 
 @pytest.mark.parametrize(
@@ -300,8 +313,6 @@ def test_the_solve_registry_does_not_know_the_turbulence_only_kinds() -> None:
 
 
 def test_the_coupled_registry_extends_the_solve_one_rather_than_restating_it() -> None:
-    from aquaflux.solve import MATERIALIZED_MAPPING
-
     assert set(MATERIALIZED_MAPPING.kinds) < set(_SPEC_MAPPING.kinds)
 
 
@@ -317,3 +328,79 @@ def test_a_bare_block_inverse_spec_round_trips_through_the_solve_registry() -> N
     mapping = materialized_spec_to_mapping(spec)
     assert mapping["inverse"]["kind"] == "SimpleSmoothed"
     assert materialized_spec_from_mapping(mapping) == spec
+
+
+# --- the values a spec file may give, per position ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("spec", "match"),
+    [
+        (
+            {
+                "kind": "MaterializedJacobian",
+                "inverse": {"kind": "CompleteLu", "backend": "umfpak"},
+            },
+            r"'umfpak' at 'inverse.backend' is not accepted there",
+        ),
+        (
+            {
+                "kind": "MaterializedJacobian",
+                "inverse": {"kind": "CompleteLu", "backend": {"kind": "CompleteLu"}},
+            },
+            r"at 'inverse.backend' is not accepted there",
+        ),
+        (
+            {
+                "kind": "MaterializedJacobian",
+                "inverse": {"kind": "MonolithicVCycle", "smoother_sweeps": True},
+            },
+            r"True at 'inverse.smoother_sweeps' is not accepted there",
+        ),
+    ],
+    ids=["misspelt-choice", "value-where-a-string-belongs", "boolean-where-a-count-belongs"],
+)
+def test_the_three_spec_files_that_used_to_load_silently_are_refused(spec, match) -> None:
+    """Issue #424's own examples.
+
+    Each of these loaded without complaint and failed where the setting is consumed -- or never, since
+    an ignored setting is indistinguishable from an absent one. A case file's whole point is that it is
+    checked before a solve runs.
+    """
+    with pytest.raises(ValueError, match=match):
+        preconditioner_spec_from_mapping(spec)
+
+
+def test_every_choice_a_spec_offers_is_one_its_consumer_accepts() -> None:
+    """The ``Literal``s are the file's copy of a choice its builder already knows; they must agree.
+
+    Each set is spelled out in the annotation, because a ``Literal`` cannot be computed from a
+    variable -- so this is the check that keeps the two from drifting. A value the spec offers and the
+    builder rejects is a file that passes validation and fails at build; the reverse is a capability no
+    file can reach.
+    """
+    choices = {
+        (CompleteLu, "backend"): set(LU_BACKENDS),
+        (BlockDiagonal, "schur_scaling"): set(SCHUR_SCALINGS),
+        (BlockDiagonal, "composition"): set(_COMPOSITIONS),
+        (SimpleSmoothed, "prolongation_smoothing"): set(_PROLONGATION_SMOOTHING),
+        (JacobiSmoothed, "prolongation_smoothing"): set(_PROLONGATION_SMOOTHING),
+    }
+    for (kind, field), accepted in choices.items():
+        annotation = typing.get_type_hints(kind)[field]
+        (literal,) = [
+            arm for arm in typing.get_args(annotation) if typing.get_origin(arm) is typing.Literal
+        ]
+        assert set(typing.get_args(literal)) == accepted, f"{kind.__name__}.{field}"
+
+
+def test_every_field_of_every_spec_is_one_the_mapping_can_check() -> None:
+    """A field whose annotation the rules cannot express would load unchecked.
+
+    ``SettingsMapping`` refuses to be built over such a field, and both mappings are module-level
+    constants, so this is really a test that importing the package still works -- written out because
+    what it pins is a property of every spec class, not of the import.
+    """
+    for mapping in (_SPEC_MAPPING, MATERIALIZED_MAPPING):
+        rebuilt = SettingsMapping(mapping.kinds)
+        assert rebuilt.kinds == mapping.kinds
