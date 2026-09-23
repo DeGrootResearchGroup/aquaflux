@@ -312,6 +312,18 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     closer), peak `nu_t` 418.9 against 418.0 (OpenFOAM 422.9), `ux`/`uy` errors unchanged at
     0.0191/0.0102. ⚠️ No wall-clock comparison: the baseline's timing is from another session and
     bundle. This is also the second case to exercise the per-field turbulence binding.
+  - **`bfs3d` (orthogonal, graded hexahedra, 23040 cells) reproduces its baseline and costs ~10 %
+    more** (`BFS3D_GRADIENT=projected`, one run, 2026-09-22): mid-span `x_r/h` **8.3611** against the
+    shipped `CorrectedGreenGauss`'s 8.36 (OpenFOAM 7.2434), same spanwise shape including the
+    side-wall corner separation, peak `nu_t` 149.8 against OpenFOAM's 146.9, in 31 steps / 224
+    cumulative cycles against 28 / 205.
+    ⚠️⚠️ **AND ITS CONDITIONING GUARD FIRED THERE: 928 of 23040 cells, worst condition number
+    2.59e7.** The near-wall cells of a graded mesh are thin, so a two-hop stencil through them is
+    nearly flat and fitting a quadratic on it is ill-conditioned -- the weights on those cells are
+    large, which is the failure this scheme exists to avoid elsewhere. It still converged to the
+    right answer here, so the threshold reports rather than refuses; what is **not** measured is
+    whether a larger `reach` or a blend nearer 0 (smaller weights) is the right answer on a stretched
+    mesh. Read the warning as a real property of that mesh, not noise.
   - **Not under domain decomposition** (two hops past a one-deep halo; raises), and the weights are
     constants after binding, so binding inside a *geometry* differentiation gives a wrong shape
     derivative — the same caveat `HessianCorrectedGradient.bind` carries.
