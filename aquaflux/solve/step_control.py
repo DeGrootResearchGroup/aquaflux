@@ -207,7 +207,7 @@ class ShiftStrengthControl(eqx.Module):
 
         **⚠️ Two different floors, and they are easy to conflate.** :attr:`ShiftStrengthControl.beta_min`
         bounds the shift the **operator** is solved with. A preconditioner refresh separately floors its
-        **own copy** (``pc_beta = max(beta, beta_floor)``), so the frozen operator can be built at a
+        **own copy** (``pc_beta = max(beta, refit_beta_floor)``), so the frozen operator can be built at a
         larger shift than the one being solved — deliberately, since the V-cycle degrades as the shift
         vanishes while the operator still needs the small one to make progress. The wall this method
         exists for is therefore **not** a shift the preconditioner cannot invert; it is the mismatch

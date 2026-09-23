@@ -556,7 +556,7 @@ complete LU and the AMG's coloured probe both still depend on it.
         zero on the continuity row** (`turbulence/coupled.py`: `self.momentum.pack(…, jnp.zeros(n_cells))`,
         and the comment says so — "0 on pressure"). The operator is then equilibrated to a unit diagonal,
         so raising β changes the *velocity/k/ω* rows' relative dominance and leaves the pressure row
-        exactly as it was; the PC-only `beta_floor` inherits the same blind spot. (ii) **PETSc's `PCILU`
+        exactly as it was; the PC-only `refit_beta_floor` inherits the same blind spot. (ii) **PETSc's `PCILU`
         defaults to `MAT_SHIFT_NONE`** — verified by `pc.view()`, which prints no shift line for `ilu`
         while `icc` prints "using Manteuffel shift [POSITIVE_DEFINITE]" — and the default `zeropivot` is
         **2.22e-14**, so `NONZERO` and `INBLOCKS` (whose triggers are `|pivot| ≤ zeropivot·rowsum` and

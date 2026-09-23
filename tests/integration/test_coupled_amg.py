@@ -169,14 +169,14 @@ def test_amg_adjoint_matches_finite_difference(case) -> None:
 
 
 @pytest.mark.slow
-def test_amg_beta_floor_builds_the_preconditioner_above_the_marchs_own_beta(
+def test_the_refit_beta_floor_builds_the_preconditioner_above_the_marchs_own_beta(
     case, monkeypatch
 ) -> None:
-    """``beta_floor`` clamps the PRECONDITIONER's shift while the march keeps solving at its own β.
+    """``refit_beta_floor`` clamps the PRECONDITIONER's shift while the march keeps solving at its own β.
 
     As β falls the shift's diagonal dominance vanishes and the frozen V-cycle degrades, but the operator
     needs the small β to make pseudo-transient progress -- so the floor applies to the preconditioner's
-    copy only. Asserts both halves: the refresh receives ``max(β, beta_floor) · d``, and the step's own
+    copy only. Asserts both halves: the refresh receives ``max(β, refit_beta_floor) · d``, and the step's own
     relaxation schedule (what the march actually solves) is untouched.
     """
     import numpy as np
@@ -187,7 +187,9 @@ def test_amg_beta_floor_builds_the_preconditioner_above_the_marchs_own_beta(
     state = coupled.pack_state(flow, k, omega)
 
     beta, floor = 0.01, 0.05  # β well below the floor, so the clamp is active
-    session = open_session(MaterializedJacobian(MonolithicVCycle(), beta_floor=floor), coupled)
+    session = open_session(
+        MaterializedJacobian(MonolithicVCycle(), refit_beta_floor=floor), coupled
+    )
     dual = session.build(state, dual_time=DualTimeLoop(inner_steps=5))
     active, _ = DualTimeControl(beta_start=beta).next_step(dual, None, None)
 

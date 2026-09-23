@@ -216,7 +216,7 @@ def beta_tracking_refresh(
     probe: JacobianProbe,
     *,
     every_step: bool,
-    beta_floor: float = 0.0,
+    refit_beta_floor: float = 0.0,
     observer: Callable[[RefreshTiming], None] | None = None,
 ) -> Callable[[NewtonStrategy, jnp.ndarray], None]:
     """The ``refresh_preconditioner`` hook that re-fits a monolithic inverse as the shift strength moves.
@@ -238,10 +238,11 @@ def beta_tracking_refresh(
     every_step : bool
         Re-factor on every step (``True``), or only on the first call and after each ``rebind``
         (``False``).
-    beta_floor : float
+    refit_beta_floor : float
         A lower bound on the shift strength the **preconditioner** is refreshed at: it is built at
-        ``max(beta, beta_floor)`` while the march keeps solving at its own ``beta``. ``0.0`` (default)
-        tracks ``beta`` exactly.
+        ``max(beta, refit_beta_floor)`` while the march keeps solving at its own ``beta``. ``0.0``
+        (default) tracks ``beta`` exactly. It is not the march's own shift floor
+        (:attr:`~aquaflux.solve.Globalization.beta_floor`), which bounds the shift the solve runs at.
     observer : callable, optional
         ``(timing: RefreshTiming) -> None``, called on each refresh with which branch ran, its total
         seconds, and its per-phase costs. ``None`` (default) elides the call.
@@ -314,9 +315,10 @@ def beta_tracking_refresh(
         # shift's diagonal dominance vanishes and the frozen V-cycle degrades, but the OPERATOR must keep
         # the small beta to make pseudo-transient progress. Flooring only the preconditioner's copy keeps
         # the V-cycle in a regime it inverts well while the solved system is untouched, so the converged
-        # root and its adjoint are unchanged. The resulting mismatch SATURATES at `beta_floor * d` rather
+        # root and its adjoint are unchanged. The resulting mismatch SATURATES at `refit_beta_floor * d`
+        # rather
         # than growing without bound the way a stale (never-refreshed) preconditioner's does.
-        pc_beta = max(beta, beta_floor)
+        pc_beta = max(beta, refit_beta_floor)
         policy = active_step.shift_policy
         pc = policy.preconditioner
         if not (every_step or forced_full["pending"]):
@@ -367,7 +369,7 @@ def beta_tracking_refresh(
             return
         started = time.perf_counter()
         step = bound_step["step"]
-        beta = max(float(step.relaxation_schedule.beta), beta_floor)
+        beta = max(float(step.relaxation_schedule.beta), refit_beta_floor)
         frozen = jax.lax.stop_gradient(jnp.asarray(iterate))
         shift = frozen_shift_diagonal(step.shift_policy.base, beta, frozen)
         _report_refresh(
@@ -636,13 +638,13 @@ class MaterializedSession:
 
     def _refresh_hook(self) -> Callable:
         if self._hook is None:
-            beta_floor = self._spec.beta_floor
+            refit_beta_floor = self._spec.refit_beta_floor
             self._hook = beta_tracking_refresh(
                 self._problem.assembler,
                 self._probe_for(),
                 every_step=isinstance(self._spec.inverse, CompleteLu),
                 observer=self._observer,
-                **({} if beta_floor is None else {"beta_floor": beta_floor}),
+                **({} if refit_beta_floor is None else {"refit_beta_floor": refit_beta_floor}),
             )
         return self._hook
 

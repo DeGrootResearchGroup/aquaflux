@@ -168,7 +168,7 @@ def preconditioner_spec_from_mapping(
           leading: {kind: SimpleSmoothed, sweeps: 2}
           trailing: {kind: JacobiSmoothed, max_coarse: 200}
         probe: {kind: JacobianProbeSpec, column_reach: [3, 3, 3, 3, 2, 2]}
-        beta_floor: 0.05
+        refit_beta_floor: 0.05
 
     As everywhere in a spec, ``null`` and an absent key both mean "not set". Leaving a
     ``BlockDiagonal``'s scalar blocks unpreconditioned is a value of its own,

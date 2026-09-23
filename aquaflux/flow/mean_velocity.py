@@ -64,9 +64,8 @@ from typing import TYPE_CHECKING
 
 import equinox as eqx
 import jax.numpy as jnp
-import lineax as lx
 
-from aquaflux.solve import DampedNewtonStep, RootSolver
+from aquaflux.solve import DEFAULT_ROOT_SOLVE, DampedNewtonStep, RootSolveSettings
 
 if TYPE_CHECKING:
     from .momentum import MomentumContinuity
@@ -176,12 +175,16 @@ class _BulkVelocityResidual(eqx.Module):
         return jnp.append(forced.residual(flow), bulk - self.target)
 
 
+#: ``bulk_velocity_flow_solve``'s own defaults, beneath whatever its caller sets. The augmented system
+#: stays near-linear for a fully-developed channel, so a small step cap suffices.
+_BULK_VELOCITY_FLOW_SOLVE = RootSolveSettings(max_steps=20)
+
+
 def bulk_velocity_flow_solve(
     *,
     target: float,
     flow_direction: int = 0,
-    max_steps: int = 20,
-    solver: lx.AbstractLinearSolver | None = None,
+    root_solve: RootSolveSettings = DEFAULT_ROOT_SOLVE,
     preconditioner: _Preconditioner | None = None,
     reference: MomentumContinuity | None = None,
 ) -> _ConstrainedSolve:
@@ -207,13 +210,12 @@ def bulk_velocity_flow_solve(
         The bulk (volume-averaged) velocity component to hold along ``flow_direction``.
     flow_direction : int
         The streamwise axis the bulk velocity is measured and the body force is applied along.
-    max_steps : int
-        Newton-iteration cap for the constrained solve. The solve stops earlier on the residual
-        tolerance; this only bounds the worst case. The augmented system stays near-linear for a
-        fully-developed channel, so a small cap suffices.
-    solver : lineax.AbstractLinearSolver or None
-        Linear solver for the augmented Newton steps (e.g. a direct solve for a small coupled system);
-        ``None`` uses the Newton strategy's inexact-GMRES default.
+    root_solve : RootSolveSettings
+        How the constrained Newton solve is run -- its step cap, its stopping test and its forward and
+        adjoint linear solvers. Its ``linear_solver`` is the solver for the augmented Newton steps
+        (e.g. a direct solve for a small coupled system); unset, they take the Newton strategy's
+        inexact-GMRES default. Only the fields it sets are applied; left unset, the step cap is this
+        builder's own and everything else is the solver's.
     preconditioner : callable or None
         Factory ``w -> (matvec ~ J^{-1})`` for the **un-augmented flow block** (e.g. a frozen
         :meth:`aquaflux.flow.BlockPreconditioner.factory`, built off-jit from a reference). When given,
@@ -243,16 +245,13 @@ def bulk_velocity_flow_solve(
         augmented_preconditioner = _bordered_preconditioner(preconditioner, force, average)
 
     augmented_residual = _BulkVelocityResidual(flow_direction, target)
+    settings = root_solve.filled_from(_BULK_VELOCITY_FLOW_SOLVE)
 
     def solve(
         momentum: MomentumContinuity, state: jnp.ndarray
     ) -> tuple[MomentumContinuity, jnp.ndarray]:
         augmented0 = jnp.append(state, momentum.body_force[flow_direction])
-        newton = RootSolver(
-            max_steps=max_steps,
-            linear_solver=solver,
-            strategy=DampedNewtonStep(preconditioner=augmented_preconditioner),
-        )
+        newton = settings.solver(DampedNewtonStep(preconditioner=augmented_preconditioner))
         augmented = newton.solve(augmented_residual, augmented0, momentum)
         flow, beta = augmented[:-1], augmented[-1]
         return _with_body_force(momentum, flow_direction, beta), flow

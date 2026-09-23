@@ -44,7 +44,7 @@ from .line_search_growth import LineSearchGrowth, MonotoneLineSearch
 from .linear import corrected_cycles, in_progress_measure, solve_linear
 from .norm import ResidualNorm
 from .relaxation import RelaxationSchedule, SwitchedEvolutionRelaxation
-from .settings_value import SettingsValue, filled_from
+from .settings_value import SettingsValue, _merged, _supplied, filled_from
 from .strategy import StepFn, StepOutcome
 
 # Inexact-Newton forward solver for the pseudo-transient march: a loose *relative* tolerance (each
@@ -558,7 +558,7 @@ class PseudoTransientStep(ShiftedStep):
             # The injected schedule sets the base shift strength for this step's first attempt (SER by
             # default: strong damping while ‖R‖ is large, easing to zero at the root). Escalation below
             # only grows it from here on a rejected attempt.
-            base_relaxation = schedule.relaxation(residual_norm, residual_norm_0)
+            base_relaxation = schedule.shift_strength(residual_norm, residual_norm_0)
             # How far the residual may rise and still count as progress. A pseudo-time march is not a
             # descent method -- the steady residual is non-monotone along a transient path -- so a
             # strict-descent ladder vetoes correct steps far from the root. The schedule relaxes that
@@ -916,7 +916,7 @@ class DualTimeStep(ShiftedStep):
             # steady residual at the anchor and the inner loop's starting G-norm are the same number.
             reference_residual = residual_fn(reference)
             reference_norm = norm(reference_residual)
-            relaxation = schedule.relaxation(reference_norm, residual_norm_0)
+            relaxation = schedule.shift_strength(reference_norm, residual_norm_0)
             # Hand the policy the residual just computed rather than letting it re-derive R(φⁿ): a
             # policy whose shift depends on how far the state is from a root then reads it for free.
             # ⚠️ Omitting it here does NOT fail — `residual` is optional, so such a policy silently
@@ -1108,78 +1108,6 @@ class DualTimeStep(ShiftedStep):
         return step
 
 
-def _supplied(target: type, fields: dict[str, object]) -> dict[str, object]:
-    """The entries of ``fields`` that are set, after checking that ``target`` declares every one.
-
-    ``None`` means *not set here*, and an unset entry is dropped so that ``target`` applies its own
-    default -- including the ones that are not ``None``: ``residual_norm=None`` gives the Euclidean
-    norm and ``inner_steps=None`` gives :class:`DualTimeStep`'s own count. Each default is therefore
-    declared once, on the class that uses it, and no caller restates one.
-
-    The names are checked **before** anything is dropped. Filtering first makes a misplaced setting
-    vanish exactly when its value is ``None`` -- a field only :class:`PseudoTransientStep` declares,
-    handed to :class:`DualTimeStep` as ``None``, would disappear without a word -- and a setting that
-    reaches no field is the failure :class:`Globalization` exists to remove.
-
-    Parameters
-    ----------
-    target : type
-        The dataclass the entries are constructor arguments for.
-    fields : dict
-        Field name -> value, with ``None`` meaning *not set here*.
-
-    Returns
-    -------
-    dict
-        The entries whose value is not ``None``.
-
-    Raises
-    ------
-    TypeError
-        If ``fields`` names something ``target`` does not declare.
-    """
-    unknown = sorted(set(fields) - {field.name for field in dataclasses.fields(target)})
-    if unknown:
-        raise TypeError(f"{target.__name__} declares no field named {', '.join(unknown)}")
-    return {name: value for name, value in fields.items() if value is not None}
-
-
-def _merged(
-    target: type, settings: dict[str, object], fields: dict[str, object]
-) -> dict[str, object]:
-    """A globalization's own settings and a caller's step fields, as one set of arguments for ``target``.
-
-    A name in both is refused. A dict merge would let one of them win silently, and which one won would
-    be decided by the order the merge was written in rather than by anything the caller meant.
-
-    Parameters
-    ----------
-    target : type
-        The step class being constructed.
-    settings : dict
-        What the :class:`Globalization` sets, already translated into ``target``'s fields.
-    fields : dict
-        The caller's remaining step fields, with ``None`` meaning *not set here*.
-
-    Returns
-    -------
-    dict
-        The union, with unset entries dropped.
-
-    Raises
-    ------
-    TypeError
-        If a field is one ``target`` does not declare, or is set both ways.
-    """
-    given = _supplied(target, fields)
-    clash = sorted(settings.keys() & given.keys())
-    if clash:
-        raise TypeError(
-            f"{', '.join(clash)} set both on the Globalization and as a step field; set it in one place"
-        )
-    return {**given, **settings}
-
-
 #: The settings a dual-time step has no field for. Its inner Newton loop replaces the escalation ladder
 #: and runs a plain descent line search, so the ladder's two counts, its acceptance guard, and the line
 #: search's growth rungs and growth rule belong to the single-step shape alone.
@@ -1236,10 +1164,10 @@ class Globalization(eqx.Module):
         A lower bound on ``β``, holding the shifted solve out of the ill-conditioned low-``β`` regime.
         It never moves the converged root -- the shift vanishes there either way -- only the path.
 
-        ⚠️ **Not the preconditioner's floor of the same name.** A ``MaterializedJacobian``'s
-        ``beta_floor`` bounds the ``β`` the *inverse is re-fitted at* while the march keeps solving at its
-        own; this one bounds the march's ``β`` itself. Nor is it the march step control's ``beta_min``.
-        Three different floors, and reaching for the wrong one changes nothing observable.
+        ⚠️ **One of three floors.** A ``MaterializedJacobian``'s ``refit_beta_floor`` bounds the ``β``
+        the *inverse is re-fitted at* while the march keeps solving at its own, and the march step
+        control's ``beta_min`` bounds the ``β`` the control will ramp down to; this one bounds the ``β``
+        the schedule produces. Reaching for the wrong one changes nothing observable.
     max_escalations : int or None
         Maximum damping escalations per step. A step whose shifted solve fails the acceptance test is
         re-damped (``β *= escalation_factor``) and retried, up to this many times; a well-behaved step

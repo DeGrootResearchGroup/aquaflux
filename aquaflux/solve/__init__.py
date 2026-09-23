@@ -120,7 +120,9 @@ from .strategy import (
 )
 from .root_adjoint import TransposedPreconditioner, root_adjoint, stop_array_gradients
 from .implicit import (
+    DEFAULT_ROOT_SOLVE,
     DampedNewtonStep,
+    RootSolveSettings,
     RootSolver,
     PositiveBlockLimit,
     PositiveBlockProjection,
@@ -243,6 +245,7 @@ from .step_control import (
 __all__ = [
     "BUILD_BETA",
     "DEFAULT_GLOBALIZATION",
+    "DEFAULT_ROOT_SOLVE",
     "ESCALATING_REASONS",
     "FACTORIZATION_LINEAR_SOLVE",
     "MATERIALIZED_MAPPING",
@@ -326,6 +329,7 @@ __all__ = [
     "ResidualNorm",
     "ResidualRatioDualTimeControl",
     "RetryPolicy",
+    "RootSolveSettings",
     "RootSolver",
     "RowScaled",
     "RowScaledNorm",

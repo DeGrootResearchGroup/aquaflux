@@ -27,13 +27,12 @@ from collections.abc import Callable
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import lineax as lx
 
 from aquaflux.solve import (
     DEFAULT_GLOBALIZATION,
-    Convergence,
+    DEFAULT_ROOT_SOLVE,
     Globalization,
-    RootSolver,
+    RootSolveSettings,
     ShiftTerm,
 )
 
@@ -112,13 +111,16 @@ class ScalarShiftPolicy(eqx.Module):
         return ShiftTerm(jax.lax.stop_gradient(self.shift_diagonal), make_preconditioner)
 
 
+#: ``scalar_pseudo_transient_solve``'s own defaults, beneath whatever its caller sets. The stiff
+#: reactive scalars take more steps than a flow block of the same size, and the tolerances are the
+#: solver's own.
+_SCALAR_PSEUDO_TRANSIENT_SOLVE = RootSolveSettings(max_steps=40)
+
+
 def scalar_pseudo_transient_solve(
     *,
     globalization: Globalization = DEFAULT_GLOBALIZATION,
-    max_steps: int = 40,
-    rtol: float = 1e-10,
-    atol: float = 1e-12,
-    solver: lx.AbstractLinearSolver | None = None,
+    root_solve: RootSolveSettings = DEFAULT_ROOT_SOLVE,
 ) -> Callable[[_ScalarResidual, jnp.ndarray, ScalarShiftPolicy | None], jnp.ndarray]:
     """Build a ``solve_scalar(residual, state, policy)`` that globalizes the solve by continuation.
 
@@ -147,13 +149,13 @@ def scalar_pseudo_transient_solve(
         too-small value. Only the fields it sets are applied; left unset, the march takes the full
         shifted step and leaves escalation as the only recourse to an overshoot, and a stiffer scalar
         can be given a ``line_search`` or a ``beta_floor`` here without constructing the step by hand.
-    max_steps : int
-        Maximum Newton/continuation iterations per scalar solve.
-    rtol, atol : float
-        Nonlinear stopping tolerances on the residual norm.
-    solver : lineax.AbstractLinearSolver or None
-        Forward-loop linear solver; ``None`` uses the pseudo-transient march's own inexact-Newton
-        default (a loose relative tolerance with a tight absolute floor).
+    root_solve : RootSolveSettings
+        How each scalar Newton solve is run -- its step cap, its stopping test and its forward linear
+        solver. Only the fields it sets are applied; left unset, the step cap is this builder's own,
+        the tolerances are the solver's, and the forward linear solve is the pseudo-transient march's
+        own inexact-Newton default (a loose relative tolerance with a tight absolute floor). Its
+        ``adjoint_solver`` is inert here: this is a forward solve (see above), so no transpose solve is
+        ever taken.
 
     Returns
     -------
@@ -163,6 +165,8 @@ def scalar_pseudo_transient_solve(
         differentiating through it raises rather than silently dropping the coupling gradient (see
         above).
     """
+
+    settings = root_solve.filled_from(_SCALAR_PSEUDO_TRANSIENT_SOLVE)
 
     def solve_scalar(
         residual: _ScalarResidual,
@@ -175,12 +179,7 @@ def scalar_pseudo_transient_solve(
             ScalarShiftPolicy(jnp.zeros_like(state)) if policy is None else policy,
             adjoint_preconditioner_factory=None if policy is None else policy.preconditioner,
         )
-        newton = RootSolver(
-            convergence=Convergence(rtol=rtol, atol=atol),
-            max_steps=max_steps,
-            linear_solver=solver,
-            strategy=forward,
-        )
+        newton = settings.solver(forward)
         return newton.solve(_ParameterFreeResidual(residual), state, None)
 
     return solve_scalar

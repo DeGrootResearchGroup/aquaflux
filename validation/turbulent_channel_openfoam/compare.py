@@ -50,6 +50,7 @@ from aquaflux.flow import MomentumContinuity, NoSlipWall, bulk_velocity_flow_sol
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
+from aquaflux.solve import Convergence, RootSolveSettings
 from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
@@ -163,7 +164,9 @@ def solve_aquaflux(nu_of, ny, growth):
     # The body force is a solve unknown enforcing <U_x> = 1 (a bordered Newton with beta as a scalar
     # Lagrange multiplier), so the bulk velocity is held exactly at every sweep -- no feedback
     # controller that could overshoot while the eddy viscosity is still developing.
-    solve_flow = bulk_velocity_flow_solve(target=1.0, flow_direction=0, solver=direct)
+    solve_flow = bulk_velocity_flow_solve(
+        target=1.0, flow_direction=0, root_solve=RootSolveSettings(linear_solver=direct)
+    )
 
     # Seed from the hybrid IC. A uniform k leaves the first sweep's residual essentially unchanged
     # for ~30 pseudo-transient steps, so the SER schedule's beta never relaxes and the scalar march
@@ -177,7 +180,11 @@ def solve_aquaflux(nu_of, ny, growth):
         # The default (max_steps=40, rtol=1e-10) exhausts its step budget on the stiff cold-start
         # k/omega sweeps here and raises rather than returning an unconverged field; this budget and
         # tolerance carry both Reynolds numbers.
-        scalar_pseudo_transient_solve(max_steps=200, rtol=1e-8, atol=1e-10),
+        scalar_pseudo_transient_solve(
+            root_solve=RootSolveSettings(
+                max_steps=200, convergence=Convergence(rtol=1e-8, atol=1e-10)
+            )
+        ),
         flow0,
         k0,
         omega0,

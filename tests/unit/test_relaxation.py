@@ -20,23 +20,23 @@ def test_ser_matches_the_switched_evolution_formula() -> None:
     ser = SwitchedEvolutionRelaxation()  # defaults beta0=2, exponent=1, beta_floor=0
     assert (ser.beta0, ser.exponent, ser.beta_floor) == (2.0, 1.0, 0.0)
     # β at ||R|| = ||R0|| is beta0; the ramp is linear in the residual ratio at exponent 1.
-    assert jnp.allclose(ser.relaxation(jnp.asarray(6.0), jnp.asarray(6.0)), 2.0)
-    assert jnp.allclose(ser.relaxation(jnp.asarray(3.0), jnp.asarray(6.0)), 1.0)
+    assert jnp.allclose(ser.shift_strength(jnp.asarray(6.0), jnp.asarray(6.0)), 2.0)
+    assert jnp.allclose(ser.shift_strength(jnp.asarray(3.0), jnp.asarray(6.0)), 1.0)
 
 
 def test_ser_exponent_and_floor_are_honoured() -> None:
     quadratic = SwitchedEvolutionRelaxation(beta0=2.0, exponent=2.0)
-    assert jnp.allclose(quadratic.relaxation(jnp.asarray(3.0), jnp.asarray(6.0)), 2.0 * 0.25)
+    assert jnp.allclose(quadratic.shift_strength(jnp.asarray(3.0), jnp.asarray(6.0)), 2.0 * 0.25)
     # The floor bounds β below, so a small residual ratio cannot ramp β to zero.
     floored = SwitchedEvolutionRelaxation(beta0=2.0, exponent=1.0, beta_floor=0.3)
-    assert jnp.allclose(floored.relaxation(jnp.asarray(1e-6), jnp.asarray(1.0)), 0.3)
+    assert jnp.allclose(floored.shift_strength(jnp.asarray(1e-6), jnp.asarray(1.0)), 0.3)
 
 
 def test_constant_relaxation_ignores_the_norms() -> None:
     """ConstantRelaxation holds β at whatever it was set to, regardless of the residual."""
     const = ConstantRelaxation(jnp.asarray(7.0))
-    assert jnp.allclose(const.relaxation(jnp.asarray(1.0), jnp.asarray(9.0)), 7.0)
-    assert jnp.allclose(const.relaxation(jnp.asarray(1e3), jnp.asarray(1e-3)), 7.0)
+    assert jnp.allclose(const.shift_strength(jnp.asarray(1.0), jnp.asarray(9.0)), 7.0)
+    assert jnp.allclose(const.shift_strength(jnp.asarray(1e3), jnp.asarray(1e-3)), 7.0)
 
 
 def test_constant_relaxation_beta_is_a_dynamic_leaf() -> None:
@@ -50,7 +50,7 @@ def test_constant_relaxation_beta_is_a_dynamic_leaf() -> None:
     @eqx.filter_jit
     def beta_of(schedule):
         traces.append(1)
-        return schedule.relaxation(jnp.asarray(1.0), jnp.asarray(1.0))
+        return schedule.shift_strength(jnp.asarray(1.0), jnp.asarray(1.0))
 
     first = beta_of(ConstantRelaxation(jnp.asarray(2.0)))
     second = beta_of(ConstantRelaxation(jnp.asarray(5.0)))  # different β value, same structure
@@ -61,5 +61,5 @@ def test_constant_relaxation_beta_is_a_dynamic_leaf() -> None:
 def test_a_schedule_stays_on_the_differentiable_path() -> None:
     """A schedule is a pure function of two scalars, so it differentiates cleanly (unlike a control)."""
     ser = SwitchedEvolutionRelaxation(beta0=2.0, exponent=1.0)
-    grad = jax.grad(lambda rn: ser.relaxation(rn, jnp.asarray(4.0)))(jnp.asarray(2.0))
+    grad = jax.grad(lambda rn: ser.shift_strength(rn, jnp.asarray(4.0)))(jnp.asarray(2.0))
     assert jnp.allclose(grad, 2.0 / 4.0)  # d/d(rn) [beta0 * rn/rn0] = beta0/rn0

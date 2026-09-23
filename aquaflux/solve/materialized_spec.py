@@ -157,9 +157,12 @@ class MaterializedJacobian:
     build_beta : float or None
         The shift strength the first build is fitted at. It matters beyond the first step when the
         inverse freezes its coarse space at that build, since every later refit reuses it.
-    beta_floor : float or None
+    refit_beta_floor : float or None
         A lower bound on the shift the inverse is refitted at, while the march keeps solving at its own
-        shift.
+        shift. Not the march's own ``beta_floor`` (a field of
+        :class:`~aquaflux.solve.Globalization`), which bounds the shift the *solve* runs at: this one
+        bounds only the shift the *inverse is fitted to*, so it changes how well the preconditioner
+        tracks the operator and never what is being solved.
 
     Raises
     ------
@@ -170,7 +173,7 @@ class MaterializedJacobian:
     inverse: CompleteLu | MonolithicVCycle | FieldSplit | BlockInverse
     probe: JacobianProbeSpec = JacobianProbeSpec()
     build_beta: float | None = None
-    beta_floor: float | None = None
+    refit_beta_floor: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.inverse, CompleteLu | MonolithicVCycle | FieldSplit | BlockInverse):
@@ -211,7 +214,7 @@ def materialized_spec_from_mapping(mapping: Mapping[str, object]) -> Materialize
         kind: MaterializedJacobian
         inverse: {kind: CompleteLu, backend: scipy}
         probe: {kind: JacobianProbeSpec, stencil_reach: 2}
-        beta_floor: 0.05
+        refit_beta_floor: 0.05
 
     Parameters
     ----------

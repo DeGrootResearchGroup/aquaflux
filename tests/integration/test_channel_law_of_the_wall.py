@@ -27,6 +27,7 @@ from aquaflux.flow import MomentumContinuity, NoSlipWall, bulk_velocity_flow_sol
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
+from aquaflux.solve import RootSolveSettings
 from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
@@ -82,8 +83,10 @@ def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=100):
     solve_flow = bulk_velocity_flow_solve(
         target=U_B,
         flow_direction=0,
-        max_steps=FLOW_MAX_STEPS,
-        solver=lx.AutoLinearSolver(well_posed=True),
+        root_solve=RootSolveSettings(
+            max_steps=FLOW_MAX_STEPS,
+            linear_solver=lx.AutoLinearSolver(well_posed=True),
+        ),
     )
 
     # A uniform k leaves the first sweep's residual essentially unchanged for ~30 pseudo-transient
@@ -94,7 +97,7 @@ def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=100):
         momentum,
         turbulence,
         solve_flow,
-        scalar_pseudo_transient_solve(max_steps=SCALAR_MAX_STEPS),
+        scalar_pseudo_transient_solve(root_solve=RootSolveSettings(max_steps=SCALAR_MAX_STEPS)),
         flow0,
         k0,
         omega0,

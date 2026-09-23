@@ -109,7 +109,7 @@ paths:
     trivial against the materialize). The `bfs3d` combo-sweep. *(A `cycle_type` V/W knob was tried and
     **dropped**: the W-cycle came back byte-identical to V — GAMG did not honour `pc_mg_cycle_type` here —
     and `coarse_eq_limit` dominates regardless.)*
-  - **Zero-fill is the low-β smoother: ILU(0), 4 sweeps, `coarse_eq_limit=2000`, PC-only `beta_floor`
+  - **Zero-fill is the low-β smoother: ILU(0), 4 sweeps, `coarse_eq_limit=2000`, PC-only `refit_beta_floor`
     (the validated bundle).** The shifted operator is `J + β d`; as the march's shift falls the diagonal
     weakens and the factorization, not the coarse space, is what fails first. Measured on the `bfs3d`
     coupled Jacobian at **adjoint-grade rtol 1e-8 on the TRUE residual**:
@@ -153,12 +153,13 @@ paths:
       did for ILU(1): 390 → 69 its at β=0.01. (This is why the `sweeps=2` sweet spot recorded above does
       not carry over: it was tuned against ILU(1).)
     - `coarse_eq_limit=2000` — `None` **stalls at every low β** (552 its, true rel. 1.3–67). Not optional.
-    - **PC-only `beta_floor=0.05`** — the V-cycle is built at `max(β, 0.05)` while the march still solves
-      at its own β: 43/69/95 → 29/45/47 its at β = 0.02/0.01/0.005. The *operator* is untouched, so the
-      converged root and the adjoint are unchanged and the mismatch saturates at `beta_floor·d` rather than
+    - **PC-only `refit_beta_floor=0.05`** — the V-cycle is built at `max(β, 0.05)` while the march still
+      solves at its own β: 43/69/95 → 29/45/47 its at β = 0.02/0.01/0.005. The *operator* is untouched, so
+      the converged root and the adjoint are unchanged and the mismatch saturates at `refit_beta_floor·d`
+      rather than
       growing as β → 0. Flooring the k/ω rows *alone* hurt; flooring all rows was best.
 
-    **`alpha_u` and a velocity-row `beta_floor` are the same knob.** A velocity under-relaxation `α_u=0.95`
+    **`alpha_u` and a velocity-row `refit_beta_floor` are the same knob.** A velocity under-relaxation `α_u=0.95`
     adds `(1−α_u)/α_u = 0.0526` of the diagonal — a β-equivalent of ~0.05 applied to the velocity rows only.
     Worth knowing before adding a second spelling of it: prefer the floor, which is explicit about being
     preconditioner-only.
@@ -684,7 +685,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     fresher Jacobian cut a march's Krylov cycles ~23 % despite more refresh work, so the lever is a
     *cheaper* materialize (batched probe, gather de-compression), not a rarer one.
     - **Trap the deleted gates taught, kept because it applies to any future refresh condition:** a
-      preconditioner-only `beta_floor` pins a β gate's input below the floor, so a condition nested
+      preconditioner-only `refit_beta_floor` pins a β gate's input below the floor, so a condition nested
       inside a β gate is unreachable in exactly the low-shift tail. Measured on the 3-rung `bfs3d` cold
       march: 91 % of sub-floor steps refreshed nothing while ν_t drifted ~20 % per step, those steps
       carried 47 % of the Krylov cycles, and un-nesting the gates cut the march 480 → 348 cycles.

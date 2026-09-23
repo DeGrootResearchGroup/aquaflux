@@ -56,7 +56,7 @@ _SPECS = [
     MaterializedJacobian(CompleteLu(backend="scipy"), build_beta=0.5),
     MaterializedJacobian(
         MonolithicVCycle(smoother_fill_levels=0, smoother_sweeps=4, coarse_eq_limit=2000),
-        beta_floor=0.05,
+        refit_beta_floor=0.05,
     ),
     MaterializedJacobian(
         FieldSplit(
@@ -64,7 +64,7 @@ _SPECS = [
             JacobiSmoothed(max_coarse=200, prolongation_smoothing="jacobi"),
         ),
         probe=JacobianProbeSpec(column_reach=(3, 3, 3, 3, 2, 2), gradient_sweeps=2),
-        beta_floor=0.05,
+        refit_beta_floor=0.05,
     ),
     MaterializedJacobian(
         FieldSplit(SimpleSmoothed(), AirReduction(theta=0.5, degree=1)),
@@ -163,7 +163,7 @@ def test_the_file_form_of_a_field_split_spec() -> None:
     spec = MaterializedJacobian(
         FieldSplit(SimpleSmoothed(sweeps=2), JacobiSmoothed(max_coarse=200)),
         probe=JacobianProbeSpec(column_reach=(3, 3, 3, 3, 2, 2)),
-        beta_floor=0.05,
+        refit_beta_floor=0.05,
     )
     assert preconditioner_spec_to_mapping(spec) == {
         "kind": "MaterializedJacobian",
@@ -173,7 +173,7 @@ def test_the_file_form_of_a_field_split_spec() -> None:
             "trailing": {"kind": "JacobiSmoothed", "max_coarse": 200},
         },
         "probe": {"kind": "JacobianProbeSpec", "column_reach": [3, 3, 3, 3, 2, 2]},
-        "beta_floor": 0.05,
+        "refit_beta_floor": 0.05,
     }
 
 
@@ -282,7 +282,7 @@ def test_the_solve_registry_round_trips_a_materialized_spec_without_the_turbulen
     )
 
     spec = MaterializedJacobian(
-        FieldSplit(SimpleSmoothed(sweeps=2), JacobiSmoothed()), beta_floor=0.05
+        FieldSplit(SimpleSmoothed(sweeps=2), JacobiSmoothed()), refit_beta_floor=0.05
     )
     mapping = materialized_spec_to_mapping(spec)
     assert mapping["kind"] == "MaterializedJacobian"

@@ -160,7 +160,7 @@ def arm_preconditioner(reach: int, gradient_sweeps: int | None = None) -> Materi
         probe=JacobianProbeSpec(
             stencil_reach=reach, column_reach=COLUMN_REACH, gradient_sweeps=gradient_sweeps
         ),
-        beta_floor=compare.PC_BETA_FLOOR,
+        refit_beta_floor=compare.PC_BETA_FLOOR,
     )
 
 

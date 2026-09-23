@@ -105,9 +105,9 @@ paths:
       written expecting `factor ** changes` measured `(factor * grow) ** changes`; the implementation
       was right and the expectation wrong.
     - **⚠️ TWO DIFFERENT FLOORS, and conflating them mis-states the mechanism.** `beta_min`
-      (on the step control) floors the shift the **operator** is solved with; `beta_floor` (on the
+      (on the step control) floors the shift the **operator** is solved with; `refit_beta_floor` (on the
       preconditioner refresh, `PC_BETA_FLOOR = 0.05` on this case) floors only the preconditioner's
-      **copy** — `pc_beta = max(beta, beta_floor)` — so the V-cycle stays in a regime it inverts well
+      **copy** — `pc_beta = max(beta, refit_beta_floor)` — so the V-cycle stays in a regime it inverts well
       while the solved system keeps the small shift it needs for pseudo-transient progress. During the
       collapse the preconditioner was built at **0.05 throughout and never saw 0.012**, so this is not
       "a shift the preconditioner cannot invert": it is the **operator/preconditioner mismatch** that

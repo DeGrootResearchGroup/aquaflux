@@ -31,9 +31,17 @@ class RelaxationSchedule(Protocol):
     in-scope scalars, so it traces inside the Newton loop and nothing it computes has to leave the loop.
     A stateful or feedback-driven damping rule is not a ``RelaxationSchedule``; it is a
     :class:`~aquaflux.solve.StepControl` on the eager march.
+
+    The method is ``shift_strength`` rather than ``relaxation`` because the two run in opposite
+    directions: an under-relaxation factor lies in ``(0, 1]`` and damps *less* as it grows, while the
+    shift strength beta damps *more* as it grows. Both words appear in this package -- the segregated
+    loop under-relaxes ``k`` and ``omega`` by a factor, and a shifted march damps by a strength -- so
+    the one that returns beta says so.
     """
 
-    def relaxation(self, residual_norm: jnp.ndarray, residual_norm_0: jnp.ndarray) -> jnp.ndarray:
+    def shift_strength(
+        self, residual_norm: jnp.ndarray, residual_norm_0: jnp.ndarray
+    ) -> jnp.ndarray:
         """The shift strength beta for a step whose residual norm is ``residual_norm``.
 
         Parameters
@@ -87,7 +95,9 @@ class SwitchedEvolutionRelaxation(eqx.Module):
     exponent: float = eqx.field(static=True, default=1.0)
     beta_floor: float = eqx.field(static=True, default=0.0)
 
-    def relaxation(self, residual_norm: jnp.ndarray, residual_norm_0: jnp.ndarray) -> jnp.ndarray:
+    def shift_strength(
+        self, residual_norm: jnp.ndarray, residual_norm_0: jnp.ndarray
+    ) -> jnp.ndarray:
         return jnp.maximum(
             self.beta_floor, self.beta0 * (residual_norm / residual_norm_0) ** self.exponent
         )
@@ -109,7 +119,9 @@ class ConstantRelaxation(eqx.Module):
 
     beta: jnp.ndarray
 
-    def relaxation(self, residual_norm: jnp.ndarray, residual_norm_0: jnp.ndarray) -> jnp.ndarray:
+    def shift_strength(
+        self, residual_norm: jnp.ndarray, residual_norm_0: jnp.ndarray
+    ) -> jnp.ndarray:
         # The norms are ignored: this schedule holds beta at whatever the controller last set.
         del residual_norm, residual_norm_0
         return self.beta
