@@ -872,9 +872,10 @@ constraint on that system.
 | {class}`~aquaflux.schemes.CompactGreenGauss` | near-orthogonal | linear, on orthogonal grids | one pass, no system |
 | {class}`~aquaflux.schemes.CorrectedGreenGauss` | any | linear, on any mesh | a few sparse sweeps |
 | {class}`~aquaflux.schemes.HessianCorrectedGradient` | skewed, where the gradient leads | linear and quadratic | an inner and an outer solve |
-| {class}`~aquaflux.schemes.MultipleCorrectionGradient` | skewed, including tetrahedra | linear and quadratic | **no system: two face passes** |
+| {class}`~aquaflux.schemes.MultipleCorrectionGradient` | skewed hexahedra and polyhedra | linear and quadratic | **no system: two face passes** |
+| {class}`~aquaflux.schemes.ProjectedStencilGradient` | any, and the one to use on tetrahedra where the reconstruction feeds a pressure coupling | linear and quadratic | no system: stored weights |
 
-**The last row is the default.** {data}`~aquaflux.schemes.DEFAULT_GRADIENT_SCHEME` is a
+**The multiple-correction scheme is the default.** {data}`~aquaflux.schemes.DEFAULT_GRADIENT_SCHEME` is a
 {class}`~aquaflux.schemes.MultipleCorrectionGradient`, and a build that names no scheme
 — {meth}`~aquaflux.flow.MomentumContinuity.build`,
 {meth}`~aquaflux.turbulence.SSTTurbulence.build` — takes it. On a skewed benchmark it reaches the
@@ -884,11 +885,24 @@ at a fixed three rings regardless of the mesh — which is where most of that ti
 preconditioner that probes the residual over a bounded stencil then needs no more reach on a skewed
 mesh than on a Cartesian one. It also has no sweep count to calibrate per mesh.
 
-The two reasons to name a different one are the practical points below: it does not yet run under
+The reasons to name a different one are the practical points below: it does not yet run under
 domain decomposition, and on a mesh with **corner tetrahedra** (a cell owning two or more boundary
 faces) its default boundary closure leaves the Hessian underdetermined there. Neither is silent —
 the first raises, and {meth}`~aquaflux.schemes.GradientScheme.bind` measures the second and warns,
 naming the cells.
+
+```{warning}
+**On a wholly tetrahedral mesh, do not use it for a field whose gradient feeds the pressure
+coupling.** Its weights there run some three orders of magnitude larger than a reconstruction that
+damps — exactly the situation [Weights chosen, not inherited](#weights-chosen-not-inherited) below
+describes — and the Rhie–Chow damping coefficient changes sign on part of the mesh, after which a
+coupled momentum–continuity march finds no admissible step from any starting field. The corner-cell
+repair does not address this: it is a property of the weights the scheme's second pass lands on, not
+of the boundary closure, and it is not reported by the conditioning warning. On a tetrahedral mesh
+use {class}`~aquaflux.schemes.ProjectedStencilGradient`, which is exact for quadratics on the same
+stencil and chooses weights of the same size as the damping reference. Hexahedral and polyhedral
+meshes, skewed or not, are unaffected — that is the regime this scheme is recommended for.
+```
 
 Two practical points beyond accuracy.
 
@@ -907,6 +921,74 @@ global inner product, so a partitioned solve can refresh ghost values once per s
 owned gradients identical to a serial run. The Krylov solve, the Hessian-corrected scheme and the
 multiple-correction scheme raise rather than return a quietly wrong answer — so a partitioned run
 is one of the few that has to name a scheme instead of taking the default.
+
+## Weights chosen, not inherited
+
+Every scheme above computes a gradient by an algorithm — a sum over faces, a correction, a solve —
+and the per-cell weights on the surrounding values come out of that algorithm as a by-product. Two
+properties of those weights matter separately, and an algorithm that fixes the first says nothing
+about the second:
+
+* **what they reproduce**, which is exactness for linear or quadratic fields, and
+* **how large they are**, which decides whether a cancelling difference built on the gradient keeps
+  its sign.
+
+The pressure coupling in a collocated momentum--continuity solve is such a difference: the compact
+two-point pressure difference across a face, minus what the reconstructed gradient contributes. The
+two nearly cancel by design, so a reconstruction with large opposing weights can overshoot the
+difference it corrects, and the coefficient that should damp pressure oscillations amplifies them
+instead. This is not a question of accuracy — a scheme can be exact for quadratics and do it.
+
+Exactness does not pin the weights down. On a tetrahedron's two-hop stencil a quadratic fixes ten
+numbers per gradient component out of the roughly thirteen available, so every scheme on that stencil
+is choosing the remainder, most of them implicitly.
+
+{class}`~aquaflux.schemes.ProjectedStencilGradient` chooses explicitly. Of all the weights on the
+stencil that are exact for quadratics, it takes the ones nearest to a reference reconstruction known
+to damp — a Green–Gauss face pass under the gradient equation's own per-cell block — and
+{attr}`~aquaflux.schemes.ProjectedStencilGradient.blend` says how much of that reference to aim at:
+
+```python
+from aquaflux.schemes import ProjectedStencilGradient
+
+scheme = ProjectedStencilGradient(blend=0.75).bind(mesh, geometry, boundary_linearization)
+gradient = scheme.gradients(phi, mesh, geometry, boundary_values)
+```
+
+At `blend=0` the weights are the smallest exact ones — an unweighted quadratic least-squares fit on
+the stencil. At `blend=1` they are as close to the reference as exactness allows. Both ends are
+second-order; what moves between them is accuracy on fields that are not quadratic, against the size
+of the weights.
+
+**The reference is a target, not an ingredient.** It is not exact for anything and never contributes
+to a reconstructed gradient. The weights that are exact for quadratics form an affine set, so the
+projection lands in that set whatever it aims at, and the target only decides *which* member —
+which is why a reference of modest accuracy gives a second-order reconstruction, and why a cheap
+target serves as well as an expensive one. What it does decide is the weights' magnitude, and through
+that the sign of the pressure damping.
+
+The weights are built once per field by {meth}`~aquaflux.schemes.GradientScheme.bind`, which needs
+the field's conditions: a boundary face whose value is prescribed constrains the stencil with a
+monomial's *value* there, and one whose value extrapolates from its owner constrains it with the
+monomial's *normal derivative*. A condition that mixes the two — Robin, or a convective outlet — is
+refused rather than reconstructed from the wrong datum. At run time a reconstruction is one gather
+and one contraction per cell: no solve, no iteration, and the same two-hop stencil the
+multiple-correction scheme already couples, so a residual's Jacobian gains no reach.
+
+```{note}
+The turbulence closure binds it for `k` and `omega` separately, at build time, through
+{attr}`~aquaflux.turbulence.SSTTurbulence.k_gradient_scheme` and
+{attr}`~aquaflux.turbulence.SSTTurbulence.omega_gradient_scheme` — the two fields' conditions differ
+(a wall prescribes `k` and lets `omega` extrapolate), so their weights do. A scheme passed to those
+equations any other way would be bound against a traced mesh, which a stencil built from the
+connectivity cannot be, and it raises rather than reconstructing.
+```
+
+```{note}
+This scheme does not run under domain decomposition (its stencil reaches two hops, past a one-deep
+halo), and its weights are constants after binding — so bind it inside the region that differentiates
+with respect to the *field*, and outside any differentiation with respect to the mesh geometry.
+```
 
 ## A reference
 

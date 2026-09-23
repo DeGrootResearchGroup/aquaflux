@@ -74,16 +74,24 @@ from aquaflux.discretization import FirstOrderUpwind, LimitedUpwind
 from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, VelocityInlet
 from aquaflux.io import read_openfoam
 from aquaflux.properties import Constant, PropertyModel
-from aquaflux.schemes import CorrectedGreenGauss, VenkatakrishnanLimiter
+from aquaflux.schemes import (
+    CorrectedGreenGauss,
+    ProjectedStencilGradient,
+    VenkatakrishnanLimiter,
+)
 from aquaflux.solve import (
-    LinearSolveSettings,
     AirReduction,
     CflResidualDualTimeControl,
     Convergence,
     DualTimeLoop,
+    FieldSplit,
     InnerIterateCheckpointer,
+    JacobianProbeSpec,
     JacobiSmoothed,
+    LinearSolveSettings,
     MarchLogger,
+    MaterializedJacobian,
+    MonolithicVCycle,
     RetryPolicy,
     SimpleSmoothed,
     StateCheckpointer,
@@ -91,8 +99,21 @@ from aquaflux.solve import (
     combine_observers,
     relative_residual_gmres,
 )
-from aquaflux.turbulence import CoupledRANS, GeometricReynoldsSchedule, LogScalars, CoupledShiftSettings, SSTModel, SSTTurbulence, coupled_fields, coupled_residuals, open_session, scale_both_blocks, scale_momentum_only, solve_reynolds_continuation, solve_reynolds_ramp
-from aquaflux.solve import FieldSplit, JacobianProbeSpec, MaterializedJacobian, MonolithicVCycle
+from aquaflux.turbulence import (
+    CoupledRANS,
+    CoupledShiftSettings,
+    GeometricReynoldsSchedule,
+    LogScalars,
+    SSTModel,
+    SSTTurbulence,
+    coupled_fields,
+    coupled_residuals,
+    open_session,
+    scale_both_blocks,
+    scale_momentum_only,
+    solve_reynolds_continuation,
+    solve_reynolds_ramp,
+)
 
 HERE = Path(__file__).resolve().parent
 RUNS = HERE / "runs" / "kwsst"  # steady run: the mesh + 3D cell centres (geometry)
@@ -626,6 +647,14 @@ def _flush_print(message: str) -> None:
 #: dependence and no sequential triangular solve, so it is also the arm with a route to a GPU. A
 #: full-march A/B against a matched `hostilu` run reached the identical root (`x_r/h` 8.3611) at a real
 #: wall-clock cost (349 cumulative cycles / 1782 s against 208 / 1403 s).
+#: The gradient reconstruction, ``BFS3D_GRADIENT``: ``corrected`` (default,
+#: :class:`~aquaflux.schemes.CorrectedGreenGauss`) or ``projected``
+#: (:class:`~aquaflux.schemes.ProjectedStencilGradient`, whose per-cell weights are exact for
+#: quadratics and nearest ``BFS3D_GRADIENT_BLEND`` x a reconstruction that damps). This mesh is
+#: orthogonal, where every scheme here agrees closely, so the arm tests that nothing regresses rather
+#: than expecting a gain.
+GRADIENT = os.environ.get("BFS3D_GRADIENT", "corrected")
+GRADIENT_BLEND = float(os.environ.get("BFS3D_GRADIENT_BLEND", "0.75"))
 FLOW_INVERSE = os.environ.get("BFS3D_FLOW_INVERSE", "simplesmooth")
 if FLOW_INVERSE != "simplesmooth":
     raise SystemExit(
@@ -1120,6 +1149,15 @@ def read_openfoam_reference():
     )
 
 
+def _gradient_scheme():
+    """The reconstruction ``BFS3D_GRADIENT`` names."""
+    if GRADIENT == "corrected":
+        return CorrectedGreenGauss()
+    if GRADIENT == "projected":
+        return ProjectedStencilGradient(blend=GRADIENT_BLEND)
+    raise SystemExit(f"BFS3D_GRADIENT={GRADIENT!r} is not one of ['corrected', 'projected']")
+
+
 def build_case(model=None, momentum_advection=None, gradient=None):
     """Assemble the benchmark: mesh, momentum, turbulence and the coupled residual -- no solve.
 
@@ -1150,7 +1188,7 @@ def build_case(model=None, momentum_advection=None, gradient=None):
         model = SSTModel()
     mesh = read_openfoam(RUNS / "polyMesh")
     geom = mesh.geometry()
-    grad = CorrectedGreenGauss() if gradient is None else gradient
+    grad = _gradient_scheme() if gradient is None else gradient
     # Second-order upwind momentum advection (Venkatakrishnan-limited linear upwind); first-order upwind
     # on the stiff k/omega scalars (a second-order stencil there lets the coupled Newton step drive omega
     # negative -- an M-matrix effect the limiter does not prevent).

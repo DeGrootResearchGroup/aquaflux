@@ -39,6 +39,7 @@ Run:
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -63,13 +64,22 @@ from aquaflux.io import read_openfoam
 from aquaflux.mesh import distance_to_patches
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import (
+    AveragedNeighbourHessian,
+    HessianCorrectedGradient,
     MultipleCorrectionGradient,
     OwnerGradient,
+    ProjectedStencilGradient,
     SkewCorrectedGradient,
 )
-from aquaflux.solve import Convergence, DualTimeLoop, RetryPolicy
-from aquaflux.turbulence import CoupledRANS, SSTModel, SSTTurbulence, inlet_k, inlet_omega, solve_coupled
-from aquaflux.solve import CompleteLu, MaterializedJacobian
+from aquaflux.solve import CompleteLu, Convergence, DualTimeLoop, MaterializedJacobian, RetryPolicy
+from aquaflux.turbulence import (
+    CoupledRANS,
+    SSTModel,
+    SSTTurbulence,
+    inlet_k,
+    inlet_omega,
+    solve_coupled,
+)
 
 HERE = Path(__file__).resolve().parent
 POLYMESH = HERE / "of_case" / "constant" / "polyMesh"
@@ -85,7 +95,7 @@ INTENSITY, LENGTH_SCALE = 0.05, 0.07 * 0.025
 #: shipped this march does not converge (issue #435), so a large cap only spends more wall time
 #: reaching the same "alpha = 0 every step" failure this case already reports at ~15 steps.
 #: Raise it if #435 is fixed and this case should actually try to converge.
-MAX_STEPS = 15
+MAX_STEPS = int(os.environ.get("TET_MAX_STEPS", "15"))
 RTOL, ATOL = 0.0, 1e-5  # the target rung's stop
 ANCHOR_RTOL = 0.01  # the anchor rung only needs to be a good enough seed for the target
 RATIO = 10.0  # anchor viscosity = target x RATIO (Reynolds number / RATIO)
@@ -98,6 +108,20 @@ BACKEND = "scipy"  # always available (no petsc4py needed); exact regardless of 
 #: then repeats identically forever (measured: 60 steps, bit-identical |R|, no retry) rather than
 #: recovering. Matches PITZ_RETRY_ON_CYCLES-style values elsewhere in validation/.
 RETRY = RetryPolicy(on_alpha=0.01, beta_factor=2.0)
+
+#: The march arms, selected by ``TET_ARMS`` (comma-separated, default ``owner,repaired``). ``hessian``
+#: is the coupled gradient and Hessian reconstruction of Betchen and Straatman (2010) with the
+#: neighbour-averaged Hessian boundary closure -- the closure under which it damps correctly on this
+#: mesh (its owner closure diverges here).
+MARCH_ARMS = {
+    "owner": lambda: MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None),
+    "repaired": lambda: MultipleCorrectionGradient(
+        boundary_closure=OwnerGradient(), fallback=SkewCorrectedGradient()
+    ),
+    "hessian": lambda: HessianCorrectedGradient(boundary_closure=AveragedNeighbourHessian()),
+    "projected": lambda: ProjectedStencilGradient(blend=float(os.environ.get("TET_BLEND", "0.75"))),
+}
+ARMS = os.environ.get("TET_ARMS", "owner,repaired").split(",")
 
 
 def build_case(gradient_scheme) -> CoupledRANS:
@@ -188,10 +212,10 @@ def report_m2_conditioning(gradient_scheme, label: str) -> float:
 def _hybrid_start(coupled: CoupledRANS) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """A wall-tapered initial condition, needing no linear solve at all.
 
-    ⚠️ **Tracked as issue #435, unresolved: this seed does not yet get the march started either.**
-    Kept in the tree because it is the current best attempt and rules out several mechanisms (see its
-    own docstring in #435) rather than because it works. ``run_march_ab`` is expected to report a
-    failure with the current code; do not read a green run as validated until #435 closes.
+    ⚠️ **This seed marches under ``ProjectedStencilGradient`` and under neither multiple-correction
+    closure** (issue #435): with ``TET_ARMS=projected`` the target rung converges in 16 steps at
+    ``alpha = 1``, while ``owner`` and ``repaired`` still diverge from it at anchor step 3. So a
+    failure here is a statement about those weights rather than about the seed.
 
     ``hybrid_initialize``'s own potential-flow seed is not usable on this mesh, and not for a reason
     worth working around: its AMG-preconditioned Laplace solve stagnates (regardless of closure), and
@@ -244,12 +268,23 @@ def _hybrid_start(coupled: CoupledRANS) -> tuple[jnp.ndarray, jnp.ndarray, jnp.n
     return flow, k, omega
 
 
-def run_march_ab(name: str, gradient_scheme) -> dict:
-    """Attempt the coupled RANS march -- see ``_hybrid_start``'s docstring; expect a FAILED report.
+def run_march_ab(name: str, gradient_scheme, start=_hybrid_start) -> dict:
+    """Attempt the coupled RANS march: an anchor rung at Re/RATIO, then the target.
 
-    Kept as a best-effort attempt (issue #435) rather than removed: it is the harness the fix for #435
-    should be checked against, and its failure mode (which rung, which exception) is itself informative
-    to whoever picks that issue up.
+    Converges under ``ProjectedStencilGradient`` and fails under either multiple-correction closure
+    (issue #435), so the default arms are expected to report FAILED and their failure mode -- which
+    rung, which exception -- is the informative part.
+
+    Parameters
+    ----------
+    name : str
+        The arm's label, used in the per-step log.
+    gradient_scheme : GradientScheme
+        The reconstruction the case is built with.
+    start : callable
+        Given the built :class:`CoupledRANS`, returns the ``(flow, k, omega)`` the anchor rung starts
+        from. Defaults to the hand-built :func:`_hybrid_start`; pass ``hybrid_initialize`` to march
+        from the shipped self-start instead, which is what ``potential_flow_probe.py`` does.
     """
     coupled = build_case(gradient_scheme)
     corners, n_cells = corner_cell_count(coupled)
@@ -269,9 +304,9 @@ def run_march_ab(name: str, gradient_scheme) -> dict:
     try:
         # A manual two-point ramp (anchor at Re/RATIO, then the target) rather than
         # solve_reynolds_continuation, which always self-starts the anchor through
-        # hybrid_initialize -- see _hybrid_start's docstring for why that is avoided here.
+        # hybrid_initialize -- here the seed is injected, so it can be either one.
         anchor = coupled.with_scaled_molecular_viscosity(RATIO)
-        flow0, k0, omega0 = _hybrid_start(coupled)
+        flow0, k0, omega0 = start(coupled)
         flow1, k1, omega1 = solve_coupled(
             anchor,
             flow0,
@@ -360,23 +395,14 @@ def main() -> None:
         f"{owner_worst / max(repaired_worst, 1e-300):.1e}x improvement\n"
     )
 
-    # Part 2: whether that fix is safe on a real march -- currently blocked, see issue #435.
-    print("=== march attempt (issue #435 -- expect FAILED; see run_march_ab's docstring) ===\n")
-    owner_arm = run_march_ab(
-        "owner",
-        MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None),
-    )
-
-    print("\n=== arm 2: fallback=SkewCorrectedGradient() (repairs the corner cells locally) ===\n")
-    repaired_arm = run_march_ab(
-        "repaired",
-        MultipleCorrectionGradient(
-            boundary_closure=OwnerGradient(), fallback=SkewCorrectedGradient()
-        ),
-    )
+    # Part 2: the march, one arm per TET_ARMS entry.
+    arms = {}
+    for name in ARMS:
+        print(f"\n=== march arm: {name} ===\n")
+        arms[name] = run_march_ab(name, MARCH_ARMS[name]())
 
     print("\n=== summary ===")
-    for arm in (owner_arm, repaired_arm):
+    for arm in arms.values():
         if arm["failed"]:
             print(f"  {arm['name']:<10} FAILED: {arm['error']}")
         else:
@@ -385,6 +411,9 @@ def main() -> None:
                 f"|R| {arm['residual_norm']:.3e}"
             )
 
+    owner_arm, repaired_arm = arms.get("owner"), arms.get("repaired")
+    if owner_arm is None or repaired_arm is None:
+        return
     if not owner_arm["failed"] and not repaired_arm["failed"]:
         du = _relative_l2(repaired_arm["flow"], owner_arm["flow"])
         dk = _relative_l2(repaired_arm["k"], owner_arm["k"])
@@ -402,9 +431,10 @@ def main() -> None:
         print(f"\n  ONE ARM FAILED ({broken}): the two closures are NOT equivalent on this mesh.")
     else:
         print(
-            "\n  BOTH ARMS FAILED, identically: this is the EXPECTED, currently-unresolved outcome "
-            "(issue #435), not a result about the gradient closure -- the M2 conditioning numbers "
-            "above are what this case currently has to say about #432."
+            "\n  BOTH ARMS FAILED, identically: the EXPECTED outcome for the multiple-correction "
+            "closures on this mesh (issue #435), not a result about the corner-cell repair -- the M2 "
+            "conditioning numbers above are what this case has to say about #432. The mesh itself "
+            "marches: run TET_ARMS=projected."
         )
 
 

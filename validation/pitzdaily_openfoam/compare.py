@@ -88,24 +88,46 @@ from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import (
     CorrectedGreenGauss,
     MultipleCorrectionGradient,
+    ProjectedStencilGradient,
     SweptGradientSolve,
     VenkatakrishnanLimiter,
 )
 from aquaflux.solve import (
-    LinearSolveSettings,
     CflResidualDualTimeControl,
     Convergence,
     DualTimeLoop,
+    FieldSplit,
+    JacobianProbeSpec,
     JacobiSmoothed,
+    LinearSolveSettings,
     MarchLogger,
+    MaterializedJacobian,
+    MonolithicVCycle,
     RetryPolicy,
     SimpleSmoothed,
     StateCheckpointer,
     combine_observers,
     relative_residual_gmres,
 )
-from aquaflux.turbulence import BetaTaperedDamping, ConstantDamping, CoupledRANS, GeometricReynoldsSchedule, LogScalars, ResidualTaperedDamping, CoupledShiftSettings, SSTModel, SSTTurbulence, coupled_fields, open_session, scale_both_blocks, scale_momentum_only, solve_reynolds_continuation, solve_reynolds_ramp, turbulence_residual_norm, wall_consistent_state
-from aquaflux.solve import FieldSplit, JacobianProbeSpec, MaterializedJacobian, MonolithicVCycle
+from aquaflux.turbulence import (
+    BetaTaperedDamping,
+    ConstantDamping,
+    CoupledRANS,
+    CoupledShiftSettings,
+    GeometricReynoldsSchedule,
+    LogScalars,
+    ResidualTaperedDamping,
+    SSTModel,
+    SSTTurbulence,
+    coupled_fields,
+    open_session,
+    scale_both_blocks,
+    scale_momentum_only,
+    solve_reynolds_continuation,
+    solve_reynolds_ramp,
+    turbulence_residual_norm,
+    wall_consistent_state,
+)
 
 HERE = Path(__file__).resolve().parent
 RUNS = HERE / "runs" / "kwsst"
@@ -678,9 +700,14 @@ GRADIENT_SWEEPS = int(os.environ.get("PITZ_GRADIENT_SWEEPS", "4"))
 #: couplings onto near entries. Vary the two together; `validation/gradient_stencil_reach.py`
 #: re-measures both halves in about a minute.
 GRADIENT = os.environ.get("PITZ_GRADIENT", "multcorr")
+GRADIENT_BLEND = float(os.environ.get("PITZ_GRADIENT_BLEND", "0.75"))
 _GRADIENTS = {
     "swept": lambda: CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=GRADIENT_SWEEPS)),
     "multcorr": MultipleCorrectionGradient,
+    # Per-cell weights exact for quadratics and nearest `PITZ_GRADIENT_BLEND` x a reconstruction
+    # that damps; the same reach as `multcorr`. Its default blend was measured on a tetrahedral
+    # duct, so on these hexahedra it is the thing being tested rather than a known-good setting.
+    "projected": lambda: ProjectedStencilGradient(blend=GRADIENT_BLEND),
 }
 if GRADIENT not in _GRADIENTS:
     raise SystemExit(f"PITZ_GRADIENT={GRADIENT!r} is not one of {sorted(_GRADIENTS)}")
@@ -1194,7 +1221,9 @@ def solve_aquaflux(
         # for that reason -- see `BETA_START_WARM`. With the environment unset the two are equal and
         # this is the same control the solve would have used anyway.
         return dict(
-            shift=CoupledShiftSettings(turbulence_damping=_damping(companion, seed_state, beta_start)),
+            shift=CoupledShiftSettings(
+                turbulence_damping=_damping(companion, seed_state, beta_start)
+            ),
             step_control=dual_time_control(beta_start),
         )
 

@@ -425,6 +425,21 @@ class MultipleCorrectionGradient(GradientScheme):
     :class:`~aquaflux.schemes.HessianCorrectedGradient`, without that scheme's coupled system, its
     sweep count, or the per-mesh calibration that count needs.
 
+    ⚠️ **Recommended for hexahedral and polyhedral meshes, skewed or not — not for a tetrahedral one
+    whose gradient feeds a pressure coupling.** Exactness for quadratics does not fix the per-cell
+    weights: on a tetrahedron's two-hop stencil it fixes ten of the roughly thirteen numbers per
+    component, and the ones this construction lands on are some three orders of magnitude larger than
+    a reconstruction that damps. The pressure damping in a collocated momentum--continuity solve is a
+    near-cancelling difference built on that gradient, so weights that size flip its sign on part of
+    the mesh and the coupled march then finds no admissible step from any starting field (measured on
+    an unstructured tetrahedral duct: 24 flipped damping diagonals under the pressure's conditions,
+    against none for every reconstruction of order one tried there). Neither
+    :attr:`boundary_closure` nor :attr:`fallback` addresses it — it is a property of the second pass's
+    weights, not of the boundary treatment — and no warning reports it, because nothing in the
+    reconstruction itself is ill-conditioned. Use
+    :class:`~aquaflux.schemes.ProjectedStencilGradient` there, which is exact for quadratics on the
+    same stencil and picks weights the size of the damping reference.
+
     Attributes
     ----------
     boundary_closure : GradientBoundaryClosure

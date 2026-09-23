@@ -41,6 +41,7 @@ from .gradient import (
     fastest_boundary_closure,
     narrow_gradient_sweeps,
 )
+from .projected_stencil import ProjectedStencilGradient
 from .multiple_correction import (
     DEFAULT_GRADIENT_SCHEME,
     Corrections,
@@ -91,6 +92,7 @@ __all__ = [
     "OwnerHessian",
     "PackedSystemSolve",
     "PreparedBoundaryClosure",
+    "ProjectedStencilGradient",
     "SkewCorrectedGradient",
     "SweepCalibration",
     "SweptGradientSolve",

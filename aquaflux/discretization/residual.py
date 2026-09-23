@@ -214,6 +214,7 @@ class ResidualAssembler(eqx.Module):
         source_operators: tuple[VolumeSource, ...] = (),
         gradient_scheme: GradientScheme | None = None,
         boundary_linearization: BoundaryLinearization | None = None,
+        bind_gradient_scheme: bool = True,
         imposed_gradient: ImposedGradient | None = None,
     ) -> ResidualAssembler:
         """Build an assembler from injected operators, schemes, and boundary closures.
@@ -258,6 +259,12 @@ class ResidualAssembler(eqx.Module):
             How each boundary value depends on its owner cell, which the gradient scheme is bound
             against. Read off the conditions when omitted; supply it only when a calculated property
             makes that impossible before a field exists.
+        bind_gradient_scheme : bool, optional
+            Bind ``gradient_scheme`` here (default ``True``). ``False`` takes it as already bound
+            against this geometry **and this equation's conditions** -- which is what a caller that
+            builds an assembler inside a residual evaluation must do, since binding a scheme whose
+            preparation reads the connectivity cannot be traced. The caller then owns the pairing
+            that binding here exists to guarantee, so pass a scheme bound for *this* equation.
 
         Raises
         ------
@@ -300,13 +307,17 @@ class ResidualAssembler(eqx.Module):
             # assembler owns the geometry and the scheme together, so binding here -- rather than
             # leaving it to a call site -- is what stops the two being paired with a mismatched mesh.
             gradient_scheme=(
-                None if gradient_scheme is None else gradient_scheme.bind(mesh, geometry)
+                None
+                if gradient_scheme is None
+                else gradient_scheme.bind(mesh, geometry)
+                if bind_gradient_scheme
+                else gradient_scheme
             ),
             coefficient=coefficient,
             boundary=boundary.resolve(mesh.face_patches, mesh.face_cells),
             imposed_gradient=imposed_gradient,
         )
-        if gradient_scheme is None:
+        if gradient_scheme is None or not bind_gradient_scheme:
             return assembled
         # Bind the scheme AGAINST the conditions, not merely against the geometry. A scheme that
         # prepares work from its own operator must be prepared from the one it will apply, and the

@@ -99,7 +99,7 @@ SUBPACKAGE_GROUPS = {
         ("Initialization and flow scales", ["initialization", "scales"]),
     ],
     "schemes": [
-        ("Gradient reconstruction", ["gradient", "multiple_correction"]),
+        ("Gradient reconstruction", ["gradient", "multiple_correction", "projected_stencil"]),
         ("Face interpolation", ["interpolation"]),
         ("Slope limiting", ["limiter"]),
     ],

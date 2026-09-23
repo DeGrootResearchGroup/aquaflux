@@ -264,6 +264,116 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   on the neighbour side) instead of deriving it from the cell index internally, so both spend the
   same displacement the reconstruction applies. Latent until now: no shipped case pairs a periodic
   mesh with a limiter (the periodic cases run unlimited or first-order advection).
+- **`projected_stencil.py` — BUILT (2026-09-22). `ProjectedStencilGradient`: the weights are CHOSEN,
+  and that is the whole point of it.** Every linear reconstruction is per-cell weights over a stencil;
+  exactness for quadratics fixes only ten of the ~13 numbers per gradient component on a tetrahedron's
+  two-hop stencil, so every scheme picks the remainder — most of them implicitly, and one of them
+  badly. This scheme takes, of the exact weights, the ones nearest `blend` × a reference that damps
+  (`P_g⁻¹ b_g`: a Green--Gauss face pass under the gradient equation's own per-cell block, which is
+  `HessianCorrectedGradient`'s system's first iterate from a zero start). `blend=0` is the minimum-norm end, which IS an unweighted quadratic least-squares fit
+  on the stencil — the same operator `w = B(BᵀB)⁻¹e`, i.e. the gradient of a k-exact (k=2)
+  reconstruction, Barth & Frederickson (AIAA 1990); pinned against an independently built fit by
+  `test_the_minimum_norm_end_is_an_unweighted_quadratic_least_squares_fit`, which is the only test in
+  that file sensitive to *which* exact weights are chosen (a 0.2 % departure fails it and nothing
+  else). ⚠️ **So the novelty is the blend and the boundary rows, not the scheme** — and `blend=0`
+  alone already fixes the tetrahedral damping, which is what a paper claim would have to survive.
+  `blend=1` is the nearest exact weights to the reference. Built once per field in
+  `bind`, applied as one gather and one contraction — no solve, no iteration, and the reach is the
+  multiple-correction scheme's, so a Jacobian gains nothing.
+  - ⚠️ **The reference is a TARGET, not an ingredient, and that is what makes a cheap one legitimate.**
+    The exact weights form an affine set; the projection lands in it whatever it aims at, so the target
+    cannot affect exactness and decides only *which* member — i.e. the magnitude, and through it the
+    damping sign. Reasoning that a low-order reference must give a low-order scheme is the error to
+    avoid here; the target is never summed into a reconstructed gradient.
+  - **The target DROPPED its local Schur correction, 2026-09-23**
+    (`validation/tetrahedral_gradient_ab/reference_target_probe.py`, geometry binding, one run, at
+    `blend=0.75`). Three targets differing only in the per-cell block: with the Schur correction (the
+    former target) **2.83 s** to build, max eig `+5.42e-4`, worst retention 0.4698, smooth-field error
+    1.50e-5; **without it (shipped) 0.05 s, `+5.59e-4`, 0.4671, 1.51e-5**; compact Green--Gauss `V·I`
+    0.02 s, **`+1.30e-3`**, 0.4777, 1.57e-5. The correction costs 2.83 s of a 2.88 s build and moves
+    nothing it is aimed for (3 % on the damping eigenvalue, 0.3 % on the weights); compact is cheaper
+    still and gives away **2.4x** on the damping eigenvalue, which is the quantity the scheme exists to
+    control. At `blend=0` all three arms are bit-identical, as the geometry requires — a wiring check
+    for that probe. **`boundary_weight` was DELETED with the correction**: with it off the block is
+    bit-identical under all three Hessian closures, so the setting reached nothing.
+    ⚠️ **Every projected-scheme measurement recorded before that date was taken under the Schur-corrected
+    target** — the tetrahedral marches, pitzDaily's 31 steps / 198 cycles, bfs3d's `x_r/h` 8.3611 and the
+    blend sweep. **The tetrahedral coupled march was re-run under the new target and is unchanged** --
+    9 anchor + 16 target steps at `alpha = 1`, no escalation, `|R|` 5.82e-6 in 164 s against the old
+    target's 16 target steps, 5.8e-6, 160 s. The two hexahedral cases were **not** re-run.
+  - **Why it exists: exactness and weight SIZE are independent, and only the second decides the
+    Rhie–Chow sign.** On the tetrahedral duct the multiple-correction scheme is exact for quadratics
+    and its worst weight is ~2900× the reference's; it flips 117 damping diagonals (geometry binding;
+    24 under the pressure binding, eigenvalue `+2.17`). Every exact weight set of order one measured
+    on that mesh flips none. `tests/unit/test_projected_stencil.py` pins the size gap on the 162-cell
+    tetrahedral fixture (145 against 7.9) — the damping itself is a case-level measurement
+    (`validation/tetrahedral_gradient_ab/rhie_chow_sign_probe.py`, `RC_SCHEMES=projected-<blend>`).
+  - **The boundary datum is per FIELD, from the linearization `bind` already receives** (#483): a face
+    whose value is prescribed constrains the stencil with a monomial's *value*; one whose value
+    extrapolates constrains it with the monomial's *normal derivative*, recovered at run time from the
+    boundary value evaluated at zero gradient, `(bv − φ_owner)/(d·n)`. ⚠️ **A Robin or convective face
+    is REFUSED, not approximated** — its datum is neither, and no stencil constraint expresses the
+    mixture yet. The row it needs is the mixed functional the condition imposes,
+    `∂ₙq + (h/Γ)q(x_f)` against datum `(h/Γ)T∞`, whose coefficients are recoverable from the
+    linearization alone (`β = 1/value_weight − 1`, `h/Γ = β/(d·n)`); that derivation is on paper and
+    unverified, which is why the guard ships instead of the branch. Tracked as #496.
+  - **It serves `k` and `omega` too, and that took a turbulence-side change.**
+    `turbulence/transport.py::_assembler` builds a `ResidualAssembler` *inside* each residual
+    evaluation, so a scheme was bound against a **traced** mesh -- which a stencil built from the
+    connectivity cannot be (it raises, naming the cause; `MultipleCorrectionGradient` survives that
+    path because its whole bind is jnp). `SSTTurbulence` now binds once per field at build
+    (`k_gradient_scheme` / `omega_gradient_scheme`, the shape momentum has had since #469) and
+    `ResidualAssembler.build` takes `bind_gradient_scheme=False` for a caller that has already bound.
+    The two bindings genuinely differ: a wall prescribes `k` and lets `omega` extrapolate. Pinned by
+    three tests in `tests/unit/test_sst_transport.py`, mutation-verified — including that each
+    *equation* reads its own field's binding, which needs a frozen closure and a perturbed mesh to
+    isolate (the blending function reads both gradients, and an orthogonal mesh's k equation does not
+    read its gradient at all).
+  - **Measured on the tetrahedral duct (2026-09-22, one run each):** laminar from rest **13 steps,
+    5.0e-9, 19 s** at `blend=0.75` and 13 steps, 4.8e-9 at `blend=0` — the same step count as
+    `CorrectedGreenGauss`, against `HessianCorrectedGradient`'s 287 s and the multiple-correction
+    scheme failing; coupled RANS **16 target steps at `alpha = 1`, 160 s** against Betchen's 1583 s
+    and both multiple-correction arms at `inf` by anchor step 3. Damping under the pressure's own
+    conditions: no flipped diagonal at any blend, largest eigenvalue 1.9–2.2e-4 against
+    `CorrectedGreenGauss`'s 9.0e-4 and the multiple-correction scheme's `+2.17`.
+  - **And it costs nothing on the hexahedral case the shipped scheme already suits**
+    (`PITZ_GRADIENT=projected`, one run, 2026-09-22): **31 steps and 198 cumulative cycles against the
+    shipped `multcorr`'s 31 and 200**, `x_r/h` 7.9857 against 8.0686 (OpenFOAM 7.7409, so marginally
+    closer), peak `nu_t` 418.9 against 418.0 (OpenFOAM 422.9), `ux`/`uy` errors unchanged at
+    0.0191/0.0102. ⚠️ No wall-clock comparison: the baseline's timing is from another session and
+    bundle. This is also the second case to exercise the per-field turbulence binding.
+  - **`bfs3d` (orthogonal, graded hexahedra, 23040 cells) reproduces its baseline and costs ~10 %
+    more** (`BFS3D_GRADIENT=projected`, one run, 2026-09-22): mid-span `x_r/h` **8.3611** against the
+    shipped `CorrectedGreenGauss`'s 8.36 (OpenFOAM 7.2434), same spanwise shape including the
+    side-wall corner separation, peak `nu_t` 149.8 against OpenFOAM's 146.9, in 31 steps / 224
+    cumulative cycles against 28 / 205.
+    ⚠️⚠️ **AND ITS CONDITIONING GUARD FIRED THERE: 928 of 23040 cells, worst condition number
+    2.59e7.** The near-wall cells of a graded mesh are thin, so a two-hop stencil through them is
+    nearly flat and fitting a quadratic on it is ill-conditioned -- the weights on those cells are
+    large, which is the failure this scheme exists to avoid elsewhere. It still converged to the
+    right answer here, so the threshold reports rather than refuses; what is **not** measured is
+    whether a larger `reach` or a blend nearer 0 (smaller weights) is the right answer on a stretched
+    mesh. Read the warning as a real property of that mesh, not noise.
+    **✅ SWEPT, AND THE BLEND IS A MARGIN THERE RATHER THAN A CLIFF**
+    (`validation/bfs3d_openfoam/gradient_weight_probe.py`, one run, 2026-09-22): the flagged set is
+    the same 1056 cells at every blend -- the fit is the **stencil's**, not the aim's, so no blend
+    changes the conditioning -- and **no blend flips a damping diagonal**. What moves is the worst
+    retention of the compact two-point difference: `0.933` at blend 0, `0.898` at 0.25, `0.848` at
+    0.5, **`0.792` at the default 0.75**, `0.735` at 1. So the guard is informative on a graded mesh
+    and the default is comfortable; blend 0.25 is the cheap extra margin if one is wanted, and 0 is
+    the least accurate end on non-polynomial fields. Left at 0.75.
+    ⚠️ **Do not compare weight MAGNITUDES across meshes**: a weight carries units of 1/length, so this
+    mesh's hundreds and the tetrahedral duct's ~1 are the cell sizes, not a difference in behaviour.
+    The scale-free quantity is the retention (or the ratio to a reference reconstruction's own
+    weights, which is what the duct's `2900x` is).
+  - **Not under domain decomposition** (two hops past a one-deep halo; raises), and the weights are
+    constants after binding, so binding inside a *geometry* differentiation gives a wrong shape
+    derivative — the same caveat `HessianCorrectedGradient.bind` carries.
+  - ⚠️ **`blend`'s default 0.75 came from ONE mesh** (the tetrahedral duct, under its pressure
+    conditions): every blend below 1 flipped no diagonal there while 1 flipped 59, and accuracy rose
+    monotonically with the blend. Re-measure with the case probe before trusting it on a mesh unlike
+    that one.
+
 - **`gradient.py` — BUILT so far:** `GradientScheme` (interface) → `CompactGreenGauss`
   (one-shot `∇φ_P = (1/V_P) Σ φ_ip S_f`, linear-interpolated interior faces). Verified in
   `tests/unit/test_gradient.py`: linear-exact + 2nd-order on orthogonal grids;
@@ -1404,7 +1514,10 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   Both are two-phase builds — construct, then `dataclasses.replace` once the closures exist to read
   the weights from. `momentum.gradient_scheme` survives as the condition-free form for an initializer
   that re-binds it against a different equation's conditions; it is **not** what the flow residual
-  applies. See `.claude/rules/flow.md` for the measured numbers and the fixture trap.
+  applies. **`SSTTurbulence` carries the same shape since 2026-09-22** (`k_gradient_scheme` /
+  `omega_gradient_scheme`): a wall prescribes `k` and lets `omega` extrapolate, so one binding cannot
+  serve both, and its assembler is built inside each residual evaluation — which also means a scheme
+  that cannot bind against a traced mesh only works there because the binding happens at build. See `.claude/rules/flow.md` for the measured numbers and the fixture trap.
   ⚠️⚠️ **THE PROBE GIVES EACH BASIS FIELD ITS OWN BOUNDARY DATA — AND TWO EARLIER RULES DID NOT.**
   `bind` takes a `BoundaryLinearization` (`value_weight` = ∂φ_f/∂φ_owner, `gradient_weight` =
   ∂φ_f/∂∇φ_owner, both read off the closures by `jax.jvp` at rest; `schemes/gradient.py`), and
@@ -1743,7 +1856,21 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   would itself be a contribution.
 
   **✅ `MultipleCorrectionGradient` IS BUILT (2026-08-24) — the same exactness contract with NO
-  system to solve.** `aquaflux/schemes/multiple_correction.py`, following Pont, Brenner, Cinnella,
+  system to solve.**
+  ⚠️ **RECOMMENDED FOR HEXAHEDRAL AND POLYHEDRAL MESHES, NOT FOR TETRAHEDRA UNDER A PRESSURE COUPLING
+  (decided 2026-09-23, closing the investigation).** On the tetrahedral duct its weights run ~2900x a
+  damping reference and flip 24 Rhie--Chow damping diagonals under the pressure's own conditions
+  (eigenvalue `+2.17`), and the coupled march then finds no admissible step from any seed tried. What
+  was tried and did **not** fix it, so nobody re-tries them: both corner-cell boundary closures
+  (`OwnerGradient`, the `SkewCorrectedGradient` repair — 15 orders of magnitude apart in `M2`
+  conditioning, near-identical march failure), the first pass alone inside Rhie--Chow, ring and
+  threshold withholding of the second pass, mixed per-cell schemes, and Betchen's scheme as a
+  calibration source. The defect is the second pass's *weights*, which exactness does not pin down;
+  the answer is a scheme that chooses them (`ProjectedStencilGradient`), not a repair of this one.
+  This is recorded in the class docstring and on the docs page as a recommendation; **no default
+  moved** — `DEFAULT_GRADIENT_SCHEME` is still this scheme, and the two shipped hexahedral cases are
+  unaffected. #435 carries the history.
+  `aquaflux/schemes/multiple_correction.py`, following Pont, Brenner, Cinnella,
   Maugars & Robinet (JCP 350, 2017); Setzwein, Ess & Gerlinger (JCP 446, 2021) is the vertex-centred
   adaptation and points back to Pont for the cell-centred correction matrices. Both papers are in
   the reference folder.
@@ -2713,6 +2840,32 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   the flow residual's own diagonals (this operator has unit weights and Dirichlet-zero boundary values, so
   its 117 corroborates the flow residual's ~103 negative pressure diagonals rather than matching them);
   one mesh.
+
+  Under the per-field consistent-probe binding (#483) and the laminar duct's own pressure conditions
+  (`RC_BINDING=pressure`), the full scheme still flips **24** diagonals with largest eigenvalue `+2.17`,
+  against `+2.9e-4` for the first pass alone -- about fivefold less than the geometry-only binding's
+  `+11.9`, with the mode still on a two-boundary-face corner cell and withholding to ring 3 still the
+  only cure. The binding shrinks the defect; it does not move it.
+
+  **✅ `HessianCorrectedGradient` (Betchen–Straatman) MARCHES THIS MESH — laminar AND coupled RANS —
+  under an averaged Hessian boundary closure (2026-09-22).** Full tables and settings:
+  `validation/tetrahedral_gradient_ab/README.md` § "Betchen's coupled reconstruction on this mesh".
+  Laminar from rest: 13 steps to 5.6e-9 (the same as `CorrectedGreenGauss`); coupled RANS: 9 anchor +
+  16 target steps at `alpha = 1` throughout, where both multiple-correction arms go to `inf` at anchor
+  step 3. On the damping operator it flips **no** diagonal (largest eigenvalue `4.5e-4`, below
+  `CorrectedGreenGauss`'s `9.0e-4`) — and so does every truncation of it down to **one** coupled
+  sweep, so the damping is a property of one local block sweep, not of the global solve; sweeps buy
+  accuracy only (worst quadratic error 0.77 at 1 sweep, 0.32 at 2, 6.8e-4 at the default 20, 6.9e-10 at
+  100). Three things to carry: *(i)* **`OwnerHessian` diverges on this mesh** (1027 flipped
+  diagonals, eigenvalue 5.9e54, at 20 sweeps and at 100) — the paper's own warning (its eqs 28–29) that
+  the owner cell's Hessian can leave the boundary gradient underdetermined, and exactly our two-face
+  tetrahedra; *(ii)* `AveragedInteriorHessian` damps but is **not** exact for quadratics here (stalls at
+  7e-4 however far swept), `AveragedNeighbourHessian` is; *(iii)* the shipped `CorrectedGreenGauss` misses
+  a quadratic's gradient by **7x** at its worst cell on this mesh — the scheme that converges is the least
+  accurate one measured. So #435 is specific to the multiple-correction second pass, not to second-order
+  gradients meeting Rhie–Chow on tets. Not established: cost against a matched control, other meshes,
+  and a scheme that is local, exact for quadratics and damped at once — truncated Betchen has the first
+  and last, the multiple-correction scheme the first two.
 
   ⚠️ **A design defect found by writing the fallback, and worth remembering: a defaulted `eqx.field`
   on an abstract base makes every subclass field defaulted too.** `reads_boundary_values` was

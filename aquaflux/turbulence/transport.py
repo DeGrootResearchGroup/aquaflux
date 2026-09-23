@@ -87,6 +87,45 @@ if TYPE_CHECKING:
     from .sst import SSTModel
 
 
+def _bound_field_scheme(
+    mesh: Mesh,
+    geometry: MeshGeometry,
+    gradient_scheme: GradientScheme,
+    boundary: BoundaryConditions,
+) -> GradientScheme:
+    """``gradient_scheme`` bound against one field's own boundary conditions.
+
+    A scheme prepares itself from the operator it will apply, and the boundary conditions are part of
+    that operator: ``k`` carries a value at a wall and ``omega`` a gradient, so a single binding
+    cannot serve both. The linearization comes from an assembler built for that equation with the
+    scheme left unbound, which is the same quantity the assembler would compute for itself.
+
+    Parameters
+    ----------
+    mesh, geometry
+        The mesh and its metrics.
+    gradient_scheme : GradientScheme
+        The injected scheme, unbound.
+    boundary : BoundaryConditions
+        That field's conditions.
+
+    Returns
+    -------
+    GradientScheme
+        The scheme bound for this geometry and these conditions.
+    """
+    unbound = ResidualAssembler.build(
+        mesh,
+        geometry,
+        PropertyModel({}),
+        (),
+        boundary,
+        gradient_scheme=gradient_scheme,
+        bind_gradient_scheme=False,
+    )
+    return gradient_scheme.bind(mesh, geometry, unbound._build_time_boundary_linearization())
+
+
 def _reconstruct_wall_distance_gradient(
     mesh, geometry, gradient_scheme, wall_distance, wall_patches
 ):
@@ -229,6 +268,13 @@ class SSTTurbulence(eqx.Module):
     wall_faces : jnp.ndarray
         Indices of the wall boundary faces, shape ``(n_wall_faces,)`` — the faces the momentum
         wall-function eddy viscosity is scattered onto (see :meth:`wall_face_eddy_viscosity`).
+    k_gradient_scheme, omega_gradient_scheme : GradientScheme, optional
+        The injected scheme bound against each field's own boundary conditions, built once by
+        :meth:`build`. A scheme's preparation depends on the conditions it will be applied under --
+        which face carries a prescribed value and which extrapolates differ between ``k`` (a wall
+        value) and ``omega`` (a wall gradient) -- so one binding cannot serve both, and binding per
+        residual evaluation would bind against a traced mesh. Absent, each equation's assembler binds
+        for itself, which is what a scheme whose binding is traceable can do.
     k_boundary, omega_boundary : BoundaryConditions
         The scalar boundary closures for each field (Dirichlet inlet / wall, zero-gradient outlet;
         the omega wall is imposed by cell fixation, so its wall closure is a placeholder).
@@ -284,6 +330,8 @@ class SSTTurbulence(eqx.Module):
     wall_faces: jnp.ndarray
     k_boundary: BoundaryConditions
     omega_boundary: BoundaryConditions
+    k_gradient_scheme: GradientScheme | None = None
+    omega_gradient_scheme: GradientScheme | None = None
     explicit_production_limiter: bool = eqx.field(static=True, default=False)
     explicit_production_viscosity: bool = eqx.field(static=True, default=False)
 
@@ -364,11 +412,21 @@ class SSTTurbulence(eqx.Module):
         wall_distance_gradient = _reconstruct_wall_distance_gradient(
             mesh, geometry, gradient_scheme, wall_distance, wall_patches
         )
+        # One binding per field, here rather than per residual evaluation: the conditions differ
+        # between the two equations and a scheme prepares itself against them (#469 did the same for
+        # the momentum fields). It also keeps the binding out of the traced path, which a scheme
+        # that builds a stencil from the connectivity requires.
+        k_scheme, omega_scheme = (
+            _bound_field_scheme(mesh, geometry, gradient_scheme, boundary)
+            for boundary in (k_boundary, omega_boundary)
+        )
         return cls(
             model=model,
             mesh=mesh,
             geometry=geometry,
             gradient_scheme=gradient_scheme,
+            k_gradient_scheme=k_scheme,
+            omega_gradient_scheme=omega_scheme,
             advection_scheme=advection_scheme,
             density=density,
             molecular_viscosity=molecular_viscosity,
@@ -538,6 +596,7 @@ class SSTTurbulence(eqx.Module):
         *,
         source_operators: tuple = (),
         imposed_gradient: ImposedGradient | None = None,
+        gradient_scheme: GradientScheme | None = None,
     ) -> ResidualAssembler:
         """An assembler on this turbulence model's mesh, geometry and gradient scheme.
 
@@ -573,8 +632,9 @@ class SSTTurbulence(eqx.Module):
             flux_operators,
             boundary,
             source_operators=source_operators,
-            gradient_scheme=self.gradient_scheme,
+            gradient_scheme=self.gradient_scheme if gradient_scheme is None else gradient_scheme,
             imposed_gradient=imposed_gradient,
+            bind_gradient_scheme=gradient_scheme is None,
         )
 
     def _field_gradient(
@@ -583,6 +643,7 @@ class SSTTurbulence(eqx.Module):
         boundary: BoundaryConditions,
         *,
         imposed: ImposedGradient | None = None,
+        scheme: GradientScheme | None = None,
     ) -> jnp.ndarray:
         """Reconstruct the cell gradient of a turbulence field with its boundary closures.
 
@@ -591,7 +652,13 @@ class SSTTurbulence(eqx.Module):
         re-implemented here. ``imposed`` names cells whose gradient is a model quantity and is passed
         through to the scheme rather than applied to what it returns.
         """
-        assembler = self._assembler(PropertyModel({}), (), boundary, imposed_gradient=imposed)
+        assembler = self._assembler(
+            PropertyModel({}),
+            (),
+            boundary,
+            imposed_gradient=imposed,
+            gradient_scheme=scheme,
+        )
         return assembler.gradient(field)
 
     def _wall_omega_gradient(self, k: jnp.ndarray, grad_k: jnp.ndarray) -> ImposedGradient:
@@ -705,9 +772,11 @@ class SSTTurbulence(eqx.Module):
             The current turbulence fields, shape ``(n_cells,)``.
         """
         strain = self.strain_rate(velocity.gradient, k)
-        grad_k = self._field_gradient(k, self.k_boundary)
+        grad_k = self._field_gradient(k, self.k_boundary, scheme=self.k_gradient_scheme)
         imposed_omega = self._wall_omega_gradient(k, grad_k)
-        grad_omega = self._field_gradient(omega, self.omega_boundary, imposed=imposed_omega)
+        grad_omega = self._field_gradient(
+            omega, self.omega_boundary, imposed=imposed_omega, scheme=self.omega_gradient_scheme
+        )
         f1 = self.model.f1(
             k, omega, self.molecular_viscosity, self.wall_distance, grad_k, grad_omega
         )
@@ -753,6 +822,7 @@ class SSTTurbulence(eqx.Module):
                 ),
             ),
             self.k_boundary,
+            gradient_scheme=self.k_gradient_scheme,
             source_operators=(
                 KProduction(
                     self._production_viscosity(closure),
@@ -854,6 +924,7 @@ class SSTTurbulence(eqx.Module):
                 DiffusionFlux(),
             ),
             self.omega_boundary,
+            gradient_scheme=self.omega_gradient_scheme,
             source_operators=(
                 OmegaProduction(
                     closure.strain_rate,
