@@ -44,7 +44,7 @@ What to take from it, none of which is specific to that mechanism:
 - **Before deleting a damping behaviour, ask what it is holding, not only whether it is right.** Those
   are different questions and the second does not answer the first.
   - **This applies to ACCIDENTS as much as to defects — to anything nobody put there deliberately.**
-    The brake above was a mis-reading; the preconditioner's own shift floor (`beta_floor`, 0.05 on that
+    The brake above was a mis-reading; the preconditioner's own shift floor (`refit_beta_floor`, 0.05 on that
     case) is the same shape from the other direction — a constant chosen against no recorded evidence
     that silently decides where the frozen operator stops following the real one. Neither was designed,
     both were load-bearing, and an unexamined constant is harder to notice than a wrong rule because
@@ -193,7 +193,11 @@ What to take from it, none of which is specific to that mechanism:
   for the acceptance test, so both drivers read it instead of re-evaluating the residual at the same
   iterate.
   - **The β schedule is an injected `RelaxationSchedule` (`solve/relaxation.py`), SER extracted as the
-    default (binding — do not re-inline the β rule).** The old `beta0`/`exponent`/`beta_floor` fields on
+    default (binding — do not re-inline the β rule).** ⚠️ **Its method is `shift_strength(‖R‖, ‖R₀‖)`,
+    renamed from `relaxation()` in #373:** it returns β, which damps *more* as it grows, where an
+    under-relaxation factor in `(0, 1]` damps *less* — and both words are live in this package (the
+    segregated loop under-relaxes k and ω by a factor). The classes keep their names,
+    `SwitchedEvolutionRelaxation` being the literature's. The old `beta0`/`exponent`/`beta_floor` fields on
     `PseudoTransientStep` are gone; the field is `relaxation_schedule: RelaxationSchedule`, defaulting to
     `SwitchedEvolutionRelaxation(beta0=2, exponent=1, beta_floor=0)` — byte-identical to the old inline
     `max(beta_floor, β₀(‖R‖/‖R₀‖)^p)`. It is the direct twin of the injected `ResidualNorm`

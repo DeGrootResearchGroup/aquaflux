@@ -31,6 +31,7 @@ from .march import MarchResult, newton_march, refuse_a_transform_the_march_canno
 from .newton import newton_correction
 from .norm import ResidualNorm
 from .root_adjoint import root_adjoint, stop_array_gradients
+from .settings_value import SettingsValue, _merged
 from .strategy import LineSearchStep, NewtonStrategy, StepFn, StepOutcome
 
 # What a Newton step returns, and what each value is for, is documented on `StepOutcome` and the
@@ -834,3 +835,83 @@ def _how_it_ended(result: MarchResult, max_steps: int) -> str:
         f"the march ended at residual {result.reports[-1].residual_norm:.3e} after "
         f"{len(result.reports)} of {max_steps} steps"
     )
+
+
+@dataclasses.dataclass(frozen=True)
+class RootSolveSettings(SettingsValue):
+    """How a root solve is run, apart from the step it runs -- the configuration every builder shares.
+
+    A builder of a :class:`RootSolver` supplies two unlike things: the Newton step for the problem it
+    knows about, and the settings of the solve around that step. The first is what makes each builder
+    different; the second is the same question wherever it is asked, and is what this value carries, so
+    that a setting reachable from one builder is reachable from all of them.
+
+    **The membership test is whether a setting's reason can be stated without naming the residual.** It
+    can for all four here -- how many Newton steps to allow, when to stop, and which linear solver to
+    use forward and in the transpose solve. It cannot for ``strategy`` (the step a builder exists to
+    construct) or for :attr:`RootSolver.measures` (what the problem's residual can be measured in), so
+    those stay with the builder and arrive through :meth:`solver` as ordinary fields.
+
+    **Every field defaults to** ``None``, **meaning "not set here"** (see :class:`SettingsValue`), so a
+    field this value leaves unset is decided by whatever it is handed to: first the builder's own base
+    through :meth:`~SettingsValue.filled_from`, then :class:`RootSolver`'s own default. So
+    ``RootSolveSettings(max_steps=200)`` changes one setting and nothing else, on every builder, and no
+    default is declared here to drift from the one the solver uses.
+
+    Attributes
+    ----------
+    convergence : Convergence or None
+        The stopping test -- its measure and the two tolerances together. Unset: the solve's own
+        (``rtol = 1e-10``, ``atol = 1e-12``, measured in the strategy's own norm).
+    max_steps : int or None
+        Maximum Newton iterations. Unset: the builder's own, else :class:`RootSolver`'s.
+    linear_solver : lineax.AbstractLinearSolver or None
+        The linear solver for the forward Newton steps. Unset: the strategy's own inexact-Newton
+        default, whose loose tolerance suits the march it globalizes.
+    adjoint_solver : lineax.AbstractLinearSolver or None
+        The linear solver for the transpose solve the adjoint takes at the converged state. Unset: the
+        tight :func:`default_linear_solver`, since this one solve sets the gradient's accuracy.
+
+    Examples
+    --------
+    One override, and the builder's own defaults for everything else::
+
+        from aquaflux.flow import reused_flow_solve
+        from aquaflux.solve import RootSolveSettings
+
+        solve_flow = reused_flow_solve(reference, root_solve=RootSolveSettings(max_steps=200))
+    """
+
+    convergence: Convergence | None = None
+    max_steps: int | None = None
+    linear_solver: lx.AbstractLinearSolver | None = None
+    adjoint_solver: lx.AbstractLinearSolver | None = None
+
+    def solver(self, strategy: NewtonStrategy, **fields: object) -> RootSolver:
+        """A :class:`RootSolver` running ``strategy`` with these settings.
+
+        Parameters
+        ----------
+        strategy : NewtonStrategy
+            The globalized step each Newton iteration runs -- the builder's own.
+        **fields
+            The solver's remaining, problem-specific fields, passed straight through: ``measures``, what
+            the problem's residual can be measured in. A field left out, or passed as ``None``, keeps
+            :class:`RootSolver`'s own default.
+
+        Returns
+        -------
+        RootSolver
+            The solver.
+
+        Raises
+        ------
+        TypeError
+            If a field is one :class:`RootSolver` does not declare, or one this value also sets.
+        """
+        return RootSolver(strategy=strategy, **_merged(RootSolver, self.settings(), fields))
+
+
+#: The empty override: every setting left to the builder's own default. The default of every builder of
+#: a root solve, so that none of them carries a second copy of a default.
+DEFAULT_ROOT_SOLVE = RootSolveSettings()

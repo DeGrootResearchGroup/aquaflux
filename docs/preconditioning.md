@@ -309,8 +309,9 @@ A {class}`~aquaflux.solve.MaterializedJacobian` settles everything the inverses 
 - `build_beta` — the pseudo-transient shift the first build is fitted at. A shifted operator
   is easier to precondition, and an inverse that freezes its coarse space at that build keeps
   it for the whole march.
-- `beta_floor` — a lower bound on the shift the inverse is re-fitted at while the march keeps
-  solving at its own.
+- `refit_beta_floor` — a lower bound on the shift the inverse is re-fitted at while the march keeps
+  solving at its own. It is not the march's own `beta_floor`, which bounds the shift the solve
+  runs at.
 
 and its `inverse` chooses how the materialized matrix is inverted: a single
 {class}`~aquaflux.solve.MonolithicVCycle` over all six fields

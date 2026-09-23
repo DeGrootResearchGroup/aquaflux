@@ -381,3 +381,28 @@ A relative tolerance asks for a fraction of the *starting* residual, so a better
 asks for a smaller residual. When every solve in a sequence must reach one level whatever it
 starts from, as the rungs of a continuation must, set `rtol=0` and give that level as `atol`.
 ```
+
+## Configuring a solve that a builder returns
+
+Some entry points do not hand you a solver: they return a callable that runs one, with the step
+already built for the problem they know about — {func}`~aquaflux.flow.reused_flow_solve`,
+{func}`~aquaflux.flow.bulk_velocity_flow_solve` and
+{func}`~aquaflux.turbulence.scalar_pseudo_transient_solve`. The settings of the solve *around* that
+step — how many Newton iterations to allow, when to stop, and which linear solver to use forward and
+in the adjoint's transpose solve — are the same question wherever it is asked, so all three take them
+as one value, {class}`~aquaflux.solve.RootSolveSettings`:
+
+```python
+from aquaflux.flow import reused_flow_solve
+from aquaflux.solve import Convergence, RootSolveSettings
+
+solve_flow = reused_flow_solve(
+    reference,
+    root_solve=RootSolveSettings(max_steps=200, convergence=Convergence(rtol=1e-8)),
+)
+```
+
+Every field left unset is the builder's own default, and each builder's step cap differs because the
+solves do: a scalar transport equation is stiffer than a flow block of the same size. What is *not*
+on the value is the step itself, which is what each builder exists to construct, and the residual's
+own measures, which are a property of the problem rather than of the solve.

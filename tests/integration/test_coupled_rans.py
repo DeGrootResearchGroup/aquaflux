@@ -40,6 +40,7 @@ from aquaflux.solve import (
     Euclidean,
     Globalization,
     RefreshPolicy,
+    RootSolveSettings,
 )
 from aquaflux.turbulence import (
     BlockDiagonal,
@@ -144,7 +145,9 @@ def case():
     # effective mu the frozen a_P sees is 21x molecular.
     reference_nu_t = jnp.full(n, 20.0 * NU)
     solve_flow = reused_flow_solve(
-        momentum.with_eddy_viscosity(reference_nu_t), max_steps=FLOW_MAX_STEPS, **PRECONDITIONER
+        momentum.with_eddy_viscosity(reference_nu_t),
+        root_solve=RootSolveSettings(max_steps=FLOW_MAX_STEPS),
+        **PRECONDITIONER,
     )
     hybrid = sst_initial_fields(momentum, turbulence)
     _, k0, omega0 = hybrid
@@ -193,12 +196,12 @@ def test_coupled_newton_converges_and_matches_the_segregated_solution(case) -> N
         momentum,
         turbulence,
         case["solve_flow"],
-        scalar_pseudo_transient_solve(max_steps=SCALAR_MAX_STEPS),
+        scalar_pseudo_transient_solve(root_solve=RootSolveSettings(max_steps=SCALAR_MAX_STEPS)),
         flow0,
         k0,
         omega0,
         max_sweeps=60,
-        rtol=1e-9,
+        increment_tol=1e-9,
         relaxation=0.9,
         scalar_preconditioner=ScalarTwoLevel(),
     )

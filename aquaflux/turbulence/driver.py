@@ -25,7 +25,7 @@ mesh once before the loop so those compiled prologues never re-run the dynamic-s
 The outer loop **stops on convergence**, not a fixed sweep count: each sweep's coupled Picard
 increment -- the largest per-field relative change ``max(||dflow||/||flow||, ||dk||/||k||,
 ||domega||/||omega||)`` -- is the residual-agnostic fixed-point measure, and the loop exits once it
-drops below ``rtol`` (``max_sweeps`` only caps the work; a warning fires if it is hit without
+drops below ``increment_tol`` (``max_sweeps`` only caps the work; a warning fires if it is hit without
 converging). The outer under-relaxation is **adaptive**: it opens from its floor toward
 ``relaxation_max`` as that increment falls, a switched-evolution-relaxation ramp
 ``w = clip(w0 (r0/r)^p, w0, w_max)`` -- conservative while the coupling is still moving, then close
@@ -182,7 +182,7 @@ def solve_segregated(
     omega: jnp.ndarray,
     *,
     max_sweeps: int,
-    rtol: float = 1e-6,
+    increment_tol: float = 1e-6,
     relaxation: float = 0.7,
     relaxation_max: float | None = None,
     ser_exponent: float = 1.0,
@@ -221,10 +221,13 @@ def solve_segregated(
         The initial turbulence fields, shape ``(n_cells,)`` (e.g. the inlet values, uniform).
     max_sweeps : int
         Upper bound on outer Picard sweeps. The loop normally stops earlier, when the coupled
-        increment drops below ``rtol``; hitting this cap without converging emits a warning.
-    rtol : float
+        increment drops below ``increment_tol``; hitting this cap without converging emits a warning.
+    increment_tol : float
         Outer convergence tolerance on the coupled Picard increment (the largest per-field relative
-        change over a sweep). The loop exits the first sweep whose increment is below it.
+        change over a sweep). The loop exits the first sweep whose increment is below it. It is a
+        tolerance on the *state increment*, not on a residual: the flow and scalar solves this loop
+        drives each converge their own residual to their own tolerance, and this one says how far the
+        coupling between them may still move.
     relaxation : float
         Under-relaxation factor for ``k`` and ``omega`` in ``(0, 1]``. This is the **floor** of the
         adaptive ramp -- the value used on the first sweep and never dropped below -- so set it to the
@@ -257,7 +260,7 @@ def solve_segregated(
     Returns
     -------
     tuple of jnp.ndarray
-        The ``(flow, k, omega)`` at the sweep that met ``rtol`` -- or at ``max_sweeps`` if it was not
+        The ``(flow, k, omega)`` at the sweep that met ``increment_tol`` -- or at ``max_sweeps`` if it was not
         reached, in which case a warning is emitted and the fields may be under-converged.
     """
     # Bind the k/omega boundaries to the mesh once, off the jit path, so the jitted sweep prologue's
@@ -318,14 +321,15 @@ def solve_segregated(
         increment = _relative_change((flow_prev, flow), (k_prev, k), (omega_prev, omega))
         if increment_0 is None:
             increment_0 = increment
-        if increment < rtol:
+        if increment < increment_tol:
             converged = True
             break
 
     if not converged:
         last = "n/a" if increment is None else f"{increment:g}"
         warnings.warn(
-            f"segregated coupling did not reach rtol={rtol:g} within max_sweeps={max_sweeps} "
+            f"segregated coupling did not reach increment_tol={increment_tol:g} within "
+            f"max_sweeps={max_sweeps} "
             f"(last increment {last}); the returned fields may be under-converged.",
             stacklevel=2,
         )

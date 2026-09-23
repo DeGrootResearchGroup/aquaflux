@@ -1150,7 +1150,7 @@ def solve_aquaflux(
             column_reach=COLUMN_REACH,
             gradient_sweeps=PROBE_GRADIENT_SWEEPS,
         ),
-        beta_floor=PC_BETA_FLOOR,
+        refit_beta_floor=PC_BETA_FLOOR,
     )
     session = open_session(preconditioner, coupled, observer=logger.on_refresh)
 

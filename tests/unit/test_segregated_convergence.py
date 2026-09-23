@@ -157,7 +157,7 @@ class _StubTurbulence(eqx.Module):
 def _drive(
     *,
     max_sweeps,
-    rtol,
+    increment_tol,
     contraction,
     relaxation=1.0,
     relaxation_max=None,
@@ -166,7 +166,7 @@ def _drive(
 ):
     """Run the driver with solvers that contract each field toward a fixed target by ``contraction``
     per solve, counting the sweeps actually taken. ``contraction`` in ``[0, 1)`` converges;
-    ``rtol=0`` never accepts, forcing the cap."""
+    ``increment_tol=0`` never accepts, forcing the cap."""
     n = 4
     momentum = _StubMomentum(PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}))
     turbulence = turbulence_class(jnp.full(n, 1.0))
@@ -189,7 +189,7 @@ def _drive(
         jnp.full(n, 0.1),
         jnp.full(n, 0.1),
         max_sweeps=max_sweeps,
-        rtol=rtol,
+        increment_tol=increment_tol,
         relaxation=relaxation,
         relaxation_max=relaxation_max,
         **driver_options,
@@ -200,7 +200,7 @@ def _drive(
 def test_loop_stops_on_convergence_before_the_cap() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # a non-convergence warning would fail the test
-        taken, flow, k, _ = _drive(max_sweeps=50, rtol=1e-3, contraction=0.5)
+        taken, flow, k, _ = _drive(max_sweeps=50, increment_tol=1e-3, contraction=0.5)
     assert taken < 50
     assert float(jnp.max(jnp.abs(flow - 1.0))) < 1e-2  # actually parked at the fixed point
     assert float(jnp.max(jnp.abs(k - 2.0))) < 1e-2
@@ -208,7 +208,7 @@ def test_loop_stops_on_convergence_before_the_cap() -> None:
 
 def test_loop_warns_and_runs_to_the_cap_when_not_converged() -> None:
     with pytest.warns(UserWarning, match="did not reach"):
-        taken, *_ = _drive(max_sweeps=3, rtol=0.0, contraction=0.5)
+        taken, *_ = _drive(max_sweeps=3, increment_tol=0.0, contraction=0.5)
     assert taken == 3
 
 
@@ -218,10 +218,10 @@ def test_adaptive_relaxation_is_no_slower_than_a_constant_floor() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         constant, *_ = _drive(
-            max_sweeps=200, rtol=1e-4, contraction=0.7, relaxation=0.3, relaxation_max=None
+            max_sweeps=200, increment_tol=1e-4, contraction=0.7, relaxation=0.3, relaxation_max=None
         )
         ramped, *_ = _drive(
-            max_sweeps=200, rtol=1e-4, contraction=0.7, relaxation=0.3, relaxation_max=1.0
+            max_sweeps=200, increment_tol=1e-4, contraction=0.7, relaxation=0.3, relaxation_max=1.0
         )
     assert ramped <= constant
 
@@ -255,7 +255,7 @@ def test_the_scalar_preconditioners_are_built_once_whatever_the_block(options, e
     with pytest.warns(UserWarning, match="did not reach"):
         _drive(
             max_sweeps=4,
-            rtol=0.0,
+            increment_tol=0.0,
             contraction=0.5,
             turbulence_class=_RecordingTurbulence,
             **options,

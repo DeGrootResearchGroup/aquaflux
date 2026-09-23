@@ -25,6 +25,7 @@ from aquaflux.discretization import (
 )
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
+from aquaflux.solve import RootSolveSettings
 from aquaflux.solve.continuation import PseudoTransientStep
 from aquaflux.solve.implicit import RootSolver
 from aquaflux.solve.newton import newton_step
@@ -144,7 +145,7 @@ def test_continuation_globalizes_where_fixed_count_newton_stalls() -> None:
     )
     cold = jnp.full(n, 5.0)  # a poor, large initial guess
 
-    solved = scalar_pseudo_transient_solve(max_steps=60)(
+    solved = scalar_pseudo_transient_solve(root_solve=RootSolveSettings(max_steps=60))(
         residual, cold, ScalarShiftPolicy(shift, precond)
     )
     assert float(jnp.linalg.norm(residual(solved))) < 1e-8
@@ -164,7 +165,7 @@ def test_continuation_globalizes_where_fixed_count_newton_stalls() -> None:
 def test_none_policy_falls_back_to_plain_continuation() -> None:
     """A ``None`` policy still converges (unshifted, unpreconditioned continuation)."""
     mesh, _, _, residual = _reactive_transport(16, 8)
-    solved = scalar_pseudo_transient_solve(max_steps=60)(
+    solved = scalar_pseudo_transient_solve(root_solve=RootSolveSettings(max_steps=60))(
         residual, jnp.full(mesh.n_cells, 2.0), None
     )
     assert float(jnp.linalg.norm(residual(solved))) < 1e-8
@@ -238,7 +239,7 @@ def _sweep_traces(*, freeze):
         traces["n"] += 1
         return residual(phi)
 
-    solve = scalar_pseudo_transient_solve(max_steps=20)
+    solve = scalar_pseudo_transient_solve(root_solve=RootSolveSettings(max_steps=20))
     carried = scalar_transport_preconditioner(
         mesh, geometry, gamma, volume_flux, residual, reference
     )

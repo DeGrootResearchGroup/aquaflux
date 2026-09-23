@@ -369,7 +369,7 @@
       line-search collapses are downstream of the same cause, not a separate problem. The captured
       iterate is all that is needed to check it. Two details worth keeping from the
       attempt: the builder's `amg_beta` defaults to **2.0**, which at a sub-floor β is a two-orders
-      mismatch that alone turns a 1-cycle solve into 7 (pass `max(β, beta_floor)`); and a
+      mismatch that alone turns a 1-cycle solve into 7 (pass `max(β, refit_beta_floor)`); and a
       preconditioner frozen 11 steps back yields **no descent whatsoever** — α reads 1.000 because
       that is the line search's non-descent fallback, with ‖G‖ flat — which is independent evidence
       that the refresh is load-bearing.

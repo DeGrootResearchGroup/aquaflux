@@ -18,7 +18,12 @@ from aquaflux.flow import BlockPreconditioner, MomentumContinuity, MovingWall, N
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import DampedNewtonStep, RootSolver, assembler_residual
+from aquaflux.solve import (
+    DampedNewtonStep,
+    RootSolver,
+    RootSolveSettings,
+    assembler_residual,
+)
 from aquaflux.turbulence import (
     ScalarTwoLevel,
     SSTModel,
@@ -86,7 +91,7 @@ def test_segregated_cavity_is_stable_and_active() -> None:
         momentum,
         turbulence,
         _solve_flow,
-        scalar_pseudo_transient_solve(max_steps=40),
+        scalar_pseudo_transient_solve(root_solve=RootSolveSettings(max_steps=40)),
         momentum.initial_state(),
         jnp.full(mesh.n_cells, 1e-4),  # seed k > 0 so the shear production can start
         jnp.full(mesh.n_cells, 1.0),

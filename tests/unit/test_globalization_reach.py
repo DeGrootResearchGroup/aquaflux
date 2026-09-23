@@ -47,6 +47,7 @@ from aquaflux.solve import (
     MonotoneLineSearch,
     PseudoTransientStep,
     RelaxedFarFromRoot,
+    RootSolveSettings,
     SwitchedEvolutionRelaxation,
 )
 from aquaflux.turbulence import (
@@ -285,7 +286,9 @@ def test_the_scalar_builder_forwards_every_field_on_both_of_its_branches(
     the multigrid is switched off -- which reads as a preconditioner result.
     """
     seen: list[PseudoTransientStep] = []
-    solve_scalar = scalar_pseudo_transient_solve(globalization=ASKED, max_steps=20)
+    solve_scalar = scalar_pseudo_transient_solve(
+        globalization=ASKED, root_solve=RootSolveSettings(max_steps=20)
+    )
 
     def residual(phi):
         return phi - 1.0

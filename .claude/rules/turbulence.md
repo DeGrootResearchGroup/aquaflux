@@ -50,7 +50,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
 | `_LinearSolveRegime`, `_resolved_regime`, `_resolved_linear_solve`, and `LinearSolveSettings` from `march_settings.py` | `solve.LinearSolveRegime`, `solve.resolve_linear_solve`, `solve.LinearSolveSettings` | `aquaflux.turbulence.LinearSolveSettings` no longer exists; the per-family regime constants (`_BLOCK_LINEAR_SOLVE`, …) stay here because they are calibrations of *these* preconditioners |
 | `CoupledJacobianProbe` (plan + gather map), `_coupled_jacobian_plan`'s graph logic | `solve.JacobianProbe`, `solve.jacobian_probe_plan` (`solve/jacobian_probe.py`) | the probe holds a `narrowing` callable for the assembler stand-in; `coupled_jacobian_probe(coupled, …)` builds one with `_CoupledNarrowing(gradient_sweeps, production_viscosity_frozen)`. `probe.gradient_sweeps` is now `probe.narrowing.gradient_sweeps`. `_coupled_jacobian_plan` stays as the coupled adapter (mesh graph + layout) |
 | `MonolithicFactorShiftPolicy`, `FrozenTransposeFactory` | `solve.MonolithicFactorShiftPolicy`, `solve.FrozenTransposeFactory` (`solve/monolithic_policy.py`) | `base` is any `ShiftPolicy`; no longer exported from `aquaflux.turbulence` |
-| `_MaterializedSession`, `_beta_tracking_refresh`, `PreconditionerSession`, `_jacobian_matvec`, `_batched_jacobian_matvec`, `_frozen_shift_diagonal`, `_PROBE_BATCH_SIZE`, `_BUILD_BETA`, `_FACTORIZATION_LINEAR_SOLVE`, `_VCYCLE_LINEAR_SOLVE`, `_is_traced` | `solve.MaterializedSession`, `beta_tracking_refresh`, `PreconditionerSession`, `jacobian_matvec`, `batched_jacobian_matvec`, `frozen_shift_diagonal`, `PROBE_BATCH_SIZE`, `BUILD_BETA`, `FACTORIZATION_LINEAR_SOLVE`, `VCYCLE_LINEAR_SOLVE` (`solve/materialized_session.py`) | the session is written against `solve.MaterializedProblem`; coupled RANS supplies `_CoupledProblem` (assembler, probe, `[flow] / [k, omega]` groups, `_monolithic_shift_source`, `_monolithic_factor_step` with the `k` positivity guards). `_beta_tracking_refresh(coupled, stencil_reach, …, probe=)` is now `beta_tracking_refresh(assembler, probe, every_step=, beta_floor=, observer=)` |
+| `_MaterializedSession`, `_beta_tracking_refresh`, `PreconditionerSession`, `_jacobian_matvec`, `_batched_jacobian_matvec`, `_frozen_shift_diagonal`, `_PROBE_BATCH_SIZE`, `_BUILD_BETA`, `_FACTORIZATION_LINEAR_SOLVE`, `_VCYCLE_LINEAR_SOLVE`, `_is_traced` | `solve.MaterializedSession`, `beta_tracking_refresh`, `PreconditionerSession`, `jacobian_matvec`, `batched_jacobian_matvec`, `frozen_shift_diagonal`, `PROBE_BATCH_SIZE`, `BUILD_BETA`, `FACTORIZATION_LINEAR_SOLVE`, `VCYCLE_LINEAR_SOLVE` (`solve/materialized_session.py`) | the session is written against `solve.MaterializedProblem`; coupled RANS supplies `_CoupledProblem` (assembler, probe, `[flow] / [k, omega]` groups, `_monolithic_shift_source`, `_monolithic_factor_step` with the `k` positivity guards). `_beta_tracking_refresh(coupled, stencil_reach, …, probe=)` is now `beta_tracking_refresh(assembler, probe, every_step=, refit_beta_floor=, observer=)` |
 | `MaterializedJacobian`, `CompleteLu`, `MonolithicVCycle`, `FieldSplit`, `JacobianProbeSpec` | the same names in `aquaflux.solve` (`solve/materialized_spec.py`) | no longer exported from `aquaflux.turbulence`; `BlockDiagonal` stays here. The registry `_SPEC_MAPPING` **extends** `solve.MATERIALIZED_MAPPING` rather than restating its kinds; a laminar spec file loads with `solve.materialized_spec_from_mapping` |
 | `_SessionContinuation` | `solve.SessionSource` | shared with the flow march |
 | the flow rows of `coupled_scaled_norm`, and the per-block reference scales | `flow.flow_row_scales`, `solve.block_reference_scales` | `coupled_scaled_norm` appends its `k`/`ω` rows to the flow's |
@@ -69,7 +69,7 @@ Many entries below are dated history written against the old API. Read them thro
 | `coupled_lu_continuation(..., lu_beta=b, backend=B, stencil_reach=r, ...)` | `coupled_step(..., preconditioner=MaterializedJacobian(CompleteLu(backend=B), build_beta=b, probe=JacobianProbeSpec(stencil_reach=r)))` |
 | `coupled_amg_continuation(..., smoother_fill_levels=…, amg_beta=b)` | `MaterializedJacobian(MonolithicVCycle(smoother_fill_levels=…), build_beta=b)` |
 | `coupled_amg_continuation(..., field_split=True, leading_inverse=L, trailing_inverse=T)` | `MaterializedJacobian(FieldSplit(L, T))` — `L`/`T` are `solve.BlockInverse` values |
-| `probe=` / `preconditioner=` shared across rungs, `amg_beta_tracking_refresh(..., beta_floor=f, observer=o)`, `lu_beta_tracking_refresh` | one session: `open_session(MaterializedJacobian(..., beta_floor=f), coupled, observer=o)`, passed as `solve_coupled(preconditioner=session)`; its `refresh_preconditioner` / `rebind` replace the hooks' |
+| `probe=` / `preconditioner=` shared across rungs, `amg_beta_tracking_refresh(..., beta_floor=f, observer=o)`, `lu_beta_tracking_refresh` | one session: `open_session(MaterializedJacobian(..., refit_beta_floor=f), coupled, observer=o)`, passed as `solve_coupled(preconditioner=session)`; its `refresh_preconditioner` / `rebind` replace the hooks' |
 | `reuse=previous.shift_policy, residual_norm=m` | `session.refresh(state, previous, **march)` — since #370 the measure is not passed; the march hands every step its own |
 | `solve_coupled(rtol=, atol=, scaled_norm=)`, `solve_coupled_mass_flow(rtol=, atol=)` | `convergence=Convergence(measure=…, rtol=…, atol=…)` (#370); `scaled_norm` is gone because the row-scaled measure is now always rebuilt |
 | `coupled_step(block_scaled_norm=True)` / `(residual_norm=m)`, the same on `mass_flow_coupled_continuation` | nothing on the builder: `solve_coupled(convergence=Convergence(measure=BlockScaled()))` (#370) |
@@ -82,6 +82,9 @@ Many entries below are dated history written against the old API. Read them thro
 | `krylov_solver=S`, `forward_rtol=…` / `forward_restart=…` / `forward_max_restarts=…` | `linear_solve=S` or `linear_solve=LinearSolveSettings(rtol=…, restart=…, max_restarts=…)` (#388) — one slot, so a solver beside a regime setting cannot be written |
 | the scalar multigrid string `M` = `"twolevel"` / `"air"` / `None` — on `BlockDiagonal.method`, `scalar_transport_preconditioner(method=)`, `SSTTurbulence.k_preconditioner`/`omega_preconditioner(method=)`, `solve_segregated(scalar_preconditioner=)`, and `_coupled_shift_policy(coupled, state, M)` | a `ScalarBlock` value `S` = `ScalarTwoLevel()` / `ScalarAir()` / `UnpreconditionedScalars()` from `aquaflux.turbulence` (#394), on `BlockDiagonal.scalar` and a `scalar=` keyword everywhere else; `_UNSET` and `resolved_method` are gone (`resolved_scalar`); a string is refused |
 | `point_setup` returning `strategy` + `RefreshPolicy(refresh_preconditioner=hook)`, `_rebinding` | `solve_reynolds_continuation` / `solve_reynolds_ramp` given `preconditioner=`; `point_setup` keeps only per-point march settings |
+| `solve_segregated(rtol=)` | `increment_tol=` (#373) — it is a tolerance on the coupled Picard **increment**, not on a residual |
+| `scalar_pseudo_transient_solve(max_steps=, rtol=, atol=, solver=)` | `root_solve=RootSolveSettings(max_steps=…, convergence=…, linear_solver=…)` (#428); its `adjoint_solver` reaches the driver but is inert, since this solve is forward-only |
+| `MaterializedJacobian(beta_floor=)` | `refit_beta_floor=` (#373) — the shift the inverse is re-fitted at, against the march's own `Globalization.beta_floor` |
 
 ## The closure — model, strain, sources, transport, preconditioner
 
@@ -283,7 +286,7 @@ Many entries below are dated history written against the old API. Read them thro
   - **✅ `preconditioner_spec.py`, the preconditioner as a value (#371, 2026-09-14) — consumed by every
     session, and readable from a case file (#391).** `BlockDiagonal` | `MaterializedJacobian(inverse=
     CompleteLu | MonolithicVCycle | FieldSplit(leading, trailing), probe=JacobianProbeSpec, build_beta,
-    beta_floor)`. `BlockDiagonal`, `CompleteLu`, `MonolithicVCycle` and `JacobianProbeSpec` are
+    refit_beta_floor)`. `BlockDiagonal`, `CompleteLu`, `MonolithicVCycle` and `JacobianProbeSpec` are
     `SettingsValue`s with `None`-unset fields; **`FieldSplit` and `MaterializedJacobian` are not** — both
     have required fields (`leading`/`trailing`, `inverse`) and `probe` defaults to `JacobianProbeSpec()`.
     `solve_coupled`, `coupled_step`, `open_session` and both Reynolds drivers take them.
@@ -1154,7 +1157,7 @@ Many entries below are dated history written against the old API. Read them thro
   second (per-face) argument, and a **turbulence** stand-in must provide `wall_face_eddy_viscosity(k)`. A
   resolved-wall stub returns zeros for it (`tests/unit/test_segregated_convergence.py`). The loop **stops on the coupled
   Picard increment** (`_relative_change` — the largest per-field relative L2 change over a sweep <
-  `rtol`), with `max_sweeps` only a backstop; the outer under-relaxation is the **SER ramp**
+  `increment_tol`), with `max_sweeps` only a backstop; the outer under-relaxation is the **SER ramp**
   `_sweep_relaxation` (opens from the `relaxation` floor toward `relaxation_max` as that increment
   falls, constant when `relaxation_max is None`). Hitting `max_sweeps` without converging warns.
   - **Flow-solve seam is `solve_flow(momentum, state) → (momentum, state)` (binding).** The flow solve
@@ -1565,7 +1568,7 @@ Many entries below are dated history written against the old API. Read them thro
       `.claude/rules/schemes.md` and `.claude/rules/solve-direct-preconditioners.md`; harness
       `validation/gradient_stencil_reach.py`.
       **Trap (from the deleted gates, #371): a refresh condition nested inside a β gate is unreachable
-      below a preconditioner-only `beta_floor`**, where the gate's clamped input never moves — 91 % of
+      below a preconditioner-only `refit_beta_floor`**, where the gate's clamped input never moves — 91 % of
       sub-floor steps once refreshed nothing while ν_t drifted ~20 % per step. Full data in
       `.claude/rules/solve-amg-multigrid.md`.
       The `assemble` half of the refresh is also precomputed now (`ShiftedCellMajorOperator`), and the
@@ -2969,8 +2972,8 @@ tuning follow-up noted above.
   must be filed as a tracked issue at merge time, not left implicit.
 
 - **Convergence-based outer stop, not a fixed sweep count — BUILT.** The loop tests the coupled
-  Picard increment and stops on it (`rtol`), with `max_sweeps` only a backstop and a warning when the
-  cap is hit unconverged. Do **not** reintroduce a hard-coded `sweeps` count. The increment measure
+  Picard increment and stops on it (`increment_tol`), with `max_sweeps` only a backstop and a warning
+  when the cap is hit unconverged. Do **not** reintroduce a hard-coded `sweeps` count. The increment measure
   is the residual-agnostic per-field relative change, not a raw combined norm (the field scales
   differ by orders of magnitude).
 
@@ -3018,9 +3021,9 @@ tuning follow-up noted above.
   was deleted rather than tuned: it cost ~45 minutes and its four assertions were all near-free,
   while its docstring claimed an isolation (unpreconditioned scalar solves) that the code
   contradicted. **A segregated-loop test must assert convergence** — that the Picard increment
-  actually reached `rtol` (the driver only `warnings.warn`s otherwise, and returns the
+  actually reached `increment_tol` (the driver only `warnings.warn`s otherwise, and returns the
   under-converged fields), or that the result matches an independently converged reference. The
-  model is `test_coupled_rans.py`, which drives the loop to `rtol=1e-9` and asserts it reaches the
+  model is `test_coupled_rans.py`, which drives the loop to `increment_tol=1e-9` and asserts it reaches the
   coupled solve's fixed point to 1e-4.
 
 ## Post-change

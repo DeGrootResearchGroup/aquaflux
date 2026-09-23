@@ -61,10 +61,11 @@ import jax.numpy as jnp
 
 from aquaflux.solve import (
     DEFAULT_GLOBALIZATION,
+    DEFAULT_ROOT_SOLVE,
     Globalization,
     LocalCourantBasis,
     PseudoTransientStep,
-    RootSolver,
+    RootSolveSettings,
     ShiftBasis,
     ShiftSettings,
     ShiftTerm,
@@ -327,10 +328,16 @@ def momentum_continuation(
     )
 
 
+#: ``reused_flow_solve``'s own defaults, beneath whatever its caller sets. A segregated outer loop
+#: re-solves the momentum system every sweep from the previous sweep's field, so the cap is generous
+#: enough for the first sweep's cold solve rather than for a typical warm one.
+_REUSED_FLOW_SOLVE = RootSolveSettings(max_steps=80)
+
+
 def reused_flow_solve(
     reference: MomentumContinuity,
     *,
-    max_steps: int = 80,
+    root_solve: RootSolveSettings = DEFAULT_ROOT_SOLVE,
     **build_kwargs: object,
 ) -> Callable[[MomentumContinuity, jnp.ndarray], jnp.ndarray]:
     """A ``solve_flow(momentum, state)`` that builds its preconditioned continuation **once** and
@@ -356,8 +363,10 @@ def reused_flow_solve(
         The flow assembler whose (effective) viscosity sets the frozen preconditioner. Its molecular
         or effective viscosity only calibrates the accelerator; each solve is driven to the residual
         of the ``momentum`` it is called with.
-    max_steps : int
-        Maximum Newton/continuation iterations per solve.
+    root_solve : RootSolveSettings
+        How the Newton solve around the continuation is run -- its step cap, its stopping test and its
+        forward and adjoint linear solvers. Only the fields it sets are applied; left unset, the step
+        cap is this builder's own and everything else is the solver's.
     **build_kwargs
         Forwarded to :func:`momentum_continuation` (e.g. ``schur_scaling="msimple"``,
         ``velocity=ConvectionTwoLevel()``, ``globalization``).
@@ -372,7 +381,7 @@ def reused_flow_solve(
         a traced program -- ``jax.jit``, ``jax.vmap``, or a traced loop such as ``jax.lax.scan``.
     """
     continuation = momentum_continuation(reference, **build_kwargs)
-    solver = RootSolver(max_steps=max_steps, strategy=continuation)
+    solver = root_solve.filled_from(_REUSED_FLOW_SOLVE).solver(continuation)
 
     def solve_flow(momentum: MomentumContinuity, state: jnp.ndarray) -> jnp.ndarray:
         # `assembler_residual` rather than a lambda: the march compiles its step with the residual as

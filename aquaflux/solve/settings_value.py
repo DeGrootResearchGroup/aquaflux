@@ -6,6 +6,11 @@ whose every field defaults to ``None``, so that constructing one with a single f
 setting and leaves every other one to the default of the class that consumes it. The default is then
 written down in exactly one place, beside the reasoning for it, rather than restated by each
 configuration object that can reach it.
+
+The two module-private helpers here are the other half of that: turning such a value, plus whatever
+fields the caller supplies alongside it, into the constructor arguments of the class being built --
+checking every name against that class and refusing a field given both ways, rather than dropping
+either in silence.
 """
 
 from __future__ import annotations
@@ -100,6 +105,78 @@ def filled_from(value: _Value, base: _Value) -> _Value:
             if field.init and getattr(value, field.name) is None
         },
     )
+
+
+def _supplied(target: type, fields: dict[str, object]) -> dict[str, object]:
+    """The entries of ``fields`` that are set, after checking that ``target`` declares every one.
+
+    ``None`` means *not set here*, and an unset entry is dropped so that ``target`` applies its own
+    default -- including the ones that are not ``None``: a step's ``residual_norm=None`` gives the
+    Euclidean norm, a dual-time loop's ``inner_steps=None`` its own count. Each default is therefore
+    declared once, on the class that uses it, and no caller restates one.
+
+    The names are checked **before** anything is dropped. Filtering first makes a misplaced setting
+    vanish exactly when its value is ``None`` -- a field only one step class declares, handed to
+    another as ``None``, would disappear without a word -- and a setting that reaches no field is the
+    failure a settings value exists to remove.
+
+    Parameters
+    ----------
+    target : type
+        The dataclass the entries are constructor arguments for.
+    fields : dict
+        Field name -> value, with ``None`` meaning *not set here*.
+
+    Returns
+    -------
+    dict
+        The entries whose value is not ``None``.
+
+    Raises
+    ------
+    TypeError
+        If ``fields`` names something ``target`` does not declare.
+    """
+    unknown = sorted(set(fields) - {field.name for field in dataclasses.fields(target)})
+    if unknown:
+        raise TypeError(f"{target.__name__} declares no field named {', '.join(unknown)}")
+    return {name: value for name, value in fields.items() if value is not None}
+
+
+def _merged(
+    target: type, settings: dict[str, object], fields: dict[str, object]
+) -> dict[str, object]:
+    """A settings value's own settings and a caller's remaining fields, as arguments for ``target``.
+
+    A name in both is refused. A dict merge would let one of them win silently, and which one won would
+    be decided by the order the merge was written in rather than by anything the caller meant.
+
+    Parameters
+    ----------
+    target : type
+        The class being constructed.
+    settings : dict
+        What the settings value sets, already translated into ``target``'s fields.
+    fields : dict
+        The caller's remaining fields, with ``None`` meaning *not set here*.
+
+    Returns
+    -------
+    dict
+        The union, with unset entries dropped.
+
+    Raises
+    ------
+    TypeError
+        If a field is one ``target`` does not declare, or is set both ways.
+    """
+    given = _supplied(target, fields)
+    clash = sorted(settings.keys() & given.keys())
+    if clash:
+        raise TypeError(
+            f"{', '.join(clash)} set both on the settings value and as a field; set it in one place"
+        )
+    return {**given, **settings}
 
 
 def _concrete_members(base: type) -> str:

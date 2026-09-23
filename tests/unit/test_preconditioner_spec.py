@@ -94,7 +94,7 @@ def test_nested_specs_compare_and_hash_by_value() -> None:
         return MaterializedJacobian(
             FieldSplit(SimpleSmoothed(sweeps=2), JacobiSmoothed(max_coarse=max_coarse)),
             probe=JacobianProbeSpec(column_reach=(3, 3, 3, 3, 2, 2)),
-            beta_floor=0.05,
+            refit_beta_floor=0.05,
         )
 
     assert spec(200) == spec(200)

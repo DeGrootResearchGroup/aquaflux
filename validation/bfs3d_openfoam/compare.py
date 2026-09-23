@@ -696,7 +696,7 @@ PRECONDITIONER = MaterializedJacobian(
         )
     ),
     probe=JacobianProbeSpec(column_reach=COLUMN_REACH),
-    beta_floor=PC_BETA_FLOOR,
+    refit_beta_floor=PC_BETA_FLOOR,
 )
 
 #: Where the session sends what the split's blocks produce: the leading hierarchy's build record, and --

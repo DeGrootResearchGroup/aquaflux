@@ -33,7 +33,7 @@ from aquaflux.flow.mean_velocity import (
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import solve_linear
+from aquaflux.solve import RootSolveSettings, solve_linear
 
 H, MU, RHO, U_TARGET = 2.0, 0.1, 1.0, 1.0  # h = H/2 = 1; beta_analytic = 12 mu U_b / H^2 = 3 mu
 _DIRECT = lx.AutoLinearSolver(well_posed=True)
@@ -62,7 +62,9 @@ def _bulk_velocity(momentum: MomentumContinuity, state: jnp.ndarray, direction: 
 def test_constraint_is_met_to_machine_precision() -> None:
     """The converged solve hits the target bulk velocity to the residual tolerance."""
     momentum = _channel(beta_initial=0.05)  # far from the analytic 0.3
-    solve = bulk_velocity_flow_solve(target=U_TARGET, flow_direction=0, solver=_DIRECT)
+    solve = bulk_velocity_flow_solve(
+        target=U_TARGET, flow_direction=0, root_solve=RootSolveSettings(linear_solver=_DIRECT)
+    )
     solved_momentum, flow = solve(momentum, momentum.initial_state())
     assert _bulk_velocity(solved_momentum, flow, 0) == pytest.approx(U_TARGET, abs=1e-10)
 
@@ -70,7 +72,9 @@ def test_constraint_is_met_to_machine_precision() -> None:
 def test_recovers_the_analytic_body_force() -> None:
     """The converged multiplier matches ``beta = 12 mu U_b / H^2`` to the discretization error."""
     momentum = _channel(beta_initial=0.05)
-    solve = bulk_velocity_flow_solve(target=U_TARGET, flow_direction=0, solver=_DIRECT)
+    solve = bulk_velocity_flow_solve(
+        target=U_TARGET, flow_direction=0, root_solve=RootSolveSettings(linear_solver=_DIRECT)
+    )
     solved_momentum, _ = solve(momentum, momentum.initial_state())
     beta_analytic = 12.0 * MU * U_TARGET / H**2  # = 3 mu = 0.3
     # The constraint is met on the *discrete* problem exactly; the gap to the continuum beta is the FVM
@@ -83,7 +87,9 @@ def test_initial_force_does_not_change_the_result() -> None:
     forces = []
     for beta_initial in (0.02, 0.5):
         momentum = _channel(beta_initial)
-        solve = bulk_velocity_flow_solve(target=U_TARGET, flow_direction=0, solver=_DIRECT)
+        solve = bulk_velocity_flow_solve(
+            target=U_TARGET, flow_direction=0, root_solve=RootSolveSettings(linear_solver=_DIRECT)
+        )
         solved_momentum, _ = solve(momentum, momentum.initial_state())
         forces.append(float(solved_momentum.body_force[0]))
     assert forces[0] == pytest.approx(forces[1], rel=1e-8)
@@ -157,9 +163,14 @@ def test_preconditioned_iterative_solve_matches_the_direct_solve() -> None:
     preconditioner = BlockPreconditioner.build(momentum).factory()
     gmres = lx.GMRES(rtol=1e-8, atol=1e-10)
     solve_iterative = bulk_velocity_flow_solve(
-        target=U_TARGET, solver=gmres, preconditioner=preconditioner, reference=momentum
+        target=U_TARGET,
+        root_solve=RootSolveSettings(linear_solver=gmres),
+        preconditioner=preconditioner,
+        reference=momentum,
     )
-    solve_direct = bulk_velocity_flow_solve(target=U_TARGET, solver=_DIRECT)
+    solve_direct = bulk_velocity_flow_solve(
+        target=U_TARGET, root_solve=RootSolveSettings(linear_solver=_DIRECT)
+    )
 
     momentum_it, flow_it = solve_iterative(momentum, momentum.initial_state())
     momentum_di, flow_di = solve_direct(momentum, momentum.initial_state())
@@ -176,7 +187,9 @@ def test_preconditioner_requires_a_reference() -> None:
     tracer into the preconditioner under ``jax.grad`` and break differentiation)."""
     with pytest.raises(ValueError, match="reference"):
         bulk_velocity_flow_solve(
-            target=U_TARGET, solver=lx.GMRES(rtol=1e-8, atol=1e-10), preconditioner=lambda w: w
+            target=U_TARGET,
+            root_solve=RootSolveSettings(linear_solver=lx.GMRES(rtol=1e-8, atol=1e-10)),
+            preconditioner=lambda w: w,
         )
 
 
@@ -204,7 +217,9 @@ def test_constrained_solve_is_reverse_differentiable() -> None:
     12 U_b / H^2 = 3``. This exercises the implicit-function-theorem adjoint (the assembler threaded as
     the Newton parameter) -- without it the solve raises rather than returning a gradient.
     """
-    solve = bulk_velocity_flow_solve(target=U_TARGET, solver=_DIRECT)
+    solve = bulk_velocity_flow_solve(
+        target=U_TARGET, root_solve=RootSolveSettings(linear_solver=_DIRECT)
+    )
     ad = float(jax.grad(lambda mu: _laminar_body_force(mu, solve))(MU))
     eps = 1e-6
     fd = (_laminar_body_force(MU + eps, solve) - _laminar_body_force(MU - eps, solve)) / (2 * eps)
@@ -231,10 +246,12 @@ def test_preconditioned_adjoint_matches_the_unpreconditioned_adjoint() -> None:
         body_force=(0.05, 0.0),
     )
     preconditioner = BlockPreconditioner.build(reference).factory()  # built off-grad, concrete
-    solve_direct = bulk_velocity_flow_solve(target=U_TARGET, solver=_DIRECT)
+    solve_direct = bulk_velocity_flow_solve(
+        target=U_TARGET, root_solve=RootSolveSettings(linear_solver=_DIRECT)
+    )
     solve_pre = bulk_velocity_flow_solve(
         target=U_TARGET,
-        solver=lx.GMRES(rtol=1e-9, atol=1e-11),
+        root_solve=RootSolveSettings(linear_solver=lx.GMRES(rtol=1e-9, atol=1e-11)),
         preconditioner=preconditioner,
         reference=reference,
     )

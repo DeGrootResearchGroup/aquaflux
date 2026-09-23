@@ -58,7 +58,10 @@ public concrete members (found from `__subclasses__`, private and abstract ones 
 block after the pressure Schur was already built. A new family base gets this by deriving from `abc.ABC`
 and marking its build hook abstract; do not add a per-family `__new__`.
 **How two partial settings values combine is written once too: `solve.filled_from(value, base)` (#399
-review).** Each `None` field of `value` takes `base`'s. `SettingsValue.filled_from` delegates to it, and
+review), and so is how one BECOMES the arguments of the class it configures — `_supplied(target, fields)`
+and `_merged(target, settings, fields)`, moved from `continuation.py` into `settings_value.py` with
+`RootSolveSettings` (#428, 2026-09-22), since `implicit.py` cannot import `continuation.py` (that is the
+direction the import already runs).** Each `None` field of `value` takes `base`'s. `SettingsValue.filled_from` delegates to it, and
 so do the settings objects that are `equinox` modules (`Globalization.filled_from` and `with_defaults`,
 `turbulence.CoupledShiftSettings.filled_from`); before, `CoupledShiftSettings`, `LinearSolveSettings` and `DualTimeLoop` each
 carried an identical body and `Globalization.with_defaults` a fourth, and because the Reynolds merge
@@ -129,6 +132,10 @@ archived march logs and any private notes still use the left column).
 | `precondition_step` | `refresh_preconditioner` | a per-step hook, not a step |
 | `_ForwardSolveRegime`, `_BLOCK_FORWARD`, … | `LinearSolveRegime` (public, `solve/shifted_step.py`; was `_LinearSolveRegime` in `turbulence/coupled.py` until 2026-09-19), `_BLOCK_LINEAR_SOLVE`, … | the regimes of the same inner solve; the per-family constants stay in `turbulence/coupled.py` |
 | `RootSolver(rtol=, atol=)`, `solve_coupled(rtol=, atol=, scaled_norm=)`, `solve_coupled_mass_flow(rtol=, atol=)` | `convergence=Convergence(measure=…, rtol=…, atol=…)` (#370, 2026-09-16) | the measure and its tolerances as one value; `RootSolver` also takes `measures=` for a structured residual |
+| `RelaxationSchedule.relaxation(…)` | `shift_strength(…)` (#373, 2026-09-22) | it returns the shift strength β, which grows with damping, where an under-relaxation factor in `(0, 1]` shrinks with it — the word ran in both directions. The classes keep their names: `SwitchedEvolutionRelaxation` is the literature's |
+| `solve_segregated(rtol=)` | `increment_tol=` (#373, 2026-09-22) | it is a tolerance on the **state increment** (the largest per-field relative change over a sweep), not on a residual, and it sat beside `solve_coupled(rtol=)`, which is one |
+| `MaterializedJacobian(beta_floor=)`, `beta_tracking_refresh(beta_floor=)` | `refit_beta_floor=` (#373, 2026-09-22) | the shift the **inverse is re-fitted at**. `Globalization.beta_floor` (the march's own) keeps its name; the step control's `beta_min` is a third floor and is unchanged |
+| `reused_flow_solve(max_steps=)`, `bulk_velocity_flow_solve(max_steps=, solver=)`, `scalar_pseudo_transient_solve(max_steps=, rtol=, atol=, solver=)` | `root_solve=RootSolveSettings(max_steps=…, convergence=…, linear_solver=…, adjoint_solver=…)` (#428, 2026-09-22) | one value on all three, so a setting reachable from one is reachable from all — `adjoint_solver` was reachable from none |
 
 **Deliberately NOT renamed**, so do not "finish the job":
 
@@ -241,7 +248,7 @@ recorded error.** A default here that disagrees with the code is a defect — fi
 | smoother fill | `smoother_fill_levels=1` (ILU(1)) | 0 (ILU(0)) — **inert**: monolithic only, and the case runs the split | `MonolithicVCycle` / `compare.py` |
 | smoother sweeps | `smoother_sweeps=2` | 4 — **inert**, as above | same |
 | coarse-eq limit | `coarse_eq_limit=None` (~50) | 2000 — **inert**, as above | same |
-| PC shift floor | `beta_floor=0.0` | **0.05** | same |
+| PC shift floor | `refit_beta_floor=0.0` | **0.05** | same |
 | aggregation | plain (`pc_gamg_agg_nsmooths=0`) | plain | `amg_preconditioner.py` |
 | field split | `field_split=False` | **True** | `compare.py` |
 | stencil reach | `stencil_reach=3` | 3 | — |
@@ -335,6 +342,32 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   - Pinned by `tests/unit/test_state.py` (mesh-free: shape, addressing, packing, the bordered
     extension, the construction refusals, and the zero-leaf/hashable pytree properties).
 
+- **`RootSolveSettings` (`implicit.py`) — the settings of a root solve, as one value (BUILT 2026-09-22,
+  #428).** `RootSolveSettings(convergence, max_steps, linear_solver, adjoint_solver)`, a `SettingsValue`
+  with `None`-unset fields, and `DEFAULT_ROOT_SOLVE` the empty override every builder defaults to. Its one
+  method, `solver(strategy, **fields)`, is the only place a value becomes a `RootSolver`; `measures` rides
+  through as a field, because it says what the *problem's* residual can be measured in. Taken by all three
+  builders of a root solve — `flow.reused_flow_solve`, `flow.bulk_velocity_flow_solve` and
+  `turbulence.scalar_pseudo_transient_solve` — each beneath its own step cap (80 / 20 / 40) via
+  `filled_from`.
+  - **The membership test is the same one `Globalization` uses:** a setting belongs here when its reason
+    can be stated without naming the residual. `strategy` (the step a builder exists to construct) and
+    `measures` cannot, so they stay with the builder.
+  - **What it replaced.** All three took `max_steps`, two a forward linear solver, one `rtol`/`atol`, and
+    **none** could reach `adjoint_solver` — the setting `solve_coupled` had to grow because its absence
+    makes a transpose solve on a hard case raise an error naming a remedy the entry point cannot reach.
+    The scalar builder's `rtol=1e-10, atol=1e-12` were a second copy of `_ROOT_CONVERGENCE`'s and are gone
+    rather than moved, so the default is declared once.
+  - **The drivers `solve_coupled` and `solve_coupled_mass_flow` still spell these as keywords** — they run
+    a solve rather than returning one, their surface is what a case file will describe (#375), and their
+    forward linear solve is reached through `linear_solve=LinearSolveSettings(...)` on the step instead.
+  - **⚠️ `tools/sibling_builders.py` reports nothing for these three and cannot**: each returns a closure
+    it defines, which the tool credits with constructing nothing, and their public surfaces share fewer
+    parameters than its threshold anyway. That silence was not evidence before this change and is not now.
+  - Pinned by `tests/unit/test_root_solve_reach.py`: every builder takes the value, a non-default one
+    arrives on the built solver field for field, the three step caps as literal numbers, one override
+    changes one setting, and each refusal.
+
 - **`convergence.py` — the stopping test as ONE value (BUILT 2026-09-16, #370).** `Convergence(measure,
   rtol, atol)`, a `SettingsValue` with `None`-unset fields, and the measure family `ResidualMeasure`
   (abstract) = `Euclidean()` / `RowScaled()` / `BlockScaled()`. Each measure builds a
@@ -419,7 +452,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
 
 - **`jacobian_probe.py` + `monolithic_policy.py` — MOVED HERE 2026-09-19 (#450 stage 1).** `JacobianProbe(plan, structure, narrowing)` and `jacobian_probe_plan(face_cells, n_cells, n_fields, …)` are the coloured-probe plan and de-compression map, which depend on the cell graph and reaches alone; `narrowing` (`assembler -> assembler`, compared by value) is the one residual-specific part — a stand-in whose Jacobian is materialized. `MonolithicFactorShiftPolicy(base, preconditioner)` pairs any base `ShiftPolicy`'s shift diagonal with a frozen monolithic inverse, and `FrozenTransposeFactory` is its value-equal transposed apply (equality is what keeps a rung's engine rebuild a compile-cache hit). Their coupled-RANS builders are `turbulence.coupled_jacobian_probe` and `_CoupledNarrowing`.
 
-- **`materialized_session.py` + `materialized_spec.py` — MOVED HERE 2026-09-19 (#450 stage 2).** `MaterializedSession(spec, problem, …)` is the lifecycle of a materialized-Jacobian preconditioner: one probe, one inverse and one refresh hook, each created at most once, so every step built from it carries the identical static objects. It is written against **`MaterializedProblem`**, an ABC that is everything the lifecycle needs from a residual: `assembler`, `layout`, `with_assembler`, `probe(settings, active_rows)`, `groups()` (`None` ⇒ nothing to split), `bind_march`, `shift_source`, `build_step`. `bind_march`'s result **must** carry `dual_time` and `inner_refresh`, which the session reads and may set; it is also where a residual validates early (coupled RANS raises its `k`-positivity refusals there, before any inverse is fitted). Implementations: `turbulence._CoupledProblem`, `flow._FlowProblem`. A `FieldSplit` inverse is refused at construction for a problem whose `groups()` is `None`. `beta_tracking_refresh(assembler, probe, every_step=, beta_floor=, observer=)`, `jacobian_matvec` / `batched_jacobian_matvec` (module-level `filter_jit`, assembler an ARGUMENT so a rung is a cache hit), `frozen_shift_diagonal`, `PROBE_BATCH_SIZE` and the two family regimes (`FACTORIZATION_LINEAR_SOLVE`, `VCYCLE_LINEAR_SOLVE`) came with it. The specs (`MaterializedJacobian`, `CompleteLu`, `MonolithicVCycle`, `FieldSplit`, `JacobianProbeSpec`) and `MATERIALIZED_MAPPING` / `materialized_spec_from_mapping` / `materialized_spec_to_mapping` are here too; a solve with more kinds extends `MATERIALIZED_MAPPING.kinds` rather than restating them. `SessionSource` (`driver.py`) is the `ContinuationSource` over any session.
+- **`materialized_session.py` + `materialized_spec.py` — MOVED HERE 2026-09-19 (#450 stage 2).** `MaterializedSession(spec, problem, …)` is the lifecycle of a materialized-Jacobian preconditioner: one probe, one inverse and one refresh hook, each created at most once, so every step built from it carries the identical static objects. It is written against **`MaterializedProblem`**, an ABC that is everything the lifecycle needs from a residual: `assembler`, `layout`, `with_assembler`, `probe(settings, active_rows)`, `groups()` (`None` ⇒ nothing to split), `bind_march`, `shift_source`, `build_step`. `bind_march`'s result **must** carry `dual_time` and `inner_refresh`, which the session reads and may set; it is also where a residual validates early (coupled RANS raises its `k`-positivity refusals there, before any inverse is fitted). Implementations: `turbulence._CoupledProblem`, `flow._FlowProblem`. A `FieldSplit` inverse is refused at construction for a problem whose `groups()` is `None`. `beta_tracking_refresh(assembler, probe, every_step=, refit_beta_floor=, observer=)`, `jacobian_matvec` / `batched_jacobian_matvec` (module-level `filter_jit`, assembler an ARGUMENT so a rung is a cache hit), `frozen_shift_diagonal`, `PROBE_BATCH_SIZE` and the two family regimes (`FACTORIZATION_LINEAR_SOLVE`, `VCYCLE_LINEAR_SOLVE`) came with it. The specs (`MaterializedJacobian`, `CompleteLu`, `MonolithicVCycle`, `FieldSplit`, `JacobianProbeSpec`) and `MATERIALIZED_MAPPING` / `materialized_spec_from_mapping` / `materialized_spec_to_mapping` are here too; a solve with more kinds extends `MATERIALIZED_MAPPING.kinds` rather than restating them. `SessionSource` (`driver.py`) is the `ContinuationSource` over any session.
 
 - **`block_preconditioner.py` — BUILT 2026-09-19.** `MaterializedBlockPreconditioner`: one `BlockInverse` (e.g. `SimpleSmoothed`) fitted to the whole materialized, shifted Jacobian, sharing the probe/shift/in-place-refresh of `MaterializedJacobianPreconditioner` with the field split. It is the inverse of a problem whose fields form a **single group** (`MaterializedProblem.groups()` is `None`), and the session enforces the mirror pair: `FieldSplit` refused for one group, a bare `BlockInverse` refused for two. `MaterializedJacobian.inverse` accepts a bare `BlockInverse`. Needs no optional dependency (the hierarchy is traced JAX), unlike `MonolithicVCycle` (PETSc GAMG). Tested for exact transposition and for being an approximate inverse of the SHIFTED operator (mutating the shift away fails it).
 
@@ -659,7 +692,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
      table identify them directly — highest cycle count, clipped `a_min`, and any step carrying a retry
      flag. Probe the state *entering* such a step (the checkpoint written after the previous one).
      The same caution applies to the *pairing*: use the operator at the march's own β with the V-cycle
-     at `max(β, beta_floor)`, because that mismatch is the shipped configuration. A probe that builds
+     at `max(β, refit_beta_floor)`, because that mismatch is the shipped configuration. A probe that builds
      the V-cycle at the march's raw β instead measures a configuration the floor exists to prevent —
      it reported "the V-cycle does not converge at all in the tail" (true residual 1.0), where the real
      pairing takes **6 cycles to 1.5e-10**.
