@@ -499,12 +499,16 @@ def test_the_grid_changes_what_the_ray_test_COSTS_and_not_what_it_ANSWERS(grid):
     """The contract of the acceleration, on a body that genuinely shadows itself.
 
     A grid decides which triangles a segment is worth testing; it must never decide whether one
-    blocks. So the two paths are compared bit for bit on a closed drum with its own interior
-    facets as receivers -- every pair of which is either across the body (blocked) or along its
-    wall (clear) -- at three resolutions, including one deliberately mismatched to the shape.
+    blocks. So the two paths are compared bit for bit, with the body's own facet centroids as
+    receivers, at three resolutions including one deliberately mismatched to the shape.
     """
+    # ⚠️ A CONVEX body does not shadow itself: every sight line between two of its interior
+    # facets stays inside it and meets nothing, so a drum alone compares 0 against 0. The
+    # partition across the middle is what puts geometry between facets -- and the
+    # one-sidedness check below is what caught the drum-only version of this test.
     drum = closed_drum(48, radius=1.0, half_height=1.0)
-    surfaces = Surfaces.from_triangles(drum, emission=1.0)
+    partition = rectangle_triangles([0.0, 0.0, 0.0], [0.95, 0.0, 0.0], [0.0, 0.0, 0.95])
+    surfaces = Surfaces.from_triangles(np.concatenate([drum, partition]), emission=1.0)
     receivers = np.asarray(surfaces.centroid)
     facet_of = np.arange(len(receivers))
     near = 1e-6 * np.sqrt(np.asarray(surfaces.area))
