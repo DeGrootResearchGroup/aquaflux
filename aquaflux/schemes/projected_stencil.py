@@ -213,26 +213,44 @@ def _entry_of(stencil: _Stencil, n_cells: int, rows: np.ndarray, columns: np.nda
     return slots[np.searchsorted(keys, rows * n_cells + columns)]
 
 
+def _reference_inverse(
+    mesh: Mesh, geometry: MeshGeometry, closure: HessianBoundaryClosure
+) -> jnp.ndarray:
+    """The per-cell block the reference sweep divides by, ``(n_cells, dim, dim)``.
+
+    The gradient equation's own diagonal block, carrying a local piece of the Hessian coupling
+    (its Schur correction under ``closure``). Taken from
+    :class:`~aquaflux.schemes.HessianCorrectedGradient`'s systems, so the reference is that scheme's
+    first iterate rather than a second copy of its algebra.
+    """
+    systems = HessianCorrectedGradient._systems(mesh, geometry, closure)
+    return systems.outer_preconditioner(systems.inner(), True).inverse
+
+
 def _reference_weights(
     mesh: Mesh,
     geometry: MeshGeometry,
     stencil: _Stencil,
-    closure: HessianBoundaryClosure,
+    inverse: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """One block sweep of the gradient--Hessian system, as weights on the stencil.
 
     From a zero start that sweep is ``g = P_g^-1 b_g``: the gradient equation's right-hand side, which
-    is a Green--Gauss sum of interpolated face values, under the cell's own block inverse. Both pieces
-    come from :class:`~aquaflux.schemes.HessianCorrectedGradient`'s own systems, so the reference this
-    scheme aims at is that scheme's, not a second copy of it.
+    is a Green--Gauss sum of interpolated face values, under the per-cell block ``inverse``
+    (:func:`_reference_inverse`).
+
+    ⚠️ **These weights are a TARGET, not a reconstruction.** They are not exact for anything — one
+    sweep is a Green--Gauss pass under a local block — and they never contribute to a reconstructed
+    gradient. What the scheme takes from them is their *size*: the exactness constraints leave a few
+    free directions per cell, which is where a reconstruction's weights can grow without bound, and
+    aiming at a bounded target picks a bounded point of that set. So the target's own error is
+    irrelevant and its magnitude is the whole point.
 
     Returns the weights on the stencil's cells, ``(n_cells, dim, width)``, and on its boundary faces,
     ``(n_cells, dim, face_width)``.
     """
     face_cells = mesh.face_cells
     dim, n = mesh.dim, mesh.n_cells
-    systems = HessianCorrectedGradient._systems(mesh, geometry, closure)
-    inverse = systems.outer_preconditioner(systems.inner(), True).inverse  # (n, dim, dim)
 
     factor = interpolation_factor(face_cells, geometry)
     area = scale(geometry.face.normal, geometry.face.area)
@@ -354,7 +372,6 @@ class ProjectedStencilGradient(GradientScheme):
         the weights are then constants the differentiation cannot see through. Binding is transparent
         to differentiation with respect to the field, which is what a flow solve differentiates.
         """
-        dim, n = mesh.dim, mesh.n_cells
         face_cells = mesh.face_cells
         if isinstance(face_cells.interior, jax.core.Tracer):
             raise NotImplementedError(
@@ -383,71 +400,20 @@ class ProjectedStencilGradient(GradientScheme):
 
         stencil = build_stencil(mesh, self.reach)
         closure = AveragedNeighbourHessian(weight=self.boundary_weight)
-        reference_cells, reference_faces = _reference_weights(mesh, geometry, stencil, closure)
-
-        centroid = geometry.cell.centroid
-        face_centroid = geometry.face.centroid
-        normal = geometry.face.normal
-        # A per-cell length, so the monomials are evaluated on offsets of order one and their normal
-        # equations stay well scaled whatever the mesh's units.
-        size = geometry.cell.volume ** (1.0 / dim)
-
-        offsets_cells = (centroid[stencil.cells] - centroid[:, None, :]) / size[:, None, None]
-        offsets_faces = (face_centroid[stencil.faces] - centroid[:, None, :]) / size[:, None, None]
-        basis_cells = polynomial_basis(offsets_cells, dim)  # (n, width, terms)
-        value_rows = polynomial_basis(offsets_faces, dim)
-        derivative_rows = (
-            jnp.einsum(
-                "nktd,nkd->nkt",
-                polynomial_basis_gradient(offsets_faces, dim),
-                normal[stencil.faces],
-            )
-            / size[:, None, None]
+        reference = _reference_weights(
+            mesh, geometry, stencil, _reference_inverse(mesh, geometry, closure)
         )
-        takes_derivative = jnp.asarray(extrapolates)[stencil.faces]
-        basis_faces = jnp.where(takes_derivative[:, :, None], derivative_rows, value_rows)
-
-        # Padding contributes nothing: a zero column leaves the normal equations and the weights
-        # untouched, so a short stencil behaves exactly as if it had been built at its own width.
-        basis = jnp.concatenate(
-            [
-                jnp.where(stencil.cell_used[:, :, None], basis_cells, 0.0),
-                jnp.where(stencil.face_used[:, :, None], basis_faces, 0.0),
-            ],
-            axis=1,
-        )  # (n, width + face_width, terms)
-        start = self.blend * jnp.concatenate(
-            [
-                jnp.where(stencil.cell_used[:, None, :], reference_cells, 0.0),
-                jnp.where(stencil.face_used[:, None, :], reference_faces, 0.0),
-            ],
-            axis=2,
-        )  # (n, dim, width + face_width)
-
-        # What the weights must reproduce: each monomial's own gradient at the cell, which is the
-        # identity on the linear terms and zero on the rest, in the monomials' scaled coordinates.
-        n_terms = basis.shape[-1]
-        exact = jnp.zeros((n, dim, n_terms))
-        for i in range(dim):
-            exact = exact.at[:, i, 1 + i].set(1.0 / size)
-
-        normal_equations = jnp.einsum("nkt,nks->nts", basis, basis)
-        defect = exact - jnp.einsum("nkt,nik->nit", basis, start)
-        # One small solve per cell, over the monomials: `solve` batches the leading axis, taking the
-        # right-hand sides in its last axis, so the gradient components ride there.
-        multipliers = jnp.linalg.solve(
-            _regularized(normal_equations), jnp.swapaxes(defect, 1, 2)
-        )  # (n, terms, dim)
-        weights = start + jnp.einsum("nkt,nti->nik", basis, multipliers)
-        _report_conditioning(normal_equations, n)
+        cell_weights, face_weights = _constrained_weights(
+            geometry, stencil, extrapolates, self.blend, reference
+        )
         return ProjectedStencilGradient(
             blend=self.blend,
             reach=self.reach,
             boundary_weight=self.boundary_weight,
             prepared=(
                 stencil,
-                weights[:, :, : stencil.cells.shape[1]],
-                weights[:, :, stencil.cells.shape[1] :],
+                cell_weights,
+                face_weights,
                 jnp.asarray((~interior) & ~extrapolates),
                 jnp.asarray(extrapolates),
             ),
@@ -506,6 +472,102 @@ class ProjectedStencilGradient(GradientScheme):
         return jnp.einsum("nik,nk->ni", cell_weights, field[stencil.cells]) + jnp.einsum(
             "nik,nk->ni", face_weights, data[stencil.faces]
         )
+
+
+def _constrained_weights(
+    geometry: MeshGeometry,
+    stencil: _Stencil,
+    extrapolates: np.ndarray,
+    blend: float,
+    reference: tuple[jnp.ndarray, jnp.ndarray],
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """The weights nearest ``blend`` x ``reference`` of those exact for quadratics on ``stencil``.
+
+    Returns them split as the reconstruction reads them: on the stencil's cells,
+    ``(n_cells, dim, width)``, and on its boundary faces, ``(n_cells, dim, face_width)``.
+
+    Exactness is a linear constraint on the weights -- one row per monomial, fewer rows than stencil
+    entries -- so its solutions form an affine set, and every member of that set reconstructs a
+    quadratic exactly. The correction added here lies in the row space of that constraint, which is
+    what makes this the member nearest the target: the target selects *within* the exact weights and
+    cannot move the answer out of them.
+
+    Parameters
+    ----------
+    geometry : MeshGeometry
+        The mesh's cell and face metrics; the monomials are evaluated on offsets from each cell's
+        centroid, scaled by its own size.
+    stencil : _Stencil
+        The cells and boundary faces each cell reconstructs from.
+    extrapolates : np.ndarray
+        Boolean per face, shape ``(n_faces,)``: a face whose condition prescribes a normal derivative
+        rather than a value, which is constrained with the monomials' normal derivatives there.
+    blend : float
+        How much of the reference to aim at; ``0`` aims at the origin (the smallest exact weights).
+    reference : tuple of jnp.ndarray
+        The target's weights on the stencil's cells and boundary faces (:func:`_reference_weights`).
+    """
+    reference_cells, reference_faces = reference
+    centroid = geometry.cell.centroid
+    face_centroid = geometry.face.centroid
+    normal = geometry.face.normal
+    n, dim = centroid.shape
+    # A per-cell length, so the monomials are evaluated on offsets of order one and their normal
+    # equations stay well scaled whatever the mesh's units.
+    size = geometry.cell.volume ** (1.0 / dim)
+
+    offsets_cells = (centroid[stencil.cells] - centroid[:, None, :]) / size[:, None, None]
+    offsets_faces = (face_centroid[stencil.faces] - centroid[:, None, :]) / size[:, None, None]
+    basis_cells = polynomial_basis(offsets_cells, dim)  # (n, width, terms)
+    value_rows = polynomial_basis(offsets_faces, dim)
+    derivative_rows = (
+        jnp.einsum(
+            "nktd,nkd->nkt",
+            polynomial_basis_gradient(offsets_faces, dim),
+            normal[stencil.faces],
+        )
+        / size[:, None, None]
+    )
+    takes_derivative = jnp.asarray(extrapolates)[stencil.faces]
+    basis_faces = jnp.where(takes_derivative[:, :, None], derivative_rows, value_rows)
+
+    # Padding contributes nothing: a zero column leaves the normal equations and the weights
+    # untouched, so a short stencil behaves exactly as if it had been built at its own width.
+    basis = jnp.concatenate(
+        [
+            jnp.where(stencil.cell_used[:, :, None], basis_cells, 0.0),
+            jnp.where(stencil.face_used[:, :, None], basis_faces, 0.0),
+        ],
+        axis=1,
+    )  # (n, width + face_width, terms)
+    start = blend * jnp.concatenate(
+        [
+            jnp.where(stencil.cell_used[:, None, :], reference_cells, 0.0),
+            jnp.where(stencil.face_used[:, None, :], reference_faces, 0.0),
+        ],
+        axis=2,
+    )  # (n, dim, width + face_width)
+
+    # What the weights must reproduce: each monomial's own gradient at the cell, which is the
+    # identity on the linear terms and zero on the rest, in the monomials' scaled coordinates.
+    n_terms = basis.shape[-1]
+    exact = jnp.zeros((n, dim, n_terms))
+    for i in range(dim):
+        exact = exact.at[:, i, 1 + i].set(1.0 / size)
+
+    normal_equations = jnp.einsum("nkt,nks->nts", basis, basis)
+    defect = exact - jnp.einsum("nkt,nik->nit", basis, start)
+    # One small solve per cell, over the monomials: `solve` batches the leading axis, taking the
+    # right-hand sides in its last axis, so the gradient components ride there.
+    multipliers = jnp.linalg.solve(
+        _regularized(normal_equations), jnp.swapaxes(defect, 1, 2)
+    )  # (n, terms, dim)
+    weights = start + jnp.einsum("nkt,nti->nik", basis, multipliers)
+    _report_conditioning(normal_equations, n)
+    return (
+        weights[:, :, : stencil.cells.shape[1]],
+        weights[:, :, stencil.cells.shape[1] :],
+    )
 
 
 def _regularized(normal_equations: jnp.ndarray) -> jnp.ndarray:

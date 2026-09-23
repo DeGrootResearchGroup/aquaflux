@@ -128,6 +128,64 @@ def rings_from_boundary(mesh) -> np.ndarray:
     return ring
 
 
+def damping_face_weight(mesh, geometry):
+    """``A / (d . n)`` per interior face, zero on a boundary face -- the damping term's own weight."""
+    face_cells = mesh.face_cells
+    d_vector = (
+        face_cells.neighbour_centroid(geometry.cell.centroid)
+        - geometry.cell.centroid[face_cells.owner]
+    )
+    normal_distance = dot(d_vector, geometry.face.normal)
+    weight = jnp.where(
+        face_cells.interior,
+        geometry.face.area / jnp.where(jnp.abs(normal_distance) > 0, normal_distance, 1.0),
+        0.0,
+    )
+    return d_vector, weight
+
+
+def damping_matrix(mesh, geometry, gradient_of) -> np.ndarray:
+    """The Rhie--Chow damping operator ``L = d/dp sum_f signed (A / (d . n)) T_f``.
+
+    ``gradient_of(pressure)`` returns the cell gradient the reconstruction under test produces for
+    that pressure, so a caller supplies whatever binding and boundary data it is measuring under.
+    Materialized by ``jacfwd``, which is affordable on this mesh and exact.
+    """
+    face_cells = mesh.face_cells
+    factor = interpolation_factor(face_cells, geometry)
+    d_vector, weight = damping_face_weight(mesh, geometry)
+
+    def cell_sum(pressure):
+        gradient = gradient_of(pressure)
+        face_gradient = (1.0 - factor)[:, None] * gradient[face_cells.owner] + factor[:, None] * (
+            gradient[face_cells.safe_neighbour]
+        )
+        difference = (pressure[face_cells.safe_neighbour] - pressure[face_cells.owner]) - dot(
+            face_gradient, d_vector
+        )
+        return face_cells.scatter_conservative(
+            jnp.where(face_cells.interior, weight * difference, 0.0)
+        )
+
+    return np.asarray(jax.jacfwd(cell_sum)(jnp.zeros(mesh.n_cells)))
+
+
+def compact_damping_diagonal(mesh, geometry) -> np.ndarray:
+    """The same operator's diagonal with the gradient set to zero: ``T_f = p_N - p_P``.
+
+    The denominator of the retention column -- what the two-point difference damps by on its own,
+    before any reconstruction is subtracted from it.
+    """
+    owner = np.asarray(mesh.face_cells.owner)
+    neighbour = np.asarray(mesh.face_cells.neighbour)
+    interior = neighbour >= 0
+    face_weight = np.asarray(damping_face_weight(mesh, geometry)[1])
+    diagonal = np.zeros(mesh.n_cells)
+    np.add.at(diagonal, owner[interior], -face_weight[interior])
+    np.add.at(diagonal, neighbour[interior], -face_weight[interior])
+    return diagonal
+
+
 def main() -> None:
     def cell_gradient(scheme, field, boundary_values):
         """The scheme's cell gradient; the multiple-correction ladder keeps its own entry point."""
@@ -179,46 +237,18 @@ def main() -> None:
     ring = rings_from_boundary(mesh)
     print("ring populations:", np.bincount(ring[ring >= 0]).tolist(), flush=True)
 
-    factor = interpolation_factor(face_cells, geometry)
-    d_vector = (
-        face_cells.neighbour_centroid(geometry.cell.centroid)
-        - geometry.cell.centroid[face_cells.owner]
-    )
-    normal_distance = dot(d_vector, geometry.face.normal)
-    weight = jnp.where(
-        face_cells.interior,
-        geometry.face.area / jnp.where(jnp.abs(normal_distance) > 0, normal_distance, 1.0),
-        0.0,
-    )
-
     def with_second_pass_on(cells_full: np.ndarray):
         """The scheme with its second pass active only where ``cells_full`` is True."""
         defect = jnp.asarray(np.asarray(prepared.gradient_defect) * cells_full[:, None, None])
         return eqx.tree_at(lambda scheme: scheme.prepared.gradient_defect, base, defect)
 
-    def damping_matrix(scheme) -> np.ndarray:
-        def cell_sum(pressure):
-            gradient = gradient_of(scheme, pressure)
-            face_gradient = (1.0 - factor)[:, None] * gradient[face_cells.owner] + factor[
-                :, None
-            ] * gradient[face_cells.safe_neighbour]
-            difference = (pressure[face_cells.safe_neighbour] - pressure[face_cells.owner]) - dot(
-                face_gradient, d_vector
-            )
-            return face_cells.scatter_conservative(
-                jnp.where(face_cells.interior, weight * difference, 0.0)
-            )
+    def matrix_of(scheme) -> np.ndarray:
+        return damping_matrix(mesh, geometry, lambda pressure: gradient_of(scheme, pressure))
 
-        return np.asarray(jax.jacfwd(cell_sum)(jnp.zeros(n)))
-
-    # The compact-only diagonal (gradient == 0): T_f = p_N - p_P.
-    compact_diagonal = np.zeros(n)
-    face_weight = np.asarray(weight)
-    np.add.at(compact_diagonal, owner[interior], -face_weight[interior])
-    np.add.at(compact_diagonal, neighbour[interior], -face_weight[interior])
+    compact_diagonal = compact_damping_diagonal(mesh, geometry)
 
     def report(label: str, cells_full: np.ndarray):
-        matrix = damping_matrix(with_second_pass_on(cells_full.astype(float)))
+        matrix = matrix_of(with_second_pass_on(cells_full.astype(float)))
         report_matrix(label, matrix, int(cells_full.sum()))
         return matrix
 
@@ -263,7 +293,7 @@ def main() -> None:
             f"{'retention med':>14s} {'ret<0 cells':>12s} {'cells full':>11s} {'nnz/row':>8s}"
         )
         for name in SCHEMES:
-            report_matrix(name, damping_matrix(bound(other_scheme(name))), n)
+            report_matrix(name, matrix_of(bound(other_scheme(name))), n)
         print(
             "\nquadratic exactness (worst |g - g_exact| / max|g_exact|): all cells, interior cells"
         )
