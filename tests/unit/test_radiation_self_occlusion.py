@@ -487,3 +487,30 @@ def test_a_visibility_with_no_receivers_at_all_builds(occluders):
     )
     assert mask.hidden_by_geometry.shape == (0, 4)
     assert mask.blocked.shape == (len(occluders), 0, 4)
+
+
+# ---------------------------------------------------------------------------------------
+# Culling the candidates with a grid
+# ---------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("grid", [True, 4, (3, 5, 7)])
+def test_the_grid_changes_what_the_ray_test_COSTS_and_not_what_it_ANSWERS(grid):
+    """The contract of the acceleration, on a body that genuinely shadows itself.
+
+    A grid decides which triangles a segment is worth testing; it must never decide whether one
+    blocks. So the two paths are compared bit for bit on a closed drum with its own interior
+    facets as receivers -- every pair of which is either across the body (blocked) or along its
+    wall (clear) -- at three resolutions, including one deliberately mismatched to the shape.
+    """
+    drum = closed_drum(48, radius=1.0, half_height=1.0)
+    surfaces = Surfaces.from_triangles(drum, emission=1.0)
+    receivers = np.asarray(surfaces.centroid)
+    facet_of = np.arange(len(receivers))
+    near = 1e-6 * np.sqrt(np.asarray(surfaces.area))
+
+    plain = RayCastOcclusion().field(surfaces, receivers, near, facet_of)
+    culled = RayCastOcclusion(grid=grid).field(surfaces, receivers, near, facet_of)
+    np.testing.assert_array_equal(np.asarray(culled.fraction), np.asarray(plain.fraction))
+    blocked = np.asarray(plain.fraction) > 0.0
+    assert 0.2 < blocked.mean() < 0.9, f"fixture is one-sided: {blocked.mean()}"

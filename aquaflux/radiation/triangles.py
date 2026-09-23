@@ -107,6 +107,44 @@ def _watertight_hit(origin, direction, vertices):
     return distance, same_side & ~edge_on
 
 
+def padded_length(count: int) -> int:
+    """The padded length a chunk of ``count`` items is clipped at: the next power of two.
+
+    Trades a handful of compiled programs for not clipping thousands of padding entries. Both
+    ends of that trade are real -- one shape for everything makes a small body absurdly slow,
+    and one shape per chunk makes any body absurdly slow. Shared by everything here that hands
+    a variable number of items to a traced kernel.
+    """
+    return 1 << max(0, int(count - 1)).bit_length() if count else 0
+
+
+def _counts_as_hit(distance, meets, near, index, exclude):
+    """Which of the hits a ray-triangle test found actually block the segment.
+
+    The geometry is in :func:`_watertight_hit`; this is the rest of the rule, shared by the
+    block kernel and the grid-culled one so the two cannot drift: a hit counts when it lies
+    **past** the origin's margin, **at or before** the far end (a segment ending exactly in a
+    facet's plane is blocked by it, which is why the far end is inclusive), and on a triangle
+    the ray was not told to ignore. Shapes broadcast, so ``index`` may be a block's column of
+    triangle indices or one index per pair.
+    """
+    hit = meets & (distance > near) & (distance <= 1.0)
+    return hit & jnp.all(index[..., None] != exclude, axis=-1)
+
+
+@jax.jit
+def _pair_is_cut(origin, direction, near, vertices, index, exclude):
+    """Whether each ray meets the ONE triangle paired with it.
+
+    The grid-culled path tests a compacted list of (ray, triangle) pairs rather than every ray
+    against every triangle of a block, because with a grid each ray has its own candidates. The
+    predicate is the same one: :func:`_watertight_hit` for the geometry and
+    :func:`_counts_as_hit` for the window and the exclusions.
+    """
+    distance, meets = _watertight_hit(origin, direction, vertices)
+    return _counts_as_hit(distance, meets, near, index, exclude)
+
+
 @jax.jit
 def _block_is_cut(origin, direction, near, block, first, exclude):
     """Whether each ray meets any triangle of one block, as a single traced kernel.
@@ -125,9 +163,9 @@ def _block_is_cut(origin, direction, near, block, first, exclude):
     against **50-58** eager, for identical output on every ray.
     """
     distance, meets = _watertight_hit(origin[:, None, :], direction[:, None, :], block[None, ...])
-    hit = meets & (distance > near[:, None]) & (distance <= 1.0)
     index = first + jnp.arange(block.shape[0])
-    return jnp.any(hit & jnp.all(index[None, :, None] != exclude[:, None, :], axis=-1), axis=-1)
+    counts = _counts_as_hit(distance, meets, near[:, None], index[None, :], exclude[:, None, :])
+    return jnp.any(counts, axis=-1)
 
 
 def _call_shape(n_rays: int, n_triangles: int, work_limit: int) -> tuple[int, int]:
