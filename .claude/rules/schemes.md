@@ -306,6 +306,12 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     and both multiple-correction arms at `inf` by anchor step 3. Damping under the pressure's own
     conditions: no flipped diagonal at any blend, largest eigenvalue 1.9–2.2e-4 against
     `CorrectedGreenGauss`'s 9.0e-4 and the multiple-correction scheme's `+2.17`.
+  - **And it costs nothing on the hexahedral case the shipped scheme already suits**
+    (`PITZ_GRADIENT=projected`, one run, 2026-09-22): **31 steps and 198 cumulative cycles against the
+    shipped `multcorr`'s 31 and 200**, `x_r/h` 7.9857 against 8.0686 (OpenFOAM 7.7409, so marginally
+    closer), peak `nu_t` 418.9 against 418.0 (OpenFOAM 422.9), `ux`/`uy` errors unchanged at
+    0.0191/0.0102. ⚠️ No wall-clock comparison: the baseline's timing is from another session and
+    bundle. This is also the second case to exercise the per-field turbulence binding.
   - **Not under domain decomposition** (two hops past a one-deep halo; raises), and the weights are
     constants after binding, so binding inside a *geometry* differentiation gives a wrong shape
     derivative — the same caveat `HessianCorrectedGradient.bind` carries.
