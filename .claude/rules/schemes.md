@@ -286,7 +286,10 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     extrapolates constrains it with the monomial's *normal derivative*, recovered at run time from the
     boundary value evaluated at zero gradient, `(bv − φ_owner)/(d·n)`. ⚠️ **A Robin or convective face
     is REFUSED, not approximated** — its datum is neither, and no stencil constraint expresses the
-    mixture yet.
+    mixture yet. The row it needs is the mixed functional the condition imposes,
+    `∂ₙq + (h/Γ)q(x_f)` against datum `(h/Γ)T∞`, whose coefficients are recoverable from the
+    linearization alone (`β = 1/value_weight − 1`, `h/Γ = β/(d·n)`); that derivation is on paper and
+    unverified, which is why the guard ships instead of the branch. Tracked as #496.
   - **It serves `k` and `omega` too, and that took a turbulence-side change.**
     `turbulence/transport.py::_assembler` builds a `ResidualAssembler` *inside* each residual
     evaluation, so a scheme was bound against a **traced** mesh -- which a stencil built from the
