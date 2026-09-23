@@ -39,6 +39,17 @@ from aquaflux.schemes.projected_stencil import build_stencil
 
 from tests.support.meshes import perturbed_grid_3d, tetrahedral_grid_3d
 
+#: What "exact" means here in practice. The constrained fit solves normal equations whose conditioning
+#: on these fixtures runs to ~1e6, so a correct reconstruction lands at 1e-10--1e-9 of the largest exact
+#: gradient rather than at machine epsilon, and the exact figure moves with the reference the weights
+#: are projected from. A BROKEN constraint row -- a monomial's value where its normal derivative
+#: belongs -- misses by 6.9 (measured, by making exactly that substitution), nine orders above this,
+#: which is the separation these tests are built on.
+#: ⚠️ It does NOT discriminate WHICH of the exact weight sets is chosen: every
+#: member of that set passes, and a start weight bumped by 0.3 still lands at 1.3e-9. That is what
+#: `test_the_minimum_norm_end_is_an_unweighted_quadratic_least_squares_fit` pins instead.
+EXACT = 1e-8
+
 HESSIAN = np.array([[1.3, 0.4, -0.2], [0.4, -0.7, 0.3], [-0.2, 0.3, 0.9]])
 SLOPE = np.array([0.5, -1.1, 0.8])
 
@@ -105,7 +116,7 @@ def test_it_reconstructs_a_quadratic_exactly_under_prescribed_values(build) -> N
         quadratic(centroid),
         quadratic_gradient(centroid),
     )
-    assert error < 1e-9, error
+    assert error < EXACT, error
 
 
 def test_it_reconstructs_a_quadratic_exactly_under_zero_gradient_conditions(tetrahedra) -> None:
@@ -131,7 +142,7 @@ def test_it_reconstructs_a_quadratic_exactly_under_zero_gradient_conditions(tetr
     error = _error(
         scheme, mesh, geometry, boundary_values, quadratic(centroid), quadratic_gradient(centroid)
     )
-    assert error < 1e-9, error
+    assert error < EXACT, error
 
 
 def test_its_weights_stay_bounded_where_the_multiple_correction_scheme_amplifies(
@@ -184,7 +195,7 @@ def test_the_blend_moves_the_weights_between_the_two_ends(tetrahedra) -> None:
             quadratic(centroid),
             quadratic_gradient(centroid),
         )
-        assert error < 1e-9, (blend, error)
+        assert error < EXACT, (blend, error)
 
 
 def test_the_minimum_norm_end_is_an_unweighted_quadratic_least_squares_fit(tetrahedra) -> None:
@@ -381,5 +392,5 @@ def test_binding_without_conditions_reads_every_boundary_face_as_prescribed(tetr
             quadratic(centroid),
             quadratic_gradient(centroid),
         )
-        assert error < 1e-9, error
+        assert error < EXACT, error
     assert bool(eqx.tree_equal(free.prepared[1], explicit.prepared[1]))

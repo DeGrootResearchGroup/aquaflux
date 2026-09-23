@@ -269,8 +269,8 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   exactness for quadratics fixes only ten of the ~13 numbers per gradient component on a tetrahedron's
   two-hop stencil, so every scheme picks the remainder — most of them implicitly, and one of them
   badly. This scheme takes, of the exact weights, the ones nearest `blend` × a reference that damps
-  (one block sweep of `HessianCorrectedGradient`'s system, `P_g⁻¹ b_g`: one face pass plus a per-cell
-  block solve). `blend=0` is the minimum-norm end, which IS an unweighted quadratic least-squares fit
+  (`P_g⁻¹ b_g`: a Green--Gauss face pass under the gradient equation's own per-cell block, which is
+  `HessianCorrectedGradient`'s system's first iterate from a zero start). `blend=0` is the minimum-norm end, which IS an unweighted quadratic least-squares fit
   on the stencil — the same operator `w = B(BᵀB)⁻¹e`, i.e. the gradient of a k-exact (k=2)
   reconstruction, Barth & Frederickson (AIAA 1990); pinned against an independently built fit by
   `test_the_minimum_norm_end_is_an_unweighted_quadratic_least_squares_fit`, which is the only test in
@@ -280,6 +280,27 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   `blend=1` is the nearest exact weights to the reference. Built once per field in
   `bind`, applied as one gather and one contraction — no solve, no iteration, and the reach is the
   multiple-correction scheme's, so a Jacobian gains nothing.
+  - ⚠️ **The reference is a TARGET, not an ingredient, and that is what makes a cheap one legitimate.**
+    The exact weights form an affine set; the projection lands in it whatever it aims at, so the target
+    cannot affect exactness and decides only *which* member — i.e. the magnitude, and through it the
+    damping sign. Reasoning that a low-order reference must give a low-order scheme is the error to
+    avoid here; the target is never summed into a reconstructed gradient.
+  - **The target DROPPED its local Schur correction, 2026-09-23**
+    (`validation/tetrahedral_gradient_ab/reference_target_probe.py`, geometry binding, one run, at
+    `blend=0.75`). Three targets differing only in the per-cell block: with the Schur correction (the
+    former target) **2.83 s** to build, max eig `+5.42e-4`, worst retention 0.4698, smooth-field error
+    1.50e-5; **without it (shipped) 0.05 s, `+5.59e-4`, 0.4671, 1.51e-5**; compact Green--Gauss `V·I`
+    0.02 s, **`+1.30e-3`**, 0.4777, 1.57e-5. The correction costs 2.83 s of a 2.88 s build and moves
+    nothing it is aimed for (3 % on the damping eigenvalue, 0.3 % on the weights); compact is cheaper
+    still and gives away **2.4x** on the damping eigenvalue, which is the quantity the scheme exists to
+    control. At `blend=0` all three arms are bit-identical, as the geometry requires — a wiring check
+    for that probe. **`boundary_weight` was DELETED with the correction**: with it off the block is
+    bit-identical under all three Hessian closures, so the setting reached nothing.
+    ⚠️ **Every projected-scheme measurement recorded before that date was taken under the Schur-corrected
+    target** — the tetrahedral marches, pitzDaily's 31 steps / 198 cycles, bfs3d's `x_r/h` 8.3611 and the
+    blend sweep. **The tetrahedral coupled march was re-run under the new target and is unchanged** --
+    9 anchor + 16 target steps at `alpha = 1`, no escalation, `|R|` 5.82e-6 in 164 s against the old
+    target's 16 target steps, 5.8e-6, 160 s. The two hexahedral cases were **not** re-run.
   - **Why it exists: exactness and weight SIZE are independent, and only the second decides the
     Rhie–Chow sign.** On the tetrahedral duct the multiple-correction scheme is exact for quadratics
     and its worst weight is ~2900× the reference's; it flips 117 damping diagonals (geometry binding;

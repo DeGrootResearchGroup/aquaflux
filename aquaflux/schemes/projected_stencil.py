@@ -18,11 +18,14 @@ and one can be exact and still anti-damp. This scheme makes the choice explicitl
 on the stencil that are exact for quadratics, take the ones nearest to a reference reconstruction
 known to damp, and stay compact.
 
-The reference is one block sweep of the coupled gradient--Hessian system of Betchen and Straatman
-(2010) (:class:`~aquaflux.schemes.HessianCorrectedGradient`'s system), which costs one pass over the
-faces and a per-cell block solve. :attr:`ProjectedStencilGradient.blend` is how much of it the weights
-aim at: ``0`` gives the minimum-norm exact weights (an unweighted quadratic least-squares fit on the
-stencil), ``1`` the nearest exact weights to the reference itself.
+The reference is a Green--Gauss face pass under the gradient equation's own per-cell block — the
+first iterate of the coupled gradient--Hessian system of Betchen and Straatman (2010) from a zero
+start. It is a *target*, never part of the answer: the exact weights form an affine set, the
+projection lands in it whatever it aims at, and the target only picks which member. So the target's
+own error does not matter and its magnitude is the whole contribution, which is why a cheap one
+serves. :attr:`ProjectedStencilGradient.blend` is how much of it the weights aim at: ``0`` gives the
+minimum-norm exact weights (an unweighted quadratic least-squares fit on the stencil), ``1`` the
+nearest exact weights to the reference itself.
 
 Everything is built once per field in :meth:`ProjectedStencilGradient.bind` and applied at run time as
 one gather and one contraction per cell — no solve, and the same stencil a two-pass compact scheme
@@ -46,7 +49,6 @@ from .gradient import (
     AveragedNeighbourHessian,
     BoundaryLinearization,
     GradientScheme,
-    HessianBoundaryClosure,
     HessianCorrectedGradient,
     ImposedGradient,
 )
@@ -213,18 +215,22 @@ def _entry_of(stencil: _Stencil, n_cells: int, rows: np.ndarray, columns: np.nda
     return slots[np.searchsorted(keys, rows * n_cells + columns)]
 
 
-def _reference_inverse(
-    mesh: Mesh, geometry: MeshGeometry, closure: HessianBoundaryClosure
-) -> jnp.ndarray:
+def _reference_inverse(mesh: Mesh, geometry: MeshGeometry) -> jnp.ndarray:
     """The per-cell block the reference sweep divides by, ``(n_cells, dim, dim)``.
 
-    The gradient equation's own diagonal block, carrying a local piece of the Hessian coupling
-    (its Schur correction under ``closure``). Taken from
-    :class:`~aquaflux.schemes.HessianCorrectedGradient`'s systems, so the reference is that scheme's
-    first iterate rather than a second copy of its algebra.
+    The gradient equation's own diagonal block, inverted per cell: pure geometry, and cheap.
+
+    ⚠️ **Deliberately WITHOUT the local Schur correction** that the coupled sweep's own
+    preconditioner carries. That correction folds a local piece of the Hessian coupling into the
+    block, which means assembling the Hessian system -- and measured on the tetrahedral duct it moves
+    this block by 21 % but the projected weights by 0.3 %, the damping eigenvalue by 3 % and the
+    smooth-field error by 0.7 %, for 2.83 s of the 2.88 s the target cost to build. The projection
+    absorbs the difference, because the target only chooses *within* the exact weights. Its boundary
+    Hessian closure becomes unreachable with the correction off (the block is bit-identical under all
+    three), which is why this scheme has no closure setting.
     """
-    systems = HessianCorrectedGradient._systems(mesh, geometry, closure)
-    return systems.outer_preconditioner(systems.inner(), True).inverse
+    systems = HessianCorrectedGradient._systems(mesh, geometry, AveragedNeighbourHessian())
+    return systems.outer_preconditioner(systems.inner(), False).inverse
 
 
 def _reference_weights(
@@ -318,9 +324,6 @@ class ProjectedStencilGradient(GradientScheme):
         Face hops in the stencil (default ``2``). Two is the smallest that can determine a quadratic
         on a tetrahedral mesh: a tetrahedron has four face neighbours against the nine coefficients a
         quadratic needs in three dimensions.
-    boundary_weight : float
-        The reference system's neighbour-averaged boundary Hessian weight (default ``0.5``). It
-        affects only the reference, and through it only the weights' starting point.
     prepared : tuple, optional
         This geometry's weights and stencil, built by :meth:`bind`. A scheme that has not been bound
         cannot reconstruct: the weights depend on the field's boundary conditions, which are not
@@ -329,7 +332,6 @@ class ProjectedStencilGradient(GradientScheme):
 
     blend: float = eqx.field(static=True, default=0.75)
     reach: int = eqx.field(static=True, default=2)
-    boundary_weight: float = eqx.field(static=True, default=0.5)
     prepared: tuple | None = None
 
     def bind(
@@ -399,17 +401,13 @@ class ProjectedStencilGradient(GradientScheme):
             extrapolates = (~interior) & (value_weight >= 1.0 - 1e-8)
 
         stencil = build_stencil(mesh, self.reach)
-        closure = AveragedNeighbourHessian(weight=self.boundary_weight)
-        reference = _reference_weights(
-            mesh, geometry, stencil, _reference_inverse(mesh, geometry, closure)
-        )
+        reference = _reference_weights(mesh, geometry, stencil, _reference_inverse(mesh, geometry))
         cell_weights, face_weights = _constrained_weights(
             geometry, stencil, extrapolates, self.blend, reference
         )
         return ProjectedStencilGradient(
             blend=self.blend,
             reach=self.reach,
-            boundary_weight=self.boundary_weight,
             prepared=(
                 stencil,
                 cell_weights,

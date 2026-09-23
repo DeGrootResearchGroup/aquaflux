@@ -5,19 +5,23 @@ The scheme takes, of the weights exact for quadratics on its stencil, the ones n
 reference. The reference is a *target*, never part of the answer: the exact weights form an affine
 set, the projection lands in it whatever it aims at, and what the target decides is only which point
 of that set -- so its own accuracy is irrelevant and its **magnitude** is the whole contribution. It
-is currently one sweep of ``HessianCorrectedGradient``'s system, which means binding builds that
-scheme's systems (its Hessian block, its boundary closure, its local Schur correction) purely to be
-thrown away.
+was one sweep of ``HessianCorrectedGradient``'s system with its local Schur correction, which means
+binding assembled that scheme's Hessian system purely to be thrown away.
 
-If a cheaper bounded target does the same job, that construction is dead weight: the module stops
-importing the package's most complicated scheme to prepare its simplest, ``boundary_weight`` (which
-exists only to configure the target's Hessian closure) goes with it, and binding gets cheaper.
+**Measured 2026-09-23 on this mesh, and the target changed as a result** (numbers below, geometry
+binding, one run): the Schur correction moves the damping eigenvalue by 3 %, the weights by 0.3 % and
+the smooth-field error by 0.7 %, for 2.83 s of the 2.88 s the target took to build. Compact
+Green--Gauss is cheaper still and gives that margin away -- its worst anti-damping eigenvalue is
+2.4x the others'. So the shipped target is now the middle one, and the scheme's ``boundary_weight``
+setting went with the correction, the block being bit-identical under all three Hessian closures once
+it is off.
 
 Three targets, all ``P^-1`` times the SAME Green--Gauss face sum, differing only in the per-cell
 block ``P``:
 
-* ``hessian`` -- the gradient equation's diagonal block with its local Schur correction (shipped);
-* ``block`` -- the same diagonal block, no Schur correction (no Hessian system, no closure);
+* ``hessian`` -- the gradient equation's diagonal block with its local Schur correction (the former
+  target; the arm that says the correction is not worth its cost);
+* ``block`` -- the same diagonal block, no Schur correction (shipped since 2026-09-23);
 * ``compact`` -- ``V I``, i.e. the target IS compact Green--Gauss, the cheapest bounded choice.
 
 Per target and blend it reports: the time to build the target, the resulting weight magnitudes, the
@@ -91,13 +95,15 @@ def smooth_gradient(points: np.ndarray) -> np.ndarray:
 def block_inverse(mesh, geometry, name: str) -> jnp.ndarray:
     """The per-cell block each target divides the Green--Gauss sum by, ``(n_cells, dim, dim)``."""
     if name == "hessian":
-        return _reference_inverse(mesh, geometry, AveragedNeighbourHessian(weight=0.5))
+        # The diagonal block WITH the local Schur correction -- what this scheme aimed at until the
+        # measurement below showed the correction changes nothing it is aimed for. Kept as the arm
+        # that says so, and as the thing a re-measurement on another mesh would compare against.
+        systems = HessianCorrectedGradient._systems(
+            mesh, geometry, AveragedNeighbourHessian(weight=0.5)
+        )
+        return systems.outer_preconditioner(systems.inner(), True).inverse
     if name == "block":
-        # The same diagonal block with no Schur correction, which is what skipping the Hessian
-        # system amounts to: `_systems` still assembles it, so this arm isolates the correction's
-        # effect rather than its cost.
-        systems = HessianCorrectedGradient._systems(mesh, geometry, AveragedNeighbourHessian())
-        return systems.outer_preconditioner(systems.inner(), False).inverse
+        return _reference_inverse(mesh, geometry)  # the shipped target
     if name == "compact":
         # Compact Green--Gauss: the sum divided by the cell volume, and nothing else.
         volume = np.asarray(geometry.cell.volume)

@@ -59,10 +59,15 @@ at step 5.
 - **Marched, laminar and coupled RANS, under `ProjectedStencilGradient`** (13 steps and 16 target
   steps respectively; see its section below). Under `MultipleCorrectionGradient` — either corner-cell
   closure — both marches still fail, which is what #435 now covers.
-- **The self-start is still not usable here.** Both marches are seeded by hand (from rest for the
-  laminar case, a wall-tapered profile for the RANS one) because `hybrid_initialize`'s potential-flow
-  Laplace solve stagnated on this mesh. That was measured under the multiple-correction closures only
-  and has **not** been retried with the weights that converge the march — the open half of #435.
+- **The self-start works under `ProjectedStencilGradient`** (`potential_flow_probe.py`, 2026-09-23):
+  `hybrid_initialize` returns in 5.9 s with the uniform 10 m/s plug this straight duct's potential
+  flow is, and the coupled march from *that* seed converges in 16 target steps at `alpha = 1` to
+  `|R|` 5.4e-6 — the same count as the hand-built seed. The hand seeds stay in the harness because the
+  multiple-correction arms still need them, not because the shipped path is unusable.
+  **The Laplace operator's conditioning is the reconstruction's, not the mesh's:** the exact Jacobian
+  of the same scalar problem is **4.67e4** under the projected weights against the 3.3e19 / 1.7e19
+  recorded under the multiple-correction closures. The old lead that this duct's aspect ratio might
+  simply be badly scaled is refuted.
 
 ## The laminar march (issue #448)
 
@@ -213,6 +218,43 @@ in [615, 4503]. This needed the turbulence closure to bind its schemes per field
 (`k_gradient_scheme` / `omega_gradient_scheme`), since `k` and `omega` build their assembler inside
 each residual evaluation and this scheme cannot be bound against a traced mesh.
 
+**The shipped self-start, and what the old conditioning number was really measuring** (2026-09-23,
+`potential_flow_probe.py`, one run per arm). `hybrid_initialize` seeds a coupled RANS problem with
+potential flow: one scalar Laplace solve whose operator carries the field's own gradient
+reconstruction. It had stagnated here under both multiple-correction closures, and the exact Jacobian
+of that scalar problem measured 3.3e19 / 1.7e19 -- read at the time as possibly a property of this
+duct's 10:1 aspect ratio.
+
+| arm | `hybrid_initialize` | exact Laplace Jacobian | march from that seed |
+|---|---|---|---|
+| `projected` | returns in 5.9 s, plug at `U_IN` | **4.67e4** | converges, 16 target steps, `alpha = 1`, `\|R\|` 5.4e-6 |
+| `owner` | stagnates | unreadable (the solve stagnates) | — |
+| `repaired` | stagnates | 1.4e5 (see below) | — |
+
+So the ill-conditioning was the **reconstruction's**, not the mesh's, and the aspect-ratio lead is
+refuted. ⚠️ **One unexplained reading**: the `repaired` arm's operator materialized at 1.4e5 on a
+second call, moments after `hybrid_initialize`'s own solve of what should be the identical operator
+stagnated, and it matches neither the recorded 1.7e19 nor the stagnation. Treat that cell as an
+anomaly rather than a measurement; `owner` stagnated on both calls, as recorded.
+
+**Which reference the projected weights aim at** (2026-09-23, `reference_target_probe.py`, geometry
+binding, one run, `blend=0.75`). The reference is a target, not an ingredient -- the exact weights
+form an affine set and the projection lands in it whatever it aims at -- so only its magnitude
+reaches the answer, and a cheap target is legitimate:
+
+| target | build | max eig | worst retention | smooth-field error |
+|---|---|---|---|---|
+| diagonal block **with** the local Schur correction (former) | 2.83 s | +5.42e-4 | 0.4698 | 1.50e-5 |
+| **diagonal block alone (shipped)** | **0.05 s** | +5.59e-4 | 0.4671 | 1.51e-5 |
+| compact Green--Gauss (`V I`) | 0.02 s | **+1.30e-3** | 0.4777 | 1.57e-5 |
+
+The Schur correction is 2.83 s of a 2.88 s build for a 3 % change in the damping eigenvalue, so it
+went; compact is cheaper still and gives away 2.4x on that eigenvalue, which is the quantity the
+scheme exists to control, so it did not win. At `blend=0` all three are bit-identical -- the target is
+not consulted there at all, which is the probe's own wiring check. `ProjectedStencilGradient` lost its
+`boundary_weight` setting with the correction: the block is bit-identical under all three Hessian
+boundary closures once the correction is off.
+
 ## Layout
 
 - `of_case/make_mesh.py` — gmsh script building the tetrahedral duct mesh (OpenCASCADE + Delaunay),
@@ -245,6 +287,12 @@ march does not start on this mesh, kept for a re-adjudication rather than remove
 point-in-time snapshot — see the module docstring of each for its own configuration, and read one before
 trusting its output against a checkout that has moved on.
 
+- `potential_flow_probe.py` — the shipped self-start on this mesh: whether `hybrid_initialize` returns
+  under each reconstruction, the exact Laplace Jacobian's conditioning, and whether the coupled march
+  runs from that seed rather than the hand-built one (`TET_SEED_ARMS`, `TET_SEED_MARCH`).
+- `reference_target_probe.py` — which reference the projected weights should be projected toward:
+  three per-cell blocks compared on build time, weight size, damping sign and accuracy
+  (`REF_TARGETS`, `REF_BLENDS`).
 - `diagnose_435.py` — reconstruction exactness on this mesh and where a plug state's residual lives.
 - `diffusion_operator_probe.py` — a scalar Laplace operator split into its orthogonal part and its
   non-orthogonal correction, across gradient schemes and on control meshes; also the schemes used to

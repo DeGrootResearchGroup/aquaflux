@@ -945,7 +945,7 @@ is choosing the remainder, most of them implicitly.
 
 {class}`~aquaflux.schemes.ProjectedStencilGradient` chooses explicitly. Of all the weights on the
 stencil that are exact for quadratics, it takes the ones nearest to a reference reconstruction known
-to damp — one block sweep of the gradient--Hessian system above — and
+to damp — a Green–Gauss face pass under the gradient equation's own per-cell block — and
 {attr}`~aquaflux.schemes.ProjectedStencilGradient.blend` says how much of that reference to aim at:
 
 ```python
@@ -959,6 +959,13 @@ At `blend=0` the weights are the smallest exact ones — an unweighted quadratic
 the stencil. At `blend=1` they are as close to the reference as exactness allows. Both ends are
 second-order; what moves between them is accuracy on fields that are not quadratic, against the size
 of the weights.
+
+**The reference is a target, not an ingredient.** It is not exact for anything and never contributes
+to a reconstructed gradient. The weights that are exact for quadratics form an affine set, so the
+projection lands in that set whatever it aims at, and the target only decides *which* member —
+which is why a reference of modest accuracy gives a second-order reconstruction, and why a cheap
+target serves as well as an expensive one. What it does decide is the weights' magnitude, and through
+that the sign of the pressure damping.
 
 The weights are built once per field by {meth}`~aquaflux.schemes.GradientScheme.bind`, which needs
 the field's conditions: a boundary face whose value is prescribed constrains the stencil with a
