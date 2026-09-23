@@ -271,7 +271,13 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   badly. This scheme takes, of the exact weights, the ones nearest `blend` × a reference that damps
   (one block sweep of `HessianCorrectedGradient`'s system, `P_g⁻¹ b_g`: one face pass plus a per-cell
   block solve). `blend=0` is the minimum-norm end, which IS an unweighted quadratic least-squares fit
-  on the stencil; `blend=1` is the nearest exact weights to the reference. Built once per field in
+  on the stencil — the same operator `w = B(BᵀB)⁻¹e`, i.e. the gradient of a k-exact (k=2)
+  reconstruction, Barth & Frederickson (AIAA 1990); pinned against an independently built fit by
+  `test_the_minimum_norm_end_is_an_unweighted_quadratic_least_squares_fit`, which is the only test in
+  that file sensitive to *which* exact weights are chosen (a 0.2 % departure fails it and nothing
+  else). ⚠️ **So the novelty is the blend and the boundary rows, not the scheme** — and `blend=0`
+  alone already fixes the tetrahedral damping, which is what a paper claim would have to survive.
+  `blend=1` is the nearest exact weights to the reference. Built once per field in
   `bind`, applied as one gather and one contraction — no solve, no iteration, and the reach is the
   multiple-correction scheme's, so a Jacobian gains nothing.
   - **Why it exists: exactness and weight SIZE are independent, and only the second decides the

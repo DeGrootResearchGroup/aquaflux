@@ -10,6 +10,9 @@ What each test pins, and the wrong answer it catches:
   sign of the Rhie--Chow damping;
 * the blend moves the weights towards the reference and away from the minimum-norm ones, so a blend
   that was ignored would not pass;
+* the minimum-norm end equals an independently built unweighted quadratic least-squares fit, which
+  says what `blend = 0` is (the classical construction) and is the only test here sensitive to WHICH
+  exact weights the fit lands on -- a 0.2 % departure from that end fails it and nothing else;
 * the stencil reaches exactly `reach` face hops, so a Jacobian's sparsity is what the scheme claims;
 * a Robin condition is refused rather than silently reconstructed from the wrong datum;
 * an unbound scheme, a stale binding and the distributed hook each raise rather than return a wrong
@@ -182,6 +185,68 @@ def test_the_blend_moves_the_weights_between_the_two_ends(tetrahedra) -> None:
             quadratic_gradient(centroid),
         )
         assert error < 1e-9, (blend, error)
+
+
+def test_the_minimum_norm_end_is_an_unweighted_quadratic_least_squares_fit(tetrahedra) -> None:
+    """At ``blend = 0`` this scheme IS the classical construction, and that is worth stating.
+
+    Fit a quadratic to the stencil's data by unweighted least squares and differentiate it at the
+    cell: with more stencil entries than monomials that fit is ``w = B (B^T B)^-1 e``, which is the
+    same operator as the smallest weights satisfying ``B^T w = e``. So the minimum-norm end is not a
+    new reconstruction, and the blend is the whole of what this scheme adds to it.
+
+    Checked on a field that is NOT a quadratic, so both sides are wrong in the same way rather than
+    exact for independent reasons -- which is the only version of this comparison that can fail. The
+    stencil membership is taken from the scheme; what is built independently here is the fit, down to
+    its own monomials in unscaled coordinates (a least-squares fit is invariant to that scaling, so
+    agreeing across it is evidence rather than a shared convention).
+    """
+    mesh, geometry = tetrahedra
+    centroid = np.asarray(geometry.cell.centroid)
+    face_centroid = np.asarray(geometry.face.centroid)
+
+    def smooth(points: np.ndarray) -> np.ndarray:
+        return np.sin(1.3 * points[:, 0]) * np.exp(0.2 * points[:, 1]) + np.cos(0.7 * points[:, 2])
+
+    field, boundary_values = smooth(centroid), smooth(face_centroid)
+    scheme = ProjectedStencilGradient(blend=0.0).bind(mesh, geometry, _prescribed_values(mesh))
+    reconstructed = np.asarray(
+        scheme.gradients(jnp.asarray(field), mesh, geometry, jnp.asarray(boundary_values))
+    )
+
+    stencil = build_stencil(mesh, 2)
+    cells, cell_used = np.asarray(stencil.cells), np.asarray(stencil.cell_used)
+    faces, face_used = np.asarray(stencil.faces), np.asarray(stencil.face_used)
+    fitted = np.zeros_like(reconstructed)
+    for cell in range(mesh.n_cells):
+        positions = np.concatenate(
+            [centroid[cells[cell][cell_used[cell]]], face_centroid[faces[cell][face_used[cell]]]]
+        )
+        data = np.concatenate(
+            [field[cells[cell][cell_used[cell]]], boundary_values[faces[cell][face_used[cell]]]]
+        )
+        d = positions - centroid[cell]
+        monomials = np.stack(
+            [
+                np.ones(len(d)),
+                d[:, 0],
+                d[:, 1],
+                d[:, 2],
+                d[:, 0] ** 2,
+                d[:, 1] ** 2,
+                d[:, 2] ** 2,
+                d[:, 0] * d[:, 1],
+                d[:, 0] * d[:, 2],
+                d[:, 1] * d[:, 2],
+            ],
+            axis=1,
+        )
+        coefficients, *_ = np.linalg.lstsq(monomials, data, rcond=None)
+        # Differentiated at the expansion point, where every quadratic term's derivative vanishes.
+        fitted[cell] = coefficients[1:4]
+
+    error = np.max(np.abs(reconstructed - fitted)) / np.max(np.abs(fitted))
+    assert error < 1e-8, error
 
 
 def test_the_stencil_reaches_exactly_the_hops_it_claims(tetrahedra) -> None:
