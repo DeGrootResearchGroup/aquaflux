@@ -268,12 +268,23 @@ def _hybrid_start(coupled: CoupledRANS) -> tuple[jnp.ndarray, jnp.ndarray, jnp.n
     return flow, k, omega
 
 
-def run_march_ab(name: str, gradient_scheme) -> dict:
-    """Attempt the coupled RANS march -- see ``_hybrid_start``'s docstring; expect a FAILED report.
+def run_march_ab(name: str, gradient_scheme, start=_hybrid_start) -> dict:
+    """Attempt the coupled RANS march: an anchor rung at Re/RATIO, then the target.
 
-    Kept as a best-effort attempt (issue #435) rather than removed: it is the harness the fix for #435
-    should be checked against, and its failure mode (which rung, which exception) is itself informative
-    to whoever picks that issue up.
+    Converges under ``ProjectedStencilGradient`` and fails under either multiple-correction closure
+    (issue #435), so the default arms are expected to report FAILED and their failure mode -- which
+    rung, which exception -- is the informative part.
+
+    Parameters
+    ----------
+    name : str
+        The arm's label, used in the per-step log.
+    gradient_scheme : GradientScheme
+        The reconstruction the case is built with.
+    start : callable
+        Given the built :class:`CoupledRANS`, returns the ``(flow, k, omega)`` the anchor rung starts
+        from. Defaults to the hand-built :func:`_hybrid_start`; pass ``hybrid_initialize`` to march
+        from the shipped self-start instead, which is what ``potential_flow_probe.py`` does.
     """
     coupled = build_case(gradient_scheme)
     corners, n_cells = corner_cell_count(coupled)
@@ -293,9 +304,9 @@ def run_march_ab(name: str, gradient_scheme) -> dict:
     try:
         # A manual two-point ramp (anchor at Re/RATIO, then the target) rather than
         # solve_reynolds_continuation, which always self-starts the anchor through
-        # hybrid_initialize -- see _hybrid_start's docstring for why that is avoided here.
+        # hybrid_initialize -- here the seed is injected, so it can be either one.
         anchor = coupled.with_scaled_molecular_viscosity(RATIO)
-        flow0, k0, omega0 = _hybrid_start(coupled)
+        flow0, k0, omega0 = start(coupled)
         flow1, k1, omega1 = solve_coupled(
             anchor,
             flow0,

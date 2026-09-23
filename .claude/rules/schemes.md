@@ -1829,7 +1829,21 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   would itself be a contribution.
 
   **✅ `MultipleCorrectionGradient` IS BUILT (2026-08-24) — the same exactness contract with NO
-  system to solve.** `aquaflux/schemes/multiple_correction.py`, following Pont, Brenner, Cinnella,
+  system to solve.**
+  ⚠️ **RECOMMENDED FOR HEXAHEDRAL AND POLYHEDRAL MESHES, NOT FOR TETRAHEDRA UNDER A PRESSURE COUPLING
+  (decided 2026-09-23, closing the investigation).** On the tetrahedral duct its weights run ~2900x a
+  damping reference and flip 24 Rhie--Chow damping diagonals under the pressure's own conditions
+  (eigenvalue `+2.17`), and the coupled march then finds no admissible step from any seed tried. What
+  was tried and did **not** fix it, so nobody re-tries them: both corner-cell boundary closures
+  (`OwnerGradient`, the `SkewCorrectedGradient` repair — 15 orders of magnitude apart in `M2`
+  conditioning, near-identical march failure), the first pass alone inside Rhie--Chow, ring and
+  threshold withholding of the second pass, mixed per-cell schemes, and Betchen's scheme as a
+  calibration source. The defect is the second pass's *weights*, which exactness does not pin down;
+  the answer is a scheme that chooses them (`ProjectedStencilGradient`), not a repair of this one.
+  This is recorded in the class docstring and on the docs page as a recommendation; **no default
+  moved** — `DEFAULT_GRADIENT_SCHEME` is still this scheme, and the two shipped hexahedral cases are
+  unaffected. #435 carries the history.
+  `aquaflux/schemes/multiple_correction.py`, following Pont, Brenner, Cinnella,
   Maugars & Robinet (JCP 350, 2017); Setzwein, Ess & Gerlinger (JCP 446, 2021) is the vertex-centred
   adaptation and points back to Pont for the cell-centred correction matrices. Both papers are in
   the reference folder.

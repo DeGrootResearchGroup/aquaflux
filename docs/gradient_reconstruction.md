@@ -872,10 +872,10 @@ constraint on that system.
 | {class}`~aquaflux.schemes.CompactGreenGauss` | near-orthogonal | linear, on orthogonal grids | one pass, no system |
 | {class}`~aquaflux.schemes.CorrectedGreenGauss` | any | linear, on any mesh | a few sparse sweeps |
 | {class}`~aquaflux.schemes.HessianCorrectedGradient` | skewed, where the gradient leads | linear and quadratic | an inner and an outer solve |
-| {class}`~aquaflux.schemes.MultipleCorrectionGradient` | skewed, including tetrahedra | linear and quadratic | **no system: two face passes** |
-| {class}`~aquaflux.schemes.ProjectedStencilGradient` | skewed, including tetrahedra where the reconstruction feeds a pressure coupling | linear and quadratic | no system: stored weights |
+| {class}`~aquaflux.schemes.MultipleCorrectionGradient` | skewed hexahedra and polyhedra | linear and quadratic | **no system: two face passes** |
+| {class}`~aquaflux.schemes.ProjectedStencilGradient` | any, and the one to use on tetrahedra where the reconstruction feeds a pressure coupling | linear and quadratic | no system: stored weights |
 
-**The last row is the default.** {data}`~aquaflux.schemes.DEFAULT_GRADIENT_SCHEME` is a
+**The multiple-correction scheme is the default.** {data}`~aquaflux.schemes.DEFAULT_GRADIENT_SCHEME` is a
 {class}`~aquaflux.schemes.MultipleCorrectionGradient`, and a build that names no scheme
 — {meth}`~aquaflux.flow.MomentumContinuity.build`,
 {meth}`~aquaflux.turbulence.SSTTurbulence.build` — takes it. On a skewed benchmark it reaches the
@@ -885,11 +885,24 @@ at a fixed three rings regardless of the mesh — which is where most of that ti
 preconditioner that probes the residual over a bounded stencil then needs no more reach on a skewed
 mesh than on a Cartesian one. It also has no sweep count to calibrate per mesh.
 
-The two reasons to name a different one are the practical points below: it does not yet run under
+The reasons to name a different one are the practical points below: it does not yet run under
 domain decomposition, and on a mesh with **corner tetrahedra** (a cell owning two or more boundary
 faces) its default boundary closure leaves the Hessian underdetermined there. Neither is silent —
 the first raises, and {meth}`~aquaflux.schemes.GradientScheme.bind` measures the second and warns,
 naming the cells.
+
+```{warning}
+**On a wholly tetrahedral mesh, do not use it for a field whose gradient feeds the pressure
+coupling.** Its weights there run some three orders of magnitude larger than a reconstruction that
+damps — exactly the situation [Weights chosen, not inherited](#weights-chosen-not-inherited) below
+describes — and the Rhie–Chow damping coefficient changes sign on part of the mesh, after which a
+coupled momentum–continuity march finds no admissible step from any starting field. The corner-cell
+repair does not address this: it is a property of the weights the scheme's second pass lands on, not
+of the boundary closure, and it is not reported by the conditioning warning. On a tetrahedral mesh
+use {class}`~aquaflux.schemes.ProjectedStencilGradient`, which is exact for quadratics on the same
+stencil and chooses weights of the same size as the damping reference. Hexahedral and polyhedral
+meshes, skewed or not, are unaffected — that is the regime this scheme is recommended for.
+```
 
 Two practical points beyond accuracy.
 
@@ -955,11 +968,13 @@ refused rather than reconstructed from the wrong datum. At run time a reconstruc
 and one contraction per cell: no solve, no iteration, and the same two-hop stencil the
 multiple-correction scheme already couples, so a residual's Jacobian gains no reach.
 
-```{warning}
-It is not yet available for the turbulence closure's `k` and `omega`. Those equations build their
-assembler inside each residual evaluation, so the scheme would be bound against a traced mesh, which
-its stencil construction cannot be; it raises rather than reconstructing. Velocity and pressure bind
-once, outside the residual, and are unaffected.
+```{note}
+The turbulence closure binds it for `k` and `omega` separately, at build time, through
+{attr}`~aquaflux.turbulence.SSTTurbulence.k_gradient_scheme` and
+{attr}`~aquaflux.turbulence.SSTTurbulence.omega_gradient_scheme` — the two fields' conditions differ
+(a wall prescribes `k` and lets `omega` extrapolate), so their weights do. A scheme passed to those
+equations any other way would be bound against a traced mesh, which a stencil built from the
+connectivity cannot be, and it raises rather than reconstructing.
 ```
 
 ```{note}
