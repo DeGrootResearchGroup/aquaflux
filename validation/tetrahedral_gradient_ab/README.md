@@ -36,6 +36,11 @@ before either arm reaches a converged state, for reasons independent of the corn
 `compare.py` to report the M2 numbers above cleanly and then both march attempts as `FAILED` — that
 second half is the expected, currently-unresolved state, not a result about the gradient closure.
 
+⚠️ **The march itself is no longer blocked — the multiple-correction closures are.** `TET_ARMS=projected`
+converges this same case (below), so a failing `owner`/`repaired` arm is now a statement about *those
+weights*, not about this mesh. What the repair does to a march that runs is still unanswered, because
+the corner-cell repair is a `MultipleCorrectionGradient` setting and that scheme is what fails here.
+
 ⚠️ **For a while it failed for a different reason and said the same thing.** `run_march_ab` called
 `solve_coupled` with `rtol=`/`atol=` after those keywords had moved onto `Convergence`, and caught
 *every* exception, so the resulting `TypeError` (raised in 0.1 s, before a single step) was reported
@@ -51,8 +56,13 @@ at step 5.
 
 - **Not a physics-validated case.** No OpenFOAM reference is run; the mesh is coarse and the duct
   short, deliberately, to keep the march cheap once it can run at all.
-- **Marched for laminar flow, not yet for coupled RANS.** `laminar_duct_march.py` marches the same mesh
-  as a laminar duct (below); the coupled RANS march is still blocked, see #435.
+- **Marched, laminar and coupled RANS, under `ProjectedStencilGradient`** (13 steps and 16 target
+  steps respectively; see its section below). Under `MultipleCorrectionGradient` — either corner-cell
+  closure — both marches still fail, which is what #435 now covers.
+- **The self-start is still not usable here.** Both marches are seeded by hand (from rest for the
+  laminar case, a wall-tapered profile for the RANS one) because `hybrid_initialize`'s potential-flow
+  Laplace solve stagnated on this mesh. That was measured under the multiple-correction closures only
+  and has **not** been retried with the weights that converge the march — the open half of #435.
 
 ## The laminar march (issue #448)
 

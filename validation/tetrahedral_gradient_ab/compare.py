@@ -212,10 +212,10 @@ def report_m2_conditioning(gradient_scheme, label: str) -> float:
 def _hybrid_start(coupled: CoupledRANS) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """A wall-tapered initial condition, needing no linear solve at all.
 
-    ⚠️ **Tracked as issue #435, unresolved: this seed does not yet get the march started either.**
-    Kept in the tree because it is the current best attempt and rules out several mechanisms (see its
-    own docstring in #435) rather than because it works. ``run_march_ab`` is expected to report a
-    failure with the current code; do not read a green run as validated until #435 closes.
+    ⚠️ **This seed marches under ``ProjectedStencilGradient`` and under neither multiple-correction
+    closure** (issue #435): with ``TET_ARMS=projected`` the target rung converges in 16 steps at
+    ``alpha = 1``, while ``owner`` and ``repaired`` still diverge from it at anchor step 3. So a
+    failure here is a statement about those weights rather than about the seed.
 
     ``hybrid_initialize``'s own potential-flow seed is not usable on this mesh, and not for a reason
     worth working around: its AMG-preconditioned Laplace solve stagnates (regardless of closure), and
@@ -420,9 +420,10 @@ def main() -> None:
         print(f"\n  ONE ARM FAILED ({broken}): the two closures are NOT equivalent on this mesh.")
     else:
         print(
-            "\n  BOTH ARMS FAILED, identically: this is the EXPECTED, currently-unresolved outcome "
-            "(issue #435), not a result about the gradient closure -- the M2 conditioning numbers "
-            "above are what this case currently has to say about #432."
+            "\n  BOTH ARMS FAILED, identically: the EXPECTED outcome for the multiple-correction "
+            "closures on this mesh (issue #435), not a result about the corner-cell repair -- the M2 "
+            "conditioning numbers above are what this case has to say about #432. The mesh itself "
+            "marches: run TET_ARMS=projected."
         )
 
 
