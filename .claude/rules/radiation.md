@@ -1402,12 +1402,120 @@ facets) as the obvious suspect while noting the sweep ruled it out as the whole 
 section above. The broadcast is still there and still costs memory, but with the call shape fixed
 the whole build reaches the kernel's own throughput, so it is no longer where the time goes.
 
-**The cost is geometry-independent, which is why one ladder settles it for every scene.** The
-pass tests every ray against every triangle with no early exit, so what the rays *hit* cannot
-change what it costs. Checked rather than asserted: the sleeve scene and an otherwise identical
-scene with the sleeve moved outside the box differ by **2.65x in blocked pairs** (463,936 against
-174,912) and by **1.11x in wall clock**, inside the ~20% spread this machine carries. A future
-change that gave the pass an early exit would break this, and the check is what would notice.
+**The cost is geometry-independent *without a grid*, which is why one ladder settles it for
+every scene the default path runs.** The pass tests every ray against every triangle with no
+early exit, so what the rays *hit* cannot change what it costs. Checked rather than asserted:
+the sleeve scene and an otherwise identical scene with the sleeve moved outside the box differ
+by **2.65x in blocked pairs** (463,936 against 174,912) and by **1.11x in wall clock**, inside
+the ~20% spread this machine carries. ⚠️ **`RayCastOcclusion(grid=...)` breaks this, by design**
+— it stops at the first blocker, so its cost depends on what the rays hit and no single ladder
+transfers between scenes. Every figure in this section is the ungridded path.
+
+## GRID ACCELERATION: BUILT as `TriangleGrid` — a HOST walk, off by default
+
+`RayCastOcclusion` tests every ray against every triangle, which a reactor puts out of reach:
+1.6M cells, 7,516 lamp facets and 53,500 wall triangles is **6.6e14** intersections, weeks at
+the measured 120-150 Mtest/s. `grid.py` registers each triangle in the voxels its bounding box
+spans and walks each segment through them (Amanatides & Woo's 3D-DDA), testing only what those
+voxels hold and stopping at the first blocker. Selected with `RayCastOcclusion(grid=True)`, an
+integer, or a per-axis triple; **`False` is the default** — it changes cost, not answers, and
+the answers are what the shipped path is trusted for.
+
+**The specification's "~20 triangles tested per ray" was an assumption and is now measured**, on
+the Sozzi reactor's own geometry (`validation/sozzi_radiation/ray_acceleration_probe.py`, 4,000
+sampled rays from cell centres to lamp facets, 53,500 wall triangles from `body.stl`, jax 0.10.2,
+CPU, x64, macOS arm64, 11 cores):
+
+| grid | occupied voxels | triangles per occupied voxel (mean / max) | steps per ray (mean / max) | tested per ray, early exit (mean / p95) | steps to the first occupied voxel |
+|---|---|---|---|---|---|
+| 32³ | 1,896 | 60.7 / 303 | 16.8 / 48 | 380 / 1,142 | 41.9 |
+| 64³ | 8,399 | 22.3 / 77 | 32.8 / 97 | 121 / 469 | 12.2 |
+| 128³ | 40,681 | 9.7 / 36 | 65.4 / 183 | **52** / 200 | 4.8 |
+
+So the assumption was optimistic by about 2.5x at the best resolution measured, and the method
+survives anyway: 52 against 53,500 is ~1,000x fewer tests. Refining past 128³ trades the two
+columns against each other — halving the triangles per voxel doubles the steps — which is where
+the default's ~10 triangles per occupied voxel comes from.
+
+⚠️ **A TRACED walk is not merely slower here, it is WORSE THAN THE BRUTE FORCE IT REPLACES, and
+that is why this is host code.** Under `jax` the trip count and the per-voxel triangle count must
+both be static, so every ray pays the longest walk against the fullest voxel whether or not it
+finds anything: 183 steps x 36 triangles = **6,588 tests a ray** at 128³, against 53,500 for the
+brute force — an 8x saving, not 1,000x, and none of the early exit. The mask is frozen and built
+from geometry alone, so nothing about it has to be traceable; only the intersection test itself
+is traced, on the compacted (ray, triangle) pairs, through `_pair_is_cut`. **Reach for a host
+implementation whenever a structure's whole value is in the work it SKIPS** — tracing prices the
+work skipped at the same rate as the work done.
+
+**One predicate, two call shapes.** `_counts_as_hit` holds the window-and-exclusion rule
+(`distance > near`, `distance <= 1.0` inclusive at the far end, triangle not excluded) for both
+`_block_is_cut` (every ray against every triangle of a block) and `_pair_is_cut` (one triangle
+per ray, which is what a grid produces). The geometry stays in `_watertight_hit`, so a cracked
+surface cannot leak light through a seam on either path.
+
+**Exactness is the test, not a tolerance.** `test_the_grid_answers_exactly_what_testing_every
+_triangle_answers` compares against `segment_is_cut` at resolutions `None, 1, 3, 16, (2,7,5)`
+for bit equality; a rectangular grid catches an axis transposed in the flattening, and one voxel
+*is* the brute force. A drum test asserts no segment from inside a closed body reaches outside,
+which is how an under-registered triangle leaks — as a bright spot in a field rather than an
+error. At the strategy level, `RayCastOcclusion(grid=...)` is compared with the ungridded one
+facet to facet on a closed drum.
+
+**Mutation pass (5 mutations, 4 red).** Registering triangles by centroid instead of bounding box,
+stopping the walk after the first voxel, dropping the exclusions, and sizing the grid per axis
+rather than by extent all go red. ⚠️ **One survived and is DISMISSED, not a gap: forcing every ray
+to start inside the grid.** Rays entering diagonally through a far face were constructed
+deliberately and gave 0 disagreements, because the walk's stepping comes from the ray itself, so a
+clipped start still covers the true path. The entry point saves steps; it does not decide
+correctness. The separate early-out for a segment that misses the box entirely *is* load-bearing
+and has its own test.
+
+**What it does not fix: the RAY COUNT, which is the binding cost at mesh scale.** 1.6M cells
+against 7,516 facets is 1.2e10 segments however cheaply each is answered. The grid makes scenes
+up to a few times 1e8 rays practical; beyond that the facet count has to come down (the lamp
+ladder, next) or the mask has to be built on a coarser emitter than the gather uses.
+
+## HOW MANY FACETS AN EMITTER NEEDS — measured, because it sets the price of everything
+
+The gather costs `n_receivers x n_facets` and the mask costs that again times what it tests, so
+the emitter's facet count is the cost. The Sozzi comparison uses the tutorial's own
+`lampWall.stl` — 7,516 facets at ~4 mm, a mesh made for `snappyHexMesh` to snap to, not a number
+anyone chose for radiation. `validation/sozzi_radiation/lamp_resolution.py` measures what it buys
+against an analytic lamp refined to 270,336 facets (128 sectors x 1,024 slices, 35.4397 W), on
+8,000 sampled cells of the case mesh, fixed exitance 696.42 W/m², `UniformAbsorption(35.67)`,
+error as `|G - G_ref| / G_ref`:
+
+| lamp | facets | power W | near the lamp (<5 mm), median / p99 | rest of the chamber, median / p99 |
+|---|---|---|---|---|
+| the case's STL | 7,516 | 35.2596 | 1.95% / 7.28% | 1.08% / 2.63% |
+| 8 x 16 | 288 | 34.4966 | 25.4% / 52.6% | 8.82% / 26.3% |
+| 16 x 32 | 1,152 | 35.205 | 10.4% / 27.7% | 2.21% / 8.38% |
+| 24 x 64 | 3,360 | 35.3374 | 4.08% / 13.4% | 0.84% / 2.28% |
+| 32 x 128 | 8,704 | 35.3837 | 1.42% / 6.51% | 0.38% / 0.88% |
+| 48 x 256 | 25,728 | 35.4169 | 0.43% / 2.77% | 0.15% / 0.35% |
+| 64 x 512 | 67,584 | 35.4285 | 0.15% / 0.98% | 0.07% / 0.17% |
+
+**Error falls about in proportion to the facet count, and the near-lamp band sets the
+requirement** — a cell a millimetre away sees one facet subtend a large angle, and absorption is
+evaluated once per facet along the centroid path, so the near-field is where a coarse emitter is
+wrong. Away from the lamp the same lamp is 3-5x better. **A Lambertian emitter's solid angle is
+exact at any distance**, so none of this is a solid-angle error: what a facet count buys is
+absorption sampling and the inscribed area, nothing else.
+
+**The STL is worse than its count suggests** — 1.95% at 7,516 against 1.42% at 8,704 — because
+its triangles are irregular and its area is 0.5% under the true cylinder. Rescaling to equal
+emitted power removes the area part and gives 1.45% / 0.58%, so roughly half the STL's
+rest-of-chamber error is the inscribed-area deficit rather than the sampling.
+
+⚠️ **The mesh's own patches are the expensive way to get this**: the snapped `lampWall` patch
+carries **48,550** faces (and the body patch 329,028), which buys about what a 25,728-facet
+analytic lamp buys for 6.5x the rays. Any patch-built `Surfaces` wants a merge or facet-size
+control in front of it.
+
+⚠️ **The gather's `chunk_size` is a number of RECEIVERS, and at these facet counts that is a
+trap**: the default 4,096 against a 270,336-facet lamp forms a chunk of ~9 GB, which killed the
+first run of this study silently. Bound the entries instead — the harness uses
+`chunk_size = 4_000_000 // n_facets`.
 
 ## ANALYTIC OCCLUSION: BUILT as `SilhouetteOcclusion` — exact per blocker, once six defects were out
 
@@ -1664,7 +1772,8 @@ unconservative cull, times a per-item rate extrapolated 600x); the cone cull's p
 the whole build, both arms, at the size the answer is for, and re-time the ratio whenever either arm
 changes.**
 
-**Power-of-two chunk padding** (`_bucket`): padding every chunk to `work_chunk` compiled one program
+**Power-of-two chunk padding** (`triangles.padded_length`, called `_bucket` while it lived in
+`self_occlusion.py` alone): padding every chunk to `work_chunk` compiled one program
 and clipped a quarter of a million pairs for a receiver with sixty candidates; padding to the next
 power of two wastes at most half a chunk and compiles a couple of dozen shapes. It took the
 silhouette tests from 110 s to 19 s and is in every figure above.
