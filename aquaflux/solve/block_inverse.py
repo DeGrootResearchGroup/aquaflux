@@ -21,6 +21,7 @@ from __future__ import annotations
 import abc
 import dataclasses
 from collections.abc import Callable
+from typing import Literal
 
 import scipy.sparse as sp
 
@@ -126,7 +127,7 @@ class SimpleSmoothed(BlockInverse):
     simplec: bool | None = None
     mu: int | None = None
     pre_smooth: bool | None = None
-    prolongation_smoothing: str | None = None
+    prolongation_smoothing: Literal["none", "standard", "symmetric-part"] | None = None
     equilibrate: bool | None = None
     strength_threshold: float | None = None
     max_levels: int | None = None
@@ -150,7 +151,7 @@ class JacobiSmoothed(BlockInverse):
     sweeps: int | None = None
     max_coarse: int | None = None
     aggressive_levels: int | None = None
-    prolongation_smoothing: str | None = None
+    prolongation_smoothing: Literal["none", "standard", "symmetric-part"] | None = None
     spectral_damping: bool | None = None
     equilibrate: bool | None = None
     avoid_singletons: bool | None = None

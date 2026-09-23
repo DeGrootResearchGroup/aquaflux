@@ -1001,6 +1001,11 @@ class SimplerComposition(SaddleComposition):
         return solve
 
 
+#: The pressure-Schur scalings :meth:`BlockPreconditioner.build` accepts. ``BlockDiagonal.schur_scaling``
+#: spells the same two in a ``Literal`` so a spec file's value is checked where it is read; a test pins
+#: the two lists equal.
+SCHUR_SCALINGS = ("simple", "msimple")
+
 _COMPOSITIONS: dict[str, type[SaddleComposition]] = {
     "triangular": BlockTriangularComposition,
     "simple": SimpleComposition,
@@ -1139,8 +1144,11 @@ class BlockPreconditioner(eqx.Module):
                 "fitted to together with the hierarchy that coarsens it, since the two do not vary "
                 "independently."
             )
-        if schur_scaling not in ("simple", "msimple"):
-            raise ValueError(f"unknown schur_scaling {schur_scaling!r}; use 'simple' or 'msimple'")
+        if schur_scaling not in SCHUR_SCALINGS:
+            raise ValueError(
+                f"unknown schur_scaling {schur_scaling!r}; use "
+                + " or ".join(repr(name) for name in SCHUR_SCALINGS)
+            )
         composition_strategy = _build_composition(composition)
         geometry = _SchurGeometry.of(assembler)
         n_cells = assembler.mesh.n_cells

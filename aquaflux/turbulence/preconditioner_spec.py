@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Mapping
+from typing import Literal
 
 from aquaflux.flow import ConvectionAir, ConvectionTwoLevel, VelocityBlock, ViscousMultilevel
 from aquaflux.solve import (
@@ -85,8 +86,8 @@ class BlockDiagonal(SettingsValue):
 
     scalar: ScalarBlock | None = None
     velocity: VelocityBlock | None = None
-    schur_scaling: str | None = None
-    composition: str | None = None
+    schur_scaling: Literal["simple", "msimple"] | None = None
+    composition: Literal["triangular", "simple", "simpler"] | None = None
     mass_scale: float | None = None
     v_cycles: int | None = None
     strength_threshold: float | None = None

@@ -353,11 +353,22 @@ flow, k, omega = solve_coupled(
 ```
 
 A field left out takes its class's default, so a file names only what it changes, and a list
-is read as a tuple. An unknown `kind`, or a field its class does not have, is refused with the
-path to the entry — a misspelt field name is an error rather than a default in disguise. The
-*values* of plain settings are not checked when the file is read: a misspelt `backend`, say,
-is refused only when the preconditioner is built. An explicit `null` means the same as
-leaving the field out. To leave a {class}`~aquaflux.turbulence.BlockDiagonal`'s scalar blocks
+is read as a tuple. An explicit `null` means the same as leaving the field out.
+
+**The file is checked as it is read, not when the preconditioner is built.** An unknown `kind`,
+a field its class does not have, and a *value* the field cannot hold are each refused with the
+path to the entry, so a misspelling is an error rather than a default in disguise:
+
+```yaml
+inverse: {kind: CompleteLu, backend: umfpak}             # 'umfpak' at 'inverse.backend' is not
+                                                         # accepted there; CompleteLu.backend takes
+                                                         # one of 'auto', 'umfpack', 'scipy' or null
+inverse: {kind: MonolithicVCycle, smoother_sweeps: true}  # a boolean where a count belongs
+inverse: {kind: FieldSplit, leading: {kind: CompleteLu}}  # a kind that cannot go in that position
+```
+
+What each field accepts comes from its own declared type, so the reference page for a value is
+also the list of what a file may say in it. To leave a {class}`~aquaflux.turbulence.BlockDiagonal`'s scalar blocks
 unpreconditioned, name that as a value: `scalar: {kind: UnpreconditionedScalars}`.
 {func}`~aquaflux.turbulence.preconditioner_spec_to_mapping` writes a spec back in the same
 form, leaving out every field at its default.

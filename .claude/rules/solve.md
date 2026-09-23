@@ -79,6 +79,30 @@ wrappers live in `turbulence/preconditioner_spec.py` (see `turbulence.md`). Omis
 round-trips, and a required field is always written. ⚠️ A value whose default is compared by `!=`
 must compare by value — an array-valued field would need its own rule; none exists today.
 
+**It checks each setting AGAINST ITS OWN FIELD'S ANNOTATION (#424, 2026-09-23), and a field it cannot
+check stops the mapping being BUILT.** The rules are read once, when the `SettingsMapping` is
+constructed, from `typing.get_type_hints`: a union is its alternatives, a `Literal` is its values, a
+nested value is any registered kind deriving from the annotated class, `tuple[int, ...]` is a list of
+those, and a number/string/boolean is itself. A setting matching none of them raises `ValueError` with
+the path and what that field takes. Three details are load-bearing:
+- **`bool` is a subclass of `int` in Python**, so a boolean satisfies an `isinstance` test for a count
+  — which is exactly how `smoother_sweeps: true` reached the multigrid builder as `1`. A boolean is
+  accepted only where a boolean is annotated, and an `int` position also takes a whole-numbered
+  `float`, because a parser hands back `3.0` and the probe's per-column reach already rounds it.
+- **An unknown `kind` is reported as unknown rather than as misplaced**, including inside a list: both
+  are refusals, and answering with "what belongs here" would leave the reader hunting for a class that
+  does not exist.
+- **An annotation the rules cannot express is a `TypeError` at construction, never a skipped field.**
+  The mappings are module-level constants, so such a field stops the package importing rather than
+  loading unchecked — a mapping that validates nothing looks exactly like one whose values are all
+  valid. Widen `_atoms` if a new form is genuinely wanted.
+⚠️ **The four string choice sets are `Literal`s now** (`CompleteLu.backend`,
+`BlockDiagonal.schur_scaling`/`.composition`, `prolongation_smoothing` on both smoothed inverses) and
+their builders' own sets are `LU_BACKENDS`, `SCHUR_SCALINGS`, `_COMPOSITIONS` and
+`_PROLONGATION_SMOOTHING`. A `Literal` cannot be computed from a variable, so the two are spelled
+separately and pinned equal by a test — which is what found that a round-trip fixture had been carrying
+`prolongation_smoothing="jacobi"`, a value no builder accepts.
+
 ## Responsibility
 - A Newton driver on `R(state, params) = 0` using the AD Jacobian (JVP/VJP), and a
   linear solve wrapped so its gradient comes from **implicit differentiation**, not by

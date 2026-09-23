@@ -326,9 +326,17 @@ Many entries below are dated history written against the old API. Read them thro
       YAML writer. `test_preconditioner_spec_mapping.py` finds every public `VelocityBlock` /
       `ScalarBlock` / `BlockInverse` subclass from the exports of **every** `aquaflux` subpackage and fails if the mapping
       does not accept it, so a new value class cannot be silently unwritable.
-    - ⚠️ **Only field NAMES and kinds are checked on reading, not field VALUES** — `backend: umfpak`,
-      `backend: {kind: CompleteLu}` and `smoother_sweeps: true` all load and fail (or are ignored) at
-      build. Per-position validation is #424 (and #375's discriminated unions).
+    - **✅ FIELD VALUES are checked per position too (#424, 2026-09-23).** `backend: umfpak`,
+      `backend: {kind: CompleteLu}` and `smoother_sweeps: true` — the three that used to load and fail
+      at build, or be ignored — are refused where they appear, with the path and what that field takes.
+      The rules are read off the fields' **own annotations**, so there is no second table to drift from
+      the dataclass; the four choice sets that lived only in docstrings (`backend`, `schur_scaling`,
+      `composition`, `prolongation_smoothing`) are `Literal`s now, pinned equal to their builders' own
+      sets by `test_preconditioner_spec_mapping.py`. ⚠️ **A wrong nested kind is now refused by the
+      LOADER, not by the value's constructor** — so a refusal message moved from `TypeError` naming the
+      family to `ValueError` naming the path. Constructing the same value in Python still meets the
+      constructor's refusal, which is deliberately unchanged: #424 is about the file. Cross-field rules
+      (a setting that means nothing beside a given kind) remain #375's.
     - **"Default omitted" is judged by EQUALITY WITH THE FIELD'S DEFAULT, not by `None`.** One field
       breaks the "`None` for unset" wording: `MaterializedJacobian.probe`, where an absent key is the
       default probe and `probe: null` is refused. (`BlockDiagonal.method` was a second, with an `_UNSET`
