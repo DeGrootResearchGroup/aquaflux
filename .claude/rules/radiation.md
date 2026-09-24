@@ -1546,14 +1546,26 @@ matter for a field and too specific to dismiss, so they are recorded rather than
 
 **Cost, measured in the same run, and it is the real argument.** The analytic arm took **6.9 s**
 against the grid's **4,659.8 s** on those same 180M rays -- **675x**. ⚠️ **Quote that figure with
-its scene, because it is the most favourable of the three available framings**: these receivers
-are pipe cells, which are the grid's worst case (its cost is set by how far a segment travels
-through empty voxels, and a ray from the lamp crosses the whole chamber before reaching the wall
-beside the receiver -- see the traversal issue #503), and the arm it is divided by is the
-*hand-derived* occluder rather than a general one. Against randomly placed receivers the grid
-runs ~130,000 rays/s rather than 38,700, and a general primitive construction costs a few times
-the bespoke one. The defensible range is **~100-350x**, with 675x as the pipe-cell-against-
-bespoke end of it. For scale in the other
+its scene: it is the most favourable corner of a table, not a property of the method.** Two
+choices move it, and conflating them is easy -- which receivers, and which primitive arm.
+
+| primitive arm | vs grid on PIPE cells (38,711 rays/s) | vs grid on RANDOM receivers (65,647) |
+|---|---|---|
+| hand-derived `BranchOpenings`, 26.1M rays/s | **675x** | 398x |
+| general `Outside` of three cylinders, 17.2M rays/s | 444x | 262x |
+
+Both grid rates are the **area-sized default grid**; a 128³ grid roughly doubles them, which is a
+third axis again. So the honest statement is **a few hundredfold, 260-675x across these corners**,
+and any single number needs its row and its column.
+
+⚠️ **AND THE RECEIVER EFFECT IS 1.7-1.9x, NOT THE 3.4x FIRST RECORDED HERE AND IN #503** -- that
+figure divided pipe cells on the default grid by random receivers on a **128³** grid, so it
+conflated the receiver population with the resolution. Measured separately, at a fixed grid the
+population is worth 1.70x and 1.87x (two runs), and at a fixed population the resolution is worth
+2.00x and 1.33x. The mechanism behind the receiver half still holds -- a ray from the lamp crosses
+the whole chamber through empty voxels before reaching the wall beside a pipe cell, so the walk's
+cost is the distance travelled (#503) -- but it is worth less than half what the conflated figure
+claimed. For scale in the other
 direction, the *entire* field with analytic occlusion -- all 1,635,909 cells, gather arithmetic
 included -- takes **557 s** (`run-20260922-125655.log`), while the grid mask alone extrapolates
 to **88 h** at the 38,700 rays/s measured here. **The triangulated mask costs about 600x
