@@ -1516,6 +1516,42 @@ that finer than that is not better; the ordering among the three finer arms is i
 is not established. `_TARGET_PER_VOXEL` was therefore left at ten — lowering it is not supported by
 this measurement, whatever the single fastest row says.
 
+**THE MASK IS EXACT ON A REAL REACTOR, AND THE ONLY DISAGREEMENT IS THE STL'S IDEA OF A
+CIRCLE.** `validation/sozzi_radiation/grid_mask_check.py` runs the general method -- the vessel
+wall as the 53,500 triangles `bodyWall.stl` actually holds, culled by the grid -- against the
+hand-derived analytic occluder that the Sozzi comparison uses, which is exact because that fluid
+is three convex cylinders. Configuration: 7,516 lamp facets, 24,000 receivers (20,000 of the
+310,886 pipe cells, 4,000 chamber cells as a control), 180,384,000 rays, area-sized grid
+(212, 11, 114), `UniformAbsorption(35.67)`, jax 0.10.2, CPU, x64, macOS arm64, 11 cores, 78 min.
+
+| | pipes, 20,000 cells | chamber, 4,000 cells |
+|---|---|---|
+| pairs masked differently, per cell | 88.8 of 7,516 | **0** |
+| relative difference in `G`, median / p99 / max | 1.2% / 8.9% / 54% | **0 / 0 / 0** |
+
+**The chamber control is exactly zero**: the faceted wall blocks nothing where the ideal one
+blocks nothing, on four thousand cells. And of the 1,776,306 pairs the two masks disagree on,
+**99.993% cross the opening between 0.976 and 0.9997 of its radius** (median 0.989). An STL
+describes a round pipe as an inscribed polygon -- `cos(pi/15) = 0.978` puts this one at about
+fifteen sides -- and the sliver between that polygon and the circle is the entire disagreement.
+Neither mask is wrong; they are given different geometry. This is what makes the case for
+describing blocking geometry as primitives rather than triangles, where the circle *is* the
+geometry.
+
+⚠️ **Two things the median hides, both worth keeping.** The worst cell moves by **54%**: cells
+deep in a pipe see a sliver of lamp, so a handful of facets carry the whole signal and one of
+them switching is a large relative change on a small number. And 0.007% of the disputed pairs --
+about 124 of them -- fall outside the rim band and are **not explained**; they are too few to
+matter for a field and too specific to dismiss, so they are recorded rather than rounded away.
+
+**Cost, measured in the same run, and it is the real argument.** The analytic arm took **6.9 s**
+against the grid's **4,659.8 s** on those same 180M rays -- **675x**. For scale in the other
+direction, the *entire* field with analytic occlusion -- all 1,635,909 cells, gather arithmetic
+included -- takes **557 s** (`run-20260922-125655.log`), while the grid mask alone extrapolates
+to **88 h** at the 38,700 rays/s measured here. **The triangulated mask costs about 600x
+everything else in the calculation put together**, which is why the grid is the fallback for
+geometry that exists only as triangles and not the path a real reactor should take (issue #501).
+
 **What it does not fix: the RAY COUNT, which is the binding cost at mesh scale.** 1.6M cells
 against 7,516 facets is 1.2e10 segments however cheaply each is answered. The grid makes scenes
 up to a few times 1e8 rays practical; beyond that the facet count has to come down (the lamp
