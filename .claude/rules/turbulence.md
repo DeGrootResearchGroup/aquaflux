@@ -606,6 +606,33 @@ Many entries below are dated history written against the old API. Read them thro
   `ResidualAssembler.residual`, which equinox treats as a pytree — that one was always fine.) Note the
   contrast with the preconditioner above: a *per-sweep* callable must be a pytree, a *frozen* one must not.
 
+## Which patches are walls is stated twice, and reconciled at the coupled build (#355, 2026-09-24)
+
+- **Both cross-block consistency checks are METHODS ON THE CLOSURE, not inline in
+  `CoupledRANS.build`** — `refuse_a_density_the_flow_disagrees_with` and
+  `refuse_a_wall_set_the_flow_disagrees_with`. Each compares a declaration the closure itself owns
+  against the flow block's, so the closure is where they belong; the density one was inline until
+  #355 and moved with the wall one so the two read as one pattern rather than two shapes.
+- **`SSTTurbulence.wall_patches` is kept on the built assembler, and `CoupledRANS.build` checks it
+  against the flow closures.** The flow block says "this patch is a wall" by giving it a closure whose
+  `shears_flow()` is true (`NoSlipWall`, `MovingWall`); the closure says it by naming the patch in
+  `wall_patches`, which drives the wall distance, the wall-adjacent cell set and hence the `omega`
+  fixation. `_refuse_wall_patches_the_flow_does_not_agree_are_walls` raises on either difference,
+  naming each side. **Both directions are defects and neither surfaces later:** a wall the closure
+  does not list gets no wall distance, so `omega` is fixed nowhere near it; a patch listed that passes
+  fluid adds a spurious zero-distance surface, pulling the wall distance down across the region
+  nearest it.
+- ⚠️ **Checked, not derived, and the reason is #364.** An imported mesh drops the patch `type` its
+  polyMesh file declares, so there is no third, authoritative source to derive both from. When #364
+  lands the set can be derived and the third registration disappears.
+- ⚠️ **`wall_patches` is kept ALONGSIDE `wall_faces`, and that is not a second spelling.** The faces
+  are what the arrays are built from; the names are the *declaration*, and only a declaration can be
+  compared with another block's — indices also do not survive a face renumbering.
+- ⚠️ **Do NOT add an `is_wall` predicate: `shears_flow()` already is one** (`flow/boundary.py`). Its
+  docstring used to say it was "consumed only by the frozen preconditioner's velocity scale; it never
+  enters the residual" — **false**: the momentum assembler selects the wall-function viscosity
+  override on exactly these faces, which is solution-affecting. Corrected in the same change.
+
 ## Near-wall treatment — `boundary.py` (the four pieces, and the wall BC question)
 
 - **`boundary.py`** — inlet/wall closures for k and ω over the generic scalar boundary machinery.

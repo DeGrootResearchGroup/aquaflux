@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING
 
 import jax.numpy as jnp
 
+from .boundary import sheared_patches
+
 if TYPE_CHECKING:
     from .momentum import MomentumContinuity
 
@@ -52,8 +54,7 @@ def hydraulic_length(assembler: MomentumContinuity) -> float:
     geometry = assembler.geometry
     wall_area = sum(
         float(jnp.sum(geometry.face.area[assembler.mesh.face_patches.indices(name)]))
-        for name, closure in assembler.boundary.conditions.items()
-        if closure.shears_flow()
+        for name in sheared_patches(assembler.boundary)
     )
     if wall_area <= 0.0:
         return 0.0

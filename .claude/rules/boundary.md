@@ -55,6 +55,25 @@ balance holds, and high-`h` convective → Dirichlet. The closures are consumed 
 `ResidualAssembler` both as the flux's boundary value and (leading-order) as the gradient
 reconstruction's boundary input.
 
+- **`BoundaryCondition.closes() -> tuple[str, ...]` (binding, #355), the same self-describing shape
+  as `requires_coefficient()` below.** A scalar closure returns `HOST_EQUATION_FIELD` — the empty
+  tuple, meaning "one field, its host equation's". It is **empty on purpose**: the closure is used by
+  whichever equation holds it and does not know that equation's name, so a name written here would be
+  a second copy of something the *assembler* owns and free to disagree with it. `FlowBoundary.closes()`
+  returns `FLOW_FIELDS = ("velocity", "pressure", "mdot")` (`flow/boundary.py`), which is what makes
+  the two families distinguishable at all — nothing about their shapes is.
+  - **The check is `collection.refuse_a_closure_that_closes_other_fields(boundary, closes, caller)`,
+    and it is deliberately NOT inside `resolve`.** `BoundaryConditions` is generic over its closure
+    type — that is what lets it carry a plain per-patch value driven by a caller's own callable, which
+    its own tests exercise — so the arity a given assembler needs is the *assembler's* knowledge, not
+    the collection's. Called by `MomentumContinuity.build` (`FLOW_FIELDS`), `ResidualAssembler.build`,
+    `ScalarTransport.build` and `SSTTurbulence.build` (once per scalar equation, naming which).
+  - **What it replaces:** handing a `Dirichlet` to the flow system raised
+    `AttributeError: 'Dirichlet' object has no attribute 'velocity_face'` — an internal method name,
+    no patch named, and nothing saying the families differ. It now names the patch, what that patch
+    has, what that closes, and what the equation needs. Every wrong patch is reported at once.
+  - An object declaring **nothing** is refused too, not skipped: skipping is how a bare value reaches
+    `apply` and gets folded into the residual as whatever it happens to be.
 - **`BoundaryCondition.requires_coefficient() -> bool` (binding, #360), the same self-describing
   shape as `FaceFluxOperator.requires()`.** Default `False`; `Neumann` and `Convective` override to
   `True` because they read the assembler's diffusion coefficient as `gamma_owner` in their closed

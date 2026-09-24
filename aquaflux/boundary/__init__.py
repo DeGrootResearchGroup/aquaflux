@@ -7,8 +7,9 @@ Pure functions of boundary-cell state + face geometry + BC parameters.
 
 from __future__ import annotations
 
-from .collection import BoundaryConditions
+from .collection import BoundaryConditions, refuse_a_closure_that_closes_other_fields
 from .conditions import (
+    HOST_EQUATION_FIELD,
     BoundaryCondition,
     Convective,
     Dirichlet,
@@ -18,6 +19,7 @@ from .conditions import (
 )
 
 __all__ = [
+    "HOST_EQUATION_FIELD",
     "BoundaryCondition",
     "BoundaryConditions",
     "Convective",
@@ -25,4 +27,5 @@ __all__ = [
     "DirichletField",
     "Neumann",
     "ZeroGradient",
+    "refuse_a_closure_that_closes_other_fields",
 ]

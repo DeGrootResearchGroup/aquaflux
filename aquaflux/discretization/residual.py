@@ -54,7 +54,11 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from aquaflux.boundary import BoundaryConditions
+from aquaflux.boundary import (
+    HOST_EQUATION_FIELD,
+    BoundaryConditions,
+    refuse_a_closure_that_closes_other_fields,
+)
 from aquaflux.context import FieldContext, MeshContext
 from aquaflux.schemes import BoundaryLinearization
 
@@ -284,6 +288,9 @@ class ResidualAssembler(eqx.Module):
             needed.add(coefficient)
         if needed:
             properties.require(*sorted(needed))
+        refuse_a_closure_that_closes_other_fields(
+            boundary, HOST_EQUATION_FIELD, "ResidualAssembler.build"
+        )
         if gradient_scheme is None:
             needing = [op for op in flux_operators if op.uses_gradient()]
             if needing:

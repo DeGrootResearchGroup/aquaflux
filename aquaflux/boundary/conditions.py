@@ -141,6 +141,12 @@ def _tangential_correction(
     return dot(grad_owner, tangential)
 
 
+#: What a closure covering exactly one field -- its host equation's -- declares from
+#: :meth:`BoundaryCondition.closes`. Empty because the field is the *assembler's*: the closure is
+#: used by whichever equation holds it and never names that equation itself.
+HOST_EQUATION_FIELD: tuple[str, ...] = ()
+
+
 class BoundaryCondition(eqx.Module):
     """Strategy interface: a weak boundary face-value closure.
 
@@ -153,6 +159,27 @@ class BoundaryCondition(eqx.Module):
     velocity--pressure system, say) is expressed by composing one such closure per field per
     patch, rather than by a separate, parallel boundary hierarchy.
     """
+
+    def closes(self) -> tuple[str, ...]:
+        """Which fields this closure closes: :data:`HOST_EQUATION_FIELD` -- one, its host equation's.
+
+        Declared rather than inferred, so an assembler can say what it needs closed and be refused
+        by name when it is handed something else. Without it the mismatch surfaces as an
+        ``AttributeError`` for whichever method the wrong family happens to lack, which names an
+        internal method rather than the mistake and does not say which patch is wrong.
+
+        Empty for this family on purpose: a single-field closure is used by whichever equation holds
+        it and does not know that equation's name. Writing a name here would be a second copy of
+        something the *assembler* already owns, free to disagree with it -- the same reasoning as
+        :meth:`requires_coefficient`, which is parameterized by a coefficient name the assembler
+        holds.
+
+        Returns
+        -------
+        tuple of str
+            :data:`HOST_EQUATION_FIELD`.
+        """
+        return HOST_EQUATION_FIELD
 
     def requires_coefficient(self) -> bool:
         """Whether this closure reads the assembler's diffusion coefficient as ``gamma_owner``.

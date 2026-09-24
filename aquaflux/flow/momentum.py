@@ -34,7 +34,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from aquaflux.boundary import BoundaryConditions
+from aquaflux.boundary import BoundaryConditions, refuse_a_closure_that_closes_other_fields
 from aquaflux.context import FieldContext, MeshContext
 from aquaflux.discretization import (
     AdvectionFlux,
@@ -52,6 +52,7 @@ from aquaflux.schemes.interpolation import (
 from aquaflux.solve import FieldLayout
 from aquaflux.vectors import dot
 
+from .boundary import FLOW_FIELDS
 from .rhie_chow import (
     advective_momentum_flux,
     interior_mass_flux,
@@ -287,6 +288,7 @@ class MomentumContinuity(eqx.Module):
         also a solve control variable (see :attr:`body_force`), and the two simply add.
         """
         properties.require("viscosity", "density")
+        refuse_a_closure_that_closes_other_fields(boundary, FLOW_FIELDS, "MomentumContinuity.build")
         reject_unsupported_face_force(sources, geometry, properties, mesh)
         force = jnp.zeros(mesh.dim) if body_force is None else jnp.asarray(body_force)
         face_geometry, cell_geometry = geometry.face, geometry.cell

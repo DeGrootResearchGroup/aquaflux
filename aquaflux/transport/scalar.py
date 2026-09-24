@@ -30,6 +30,10 @@ from typing import TYPE_CHECKING
 import equinox as eqx
 import jax.numpy as jnp
 
+from aquaflux.boundary import (
+    HOST_EQUATION_FIELD,
+    refuse_a_closure_that_closes_other_fields,
+)
 from aquaflux.discretization import (
     AdvectionFlux,
     DiffusionFlux,
@@ -163,6 +167,9 @@ class ScalarTransport(eqx.Module):
         transient : TransientTerm, optional
             Accumulation term; omit for a steady scalar.
         """
+        refuse_a_closure_that_closes_other_fields(
+            boundary, HOST_EQUATION_FIELD, "ScalarTransport.build"
+        )
         return cls(
             mesh=mesh,
             geometry=geometry,
