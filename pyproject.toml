@@ -49,9 +49,10 @@ dependencies = [
     # no bound at all. `aquaflux/__init__.py` degrades to an unbounded cache if it is
     # somehow absent, but the bound is the point, so it ships as a dependency.
     "filelock>=3.12",
-    # NOTE: pydantic + pyyaml are intentionally NOT dependencies yet. The
-    # YAML→AST model format is the last layer to be built; it is added when that
-    # work starts, not before. Do not add them to scaffold empty structure.
+    # PyYAML: parses a case file (`aquaflux.case`). Only the parse is YAML-specific --
+    # every section is read from the parsed mapping by `solve.SettingsMapping`, which
+    # also does the validation, so pydantic is deliberately not a dependency.
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]

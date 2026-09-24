@@ -14,6 +14,9 @@ before anyone moved a line of it out, because no check looked at how large a phy
   consumer can use them only while they import nothing from a physics package.
 * :func:`test_a_physics_module_stays_below_the_size_at_which_generic_machinery_hides_in_it` -- a size
   ratchet on the physics packages, with each over-size module's current size as its budget.
+* :func:`test_nothing_below_the_case_layer_imports_it` -- ``case/`` is the opposite end: it composes
+  every physics package into a described case, so a package it composes that imported it back would
+  make the description a dependency of the thing described.
 """
 
 from __future__ import annotations
@@ -57,6 +60,28 @@ def _imports(path: pathlib.Path) -> list[tuple[int, str | None, int]]:
         elif isinstance(node, ast.Import):
             found.extend((node.lineno, alias.name, 0) for alias in node.names)
     return found
+
+
+def _absolute(path: pathlib.Path, module: str | None, level: int) -> list[str]:
+    """The dotted parts of the module an import in ``path`` names, relative imports resolved."""
+    if level == 0:
+        return (module or "").split(".")
+    package = ["aquaflux", *path.parent.relative_to(PACKAGE).parts]
+    return [*package[: len(package) - (level - 1)], *(module.split(".") if module else [])]
+
+
+def test_nothing_below_the_case_layer_imports_it() -> None:
+    offenders = [
+        f"{path.relative_to(PACKAGE)}:{line} imports {'.' * level}{module}"
+        for path in sorted(PACKAGE.rglob("*.py"))
+        if path.relative_to(PACKAGE).parts[0] != "case"
+        for line, module, level in _imports(path)
+        if _absolute(path, module, level)[:2] == ["aquaflux", "case"]
+    ]
+    assert not offenders, (
+        "case/ is the top layer: it reads a case file into the physics packages' own values, so none "
+        "of them may import it:\n" + "\n".join(offenders)
+    )
 
 
 #: Packages that must import nothing of aquaflux but themselves and the neutral leaves, each with
