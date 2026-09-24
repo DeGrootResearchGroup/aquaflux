@@ -25,8 +25,8 @@ same for every pair, compiled into one expression. Against a triangulated wall i
 thousands of triangles, and it is also *wrong* by the sliver between a round pipe and the polygon
 that stands in for it. On the Sozzi & Taghipour (2006) reactor the triangulated wall's mask costs
 several hundred times the rest of the calculation put together; described as three cylinders, the
-same mask is exact and costs seconds. The CAD reader is how a real drawing gets that description
-without anyone typing radii into a script.
+same mask is exact and costs about as much as the gather it shadows. The CAD reader is how a real
+drawing gets that description without anyone typing radii into a script.
 
 ## Reading a drawing
 
