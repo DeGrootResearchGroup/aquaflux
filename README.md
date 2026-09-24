@@ -62,6 +62,14 @@ applies anywhere you want gradients through a flow solve.
   limiters are first-class strategy objects with a known order of accuracy,
   injected into operators and tested in isolation, so the numerics can be changed
   without touching the physics.
+- **Ultraviolet radiation and CAD geometry** — the fluence rate in the water by an
+  exact backward gather over emitting surface facets, with absorption, shadowing and
+  diffuse interreflection. Blocking geometry is described as exact solids
+  (`aquaflux.solids`: cylinders, spheres, cones, their unions, and a vessel as the
+  fluid it holds), and both those solids and a lamp's emitting surface can be read
+  from a STEP drawing with `aquaflux.io.cad.read_step`, which checks every solid it
+  hands out against the drawing and refuses one it cannot describe exactly. Install
+  the CAD kernel with `pip install "aquaflux[cad]"`.
 - **Distributed memory** — domain decomposition (including a SCOTCH partitioner)
   and halo exchange for a sharded residual.
 - **Case files** — describe a case's mesh, fluid, physics, boundary patches and
@@ -72,7 +80,7 @@ applies anywhere you want gradients through a flow solve.
 
 ## Installation
 
-aquaflux requires Python ≥ 3.10. Until it is published to PyPI, install from
+aquaflux requires Python ≥ 3.11. Until it is published to PyPI, install from
 source:
 
 ```bash

@@ -6,7 +6,7 @@ which is why it is answered here rather than by a body standing in the light.
 
 ⚠️ **This is the fallback, not the first choice.** Where the shape has an analytic description —
 and a vessel usually does — describing the fluid it holds and letting
-:class:`~aquaflux.radiation.occluders.Outside` decide is both exact and orders of magnitude
+:class:`~aquaflux.solids.Outside` decide is both exact and orders of magnitude
 cheaper, because it is a formula rather than a search over triangles. What belongs here is a
 surface with no such description, or one whose description has not been written down.
 

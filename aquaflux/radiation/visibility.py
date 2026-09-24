@@ -60,7 +60,7 @@ def _compiled_blocks(body, origin, target, near):
     walking a grid of triangles, dropping rays as they are settled — cannot be traced at all,
     and deliberately so.
 
-    So this is applied only where :attr:`~aquaflux.radiation.occluders.Occluder.traceable` says
+    So this is applied only where :attr:`~aquaflux.solids.Body.traceable` says
     it may be, which is a declaration on the body rather than a guess from its type. The two
     kinds are meant to compose in one scene: a vessel described as primitives, with whatever
     genuinely is a triangle soup standing beside it.
@@ -181,7 +181,7 @@ def build_visibility(
 
     Parameters
     ----------
-    occluders : sequence of Occluder
+    occluders : sequence of aquaflux.solids.Body
         The analytic bodies. An empty sequence is fine; the surface's own triangles are handled
         separately.
     surfaces : Surfaces

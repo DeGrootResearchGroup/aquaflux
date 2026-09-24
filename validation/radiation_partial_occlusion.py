@@ -44,13 +44,13 @@ import aquaflux  # noqa: F401  (enables x64)
 import numpy as np
 from aquaflux.radiation.self_occlusion import NoOcclusion
 from aquaflux.radiation import (
-    Cylinder,
     RadiationSettings,
     Surfaces,
     build_radiation_model,
     build_transfer,
     fluence_rate,
 )
+from aquaflux.solids import Cylinder
 from tests.unit.radiation_references import area_average_onto, facing_plates
 
 #: Plate half-width, and the half-gap between them, in metres. A square aperture of the same

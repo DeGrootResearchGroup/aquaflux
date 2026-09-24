@@ -22,6 +22,7 @@ gradient_reconstruction
 steady_state_solving
 preconditioning
 case_files
+cad_geometry
 ```
 
 ```{toctree}

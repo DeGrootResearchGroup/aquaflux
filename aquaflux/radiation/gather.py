@@ -229,7 +229,7 @@ def direct_fluence_rate(
         Which bodies lie between which sources and which receivers, built once for these exact
         receiver positions and checked against them here. Mutually exclusive with ``occluders``
         and ``self_occlusion``.
-    occluders : sequence of Occluder, optional
+    occluders : sequence of aquaflux.solids.Body, optional
         The bodies themselves, instead of a mask built from them. Each chunk's mask is then
         built here and **dropped when that chunk is done**, so peak memory is set by the chunk
         rather than by the receiver count -- which is what makes a mesh-scale field computable

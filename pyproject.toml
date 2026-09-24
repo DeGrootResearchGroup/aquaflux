@@ -10,7 +10,7 @@ name = "aquaflux"
 dynamic = ["version"]
 description = "Differentiable unstructured finite-volume flow solver in JAX, purpose-built to couple with aquakin for reactive environmental transport"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Christopher DeGroot", email = "christopher.degroot@uwo.ca" }]
@@ -72,6 +72,10 @@ test = [
     "pytest-xdist>=3.6",
     "pytest-split>=0.9",
     "pytest-timeout>=2.3",
+    # The CAD reader's tests need its kernel. It has wheels for every interpreter CI runs, so it is
+    # carried here and those tests run there -- unlike `petsc`, whose absence from CI is a recorded
+    # cost (tests/unit/test_optional_dependency_skips.py).
+    "aquaflux[cad]",
 ]
 # `docs` is the Sphinx toolchain for the site under `docs/` — MyST Markdown pages,
 # the pydata theme, and the copy-button extension; autodoc imports the package
@@ -90,6 +94,14 @@ docs = [
     "pydata-sphinx-theme>=0.15,<1",
     "sphinx-copybutton>=0.5,<1",
 ]
+# `cad` is the kernel `aquaflux.io.cad.read_step` reads STEP files through: OpenCASCADE Technology,
+# by its Python binding OCP. Pinned exactly, because the binding's API moves between releases
+# (collection types renamed, static methods losing their suffix) and every call to it lives in
+# `aquaflux/io/cad/kernel.py` against this one version. The `-novtk` build is the same `OCP` module
+# without the VTK visualization toolkit (a further large wheel nothing here uses); it cannot be
+# installed beside `cadquery`, which brings the VTK build of the same module. Wheels exist for
+# CPython 3.11-3.14 on Linux, macOS and Windows, and none for 3.10, which is why the floor is 3.11.
+cad = ["cadquery-ocp-novtk==8.0.1.0.0"]
 # `petsc` (petsc4py) backs two coupled preconditioners. For the complete-LU
 # (`coupled_lu_continuation`) it is the optional fast backend — UMFPACK (SuiteSparse) factors the coupled
 # Jacobian roughly an order of magnitude faster than the threshold-ILU on a moderate 2D mesh; without it
@@ -113,7 +125,7 @@ include = ["aquaflux*"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 # Lint only the package and its tests; everything else in the repo is out of
 # scope for the style gate.
 src = ["aquaflux", "tests"]

@@ -59,6 +59,51 @@ being evidence the moment the bespoke one is deleted. The harness uses the meshe
 when `work/case` is present and samples the three cylinders when it is not, saying which in its
 summary — so it runs without OpenFOAM, at the cost of a different receiver population.
 
+## The reactor read from its CAD drawing (2026-09-24, `primitive_occlusion.py`, `lamp_resolution.py`)
+
+The tutorial's STLs are generated from a STEP drawing, `SozziTaghipour.step` (an Onshape export in
+metres, body axis along `y`, declared tolerance 10 µm; committed at
+`validation/uvreactor_openfoam/of_case/`). `aquaflux.io.cad.read_step` reads it with the axes swapped
+to the case's frame, and both harnesses take it as a further arm when the CAD kernel is installed
+(`pip install "aquaflux[cad]"`); without it the arm is skipped and the log says so.
+
+**Shadowing.** `cad.fluid("reactor_body", "inlet_pipe", "outlet_pipe")` is read and checked against
+the drawing in 0.8 s — its boundary lies within **0.75 µm** of the drawing's against the declared
+10 µm — and, on the same 24,000 cells, 7,516-facet STL lamp and 180,384,000 rays as the two arms
+above, masks **0 pairs differently** from `BranchOpenings`, with `G` equal to 0.0 relative at the
+median, p99 and max. Its cylinders are the drawing's, not the hand-typed ones — the pipes run 850 mm
+where the hand-written ones stop at the meshed domain, and the riser is carried into the chamber by
+recognition — so the parameters differ by design and the mask on the mesh's cells is identical.
+Single-pass times: `BranchOpenings` 8.7 s, hand-typed `Outside` 12.8 s, drawing `Outside` 11.0 s —
+one pass each, so not a ratio to quote (#513).
+
+**The lamp as an emitter.** `cad.triangles("lamp", chord=..., facet_size=...)`, base disc dropped
+(the analytic ladder and the case's patch omit it too), against the same 270,336-facet reference on
+the same 8,000 cells, in the same process as the ladder above:
+
+| drawing's lamp: chord, facet size | facets | power W | near the lamp (<5 mm), median / p99 | rest of the chamber, median / p99 |
+|---|---|---|---|---|
+| 1e-4 m, 20 mm | 3,144 | 35.3839 | 6.65% / 19.1% | 0.85% / 4.71% |
+| 2e-5 m, 10 mm | 14,888 | 35.4317 | 2.22% / 9.27% | 0.18% / 0.89% |
+| 1e-4 m, 5 mm | 17,453 | 35.4155 | 0.74% / 4.40% | 0.18% / 0.52% |
+| 2e-5 m, 5 mm | 28,521 | 35.4329 | 0.60% / 4.13% | 0.07% / 0.25% |
+| 1e-4 m, 2.5 mm | 66,011 | 35.4347 | 0.16% / 1.75% | 0.04% / 0.18% |
+| 5e-6 m, 2.5 mm | 116,753 | 35.4410 | 0.11% / 1.62% | 0.00% / 0.04% |
+
+- **Size the facets along the lamp and keep the chord coarse.** The cells nearest the lamp are
+  sensitive to the spacing *along* it, which `facet_size` sets; the chord sets the spacing *around*
+  it. At 2.5 mm and a 1e-4 chord the drawing's lamp matches the analytic 64 x 512 lamp at equal
+  facet count near it (0.16% against 0.15% median at 66,011 against 67,584 facets) and beats it
+  everywhere else (0.04% against 0.07%). Its near-lamp p99 is worse (1.75% against 0.98%): the plane
+  grid that bounds facet size leaves some irregular patches beside the lamp.
+- **Its vertices are on the true surface, so its area is not inscribed.** The finest rung radiates
+  35.4410 W, closer to the true 35.443 W (`2 pi R L + 2 pi R^2` at 696.42 W/m²) than the
+  270,336-facet analytic reference itself (35.4397 W); read its sub-0.01% errors as at the
+  reference's own floor.
+
+Configuration: jax 0.10.2, CPU, x64, macOS arm64, 11 cores; `cadquery-ocp-novtk` 8.0.1.0.0 on
+CPython 3.13; `work/case` and `work/cell_centres.npy` from the meshed case of the DOM run below.
+
 ## Measured (2026-09-22)
 
 Configuration: of-optical-radiation `726714d`, image built locally from its `Dockerfile`

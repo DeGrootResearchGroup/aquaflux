@@ -23,6 +23,13 @@ one convex region need no test at all -- the straight line between them cannot l
 the structural reason a chamber full of cells costs nothing to shadow. That share is *counted*
 here rather than asserted, per region and overall.
 
+**And the same fluid read from the reactor's own CAD drawing** (``read_step`` on the tutorial's
+``SozziTaghipour.step``) is a third arm when the CAD kernel is installed. Its cylinders are not
+the hand-typed ones -- the drawing's pipes run 850 mm where the hand-written ones stop at the
+meshed domain, and the riser is carried into the chamber by recognition rather than by a chosen
+``REACH_BACK`` -- so the parameters differ by design and what must agree is the mask on these
+receivers. Without the kernel the arm is skipped and the summary says so.
+
 Receivers come from the meshed case when ``work/case`` exists, which is what makes this
 comparable with the other harnesses in this directory. Without it the same three cylinders are
 sampled directly, so the comparison still runs anywhere; the summary says which was used, because
@@ -54,7 +61,7 @@ from aquaflux.radiation import (  # noqa: E402
     build_visibility,
     direct_fluence_rate,
 )
-from aquaflux.radiation.occluders import Cylinder, Outside  # noqa: E402
+from aquaflux.solids import Cylinder, Outside  # noqa: E402
 from compare_fluence import (  # noqa: E402
     ABSORPTION,
     CASE,
@@ -109,6 +116,33 @@ def fluid() -> Outside:
         half_length=(RISER_TOP - riser_foot) / 2.0,
     )
     return Outside(chamber, inlet, riser)
+
+
+#: The reactor's own drawing, and the solids in it that hold the water.
+DRAWING = HERE.parent / "uvreactor_openfoam" / "of_case" / "SozziTaghipour.step"
+VESSEL = ("reactor_body", "inlet_pipe", "outlet_pipe")
+
+
+def from_drawing() -> Outside | None:
+    """The fluid read from the CAD drawing and checked against it, or None without the kernel.
+
+    The drawing has the body axis along ``y`` and the case along ``x``, so the two are swapped.
+    """
+    try:
+        from aquaflux.io.cad import Placement, read_step
+
+        cad = read_step(DRAWING, Placement(matrix=[[0, 1, 0], [1, 0, 0], [0, 0, 1]]))
+    except ImportError:
+        return None
+    started = time.perf_counter()
+    water = cad.fluid(*VESSEL)
+    distance, tolerance = cad.discrepancy(VESSEL)
+    _say(
+        f"drawing: {len(water.regions)} regions read and checked in "
+        f"{time.perf_counter() - started:.1f} s; boundaries agree to {distance:.2e} m against the "
+        f"drawing's declared {tolerance:.0e} m"
+    )
+    return water
 
 
 def lamp() -> tuple[Surfaces, str]:
@@ -232,6 +266,11 @@ def main() -> None:
     _say(f"fluid: {len(water.regions)} regions, {water.fluid.interval_count} intervals per ray")
 
     arms = {"primitives": water, "hand-derived": BranchOpenings()}
+    drawing = from_drawing()
+    if drawing is None:
+        _say("CAD kernel not installed: the arm read from the drawing is skipped")
+    else:
+        arms["from the drawing"] = drawing
     fields, seconds, masks = {}, {}, {}
     for name, body in arms.items():
         fields[name], seconds[name] = field(surfaces, points, body)
@@ -239,22 +278,34 @@ def main() -> None:
             f"  {name}: {seconds[name]:.1f} s for {len(points) * surfaces.n_facets / 1e6:.0f}M rays"
         )
 
-    differing = np.zeros(len(points), dtype=int)
+    # Every arm against the hand-derived one, which is the reference because it was derived
+    # independently of both general constructions.
+    others = [name for name in arms if name != "hand-derived"]
+    differing = {name: np.zeros(len(points), dtype=int) for name in others}
     for start in range(0, len(points), CHUNK):
         chunk = points[start : start + CHUNK]
         for name, body in arms.items():
             masks[name] = np.asarray(
                 build_visibility([body], surfaces, chunk, self_occlusion=NoOcclusion()).blocked[0]
             )
-        differing[start : start + CHUNK] = (masks["primitives"] != masks["hand-derived"]).sum(
-            axis=1
-        )
+        for name in others:
+            differing[name][start : start + CHUNK] = (masks[name] != masks["hand-derived"]).sum(
+                axis=1
+            )
 
     lit = fields["hand-derived"] > 0.0
-    relative = (
-        np.abs(fields["primitives"][lit] - fields["hand-derived"][lit])
-        / fields["hand-derived"][lit]
-    )
+
+    def field_difference(name):
+        relative = (
+            np.abs(fields[name][lit] - fields["hand-derived"][lit]) / fields["hand-derived"][lit]
+        )
+        return {
+            "cells_compared": int(lit.sum()),
+            "median": float(np.median(relative)),
+            "p99": float(np.percentile(relative, 99)),
+            "max": float(relative.max()),
+        }
+
     rays = len(points) * int(surfaces.n_facets)
     summary = {
         "lamp": {"facets": int(surfaces.n_facets), "source": lamp_source},
@@ -268,13 +319,13 @@ def main() -> None:
             name: round(1_635_909 * int(surfaces.n_facets) / (rays / value))
             for name, value in seconds.items()
         },
-        "pairs_masked_differently": int(differing.sum()),
-        "cells_with_any_pair_differing": int((differing > 0).sum()),
-        "relative_field_difference": {
-            "cells_compared": int(lit.sum()),
-            "median": float(np.median(relative)),
-            "p99": float(np.percentile(relative, 99)),
-            "max": float(relative.max()),
+        "against the hand-derived arm": {
+            name: {
+                "pairs_masked_differently": int(differing[name].sum()),
+                "cells_with_any_pair_differing": int((differing[name] > 0).sum()),
+                "relative_field_difference": field_difference(name),
+            }
+            for name in others
         },
         "receivers_per_region": by_region(water, points),
         "convex_shortcut": shared_region(water, np.asarray(surfaces.centroid), points),
@@ -282,11 +333,13 @@ def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "primitive_occlusion.json").write_text(json.dumps(summary, indent=2) + "\n")
     _say(json.dumps(summary, indent=2))
-    if summary["pairs_masked_differently"]:
-        _say(
-            "⚠️ the two occluders disagree. They describe the same ideal cylinders, so unlike the "
-            "triangle comparison there is no faceting to explain a difference away."
-        )
+    for name, result in summary["against the hand-derived arm"].items():
+        if result["pairs_masked_differently"]:
+            _say(
+                f"⚠️ {name!r} and the hand-derived occluder disagree. They describe the same ideal "
+                "cylinders, so unlike the triangle comparison there is no faceting to explain a "
+                "difference away."
+            )
 
 
 if __name__ == "__main__":
