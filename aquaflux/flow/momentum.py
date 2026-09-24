@@ -34,7 +34,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from aquaflux.boundary import BoundaryConditions
+from aquaflux.boundary import BoundaryConditions, refuse_a_closure_that_closes_other_fields
 from aquaflux.context import FieldContext, MeshContext
 from aquaflux.discretization import (
     AdvectionFlux,
@@ -52,6 +52,7 @@ from aquaflux.schemes.interpolation import (
 from aquaflux.solve import FieldLayout
 from aquaflux.vectors import dot, scale
 
+from .boundary import FLOW_FIELDS
 from .drive import BOUNDARY_DRIVEN, Drive
 from .rhie_chow import (
     advective_momentum_flux,
@@ -286,6 +287,7 @@ class MomentumContinuity(eqx.Module):
         into and a border column ``dR/dbeta = −V`` a source cannot supply.
         """
         properties.require("viscosity", "density")
+        refuse_a_closure_that_closes_other_fields(boundary, FLOW_FIELDS, "MomentumContinuity.build")
         reject_unsupported_face_force(sources, geometry, properties, mesh)
         face_geometry, cell_geometry = geometry.face, geometry.cell
         face_cells = mesh.face_cells

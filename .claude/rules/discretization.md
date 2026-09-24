@@ -67,6 +67,11 @@ Principles.
   NaN'd (a divide) inside the residual rather than failing at build — the same failure shape
   `requires()`/`uses_gradient()` exist to prevent, just on the boundary closures rather than the
   flux/source operators.
+  **A fourth checks the closure FAMILY, not what it needs (binding, #355):** `build` calls
+  `refuse_a_closure_that_closes_other_fields(boundary, HOST_EQUATION_FIELD, ...)`, so a multi-field
+  flow bundle handed to this single-field assembler is refused by patch name instead of failing on
+  whichever method it lacks. See `.claude/rules/boundary.md` for why the check sits beside `resolve`
+  rather than inside it.
   **Why the context moved (binding — do not move it back into this package).** `FieldContext` lives
   below `schemes/` and `boundary/`, importing only `aquaflux.mesh`, precisely so those two packages
   could consume it too without a cycle (`discretization` already imports both) — the placement defect

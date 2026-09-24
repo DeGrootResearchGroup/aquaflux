@@ -26,7 +26,13 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
+from aquaflux.boundary import (
+    HOST_EQUATION_FIELD,
+    BoundaryConditions,
+    Dirichlet,
+    ZeroGradient,
+    refuse_a_closure_that_closes_other_fields,
+)
 from aquaflux.discretization import (
     AdvectionFlux,
     DifferenceRow,
@@ -36,6 +42,7 @@ from aquaflux.discretization import (
     ResidualAssembler,
 )
 from aquaflux.flow import volume_flux
+from aquaflux.flow.boundary import sheared_patches
 from aquaflux.mesh import distance_to_patches
 from aquaflux.properties import FieldProperty, PropertyModel
 from aquaflux.schemes import DEFAULT_GRADIENT_SCHEME, ImposedGradient
@@ -80,7 +87,7 @@ if TYPE_CHECKING:
 
     from aquaflux.boundary import BoundaryConditions
     from aquaflux.discretization import AdvectionScheme
-    from aquaflux.flow import VelocityFields
+    from aquaflux.flow import MomentumContinuity, VelocityFields
     from aquaflux.mesh import Mesh, MeshGeometry
     from aquaflux.schemes import GradientScheme
 
@@ -268,6 +275,13 @@ class SSTTurbulence(eqx.Module):
     wall_faces : jnp.ndarray
         Indices of the wall boundary faces, shape ``(n_wall_faces,)`` — the faces the momentum
         wall-function eddy viscosity is scattered onto (see :meth:`wall_face_eddy_viscosity`).
+    wall_patches : tuple of str
+        The patch names those faces came from, static. Kept as well as the indices because they are
+        different facts: the indices are what the arrays above are built from, while the names are
+        the *declaration*, and only the declaration can be compared against another block's. It is
+        what :meth:`~aquaflux.turbulence.CoupledRANS.build` reconciles against the flow closures that
+        shear the flow, so "this patch is a wall" cannot be stated twice and disagree. Names also
+        survive a cell or face renumbering, which indices do not.
     k_gradient_scheme, omega_gradient_scheme : GradientScheme, optional
         The injected scheme bound against each field's own boundary conditions, built once by
         :meth:`build`. A scheme's preparation depends on the conditions it will be applied under --
@@ -328,6 +342,7 @@ class SSTTurbulence(eqx.Module):
     wall_distance_gradient: jnp.ndarray
     wall_cells: jnp.ndarray
     wall_faces: jnp.ndarray
+    wall_patches: tuple[str, ...] = eqx.field(static=True)
     k_boundary: BoundaryConditions
     omega_boundary: BoundaryConditions
     k_gradient_scheme: GradientScheme | None = None
@@ -365,7 +380,9 @@ class SSTTurbulence(eqx.Module):
             ``viscosity / density``.
         wall_patches : sequence of str
             The boundary patches treated as walls; their wall distance is computed and their
-            owner cells become the ``omega`` fixation set.
+            owner cells become the ``omega`` fixation set. Kept on the built assembler, so a coupled
+            build can check it against the flow block's own wall closures rather than trusting that
+            the two were written consistently.
         gradient_scheme : GradientScheme
             Reconstructs the ``k``/``omega`` gradients and the wall-distance gradient; omitting it
             takes :data:`~aquaflux.schemes.DEFAULT_GRADIENT_SCHEME`, which is where that choice is
@@ -392,6 +409,10 @@ class SSTTurbulence(eqx.Module):
             uniform across cells (variable-density turbulent transport is not supported).
         """
         properties.require("viscosity", "density")
+        for field, closures in (("k", k_boundary), ("omega", omega_boundary)):
+            refuse_a_closure_that_closes_other_fields(
+                closures, HOST_EQUATION_FIELD, f"SSTTurbulence.build ({field})"
+            )
         evaluated = properties.evaluate(mesh.cell_zones)
         density_field = evaluated["density"]
         if not bool(jnp.all(jnp.isclose(density_field, density_field[0]))):
@@ -434,6 +455,7 @@ class SSTTurbulence(eqx.Module):
             wall_distance_gradient=wall_distance_gradient,
             wall_cells=wall_cells,
             wall_faces=wall_faces,
+            wall_patches=tuple(wall_patches),
             k_boundary=k_boundary,
             omega_boundary=omega_boundary,
             explicit_production_limiter=explicit_production_limiter,
@@ -458,6 +480,85 @@ class SSTTurbulence(eqx.Module):
                 self.k_boundary.resolve(face_patches, face_cells),
                 self.omega_boundary.resolve(face_patches, face_cells),
             ),
+        )
+
+    def refuse_a_density_the_flow_disagrees_with(self, momentum: MomentumContinuity) -> None:
+        """Refuse a flow block whose density is not this closure's.
+
+        The two come from separate property models -- this closure's
+        ``properties`` argument and :meth:`~aquaflux.flow.MomentumContinuity.build`'s -- with nothing
+        forcing them to describe the same fluid, and nothing else catches a mismatch: the k/omega
+        volume flux (``mdot / density``) would then be wrong by that ratio in every consumer of this
+        closure -- both residuals, both AMGs, both shift diagonals -- with no other symptom, since the
+        flow block is unaffected and solves fine.
+
+        Parameters
+        ----------
+        momentum : MomentumContinuity
+            The flow block this closure is about to be coupled to, read for its per-cell density.
+
+        Raises
+        ------
+        ValueError
+            If the densities differ, naming both.
+        """
+        flow_density = momentum.density
+        if bool(jnp.all(jnp.isclose(flow_density, self.density))):
+            return
+        raise ValueError(
+            f"SSTTurbulence.density ({self.density}) does not match the flow assembler's density "
+            f"(range [{float(jnp.min(flow_density))}, {float(jnp.max(flow_density))}]). The two come "
+            "from separate PropertyModels -- SSTTurbulence.build(properties=...) and "
+            "MomentumContinuity.build(properties=...) -- and nothing else checks that they agree: if "
+            "they don't, the k/omega volume flux (mdot / density) is wrong by that ratio in every SST "
+            "consumer, silently. Pass a PropertyModel with the same density to both."
+        )
+
+    def refuse_a_wall_set_the_flow_disagrees_with(self, momentum: MomentumContinuity) -> None:
+        """Refuse a flow block that does not call the same patches walls as this closure does.
+
+        "This patch is a wall" is registered twice and reconciled nowhere else. The flow block says it
+        by giving the patch a closure that shears the flow
+        (:meth:`~aquaflux.flow.boundary.FlowBoundary.shears_flow`); this closure says it by naming the
+        patch in :attr:`wall_patches`, which is what drives the wall distance, the wall-adjacent cell
+        set and hence the ``omega`` fixation. Neither is derivable from the other today -- an imported
+        mesh drops the patch ``type`` its file declared -- so the pair is checked rather than collapsed.
+
+        Both directions are defects and neither shows up as an error later. A wall this closure does
+        not list gets no wall distance, so ``omega`` is fixed nowhere near it and the near-wall budget
+        is wrong. A patch listed that the flow does not shear -- an inlet, an outlet -- contributes a
+        spurious zero-distance surface, which pulls the wall distance down across the whole region
+        that was nearest to it.
+
+        Parameters
+        ----------
+        momentum : MomentumContinuity
+            The flow block this closure is about to be coupled to, read for its per-patch closures.
+
+        Raises
+        ------
+        ValueError
+            If the two sets differ, naming each side of the difference and what it costs.
+        """
+        sheared = set(sheared_patches(momentum.boundary))
+        listed = set(self.wall_patches)
+        if sheared == listed:
+            return
+        parts = []
+        if sheared - listed:
+            parts.append(
+                f"{sorted(sheared - listed)} shear the flow but are not in wall_patches, so they get "
+                "no wall distance and omega is fixed nowhere near them"
+            )
+        if listed - sheared:
+            parts.append(
+                f"{sorted(listed - sheared)} are in wall_patches but carry a flow closure that passes "
+                "fluid, so they add a surface the wall distance is measured from that is not a wall"
+            )
+        raise ValueError(
+            "CoupledRANS.build: the flow block and the turbulence closure disagree about which "
+            f"patches are walls -- {'; and '.join(parts)}. Give SSTTurbulence.build the same patches "
+            "that carry a NoSlipWall or MovingWall in the flow boundary."
         )
 
     def with_scaled_molecular_viscosity(self, factor: float) -> SSTTurbulence:

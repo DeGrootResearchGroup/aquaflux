@@ -44,7 +44,7 @@ import abc
 import equinox as eqx
 import jax.numpy as jnp
 
-from aquaflux.boundary import Dirichlet, DirichletField, ZeroGradient
+from aquaflux.boundary import BoundaryConditions, Dirichlet, DirichletField, ZeroGradient
 from aquaflux.boundary.conditions import as_float_leaf, as_position_function
 from aquaflux.vectors import dot
 
@@ -155,6 +155,31 @@ def _prescribed_components(velocity, dim: int):
     if callable(velocity):
         return [DirichletField(field_fn=_Component(velocity, i)) for i in range(dim)]
     return [Dirichlet(value=velocity[i]) for i in range(dim)]
+
+
+def sheared_patches(boundary: BoundaryConditions) -> tuple[str, ...]:
+    """The names of the patches whose closure is a solid surface the flow shears against.
+
+    "Which patches are walls" is asked in more than one place -- the wetted area a hydraulic length
+    is formed from, and the coupled build's reconciliation against the turbulence closure's own wall
+    list -- so the filter lives here rather than being written out at each of them.
+
+    Parameters
+    ----------
+    boundary : BoundaryConditions
+        The flow closures, bound or unbound.
+
+    Returns
+    -------
+    tuple of str
+        The patch names, in the collection's own order.
+    """
+    return tuple(name for name, closure in boundary.conditions.items() if closure.shears_flow())
+
+
+#: The three quantities a flow boundary condition closes on its patch faces, in the order the
+#: module docstring's table lists them.
+FLOW_FIELDS: tuple[str, ...] = ("velocity", "pressure", "mdot")
 
 
 class FlowBoundary(eqx.Module):
@@ -331,6 +356,21 @@ class FlowBoundary(eqx.Module):
         """
         return jnp.zeros(centroid.shape)
 
+    def closes(self) -> tuple[str, ...]:
+        """Which fields this closure closes: the velocity, the pressure and the mass flux.
+
+        A flow condition is a *bundle* of three closures, where a
+        :class:`~aquaflux.boundary.BoundaryCondition` is one. Declared so an assembler can say what
+        it needs closed and refuse anything else by name, rather than the mismatch surfacing as an
+        ``AttributeError`` for whichever method the wrong family lacks.
+
+        Returns
+        -------
+        tuple of str
+            ``("velocity", "pressure", "mdot")``.
+        """
+        return FLOW_FIELDS
+
     def shears_flow(self) -> bool:
         """Whether this patch is a solid surface the flow shears against (static).
 
@@ -341,7 +381,11 @@ class FlowBoundary(eqx.Module):
         of a pipe. A body-force-driven flow has no prescribed velocity to size a characteristic speed
         from, and that length is what closes the force balance instead.
 
-        Consumed only by the frozen preconditioner's velocity scale; it never enters the residual.
+        Three consumers, and they are not all outside the residual. The wetted area sets the
+        hydraulic length above; the momentum assembler selects the **wall-function viscosity
+        override** on exactly these faces, which *is* in the residual and so is solution-affecting;
+        and the coupled build reconciles it against the turbulence closure's wall patches, since
+        which patches are walls must not be stated twice and disagree.
         """
         return False
 

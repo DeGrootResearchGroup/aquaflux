@@ -42,7 +42,7 @@ BUDGETS = {
     # layout, seed, constraint vectors and bulk-velocity average -- to ``flow/drive.py``; the sessions
     # and the coloured probe are still to move (they take a ``CoupledRANS`` only for its residual and
     # layout).
-    "turbulence/coupled.py": 3298,
+    "turbulence/coupled.py": 3286,
 }
 
 
