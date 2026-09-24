@@ -1,23 +1,33 @@
 # pitzDaily -- the 2D backward-facing step, described as a case file.
 #
-# This states the case compare.py builds in code: the same mesh, fluid, physics, boundaries and
-# numerics (its defaults: the multiple-correction gradient, k zero-gradient at the walls). It does not
-# describe the march -- the Reynolds ramp, the preconditioner, the step control -- and compare.py does
-# not read it yet. `tests/unit/test_case_file.py` checks it against the mesh on every fast-gate run, so
-# a patch renamed in the mesh, or a setting the loader no longer accepts, fails there.
+# This is the case compare.py solves: its build_case() reads this file, applies any study override
+# (PITZ_GRADIENT, PITZ_K_WALL, or a model / gradient passed in code) as an edit of it, and builds it
+# with aquaflux.case. The march -- the Reynolds ramp, the preconditioner, the step control -- stays in
+# compare.py. validation/case_file_parity.py checks that this file builds the same problem, bit for
+# bit, as the case compare.py used to assemble by hand.
 
 mesh:
   kind: OpenFOAMMesh
   path: runs/kwsst/polyMesh
 
+# The OpenFOAM tutorial's operating point: incompressible, kinematic (rho = 1).
 fluid:
   density: 1.0
   kinematic_viscosity: 1.0e-5
 
 physics:
   kind: RANS
+  # First-order upwind on k and omega. The negative-omega failure of a second-order scheme on the stiff
+  # omega equation is a Newton-update overshoot at the cell centre, not a face-value one, so a slope
+  # limiter does not prevent it; first-order upwind keeps the omega transport operator diagonally
+  # dominant (an M-matrix), which is what keeps the shifted Newton step positive.
   advection: {kind: FirstOrderUpwind}
+  # omega = e^w stays positive under any Newton step. k stays direct: log(k) is ill-conditioned where
+  # k -> 0 at the walls.
   omega_variable: {kind: LogScalars}
+  # Freeze the k-production cap in the linearization, as the sibling bfs3d case does. Left exact, the
+  # cap's own derivative destabilizes the march; the library default is the exact operator, so omitting
+  # this silently gives the two cases different Newton operators on the same physics.
   explicit_production_limiter: true
 
 boundaries:
@@ -26,11 +36,17 @@ boundaries:
     velocity: [10.0, 0.0]
     turbulence: {kind: FixedTurbulence, k: 0.375, omega: 440.15}
   outlet: {kind: Outlet, pressure: 0.0}
+  # Zero-gradient k at the walls: a different discrete problem from the textbook k = 0, with its own
+  # reattachment length, and the one the sibling case runs.
   upperWall: {kind: Wall, k: zero_gradient}
   lowerWall: {kind: Wall, k: zero_gradient}
 
 numerics:
+  # Second-order upwind momentum advection: the upwind cell reconstructed to the face with its
+  # gradient, slope-limited -- the analogue of OpenFOAM's `Gauss linearUpwind`.
   momentum_advection:
     kind: LimitedUpwind
     limiter: {kind: VenkatakrishnanLimiter}
+  # The two-face-pass reconstruction: quadratic-exact with no solve, and its residual reaches exactly
+  # distance 3 across the cell graph, which is what makes the driver's probe at reach 3 exact.
   gradient: {kind: MultipleCorrectionGradient}

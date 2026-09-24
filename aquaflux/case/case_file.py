@@ -13,6 +13,12 @@ keeping whichever came last.
 Checking a case is the cheap half of loading it: the file is read and validated, the mesh's topology
 is read and validated, and the case is checked against that topology. No geometry is computed and no
 equation is built, so a file can be checked in about the time its mesh takes to read.
+:meth:`CheckedCase.build` is the other half: the geometry, then the equations.
+
+What a case builds is its problem -- the assembler an initializer and a solve take -- and never a
+solve. A solve's frozen preconditioner is fitted to a state, and a march re-fits it from states the
+file never sees (at each step of a Reynolds continuation, at each refresh), so it is configured
+against the built problem rather than read from here.
 """
 
 from __future__ import annotations
@@ -86,6 +92,21 @@ class CheckedCase:
 
     spec: CaseSpec
     mesh: Mesh
+
+    def build(self) -> object:
+        """The case's problem: its mesh's geometry, then its equations.
+
+        This is where the cost of loading a case starts -- the geometry, and for a Reynolds-averaged
+        case the wall distance. Its physics decides what is built (see
+        :meth:`~aquaflux.case.Physics.build`).
+
+        Returns
+        -------
+        MomentumContinuity or CoupledRANS
+            The flow assembler for a laminar case; the coupled flow and closure for a
+            Reynolds-averaged one.
+        """
+        return self.spec.physics.build(self.spec, self.mesh, self.mesh.geometry())
 
 
 @dataclasses.dataclass(frozen=True)

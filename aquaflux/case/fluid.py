@@ -12,6 +12,10 @@ from __future__ import annotations
 import dataclasses
 import math
 
+import jax.numpy as jnp
+
+from aquaflux.properties import Constant, PropertyModel
+
 __all__ = ["Fluid"]
 
 
@@ -63,3 +67,27 @@ class Fluid:
                 raise ValueError(
                     f"the fluid's {name} must be a positive, finite number, got {value!r}."
                 )
+
+    def property_model(self) -> PropertyModel:
+        """The ``"viscosity"`` (dynamic) and ``"density"`` properties every equation of a case reads.
+
+        One model, handed to the flow and to a turbulence closure alike, so the two cannot describe
+        different fluids. The viscosity is held as an array rather than a Python number: a Reynolds
+        continuation rescales it at each step, and as an array leaf a rescaled value keeps the solve's
+        compiled code, where a changed Python number would recompile it. Nothing rescales the density,
+        so it stays a number.
+
+        Returns
+        -------
+        PropertyModel
+            ``{"viscosity": mu, "density": rho}``, with ``mu = rho nu`` when the kinematic viscosity was
+            given.
+        """
+        viscosity = (
+            self.density * self.kinematic_viscosity
+            if self.dynamic_viscosity is None
+            else self.dynamic_viscosity
+        )
+        return PropertyModel(
+            {"viscosity": Constant(jnp.asarray(viscosity)), "density": Constant(self.density)}
+        )

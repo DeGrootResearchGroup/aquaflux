@@ -16,7 +16,14 @@ from .block_preconditioner import (
     ViscousMultilevel,
     frozen_momentum_diagonal_parts,
 )
-from .boundary import FlowBoundary, MovingWall, NoSlipWall, PressureOutlet, VelocityInlet
+from .boundary import (
+    FlowBoundary,
+    MovingWall,
+    NoSlipWall,
+    PressureOutlet,
+    VelocityInlet,
+    sheared_patches,
+)
 from .drive import (
     BoundaryDriven,
     Drive,
@@ -85,6 +92,7 @@ __all__ = [
     "pressure_schur_laplacian",
     "refuse_a_constraint_this_solve_cannot_hold",
     "reused_flow_solve",
+    "sheared_patches",
     "solve_flow_march",
     "volume_flux",
 ]

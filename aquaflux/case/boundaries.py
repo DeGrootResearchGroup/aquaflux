@@ -7,6 +7,11 @@ closure measures its wall distance from are all derived from that one statement,
 written in a way that disagrees: a patch cannot be a wall to the flow and an inflow to the turbulence
 closure.
 
+Each kind builds the closures it stands for: :meth:`PatchCondition.flow_closure` the velocity, pressure
+and mass-flux closure of the flow, and :meth:`PatchCondition.turbulence_closures` the ``k`` and
+``omega`` ones. A wall's ``omega`` closure is a placeholder: the closure fixes ``omega`` in the cells
+next to a wall instead, so the value its boundary faces would carry is never read.
+
 A setting that only a turbulence closure reads -- an inlet's turbulence, a wall's ``k`` condition --
 sits on the patch it belongs to, and the case's physics decides whether it may be there: a laminar
 case refuses one, and a Reynolds-averaged case requires the inflow turbulence at every inlet.
@@ -18,6 +23,9 @@ import abc
 import dataclasses
 import math
 from typing import Literal
+
+from aquaflux.boundary import BoundaryCondition, Dirichlet, ZeroGradient
+from aquaflux.flow import FlowBoundary, NoSlipWall, PressureOutlet, VelocityInlet
 
 __all__ = [
     "FixedTurbulence",
@@ -104,6 +112,20 @@ class PatchCondition(abc.ABC):
     def prescribes_pressure(self) -> bool:
         """Whether this patch fixes the pressure level -- and so gives the domain its datum."""
 
+    @abc.abstractmethod
+    def flow_closure(self) -> FlowBoundary:
+        """The flow's closure on this patch: its velocity, pressure and mass flux."""
+
+    @abc.abstractmethod
+    def turbulence_closures(self) -> tuple[BoundaryCondition, BoundaryCondition]:
+        """The ``(k, omega)`` closures on this patch, for a Reynolds-averaged case.
+
+        Returns
+        -------
+        tuple of BoundaryCondition
+            The ``k`` closure and the ``omega`` closure.
+        """
+
     def turbulence_settings(self) -> tuple[str, ...]:
         """The settings given here that only a turbulence closure reads; none by default."""
         return ()
@@ -167,6 +189,26 @@ class Inlet(PatchCondition):
         """``False`` -- an inlet's pressure follows the interior."""
         return False
 
+    def flow_closure(self) -> VelocityInlet:
+        """A :class:`~aquaflux.flow.VelocityInlet` at :attr:`velocity`."""
+        return VelocityInlet(velocity=self.velocity)
+
+    def turbulence_closures(self) -> tuple[Dirichlet, Dirichlet]:
+        """The inflow ``k`` and ``omega``, each prescribed.
+
+        Raises
+        ------
+        ValueError
+            If the inlet gives no inflow turbulence -- which a Reynolds-averaged case refuses when it is
+            constructed, so this is reached only by a caller that skipped that check.
+        """
+        if self.turbulence is None:
+            raise ValueError(
+                "this inlet gives no inflow turbulence, so it has no k or omega closure to build."
+            )
+        k, omega = self.turbulence.inflow(self.velocity)
+        return Dirichlet(k), Dirichlet(omega)
+
     def turbulence_settings(self) -> tuple[str, ...]:
         """``("turbulence",)`` if the inflow turbulence is given."""
         return () if self.turbulence is None else ("turbulence",)
@@ -208,6 +250,14 @@ class Outlet(PatchCondition):
         """``True`` -- an outlet fixes the pressure level."""
         return True
 
+    def flow_closure(self) -> PressureOutlet:
+        """A :class:`~aquaflux.flow.PressureOutlet` at :attr:`pressure`."""
+        return PressureOutlet(pressure=self.pressure)
+
+    def turbulence_closures(self) -> tuple[ZeroGradient, ZeroGradient]:
+        """``k`` and ``omega`` leave with the flow: a zero gradient for each."""
+        return ZeroGradient(), ZeroGradient()
+
 
 @dataclasses.dataclass(frozen=True)
 class Wall(PatchCondition):
@@ -229,6 +279,19 @@ class Wall(PatchCondition):
     def prescribes_pressure(self) -> bool:
         """``False`` -- a wall's pressure follows the interior."""
         return False
+
+    def flow_closure(self) -> NoSlipWall:
+        """A :class:`~aquaflux.flow.NoSlipWall`."""
+        return NoSlipWall()
+
+    def turbulence_closures(self) -> tuple[BoundaryCondition, ZeroGradient]:
+        """``k`` by :attr:`k` (a zero gradient when unset), and the placeholder ``omega`` closure.
+
+        ``omega`` is fixed in the cells next to the wall rather than at its faces, so its face closure
+        is never read; a zero gradient stands in for it.
+        """
+        k = Dirichlet(0.0) if self.k == "zero" else ZeroGradient()
+        return k, ZeroGradient()
 
     def turbulence_settings(self) -> tuple[str, ...]:
         """``("k",)`` if the wall's ``k`` condition is given."""

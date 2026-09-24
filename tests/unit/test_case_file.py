@@ -6,8 +6,13 @@ import dataclasses
 import shutil
 from pathlib import Path
 
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+import numpy as np
 import pytest
 import yaml
+from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.case import (
     RANS,
     CaseFile,
@@ -25,13 +30,18 @@ from aquaflux.case import (
     write_case,
 )
 from aquaflux.discretization import FirstOrderUpwind, LimitedUpwind
+from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, VelocityInlet
+from aquaflux.io import read_openfoam
 from aquaflux.io.openfoam.cyclic import DEFAULT_MATCH_TOLERANCE
+from aquaflux.mesh import Mesh, MeshGeometry
+from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import (
+    CorrectedGreenGauss,
     HessianCorrectedGradient,
     MultipleCorrectionGradient,
     VenkatakrishnanLimiter,
 )
-from aquaflux.turbulence import LogScalars
+from aquaflux.turbulence import CoupledRANS, LogScalars, SSTModel, SSTTurbulence
 
 REPO = Path(__file__).resolve().parents[2]
 #: A one-cell-thick slab between `empty` front and back patches, read as 2D: left, right, bottom, top.
@@ -496,3 +506,214 @@ def test_a_value_built_in_code_refuses_what_a_file_could_not_say(build, error, m
     """The same refusals hold for a case assembled in code, which no mapping has checked first."""
     with pytest.raises(error, match=match):
         build()
+
+
+# --- built into the problem it describes -------------------------------------------------------
+#
+# The reference for each build is the same problem assembled by hand from the library's own builders,
+# and the comparison is the strongest one available: one pytree -- the same structure, static fields
+# included, and every array leaf bit-for-bit equal. Two problems that pass it evaluate every residual,
+# Jacobian and adjoint identically.
+
+
+def _same_problem(built: object, reference: object) -> None:
+    built_leaves, built_def = jax.tree.flatten(built)
+    reference_leaves, reference_def = jax.tree.flatten(reference)
+    assert built_def == reference_def
+    for a, b in zip(built_leaves, reference_leaves, strict=True):
+        # An array leaf must be matched by an array leaf: a Python number beside an equal array is a
+        # different compiled program (a number is static to a jitted function, so a continuation
+        # that rescales it recompiles), however equal their values.
+        assert eqx.is_array(a) == eqx.is_array(b), (type(a), type(b))
+        if eqx.is_array(a):
+            assert np.asarray(a).dtype == np.asarray(b).dtype
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+        else:
+            assert a == b
+
+
+def _slab() -> tuple[Mesh, MeshGeometry]:
+    mesh = read_openfoam(SLAB)
+    return mesh, mesh.geometry()
+
+
+def _hand_built_momentum(mesh, geometry, *, rho=2.0, mu=4.0e-3) -> MomentumContinuity:
+    return MomentumContinuity.build(
+        mesh,
+        geometry,
+        PropertyModel({"viscosity": Constant(jnp.asarray(mu)), "density": Constant(rho)}),
+        BoundaryConditions(
+            {
+                "left": VelocityInlet(velocity=(1.0, 0.0)),
+                "right": PressureOutlet(pressure=0.5),
+                "bottom": NoSlipWall(),
+                "top": NoSlipWall(),
+            }
+        ),
+        advection_scheme=FirstOrderUpwind(),
+    )
+
+
+_SLAB_FLUID = {"density": 2.0, "kinematic_viscosity": 2.0e-3}  # mu = 4e-3
+_SLAB_PATCHES = {
+    "left": {"kind": "Inlet", "velocity": [1.0, 0.0]},
+    "right": {"kind": "Outlet", "pressure": 0.5},
+    "bottom": {"kind": "Wall"},
+    "top": {"kind": "Wall"},
+}
+
+
+# The default gradient reconstruction warns that the fixture's two cells, each with three boundary
+# faces, leave it underdetermined -- true, and beside the point of a test comparing two builds.
+_DEFAULT_GRADIENT_ON_TWO_CELLS = pytest.mark.filterwarnings(
+    "ignore:MultipleCorrectionGradient.*underdetermined:UserWarning"
+)
+
+
+@_DEFAULT_GRADIENT_ON_TWO_CELLS
+def test_a_laminar_case_builds_the_flow_assembler_written_by_hand() -> None:
+    mesh, geometry = _slab()
+    spec = case_spec_from_mapping(_sections(fluid=_SLAB_FLUID, boundaries=_SLAB_PATCHES))
+    built = CaseFile(spec, REPO).check().build()
+    assert isinstance(built, MomentumContinuity)
+    _same_problem(built, _hand_built_momentum(mesh, geometry))
+
+
+@_DEFAULT_GRADIENT_ON_TWO_CELLS
+def test_a_dynamic_viscosity_builds_the_same_fluid_as_the_kinematic_one_it_equals() -> None:
+    mesh, geometry = _slab()
+    fluid = {"density": 2.0, "dynamic_viscosity": 4.0e-3}
+    spec = case_spec_from_mapping(_sections(fluid=fluid, boundaries=_SLAB_PATCHES))
+    _same_problem(CaseFile(spec, REPO).check().build(), _hand_built_momentum(mesh, geometry))
+
+
+def test_a_rans_case_builds_the_coupled_system_written_by_hand() -> None:
+    """Every derived piece at once: the closures per patch, the wall set, one fluid, the settings.
+
+    The walls differ on purpose -- one zero-gradient ``k`` (the default), one zero ``k`` -- so a build
+    that applied one wall's setting to every wall, or ignored it, differs from the reference.
+    """
+    mesh, geometry = _slab()
+    gradient = CorrectedGreenGauss()
+    momentum = MomentumContinuity.build(
+        mesh,
+        geometry,
+        PropertyModel({"viscosity": Constant(jnp.asarray(4.0e-3)), "density": Constant(2.0)}),
+        BoundaryConditions(
+            {
+                "left": VelocityInlet(velocity=(1.0, 0.0)),
+                "right": PressureOutlet(pressure=0.5),
+                "bottom": NoSlipWall(),
+                "top": NoSlipWall(),
+            }
+        ),
+        gradient_scheme=gradient,
+        advection_scheme=LimitedUpwind(limiter=VenkatakrishnanLimiter()),
+    )
+    model = SSTModel(wall_omega_exponent=3.0)
+    turbulence = SSTTurbulence.build(
+        model,
+        mesh,
+        geometry,
+        FirstOrderUpwind(),
+        momentum.properties,
+        wall_patches=["bottom", "top"],
+        k_boundary=BoundaryConditions(
+            {
+                "left": Dirichlet(0.02),
+                "right": ZeroGradient(),
+                "bottom": ZeroGradient(),
+                "top": Dirichlet(0.0),
+            }
+        ),
+        omega_boundary=BoundaryConditions(
+            {
+                "left": Dirichlet(30.0),
+                "right": ZeroGradient(),
+                "bottom": ZeroGradient(),
+                "top": ZeroGradient(),
+            }
+        ),
+        gradient_scheme=gradient,
+        explicit_production_limiter=True,
+    )
+    reference = CoupledRANS.build(momentum, turbulence, omega_transform=LogScalars())
+
+    sections = _sections(
+        fluid=_SLAB_FLUID,
+        physics={
+            "kind": "RANS",
+            "advection": {"kind": "FirstOrderUpwind"},
+            "model": {"kind": "SSTModel", "wall_omega_exponent": 3.0},
+            "omega_variable": {"kind": "LogScalars"},
+            "explicit_production_limiter": True,
+        },
+        boundaries={
+            **_SLAB_PATCHES,
+            "left": {
+                "kind": "Inlet",
+                "velocity": [1.0, 0.0],
+                "turbulence": {"kind": "FixedTurbulence", "k": 0.02, "omega": 30.0},
+            },
+            "top": {"kind": "Wall", "k": "zero"},
+        },
+        numerics={
+            "momentum_advection": {
+                "kind": "LimitedUpwind",
+                "limiter": {"kind": "VenkatakrishnanLimiter"},
+            },
+            "gradient": {"kind": "CorrectedGreenGauss"},
+        },
+    )
+    built = CaseFile(case_spec_from_mapping(sections), REPO).check().build()
+    assert isinstance(built, CoupledRANS)
+    _same_problem(built, reference)
+    # Both equations read one fluid, not two equal ones.
+    assert built.turbulence.molecular_viscosity[0] == pytest.approx(2.0e-3)
+
+
+@_DEFAULT_GRADIENT_ON_TWO_CELLS
+def test_an_unset_setting_leaves_the_builders_default_in_force() -> None:
+    """Nothing is passed for a setting the file leaves out, so the builder's own default applies."""
+    mesh, geometry = _slab()
+    sections = _sections(
+        fluid=_SLAB_FLUID,
+        physics={"kind": "RANS", "advection": {"kind": "FirstOrderUpwind"}},
+        boundaries={
+            **_SLAB_PATCHES,
+            "left": {
+                "kind": "Inlet",
+                "velocity": [1.0, 0.0],
+                "turbulence": {"kind": "FixedTurbulence", "k": 0.02, "omega": 30.0},
+            },
+        },
+    )
+    built = CaseFile(case_spec_from_mapping(sections), REPO).check().build()
+    reference = CoupledRANS.build(
+        (momentum := _hand_built_momentum(mesh, geometry)),
+        SSTTurbulence.build(
+            SSTModel(),
+            mesh,
+            geometry,
+            FirstOrderUpwind(),
+            momentum.properties,
+            wall_patches=["bottom", "top"],
+            k_boundary=BoundaryConditions(
+                {
+                    "left": Dirichlet(0.02),
+                    "right": ZeroGradient(),
+                    "bottom": ZeroGradient(),
+                    "top": ZeroGradient(),
+                }
+            ),
+            omega_boundary=BoundaryConditions(
+                {
+                    "left": Dirichlet(30.0),
+                    "right": ZeroGradient(),
+                    "bottom": ZeroGradient(),
+                    "top": ZeroGradient(),
+                }
+            ),
+        ),
+    )
+    _same_problem(built, reference)
