@@ -19,7 +19,13 @@ import jax
 import jax.numpy as jnp
 import pytest
 from aquaflux.boundary import BoundaryConditions
-from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, VelocityInlet
+from aquaflux.flow import (
+    MomentumContinuity,
+    NoSlipWall,
+    PressureOutlet,
+    UniformBodyForce,
+    VelocityInlet,
+)
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss
@@ -156,7 +162,7 @@ def test_velocity_fields_skips_the_rhie_chow_assembly(monkeypatch) -> None:
 def test_body_force_is_a_uniform_volume_source() -> None:
     """A uniform body force enters the momentum residual as ``-beta * volume`` per component and
     only there: at the zero state the streamwise block is exactly ``-beta * V`` and the rest is
-    zero, and the force is a differentiable leaf (a mass-flow controller updates it)."""
+    zero, and the force is a differentiable leaf."""
     beta = 3.0
     mesh = structured_grid_2d(6, 4, periodic=("x",), named_boundaries=True)
     geom = mesh.geometry()
@@ -167,7 +173,7 @@ def test_body_force_is_a_uniform_volume_source() -> None:
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         gradient_scheme=CorrectedGreenGauss(),
         pressure_pin=0,
-        body_force=(beta, 0.0),
+        sources=(UniformBodyForce(jnp.array([beta, 0.0])),),
     )
     velocity_residual, _ = asm.unpack(asm.residual(asm.initial_state()))
     volume = jnp.asarray(geom.cell.volume)
@@ -183,7 +189,7 @@ def test_body_force_is_a_uniform_volume_source() -> None:
             BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
             gradient_scheme=CorrectedGreenGauss(),
             pressure_pin=0,
-            body_force=jnp.array([b, 0.0]),
+            sources=(UniformBodyForce(jnp.array([b, 0.0])),),
         )
         return jnp.sum(assembler.residual(asm.initial_state())[: mesh.n_cells])
 

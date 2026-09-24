@@ -31,8 +31,7 @@ import jax.numpy as jnp
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
-from aquaflux.flow import ConvectionTwoLevel, MomentumContinuity, NoSlipWall
-from aquaflux.flow.mean_velocity import _with_body_force
+from aquaflux.flow import ConvectionTwoLevel, MassFlow, MomentumContinuity, NoSlipWall
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
@@ -68,10 +67,8 @@ def _periodic_channel():
         gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
         pressure_pin=0,
-        body_force=(
-            BETA0,
-            0.0,
-        ),  # only the initial guess for the multiplier; the constraint sets it
+        # BETA0 is only the initial guess for the multiplier; the constraint sets it.
+        drive=MassFlow(target=U_B, force=BETA0),
     )
     turbulence = SSTTurbulence.build(
         SSTModel(),
@@ -102,8 +99,6 @@ def case():
     # (u_y == 0), so this exercises the guarded-sqrt strain fix directly.
     flow, k, omega, beta = solve_coupled_mass_flow(
         coupled,
-        target=U_B,
-        flow_direction=0,
         preconditioner=BlockDiagonal(scalar=ScalarAir(), **FLOW_BLOCK),
         max_steps=MAX_STEPS,
     )
@@ -126,7 +121,8 @@ def test_constrained_solve_holds_bulk_velocity_and_converges(case) -> None:
     assert _bulk_velocity(momentum, flow) == pytest.approx(U_B, abs=1e-8)
 
     # The bordered residual [R_coupled(state; beta); <U> - U_b] is a genuine root to machine precision.
-    forced = eqx.tree_at(lambda c: c.momentum, coupled, _with_body_force(coupled.momentum, 0, beta))
+    drive = coupled.momentum.drive
+    forced = eqx.tree_at(lambda c: c.momentum, coupled, drive.forced(coupled.momentum, beta))
     r_coupled = forced.residual(coupled.pack_state(flow, k, omega))
     constraint = _bulk_velocity(momentum, flow) - U_B
     assert float(jnp.linalg.norm(jnp.append(r_coupled, constraint))) < 1e-8
@@ -159,8 +155,6 @@ def test_constrained_fixed_point_is_amg_method_independent(case) -> None:
 
     flow_tl, k_tl, omega_tl, beta_tl = solve_coupled_mass_flow(
         coupled,
-        target=U_B,
-        flow_direction=0,
         preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **FLOW_BLOCK),
         max_steps=400,
     )
@@ -199,7 +193,6 @@ def test_constrained_coupled_adjoint_matches_finite_difference(case) -> None:
     continuation = mass_flow_coupled_continuation(
         coupled,
         reference_state,
-        flow_direction=0,
         preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **FLOW_BLOCK),
     )
 
@@ -211,8 +204,6 @@ def test_constrained_coupled_adjoint_matches_finite_difference(case) -> None:
         )
         _, k, _, _ = solve_coupled_mass_flow(
             scaled,
-            target=U_B,
-            flow_direction=0,
             flow=flow_ws,
             k=k_ws,
             omega=omega_ws,

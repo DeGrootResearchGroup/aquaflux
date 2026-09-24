@@ -232,7 +232,7 @@ def potential_flow(momentum: MomentumContinuity) -> jnp.ndarray:
     uniform plug for anything but a straight duct, at the cost of one linear solve.
 
     A domain with no through-flow boundary at all has no potential to solve for, but may still be
-    driven: a streamwise-periodic channel is pushed by a uniform ``body_force``, whose potential is
+    driven: a streamwise-periodic channel is pushed by a uniform body force, whose potential is
     uniform. That case returns a plug at the characteristic speed the force sustains against the wall
     drag (:func:`~aquaflux.flow.scales.body_force_velocity`) — far closer to the developed flow than
     rest, which leaves a globalized solve to march the entire viscous spin-up. A domain driven only by

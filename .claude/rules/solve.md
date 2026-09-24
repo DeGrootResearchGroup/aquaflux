@@ -345,10 +345,16 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     stated exactly once; `_k_block` is gone (`coupled.layout.slice_of("k")`). `MomentumContinuity.layout`
     is public for exactly this — the coupled builder takes the assembler's own layout object rather
     than rebuilding one from `dim` and `n_cells`.
-  - **A bordered state is an extra named block, not a special case.** The mass-flow-constrained march
-    carries `[flow…, k, omega, beta]`; `_mass_flow_layout(coupled)` is
-    `coupled.layout.appended(GlobalDofs("mass_flow", 1))`, and the block-scaled measure reads its
-    `sizes` instead of hand-building `(flow_size, n, n, 1)`.
+  - **A bordered state is an extra named block, not a special case — AND THE BLOCK HAS TO DO THE
+    PACKING (2026-09-23, #375).** The mass-flow-constrained march carries `[flow…, k, omega, beta]`;
+    `MassFlow.layout(fields)` is `fields.appended(GlobalDofs("body_force", 1))`, and the block-scaled
+    measure reads its `sizes` instead of hand-building `(flow_size, n, n, 1)`. ⚠️ **Declaring the
+    layout is only half of it**: for months that declaration's *only* consumer was that one measure,
+    while the actual packing and unpacking was `jnp.append` / `[:-1]` / `[-1]` at five sites across
+    `turbulence/coupled.py` and `flow/mean_velocity.py` — so an object that read as "the bordered
+    state's layout" was describing a partition nothing was packed by, and a border added anywhere but
+    the end would have been wrong in five places and right in one. `MassFlow.join` / `.split` are now
+    the only packing, and they read the entry's position off the layout with `slice_of`.
   - **`FieldGroups` is a partition VIEW over a layout, not parallel arithmetic** — see
     `solve-field-split.md`. It holds the layout and a leading field count, derives `n_dofs` /
     `leading` / `trailing` from it, and refuses a layout carrying a `GlobalDofs` block, because a

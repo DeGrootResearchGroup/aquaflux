@@ -47,7 +47,7 @@ from aquaflux.solve import (
 )
 from aquaflux.turbulence import ScalarShiftPolicy, scalar_pseudo_transient_solve
 
-from tests.unit.test_coupled_rans import _cavity
+from tests.unit.test_coupled_rans import _cavity, _mass_flow_cavity
 
 #: Every field set, each to a value no builder defaults to, so a setting that fails to arrive shows up as
 #: its default rather than coinciding with what was asked for.
@@ -92,6 +92,13 @@ def momentum():
     return coupled.momentum
 
 
+@pytest.fixture(scope="module")
+def mass_flow_momentum():
+    """The same assembler, driven by a constrained body force -- what the bordered builder needs."""
+    _, coupled = _mass_flow_cavity(4)
+    return coupled.momentum
+
+
 @pytest.fixture
 def built(monkeypatch: pytest.MonkeyPatch) -> list[RootSolver]:
     """The solvers the builders construct, recorded on the way past.
@@ -110,14 +117,14 @@ def built(monkeypatch: pytest.MonkeyPatch) -> list[RootSolver]:
     return recorded
 
 
-def _drive(builder, momentum, settings: RootSolveSettings) -> None:
+def _drive(builder, momentum, mass_flow_momentum, settings: RootSolveSettings) -> None:
     """Take ``builder`` as far as constructing its solver, whichever side of the closure that happens on."""
     with pytest.raises(_Stop):
         if builder is reused_flow_solve:
             reused_flow_solve(momentum, root_solve=settings)
         elif builder is bulk_velocity_flow_solve:
-            solve = bulk_velocity_flow_solve(target=1.0, root_solve=settings)
-            solve(momentum, momentum.initial_state())
+            solve = bulk_velocity_flow_solve(mass_flow_momentum, root_solve=settings)
+            solve(mass_flow_momentum, mass_flow_momentum.initial_state())
         else:
             solve_scalar = scalar_pseudo_transient_solve(root_solve=settings)
             state = jnp.full((3,), 2.0)
@@ -148,10 +155,10 @@ def test_every_builder_defaults_to_nothing_overridden() -> None:
 
 
 @pytest.mark.parametrize("builder", BUILDERS, ids=lambda b: b.__name__)
-def test_every_builder_forwards_every_field(builder, momentum, built) -> None:
+def test_every_builder_forwards_every_field(builder, momentum, mass_flow_momentum, built) -> None:
     """Field for field on the solver each builder builds -- including ``adjoint_solver``, which is the
     setting none of the three could reach."""
-    _drive(builder, momentum, ASKED)
+    _drive(builder, momentum, mass_flow_momentum, ASKED)
 
     (solver,) = built
     assert solver.max_steps == ASKED.max_steps
@@ -161,14 +168,16 @@ def test_every_builder_forwards_every_field(builder, momentum, built) -> None:
 
 
 @pytest.mark.parametrize("builder", BUILDERS, ids=lambda b: b.__name__)
-def test_the_shipped_defaults_are_the_ones_every_case_runs_under(builder, momentum, built) -> None:
+def test_the_shipped_defaults_are_the_ones_every_case_runs_under(
+    builder, momentum, mass_flow_momentum, built
+) -> None:
     """Pinned as literal numbers, because nothing else in the suite would notice one moving.
 
     Every case in the repository solves under these values and passes none of them explicitly, so a
     default that moves moves every case at once -- and a test comparing a solver against the value that
     configured it is blind to that by construction.
     """
-    _drive(builder, momentum, DEFAULT_ROOT_SOLVE)
+    _drive(builder, momentum, mass_flow_momentum, DEFAULT_ROOT_SOLVE)
 
     (solver,) = built
     assert solver.max_steps == SHIPPED_MAX_STEPS[builder]
@@ -182,12 +191,12 @@ def test_the_shipped_defaults_are_the_ones_every_case_runs_under(builder, moment
 
 @pytest.mark.parametrize("builder", BUILDERS, ids=lambda b: b.__name__)
 def test_one_override_changes_one_setting_and_each_builder_keeps_its_own_cap(
-    builder, momentum, built
+    builder, momentum, mass_flow_momentum, built
 ) -> None:
     """``RootSolveSettings(adjoint_solver=...)`` means the same thing on every builder: that setting,
     and nothing else. The step cap is the one default that differs between them."""
     adjoint = lx.GMRES(rtol=0.125, atol=0.125)
-    _drive(builder, momentum, RootSolveSettings(adjoint_solver=adjoint))
+    _drive(builder, momentum, mass_flow_momentum, RootSolveSettings(adjoint_solver=adjoint))
 
     (solver,) = built
     assert solver.adjoint_solver is adjoint

@@ -21,7 +21,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions
-from aquaflux.flow import ConvectionTwoLevel, MomentumContinuity, NoSlipWall, reused_flow_solve
+from aquaflux.flow import (
+    ConvectionTwoLevel,
+    MomentumContinuity,
+    NoSlipWall,
+    UniformBodyForce,
+    reused_flow_solve,
+)
 from aquaflux.flow.initialization import potential_flow
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
@@ -42,7 +48,7 @@ def _solve(nx, ny):
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         gradient_scheme=CorrectedGreenGauss(),
         pressure_pin=0,  # periodic + walls is a closed domain: fix the pressure datum
-        body_force=(BETA, 0.0),
+        sources=(UniformBodyForce(jnp.array([BETA, 0.0])),),
     )
     state = eqx.filter_jit(newton_step)(assembler.residual, assembler.initial_state())
     return mesh, geometry, assembler, state

@@ -23,7 +23,12 @@ import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
-from aquaflux.flow import MomentumContinuity, NoSlipWall, bulk_velocity_flow_solve
+from aquaflux.flow import (
+    MassFlow,
+    MomentumContinuity,
+    NoSlipWall,
+    bulk_velocity_flow_solve,
+)
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
@@ -62,7 +67,7 @@ def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=100):
         gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
         pressure_pin=0,
-        body_force=(beta0, 0.0),
+        drive=MassFlow(target=U_B, force=beta0),
     )
     turbulence = SSTTurbulence.build(
         model,
@@ -81,8 +86,7 @@ def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=100):
     # is nonlinear (upwind convection), so the augmented solve stops on a convergence test; the mesh is
     # small, so a direct linear solve is the cheap, robust choice.
     solve_flow = bulk_velocity_flow_solve(
-        target=U_B,
-        flow_direction=0,
+        momentum,
         root_solve=RootSolveSettings(
             max_steps=FLOW_MAX_STEPS,
             linear_solver=lx.AutoLinearSolver(well_posed=True),

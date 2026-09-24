@@ -50,15 +50,16 @@ from aquaflux.schemes.interpolation import (
     interpolation_factor,
 )
 from aquaflux.solve import FieldLayout
-from aquaflux.vectors import dot
+from aquaflux.vectors import dot, scale
 
+from .drive import BOUNDARY_DRIVEN, Drive
 from .rhie_chow import (
     advective_momentum_flux,
     interior_mass_flux,
     momentum_diagonal,
     momentum_diagonal_parts,
 )
-from .source import MomentumSource, reject_unsupported_face_force
+from .source import MomentumSource, UniformBodyForce, reject_unsupported_face_force
 from .state import flow_state_layout
 
 if TYPE_CHECKING:
@@ -213,17 +214,14 @@ class MomentumContinuity(eqx.Module):
         free; ``None`` for a domain with a pressure outlet.
     pressure_pin_value : float
         The pressure imposed at :attr:`pressure_pin`.
-    body_force : jnp.ndarray
-        Uniform body force per unit volume ``(dim,)``, added to the momentum equation. Drives a
-        streamwise-periodic channel: with the pressure split ``p = p̃ + G·x`` into a periodic ``p̃``
-        and a mean gradient ``G``, the linear part is a constant force ``f = −G``, so a positive
-        ``body_force[0]`` drives the flow in ``+x`` (mean gradient ``G = −body_force``). Default zero.
-
-        This is deliberately **not** one of :attr:`sources`, because it is not only a source term: it
-        is the *control variable* of the bulk-velocity-constrained solve
-        (:func:`~aquaflux.flow.bulk_velocity_flow_solve`), which treats it as a coupled unknown,
-        writes it here every residual evaluation, and forms its border column from the analytic
-        ``dR/d(body_force) = −V`` that holds only for a uniform, state-independent force.
+    drive : Drive
+        What sets this flow in motion, and what that makes of the state.
+        :class:`~aquaflux.flow.BoundaryDriven` — the default — means the motion comes from the
+        boundary conditions and from :attr:`sources`, so the unknowns are the fields;
+        :class:`~aquaflux.flow.MassFlow` means a uniform streamwise force is a *coupled unknown*
+        constrained to hold a target bulk velocity, so the solved state carries one more degree of
+        freedom and the residual one more row. A force that is simply **prescribed** is not a drive
+        at all: it is a :class:`UniformBodyForce` in :attr:`sources`.
     sources : tuple of MomentumSource
         Momentum source terms subtracted from the balance (each returns its cell integral,
         production positive); empty by default. Where buoyancy, porous drag, or a rotating-frame
@@ -240,7 +238,7 @@ class MomentumContinuity(eqx.Module):
     boundary: BoundaryConditions
     interp_factor: jnp.ndarray
     normal_distance: jnp.ndarray
-    body_force: jnp.ndarray
+    drive: Drive
     pressure_pin: int | None = eqx.field(static=True)
     pressure_pin_value: float
     sources: tuple[MomentumSource, ...] = ()
@@ -259,7 +257,7 @@ class MomentumContinuity(eqx.Module):
         advection_scheme: AdvectionScheme | None = None,
         pressure_pin: int | None = None,
         pressure_pin_value: float = 0.0,
-        body_force=None,
+        drive: Drive = BOUNDARY_DRIVEN,
         sources: tuple[MomentumSource, ...] = (),
     ) -> MomentumContinuity:
         """Build the coupled assembler, precomputing face interpolation geometry.
@@ -279,16 +277,16 @@ class MomentumContinuity(eqx.Module):
         ``pressure_pin`` fixes the pressure at one cell (its continuity equation is replaced by
         ``p = pressure_pin_value``) — required for a closed domain (all-wall, no pressure outlet, e.g.
         a streamwise-periodic channel), where pressure is otherwise defined only up to a constant.
-        ``body_force`` is a uniform force per unit volume ``(dim,)`` added to the momentum equation
-        (see :attr:`body_force`); default (``None``) is no force. It drives a periodic channel and is
-        the leaf a mass-flow controller updates via ``eqx.tree_at``. ``sources`` is the tuple of
-        :class:`~aquaflux.flow.MomentumSource` terms — buoyancy, porous drag, a rotating-frame term —
-        subtracted from the momentum balance; it is separate from ``body_force`` because that one is
-        also a solve control variable (see :attr:`body_force`), and the two simply add.
+        ``drive`` says what sets the flow in motion (see :attr:`drive`); the default,
+        :class:`~aquaflux.flow.BoundaryDriven`, adds no force of its own. ``sources`` is the tuple of
+        :class:`~aquaflux.flow.MomentumSource` terms — buoyancy, porous drag, a rotating-frame term,
+        and a **prescribed** uniform driving force (:class:`UniformBodyForce`) — subtracted from the
+        momentum balance. A driving force belongs there unless it is the unknown of a
+        :class:`~aquaflux.flow.MassFlow` solve, which needs a leaf of its own to write each iterate
+        into and a border column ``dR/dbeta = −V`` a source cannot supply.
         """
         properties.require("viscosity", "density")
         reject_unsupported_face_force(sources, geometry, properties, mesh)
-        force = jnp.zeros(mesh.dim) if body_force is None else jnp.asarray(body_force)
         face_geometry, cell_geometry = geometry.face, geometry.cell
         face_cells = mesh.face_cells
         owner = face_cells.owner
@@ -323,7 +321,7 @@ class MomentumContinuity(eqx.Module):
             boundary=boundary.resolve(mesh.face_patches, mesh.face_cells),
             interp_factor=interp_factor,
             normal_distance=normal_distance,
-            body_force=force,
+            drive=drive,
             pressure_pin=pressure_pin,
             pressure_pin_value=pressure_pin_value,
             sources=sources,
@@ -492,6 +490,33 @@ class MomentumContinuity(eqx.Module):
     def density(self) -> jnp.ndarray:
         """Per-cell density, shape ``(n_cells,)``."""
         return self.properties.evaluate(self.mesh.cell_zones)["density"]
+
+    def uniform_body_force(self) -> jnp.ndarray:
+        """The total uniform force per unit volume acting on this flow, shape ``(dim,)``.
+
+        A uniform driving force reaches the momentum balance by either of two routes — a prescribed
+        :class:`UniformBodyForce` among :attr:`sources`, or the solved multiplier of a
+        :class:`~aquaflux.flow.MassFlow` drive — and every consumer that asks "what is pushing this
+        flow" wants their sum. Reading one route alone answers zero for a channel driven by the other,
+        which is what an initializer choosing between a force balance and a prescribed velocity must
+        not do.
+
+        Spatially varying and state-dependent sources are excluded: this is the *uniform* part, the
+        one a global force balance can be closed against.
+
+        Returns
+        -------
+        jnp.ndarray
+            The summed uniform force per unit volume, shape ``(dim,)``; zero when nothing uniform acts.
+        """
+        total = jnp.zeros(self.mesh.dim)
+        driven = self.drive.volumetric_force(self.mesh.dim)
+        if driven is not None:
+            total = total + driven
+        for source in self.sources:
+            if isinstance(source, UniformBodyForce):
+                total = total + source.force
+        return total
 
     def _wall_boundary_viscosity(self) -> jnp.ndarray | None:
         """Per-face momentum diffusion coefficient carrying the wall-function override, or ``None``.
@@ -1073,9 +1098,15 @@ class MomentumContinuity(eqx.Module):
             # associative, so viscous-pressure-advective is the arithmetic, not just the reading
             # order. Rearranging them perturbs the residual in the last bits.
             balance = CellBalance((diffusion, PressureForce(pressure_face, i), *advection))
-            # R = balance - source; the body force is a uniform volume source.
-            columns.append(balance.residual(component, context) - self.body_force[i] * volume)
+            columns.append(balance.residual(component, context))
         residual = jnp.stack(columns, axis=1)
+        # A solved driving force is not a source: the constrained solve writes each iterate into the
+        # drive, so the term is read from there and subtracted like one. `None` is no force at all,
+        # which is not the same as a force that is currently zero -- the seed of every mass-flow
+        # solve -- so the branch is on the drive, never on the value.
+        force = self.drive.volumetric_force(self.mesh.dim)
+        if force is not None:
+            residual = residual - scale(jnp.broadcast_to(force, residual.shape), volume)
         # Each injected source returns its cell integral (production positive), so it leaves the
         # balance as a sink -- the vector counterpart of a CellBalance's scalar source loop.
         if self.sources:

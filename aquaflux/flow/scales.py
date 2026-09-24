@@ -87,7 +87,7 @@ def friction_velocity(assembler: MomentumContinuity) -> jnp.ndarray:
     h = hydraulic_length(assembler)
     if h <= 0.0:
         return jnp.asarray(0.0)
-    beta = jnp.linalg.norm(assembler.body_force)
+    beta = jnp.linalg.norm(assembler.uniform_body_force())
     return jnp.sqrt(beta * h / jnp.mean(assembler.density))
 
 
@@ -130,7 +130,7 @@ def body_force_speed(
     jnp.ndarray
         The scalar characteristic speed (zero with no body force, or no wetted wall to balance it).
     """
-    beta = jnp.linalg.norm(assembler.body_force)
+    beta = jnp.linalg.norm(assembler.uniform_body_force())
     h = hydraulic_length(assembler)
     if h <= 0.0:
         return jnp.asarray(0.0)
@@ -156,7 +156,7 @@ def body_force_velocity(assembler: MomentumContinuity) -> jnp.ndarray:
     jnp.ndarray
         The plug velocity vector, shape ``(dim,)``.
     """
-    force = assembler.body_force
+    force = assembler.uniform_body_force()
     magnitude = jnp.linalg.norm(force)
     if float(magnitude) == 0.0:
         return jnp.zeros_like(force)

@@ -406,3 +406,48 @@ Every field left unset is the builder's own default, and each builder's step cap
 solves do: a scalar transport equation is stiffer than a flow block of the same size. What is *not*
 on the value is the step itself, which is what each builder exists to construct, and the residual's
 own measures, which are a property of the problem rather than of the solve.
+
+## What drives the flow
+
+A flow is set in motion in one of two ways, and the choice is not a flag on an otherwise common
+solve — it decides what the unknowns are. {class}`~aquaflux.flow.MomentumContinuity` therefore carries
+a {class}`~aquaflux.flow.Drive`, and there are two:
+
+{class}`~aquaflux.flow.BoundaryDriven`
+: The default. Whatever moves the fluid is already in the boundary conditions — a prescribed inlet
+  velocity, a moving wall — or in the momentum source terms. A uniform driving force belongs here:
+  it is a {class}`~aquaflux.flow.UniformBodyForce` in `sources`, like any other force per unit
+  volume. The unknowns are the fields.
+
+{class}`~aquaflux.flow.MassFlow`
+: A uniform streamwise force held to a target bulk velocity. The force is *not* known in advance, so
+  it cannot be a source: it is an unknown of the same solve, a scalar Lagrange multiplier for the
+  constraint `<U_dir> - target = 0`. The state carries one degree of freedom belonging to no cell,
+  and the residual one row belonging to no cell.
+
+```python
+from aquaflux.flow import MassFlow, MomentumContinuity, bulk_velocity_flow_solve
+
+momentum = MomentumContinuity.build(
+    mesh,
+    geometry,
+    properties,
+    boundary,
+    pressure_pin=0,  # a periodic channel has no outlet to set the pressure level
+    drive=MassFlow(target=1.0, force=0.004),  # `force` is only where the multiplier starts
+)
+solve = bulk_velocity_flow_solve(momentum)
+momentum, flow = solve(momentum, momentum.initial_state())
+beta = momentum.drive.force  # the force that holds the target, found by the solve
+```
+
+The target is read off the assembler rather than passed to the solve, because the residual writes
+each Newton iterate into that same drive: naming it twice is how the constraint being enforced and
+the force being applied come to disagree. The coupled RANS counterpart,
+{func}`~aquaflux.turbulence.solve_coupled_mass_flow`, reads it the same way, and both refuse an
+assembler whose drive is not a `MassFlow`.
+
+Because the constraint lives *inside* the residual, `<U_dir> = target` holds at the converged root by
+construction — it cannot overshoot while the eddy viscosity is still developing, as an outer
+controller that solved at a fixed force and then nudged it can — and the implicit-function-theorem
+adjoint carries it, so a gradient through the solve is the sensitivity *at fixed bulk velocity*.

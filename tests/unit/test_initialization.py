@@ -22,6 +22,7 @@ from aquaflux.flow import (
     MovingWall,
     NoSlipWall,
     PressureOutlet,
+    UniformBodyForce,
     VelocityInlet,
     bernoulli_pressure,
     laplace_field,
@@ -357,7 +358,7 @@ def _periodic_channel(beta=0.0035, mu_factor=1.0):
         gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
         pressure_pin=0,
-        body_force=(beta, 0.0),
+        sources=(UniformBodyForce(jnp.array([beta, 0.0])),),
     )
     turbulence = SSTTurbulence.build(
         SSTModel(),

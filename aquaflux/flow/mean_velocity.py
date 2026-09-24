@@ -23,6 +23,13 @@ is still developing (the failure the old proportional controller had at high Rey
 aspect ratio: it measured ``U_bulk`` at a fixed ``beta``, which spiked before the feedback could react,
 collapsing the near-wall ``k`` onto its floor).
 
+The constraint itself -- what is held, along which axis, where the multiplier sits in the state, and
+the border column and row -- is a :class:`~aquaflux.flow.MassFlow` drive, carried by the assembler
+being solved (see :mod:`aquaflux.flow.drive`). This module holds only what is specific to bordering
+the **flow** block: the constraint preconditioner below, and the residual that reads the velocity out
+of a flow state. The coupled RANS solve borders the same constraint over its own state and shares the
+rest, so neither can come to enforce a different target from the one its assembler is forced with.
+
 Being the production Newton solve, it is **convergence-gated** (stops on the residual tolerance) and
 **reverse-differentiable** through the implicit-function-theorem adjoint at the converged root. The
 assembler is threaded as the Newton solve's differentiable parameter (not captured in the residual
@@ -65,7 +72,14 @@ from typing import TYPE_CHECKING
 import equinox as eqx
 import jax.numpy as jnp
 
-from aquaflux.solve import DEFAULT_ROOT_SOLVE, DampedNewtonStep, RootSolveSettings
+from aquaflux.solve import (
+    DEFAULT_ROOT_SOLVE,
+    DampedNewtonStep,
+    FieldLayout,
+    RootSolveSettings,
+)
+
+from .drive import MassFlow, mass_flow_drive
 
 if TYPE_CHECKING:
     from .momentum import MomentumContinuity
@@ -77,34 +91,12 @@ _ConstrainedSolve = Callable[
 ]
 
 
-def _with_body_force(
-    momentum: MomentumContinuity, flow_direction: int, beta: jnp.ndarray
-) -> MomentumContinuity:
-    """Return ``momentum`` with its body force along ``flow_direction`` set to ``beta``."""
-    return eqx.tree_at(
-        lambda m: m.body_force, momentum, momentum.body_force.at[flow_direction].set(beta)
-    )
-
-
-def _constraint_vectors(
-    momentum: MomentumContinuity, flow_direction: int
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """The constant border column/row ``(a, c)`` of the augmented Jacobian, as flat flow-state vectors.
-
-    ``a = dR_flow/dbeta = -V`` on the flow-direction velocity rows (the body force enters as
-    ``R = flux - beta V``); ``c = d<U_dir>/dw = V/sum(V)`` there (so ``c . w = <U_dir>``). Both are
-    fixed by the geometry.
-    """
-    volume = momentum.geometry.cell.volume
-    n_cells, dim = momentum.mesh.n_cells, momentum.mesh.dim
-    pressure_zero = jnp.zeros(n_cells)
-    force = jnp.zeros((n_cells, dim)).at[:, flow_direction].set(-volume)
-    average = jnp.zeros((n_cells, dim)).at[:, flow_direction].set(volume / jnp.sum(volume))
-    return momentum.pack(force, pressure_zero), momentum.pack(average, pressure_zero)
-
-
 def _bordered_preconditioner(
-    flow_preconditioner: _Preconditioner, force: jnp.ndarray, average: jnp.ndarray
+    flow_preconditioner: _Preconditioner,
+    drive: MassFlow,
+    fields: FieldLayout,
+    force: jnp.ndarray,
+    average: jnp.ndarray,
 ) -> _Preconditioner:
     """Wrap a flow-block preconditioner ``M ~ J^{-1}`` into one for the augmented ``[w, beta]`` system.
 
@@ -116,9 +108,14 @@ def _bordered_preconditioner(
     flow_preconditioner : callable
         Factory ``w -> (matvec ~ J^{-1})`` for the un-augmented flow block (e.g.
         :meth:`aquaflux.flow.BlockPreconditioner.factory`).
+    drive : MassFlow
+        The drive whose layout says where the border entry sits; the same one the residual borders by,
+        so the preconditioner and the operator it approximates cannot disagree about the split.
+    fields : FieldLayout
+        The layout of the un-augmented block ``M`` inverts -- the flow alone here, the whole coupled
+        state when a coupled solve borders itself.
     force, average : jnp.ndarray
-        The border column ``a`` and row ``c`` from :func:`_constraint_vectors`, shape
-        ``((dim + 1) n_cells,)``.
+        The border column ``a`` and row ``c``, shape ``(fields.size,)``.
 
     Returns
     -------
@@ -127,14 +124,15 @@ def _bordered_preconditioner(
     """
 
     def factory(augmented: jnp.ndarray) -> _Matvec:
-        flow_matvec = flow_preconditioner(augmented[:-1])
+        flow_matvec = flow_preconditioner(drive.fields_state(fields, augmented))
         m_force = flow_matvec(force)  # M a
         schur = jnp.dot(average, m_force)  # c^T M a  (approximates c^T J^{-1} a)
 
         def apply(residual: jnp.ndarray) -> jnp.ndarray:
-            y = flow_matvec(residual[:-1])  # M r_flow
-            d_beta = (jnp.dot(average, y) - residual[-1]) / schur
-            return jnp.append(y - d_beta * m_force, d_beta)
+            block, border = drive.split(fields, residual)
+            y = flow_matvec(block)  # M r_flow
+            d_beta = (jnp.dot(average, y) - border) / schur
+            return drive.join(fields, y - d_beta * m_force, d_beta)
 
         return apply
 
@@ -151,28 +149,27 @@ class _BulkVelocityResidual(eqx.Module):
     outer assembler would be a closed-over input of the adjoint's ``custom_vjp`` and differentiating it
     raises.
 
-    A **module rather than a closure**, so that the two settings below are compared by value: the march
+    A **module rather than a closure**, so that the drive below is compared by value: the march
     compiles its step with the residual as an argument, and a closure built per solve is hashed by
     identity, so a solver reused across a sweep would recompile every call.
 
     Attributes
     ----------
-    flow_direction : int
-        The streamwise axis the bulk velocity is measured and the body force applied along.
-    target : float
-        The bulk (volume-averaged) velocity component to hold.
+    drive : MassFlow
+        The constraint being enforced, and the arithmetic of the border -- the layout the augmented
+        vector is split and reassembled by, the bulk-velocity average, and where the multiplier is
+        written into the assembler.
     """
 
-    flow_direction: int
-    target: float
+    drive: MassFlow
 
     def __call__(self, augmented: jnp.ndarray, theta: MomentumContinuity) -> jnp.ndarray:
-        flow, beta = augmented[:-1], augmented[-1]
-        forced = _with_body_force(theta, self.flow_direction, beta)
+        layout = theta.layout
+        flow = self.drive.fields_state(layout, augmented)
+        forced = self.drive.forced(theta, self.drive.settled(layout, augmented).force)
         velocity, _ = forced.unpack(flow)
-        volume = theta.geometry.cell.volume
-        bulk = jnp.sum(velocity[:, self.flow_direction] * volume) / jnp.sum(volume)
-        return jnp.append(forced.residual(flow), bulk - self.target)
+        bulk = self.drive.bulk_velocity(velocity, theta.geometry.cell.volume)
+        return self.drive.join(layout, forced.residual(flow), bulk - self.drive.target)
 
 
 #: ``bulk_velocity_flow_solve``'s own defaults, beneath whatever its caller sets. The augmented system
@@ -181,21 +178,21 @@ _BULK_VELOCITY_FLOW_SOLVE = RootSolveSettings(max_steps=20)
 
 
 def bulk_velocity_flow_solve(
+    reference: MomentumContinuity,
     *,
-    target: float,
-    flow_direction: int = 0,
     root_solve: RootSolveSettings = DEFAULT_ROOT_SOLVE,
     preconditioner: _Preconditioner | None = None,
-    reference: MomentumContinuity | None = None,
 ) -> _ConstrainedSolve:
-    """Build a ``solve(momentum, state) -> (momentum, state)`` that holds the bulk velocity at ``target``.
+    """Build a ``solve(momentum, state) -> (momentum, state)`` that holds ``reference``'s bulk target.
 
-    Solves the flow with the body force ``beta`` (along ``flow_direction``) treated as a Lagrange
-    multiplier for the constraint ``<U_dir> = target`` -- ``beta`` appended to the state and the flow
-    residual augmented with the constraint equation, driven by the production
-    :class:`~aquaflux.solve.RootSolver` (see the module docstring). The initial ``beta`` is
-    read from ``momentum.body_force[flow_direction]``, and the returned ``momentum`` carries the
-    converged ``beta`` (via :func:`equinox.tree_at`), so a segregated outer loop can thread it forward.
+    Solves the flow with the body force ``beta`` treated as a Lagrange multiplier for the constraint
+    ``<U_dir> = target`` -- ``beta`` attached to the state and the flow residual augmented with the
+    constraint equation, driven by the production :class:`~aquaflux.solve.RootSolver` (see the module
+    docstring). What is being held, along which axis, and the ``beta`` the march starts from all come
+    from ``reference``'s own :class:`~aquaflux.flow.MassFlow` drive, so the assembler the residual
+    writes each iterate into and the constraint this builder enforces cannot name different targets.
+    The returned ``momentum`` carries the converged ``beta`` on its drive, so a segregated outer loop
+    can thread it forward.
 
     The assembler is threaded as the Newton solve's differentiable parameter, so the solve is
     **reverse-differentiable in** ``momentum`` (e.g. its viscosity) through the implicit-function-theorem
@@ -206,10 +203,13 @@ def bulk_velocity_flow_solve(
 
     Parameters
     ----------
-    target : float
-        The bulk (volume-averaged) velocity component to hold along ``flow_direction``.
-    flow_direction : int
-        The streamwise axis the bulk velocity is measured and the body force is applied along.
+    reference : MomentumContinuity
+        The concrete assembler this solve is built for. Its drive must be a
+        :class:`~aquaflux.flow.MassFlow`: that is what makes the body force an unknown rather than a
+        prescribed source, and it supplies the target, the flow direction and the initial ``beta``. Its
+        geometry sets the border row and column of the constraint preconditioner, built **once here**
+        (not inside the jitted, potentially traced solve) so the frozen preconditioner carries no
+        tracer and the differentiated solve stays clean.
     root_solve : RootSolveSettings
         How the constrained Newton solve is run -- its step cap, its stopping test and its forward and
         adjoint linear solvers. Its ``linear_solver`` is the solver for the augmented Newton steps
@@ -222,38 +222,43 @@ def bulk_velocity_flow_solve(
         it is wrapped by :func:`_bordered_preconditioner` into a constraint preconditioner for the
         augmented Krylov solve -- the mesh-independent path for a large iterative solve. ``None`` solves
         unpreconditioned (a direct or small solve needs nothing).
-    reference : MomentumContinuity or None
-        Required when ``preconditioner`` is given: the concrete assembler whose geometry sets the
-        border row/column of the constraint preconditioner. It is built **once here** (not inside the
-        jitted, potentially traced solve), so the frozen preconditioner carries no tracer and the
-        differentiated solve stays clean.
 
     Returns
     -------
     callable
         ``solve(momentum, state) -> (momentum, state)``: the flow state meeting the constraint and the
         ``momentum`` carrying the converged body force.
+
+    Raises
+    ------
+    TypeError
+        If ``reference`` is not driven by a :class:`~aquaflux.flow.MassFlow`.
     """
+    drive = mass_flow_drive(reference, "bulk_velocity_flow_solve")
+    fields = reference.layout
     augmented_preconditioner = None
     if preconditioner is not None:
-        if reference is None:
-            raise ValueError(
-                "bulk_velocity_flow_solve: a preconditioner requires a concrete `reference` assembler "
-                "for the constraint preconditioner's border geometry."
-            )
-        force, average = _constraint_vectors(reference, flow_direction)
-        augmented_preconditioner = _bordered_preconditioner(preconditioner, force, average)
+        force, average = drive.constraint_vectors(reference)
+        augmented_preconditioner = _bordered_preconditioner(
+            preconditioner, drive, fields, force, average
+        )
 
-    augmented_residual = _BulkVelocityResidual(flow_direction, target)
+    augmented_residual = _BulkVelocityResidual(drive)
     settings = root_solve.filled_from(_BULK_VELOCITY_FLOW_SOLVE)
 
     def solve(
         momentum: MomentumContinuity, state: jnp.ndarray
     ) -> tuple[MomentumContinuity, jnp.ndarray]:
-        augmented0 = jnp.append(state, momentum.body_force[flow_direction])
+        # The layout comes from the assembler being solved, not from `reference`: only the constraint
+        # preconditioner is tied to one mesh, and an unpreconditioned solve is happy to run the same
+        # constraint on a refined copy of the channel.
+        solved_fields = momentum.layout
+        augmented0 = drive.driven_state(solved_fields, state)
         newton = settings.solver(DampedNewtonStep(preconditioner=augmented_preconditioner))
         augmented = newton.solve(augmented_residual, augmented0, momentum)
-        flow, beta = augmented[:-1], augmented[-1]
-        return _with_body_force(momentum, flow_direction, beta), flow
+        settled = drive.settled(solved_fields, augmented)
+        return eqx.tree_at(lambda m: m.drive, momentum, settled), drive.fields_state(
+            solved_fields, augmented
+        )
 
     return solve

@@ -34,10 +34,12 @@ LINE_LIMIT = 1500
 #: Modules over the limit, each with the size it may not exceed. **A ratchet, not a licence**: a budget
 #: is lowered as code moves out, never raised to make a change fit. Add an entry only with the reason.
 BUDGETS = {
-    # Holds the k--omega residual and the coupled march's preconditioner sessions, probe and mass-flow
-    # borders. The residual-agnostic driver and step tail have moved to ``solve/``; the sessions and the
-    # coloured probe are still to move (they take a ``CoupledRANS`` only for its residual and layout).
-    "turbulence/coupled.py": 3307,
+    # Holds the k--omega residual and the coupled march's preconditioner sessions and probe. The
+    # residual-agnostic driver and step tail have moved to ``solve/``, and the mass-flow border --
+    # layout, seed, constraint vectors and bulk-velocity average -- to ``flow/drive.py``; the sessions
+    # and the coloured probe are still to move (they take a ``CoupledRANS`` only for its residual and
+    # layout).
+    "turbulence/coupled.py": 3298,
 }
 
 
