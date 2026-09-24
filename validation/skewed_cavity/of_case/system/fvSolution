@@ -1,0 +1,67 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Version:  13
+    \\  /    A nd           |
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      fvSolution;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+solvers
+{
+    p
+    {
+        solver          GAMG;
+        smoother        GaussSeidel;
+        tolerance       1e-10;
+        relTol          0.01;
+    }
+
+    "(U|k|epsilon|omega)"
+    {
+        solver          smoothSolver;
+        smoother        symGaussSeidel;
+        tolerance       1e-10;
+        relTol          0.01;
+    }
+}
+
+SIMPLE
+{
+    // nNonOrthogonalCorrectors is the deferred-correction knob: extra inner
+    // sweeps that lag the mesh non-orthogonal correction of the pressure
+    // equation. The run script sweeps this value {0,1,2}. It is the segregated
+    // analogue of folding the correction into the coupled Jacobian (aquaflux).
+    nNonOrthogonalCorrectors 1;   //__NNONORTH__
+
+    consistent      yes;          // SIMPLEC
+
+    // Closed domain (all walls): pressure is defined up to a constant, so pin
+    // one reference cell -- matches aquaflux's pressure_pin=0.
+    pRefCell        0;
+    pRefValue       0;
+
+    residualControl
+    {
+        p               1e-8;
+        U               1e-8;
+    }
+}
+
+relaxationFactors
+{
+    equations
+    {
+        U               0.9;
+        ".*"            0.9;
+    }
+}
+
+// ************************************************************************* //

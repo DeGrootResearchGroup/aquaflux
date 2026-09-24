@@ -1,0 +1,99 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Version:  13
+    \\  /    A nd           |
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Inclined (skewed) lid-driven cavity -- the Demirdzic/Lilek/Peric (1992)
+// non-orthogonal benchmark. A unit parallelogram: bottom and top walls are
+// horizontal (length 1); the left and right walls are inclined at beta = 45
+// degrees from horizontal. The uniformly sheared quad mesh therefore has a
+// uniform mesh non-orthogonality of ~45 deg (reported by checkMesh), which is
+// exactly the term the AD-linearized non-orthogonal correction is about.
+//
+// The lid is the top wall, translating horizontally at U = (1 0 0).
+//
+// beta = 45 deg  ->  shear offset (cos beta, sin beta) = (0.7071067811865476,
+// 0.7071067811865476). Change these two numbers (kept consistent) to sweep the
+// skew angle.
+
+convertToMeters 1;
+
+// beta = 45 deg: top edge sheared by (cos beta, sin beta) = (0.70710678,
+// 0.70710678) relative to the bottom edge. Coordinates are written out
+// literally (no #calc: that compiles a runtime library, which OpenFOAM refuses
+// when the process runs as root, as it does inside the container).
+// vertex 2 = (1 + 0.70710678, 0.70710678); vertex 3 = (0.70710678, 0.70710678).
+
+vertices
+(
+    (0                     0                    0)      // 0
+    (1                     0                    0)      // 1
+    (1.7071067811865476    0.7071067811865476   0)      // 2
+    (0.7071067811865476    0.7071067811865476   0)      // 3
+    (0                     0                    0.1)    // 4
+    (1                     0                    0.1)    // 5
+    (1.7071067811865476    0.7071067811865476   0.1)    // 6
+    (0.7071067811865476    0.7071067811865476   0.1)    // 7
+);
+
+blocks
+(
+    hex (0 1 2 3 4 5 6 7) (40 40 1) simpleGrading (1 1 1)
+);
+
+edges
+(
+);
+
+boundary
+(
+    movingWall
+    {
+        type wall;
+        faces
+        (
+            (3 7 6 2)
+        );
+    }
+    fixedWalls
+    {
+        type wall;
+        faces
+        (
+            (0 4 7 3)
+            (2 6 5 1)
+            (1 5 4 0)
+        );
+    }
+    // Split into two separate empty caps (front and back) rather than the usual
+    // single OpenFOAM "frontAndBack" patch: aquaflux's 2D collapse identifies the
+    // through-thickness axis from exactly two capping patches, one per plane.
+    back
+    {
+        type empty;
+        faces
+        (
+            (0 3 2 1)
+        );
+    }
+    front
+    {
+        type empty;
+        faces
+        (
+            (4 5 6 7)
+        );
+    }
+);
+
+// ************************************************************************* //
