@@ -22,19 +22,22 @@ Configuration: the case's own `lampWall.stl` (7,516 facets), 24,000 receivers dr
 from the mesh's 1,635,909 cell centres (22,250 chamber, 1,200 riser, 640 inlet), exitance
 696.42 W/m², absorption 35.67 /m, jax 0.10.2, CPU, x64, macOS arm64, 11 cores.
 
-| | rays/s | 180M rays |
-|---|---|---|
-| `Outside` of three cylinders | 17.2M | 10.5 s |
-| `BranchOpenings`, hand-derived | 28.6M | 6.3 s |
+| | rays/s | 180M rays | repeat spread over 3 passes |
+|---|---|---|---|
+| `Outside` of three cylinders | 20.7M | 8.72 s | 1.003× |
+| `BranchOpenings`, hand-derived | 28.8M | 6.27 s | 1.033× |
 
 **0 of 180 million pairs masked differently**, and `G` agrees to `0.0` relative at the median, the
 99th percentile and the maximum. Both describe the same ideal cylinders, so there is no faceting
 to explain a difference away and a disagreement would have meant a defect in one of them. The
 1,840 pipe receivers carry 13.8M of those pairs — the only place the mask does anything — so the
-agreement is not an artifact of testing mostly-clear geometry. The general construction costs
-1.7× the bespoke one, which is the price of not being told where the openings are.
+agreement is not an artifact of testing mostly-clear geometry, and it survives `BranchOpenings`
+being reformulated — the same comparison against its `crossing_ratio` rewrite is still 0 pairs, so
+`Outside` matches two independent spellings of the bespoke test. The general construction costs
+1.39× the bespoke one, which is the price of not being told where the openings are; single runs of
+the pair gave 1.67× and 1.48×, so the three passes are what make that a number.
 
-Against the triangle grid the primitive arm is 122–609× faster, and the span is over the *grid's*
+Against the triangle grid the primitive arm is 146–732× faster, and the span is over the *grid's*
 configurations rather than one number — from its worst measured corner (pipe-cell receivers on the
 area-sized default grid, 28,248 rays/s) to its best (random cells on a 128³ grid, 141,451). The
 two axes interact, so neither has a single factor: resolution is worth 3.26× on pipe cells and

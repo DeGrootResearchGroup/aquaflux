@@ -561,10 +561,10 @@ uniformly from the meshed case's 1,635,909 cell centres** (22,250 chamber, 1,200
 inlet); exitance 696.42 W/m², `UniformAbsorption(35.67)`, `NoOcclusion()` for the surface's own
 triangles; jax/jaxlib 0.10.2, CPU, x64, macOS arm64, 11 cores.
 
-| | rays/s | 180M rays |
-|---|---|---|
-| `Outside` of three `Cylinder` primitives | **17.2M** | 10.5 s |
-| `BranchOpenings`, hand-derived for this reactor | **28.6M** | 6.3 s |
+| | rays/s | 180M rays | repeat spread over 3 passes |
+|---|---|---|---|
+| `Outside` of three `Cylinder` primitives | **20.7M** | 8.72 s | 1.003x |
+| `BranchOpenings`, hand-derived for this reactor | **28.8M** | 6.27 s | 1.033x |
 
 - **0 of 180 million pairs masked differently**, and the fluence rate agrees to `0.0` relative at
   the median, the 99th percentile *and* the maximum — not "to rounding", bit for bit. The two
@@ -572,9 +572,19 @@ triangles; jax/jaxlib 0.10.2, CPU, x64, macOS arm64, 11 cores.
   explain a difference away, and a disagreement would have been a defect in one of them. The
   1,840 pipe receivers are where the mask does anything at all, and they carry 13.8M of those
   pairs, so the agreement is not an artifact of testing mostly-clear geometry.
-- **The general construction costs 1.7x the bespoke one**, which is the honest price of not being
+- **The general construction costs 1.39x the bespoke one**, which is the honest price of not being
   told where the openings are: three regions of three inequalities each plus the covering test,
-  against two hand-written quadratics.
+  against two hand-written quadratics. ⚠️ **That figure needs the three passes to be worth
+  quoting.** Single runs of the same pair on the same machine gave 1.67x and 1.48x; the arms are
+  timed in one process so each is internally fair, but the *ratio* still moves by 20% between runs.
+  Three consecutive passes repeating to 1.003x are what makes 1.39x a number rather than an
+  impression.
+- **The agreement survives a reformulation of the arm it is checked against**, which is worth more
+  than the original check. #502 rewrote `BranchOpenings.blocks` as `crossing_ratio(...) > 1.0` —
+  `sqrt(x^2+y^2)/R > 1` where it had compared squares — which is algebraically the same test and
+  numerically a different one at the rim, exactly where a disagreement would live. Re-run against
+  it: still 0 pairs. So `Outside` matches two independent spellings of the bespoke occluder, not
+  one.
 - **92.8% of pairs lie in one convex region** (92.7% chamber, 0.07% riser, 0% inlet — the lamp is
   in the chamber, so no facet is in the inlet). ⚠️ **The test does not skip those pairs**: it is
   one branch-free expression, so every pair pays the same handful of comparisons. What convexity
@@ -591,17 +601,17 @@ ratio here needs THREE axes named before it means anything**: which analytic arm
 (the general construction or the bespoke closure), where the receivers are (pipe cells walk much
 further through empty grid than randomly placed ones), and what resolution the grid is.
 
-Only the primitive arm was measured here, at **17.2M rays/s** — and being one branch-free
+Only the primitive arm was measured here, at **20.7M rays/s** — and being one branch-free
 expression it runs at that rate whatever the receivers are, which is what makes it comparable
 against any grid configuration. The grid's four corners are from #502's matched square (300,000
 rays per corner, one process, two alternating passes, fastest per corner):
 
 | grid configuration | grid rays/s | primitives are |
 |---|---|---|
-| pipe cells, area-sized default `(212, 11, 114)` | 28,248 | **609x** |
-| random cells, area-sized default | 79,963 | **215x** |
-| pipe cells, 128³ | 92,038 | **187x** |
-| random cells, 128³ | 141,451 | **122x** |
+| pipe cells, area-sized default `(212, 11, 114)` | 28,248 | **732x** |
+| random cells, area-sized default | 79,963 | **259x** |
+| pipe cells, 128³ | 92,038 | **225x** |
+| random cells, 128³ | 141,451 | **146x** |
 
 **The two axes interact, so neither has a single factor.** Resolution is worth **3.26x** on pipe
 cells and **1.77x** on random ones; receiver placement is worth **2.83x** at the default grid and
@@ -654,7 +664,7 @@ remedy is structural, not behavioural: **run every arm in one process and report
 beside the result.** The matched square is trustworthy because it removed the opportunity to pair
 across runs, not because anyone was more careful inside it.
 
-⚠️ **An extrapolation, flagged as one: ~715 s for the whole 1.6M-cell mesh** (against ~430 s for
+⚠️ **An extrapolation, flagged as one: ~595 s for the whole 1.6M-cell mesh** (against ~430 s for
 the hand-derived arm). That is a per-ray rate from a 24,000-receiver run multiplied out by 68x,
 which is exactly the shape of estimate that has been wrong before in this subsystem. Read it
 beside the 557 s the entire field took with analytic occlusion as an order of magnitude, not as a
@@ -1822,7 +1832,12 @@ choices move it, and conflating them is easy -- which receivers, and which primi
 | primitive arm | vs grid on PIPE cells (38,711 rays/s) | vs grid on RANDOM receivers (65,647) |
 |---|---|---|
 | hand-derived `BranchOpenings`, 26.1M rays/s | **675x** | 398x |
-| general `Outside` of three cylinders, 17.2M rays/s | 444x | 262x |
+| general `Outside` of three cylinders, 20.7M rays/s | 534x | 315x |
+
+⚠️ The general arm's rate was **17.2M** here until 2026-09-24 and every quotient in its row has
+moved with it. A single run understated it: three consecutive passes repeat to 1.003x and are the
+measurement, recorded with the rest of that arm under "MEASURED: the Sozzi reactor as three
+cylinders" above. Nothing about the grid's numbers changed.
 
 Both grid rates are the **area-sized default grid**; a 128³ grid roughly doubles them, which is a
 third axis again. So the honest statement is **a few hundredfold, 260-675x across these corners**,
