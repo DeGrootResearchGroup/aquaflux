@@ -219,7 +219,7 @@ def build_transfer(
     ----------
     surfaces : Surfaces
         The facets. Only their geometry is read; the optical properties are supplied per call.
-    occluders : sequence of Occluder, optional
+    occluders : sequence of aquaflux.solids.Body, optional
         Analytic bodies between facets.
     self_occlusion : SelfOcclusion or None, optional
         How the facets are tested for blocking one another, which for a non-convex body they do.

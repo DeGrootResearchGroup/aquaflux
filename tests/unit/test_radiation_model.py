@@ -17,10 +17,10 @@ from aquaflux.radiation.model import (
     radiosity,
     surface_irradiance,
 )
-from aquaflux.radiation.occluders import Cylinder
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian
 from aquaflux.radiation.self_occlusion import NoOcclusion, RayCastOcclusion, SilhouetteOcclusion
 from aquaflux.radiation.surfaces import Surfaces
+from aquaflux.solids import Cylinder
 from aquaflux.solve import relative_residual_gmres
 
 from tests.unit.radiation_references import (

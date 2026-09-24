@@ -37,6 +37,7 @@ PUBLIC_SUBPACKAGES = [
     "turbulence",
     "transport",
     "radiation",
+    "solids",
 ]
 
 # How the API reference groups each subpackage, keyed on the module a name is DEFINED in.
@@ -112,8 +113,11 @@ SUBPACKAGE_GROUPS = {
         ("Emitting surfaces", ["surfaces", "profiles", "stl", "subdivide", "checks"]),
         ("Direct gathers and the medium between", ["gather", "absorption"]),
         ("Surface-to-surface transfer", ["transfer", "quadrature"]),
-        ("What stands in the way", ["occluders", "visibility", "self_occlusion", "triangles"]),
+        ("What stands in the way", ["visibility", "self_occlusion", "triangles"]),
         ("Solid-angle kernels", ["solid_angle"]),
+    ],
+    "solids": [
+        ("Solid bodies, their combinations, and fluid regions", ["bodies"]),
     ],
     "turbulence": [
         ("The k-ω SST model", ["sst", "transport", "sources", "strain"]),

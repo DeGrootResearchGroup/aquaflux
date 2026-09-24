@@ -54,7 +54,7 @@ from aquaflux.radiation import (  # noqa: E402
     read_stl,
     refine_for_receivers,
 )
-from aquaflux.radiation.occluders import Occluder  # noqa: E402
+from aquaflux.solids import Body  # noqa: E402
 
 WORK = HERE / "work"
 CASE = WORK / "case"
@@ -76,7 +76,7 @@ def _say(message: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
 
 
-class BranchOpenings(Occluder):
+class BranchOpenings(Body):
     """The chamber's wall, seen from a cell in one of the two pipes.
 
     A segment from a lamp point (inside the chamber) to a cell in the inlet pipe is clear

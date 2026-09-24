@@ -1,4 +1,4 @@
-"""The analytic primitives, the CSG that composes them, and the fluid-region occluder.
+"""The analytic primitives, the CSG that composes them, and the fluid-region body.
 
 Each primitive is pinned against a closed form, because that is the only reference that says a
 body is the shape it claims to be rather than merely a consistent shape. On top of that sits one
@@ -15,15 +15,13 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.radiation import NoOcclusion, Surfaces, build_visibility
-from aquaflux.radiation.occluders import (
+from aquaflux.solids import (
     Box,
     Cone,
     Cylinder,
     Difference,
     HalfSpace,
     Intersection,
-    Occluder,
     Outside,
     Solid,
     Sphere,
@@ -280,7 +278,7 @@ def test_a_hole_in_several_pieces_is_refused_with_the_rewrite_that_works():
 
 
 def test_a_combinator_refuses_a_body_that_cannot_report_intervals():
-    """``Outside`` answers only the two occluder questions, so it cannot be composed."""
+    """``Outside`` answers only the two ``Body`` questions, so it cannot be composed."""
     ball = Sphere([0, 0, 0], 1.0)
     with pytest.raises(TypeError, match="intervals"):
         Union(ball, Outside(ball))
@@ -417,7 +415,7 @@ def test_the_regions_can_be_any_solid_not_only_a_convex_one():
 
 
 # ---------------------------------------------------------------------------------------
-# What the rest of the module expects of an occluder
+# What a consumer building a mask expects of a body
 # ---------------------------------------------------------------------------------------
 
 
@@ -456,50 +454,3 @@ def test_a_body_survives_being_traced_with_its_geometry_as_arguments():
     )
     assert eager.any() and not eager.all(), "the fixture must exercise both answers"
     assert np.array_equal(eager, compiled)
-
-
-class _HostBody(Occluder):
-    """A blocker answered on the host, as a triangulated one is: numpy, and index bookkeeping.
-
-    Stands in for the triangle path, whose grid walk drops rays as they are settled and so
-    cannot be traced. What matters here is only that it touches ``numpy`` on its arguments,
-    which is what raises under a trace.
-    """
-
-    def contains(self, position) -> jnp.ndarray:
-        """A zero-thickness sheet has no interior, so nothing is inside it."""
-        return jnp.zeros(jnp.asarray(position).shape[:-1], dtype=bool)
-
-    def blocks(self, origin, target, min_distance) -> jnp.ndarray:
-        """Blocks whatever starts on the far side of ``x = 0``."""
-        del min_distance
-        source, _ = np.broadcast_arrays(
-            np.asarray(origin, dtype=float), np.asarray(target, dtype=float)
-        )
-        live = np.flatnonzero(np.ones(source.shape[:-1]).ravel())
-        out = np.zeros(source.shape[:-1], dtype=bool).ravel()
-        out[live] = source.reshape(-1, 3)[live, 0] < 0.0
-        return jnp.asarray(out.reshape(source.shape[:-1]))
-
-
-def test_a_host_side_blocker_and_a_primitive_stand_in_one_scene():
-    """The hybrid: a vessel described as primitives beside whatever really is a triangle soup.
-
-    ⚠️ **Compiling the mask build unconditionally breaks this, and breaks it by raising.** A
-    primitive wants compiling — several inequalities across a receivers-by-facets array
-    materialize every intermediate otherwise — and a host-side blocker cannot be traced at all.
-    Whoever builds the mask therefore reads each body's own declaration. Without that, the only
-    bodies that work are the ones this module happens to ship.
-    """
-    vertices = np.array([[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]])
-    emitters = Surfaces.from_triangles(vertices, emission=1.0)
-    points = np.array([[0.0, 0.0, 1.0], [0.0, 0.0, -1.0]])
-    primitive = Sphere(centre=[0.0, 0.0, 5.0], radius=0.1)
-    assert primitive.traceable and not _HostBody().traceable
-
-    mask = build_visibility(
-        [primitive, _HostBody()], emitters, points, self_occlusion=NoOcclusion()
-    )
-    assert mask.blocked.shape == (2, 2, 1)
-    assert not np.asarray(mask.blocked[0]).any(), "the sphere is nowhere near these segments"
-    assert not np.asarray(mask.blocked[1]).any(), "the facet centroid is not at negative x"

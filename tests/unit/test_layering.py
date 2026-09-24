@@ -7,8 +7,11 @@ them, so it could not be marched by the machinery a turbulent one is, and a cont
 asked whether a solver behaviour needs turbulence had nothing to run. The file reached ~4000 lines
 before anyone moved a line of it out, because no check looked at how large a physics module had become.
 
-* :func:`test_the_solve_package_imports_nothing_outside_itself` -- ``solve/`` is the residual-agnostic
-  layer. It holds no mesh, field or physics import, which is what lets every residual run on it.
+* :func:`test_a_generic_package_imports_nothing_outside_itself` -- ``solve/`` is the residual-agnostic
+  layer. It holds no mesh, field or physics import, which is what lets every residual run on it. The
+  same holds for ``solids/``: its bodies were written for the radiation model's shadows and lived
+  inside it, and a solid body names no physics, so a computer-aided design (CAD) reader or any other
+  consumer can use them only while they import nothing from a physics package.
 * :func:`test_a_physics_module_stays_below_the_size_at_which_generic_machinery_hides_in_it` -- a size
   ratchet on the physics packages, with each over-size module's current size as its budget.
 """
@@ -17,6 +20,8 @@ from __future__ import annotations
 
 import ast
 import pathlib
+
+import pytest
 
 PACKAGE = pathlib.Path(__file__).resolve().parents[2] / "aquaflux"
 
@@ -54,9 +59,22 @@ def _imports(path: pathlib.Path) -> list[tuple[int, str | None, int]]:
     return found
 
 
-def test_the_solve_package_imports_nothing_outside_itself() -> None:
+#: Packages that must import nothing of aquaflux but themselves and the neutral leaves, each with
+#: what it is. A generic package that names a physics one has stopped being generic.
+GENERIC_PACKAGES = {
+    "solve": "the residual-agnostic layer, and a residual-agnostic solver that names one is not "
+    "residual-agnostic",
+    "solids": "plain geometry, and a solid body that needs a physics package to be described is in "
+    "the wrong package",
+}
+
+
+@pytest.mark.parametrize("package", sorted(GENERIC_PACKAGES))
+def test_a_generic_package_imports_nothing_outside_itself(package: str) -> None:
     offenders = []
-    for path in sorted((PACKAGE / "solve").glob("*.py")):
+    paths = sorted((PACKAGE / package).glob("*.py"))
+    assert paths, f"{package}/ holds no modules, so this check would see nothing"
+    for path in paths:
         for line, module, level in _imports(path):
             if level >= 2:
                 target = (module or "").split(".")[0]
@@ -64,13 +82,11 @@ def test_the_solve_package_imports_nothing_outside_itself() -> None:
                 target = [*module.split("."), ""][1]
             else:
                 continue
-            leaves_solve = target not in ("solve", *NEUTRAL_LEAVES)
-            if leaves_solve:
+            if target not in (package, *NEUTRAL_LEAVES):
                 offenders.append(f"{path.name}:{line} imports {'.' * level}{module}")
     assert not offenders, (
-        "solve/ is the residual-agnostic layer and must not import a physics or discretization "
-        "package -- a residual-agnostic solver that names one is not residual-agnostic:\n"
-        + "\n".join(offenders)
+        f"{package}/ is {GENERIC_PACKAGES[package]}, so it must not import a physics or "
+        "discretization package:\n" + "\n".join(offenders)
     )
 
 

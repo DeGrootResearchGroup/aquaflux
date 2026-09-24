@@ -2,7 +2,7 @@
 
 This is the test that lets a reactor shadow itself: a facet on one leg of a bent duct does not
 illuminate a cell in the other leg, because the wall between them is in the way. The analytic
-bodies of :mod:`aquaflux.radiation.occluders` cannot express that — the geometry doing the
+bodies of :mod:`aquaflux.solids` cannot express that — the geometry doing the
 blocking *is* the emitting surface.
 
 The intersection is Woop, Benthin and Wald's **watertight** ray-triangle test (*Journal of

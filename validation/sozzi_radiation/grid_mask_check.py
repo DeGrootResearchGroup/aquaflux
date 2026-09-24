@@ -49,7 +49,7 @@ from aquaflux.radiation import (  # noqa: E402
     read_stl,
 )
 from aquaflux.radiation.grid import TriangleGrid  # noqa: E402
-from aquaflux.radiation.occluders import Occluder  # noqa: E402
+from aquaflux.solids import Body  # noqa: E402
 from compare_fluence import (  # noqa: E402
     ABSORPTION,
     CASE,
@@ -70,7 +70,7 @@ def _say(message: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
 
 
-class WallTriangles(Occluder):
+class WallTriangles(Body):
     """The vessel wall as the triangles it really is, culled by a uniform grid.
 
     Attributes
@@ -93,7 +93,7 @@ class WallTriangles(Occluder):
         return jnp.zeros(jnp.asarray(position).shape[:-1], dtype=bool)
 
     def blocks(self, origin, target, min_distance) -> jnp.ndarray:
-        """See :meth:`aquaflux.radiation.occluders.Occluder.blocks`."""
+        """See :meth:`aquaflux.solids.Body.blocks`."""
         source, receiver = np.broadcast_arrays(
             np.asarray(origin, dtype=float), np.asarray(target, dtype=float)
         )

@@ -7,11 +7,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.radiation.gather import direct_fluence_rate
-from aquaflux.radiation.occluders import Cylinder
 from aquaflux.radiation.self_occlusion import NoOcclusion, RayCastOcclusion
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.triangles import _call_shape, _edge_function, segment_is_cut
 from aquaflux.radiation.visibility import build_visibility
+from aquaflux.solids import Cylinder
 from scipy.spatial import ConvexHull
 
 from tests.unit.radiation_references import (

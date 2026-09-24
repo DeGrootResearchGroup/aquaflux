@@ -3,7 +3,7 @@ paths:
   - "aquaflux/io/**"
 ---
 
-# Rules — `aquaflux/io/` (mesh import/export)
+# Rules — `aquaflux/io/` (mesh import/export, and CAD import)
 
 > **Provenance boundary (binding).** This file may cite the C++/Fortran precursors to inform *your*
 > understanding. Per the root `CLAUDE.md` **Comment Convention**, none of
@@ -411,6 +411,153 @@ questions have different answers.
   - **A `uniform X` and a `nonuniform List<scalar>` entry occur in the same file** — a wall's flux
     is written `uniform 0` while an inlet's is a full list — so a reader handling only the list form
     fails on most of the boundary.
+
+## Structure — BUILT (CAD import: STEP → exact bodies and emitting triangles) — 2026-09-24, #505
+
+`aquaflux/io/cad/`: `read_step(path, placement) -> CadModel`, and the model hands out
+`solid(name)` (one exact `aquaflux.solids` body), `fluid(*names)` (an `Outside` — the vessel as the
+water it holds) and `triangles(name, chord=, facet_size=)` (an emitting surface). **`io` now depends
+on `solids` as well as `mesh`**; `solids` imports nothing back, and it is generic geometry, not a
+physics package (`.claude/rules/solids.md`), which is what makes that direction acceptable.
+
+**Why a library and not a reader of our own (decided with the user, 2026-09-24).** The stated
+direction is *arbitrary* CAD — B-spline surfaces, trimmed faces, fillets, booleans, tessellation to a
+tolerance, point-in-solid — and a reader for the primitive subset would be dominated the day the
+library path existed. Open-source full B-rep kernels that read STEP are, in practice, OpenCASCADE and
+things built on it (gmsh, FreeCAD, CadQuery, build123d); the Rust kernels are not mature and a bare
+STEP entity parser has no geometry. The binding is **OCP**, published by the CadQuery project as
+`cadquery-ocp` — **we use the binding, not CadQuery**. `pythonocc-core` is conda-only; `gmsh` embeds
+OCCT but does not hand back surface parameters. ⚠️ Pinned exactly
+(`cadquery-ocp-novtk==8.0.1.0.0`, the `cad` extra): two short probes of 8.0.1 hit four API breaks —
+`TDF_LabelSequence` → `OCP.collections.Sequence_TDF_Label`, `TopTools_ListOfShape` →
+`OCP.collections.List_TopoDS_Shape`, `TopoDS.Solid_s` → `TopoDS.Solid`, and `Bnd_Box.Get()` cannot
+convert its return type (use `CornerMin`/`CornerMax`). `-novtk` is the same `OCP` module without VTK
+(a further large wheel) and cannot be installed beside CadQuery. No cp310 wheel, so
+`requires-python` went to `>=3.11` (CI already ran 3.11/3.12 only). **Unlike `petsc4py` it runs in
+CI**: the `test` extra carries `aquaflux[cad]`, and `tests/unit/test_cad_step.py` is in the
+optional-dependency census as gated on `OCP`.
+
+**Layout — one module touches the kernel; everything else is plain numpy, testable without it.**
+- `kernel.py` — `OpenCascade`, the only `import OCP` in the package. Reads STEP into named, placed
+  solids; describes faces as records; builds `solids` bodies back into kernel solids; fuses;
+  measures boundary distances; triangulates. No kernel object leaves `CadModel`.
+- `faces.py` — `PlaneFace`, `CylinderFace`, `ConeFace`, `SphereFace`, `OtherFace`,
+  `SolidDescription`: the facts recognition needs, as numbers.
+- `recognize.py` — `RecognitionRule` strategies + `recognize(description, rules)`.
+- `placement.py` — `Placement(matrix, offset)`, orthogonal only (a reflection is allowed; a stretch
+  would make a cylinder elliptic and is refused; so is a uniform scale — units are the reader's job).
+- `model.py` — `CadModel`, `InexactBody`, `read_step` (imports the kernel lazily, so
+  `import aquaflux.io` needs no CAD kernel).
+
+**Recognition is two rules, and a proposal is a CLAIM that is checked, not a result.**
+- `CurvedPieces` — the solid is the union of the whole-turn convex surfaces it lies inside: each
+  cylinder / cone / sphere face with the solid on its axis side becomes that primitive over the
+  face's own axial extent. ⚠️ **Which side the solid is on is recorded per face** (`solid_inside`),
+  because a pipe wall and a sleeve's bore are the same cylinder read from opposite sides and only the
+  first is a convex piece; a whole-turn face with the solid outside is refused as a bore.
+  ⚠️ **Faces of one surface are merged before "whole turn" is decided** — exporters split a periodic
+  face into halves, reported from different origins with opposite axis signs, so faces are compared
+  on a canonical axis (`_Axial`: one direction sign, the foot of the line nearest the origin). A
+  partial face that remains is skipped and the proposal is marked `stands_alone=False`: that is the
+  **pipe whose end is cut to the curve of the vessel it joins** (the Sozzi riser's end is a 0.43-rad
+  patch of the *chamber's* cylinder with the pipe outside it). Its cylinder runs on into the vessel;
+  the union with the vessel is exact, the pipe alone is not, so `solid()` refuses it and `fluid()`
+  accepts it.
+- `ConvexPolyhedron` — an all-planar solid whose every vertex is inside every face's plane is the
+  `Intersection` of its faces' `HalfSpace`s. A theorem, so `proven=True` and no check; in a union
+  check the drawing's own solid stands in for it (a half-space has no finite kernel counterpart to
+  build — mutation-checked: rebuilding it fails `test_a_polyhedron_takes_part_in_a_fluid_as_the_solid_it_is`).
+- Anything else — a torus, a spline patch, a non-convex planar solid — raises `UnrecognizedSolid`
+  naming every rule's reason. **There is no triangle fallback yet**: #510's triangle-backed occluder
+  does not exist, so an unrecognized solid is a documented refusal, which is what #505's acceptance
+  allows. When #510 lands, the fallback slots in behind the same refusal.
+
+**⚠️⚠️ THE CHECK IS BOUNDARY DISTANCE, NOT VOLUME — AND THE VOLUME VERSION WAS BUILT FIRST AND FAILED
+ON A CORRECT FILE.** Sample points on both boundaries (the union of the proposed bodies and the
+union of the drawing's solids; mesh nodes after cutting to `sample_spacing`, a sixteenth of the extent
+by default) and require every point within the drawing's **own declared tolerance**
+(`ShapeAnalysis_ShapeTolerance`, max over edges/vertices/faces) of the other boundary, in both
+directions. Why not the obvious symmetric-difference volume, measured on the Sozzi drawing:
+- The drawing's `outlet_pipe` is **1.48e-5 below its analytic volume**, and that is geometry, not
+  integration — OCCT's adaptive volume integration reports an error estimate of 3.8e-14 at
+  `eps` 1e-6/1e-9/1e-12 and the gap does not move. The saddle edge is a B-spline fitted to the
+  drawing's **declared 10 µm** tolerance (Onshape's export precision). The recognized primitives,
+  meanwhile, match the analytic union to **7e-10**. So the proposal was closer to the true shape than
+  the file was, and a 1e-7 relative volume tolerance refused it (measured 1.51e-7 → then 2.2e-7).
+- Loosening the volume tolerance to the file's precision (area × 10 µm = 3.6 cm³ here) would pass
+  a missing baffle. A volume test cannot be set: either it fails a correct file or it waves a thin
+  feature through.
+- The distance sees a thin feature regardless of its volume, because every face is sampled at least
+  at its own corners. Two configurations, not to be mixed:
+  - **Shipped defaults** (`sample_spacing` = extent/16 ≈ 0.056 m, chord = spacing; drawing
+    tolerance 1e-5): true fluid **7.5e-7 m**, true lamp **2.1e-6 m** — the numbers
+    `CadModel.discrepancy` reports.
+  - **The decoy probe** (spacing 0.05 m, chord 1e-4, a scratch harness): true fluid **1.66e-6 m**,
+    true lamp **2.33e-6 m**; riser radius −1% **9.55e-5 m** (caught), riser 0.5 mm short **5.0e-4 m**
+    (caught), riser radius **−0.1% → 9.6e-6 m, NOT caught** — below what a drawing exported at 10 µm
+    can resolve. That limit is the honest one: nothing can be compared to a drawing more finely than
+    the drawing was exported. The −1% case is pinned by `test_a_proposal_that_is_wrong_by_a_percent_is_refused`.
+- ⚠️ **Both directions are load-bearing, each with its own test** (mutation-checked): a phantom
+  flange on the proposal is seen only from the proposal's side
+  (`test_a_phantom_flange_on_the_proposal_is_refused`), a thin fin on the drawing that the rule
+  misses only from the drawing's side (`test_a_thin_fin_the_rules_do_not_see_is_refused`).
+- Cost: 0.5–0.8 s for the Sozzi vessel (BRepExtrema point-to-shape distance ≈ 0.1 ms/point). ⚠️
+  Sampling with a 1e-6 chord took > 10 min — millions of points — and was killed; the spacing, not
+  the chord, is what should set the sample count.
+
+**Three kernel details that are load-bearing, each found on the real file:**
+1. **Units: `XCAFDoc_DocumentTool.SetLengthUnit_s(doc, 1.0)` before transfer.** Otherwise every
+   length comes out in **millimetres** whatever the file declares (the Sozzi file is in metres), and
+   setting the `xstep.cascade.unit` static does *not* reach the XCAF reader. Pinned by the Sozzi
+   dimensions test and by a synthetic file written in millimetres.
+2. **`solid_inside` from face orientation, not from classifying a point.** The natural surface
+   normal flipped when the face is `REVERSED` points out of a valid solid everywhere on the surface;
+   a classifier needs a point certainly on the face, which a face with a hole does not give at its
+   parameter midpoint.
+3. **Never recognize from edge types.** The adaptor reports straight seam lines as
+   `GeomAbs_BSplineCurve` although the Sozzi file holds a single `B_SPLINE_CURVE_WITH_KNOTS`.
+
+**Assemblies**: locations are accumulated down the component tree (`location.Multiplied(...)`), and a
+part's own name is preferred to its instance's; a repeated name gets `[k]`, several solids under one
+name get `.k`. Pinned by a two-instance synthetic assembly (mutation: dropping the location or the
+suffix goes red).
+
+**Triangulation: facet SIZE is bounded by cutting the boundary SHELLS with a grid of planes, and the
+first two ways of doing it were wrong.**
+- OCCT's mesher bounds chord and angle only (`IMeshTools_Parameters` has `MinSize`, no maximum), so a
+  straight cylinder comes out as full-length slivers: the Sozzi lamp's cylinder was 100 triangles
+  0.8 m long and ~0.9 mm wide.
+- ⚠️ **Longest-edge (Rivara) bisection afterwards is the wrong tool on such input and was deleted.**
+  On slivers all three edges are within ~1e-7 of each other, "the longest" is arbitrary, and the
+  conformity closure splits three ways per pass: **148,467** triangles at 20 mm against ~18k needed,
+  median aspect 318. Marking only each triangle's longest edge (classic Rivara) changed not one count.
+- ⚠️ `ShapeUpgrade_ShapeDivideArea` (by area) left patches long and thin (median aspect 25–79, 10 s
+  at 2.5 mm); `ShapeUpgrade_FaceDivideArea` by number did nothing (it gates on an area threshold OCP
+  exposes only as a reference).
+- **What works**: `BRepAlgoAPI_Splitter` of the solid's **shells** (never the solid — splitting the
+  volume meshes the cutting planes' interior faces too: area **+175%**) by three families of planes
+  `facet_size` apart, then mesh. Every patch fits in a `facet_size` cube, so edges ≤ `√3·facet_size`
+  and in practice ≈ `facet_size`: lamp at chord 1e-5 → 11,002 / 22,271 / 40,085 / 86,315 triangles at
+  20 / 10 / 5 / 2.5 mm, longest edge 19.8 / 9.9 / 5.7 / 3.1 mm, area −1.8e-4…−1.4e-4, 0.07–6 s.
+  Remaining aspect (31 → 4.5) is `facet_size` over the chord-set circumferential spacing, which the
+  gather does not care about (its solid angle is exact at any shape).
+- **Zero-area triangles are dropped** — the mesher emits one or two at a pole, and a zero-area facet
+  is a *point source* to `radiation.Surfaces`, which an emitting surface must not contain by
+  accident. Mutation-checked.
+- **A reflecting placement keeps triangles outward** — `BRepBuilderAPI_Transform` with a negative
+  `gp_Trsf` reverses the faces itself; the Sozzi placement (x↔y) is a reflection and the lamp test
+  runs through it (signed volume positive to 2e-3 of the analytic value).
+
+**MEASURED (2026-09-24): the fluid read from the drawing shadows the Sozzi reactor exactly as the
+hand-derived occluder does** (`validation/sozzi_radiation/primitive_occlusion.py`, third arm): **0 of
+180,384,000 pairs** masked differently and `G` equal to 0.0 relative at median, p99 and max, on
+24,000 cells drawn from the meshed case's 1,635,909 (22,250 chamber / 640 inlet / 1,200 riser), the
+case's `lampWall.stl` (7,516 facets), exitance 696.42 W/m², absorption 35.67 /m; jax 0.10.2, CPU, x64,
+macOS arm64, 11 cores, `cadquery-ocp-novtk` 8.0.1.0.0, CPython 3.13. The drawing's cylinders differ
+from the hand-typed ones in *parameters* (850 mm pipes against the meshed domain's cut at x = 1.10 /
+z = 0.40, and the riser carried into the chamber by recognition rather than by `REACH_BACK`), and the
+mask on the mesh's receivers is identical. Read-and-check took 0.8 s. The three arms' single-pass
+timings (8.7 / 12.8 / 11.0 s) are one pass each and are **not** a ratio to quote (#513).
 
 ## Deferred (additive; no seam changes)
 Binary polyMesh; `faceZones`/`pointZones`; `.gz` compression / multi-region cases; **mesh writing**

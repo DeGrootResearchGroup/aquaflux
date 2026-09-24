@@ -251,7 +251,7 @@ def build_radiation_model(
         is not asked for, because nothing here reads anything else from one.
     surfaces : Surfaces
         The emitting set. Only its geometry is read — the optics are supplied per call.
-    occluders : sequence of Occluder, optional
+    occluders : sequence of aquaflux.solids.Body, optional
         Analytic bodies standing between things. Their *geometry* is frozen here; what each
         lets through is a call argument.
     settings : RadiationSettings, optional
