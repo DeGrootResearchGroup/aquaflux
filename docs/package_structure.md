@@ -111,6 +111,7 @@ cfd/                                  # repo root
 │   │   ├── block_preconditioner.py   #   BlockPreconditioner composing injected InnerSchurSolver / VelocityBlockSolver / SaddleComposition strategies
 │   │   ├── continuation.py           #   momentum_continuation / reused_flow_solve: pseudo-transient continuation for the flow Newton solve at high Reynolds number
 │   │   ├── initialization.py         #   cheap initializers: laplace_field, potential_flow, bernoulli_pressure
+│   │   ├── drive.py                  #   Drive → BoundaryDriven / MassFlow: what forces the momentum equation, and what that makes of the state
 │   │   ├── mean_velocity.py          #   bulk_velocity_flow_solve: the driving body force is a solve unknown, not a feedback loop
 │   │   └── scales.py                 #   characteristic_velocity: the flow's velocity scale, derived from what drives it
 │   │

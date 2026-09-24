@@ -91,7 +91,7 @@ SUBPACKAGE_GROUPS = {
         ("Sparse Jacobians", ["sparse_jacobian", "jacobian_probe"]),
     ],
     "flow": [
-        ("The momentum-continuity system", ["momentum", "rhie_chow", "source"]),
+        ("The momentum-continuity system", ["momentum", "rhie_chow", "source", "drive"]),
         ("Boundary conditions", ["boundary"]),
         ("Solving a flow", ["continuation", "march", "mean_velocity"]),
         ("Measuring the flow residual", ["measures"]),

@@ -17,6 +17,13 @@ from .block_preconditioner import (
     frozen_momentum_diagonal_parts,
 )
 from .boundary import FlowBoundary, MovingWall, NoSlipWall, PressureOutlet, VelocityInlet
+from .drive import (
+    BoundaryDriven,
+    Drive,
+    MassFlow,
+    mass_flow_drive,
+    refuse_a_constraint_this_solve_cannot_hold,
+)
 from .continuation import (
     FrozenViscosityVelocityParts,
     MomentumShiftPolicy,
@@ -37,12 +44,15 @@ from .rhie_chow import interior_mass_flux, momentum_diagonal, volume_flux
 
 __all__ = [
     "BlockPreconditioner",
+    "BoundaryDriven",
     "ConvectionAir",
     "ConvectionTwoLevel",
+    "Drive",
     "FlowBoundary",
     "FlowFields",
     "FlowMeasures",
     "FrozenViscosityVelocityParts",
+    "MassFlow",
     "MomentumContinuity",
     "MomentumShiftPolicy",
     "MomentumSource",
@@ -65,6 +75,7 @@ __all__ = [
     "frozen_momentum_diagonal_parts",
     "interior_mass_flux",
     "laplace_field",
+    "mass_flow_drive",
     "momentum_continuation",
     "momentum_diagonal",
     "momentum_shift_only_policy",
@@ -72,6 +83,7 @@ __all__ = [
     "open_flow_session",
     "potential_flow",
     "pressure_schur_laplacian",
+    "refuse_a_constraint_this_solve_cannot_hold",
     "reused_flow_solve",
     "solve_flow_march",
     "volume_flux",

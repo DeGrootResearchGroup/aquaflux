@@ -21,7 +21,13 @@ import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import DifferenceRow, FirstOrderUpwind, LogRatioRow
-from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall, ViscousMultilevel
+from aquaflux.flow import (
+    MassFlow,
+    MomentumContinuity,
+    MovingWall,
+    NoSlipWall,
+    ViscousMultilevel,
+)
 from aquaflux.flow.state import flow_state_layout
 from aquaflux.initialization import hybrid_initialize
 from aquaflux.mesh import structured_grid_2d
@@ -109,7 +115,7 @@ def test_layout_round_trips_and_sizes() -> None:
     assert jnp.array_equal(oo, omega)
 
 
-def _cavity(n=6, mesh=None, gradient=None):
+def _cavity(n=6, mesh=None, gradient=None, drive=None):
     mesh = structured_grid_2d(n, n, lx=1.0, ly=1.0, named_boundaries=True) if mesh is None else mesh
     gradient = CompactGreenGauss() if gradient is None else gradient
     geometry = mesh.geometry()
@@ -129,6 +135,7 @@ def _cavity(n=6, mesh=None, gradient=None):
         gradient_scheme=gradient,
         advection_scheme=FirstOrderUpwind(),
         pressure_pin=0,
+        **({} if drive is None else {"drive": drive}),
     )
     turbulence = SSTTurbulence.build(
         SSTModel(),
@@ -142,6 +149,21 @@ def _cavity(n=6, mesh=None, gradient=None):
         omega_boundary=BoundaryConditions({w: ZeroGradient() for w in WALLS}),
     )
     return mesh, CoupledRANS.build(momentum, turbulence)
+
+
+def _mass_flow_cavity(n=6):
+    """The same cavity, driven instead by a body force constrained to a bulk velocity.
+
+    The bordered builders read what they are constraining off the assembler, so a test of one needs a
+    case whose drive is a ``MassFlow`` -- there is nowhere else for the target to come from, and the
+    residual writes each Newton iterate into that very leaf.
+    """
+    return _cavity(n, drive=MassFlow(target=U_LID))
+
+
+def _case_for(builder, n=4):
+    """The cavity a builder can be handed: the bordered one needs a ``MassFlow``-driven assembler."""
+    return _mass_flow_cavity(n) if builder is mass_flow_coupled_continuation else _cavity(n)
 
 
 def _healthy_state(mesh, coupled, seed=0):
@@ -323,6 +345,8 @@ def test_every_builder_stops_its_linear_solve_in_the_measure_the_march_hands_the
     """
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
+    mass_flow_mesh, mass_flow_coupled = _mass_flow_cavity()
+    mass_flow_state = _healthy_state(mass_flow_mesh, mass_flow_coupled)
     steps = {
         "block": coupled_step(
             coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
@@ -331,7 +355,9 @@ def test_every_builder_stops_its_linear_solve_in_the_measure_the_march_hands_the
             coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
         ),
         "mass flow": mass_flow_coupled_continuation(
-            coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+            mass_flow_coupled,
+            mass_flow_state,
+            preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
         ),
     }
     for name, step in steps.items():
@@ -353,12 +379,15 @@ def test_each_solve_measures_the_residual_it_can_measure() -> None:
     assert isinstance(measures.row_scaled(step, state), RowScaledNorm)
     assert isinstance(measures.block_scaled(state), BlockScaledNorm)
 
-    bordered = jnp.append(state, 0.0)
-    mass_flow = coupled_module._MassFlowMeasures(coupled)
+    mass_flow_mesh, mass_flow_coupled = _mass_flow_cavity()
+    mass_flow_state = _healthy_state(mass_flow_mesh, mass_flow_coupled)
+    drive = mass_flow_coupled.momentum.drive
+    bordered = drive.join(mass_flow_coupled.layout, mass_flow_state, jnp.asarray(0.0))
+    mass_flow = coupled_module._MassFlowMeasures(mass_flow_coupled)
     with pytest.raises(TypeError, match=r"RowScaled.*border row"):
         mass_flow.row_scaled(step, bordered)
     # The multiplier shares the flow block's scale, so the bordered measure has one more block.
-    assert mass_flow.block_scaled(bordered).sizes == (*coupled.layout.sizes, 1)
+    assert mass_flow.block_scaled(bordered).sizes == (*mass_flow_coupled.layout.sizes, 1)
 
 
 def test_the_constrained_builder_refuses_a_materialized_preconditioner() -> None:
@@ -367,7 +396,7 @@ def test_the_constrained_builder_refuses_a_materialized_preconditioner() -> None
     A materialized Jacobian has no constraint row, so its inverse would precondition a system other than
     the one solved. Refused before anything is built, so this needs no factorization.
     """
-    mesh, coupled = _cavity(4)
+    mesh, coupled = _mass_flow_cavity(4)
     state = _healthy_state(mesh, coupled)
     with pytest.raises(TypeError, match="must be a BlockDiagonal, not MaterializedJacobian"):
         mass_flow_coupled_continuation(
@@ -393,14 +422,14 @@ def test_the_constrained_solve_refuses_configuration_beside_a_finished_continuat
     passing any of them beside it used to reach nothing: an lAIR scalar block beside a two-level step
     ran two-level, with no error. The refusal comes before the initial condition is built.
     """
-    mesh, coupled = _cavity(4)
+    mesh, coupled = _mass_flow_cavity(4)
     state = _healthy_state(mesh, coupled)
     continuation = mass_flow_coupled_continuation(
         coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
     )
     given = {name: state if value == "state" else value for name, value in configuration.items()}
     with pytest.raises(TypeError, match=r"configure the continuation `solve_coupled_mass_flow`"):
-        solve_coupled_mass_flow(coupled, 1.0, strategy=continuation, **given)
+        solve_coupled_mass_flow(coupled, strategy=continuation, **given)
 
 
 def test_a_monolithic_builder_takes_the_injected_velocity_shift_source() -> None:
@@ -1596,7 +1625,7 @@ def test_every_coupled_continuation_builder_refuses_the_same_inert_combination(b
     ``petsc4py`` (not installed by CI, see ``tests/unit/test_optional_dependency_skips.py``), so checking
     the raise here would break under that dependency's absence if the guard ran any later than it does.
     """
-    mesh, coupled = _cavity(4)
+    mesh, coupled = _case_for(builder)
     state = _healthy_state(mesh, coupled)
     with pytest.raises(ValueError, match=r"positivity_floor.*has no effect"):
         builder(coupled, state, positivity_floor=1e-6)
@@ -1616,7 +1645,7 @@ def test_the_inert_combination_is_the_only_thing_refused(builder) -> None:
     preconditioner needs ``petsc4py``, which this file does not gate on, so only the checks that
     never reach it may run unconditionally.
     """
-    mesh, coupled = _cavity(4)
+    mesh, coupled = _case_for(builder)
     state = _healthy_state(mesh, coupled)
     builder(coupled, state, positivity_floor=1e-6, positivity_projection=False)
     builder(coupled, state, positivity_floor=0.0)

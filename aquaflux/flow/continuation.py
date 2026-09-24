@@ -75,6 +75,7 @@ from aquaflux.solve import (
 )
 
 from .block_preconditioner import BlockPreconditioner, frozen_momentum_diagonal_parts
+from .drive import refuse_a_constraint_this_solve_cannot_hold
 
 if TYPE_CHECKING:
     from .momentum import MomentumContinuity
@@ -380,6 +381,7 @@ def reused_flow_solve(
         took to reach it). Like every march, it steps in Python and so cannot itself be called from inside
         a traced program -- ``jax.jit``, ``jax.vmap``, or a traced loop such as ``jax.lax.scan``.
     """
+    refuse_a_constraint_this_solve_cannot_hold(reference, "reused_flow_solve")
     continuation = momentum_continuation(reference, **build_kwargs)
     solver = root_solve.filled_from(_REUSED_FLOW_SOLVE).solver(continuation)
 

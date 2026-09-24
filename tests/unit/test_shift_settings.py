@@ -31,7 +31,7 @@ from aquaflux.turbulence.coupled import (
 )
 from aquaflux.turbulence.march_settings import merged_march_options
 
-from tests.unit.test_coupled_rans import _cavity, _healthy_state
+from tests.unit.test_coupled_rans import _cavity, _healthy_state, _mass_flow_cavity
 from tests.unit.test_reynolds_continuation import _record_solves, _tiny_coupled
 
 _BASIS = LocalCourantBasis(dissipative_weight=0.0)
@@ -85,8 +85,12 @@ def test_the_damping_reaches_the_policy_of_every_family_and_the_mass_flow_builde
     lu = session.build(state, shift=shift)
     assert float(lu.shift_policy.base.turbulence_damping.factor(relaxation, None)) == 2.0
 
+    mass_flow_mesh, mass_flow_coupled = _mass_flow_cavity(4)
     mass_flow = mass_flow_coupled_continuation(
-        coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()), shift=shift
+        mass_flow_coupled,
+        _healthy_state(mass_flow_mesh, mass_flow_coupled),
+        preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
+        shift=shift,
     )
     assert float(mass_flow.shift_policy.inner.turbulence_damping.factor(relaxation, None)) == 2.0
 

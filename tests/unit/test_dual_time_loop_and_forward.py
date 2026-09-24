@@ -32,7 +32,7 @@ from aquaflux.turbulence.coupled import (
 )
 from aquaflux.turbulence.march_settings import merged_march_options
 
-from tests.unit.test_coupled_rans import _cavity, _healthy_state
+from tests.unit.test_coupled_rans import _cavity, _healthy_state, _mass_flow_cavity
 
 _LOOP_FIELDS = ("inner_steps", "inner_tol", "cycle_budget", "refresh_on_cycles")
 #: The loose keywords the two values replaced -- none may reappear on a builder beside them.
@@ -108,7 +108,13 @@ def test_the_loop_selects_the_step_shape_and_reaches_its_fields(case) -> None:
     assert (dual.inner_steps, dual.inner_tol, dual.cycle_budget) == (3, 1e-3, 40)
     assert dual.krylov_solver.restart == 30
     assert type(coupled_step(coupled, state, preconditioner=spec)) is PseudoTransientStep
-    mass_flow = mass_flow_coupled_continuation(coupled, state, preconditioner=spec, dual_time=loop)
+    mass_flow_mesh, mass_flow_coupled = _mass_flow_cavity(4)
+    mass_flow = mass_flow_coupled_continuation(
+        mass_flow_coupled,
+        _healthy_state(mass_flow_mesh, mass_flow_coupled),
+        preconditioner=spec,
+        dual_time=loop,
+    )
     assert type(mass_flow) is DualTimeStep
     assert mass_flow.inner_steps == 3
 

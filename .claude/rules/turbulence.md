@@ -440,8 +440,11 @@ Many entries below are dated history written against the old API. Read them thro
       (fixed 2026-09-14, #392).** It was blind to `coupled_step` for the life of #371 — the call
       `session._build(...)` names a method four classes define, and the tool dropped it — so the coupled
       family was absent from the report, which reads as clean. It now resolves the method on the classes
-      `open_session` returns. Since #370 `only here` is `flow_direction` on the mass-flow builder alone
-      (deliberate); `residual_norm` left `coupled_step` with the measure's move to the solve. `test_sibling_builders.py` pins the pair, and
+      `open_session` returns. Both `only here` lists are now **empty**: `residual_norm` left
+      `coupled_step` with the measure's move to the solve (#370), and `flow_direction` left the
+      mass-flow builder when what is constrained became a property of the assembler's drive rather than
+      a keyword on the step (#375) — it is read from `coupled.momentum.drive`, so the two builders'
+      surfaces are identical. `test_sibling_builders.py` pins the pair, and
       `test_every_continuation_builder_installs_the_same_globalization` still pins the two surfaces.
       It is the only pair the fix added; the mechanism, and the six invented pairs its first version
       reported before review, are in `CLAUDE.md`'s sibling-builder item.
@@ -1868,10 +1871,13 @@ Many entries below are dated history written against the old API. Read them thro
     (observer, refresh, retries) that only `solve_coupled` passes today. Its bordered residual is
     `_MassFlowConstrainedResidual`, a module rather than the closure it was, so a solver reused across
     calls keeps one compiled step. The border column/row `(a, c)` and the Schur (constraint)
-    preconditioner are the flow block's own primitives (`_constraint_vectors`,
-    `_bordered_preconditioner`, `_with_body_force` from `flow/mean_velocity.py`) reused in the coupled
-    `[flow…, k, ω]` layout by `_coupled_constraint_vectors` — the same Schur elimination one careful
-    place keeps consistent, not re-derived. Globalized by `mass_flow_coupled_continuation`, which
+    preconditioner are the flow block's own primitives (`MassFlow.constraint_vectors` / `join` /
+    `split` / `forced` in `flow/drive.py`, and `_bordered_preconditioner` in `flow/mean_velocity.py`)
+    reused in the coupled `[flow…, k, ω]` layout by `MassFlow.constraint_vectors_in` — the same Schur
+    elimination one careful place keeps consistent, not re-derived. What is being held, and along which
+    axis, is read off `coupled.momentum.drive`, so the constraint the step enforces and the force the
+    residual writes cannot name different targets; an assembler with no `MassFlow` drive is refused by
+    name (`_mass_flow_drive`) before anything is built. Globalized by `mass_flow_coupled_continuation`, which
     borders the **same** `_coupled_shift_policy` the block-diagonal session builds (from a
     `BlockDiagonal` spec, the only family it accepts) with a `_MassFlowBorderedPolicy`: the shift diagonal gains a **zero** for `β` (the linear
     constraint row needs no pseudo-time damping) and the block preconditioner is wrapped by the

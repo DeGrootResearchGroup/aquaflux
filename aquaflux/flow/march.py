@@ -59,6 +59,7 @@ from aquaflux.solve import (
 )
 
 from .continuation import momentum_shift_only_policy, momentum_shift_policy
+from .drive import refuse_a_constraint_this_solve_cannot_hold
 from .initialization import potential_flow
 from .measures import FlowMeasures
 from .momentum import MomentumContinuity
@@ -504,6 +505,7 @@ def solve_flow_march(
         If a step-configuring setting is passed where the step is not built here.
     """
     refuse_a_transform_the_march_cannot_run_in((momentum, state), caller="solve_flow_march")
+    refuse_a_constraint_this_solve_cannot_hold(momentum, "solve_flow_march")
     frozen = stop_array_gradients(momentum)
     given = dict(march)
     if preconditioner_options is not None:

@@ -4,6 +4,61 @@
 runs its discrete-ordinates (DOM) solver at several angular resolutions. See its docstring for the
 case and the environment it needs.
 
+## The reactor as CAD primitives (2026-09-23, `primitive_occlusion.py`)
+
+`compare_fluence.py` shadows this reactor with `BranchOpenings`: a closure that knows, for this
+reactor, where each pipe's opening is and what crossing it means. `primitive_occlusion.py` runs
+the general construction against it — the fluid declared as three cylinders,
+
+```python
+Outside(chamber, inlet, riser)
+```
+
+with a segment clear exactly when those regions cover it end to end. No opening is identified and
+no shadow edge is derived, so the same three lines describe a chamber–pipe–elbow chain of any
+length.
+
+Configuration: the case's own `lampWall.stl` (7,516 facets), 24,000 receivers drawn uniformly
+from the mesh's 1,635,909 cell centres (22,250 chamber, 1,200 riser, 640 inlet), exitance
+696.42 W/m², absorption 35.67 /m, jax 0.10.2, CPU, x64, macOS arm64, 11 cores.
+
+| | rays/s | 180M rays | repeat spread over 3 passes |
+|---|---|---|---|
+| `Outside` of three cylinders | 20.7M | 8.72 s | 1.003× |
+| `BranchOpenings`, hand-derived | 28.8M | 6.27 s | 1.033× |
+
+**0 of 180 million pairs masked differently**, and `G` agrees to `0.0` relative at the median, the
+99th percentile and the maximum. Both describe the same ideal cylinders, so there is no faceting
+to explain a difference away and a disagreement would have meant a defect in one of them. The
+1,840 pipe receivers carry 13.8M of those pairs — the only place the mask does anything — so the
+agreement is not an artifact of testing mostly-clear geometry, and it survives `BranchOpenings`
+being reformulated — the same comparison against its `crossing_ratio` rewrite is still 0 pairs, so
+`Outside` matches two independent spellings of the bespoke test. The general construction costs
+1.39× the bespoke one, which is the price of not being told where the openings are; single runs of
+the pair gave 1.67× and 1.48×, so the three passes are what make that a number.
+
+Against the triangle grid the primitive arm is 146–732× faster, and the span is over the *grid's*
+configurations rather than one number — from its worst measured corner (pipe-cell receivers on the
+area-sized default grid, 28,248 rays/s) to its best (random cells on a 128³ grid, 141,451). The
+two axes interact, so neither has a single factor: resolution is worth 3.26× on pipe cells and
+1.77× on random ones, receiver placement 2.83× at the default grid and 1.54× at 128³. The
+primitive arm is one branch-free expression, so its own rate does not depend on either.
+
+⚠️ Those ratios divide this harness's number by a separate run's, so read them as approximate and
+the grid's internal comparisons (measured in one process, repeating to 1.10×) as sharp. Running
+both arms in one process is what would make the ratios as solid as the square.
+
+92.8% of pairs lie inside one convex region, where a straight segment cannot leave and nothing has
+to be tested at all. ⚠️ That share depends on where the receivers are, and sampling the fluid by
+*volume* gets it wrong — 97.1% — because the snapped mesh refines near the walls and near the
+lamp, which is where the pairs that are not in one region live. Quote the cell-centre figure.
+
+`BranchOpenings` stays. It was derived independently, so it is the reference the general
+construction is checked against, and a general construction agreeing with a bespoke one stops
+being evidence the moment the bespoke one is deleted. The harness uses the meshed case's cells
+when `work/case` is present and samples the three cylinders when it is not, saying which in its
+summary — so it runs without OpenFOAM, at the cost of a different receiver population.
+
 ## Measured (2026-09-22)
 
 Configuration: of-optical-radiation `726714d`, image built locally from its `Dockerfile`
@@ -58,3 +113,78 @@ Three places they differ, visible in `work/compare/`:
   steps to 1e-37 (256) and 1e-67 (64) — only a narrow cone of directions reaches down a 19 mm pipe,
   and the discrete directions mostly miss it. Negligible for dose (G < 1 W/m² there against
   hundreds in the chamber), but it is where DOM is wrong by orders of magnitude.
+
+## How many facets the lamp needs (2026-09-23, `lamp_resolution.py`)
+
+The comparison above uses the tutorial's own `lampWall.stl` — 7,516 facets at ~4 mm, a mesh made
+for `snappyHexMesh` to snap to rather than a number chosen for radiation. This measures what that
+buys, against an analytic lamp refined to 270,336 facets (35.4397 W), on 8,000 sampled cells,
+exitance 696.42 W/m², absorption 35.67 /m.
+
+| lamp | facets | power W | near the lamp (<5 mm), median / p99 | rest of the chamber, median / p99 |
+|---|---|---|---|---|
+| the case's STL | 7,516 | 35.2596 | 1.95% / 7.28% | 1.08% / 2.63% |
+| 8 x 16 | 288 | 34.4966 | 25.4% / 52.6% | 8.82% / 26.3% |
+| 16 x 32 | 1,152 | 35.205 | 10.4% / 27.7% | 2.21% / 8.38% |
+| 24 x 64 | 3,360 | 35.3374 | 4.08% / 13.4% | 0.84% / 2.28% |
+| 32 x 128 | 8,704 | 35.3837 | 1.42% / 6.51% | 0.38% / 0.88% |
+| 48 x 256 | 25,728 | 35.4169 | 0.43% / 2.77% | 0.15% / 0.35% |
+| 64 x 512 | 67,584 | 35.4285 | 0.15% / 0.98% | 0.07% / 0.17% |
+
+Error falls about in proportion to the facet count, and the cells nearest the lamp set the
+requirement: one facet subtends a large angle from a millimetre away, and the absorption along its
+path is evaluated once, at its centroid. A Lambertian emitter's solid angle is exact at any
+distance, so none of this is a solid-angle error — a facet count buys absorption sampling and the
+inscribed area, nothing else. The STL is slightly worse than its count suggests (1.95% against
+1.42% at 8,704) because its triangles are irregular and its area is 0.5% under the true cylinder;
+rescaling to equal emitted power gives 1.45% / 0.58%.
+
+The mesh's own patches are the expensive way to get this: the snapped `lampWall` patch carries
+48,550 faces for about what 25,728 analytic facets buy.
+
+## Shadowing arbitrary geometry (2026-09-23, `ray_acceleration_probe.py`, `grid_mask_check.py`)
+
+The comparison above shadows this reactor analytically, which is exact because the fluid is three
+convex cylinders — and is a description of one reactor rather than a method. These two measure the
+general alternative: the vessel wall as the 53,500 triangles `bodyWall.stl` holds, with a uniform
+grid deciding which of them a sight line is worth testing against.
+
+`ray_acceleration_probe.py`, on 4,000 sampled rays: at a 128-cubed grid an occupied voxel holds 9.7
+triangles, a segment enters 65 of them and reaches the first occupied one after about 5, so it
+tests **52 triangles instead of 53,500**. A traced implementation cannot do this — needing a static
+trip count and a static per-voxel count, it would pay 183 steps times 36 triangles, 6,588 tests a
+ray, worse than testing everything — which is why the walk is ordinary host code over the rays
+still in flight.
+
+`grid_mask_check.py` runs that mask against the analytic one on the same rays: 7,516 lamp facets,
+24,000 receivers (20,000 pipe cells, where a mask does anything, plus 4,000 chamber cells as a
+control), 180,384,000 rays, 78 min.
+
+| | pipes, 20,000 cells | chamber, 4,000 cells |
+|---|---|---|
+| pairs masked differently, per cell | 88.8 of 7,516 | 0 |
+| relative difference in G, median / p99 / max | 1.2% / 8.9% / 54% | 0 / 0 / 0 |
+
+The chamber control is exactly zero, and of the 1,776,306 pairs the two masks disagree on, 99.993%
+cross the pipe opening between **0.976 and 0.9997** of its radius. An STL draws a round pipe as an
+inscribed polygon — `cos(pi/15) = 0.978` puts this one at about fifteen sides — and that sliver
+between the polygon and the circle is the entire disagreement. Neither mask is wrong; they are
+given different geometry.
+
+**The cost is the finding.** In that run the analytic arm took 6.9 s against the grid's 4,659.8 s
+on the same rays, and the whole field with analytic visibility takes 557 s where the triangulated
+mask alone extrapolates to tens of hours. Read any such ratio with its scene: the grid's cost is
+set by how far a segment travels through empty voxels, so it depends on both the receivers and the
+voxel size. Measured in one process, 300,000 rays per corner, two alternating passes, fastest per
+corner:
+
+| | area-sized default grid (212, 11, 114) | 128 cubed |
+|---|---|---|
+| pipe cells | 28,248 rays/s | 92,038 |
+| randomly placed cells | 79,963 | 141,451 |
+
+The two axes interact, so neither has a single factor. Pipe-cell rays run the length of the
+chamber, so the coarser axial voxel of the 128-cubed grid is worth 3.26x to them and 1.77x to
+randomly aimed rays: what sets the cost is the voxel size along the axis the rays actually
+traverse. Ratios taken across separate runs of this machine are not reliable to better than about
+1.4x; within one process, repeats here held to 1.01-1.10x.

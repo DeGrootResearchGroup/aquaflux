@@ -30,6 +30,32 @@ Engineering Principles.
   reconciliation. Its docstring claimed the first only, and said it "never enters the residual" —
   false since the wall model landed, corrected in #355. It is also this package's `is_wall` predicate:
   do not add a second one.
+- **`drive.py` — `Drive` → `BoundaryDriven` / `MassFlow` (2026-09-23, #375).** What forces the
+  momentum equation, and what that makes of the state. `MomentumContinuity.drive` **replaces the
+  `body_force` leaf**, which meant a prescribed input on one case and a live solve unknown on another
+  (#224). Two members, not three: a *prescribed* uniform force is a `UniformBodyForce` source, so it is
+  not a drive at all, and the union is only "the unknowns are the fields" against "the unknowns are the
+  fields plus a multiplier". `Drive` is abstract in all five members on purpose — a default would let a
+  bordered drive inherit an answer that drops its multiplier.
+  `MassFlow` owns everything the bordered form needs, so the flow-only solve
+  (`mean_velocity.bulk_velocity_flow_solve`) and the coupled one
+  (`turbulence.solve_coupled_mass_flow`) share one definition of it: `layout` / `join` / `split`
+  (the border, attached through the declared layout), `driven_state` / `fields_state` / `settled`
+  (the seed and the answer), `constraint_vectors` / `constraint_vectors_in` (the border column and
+  row, padded into an outer layout), `forced` (writing an iterate into the assembler),
+  `bulk_velocity`, and `MASS_FLOW_CONVERGENCE` (the row-scaled measure has no bordered form).
+  ⚠️ **Both entry points read the drive off the ASSEMBLER rather than taking a target** — a target
+  named twice is how the constraint being enforced and the force being applied come to disagree — and
+  `mass_flow_drive(momentum, caller)` is the one refusal for an assembler that has none. It is worth
+  raising early: the bordered residual writes each iterate into `momentum.drive.force`, so on a
+  boundary-driven assembler the failure is an `equinox.tree_at` path error from inside a traced step.
+  ⚠️ **The refusal runs in BOTH directions, and the second one is the dangerous case because it would
+  otherwise WORK.** `refuse_a_constraint_this_solve_cannot_hold` is called by `solve_flow_march`,
+  `reused_flow_solve` and `solve_coupled` — the solves that march the fields alone. A `MassFlow`
+  drive's force is a perfectly good force, so those would hold it fixed at the seed, converge, and
+  report a bulk velocity nobody asked for, with the constraint silently dropped and nothing in the
+  result saying so. A refusal that only caught the *missing* drive would leave exactly the class of
+  defect this split exists to remove.
 - **`momentum.py` — `MomentumContinuity`.** The coupled residual over the flat state
   `[vel_0..vel_{dim-1}, pressure]` (the system-first layout; `pack`/`unpack` convert to
   `(velocity, pressure)`). **That layout is not written here.** `state.py::flow_state_layout(dim,
@@ -120,17 +146,23 @@ Engineering Principles.
       flux carries the pressure-gradient term alone, so a declared face force would be silently
       dropped, which is the *worst* of the three possible behaviours. Evaluated at build, not per
       residual: whether a source declares one is a property of the source, not of the state.
-  - **⚠️ `body_force` is NOT a `MomentumSource`, and this is deliberate (#58, follow-up filed).** It
-    is also the **control variable** of the bulk-velocity-constrained solve: `bulk_velocity_flow_solve`
-    treats it as a coupled unknown, writes a traced scalar into that array leaf every residual
-    evaluation (`mean_velocity._with_body_force`, `eqx.tree_at` + `.at[dir].set(beta)`), and forms its
-    border column from the **analytic** `a = dR_flow/dβ = −V`, which holds only for a uniform,
-    state-independent force. Migrating it therefore needs the bordered solve to address the driving
-    source *and* to ask it for its own `dR/dβ` instead of assuming `−V` — the same
-    hand-derived-coefficient trap as the row-scaler defect. That is its own change; until it lands,
-    `body_force` and `sources` simply add. Five consumers ride the leaf: the bordered flow solve, the
-    coupled-RANS mass-flow path, `scales.body_force_speed`/`body_force_velocity`, the hybrid IC plug,
-    and two validation cases.
+  - **⚠️ A PRESCRIBED uniform force IS a `UniformBodyForce` source; only a SOLVED one is not (#224,
+    2026-09-23).** Until then `MomentumContinuity` carried a `body_force` leaf beside `sources`, and it
+    meant two different things: a fixed input on a periodic channel, and the live iterate of a
+    bulk-velocity solve. The two meanings are now two classes — a source and a `MassFlow` drive
+    (`flow/drive.py`) — and the leaf is gone. The reason a solved force cannot be a source is specific
+    and worth keeping: the bordered solve writes a traced scalar into that leaf on **every** residual
+    evaluation (`MassFlow.forced`, `eqx.tree_at` on `momentum.drive.force`) and forms its border column
+    from the **analytic** `a = dR_flow/dβ = −V`, which holds only for a uniform, state-independent
+    force. Addressing a *source* that way would mean asking it for its own `dR/dβ` instead of assuming
+    `−V` — the same hand-derived-coefficient trap as the row-scaler defect.
+    ⚠️ **The migration fixed a live defect, which is the general lesson: an inference from a VALUE is
+    not the same as the fact it stands for.** `scales.body_force_velocity` decided "this domain is
+    body-force-driven" by reading the leaf, so a channel built the source way answered zero and the
+    hybrid IC started it at rest. The sum of both routes now has one home,
+    `MomentumContinuity.uniform_body_force()`, and `Drive.volumetric_force` returns `None` for "no
+    force at all" rather than a zero vector — because a mass-flow solve *is* force-driven at the
+    instant its multiplier happens to be zero, which is every solve's first step.
   - **One shared assembly per state — `flow_fields` / `residual_from_fields` (binding, #106).** The
     boundary fields, both gradients, the lagged `a_P`, and the Rhie–Chow flux are assembled once by
     the public `flow_fields(state) -> FlowFields`; `residual` = `residual_from_fields(flow_fields(state))`
@@ -409,12 +441,13 @@ Engineering Principles.
   limited), which makes the residual **nonlinear** (mass flux and advected velocity both depend
   on velocity). `a_P`'s convective part uses a lagged velocity-flux estimate (breaks the
   `a_P`↔`mdot` circularity). Closed domains pin the pressure at one cell (`pressure_pin=`).
-- **Body force — BUILT.** `body_force=(β,…)` adds a uniform per-volume source to the momentum
-  residual (subtracted per component: `R = flux − β·V`). Sign: with `p = p̃ + G·x`, `β>0` drives
-  `+x` and the mean gradient is `G = −β`. It is a differentiable leaf (the mass-flow constraint below
-  swaps it via `eqx.tree_at`), and drives a **streamwise-periodic** channel (`structured_grid_2d(periodic=
-  ("x",))` + `pressure_pin`): verified against exact fully-developed Poiseuille in
-  `test_periodic_channel.py`. A uniform force needs no Rhie–Chow term and does not enter continuity.
+- **Body force — BUILT.** `sources=(UniformBodyForce(f),)` adds a uniform per-volume force to the
+  momentum residual (subtracted per component: `R = flux − β·V`). Sign: with `p = p̃ + G·x`, `β>0`
+  drives `+x` and the mean gradient is `G = −β`. Its `force` is a differentiable leaf, and it drives a
+  **streamwise-periodic** channel (`structured_grid_2d(periodic=("x",))` + `pressure_pin`): verified
+  against exact fully-developed Poiseuille in `test_periodic_channel.py`. A uniform force needs no
+  Rhie–Chow term and does not enter continuity. A force that is *solved for* rather than prescribed is
+  a `MassFlow` drive instead — see the bullet above and the constraint below.
 - **Bulk-velocity constraint — BUILT (`flow/mean_velocity.py`, `bulk_velocity_flow_solve`).** A
   streamwise-periodic channel is driven to a target **bulk velocity** `U_bar` by making the body force
   `β` a **scalar Lagrange multiplier** on the constraint `⟨U_dir⟩ − U_bar = 0`, solved *jointly* with
@@ -467,12 +500,19 @@ Engineering Principles.
     changes the sensitivity, only the adjoint Krylov iteration count).
   Pinned by `tests/unit/test_mean_velocity.py` (constraint met to machine precision; analytic β
   recovered; initial-force-independent; the preconditioner and gradient tests above).
-  - **The same primitives border the monolithic coupled RANS solve (#128).** `_constraint_vectors`,
-    `_bordered_preconditioner`, and `_with_body_force` are imported by
-    `turbulence/coupled.py::solve_coupled_mass_flow` to append `β` to the *coupled* `[flow…, k, ω]`
-    state and Schur-eliminate it in the coupled preconditioner — so the bulk-velocity constraint is
-    enforced by the same one place whether the forward solve is segregated (this flow-block solve) or
-    monolithic. Do not re-derive the border there.
+  - **The same primitives border the monolithic coupled RANS solve (#128).** `MassFlow`'s own
+    `constraint_vectors` / `join` / `split` / `forced` / `bulk_velocity`, plus
+    `mean_velocity._bordered_preconditioner`, are what `turbulence/coupled.py::solve_coupled_mass_flow`
+    uses to append `β` to the *coupled* `[flow…, k, ω]` state and Schur-eliminate it in the coupled
+    preconditioner — so the bulk-velocity constraint is enforced by the same one place whether the
+    forward solve is segregated (this flow-block solve) or monolithic. Do not re-derive the border
+    there.
+    ⚠️ **The border is attached and detached through the DECLARED layout, never by `jnp.append` /
+    `[:-1]` (2026-09-23, #375).** `MassFlow.layout(fields)` is `fields.appended(GlobalDofs("body_force",
+    1))`, and `join` / `split` read the entry's position off it with `slice_of`. Before that the layout
+    was declared and then ignored: its only consumer was one residual norm, while five sites across two
+    modules did the packing by hand — so the object that claimed to own the bordered state was telling
+    the truth for three case shapes and not the fourth.
   - **The periodic seam is NOT a preconditioner problem — do not go looking there again.** A
     `reused_flow_solve` on a periodic mesh was suspected of a block-SIMPLE defect "across the seam";
     it was measured and the seam is clean. The offset is absorbed one layer down (`interpolation_factor`
