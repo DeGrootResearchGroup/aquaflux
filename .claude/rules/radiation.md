@@ -1579,7 +1579,15 @@ fastest pass per corner** (`bodyWall.stl`, 53,500 triangles, jax 0.10.2, CPU, x6
 ⚠️ **THE "CLOSURE CHECK" THIS SQUARE FIRST SHIPPED WITH IS VACUOUS, and it is the same defect as a
 test that cannot fail.** Both paths through a 2x2 -- `(B/A)(D/B)` and `(D/C)(C/A)` -- are `D/A`
 with the middle corner cancelling, so they agree for **any** four numbers, including four wrong
-ones. It was printed as `5.01 = 5.01` and read as corroboration; it corroborates nothing. What
+ones. It was printed as `5.01 = 5.01` and read as corroboration; it corroborates nothing.
+
+**The phrasing is what did the damage, and that part generalizes past this table.** The line
+carried a `must agree` label, two numbers and a tick. A tautology dressed as an assertion is
+**worse than the bare quantity**, because the phrasing is precisely what stops a reader asking
+what it could ever have shown -- and there is no test runner watching a print statement the way
+one watches an assert. Before writing `must`, `expected` or a tick beside a computed pair, ask
+what inputs would make it disagree; if none would, it is a derived quantity and must be labelled
+as one. What
 makes this square worth more than the factors it replaces is not a check, it is that all four
 corners come from **one process, back to back**, so no ratio spans a run boundary.
 
