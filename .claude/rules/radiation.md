@@ -1545,7 +1545,15 @@ about 124 of them -- fall outside the rim band and are **not explained**; they a
 matter for a field and too specific to dismiss, so they are recorded rather than rounded away.
 
 **Cost, measured in the same run, and it is the real argument.** The analytic arm took **6.9 s**
-against the grid's **4,659.8 s** on those same 180M rays -- **675x**. For scale in the other
+against the grid's **4,659.8 s** on those same 180M rays -- **675x**. ⚠️ **Quote that figure with
+its scene, because it is the most favourable of the three available framings**: these receivers
+are pipe cells, which are the grid's worst case (its cost is set by how far a segment travels
+through empty voxels, and a ray from the lamp crosses the whole chamber before reaching the wall
+beside the receiver -- see the traversal issue #503), and the arm it is divided by is the
+*hand-derived* occluder rather than a general one. Against randomly placed receivers the grid
+runs ~130,000 rays/s rather than 38,700, and a general primitive construction costs a few times
+the bespoke one. The defensible range is **~100-350x**, with 675x as the pipe-cell-against-
+bespoke end of it. For scale in the other
 direction, the *entire* field with analytic occlusion -- all 1,635,909 cells, gather arithmetic
 included -- takes **557 s** (`run-20260922-125655.log`), while the grid mask alone extrapolates
 to **88 h** at the 38,700 rays/s measured here. **The triangulated mask costs about 600x
