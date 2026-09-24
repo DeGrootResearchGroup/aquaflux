@@ -34,11 +34,10 @@ from aquaflux.radiation.absorption import Absorption
 from aquaflux.radiation.solid_angle import projected_solid_angle, solid_angle
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.visibility import Visibility, build_visibility
+from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, receivers_per_pass
 from aquaflux.vectors import dot
 
 __all__ = ["direct_fluence_rate", "direct_irradiance"]
-
-_DEFAULT_CHUNK = 4096
 
 
 def _groups(surfaces: Surfaces) -> list[tuple[object, np.ndarray, np.ndarray]]:
@@ -74,7 +73,7 @@ def _groups(surfaces: Surfaces) -> list[tuple[object, np.ndarray, np.ndarray]]:
     return partition
 
 
-def _chunked(arrays, chunk_size: int, body):
+def _chunked(arrays, pair_limit: int, per_receiver: int, body):
     """Apply ``body`` to the receivers in fixed-size chunks and concatenate the results.
 
     Every array in ``arrays`` is indexed by receiver and is cut the same way, so a per-receiver
@@ -83,23 +82,22 @@ def _chunked(arrays, chunk_size: int, body):
 
     The receiver-by-source product is the module's whole cost and would be the whole of its
     memory too if it were formed at once: a hundred thousand cells against a thousand facets is
-    a hundred million entries per intermediate. Chunking keeps the working set proportional to
-    the chunk rather than to the problem, at no cost in arithmetic. The last chunk is padded
-    rather than made smaller, so the traced body is compiled once.
+    a hundred million entries per intermediate. A chunk takes as many receivers as keep it within
+    ``pair_limit`` pairs, so the working set is set by the limit and not by how finely the emitter
+    happens to be divided. The last chunk is padded rather than made smaller, so the traced body
+    is compiled once.
     """
-    if chunk_size < 1:
-        msg = f"chunk_size must be at least 1 receiver; got {chunk_size}"
-        raise ValueError(msg)
+    per_chunk = receivers_per_pass(pair_limit, per_receiver)
     arrays = [jnp.asarray(array) for array in arrays]
     n_points = arrays[0].shape[0]
     if n_points == 0:
         return jnp.zeros(0)
-    chunk_size = min(chunk_size, n_points)
-    n_chunks = -(-n_points // chunk_size)
-    padding = n_chunks * chunk_size - n_points
+    per_chunk = min(per_chunk, n_points)
+    n_chunks = -(-n_points // per_chunk)
+    padding = n_chunks * per_chunk - n_points
     shaped = [
         jnp.concatenate([array, jnp.repeat(array[-1:], padding, axis=0)]).reshape(
-            n_chunks, chunk_size, *array.shape[1:]
+            n_chunks, per_chunk, *array.shape[1:]
         )
         for array in arrays
     ]
@@ -107,24 +105,31 @@ def _chunked(arrays, chunk_size: int, body):
     return out.reshape(-1)[:n_points]
 
 
-def _surviving_rows(visibility, transmittance, points, n_facets) -> jnp.ndarray:
-    """Per-receiver rows of the fraction getting past the intervening bodies.
+def _surviving_rows(visibility, transmittance, points) -> tuple:
+    """Per-receiver rows of the fraction getting past the intervening bodies, as chunkable arrays.
 
-    Returns a full ``(n_receivers, n_facets)`` array even when nothing occludes, so that the
-    chunking and the gather have one shape to deal with rather than two code paths.
+    **Empty when nothing occludes, and deliberately not a row of ones.** Rows of ones would have
+    the shape of the whole problem, ``(n_receivers, n_facets)``, formed before any chunking: at a
+    mesh's cells against a finely divided lamp that is hundreds of gigabytes, which no chunk
+    size could then bound. A mask, where there is one, is already that size by construction.
     """
     if visibility is None:
         if transmittance is not None:
             msg = "transmittance was given without a visibility mask to apply it to"
             raise ValueError(msg)
-        return jnp.ones((jnp.asarray(points).shape[0], n_facets))
+        return ()
     if not isinstance(visibility, Visibility):
         msg = f"visibility must be a Visibility; got {type(visibility).__name__}"
         raise TypeError(msg)
     visibility.for_receivers(points)
     if transmittance is None:
         transmittance = jnp.zeros(visibility.n_occluders)
-    return visibility.surviving(transmittance)
+    return (visibility.surviving(transmittance),)
+
+
+def _masked(rows, facets):
+    """The surviving fraction for ``facets`` from a chunk's mask rows, or 1 where there is none."""
+    return jnp.take(rows[0], facets, axis=1) if rows else 1.0
 
 
 def _transmittance(absorption, source: jnp.ndarray, receivers: jnp.ndarray) -> jnp.ndarray:
@@ -161,7 +166,7 @@ def _emitter_cosine(surfaces: Surfaces, facets: np.ndarray, receivers: jnp.ndarr
 
 
 def _streamed(
-    surfaces, points, *, occluders, self_occlusion, absorption, transmittance, chunk_size
+    surfaces, points, *, occluders, self_occlusion, absorption, transmittance, pair_limit
 ):
     """Gather chunk by chunk, building each chunk's visibility and letting it go.
 
@@ -170,14 +175,12 @@ def _streamed(
     not call it. Each chunk's gather is the ordinary traced one.
     """
     points = jnp.asarray(points, dtype=float)
-    if chunk_size < 1:
-        msg = f"chunk_size must be at least 1 receiver; got {chunk_size}"
-        raise ValueError(msg)
+    per_chunk = receivers_per_pass(pair_limit, surfaces.n_facets)
     if points.shape[0] == 0:
         return jnp.zeros(0)
     pieces = []
-    for start in range(0, points.shape[0], chunk_size):
-        chunk = points[start : start + chunk_size]
+    for start in range(0, points.shape[0], per_chunk):
+        chunk = points[start : start + per_chunk]
         mask = build_visibility(occluders, surfaces, chunk, self_occlusion=self_occlusion)
         pieces.append(
             direct_fluence_rate(
@@ -186,7 +189,7 @@ def _streamed(
                 absorption=absorption,
                 visibility=mask,
                 transmittance=transmittance,
-                chunk_size=chunk_size,
+                pair_limit=pair_limit,
             )
         )
         del mask
@@ -202,7 +205,7 @@ def direct_fluence_rate(
     occluders=None,
     self_occlusion=None,
     transmittance=None,
-    chunk_size: int = _DEFAULT_CHUNK,
+    pair_limit: int = DEFAULT_PAIR_LIMIT,
 ):
     """Fluence rate at each receiver point, in vacuum.
 
@@ -242,9 +245,11 @@ def direct_fluence_rate(
     transmittance : array_like, shape ``(n_occluders,)``, optional
         What fraction each body lets through, in ``[0, 1]``. Differentiable, and defaulting to
         zero -- opaque -- so that a mask supplied without one blocks rather than passes.
-    chunk_size : int, optional
-        Receivers per traced chunk, and per streamed mask. Trades peak memory against nothing;
-        the arithmetic is the same either way.
+    pair_limit : int, optional
+        Receiver-by-facet pairs per traced chunk, and per streamed mask. The pairs are what
+        cost memory, so a chunk holds as many receivers as fit and a finer emitter gets fewer of
+        them per chunk rather than a larger chunk. Trades peak memory against nothing; the
+        arithmetic is the same either way.
 
     Returns
     -------
@@ -254,7 +259,7 @@ def direct_fluence_rate(
     Raises
     ------
     ValueError
-        If ``chunk_size`` is less than one receiver, if the visibility mask was built for a
+        If ``pair_limit`` is less than one, if the visibility mask was built for a
         different set of receivers than the points given here, or if a mask is given together
         with the bodies to build one from.
 
@@ -280,13 +285,13 @@ def direct_fluence_rate(
             self_occlusion=self_occlusion,
             absorption=absorption,
             transmittance=transmittance,
-            chunk_size=chunk_size,
+            pair_limit=pair_limit,
         )
     points = jnp.asarray(points, dtype=float)
     partition = _groups(surfaces)
-    surviving_rows = _surviving_rows(visibility, transmittance, points, surfaces.n_facets)
+    rows = _surviving_rows(visibility, transmittance, points)
 
-    def at(receivers, surviving_all):
+    def at(receivers, *surviving_all):
         total = jnp.zeros(receivers.shape[0])
         for profile, areal, point in partition:
             if len(areal):
@@ -299,21 +304,21 @@ def direct_fluence_rate(
                 )
                 surviving = _transmittance(
                     absorption, jnp.take(surfaces.centroid, areal, axis=0), receivers
-                ) * jnp.take(surviving_all, areal, axis=1)
+                ) * _masked(surviving_all, areal)
                 total = total + jnp.sum(radiance * omega * surviving, axis=1)
             if len(point):
                 cosine, distance_squared = _emitter_cosine(surfaces, point, receivers)
                 fraction = profile.intensity_fraction(cosine)
                 surviving = _transmittance(
                     absorption, jnp.take(surfaces.centroid, point, axis=0), receivers
-                ) * jnp.take(surviving_all, point, axis=1)
+                ) * _masked(surviving_all, point)
                 total = total + jnp.sum(
                     jnp.take(surfaces.power, point) * fraction * surviving / distance_squared,
                     axis=1,
                 )
         return total
 
-    return _chunked((points, surviving_rows), chunk_size, at)
+    return _chunked((points, *rows), pair_limit, surfaces.n_facets, at)
 
 
 def direct_irradiance(
@@ -324,7 +329,7 @@ def direct_irradiance(
     absorption: Absorption | None = None,
     visibility: Visibility | None = None,
     transmittance=None,
-    chunk_size: int = _DEFAULT_CHUNK,
+    pair_limit: int = DEFAULT_PAIR_LIMIT,
 ):
     """Irradiance on an oriented receiving surface at each point, in vacuum.
 
@@ -352,8 +357,8 @@ def direct_irradiance(
     transmittance : array_like, shape ``(n_occluders,)``, optional
         What fraction each body lets through, in ``[0, 1]``. Differentiable, and defaulting to
         zero -- opaque -- so that a mask supplied without one blocks rather than passes.
-    chunk_size : int, optional
-        Receivers per traced chunk.
+    pair_limit : int, optional
+        Receiver-by-facet pairs per traced chunk, as for :func:`direct_fluence_rate`.
 
     Returns
     -------
@@ -363,8 +368,8 @@ def direct_irradiance(
     Raises
     ------
     ValueError
-        If ``normals`` and ``points`` disagree in shape, if ``chunk_size`` is less than one
-        receiver, or if the visibility mask was built for a different set of receivers.
+        If ``normals`` and ``points`` disagree in shape, if ``pair_limit`` is less than one, or
+        if the visibility mask was built for a different set of receivers.
     """
     points = jnp.asarray(points, dtype=float)
     normals = jnp.asarray(normals, dtype=float)
@@ -372,9 +377,9 @@ def direct_irradiance(
         msg = f"normals must match points in shape; got {normals.shape} and {points.shape}"
         raise ValueError(msg)
     partition = _groups(surfaces)
-    surviving_rows = _surviving_rows(visibility, transmittance, points, surfaces.n_facets)
+    rows = _surviving_rows(visibility, transmittance, points)
 
-    def at(receivers, receiver_normal, surviving_all):
+    def at(receivers, receiver_normal, *surviving_all):
         total = jnp.zeros(receivers.shape[0])
         for profile, areal, point in partition:
             if len(areal):
@@ -389,7 +394,7 @@ def direct_irradiance(
                 )
                 surviving = _transmittance(
                     absorption, jnp.take(surfaces.centroid, areal, axis=0), receivers
-                ) * jnp.take(surviving_all, areal, axis=1)
+                ) * _masked(surviving_all, areal)
                 total = total + jnp.sum(radiance * projected * surviving, axis=1)
             if len(point):
                 centroid = jnp.take(surfaces.centroid, point, axis=0)
@@ -401,8 +406,8 @@ def direct_irradiance(
                     -dot(offset, receiver_normal[:, None, :]) / distance, 0.0
                 )
                 fraction = profile.intensity_fraction(source_cosine / distance)
-                surviving = _transmittance(absorption, centroid, receivers) * jnp.take(
-                    surviving_all, point, axis=1
+                surviving = _transmittance(absorption, centroid, receivers) * _masked(
+                    surviving_all, point
                 )
                 total = total + jnp.sum(
                     jnp.take(surfaces.power, point)
@@ -414,4 +419,4 @@ def direct_irradiance(
                 )
         return total
 
-    return _chunked((points, normals, surviving_rows), chunk_size, at)
+    return _chunked((points, normals, *rows), pair_limit, surfaces.n_facets, at)

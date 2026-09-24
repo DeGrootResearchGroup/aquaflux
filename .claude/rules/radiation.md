@@ -405,8 +405,9 @@ body at production size, stored as bytes. Packing to bits is the obvious eightfo
 ever matters. ⚠️ **At MESH scale it cannot be held at all**: 1.6M cells against 7,516 lamp facets
 is **12 GB per body**, so a real case could not be built through the model. `direct_fluence_rate`
 therefore also takes `occluders=` (and `self_occlusion=`) **instead of** a built mask: it then
-builds each chunk's mask, gathers, and drops it, so peak memory is the chunk's
-(`chunk_size x n_facets`, a few hundred MB at the 4096 default) rather than the problem's. The two
+builds each chunk's mask, gathers, and drops it, so peak memory is the chunk's (at most
+`pair_limit` receiver-by-facet pairs, 1.5-1.9 GB of footprint at the 4M default — see the #509
+section below) rather than the problem's. The two
 are mutually exclusive and giving both raises — with both, the mask doing the work would silently
 be the streamed one. **Streaming rebuilds the mask every call**, so a sweep over one frozen scene
 still wants the model's frozen mask, which is also what carries `dG/dt` for a body's
@@ -1111,7 +1112,7 @@ directions. With `rho = 0` the same fixture gives `G = P/(4 pi r^2)` exactly.
   profile imposed on the same object returns **zero** intensity along a point source's zero
   normal. The two guards overlap today; both stay, because the overlap is a property of
   `Lambertian` and not of the function, and the comment in `model.py` says so.
-- Transposing `_chunked`'s reshape from `(n_chunks, chunk_size)` to `(chunk_size, n_chunks)` is
+- Transposing `_chunked`'s reshape from `(n_chunks, per_chunk)` to `(per_chunk, n_chunks)` is
   inert: the padded array is flattened again in the same order whichever way it is factored, so
   only the chunk partition changes. What *is* covered is losing a receiver off the padded end,
   which needs a chunk size that does not divide the receiver count to show up at all.
@@ -1810,10 +1811,51 @@ carries **48,550** faces (and the body patch 329,028), which buys about what a 2
 analytic lamp buys for 6.5x the rays. Any patch-built `Surfaces` wants a merge or facet-size
 control in front of it.
 
-⚠️ **The gather's `chunk_size` is a number of RECEIVERS, and at these facet counts that is a
-trap**: the default 4,096 against a 270,336-facet lamp forms a chunk of ~9 GB, which killed the
-first run of this study silently. Bound the entries instead — the harness uses
-`chunk_size = 4_000_000 // n_facets`.
+## A PASS IS BOUNDED IN RECEIVER-BY-FACET PAIRS, NOT RECEIVERS (#509, 2026-09-24)
+
+`pair_limit` (default `work.DEFAULT_PAIR_LIMIT`, 4,000,000) bounds every loop that visits
+receivers: the gather's traced chunks (`direct_fluence_rate`, `direct_irradiance`), the streamed
+path's per-pass mask, `build_visibility`'s body test, `RayCastOcclusion`'s passes and
+`enclosure_winding`. **One helper, `work.receivers_per_pass(pair_limit, per_receiver)`, turns it into
+a receiver count** — `checks.py` used to hand-write the same division. `RadiationSettings.
+gather_chunk_size` is now `gather_pair_limit`. ⚠️ **There is no `chunk_size` on any of these any
+more**: renamed rather than reinterpreted, so an old caller fails with a `TypeError` instead of
+silently getting a different chunk. `work_limit` keeps its meaning — rays × triangles in the
+intersection test — which is a different unit. **The transfer build's `chunk_size` (receiving facets,
+default 256) was deliberately left**: it has the same shape of trap, but an `n^2` transfer at a
+facet count where it would bite is unaffordable anyway.
+
+**Why.** A receiver count left a pass's size to the facet count: the old default 4,096 receivers
+against a 270,336-facet lamp is a ~9 GB pass, which killed the first run of `lamp_resolution.py`
+silently (an out-of-memory kill has no traceback naming the setting), and refining the emitter is
+exactly what a user does to improve accuracy.
+
+⚠️ **A SECOND, WORSE WHOLE-PROBLEM ARRAY WAS FOUND AND REMOVED IN THE SAME CHANGE.** With no mask,
+`_surviving_rows` returned `jnp.ones((n_receivers, n_facets))`, formed *before* any chunking — at a
+mesh's 1.6M cells against a 66k-facet CAD lamp that is ~850 GB, which no chunk size bounds. It went
+unnoticed because every study that hit it (the lamp ladder formed 17 GB of it) ran on macOS, which
+compresses an array of ones to almost nothing. It is now an empty tuple and the scan is handed the
+points alone; `test_a_scene_with_nothing_in_the_way_forms_no_array_the_size_of_the_problem` pins it.
+
+**The default is measured, not copied** (`validation/radiation_gather_pair_limit.py`: analytic
+Sozzi lamps of 8,704 / 67,584 / 270,336 facets, every point doing ~35M pairs, receivers uniform in
+the chamber, `UniformAbsorption(35.67)`; each point in its own process for its peak memory
+footprint, two alternating passes, fastest kept, repeat spread ≤ 1.1 except two points at 1.5 / 1.8;
+jax 0.10.2, CPU, x64, macOS arm64, 11 cores, 2026-09-24):
+
+| path | 1M pairs | 4M | 16M | 64M |
+|---|---|---|---|---|
+| gather alone, s (8.7k / 67.6k / 270k facets) | 0.33 / 0.38 / 0.40 | 0.32 / 0.61 / 0.41 | 0.39 / 0.77 / 0.83 | 0.38 / 0.63 / 0.65 |
+| gather alone, peak footprint | 0.36-0.43 GB | 0.82-0.95 GB | 2.6-2.8 GB | 5.0-5.3 GB |
+| streamed with `Outside`, s | 3.3 / 3.5 / 3.7 | 1.14 / 1.43 / 1.36 | 0.68 / 0.92 / 1.00 | 1.9 / 2.4 / 1.3 |
+| streamed, peak footprint | 0.88-0.93 GB | 1.5-1.9 GB | 4.3-4.6 GB | 7.0-7.3 GB |
+
+4M is as fast as any limit for the traced gather within the spread and keeps every path under 2 GB.
+⚠️ **The streamed path would be 1.4-1.7x faster at 16M, at 2.3-2.8x the footprint**, and its cost at
+small limits is *per-pass host overhead* (a mask build and a fresh gather call per pass), not
+arithmetic — 1M is ~3x slower than 4M on it for the same pairs. That is the lever for #489: the
+streamed pass and the traced chunk inside it want different sizes, and today one limit sets both.
+Every checksum agreed across all 48 points: how the work is cut changes nothing about the answer.
 
 ## ANALYTIC OCCLUSION: BUILT as `SilhouetteOcclusion` — exact per blocker, once six defects were out
 

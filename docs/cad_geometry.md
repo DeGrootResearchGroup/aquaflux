@@ -87,7 +87,6 @@ G = direct_fluence_rate(
     absorption=UniformAbsorption(absorption_from_uvt(70.0)),
     occluders=[water],
     self_occlusion=NoOcclusion(),                   # a convex lamp cannot shadow itself
-    chunk_size=max(1, 4_000_000 // lamp.n_facets),  # bound the work per chunk by entries
 )
 ```
 

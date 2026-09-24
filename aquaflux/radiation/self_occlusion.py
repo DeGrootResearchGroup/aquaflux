@@ -51,6 +51,7 @@ from aquaflux.radiation.silhouette import (
     source_view,
 )
 from aquaflux.radiation.triangles import padded_length, segment_is_cut
+from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, receivers_per_pass
 
 __all__ = [
     "NoOcclusion",
@@ -152,8 +153,9 @@ class RayCastOcclusion(SelfOcclusion):
 
     Attributes
     ----------
-    chunk_size : int
-        Receivers per pass, bounding the peak memory of the build.
+    pair_limit : int
+        Receiver-by-facet pairs per pass, bounding the peak memory of the build: a pass forms
+        one ray per pair, and its origins, targets and exclusions with it.
     work_limit : int
         Ray-by-triangle entries per pass, which is what bounds the intersection test's memory
         and, through that, its speed. It bounds the grid's passes too: a step of the walk tests
@@ -167,7 +169,7 @@ class RayCastOcclusion(SelfOcclusion):
         real reactor is unusable without it.
     """
 
-    chunk_size: int = 4096
+    pair_limit: int = DEFAULT_PAIR_LIMIT
     work_limit: int = 4_000_000
     grid: bool | int | tuple[int, int, int] = False
 
@@ -194,9 +196,10 @@ class RayCastOcclusion(SelfOcclusion):
             )
             exclusions = jnp.stack([source_of, target_of], axis=-1)
 
+        per_pass = receivers_per_pass(self.pair_limit, n_facets)
         rows = []
-        for start in range(0, n_receivers, self.chunk_size):
-            receivers = points[start : start + self.chunk_size]
+        for start in range(0, n_receivers, per_pass):
+            receivers = points[start : start + per_pass]
             rays = receivers.shape[0]
             flat = (rays * n_facets, 3)
             origin = surfaces.centroid[None, :, :]
@@ -212,7 +215,7 @@ class RayCastOcclusion(SelfOcclusion):
                                 np.asarray(receivers)[:, None, :], (rays, n_facets, 3)
                             ).reshape(flat),
                             np.broadcast_to(np.asarray(near), (rays, n_facets)).reshape(-1),
-                            exclude=np.asarray(exclusions[start : start + self.chunk_size]).reshape(
+                            exclude=np.asarray(exclusions[start : start + per_pass]).reshape(
                                 -1, exclusions.shape[-1]
                             ),
                             work_limit=self.work_limit,
@@ -226,9 +229,7 @@ class RayCastOcclusion(SelfOcclusion):
                     jnp.broadcast_to(target, (rays, n_facets, 3)).reshape(flat),
                     surfaces.vertices,
                     jnp.broadcast_to(near, (rays, n_facets)).reshape(-1),
-                    exclude=exclusions[start : start + self.chunk_size].reshape(
-                        -1, exclusions.shape[-1]
-                    ),
+                    exclude=exclusions[start : start + per_pass].reshape(-1, exclusions.shape[-1]),
                     work_limit=self.work_limit,
                 ).reshape(rays, n_facets)
             )

@@ -24,6 +24,7 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
 from aquaflux.radiation.solid_angle import signed_solid_angle
+from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, receivers_per_pass
 
 __all__ = [
     "WindingReport",
@@ -35,11 +36,6 @@ __all__ = [
     "stored_normal_disagreement",
     "winding_report",
 ]
-
-#: Point-by-facet entries one pass may form, matching the intersection test's own budget in
-#: :mod:`aquaflux.radiation.triangles` — the same product, formed for the same reason, so the
-#: same bound applies.
-_WORK_LIMIT = 4_000_000
 
 #: Largest winding number, in magnitude, that a closed surface plausibly reports at a point it
 #: does not enclose. A closed box measures around 1e-16 there; a bare disc measures 0.45, which
@@ -361,7 +357,7 @@ def check_profiles(surfaces) -> None:
         raise ValueError(msg)
 
 
-def enclosure_winding(vertices, points, *, work_limit: int = _WORK_LIMIT) -> np.ndarray:
+def enclosure_winding(vertices, points, *, pair_limit: int = DEFAULT_PAIR_LIMIT) -> np.ndarray:
     """Winding number of a closed triangulated surface about each point.
 
     The signed solid angles of every facet, summed at a point and divided by ``4 pi``. For a
@@ -384,9 +380,9 @@ def enclosure_winding(vertices, points, *, work_limit: int = _WORK_LIMIT) -> np.
         The surface's triangles.
     points : array_like, shape ``(n_points, 3)``
         Where to ask — cell centres, usually.
-    work_limit : int, optional
-        Point-by-facet entries per pass. The product is the whole memory cost, so it is cut
-        into chunks of points; the arithmetic is identical either way.
+    pair_limit : int, optional
+        Point-by-facet pairs per pass. The product is the whole memory cost, so it is cut into
+        chunks of points; the arithmetic is identical either way.
 
     Returns
     -------
@@ -408,7 +404,7 @@ def enclosure_winding(vertices, points, *, work_limit: int = _WORK_LIMIT) -> np.
     if n_points == 0 or n_facets == 0:
         return np.zeros(n_points)
 
-    chunk = max(1, work_limit // max(1, n_facets))
+    chunk = receivers_per_pass(pair_limit, n_facets)
     totals = [
         np.asarray(
             jnp.sum(
@@ -421,7 +417,7 @@ def enclosure_winding(vertices, points, *, work_limit: int = _WORK_LIMIT) -> np.
     return np.concatenate(totals) / (4.0 * np.pi)
 
 
-def check_points_outside(vertices, points, *, work_limit: int = _WORK_LIMIT) -> np.ndarray:
+def check_points_outside(vertices, points, *, pair_limit: int = DEFAULT_PAIR_LIMIT) -> np.ndarray:
     """Refuse points the surface encloses — a cell centre embedded in the solid.
 
     A receiver inside the metal is a meshing error, not a dark corner: it is not shadowed by
@@ -445,7 +441,7 @@ def check_points_outside(vertices, points, *, work_limit: int = _WORK_LIMIT) -> 
         The surface's triangles.
     points : array_like, shape ``(n_points, 3)``
         Where the field is wanted.
-    work_limit : int, optional
+    pair_limit : int, optional
         Passed through to :func:`enclosure_winding`.
 
     Returns
@@ -464,7 +460,7 @@ def check_points_outside(vertices, points, *, work_limit: int = _WORK_LIMIT) -> 
         If nothing is enclosed but the surface does not appear to be closed, so the pass
         establishes less than it seems to.
     """
-    winding = enclosure_winding(vertices, points, work_limit=work_limit)
+    winding = enclosure_winding(vertices, points, pair_limit=pair_limit)
     inside = np.flatnonzero(np.abs(winding) > 0.5)
     if len(inside):
         msg = (
