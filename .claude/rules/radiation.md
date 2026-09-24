@@ -1574,7 +1574,22 @@ fastest pass per corner** (`bodyWall.stl`, 53,500 triangles, jax 0.10.2, CPU, x6
 |---|---|---|---|
 | **pipe cells** (52% blocked) | 28,248 rays/s | 92,038 | **3.26x** |
 | **random cells** (10% blocked) | 79,963 | 141,451 | **1.77x** |
-| **population is worth** | **2.83x** | **1.54x** | closure 5.01 = 5.01 |
+| **population is worth** | **2.83x** | **1.54x** | |
+
+⚠️ **THE "CLOSURE CHECK" THIS SQUARE FIRST SHIPPED WITH IS VACUOUS, and it is the same defect as a
+test that cannot fail.** Both paths through a 2x2 -- `(B/A)(D/B)` and `(D/C)(C/A)` -- are `D/A`
+with the middle corner cancelling, so they agree for **any** four numbers, including four wrong
+ones. It was printed as `5.01 = 5.01` and read as corroboration; it corroborates nothing. What
+makes this square worth more than the factors it replaces is not a check, it is that all four
+corners come from **one process, back to back**, so no ratio spans a run boundary.
+
+**What licenses reading these as real is the within-process repeat**, which is far tighter than the
+cross-run spread: pass to pass, the two pipe corners repeated to **1.10x** and the two random
+corners to **1.01x**, against **1.37x** between runs at one corner on different days. Every effect
+in the table (1.54x and up) clears the within-process figure; several effects in the *deleted*
+decompositions (1.33x, 1.70x) sat inside the cross-run band that produced them, which is why they
+could not have been resolved however carefully they were divided. **Alternate the passes and take
+the fastest per corner** -- a single pass gives a number that looks decisive and is not.
 
 **The interaction is the finding, and it confirms the distance story rather than weakening it.**
 The default grid is near cubic at 8.2 mm; a 128³ grid over this long box is 13.6 mm along x and
