@@ -36,6 +36,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from aquaflux.radiation.checks import open_facets
+from aquaflux.radiation.grid import TriangleGrid
 from aquaflux.radiation.silhouette import (
     angular_cone,
     beyond_source_plane,
@@ -43,7 +44,7 @@ from aquaflux.radiation.silhouette import (
     covered_by,
     source_view,
 )
-from aquaflux.radiation.triangles import segment_is_cut
+from aquaflux.radiation.triangles import padded_length, segment_is_cut
 
 __all__ = [
     "NoOcclusion",
@@ -52,16 +53,6 @@ __all__ = [
     "SelfOcclusion",
     "SilhouetteOcclusion",
 ]
-
-
-def _bucket(count: int) -> int:
-    """The padded length a chunk of ``count`` items is clipped at: the next power of two.
-
-    Trades a handful of compiled programs for not clipping thousands of padding entries. Both
-    ends of that trade are real -- one shape for everything makes a small body absurdly slow,
-    and one shape per receiver makes any body absurdly slow.
-    """
-    return 1 << max(0, int(count - 1)).bit_length() if count else 0
 
 
 class OcclusionField(eqx.Module):
@@ -147,21 +138,43 @@ class RayCastOcclusion(SelfOcclusion):
     several separate bodies can shadow one sight line -- the case the silhouette clip adds up
     twice.
 
+    **Every ray is tested against every triangle** unless :attr:`grid` is set, which is what
+    makes this cost ``n_receivers x n_facets x n_triangles``. Set it on anything but a small
+    scene: a uniform grid over the triangles turns the per-ray work from the whole surface into
+    the few triangles the segment's own voxels hold, for the same answers
+    (:class:`~aquaflux.radiation.grid.TriangleGrid`).
+
     Attributes
     ----------
     chunk_size : int
         Receivers per pass, bounding the peak memory of the build.
     work_limit : int
         Ray-by-triangle entries per pass, which is what bounds the intersection test's memory
-        and, through that, its speed.
+        and, through that, its speed. Unused when :attr:`grid` is set: the grid's passes are
+        sized by what the voxels hold rather than by a fixed block.
+    grid : bool or int or tuple of int
+        Cull each ray's candidates with a uniform grid over the triangles. ``False`` (the
+        default) tests everything; ``True`` sizes the grid from the triangle count; an integer
+        or a triple sets its resolution per axis. **Off by default** because it is a change of
+        cost, not of answers, and the answers are what the shipped path is trusted for -- but a
+        real reactor is unusable without it.
     """
 
     chunk_size: int = 4096
     work_limit: int = 4_000_000
+    grid: bool | int | tuple[int, int, int] = False
 
     def field(self, surfaces, points, near, receiver_facet) -> OcclusionField:
         """Cast the rays. See :meth:`SelfOcclusion.field`."""
         n_receivers, n_facets = points.shape[0], surfaces.n_facets
+        grid = (
+            TriangleGrid.build(
+                np.asarray(surfaces.vertices),
+                resolution=None if self.grid is True else self.grid,
+            )
+            if self.grid is not False
+            else None
+        )
         facet = jnp.arange(n_facets)
         # Every ray must ignore the facet it leaves; one aimed at a facet centroid must ignore
         # that facet too, or it is blocked by its own destination.
@@ -181,6 +194,24 @@ class RayCastOcclusion(SelfOcclusion):
             flat = (rays * n_facets, 3)
             origin = surfaces.centroid[None, :, :]
             target = receivers[:, None, :]
+            if grid is not None:
+                rows.append(
+                    jnp.asarray(
+                        grid.blocks(
+                            np.broadcast_to(
+                                np.asarray(surfaces.centroid)[None, :, :], (rays, n_facets, 3)
+                            ).reshape(flat),
+                            np.broadcast_to(
+                                np.asarray(receivers)[:, None, :], (rays, n_facets, 3)
+                            ).reshape(flat),
+                            np.broadcast_to(np.asarray(near), (rays, n_facets)).reshape(-1),
+                            exclude=np.asarray(exclusions[start : start + self.chunk_size]).reshape(
+                                -1, exclusions.shape[-1]
+                            ),
+                        ).reshape(rays, n_facets)
+                    )
+                )
+                continue
             rows.append(
                 segment_is_cut(
                     jnp.broadcast_to(origin, (rays, n_facets, 3)).reshape(flat),
@@ -391,7 +422,7 @@ class SilhouetteOcclusion(SelfOcclusion):
             piece = slice(start, stop)
             # Padded up to a power of two, so one compiled program serves every chunk of that
             # size; the padding repeats a real item and its answer is discarded.
-            pad = _bucket(stop - start) - (stop - start)
+            pad = padded_length(stop - start) - (stop - start)
             take_source = np.pad(source[piece], (0, pad), mode="edge")
             take_blocker = np.pad(blocker[piece], (0, pad), mode="edge")
             part, struck = self._clip_chunk(
