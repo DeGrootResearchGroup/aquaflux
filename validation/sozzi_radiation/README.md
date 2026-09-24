@@ -4,6 +4,58 @@
 runs its discrete-ordinates (DOM) solver at several angular resolutions. See its docstring for the
 case and the environment it needs.
 
+## The reactor as CAD primitives (2026-09-23, `primitive_occlusion.py`)
+
+`compare_fluence.py` shadows this reactor with `BranchOpenings`: a closure that knows, for this
+reactor, where each pipe's opening is and what crossing it means. `primitive_occlusion.py` runs
+the general construction against it — the fluid declared as three cylinders,
+
+```python
+Outside(chamber, inlet, riser)
+```
+
+with a segment clear exactly when those regions cover it end to end. No opening is identified and
+no shadow edge is derived, so the same three lines describe a chamber–pipe–elbow chain of any
+length.
+
+Configuration: the case's own `lampWall.stl` (7,516 facets), 24,000 receivers drawn uniformly
+from the mesh's 1,635,909 cell centres (22,250 chamber, 1,200 riser, 640 inlet), exitance
+696.42 W/m², absorption 35.67 /m, jax 0.10.2, CPU, x64, macOS arm64, 11 cores.
+
+| | rays/s | 180M rays |
+|---|---|---|
+| `Outside` of three cylinders | 17.2M | 10.5 s |
+| `BranchOpenings`, hand-derived | 28.6M | 6.3 s |
+
+**0 of 180 million pairs masked differently**, and `G` agrees to `0.0` relative at the median, the
+99th percentile and the maximum. Both describe the same ideal cylinders, so there is no faceting
+to explain a difference away and a disagreement would have meant a defect in one of them. The
+1,840 pipe receivers carry 13.8M of those pairs — the only place the mask does anything — so the
+agreement is not an artifact of testing mostly-clear geometry. The general construction costs
+1.7× the bespoke one, which is the price of not being told where the openings are.
+
+Against the triangle grid the primitive arm is 122–609× faster, and the span is over the *grid's*
+configurations rather than one number — from its worst measured corner (pipe-cell receivers on the
+area-sized default grid, 28,248 rays/s) to its best (random cells on a 128³ grid, 141,451). The
+two axes interact, so neither has a single factor: resolution is worth 3.26× on pipe cells and
+1.77× on random ones, receiver placement 2.83× at the default grid and 1.54× at 128³. The
+primitive arm is one branch-free expression, so its own rate does not depend on either.
+
+⚠️ Those ratios divide this harness's number by a separate run's, so read them as approximate and
+the grid's internal comparisons (measured in one process, repeating to 1.10×) as sharp. Running
+both arms in one process is what would make the ratios as solid as the square.
+
+92.8% of pairs lie inside one convex region, where a straight segment cannot leave and nothing has
+to be tested at all. ⚠️ That share depends on where the receivers are, and sampling the fluid by
+*volume* gets it wrong — 97.1% — because the snapped mesh refines near the walls and near the
+lamp, which is where the pairs that are not in one region live. Quote the cell-centre figure.
+
+`BranchOpenings` stays. It was derived independently, so it is the reference the general
+construction is checked against, and a general construction agreeing with a bespoke one stops
+being evidence the moment the bespoke one is deleted. The harness uses the meshed case's cells
+when `work/case` is present and samples the three cylinders when it is not, saying which in its
+summary — so it runs without OpenFOAM, at the cost of a different receiver population.
+
 ## Measured (2026-09-22)
 
 Configuration: of-optical-radiation `726714d`, image built locally from its `Dockerfile`

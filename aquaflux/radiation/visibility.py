@@ -3,11 +3,13 @@
 Occlusion enters the gather as one more factor on each source-receiver term, and it is built in
 two halves because the halves behave completely differently.
 
-The bodies are of two kinds, stored separately. **Analytic primitives** — a sleeve, a baffle —
-each carry their own transmittance, so each needs its own layer of the mask. **The emitting
-surface's own triangles** are the reactor's walls and are opaque, so they collapse into one layer
-with no transmittance to carry. That second kind is what lets a bent duct shadow itself, which no
-primitive can express because the geometry doing the blocking *is* the emitting surface.
+The bodies are of two kinds, stored separately. **Analytic bodies** — a sleeve, a baffle, a
+vessel composed from primitives, or the water a vessel holds — each carry their own
+transmittance, so each needs its own layer of the mask. **The emitting surface's own triangles**
+are the reactor's walls and are opaque, so they collapse into one layer with no transmittance to
+carry. That second kind is what answers for a shape nobody has described analytically: the
+geometry doing the blocking is the emitting surface itself, and a triangle soup is all there is
+to go on.
 
 **Whether a body lies across a segment is a hard yes or no, fixed by geometry.** It is computed
 once, when the model is built, and stored. It has no derivative worth having: move an occluder
@@ -42,6 +44,41 @@ from aquaflux.radiation.self_occlusion import (
 )
 
 __all__ = ["Visibility", "build_visibility"]
+
+
+@eqx.filter_jit
+def _compiled_blocks(body, origin, target, near):
+    """One body's layer of one chunk, as a single compiled expression.
+
+    ⚠️ **Compiling an analytic body is worth a great deal, and compiling a triangulated one
+    raises.** An analytic test is a few dozen arithmetic operations over a receivers-by-facets
+    array, and a body assembled from several inequalities — or a fluid described by several
+    regions — is several such arrays. Evaluated eagerly, every one of them is materialized in
+    turn, hundreds of megabytes each at a production chunk, and the mask's cost becomes the cost
+    of writing those intermediates rather than of the arithmetic. Compiled, they fuse into the
+    reduction at the end and none is ever formed. A body that answers on the host instead —
+    walking a grid of triangles, dropping rays as they are settled — cannot be traced at all,
+    and deliberately so.
+
+    So this is applied only where :attr:`~aquaflux.radiation.occluders.Occluder.traceable` says
+    it may be, which is a declaration on the body rather than a guess from its type. The two
+    kinds are meant to compose in one scene: a vessel described as primitives, with whatever
+    genuinely is a triangle soup standing beside it.
+    """
+    return body.blocks(origin, target, near)
+
+
+def _blocked_by(bodies, origin, target, near):
+    """One chunk's layer of the mask, per body, compiling each where it says it can be."""
+    return jnp.stack(
+        [
+            _compiled_blocks(body, origin, target, near)
+            if body.traceable
+            else body.blocks(origin, target, near)
+            for body in bodies
+        ],
+        axis=0,
+    )
 
 
 class Visibility(eqx.Module):
@@ -222,11 +259,7 @@ def build_visibility(
         origin = surfaces.centroid[None, :, :]
         target = receivers[:, None, :]
         if occluders:
-            primitive_rows.append(
-                jnp.stack(
-                    [body.blocks(origin, target, near[None, :]) for body in occluders], axis=0
-                )
-            )
+            primitive_rows.append(_blocked_by(occluders, origin, target, near[None, :]))
     # The fallback turns on whether any row was produced, not on whether one was asked for: a
     # set with no receivers at all -- a surface-only study, which is a legal thing to build --
     # runs no chunks, so the list is empty however the flags are set, and concatenating nothing
