@@ -119,7 +119,10 @@ class TriangleGrid:
         # A margin, so a triangle exactly on the far face still lands inside the grid.
         low = low - 1e-9 * extent
         extent = extent * (1.0 + 2e-9)
-        counts = _resolution(extent, len(vertices), resolution)
+        # Twice the area, since the cross product of two edges spans the parallelogram.
+        edges = np.cross(vertices[:, 1] - vertices[:, 0], vertices[:, 2] - vertices[:, 0])
+        area = 0.5 * float(np.sqrt(np.sum(edges * edges, axis=-1)).sum())
+        counts = _resolution(extent, area, len(vertices), resolution)
         spacing = extent / counts
 
         span_low = np.clip(((vertices.min(axis=1) - low) / spacing).astype(int), 0, counts - 1)
@@ -136,7 +139,9 @@ class TriangleGrid:
             triangles=triangle_of[order],
         )
 
-    def blocks(self, origin, target, min_distance, *, exclude=None) -> np.ndarray:
+    def blocks(
+        self, origin, target, min_distance, *, exclude=None, work_limit: int = 4_000_000
+    ) -> np.ndarray:
         """Whether any triangle lies across each segment, testing only what the grid selects.
 
         The contract is :func:`~aquaflux.radiation.triangles.segment_is_cut`'s, and the answers
@@ -150,6 +155,12 @@ class TriangleGrid:
             How far from ``origin`` a hit must be before it counts, in length units.
         exclude : array_like of int, shape ``(n_rays,)`` or ``(n_rays, k)``, optional
             Triangles each ray ignores; ``-1`` excludes nothing.
+        work_limit : int, optional
+            Most (ray, triangle) pairs to hold at once, as
+            :func:`~aquaflux.radiation.triangles.segment_is_cut` bounds its own block. A step of
+            the walk tests every live ray against everything its voxel holds, so without a bound
+            a coarse grid over many rays builds one array of every pair in that step -- which is
+            how a grid runs a machine out of memory rather than saving it work.
 
         Returns
         -------
@@ -162,6 +173,10 @@ class TriangleGrid:
         direction = target - origin
         # The segment is parametrized on [0, 1], so a hit distance is in those units too --
         # which is what makes the walk's own parameter and the intersection test's comparable.
+        # `min_distance` is a LENGTH, though, as `segment_is_cut` takes it, so it converts here
+        # rather than being compared against a parameter it does not share units with.
+        length = np.sqrt(np.sum(direction * direction, axis=-1))
+        near = near / np.where(length == 0.0, 1.0, length)
         blocked = np.zeros(len(origin), dtype=bool)
         alive, entry = _enters_grid(origin, direction, self.low, self.spacing, self.resolution)
         if not np.any(alive):
@@ -177,7 +192,7 @@ class TriangleGrid:
             flat = (voxel[:, 0] * self.resolution[1] + voxel[:, 1]) * self.resolution[2] + voxel[
                 :, 2
             ]
-            hit = self._test(ray, flat, origin, direction, near, exclude)
+            hit = self._test(ray, flat, origin, direction, near, exclude, work_limit)
             blocked[ray[hit]] = True
             axis = np.argmin(until, axis=1)
             rows = np.arange(len(ray))
@@ -197,7 +212,7 @@ class TriangleGrid:
             )
         return blocked
 
-    def _test(self, ray, flat, origin, direction, near, exclude) -> np.ndarray:
+    def _test(self, ray, flat, origin, direction, near, exclude, work_limit) -> np.ndarray:
         """Test each live ray against the triangles of the voxel it is in."""
         first, last = self.starts[flat], self.starts[flat + 1]
         held = last - first
@@ -205,28 +220,50 @@ class TriangleGrid:
         hit = np.zeros(len(ray), dtype=bool)
         if len(busy) == 0:
             return hit
-        # Compressed-sparse-row expansion: one (ray, triangle) pair per triangle held by the
-        # voxel that ray is in, without a Python loop over the rays or the voxels.
-        repeats = held[busy]
-        owner = np.repeat(busy, repeats)
-        offsets = np.arange(repeats.sum()) - np.repeat(np.cumsum(repeats) - repeats, repeats)
-        candidate = self.triangles[np.repeat(first[busy], repeats) + offsets]
-        of_ray = ray[owner]
-        # Padded to a power of two so a walk compiles a couple of dozen programs rather than one
-        # per step; the padding repeats a real pair and its answer is dropped.
-        pad = padded_length(len(candidate)) - len(candidate)
-        struck = np.asarray(
-            _pair_is_cut(
-                jnp.asarray(_pad(origin[of_ray], pad)),
-                jnp.asarray(_pad(direction[of_ray], pad)),
-                jnp.asarray(_pad(near[of_ray], pad)),
-                jnp.asarray(_pad(self.vertices[candidate], pad)),
-                jnp.asarray(_pad(candidate, pad)),
-                jnp.asarray(_pad(exclude[of_ray], pad)),
-            )
-        )[: len(candidate)]
-        np.logical_or.at(hit, owner, struck)
+        counts = held[busy]
+        for start, stop in _work_groups(counts, work_limit):
+            group, repeats = busy[start:stop], counts[start:stop]
+            # Compressed-sparse-row expansion: one (ray, triangle) pair per triangle held by the
+            # voxel that ray is in, without a Python loop over the rays or the voxels.
+            owner = np.repeat(group, repeats)
+            offsets = np.arange(repeats.sum()) - np.repeat(np.cumsum(repeats) - repeats, repeats)
+            candidate = self.triangles[np.repeat(first[group], repeats) + offsets]
+            of_ray = ray[owner]
+            # Padded to a power of two so a walk compiles a couple of dozen programs rather than
+            # one per step; the padding repeats a real pair and its answer is dropped.
+            pad = padded_length(len(candidate)) - len(candidate)
+            struck = np.asarray(
+                _pair_is_cut(
+                    jnp.asarray(_pad(origin[of_ray], pad)),
+                    jnp.asarray(_pad(direction[of_ray], pad)),
+                    jnp.asarray(_pad(near[of_ray], pad)),
+                    jnp.asarray(_pad(self.vertices[candidate], pad)),
+                    jnp.asarray(_pad(candidate, pad)),
+                    jnp.asarray(_pad(exclude[of_ray], pad)),
+                )
+            )[: len(candidate)]
+            np.logical_or.at(hit, owner, struck)
         return hit
+
+
+def _work_groups(counts: np.ndarray, work_limit: int):
+    """Slices of a per-voxel triangle count whose pairs each fit ``work_limit``.
+
+    Yields ``(start, stop)`` index pairs. A single voxel holding more than the limit is its own
+    group rather than being dropped -- the limit bounds what is held at once where it can, and
+    a grid coarse enough to break it is the caller's to re-size.
+    """
+    total = int(counts.sum())
+    if total <= work_limit or len(counts) == 1:
+        yield 0, len(counts)
+        return
+    running = np.cumsum(counts)
+    start = 0
+    while start < len(counts):
+        taken = int(running[start - 1]) if start else 0
+        stop = max(int(np.searchsorted(running, taken + work_limit, side="right")), start + 1)
+        yield start, stop
+        start = stop
 
 
 def _pad(array: np.ndarray, pad: int) -> np.ndarray:
@@ -234,8 +271,18 @@ def _pad(array: np.ndarray, pad: int) -> np.ndarray:
     return array if pad == 0 else np.concatenate([array, np.repeat(array[-1:], pad, axis=0)])
 
 
-def _resolution(extent, n_triangles: int, resolution) -> np.ndarray:
-    """Voxels per axis: what the caller asked for, or near-cubic voxels of the target size."""
+def _resolution(extent, area: float, n_triangles: int, resolution) -> np.ndarray:
+    """Voxels per axis: what the caller asked for, or near-cubic voxels of the target size.
+
+    ⚠️ **The size comes from the triangles' AREA, not from the box's volume.** Blocking
+    triangles tile a surface, so the voxels they occupy are the ones their sheet passes
+    through: about ``area / size**2`` of them, however large the box around it. Dividing the
+    *volume* into one voxel per ten triangles assumes the box is filled, and a thin shell in a
+    long box is the opposite of that -- on a reactor's wall (53,500 triangles over ~0.3 m^2 in
+    a 0.9 m box) it sized 5,350 voxels of which **298** were occupied, holding 217 triangles
+    each against the ten intended, and a walk through those cost more memory than testing every
+    triangle would have.
+    """
     if resolution is not None:
         counts = np.broadcast_to(np.asarray(resolution, dtype=int), (3,)).copy()
         if np.any(counts < 1):
@@ -243,7 +290,7 @@ def _resolution(extent, n_triangles: int, resolution) -> np.ndarray:
             raise ValueError(msg)
         return counts
     wanted = max(n_triangles / _TARGET_PER_VOXEL, 1.0)
-    size = float((np.prod(extent) / wanted) ** (1.0 / 3.0))
+    size = float(np.sqrt(max(area, np.finfo(float).tiny) / wanted))
     counts = np.maximum(np.round(extent / max(size, np.finfo(float).tiny)), 1).astype(int)
     while np.prod(counts, dtype=float) > _MAX_VOXELS:
         counts = np.maximum(counts // 2, 1)

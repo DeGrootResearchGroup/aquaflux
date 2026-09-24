@@ -1470,6 +1470,52 @@ clipped start still covers the true path. The entry point saves steps; it does n
 correctness. The separate early-out for a segment that misses the box entirely *is* load-bearing
 and has its own test.
 
+**⚠️ THREE DEFECTS SURVIVED THE FIRST ROUND OF TESTS AND ALL THREE SURFACED ON FIRST USE AT
+SCALE — the pattern is worth more than the individual bugs.** Every fixture in the first suite ran
+segments about one unit long, with a margin of 1e-6, on a few hundred triangles scattered through a
+cube. That is one shape of input, repeated; the suite could not distinguish a correct
+implementation from three broken ones.
+
+1. **`min_distance` was read as a share of the segment, not as a length.** `segment_is_cut` takes
+   it in length units and divides by the segment's length; the grid compared it against the
+   parameter directly. On a unit-length segment with a 1e-6 margin the two are indistinguishable,
+   which is every fixture that existed. It bites on a segment whose length is not one — a blocker
+   halfway along a ten-unit segment with a margin of 3 is blocked by the correct reading and clear
+   by the wrong one.
+2. **The candidate expansion had no work limit.** A step of the walk tests every live ray against
+   everything its voxel holds, and `_test` built that whole (ray, triangle) array at once, while
+   `segment_is_cut` has bounded its own block all along. The first attempt to walk the reactor wall
+   with 1M rays was **killed for memory**, not slow. `blocks` now takes `work_limit` (the same
+   4,000,000-pair default) and `RayCastOcclusion` passes its own through.
+3. **The default resolution was sized from the box's VOLUME, and blocking triangles are a
+   SURFACE.** Voxels occupied by a sheet go as `area / size**2`, not `volume / size**3`, so sizing
+   one voxel per ten triangles assumes a filled box. On the reactor wall — 53,500 triangles over
+   ~0.3 m^2 inside a 1.74 x 0.09 x 0.94 m box — it built 5,350 voxels of which **298** were
+   occupied, holding **217 triangles each** against the ten intended. Sizing from the triangles'
+   own area gives 6,537 occupied voxels holding 18.4 each, near cubic to 0.5%. (Entries per voxel
+   run about twice the target because a triangle registers in every voxel its bounding box spans;
+   that is expected and the test's tolerance says so.)
+
+**Wall clock against resolution, on the reactor wall** (500,000 cell-to-facet rays, `bodyWall.stl`,
+jax 0.10.2, CPU, x64, macOS arm64, 11 cores; every arm agreed with every other bit for bit, which
+is also the cross-check on the work-limit chunking):
+
+| grid | run 1 | run 2 |
+|---|---|---|
+| area-sized default, (212, 11, 114) | 65,600 | 72,500 rays/s |
+| 32³ | 47,300 | — |
+| 64³ | 102,800 | — |
+| 128³ | 131,500 | 96,300 |
+| 192³ | 106,200 | — |
+| (424, 22, 228) | — | 85,900 |
+| (636, 33, 342) | — | 77,100 |
+
+⚠️ **Read the spread before the ranking: 128³ moved 1.37x between two identical runs.** What the
+two runs support is that a 128³-like grid is **1.3-1.8x** faster than the area-sized default and
+that finer than that is not better; the ordering among the three finer arms is inside the noise and
+is not established. `_TARGET_PER_VOXEL` was therefore left at ten — lowering it is not supported by
+this measurement, whatever the single fastest row says.
+
 **What it does not fix: the RAY COUNT, which is the binding cost at mesh scale.** 1.6M cells
 against 7,516 facets is 1.2e10 segments however cheaply each is answered. The grid makes scenes
 up to a few times 1e8 rays practical; beyond that the facet count has to come down (the lamp

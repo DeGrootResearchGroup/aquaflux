@@ -150,8 +150,9 @@ class RayCastOcclusion(SelfOcclusion):
         Receivers per pass, bounding the peak memory of the build.
     work_limit : int
         Ray-by-triangle entries per pass, which is what bounds the intersection test's memory
-        and, through that, its speed. Unused when :attr:`grid` is set: the grid's passes are
-        sized by what the voxels hold rather than by a fixed block.
+        and, through that, its speed. It bounds the grid's passes too: a step of the walk tests
+        every live ray against everything its voxel holds, which without a bound is one array of
+        every pair in that step.
     grid : bool or int or tuple of int
         Cull each ray's candidates with a uniform grid over the triangles. ``False`` (the
         default) tests everything; ``True`` sizes the grid from the triangle count; an integer
@@ -208,6 +209,7 @@ class RayCastOcclusion(SelfOcclusion):
                             exclude=np.asarray(exclusions[start : start + self.chunk_size]).reshape(
                                 -1, exclusions.shape[-1]
                             ),
+                            work_limit=self.work_limit,
                         ).reshape(rays, n_facets)
                     )
                 )
