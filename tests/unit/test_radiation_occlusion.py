@@ -307,7 +307,7 @@ def test_streaming_the_bodies_gives_what_a_built_mask_gives(transmittance):
     built = build_visibility([sleeve()], source, probes)
     held = direct_fluence_rate(source, probes, visibility=built, transmittance=transmittance)
     streamed = direct_fluence_rate(
-        source, probes, occluders=[sleeve()], transmittance=transmittance, chunk_size=8
+        source, probes, occluders=[sleeve()], transmittance=transmittance, pair_limit=8
     )
     np.testing.assert_array_equal(np.asarray(streamed), np.asarray(held))
     assert float(np.asarray(held).min()) < float(np.asarray(held).max()), "nothing is shadowed"
@@ -317,7 +317,7 @@ def test_streaming_never_builds_a_mask_wider_than_a_chunk(monkeypatch):
     """The memory claim, pinned mechanically rather than by timing or by peak RSS.
 
     A mask is ``receivers x facets`` per body, so what bounds it is the number of receivers each
-    build is handed. At mesh scale that is the difference between tens of gigabytes and a few
+    build is handed -- eight here, because the source is one facet and the limit eight pairs. At mesh scale that is the difference between tens of gigabytes and a few
     hundred megabytes, and it is invisible in the answer -- which is why this checks the calls
     rather than the field.
     """
@@ -332,8 +332,41 @@ def test_streaming_never_builds_a_mask_wider_than_a_chunk(monkeypatch):
 
     monkeypatch.setattr(gather, "build_visibility", watched)
     source, probes = point_source(), _probe_line(37)
-    direct_fluence_rate(source, probes, occluders=[sleeve()], chunk_size=8)
+    direct_fluence_rate(source, probes, occluders=[sleeve()], pair_limit=8)
     assert handed == [8, 8, 8, 8, 5], handed
+
+
+def test_streaming_and_the_body_test_count_pairs_not_receivers(monkeypatch):
+    """Four facets and a limit of eight pairs: two receivers per streamed mask and per body test.
+
+    With a one-facet source a pair limit and a receiver count are the same number, so the test
+    above cannot tell them apart; this one can.
+    """
+    from aquaflux.radiation import gather, visibility
+
+    handed, tested = [], []
+    real_build, real_blocked = gather.build_visibility, visibility._blocked_by
+
+    def watched_build(occluders, surfaces, points, **options):
+        handed.append(np.asarray(points).shape[0])
+        return real_build(occluders, surfaces, points, **options)
+
+    def watched_blocked(bodies, origin, target, near):
+        tested.append(target.shape[0])
+        return real_blocked(bodies, origin, target, near)
+
+    monkeypatch.setattr(gather, "build_visibility", watched_build)
+    monkeypatch.setattr(visibility, "_blocked_by", watched_blocked)
+    source = point_source(
+        np.array([[0.0, 0.0, 0.0], [0.0, 0.1, 0.0], [0.0, 0.0, 0.1], [0.0, -0.1, 0.0]])
+    )
+    direct_fluence_rate(source, _probe_line(7), occluders=[sleeve()], pair_limit=8)
+    assert handed == [2, 2, 2, 1], handed
+    # The mask build bounds its own body test the same way. Called directly, because through the
+    # streamed path it is only ever handed a chunk that already fits, and its bound never binds.
+    tested.clear()
+    build_visibility([sleeve()], source, _probe_line(7), pair_limit=8)
+    assert tested == [2, 2, 2, 1], tested
 
 
 def test_streaming_with_no_bodies_still_streams_the_surface_s_own_shadowing():
@@ -350,7 +383,7 @@ def test_streaming_with_no_bodies_still_streams_the_surface_s_own_shadowing():
         emission=[1000.0, 0.0],
     )
     probes = np.array([[3.0, 0.0, 0.0], [3.0, 2.0, 0.0]])
-    shadowed = direct_fluence_rate(panel, probes, occluders=[], chunk_size=1)
+    shadowed = direct_fluence_rate(panel, probes, occluders=[], pair_limit=1)
     clear = direct_fluence_rate(panel, probes, occluders=[], self_occlusion=NoOcclusion())
     assert float(shadowed[0]) == 0.0, "the panel in the way should hide the emitter"
     assert float(clear[0]) > 0.0, "with self-occlusion off the emitter is visible again"

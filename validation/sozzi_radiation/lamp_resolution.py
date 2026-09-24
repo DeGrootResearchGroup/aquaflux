@@ -155,15 +155,12 @@ def field(vertices: np.ndarray, receivers: np.ndarray) -> tuple[np.ndarray, floa
     if (outward > 0).mean() < 0.5:
         surfaces = Surfaces.from_triangles(vertices[:, ::-1, :], emission=EXITANCE)
     power = float(np.sum(np.asarray(surfaces.area)) * EXITANCE)
-    # ⚠️ The gather's chunk is a number of RECEIVERS, so at these facet counts the default
-    # 4096 would form a chunk of 4096 x 270,000 entries -- about 9 GB, which is what killed the
-    # first run of this study. Bound the entries instead, as the intersection test does.
+    # The gather bounds each chunk by receiver-by-facet pairs, so the 270,336-facet reference
+    # runs at its default. (It once counted receivers, and its default then formed a 9 GB chunk
+    # against this lamp -- which is what killed the first run of this study.)
     values = np.asarray(
         direct_fluence_rate(
-            surfaces,
-            jnp.asarray(receivers),
-            absorption=UniformAbsorption(ABSORPTION),
-            chunk_size=max(1, int(4_000_000 // len(vertices))),
+            surfaces, jnp.asarray(receivers), absorption=UniformAbsorption(ABSORPTION)
         )
     )
     return values, power

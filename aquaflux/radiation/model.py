@@ -125,11 +125,12 @@ class RadiationSettings(eqx.Module):
         :func:`~aquaflux.radiation.transfer.build_transfer`.
     transfer_chunk_size : int or None
         Receiving facets per pass of the ``n^2`` transfer build, bounding its peak memory.
-    gather_chunk_size : int or None
-        Receivers per pass of the volume gather, bounding its peak memory. A separate number
-        from the one above because the two loops are over different things — facets against
-        facets, and receivers against facets — and a scene may have far more of one than the
-        other.
+    gather_pair_limit : int or None
+        Receiver-by-facet pairs per pass of the volume gather, bounding its peak memory whatever
+        the facet count. Counted in pairs rather than receivers because a pass's size is their
+        product, and a receiver count would leave it to how finely the emitter is divided. A
+        separate setting from the one above because the two loops are over different things —
+        facets against facets, and receivers against facets.
     self_occlusion : SelfOcclusion or None
         How the emitting facets are tested for shadowing one another, which for any non-convex
         body they do. Unset, one ray is cast per pair. Pass
@@ -148,7 +149,7 @@ class RadiationSettings(eqx.Module):
 
     receiver_quadrature: int | TriangleQuadrature | None = eqx.field(static=True, default=None)
     transfer_chunk_size: int | None = eqx.field(static=True, default=None)
-    gather_chunk_size: int | None = eqx.field(static=True, default=None)
+    gather_pair_limit: int | None = eqx.field(static=True, default=None)
     self_occlusion: SelfOcclusion | None = eqx.field(static=True, default=None)
     receiver_occlusion: SelfOcclusion | None = eqx.field(static=True, default=None)
 
@@ -187,7 +188,7 @@ class RadiationSettings(eqx.Module):
 
     def gather_options(self) -> dict:
         """The subset the volume gather reads."""
-        return self._passed(chunk_size=self.gather_chunk_size)
+        return self._passed(pair_limit=self.gather_pair_limit)
 
 
 class RadiationModel(eqx.Module):
