@@ -1824,24 +1824,31 @@ them switching is a large relative change on a small number. And 0.007% of the d
 about 124 of them -- fall outside the rim band and are **not explained**; they are too few to
 matter for a field and too specific to dismiss, so they are recorded rather than rounded away.
 
-**Cost, measured in the same run, and it is the real argument.** The analytic arm took **6.9 s**
-against the grid's **4,659.8 s** on those same 180M rays -- **675x**. ⚠️ **Quote that figure with
-its scene: it is the most favourable corner of a table, not a property of the method.** Two
-choices move it, and conflating them is easy -- which receivers, and which primitive arm.
+**Cost, measured in the same run, and it is the real argument.** The hand-derived analytic arm
+took **6.9 s** against the grid's **4,659.8 s** on those same 180M rays — **675x**. ⚠️ **That is
+the one arm-to-arm figure on record taken WITHIN a run**, both arms in one process on one ray
+set, which is why it is kept when the table that used to stand here was deleted. It is also the
+most favourable corner available: the *bespoke* arm, against the grid on this run's pipe-heavy
+receivers, at the area-sized default grid.
 
-| primitive arm | vs grid on PIPE cells (38,711 rays/s) | vs grid on RANDOM receivers (65,647) |
-|---|---|---|
-| hand-derived `BranchOpenings`, 26.1M rays/s | **675x** | 398x |
-| general `Outside` of three cylinders, 20.7M rays/s | 534x | 315x |
+⚠️ **A four-cell table stood here and has been DELETED rather than corrected (2026-09-24).** One
+of its cells was the 675x above; the other three divided numbers that were never measured
+together, and every quantity in it has a better-measured equivalent elsewhere in this file — the
+general arm and the bespoke arm under "MEASURED: the Sozzi reactor as three cylinders", the grid's
+corners in the matched square below. Three specific things were wrong with it, and they are worth
+knowing because each is a shape that recurs:
 
-⚠️ The general arm's rate was **17.2M** here until 2026-09-24 and every quotient in its row has
-moved with it. A single run understated it: three consecutive passes repeat to 1.003x and are the
-measurement, recorded with the rest of that arm under "MEASURED: the Sozzi reactor as three
-cylinders" above. Nothing about the grid's numbers changed.
+- **It gave the bespoke arm a second value.** 26.1M rays/s here against 28.8M from three
+  controlled passes — 1.10x apart, same quantity, same file.
+- **Its grid rates predate the square.** 38,711 and 65,647 against the square's 28,248 and
+  79,963 for those corners, 1.37x and 1.22x apart.
+- **Its column header named a population it did not measure.** 38,711 was labelled "pipe cells",
+  but that run's receivers were 20,000 pipe **plus 4,000 chamber**, and composition alone accounts
+  for 1.12x of the gap to the square's actual pipe corner.
 
-Both grid rates are the **area-sized default grid**; a 128³ grid roughly doubles them, which is a
-third axis again. So the honest statement is **a few hundredfold, 260-675x across these corners**,
-and any single number needs its row and its column.
+⚠️ **The first attempt to fix it patched one row and left the other three defects greppable**,
+which is the annotation failure this file warns about in general terms: a corrected cell beside
+three uncorrected ones reads as a maintained table. Supersede by deleting.
 
 ⚠️ **THE RECEIVER POPULATION AND THE GRID RESOLUTION INTERACT, so neither has a single factor
 and two earlier attempts to give one here were wrong.** The first divided pipe cells on the
