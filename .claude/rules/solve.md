@@ -73,11 +73,30 @@ the base's"; write a numeric default out, and keep a setting whose default is `N
 **`SettingsMapping` (`settings_mapping.py`, #391) writes and reads any family of such values as a nested
 plain mapping** — `kind` = class name, a field equal to its dataclass default omitted, nested values as
 nested mappings, tuples as lists — and refuses an unknown kind or field with the path to it. It is
-generic and parses nothing (no YAML dependency, per `pyproject.toml`'s note); the coupled-preconditioner
-wrappers live in `turbulence/preconditioner_spec.py` (see `turbulence.md`). Omission is decided by
-**equality with the default, not by `None`**, so a field whose default is a sentinel (`BlockDiagonal.method`)
-round-trips, and a required field is always written. ⚠️ A value whose default is compared by `!=`
-must compare by value — an array-valued field would need its own rule; none exists today.
+generic and parses nothing: the YAML parse (PyYAML, a core dependency since 2026-09-24) lives in
+`case/case_file.py`, and this module works on whatever mapping a parser hands it. The coupled-preconditioner
+wrappers live in `turbulence/preconditioner_spec.py` (see `turbulence.md`), the case-file registry in
+`case/spec.py` (see `case.md`). Omission is decided by **equality with the default, not by `None`**, so
+a field whose default is not `None` round-trips, and a required field is always written. ⚠️ A value
+whose default is compared by `!=` must compare by value — an array-valued field would need its own
+rule; none exists today. (There is no `BlockDiagonal.method`; an earlier version of this paragraph
+cited one as its example.)
+
+**Three additions for the case file (2026-09-24, #437), all generic:**
+- **A table** — a field annotated `Mapping[str, X]` holds entries named by the *file* (a boundary
+  condition per patch), written as a mapping of those entries and read back as a read-only
+  `types.MappingProxyType`, in the file's order. A table has no `kind`: **the position decides the
+  reading, never the presence of a `kind` key**, which is what lets an entry be *named* `kind`. For the
+  same reason `_atoms` refuses a union of a table and a nested value (both are mappings, and nothing but
+  a `kind` key could tell them apart) and a table keyed by anything but `str`. Decoding is now one
+  position-aware reader (`_check` then `_read`) for tables, sequences and nested values alike; each table
+  entry is checked and reported by its own path (`boundaries.inlet`).
+- **A missing required field is refused by name and path** (`Outlet at 'boundaries.right' needs
+  'pressure', which has no default`) rather than surfacing as Python's positional-argument `TypeError`.
+- **A nested value's own constructor refusal is re-raised with its path prepended** (`Inlet at
+  'boundaries.left': an inlet velocity has two or three components`). Only exact `ValueError` /
+  `TypeError` are re-raised (a subclass may not take a bare message), and never at the root, whose
+  caller already knows where it is.
 
 **It checks each setting AGAINST ITS OWN FIELD'S ANNOTATION (#424, 2026-09-23), and a field it cannot
 check stops the mapping being BUILT.** The rules are read once, when the `SettingsMapping` is

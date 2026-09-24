@@ -8,6 +8,11 @@ mapping back reproduces the value exactly, and a mapping that omits a field leav
 default of the class that consumes it. Everything else in it is plain data -- strings, numbers,
 booleans, ``None`` and lists of them -- so any YAML or JSON writer can store it.
 
+A field may also be a **table**: a mapping from names the file chooses to entries of one form, such as
+a boundary condition per patch. Its keys are names rather than fields, so a table carries no ``kind``
+of its own; the field's ``Mapping[str, ...]`` annotation is what says a mapping in that position is
+one.
+
 Reading one is checked: a mapping must name a class this accepts, every key must be a field of it, and
 every setting must be something that field can hold -- a number where a number belongs, one of a fixed
 set of names where the field offers a choice, a nested value of a kind usable in that position. What
@@ -37,8 +42,9 @@ class SettingsMapping:
 
     Each accepted class is named in a mapping by its class name, under the ``kind`` key. A field holding
     another accepted value is written as a nested mapping; a tuple is written as a list and read back as
-    a tuple; a string, number, boolean or ``None`` is written as it is. Nothing else is written, so the
-    mapping is always plain data.
+    a tuple; a table (a field annotated ``Mapping[str, ...]``) is written as a mapping of its entries by
+    name and read back as a read-only mapping; a string, number, boolean or ``None`` is written as it
+    is. Nothing else is written, so the mapping is always plain data.
 
     Parameters
     ----------
@@ -123,7 +129,8 @@ class SettingsMapping:
         ----------
         mapping : mapping
             ``{"kind": <class name>, <field>: <value>, ...}``. A nested mapping is read as a nested value
-            and so needs its own ``kind``; a list is read as a tuple.
+            and so needs its own ``kind`` -- except in a table's position, where it is read as the
+            table, each entry by its name; a list is read as a tuple.
 
         Returns
         -------
@@ -173,11 +180,22 @@ class SettingsMapping:
             return self._to_mapping(setting, path)
         if isinstance(setting, list | tuple):
             return [self._encode(item, f"{path}[{i}]") for i, item in enumerate(setting)]
+        if isinstance(setting, Mapping):
+            for entry in setting:
+                if not isinstance(entry, str):
+                    raise TypeError(
+                        f"{entry!r}{_where(path)} is not a name: a table's entries are named by "
+                        "strings."
+                    )
+            return {
+                entry: self._encode(item, _join(path, entry)) for entry, item in setting.items()
+            }
         if setting is None or isinstance(setting, str | bool | int | float):
             return setting
         raise TypeError(
             f"{type(setting).__name__}{_where(path)} is not plain data: a setting is written as a string, "
-            "number, boolean or None, a list of those, or a nested value of an accepted kind."
+            "number, boolean or None, a list of those, a table of them by name, or a nested value of an "
+            "accepted kind."
         )
 
     def _decode(self, setting: object, path: str) -> object:
@@ -209,25 +227,85 @@ class SettingsMapping:
                 f"{sorted(fields)}."
             )
         accepts = self._accepts[name]
+        # Every field is checked before any is decoded, so of two bad settings the shallower one is
+        # reported rather than whichever a nested decode happens to reach first.
         for key, setting in mapping.items():
-            if key == KIND:
-                continue
-            atoms = accepts[key]
-            if self._names_no_known_kind(setting):
-                # A mapping naming a kind nothing knows is misspelt, not misplaced. Decoding it reports
-                # exactly that, with the same path, which is more use than a list of what belongs here.
-                continue
-            if not any(atom.accepts(setting, self._by_name) for atom in atoms):
-                raise ValueError(
-                    f"{setting!r}{_where(_join(path, key))} is not accepted there; {name}.{key} takes "
-                    f"{_describe(atoms, self._by_name)}."
-                )
+            if key != KIND:
+                self._check(setting, accepts[key], _join(path, key), f"{name}.{key}")
+        required = [
+            field.name
+            for field in dataclasses.fields(kind)
+            if field.init and _default(field) is dataclasses.MISSING and field.name not in mapping
+        ]
+        if required:
+            raise ValueError(
+                f"{name}{where} needs {', '.join(repr(r) for r in required)}, which "
+                f"{'has' if len(required) == 1 else 'have'} no default."
+            )
         settings = {
-            key: self._decode(setting, _join(path, key))
+            key: self._read(setting, accepts[key], _join(path, key), f"{name}.{key}")
             for key, setting in mapping.items()
             if key != KIND
         }
-        return kind(**settings)
+        try:
+            return kind(**settings)
+        except (ValueError, TypeError) as error:
+            # A value's own refusal knows the value, not where it sits in the file; for a nested one,
+            # say where. Only these two exact types are re-raised, since a subclass may not take a
+            # message alone.
+            if not path or type(error) not in (ValueError, TypeError):
+                raise
+            raise type(error)(f"{name}{where}: {error}") from error
+
+    def _check(self, setting: object, atoms: tuple[object, ...], path: str, label: str) -> None:
+        """Refuse ``setting`` unless one of ``atoms`` accepts it, naming what ``label`` takes.
+
+        A table's entries are checked when the table is read, entry by entry, so that a bad entry is
+        reported by its own name rather than as the whole table being unacceptable.
+        """
+        if isinstance(setting, Mapping) and _table_of(atoms) is not None:
+            return
+        if self._names_no_known_kind(setting):
+            # A mapping naming a kind nothing knows is misspelt, not misplaced. Decoding it reports
+            # exactly that, with the same path, which is more use than a list of what belongs here.
+            return
+        if not any(atom.accepts(setting, self._by_name) for atom in atoms):
+            raise ValueError(
+                f"{setting!r}{_where(path)} is not accepted there; {label} takes "
+                f"{_describe(atoms, self._by_name)}."
+            )
+
+    def _read(self, setting: object, atoms: tuple[object, ...], path: str, label: str) -> object:
+        """``setting`` decoded as the position ``atoms`` describes, once :meth:`_check` has passed it.
+
+        The position decides the reading, not the setting's shape alone: a mapping is a table where the
+        field is one and a nested value everywhere else, which is what lets a table hold an entry
+        whose name happens to be ``kind``.
+        """
+        table = _table_of(atoms)
+        if table is not None and isinstance(setting, Mapping):
+            entries = {}
+            for entry, item in setting.items():
+                where = _join(path, str(entry))
+                if not isinstance(entry, str):
+                    raise ValueError(
+                        f"{entry!r}{_where(path)} is not a name; {label} takes "
+                        f"{_describe(atoms, self._by_name)}."
+                    )
+                self._check(item, table.atoms, where, f"each entry of {label}")
+                entries[entry] = self._read(item, table.atoms, where, f"each entry of {label}")
+            return types.MappingProxyType(entries)
+        if isinstance(setting, list | tuple) and not self._names_no_known_kind(setting):
+            sequence = next(
+                atom
+                for atom in atoms
+                if isinstance(atom, _Sequence) and atom.accepts(setting, self._by_name)
+            )
+            return tuple(
+                self._read(item, sequence.atoms, f"{path}[{i}]", label)
+                for i, item in enumerate(setting)
+            )
+        return self._decode(setting, path)
 
 
 # --- what may appear in one field, read off its annotation ------------------------------------
@@ -320,6 +398,28 @@ class _Nested:
 
 
 @dataclasses.dataclass(frozen=True)
+class _Table:
+    """A mapping from names to entries each accepted by ``atoms``, from a ``Mapping[str, ...]`` annotation.
+
+    Read back as a read-only mapping (:class:`types.MappingProxyType`), so a frozen value holding one
+    cannot be changed through it. Its entries carry no ``kind`` of their own at this level: the names
+    are the table's keys, and each entry is whatever ``atoms`` describes -- usually a nested value,
+    which has its own ``kind``.
+    """
+
+    atoms: tuple[object, ...]
+
+    def accepts(self, setting: object, kinds: Mapping[str, type]) -> bool:
+        return isinstance(setting, Mapping) and all(
+            isinstance(entry, str) and any(atom.accepts(item, kinds) for atom in self.atoms)
+            for entry, item in setting.items()
+        )
+
+    def describe(self, kinds: Mapping[str, type]) -> str:
+        return f"a table from names to ({_describe(self.atoms, kinds)})"
+
+
+@dataclasses.dataclass(frozen=True)
 class _Sequence:
     """A list (read back as a tuple) whose entries are each accepted by ``atoms``."""
 
@@ -361,9 +461,27 @@ def _atoms(annotation: object, owner: str, field: str) -> tuple[object, ...]:
     """
     origin = typing.get_origin(annotation)
     if origin in (types.UnionType, typing.Union):
-        return tuple(
+        atoms = tuple(
             atom for arm in typing.get_args(annotation) for atom in _atoms(arm, owner, field)
         )
+        if any(isinstance(atom, _Table) for atom in atoms) and any(
+            isinstance(atom, _Nested) for atom in atoms
+        ):
+            # Both are written as mappings, so the only thing telling them apart would be whether a
+            # `kind` key is present -- and a table may well hold an entry of that name.
+            raise TypeError(
+                f"{owner}.{field} is annotated {annotation!r}: a field may be a table or a nested "
+                "value, not either, since both are written as mappings."
+            )
+        return atoms
+    if origin in (Mapping, dict):
+        key, value = typing.get_args(annotation) or (None, None)
+        if key is not str:
+            raise TypeError(
+                f"{owner}.{field} is annotated {annotation!r}: a table's entries are named by strings, "
+                "so its key type must be str."
+            )
+        return (_Table(_atoms(value, owner, field)),)
     if annotation is type(None):
         return (_Null(),)
     if origin is typing.Literal:
@@ -377,9 +495,14 @@ def _atoms(annotation: object, owner: str, field: str) -> tuple[object, ...]:
         return (_Nested(annotation),)
     raise TypeError(
         f"{owner}.{field} is annotated {annotation!r}, which a settings mapping cannot check. A field "
-        "is a number, string, boolean, Literal, nested settings value, tuple of those, or a union with "
-        "None."
+        "is a number, string, boolean, Literal, nested settings value, tuple of those, table of those "
+        "by name (Mapping[str, ...]), or a union with None."
     )
+
+
+def _table_of(atoms: Iterable[object]) -> _Table | None:
+    """The table among ``atoms``, if the position is one (at most one can be -- see :func:`_atoms`)."""
+    return next((atom for atom in atoms if isinstance(atom, _Table)), None)
 
 
 def _describe(atoms: Iterable[object], kinds: Mapping[str, type]) -> str:

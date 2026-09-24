@@ -29,6 +29,9 @@ from typing import TYPE_CHECKING
 import equinox as eqx
 import jax.numpy as jnp
 
+# Imported at run time rather than for type checking alone: `LimitedUpwind.limiter` is annotated with
+# it, and a settings mapping reads that annotation to decide what a case file may put in the field.
+from aquaflux.schemes import Limiter
 from aquaflux.vectors import dot
 
 from .face_flux import FaceFluxOperator
@@ -36,7 +39,6 @@ from .face_flux import FaceFluxOperator
 if TYPE_CHECKING:
     from aquaflux.context import FieldContext
     from aquaflux.mesh import FaceCellConnectivity
-    from aquaflux.schemes import Limiter
 
 
 def _upwind_value(

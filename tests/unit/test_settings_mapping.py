@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Literal
 
 import numpy as np
@@ -300,3 +300,109 @@ def test_a_field_whose_annotation_cannot_be_checked_fails_when_the_mapping_is_bu
 
     with pytest.raises(TypeError, match=r"_Opaque.callback is annotated .* cannot check"):
         SettingsMapping([_Opaque])
+
+
+# --- tables: a mapping from names the file chooses to entries of one form ---------------------
+#
+# A case file's boundary conditions are one entry per patch, keyed by the patch's name. The keys are
+# names rather than fields, so a table carries no `kind`; its field's `Mapping[str, ...]` annotation is
+# what says a mapping in that position is one.
+
+
+@dataclasses.dataclass(frozen=True)
+class _Tabled:
+    smoothers: Mapping[str, _Smoother] = dataclasses.field(default_factory=dict)
+    counts: Mapping[str, int] | None = None
+
+
+_TABLED = SettingsMapping([_Tabled, _Smoother])
+
+
+def test_a_table_is_written_as_its_entries_by_name_and_read_back_equal() -> None:
+    value = _Tabled(smoothers={"inlet": _Smoother(sweeps=2), "wall": _Smoother()}, counts={"a": 1})
+    mapping = _TABLED.to_mapping(value)
+    assert mapping == {
+        "kind": "_Tabled",
+        "smoothers": {"inlet": {"kind": "_Smoother", "sweeps": 2}, "wall": {"kind": "_Smoother"}},
+        "counts": {"a": 1},
+    }
+    read = _TABLED.from_mapping(mapping)
+    assert read == value
+    assert list(read.smoothers) == ["inlet", "wall"]  # the file's order is kept
+    assert isinstance(read.smoothers["inlet"], _Smoother)
+
+
+def test_a_table_read_back_cannot_be_changed_through_the_frozen_value() -> None:
+    read = _TABLED.from_mapping({"kind": "_Tabled", "smoothers": {"inlet": {"kind": "_Smoother"}}})
+    with pytest.raises(TypeError):
+        read.smoothers["outlet"] = _Smoother()  # type: ignore[index]
+
+
+def test_an_empty_table_at_its_default_is_omitted() -> None:
+    assert _TABLED.to_mapping(_Tabled()) == {"kind": "_Tabled"}
+
+
+def test_an_entry_may_be_named_kind_since_a_table_has_no_kind_of_its_own() -> None:
+    """The reading is decided by the position, never by whether a ``kind`` key is present."""
+    read = _TABLED.from_mapping({"kind": "_Tabled", "counts": {"kind": 3}})
+    assert dict(read.counts) == {"kind": 3}
+
+
+@pytest.mark.parametrize(
+    ("mapping", "match"),
+    [
+        (
+            {"smoothers": {"inlet": {"kind": "Chebyshev"}}},
+            "unknown kind 'Chebyshev' at 'smoothers.inlet'",
+        ),
+        (
+            {"smoothers": {"inlet": {"kind": "_Smoother", "sweep": 2}}},
+            "_Smoother at 'smoothers.inlet' has no field 'sweep'",
+        ),
+        (
+            {"smoothers": {"inlet": 2}},
+            r"2 at 'smoothers.inlet' is not accepted there; each entry of _Tabled.smoothers takes "
+            r"one of '_Smoother'",
+        ),
+        ({"counts": {"a": "3"}}, r"'3' at 'counts.a' is not accepted there"),
+        ({"counts": {1: 3}}, r"1 at 'counts' is not a name"),
+        (
+            {"smoothers": [1, 2]},
+            r"at 'smoothers' is not accepted there; _Tabled.smoothers takes a table",
+        ),
+    ],
+    ids=[
+        "unknown-kind-in-an-entry",
+        "unknown-field-in-an-entry",
+        "wrong-form-entry",
+        "wrong-form-scalar-entry",
+        "a-key-that-is-not-a-name",
+        "a-list-where-a-table-belongs",
+    ],
+)
+def test_a_bad_table_entry_is_refused_by_its_own_name(mapping, match) -> None:
+    with pytest.raises(ValueError, match=match):
+        _TABLED.from_mapping({"kind": "_Tabled", **mapping})
+
+
+def test_a_table_entry_that_is_not_plain_data_is_refused_on_writing() -> None:
+    with pytest.raises(TypeError, match=r"int64 at 'counts.a' is not plain data"):
+        _TABLED.to_mapping(_Tabled(counts={"a": np.int64(3)}))
+    with pytest.raises(TypeError, match=r"1 at 'counts' is not a name"):
+        _TABLED.to_mapping(_Tabled(counts={1: 3}))  # type: ignore[dict-item]
+
+
+def test_a_table_must_be_keyed_by_name_and_cannot_share_a_position_with_a_nested_value() -> None:
+    @dataclasses.dataclass(frozen=True)
+    class _IntKeyed:
+        table: Mapping[int, int] | None = None
+
+    with pytest.raises(TypeError, match=r"_IntKeyed.table .* key type must be str"):
+        SettingsMapping([_IntKeyed])
+
+    @dataclasses.dataclass(frozen=True)
+    class _Either:
+        either: Mapping[str, int] | _Smoother | None = None
+
+    with pytest.raises(TypeError, match=r"_Either.either .* a table or a nested value"):
+        SettingsMapping([_Either, _Smoother])

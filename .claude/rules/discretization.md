@@ -262,7 +262,12 @@ Principles.
   (a **per-cell** slope limiter `psi ∈ [0,1]`, smooth Venkatakrishnan 1993, `eps² = vol K³`,
   matching `coeff.F90`), so it sits beside the gradient/interpolation schemes — keeping the
   `discretization → schemes` dependency one-way (a `schemes/` scheme could want limiting; it must
-  not import *up* into `discretization`). The limiter is **held by `LimitedUpwind`**
+  not import *up* into `discretization`). ⚠️ **`advection.py` imports `Limiter` at RUN TIME, not under
+  `TYPE_CHECKING` (2026-09-24, #437) — do not move it back.** `LimitedUpwind.limiter` is annotated with
+  it, and the case-file reader's `SettingsMapping` resolves that annotation with `typing.get_type_hints`
+  to decide what a file may put there; under `TYPE_CHECKING` the name does not exist at run time and
+  building the case registry raises `NameError` at import. No cycle: `schemes/` imports nothing from
+  `discretization/`. The limiter is **held by `LimitedUpwind`**
   (`LimitedUpwind(limiter=…)`, in `advection.py`) and
   evaluated only when that scheme runs — a diffusion-only or first-order-advection solve never
   forms it (`psi` is not a shared/gathered field; `limiter=None` gives `psi = 1`, unlimited 2nd
