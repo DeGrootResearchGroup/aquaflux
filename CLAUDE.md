@@ -650,6 +650,28 @@ does this catch, and did I verify that it would?** A green suite answers "does t
 written"; it does not answer "can these tests tell a correct implementation from a broken one" unless
 that has been checked by actually breaking something and watching the suite react.
 
+**⚠️ THE SAME DEFECT IN A MEASUREMENT SCRIPT HAS NO RUNNER TO NOTICE IT, AND THAT MAKES IT WORSE.**
+Everything above is about the test suite, where at least a green count is a claim someone might
+interrogate. A **printed** check in a harness is read once, believed, and quoted afterwards. Measured
+2026-09-24, while separating two variables in the radiation grid's cost: a 2x2 of measurements was
+printed with a closure check reading `closure: 5.01 = 5.01 (must agree)`, and it was read as
+corroboration that the four corners were consistent. **Both paths through a 2x2 are the same quotient
+with the middle corner cancelling** — `(B/A)(D/B)` and `(D/C)(C/A)` are each `D/A` — so it agrees for
+*any* four numbers, including four wrong ones. There was no second path to find and the check had never
+been able to fail.
+
+- **The phrasing is what did the damage, not the arithmetic.** The line carried a `must agree` label, a
+  pair of numbers and a tick. **A tautology dressed as an assertion is worse than the bare quantity**,
+  because the phrasing is exactly what stops a reader asking what it could ever have shown.
+- **Concrete trigger:** *before writing `must`, `expected`, `should equal` or a tick beside a computed
+  pair — in a script, a log line, or a commit message — ask what inputs would make it disagree. If none
+  would, it is a derived quantity and must be labelled as one.*
+- **The general form, which cost more than the check did:** a number that matches what you already
+  believe is the least reliable kind of agreement, and the instinct it produces is to stop. Decompose it
+  first. In the same session a gap of exactly 1.37x was read as confirming a known 1.37x machine spread,
+  and was in fact **1.12x of receiver composition times 1.22x of everything else** — two effects whose
+  product looked like one clean corroboration.
+
 **⚠️ CI IS NOT A SUPERSET OF A LOCAL RUN, AND `importorskip` IS WHY.** CI installs `.[test]`, which does
 **not** include the optional `petsc` extra, so every module guarded by `pytest.importorskip("petsc4py")`
 — `tests/integration/test_coupled_amg.py` and `test_coupled_field_split.py` — is **skipped there and runs
