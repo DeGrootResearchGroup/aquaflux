@@ -1558,14 +1558,34 @@ Both grid rates are the **area-sized default grid**; a 128³ grid roughly double
 third axis again. So the honest statement is **a few hundredfold, 260-675x across these corners**,
 and any single number needs its row and its column.
 
-⚠️ **AND THE RECEIVER EFFECT IS 1.7-1.9x, NOT THE 3.4x FIRST RECORDED HERE AND IN #503** -- that
-figure divided pipe cells on the default grid by random receivers on a **128³** grid, so it
-conflated the receiver population with the resolution. Measured separately, at a fixed grid the
-population is worth 1.70x and 1.87x (two runs), and at a fixed population the resolution is worth
-2.00x and 1.33x. The mechanism behind the receiver half still holds -- a ray from the lamp crosses
-the whole chamber through empty voxels before reaching the wall beside a pipe cell, so the walk's
-cost is the distance travelled (#503) -- but it is worth less than half what the conflated figure
-claimed. For scale in the other
+⚠️ **THE RECEIVER POPULATION AND THE GRID RESOLUTION INTERACT, so neither has a single factor
+and two earlier attempts to give one here were wrong.** The first divided pipe cells on the
+area-sized default grid by random receivers on a **128³** grid and called the quotient a receiver
+effect -- two variables at once. The second decomposed it into 1.70/1.87x and 2.00/1.33x, which
+paired numbers from *different runs* on a machine whose spread at one of those corners is 1.37x,
+and rested on a corner -- pipe cells at 128³ -- that had never been measured. Both are deleted
+rather than annotated.
+
+**Measured properly: all four corners in one process, 300,000 rays each, alternating twice,
+fastest pass per corner** (`bodyWall.stl`, 53,500 triangles, jax 0.10.2, CPU, x64, macOS arm64,
+11 cores):
+
+| | area-sized default (212, 11, 114) | 128³ | resolution is worth |
+|---|---|---|---|
+| **pipe cells** (52% blocked) | 28,248 rays/s | 92,038 | **3.26x** |
+| **random cells** (10% blocked) | 79,963 | 141,451 | **1.77x** |
+| **population is worth** | **2.83x** | **1.54x** | closure 5.01 = 5.01 |
+
+**The interaction is the finding, and it confirms the distance story rather than weakening it.**
+The default grid is near cubic at 8.2 mm; a 128³ grid over this long box is 13.6 mm along x and
+much finer across. Pipe-cell rays run *axially*, the length of the chamber, so the coarse axial
+voxel is worth **3.26x** to them and only 1.77x to randomly aimed rays. What sets the cost is the
+voxel size along the axis the rays actually traverse -- which is why the population effect is
+2.83x on the near-cubic grid and only 1.54x once the axial steps are cheap.
+
+⚠️ **This makes the near-cubic default questionable for a long thin vessel** -- 128³ is anisotropic
+and beats it at every corner here. Not changed: one scene, and the sizing rule should not be
+rewritten around it. Recorded as the thing to test in #503. For scale in the other
 direction, the *entire* field with analytic occlusion -- all 1,635,909 cells, gather arithmetic
 included -- takes **557 s** (`run-20260922-125655.log`), while the grid mask alone extrapolates
 to **88 h** at the 38,700 rays/s measured here. **The triangulated mask costs about 600x
