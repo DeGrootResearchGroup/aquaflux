@@ -129,3 +129,72 @@ def test_a_grid_needs_triangles_and_a_positive_resolution():
         TriangleGrid.build(np.zeros((0, 3, 3)))
     with pytest.raises(ValueError, match="at least 1 voxel"):
         TriangleGrid.build(scattered_triangles(4, rng), resolution=0)
+
+
+def test_the_near_margin_is_read_in_LENGTH_units_not_as_a_share_of_the_segment():
+    """``min_distance`` is a length, as :func:`segment_is_cut` takes it, and the grid must read
+    it the same way -- it divides by the segment's length before comparing.
+
+    Every other fixture in this file runs segments about one unit long with a hair of a margin,
+    where a length and a fraction of a length are indistinguishable, so none of them can tell
+    the two readings apart. This one puts a blocker halfway along a segment **ten** units long:
+    a margin of 3 lengths reaches 0.3 of the way, so the blocker at 0.5 counts, while the same
+    number read as a share of the segment sits past the far end and would hide it. A margin of 7
+    genuinely does hide it, which is the other half of the check -- a grid that ignored the
+    margin entirely would pass the first assertion and fail this one.
+    """
+    vertices = np.array(
+        [
+            [[5.0, -1.0, -1.0], [5.0, 3.0, -1.0], [5.0, 0.0, 3.0]],  # across the segment at 0.5
+            [[8.0, 4.0, 4.0], [8.0, 6.0, 4.0], [8.0, 5.0, 6.0]],  # off to the side, for extent
+        ]
+    )
+    origin = np.zeros((2, 3))
+    target = np.tile([10.0, 0.0, 0.0], (2, 1))
+    near = np.array([3.0, 7.0])
+    found = TriangleGrid.build(vertices).blocks(origin, target, near)
+    # Pinned against the geometry itself, not only against the unaccelerated path, so the two
+    # cannot be wrong together.
+    assert found.tolist() == [True, False]
+    np.testing.assert_array_equal(found, brute(origin, target, vertices, near))
+
+
+def test_the_work_limit_bounds_the_pairs_it_holds_without_changing_the_answers():
+    """A step tests every live ray against everything its voxel holds, so the pairs of one step
+    are unbounded unless something bounds them -- and a coarse grid over many rays is exactly
+    where that bites: the first attempt to walk a reactor's wall was killed for memory, not
+    slow. Splitting a step into groups must be invisible in the answers, so the same walk is run
+    at limits far below one step's pairs and compared with the unsplit one.
+    """
+    rng = np.random.default_rng(13)
+    vertices = scattered_triangles(300, rng)
+    origin, target = rays_through(400, rng)
+    near = np.zeros(len(origin))
+    grid = TriangleGrid.build(vertices, resolution=4)
+    whole = grid.blocks(origin, target, near)
+    assert 0.2 < whole.mean() < 0.9, f"fixture is one-sided: {whole.mean()}"
+    for limit in (1, 17, 500):
+        np.testing.assert_array_equal(grid.blocks(origin, target, near, work_limit=limit), whole)
+
+
+def test_the_default_resolution_is_sized_by_the_TRIANGLES_AREA_not_the_boxs_volume():
+    """The occupancy target is about a surface, because blocking triangles are a surface.
+
+    A shell in a large box is the case that separates the two rules: its triangles occupy the
+    voxels its sheet passes through, of order ``area / size**2``, while the box holds
+    ``volume / size**3`` of them. Sizing by the volume therefore lands a shell in far too few
+    voxels -- measured on a reactor wall, 217 triangles in an occupied voxel against the ten
+    intended. The tolerance here is loose on the high side on purpose: a triangle registers in
+    every voxel its bounding box spans, so entries per voxel run above the sheet's own
+    occupancy.
+    """
+    rng = np.random.default_rng(4)
+    angle = rng.uniform(0.0, 2.0 * np.pi, 3000)
+    height = rng.uniform(-4.0, 4.0, 3000)
+    # A thin cylindrical shell of small triangles, inside a box eight times as long as it is wide.
+    centre = np.stack([np.cos(angle), np.sin(angle), height], axis=1)
+    shell = centre[:, None, :] + 0.02 * rng.normal(size=(3000, 3, 3))
+    grid = TriangleGrid.build(shell)
+    occupied = np.diff(grid.starts)
+    assert (occupied > 0).sum() > 300, f"the shell landed in {(occupied > 0).sum()} voxels"
+    assert occupied[occupied > 0].mean() < 40.0, occupied[occupied > 0].mean()

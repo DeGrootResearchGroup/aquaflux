@@ -1470,6 +1470,151 @@ clipped start still covers the true path. The entry point saves steps; it does n
 correctness. The separate early-out for a segment that misses the box entirely *is* load-bearing
 and has its own test.
 
+**⚠️ THREE DEFECTS SURVIVED THE FIRST ROUND OF TESTS AND ALL THREE SURFACED ON FIRST USE AT
+SCALE — the pattern is worth more than the individual bugs.** Every fixture in the first suite ran
+segments about one unit long, with a margin of 1e-6, on a few hundred triangles scattered through a
+cube. That is one shape of input, repeated; the suite could not distinguish a correct
+implementation from three broken ones.
+
+1. **`min_distance` was read as a share of the segment, not as a length.** `segment_is_cut` takes
+   it in length units and divides by the segment's length; the grid compared it against the
+   parameter directly. On a unit-length segment with a 1e-6 margin the two are indistinguishable,
+   which is every fixture that existed. It bites on a segment whose length is not one — a blocker
+   halfway along a ten-unit segment with a margin of 3 is blocked by the correct reading and clear
+   by the wrong one.
+2. **The candidate expansion had no work limit.** A step of the walk tests every live ray against
+   everything its voxel holds, and `_test` built that whole (ray, triangle) array at once, while
+   `segment_is_cut` has bounded its own block all along. The first attempt to walk the reactor wall
+   with 1M rays was **killed for memory**, not slow. `blocks` now takes `work_limit` (the same
+   4,000,000-pair default) and `RayCastOcclusion` passes its own through.
+3. **The default resolution was sized from the box's VOLUME, and blocking triangles are a
+   SURFACE.** Voxels occupied by a sheet go as `area / size**2`, not `volume / size**3`, so sizing
+   one voxel per ten triangles assumes a filled box. On the reactor wall — 53,500 triangles over
+   ~0.3 m^2 inside a 1.74 x 0.09 x 0.94 m box — it built 5,350 voxels of which **298** were
+   occupied, holding **217 triangles each** against the ten intended. Sizing from the triangles'
+   own area gives 6,537 occupied voxels holding 18.4 each, near cubic to 0.5%. (Entries per voxel
+   run about twice the target because a triangle registers in every voxel its bounding box spans;
+   that is expected and the test's tolerance says so.)
+
+**Wall clock against resolution, on the reactor wall** (500,000 cell-to-facet rays, `bodyWall.stl`,
+jax 0.10.2, CPU, x64, macOS arm64, 11 cores; every arm agreed with every other bit for bit, which
+is also the cross-check on the work-limit chunking):
+
+| grid | run 1 | run 2 |
+|---|---|---|
+| area-sized default, (212, 11, 114) | 65,600 | 72,500 rays/s |
+| 32³ | 47,300 | — |
+| 64³ | 102,800 | — |
+| 128³ | 131,500 | 96,300 |
+| 192³ | 106,200 | — |
+| (424, 22, 228) | — | 85,900 |
+| (636, 33, 342) | — | 77,100 |
+
+⚠️ **Read the spread before the ranking: 128³ moved 1.37x between two identical runs.** What the
+two runs support is that a 128³-like grid is **1.3-1.8x** faster than the area-sized default and
+that finer than that is not better; the ordering among the three finer arms is inside the noise and
+is not established. `_TARGET_PER_VOXEL` was therefore left at ten — lowering it is not supported by
+this measurement, whatever the single fastest row says.
+
+**THE MASK IS EXACT ON A REAL REACTOR, AND THE ONLY DISAGREEMENT IS THE STL'S IDEA OF A
+CIRCLE.** `validation/sozzi_radiation/grid_mask_check.py` runs the general method -- the vessel
+wall as the 53,500 triangles `bodyWall.stl` actually holds, culled by the grid -- against the
+hand-derived analytic occluder that the Sozzi comparison uses, which is exact because that fluid
+is three convex cylinders. Configuration: 7,516 lamp facets, 24,000 receivers (20,000 of the
+310,886 pipe cells, 4,000 chamber cells as a control), 180,384,000 rays, area-sized grid
+(212, 11, 114), `UniformAbsorption(35.67)`, jax 0.10.2, CPU, x64, macOS arm64, 11 cores, 78 min.
+
+| | pipes, 20,000 cells | chamber, 4,000 cells |
+|---|---|---|
+| pairs masked differently, per cell | 88.8 of 7,516 | **0** |
+| relative difference in `G`, median / p99 / max | 1.2% / 8.9% / 54% | **0 / 0 / 0** |
+
+**The chamber control is exactly zero**: the faceted wall blocks nothing where the ideal one
+blocks nothing, on four thousand cells. And of the 1,776,306 pairs the two masks disagree on,
+**99.993% cross the opening between 0.976 and 0.9997 of its radius** (median 0.989). An STL
+describes a round pipe as an inscribed polygon -- `cos(pi/15) = 0.978` puts this one at about
+fifteen sides -- and the sliver between that polygon and the circle is the entire disagreement.
+Neither mask is wrong; they are given different geometry. This is what makes the case for
+describing blocking geometry as primitives rather than triangles, where the circle *is* the
+geometry.
+
+⚠️ **Two things the median hides, both worth keeping.** The worst cell moves by **54%**: cells
+deep in a pipe see a sliver of lamp, so a handful of facets carry the whole signal and one of
+them switching is a large relative change on a small number. And 0.007% of the disputed pairs --
+about 124 of them -- fall outside the rim band and are **not explained**; they are too few to
+matter for a field and too specific to dismiss, so they are recorded rather than rounded away.
+
+**Cost, measured in the same run, and it is the real argument.** The analytic arm took **6.9 s**
+against the grid's **4,659.8 s** on those same 180M rays -- **675x**. ⚠️ **Quote that figure with
+its scene: it is the most favourable corner of a table, not a property of the method.** Two
+choices move it, and conflating them is easy -- which receivers, and which primitive arm.
+
+| primitive arm | vs grid on PIPE cells (38,711 rays/s) | vs grid on RANDOM receivers (65,647) |
+|---|---|---|
+| hand-derived `BranchOpenings`, 26.1M rays/s | **675x** | 398x |
+| general `Outside` of three cylinders, 17.2M rays/s | 444x | 262x |
+
+Both grid rates are the **area-sized default grid**; a 128³ grid roughly doubles them, which is a
+third axis again. So the honest statement is **a few hundredfold, 260-675x across these corners**,
+and any single number needs its row and its column.
+
+⚠️ **THE RECEIVER POPULATION AND THE GRID RESOLUTION INTERACT, so neither has a single factor
+and two earlier attempts to give one here were wrong.** The first divided pipe cells on the
+area-sized default grid by random receivers on a **128³** grid and called the quotient a receiver
+effect -- two variables at once. The second decomposed it into 1.70/1.87x and 2.00/1.33x, which
+paired numbers from *different runs* on a machine whose spread at one of those corners is 1.37x,
+and rested on a corner -- pipe cells at 128³ -- that had never been measured. Both are deleted
+rather than annotated.
+
+**Measured properly: all four corners in one process, 300,000 rays each, alternating twice,
+fastest pass per corner** (`bodyWall.stl`, 53,500 triangles, jax 0.10.2, CPU, x64, macOS arm64,
+11 cores):
+
+| | area-sized default (212, 11, 114) | 128³ | resolution is worth |
+|---|---|---|---|
+| **pipe cells** (52% blocked) | 28,248 rays/s | 92,038 | **3.26x** |
+| **random cells** (10% blocked) | 79,963 | 141,451 | **1.77x** |
+| **population is worth** | **2.83x** | **1.54x** | |
+
+⚠️ **THE "CLOSURE CHECK" THIS SQUARE FIRST SHIPPED WITH IS VACUOUS, and it is the same defect as a
+test that cannot fail.** Both paths through a 2x2 -- `(B/A)(D/B)` and `(D/C)(C/A)` -- are `D/A`
+with the middle corner cancelling, so they agree for **any** four numbers, including four wrong
+ones. It was printed as `5.01 = 5.01` and read as corroboration; it corroborates nothing.
+
+**The phrasing is what did the damage, and that part generalizes past this table.** The line
+carried a `must agree` label, two numbers and a tick. A tautology dressed as an assertion is
+**worse than the bare quantity**, because the phrasing is precisely what stops a reader asking
+what it could ever have shown -- and there is no test runner watching a print statement the way
+one watches an assert. Before writing `must`, `expected` or a tick beside a computed pair, ask
+what inputs would make it disagree; if none would, it is a derived quantity and must be labelled
+as one. What
+makes this square worth more than the factors it replaces is not a check, it is that all four
+corners come from **one process, back to back**, so no ratio spans a run boundary.
+
+**What licenses reading these as real is the within-process repeat**, which is far tighter than the
+cross-run spread: pass to pass, the two pipe corners repeated to **1.10x** and the two random
+corners to **1.01x**, against **1.37x** between runs at one corner on different days. Every effect
+in the table (1.54x and up) clears the within-process figure; several effects in the *deleted*
+decompositions (1.33x, 1.70x) sat inside the cross-run band that produced them, which is why they
+could not have been resolved however carefully they were divided. **Alternate the passes and take
+the fastest per corner** -- a single pass gives a number that looks decisive and is not.
+
+**The interaction is the finding, and it confirms the distance story rather than weakening it.**
+The default grid is near cubic at 8.2 mm; a 128³ grid over this long box is 13.6 mm along x and
+much finer across. Pipe-cell rays run *axially*, the length of the chamber, so the coarse axial
+voxel is worth **3.26x** to them and only 1.77x to randomly aimed rays. What sets the cost is the
+voxel size along the axis the rays actually traverse -- which is why the population effect is
+2.83x on the near-cubic grid and only 1.54x once the axial steps are cheap.
+
+⚠️ **This makes the near-cubic default questionable for a long thin vessel** -- 128³ is anisotropic
+and beats it at every corner here. Not changed: one scene, and the sizing rule should not be
+rewritten around it. Recorded as the thing to test in #503. For scale in the other
+direction, the *entire* field with analytic occlusion -- all 1,635,909 cells, gather arithmetic
+included -- takes **557 s** (`run-20260922-125655.log`), while the grid mask alone extrapolates
+to **88 h** at the 38,700 rays/s measured here. **The triangulated mask costs about 600x
+everything else in the calculation put together**, which is why the grid is the fallback for
+geometry that exists only as triangles and not the path a real reactor should take (issue #501).
+
 **What it does not fix: the RAY COUNT, which is the binding cost at mesh scale.** 1.6M cells
 against 7,516 facets is 1.2e10 segments however cheaply each is answered. The grid makes scenes
 up to a few times 1e8 rays practical; beyond that the facet count has to come down (the lamp

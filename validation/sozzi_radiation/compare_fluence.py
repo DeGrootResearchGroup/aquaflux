@@ -91,8 +91,15 @@ class BranchOpenings(Occluder):
         p = jnp.asarray(position, dtype=float)
         return ~(_in_chamber(p) | _in_inlet(p) | _in_riser(p))
 
-    def blocks(self, origin, target, min_distance) -> jnp.ndarray:
-        del min_distance  # the lamp is not an occluder here, so nothing can shadow itself
+    def crossing_ratio(self, origin, target) -> jnp.ndarray:
+        """Where each segment crosses its opening, as a fraction of the opening's radius.
+
+        One at the rim, less inside it, more outside. :meth:`blocks` is exactly ``ratio > 1`` for
+        a target in a pipe, and this is separate from it so that a study can ask *how far from
+        the rim* a sight line passes -- which is what distinguishes a mask that disagrees with
+        another because the two describe the opening differently from one that is simply wrong.
+        A segment aimed at a cell in the chamber crosses no opening and gets zero.
+        """
         o, t = jnp.asarray(origin, dtype=float), jnp.asarray(target, dtype=float)
         d = t - o
         # Inlet: where the segment crosses the end plane.
@@ -101,7 +108,7 @@ class BranchOpenings(Occluder):
             + ((X_BODY_END - o[..., 0]) / jnp.where(d[..., 0] == 0.0, 1.0, d[..., 0]))[..., None]
             * d
         )
-        through_inlet = at_plane[..., 1] ** 2 + at_plane[..., 2] ** 2 <= R_PIPE**2
+        inlet = jnp.sqrt(at_plane[..., 1] ** 2 + at_plane[..., 2] ** 2) / R_PIPE
         # Riser: where the segment leaves the chamber's cylinder (the origin is inside it).
         a = d[..., 1] ** 2 + d[..., 2] ** 2
         b = 2.0 * (o[..., 1] * d[..., 1] + o[..., 2] * d[..., 2])
@@ -109,13 +116,16 @@ class BranchOpenings(Occluder):
         safe_a = jnp.where(a == 0.0, 1.0, a)
         exit_t = (-b + jnp.sqrt(jnp.maximum(b * b - 4.0 * safe_a * c, 0.0))) / (2.0 * safe_a)
         exit = o + exit_t[..., None] * d
-        through_riser = ((exit[..., 0] - X_RISER) ** 2 + exit[..., 1] ** 2 <= R_PIPE**2) & (
-            exit[..., 2] > 0.0
+        riser = jnp.where(
+            exit[..., 2] > 0.0,
+            jnp.sqrt((exit[..., 0] - X_RISER) ** 2 + exit[..., 1] ** 2) / R_PIPE,
+            jnp.inf,
         )
-        in_chamber = _in_chamber(t)
-        return jnp.where(
-            in_chamber, False, jnp.where(t[..., 0] > X_BODY_END, ~through_inlet, ~through_riser)
-        )
+        return jnp.where(_in_chamber(t), 0.0, jnp.where(t[..., 0] > X_BODY_END, inlet, riser))
+
+    def blocks(self, origin, target, min_distance) -> jnp.ndarray:
+        del min_distance  # the lamp is not an occluder here, so nothing can shadow itself
+        return self.crossing_ratio(origin, target) > 1.0
 
 
 def _in_chamber(p):
