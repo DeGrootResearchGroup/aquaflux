@@ -321,26 +321,14 @@ class CoupledRANS(eqx.Module):
         Raises
         ------
         ValueError
-            If ``turbulence.density`` does not match ``momentum``'s (its ``PropertyModel``'s
-            ``"density"``, evaluated per cell). Both values now originate from a
-            :class:`~aquaflux.properties.PropertyModel` -- ``SSTTurbulence.build``'s
-            ``properties`` argument and ``MomentumContinuity.build``'s -- but they are still two
-            separate models with nothing forcing them to describe the same fluid, so nothing else
-            catches a mismatch: the k/omega volume flux (``mdot / density``) would then be wrong
-            by that ratio in every SST consumer -- both residuals, both AMGs, both shift diagonals
-            -- with no other symptom, since the flow block is unaffected and solves fine.
+            If the two blocks describe different fluids or disagree about which patches are walls.
+            Both are checked by the closure itself, which owns each declaration being compared --
+            see :meth:`~aquaflux.turbulence.SSTTurbulence.refuse_a_density_the_flow_disagrees_with`
+            and :meth:`~aquaflux.turbulence.SSTTurbulence.refuse_a_wall_set_the_flow_disagrees_with`
+            for what each mismatch costs.
         """
-        flow_density = momentum.density
-        if not bool(jnp.all(jnp.isclose(flow_density, turbulence.density))):
-            raise ValueError(
-                f"SSTTurbulence.density ({turbulence.density}) does not match the flow "
-                f"assembler's density (range [{float(jnp.min(flow_density))}, "
-                f"{float(jnp.max(flow_density))}]). The two come from separate PropertyModels -- "
-                "SSTTurbulence.build(properties=...) and MomentumContinuity.build(properties=...) "
-                "-- and nothing else checks that they agree: if they don't, the k/omega volume "
-                "flux (mdot / density) is wrong by that ratio in every SST consumer, silently. "
-                "Pass a PropertyModel with the same density to both."
-            )
+        turbulence.refuse_a_density_the_flow_disagrees_with(momentum)
+        turbulence.refuse_a_wall_set_the_flow_disagrees_with(momentum)
         return cls(
             momentum,
             turbulence.resolve_boundaries(),

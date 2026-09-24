@@ -19,7 +19,9 @@ contaminant does in a reactor — solved on the flow the coupled block produces.
 - **`scalar.py` — `ScalarTransport`, `effective_diffusivity`, `DIFFUSIVITY`.** A configured scalar
   transport equation. `build(mesh, geometry, diffusivity, boundary, advection_scheme, *,
   gradient_scheme, sources, transient)` fixes the configuration; `residual(flux)` returns the
-  residual function for a particular flow. It composes `AdvectionFlux` + `DiffusionFlux` +
+  residual function for a particular flow. `build` refuses a boundary collection holding anything but
+  single-field closures (`refuse_a_closure_that_closes_other_fields`, #355), so a flow bundle is named
+  by patch rather than failing later on a method it lacks. It composes `AdvectionFlux` + `DiffusionFlux` +
   the injected `VolumeSource`s + the optional `TransientTerm` through the ordinary
   `ResidualAssembler` — it adds no numerics of its own, only the composition and the two
   conventions below.

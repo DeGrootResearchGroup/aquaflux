@@ -172,3 +172,64 @@ class BoundaryConditions(eqx.Module):
             owner = face_cells.owner[faces]
             result = result.at[faces].set(closure(bc, faces, owner))
         return result
+
+
+def _named(fields: tuple[str, ...]) -> str:
+    """``fields`` as prose -- ``"velocity, pressure and mdot"``, or the single-field phrasing."""
+    if not fields:
+        return "one field, its host equation's"
+    if len(fields) == 1:
+        return fields[0]
+    return f"{', '.join(fields[:-1])} and {fields[-1]}"
+
+
+def refuse_a_closure_that_closes_other_fields(
+    boundary: BoundaryConditions, closes: tuple[str, ...], caller: str
+) -> None:
+    """Refuse any closure in ``boundary`` that does not close exactly ``closes``.
+
+    The two closure families differ in arity -- a flow bundle closes the velocity, the pressure and
+    the mass flux, while a scalar condition closes one field -- and nothing about handing one where
+    the other belongs is caught by the shapes. Left unchecked it surfaces from inside an assembler
+    as an ``AttributeError`` for whichever method the wrong family lacks: that names an internal
+    method rather than the mistake, and does not say which patch carries it.
+
+    This is deliberately **not** inside :meth:`BoundaryConditions.resolve`. The collection is generic
+    over its closure type -- that is what lets it carry a plain per-patch value driven by a caller's
+    own callable -- so the arity a given assembler needs is the assembler's knowledge, not the
+    collection's. Every patch that disagrees is reported at once, not just the first.
+
+    Parameters
+    ----------
+    boundary : BoundaryConditions
+        The collection to check, bound or unbound.
+    closes : tuple of str
+        What each closure must declare from its ``closes()``; empty for a single-field equation
+        (:data:`~aquaflux.boundary.HOST_EQUATION_FIELD`).
+    caller : str
+        The builder to name in the message.
+
+    Raises
+    ------
+    ValueError
+        If any closure declares a different set, or declares nothing at all.
+    """
+    wrong = {
+        name: getattr(closure, "closes", None)
+        for name, closure in boundary.conditions.items()
+        if not callable(getattr(closure, "closes", None)) or closure.closes() != closes
+    }
+    if not wrong:
+        return
+    listed = "; ".join(
+        f"'{name}' has a {type(boundary.conditions[name]).__name__}, which closes "
+        + (
+            _named(boundary.conditions[name].closes())
+            if callable(declared)
+            else "nothing it declares"
+        )
+        for name, declared in wrong.items()
+    )
+    raise ValueError(
+        f"{caller}: {listed}. This equation needs every patch closed for {_named(closes)}."
+    )

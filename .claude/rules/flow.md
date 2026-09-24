@@ -20,6 +20,16 @@ The coupled p–U block — the project's central bet. Solved **monolithically**
 Engineering Principles.
 
 ## Status — BUILT (steady laminar, Poiseuille-validated)
+- **`FlowBoundary.closes() -> FLOW_FIELDS = ("velocity", "pressure", "mdot")` (#355).** A flow
+  condition is a *bundle* of three closures where a scalar `BoundaryCondition` is one, and nothing
+  about their shapes says so. `MomentumContinuity.build` refuses a collection whose closures declare
+  anything else, naming the patch — see `boundary.md` for the mechanism and what it replaces.
+- **`FlowBoundary.shears_flow()` has THREE consumers, and one is inside the residual.** The wetted
+  area for `scales.hydraulic_length`; the **wall-function viscosity override** the momentum assembler
+  selects on exactly these faces, which is solution-affecting; and `CoupledRANS.build`'s wall
+  reconciliation. Its docstring claimed the first only, and said it "never enters the residual" —
+  false since the wall model landed, corrected in #355. It is also this package's `is_wall` predicate:
+  do not add a second one.
 - **`drive.py` — `Drive` → `BoundaryDriven` / `MassFlow` (2026-09-23, #375).** What forces the
   momentum equation, and what that makes of the state. `MomentumContinuity.drive` **replaces the
   `body_force` leaf**, which meant a prescribed input on one case and a live solve unknown on another
