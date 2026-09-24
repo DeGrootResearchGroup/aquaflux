@@ -1,8 +1,14 @@
 """How much of each source a surface's own triangles hide from each receiver.
 
 The emitting surface is the reactor's walls and bodies, so it shadows itself: a bent duct, a
-lamp sleeve, a baffle. That is the part of occlusion no analytic primitive can express, because
-the geometry doing the blocking *is* the geometry doing the emitting.
+lamp sleeve, a baffle. The geometry doing the blocking *is* the geometry doing the emitting,
+which is why it is answered here rather than by a body standing in the light.
+
+⚠️ **This is the fallback, not the first choice.** Where the shape has an analytic description —
+and a vessel usually does — describing the fluid it holds and letting
+:class:`~aquaflux.radiation.occluders.Outside` decide is both exact and orders of magnitude
+cheaper, because it is a formula rather than a search over triangles. What belongs here is a
+surface with no such description, or one whose description has not been written down.
 
 Two strategies answer it, and **neither dominates the other**, which is why both are kept and
 injected rather than one being chosen here:

@@ -24,7 +24,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `profiles.py` — `Isotropic`, `Lambertian`, `CosinePower` | **BUILT** |
 | `gather.py` — `direct_fluence_rate` and `direct_irradiance` | **BUILT** |
 | `absorption.py` — `UniformAbsorption`, `VoxelAbsorption` | **BUILT** |
-| `occluders.py` — `Cylinder`, `HalfSpace` | **BUILT** |
+| `occluders.py` — the primitive library (`HalfSpace`, `Sphere`, `Cylinder`, `Cone`, `Box`), the CSG algebra (`Union`, `Intersection`, `Difference`) and the fluid-region occluder (`Outside`) | **BUILT** |
 | `visibility.py` — the frozen shadow mask | **BUILT** |
 | `triangles.py` — watertight ray-triangle intersection | **BUILT** |
 | `self_occlusion.py` — the `SelfOcclusion` strategies: ray cast, silhouette clip, none | **BUILT** |
@@ -415,6 +415,13 @@ through the gather directly, as `validation/sozzi_radiation/compare_fluence.py` 
 
 ## ⚠️ FORM THE CYLINDER'S DISCRIMINANT AS `a(r^2 - h^2)`, NEVER AS `b^2 - a c`
 
+**One home: `_Tube` in `occluders.py`**, shared with `_Ball` through `_positive_definite_span`,
+and reached by every body with a round side — a cylinder, a lamp's spherical tip, a vessel
+composed of either. ⚠️ **`_Taper` cannot have it**: a cone's quadratic is *indefinite*, so there
+is no positive-definite form to build a closest-approach distance from, and a `Cone` whose
+surface a ray must graze is better described as a `Cylinder` — which is why equal end radii are
+refused rather than quietly accepted.
+
 The naive form subtracts two nearly equal numbers exactly when a ray almost grazes the surface,
 which at *any* precision throws away most of the significant digits. Measured over eighteen
 near-tangential cases — three source distances, offsets a few parts in `1e9` to `1e13` either
@@ -438,6 +445,279 @@ and nothing computed there means anything. Both facets and receivers are checked
 **Do not represent a body twice.** A sleeve that is already an emitting surface must not also be
 an occluder: every ray would leave a facet lying exactly on an occluder, and the emitter's own
 convexity already makes the source-side clamp an exact visibility test for it.
+
+## BLOCKING GEOMETRY AS CAD PRIMITIVES: three layers, and why the middle one is intervals
+
+`occluders.py` is a primitive library, a constructive-solid-geometry algebra over it, and a way
+to describe a vessel by the fluid it holds. The whole of it rests on **one property**, and
+naming that property is what keeps it from being a zoo of special cases.
+
+| layer | what it promises | who implements it |
+|---|---|---|
+| `Occluder` | answers `blocks` and `contains` | anything, including host code over triangles |
+| `Solid` | its inside, along a line, is a **bounded union of intervals** in the line's parameter | every body here |
+| `ConvexSolid` | that union is a **single** interval | `HalfSpace`, `Sphere`, `Cylinder`, `Cone`, `Box` |
+
+**Why the interval is the right middle layer.** Blocking is then "does any interval overlap the
+segment"; `Union` pools intervals, `Intersection` overlaps them pairwise, `Difference` cuts each
+of one body's by another's — so there is one implementation of each operation rather than one
+intersection routine per pair of shapes. The count is a static property of the body (`Union` of
+three convex bodies has three), the same for every ray, so nothing here is a search with a
+data-dependent length and the whole mask stays a single array expression.
+
+**A convex body is a list of inequalities, and that is the deduplication that matters.** Private
+`_Plane`, `_Tube`, `_Ball` and `_Taper` each supply two views of one `f(x) <= 0` — a signed
+distance at a point and an interval along a line. A cylinder is a tube and two planes, a box is
+six planes, a cone is a taper and two planes. So `contains` and the interval **cannot disagree
+about where a surface is**: they are two readings of the same inequalities. And the
+grazing-robust cylinder quadratic below has exactly one home, reached by every body with a round
+side.
+
+⚠️ **`Difference` takes a CONVEX hole**, because the complement of a hole in several pieces
+cannot be written down without sorting and merging its intervals first. `A - (B + C)` is
+`Difference(Difference(A, B), C)`; each cut doubles the interval count, which is the honest
+price. The constructor refuses a multi-interval hole and says this.
+
+## THE FLUID AS REGIONS: `Outside`, and why it beats a hand-derived occluder
+
+A reactor wall is awkward to write as a solid and trivial to write as the *water it holds*.
+`Outside(chamber, inlet, riser)` is everything those three regions are not, and a segment is
+clear exactly when they **cover it end to end** — an interval-covering test over the pooled
+intervals, with no opening identified and no shadow edge derived.
+
+**This is strictly more general than the hand-derived alternative it replaces.** The
+`BranchOpenings` closure in `validation/sozzi_radiation/compare_fluence.py` works out, for that
+one reactor, where each pipe's opening is and what crossing it means. `Outside` needs three
+cylinders and the same three lines describe a chamber-pipe-elbow chain of any length.
+
+**Correctness does not need convexity; cheapness does.** Any `Solid` may be a region — the test
+pools every region's intervals and asks whether together they leave a gap. A *convex* region
+contributes one interval, which is why a chain of chambers and pipes costs a handful of
+comparisons per ray. Convexity is also where the shortcut comes from: two points inside one
+convex region have a clear segment between them by definition, with nothing to test at all.
+
+⚠️ **NEIGHBOURING REGIONS MUST OVERLAP OR TOUCH — A GAP BETWEEN THEM READS AS SOLID**, and reads
+that way silently, as a shadow rather than as an error: the reactor simply goes dark up that
+pipe. A pipe standing on a chamber is described by extending its cylinder *into* the chamber, not
+by stopping it at the chamber's surface, where a curved junction leaves slivers of neither
+region. The overlap is inside the chamber anyway, so it adds nothing to the fluid.
+
+⚠️ **The covering test examines each interval's FAR END, not just the segment's start, and the
+comparison there is STRICT.** Coverage can only first fail at the start or at the right-hand end
+of some interval, and at each of those the pool must *continue past*, not merely reach. Dropping
+either half reports a gap as covered: with only the start examined, a gap beyond it is never
+looked at; with a non-strict comparison, an interval's own far end is trivially satisfied by
+that same interval and no gap is ever found. Both are pinned by
+`test_a_gap_between_two_regions_reads_as_solid`. Sorting the intervals would be the textbook
+covering sweep and is the wrong choice here — a sort over the last axis of a
+receivers-by-facets array materializes a permutation the size of the whole mask, where the
+pairwise test fuses into the reduction and forms nothing.
+
+⚠️ **`Outside` needs the margin at BOTH ENDS of a segment, and that is the same defect that
+once shipped for facet-to-facet rays.** A facet centroid used as a receiver sits exactly on the
+wall the regions are bounded by, so a rounding puts it outside and leaves an infinitesimal
+uncovered sliver at `t = 1`. Over an enclosure that is not a small error but a shadow
+everywhere. `min_distance` is therefore applied at the far end as well as the near one.
+
+**`contains` means "outside every region", which is the right answer for a surface that bounds
+fluid** — a point there is embedded in the wall, and the build-time guard should refuse it. It
+carries a `tolerance`, a length, because a mesh never lands exactly on the surface its cells were
+snapped to and a cell centre a rounding outside a region is a discretization rather than a cell
+in the metal. It applies to that test only: where a *segment* is clear is decided with no slack.
+
+## ⚠️ AN OCCLUDER DECLARES WHETHER IT CAN BE TRACED, AND COMPILING ONE THAT CANNOT IS A CRASH
+
+`Occluder.traceable` (a `ClassVar`, defaulting to `False`, following
+`SelfOcclusion.serves_volume_receivers`) says whether a body's answers are a pure array
+expression. `build_visibility` compiles the bodies that say they can be and calls the rest
+directly.
+
+Both directions are load-bearing, and they pull opposite ways:
+
+- **A primitive wants compiling badly.** A body assembled from several inequalities, or a fluid
+  of several regions, forms several receiver-by-facet intermediates. Evaluated eagerly each one
+  is materialized — hundreds of megabytes at a production chunk — and the mask's cost becomes the
+  cost of writing them rather than of the arithmetic. This is the same failure the ray-triangle
+  test had before `_block_is_cut` was traced, one layer up.
+- **A triangulated body cannot be traced at all.** It walks a grid on the host, dropping rays as
+  they are settled — a search whose whole value is the work it skips, which tracing prices at the
+  same rate as the work it does. Handed a tracer it raises `TracerArrayConversionError`.
+
+⚠️ **Compiling the mask build unconditionally breaks the hybrid, which is the point of having
+both kinds.** Measured directly: a host-side `Occluder` through `build_visibility` raises under a
+blanket `filter_jit`. `test_a_host_side_blocker_and_a_primitive_stand_in_one_scene` puts one of
+each in one scene and goes red if the compile is made unconditional. ⚠️ Note what was **not**
+affected and was first reported as though it were: `RayCastOcclusion(grid=...)` is a
+`SelfOcclusion`, reached through `strategy.field`, not through the occluder list — verified, not
+assumed. The seam is the occluder list alone.
+
+## MEASURED: the Sozzi reactor as three cylinders reproduces the hand-derived occluder EXACTLY (2026-09-23)
+
+`validation/sozzi_radiation/primitive_occlusion.py`, both arms in one process on the same rays.
+Configuration: `Outside(chamber, inlet, riser)` at the tutorial's dimensions (`R_BODY` 0.0445,
+`X_BODY_END` 0.889, `R_PIPE` 0.00955, `X_RISER` 0.04765), against `BranchOpenings` from
+`compare_fluence.py`; the case's own `lampWall.stl` (7,516 facets); **24,000 receivers drawn
+uniformly from the meshed case's 1,635,909 cell centres** (22,250 chamber, 1,200 riser, 640
+inlet); exitance 696.42 W/m², `UniformAbsorption(35.67)`, `NoOcclusion()` for the surface's own
+triangles; jax/jaxlib 0.10.2, CPU, x64, macOS arm64, 11 cores.
+
+| | rays/s | 180M rays | repeat spread over 3 passes |
+|---|---|---|---|
+| `Outside` of three `Cylinder` primitives | **20.7M** | 8.72 s | 1.003x |
+| `BranchOpenings`, hand-derived for this reactor | **28.8M** | 6.27 s | 1.033x |
+
+- **0 of 180 million pairs masked differently**, and the fluence rate agrees to `0.0` relative at
+  the median, the 99th percentile *and* the maximum — not "to rounding", bit for bit. The two
+  describe the same ideal cylinders, so unlike the triangle comparison there is no faceting to
+  explain a difference away, and a disagreement would have been a defect in one of them. The
+  1,840 pipe receivers are where the mask does anything at all, and they carry 13.8M of those
+  pairs, so the agreement is not an artifact of testing mostly-clear geometry.
+- **The general construction costs 1.39x the bespoke one**, which is the honest price of not being
+  told where the openings are: three regions of three inequalities each plus the covering test,
+  against two hand-written quadratics. ⚠️ **That figure needs the three passes to be worth
+  quoting.** Single runs of the same pair on the same machine gave 1.67x and 1.48x; the arms are
+  timed in one process so each is internally fair, but the *ratio* still moves by 20% between runs.
+  Three consecutive passes repeating to 1.003x are what makes 1.39x a number rather than an
+  impression.
+- **The agreement survives a reformulation of the arm it is checked against**, which is worth more
+  than the original check. #502 rewrote `BranchOpenings.blocks` as `crossing_ratio(...) > 1.0` —
+  `sqrt(x^2+y^2)/R > 1` where it had compared squares — which is algebraically the same test and
+  numerically a different one at the rim, exactly where a disagreement would live. Re-run against
+  it: still 0 pairs. So `Outside` matches two independent spellings of the bespoke occluder, not
+  one.
+- **92.8% of pairs lie in one convex region** (92.7% chamber, 0.07% riser, 0% inlet — the lamp is
+  in the chamber, so no facet is in the inlet). ⚠️ **The test does not skip those pairs**: it is
+  one branch-free expression, so every pair pays the same handful of comparisons. What convexity
+  buys is that the handful is all there is.
+
+⚠️ **THAT SHARE IS A PROPERTY OF WHERE THE RECEIVERS ARE, AND SAMPLING THE FLUID BY VOLUME GETS
+IT WRONG.** Drawn uniformly from the *geometry* rather than from the mesh it is **97.1%** — 4.3
+points high, because the snapped mesh refines near the walls and near the lamp, which is exactly
+where the pairs that are *not* in one region live. Quote the cell-centre figure; a volume-uniform
+sample is not the population the field is computed on.
+
+**Against the triangle grid**, which is the comparison the primitive path exists for. ⚠️ **A
+ratio here needs THREE axes named before it means anything**: which analytic arm is the numerator
+(the general construction or the bespoke closure), where the receivers are (pipe cells walk much
+further through empty grid than randomly placed ones), and what resolution the grid is.
+
+Only the primitive arm was measured here, at **20.7M rays/s** — and being one branch-free
+expression it runs at that rate whatever the receivers are, which is what makes it comparable
+against any grid configuration. The grid's four corners are from #502's matched square (300,000
+rays per corner, one process, two alternating passes, fastest per corner):
+
+| grid configuration | grid rays/s | primitives are |
+|---|---|---|
+| pipe cells, area-sized default `(212, 11, 114)` | 28,248 | **732x** |
+| random cells, area-sized default | 79,963 | **259x** |
+| pipe cells, 128³ | 92,038 | **225x** |
+| random cells, 128³ | 141,451 | **146x** |
+
+**The two axes interact, so neither has a single factor.** Resolution is worth **3.26x** on pipe
+cells and **1.77x** on random ones; receiver placement is worth **2.83x** at the default grid and
+**1.54x** at 128³. The mechanism is voxel size *along the axis the rays actually traverse*: the
+area-sized default is near-cubic at 8.2 mm, while 128³ over this long box is 13.6 mm along `x` and
+much finer across, and pipe-cell rays run axially down the length of the chamber. ⚠️ That makes
+**near-cubic voxels look wrong for a long thin vessel** — the anisotropic 128³ beats the default
+at every corner of this square. One scene is not enough to rewrite the sizing rule, and #503 is
+where that is being taken up.
+
+⚠️ **What licenses reading the square is the within-process repeat, not any closure.** Pass to
+pass the pipe corners repeated to 1.10x and the random corners to 1.01x, and every effect in it
+clears that. ⚠️ **A 2x2's "closure identity" is VACUOUS and was twice read as corroboration here** —
+once in this section and once in #502's script. Both paths through a 2x2 are `D/A` with the middle
+corner cancelling, so they agree for *any* four numbers, including four wrong ones. There is no
+independent second path. A printed check that cannot fail is the measurement-script form of the
+vacuous-test defect this file warns about for tests — with no test runner to notice it, and one
+thing worse: **a tautology printed with an assertion's phrasing** (`must agree`, `check:`, a pair
+of numbers and a tick) is more dangerous than the bare quantity would have been, because the
+phrasing is what stops the reader asking what it could ever have shown.
+
+⚠️ **Cross-run division is the remaining soft spot in the four ratios above**: the primitive rate
+is from this harness and the grid rates from #502's square, and the same nominal measurement on
+different days has come out well over 1.1x apart. So read the *column* of ratios as approximate and
+the grid's internal comparisons as sharp. Running both arms in one process is what would fix it,
+and is the reason to fold this harness into `grid_mask_check.py` as a third body rather than keep
+it beside it — at which point the caveat is deleted rather than carried.
+
+⚠️ **A WORKED EXAMPLE OF THE MISTAKE THIS WHOLE SECTION IS ABOUT, MADE WHILE WRITING IT.** The
+acceptance run put "pipe/default" at 38,711 and the square puts it at 28,248 — a factor of 1.37,
+which is also the spread once quoted between repeats, and it was written up here as two
+independent routes to one number and therefore as corroboration. **It is a product of two effects
+that happens to land there.** The acceptance run's receivers were not the square's pipe corner:
+they were 20,000 pipe cells *plus 4,000 chamber cells*, and chamber cells run near the random-cell
+rate. Blending by ray share — time adds, so the effective rate is harmonic — predicts **31,661**
+from composition alone, which is 1.12x of the pure corner; the remaining 1.22x is unexplained and
+sits inside the run-to-run band. **Composition accounts for about a third of the gap and is
+systematic and knowable; the rest is noise.** A number that matches something you already believe
+is the least reliable kind of agreement: decompose it before reading it as a check.
+
+⚠️ **Earlier per-axis figures from this comparison are DELETED, not corrected**: 3.4x, "under 2x",
+1.33x and 1.70x were each computed by dividing numbers from different runs, and the smaller of them
+are at or below the run-to-run variation that produced them — they could not have been resolved
+however carefully they were divided.
+
+**⚠️ THE DEFECT IS IN THE PAIRING, NOT THE DIVISION, WHICH IS WHY CARE DOES NOT FIX IT.** Every one
+of those figures was computed correctly from numbers that were never comparable. Nothing at the
+point of division could have caught it, because division is not where it went wrong — so the
+remedy is structural, not behavioural: **run every arm in one process and report the repeat spread
+beside the result.** The matched square is trustworthy because it removed the opportunity to pair
+across runs, not because anyone was more careful inside it.
+
+⚠️ **An extrapolation, flagged as one: ~595 s for the whole 1.6M-cell mesh** (against ~430 s for
+the hand-derived arm). That is a per-ray rate from a 24,000-receiver run multiplied out by 68x,
+which is exactly the shape of estimate that has been wrong before in this subsystem. Read it
+beside the 557 s the entire field took with analytic occlusion as an order of magnitude, not as a
+prediction, and do **not** subtract the two to infer what the gather alone costs.
+
+⚠️ **The harness falls back to sampling the three cylinders when `work/case` is absent**, and
+says which it used in its summary. Those runs are reproducible anywhere but are a different
+receiver population, and the 97.1% above is what that fallback reports — do not mix the two.
+
+**Two mutation rounds over `occluders.py`, 23 mutations, 22 red.** Each broke one line and the
+suite was rerun (`PYTHONDONTWRITEBYTECODE=1`, per the bytecode trap recorded above). Red: both
+halves of the covering test, the far-end margin, the taper's branch selection, the box's own
+axes, the difference's second piece, the intersection's overlap, the grazing discriminant, the
+segment's far end, the near-origin exclusion, the cylinder's end caps, the convex signed
+distance, the plane's solid side, the union's pooling and its nearest-body distance, the
+difference's hole sign, the tolerance, the covering result's sense, the cone's slope, the ball's
+centre, and the unconditional compile.
+
+⚠️ **ONE MUTATION WAS INVALID, AND A MUTATION THAT GOES RED FOR THE WRONG REASON IS WORSE THAN NO
+MUTATION — IT READS AS COVERAGE.** Written as `0.0 * solid_side[0]` it multiplied an infinity and
+produced a NaN rather than removing the cut, so what it tested was NaN propagation; its red said
+nothing about the line it was aimed at, and taken at face value it would have retired a real
+question as answered. **Check that a mutation's failure comes from the mechanism you intended**,
+not merely that the suite went red — the rerun with a clean removal is what found the survivor
+below.
+
+**The one genuine survivor is DISMISSED, with a measurement rather than an argument**: the
+taper's solid-nappe cut changes no answer reachable through `Cone`, because non-negative end
+radii put the mirror nappe beyond an end cap — 0 disagreements in 160,000 rays over four cone
+shapes (a true cone, a frustum whose apex is far outside it, a tilted narrowing one, a steep
+one). It is kept so the inequality means on its own what it says, since on a bare taper the two
+differ on 7.2% of the same rays. What is *not* redundant is the branch selection beside it, whose
+mutation is red.
+
+## What is NOT built here, and why each was left out rather than forgotten
+
+- **Torus.** An elbow is a torus and the bent-duct case wants one, but a torus *tube is not
+  convex*, so it does not fit the convex-region machinery, and its ray intersection is a quartic
+  whose branchless solution is accurate enough only with care that is its own piece of work.
+  `Solid.intervals` already returns `interval_count` intervals rather than one, so a torus
+  reporting two slots in with no re-cut of the algebra. Approximating an elbow by a fan of convex
+  wedges is available and is **not** the answer: it reintroduces exactly the faceting error
+  primitives exist to remove.
+- **A STEP reader.** Deferred as its own decision: `pythonocc`/`cadquery` are heavy dependencies
+  for a package with nothing of that kind, and a hand-written reader for the primitive subset is
+  a partial reader of a large format. The primitives are already the neutral description such a
+  loader would emit — each is an `equinox.Module` whose constructor keywords are its full
+  parameterization, so a case file mapping a name and a few numbers onto a class is a dispatch
+  table and nothing more.
+- **Trimmed patches.** A B-rep face is a bounded piece of an analytic surface cut by edge loops
+  in parameter space, so a real CAD import is a closed-form hit *plus* a point-in-trim test.
+  Nothing here does the second, which is why the triangle path stays the fallback rather than a
+  formality.
 
 ## The emitting surface occludes too, and that half is opaque
 
@@ -1544,19 +1824,31 @@ them switching is a large relative change on a small number. And 0.007% of the d
 about 124 of them -- fall outside the rim band and are **not explained**; they are too few to
 matter for a field and too specific to dismiss, so they are recorded rather than rounded away.
 
-**Cost, measured in the same run, and it is the real argument.** The analytic arm took **6.9 s**
-against the grid's **4,659.8 s** on those same 180M rays -- **675x**. ⚠️ **Quote that figure with
-its scene: it is the most favourable corner of a table, not a property of the method.** Two
-choices move it, and conflating them is easy -- which receivers, and which primitive arm.
+**Cost, measured in the same run, and it is the real argument.** The hand-derived analytic arm
+took **6.9 s** against the grid's **4,659.8 s** on those same 180M rays — **675x**. ⚠️ **That is
+the one arm-to-arm figure on record taken WITHIN a run**, both arms in one process on one ray
+set, which is why it is kept when the table that used to stand here was deleted. It is also the
+most favourable corner available: the *bespoke* arm, against the grid on this run's pipe-heavy
+receivers, at the area-sized default grid.
 
-| primitive arm | vs grid on PIPE cells (38,711 rays/s) | vs grid on RANDOM receivers (65,647) |
-|---|---|---|
-| hand-derived `BranchOpenings`, 26.1M rays/s | **675x** | 398x |
-| general `Outside` of three cylinders, 17.2M rays/s | 444x | 262x |
+⚠️ **A four-cell table stood here and has been DELETED rather than corrected (2026-09-24).** One
+of its cells was the 675x above; the other three divided numbers that were never measured
+together, and every quantity in it has a better-measured equivalent elsewhere in this file — the
+general arm and the bespoke arm under "MEASURED: the Sozzi reactor as three cylinders", the grid's
+corners in the matched square below. Three specific things were wrong with it, and they are worth
+knowing because each is a shape that recurs:
 
-Both grid rates are the **area-sized default grid**; a 128³ grid roughly doubles them, which is a
-third axis again. So the honest statement is **a few hundredfold, 260-675x across these corners**,
-and any single number needs its row and its column.
+- **It gave the bespoke arm a second value.** 26.1M rays/s here against 28.8M from three
+  controlled passes — 1.10x apart, same quantity, same file.
+- **Its grid rates predate the square.** 38,711 and 65,647 against the square's 28,248 and
+  79,963 for those corners, 1.37x and 1.22x apart.
+- **Its column header named a population it did not measure.** 38,711 was labelled "pipe cells",
+  but that run's receivers were 20,000 pipe **plus 4,000 chamber**, and composition alone accounts
+  for 1.12x of the gap to the square's actual pipe corner.
+
+⚠️ **The first attempt to fix it patched one row and left the other three defects greppable**,
+which is the annotation failure this file warns about in general terms: a corrected cell beside
+three uncorrected ones reads as a maintained table. Supersede by deleting.
 
 ⚠️ **THE RECEIVER POPULATION AND THE GRID RESOLUTION INTERACT, so neither has a single factor
 and two earlier attempts to give one here were wrong.** The first divided pipe cells on the
