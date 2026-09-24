@@ -37,6 +37,7 @@ PUBLIC_SUBPACKAGES = [
     "turbulence",
     "transport",
     "radiation",
+    "case",
 ]
 
 # How the API reference groups each subpackage, keyed on the module a name is DEFINED in.
@@ -45,6 +46,10 @@ PUBLIC_SUBPACKAGES = [
 # name defined outside the subpackage falls into "Other". The whole ``__all__`` therefore
 # reaches the page either way — this table decides only the order and the headings.
 SUBPACKAGE_GROUPS = {
+    "case": [
+        ("Reading, writing and checking a case file", ["case_file", "spec"]),
+        ("The sections of a case", ["mesh_source", "fluid", "physics", "boundaries"]),
+    ],
     "mesh": [
         ("The mesh and its geometry", ["mesh", "geometry", "cell", "face", "connectivity"]),
         ("Cell zones and face patches", ["groups"]),

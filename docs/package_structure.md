@@ -29,6 +29,7 @@ cfd/                                  # repo root
 │   ├── mesh.md  mesh_zones_and_patches.md
 │   ├── steady_state_solving.md       #   the nonlinear solve, globalization, and the IFT adjoint
 │   ├── preconditioning.md            #   every preconditioner, how to choose one, and how to keep it current
+│   ├── case_files.md                 #   describing a whole case in one YAML file, and what is checked when
 │   └── package_structure.md          #   this file (excluded from the built site)
 │
 ├── tools/
@@ -158,6 +159,13 @@ cfd/                                  # repo root
 │   │   ├── sparse_jacobian.py        #   materialize_block_jacobian: the sparse Jacobian by compressed graph-coloured probing
 │   │   └── refresh_timing.py         #   RefreshTiming: what a preconditioner refresh did, and what each part cost
 │   │
+│   ├── case/                         # a whole case described in one YAML file (top layer: nothing else imports it)
+│   │   ├── spec.py                   #   CaseSpec (mesh/fluid/physics/boundaries/numerics/drive) + Numerics; case_spec_from/to_mapping; check_against(mesh)
+│   │   ├── case_file.py              #   read_case / write_case (YAML 1.2 scalars, duplicate keys refused); CaseFile.check() -> CheckedCase
+│   │   ├── mesh_source.py            #   MeshSource -> OpenFOAMMesh (a path relative to the case file)
+│   │   ├── fluid.py                  #   Fluid: density and exactly one of the kinematic / dynamic viscosity
+│   │   ├── physics.py                #   Physics -> Laminar / RANS (k-omega SST settings live inside RANS)
+│   │   └── boundaries.py             #   PatchCondition -> Inlet / Outlet / Wall, one per patch for every field; FixedTurbulence
 │   └── parallel/                     # distributed memory: decomposition and halo exchange (the concern kept out of Mesh)
 │       ├── partitioner.py            #   Partitioner → BlockPartitioner (RCM-block, dependency-free default) / ScotchCLIPartitioner / ScotchPartitioner; consumes cell_adjacency_csr
 │       ├── partition.py              #   PartitionedMesh + LocalPartition; partition_mesh(mesh, labels) → owned+halo local meshes, gathered geometry, halo plan

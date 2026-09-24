@@ -329,7 +329,9 @@ build a frozen step with {func}`~aquaflux.turbulence.coupled_step` and pass it a
 Because the spec is a value, it can be stored in a case description instead of assembled in
 code. {func}`~aquaflux.turbulence.preconditioner_spec_from_mapping` reads it from the nested
 mapping a YAML or JSON document parses to: each level names its class under `kind`, and its
-other keys are the fields it sets. The spec above is
+other keys are the fields it sets. (A [case file](case_files.md) describes the problem but not yet
+the solve, so this mapping is read on its own rather than as one of a case file's sections.) The
+spec above is
 
 ```yaml
 kind: MaterializedJacobian

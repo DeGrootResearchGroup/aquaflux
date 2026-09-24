@@ -1,0 +1,36 @@
+# pitzDaily -- the 2D backward-facing step, described as a case file.
+#
+# This states the case compare.py builds in code: the same mesh, fluid, physics, boundaries and
+# numerics (its defaults: the multiple-correction gradient, k zero-gradient at the walls). It does not
+# describe the march -- the Reynolds ramp, the preconditioner, the step control -- and compare.py does
+# not read it yet. `tests/unit/test_case_file.py` checks it against the mesh on every fast-gate run, so
+# a patch renamed in the mesh, or a setting the loader no longer accepts, fails there.
+
+mesh:
+  kind: OpenFOAMMesh
+  path: runs/kwsst/polyMesh
+
+fluid:
+  density: 1.0
+  kinematic_viscosity: 1.0e-5
+
+physics:
+  kind: RANS
+  advection: {kind: FirstOrderUpwind}
+  omega_variable: {kind: LogScalars}
+  explicit_production_limiter: true
+
+boundaries:
+  inlet:
+    kind: Inlet
+    velocity: [10.0, 0.0]
+    turbulence: {kind: FixedTurbulence, k: 0.375, omega: 440.15}
+  outlet: {kind: Outlet, pressure: 0.0}
+  upperWall: {kind: Wall, k: zero_gradient}
+  lowerWall: {kind: Wall, k: zero_gradient}
+
+numerics:
+  momentum_advection:
+    kind: LimitedUpwind
+    limiter: {kind: VenkatakrishnanLimiter}
+  gradient: {kind: MultipleCorrectionGradient}
