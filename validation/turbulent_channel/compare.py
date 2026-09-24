@@ -29,7 +29,12 @@ import numpy as np
 from aquaflux.turbulence import sst_initial_fields
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
-from aquaflux.flow import MomentumContinuity, NoSlipWall, bulk_velocity_flow_solve
+from aquaflux.flow import (
+    MassFlow,
+    MomentumContinuity,
+    NoSlipWall,
+    bulk_velocity_flow_solve,
+)
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
@@ -90,7 +95,7 @@ def solve_case(Re_b, ny, growth, beta0, sweeps):
         gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
         pressure_pin=0,
-        body_force=(beta0, 0.0),
+        drive=MassFlow(target=U_B, force=beta0),
     )
     turbulence = SSTTurbulence.build(
         model,
@@ -111,7 +116,7 @@ def solve_case(Re_b, ny, growth, beta0, sweeps):
     # Lagrange multiplier), so the bulk velocity is held exactly at every sweep -- no feedback
     # controller that could overshoot while the eddy viscosity is still developing.
     solve_flow = bulk_velocity_flow_solve(
-        target=U_B, flow_direction=0, root_solve=RootSolveSettings(linear_solver=direct)
+        momentum, root_solve=RootSolveSettings(linear_solver=direct)
     )
 
     # Seed from the hybrid IC. A uniform k leaves the first sweep's residual essentially unchanged

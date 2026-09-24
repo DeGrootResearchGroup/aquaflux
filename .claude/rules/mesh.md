@@ -104,7 +104,7 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
   surface. `structured_grid_2d(..., periodic=("x",))` makes the x-axis **streamwise-periodic**: its
   left/right planes fuse into one interior seam face per row (`nx` x-faces, not `nx+1`; only
   `bottom`/`top` named) carrying the `neighbour_offset` above — the connectivity a fully-developed
-  channel driven by `MomentumContinuity.body_force` needs (requires `nx >= 2`). **Grid skewing is
+  channel driven by a uniform body force needs (requires `nx >= 2`). **Grid skewing is
   deliberately not here.** The `perturb`/`seed` interior-node
   displacement that breaks a smooth grid's error cancellation for order-of-accuracy studies is a
   *verification* concern, so it lives in the test suite (`tests/support/meshes.py`:

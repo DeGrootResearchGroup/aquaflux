@@ -26,6 +26,7 @@ import jax.numpy as jnp
 import pytest
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.flow import (
+    MassFlow,
     MomentumContinuity,
     MomentumSource,
     NoSlipWall,
@@ -105,37 +106,44 @@ def test_a_uniform_force_needs_no_face_treatment_and_adds_no_diagonal(case) -> N
     )
 
 
-def test_a_uniform_source_reproduces_the_inline_body_force_term(case) -> None:
-    """``UniformBodyForce`` and the ``body_force`` leaf are the same term, so they must agree.
+def test_a_uniform_source_and_a_solved_drive_are_the_same_term(case) -> None:
+    """A prescribed ``UniformBodyForce`` and a ``MassFlow`` drive at the same force are one term.
 
-    They add rather than replace, so putting the force in one place or the other gives the same
-    residual -- which is what will make migrating the leaf onto the source a behaviour-neutral
-    change rather than a numerical one.
+    The two are the only ways a uniform force reaches the momentum balance, and they differ in *where
+    the number comes from*, not in what it does: one is an input, the other the current value of a
+    solve unknown. A consumer asking what pushes this flow therefore has to sum them, which is only
+    legitimate because they are the same term -- so this is what makes ``uniform_body_force`` honest,
+    and what would catch the drive's force being scaled, signed or directed differently from a
+    source's.
     """
     momentum, _, _ = case
-    force = (0.35, -0.2)
+    beta = 0.35
+    force = (beta, 0.0)
     state = momentum.initial_state().at[0].set(0.4)
+    walls = BoundaryConditions({name: NoSlipWall() for name in momentum.mesh.face_patches.names})
 
-    via_leaf = momentum.build(
+    via_drive = momentum.build(
         momentum.mesh,
         momentum.geometry,
         momentum.properties,
-        BoundaryConditions({name: NoSlipWall() for name in momentum.mesh.face_patches.names}),
+        walls,
         gradient_scheme=momentum.gradient_scheme,
         pressure_pin=0,
-        body_force=force,
+        drive=MassFlow(target=1.0, force=beta),
     )
     via_source = momentum.build(
         momentum.mesh,
         momentum.geometry,
         momentum.properties,
-        BoundaryConditions({name: NoSlipWall() for name in momentum.mesh.face_patches.names}),
+        walls,
         gradient_scheme=momentum.gradient_scheme,
         pressure_pin=0,
         sources=(UniformBodyForce(jnp.asarray(force)),),
     )
 
-    assert jnp.allclose(via_leaf.residual(state), via_source.residual(state))
+    assert jnp.allclose(via_drive.residual(state), via_source.residual(state))
+    assert jnp.allclose(via_drive.uniform_body_force(), via_source.uniform_body_force())
+    assert jnp.allclose(via_drive.uniform_body_force(), jnp.asarray(force))
 
 
 def test_sources_are_subtracted_and_compose_additively(case) -> None:

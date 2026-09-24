@@ -12,7 +12,14 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
 import pytest
 from aquaflux.boundary import BoundaryConditions
-from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall, PressureOutlet, VelocityInlet
+from aquaflux.flow import (
+    MomentumContinuity,
+    MovingWall,
+    NoSlipWall,
+    PressureOutlet,
+    UniformBodyForce,
+    VelocityInlet,
+)
 from aquaflux.flow.scales import (
     BULK_TO_FRICTION_RATIO,
     body_force_speed,
@@ -31,13 +38,14 @@ H, LX, RHO = 1.0, 2.0, 1.0
 def _build(boundary, *, mu=0.1, body_force=None, periodic=False, pin=None):
     kw = {"periodic": ("x",)} if periodic else {}
     mesh = structured_grid_2d(6, 16, lx=LX, ly=H, named_boundaries=True, **kw)
+    sources = () if body_force is None else (UniformBodyForce(jnp.asarray(body_force)),)
     return MomentumContinuity.build(
         mesh,
         mesh.geometry(),
         PropertyModel({"viscosity": Constant(mu), "density": Constant(RHO)}),
         BoundaryConditions(boundary),
         gradient_scheme=CompactGreenGauss(),
-        body_force=body_force,
+        sources=sources,
         pressure_pin=pin,
     )
 

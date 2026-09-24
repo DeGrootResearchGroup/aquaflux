@@ -60,7 +60,7 @@ from aquaflux.turbulence import (
 )
 from aquaflux.turbulence.coupled import mass_flow_coupled_continuation
 
-from tests.unit.test_coupled_rans import _cavity, _healthy_state
+from tests.unit.test_coupled_rans import _cavity, _healthy_state, _mass_flow_cavity
 
 #: Every field set, each to a value no builder defaults to, so a setting that fails to arrive shows up
 #: as its default rather than coinciding with what was asked for.
@@ -321,6 +321,9 @@ def test_the_coupled_builders_forward_every_field(case, dual_time: bool) -> None
     the marches that matter -- both flagship cases run ``inner_steps > 1``.
     """
     coupled, state = case
+    # The bordered builder reads its target off the assembler, so it needs a mass-flow-driven one.
+    mass_flow_mesh, mass_flow_coupled = _mass_flow_cavity(4)
+    mass_flow_state = _healthy_state(mass_flow_mesh, mass_flow_coupled)
     asked = DUAL_TIME_ASKED if dual_time else ASKED
     extra = {"dual_time": DualTimeLoop(inner_steps=3, inner_tol=1e-3)} if dual_time else {}
     built = {
@@ -339,8 +342,8 @@ def test_the_coupled_builders_forward_every_field(case, dual_time: bool) -> None
             **extra,
         ),
         "mass flow": mass_flow_coupled_continuation(
-            coupled,
-            state,
+            mass_flow_coupled,
+            mass_flow_state,
             preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
             globalization=asked,
             **extra,

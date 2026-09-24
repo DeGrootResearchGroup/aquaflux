@@ -1467,8 +1467,10 @@ After **every code change**, before considering the task complete, review and ac
      `AmgVCycle._build` constructs — and a receiver whose producer returns no package class **falls back to
      the bare name**, because the first version lost `_coupled_step`'s `globalization.step(...)` (a rebound
      parameter) and silently re-hid the pair it was written to find. The one new pair is `coupled_step` /
-     `mass_flow_coupled_continuation` (22 shared; only `residual_norm` / `flow_direction` differ, both
-     documented carve-outs); every other pair is main's, unchanged.
+     `mass_flow_coupled_continuation`; every other pair is main's, unchanged. Its two carve-outs have
+     since both gone — `residual_norm` with the measure's move onto the solve (#370), `flow_direction`
+     with the drive's (#375, 2026-09-23) — so the pair now reports **13 shared and `only here: []` on
+     both sides**: two identical surfaces over one tail, which is what this rule is for.
      ⚠️ **Its first version INVENTED six pairs, caught by an independent review of PR #397 — two
      over-broad rules, and the lesson is that "more reach" is only a fix if it does not also add noise.**
      *(a)* It credited a returned local wherever the return *mentioned* it, so `return cls(sweeps=

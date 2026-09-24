@@ -54,11 +54,13 @@ from aquaflux.flow import (
 # are shared with the flow-block solve `aquaflux.flow.bulk_velocity_flow_solve`: the border column/row,
 # the Schur (constraint) preconditioner, and the body-force setter. Reused here rather than re-deriving
 # the Schur elimination, which one careful place keeps consistent.
-from aquaflux.flow.mean_velocity import (
-    _bordered_preconditioner,
-    _constraint_vectors,
-    _with_body_force,
+from aquaflux.flow.drive import (
+    MASS_FLOW_CONVERGENCE,
+    MassFlow,
+    mass_flow_drive,
+    refuse_a_constraint_this_solve_cannot_hold,
 )
+from aquaflux.flow.mean_velocity import _bordered_preconditioner
 from aquaflux.initialization import hybrid_initialize
 from aquaflux.schemes import narrow_gradient_sweeps
 from aquaflux.solve import (
@@ -70,11 +72,9 @@ from aquaflux.solve import (
     ContinuationSource,
     Convergence,
     DualTimeLoop,
-    Euclidean,
     FieldGroups,
     FieldLayout,
     FieldSplit,
-    GlobalDofs,
     Globalization,
     JacobianProbe,
     LinearSolveRegime,
@@ -1261,25 +1261,19 @@ def _coupled_residual_norm(coupled: CoupledRANS, reference_state: jnp.ndarray) -
     return BlockScaledNorm(coupled.layout.sizes, _coupled_block_scales(coupled, reference_state))
 
 
-def _mass_flow_layout(coupled: CoupledRANS) -> FieldLayout:
-    """The coupled layout bordered with the mass-flow constraint's scalar multiplier.
-
-    The constrained march carries the augmented state ``[flow..., k, omega, beta]``. ``beta`` is one
-    degree of freedom belonging to no cell, so it is an ordinary extra block of the layout rather than
-    a length appended by hand wherever the augmented system's shape is wanted.
-    """
-    return coupled.layout.appended(GlobalDofs("mass_flow", 1))
-
-
-def _mass_flow_residual_norm(coupled: CoupledRANS, reference_state: jnp.ndarray) -> BlockScaledNorm:
+def _mass_flow_residual_norm(
+    coupled: CoupledRANS, drive: MassFlow, reference_state: jnp.ndarray
+) -> BlockScaledNorm:
     """The :func:`_coupled_residual_norm` measure extended with the mass-flow constraint dof.
 
     The bordered march carries the augmented residual ``[R_flow, R_k, R_omega, ⟨U⟩ − target]``; the
     trailing scalar constraint is a bulk-velocity (velocity-magnitude) equation, so it shares the
-    flow block's reference scale.
+    flow block's reference scale. The block sizes come from the drive's own layout -- the same one the
+    residual is bordered by -- so the measure cannot weigh a partition the state is not in.
     """
     s_flow, s_k, s_omega = _coupled_block_scales(coupled, reference_state)
-    return BlockScaledNorm(_mass_flow_layout(coupled).sizes, (s_flow, s_k, s_omega, s_flow))
+    sizes = drive.layout(coupled.layout).sizes
+    return BlockScaledNorm(sizes, (s_flow, s_k, s_omega, s_flow))
 
 
 class _CoupledMeasures(eqx.Module):
@@ -1310,7 +1304,10 @@ class _MassFlowMeasures(eqx.Module):
     Attributes
     ----------
     coupled : CoupledRANS
-        The assembler whose bordered residual is measured, with its gradients stopped.
+        The assembler whose bordered residual is measured, with its gradients stopped. Its own drive is
+        what says where the multiplier sits, so the block scales are read from the coupled state rather
+        than from the augmented one -- and the measure cannot come to disagree with the residual about
+        which state it is judging.
     """
 
     coupled: CoupledRANS
@@ -1323,8 +1320,10 @@ class _MassFlowMeasures(eqx.Module):
         )
 
     def block_scaled(self, state: jnp.ndarray) -> BlockScaledNorm:
-        # The bordered state carries the multiplier last; the block scales are the coupled blocks'.
-        return _mass_flow_residual_norm(self.coupled, state[:-1])
+        drive = mass_flow_drive(self.coupled.momentum, "the mass-flow-constrained solve")
+        return _mass_flow_residual_norm(
+            self.coupled, drive, drive.fields_state(self.coupled.layout, state)
+        )
 
 
 def positive_k_limit(coupled: CoupledRANS, tau: float = 0.99, floor: float = 0.0):
@@ -2939,6 +2938,7 @@ def solve_coupled(
         If a strategy setting is passed where the strategy is not built here.
     """
     refuse_a_transform_the_march_cannot_run_in((coupled, flow, k, omega), caller="solve_coupled")
+    refuse_a_constraint_this_solve_cannot_hold(coupled.momentum, "solve_coupled")
     # The march runs on a stopped copy of the assembler, so every build, re-fit, refresh and step below
     # sees concrete arrays even under `jax.grad`. The derivative is attached at the root afterwards.
     frozen = stop_array_gradients(coupled)
@@ -3011,33 +3011,45 @@ class _MassFlowBorderedPolicy(eqx.Module):
     ----------
     inner : CoupledShiftPolicy
         The block-diagonal coupled policy for the ``[flow..., k, omega]`` sub-state.
+    drive : MassFlow
+        The constraint bordering it; every split of the augmented vector and every re-attachment of a
+        border entry here goes through its layout, so the shift, the preconditioner and the residual
+        agree on where the multiplier is.
     force, average : jnp.ndarray
         The border column ``a = dR_coupled/dbeta`` and row ``c = d<U_dir>/dstate`` in the coupled
-        layout, shape ``((dim + 3) n_cells,)`` (:func:`_coupled_constraint_vectors`).
+        layout, shape ``((dim + 3) n_cells,)``
+        (:meth:`~aquaflux.flow.MassFlow.constraint_vectors_in`).
     """
 
     inner: CoupledShiftPolicy
+    drive: MassFlow
     force: jnp.ndarray
     average: jnp.ndarray
 
     def shift_term(self, phi: jnp.ndarray, residual: jnp.ndarray | None = None) -> ShiftTerm:
         """The augmented block-diagonal shift and the bordered preconditioner at ``phi``."""
-        inner = phi[: self.inner.layout.size]
+        fields = self.inner.layout
+        inner = self.drive.fields_state(fields, phi)
         inner_term = self.inner.shift_term(
-            inner, None if residual is None else residual[: self.inner.layout.size]
+            inner, None if residual is None else self.drive.fields_state(fields, residual)
         )
-        diagonal = jnp.append(inner_term.diagonal, 0.0)
+        # The constraint row is linear and needs no pseudo-time damping, so its diagonal entry is zero.
+        diagonal = self.drive.join(fields, inner_term.diagonal, jnp.asarray(0.0))
 
         def make_preconditioner(relaxation: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
             coupled_m = inner_term.make_preconditioner(relaxation)
-            return _bordered_preconditioner(lambda _w: coupled_m, self.force, self.average)(phi)
+            return _bordered_preconditioner(
+                lambda _w: coupled_m, self.drive, fields, self.force, self.average
+            )(phi)
 
         # The bordered constraint row carries no shift (its diagonal entry is zero above), so it needs
-        # no per-row scale; appending 1.0 keeps the multiplier the same shape as the diagonal.
+        # no per-row scale; a border entry of 1.0 keeps the multiplier the diagonal's own shape.
         row_relaxation = (
             None
             if inner_term.row_relaxation is None
-            else lambda relaxation: jnp.append(inner_term.row_relaxation(relaxation), 1.0)
+            else lambda relaxation: self.drive.join(
+                fields, inner_term.row_relaxation(relaxation), jnp.asarray(1.0)
+            )
         )
         return ShiftTerm(diagonal, make_preconditioner, row_relaxation)
 
@@ -3046,28 +3058,10 @@ class _MassFlowBorderedPolicy(eqx.Module):
         return lambda state: self.shift_term(state).make_preconditioner(jnp.asarray(0.0))
 
 
-def _coupled_constraint_vectors(
-    coupled: CoupledRANS, flow_direction: int
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """The mass-flow border column/row ``(a, c)`` in the coupled ``[flow..., k, omega]`` layout.
-
-    ``beta`` enters only the momentum block (as the body force), and ``<U>`` reads only the velocity, so
-    both vectors are the flow-block border (:func:`~aquaflux.flow.mean_velocity._constraint_vectors`)
-    packed with zero ``k`` / ``omega`` blocks.
-    """
-    force_flow, average_flow = _constraint_vectors(coupled.momentum, flow_direction)
-    zero = jnp.zeros(coupled.momentum.mesh.n_cells)
-    return (
-        coupled.layout.pack(force_flow, zero, zero),
-        coupled.layout.pack(average_flow, zero, zero),
-    )
-
-
 def mass_flow_coupled_continuation(
     coupled: CoupledRANS,
     reference_state: jnp.ndarray,
     *,
-    flow_direction: int = 0,
     preconditioner: BlockDiagonal | None = None,
     globalization: Globalization = DEFAULT_GLOBALIZATION,
     dual_time: DualTimeLoop | None = None,
@@ -3085,8 +3079,10 @@ def mass_flow_coupled_continuation(
     The block-diagonal step :func:`coupled_step` builds, with its :class:`CoupledShiftPolicy` bordered by
     the mass-flow constraint (:class:`_MassFlowBorderedPolicy`), so it drives the augmented
     ``[flow..., k, omega, beta]`` system where ``beta`` is a Lagrange multiplier for ``<U_dir> =
-    target``. The march settings are :func:`coupled_step`'s (including ``globalization`` /
-    ``linear_solve`` / ``shift``); ``flow_direction`` selects the constrained velocity component. Its
+    target``. What is constrained, and along which axis, is ``coupled.momentum``'s own
+    :class:`~aquaflux.flow.MassFlow` drive -- the same value the residual writes each iterate into. The
+    march settings are :func:`coupled_step`'s (including ``globalization`` / ``linear_solve`` /
+    ``shift``). Its
     ``linear_solve`` regime is :func:`coupled_step`'s too, but this path defaults to
     :data:`_CONSTRAINED_LINEAR_SOLVE` rather than :data:`_BLOCK_LINEAR_SOLVE`: the restart regime is the
     same, and the **tolerance differs because the measure does** -- the linear solve stops in the march's
@@ -3104,8 +3100,10 @@ def mass_flow_coupled_continuation(
     Raises
     ------
     TypeError
-        If ``preconditioner`` is neither ``None`` nor a ``BlockDiagonal``.
+        If ``coupled`` is not driven by a :class:`~aquaflux.flow.MassFlow`, or if ``preconditioner`` is
+        neither ``None`` nor a ``BlockDiagonal``.
     """
+    drive = mass_flow_drive(coupled.momentum, "mass_flow_coupled_continuation")
     if preconditioner is None:
         preconditioner = BlockDiagonal()
     if not isinstance(preconditioner, BlockDiagonal):
@@ -3130,8 +3128,8 @@ def mass_flow_coupled_continuation(
         *_resolved_shift(shift),
         **preconditioner.flow_block_options(),
     )
-    force, average = _coupled_constraint_vectors(coupled, flow_direction)
-    bordered = _MassFlowBorderedPolicy(policy, force, average)
+    force, average = drive.constraint_vectors_in(coupled.momentum, coupled.layout)
+    bordered = _MassFlowBorderedPolicy(policy, drive, force, average)
     regime, krylov_solver = resolve_linear_solve(linear_solve, _CONSTRAINED_LINEAR_SOLVE)
     return _coupled_step(
         coupled,
@@ -3165,38 +3163,29 @@ class _MassFlowConstrainedResidual(eqx.Module):
 
     Attributes
     ----------
-    flow_direction : int
-        The streamwise axis the bulk velocity is measured and the body force applied along.
-    target : float
-        The bulk (volume-averaged) velocity component to hold.
+    drive : MassFlow
+        The constraint being enforced, and the arithmetic of the border -- the layout the augmented
+        vector is split and reassembled by, the bulk-velocity average, and where the multiplier is
+        written into the momentum assembler.
     """
 
-    flow_direction: int
-    target: float
+    drive: MassFlow
 
     def __call__(self, augmented: jnp.ndarray, theta: CoupledRANS) -> jnp.ndarray:
-        # beta (the last entry) overrides the assembler's body force.
-        coupled_state, beta = augmented[:-1], augmented[-1]
-        forced_momentum = _with_body_force(theta.momentum, self.flow_direction, beta)
+        # The border entry overrides the momentum assembler's driving force for this evaluation.
+        coupled_state, beta = self.drive.split(theta.layout, augmented)
+        forced_momentum = self.drive.forced(theta.momentum, beta)
         forced = eqx.tree_at(lambda c: c.momentum, theta, forced_momentum)
         r_coupled = forced.residual(coupled_state)
         flow_state, _, _ = theta.layout.unpack(coupled_state)
         velocity, _ = theta.momentum.unpack(flow_state)
-        volume = theta.momentum.geometry.cell.volume
-        bulk = jnp.sum(velocity[:, self.flow_direction] * volume) / jnp.sum(volume)
-        return jnp.append(r_coupled, bulk - self.target)
-
-
-#: The stopping test of a mass-flow-constrained solve given no :class:`~aquaflux.solve.Convergence`. The
-#: row-scaled measure the unconstrained solve defaults to has no form for the bordered system.
-_MASS_FLOW_CONVERGENCE = Convergence(measure=Euclidean(), rtol=1e-10, atol=1e-12)
+        bulk = self.drive.bulk_velocity(velocity, theta.momentum.geometry.cell.volume)
+        return self.drive.join(theta.layout, r_coupled, bulk - self.drive.target)
 
 
 def solve_coupled_mass_flow(
     coupled: CoupledRANS,
-    target: float,
     *,
-    flow_direction: int = 0,
     flow: jnp.ndarray | None = None,
     k: jnp.ndarray | None = None,
     omega: jnp.ndarray | None = None,
@@ -3224,14 +3213,14 @@ def solve_coupled_mass_flow(
     monolithic here, but the same bordered residual is what a *segregated* forward loop would need its
     coupled adjoint to transpose (segregated forward, coupled adjoint).
 
+    What is held, along which axis, and the ``beta`` the march starts from are ``coupled.momentum``'s
+    own :class:`~aquaflux.flow.MassFlow` drive -- the same value the residual writes each iterate into,
+    so the constraint being enforced and the force being written cannot name different targets.
+
     Parameters mirror :func:`solve_coupled` (``coupled`` is the differentiable parameter pytree; leave
     ``flow``/``k``/``omega`` ``None`` to self-start from the hybrid IC; build ``strategy`` outside
     ``jax.grad`` when differentiating), plus:
 
-    target : float
-        The bulk (volume-averaged) velocity component to hold along ``flow_direction``.
-    flow_direction : int
-        The streamwise axis the bulk velocity is measured and the body force applied along.
     convergence : Convergence or None
         The stopping test. Unset fields take :class:`~aquaflux.solve.Euclidean`, ``rtol = 1e-10`` and
         ``atol = 1e-12``. The measure may be :class:`~aquaflux.solve.Euclidean` or
@@ -3245,15 +3234,17 @@ def solve_coupled_mass_flow(
     Returns
     -------
     tuple of jnp.ndarray
-        The converged ``(flow, k, omega, beta)`` -- the fields and the multiplier that hits ``target``.
+        The converged ``(flow, k, omega, beta)`` -- the fields and the multiplier that hits the drive's
+        target.
 
     Raises
     ------
     TypeError
-        If ``preconditioner``, ``reference_state`` or a march setting is given beside a finished
-        ``strategy``, which already carries its configuration -- they would otherwise be dropped
-        without a word.
+        If ``coupled`` is not driven by a :class:`~aquaflux.flow.MassFlow`, or if ``preconditioner``,
+        ``reference_state`` or a march setting is given beside a finished ``strategy``, which already
+        carries its configuration -- they would otherwise be dropped without a word.
     """
+    drive = mass_flow_drive(coupled.momentum, "solve_coupled_mass_flow")
     refuse_a_transform_the_march_cannot_run_in(
         (coupled, flow, k, omega), caller="solve_coupled_mass_flow"
     )
@@ -3274,22 +3265,21 @@ def solve_coupled_mass_flow(
     # Map the physical initial condition into the solved-variable space (identity for DirectScalars,
     # log for LogScalars) so the constrained Newton march iterates on the right scalar unknown.
     state = coupled.state_from_physical(flow, k, omega)
-    augmented0 = jnp.append(state, coupled.momentum.body_force[flow_direction])
+    augmented0 = drive.driven_state(coupled.layout, state)
 
     if strategy is None:
         reference = state if reference_state is None else reference_state
         strategy = mass_flow_coupled_continuation(
             coupled,
             reference,
-            flow_direction=flow_direction,
             preconditioner=preconditioner,
             **strategy_kwargs,
         )
     solver = RootSolver(
         convergence=(
-            _MASS_FLOW_CONVERGENCE
+            MASS_FLOW_CONVERGENCE
             if convergence is None
-            else convergence.filled_from(_MASS_FLOW_CONVERGENCE)
+            else convergence.filled_from(MASS_FLOW_CONVERGENCE)
         ),
         measures=_MassFlowMeasures(stop_array_gradients(coupled)),
         max_steps=max_steps,
@@ -3302,6 +3292,7 @@ def solve_coupled_mass_flow(
         **({} if adjoint_solver is None else {"adjoint_solver": adjoint_solver}),
     )
 
-    solved = solver.solve(_MassFlowConstrainedResidual(flow_direction, target), augmented0, coupled)
-    flow_s, k_s, omega_s = coupled.physical_fields(solved[:-1])
-    return flow_s, k_s, omega_s, solved[-1]
+    solved = solver.solve(_MassFlowConstrainedResidual(drive), augmented0, coupled)
+    fields, beta = drive.split(coupled.layout, solved)
+    flow_s, k_s, omega_s = coupled.physical_fields(fields)
+    return flow_s, k_s, omega_s, beta
