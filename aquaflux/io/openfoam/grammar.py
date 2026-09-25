@@ -22,6 +22,7 @@ _FACE_RE = re.compile(r"(\d+)\s*\(([^()]*)\)")
 _DICT_BLOCK_RE = re.compile(r"(\w+)\s*\{(.*?)\}", re.DOTALL)
 _CELL_LABELS_RE = re.compile(r"cellLabels\s+(?:List<label>\s*)?(\d+)\s*\((.*?)\)", re.DOTALL)
 _KEY_VALUE_RE = re.compile(r"(\w+)\s+([^;{}]+);")
+_WORD_LIST_RE = re.compile(r"(?:List<word>\s*)?(\d+)?\s*\(([^()]*)\)")
 
 
 def list_envelope(body: str) -> tuple[int, str]:
@@ -171,12 +172,32 @@ def parse_boundary(body: str) -> tuple[FoamPatch, ...]:
                     start_face=int(entries["startFace"]),
                     n_faces=int(entries["nFaces"]),
                     neighbour_patch=entries.get("neighbourPatch", ""),
+                    in_groups=_word_list(
+                        entries.get("inGroups", ""), f"boundary patch '{name}' inGroups"
+                    ),
                 )
             )
         except KeyError as missing:
             raise ValueError(f"boundary patch '{name}' is missing {missing}") from None
     _check_count("boundary", count, len(patches))
     return tuple(patches)
+
+
+def _word_list(value: str, where: str) -> tuple[str, ...]:
+    """The words of a ``wordList`` entry, in the forms a ``boundary`` file writes it.
+
+    ``List<word> 2(wall walls)``, ``2(wall walls)`` and ``(wall walls)`` all give ``("wall", "walls")``;
+    an absent entry (the empty string) gives ``()``.
+    """
+    if not value:
+        return ()
+    match = _WORD_LIST_RE.fullmatch(value.strip())
+    if match is None:
+        raise ValueError(f"{where}: expected a list of words such as 1(wall), got {value!r}")
+    words = tuple(match.group(2).split())
+    if match.group(1) is not None:
+        _check_count(where, int(match.group(1)), len(words))
+    return words
 
 
 def parse_cell_zones(body: str) -> tuple[CellZone, ...]:

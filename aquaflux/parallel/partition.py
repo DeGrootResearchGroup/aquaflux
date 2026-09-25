@@ -41,7 +41,7 @@ from aquaflux.mesh.connectivity import (
     FaceNodeConnectivity,
     interior_mask,
 )
-from aquaflux.mesh.groups import CellZones, FacePatches
+from aquaflux.mesh.groups import CellZones
 
 
 def scatter_owned_partitions(
@@ -296,8 +296,11 @@ def partition_mesh(mesh: Mesh, labels) -> PartitionedMesh:
         local_indices = global_to_local_node[global_node_indices]
         local_node_coords = node_coords[local_nodes]
 
-        local_patches = FacePatches(
-            label=jnp.asarray(face_patch_label[local_faces]), names=mesh.face_patches.names
+        # The global record with the local faces' labels: names, declared types and groups carry over.
+        local_patches = eqx.tree_at(
+            lambda patches: patches.label,
+            mesh.face_patches,
+            jnp.asarray(face_patch_label[local_faces]),
         )
         local_zones = CellZones(
             label=jnp.asarray(cell_zone_label[local_global]), names=mesh.cell_zones.names

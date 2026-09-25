@@ -358,7 +358,12 @@ def pad_partition(
         ),
         face_nodes=FaceNodeConnectivity.from_csr(offsets, indices),
         cell_zones=CellZones(label=jnp.asarray(zone_label), names=local_mesh.cell_zones.names),
-        face_patches=FacePatches(label=jnp.asarray(patch_label), names=patch_names),
+        face_patches=FacePatches(
+            label=jnp.asarray(patch_label),
+            names=patch_names,
+            patch_types=local_mesh.face_patches.patch_types,
+            patch_groups=local_mesh.face_patches.patch_groups,
+        ),
     )
     padded_geometry = MeshGeometry(
         face=FaceGeometry(

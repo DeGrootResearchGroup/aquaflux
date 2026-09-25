@@ -83,6 +83,8 @@ def assemble(
         n_cells=n_cells,
         cell_zones=_cell_zones_to_dict(data.cell_zones),
         face_patches=_patches_to_face_patches(fused.patches),
+        patch_types={p.name: p.type_ for p in fused.patches if p.type_},
+        patch_groups=_patch_groups(fused.patches),
         neighbour_offset=fused.neighbour_offset,
     )
 
@@ -124,6 +126,15 @@ def _patches_to_face_patches(patches: tuple[FoamPatch, ...]) -> dict[str, np.nda
             f"{list(RESERVED_PATCH_NAMES)}; rename them in the polyMesh boundary file"
         )
     return {p.name: patch_face_range(p) for p in patches}
+
+
+def _patch_groups(patches: tuple[FoamPatch, ...]) -> dict[str, list[str]]:
+    """Gather the patches' ``inGroups`` entries into ``{group: member patches}``, in file order."""
+    groups: dict[str, list[str]] = {}
+    for patch in patches:
+        for group in patch.in_groups:
+            groups.setdefault(group, []).append(patch.name)
+    return groups
 
 
 def _cell_zones_to_dict(zones: tuple[CellZone, ...]) -> dict[str, np.ndarray] | None:

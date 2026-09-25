@@ -383,6 +383,19 @@ mesh file). Use "face geometry" / "cell geometry".
   just a named patch on interior faces. Both coexist (derive by default, name for bespoke
   treatment). Node groups omitted until needed; overlapping groups rejected. Shared code
   lives in the `LabelledGroups` base; `CellZones`/`FacePatches` add type-specific helpers.
+- **`FacePatches` also carries what a mesh file DECLARED about its patches (#364, 2026-09-25)** — two
+  static fields, both defaulting to `()` so every builder that never heard of them still constructs:
+  `patch_types` (`(patch, declared type)` pairs — OpenFOAM's `type`) and `patch_groups`
+  (`(group, member patches)`, members in patch order — OpenFOAM's `inGroups`). Carried **uninterpreted**:
+  nothing in the numerics reads them; the case file resolves group names through `addressed_by`. A group
+  is **not** a partition (a patch may be in several), which is why it is a separate record rather than a
+  second `LabelledGroups`. Static tuples, not dicts, because a static field must be hashable (it is part
+  of the treedef). `__check_init__` refuses a type or member naming no named patch, a reserved group
+  name, and a duplicate or empty group — at *every* construction, including the partition/padding paths
+  that build `FacePatches` directly. **A transform that removes patches must drop them from both
+  records** — `FacePatches.without(removed)` does it (and drops a group left empty), used by the 2D
+  collapse; the partition carries the global record with `eqx.tree_at` on `label`, and padding copies it
+  beside its added `padding` name.
 
 - **Warped-face robustness is a measured property (`quality.py`).** `face_planarity(mesh)`
   = `|S|/Σ|d_i|` (1 = planar) is a near-free warp screen; `centroid_iteration_shift(mesh)`

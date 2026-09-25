@@ -1073,3 +1073,126 @@ def test_an_intensity_length_inlet_builds_the_problem_its_k_and_omega_would() ->
 
     stated = {"kind": "IntensityLength", "intensity": intensity, "length": length}
     _same_problem(built(stated), built({"kind": "FixedTurbulence", "k": k, "omega": omega}))
+
+
+# --- patch groups ---------------------------------------------------------------------------------
+
+
+def _grouped_slab(tmp_path: Path) -> Path:
+    """The slab fixture with its walls in a ``walls`` group, as an OpenFOAM ``boundary`` file writes it."""
+    mesh = tmp_path / "polyMesh"
+    shutil.copytree(SLAB, mesh)
+    text = (mesh / "boundary").read_text()
+    for wall in ("bottom", "top"):
+        text = text.replace(
+            f"    {wall}\n    {{\n", f"    {wall}\n    {{\n        inGroups List<word> 1(walls);\n"
+        )
+    (mesh / "boundary").write_text(text)
+    return mesh
+
+
+def _grouped_sections(directory: Path, boundaries: dict[str, object], **overrides: object):
+    """The slab case on a mesh already written to ``directory``, with ``boundaries`` for its patches."""
+    mesh = {"kind": "OpenFOAMMesh", "path": str(directory)}
+    return _sections(mesh=mesh, boundaries=boundaries, **overrides)
+
+
+_GROUPED_PATCHES = {
+    "left": _SLAB_PATCHES["left"],
+    "right": _SLAB_PATCHES["right"],
+    "walls": {"kind": "Wall"},
+}
+
+
+@_DEFAULT_GRADIENT_ON_TWO_CELLS
+@pytest.mark.parametrize(
+    "physics",
+    [
+        {"kind": "Laminar"},
+        {"kind": "RANS", "advection": {"kind": "FirstOrderUpwind"}},
+    ],
+    ids=["laminar", "rans"],
+)
+def test_a_group_key_builds_the_problem_its_patches_stated_one_by_one_would(
+    tmp_path, physics
+) -> None:
+    """Both builds -- the flow closures, and under RANS the k and omega closures and the wall set."""
+    inlet = {
+        **_SLAB_PATCHES["left"],
+        "turbulence": {"kind": "FixedTurbulence", "k": 0.01, "omega": 5.0},
+    }
+    # The wall setting is not the default, so a build that dropped the group's condition cannot pass.
+    wall = {"kind": "Wall", "k": "zero"} if physics["kind"] == "RANS" else {"kind": "Wall"}
+    left = inlet if physics["kind"] == "RANS" else _SLAB_PATCHES["left"]
+
+    directory = _grouped_slab(tmp_path)
+
+    def built(boundaries):
+        sections = _grouped_sections(directory, boundaries, physics=physics, fluid=_SLAB_FLUID)
+        return CaseFile(case_spec_from_mapping(sections), REPO).check().build()
+
+    grouped = built({**_GROUPED_PATCHES, "left": left, "walls": wall})
+    one_by_one = built({**_SLAB_PATCHES, "left": left, "bottom": wall, "top": wall})
+    _same_problem(grouped, one_by_one)
+
+
+def test_a_group_gives_its_condition_to_each_of_its_patches(tmp_path: Path) -> None:
+    sections = _grouped_sections(
+        _grouped_slab(tmp_path),
+        {**_GROUPED_PATCHES, "walls": {"kind": "Wall", "velocity": [2.0, 0.0]}},
+    )
+    checked = CaseFile(case_spec_from_mapping(sections), REPO).check()
+    conditions = checked.spec.patch_conditions(checked.mesh)
+    assert list(conditions) == ["left", "right", "bottom", "top"]
+    assert conditions["bottom"] == conditions["top"] == Wall(velocity=(2.0, 0.0))
+
+
+@pytest.mark.parametrize(
+    ("boundaries", "match"),
+    [
+        (
+            {**_GROUPED_PATCHES, "top": {"kind": "Wall"}},
+            r"a patch is given a condition twice: 'top' \(by 'walls' and 'top'\)",
+        ),
+        (
+            {**_GROUPED_PATCHES, "lid": {"kind": "Wall"}},
+            r"the mesh has no patch 'lid' \(its boundary patches are \['bottom', 'left', 'right', "
+            r"'top'\], and its patch groups are \['walls'\]\)",
+        ),
+    ],
+    ids=["patch-twice", "unknown-lists-groups"],
+)
+def test_a_group_key_that_does_not_fit_the_mesh_is_refused_when_checked(
+    tmp_path, boundaries, match
+) -> None:
+    sections = _grouped_sections(_grouped_slab(tmp_path), boundaries)
+    case = CaseFile(case_spec_from_mapping(sections), REPO)
+    with pytest.raises(ValueError, match=match):
+        case.check()
+
+
+def test_a_name_that_is_a_patch_and_a_group_of_other_patches_is_refused_when_checked(
+    tmp_path: Path,
+) -> None:
+    directory = _grouped_slab(tmp_path)
+    boundary = directory / "boundary"
+    boundary.write_text(boundary.read_text().replace("1(walls)", "1(top)"))
+    boundaries = {**_SLAB_PATCHES, "bottom": {"kind": "Wall"}, "top": {"kind": "Wall"}}
+    case = CaseFile(case_spec_from_mapping(_grouped_sections(directory, boundaries)), REPO)
+    with pytest.raises(
+        ValueError, match=r"'top' is both a patch and a patch group of \['bottom', 'top'\]"
+    ):
+        case.check()
+
+
+def test_the_per_patch_conditions_are_refused_for_a_mesh_the_keys_do_not_fit(
+    tmp_path: Path,
+) -> None:
+    """The build's own entry point refuses what the check would, rather than building a partial set."""
+    directory = _grouped_slab(tmp_path)
+    spec = case_spec_from_mapping(
+        _grouped_sections(directory, {**_GROUPED_PATCHES, "bottom": {"kind": "Wall"}})
+    )
+    mesh = read_openfoam(directory)
+    with pytest.raises(ValueError, match=r"'bottom' \(by 'walls' and 'bottom'\)"):
+        spec.patch_conditions(mesh)
