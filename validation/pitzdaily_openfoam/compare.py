@@ -63,6 +63,7 @@ Run (after ``run_of.sh``) from the repo root:
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import sys
@@ -78,19 +79,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
-import jax.numpy as jnp
 import numpy as np
-from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
-from aquaflux.discretization import FirstOrderUpwind, LimitedUpwind
-from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, VelocityInlet
-from aquaflux.io import read_openfoam
-from aquaflux.properties import Constant, PropertyModel
+from aquaflux.case import CaseFile, Wall, read_case
 from aquaflux.schemes import (
+    DEFAULT_GRADIENT_SCHEME,
     CorrectedGreenGauss,
     MultipleCorrectionGradient,
     ProjectedStencilGradient,
     SweptGradientSolve,
-    VenkatakrishnanLimiter,
 )
 from aquaflux.solve import (
     CflResidualDualTimeControl,
@@ -112,13 +108,9 @@ from aquaflux.solve import (
 from aquaflux.turbulence import (
     BetaTaperedDamping,
     ConstantDamping,
-    CoupledRANS,
     CoupledShiftSettings,
     GeometricReynoldsSchedule,
-    LogScalars,
     ResidualTaperedDamping,
-    SSTModel,
-    SSTTurbulence,
     coupled_fields,
     open_session,
     scale_both_blocks,
@@ -138,11 +130,15 @@ RUNS = HERE / "runs" / "kwsst"
 TRANSIENT = HERE / "of_transient" / "0.14"
 FIGS = HERE / "figures"
 
-# The pitzDaily operating point (0/ and constant/): U_in = 10 m/s, nu = 1e-5, k_in = 0.375,
-# omega_in = 440.15. rho = 1 (incompressible kinematic).
-RHO, NU = 1.0, 1e-5
-U_IN, K_IN, OMEGA_IN = 10.0, 0.375, 440.15
-WALLS = ["upperWall", "lowerWall"]
+# The case itself -- mesh, fluid, physics, boundary patches, numerics -- is stated once, in
+# `case.yaml` beside this script (the pitzDaily operating point of the OpenFOAM `0/` and `constant/`:
+# U_in = 10 m/s, nu = 1e-5, k_in = 0.375, omega_in = 440.15, rho = 1). This driver adds the march and
+# the comparison; the two scales the comparison normalizes by are read back out of the file rather
+# than restated beside it.
+CASE_FILE = HERE / "case.yaml"
+CASE = read_case(CASE_FILE)
+U_IN = float(CASE.spec.boundaries["inlet"].velocity[0])
+NU = CASE.spec.fluid.kinematic_viscosity
 STEP_X, STEP_Y = 0.0, 0.0  # the step lip; the lower wall drops to y = -0.0254 for x > 0
 # The coupled Newton march budget. This is a stiff, separating, high-Re case on a wall-function mesh
 # (aquaflux's SST is wall-resolving), so it converges to an engineering tolerance rather than machine
@@ -531,11 +527,11 @@ K_POSITIVITY_FLOOR = 1e-8 if not POSITIVITY_PROJECTION else 0.0
 #: but it makes a DIFFERENT discrete problem from the zero-gradient one, with its own reattachment
 #: length, so the two cannot be compared and a number from one is not a target for the other. The
 #: sibling case runs zero-gradient, and this case is the same geometry, so it runs zero-gradient too.
-_K_WALL_BCS = {"dirichlet": Dirichlet(0.0), "zerogradient": ZeroGradient()}
-K_WALL = os.environ.get("PITZ_K_WALL", "zerogradient")
-if K_WALL not in _K_WALL_BCS:
-    raise SystemExit(f"PITZ_K_WALL={K_WALL!r} is not one of {sorted(_K_WALL_BCS)}")
-K_WALL_BC = _K_WALL_BCS[K_WALL]
+#: `case.yaml` states that; `PITZ_K_WALL` overrides it for an A/B, and unset leaves the file's choice.
+_K_WALL_CHOICES = {"dirichlet": "zero", "zerogradient": "zero_gradient"}
+K_WALL = os.environ.get("PITZ_K_WALL")
+if K_WALL is not None and K_WALL not in _K_WALL_CHOICES:
+    raise SystemExit(f"PITZ_K_WALL={K_WALL!r} is not one of {sorted(_K_WALL_CHOICES)}")
 
 
 #: ⚠️ WHICH INVERSE THE LEADING `[u, v, p]` BLOCK GETS. `simplesmooth` (default since 2026-08-22) is a
@@ -688,9 +684,9 @@ JACOBIAN_GRADIENT_SWEEPS = (
 #: far coupling onto near entries instead of capturing it.
 GRADIENT_SWEEPS = int(os.environ.get("PITZ_GRADIENT_SWEEPS", "4"))
 
-#: Which gradient reconstruction the case runs. `swept` (default) is the shipped corrected
-#: Green-Gauss whose `A_g^-1` apply is a fixed number of Richardson sweeps; `multcorr` is the
-#: two-face-pass scheme that reaches the same quadratic-exact contract with no solve.
+#: Which gradient reconstruction the case runs. Unset, the case file's own: `multcorr`, the
+#: two-face-pass scheme that reaches the quadratic-exact contract with no solve. `swept` is the
+#: corrected Green-Gauss whose `A_g^-1` apply is a fixed number of Richardson sweeps.
 #:
 #: ⚠️ **The choice is coupled to `PITZ_STENCIL_REACH`, and that is the point of having it.** Each
 #: Richardson sweep couples a cell one further ring, so the swept residual reaches `sweeps + 1` -- on
@@ -699,7 +695,7 @@ GRADIENT_SWEEPS = int(os.environ.get("PITZ_GRADIENT_SWEEPS", "4"))
 #: therefore recovers the two-pass Jacobian exactly, where against the swept one it would fold far
 #: couplings onto near entries. Vary the two together; `validation/gradient_stencil_reach.py`
 #: re-measures both halves in about a minute.
-GRADIENT = os.environ.get("PITZ_GRADIENT", "multcorr")
+GRADIENT = os.environ.get("PITZ_GRADIENT")
 GRADIENT_BLEND = float(os.environ.get("PITZ_GRADIENT_BLEND", "0.75"))
 _GRADIENTS = {
     "swept": lambda: CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=GRADIENT_SWEEPS)),
@@ -709,7 +705,7 @@ _GRADIENTS = {
     # duct, so on these hexahedra it is the thing being tested rather than a known-good setting.
     "projected": lambda: ProjectedStencilGradient(blend=GRADIENT_BLEND),
 }
-if GRADIENT not in _GRADIENTS:
+if GRADIENT is not None and GRADIENT not in _GRADIENTS:
     raise SystemExit(f"PITZ_GRADIENT={GRADIENT!r} is not one of {sorted(_GRADIENTS)}")
 
 #: ⚠️ UNIFORM PROBING REACH, deliberately, where the sibling case shortens two columns. Its
@@ -893,31 +889,29 @@ def read_openfoam_reference():
     )
 
 
-def build_case(model=None, gradient_scheme=None):
-    """Assemble the benchmark: mesh, momentum, turbulence and the coupled residual -- no solve.
+def case_spec(model=None, gradient_scheme=None):
+    """The case this benchmark runs: ``case.yaml``, with any study override applied to it.
 
-    Split out from :func:`solve_aquaflux` so a solver study can re-solve at a saved state (a
-    mid-march checkpoint, say) without re-marching to it, and without restating the case. The
-    mesh import, boundary conditions, model constants and scheme choices *are* the definition of
-    this benchmark; a second copy of them would drift from the one the validation figures use.
+    The overrides are edits of the case rather than a second assembly of it, so what is not overridden
+    is exactly what the file says. ``PITZ_GRADIENT`` and ``PITZ_K_WALL``, when set, override the
+    file's gradient reconstruction and wall ``k`` condition; unset, they leave the file's own.
 
     Parameters
     ----------
     model : SSTModel, optional
-        The SST constants to use. Defaults to :class:`~aquaflux.turbulence.SSTModel`. Passing a model
-        that differs only in the near-wall omega blend (``wall_omega_exponent`` /
-        ``wall_omega_viscous_coeff``) is how a wall-treatment study compares blend shapes on the same
-        case -- e.g. a large exponent to reproduce the ``max(omega_vis, omega_log)`` blend.
+        The SST constants to use in place of the file's. Passing a model that differs only in the
+        near-wall omega blend (``wall_omega_exponent`` / ``wall_omega_viscous_coeff``) is how a
+        wall-treatment study compares blend shapes on the same case -- e.g. a large exponent to
+        reproduce the ``max(omega_vis, omega_log)`` blend.
     gradient_scheme : GradientScheme, optional
-        The gradient reconstruction, used by momentum and turbulence alike. Defaults to whatever
-        ``GRADIENT`` selects -- :class:`~aquaflux.schemes.MultipleCorrectionGradient`, described below.
-        Injected so a scheme study compares reconstructions on this exact case rather than on a second
-        copy of it. ⚠️ A scheme whose residual reaches further across the cell graph than
-        ``stencil_reach`` needs that raised to match: the coloured probe folds coupling beyond its
-        reach onto near entries instead of dropping it, so an under-reaching probe corrupts the
-        preconditioner rather than approximating it. The default reconstruction carries *exactly zero*
-        mass beyond reach 3 and ``CorrectedGreenGauss`` beyond ``sweeps + 1``, which is what makes each
-        of those pairings exact;
+        The gradient reconstruction, used by momentum and turbulence alike, in place of the one
+        ``GRADIENT`` or the file selects. Injected so a scheme study compares reconstructions on this
+        exact case rather than on a second copy of it. ⚠️ A scheme whose residual reaches further
+        across the cell graph than ``stencil_reach`` needs that raised to match: the coloured probe
+        folds coupling beyond its reach onto near entries instead of dropping it, so an under-reaching
+        probe corrupts the preconditioner rather than approximating it. The default reconstruction
+        carries *exactly zero* mass beyond reach 3 and ``CorrectedGreenGauss`` beyond ``sweeps + 1``,
+        which is what makes each of those pairings exact;
         :class:`~aquaflux.schemes.HessianCorrectedGradient` does not have that cut-off at any sweep
         setting, so a study that swaps it in needs a preconditioner that is not built by probing --
         which is why that comparison lives in the sibling ``pitzdaily_gradient_ab`` case rather than
@@ -925,93 +919,55 @@ def build_case(model=None, gradient_scheme=None):
 
     Returns
     -------
-    dict
-        ``coupled``, ``momentum``, ``turbulence`` and ``geom`` for the assembled case.
+    aquaflux.case.CaseSpec
+        The case, not yet built.
     """
-    if model is None:
-        model = SSTModel()
-    mesh = read_openfoam(RUNS / "polyMesh")
-    geom = mesh.geometry()
-    # Corrected (non-orthogonal / skewness) Green-Gauss gradients. Its A_g^-1 apply is the default O(n)
-    # matrix-free swept solve (fixed Richardson sweeps), not a nested GMRES: identical discretization,
-    # but it avoids a nested Krylov solve (carrying its own implicit-diff tangent) inside every
-    # coupled-residual evaluation, which otherwise dominates the monolithic Newton cost on this
-    # ~12k-cell mesh (measured ~180x per residual eval here). The default sweep count is used: this mesh
-    # is only mildly non-orthogonal (worst face angle ~6 degrees), so the swept solve reaches the
-    # converged corrected-gradient to machine precision in the default few sweeps -- and the
-    # reconstructed gradient, the coupled residual, and the reattachment length are all unchanged from a
-    # much higher sweep count, so paying for more sweeps only enlarges the differentiated residual.
-    grad = _GRADIENTS[GRADIENT]() if gradient_scheme is None else gradient_scheme
-    # Momentum advection: second-order upwind = Venkatakrishnan-limited linear upwind (the upwind cell
-    # reconstructed to the face with its corrected-Green-Gauss gradient, slope-limited so the
-    # reconstruction is monotonicity-bounded) -- the analogue of OpenFOAM's `Gauss linearUpwind`.
-    momentum_upwind = LimitedUpwind(limiter=VenkatakrishnanLimiter())
-    # Turbulence advection: first-order upwind on k and omega. The slope limiter bounds the advective
-    # *face value*, but the negative-omega failure of second-order on the stiff omega equation is a
-    # Newton-*update* overshoot at the cell centre, not a face-value one: first-order upwind makes the
-    # omega transport operator diagonally dominant (an M-matrix) so the pseudo-transient-shifted Newton
-    # step preserves positivity, whereas a second-order stencil -- even limited -- weakens that
-    # dominance and lets the update drive omega < 0 (then nu_t = k/omega flips sign and poisons the
-    # closure while the residual stays finite, so the divergence guard never trips). The structural fix
-    # for second-order scalars is log-variable transport (omega = e^w), which is not built here.
-    scalar_upwind = FirstOrderUpwind()
-    properties = PropertyModel(
-        {"viscosity": Constant(jnp.asarray(RHO * NU)), "density": Constant(RHO)}
+    spec = CASE.spec
+    if gradient_scheme is None and GRADIENT is not None:
+        gradient_scheme = _GRADIENTS[GRADIENT]()
+    if gradient_scheme is not None:
+        spec = dataclasses.replace(
+            spec, numerics=dataclasses.replace(spec.numerics, gradient=gradient_scheme)
+        )
+    if model is not None:
+        spec = dataclasses.replace(spec, physics=dataclasses.replace(spec.physics, model=model))
+    if K_WALL is not None:
+        k = _K_WALL_CHOICES[K_WALL]
+        spec = dataclasses.replace(
+            spec,
+            boundaries={
+                name: dataclasses.replace(condition, k=k)
+                if isinstance(condition, Wall)
+                else condition
+                for name, condition in spec.boundaries.items()
+            },
+        )
+    return spec
+
+
+def build_case(model=None, gradient_scheme=None):
+    """Assemble the benchmark: mesh, momentum, turbulence and the coupled residual -- no solve.
+
+    Split out from :func:`solve_aquaflux` so a solver study can re-solve at a saved state (a
+    mid-march checkpoint, say) without re-marching to it, and without restating the case. The case
+    is ``case.yaml``, read and built by :mod:`aquaflux.case`; the parameters are :func:`case_spec`'s
+    study overrides.
+
+    Returns
+    -------
+    dict
+        ``coupled``, ``momentum``, ``turbulence`` and ``geom`` for the assembled case, and ``spec``, the
+        case they were built from.
+    """
+    spec = case_spec(model=model, gradient_scheme=gradient_scheme)
+    coupled = CaseFile(spec, HERE).check().build()
+    return dict(
+        coupled=coupled,
+        momentum=coupled.momentum,
+        turbulence=coupled.turbulence,
+        geom=coupled.momentum.geometry,
+        spec=spec,
     )
-    momentum = MomentumContinuity.build(
-        mesh,
-        geom,
-        properties,
-        BoundaryConditions(
-            {
-                "inlet": VelocityInlet(velocity=(U_IN, 0.0)),
-                "outlet": PressureOutlet(pressure=0.0),
-                "upperWall": NoSlipWall(),
-                "lowerWall": NoSlipWall(),
-            }
-        ),
-        gradient_scheme=grad,
-        advection_scheme=momentum_upwind,
-    )
-    # ⚠️ MATCHES THE SIBLING CASE'S LINEARIZATION. With the limiter left implicit the Jacobian
-    # carries the k-production cap's own derivative, which is destabilizing; freezing it is the
-    # Patankar treatment the sibling case runs. The library default is False, so omitting this
-    # silently gave the two cases DIFFERENT Newton operators on the same physics.
-    turbulence = SSTTurbulence.build(
-        model,
-        mesh,
-        geom,
-        scalar_upwind,
-        properties,
-        gradient_scheme=grad,
-        wall_patches=WALLS,
-        explicit_production_limiter=True,
-        k_boundary=BoundaryConditions(
-            {
-                "inlet": Dirichlet(K_IN),
-                "outlet": ZeroGradient(),
-                "upperWall": K_WALL_BC,
-                "lowerWall": K_WALL_BC,
-            }
-        ),
-        omega_boundary=BoundaryConditions(
-            {
-                "inlet": Dirichlet(OMEGA_IN),
-                "outlet": ZeroGradient(),
-                "upperWall": ZeroGradient(),
-                "lowerWall": ZeroGradient(),
-            }
-        ),
-    )
-    # Log-transform omega: omega = e^w stays strictly positive under any Newton step. On this stiff
-    # separating case a direct-omega step drives omega negative once the recirculation forms (nu_t =
-    # k/omega then flips sign and poisons the closure while the residual stays finite, so the divergence
-    # guard never trips). k stays direct -- log(k) is ill-conditioned where k -> 0 at the walls.
-    coupled = CoupledRANS.build(momentum, turbulence, omega_transform=LogScalars())
-    # The monolithic Newton is globalized by the default pseudo-transient continuation: an a_P /
-    # transport-diagonal shift that damps each step heavily far from the fixed point and ramps to
-    # zero on the residual, recovering the exact steady Newton state at convergence.
-    return dict(coupled=coupled, momentum=momentum, turbulence=turbulence, geom=geom)
 
 
 def _gradient_scheme_label(scheme):
@@ -1022,7 +978,7 @@ def _gradient_scheme_label(scheme):
     only the class cannot be read against a recorded measurement.
     """
     if scheme is None:
-        scheme = _GRADIENTS[GRADIENT]()
+        scheme = DEFAULT_GRADIENT_SCHEME
     solver = getattr(scheme, "solver", None)
     sweeps = getattr(solver, "sweeps", None)
     return f"{type(scheme).__name__}" + (f" (swept {sweeps})" if sweeps is not None else "")
@@ -1128,7 +1084,18 @@ def solve_aquaflux(
             if RAMP == "continuous"
             else f"off ({RAMP}) -- the span is walked as a rung ladder",
         ),
-        ("k wall BC", K_WALL),
+        (
+            "k wall BC",
+            ", ".join(
+                sorted(
+                    {
+                        c.k or "unset"
+                        for c in case["spec"].boundaries.values()
+                        if isinstance(c, Wall)
+                    }
+                )
+            ),
+        ),
         ("preconditioner refresh", f"on {REFRESH_ON_CYCLES} restart cycles (mid-step)"),
         (
             "smoother fill / sweeps / coarse limit",
@@ -1143,7 +1110,7 @@ def solve_aquaflux(
         ),
         ("trailing inverse", f"jacobi_smoothed {JACOBI_TRAILING}" if FIELD_SPLIT else "n/a"),
         ("probe stencil reach", stencil_reach),
-        ("gradient scheme", _gradient_scheme_label(gradient_scheme)),
+        ("gradient scheme", _gradient_scheme_label(case["spec"].numerics.gradient)),
         ("probe gradient sweeps", PROBE_GRADIENT_SWEEPS or "full (the scheme's own)"),
         (
             "JACOBIAN gradient sweeps",

@@ -2000,8 +2000,8 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   no `stencil_reach` at all. What this changes is the standing warning that "`stencil_reach = 3` IS A
   PROPERTY OF SKEW-FREE MESHES, NOT OF THE DISCRETIZATION … the sibling gets 3 for free and that is luck,
   not physics": with a two-pass reconstruction, reach 3 becomes a property of the **scheme**, so a case on
-  a genuinely skewed mesh gets it too. pitzDaily has since adopted it (`PITZ_GRADIENT` defaults to
-  `multcorr`, `STENCIL_REACH` to 3); `bfs3d` still builds `CorrectedGreenGauss` in its own
+  a genuinely skewed mesh gets it too. pitzDaily has since adopted it (its `case.yaml` states
+  `MultipleCorrectionGradient`, which `PITZ_GRADIENT` overrides only when set; `STENCIL_REACH` defaults to 3); `bfs3d` still builds `CorrectedGreenGauss` in its own
   `build_case`, where the choice is inert — see the library-default entry below.
 
   **✅✅ AND IT IS NOW THE LIBRARY DEFAULT — `schemes.DEFAULT_GRADIENT_SCHEME`, 2026-09-16 (#361).**

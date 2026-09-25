@@ -132,8 +132,14 @@ latter is dominated by ω's ~1e5 near-wall scale and looks stalled while the flo
 - `of_transient/` — the **time-accurate** case whose statistically-steady field *is* the comparison
   target (x_r/h ≈ 7.74). Case definition plus its written time directories; mesh, log and probe output
   are regenerable and excluded.
-- `compare.py` — imports that mesh into aquaflux, runs the coupled solve on it, compares cell-for-cell,
-  and writes `report.md` + `figures/comparison.png`.
+- `case.yaml` — **the case**: mesh, fluid, k–ω SST physics, boundary patches and numerics, as a case
+  file. `compare.py` builds from it (`build_case()`), applying `PITZ_GRADIENT` / `PITZ_K_WALL` — or a
+  model or gradient passed in code — as edits of it, so anything not overridden is exactly the file.
+  `validation/case_file_parity.py` checks it builds the same problem, bit for bit, as the case this
+  driver used to assemble by hand.
+- `compare.py` — builds the case from `case.yaml`, runs the coupled solve on it (the march — Reynolds
+  ramp, preconditioner, step control — is configured here), compares cell-for-cell, and writes
+  `report.md` + `figures/comparison.png`.
 - `compare_reynolds_continuation.py` — the same benchmark solved by **Reynolds-number continuation**
   (viscosity ramp Re ≈ 250 → 2500 → 25000) with a **dual-time pseudo-timestep march**; reuses
   `compare.build_case` and the reattachment metric and streams per-step progress. See the variant note

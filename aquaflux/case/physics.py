@@ -5,6 +5,11 @@ a case may carry at all: everything that belongs to a turbulence closure -- its 
 its variables are parametrized, how its fields are advected, the inflow turbulence at an inlet -- lives
 inside :class:`RANS` or on a boundary patch, and a :class:`Laminar` case refuses any of it rather than
 ignoring it.
+
+Each physics also builds its own problem from a checked case (:meth:`Physics.build`): a laminar case
+is the flow assembler, a Reynolds-averaged one the coupled system holding the flow and the closure.
+What comes back is the problem the initializers and the solves already take, so nothing downstream
+needs a case-specific type.
 """
 
 from __future__ import annotations
@@ -12,11 +17,19 @@ from __future__ import annotations
 import abc
 import dataclasses
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
+from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import AdvectionScheme
-from aquaflux.turbulence import ScalarVariableTransform, SSTModel
+from aquaflux.flow import MomentumContinuity, sheared_patches
+from aquaflux.turbulence import CoupledRANS, ScalarVariableTransform, SSTModel, SSTTurbulence
 
 from .boundaries import PatchCondition
+
+if TYPE_CHECKING:
+    from aquaflux.mesh import Mesh, MeshGeometry
+
+    from .spec import CaseSpec
 
 __all__ = ["RANS", "Laminar", "Physics"]
 
@@ -40,6 +53,25 @@ class Physics(abc.ABC):
             Naming every offending setting at once, by its path in the case file.
         """
 
+    @abc.abstractmethod
+    def build(self, spec: CaseSpec, mesh: Mesh, geometry: MeshGeometry) -> object:
+        """The problem ``spec`` describes, assembled on ``mesh``.
+
+        Parameters
+        ----------
+        spec : CaseSpec
+            The case, already checked against ``mesh``.
+        mesh : Mesh
+            Its mesh.
+        geometry : MeshGeometry
+            The mesh's geometry, computed once and shared by every equation.
+
+        Returns
+        -------
+        object
+            The problem's assembler, in the form its initializer and its solve take.
+        """
+
 
 @dataclasses.dataclass(frozen=True)
 class Laminar(Physics):
@@ -58,6 +90,10 @@ class Laminar(Physics):
                 f"{'this setting' if len(stray) == 1 else 'these settings'}. Remove "
                 f"{'it' if len(stray) == 1 else 'them'}, or make the physics RANS."
             )
+
+    def build(self, spec: CaseSpec, mesh: Mesh, geometry: MeshGeometry) -> MomentumContinuity:
+        """The flow assembler -- see :meth:`Physics.build`."""
+        return _momentum(spec, mesh, geometry)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -118,3 +154,54 @@ class RANS(Physics):
                 f"{', '.join(missing)}: a RANS case needs the turbulence every inflow carries in. Give "
                 "it, e.g. turbulence: {kind: FixedTurbulence, k: ..., omega: ...}."
             )
+
+    def build(self, spec: CaseSpec, mesh: Mesh, geometry: MeshGeometry) -> CoupledRANS:
+        """The coupled flow and closure -- see :meth:`Physics.build`.
+
+        The closure's walls are the patches whose flow closure is a wall, and its ``k`` and ``omega``
+        closures are each patch's own, so neither is stated a second time. Both equations read the one
+        property model the fluid gives, and the same gradient reconstruction.
+        """
+        momentum = _momentum(spec, mesh, geometry)
+        closures = {
+            name: condition.turbulence_closures() for name, condition in spec.boundaries.items()
+        }
+        options = _set(
+            gradient_scheme=spec.numerics.gradient,
+            explicit_production_limiter=self.explicit_production_limiter,
+        )
+        turbulence = SSTTurbulence.build(
+            SSTModel() if self.model is None else self.model,
+            mesh,
+            geometry,
+            self.advection,
+            momentum.properties,
+            wall_patches=list(sheared_patches(momentum.boundary)),
+            k_boundary=BoundaryConditions({name: k for name, (k, _) in closures.items()}),
+            omega_boundary=BoundaryConditions(
+                {name: omega for name, (_, omega) in closures.items()}
+            ),
+            **options,
+        )
+        return CoupledRANS.build(
+            momentum, turbulence, k_transform=self.k_variable, omega_transform=self.omega_variable
+        )
+
+
+def _set(**settings: object) -> dict[str, object]:
+    """The settings that are set: a case leaves a builder's default in force by leaving one unset."""
+    return {name: value for name, value in settings.items() if value is not None}
+
+
+def _momentum(spec: CaseSpec, mesh: Mesh, geometry: MeshGeometry) -> MomentumContinuity:
+    """The flow assembler every physics starts from: the fluid, each patch's flow closure, the numerics."""
+    return MomentumContinuity.build(
+        mesh,
+        geometry,
+        spec.fluid.property_model(),
+        BoundaryConditions(
+            {name: condition.flow_closure() for name, condition in spec.boundaries.items()}
+        ),
+        advection_scheme=spec.numerics.momentum_advection,
+        **_set(gradient_scheme=spec.numerics.gradient, drive=spec.drive),
+    )

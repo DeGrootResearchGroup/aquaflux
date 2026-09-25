@@ -1,0 +1,36 @@
+# bfs3d -- the 3D backward-facing step, described as a case file.
+#
+# This states the case compare.py builds in code, at that driver's defaults: the corrected
+# Green-Gauss gradient, k zero-gradient at the walls, the production limiter on. It does not describe
+# the march, and compare.py does not read it: that driver stays hand-assembled, which is what lets
+# validation/case_file_parity.py use it as the independent reference this file is checked against.
+
+mesh:
+  kind: OpenFOAMMesh
+  path: runs/kwsst/polyMesh
+
+fluid:
+  density: 1.0
+  kinematic_viscosity: 1.0e-5
+
+physics:
+  kind: RANS
+  advection: {kind: FirstOrderUpwind}
+  omega_variable: {kind: LogScalars}
+  explicit_production_limiter: true
+
+boundaries:
+  inlet:
+    kind: Inlet
+    velocity: [10.0, 0.0, 0.0]
+    turbulence: {kind: FixedTurbulence, k: 0.375, omega: 1600.0}
+  outlet: {kind: Outlet, pressure: 0.0}
+  upperWall: {kind: Wall, k: zero_gradient}
+  lowerWall: {kind: Wall, k: zero_gradient}
+  sideWalls: {kind: Wall, k: zero_gradient}
+
+numerics:
+  momentum_advection:
+    kind: LimitedUpwind
+    limiter: {kind: VenkatakrishnanLimiter}
+  gradient: {kind: CorrectedGreenGauss}

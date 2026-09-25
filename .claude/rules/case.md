@@ -14,18 +14,21 @@ paths:
 Tracking issue: #437. Design constraints it is held to: #374 (a loaded case yields a builder, never a
 built solver) and #375 (no flat case object — a small core plus two discriminators).
 
-## Status — phases A–C BUILT (2026-09-24); phase D (building the assemblers) is NOT
+## Status — phases A–D BUILT (2026-09-24); the solver section is NOT
 
 The construction order #374 records is A spec → B topology → C geometry → D equations → E state →
-F frozen solver → G drive. **What exists stops before any geometry**: `read_case(path)` →
-`CaseFile(spec, directory)` (phase A), and `CaseFile.check()` → `CheckedCase(spec, mesh)` (phase B: the
-mesh read and `validate()`d, and the spec checked against its topology). ~1 s on pitzDaily (12225
-cells, ASCII read; one run, 2026-09-24, macOS arm64) — the "check the file" stop #374 asked to be kept
-cheap. **Nothing here builds a `MomentumContinuity`, an `SSTTurbulence` or a `CoupledRANS` yet**; the
-patch kinds hold the settings the closures will be built from, but no code derives a closure from them.
-When phase D lands, `CheckedCase` is where `build()` goes, and the solver section must produce a
-`state -> NewtonStrategy` builder, never a built step (#374: the step is rebuilt from mid-march states
-at every Reynolds rung and every refresh).
+F frozen solver → G drive.
+- **A–B, the cheap "check the file" stop:** `read_case(path)` → `CaseFile(spec, directory)`, then
+  `CaseFile.check()` → `CheckedCase(spec, mesh)` (the mesh read and `validate()`d, the spec checked
+  against its topology, **no geometry**). ~1 s on pitzDaily (12225 cells, ASCII read; one run,
+  2026-09-24, macOS arm64).
+- **C–D:** `CheckedCase.build()` computes the geometry once and hands it to `spec.physics.build(spec,
+  mesh, geometry)`, which returns **the problem the initializers and solves already take** —
+  `MomentumContinuity` for `Laminar`, `CoupledRANS` for `RANS` — never a case-specific wrapper (#375) and
+  never a built step (#374: the step is rebuilt from mid-march states at every Reynolds rung and refresh,
+  so the solver section, when it exists, must be a `state -> NewtonStrategy` builder). ~8 s on pitzDaily
+  including the wall distance (same run).
+- **E onward are the driver's**: `hybrid_initialize(problem)` and the march, configured in code.
 
 ## The layout, and why each part is where it is
 
@@ -60,7 +63,7 @@ at every Reynolds rung and every refresh).
   closure dicts.** The per-field form (what every validation driver writes today, and OpenFOAM's `0/U`,
   `0/p`, `0/k`) states one physical boundary four times — momentum, `k`, `omega`, and `wall_patches` —
   which is exactly the double registration #355/#514 has to reconcile by checking. Here the closures and
-  the wall set will be **derived** from one statement, so they cannot disagree. The cost, accepted: a
+  the wall set are **derived** from one statement (see below), so they cannot disagree. The cost, accepted: a
   per-field choice becomes a field on the kind (`Wall.k: zero_gradient | zero` — the one that varies in
   the existing cases), and an unusual combination needs a new kind.
 - **Turbulence settings sit on the patch; the PHYSICS decides whether they may.** Each `PatchCondition`
@@ -108,9 +111,6 @@ constructor refusal re-raised with the path prepended** (so `Inlet`'s bad veloci
 
 ## What a file cannot describe yet — and where each goes
 
-- **Phase D** (build the assemblers from a `CheckedCase`) — the next step. It must write the one
-  `PropertyModel` the fluid implies (dynamic viscosity as a **JAX array**, so continuation rungs share
-  compiled code — bfs3d's driver records why) and hand it to both assemblers.
 - **The solver section** (march, preconditioner, convergence, Reynolds schedule) — a `state -> step`
   builder per #374. The preconditioner part already reads through `preconditioner_spec_from_mapping`.
   The validation drivers carry closures no file can state (`point_setup`, the damping tapers reading a
@@ -124,12 +124,65 @@ constructor refusal re-raised with the path prepended** (so `Inlet`'s bad veloci
   flow driver by path today) — a dependency edge between cases, not a field on one.
 - **Profiles** (`DirichletField`, a callable) — not plain data; a named-profile kind if ever needed.
 
-## The one case file in the repository
+## How the build derives what the drivers used to restate (binding)
 
-`validation/pitzdaily_openfoam/case.yaml` states the case `compare.py` builds in code (same mesh, fluid,
-physics, boundaries, numerics at that driver's defaults). `compare.py` does **not** read it yet.
-`tests/unit/test_case_file.py::test_the_shipped_pitzdaily_file_reads_as_the_case_its_driver_builds_and_fits_its_mesh`
-compares it against a `CaseSpec` written out independently in the test and checks it against the real
-mesh, so a renamed patch or a setting the loader stops accepting fails the fast gate. ⚠️ It does **not**
-catch the driver's constants moving (`U_IN`, `K_IN`, …): the test's expected value is a third copy. When
-phase D lets the driver read the file, delete that duplication rather than maintaining three.
+- **Each patch kind builds its own closures**: `PatchCondition.flow_closure()` (`Inlet` → `VelocityInlet`,
+  `Outlet` → `PressureOutlet`, `Wall` → `NoSlipWall`) and `turbulence_closures()` → `(k, omega)`
+  (`Inlet` → both `Dirichlet` from `InletTurbulence.inflow(velocity)`; `Outlet` → both `ZeroGradient`;
+  `Wall` → `k` by `Wall.k` (`ZeroGradient` unset, `Dirichlet(0)` for `zero`) and a **placeholder**
+  `ZeroGradient` for `omega`, which the closure fixes in the wall cells instead). That table is what every
+  validation driver wrote by hand.
+- **The wall set is `flow.sheared_patches(momentum.boundary)`** — the one predicate (#514 declined to add
+  an `is_wall`), exported from `aquaflux.flow` for this. So the flow/turbulence wall reconciliation #514
+  checks at `CoupledRANS.build` holds by construction for a case file.
+- **One `PropertyModel`**, `Fluid.property_model()`, built once in the momentum builder and handed to
+  `SSTTurbulence.build` as `momentum.properties` — the same object, not an equal one.
+  ⚠️ **Its viscosity is `Constant(jnp.asarray(mu))` and its density a plain float — deliberately, and
+  this is load-bearing.** A Python number in a module is static to a jitted function, so a continuation
+  that rescales the viscosity would recompile the coupled solve at every rung; as an array leaf it is a
+  value change. Density is never rescaled. `mu = rho * nu` is computed in that order so it is
+  bit-identical to the drivers' `RHO * NU`.
+- **An unset setting is not passed**, so the builder's own default applies (`_set`), and nothing restates
+  a default here: `gradient_scheme`, `explicit_production_limiter`, `drive`, `k_transform`/`omega_transform`
+  (`CoupledRANS.build` takes `None`), and `SSTModel()` when `model` is unset.
+- **`_momentum(spec, mesh, geometry)` is the one flow builder** both physics start from, so a setting
+  added to the flow reaches laminar and RANS cases together.
+
+## Checking a build: the parity harness, and the trap it had
+
+`validation/case_file_parity.py` builds each case with a `case.yaml` two ways and requires **one pytree**
+(same tree structure, static fields included, every array leaf bit-equal) **and** a bit-identical residual
+at the reference's hybrid initial condition. References, independent of the files: pitzDaily — a
+**frozen copy** of the assembly `compare.py` used to write by hand (the driver cannot be the reference any
+more, since it builds from the file); bfs3d — its driver's own `build_case()`, which stays hand-built for
+exactly this reason. **Both pass** (2026-09-24, commit 9476606 + this change): pitzDaily |R| 2.884371e+02,
+bfs3d |R| 2.178624e+00, both bit-identical. bfs3d is kept out of CI **by design** (project owner, 2026-09-24: its run is too long and its generated
+mesh, gitignored under `runs/`, too large), so the harness is a local check — link `runs/` from a checkout
+that has the mesh.
+The fast tier's own guard is `tests/unit/test_case_file.py`'s build tests on the 2D slab fixture (laminar,
+RANS with mixed wall `k`, and all-unset), against hand-built references by the same pytree comparison.
+⚠️ **The first version of that comparison could not see a float leaf standing in for an array** — it
+converted both with `np.asarray`, so `Constant(4e-3)` and `Constant(jnp.asarray(4e-3))` compared equal,
+and the mutation that makes every Reynolds rung recompile passed. Both the test and the harness now
+require an array leaf to be matched by an array leaf. **15 of 15 build mutations RED after the fix; two
+equivalent mutations dismissed**: building a second, equal `PropertyModel` for the closure (value-identical
+by construction), and not passing `drive` (the only nameable drive is the builder's own default).
+
+## The case files in the repository
+
+- **`validation/pitzdaily_openfoam/case.yaml` IS what `compare.py` solves.** `compare.case_spec(model=,
+  gradient_scheme=)` reads it and applies study overrides as **edits of the spec** (`dataclasses.replace`),
+  so what is not overridden is exactly the file; `build_case()` builds that and returns the same dict as
+  before (`coupled`, `momentum`, `turbulence`, `geom`) plus `spec`. ⚠️ **`PITZ_GRADIENT` and `PITZ_K_WALL`
+  no longer carry defaults of their own**: unset means "the file's choice", set overrides it — so the
+  default is stated once, in the file. `turbulence` is now the coupled system's (boundaries pre-resolved),
+  which is what every harness reads. `U_IN` and `NU` (the comparison's scales, read by
+  `compare_reynolds_continuation.py`) are read out of the file; `RHO`, `K_IN`, `OMEGA_IN`, `WALLS`,
+  `K_WALL_BC` are gone. The reasons for each choice moved into the file's comments.
+- **`validation/bfs3d_openfoam/case.yaml` states bfs3d at its driver's defaults and is NOT read by it** —
+  kept hand-built as the parity reference. Switching that driver is a separate decision: it is where most
+  of the `BFS3D_*` environment configuration lives.
+- `tests/unit/test_case_file.py::test_the_shipped_pitzdaily_file_reads_as_the_case_its_driver_builds_and_fits_its_mesh`
+  still compares the pitzDaily file against a `CaseSpec` written in the test — now a **second** copy rather
+  than a third, and it catches the reader misreading the file, not a physics change (a changed file value
+  is a deliberate change to the case, and should be reflected there).
