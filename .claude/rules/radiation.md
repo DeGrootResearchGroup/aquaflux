@@ -847,10 +847,15 @@ tuned under one execution model is a hypothesis under the next.**
 With triangles first, raising it only enlarges the ray chunk per call, and whole builds get
 *slower*: 100M against the default 4M reads **156.1 against 443.8 Mtest/s at 832 facets** and
 **202.6 against 463.5 at 1532** (same run as the ladder below). The ~30% a larger bound once seemed
-to buy was a rays-first, small-block artifact. ⚠️ **Not measured: whether a bound *below* 4M is
-faster still** — the trend suggests smaller ray chunks help, and nothing has checked where it
-turns. Each distinct call shape compiles once, so an uneven division costs one extra small program
-for the remainder, not one per block.
+to buy was a rays-first, small-block artifact. **A bound *below* 4M is not faster either — measured
+flat (#526):** `validation/radiation_receiver_ray_mask.py` with `RADIATION_WORK_LIMIT_SWEEP=1`,
+400,000 rays against 1,532 triangles, two alternating passes, fastest kept, run alone (jax 0.10.2,
+CPU, x64, macOS arm64, 11 cores, 2026-09-25): **449 / 435 / 422 / 431 / 439 / 428 Mtest/s** at
+0.25 / 0.5 / 1 / 2 / 4 / 8M, answers identical. ⚠️ The review that filed #526 read 134 → 424
+across the same ladder, on a machine running another session's tests; that slope was the
+contention, and is not recorded as a property of the limit. Each distinct call shape compiles once;
+since #526 a chunk shorter than the full one is padded to a power of two (`segment_is_cut`), so a
+caller whose ray count changes every pass compiles a few programs, not one per pass.
 
 ## Watertight intersection, and one piece of the published algorithm deliberately dropped
 
@@ -1691,6 +1696,88 @@ by **2.65x in blocked pairs** (463,936 against 174,912) and by **1.11x in wall c
 the ~20% spread this machine carries. ⚠️ **`RayCastOcclusion(grid=...)` breaks this, by design**
 — it stops at the first blocker, so its cost depends on what the rays hit and no single ladder
 transfers between scenes. Every figure in this section is the ungridded path.
+
+## THE RECEIVER RAY MASK CASTS ONLY FACING PAIRS, AND THE GRID TAKES INDICES (#526, 2026-09-25)
+
+Three changes to `RayCastOcclusion` for receivers in the volume. The field is unchanged: every
+checksum below is identical to 13 figures before and after.
+
+**A pair whose source faces away from its receiver is not cast.** The gather weights a pair by
+`radiance_per_exitance(cos)`, which for `Lambertian` and `CosinePower` is exactly zero for `cos <= 0`,
+so a ray there could only be multiplied by nothing. Now `Profile.dark_behind` (a `ClassVar`, `False`
+on the base, `True` on those two) declares it, and `Surfaces.dark_behind` asks it of every areal facet's
+profile. When that holds and `receiver_facet is None`, `field` drops the pairs whose receiver is
+**certainly** behind the facet's plane — `clipping.decidable_heights` of the receiver above the plane
+through the centroid, a height too near zero to trust snapped to zero and **kept**, so rounding can
+never cull a pair the gather's own cosine would light. Point sources are never culled (zero normal, so
+zero height; and excluded by label). The dropped pairs are recorded clear, so
+`hidden_by_geometry` there means "blocked, where it matters", and the mask says so:
+**`Visibility.clear_behind`** (and `OcclusionField.clear_behind`), static, `False` from every other path.
+⚠️ **A gather through such a mask refuses a set whose areal profiles are not all dark behind**
+(`_refuse_light_from_behind`, in `summed_fluence_rate` and `direct_irradiance`), because a profile
+swapped in at call time would be taken at the mask's word. **Receivers on facets are always cast in
+full**: the transfer's weights do not vanish behind a source (the issue measured `geometric == 0` on
+only 3-8% of facet pairs), and a `receiver_facet` array — even all `-1` — switches the cull off, which
+is how a test builds the full mask to compare against.
+
+**The cull needed two things it did not ask for.** Casting only the kept pairs means each pass forms
+its exclusions for its own rays, from the two indices, so **the whole-problem `(n_receivers,
+n_facets[, 2])` exclusion array of #525 item 1 is gone** as a side effect; #525's other items are
+untouched. And a pass's ray count now differs from every other pass's, so `segment_is_cut` pads a
+chunk shorter than the full one to a power of two (repeating its last ray, answers dropped) — without
+that, every pass compiles its own programs.
+
+**The grid kernel is sent indices.** `TriangleGrid.blocks` uploads the call's rays (padded to a power
+of two, for the same reason) and the triangles once as a `_Rays` module; each step sends only int32
+`(ray, candidate)` indices to `_indexed_pair_is_cut`, which gathers inside the compiled kernel, and
+reduces with `np.logical_or.reduceat` over each ray's contiguous run. Bit-identical: the existing
+grid-against-brute-force tests are unchanged and pass.
+
+**A stream prepares once.** `SelfOcclusion.prepared(surfaces)` (default: itself) does a strategy's
+surface-only work once; `RayCastOcclusion.prepared` builds the grid, and `grid=` now also accepts a
+built `TriangleGrid` (refused if it is of other triangles). `streamed_fluence_rate` prepares the
+strategy and calls `refuse_points_inside` **once over all points**, then builds each pass's mask with
+`visibility._unchecked_visibility` — `build_visibility` without the refusal, which it now wraps.
+⚠️ **There is no per-pass refusal any more**; a test that counts mask builds patches
+`gather._unchecked_visibility`, not `gather.build_visibility`.
+
+Measured with `validation/radiation_receiver_ray_mask.py` (an annular reactor in triangles: the Sozzi
+lamp's radius and length at 24 × 32, a dark sleeve at x = 0.03 m, the dark vessel wall at 48 × 32
+facing in — 4,992 facets, all of them blockers; receivers uniform in the annulus;
+`UniformAbsorption(35.67)`; warm median of three; jax 0.10.2, CPU, x64, macOS arm64, 11 cores, each
+run alone — two earlier runs overlapped another session's fast gate and were discarded; "before" is
+`4e0b632`, 2026-09-25):
+
+| build | before | after |
+|---|---|---|
+| every triangle, 500 receivers | 29.8 s | **22.4 s** (1.33x) |
+| grid, 4,000 receivers | 218.3 s | **86.4 s** (2.53x) |
+| streamed, grid, 4,000 receivers in 20 passes | 273.5 s | **87.0 s** (3.14x) |
+
+- **The cull is 1.33x here, not the issue's 2.7x, and the scene is why.** 75.6% of pairs face their
+  receiver, because the wall — 62% of the facets — faces every receiver; the issue's 37% was a lamp
+  alone. The brute-force row is almost exactly `1 / 0.756`, which is what the cull alone predicts.
+  ⚠️ **Read the saving against the scene's facing share**, not as a constant.
+- **The grid row's remaining ~1.9x is the index change.** It was 91k rays/s before; the issue's own
+  probe read 70.7k → 145k with a sleeve in the way, on a busy machine.
+- **Streaming now costs what holding costs** (87.0 against 86.4 s). Before it paid ~55 s over the held
+  build for 20 passes of grid rebuilds and facet refusals.
+- The stored `hidden_by_geometry` mean falls 0.43 → 0.19: those are the back-facing pairs the lamp's
+  own body blocked, now recorded clear. It is the field that must not move, and it does not.
+
+Tests, each mutation-checked (11 of 12 red): `test_a_pair_facing_away_is_not_cast_and_the_field_does_not_notice`
+(grid and not; culled against a full mask built with `receiver_facet = -1`, fields `array_equal`, masks
+different on back pairs — the cull off, and the cull on the wrong side, both fail),
+`test_only_the_facing_pairs_are_cast` and the updated `test_the_ray_test_passes_are_bounded_in_pairs_not_receivers`
+(ray counts equal the facing count), `test_a_receiver_in_a_facet_s_own_plane_is_cast_whatever_its_rounding_says`
+(a raw sign test fails), `test_a_profile_that_lights_behind_itself_is_refused_through_a_mask_that_did_not_look`,
+`test_a_point_source_is_never_left_untested`, `test_a_stream_builds_its_grid_and_refuses_its_scene_once_not_once_a_pass`
+(counts refusals through both module bindings, so a per-pass refusal through the mask builder shows),
+`test_a_grid_built_for_other_triangles_is_refused`, `test_ray_counts_that_vary_from_call_to_call_share_their_compiled_programs`
+and, in `test_radiation_grid.py`, `test_calls_with_different_ray_counts_share_their_compiled_programs`.
+Culling facet receivers too fails an existing transfer test. **Dismissed**: dropping the point-source
+label from the cull is inert — a point source's zero normal already gives it zero heights — and the
+label stays because a source's kind is read from its label, never inferred.
 
 ## GRID ACCELERATION: BUILT as `TriangleGrid` — a HOST walk, off by default
 

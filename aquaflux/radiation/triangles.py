@@ -259,21 +259,36 @@ def segment_is_cut(origin, target, vertices, min_distance, *, exclude=None, work
         return jnp.zeros(n_rays, dtype=bool)
 
     ray_chunk, block_size = _call_shape(n_rays, n_triangles, work_limit)
+    full_chunk, _ = _call_shape(work_limit, n_triangles, work_limit)
 
     pieces = []
     for first in range(0, n_rays, ray_chunk):
         rays = slice(first, first + ray_chunk)
+        count = min(ray_chunk, n_rays - first)
+        # A chunk shorter than the full one -- the last, or the only one when there are few rays
+        # -- is padded to a power of two by repeating its last ray, so a caller whose ray counts
+        # vary from pass to pass compiles a few shapes rather than one per pass. The padding's
+        # answers are dropped.
+        pad = min(padded_length(count), full_chunk) - count if count < full_chunk else 0
         # The sentinel has one row for all of them and so is not sliced alongside the rays.
-        excluded = exclude if exclude.shape[0] == 1 else exclude[rays]
-        cut = jnp.zeros(origin[rays].shape[0], dtype=bool)
+        excluded = exclude if exclude.shape[0] == 1 else _repeat_last(exclude[rays], pad)
+        chunk_origin = _repeat_last(origin[rays], pad)
+        chunk_direction = _repeat_last(direction[rays], pad)
+        chunk_near = _repeat_last(near[rays], pad)
+        cut = jnp.zeros(count + pad, dtype=bool)
         for start in range(0, n_triangles, block_size):
             cut = cut | _block_is_cut(
-                origin[rays],
-                direction[rays],
-                near[rays],
+                chunk_origin,
+                chunk_direction,
+                chunk_near,
                 vertices[start : start + block_size],
                 start,
                 excluded,
             )
-        pieces.append(cut)
+        pieces.append(cut[:count])
     return jnp.concatenate(pieces)
+
+
+def _repeat_last(array, pad: int):
+    """``array`` with its last row repeated ``pad`` more times."""
+    return array if pad == 0 else jnp.concatenate([array, jnp.repeat(array[-1:], pad, axis=0)])

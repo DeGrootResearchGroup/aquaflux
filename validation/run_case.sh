@@ -312,7 +312,7 @@ fi
   # mesh had to be hunted for across checkouts before the run could be repeated. PROFILE_, CONSISTENCY_,
   # FLOW_ and TAPER_ were missing the same way until 2026-09-15 -- tools/check_env_prefixes.py now
   # gates on this list falling behind the prefixes actually read under validation/ again.
-  env | grep -E '^(BFS3D|PITZ|UV|AQUAFLUX|ILU0_SWEEP|PROBE|PROFILE|CONSISTENCY|FLOW|TAPER|LAM|TET|SOZZI|RC|REF|BV|BP|BL)_' | sort | sed 's/^/env: /' || true
+  env | grep -E '^(BFS3D|PITZ|UV|AQUAFLUX|ILU0_SWEEP|PROBE|PROFILE|CONSISTENCY|FLOW|TAPER|LAM|TET|SOZZI|RC|REF|BV|BP|BL|RADIATION)_' | sort | sed 's/^/env: /' || true
 } > "$RUN_FILE"
 
 echo "launched pid $PID"

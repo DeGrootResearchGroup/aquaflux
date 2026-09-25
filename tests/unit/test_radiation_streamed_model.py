@@ -52,13 +52,13 @@ def _model(stream, **settings):
 def _watch_mask_builds(monkeypatch):
     """Record how many receivers each streamed mask build is handed."""
     handed = []
-    real = gather.build_visibility
+    real = gather._unchecked_visibility
 
     def watched(occluders, surfaces, points, **options):
         handed.append(np.asarray(points).shape[0])
         return real(occluders, surfaces, points, **options)
 
-    monkeypatch.setattr(gather, "build_visibility", watched)
+    monkeypatch.setattr(gather, "_unchecked_visibility", watched)
     return handed
 
 

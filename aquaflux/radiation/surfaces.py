@@ -261,6 +261,18 @@ class Surfaces(eqx.Module):
         mask[list(self.point_source_index)] = True
         return mask
 
+    @property
+    def dark_behind(self) -> bool:
+        """Whether every areal facet sends exactly nothing into the half-space behind it.
+
+        True when each profile an areal facet uses declares
+        :attr:`~aquaflux.radiation.profiles.Profile.dark_behind`. Read from the labels and the
+        profile objects, which are concrete even inside a trace, so it is a plain answer there
+        too. Point sources are not asked: they have no behind.
+        """
+        kinds = np.unique(np.asarray(self.profile_index)[~self.is_point_source])
+        return all(self.profiles[int(kind)].dark_behind for kind in kinds)
+
     def with_geometry(self, vertices) -> Surfaces:
         """A copy on moved vertices, with the derived geometry recomputed and the labels kept.
 

@@ -520,8 +520,8 @@ def test_the_grid_changes_what_the_ray_test_COSTS_and_not_what_it_ANSWERS(grid):
     assert 0.2 < blocked.mean() < 0.9, f"fixture is one-sided: {blocked.mean()}"
 
 
-def test_the_ray_test_passes_are_bounded_in_pairs_not_receivers(monkeypatch):
-    """One ray per receiver-and-facet pair, so a pass is bounded by pairs whatever the facets."""
+def _watch_rays(monkeypatch):
+    """Record how many rays each call of the brute-force ray test is handed."""
     from aquaflux.radiation import self_occlusion
 
     rays = []
@@ -532,15 +532,206 @@ def test_the_ray_test_passes_are_bounded_in_pairs_not_receivers(monkeypatch):
         return real(origin, target, *args, **kwargs)
 
     monkeypatch.setattr(self_occlusion, "segment_is_cut", watched)
+    return rays
+
+
+def _facing(surfaces, receivers) -> np.ndarray:
+    """Which (receiver, facet) pairs face each other, by the sign of the receiver's height."""
+    offset = receivers[:, None, :] - np.asarray(surfaces.centroid)[None, :, :]
+    return np.sum(offset * np.asarray(surfaces.normal)[None, :, :], axis=-1) > 0.0
+
+
+def test_the_ray_test_passes_are_bounded_in_pairs_not_receivers(monkeypatch):
+    """One ray per receiver-and-facet pair, so a pass is bounded by pairs whatever the facets.
+
+    Receivers on no facet, so the pairs a facet turns its back on are not cast (see below): the
+    rays cast are the facing pairs, every one of them, and no pass holds more than the limit.
+    """
+    rays = _watch_rays(monkeypatch)
     rng = np.random.default_rng(3)
     for n_facets in (1, 4):
         rays.clear()
         corners = rng.uniform(-0.1, 0.1, (n_facets, 3, 3))
         surfaces = Surfaces.from_triangles(corners, emission=1.0)
+        # On every side of the facets, so some pairs face each other and some do not.
+        receivers = rng.uniform(-2.0, 2.0, (30, 3))
         build_visibility(
-            [], surfaces, rng.uniform(1.0, 2.0, (30, 3)),
-            self_occlusion=RayCastOcclusion(pair_limit=12),
+            [], surfaces, receivers, self_occlusion=RayCastOcclusion(pair_limit=12)
         )  # fmt: skip
+        facing = _facing(surfaces, receivers)
+        assert 0 < facing.sum() < facing.size, "the fixture must hold both kinds of pair"
         assert max(rays) <= 12, rays
-        assert rays[0] == (12 // n_facets) * n_facets, rays
-        assert sum(rays) == 30 * n_facets, "every pair is still cast"
+        assert sum(rays) == int(facing.sum()), "every facing pair is cast"
+
+
+def _lamp_in_a_sleeved_box():
+    """A tube lamp, a dark sleeve beside it and a dark box round both, as one surface set.
+
+    Receivers see the lamp's far side through the lamp itself, so a ray cast from a facet facing
+    away is blocked -- which is what makes a mask that casts it differ from one that does not.
+    """
+    lamp = cylinder_triangles(0.1, 0.4, sectors=12, slices=6)
+    sleeve = cylinder_triangles(0.05, 0.45, sectors=8, slices=4) + np.array([0.3, 0.0, 0.0])
+    box = closed_prism(np.array([[-0.6, -0.6], [0.6, -0.6], [0.6, 0.6], [-0.6, 0.6]]), 0.5)
+    box = box[:, ::-1, :]
+    emission = np.concatenate([np.full(len(lamp), 5.0), np.zeros(len(sleeve) + len(box))])
+    surfaces = Surfaces.from_triangles(np.concatenate([lamp, sleeve, box]), emission=emission)
+    rng = np.random.default_rng(8)
+    angle, radius = rng.uniform(0.0, 2.0 * np.pi, 60), rng.uniform(0.15, 0.5, 60)
+    receivers = np.stack(
+        [radius * np.cos(angle), radius * np.sin(angle), rng.uniform(-0.3, 0.3, 60)], 1
+    )
+    receivers = receivers[np.linalg.norm(receivers[:, :2] - [0.3, 0.0], axis=1) > 0.08]
+    return surfaces, receivers
+
+
+@pytest.mark.parametrize("grid", [False, True])
+def test_a_pair_facing_away_is_not_cast_and_the_field_does_not_notice(monkeypatch, grid):
+    """For receivers in the volume, a facet turned away from one sends it nothing, so its ray is
+    not cast -- and the field through that mask is exactly the field through one cast in full.
+
+    ``receiver_facet`` rows of ``-1`` are receivers on no facet as well, but they switch the cut
+    off, which is how the full mask is built for comparison. The two masks must DIFFER, on the
+    pairs facing away that the lamp's own body blocks, or the comparison shows nothing.
+    """
+    surfaces, receivers = _lamp_in_a_sleeved_box()
+    strategy = RayCastOcclusion(grid=grid)
+    culled = build_visibility([], surfaces, receivers, self_occlusion=strategy)
+    full = build_visibility(
+        [], surfaces, receivers, self_occlusion=strategy,
+        receiver_facet=np.full(len(receivers), -1),
+    )  # fmt: skip
+    facing = _facing(surfaces, receivers)
+    assert culled.clear_behind and not full.clear_behind
+    assert not np.any(np.asarray(culled.hidden_by_geometry)[~facing]), "recorded clear"
+    np.testing.assert_array_equal(
+        np.asarray(culled.hidden_by_geometry)[facing], np.asarray(full.hidden_by_geometry)[facing]
+    )
+    assert np.asarray(full.hidden_by_geometry)[~facing].mean() > 0.2, "the lamp hides its back"
+    field = direct_fluence_rate(surfaces, receivers, visibility=culled)
+    np.testing.assert_array_equal(field, direct_fluence_rate(surfaces, receivers, visibility=full))
+    assert float(jnp.min(field)) > 0.0
+
+
+def test_only_the_facing_pairs_are_cast(monkeypatch):
+    """The saving, counted: a lamp turns about half its facets away from any receiver."""
+    rays = _watch_rays(monkeypatch)
+    surfaces, receivers = _lamp_in_a_sleeved_box()
+    build_visibility([], surfaces, receivers, self_occlusion=RayCastOcclusion())
+    facing = _facing(surfaces, receivers)
+    assert sum(rays) == int(facing.sum()) < 0.9 * facing.size
+
+
+def test_a_receiver_in_a_facet_s_own_plane_is_cast_whatever_its_rounding_says():
+    """A pair is dropped only where the receiver is CERTAINLY behind the facet.
+
+    Points placed in a tilted facet's plane have heights above it that are zero up to rounding,
+    of either sign. A plain sign test drops the ones that round negative; the filtered one keeps
+    all of them, as it must -- the gather's own cosine there is rounding of either sign too.
+    """
+    from aquaflux.radiation.self_occlusion import _facing_away
+
+    triangle = np.array([[[0.1, 0.2, 0.3], [1.3, 0.7, -0.4], [0.4, 1.9, 1.1]]])
+    surfaces = Surfaces.from_triangles(triangle, emission=1.0)
+    rng = np.random.default_rng(2)
+    u, v = rng.uniform(-3.0, 3.0, (2, 400, 1))
+    in_plane = (
+        triangle[0, 0]
+        + u * (triangle[0, 1] - triangle[0, 0])
+        + v * (triangle[0, 2] - triangle[0, 0])
+    )
+    heights = (in_plane - np.asarray(surfaces.centroid)) @ np.asarray(surfaces.normal)[0]
+    assert np.any(heights < 0.0), "the fixture must hold points that round below the plane"
+    assert not np.any(_facing_away(surfaces, in_plane))
+    behind = in_plane - 1e-3 * np.asarray(surfaces.normal)
+    assert np.all(_facing_away(surfaces, behind))
+
+
+def test_a_point_source_is_never_left_untested():
+    """A point source has no back: its pairs are all cast, and a panel still shadows it."""
+    panel = rectangle_triangles([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0])
+    lamp = np.zeros((1, 3, 3))
+    surfaces = Surfaces.from_triangles(np.concatenate([lamp, panel]), power=[1.0, 0.0, 0.0])
+    mask = build_visibility([], surfaces, np.array([[2.0, 0.0, 0.0], [-2.0, 0.0, 0.0]]))
+    np.testing.assert_array_equal(np.asarray(mask.hidden_by_geometry)[:, 0], [1.0, 0.0])
+
+
+def test_a_profile_that_lights_behind_itself_is_refused_through_a_mask_that_did_not_look():
+    """The cut is right only for sources dark behind themselves, so the gather checks the
+    profiles it is handed -- which may not be the ones the mask was built with."""
+    from aquaflux.radiation.profiles import Lambertian
+
+    class Glowing(Lambertian):
+        dark_behind = False
+
+    surfaces, receivers = _lamp_in_a_sleeved_box()
+    mask = build_visibility([], surfaces, receivers)
+    glowing = surfaces.with_optics(profiles=[Glowing()])
+    with pytest.raises(ValueError, match="not declared dark behind itself"):
+        direct_fluence_rate(glowing, receivers, visibility=mask)
+    full = build_visibility([], glowing, receivers)
+    assert not full.clear_behind, "a mask built with that profile tests every pair"
+    direct_fluence_rate(glowing, receivers, visibility=full)
+
+
+def test_a_stream_builds_its_grid_and_refuses_its_scene_once_not_once_a_pass(monkeypatch):
+    """What depends on the surface alone is done once per stream, however many passes it has."""
+    from aquaflux.radiation import gather, grid, visibility
+
+    builds, refusals = [], []
+    real_build, real_refuse = grid.TriangleGrid.build.__func__, gather.refuse_points_inside
+
+    def counted_build(cls, *args, **kwargs):
+        builds.append(1)
+        return real_build(cls, *args, **kwargs)
+
+    def counted_refuse(*args, **kwargs):
+        refusals.append(1)
+        return real_refuse(*args, **kwargs)
+
+    monkeypatch.setattr(grid.TriangleGrid, "build", classmethod(counted_build))
+    # Both bindings, so a refusal reached through the mask builder is counted too.
+    monkeypatch.setattr(gather, "refuse_points_inside", counted_refuse)
+    monkeypatch.setattr(visibility, "refuse_points_inside", counted_refuse)
+    surfaces, receivers = _lamp_in_a_sleeved_box()
+    pair_limit = 8 * surfaces.n_facets
+    streamed = direct_fluence_rate(
+        surfaces, receivers, occluders=[], self_occlusion=RayCastOcclusion(grid=True),
+        pair_limit=pair_limit,
+    )  # fmt: skip
+    assert len(receivers) > 4 * 8, "the stream must run several passes"
+    assert len(builds) == 1 and len(refusals) == 1, (len(builds), len(refusals))
+    held = build_visibility([], surfaces, receivers, self_occlusion=RayCastOcclusion(grid=True))
+    np.testing.assert_allclose(
+        streamed, direct_fluence_rate(surfaces, receivers, visibility=held), rtol=1e-13
+    )
+
+
+def test_a_grid_built_for_other_triangles_is_refused():
+    surfaces, receivers = _lamp_in_a_sleeved_box()
+    from aquaflux.radiation.grid import TriangleGrid
+
+    other = TriangleGrid.build(np.asarray(surfaces.vertices)[:-1])
+    with pytest.raises(ValueError, match="built over other triangles"):
+        build_visibility([], surfaces, receivers, self_occlusion=RayCastOcclusion(grid=other))
+
+
+def test_ray_counts_that_vary_from_call_to_call_share_their_compiled_programs():
+    """A pass casts only its facing pairs, so its ray count differs from every other pass's; a
+    short chunk is padded to a power of two, or each pass would compile programs of its own."""
+    from aquaflux.radiation.triangles import _block_is_cut
+
+    rng = np.random.default_rng(5)
+    vertices = rng.uniform(-1.0, 1.0, (7, 3, 3))
+    before = _block_is_cut._cache_size()
+    for n_rays in (9, 11, 13, 16):
+        origin = rng.uniform(-2.0, 2.0, (n_rays, 3))
+        target = rng.uniform(-2.0, 2.0, (n_rays, 3))
+        cut = segment_is_cut(origin, target, vertices, np.zeros(n_rays))
+        one_by_one = [
+            bool(segment_is_cut(origin[k : k + 1], target[k : k + 1], vertices, np.zeros(1))[0])
+            for k in range(n_rays)
+        ]
+        np.testing.assert_array_equal(np.asarray(cut), one_by_one)
+    # 9, 11, 13 and 16 rays all pad to 16, and a single ray to 1: two programs, not five.
+    assert _block_is_cut._cache_size() - before <= 2
