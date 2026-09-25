@@ -6,16 +6,19 @@ the flow is solved on, by summing the contribution of every emitting surface ele
 receiver. Contributions are attenuated exponentially through the absorbing water, blocked by
 intervening geometry, and closed over diffuse reflection from the surfaces themselves.
 
-**What the method is.** A deterministic backward gather: at each receiver, the exact solid angle
-of every emitting triangle, weighted by its radiance, attenuated along the path, and gated by
-whatever stands in the way. That is the mainstream formulation of ultraviolet reactor modelling,
-not a new one — the multiple segment source summation (MSSS) model, a cylindrical diffuse lamp cut
-into segments and summed at each point, is this with the lamp restricted to a cylinder (Liu et
-al., 2004, find it the best approximation of a lamp among the summation models). What the field's
-summation models lack, and this adds, is shadowing by the reactor's own geometry, diffuse
-interreflection solved to convergence, and exact derivatives. The sum is evaluated at a point
-exactly, so it carries neither the statistical error nor the finite-volume scoring bias of a
-Monte Carlo estimate.
+**What the method is.** A deterministic backward gather: at each receiver, the exact solid angle of
+every emitting triangle, weighted by its radiance, attenuated along the path, and gated by whatever
+stands in the way. That is the mainstream formulation of ultraviolet reactor modelling, not a new
+one — the multiple segment source summation (MSSS) model, a cylindrical diffuse lamp cut into
+segments and summed at each point, is this with the lamp restricted to a cylinder (Liu et al.,
+2004, find it the best approximation of a lamp among the summation models). The basic summation
+models assume an unobstructed path from lamp to point; extensions such as RAD-LSI (a radial
+correction to line source integration) and the commercial UVCalc3D add shadowing by the sleeves of
+neighbouring lamps in a multi-lamp array (Liu et al., 2005). What this adds is shadowing by
+arbitrary triangulated geometry rather than by lamp sleeves alone, diffuse interreflection from
+every surface solved to convergence, and exact derivatives. The sum is evaluated at a point
+exactly, so it carries neither the statistical error nor the finite-volume scoring bias of a Monte
+Carlo estimate.
 
 Start at :func:`~aquaflux.radiation.model.build_radiation_model`, which freezes everything a
 scene's shape decides, and then ask the model for what you need. From a lamp rating and a water
