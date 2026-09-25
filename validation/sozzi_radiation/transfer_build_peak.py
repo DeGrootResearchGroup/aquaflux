@@ -7,6 +7,8 @@ handed back to the system, so a build's peak is the running total of every array
 and the first version, which assembled each quantity whole, peaked at 8.33 GB. This measures the
 peak of :func:`~aquaflux.radiation.build_transfer` alone, in a process of its own so that
 ``/usr/bin/time -l`` can read it, beside what the result actually holds.
+``validation/peak_footprint.py`` runs that process, and forwards a ``kill`` of this one to it rather
+than leaving it orphaned.
 
 The water is the three hand-typed cylinders of ``primitive_occlusion.py`` and the lamp is convex, so
 self-occlusion is off, as in the Sozzi field itself; no CAD kernel is needed.
@@ -18,8 +20,6 @@ Run with ``validation/run_case.sh validation/sozzi_radiation/transfer_build_peak
 from __future__ import annotations
 
 import json
-import re
-import subprocess
 import sys
 import tempfile
 import time
@@ -28,6 +28,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1]))
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent))
 
 
 def build() -> dict:
@@ -60,15 +61,17 @@ def build() -> dict:
 
 
 def main() -> None:
+    from peak_footprint import run_with_footprint
+
     with tempfile.TemporaryDirectory() as scratch:
-        timing, result = Path(scratch) / "time", Path(scratch) / "result.json"
-        command = ["/usr/bin/time", "-l", "-o", str(timing), sys.executable, "-u", __file__]
-        code = subprocess.run([*command, "--child", str(result)], check=False).returncode
-        if code:
-            sys.exit(code)
+        result = Path(scratch) / "result.json"
+        child = run_with_footprint([sys.executable, "-u", __file__, "--child", str(result)])
+        if child.returncode:
+            sys.exit(child.returncode)
         summary = json.loads(result.read_text())
-        footprint = re.search(r"(\d+)\s+peak memory footprint", timing.read_text())
-    summary["peak_footprint_GB"] = round(int(footprint.group(1)) / 1e9, 2)
+    if child.peak_footprint_gb is None:
+        sys.exit("/usr/bin/time reported no peak memory footprint")
+    summary["peak_footprint_GB"] = round(child.peak_footprint_gb, 2)
     summary["peak_over_one_array"] = round(
         summary["peak_footprint_GB"] / summary["one_n_by_n_float_GB"], 1
     )
