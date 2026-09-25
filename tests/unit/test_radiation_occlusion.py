@@ -216,6 +216,28 @@ def test_a_mask_built_for_other_receivers_is_refused():
         )
 
 
+def test_a_mask_is_still_checked_inside_a_compiled_function():
+    """Compiling the gather must not switch the receiver check off where it can still run.
+
+    The comparison has to be made on the host, since a staged one cannot be read there, and the
+    easy way to make that traceable is to skip it whenever a trace is active. That would drop the
+    check for exactly the common case -- a model and its receivers closed over by a compiled
+    sweep -- where both sets are concrete and the check costs nothing.
+    """
+    source = point_source()
+    mask = build_visibility([sleeve()], source, np.array([[4.0, 0.0, 0.0]]))
+    elsewhere = np.array([[4.0, 1.0, 0.0]])
+    with pytest.raises(ValueError, match="built for different receivers"):
+        jax.jit(lambda t: direct_fluence_rate(source, elsewhere, visibility=mask, transmittance=t))(
+            jnp.asarray([0.0])
+        )
+    # Traced points cannot be read, but their count can, and a wrong count is still refused.
+    with pytest.raises(ValueError, match="built for different receivers"):
+        jax.jit(lambda p: direct_fluence_rate(source, p, visibility=mask))(
+            jnp.asarray([[4.0, 0.0, 0.0], [4.0, 1.0, 0.0]])
+        )
+
+
 def test_transmittance_without_a_mask_is_refused():
     with pytest.raises(ValueError, match="without a visibility mask"):
         direct_fluence_rate(point_source(), np.array([[4.0, 0.0, 0.0]]), transmittance=[0.5])
@@ -367,6 +389,28 @@ def test_streaming_and_the_body_test_count_pairs_not_receivers(monkeypatch):
     tested.clear()
     build_visibility([sleeve()], source, _probe_line(7), pair_limit=8)
     assert tested == [2, 2, 2, 1], tested
+
+
+def test_the_streamed_passes_share_one_compiled_gather(monkeypatch):
+    """Each pass's gather is compiled once per call and reused, not traced again per pass.
+
+    Run eagerly, a pass re-traces the gather and forms its arrays one operation at a time, and at
+    a finely divided emitter a streamed field is tens of thousands of passes -- so that overhead
+    is most of the cost. The partition by profile runs once per trace, which makes it the count:
+    five passes here, of which the last is shorter and compiles once more.
+    """
+    from aquaflux.radiation import gather
+
+    traced = []
+    real = gather._groups
+
+    def watched(surfaces):
+        traced.append(surfaces.n_facets)
+        return real(surfaces)
+
+    monkeypatch.setattr(gather, "_groups", watched)
+    direct_fluence_rate(point_source(), _probe_line(37), occluders=[sleeve()], pair_limit=8)
+    assert len(traced) == 2, traced
 
 
 def test_streaming_with_no_bodies_still_streams_the_surface_s_own_shadowing():

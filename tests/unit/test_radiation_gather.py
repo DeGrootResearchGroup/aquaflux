@@ -503,6 +503,76 @@ def test_the_gather_compiles_with_the_geometry_closed_over():
     )
 
 
+def _narrow_panel():
+    panel = rectangle_triangles([0.0, 0.0, 0.0], [0.2, 0.0, 0.0], [0.0, 0.2, 0.0])
+    return Surfaces.from_triangles(panel, emission=5.0, profiles=(CosinePower(4.0),))
+
+
+@pytest.mark.parametrize(
+    "rebuild",
+    [
+        pytest.param(
+            lambda surfaces, value: surfaces.with_optics(
+                emission=value * surfaces.emission, profiles=(Lambertian(),)
+            ),
+            id="profiles replaced",
+        ),
+        pytest.param(
+            lambda surfaces, value: surfaces.with_geometry(surfaces.vertices + value - 1.0),
+            id="geometry moved",
+        ),
+    ],
+)
+def test_a_surface_set_rebuilt_inside_the_trace_still_compiles(rebuild):
+    """Which profile each facet uses must survive being rebuilt inside a traced function.
+
+    Re-reading a set as Lambertian is what the volume field does for its reflected part, and
+    moving a set is how a lamp's position is differentiated. Both rebuild the record inside the
+    trace, and a ``jnp`` array made there is staged even from concrete input -- so the grouping
+    the gather partitions on used to arrive as a tracer and be refused.
+    """
+    surfaces = _narrow_panel()
+    probes = jnp.asarray([[0.1, 0.1, 0.5], [0.3, -0.1, 0.4]])
+
+    def field(value):
+        return direct_fluence_rate(rebuild(surfaces, value), probes)
+
+    value = jnp.asarray(1.0)
+    np.testing.assert_allclose(
+        np.asarray(jax.jit(field)(value)), np.asarray(field(value)), rtol=1e-13
+    )
+
+
+def test_a_gradient_s_memory_is_bounded_by_the_pair_limit_not_the_receiver_count():
+    """The pair limit bounds a reverse pass as well as a forward one.
+
+    A scan's reverse pass keeps every chunk's intermediates unless its body is checkpointed, so
+    without the checkpoint a gradient's working memory grows in proportion to the receivers --
+    at a mesh's cells against a finely divided lamp, terabytes -- however small the limit.
+    Pinned on the compiled program's own working-memory figure, which is exact and immune to
+    what else the machine is doing, at sixteen times the receivers and the same limit.
+    """
+    surfaces = _narrow_panel()
+    pair_limit = 16 * surfaces.n_facets
+    medium = UniformAbsorption(2.0)
+
+    def working_memory(n_receivers):
+        rng = np.random.default_rng(3)
+        probes = jnp.asarray(rng.uniform([-0.2, -0.2, 0.3], [0.4, 0.4, 0.9], (n_receivers, 3)))
+
+        def total(emission):
+            lit = surfaces.with_optics(emission=emission)
+            return jnp.sum(
+                direct_fluence_rate(lit, probes, absorption=medium, pair_limit=pair_limit)
+            )
+
+        compiled = jax.jit(jax.grad(total)).lower(jnp.asarray(surfaces.emission)).compile()
+        return compiled.memory_analysis().temp_size_in_bytes
+
+    few, many = working_memory(64), working_memory(1024)
+    assert many < 1.5 * few, (few, many)
+
+
 def test_passing_the_whole_surface_set_as_a_traced_argument_says_why_it_cannot_work():
     """A bare tracer error from inside the partition would send a reader looking in the wrong
     place; the message names the fix instead."""

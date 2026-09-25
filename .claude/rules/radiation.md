@@ -281,6 +281,18 @@ same array does not. So a range check on an index array — `solid_id`, `profile
 written in numpy, and skipped outright when the array itself is traced. This cost an afternoon
 to find because the isinstance check said "not a tracer" while the very next line disagreed.
 
+⚠️ **It recurred in two more places, and between them they made the whole model untraceable (#522,
+2026-09-24).** `Visibility.for_receivers` compared positions with `bool(jnp.all(points == ...))`, and
+`with_optics(profiles=...)` — which the reflected pass of `fluence_rate` calls — stored the new index
+through `jnp.asarray`, so the gather's partition received a tracer. So **no model entry point with a
+mask could be jitted**, every call ran op by op, and the streamed path paid a fresh trace per pass. The
+fixes are the rule above applied: the receiver check runs in numpy whenever both sets are concrete
+(a model closed over by a compiled sweep still is, and is still checked) and goes by shape alone only
+for traced points; and **`profile_index` is now stored as a numpy array** everywhere
+(`from_triangles`, `with_optics`), as the label it is — like `point_source_index`. Pinned by
+`test_the_field_compiles_with_the_model_closed_over`, `test_a_surface_set_rebuilt_inside_the_trace_still_compiles`
+(`with_geometry` inside `jit` failed the same way) and `test_a_mask_is_still_checked_inside_a_compiled_function`.
+
 ## ⚠️ GEOMETRY IS CLOSED OVER, VALUES ARE PASSED
 
 The gather partitions facets by angular distribution and by areal-versus-point **on the host**,
@@ -288,7 +300,8 @@ so each group's profile is a concrete object whose methods inline and the traced
 no branch on facet kind. That partition decides the program's *shape*, so `area` and
 `profile_index` cannot themselves be traced. `jit(lambda s, p: direct_fluence_rate(s, p))` over a whole
 `Surfaces` raises with an explanation; close over the set and substitute values through
-`with_optics` instead. `RadiationModel` formalizes that boundary: it holds the frozen
+`with_optics` instead (a `profile_index` that arrives traced this way is refused with the reason;
+one built inside a trace from concrete input stays numpy and is fine). `RadiationModel` formalizes that boundary: it holds the frozen
 geometry and every entry point takes the surface set again — for its optics, but its geometry is
 read live too (the direct gather, the point-source arrivals), so it must be the build's; every call
 checks (`RadiationModel.geometry`, below).
@@ -1983,6 +1996,36 @@ small limits is *per-pass host overhead* (a mask build and a fresh gather call p
 arithmetic — 1M is ~3x slower than 4M on it for the same pairs. That is the lever for #489: the
 streamed pass and the traced chunk inside it want different sizes, and today one limit sets both.
 Every checksum agreed across all 48 points: how the work is cut changes nothing about the answer.
+⚠️ **This table predates #522**, which compiles `streamed_fluence_rate`'s per-chunk gather once per
+call (`_compiled_gather`: the live floats and the chunk's mask are arguments, only the labels that
+shape the program are closed over) instead of re-tracing it eagerly every chunk.
+`validation/radiation_compiled_gather.py` (4,096-facet analytic lamp, 3,944 receivers in 20 chunks,
+one sleeve as a `Cylinder`, `NoOcclusion`, `UniformAbsorption(35.67)`, jax 0.10.2, CPU, x64, macOS
+arm64, 11 cores, nothing else running, 2026-09-24; "before" is `f46c648`, i.e. with #520's custom
+VJP) reads **1.54 s → 0.35 s** per warm call, checksum identical to 13 figures; the first call of a
+process pays ~0.7 s of compilation. The mask build per chunk is unchanged. So the streamed rows, and
+the 1M-vs-4M gap in particular, are stale until re-run; the gather-alone rows are unaffected.
+
+**The same change stops the field phase GROWING call by call**, which was the Sozzi session's finding
+under #489: identical `fluence_rate` calls on the streamed model went 5.91 → 7.16 GB, and a
+`jax.clear_caches()` between them released 3.2 GB — compiled programs, not arrays, because every
+eager chunk of every call traced and compiled afresh. The harness's footprint column (ten identical
+streamed calls, `proc_pid_rusage` `ri_phys_footprint`) reads **0.58 → 1.18 GB, ~67 MB a call, at
+`f46c648`, against 0.413 → 0.418 GB after**. Not yet re-measured on the Sozzi model itself.
+
+**A GRADIENT WAS NOT BOUNDED BY THE LIMIT AT ALL, UNTIL THE SCAN BODY WAS CHECKPOINTED (#523).** The
+limit bounded the forward pass only: a scan's reverse pass keeps every chunk's intermediates, so a
+gradient's working memory grew in proportion to the receivers. Same harness and configuration,
+compiled `temp_size_in_bytes` of `grad` in the emission at the default limit: **960 → 608 MB at
+8.2e6 pairs and 3,839 → 608 MB at 1.3e8** — before, ~25 B per pair on top of a fixed base; about
+2.6 TB at Sozzi scale (1.6M cells × 66k facets), and a review probe read 80-97 B per pair through
+the model path. `_chunked` now wraps the body in `jax.checkpoint(prevent_cse=False)`: flat in the
+receiver count, forward unaffected; the review probe measured value and gradient bit-identical and
+~1.67x the plain gradient's time (on a shared machine — not re-measured). `test_a_gradient_s_memory_is_bounded_by_the_pair_limit_not_the_receiver_count`
+pins it on the compiled figure. The streamed path is bounded separately, and was first: each of
+`streamed_fluence_rate`'s chunks is a custom VJP that rebuilds its mask on the way back (#520, see
+the streamed-model section), so its tape holds a chunk's inputs rather than its mask rows. For a few
+scalar parameters `jax.jacfwd` also stays at forward memory.
 
 ## ANALYTIC OCCLUSION: BUILT as `SilhouetteOcclusion` — exact per blocker, once six defects were out
 
