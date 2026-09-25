@@ -284,3 +284,42 @@ def _signed_loop_solid_angle(normal: jnp.ndarray, loop: jnp.ndarray) -> jnp.ndar
     span = jnp.where(flat, 0.0, span)
     angle = jnp.arctan2(span, dot(direction, following))
     return 0.5 * jnp.sum(angle * dot(axis, normal[..., None, :]), axis=-1)
+
+
+def _signed_loop_area(loop: jnp.ndarray) -> jnp.ndarray:
+    """The plain solid angle of a closed, convex loop of directions, **signed**.
+
+    The unprojected counterpart of :func:`_signed_loop_solid_angle`: the area of the loop's image
+    on the unit sphere, with no weighting by any receiving normal. It is what a share of a
+    *volume* receiver's view needs, because a point in the fluid has no normal to project onto.
+
+    Evaluated as a fan of triangles from the loop's first vertex, each by the same closed form as
+    :func:`signed_solid_angle`. That keeps the two properties the projected form is used for:
+
+    * **It is additive over a partition**, and it negates with the winding, since each fan term
+      is the signed area of its own triangle. So a covered region can still be subtracted from a
+      whole without the visible region ever being constructed.
+    * **Every term is a two-argument arctangent**, so a thin loop -- a sliver left by a clip -- is
+      as well conditioned as a small triangle, rather than the small difference of interior
+      angles an angle-excess formula would give.
+
+    The loop must be convex and lie within an open hemisphere, which a triangle seen from any
+    point off its plane does, and so does everything a clip of it by half-spaces through the
+    receiver leaves: each fan triangle is then inside the loop and smaller than a hemisphere,
+    where the closed form's branch is the right one.
+
+    Parameters
+    ----------
+    loop : jnp.ndarray, shape ``(..., n, 3)``
+        Directions from the receiver to each vertex in order, not necessarily unit length.
+        Repeated vertices, as a fixed-width clipped loop carries, make degenerate fan triangles
+        that contribute nothing; an emptied loop of zero vectors contributes nothing at all.
+
+    Returns
+    -------
+    jnp.ndarray, shape ``(...)``
+        The signed solid angle, in ``(-2 pi, 2 pi)``.
+    """
+    apex = jnp.broadcast_to(loop[..., :1, :], loop[..., 1:-1, :].shape)
+    fan = jnp.stack([apex, loop[..., 1:-1, :], loop[..., 2:, :]], axis=-2)
+    return jnp.sum(signed_solid_angle(jnp.zeros(3), fan), axis=-1)
