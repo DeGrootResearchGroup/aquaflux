@@ -222,6 +222,26 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
     (and the `jax.live_arrays()` check that nothing leaks beyond it) was taken when this was the only
     search path there was; it has not been re-measured since the concrete path stopped exercising it, but
     nothing about the traced path's memory behaviour changed.
+- `surface.py` — `patch_triangles(mesh, geometry, patch_names)` → `PatchTriangles` (`vertices`
+  `(n, 3, 3)`, `patch_id`, `patch_names`, `face`): named **boundary** patches cut into the same
+  centre-fan triangles `face.py` computes face geometry from (one triangle per face-node incidence,
+  via `PolygonFaceGeometry.fan_triangles`, which `centre_fan` and `warp_first_moment` also build on —
+  the fan's corners have one home), each wound so its right-hand normal points **into the domain**,
+  i.e. against the stored owner-outward normal. Orientation is decided from that normal, never from
+  the node order (`test_every_triangle_faces_into_the_domain_whatever_the_node_order` reverses half
+  the rings to prove it). A planar face's triangles sum to exactly its `|S|`; a warped one's to
+  `sum|d_i|`, the planarity metric's numerator. Refused: a 2D mesh, a patch holding interior faces
+  (a baffle has two sides, and which faces the domain is not a property of the face — offering it
+  as a two-sided sheet is not built), and any face **not star-shaped from its vertex mean**, whose
+  fan folds over itself and would cover part of the face twice. That last refusal is a decision,
+  not a gap to fill silently: on the Sozzi snapped mesh (`lampWall` 48,550 faces, `bodyWall`
+  329,028; quads with a few 5-/6-gons and 218 triangles) **no** face folds — the worst fan triangle
+  carries 12% of its face's mean share — so ear clipping was not built; build it the day a real mesh
+  trips the check. It lives here and not in `radiation/` because nothing in it is radiation: it is
+  "the mesh's boundary as triangles", and `radiation/` imports no mesh. Supporting it,
+  `FaceNodeConnectivity.select(faces)` returns the connectivity of a face subset in the order given
+  (node indices unchanged), so a few patches of a large mesh are traversed without touching every
+  face.
 - `groups.py` — `LabelledGroups` base → `CellZones` / `FacePatches`. Named **partitions**
   of cells (zones) and faces (patches) — the SoA analogue of the C++ `MeshObjectGroup`
   `name→group` maps. See `docs/mesh_zones_and_patches.md` for the full design.
@@ -287,7 +307,8 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
     (`tests/unit/test_collapse.py::_periodic_extruded_slab`); that helper is the thing to reuse if a
     3D periodic generator is ever added.
   - `FaceNodeConnectivity` (obtained as **`mesh.face_nodes`**) — the ragged face→node relation:
-    `gather_node_coords`, `perimeter_next`, `reduce_to_faces`, `vertex_mean`; the face-geometry
+    `gather_node_coords`, `perimeter_next`, `reduce_to_faces`, `vertex_mean`, and `select(faces)`
+    for a subset's connectivity; the face-geometry
     schemes (`face.py`) traverse a polygon through these instead of open-coding CSR arithmetic.
   - `interior_mask(neighbour)` — the boundary convention (`neighbour < 0` marks a boundary face)
     as the one free-function **primitive** the classes are built on (`FaceCellConnectivity.interior`),

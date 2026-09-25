@@ -21,6 +21,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `surfaces.py` — the `Surfaces` value object | **BUILT** |
 | `checks.py` — build-time geometry checks, including the cell-in-the-metal test | **BUILT** |
 | `subdivide.py` — the width-over-distance refinement | **BUILT** |
+| `coarsen.py` — coarsening a dense surface (a mesh patch) by edge collapse, under longest-edge, chord and angle bounds | **BUILT** |
 | `profiles.py` — `Isotropic`, `Lambertian`, `CosinePower` | **BUILT** |
 | `gather.py` — `direct_fluence_rate` and `direct_irradiance` | **BUILT** |
 | `absorption.py` — `UniformAbsorption`, `VoxelAbsorption` | **BUILT** |
@@ -1953,10 +1954,57 @@ facets, 0.15% / 0.98% and 0.07% — equal near the lamp at equal count, better a
 near-lamp error follows the spacing ALONG the lamp (`facet_size`), not around it (`chord`): halving
 the chord at a 5 mm facet size bought 0.74% → 0.60% for 63% more facets.
 
-⚠️ **The mesh's own patches are the expensive way to get this**: the snapped `lampWall` patch
-carries **48,550** faces (and the body patch 329,028), which buys about what a 25,728-facet
-analytic lamp buys for 6.5x the rays. Any patch-built `Surfaces` wants a merge or facet-size
-control in front of it.
+⚠️ **The mesh's own patch, raw, is the expensive way to get this — so it is coarsened first (#492,
+next section).** The snapped `lampWall` patch carries **48,550** faces, **194,636** centre-fan
+triangles (the body patch 329,028 faces); and it is **no more accurate than the STL** against the
+true lamp (2.01% near it against 1.95%), because it is the STL shrunk again by snapping.
+
+## THE MESH'S OWN PATCH AS THE EMITTER: exact, then coarsened (#492, 2026-09-25)
+
+`aquaflux.mesh.patch_triangles(mesh, geometry, names)` gives the exact triangles (its record is in
+`mesh.md`); `coarsen.py` makes them affordable. Agreed design, three decisions taken with the user
+before building: **collapse only** (every surviving vertex is an input vertex, so no projection onto
+the input surface is needed or made), **each body's power held** (exitance scaled by area before
+over after, in `coarsen_surfaces`), and **both steps in one change as separate classes**.
+
+- **Two bounds, and the size one is not `CadModel.triangles`' `facet_size`.** `max_edge` is a strict
+  longest-edge bound; `facet_size` is "fits in a cube of that side", edges up to `sqrt(3)` times it.
+  Same job, different quantity, so it has a different name — do not "unify" the two keywords.
+  `chord` means what it means there, measured at the **input vertices** (exact to the input's own
+  resolution, far below any chord worth asking for on a millimetre patch). `angle` (default 0.5 rad)
+  bounds each input facet's normal against the coarse triangle its centroid is nearest, and is also
+  the crease threshold.
+- **⚠️ THE CHORD IS JUDGED PER INPUT VERTEX AGAINST THE PATCH *AND ITS UNCHANGED RING*, AND THE FIRST
+  VERSION DID NEITHER.** It measured each input *facet* against *one* coarse triangle, so a small facet
+  straddling two coarse triangles read as lying off the surface — on a perfect plane — and
+  800 → 228 facets became 800 → 56 once fixed; a tube went 14,400 → 5,810 → 2,984. Measuring against
+  the changed triangles alone still refused 2,189 collapses on a plane, because input facets overhang
+  the patch a collapse rewrites. Only the rewritten triangles' covers move; the ring's only grow.
+- **Features.** Rims, body interfaces, non-manifold edges and creases sharper than `angle` are
+  feature lines; a feature vertex may only slide along its line, and is **pinned where the line turns
+  by more than `angle`**. That corner rule was added after a mutation check: with the whole feature
+  rule disabled no test failed, because every fixture's chord was tight enough to hold the rim by
+  itself — and a rectangle's corner has exactly two feature edges, so it was *allowed* to slide.
+  `test_with_a_loose_chord_the_outline_is_held_by_the_feature_rule_alone` pins both now.
+- **Dismissed mutation, recorded so it is not re-chased: the link condition.** Disabling it changed
+  no output on any fixture tried (spheres at 512 and 2,048 triangles down to a tetrahedron, a loose
+  plane, a loose tube): the shape, fold and feature checks refuse the same collapses. It stays as
+  the standard, cheap guard; no test pins it.
+- **The quantization is structural.** A half-edge collapse cannot put a vertex anywhere new, so edges
+  grow in jumps and the realized median edge sits at 0.7-0.9x `max_edge` (2.20 mm at 2.5, 3.18 at 4,
+  4.35 at 6 on the Sozzi lamp). That is the price of every vertex staying on the input; a remeshing
+  that moved vertices would reach the bound and need a projection — the option declined.
+- **Cost, measured (Sozzi `lampWall`, 194,636 triangles in, nothing else running, jax 0.10.2, macOS
+  arm64, two runs within 2%):** 72-124 s per coarsening, pure Python/numpy on one core, ~0.4-0.6 ms
+  per input triangle. Most of the first version's time was numpy overhead on arrays of a few dozen
+  triangles; `_cross`/`_dot`/`_edges` are written by component for that reason. At the body patch's
+  1.3M triangles this is 10-15 min, which #491 will need to bring down.
+- **Measured on Sozzi (full table in `validation/sozzi_radiation/README.md`, `lamp_resolution.py`),
+  coarsening error against the exact patch:** 4 mm / 1e-4 m → 18,292 facets, **0.53% / 3.15%** near
+  the lamp (median / p99) and 0.13% elsewhere; 2.5 mm → 39,464, 0.30% / 2.06%; 6 mm → 11,082,
+  0.75% / 4.38%. Loosening the chord 1e-4 → 2.5e-4 at 4 mm saves 15% of the facets for +60% error
+  near the lamp: **size along the lamp, keep the chord at 1e-4**, as for the drawing's lamp. The exact
+  patch against the STL-built field: 0.30% / 3.65% near the lamp, 0.24% / 0.59% elsewhere.
 
 ## A PASS IS BOUNDED IN RECEIVER-BY-FACET PAIRS, NOT RECEIVERS (#509, 2026-09-24)
 

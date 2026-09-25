@@ -32,6 +32,14 @@ run. The drawing's lamp has a base disc the analytic lamp and the case's patch b
 the reason given in :func:`lamp`; it is dropped here too, so every rung radiates from the same
 surface. (It could not light a cell anyway: its normal points into the end wall.)
 
+**The lamp built from the mesh's own patch** is the last set of rungs: the snapped ``lampWall``
+patch cut into its centre-fan triangles (:func:`aquaflux.mesh.patch_triangles`), exactly, and then
+coarsened (:func:`aquaflux.radiation.coarsen_surfaces`) at several longest-edge and chord bounds,
+each holding the exact patch's emitted power. That is the route a user with only a mesh would take,
+and each coarse rung is judged twice: against the analytic reference like every other rung, and
+against the exact patch, which isolates what the coarsening itself costs from what the snapped
+surface already differed by.
+
 Run with ``validation/run_case.sh validation/sozzi_radiation/lamp_resolution.py``.
 """
 
@@ -50,9 +58,11 @@ sys.path.insert(0, str(HERE.parents[1]))
 import aquaflux  # noqa: E402,F401  (enables x64)
 import jax.numpy as jnp  # noqa: E402
 from aquaflux.io import read_openfoam  # noqa: E402
+from aquaflux.mesh import patch_triangles  # noqa: E402
 from aquaflux.radiation import (  # noqa: E402
     Surfaces,
     UniformAbsorption,
+    coarsen_surfaces,
     direct_fluence_rate,
     read_stl,
 )
@@ -80,6 +90,11 @@ DRAWING_LADDER = (
     (1e-4, 0.0025),
 )
 DRAWING = HERE.parent / "uvreactor_openfoam" / "of_case" / "SozziTaghipour.step"
+#: (longest edge, chord) in metres, for the lamp coarsened from the mesh's patch. The chord bounds
+#: the spacing around the lamp -- about ``sqrt(8 R chord)``, 2.8 mm at 1e-4 -- and the longest edge
+#: the spacing along it.
+PATCH_LADDER = ((2.5e-3, 1e-4), (4e-3, 1e-4), (6e-3, 1e-4), (4e-3, 2.5e-4), (8e-3, 2.5e-4))
+PATCH = "lampWall"
 
 
 def _say(message: str) -> None:
@@ -127,12 +142,14 @@ def lamp(sectors: int, slices: int) -> np.ndarray:
 
 def drawing_lamps() -> list[tuple[str, np.ndarray]]:
     """The drawing's lamp at each rung of :data:`DRAWING_LADDER`, base disc removed; [] without CAD."""
+    from aquaflux.io.cad import Placement, read_step
+
+    # The kernel is imported by `read_step`, not by the package, so this is where its absence shows.
     try:
-        from aquaflux.io.cad import Placement, read_step
+        cad = read_step(DRAWING, Placement(matrix=[[0, 1, 0], [1, 0, 0], [0, 0, 1]]))
     except ImportError:
         _say("CAD kernel not installed: the rungs read from the drawing are skipped")
         return []
-    cad = read_step(DRAWING, Placement(matrix=[[0, 1, 0], [1, 0, 0], [0, 0, 1]]))
     rungs = []
     for chord, size in DRAWING_LADDER:
         triangles = cad.triangles("lamp", chord=chord, facet_size=size)
@@ -141,8 +158,8 @@ def drawing_lamps() -> list[tuple[str, np.ndarray]]:
     return rungs
 
 
-def field(vertices: np.ndarray, receivers: np.ndarray) -> tuple[np.ndarray, float]:
-    """``G`` at the receivers from a lamp of these facets, and the power it emits."""
+def lamp_surfaces(vertices: np.ndarray) -> Surfaces:
+    """A lamp of these facets at the case's exitance, wound outward whatever order they came in."""
     surfaces = Surfaces.from_triangles(vertices, emission=EXITANCE)
     outward = np.einsum(
         "ij,ij->i",
@@ -154,7 +171,12 @@ def field(vertices: np.ndarray, receivers: np.ndarray) -> tuple[np.ndarray, floa
     )
     if (outward > 0).mean() < 0.5:
         surfaces = Surfaces.from_triangles(vertices[:, ::-1, :], emission=EXITANCE)
-    power = float(np.sum(np.asarray(surfaces.area)) * EXITANCE)
+    return surfaces
+
+
+def field(surfaces: Surfaces, receivers: np.ndarray) -> tuple[np.ndarray, float]:
+    """``G`` at the receivers from this lamp, and the power it emits."""
+    power = float(np.sum(np.asarray(surfaces.area) * np.asarray(surfaces.emission)))
     # The gather bounds each chunk by receiver-by-facet pairs, so the 270,336-facet reference
     # runs at its default. (It once counted receivers, and its default then formed a 9 GB chunk
     # against this lamp -- which is what killed the first run of this study.)
@@ -164,6 +186,18 @@ def field(vertices: np.ndarray, receivers: np.ndarray) -> tuple[np.ndarray, floa
         )
     )
     return values, power
+
+
+def patch_lamp() -> np.ndarray:
+    """The case's ``lampWall`` patch as its centre-fan triangles, cached beside the case."""
+    cache = WORK / "lamp_patch.npy"
+    if cache.exists():
+        return np.load(cache)
+    _say("reading the mesh for its lamp patch")
+    mesh = read_openfoam(CASE)
+    triangles = patch_triangles(mesh, mesh.geometry(), [PATCH]).vertices
+    np.save(cache, triangles)
+    return triangles
 
 
 def main() -> None:
@@ -193,7 +227,7 @@ def main() -> None:
     fine_sectors, fine_slices = LADDER[-1]
     reference_facets = lamp(fine_sectors, fine_slices)
     started = time.perf_counter()
-    reference, reference_power = field(reference_facets, points)
+    reference, reference_power = field(lamp_surfaces(reference_facets), points)
     _say(
         f"reference {len(reference_facets)} facets ({fine_sectors}x{fine_slices}), "
         f"{reference_power:.4f} W, {time.perf_counter() - started:.0f} s"
@@ -204,18 +238,54 @@ def main() -> None:
         (f"{sectors}x{slices}", lamp(sectors, slices)) for sectors, slices in LADDER[:-1]
     ]
     arms += drawing_lamps()
-    for name, vertices in arms:
+    arms = [(name, lamp_surfaces(vertices), {}) for name, vertices in arms]
+
+    exact = lamp_surfaces(patch_lamp())
+    arms.append((f"the case's {PATCH} patch, exact", exact, {}))
+    for max_edge, chord in PATCH_LADDER:
         started = time.perf_counter()
-        values, power = field(vertices, points)
+        coarse, record = coarsen_surfaces(exact, max_edge=max_edge, chord=chord)
+        arms.append(
+            (
+                f"{PATCH} patch coarsened, edge {max_edge:g} m, chord {chord:g} m",
+                coarse,
+                {
+                    "coarsening_seconds": round(time.perf_counter() - started, 1),
+                    "longest_edge_max_m": float(record.longest_edge.max()),
+                    "longest_edge_median_m": float(np.median(record.longest_edge)),
+                    "chord_max_m": float(record.chord.max()),
+                    "angle_max_rad": float(record.angle.max()),
+                    "area_after_over_before": float(record.area_after[0] / record.area_before[0]),
+                },
+            )
+        )
+
+    exact_values = stl_values = None
+    for name, surfaces, extra in arms:
+        started = time.perf_counter()
+        values, power = field(surfaces, points)
         elapsed = time.perf_counter() - started
         error = np.abs(values - reference) / reference
         scaled = np.abs(values * (reference_power / power) - reference) / reference
         summary[name] = {
-            "facets": len(vertices),
+            "facets": int(surfaces.n_facets),
             "power_W": round(power, 4),
             "seconds": round(elapsed, 1),
-            "rays_for_the_full_mesh": float(len(centres) * len(vertices)),
+            "rays_for_the_full_mesh": float(len(centres) * surfaces.n_facets),
+            **extra,
         }
+        if name == "the case's STL":
+            stl_values = values
+        if surfaces is exact:
+            exact_values = values
+        # The patch and the STL are two descriptions of one lamp, so the patch is also judged
+        # against the field the STL gives.
+        against_stl = np.abs(values - stl_values) / stl_values if surfaces is exact else None
+        against_exact = (
+            np.abs(values - exact_values) / exact_values
+            if exact_values is not None and surfaces is not exact
+            else None
+        )
         for band, rows in bands.items():
             which = np.isin(receivers, rows)
             summary[name][band] = {
@@ -223,6 +293,16 @@ def main() -> None:
                 "p99": float(np.percentile(error[which], 99)),
                 "median_at_equal_power": float(np.median(scaled[which])),
             }
+            if against_stl is not None:
+                summary[name][band]["against_the_stl"] = {
+                    "median": float(np.median(against_stl[which])),
+                    "p99": float(np.percentile(against_stl[which], 99)),
+                }
+            if against_exact is not None:
+                summary[name][band]["against_the_exact_patch"] = {
+                    "median": float(np.median(against_exact[which])),
+                    "p99": float(np.percentile(against_exact[which], 99)),
+                }
         _say(f"{name}: {json.dumps(summary[name])}")
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "lamp_resolution.json").write_text(json.dumps(summary, indent=2) + "\n")
