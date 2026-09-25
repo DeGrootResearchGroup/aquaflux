@@ -68,6 +68,8 @@ multiply against them.
 
 from __future__ import annotations
 
+import functools
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -204,6 +206,99 @@ class TransferMatrix(eqx.Module):
         return common, common * relative
 
 
+class _Geometry(eqx.Module):
+    """What the row blocks read of the facets, bundled so the compiled block takes one argument."""
+
+    vertices: jnp.ndarray
+    centroid: jnp.ndarray
+    normal: jnp.ndarray
+    areal: jnp.ndarray
+
+
+@functools.partial(jax.jit, static_argnames="rows")
+def _row_block(geometry: _Geometry, sample, weight, start, *, rows: int):
+    """Every frozen quantity for ``rows`` receiving facets from ``start``, against all facets.
+
+    One compiled pass, so nothing it forms is larger than ``rows x n_facets`` (or that times three
+    for the offsets), and it is the only place each of the three quantities is computed.
+    """
+    n_facets = geometry.vertices.shape[0]
+    index = start + jnp.arange(rows)
+    facing = geometry.normal[index]
+
+    def accumulate(total, sampled):
+        weight_q, point_q = sampled
+        at_point = jax.vmap(
+            lambda point, facing_i: jax.vmap(
+                lambda triangle: projected_solid_angle(point, facing_i, triangle)
+            )(geometry.vertices)
+        )(point_q, facing)
+        return total + weight_q * at_point, None
+
+    # Scanned rather than vmapped over the quadrature points so the live intermediate stays
+    # (rows, n_facets) whatever the rule costs, which is what lets ``chunk_size`` keep meaning
+    # the same thing it did with a single point per facet.
+    solid, _ = jax.lax.scan(
+        accumulate,
+        jnp.zeros((rows, n_facets)),
+        (weight, jnp.swapaxes(sample[index], 0, 1)),
+    )
+    # A facet cannot transfer to itself: every quadrature point lies in its own plane, where the
+    # contour integral returns a whole hemisphere. Left in, every row sum is exactly one too
+    # large. A planar triangle really does see none of itself, so this is the exact value and
+    # not a repair. A point source has no surface to receive on and no area to emit from; it
+    # reaches the facets through the ordinary gather instead, as an external irradiance.
+    keep = (index[:, None] != jnp.arange(n_facets)[None, :]) & (
+        geometry.areal[index][:, None] & geometry.areal[None, :]
+    )
+    geometric = jnp.where(keep, solid / jnp.pi, 0.0)
+
+    offset = geometry.centroid[index][:, None, :] - geometry.centroid[None, :, :]
+    separation_squared = dot(offset, offset)
+    separation = jnp.sqrt(jnp.where(separation_squared == 0.0, 0.0, separation_squared))
+    safe = jnp.where(separation == 0.0, 1.0, separation)
+    source_cosine = dot(offset, geometry.normal[None, :, :]) / safe
+    return geometric, source_cosine, separation
+
+
+@functools.partial(jax.jit, donate_argnums=0)
+def _written(buffers, block, start):
+    """``buffers`` with ``block`` written at row ``start``, in place: the buffers are donated."""
+    return tuple(
+        jax.lax.dynamic_update_slice(buffer, part, (start, 0))
+        for buffer, part in zip(buffers, block, strict=True)
+    )
+
+
+def _row_blocks(geometry: _Geometry, sample, weight, rows: int):
+    """The three ``n x n`` frozen arrays, filled block by block into buffers of their final size.
+
+    ⚠️ **The whole-matrix temporaries are the cost, not the stored arrays**, and on this backend
+    freed memory is not handed back, so a build's peak is the running total of everything it ever
+    formed. The first version assembled each quantity whole — rows collected and concatenated, then
+    masked in two more full-size passes, the separation from an ``(n, n, 3)`` offset array — and
+    peaked at about eighteen of its own ``n x n`` arrays: 8.3 GB against 0.45 GB each for a
+    7,516-facet lamp. Here each block is computed once, by one compiled pass, and written into its
+    place by an update that donates the buffer, so nothing larger than a block exists besides the
+    three arrays being kept.
+
+    The last block starts at ``n - rows`` rather than being padded, so every buffer is exactly
+    ``n x n`` and never needs trimming — a trim is a copy of the whole thing. Its first rows are
+    computed twice, which costs one block's arithmetic.
+    """
+    n_facets = int(geometry.vertices.shape[0])
+    if n_facets == 0:
+        empty = jnp.zeros((0, 0))
+        return empty, empty, empty
+    rows = max(1, min(int(rows), n_facets))
+    buffers = tuple(jnp.zeros((n_facets, n_facets)) for _ in range(3))
+    starts = [*range(0, n_facets - rows, rows), n_facets - rows]
+    for start in starts:
+        block = _row_block(geometry, sample, weight, start, rows=rows)
+        buffers = _written(buffers, block, start)
+    return buffers
+
+
 def build_transfer(
     surfaces: Surfaces,
     *,
@@ -233,9 +328,9 @@ def build_transfer(
         It is the only knob that improves reciprocity, and it costs far less than its point
         count suggests — see the tables below.
     chunk_size : int, optional
-        Receiving facets per pass of the solid-angle build, bounding its peak memory. Its
-        meaning is unchanged by the quadrature: the points are accumulated one at a time within
-        a pass, so a finer rule costs time and not memory.
+        Receiving facets per block of the build, bounding the working set beside the arrays kept.
+        Its meaning is unchanged by the quadrature: the points are accumulated one at a time
+        within a block, so a finer rule costs time and not memory.
     **visibility_options
         Passed through to the visibility build.
 
@@ -325,75 +420,38 @@ def build_transfer(
     against the per-pair figures above and not against an energy balance, which is much the more
     flattering of the two.
 
-    The build is ``n^2`` in both time and memory: a thousand facets is a million entries per
-    array and four such arrays, which is megabytes; ten thousand is a hundred million, which is
-    gigabytes. The facet count, not the cell count, is what limits the surface system.
+    The build is ``n^2`` in both time and memory: three floating-point arrays of ``n x n`` are kept,
+    with a facet-side shadow mask of one boolean and one floating-point array more, so a thousand
+    facets is tens of megabytes and ten thousand is gigabytes. The facet count, not the cell count,
+    is what limits the surface system. Rows are computed ``chunk_size`` at a time and written in
+    place into arrays of their final size, so the build's peak is what it keeps plus one block's
+    work and the shadow pass, not a multiple of the matrix.
     """
     if receiver_quadrature is None:
         receiver_quadrature = _DEFAULT_RECEIVER_POINTS
     if not isinstance(receiver_quadrature, TriangleQuadrature):
         receiver_quadrature = triangle_quadrature(int(receiver_quadrature))
 
-    vertices = surfaces.vertices
-    centroid = surfaces.centroid
-    normal = surfaces.normal
-    n_facets = surfaces.n_facets
-
-    # (n_facets, n_points, 3) -- where on each receiving facet the transfer is sampled.
-    sample = receiver_quadrature.points(vertices)
+    # The build is frozen geometry: nothing downstream differentiates it, so it is cut from any
+    # trace at its inputs rather than at its outputs, where it would be the whole matrix.
+    geometry = _Geometry(
+        vertices=jax.lax.stop_gradient(surfaces.vertices),
+        centroid=jax.lax.stop_gradient(surfaces.centroid),
+        normal=jax.lax.stop_gradient(surfaces.normal),
+        areal=jnp.asarray(~surfaces.is_point_source),
+    )
+    sample = receiver_quadrature.points(geometry.vertices)
     weight = jnp.asarray(receiver_quadrature.weight)
-
-    def solid_angles(receiver_slice):
-        facing = normal[receiver_slice]
-
-        def accumulate(total, sampled):
-            weight_q, point_q = sampled
-            at_point = jax.vmap(
-                lambda point, facing_i: jax.vmap(
-                    lambda triangle: projected_solid_angle(point, facing_i, triangle)
-                )(vertices)
-            )(point_q, facing)
-            return total + weight_q * at_point, None
-
-        # Scanned rather than vmapped over the quadrature points so the live intermediate stays
-        # (receivers, n_facets) whatever the rule costs, which is what lets ``chunk_size`` keep
-        # meaning the same thing it did with a single point per facet.
-        rows, _ = jax.lax.scan(
-            accumulate,
-            jnp.zeros((facing.shape[0], n_facets)),
-            (weight, jnp.swapaxes(sample[receiver_slice], 0, 1)),
-        )
-        return rows
-
-    rows = [
-        solid_angles(slice(start, start + chunk_size)) for start in range(0, n_facets, chunk_size)
-    ]
-    geometric = jnp.concatenate(rows, axis=0) / jnp.pi
-
-    # A facet cannot transfer to itself: every quadrature point lies in its own plane, where the
-    # contour integral returns a whole hemisphere. Left in, every row sum is exactly one too
-    # large. A planar triangle really does see none of itself, so this is the exact value and
-    # not a repair.
-    geometric = geometric * ~jnp.eye(n_facets, dtype=bool)
-    # A point source has no surface to receive on and no area to emit from; it reaches the
-    # facets through the ordinary gather instead, as an external irradiance.
-    areal = jnp.asarray(~surfaces.is_point_source)
-    geometric = geometric * (areal[:, None] & areal[None, :])
-
-    offset = centroid[:, None, :] - centroid[None, :, :]
-    separation_squared = dot(offset, offset)
-    separation = jnp.sqrt(jnp.where(separation_squared == 0.0, 0.0, separation_squared))
-    safe = jnp.where(separation == 0.0, 1.0, separation)
-    source_cosine = dot(offset, normal[None, :, :]) / safe
+    geometric, source_cosine, separation = _row_blocks(geometry, sample, weight, chunk_size)
 
     return TransferMatrix(
-        geometric=jax.lax.stop_gradient(geometric),
-        source_cosine=jax.lax.stop_gradient(source_cosine),
-        separation=jax.lax.stop_gradient(separation),
+        geometric=geometric,
+        source_cosine=source_cosine,
+        separation=separation,
         visibility=build_visibility(
             occluders,
             surfaces,
-            centroid,
+            surfaces.centroid,
             # The receivers here ARE the facets, so each ray ends on the one it is aimed at and
             # must be told to ignore it. Without this every mutually visible pair reads as
             # blocked and a closed enclosure loses its interreflection entirely.
