@@ -20,7 +20,8 @@ agree to the solve's tolerance everywhere, and a larger difference anywhere is a
 
 The run re-executes itself as a child process so its peak memory *footprint* can be read
 (``/usr/bin/time -l``), which counts the compressed pages a resident-set figure leaves out — the
-number that says whether the model really stayed within a chunk.
+number that says whether the model really stayed within a chunk. ``validation/peak_footprint.py``
+runs the child, and forwards a ``kill`` of this process to it rather than leaving it orphaned.
 
 Run with ``validation/run_case.sh validation/sozzi_radiation/model_at_mesh_scale.py`` in an
 environment with the CAD kernel (``pip install "aquaflux[cad]"``). Needs ``work/case`` (for the
@@ -30,8 +31,6 @@ lamp), ``work/cell_centres.npy``, and ``work/compare/G_aquaflux.npy`` from ``com
 from __future__ import annotations
 
 import json
-import re
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -39,6 +38,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1]))
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent))
 
 WORK = HERE / "work"
 DRAWING = HERE.parent / "uvreactor_openfoam" / "of_case" / "SozziTaghipour.step"
@@ -113,16 +113,16 @@ def run() -> dict:
 
 
 def main() -> None:
-    """Run the child under ``/usr/bin/time``, its progress streaming, and read its footprint."""
-    timing = WORK / "compare" / "model_at_mesh_scale.time"
+    """Run the child, its progress streaming, and read its footprint."""
+    from peak_footprint import run_with_footprint
+
     result = WORK / "compare" / "model_at_mesh_scale.json"
-    command = ["/usr/bin/time", "-l", "-o", str(timing), sys.executable, "-u", __file__, "--child"]
-    code = subprocess.run(command, check=False).returncode
-    if code:
-        sys.exit(code)
+    child = run_with_footprint([sys.executable, "-u", __file__, "--child"])
+    if child.returncode:
+        sys.exit(child.returncode)
     summary = json.loads(result.read_text())
-    footprint = re.search(r"(\d+)\s+peak memory footprint", timing.read_text())
-    summary["peak_footprint_GB"] = round(int(footprint.group(1)) / 1e9, 2) if footprint else None
+    gb = child.peak_footprint_gb
+    summary["peak_footprint_GB"] = None if gb is None else round(gb, 2)
     result.write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2), flush=True)
 

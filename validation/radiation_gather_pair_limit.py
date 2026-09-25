@@ -22,7 +22,8 @@ memory *footprint* (``/usr/bin/time -l``'s "peak memory footprint", which counts
 pages that the resident set size leaves out), and a footprint can only be read per process. The
 cost of that is that each wall-clock figure is from its own process: the sweep is therefore run
 twice in alternating order and the faster of the two kept, with the spread between them reported
-beside it, so a difference smaller than that spread is read as none.
+beside it, so a difference smaller than that spread is read as none. ``peak_footprint.py`` runs each
+child, and forwards a ``kill`` of this process to it rather than leaving it orphaned.
 
 Run with ``validation/run_case.sh validation/radiation_gather_pair_limit.py``. ``--point`` is the
 child-process entry and is not for direct use.
@@ -31,14 +32,13 @@ child-process entry and is not for direct use.
 from __future__ import annotations
 
 import json
-import re
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
+sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "sozzi_radiation"))
 
 #: The limits swept, in receiver-by-facet pairs.
@@ -95,14 +95,15 @@ def point(path: str, sectors: int, slices: int, limit: int) -> dict:
 
 def measure(path: str, sectors: int, slices: int, limit: int) -> dict:
     """One point in a fresh process, with its peak memory footprint."""
-    command = ["/usr/bin/time", "-l", sys.executable, "-u", __file__, "--point", path]
+    from peak_footprint import run_with_footprint
+
+    command = [sys.executable, "-u", __file__, "--point", path]
     command += [str(sectors), str(slices), str(limit)]
-    run = subprocess.run(command, capture_output=True, text=True, check=False)
+    run = run_with_footprint(command, capture_output=True)
     if run.returncode:
         return {"failed": run.returncode, "stderr": run.stderr[-500:]}
     result = json.loads(run.stdout.strip().splitlines()[-1])
-    footprint = re.search(r"(\d+)\s+peak memory footprint", run.stderr)
-    result["peak_footprint_GB"] = int(footprint.group(1)) / 1e9 if footprint else None
+    result["peak_footprint_GB"] = run.peak_footprint_gb
     return result
 
 
