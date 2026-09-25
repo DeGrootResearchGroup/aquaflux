@@ -34,11 +34,16 @@ from jax import lax
 from aquaflux.radiation.absorption import Absorption
 from aquaflux.radiation.solid_angle import projected_solid_angle, solid_angle
 from aquaflux.radiation.surfaces import Surfaces
-from aquaflux.radiation.visibility import Visibility, build_visibility
+from aquaflux.radiation.visibility import Visibility, build_visibility, surviving_fraction
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, receivers_per_pass
 from aquaflux.vectors import dot
 
-__all__ = ["direct_fluence_rate", "direct_irradiance", "streamed_fluence_rate"]
+__all__ = [
+    "direct_fluence_rate",
+    "direct_irradiance",
+    "streamed_fluence_rate",
+    "summed_fluence_rate",
+]
 
 
 def _groups(surfaces: Surfaces) -> list[tuple[object, np.ndarray, np.ndarray]]:
@@ -77,16 +82,22 @@ def _groups(surfaces: Surfaces) -> list[tuple[object, np.ndarray, np.ndarray]]:
 def _chunked(arrays, pair_limit: int, per_receiver: int, body):
     """Apply ``body`` to the receivers in fixed-size chunks and concatenate the results.
 
-    Every array in ``arrays`` is indexed by receiver and is cut the same way, so a per-receiver
-    quantity computed outside — a row of the visibility mask, a receiving surface's normal —
-    stays lined up with its point without the body having to index anything itself.
+    Each entry of ``arrays`` is an ``(array, axis)`` pair: the array is cut along ``axis``, its
+    receiver axis, the same way as every other, so a per-receiver quantity computed outside — a
+    layer of the visibility mask, a receiving surface's normal — stays lined up with its point
+    without the body having to index anything itself. The first array's receiver count is the
+    count.
 
     The receiver-by-source product is the module's whole cost and would be the whole of its
     memory too if it were formed at once: a hundred thousand cells against a thousand facets is
     a hundred million entries per intermediate. A chunk takes as many receivers as keep it within
     ``pair_limit`` pairs, so the working set is set by the limit and not by how finely the emitter
-    happens to be divided. The last chunk is padded rather than made smaller, so the traced body
-    is compiled once.
+    happens to be divided.
+
+    **Chunks are sliced out of the arrays where they lie**, not cut from a padded copy: a shadow
+    mask is the size of the whole problem, and padding it to a whole number of chunks would copy
+    it. The full chunks run as one scan, compiled once; a shorter remainder, if there is one, runs
+    after it as one more call of the same body.
 
     ⚠️ **The body is checkpointed, and that is what makes the limit hold for a gradient too.** A
     scan's reverse pass otherwise keeps every chunk's intermediates for the backward sweep, so a
@@ -95,52 +106,80 @@ def _chunked(arrays, pair_limit: int, per_receiver: int, body):
     Checkpointed, each chunk is recomputed on the way back instead, for roughly two thirds more
     time on the gradient and nothing on a forward evaluation, whose values it does not change.
     """
-    per_chunk = receivers_per_pass(pair_limit, per_receiver)
-    arrays = [jnp.asarray(array) for array in arrays]
-    n_points = arrays[0].shape[0]
+    arrays = [(jnp.asarray(array), axis) for array, axis in arrays]
+    first, axis = arrays[0]
+    n_points = first.shape[axis]
     if n_points == 0:
         return jnp.zeros(0)
-    per_chunk = min(per_chunk, n_points)
-    n_chunks = -(-n_points // per_chunk)
-    padding = n_chunks * per_chunk - n_points
-    shaped = [
-        jnp.concatenate([array, jnp.repeat(array[-1:], padding, axis=0)]).reshape(
-            n_chunks, per_chunk, *array.shape[1:]
+    per_chunk = min(receivers_per_pass(pair_limit, per_receiver), n_points)
+    n_full, remainder = divmod(n_points, per_chunk)
+
+    # The slicing is inside the checkpoint, so what a gradient keeps per chunk is the chunk's
+    # starting index and not the chunk it cut -- which, summed over the chunks, is every array
+    # handed in. prevent_cse=False is the setting for a checkpoint inside a scan, which already
+    # stops the recomputation from being merged back into the forward pass.
+    def run(size):
+        return jax.checkpoint(
+            lambda start: body(*[_slice(array, axis, start, size) for array, axis in arrays]),
+            prevent_cse=False,
         )
-        for array in arrays
-    ]
-    # prevent_cse=False is the setting for a checkpoint inside a scan, which already stops the
-    # recomputation from being merged back into the forward pass.
-    body = jax.checkpoint(body, prevent_cse=False)
-    _, out = lax.scan(lambda carry, chunk: (carry, body(*chunk)), None, tuple(shaped))
-    return out.reshape(-1)[:n_points]
+
+    pieces = []
+    if n_full:
+        full_chunk = run(per_chunk)
+        _, full = lax.scan(
+            lambda carry, index: (carry, full_chunk(index * per_chunk)), None, jnp.arange(n_full)
+        )
+        pieces.append(full.reshape(-1))
+    if remainder:
+        pieces.append(run(remainder)(n_full * per_chunk))
+    return pieces[0] if len(pieces) == 1 else jnp.concatenate(pieces)
 
 
-def _surviving_rows(visibility, transmittance, points) -> tuple:
-    """Per-receiver rows of the fraction getting past the intervening bodies, as chunkable arrays.
+def _slice(array, axis: int, start, size: int):
+    """``size`` receivers of ``array`` along its receiver axis, from ``start``."""
+    return lax.dynamic_slice_in_dim(array, start, size, axis=axis)
 
-    **Empty when nothing occludes, and deliberately not a row of ones.** Rows of ones would have
-    the shape of the whole problem, ``(n_receivers, n_facets)``, formed before any chunking: at a
-    mesh's cells against a finely divided lamp that is hundreds of gigabytes, which no chunk
-    size could then bound. A mask, where there is one, is already that size by construction.
+
+def _shadow_rows(visibility, transmittance, points) -> tuple:
+    """What the chunks need to form the fraction getting past the intervening bodies.
+
+    ``(array, axis)`` pairs for :func:`_chunked` — the mask's own layers, each cut along its
+    receiver axis — and **not** the fraction itself: formed here it would be a floating-point
+    array the size of the whole problem, eight bytes a pair on top of the mask, before any
+    chunking could bound it. Each chunk forms its own share instead, in
+    :func:`~aquaflux.radiation.visibility.surviving_fraction`, the one expression
+    :meth:`~aquaflux.radiation.visibility.Visibility.surviving` also evaluates.
+
+    **Empty when nothing occludes, and deliberately not a row of ones**, for the same reason.
+
+    Returns
+    -------
+    tuple
+        The ``(array, axis)`` pairs, and the transmittance to apply, defaulting to opaque.
     """
     if visibility is None:
         if transmittance is not None:
             msg = "transmittance was given without a visibility mask to apply it to"
             raise ValueError(msg)
-        return ()
+        return (), None
     if not isinstance(visibility, Visibility):
         msg = f"visibility must be a Visibility; got {type(visibility).__name__}"
         raise TypeError(msg)
     visibility.for_receivers(points)
     if transmittance is None:
         transmittance = jnp.zeros(visibility.n_occluders)
-    return (visibility.surviving(transmittance),)
+    return ((visibility.blocked, 1), (visibility.hidden_by_geometry, 0)), transmittance
 
 
-def _masked(rows, facets):
-    """The surviving fraction for ``facets`` from a chunk's mask rows, or 1 where there is none."""
-    return jnp.take(rows[0], facets, axis=1) if rows else 1.0
+def _surviving(layers, transmittance):
+    """A chunk's surviving fraction from its mask layers, or ``None`` where nothing occludes."""
+    return surviving_fraction(*layers, transmittance) if layers else None
+
+
+def _masked(surviving, facets):
+    """The surviving fraction for ``facets`` from a chunk's, or 1 where nothing occludes."""
+    return 1.0 if surviving is None else jnp.take(surviving, facets, axis=1)
 
 
 def _transmittance(absorption, source: jnp.ndarray, receivers: jnp.ndarray) -> jnp.ndarray:
@@ -281,16 +320,13 @@ def _compiled_gather(live, pair_limit: int):
     @jax.jit
     def gather(values, points, mask):
         sets, absorption, transmittance = eqx.combine(values, labels)
-        return sum(
-            direct_fluence_rate(
-                surfaces,
-                points,
-                absorption=absorption,
-                visibility=mask,
-                transmittance=transmittance,
-                pair_limit=pair_limit,
-            )
-            for surfaces in sets
+        return summed_fluence_rate(
+            sets,
+            points,
+            absorption=absorption,
+            visibility=mask,
+            transmittance=transmittance,
+            pair_limit=pair_limit,
         )
 
     return gather
@@ -427,38 +463,144 @@ def direct_fluence_rate(
             transmittance=transmittance,
             pair_limit=pair_limit,
         )
-    rows = _surviving_rows(visibility, transmittance, points)
+    return summed_fluence_rate(
+        (surfaces,),
+        points,
+        absorption=absorption,
+        visibility=visibility,
+        transmittance=transmittance,
+        pair_limit=pair_limit,
+    )
+
+
+def summed_fluence_rate(
+    sets,
+    points,
+    *,
+    absorption: Absorption | None = None,
+    visibility: Visibility | None = None,
+    transmittance=None,
+    pair_limit: int = DEFAULT_PAIR_LIMIT,
+):
+    """The summed fluence rate of several surface sets **on one geometry**, in one pass.
+
+    What :func:`direct_fluence_rate` gives for each set, added — but everything that depends only
+    on where the facets and receivers are is formed **once** and shared: the solid angle of
+    every facet at every receiver, the emitter cosine, the attenuation along each path and the
+    surviving fraction through the mask. Only the radiance weight differs between the sets, so a
+    model's emitted field and the reflected field it bounces into cost one geometric pass rather
+    than two. Under a graded medium that saves a second walk of every path through the grid.
+
+    Each set's own terms are summed first and the sets added after, in the order given, which is
+    exactly what adding :func:`direct_fluence_rate`'s results would do; the shared factors are
+    the same numbers either way, so the answer is too.
+
+    Parameters
+    ----------
+    sets : sequence of Surfaces
+        The sets whose fields are summed. **The geometry is read from the first**: the others
+        must be the same facets with other optics -- ``surfaces.with_optics(...)`` of it -- and a
+        set whose concrete vertices differ is refused. Their emission, power and profiles are read
+        from each set.
+    points, absorption, visibility, transmittance, pair_limit
+        As for :func:`direct_fluence_rate`.
+
+    Returns
+    -------
+    jnp.ndarray, shape ``(n_points,)``
+        Fluence rate in W/m².
+
+    Raises
+    ------
+    ValueError
+        If no set is given, or if the sets do not share their geometry.
+    """
+    sets = tuple(sets)
+    geometry = _one_geometry(sets)
+    layers, transmittance = _shadow_rows(visibility, transmittance, points)
     points = jnp.asarray(points, dtype=float)
-    partition = _groups(surfaces)
+    plans = [_groups(surfaces) for surfaces in sets]
+    areal_all = np.flatnonzero(~geometry.is_point_source)
+    point_all = np.flatnonzero(geometry.is_point_source)
 
-    def at(receivers, *surviving_all):
-        total = jnp.zeros(receivers.shape[0])
-        for profile, areal, point in partition:
-            if len(areal):
-                cosine, _ = _emitter_cosine(surfaces, areal, receivers)
-                radiance = jnp.take(surfaces.emission, areal) * profile.radiance_per_exitance(
-                    cosine
-                )
-                omega = solid_angle(
-                    receivers[:, None, :], jnp.take(surfaces.vertices, areal, axis=0)[None, ...]
-                )
-                surviving = _transmittance(
-                    absorption, jnp.take(surfaces.centroid, areal, axis=0), receivers
-                ) * _masked(surviving_all, areal)
-                total = total + jnp.sum(radiance * omega * surviving, axis=1)
-            if len(point):
-                cosine, distance_squared = _emitter_cosine(surfaces, point, receivers)
-                fraction = profile.intensity_fraction(cosine)
-                surviving = _transmittance(
-                    absorption, jnp.take(surfaces.centroid, point, axis=0), receivers
-                ) * _masked(surviving_all, point)
-                total = total + jnp.sum(
-                    jnp.take(surfaces.power, point) * fraction * surviving / distance_squared,
-                    axis=1,
-                )
-        return total
+    def at(receivers, *chunk_layers):
+        surviving_all = _surviving(chunk_layers, transmittance)
+        if len(areal_all):
+            areal_cosine, _ = _emitter_cosine(geometry, areal_all, receivers)
+            omega = solid_angle(
+                receivers[:, None, :], jnp.take(geometry.vertices, areal_all, axis=0)[None, ...]
+            )
+            areal_surviving = _transmittance(
+                absorption, jnp.take(geometry.centroid, areal_all, axis=0), receivers
+            ) * _masked(surviving_all, areal_all)
+        if len(point_all):
+            point_cosine, distance_squared = _emitter_cosine(geometry, point_all, receivers)
+            point_surviving = _transmittance(
+                absorption, jnp.take(geometry.centroid, point_all, axis=0), receivers
+            ) * _masked(surviving_all, point_all)
+        totals = []
+        for surfaces, partition in zip(sets, plans, strict=True):
+            total = jnp.zeros(receivers.shape[0])
+            for profile, areal, point in partition:
+                if len(areal):
+                    pick = _columns(areal, areal_all)
+                    radiance = jnp.take(surfaces.emission, areal) * profile.radiance_per_exitance(
+                        pick(areal_cosine)
+                    )
+                    total = total + jnp.sum(radiance * pick(omega) * pick(areal_surviving), axis=1)
+                if len(point):
+                    pick = _columns(point, point_all)
+                    fraction = profile.intensity_fraction(pick(point_cosine))
+                    total = total + jnp.sum(
+                        jnp.take(surfaces.power, point)
+                        * fraction
+                        * pick(point_surviving)
+                        / pick(distance_squared),
+                        axis=1,
+                    )
+            totals.append(total)
+        return sum(totals)
 
-    return _chunked((points, *rows), pair_limit, surfaces.n_facets, at)
+    return _chunked(((points, 0), *layers), pair_limit, geometry.n_facets, at)
+
+
+def _one_geometry(sets) -> Surfaces:
+    """The geometry every set shares, refusing sets that do not share one."""
+    if not sets:
+        msg = "at least one surface set is needed"
+        raise ValueError(msg)
+    geometry = sets[0]
+    for other in sets[1:]:
+        same = (
+            other.n_facets == geometry.n_facets
+            and other.point_source_index == geometry.point_source_index
+        )
+        if same and not any(
+            isinstance(surfaces.vertices, jax.core.Tracer) for surfaces in (geometry, other)
+        ):
+            same = other.vertices is geometry.vertices or np.array_equal(
+                np.asarray(other.vertices), np.asarray(geometry.vertices)
+            )
+        if not same:
+            msg = (
+                "the surface sets summed in one gather must share their geometry -- the solid "
+                "angles and shadows are formed once, from the first -- so each must be "
+                "`with_optics(...)` of the same set"
+            )
+            raise ValueError(msg)
+    return geometry
+
+
+def _columns(subset: np.ndarray, of: np.ndarray):
+    """Pick ``subset``'s columns out of arrays formed over ``of``, or pass them through whole.
+
+    A scalar passes through too, which is what the surviving fraction is when nothing occludes and
+    the medium is vacuum.
+    """
+    if len(subset) == len(of):
+        return lambda array: array
+    positions = np.searchsorted(of, subset)
+    return lambda array: array if jnp.ndim(array) == 0 else jnp.take(array, positions, axis=1)
 
 
 def direct_irradiance(
@@ -470,6 +612,7 @@ def direct_irradiance(
     visibility: Visibility | None = None,
     transmittance=None,
     pair_limit: int = DEFAULT_PAIR_LIMIT,
+    point_sources_only: bool = False,
 ):
     """Irradiance on an oriented receiving surface at each point, in vacuum.
 
@@ -499,6 +642,12 @@ def direct_irradiance(
         zero -- opaque -- so that a mask supplied without one blocks rather than passes.
     pair_limit : int, optional
         Receiver-by-facet pairs per traced chunk, as for :func:`direct_fluence_rate`.
+    point_sources_only : bool, optional
+        Gather the point sources alone and leave the areal facets out entirely -- not weighted
+        by zero, but never visited. What a surface solve needs as the irradiance arriving from
+        outside its transfer matrix, which already carries every areal facet; and the areal
+        pairs are nearly all of the cost, since a clipped projected solid angle is formed for
+        each.
 
     Returns
     -------
@@ -511,7 +660,7 @@ def direct_irradiance(
         If ``normals`` and ``points`` disagree in shape, if ``pair_limit`` is less than one, or
         if the visibility mask was built for a different set of receivers.
     """
-    rows = _surviving_rows(visibility, transmittance, points)
+    layers, transmittance = _shadow_rows(visibility, transmittance, points)
     points = jnp.asarray(points, dtype=float)
     normals = jnp.asarray(normals, dtype=float)
     if normals.shape != points.shape:
@@ -519,10 +668,11 @@ def direct_irradiance(
         raise ValueError(msg)
     partition = _groups(surfaces)
 
-    def at(receivers, receiver_normal, *surviving_all):
+    def at(receivers, receiver_normal, *chunk_layers):
+        surviving_all = _surviving(chunk_layers, transmittance)
         total = jnp.zeros(receivers.shape[0])
         for profile, areal, point in partition:
-            if len(areal):
+            if len(areal) and not point_sources_only:
                 cosine, _ = _emitter_cosine(surfaces, areal, receivers)
                 radiance = jnp.take(surfaces.emission, areal) * profile.radiance_per_exitance(
                     cosine
@@ -559,4 +709,4 @@ def direct_irradiance(
                 )
         return total
 
-    return _chunked((points, normals, *rows), pair_limit, surfaces.n_facets, at)
+    return _chunked(((points, 0), (normals, 0), *layers), pair_limit, surfaces.n_facets, at)

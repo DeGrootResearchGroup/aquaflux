@@ -407,12 +407,39 @@ def radiosity(
     by ``1/(rho A)``, and zero reflectance is both the default and the value on every non-lamp
     surface of a real reactor.
     """
+    solved = _solve(model, surfaces, absorption, transmittance, external_irradiance, solver)
+    return solved.outgoing, solved.cycles
+
+
+class _Solved(eqx.Module):
+    """The interreflection solve and the pieces it was assembled from, for reuse by a caller.
+
+    :func:`surface_irradiance` needs the transfer matrices and the arrivals the solve's
+    right-hand side was built from; forming them a second time would repeat an ``n^2`` product
+    against the frozen arrays and a gather of every point source at every facet.
+    """
+
+    outgoing: jnp.ndarray
+    cycles: jnp.ndarray
+    reflected: jnp.ndarray
+    emitted: jnp.ndarray
+    arriving: jnp.ndarray | None
+
+
+def _solve(model, surfaces, absorption, transmittance, external_irradiance, solver) -> _Solved:
+    """Assemble and solve ``(I - diag(rho) F) B = M + rho ((F^M - F) M + H_point + H_external)``."""
     _check_geometry(model, surfaces)
     emission = jnp.asarray(surfaces.emission, dtype=float)
     reflectance = jnp.asarray(surfaces.reflectance, dtype=float)
     reflected, emitted = model.transfer.assemble(surfaces, absorption, transmittance)
 
-    source = emission + reflectance * ((emitted - reflected) @ emission)
+    # The two matrices are one array whenever every areal source is Lambertian, and then their
+    # difference is an n^2 array of zeros: skip forming it rather than multiply by it.
+    source = (
+        emission
+        if emitted is reflected
+        else emission + reflectance * ((emitted - reflected) @ emission)
+    )
     arriving = _point_source_irradiance(model, surfaces, absorption, transmittance)
     if external_irradiance is not None:
         arriving = (
@@ -426,7 +453,10 @@ def radiosity(
     def matvec(x):
         return x - reflectance * (reflected @ x)
 
-    return solve_linear(matvec, source, solver=solver or relative_residual_gmres(_DEFAULT_RTOL))
+    outgoing, cycles = solve_linear(
+        matvec, source, solver=solver or relative_residual_gmres(_DEFAULT_RTOL)
+    )
+    return _Solved(outgoing, cycles, reflected, emitted, arriving)
 
 
 def surface_irradiance(
@@ -453,25 +483,14 @@ def surface_irradiance(
         Irradiance per facet in W/m², and the solver's restart-cycle count.
     """
     emission = jnp.asarray(surfaces.emission, dtype=float)
-    reflected, emitted = model.transfer.assemble(surfaces, absorption, transmittance)
-    outgoing, cycles = radiosity(
-        model,
-        surfaces,
-        absorption=absorption,
-        transmittance=transmittance,
-        external_irradiance=external_irradiance,
-        solver=solver,
-    )
-    landing = emitted @ emission + reflected @ (outgoing - emission)
-    # The same two arrivals the solve's right-hand side carries, and for the same reason: the
-    # set's own point sources are not in the transfer matrix, so their contribution has to be
-    # added here too or a lamp-lit wall reads as dark.
-    arriving = _point_source_irradiance(model, surfaces, absorption, transmittance)
-    if arriving is not None:
-        landing = landing + arriving
-    if external_irradiance is not None:
-        landing = landing + jnp.asarray(external_irradiance, dtype=float)
-    return jnp.where(jnp.asarray(surfaces.is_point_source), jnp.nan, landing), cycles
+    solved = _solve(model, surfaces, absorption, transmittance, external_irradiance, solver)
+    landing = solved.emitted @ emission + solved.reflected @ (solved.outgoing - emission)
+    # The same arrivals the solve's right-hand side carries -- the set's own point sources, which
+    # are not in the transfer matrix, and any external irradiance -- or a lamp-lit wall reads as
+    # dark.
+    if solved.arriving is not None:
+        landing = landing + solved.arriving
+    return jnp.where(jnp.asarray(surfaces.is_point_source), jnp.nan, landing), solved.cycles
 
 
 def _point_source_irradiance(model, surfaces, absorption, transmittance):
@@ -486,16 +505,17 @@ def _point_source_irradiance(model, surfaces, absorption, transmittance):
     """
     if not surfaces.is_point_source.any():
         return None
-    # Zeroing the areal exitance leaves only the point branch of the gather; the facets' own
-    # emission reaches them through the transfer matrix and must not be counted twice.
-    lamps = surfaces.with_optics(emission=jnp.zeros(surfaces.n_facets))
+    # Only the point sources are gathered: the facets' own emission reaches them through the
+    # transfer matrix and must not be counted twice, and leaving the areal facets out rather than
+    # weighting them by zero skips nearly all of the gather's cost.
     landing = direct_irradiance(
-        lamps,
+        surfaces,
         surfaces.centroid,
         surfaces.normal,
         absorption=absorption,
         visibility=model.transfer.visibility,
         transmittance=transmittance,
+        point_sources_only=True,
     )
     # A point source has no surface for an arrival to land on, and a zero-length normal, so its
     # own entry is meaningless rather than small.
@@ -555,11 +575,13 @@ def fluence_rate(
 
     Notes
     -----
-    The volume gather runs **twice**, once for the emitted field and once for the reflected one,
-    and the second pass is paid even when every reflectance is zero. It cannot be skipped on
-    that condition: reflectance is a traced value a gradient must reach, so there is nothing to
-    branch on at trace time. A scene that genuinely has no reflecting surface is better served
-    by :func:`~aquaflux.radiation.gather.direct_fluence_rate` on its own.
+    The emitted and the reflected field are gathered in **one pass**: they share every geometric
+    factor -- solid angle, attenuation, shadow -- and differ only in the radiance weight, so the
+    second costs a weighted sum rather than a second gather. It is still paid when every
+    reflectance is zero, and cannot be skipped on that condition: reflectance is a traced value a
+    gradient must reach, so there is nothing to branch on at trace time. A scene that genuinely
+    has no reflecting surface is better served by
+    :func:`~aquaflux.radiation.gather.direct_fluence_rate` on its own.
     """
     outgoing, cycles = radiosity(
         model,
@@ -587,8 +609,9 @@ def fluence_rate(
         power=jnp.zeros(surfaces.n_facets),
         profiles=(Lambertian(),),
     )
-    # Both sets are gathered through one set of shadows -- they share the geometry -- which for a
-    # streamed mask is what keeps it to one build per chunk rather than one per set.
+    # Both sets are gathered in one pass through one set of shadows -- they share the geometry --
+    # so the solid angles, attenuation and shadows are formed once for the two, and a streamed
+    # mask is built once per chunk rather than once per set.
     field = model.receiver_shadows.fluence_rate(
         (surfaces, bounced),
         model.receivers,

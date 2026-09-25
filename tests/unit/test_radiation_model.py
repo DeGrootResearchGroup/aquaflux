@@ -967,20 +967,38 @@ def test_relabelling_which_facets_are_point_sources_is_refused():
 def test_a_traced_geometry_is_let_through_so_a_lamp_can_be_moved_under_a_gradient():
     """The exception, and the reason for it: under tracing the geometry cannot be inspected,
     and moving a source under a gradient is what the live gather is for. The derivative is taken
-    with the shadows frozen, like every other frozen quantity."""
-    surfaces = box(2, emission=1.0, reflectance=0.5)
+    with the shadows frozen, like every other frozen quantity.
+
+    The walls emit unevenly, because a uniformly emitting closed box has a uniform field inside
+    and translating it changes nothing: its derivative is zero to rounding, which a test asserting
+    "non-zero" would be reading. And the gradient is checked against the two gathers the field is
+    made of, taken separately, since the emitted and reflected fields share one geometric pass and
+    the reflected set's dependence on the vertices must survive that.
+    """
+    surfaces = box(2, reflectance=0.5)
+    surfaces = surfaces.with_optics(emission=1.0 + np.asarray(surfaces.centroid)[:, 2])
+    receiver = np.array([[0.4, 0.5, 0.6]])
     model = build_radiation_model(
-        np.array([[0.4, 0.5, 0.6]]),
-        surfaces,
-        settings=RadiationSettings(self_occlusion=NoOcclusion()),
+        receiver, surfaces, settings=RadiationSettings(self_occlusion=NoOcclusion())
     )
     base = jnp.asarray(surfaces.vertices)
+    lift = jnp.array([0.0, 0.0, 1.0])
 
     def total(shift):
-        field, _ = fluence_rate(
-            model, surfaces.with_geometry(base + shift * jnp.array([0.0, 0.0, 1.0]))
-        )
+        field, _ = fluence_rate(model, surfaces.with_geometry(base + shift * lift))
         return field[0]
 
+    outgoing, _ = radiosity(model, surfaces)
+
+    def separately(shift):
+        moved = surfaces.with_geometry(base + shift * lift)
+        bounced = moved.with_optics(emission=outgoing - moved.emission, profiles=(Lambertian(),))
+        visibility = model.receiver_shadows.visibility
+        return (
+            direct_fluence_rate(moved, receiver, visibility=visibility)
+            + direct_fluence_rate(bounced, receiver, visibility=visibility)
+        )[0]
+
     gradient = float(jax.grad(total)(jnp.asarray(0.0)))
-    assert np.isfinite(gradient) and gradient != 0.0
+    assert np.isfinite(gradient) and abs(gradient) > 1e-3
+    assert gradient == pytest.approx(float(jax.grad(separately)(jnp.asarray(0.0))), rel=1e-12)

@@ -473,7 +473,9 @@ difference over the 1,285,221 lit cells **median 0, p99 1.8e-16, max 4.4e-16**; 
 cells (never compared before) agree to 6.8e-21 W/m² absolute. Build 65 s, field **1,170 s** — about
 twice the hand-chunked 557 s, because `fluence_rate` also gathers the reflected set, which with black
 walls carries nothing (its own docstring already says so: reflectance is traced, so there is nothing
-to branch on). Solve: 3 restart cycles.
+to branch on). Solve: 3 restart cycles. ⚠️ Since #524 the two sets share one geometric pass
+(`summed_fluence_rate`), so the reflected set costs a weighted sum rather than a second gather; the
+1,170 s predates that and #522, and has not been re-measured on this case.
 
 ⚠️ **Peak memory footprint 11.15 GB, and it is the FIELD phase, not the build.** It was first
 recorded here as "8.5 GB of it is the transfer build", which was an inference from a separately
@@ -485,8 +487,12 @@ the footprint read 4.10 GB after the build, 5.92 after one `fluence_rate` and 7.
 second call. **Most of it is JAX's compile and trace caches, not arrays**: `jax.clear_caches()` plus
 `gc.collect()` between the two calls took the footprint from 5.91 to **2.74 GB** (the kept transfer
 plus base), and the second call rebuilt ~2.9 GB (67 s per call, uncontended). Every call re-traces and
-recompiles the per-chunk programs. The fix (compile each pass once, taking big arrays as arguments
-rather than closure constants) is #522/#524's. ⚠️ **A peak on a platform whose allocator
+recompiled the per-chunk programs. **Fixed by #522** (merged): `streamed_fluence_rate` compiles its
+per-chunk gather once per call, taking the live values and each chunk's mask as arguments. On the same
+100,000 cells at `66501ac`, three identical calls settled at 4.36 / 4.83 / 4.57 GB (peaks 5.77 / 6.54
+GB within a call, about one 4M-pair pass above), 40-42 s each against 67 s, field unchanged
+(median 0, max 4.3e-16 against `G_aquaflux.npy`). The whole-run peak on the full mesh has not been
+re-measured with both #521 and #522 in. ⚠️ **A peak on a platform whose allocator
 keeps freed pages is attributed only by sampling between phases in one process** — subtracting a phase
 measured in another process from a whole-run total is exactly how the wrong attribution got written.
 
@@ -1252,10 +1258,10 @@ directions. With `rho = 0` the same fixture gives `G = P/(4 pi r^2)` exactly.
   profile imposed on the same object returns **zero** intensity along a point source's zero
   normal. The two guards overlap today; both stay, because the overlap is a property of
   `Lambertian` and not of the function, and the comment in `model.py` says so.
-- Transposing `_chunked`'s reshape from `(n_chunks, per_chunk)` to `(per_chunk, n_chunks)` is
-  inert: the padded array is flattened again in the same order whichever way it is factored, so
-  only the chunk partition changes. What *is* covered is losing a receiver off the padded end,
-  which needs a chunk size that does not divide the receiver count to show up at all.
+- `_chunked` no longer pads (#524): full chunks are sliced in place and a shorter remainder runs
+  as one more call. Losing or duplicating the remainder needs a chunk size that does not divide
+  the receiver count to show up at all, which is why `test_chunking_changes_nothing_about_the_answer`
+  uses 37 receivers.
 
 ## Documentation
 
@@ -1974,8 +1980,10 @@ exactly what a user does to improve accuracy.
 `_surviving_rows` returned `jnp.ones((n_receivers, n_facets))`, formed *before* any chunking — at a
 mesh's 1.6M cells against a 66k-facet CAD lamp that is ~850 GB, which no chunk size bounds. It went
 unnoticed because every study that hit it (the lamp ladder formed 17 GB of it) ran on macOS, which
-compresses an array of ones to almost nothing. It is now an empty tuple and the scan is handed the
-points alone; `test_a_scene_with_nothing_in_the_way_forms_no_array_the_size_of_the_problem` pins it.
+compresses an array of ones to almost nothing. It is now an empty tuple and only the points are cut
+into chunks; `test_a_scene_with_nothing_in_the_way_forms_no_array_the_size_of_the_problem` pins it.
+(The helper is `_shadow_rows` since #524, which hands the chunks the mask's own layers rather than a
+fraction formed whole — see the #524 entry below.)
 
 **The default is measured, not copied** (`validation/radiation_gather_pair_limit.py`: analytic
 Sozzi lamps of 8,704 / 67,584 / 270,336 facets, every point doing ~35M pairs, receivers uniform in
@@ -2026,6 +2034,53 @@ pins it on the compiled figure. The streamed path is bounded separately, and was
 `streamed_fluence_rate`'s chunks is a custom VJP that rebuilds its mask on the way back (#520, see
 the streamed-model section), so its tape holds a chunk's inputs rather than its mask rows. For a few
 scalar parameters `jax.jacfwd` also stays at forward memory.
+
+**ONE GEOMETRIC PASS FOR THE EMITTED AND REFLECTED FIELDS, AND NOTHING OF THE PROBLEM'S SIZE FORMED
+PER CALL (#524).** Three changes to the per-call path, all answer-preserving:
+
+- **`summed_fluence_rate(sets, ...)`** is the gather for several sets on one geometry: the solid
+  angle, emitter cosine, attenuation (a whole voxel walk under `VoxelAbsorption`) and surviving
+  fraction are formed once from the **first** set, and each set contributes only its radiance
+  weights. Each set's terms are summed first and the sets added after, in order, so it equals
+  adding `direct_fluence_rate` per set (`test_summing_sets_in_one_pass_is_summing_their_gathers`,
+  1e-14). `direct_fluence_rate`, `FrozenShadows` and the streamed `_compiled_gather` all go through
+  it. ⚠️ Sets whose concrete vertices differ are **refused**, not silently gathered with the first
+  set's geometry; traced vertices cannot be compared and are trusted — the model's reflected set is
+  `with_optics` of the traced set, so it carries the same tracer, and
+  `test_a_traced_geometry_is_let_through_so_a_lamp_can_be_moved_under_a_gradient` now checks that
+  gradient against two separate gathers. ⚠️ That test used to assert only `!= 0.0` on a uniformly
+  emitting closed box, whose interior field is uniform: its derivative under translation is zero
+  **to rounding**, and the fused pass rounded it to exactly 0. It now emits unevenly.
+- **The surviving fraction is formed per chunk** from the mask's own layers (`_shadow_rows` hands
+  `blocked` and `hidden_by_geometry` to `_chunked` with their receiver axes; `surviving_fraction` in
+  `visibility.py` is the one expression, also behind `Visibility.surviving`). Before, it was a
+  float64 array of the whole problem, 8 B/pair beyond the mask, formed eagerly per call — and
+  `_chunked` then **copied** it into a padded array. `_chunked` now slices chunks in place
+  (`lax.dynamic_slice_in_dim`) with the slice **inside** the checkpoint, so a gradient keeps a
+  chunk's start index rather than the chunk; with the slice outside, the gradient-memory test caught
+  24 B per receiver of saved chunks. Pinned by
+  `test_a_mask_is_cut_into_chunks_rather_than_turned_into_a_fraction_first`.
+- **`direct_irradiance(..., point_sources_only=True)`** gathers the point sources and never visits
+  an areal facet; `_point_source_irradiance` used to zero the areal emission and pay a clipped
+  projected solid angle for every facet pair. And `surface_irradiance` reuses `radiosity`'s
+  assembly (`_solve`) instead of assembling the transfer and gathering the point sources a second
+  time; the `(F^M - F) M` product is skipped when the two are one array (every areal source
+  Lambertian).
+
+Measured with `validation/radiation_fluence_rate_call.py` (4,096-facet analytic lamp, reflectance
+0.3, 3,954 receivers, one sleeve as a `Cylinder`, `NoOcclusion`; jax 0.10.2, CPU, x64, macOS arm64,
+11 cores, nothing else running, 2026-09-24; "before" is `66501ac`, i.e. #522 applied), warm calls,
+every checksum identical before and after:
+
+| medium | held mask | streamed mask |
+|---|---|---|
+| `UniformAbsorption(35.67)` | 0.55 → 0.37-0.42 s | 0.70 → 0.47 s |
+| graded `VoxelAbsorption`, 12 × 12 × 16 | ~219 → ~170 s | ~200 → ~158 s |
+
+⚠️ **The graded rows are dominated by what this did NOT touch**: `TransferMatrix.assemble` walks all
+`n^2` facet pairs through the grid unchunked on every call (#528) — 16.8M pairs here against the
+gather's 16.2M — so the saved second receiver walk shows as ~1.3x rather than ~2x. Graded calls
+also spread ~15% call to call on this machine; read the ratio, not the seconds.
 
 ## ANALYTIC OCCLUSION: BUILT as `SilhouetteOcclusion` — exact per blocker, once six defects were out
 

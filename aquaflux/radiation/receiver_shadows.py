@@ -26,7 +26,7 @@ import equinox as eqx
 import jax.numpy as jnp
 
 from aquaflux.radiation.absorption import Absorption
-from aquaflux.radiation.gather import direct_fluence_rate, streamed_fluence_rate
+from aquaflux.radiation.gather import streamed_fluence_rate, summed_fluence_rate
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.visibility import Visibility, build_visibility, refuse_points_inside
 
@@ -75,17 +75,17 @@ class FrozenShadows(ReceiverShadows):
     def fluence_rate(
         self, sets, receivers, *, absorption=None, transmittance=None, pair_limit=None
     ):
-        """Each set gathered through the held mask. See :meth:`ReceiverShadows.fluence_rate`."""
-        return sum(
-            direct_fluence_rate(
-                surfaces,
-                receivers,
-                absorption=absorption,
-                visibility=self.visibility,
-                transmittance=transmittance,
-                **_pair_limit(pair_limit),
-            )
-            for surfaces in sets
+        """The sets gathered through the held mask in one shared pass.
+
+        See :meth:`ReceiverShadows.fluence_rate`.
+        """
+        return summed_fluence_rate(
+            sets,
+            receivers,
+            absorption=absorption,
+            visibility=self.visibility,
+            transmittance=transmittance,
+            **_pair_limit(pair_limit),
         )
 
 
