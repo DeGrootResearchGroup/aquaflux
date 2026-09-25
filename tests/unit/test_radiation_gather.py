@@ -417,16 +417,16 @@ def _chunk_slices(monkeypatch):
 
     Watches the slicing rather than replacing it, so the gather still computes its answer.
     """
-    from aquaflux.radiation import gather
+    from aquaflux.radiation import work
 
     seen = []
-    real = gather._slice
+    real = work._slice
 
     def watched(array, axis, start, size):
         seen.append((tuple(array.shape), axis, size))
         return real(array, axis, start, size)
 
-    monkeypatch.setattr(gather, "_slice", watched)
+    monkeypatch.setattr(work, "_slice", watched)
     return seen
 
 

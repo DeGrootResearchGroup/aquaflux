@@ -371,7 +371,9 @@ where zero is correct and is what is returned. A clamp would buy nothing and wou
 
 **The absorbance grid need not match the flow mesh, and usually should not.** A segment's cost is
 the fixed `nx + ny + nz + 1` steps, so a coarse absorbance grid over a fine flow mesh is cheaper
-and no less accurate — absorbance varies far more smoothly than velocity.
+and no less accurate — absorbance varies far more smoothly than velocity. Since #528 that is its
+cost in time and, under a gradient, in memory (a carry a step); its forward memory is flat in the
+grid (see the #528 section).
 
 ⚠️ **Attenuation is taken along the facet CENTROID's path.** A facet wide enough for its far
 corner to sit at a different optical depth is attenuated as though it were not. Same remedy as
@@ -1257,7 +1259,7 @@ directions. With `rho = 0` the same fixture gives `G = P/(4 pi r^2)` exactly.
   profile imposed on the same object returns **zero** intensity along a point source's zero
   normal. The two guards overlap today; both stay, because the overlap is a property of
   `Lambertian` and not of the function, and the comment in `model.py` says so.
-- `_chunked` no longer pads (#524): full chunks are sliced in place and a shorter remainder runs
+- `work.in_passes` (`_chunked` in `gather.py` until #528) no longer pads (#524): full chunks are sliced in place and a shorter remainder runs
   as one more call. Losing or duplicating the remainder needs a chunk size that does not divide
   the receiver count to show up at all, which is why `test_chunking_changes_nothing_about_the_answer`
   uses 37 receivers.
@@ -2026,7 +2028,7 @@ gradient's working memory grew in proportion to the receivers. Same harness and 
 compiled `temp_size_in_bytes` of `grad` in the emission at the default limit: **960 → 608 MB at
 8.2e6 pairs and 3,839 → 608 MB at 1.3e8** — before, ~25 B per pair on top of a fixed base; about
 2.6 TB at Sozzi scale (1.6M cells × 66k facets), and a review probe read 80-97 B per pair through
-the model path. `_chunked` now wraps the body in `jax.checkpoint(prevent_cse=False)`: flat in the
+the model path. `_chunked` (now `work.in_passes`, #528) wraps the body in `jax.checkpoint(prevent_cse=False)`: flat in the
 receiver count, forward unaffected; the review probe measured value and gradient bit-identical and
 ~1.67x the plain gradient's time (on a shared machine — not re-measured). `test_a_gradient_s_memory_is_bounded_by_the_pair_limit_not_the_receiver_count`
 pins it on the compiled figure. The streamed path is bounded separately, and was first: each of
@@ -2051,7 +2053,7 @@ PER CALL (#524).** Three changes to the per-call path, all answer-preserving:
   emitting closed box, whose interior field is uniform: its derivative under translation is zero
   **to rounding**, and the fused pass rounded it to exactly 0. It now emits unevenly.
 - **The surviving fraction is formed per chunk** from the mask's own layers (`_shadow_rows` hands
-  `blocked` and `hidden_by_geometry` to `_chunked` with their receiver axes; `surviving_fraction` in
+  `blocked` and `hidden_by_geometry` to `_chunked` (now `work.in_passes`) with their receiver axes; `surviving_fraction` in
   `visibility.py` is the one expression, also behind `Visibility.surviving`). Before, it was a
   float64 array of the whole problem, 8 B/pair beyond the mask, formed eagerly per call — and
   `_chunked` then **copied** it into a padded array. `_chunked` now slices chunks in place
@@ -2076,10 +2078,76 @@ every checksum identical before and after:
 | `UniformAbsorption(35.67)` | 0.55 → 0.37-0.42 s | 0.70 → 0.47 s |
 | graded `VoxelAbsorption`, 12 × 12 × 16 | ~219 → ~170 s | ~200 → ~158 s |
 
-⚠️ **The graded rows are dominated by what this did NOT touch**: `TransferMatrix.assemble` walks all
-`n^2` facet pairs through the grid unchunked on every call (#528) — 16.8M pairs here against the
-gather's 16.2M — so the saved second receiver walk shows as ~1.3x rather than ~2x. Graded calls
-also spread ~15% call to call on this machine; read the ratio, not the seconds.
+⚠️ **The graded rows were dominated by what this did NOT touch**: `TransferMatrix.assemble` walked all
+`n^2` facet pairs through the grid unchunked on every call — 16.8M pairs here against the gather's
+16.2M — so the saved second receiver walk showed as ~1.3x rather than ~2x. Graded calls also spread
+~15% call to call on this machine; read the ratio, not the seconds. #528 fixed the walk itself, and
+the graded rows are now ~19-21 s (next section).
+
+## THE VOXEL WALK CARRIES ITS TOTAL, AND THE FACET-TO-FACET WALK GOES IN PASSES (#528, 2026-09-25)
+
+**The walk collected every piece before summing them.** `VoxelAbsorption.optical_depth` scanned its
+fixed `nx + ny + nz + 1` steps returning each Simpson piece, so the scan stacked a
+`(max_crossings, ...)` array before one sum — **8 B a pair per step** on top of a flat ~100 B, i.e.
+~1 kB a pair on a 32³ grid, ~4 GB in one 4M-pair gather chunk, where `UniformAbsorption` is a few
+bytes. Now the running total and the field at the piece's near end ride in the scan's **carry**: the
+near end is the previous piece's far end, so each step does two lookups, not three, and nothing is
+stacked. **The step is `jax.checkpoint`ed**, which is the other half and was not in the issue: under a
+gradient a scan keeps its step's residuals for the way back, and those were every lookup's gather
+indices and trilinear weights, **~500 B a pair per step, 47.9 kB a pair at 32³** (3 GB for 65,536
+segments). Checkpointed, it keeps the carry and recomputes the lookups: ~40-60 B a pair per step.
+The value is not bit-identical — a running total sums in a different order from one reduction — and
+the harness checksums agree to 15 figures forward and 14 for the gradient.
+
+**The facet-to-facet walk went through `work.in_passes`.** Under any non-uniform `Absorption`,
+`TransferMatrix.assemble` walked all `n^2` centroid pairs at once, on every call. It now walks a block
+of receiving facets at a time, bounded by `pair_limit` (a new keyword on `assemble`; `_solve` passes
+the model's `gather_pair_limit`, whose docstring now says it bounds this too, since both are per-call
+receiver-by-facet walks). `_chunked` moved from `gather.py` to `work.py` as **`in_passes`** to make
+that possible, and its output may now carry a row per receiver as well as a value (`reshape(-1,
+*shape[2:])`). ⚠️ **There is no `gather._chunked` or `gather._slice` any more**; the chunk-slicing
+test patches `work._slice`. The issue's second complaint, that an eager `surface_irradiance`
+assembled twice, was already gone with #524's `_solve`.
+
+Measured with `validation/radiation_voxel_walk.py` (walk: 65,536 random segments in a random 32³
+grid; assemble: a closed 10 cm `inward_box` at 972 and 2,028 facets, a random 12³ medium,
+`NoOcclusion`; compiled `temp_size_in_bytes`, median of five warm calls; jax 0.10.2, CPU, x64, macOS
+arm64, 11 cores; "before" is `4e0b632` in one run and "after" the working tree in two runs straight
+after it, 2026-09-25; checksums identical to the last printed digit except the walk gradient's last
+two):
+
+| | before | after |
+|---|---|---|
+| walk forward, working per pair | 988 B | **104 B** |
+| walk gradient, working per pair | 47,864 B | **3,512 B** |
+| walk forward / gradient, s | 0.41 / 0.66 | 0.09-0.17 / 0.23-0.37 |
+| assemble, 972 facets | 0.578 GB, 1.84 s | 0.197 GB, 0.42 s |
+| assemble, 2,028 facets, default limit | 2.517 GB, 8.98 s | 0.849 GB, 1.81-1.86 s |
+| assemble, 2,028 facets, `pair_limit=1_000_000` | — | **0.241 GB**, 1.90 s |
+
+⚠️ **The default-limit rows are still ONE pass**: 2,028² is 4.1M pairs against the 4M default, so
+what bounds them is the walk's per-pair cost (612 → 206 B), not the passes. The 1M row is what
+shows the passes bounding the working set. The seconds are across runs (the rule on dividing across
+runs applies; two after-runs are quoted as a range) and are approximate; the working memory is exact.
+
+**Per-call, `validation/radiation_fluence_rate_call.py`** (the #524 configuration above, run alone,
+2026-09-25): graded **held ~170 → 18.9-19.5 s, streamed ~158 → 20.3-21.2 s**, uniform unchanged
+(0.41-0.49 / 0.45 s), every checksum identical to 13 figures against the #524 run. About 8x, and
+most of it is the walk itself rather than the passes: the 4,096-facet assemble is 16.8M pairs, four
+passes at the default limit.
+
+Tests, each mutation-checked: `test_the_walk_s_working_memory_does_not_grow_with_the_number_of_cells_it_crosses`
+(forward flat from 4³ to 32³ — `main`'s walk reads 317 → 989 B there and fails; reverse under 100 B
+a step — dropping the checkpoint fails); `test_a_graded_medium_attenuates_each_pair_by_its_own_walk_however_the_pairs_are_cut`
+(a pass of 7 rows on 54 facets, against all pairs walked at once — a dropped remainder and a pass
+shifted by a row both fail) and `test_a_uniform_grid_walked_between_facets_is_the_closed_form` (the
+walk against the frozen separations, which never walk: **nothing tested the non-uniform `assemble`
+path before this**); `test_the_walk_between_facets_is_bounded_by_the_pair_limit_not_the_facet_count`
+(compiled memory at 8 rows a pass under 0.2x all at once — ignoring the limit fails). Carrying the
+wrong sample as the near end passes all four and fails six of the existing walk exactness tests.
+**Not done, and not probed**: sharing one 8-corner lookup across a piece's three Simpson samples
+(the issue's third idea; a piece lies in one interpolation cell, but it is not bit-identical at the
+plane endpoints).
 
 ## ANALYTIC OCCLUSION: BUILT as `SilhouetteOcclusion` — exact per blocker, once six defects were out
 
