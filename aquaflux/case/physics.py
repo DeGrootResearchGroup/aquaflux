@@ -203,5 +203,9 @@ def _momentum(spec: CaseSpec, mesh: Mesh, geometry: MeshGeometry) -> MomentumCon
             {name: condition.flow_closure() for name, condition in spec.boundaries.items()}
         ),
         advection_scheme=spec.numerics.momentum_advection,
-        **_set(gradient_scheme=spec.numerics.gradient, drive=spec.drive),
+        **_set(
+            gradient_scheme=spec.numerics.gradient,
+            drive=spec.drive,
+            pressure_datum=spec.pressure_datum,
+        ),
     )

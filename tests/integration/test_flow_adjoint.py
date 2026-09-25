@@ -18,7 +18,13 @@ import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import FirstOrderUpwind
-from aquaflux.flow import BlockPreconditioner, MomentumContinuity, MovingWall, NoSlipWall
+from aquaflux.flow import (
+    BlockPreconditioner,
+    MomentumContinuity,
+    MovingWall,
+    NoSlipWall,
+    PinnedPoint,
+)
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, SweptGradientSolve
 from aquaflux.solve import DampedNewtonStep, RootSolver
@@ -47,7 +53,7 @@ def _cavity(mu, n, advection):
         ),
         gradient_scheme=CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=16)),
         advection_scheme=advection,
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
     )
 
 

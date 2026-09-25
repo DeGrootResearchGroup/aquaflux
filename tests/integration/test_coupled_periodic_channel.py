@@ -34,7 +34,13 @@ import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
-from aquaflux.flow import ConvectionTwoLevel, MomentumContinuity, NoSlipWall, UniformBodyForce
+from aquaflux.flow import (
+    ConvectionTwoLevel,
+    MomentumContinuity,
+    NoSlipWall,
+    PinnedPoint,
+    UniformBodyForce,
+)
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
@@ -71,7 +77,7 @@ def _periodic_channel():
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
         sources=(UniformBodyForce(jnp.array([BETA0, 0.0])),),
     )
     turbulence = SSTTurbulence.build(

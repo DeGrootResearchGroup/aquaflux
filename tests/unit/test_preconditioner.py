@@ -21,6 +21,7 @@ from aquaflux.flow import (
     MomentumShiftPolicy,
     MovingWall,
     NoSlipWall,
+    PinnedPoint,
     PressureOutlet,
     VelocityInlet,
     damped_jacobi_solve,
@@ -57,6 +58,7 @@ def _geometry(n, perturb=0.0):
         PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
         BoundaryConditions(walls),
         gradient_scheme=CompactGreenGauss(),
+        pressure_datum=PinnedPoint((0.0, 0.0)),  # closed: the level needs a datum
     )
 
 
@@ -212,6 +214,7 @@ def test_reference_state_is_driven_by_a_moving_wall_too() -> None:
             PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
             BoundaryConditions(conditions),
             gradient_scheme=CompactGreenGauss(),
+            pressure_datum=PinnedPoint((0.0, 0.0)),  # closed: the level needs a datum
         )
 
     lid = _cavity({**walls, "top": MovingWall(velocity=(2.5, 0.0))})
@@ -248,6 +251,7 @@ def test_a_convection_block_with_no_reference_flux_says_so_instead_of_degrading_
             PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
             BoundaryConditions(conditions),
             gradient_scheme=CompactGreenGauss(),
+            pressure_datum=PinnedPoint((0.0, 0.0)),  # closed: the level needs a datum
         )
         return BlockPreconditioner.build(assembler, velocity=ConvectionTwoLevel())
 
@@ -315,7 +319,7 @@ def test_momentum_diagonal_is_the_residual_operator_diagonal_under_graded_viscos
         PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
         BoundaryConditions({side: NoSlipWall() for side in ("top", "bottom", "left", "right")}),
         gradient_scheme=CompactGreenGauss(),
-        pressure_pin=0,  # closed domain
+        pressure_datum=PinnedPoint((0.0, 0.0)),  # closed domain
     )  # no advection_scheme -> Stokes: a_P is purely viscous, the residual is linear
     x = geom.cell.centroid[:, 0]
     nu_t = jnp.exp(3.0 * (x - x.min()) / (x.max() - x.min())) - 1.0  # 0 .. ~19, smoothly graded
@@ -347,7 +351,7 @@ def test_momentum_diagonal_matches_the_operator_at_active_wall_faces() -> None:
         PropertyModel({"viscosity": Constant(1e-3), "density": Constant(1.0)}),
         BoundaryConditions({side: NoSlipWall() for side in ("top", "bottom", "left", "right")}),
         gradient_scheme=CompactGreenGauss(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
     )  # Stokes closed cavity: a_P is purely viscous, the residual is linear
     # A large log-layer cell eddy viscosity with a much smaller wall-model value on the wall faces —
     # the wall-function regime where the owner-cell and wall-model viscosities genuinely differ (~7x).

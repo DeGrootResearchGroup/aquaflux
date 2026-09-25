@@ -40,16 +40,15 @@ import time
 from pathlib import Path
 
 import aquaflux  # noqa: F401  (enables x64)
-import jax.numpy as jnp
 import lineax as lx
 import numpy as np
-from aquaflux.turbulence import sst_initial_fields
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind, LimitedUpwind
 from aquaflux.flow import (
     MassFlow,
     MomentumContinuity,
     NoSlipWall,
+    PinnedPoint,
     bulk_velocity_flow_solve,
 )
 from aquaflux.mesh import graded_nodes, structured_grid_2d
@@ -61,6 +60,7 @@ from aquaflux.turbulence import (
     SSTTurbulence,
     scalar_pseudo_transient_solve,
     solve_segregated,
+    sst_initial_fields,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -148,7 +148,7 @@ def solve_aquaflux(nu_of, ny, growth):
         # the realized kappa, which is a discretization difference rather than a model one.
         gradient_scheme=CompactGreenGauss(),
         advection_scheme=LimitedUpwind(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
         drive=MassFlow(target=1.0, force=0.004),
     )
     turbulence = SSTTurbulence.build(

@@ -30,7 +30,14 @@ from aquaflux.case import (
     write_case,
 )
 from aquaflux.discretization import FirstOrderUpwind, LimitedUpwind
-from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, VelocityInlet
+from aquaflux.flow import (
+    MomentumContinuity,
+    MovingWall,
+    NoSlipWall,
+    PinnedPoint,
+    PressureOutlet,
+    VelocityInlet,
+)
 from aquaflux.io import read_openfoam
 from aquaflux.io.openfoam.cyclic import DEFAULT_MATCH_TOLERANCE
 from aquaflux.mesh import Mesh, MeshGeometry
@@ -47,6 +54,12 @@ REPO = Path(__file__).resolve().parents[2]
 #: A one-cell-thick slab between `empty` front and back patches, read as 2D: left, right, bottom, top.
 SLAB = REPO / "tests" / "fixtures" / "polymesh_2d_slab_frontandback"
 PITZDAILY = REPO / "validation" / "pitzdaily_openfoam" / "case.yaml"
+
+# The default gradient reconstruction warns that the fixture's two cells, each with three boundary
+# faces, leave it underdetermined -- true, and beside the point of a test comparing two builds.
+_DEFAULT_GRADIENT_ON_TWO_CELLS = pytest.mark.filterwarnings(
+    "ignore:MultipleCorrectionGradient.*underdetermined:UserWarning"
+)
 
 
 def _sections(**overrides: object) -> dict[str, object]:
@@ -283,11 +296,98 @@ def test_a_rans_case_with_inflow_turbulence_and_no_wall_setting_loads() -> None:
     assert spec.boundaries["top"] == Wall()
 
 
-def test_a_domain_with_no_outlet_is_refused_for_want_of_a_pressure_datum() -> None:
-    """A closed domain would solve a singular system: its pressure level is free and nothing fixes it."""
-    sections = _sections(boundaries=_boundaries(right={"kind": "Wall"}))
-    with pytest.raises(ValueError, match=r"no boundary patch fixes the pressure"):
+# --- the pressure level: fixed exactly once -----------------------------------------------------
+
+#: A lid-driven cavity on the slab fixture: every patch a wall, the top one moving.
+_CAVITY_PATCHES = {
+    "left": {"kind": "Wall"},
+    "right": {"kind": "Wall"},
+    "bottom": {"kind": "Wall"},
+    "top": {"kind": "Wall", "velocity": [1.0, 0.0]},
+}
+
+
+def test_a_closed_domain_with_no_datum_is_refused_when_read() -> None:
+    """Without one its pressure level is free and the system singular -- refused, not left to solve."""
+    with pytest.raises(ValueError, match=r"the case: no boundary patch prescribes the pressure"):
+        case_spec_from_mapping(_sections(boundaries=_CAVITY_PATCHES))
+
+
+def test_a_datum_beside_an_outlet_is_refused_when_read() -> None:
+    sections = _sections(pressure_datum={"kind": "PinnedPoint", "point": [0.5, 0.5]})
+    with pytest.raises(ValueError, match=r"'right' already fixes the pressure level"):
         case_spec_from_mapping(sections)
+
+
+def test_a_closed_case_with_a_datum_reads_and_round_trips(tmp_path: Path) -> None:
+    sections = _sections(
+        boundaries=_CAVITY_PATCHES,
+        pressure_datum={"kind": "PinnedPoint", "point": [0.5, 0.25], "value": 1.5},
+    )
+    spec = case_spec_from_mapping(sections)
+    assert spec.pressure_datum == PinnedPoint((0.5, 0.25), value=1.5)
+    assert spec.boundaries["top"] == Wall(velocity=(1.0, 0.0))
+    path = tmp_path / "case.yaml"
+    write_case(spec, path)
+    assert read_case(path).spec == spec
+
+
+@_DEFAULT_GRADIENT_ON_TWO_CELLS
+def test_a_closed_case_builds_the_pinned_cavity_written_by_hand() -> None:
+    """The moving wall, the datum and the resolved pin, against the same cavity assembled by hand."""
+    mesh, geometry = _slab()
+    reference = MomentumContinuity.build(
+        mesh,
+        geometry,
+        PropertyModel({"viscosity": Constant(jnp.asarray(4.0e-3)), "density": Constant(2.0)}),
+        BoundaryConditions(
+            {
+                "left": NoSlipWall(),
+                "right": NoSlipWall(),
+                "bottom": NoSlipWall(),
+                "top": MovingWall(velocity=(1.0, 0.0)),
+            }
+        ),
+        advection_scheme=FirstOrderUpwind(),
+        pressure_datum=PinnedPoint((1.2, 0.1), value=1.5),
+    )
+    sections = _sections(
+        fluid=_SLAB_FLUID,
+        boundaries=_CAVITY_PATCHES,
+        pressure_datum={"kind": "PinnedPoint", "point": [1.2, 0.1], "value": 1.5},
+    )
+    built = CaseFile(case_spec_from_mapping(sections), REPO).check().build()
+    _same_problem(built, reference)
+    assert built.pressure_pin == 1  # the slab's second cell, centred at x = 1.5
+
+
+@pytest.mark.parametrize(
+    ("datum", "match"),
+    [
+        ({"kind": "PinnedPoint", "point": [0.5, 0.5, 0.5]}, r"pressure_datum: the point .* has 3"),
+        (
+            {"kind": "PinnedPoint", "point": [5.0, 0.5]},
+            r"pressure_datum: the point .* lies outside",
+        ),
+    ],
+    ids=["wrong-dimension", "outside-the-mesh"],
+)
+def test_a_datum_that_does_not_fit_the_mesh_is_refused_when_checked(datum, match) -> None:
+    case = CaseFile(
+        case_spec_from_mapping(_sections(boundaries=_CAVITY_PATCHES, pressure_datum=datum)), REPO
+    )
+    with pytest.raises(ValueError, match=match):
+        case.check()
+
+
+def test_a_wall_velocity_of_the_wrong_dimension_is_refused_when_checked() -> None:
+    patches = {**_CAVITY_PATCHES, "top": {"kind": "Wall", "velocity": [1.0, 0.0, 0.0]}}
+    datum = {"kind": "PinnedPoint", "point": [0.5, 0.5]}
+    case = CaseFile(
+        case_spec_from_mapping(_sections(boundaries=patches, pressure_datum=datum)), REPO
+    )
+    with pytest.raises(ValueError, match=r"boundaries.top: the wall velocity .* has 3 components"):
+        case.check()
 
 
 @pytest.mark.parametrize(
@@ -458,6 +558,8 @@ def test_the_mesh_tolerance_reaches_the_reader_and_is_left_to_it_when_unset() ->
         (lambda: Inlet((1.0, float("inf"))), ValueError, r"Inlet.velocity must be finite"),
         (lambda: Inlet((1.0, 0.0), turbulence=(0.1, 1.0)), TypeError, r"Inlet.turbulence must be"),
         (lambda: Outlet(pressure=float("nan")), ValueError, r"Outlet.pressure must be finite"),
+        (lambda: Wall(velocity=(1.0,)), ValueError, r"a wall velocity has two or three components"),
+        (lambda: Wall(velocity=(1.0, float("nan"))), ValueError, r"Wall.velocity must be finite"),
         (lambda: OpenFOAMMesh(""), ValueError, r"needs the path"),
         (lambda: OpenFOAMMesh("m", cyclic_match_tolerance=0.0), ValueError, r"positive, finite"),
         (lambda: RANS(advection=None), TypeError, r"RANS.advection must be an AdvectionScheme"),
@@ -491,6 +593,8 @@ def test_the_mesh_tolerance_reaches_the_reader_and_is_left_to_it_when_unset() ->
         "non-finite-velocity",
         "turbulence-of-the-wrong-family",
         "non-finite-pressure",
+        "a-wall-velocity-of-one-component",
+        "a-non-finite-wall-velocity",
         "empty-mesh-path",
         "zero-tolerance",
         "rans-without-advection",
@@ -561,13 +665,6 @@ _SLAB_PATCHES = {
     "bottom": {"kind": "Wall"},
     "top": {"kind": "Wall"},
 }
-
-
-# The default gradient reconstruction warns that the fixture's two cells, each with three boundary
-# faces, leave it underdetermined -- true, and beside the point of a test comparing two builds.
-_DEFAULT_GRADIENT_ON_TWO_CELLS = pytest.mark.filterwarnings(
-    "ignore:MultipleCorrectionGradient.*underdetermined:UserWarning"
-)
 
 
 @_DEFAULT_GRADIENT_ON_TWO_CELLS

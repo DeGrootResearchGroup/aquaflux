@@ -26,6 +26,7 @@ from aquaflux.flow import (
     MomentumContinuity,
     MovingWall,
     NoSlipWall,
+    PinnedPoint,
     ViscousMultilevel,
 )
 from aquaflux.flow.state import flow_state_layout
@@ -134,7 +135,7 @@ def _cavity(n=6, mesh=None, gradient=None, drive=None):
         ),
         gradient_scheme=gradient,
         advection_scheme=FirstOrderUpwind(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
         **({} if drive is None else {"drive": drive}),
     )
     turbulence = SSTTurbulence.build(
@@ -204,7 +205,7 @@ def test_coupled_build_rejects_a_turbulence_density_that_disagrees_with_the_flow
         ),
         gradient_scheme=gradient,
         advection_scheme=FirstOrderUpwind(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
     )
     turbulence = SSTTurbulence.build(
         SSTModel(),

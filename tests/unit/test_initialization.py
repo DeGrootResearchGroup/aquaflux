@@ -21,6 +21,7 @@ from aquaflux.flow import (
     MomentumContinuity,
     MovingWall,
     NoSlipWall,
+    PinnedPoint,
     PressureOutlet,
     UniformBodyForce,
     VelocityInlet,
@@ -159,7 +160,7 @@ def test_potential_flow_is_zero_on_a_closed_domain() -> None:
         ),
         gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
     )
     velocity, _ = momentum.unpack(potential_flow(momentum))
     assert float(jnp.max(jnp.abs(velocity))) < 1e-8
@@ -357,7 +358,7 @@ def _periodic_channel(beta=0.0035, mu_factor=1.0):
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
         sources=(UniformBodyForce(jnp.array([beta, 0.0])),),
     )
     turbulence = SSTTurbulence.build(

@@ -25,6 +25,7 @@ from aquaflux.flow import (
     ConvectionTwoLevel,
     MomentumContinuity,
     NoSlipWall,
+    PinnedPoint,
     UniformBodyForce,
     reused_flow_solve,
 )
@@ -47,7 +48,9 @@ def _solve(nx, ny):
         PropertyModel({"viscosity": Constant(MU), "density": Constant(RHO)}),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         gradient_scheme=CorrectedGreenGauss(),
-        pressure_pin=0,  # periodic + walls is a closed domain: fix the pressure datum
+        pressure_datum=PinnedPoint(
+            (0.0, 0.0)
+        ),  # periodic + walls is a closed domain: fix the pressure datum
         sources=(UniformBodyForce(jnp.array([BETA, 0.0])),),
     )
     state = eqx.filter_jit(newton_step)(assembler.residual, assembler.initial_state())

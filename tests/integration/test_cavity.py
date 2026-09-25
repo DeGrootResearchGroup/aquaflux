@@ -21,7 +21,13 @@ import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import FirstOrderUpwind
-from aquaflux.flow import BlockPreconditioner, MomentumContinuity, MovingWall, NoSlipWall
+from aquaflux.flow import (
+    BlockPreconditioner,
+    MomentumContinuity,
+    MovingWall,
+    NoSlipWall,
+    PinnedPoint,
+)
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
@@ -59,7 +65,7 @@ def _cavity(n, mu=MU, scheme=None):
         ),
         gradient_scheme=CompactGreenGauss(),
         advection_scheme=scheme if scheme is not None else FirstOrderUpwind(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
     )
 
 

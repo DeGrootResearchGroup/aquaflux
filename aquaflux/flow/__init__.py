@@ -24,6 +24,7 @@ from .boundary import (
     VelocityInlet,
     sheared_patches,
 )
+from .datum import PinnedPoint, PressureDatum, refuse_an_unsuitable_pressure_datum
 from .drive import (
     BoundaryDriven,
     Drive,
@@ -65,6 +66,8 @@ __all__ = [
     "MomentumSource",
     "MovingWall",
     "NoSlipWall",
+    "PinnedPoint",
+    "PressureDatum",
     "PressureForce",
     "PressureOutlet",
     "UniformBodyForce",
@@ -91,6 +94,7 @@ __all__ = [
     "potential_flow",
     "pressure_schur_laplacian",
     "refuse_a_constraint_this_solve_cannot_hold",
+    "refuse_an_unsuitable_pressure_datum",
     "reused_flow_solve",
     "sheared_patches",
     "solve_flow_march",

@@ -22,6 +22,7 @@ from aquaflux.boundary import BoundaryConditions
 from aquaflux.flow import (
     MomentumContinuity,
     NoSlipWall,
+    PinnedPoint,
     PressureOutlet,
     UniformBodyForce,
     VelocityInlet,
@@ -172,7 +173,7 @@ def test_body_force_is_a_uniform_volume_source() -> None:
         PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         gradient_scheme=CorrectedGreenGauss(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
         sources=(UniformBodyForce(jnp.array([beta, 0.0])),),
     )
     velocity_residual, _ = asm.unpack(asm.residual(asm.initial_state()))
@@ -188,7 +189,7 @@ def test_body_force_is_a_uniform_volume_source() -> None:
             PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
             BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
             gradient_scheme=CorrectedGreenGauss(),
-            pressure_pin=0,
+            pressure_datum=PinnedPoint((0.0, 0.0)),
             sources=(UniformBodyForce(jnp.array([b, 0.0])),),
         )
         return jnp.sum(assembler.residual(asm.initial_state())[: mesh.n_cells])
@@ -211,6 +212,7 @@ def _turbulent_assembler():
         PropertyModel({"viscosity": Constant(MU_T), "density": Constant(RHO_T)}),
         BoundaryConditions({n: NoSlipWall() for n in ("left", "right", "bottom", "top")}),
         gradient_scheme=CorrectedGreenGauss(),
+        pressure_datum=PinnedPoint((0.0, 0.0)),  # closed: the level needs a datum
     )
     return mesh, asm
 

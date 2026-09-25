@@ -26,13 +26,13 @@ from pathlib import Path
 import aquaflux  # noqa: F401  (enables x64)
 import lineax as lx
 import numpy as np
-from aquaflux.turbulence import sst_initial_fields
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import (
     MassFlow,
     MomentumContinuity,
     NoSlipWall,
+    PinnedPoint,
     bulk_velocity_flow_solve,
 )
 from aquaflux.mesh import graded_nodes, structured_grid_2d
@@ -46,6 +46,7 @@ from aquaflux.turbulence import (
     bulk_velocity,
     scalar_pseudo_transient_solve,
     solve_segregated,
+    sst_initial_fields,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -94,7 +95,7 @@ def solve_case(Re_b, ny, growth, beta0, sweeps):
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
         drive=MassFlow(target=U_B, force=beta0),
     )
     turbulence = SSTTurbulence.build(

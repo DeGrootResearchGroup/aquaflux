@@ -31,7 +31,7 @@ import jax.numpy as jnp
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
-from aquaflux.flow import ConvectionTwoLevel, MassFlow, MomentumContinuity, NoSlipWall
+from aquaflux.flow import ConvectionTwoLevel, MassFlow, MomentumContinuity, NoSlipWall, PinnedPoint
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
@@ -66,7 +66,7 @@ def _periodic_channel():
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
         # BETA0 is only the initial guess for the multiplier; the constraint sets it.
         drive=MassFlow(target=U_B, force=BETA0),
     )
