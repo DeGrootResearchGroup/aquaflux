@@ -141,12 +141,13 @@ constructor refusal re-raised with the path prepended** (so `Inlet`'s bad veloci
 
 ## What a file cannot describe yet — and where each goes
 
+- **A starting state** (#544) — no `initial` section, no checkpoint loader, and the ramp takes no seed.
 - **Where results go** — a `run` entry point (`python -m aquaflux run case.yaml`) and an outputs section
   (VTK, OpenFOAM time directories, checkpoints). The next PR.
-- **A laminar case holding a bulk velocity** — `FlowMarch` refuses one (`solve_flow_march` refuses a
+- **A laminar case holding a bulk velocity (#541)** — `FlowMarch` refuses one (`solve_flow_march` refuses a
   `MassFlow` drive) and there is no laminar segregated solve; `bulk_velocity_flow_solve` exists but is a
   bordered Newton, not a march.
-- **A coupled march holding a bulk velocity** — `CoupledMarch` refuses one and points at `Segregated`.
+- **A coupled march holding a bulk velocity (#541)** — `CoupledMarch` refuses one and points at `Segregated`.
   `solve_coupled_mass_flow` exists, but it is the older `RootSolver` path: `BlockDiagonal` only, no dual
   time, no retry, no step control, no ramp. Routing a file there would publish a surface that silently
   cannot take half the section's settings; the gap is the library's (#277/#448 made the march generic but
@@ -256,7 +257,7 @@ by construction), and not passing `drive` (the only nameable drive is the builde
 - **Unset means the library's default, never one restated here** (`_set`). The file-level consequence:
   a pitzDaily file with **no** solver section runs `CoupledMarch()` — a single-step march with no ramp —
   which is the recorded reachability crawl and does not converge in `max_steps`. The shipped default was
-  not changed (that needs the project owner); the validation files state their calibrated values.
+  not changed (that needs the project owner, #542); the validation files state their calibrated values.
 - **A script can observe a solve, never configure it.** `solve(problem, **observers)` refuses any keyword
   that is one of the solve's settings **whether the file sets it or not** (`_owned()`, derived from the
   `_March` fields plus `shift`/`positivity_*`/`homotopy`) — an unset setting is still the file's, since its
@@ -264,7 +265,8 @@ by construction), and not passing `drive` (the only nameable drive is the builde
   here** (`open_session(spec, problem, **session_options)`), so a harness passes the session's *observers*
   (`observer`, `reports`, `on_build`, the wrappers) rather than a session of its own that might hold other
   settings; `session_options` beside a `BlockDiagonal` is refused. A `point_setup` may be passed to observe
-  a ramp's anchor, and is refused if it returns any settings. `Segregated` takes no observers.
+  a ramp's anchor, and is refused if it returns any settings. `Segregated` takes no observers, because
+  `solve_segregated` has none, and it only WARNS when it runs out of sweeps (#543).
 - ⚠️ **`station_step` and `jacobian_gradient_sweeps` are NOT in `_owned()` and are not file settings.**
   The pitzDaily harness's study arms need them; they reach the library through that harness's own study
   path, not through `solve(**observers)`. `station_step` reshapes the path, so passing it as an "observer"
