@@ -117,8 +117,9 @@ class CaseSpec:
     physics : Physics
         :class:`~aquaflux.case.Laminar` or :class:`~aquaflux.case.RANS`.
     boundaries : mapping of {str: PatchCondition}
-        What each boundary patch is, by the patch's name in the mesh. Stored read-only, in the order
-        given.
+        What each boundary patch is, by the patch's name in the mesh or by the name of a patch group
+        (every wall at once, say), whose condition then applies to each patch in it. Stored read-only,
+        in the order given; :meth:`patch_conditions` gives the per-patch form.
     numerics : Numerics
         The discretization choices common to every physics.
     drive : DriveSpec or None
@@ -225,9 +226,9 @@ class CaseSpec:
     def check_against(self, mesh: Mesh) -> None:
         """Refuse this case on ``mesh`` unless its patches fit it exactly.
 
-        Every patch named must be a boundary patch of the mesh; every boundary face must lie in a named
-        patch (a face nobody gave a condition would keep a zero face value, which is a boundary condition
-        nobody chose); each patch's, the drive's and each source's settings must fit the mesh's
+        Every key must name a boundary patch of the mesh, or a patch group of them, and no patch may be
+        reached by two keys; every boundary face must lie in a patch given a condition (a face nobody gave
+        a condition would keep a zero face value, which is a boundary condition nobody chose); each patch's, the drive's and each source's settings must fit the mesh's
         dimension; and a pressure datum's point must have one coordinate per dimension and lie within the
         mesh's bounding box. Needs the mesh's
         topology and node coordinates only, not its geometry.
@@ -242,27 +243,10 @@ class CaseSpec:
         ValueError
             Listing every problem found, not only the first.
         """
-        patches = mesh.face_patches
         problems = []
-        unknown = [name for name in self.boundaries if name not in patches.names]
-        not_boundary = [
-            name
-            for name in self.boundaries
-            if name in patches.names and not patches.is_boundary_patch(name, mesh.face_cells)
-        ]
-        known = [name for name in self.boundaries if name in patches.names]
-        uncovered = patches.uncovered_boundary_faces(known, mesh.face_cells)
-        if unknown or not_boundary:
-            available = sorted(
-                name for name in patches.names if patches.is_boundary_patch(name, mesh.face_cells)
-            )
-            if unknown:
-                problems.append(f"the mesh has no patch {', '.join(map(repr, unknown))}")
-            if not_boundary:
-                problems.append(
-                    f"{', '.join(map(repr, not_boundary))} {'is not a boundary patch' if len(not_boundary) == 1 else 'are not boundary patches'}"
-                )
-            problems[-1] += f" (its boundary patches are {available})"
+        conditions, patch_problems = _patch_conditions(self.boundaries, mesh)
+        problems.extend(patch_problems)
+        uncovered = mesh.face_patches.uncovered_boundary_faces(conditions, mesh.face_cells)
         if uncovered:
             listed = ", ".join(
                 f"{name!r} ({count} face{'' if count == 1 else 's'})"
@@ -294,6 +278,87 @@ class CaseSpec:
             problems.extend(_datum_misfits(self.pressure_datum, mesh))
         if problems:
             raise ValueError("the case does not fit its mesh: " + "; ".join(problems) + ".")
+
+    def patch_conditions(self, mesh: Mesh) -> dict[str, PatchCondition]:
+        """Each boundary patch of ``mesh`` with its condition, a group's condition given to every member.
+
+        A key of :attr:`boundaries` names a patch or a patch group of the mesh (an OpenFOAM ``boundary``
+        file's ``inGroups``); a group's condition applies to each patch in it. This is the per-patch
+        form every closure is built from.
+
+        Parameters
+        ----------
+        mesh : Mesh
+            The case's mesh.
+
+        Returns
+        -------
+        dict of {str: PatchCondition}
+            Patch name to condition, in the order the keys name them.
+
+        Raises
+        ------
+        ValueError
+            If a key names no patch or group, names one that holds a face not on the boundary, or is
+            both a patch and a group of other patches, or if two keys reach the same patch -- the problems
+            :meth:`check_against` reports.
+        """
+        conditions, problems = _patch_conditions(self.boundaries, mesh)
+        if problems:
+            raise ValueError(
+                "the case's boundaries do not fit its mesh: " + "; ".join(problems) + "."
+            )
+        return conditions
+
+
+def _patch_conditions(
+    boundaries: Mapping[str, PatchCondition], mesh: Mesh
+) -> tuple[dict[str, PatchCondition], list[str]]:
+    """Resolve each key of ``boundaries`` to the patches it names, and say what does not resolve.
+
+    Returns the conditions of the patches reached, by patch, and the problems found: a key that names
+    nothing (or two different sets of faces), a patch reached that is not a boundary patch, and a patch
+    reached by two keys -- every one of them, not only the first.
+    """
+    patches = mesh.face_patches
+    conditions: dict[str, PatchCondition] = {}
+    reached_by: dict[str, str] = {}
+    unknown, ambiguous, not_boundary, twice = [], [], [], []
+    for key, condition in boundaries.items():
+        if key not in patches.names and key not in patches.group_names:
+            unknown.append(key)
+            continue
+        try:
+            members = patches.addressed_by(key)
+        except ValueError as error:
+            ambiguous.append(str(error))
+            continue
+        for patch in members:
+            if patch in reached_by:
+                twice.append(f"{patch!r} (by {reached_by[patch]!r} and {key!r})")
+                continue
+            reached_by[patch] = key
+            conditions[patch] = condition
+            if not patches.is_boundary_patch(patch, mesh.face_cells):
+                not_boundary.append(repr(patch) if patch == key else f"{patch!r} (in {key!r})")
+    problems = [*ambiguous]
+    if unknown or not_boundary:
+        if unknown:
+            problems.append(f"the mesh has no patch {', '.join(map(repr, unknown))}")
+        if not_boundary:
+            problems.append(
+                f"{', '.join(not_boundary)} {'is not a boundary patch' if len(not_boundary) == 1 else 'are not boundary patches'}"
+            )
+        available = sorted(
+            name for name in patches.names if patches.is_boundary_patch(name, mesh.face_cells)
+        )
+        groups = (
+            f", and its patch groups are {list(patches.group_names)}" if patches.group_names else ""
+        )
+        problems[-1] += f" (its boundary patches are {available}{groups})"
+    if twice:
+        problems.append(f"a patch is given a condition twice: {', '.join(twice)}")
+    return conditions, problems
 
 
 def _datum_misfits(datum: PinnedPoint, mesh: Mesh) -> list[str]:

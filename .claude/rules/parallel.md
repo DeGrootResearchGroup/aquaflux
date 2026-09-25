@@ -138,6 +138,11 @@ operator-independent:
   closure on faces that carry no physics. `pad_partition` appends `"padding"` to the local mesh's
   patch names; the name is reserved in `FacePatches.from_dict`, so a real patch cannot collide with
   it. Every partition appends the same name, so the static `names` tuple stays uniform across shards.
+  The same holds for `FacePatches.patch_types` / `patch_groups` (a mesh file's declared types and
+  `inGroups`, #364): `partition_mesh` keeps the **global** record (`eqx.tree_at` on `label` only) and
+  `pad_partition` copies it, so every shard has the same static fields — a per-partition record (a group
+  trimmed to the patches that partition happens to touch) would make the treedefs differ and break the
+  stacking.
 
 Padding is inert through **three independent mechanisms** — deliberately belt-and-braces, since the
 layout no longer knows which operator will run: (1) zero area ⇒ zero flux; (2) null-cell ownership

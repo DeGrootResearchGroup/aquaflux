@@ -109,6 +109,8 @@ def collapse_extruded_direction(mesh: Mesh, removed_patch_names: Sequence[str]) 
     if offset is not None:
         offset = offset[:, kept_axes]
 
+    # The caps leave the declared types and every group with their faces; a group of caps alone goes.
+    patch_types, patch_groups = mesh.face_patches.without(removed)
     return Mesh.from_csr(
         new_coords,
         edge_offsets,
@@ -118,6 +120,8 @@ def collapse_extruded_direction(mesh: Mesh, removed_patch_names: Sequence[str]) 
         n_cells=mesh.n_cells,
         cell_zones=_carry_cell_zones(mesh),
         face_patches=_carry_face_patches(mesh, removed, kept_faces),
+        patch_types=patch_types,
+        patch_groups=patch_groups,
         neighbour_offset=offset,
     )
 

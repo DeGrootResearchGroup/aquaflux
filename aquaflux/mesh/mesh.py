@@ -26,6 +26,8 @@ centroids, formed where needed.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
+
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
@@ -83,6 +85,8 @@ class Mesh(eqx.Module):
         *,
         cell_zones: dict[str, object] | None = None,
         face_patches: dict[str, object] | None = None,
+        patch_types: Mapping[str, str] | None = None,
+        patch_groups: Mapping[str, Iterable[str]] | None = None,
         neighbour_offset=None,
     ) -> Mesh:
         """Build a mesh from a ragged list of per-face node-index lists.
@@ -112,6 +116,11 @@ class Mesh(eqx.Module):
         face_patches : dict of {str: indices}, optional
             Named face patches overlaying the default ``"interior"`` / ``"boundary"`` split
             (boundary patches for BCs; interior patches for baffles / named interfaces).
+        patch_types : dict of {str: str}, optional
+            The type a mesh file declared for each named patch (``wall``, ``patch``, …), carried on
+            :attr:`face_patches` uninterpreted. Omit when the source declares none.
+        patch_groups : dict of {str: iterable of str}, optional
+            Named groups of patches (a patch may be in several), so one name can address them all.
         neighbour_offset : array-like, optional
             Per-face periodic-image translation of the neighbour centroid, as in
             :meth:`from_csr`. Omit for a non-periodic mesh.
@@ -130,6 +139,8 @@ class Mesh(eqx.Module):
             n_cells,
             cell_zones=cell_zones,
             face_patches=face_patches,
+            patch_types=patch_types,
+            patch_groups=patch_groups,
             neighbour_offset=neighbour_offset,
         )
 
@@ -145,6 +156,8 @@ class Mesh(eqx.Module):
         *,
         cell_zones: dict[str, object] | None = None,
         face_patches: dict[str, object] | None = None,
+        patch_types: Mapping[str, str] | None = None,
+        patch_groups: Mapping[str, Iterable[str]] | None = None,
         neighbour_offset=None,
     ) -> Mesh:
         """Build a mesh from already-assembled CSR face connectivity.
@@ -171,6 +184,8 @@ class Mesh(eqx.Module):
             Number of cells (every cell must be referenced by at least one face).
         cell_zones, face_patches : dict of {str: indices}, optional
             As in :meth:`from_faces`.
+        patch_types, patch_groups : dict, optional
+            As in :meth:`from_faces`.
         neighbour_offset : array-like, optional
             Per-face periodic-image translation of the neighbour centroid, shape ``(n_faces, dim)``
             (see :attr:`~aquaflux.mesh.connectivity.FaceCellConnectivity.neighbour_offset`). Omit for
@@ -194,7 +209,9 @@ class Mesh(eqx.Module):
             if cell_zones
             else groups.CellZones.default(n_cells)
         )
-        patches = groups.FacePatches.from_dict(neighbour, face_patches or {})
+        patches = groups.FacePatches.from_dict(
+            neighbour, face_patches or {}, patch_types=patch_types, patch_groups=patch_groups
+        )
         offset = None if neighbour_offset is None else jnp.asarray(neighbour_offset)
         mesh = cls(
             node_coords=jnp.asarray(node_coords),

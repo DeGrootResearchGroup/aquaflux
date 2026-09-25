@@ -217,7 +217,7 @@ class RANS(Physics):
         # The model is the one the closure is built with, so an inlet's length scale reads its constants.
         closures = {
             name: condition.turbulence_closures(model)
-            for name, condition in spec.boundaries.items()
+            for name, condition in spec.patch_conditions(mesh).items()
         }
         options = _set(
             gradient_scheme=spec.numerics.gradient,
@@ -271,7 +271,10 @@ def _momentum(spec: CaseSpec, mesh: Mesh, geometry: MeshGeometry) -> MomentumCon
         geometry,
         spec.fluid.property_model(),
         BoundaryConditions(
-            {name: condition.flow_closure() for name, condition in spec.boundaries.items()}
+            {
+                name: condition.flow_closure()
+                for name, condition in spec.patch_conditions(mesh).items()
+            }
         ),
         advection_scheme=spec.numerics.momentum_advection,
         sources=tuple(source.momentum_source() for source in spec.sources),

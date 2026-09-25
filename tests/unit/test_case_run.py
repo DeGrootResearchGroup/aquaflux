@@ -6,6 +6,7 @@ What a whole run writes -- a solve, its fields, its records -- is ``tests/integr
 from __future__ import annotations
 
 import inspect
+import shutil
 import subprocess
 import sys
 import types
@@ -362,6 +363,23 @@ def test_check_says_what_the_file_describes(tmp_path: Path, capsys) -> None:
     assert main(["check", str(case)]) == 0
     out = capsys.readouterr().out
     assert "a Laminar case on 2 cells (2D)" in out and "FlowMarch (the default)" in out
+
+
+def test_check_names_the_patches_a_group_key_reaches(tmp_path: Path, capsys) -> None:
+    mesh = tmp_path / "polyMesh"
+    shutil.copytree(SLAB, mesh)
+    boundary = mesh / "boundary"
+    text = boundary.read_text()
+    for wall in ("bottom", "top"):
+        text = text.replace(
+            f"    {wall}\n    {{\n", f"    {wall}\n    {{\n        inGroups 1(walls);\n"
+        )
+    boundary.write_text(text)
+    boundaries = {**_sections()["boundaries"], "walls": {"kind": "Wall"}}
+    del boundaries["bottom"], boundaries["top"]
+    sections = _sections(mesh={"kind": "OpenFOAMMesh", "path": str(mesh)}, boundaries=boundaries)
+    assert main(["check", str(_write(tmp_path / "case.yaml", sections))]) == 0
+    assert "patches left, right, bottom, top;" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("command", ["check", "run"])

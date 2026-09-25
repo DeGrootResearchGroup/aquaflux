@@ -94,6 +94,16 @@ of interior faces, and the flux/boundary layer gives it its special treatment.
 {meth}`FacePatches.is_boundary_patch <aquaflux.mesh.FacePatches.is_boundary_patch>`
 distinguishes a true boundary patch from such an interior one.
 
+**Patch types and patch groups.** A mesh file may say more about its patches than their
+faces: an OpenFOAM `boundary` file gives each patch a `type` (`wall`, `patch`, `symmetry`,
+…) and may put patches in named groups with `inGroups`, so one name addresses every wall at
+once. A mesh read from such a file carries both on its face patches, uninterpreted —
+{meth}`FacePatches.type_of <aquaflux.mesh.FacePatches.type_of>` gives a patch's declared type,
+and {meth}`FacePatches.addressed_by <aquaflux.mesh.FacePatches.addressed_by>` the patches a
+name means (a patch itself, or a group's members). A group is not a partition: a patch may be
+in several groups, or in none. Neither changes the numerics; a case file uses the groups to
+give one condition to many patches.
+
 Derivation is the convenience; naming is the escape hatch — use a derived interface when
 the zones already say everything, and a named patch when a specific set of faces needs a
 specific model.

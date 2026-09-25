@@ -70,7 +70,7 @@ def _check(path: str) -> int:
     solver = solver_for(spec)
     print(
         f"{path}: a {type(spec.physics).__name__} case on {mesh.n_cells} cells ({mesh.dim}D), "
-        f"patches {', '.join(spec.boundaries)}; solved by {type(solver).__name__}"
+        f"patches {', '.join(spec.patch_conditions(mesh))}; solved by {type(solver).__name__}"
         f"{'' if spec.solver is not None else ' (the default)'}; checked."
     )
     return 0

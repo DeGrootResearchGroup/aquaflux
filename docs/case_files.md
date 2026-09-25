@@ -121,6 +121,22 @@ wall distance from, all follow from this one statement. A moving wall — the dr
 cavity, `{kind: Wall, velocity: [1.0, 0.0]}` — is a wall in every other respect: it passes no
 fluid, and it is a wall to the turbulence closure.
 
+An entry may instead name a **patch group**, and its condition then applies to every patch in
+the group. An OpenFOAM mesh declares its groups in the `boundary` file's `inGroups` entries —
+most meshes put every `wall` patch in a group named `wall` — so a mesh with many walls needs
+one entry for all of them:
+
+```yaml
+boundaries:
+  inlet: {kind: Inlet, velocity: [10.0, 0.0], turbulence: {kind: FixedTurbulence, k: 0.375, omega: 440.15}}
+  outlet: {kind: Outlet, pressure: 0.0}
+  wall: {kind: Wall}
+```
+
+No patch may be reached twice, by its own name and by a group, or by two groups; and a name
+that is both a patch and a group of other patches is refused, since it does not say which
+faces it means.
+
 An inlet's `turbulence` is given either outright or the way it is usually known:
 
 - {class}`~aquaflux.case.FixedTurbulence` — `k` and `omega` as values;
@@ -271,9 +287,9 @@ When the file is **read**:
 When the case is **checked** against its mesh ({meth}`~aquaflux.case.CaseFile.check`):
 
 - the mesh's topology is valid;
-- every patch named is a boundary patch of the mesh, and every boundary face lies in a named
-  patch — a face given no condition would otherwise keep a zero face value, a boundary
-  condition nobody chose;
+- every name is a boundary patch of the mesh or a group of them, no patch is reached twice, and
+  every boundary face lies in a patch given a condition — a face given no condition would
+  otherwise keep a zero face value, a boundary condition nobody chose;
 - each patch fits the mesh — an inlet or wall velocity has one component per dimension — and so
   do the drive's direction and each source's force;
 - a pressure datum's point has one coordinate per dimension and lies within the mesh's

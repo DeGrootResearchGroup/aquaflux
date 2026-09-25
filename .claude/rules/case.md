@@ -131,9 +131,22 @@ F frozen solver → G drive.
 - **`Numerics.momentum_advection` and `RANS.advection` are REQUIRED.** `MomentumContinuity.build`'s
   `advection_scheme=None` means *Stokes flow* — a different problem, not a default — so a file cannot
   reach it by omission. `RANS.advection` is required because `SSTTurbulence.build` takes it positionally.
+- **A `boundaries` key names a patch OR a patch group (decided by the project owner, 2026-09-25, #364).**
+  `CaseSpec.boundaries` keeps the file's keys as written (so a case round-trips unchanged);
+  `CaseSpec.patch_conditions(mesh)` resolves them to `{patch: condition}` through
+  `FacePatches.addressed_by`, and **every build reads that per-patch form, never `spec.boundaries`
+  directly** — both `_momentum` and `RANS.build` do; a third build reading the keys would hand a group
+  name to `BoundaryConditions.resolve`, which knows only patches. Refused, all at once, by
+  `_patch_conditions` (shared by the check and `patch_conditions`, so the two cannot disagree): a
+  patch reached twice (its own name and a group, or two groups), a name that is both a patch and a group
+  of *other* patches (a group holding only its namesake is harmless and allowed), and a group member that
+  is not a boundary patch. The mesh-free checks (`refuse_boundaries`, the pressure-datum rule) still read
+  the keys: neither depends on how many patches a key reaches. Tests: a group key builds the same problem
+  as its patches stated one by one, under Laminar and RANS (with `k: zero` so a dropped condition shows);
+  mutation-checked with the mesh-side record, 24/24 red.
 - **`check_against` needs topology only, and reports every misfit at once**: an unknown patch name (with
-  the mesh's boundary patches listed), a named patch that is not a boundary patch (`interior`), boundary
-  faces in no named patch (via `FacePatches.uncovered_boundary_faces` — the same query
+  the mesh's boundary patches and patch groups listed), a named patch that is not a boundary patch
+  (`interior`), a patch reached twice, boundary faces in no named patch (via `FacePatches.uncovered_boundary_faces` — the same query
   `BoundaryConditions.resolve` refuses on), and a patch that does not fit the dimension (an inlet velocity
   of the wrong length). `CaseFile.check` calls `mesh.validate()` even though the OpenFOAM reader already
   validates, so phase B does not depend on which reader produced the mesh.
@@ -171,7 +184,6 @@ constructor refusal re-raised with the path prepended** (so `Inlet`'s bad veloci
   is 2D only rather than half-supporting a uniform 3D box no case needs.
 - **Other source kinds** — a `sources:` section beyond `BodyForce` waits on #362 (sources declaring their
   inputs); `BodyForce` reads no field and no gradient, so it needs nothing #362 would add.
-- **Patch types / `inGroups`** (#364) — would let a file say "all walls" instead of listing each patch.
 - **A passive-scalar case referring to another case's converged flow** (#375; `bfs3d_species` imports the
   flow driver by path today) — a dependency edge between cases, not a field on one.
 - **Profiles** (`DirichletField`, a callable) — not plain data; a named-profile kind if ever needed.

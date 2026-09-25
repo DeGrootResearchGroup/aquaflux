@@ -34,6 +34,9 @@ class FoamPatch(NamedTuple):
         For a ``cyclic`` patch, the name of the patch it is paired with. Empty for every other
         patch type, and for a ``cyclic`` patch whose ``boundary`` entry omits ``neighbourPatch``
         (which :func:`.cyclic.fuse_cyclic_patches` rejects).
+    in_groups : tuple of str
+        The patch groups the ``inGroups`` entry puts this patch in, in the order written. Empty when the
+        entry is absent.
     """
 
     name: str
@@ -41,6 +44,7 @@ class FoamPatch(NamedTuple):
     start_face: int
     n_faces: int
     neighbour_patch: str = ""
+    in_groups: tuple[str, ...] = ()
 
 
 def patch_face_range(patch: FoamPatch) -> np.ndarray:

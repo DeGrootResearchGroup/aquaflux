@@ -37,7 +37,11 @@ Three pure seams so ~80% of the logic tests with no filesystem (separate I/O fro
     record, not a fistful of loose arrays). Faces are stored **CSR already**; `neighbour_internal`
     is the raw interior-only `neighbour` file (padding to full length is a *semantic* step, done in
     the assembler, not the parser). `FoamPatch.neighbour_patch` carries a `cyclic` patch's
-    `neighbourPatch` entry (empty for every other patch type). `patch_face_range(patch)` is the one
+    `neighbourPatch` entry (empty for every other patch type), and `FoamPatch.in_groups` its `inGroups`
+    words (`List<word> 2(a b)`, `2(a b)` and `(a b)` all read; the count is checked). The assembler hands
+    each surviving patch's `type_` and the groups gathered from `in_groups` to `Mesh.from_csr`
+    (`patch_types` / `patch_groups`), so they reach `mesh.face_patches`; a fused cyclic patch is simply
+    absent from `fused.patches` and so from both. `patch_face_range(patch)` is the one
     place `[start_face, start_face + n_faces)` becomes an index array — shared by the assembler's
     patch-naming step and `cyclic.py`'s fusion, so both read "this patch's faces" the same way.
   - `foamfile.py` — the shared file envelope: strip `/* */` + `//` comments, split the
