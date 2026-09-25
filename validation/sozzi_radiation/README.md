@@ -273,11 +273,11 @@ the ladder above, in the same process; every other rung reproduced that table to
 | lamp | facets | power W | near the lamp (<5 mm), median / p99 | rest of the chamber, median / p99 |
 |---|---|---|---|---|
 | the patch, exact | 194,636 | 35.1511 | 2.01% / 4.97% | 1.33% / 3.04% |
-| coarsened, edge 2.5 mm, chord 1e-4 m | 39,464 | 35.1511 | 2.31% / 5.93% | 1.40% / 3.07% |
-| coarsened, edge 4 mm, chord 1e-4 m | 18,292 | 35.1511 | 2.52% / 6.66% | 1.45% / 3.15% |
-| coarsened, edge 6 mm, chord 1e-4 m | 11,082 | 35.1511 | 2.79% / 7.93% | 1.48% / 3.23% |
-| coarsened, edge 4 mm, chord 2.5e-4 m | 15,569 | 35.1511 | 2.83% / 7.85% | 1.60% / 3.75% |
-| coarsened, edge 8 mm, chord 2.5e-4 m | 6,119 | 35.1511 | 3.62% / 10.75% | 1.74% / 4.12% |
+| coarsened, edge 2.5 mm, chord 1e-4 m | 40,083 | 35.1511 | 2.30% / 5.90% | 1.40% / 3.03% |
+| coarsened, edge 4 mm, chord 1e-4 m | 18,432 | 35.1511 | 2.53% / 6.70% | 1.46% / 3.16% |
+| coarsened, edge 6 mm, chord 1e-4 m | 10,860 | 35.1511 | 2.76% / 7.99% | 1.49% / 3.29% |
+| coarsened, edge 4 mm, chord 2.5e-4 m | 15,479 | 35.1511 | 2.83% / 7.64% | 1.59% / 3.71% |
+| coarsened, edge 8 mm, chord 2.5e-4 m | 5,995 | 35.1511 | 3.64% / 11.01% | 1.75% / 4.15% |
 
 - **The patch is not the cylinder, and that dominates.** Its 194,636 facets sit 2.0% from the true
   lamp near it — no better than the 7,516-facet STL (1.95%) — because its area is the STL's, shrunk
@@ -294,16 +294,16 @@ the ladder above, in the same process; every other rung reproduced that table to
 
   | coarsened | near the lamp, median / p99 | rest, median / p99 | realized longest edge, max / median | coarsening s |
   |---|---|---|---|---|
-  | 2.5 mm, 1e-4 m | 0.30% / 2.06% | 0.07% / 0.28% | 2.50 / 2.20 mm | 78 |
-  | 4 mm, 1e-4 m | 0.53% / 3.15% | 0.13% / 0.34% | 4.00 / 3.18 mm | 93 |
-  | 6 mm, 1e-4 m | 0.75% / 4.38% | 0.16% / 0.42% | 6.00 / 4.35 mm | 124 |
-  | 4 mm, 2.5e-4 m | 0.86% / 4.28% | 0.32% / 0.89% | 4.00 / 3.46 mm | 72 |
-  | 8 mm, 2.5e-4 m | 1.64% / 7.18% | 0.46% / 1.16% | 8.00 / 5.91 mm | 109 |
+  | 2.5 mm, 1e-4 m | 0.31% / 2.05% | 0.08% / 0.26% | 2.50 / 2.19 mm | 20 |
+  | 4 mm, 1e-4 m | 0.52% / 2.97% | 0.14% / 0.34% | 4.00 / 3.18 mm | 20 |
+  | 6 mm, 1e-4 m | 0.73% / 4.35% | 0.17% / 0.42% | 6.00 / 4.37 mm | 28 |
+  | 4 mm, 2.5e-4 m | 0.88% / 3.95% | 0.32% / 0.85% | 4.00 / 3.48 mm | 16 |
+  | 8 mm, 2.5e-4 m | 1.65% / 7.37% | 0.46% / 1.22% | 8.00 / 6.00 mm | 26 |
 
-  At 4 mm and 1e-4 m the lamp has 18,292 facets — a tenth of the patch's, and 2.4x the STL's — for
-  a 0.53% median change near it, a quarter of the patch's own 2.0% from the cylinder. As with the
+  At 4 mm and 1e-4 m the lamp has 18,432 facets — a tenth of the patch's, and 2.5x the STL's — for
+  a 0.52% median change near it, a quarter of the patch's own 2.0% from the cylinder. As with the
   drawing's lamp, **the spacing along the lamp matters more than the chord**: loosening the chord
-  from 1e-4 to 2.5e-4 m at 4 mm saves 15% of the facets and adds 60% to the error near the lamp.
+  from 1e-4 to 2.5e-4 m at 4 mm saves 16% of the facets and adds 70% to the error near the lamp.
   The realized chord and angle stayed inside their bounds on every rung (angle at most 0.44 rad); the
   area fell by 0.2-0.6%, which the power-holding exitance puts back.
 - **Which surface to use.** Against DOM, the patch is exactly the surface the reference emits from, so
@@ -311,10 +311,31 @@ the ladder above, in the same process; every other rung reproduced that table to
   the drawing's lamp is better at every facet count (0.16% at 66,011 facets) because its vertices
   are on the cylinder rather than on a mesher's approximation of it.
 
-Configuration: jax 0.10.2, CPU, x64, macOS arm64, 11 cores, nothing else running; two runs, every
-rung identical to the digit between them, coarsening times within 2%. Reading the 1.6M-cell mesh
+Measured with the batched coarsener (the coarsening times are its own; the first, one-at-a-time
+version took 72-124 s per rung on the same rungs, for facet counts within 2% of these and the same
+errors to within 0.03 points). Configuration: jax 0.10.2, CPU, x64, macOS arm64, 11 cores, nothing
+else running; every non-coarsened rung identical to the digit across three runs. Reading the 1.6M-cell mesh
 for its patch took ~8.5 min the first time (`work/lamp_patch.npy` caches the triangles after). The
 drawing's rungs were skipped: the CAD kernel is not installed in this interpreter.
+
+## What coarsening costs, at the lamp's size and the vessel's (2026-09-25, `coarsen_speed.py`)
+
+The vessel wall is what a reflecting wall's optical surface would be coarsened from (#491), so it
+is the size the coarsener has to be fast at. Same machine and configuration as above, nothing else
+running, after a 0.5 s warm-up that compiles the distance kernel:
+
+| patch | input triangles | edge, chord | facets | seconds | ms per input triangle |
+|---|---|---|---|---|---|
+| `lampWall` | 194,636 | 4 mm, 1e-4 m | 18,432 | 20.8 | 0.107 |
+| `lampWall` | 194,636 | 10 mm, 1e-4 m | 7,652 | 35.7 | 0.183 |
+| `bodyWall` | 1,322,096 | 4 mm, 1e-4 m | 116,989 | 140.0 | 0.106 |
+| `bodyWall` | 1,322,096 | 10 mm, 1e-4 m | 37,431 | 210.0 | 0.159 |
+
+The cost is linear in the input at a fixed bound: 0.106-0.107 ms per triangle on a patch 6.8x the
+size. Against the first, one-at-a-time version on the same machine, same inputs, same process
+family: the lamp at 4 mm took 93 s for 18,292 facets and the wall **555 s for 117,175** — so the
+batched coarsener is about **4x** faster at both sizes, for facet counts within 1%. Realized bounds
+held on every run (chord at most the bound, angle at most 0.49 rad).
 
 ## Shadowing arbitrary geometry (2026-09-23, `ray_acceleration_probe.py`, `grid_mask_check.py`)
 

@@ -530,6 +530,13 @@ structure, not the seconds. `norm_squared` delegates to `dot` and inherits it.
   every residual evaluation at once. Open-coded at each call site it would have reached none of
   them.
 
+**Ragged lists live in one leaf, `aquaflux/ragged.py`** (numpy only, imports nothing from the
+package, listed in `tests/unit/test_layering.py`'s neutral leaves): `rows` gathers chosen rows of a
+compressed-sparse-row (CSR) list, `group` builds one from integer keys, `pairs_within_groups` forms the
+per-group Cartesian product in flat form. The mesh's face-subset code (`FaceNodeConnectivity.select`,
+`collapse.py`) and the radiation coarsener's batched checks all use it; before it, the first two
+carried their own copy of `rows`. Reach for it before writing `np.repeat(..., counts)` index arithmetic.
+
 **Frozen preconditioner operators are assembled in one place, `aquaflux/solve/frozen_operator.py`.**
 The AMG preconditioners coarsen a *frozen* linearization of a transport equation — a symmetric
 diffusive edge coupling, optionally plus first-order-upwind convection at a reference flux —

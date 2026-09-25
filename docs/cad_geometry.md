@@ -129,8 +129,8 @@ facets lose, so the lamp radiates exactly what the patch did; `record` reports t
 chord and angle per facet.
 
 On the Sozzi reactor (`validation/sozzi_radiation/lamp_resolution.py`) the 48,550-face lamp patch is
-194,636 triangles; at `max_edge=4e-3, chord=1e-4` it coarsens to 18,292 facets in about a minute and
-a half, changing the fluence rate by a median 0.53% within 5 mm of the lamp and 0.13% elsewhere. As
+194,636 triangles; at `max_edge=4e-3, chord=1e-4` it coarsens to 18,432 facets in about twenty
+seconds, changing the fluence rate by a median 0.52% within 5 mm of the lamp and 0.14% elsewhere. As
 for the drawing's lamp, the spacing along the lamp matters more than the chord. The patch itself is
 a snapped approximation of the lamp: against the true cylinder it is about as accurate as the STL
 the mesh was snapped to, so where a drawing is available its lamp is the more accurate emitter, and

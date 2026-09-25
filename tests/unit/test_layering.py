@@ -29,7 +29,7 @@ import pytest
 PACKAGE = pathlib.Path(__file__).resolve().parents[2] / "aquaflux"
 
 #: Dependency-free leaf modules of the package, which any layer may import.
-NEUTRAL_LEAVES = ("text_table", "vectors")
+NEUTRAL_LEAVES = ("ragged", "text_table", "vectors")
 
 #: The packages that hold a specific physical model rather than machinery. A module here that grows large
 #: is the place residual-agnostic code hides, because it was written for the first consumer.

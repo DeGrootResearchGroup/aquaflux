@@ -2142,18 +2142,56 @@ over after, in `coarsen_surfaces`), and **both steps in one change as separate c
   plane, a loose tube): the shape, fold and feature checks refuse the same collapses. It stays as
   the standard, cheap guard; no test pins it.
 - **The quantization is structural.** A half-edge collapse cannot put a vertex anywhere new, so edges
-  grow in jumps and the realized median edge sits at 0.7-0.9x `max_edge` (2.20 mm at 2.5, 3.18 at 4,
-  4.35 at 6 on the Sozzi lamp). That is the price of every vertex staying on the input; a remeshing
+  grow in jumps and the realized median edge sits at 0.7-0.9x `max_edge` (2.19 mm at 2.5, 3.18 at 4,
+  4.37 at 6 on the Sozzi lamp). That is the price of every vertex staying on the input; a remeshing
   that moved vertices would reach the bound and need a projection — the option declined.
-- **Cost, measured (Sozzi `lampWall`, 194,636 triangles in, nothing else running, jax 0.10.2, macOS
-  arm64, two runs within 2%):** 72-124 s per coarsening, pure Python/numpy on one core, ~0.4-0.6 ms
-  per input triangle. Most of the first version's time was numpy overhead on arrays of a few dozen
-  triangles; `_cross`/`_dot`/`_edges` are written by component for that reason. At the body patch's
-  1.3M triangles this is 10-15 min, which #491 will need to bring down.
-- **Measured on Sozzi (full table in `validation/sozzi_radiation/README.md`, `lamp_resolution.py`),
-  coarsening error against the exact patch:** 4 mm / 1e-4 m → 18,292 facets, **0.53% / 3.15%** near
-  the lamp (median / p99) and 0.13% elsewhere; 2.5 mm → 39,464, 0.30% / 2.06%; 6 mm → 11,082,
-  0.75% / 4.38%. Loosening the chord 1e-4 → 2.5e-4 at 4 mm saves 15% of the facets for +60% error
+- **BATCHED, NOT ONE AT A TIME (#492 follow-up, 2026-09-25): ~4x, and linear in the input.** Each
+  sweep takes every candidate that is best within **two edges** of it (`_local_minima`: a scatter-min
+  spread twice over the vertex graph), checks all of them in one vectorized pass (`_check_patches`,
+  shared by collapses and flips), and applies all that pass. Two edges is what the checks require: a
+  collapse reads the triangles around its two vertices *and the ring around those*, so two chosen
+  together must be three edges apart or one could validate against a triangle the other rewrites.
+  Measured (`validation/sozzi_radiation/coarsen_speed.py`, nothing else running, jax 0.10.2, macOS
+  arm64, 11 cores): `lampWall` 194,636 → 18,432 facets in **20.8 s**, `bodyWall` 1,322,096 → 116,989
+  in **140 s**, both 4 mm / 1e-4 m, **0.106-0.107 ms per input triangle** at both sizes. The first,
+  one-at-a-time version, same machine and inputs: **93 s and 555 s** (0.42-0.48 ms/triangle), facet
+  counts within 1%. Four things made the difference, each measured, and three dead ends worth not
+  retrying:
+  - **Random order within 5% length bands, not a strict length order** (`_priority`). Most edges of a
+    snapped patch are one length, ties fell to index order, and a candidate was a local minimum only at
+    the leading edge of that order: **1,722 sweeps at ~60 collapses each** on a 24,054-triangle slab,
+    slower than the serial version. Banded-random: 675 sweeps starting at ~320. This is Luby's
+    randomized independent-set choice; it is seeded, so a coarsening is reproducible. It costs a
+    little on a perfectly regular mesh (a regular tube keeps 8% more facets than the strict order) and
+    under 1% on a real patch.
+  - **Refusals last a round** (`new_round`), not until a neighbour changes. Clearing them around every
+    applied collapse re-checked the same doomed candidates after each neighbour's collapse — half the
+    time on the full lamp went to ~650 sweeps that applied nothing. A round repeats until it changes
+    nothing, so a collapse a later change makes valid is still found, one round later.
+  - **Screening**: once a sweep applies under `SCREEN_BELOW` (a quarter) of what it chose, the next
+    sweep checks *every* remaining candidate — legal because checking only reads — refuses all that
+    fail, and chooses among the rest. ⚠️ **Only together with round-long refusals**: with refusals
+    cleared around each change, screening doubled the tail's cost (51.6 s against 27.2 s), because the
+    screened survivors were un-refused and re-screened.
+  - **The pair distance runs compiled** (`_compiled_pair_distance`, jax; pairs and candidate lists
+    padded to powers of two so a few sizes are compiled). A sweep measures millions of point-triangle
+    pairs, where numpy's pass per operation costs several times the arithmetic. Measured every pair
+    exactly — a bounding-sphere prune in numpy was tried first and cost as much as it saved once the
+    kernel was compiled, and dropping it also dropped a fallback search at body interfaces.
+  - **Dead ends:** (i) the first batched version was *slower* than serial (8.0 against 4.7 s on a tube)
+    until the priority fix; (ii) screening without round-long refusals (above); (iii) the inputs a
+    batch covers are found by a mask over the owner array (`_inputs_of`), not by grouping all input
+    facets by owner every sweep — that grouping was 16.5 s of a 58 s run.
+  - **Dismissed mutation, recorded: a one-edge independence radius** (`range(2)` → `range(1)` in
+    `_local_minima`) passes every test and, re-measured from scratch on the lamp slab at two bounds,
+    kept every chord within its bound. The conflict it permits needs an input facet overhanging
+    exactly where two patches meet, which is rare and small. Two edges stays because it is what the
+    argument above requires, not because a test demands it; zero edges is caught (7 tests fail).
+- **Measured on Sozzi (full table in `validation/sozzi_radiation/README.md`, `lamp_resolution.py`,
+  batched coarsener),
+  coarsening error against the exact patch:** 4 mm / 1e-4 m → 18,432 facets, **0.52% / 2.97%** near
+  the lamp (median / p99) and 0.14% elsewhere; 2.5 mm → 40,083, 0.31% / 2.05%; 6 mm → 10,860,
+  0.73% / 4.35%. Loosening the chord 1e-4 → 2.5e-4 at 4 mm saves 16% of the facets for +70% error
   near the lamp: **size along the lamp, keep the chord at 1e-4**, as for the drawing's lamp. The exact
   patch against the STL-built field: 0.30% / 3.65% near the lamp, 0.24% / 0.59% elsewhere.
 
