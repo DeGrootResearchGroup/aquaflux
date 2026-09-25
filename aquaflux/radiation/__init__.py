@@ -77,8 +77,7 @@ respect to mesh-node positions gets no contribution from the fluence rate.
 - **A source that is not diffuse** has its distribution evaluated along one direction per pair of
   facets, from centroid to centroid; energy balance is exact only for diffuse sources.
 - **Zero-thickness sheets** block from both sides only when named: see
-  :class:`~aquaflux.radiation.self_occlusion.SilhouetteOcclusion`. The exact silhouette clip also
-  needs a surface normal at each receiver, so a field in the water is shadowed by one ray per pair.
+  :class:`~aquaflux.radiation.self_occlusion.SilhouetteOcclusion`.
 
 Underneath are the pieces the model composes, each usable on its own: the exact closed-form
 solid angle of a triangle at a point, in the two forms the two receiver kinds need; the surface

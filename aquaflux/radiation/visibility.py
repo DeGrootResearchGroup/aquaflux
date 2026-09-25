@@ -45,7 +45,7 @@ from aquaflux.radiation.self_occlusion import (
 )
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, receivers_per_pass
 
-__all__ = ["Visibility", "build_visibility", "refuse_points_inside"]
+__all__ = ["Visibility", "build_visibility", "refuse_points_inside", "surviving_fraction"]
 
 
 @eqx.filter_jit
@@ -81,6 +81,29 @@ def _blocked_by(bodies, origin, target, near):
         ],
         axis=0,
     )
+
+
+def surviving_fraction(blocked, hidden_by_geometry, transmittance) -> jnp.ndarray:
+    """Fraction of light getting through, from a mask's layers and each body's transmittance.
+
+    The one expression of it, evaluated by :meth:`Visibility.surviving` over a whole mask and by
+    the gather over one chunk of it at a time -- which is what keeps a floating-point copy of the
+    whole mask from ever being formed.
+
+    Parameters
+    ----------
+    blocked : jnp.ndarray of bool, shape ``(n_occluders, n_receivers, n_facets)``
+    hidden_by_geometry : jnp.ndarray, shape ``(n_receivers, n_facets)``
+    transmittance : array_like, shape ``(n_occluders,)``
+        What fraction each body transmits, in ``[0, 1]``. Differentiable.
+
+    Returns
+    -------
+    jnp.ndarray, shape ``(n_receivers, n_facets)``
+    """
+    transmittance = jnp.broadcast_to(jnp.asarray(transmittance, dtype=float), (blocked.shape[0],))
+    attenuation = 1.0 - blocked * (1.0 - transmittance[:, None, None])
+    return jnp.prod(attenuation, axis=0) * (1.0 - hidden_by_geometry)
 
 
 class Visibility(eqx.Module):
@@ -139,11 +162,7 @@ class Visibility(eqx.Module):
         -------
         jnp.ndarray, shape ``(n_receivers, n_facets)``
         """
-        transmittance = jnp.broadcast_to(
-            jnp.asarray(transmittance, dtype=float), (self.n_occluders,)
-        )
-        attenuation = 1.0 - self.blocked * (1.0 - transmittance[:, None, None])
-        return jnp.prod(attenuation, axis=0) * (1.0 - self.hidden_by_geometry)
+        return surviving_fraction(self.blocked, self.hidden_by_geometry, transmittance)
 
     def for_receivers(self, points) -> jnp.ndarray:
         """Check that ``points`` are the receivers this mask was built for, and return it.

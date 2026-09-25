@@ -48,8 +48,8 @@ SOURCE = np.array([[-1.0, -1.0, 4.0], [1.0, -1.0, 4.0], [0.0, 1.5, 4.0]])
 SAMPLER_FLOOR = 4e-3
 
 
-def _fraction(blocker) -> float:
-    return float(covered_fraction(RECEIVER, NORMAL, SOURCE, np.asarray(blocker))[0])
+def _fraction(blocker, normal=NORMAL) -> float:
+    return float(covered_fraction(RECEIVER, normal, SOURCE, np.asarray(blocker))[0])
 
 
 @pytest.mark.parametrize(
@@ -61,12 +61,52 @@ def _fraction(blocker) -> float:
         ("straddling the source's plane", [[-9.0, -9.0, 2.0], [9.0, -9.0, 2.0], [0.0, 9.0, 6.0]]),
     ],
 )
-def test_the_clip_agrees_with_a_brute_force_sampler(name, blocker):
-    """The whole claim, against an algorithm with nothing in common with it."""
+@pytest.mark.parametrize("normal", [NORMAL, None], ids=["on a surface", "in the volume"])
+def test_the_clip_agrees_with_a_brute_force_sampler(name, blocker, normal):
+    """The whole claim, against an algorithm with nothing in common with it -- in both measures."""
     blocker = np.asarray(blocker)
-    assert _fraction(blocker) == pytest.approx(
-        sampled_fraction(RECEIVER, NORMAL, SOURCE, blocker, samples=400_000),
+    assert _fraction(blocker, normal) == pytest.approx(
+        sampled_fraction(RECEIVER, normal, SOURCE, blocker, samples=400_000),
         abs=SAMPLER_FLOOR,
+    )
+
+
+#: A long source running from overhead out towards grazing, with its overhead end covered. The
+#: projected measure weights the overhead end by its cosine, so the two measures' shares differ
+#: here by 0.117 -- nearly thirty times the sampler's floor -- where on axis they barely differ.
+OBLIQUE_SOURCE = np.array([[-0.5, -1.0, 1.0], [4.0, -1.0, 1.0], [4.0, 1.5, 1.0]])
+OVERHEAD_BLOCKER = np.array([[-9.0, -9.0, 0.5], [0.5, -9.0, 0.5], [0.5, 9.0, 0.5]])
+
+
+def test_a_volume_receiver_takes_its_share_of_the_plain_solid_angle_not_the_projected_one():
+    """The two measures are different integrals, and each receiver kind must get its own.
+
+    On-axis fixtures cannot tell them apart -- the cosine is near one over the whole source --
+    so this one is oblique, and the assertion is that each measure matches its own sampler and
+    sits far from the other's.
+    """
+    plain = float(covered_fraction(RECEIVER, None, OBLIQUE_SOURCE, OVERHEAD_BLOCKER)[0])
+    projected = float(covered_fraction(RECEIVER, NORMAL, OBLIQUE_SOURCE, OVERHEAD_BLOCKER)[0])
+    sampled = {
+        kind: sampled_fraction(RECEIVER, n, OBLIQUE_SOURCE, OVERHEAD_BLOCKER, samples=400_000)
+        for kind, n in (("plain", None), ("projected", NORMAL))
+    }
+    assert plain == pytest.approx(sampled["plain"], abs=SAMPLER_FLOOR)
+    assert projected == pytest.approx(sampled["projected"], abs=SAMPLER_FLOOR)
+    assert abs(sampled["plain"] - sampled["projected"]) > 20 * SAMPLER_FLOOR
+
+
+def test_a_volume_receiver_sees_behind_any_plane_through_it():
+    """A point in the fluid faces every way, so nothing is clipped to a half-space.
+
+    Seen from a surface whose normal points away, this source and blocker are behind it and
+    count for nothing; seen from the same point in the volume, the shadow is all there.
+    """
+    below = SOURCE * np.array([1.0, 1.0, -1.0])
+    blocker = np.array([[-0.4, -3.0, -2.0], [0.4, -3.0, -2.0], [0.0, 3.0, -2.0]])
+    assert float(covered_fraction(RECEIVER, NORMAL, below, blocker)[0]) == 0.0
+    assert float(covered_fraction(RECEIVER, None, below, blocker)[0]) == pytest.approx(
+        sampled_fraction(RECEIVER, None, below, blocker, samples=400_000), abs=SAMPLER_FLOOR
     )
 
 
@@ -131,7 +171,10 @@ def test_the_fraction_is_additive_over_a_tiling():
         [midpoints[2], midpoints[1], c],
         [midpoints[0], midpoints[1], midpoints[2]],
     ]
-    assert sum(_fraction(p) for p in pieces) == pytest.approx(_fraction(whole), rel=1e-9)
+    for normal in (NORMAL, None):
+        assert sum(_fraction(p, normal) for p in pieces) == pytest.approx(
+            _fraction(whole, normal), rel=1e-9
+        )
 
 
 def test_a_cone_that_cannot_bound_its_triangle_is_flagged_rather_than_trusted():
@@ -291,24 +334,71 @@ def test_the_surviving_fraction_lets_a_half_hidden_pair_through_by_half():
     assert np.allclose(np.asarray(half.surviving(jnp.zeros(0))), 0.75)
 
 
-@pytest.mark.parametrize(
-    "receiver_facet, expected",
-    [(None, "volume gather"), (np.array([0, -1]), "lie on no facet")],
-    ids=["no facets at all", "some receivers off the surface"],
-)
-def test_the_silhouette_refuses_receivers_that_have_no_normal(receiver_facet, expected):
-    """It takes a fraction of a PROJECTED solid angle, so a point in the fluid has nothing to
-    project onto. Refused with the alternative named, rather than answered wrongly."""
-    surfaces = Surfaces.from_triangles(inward_box(2))
-    points = np.asarray(surfaces.centroid)[:2]
-    with pytest.raises(ValueError, match=expected):
-        build_visibility(
-            (),
-            surfaces,
-            points,
-            receiver_facet=receiver_facet,
-            self_occlusion=SilhouetteOcclusion(),
-        )
+#: Points in the reactor's water, clear of the sleeve, from which the sleeve hides part of a wall.
+VOLUME_POINTS = np.array([[0.2, 0.5, 0.5], [0.8, 0.45, 0.3], [0.5, 0.15, 0.7]])
+
+
+def _volume_mask(points, receiver_facet=None):
+    surfaces = _reactor()
+    mask = build_visibility(
+        (),
+        surfaces,
+        jnp.asarray(points),
+        receiver_facet=receiver_facet,
+        self_occlusion=SilhouetteOcclusion(),
+    )
+    return surfaces, np.asarray(mask.hidden_by_geometry)
+
+
+def test_the_silhouette_serves_points_in_the_volume_with_the_plain_solid_angle():
+    """A point in the fluid has no normal, so its share is of the unprojected solid angle.
+
+    Checked pair by pair against the sampler with the plain weighting, over every partly hidden
+    pair a few points in the reactor see -- a fraction of the projected measure would be wrong
+    here by as much as the two measures differ, and the sampler, which never reads a normal,
+    would disagree. The sleeve is the only blocker the sampler is given: the box is convex, so it
+    hides nothing of itself from inside, and the clip must find the same.
+    """
+    surfaces, hidden = _volume_mask(VOLUME_POINTS)
+    vertices = np.asarray(surfaces.vertices)
+    sleeve = vertices[len(inward_box(2)) :]
+    receiver, source = np.nonzero((hidden > 0.05) & (hidden < 0.95))
+    assert len(receiver) >= 3, "the fixture has moved: too few partly hidden pairs to check"
+    for r, f in list(zip(receiver, source, strict=True))[:6]:
+        sampled = sampled_fraction(VOLUME_POINTS[r], None, vertices[f], sleeve, samples=200_000)
+        assert hidden[r, f] == pytest.approx(sampled, abs=SAMPLER_FLOOR), (r, f)
+
+
+def test_a_receiver_on_no_facet_is_answered_as_a_point_in_the_volume():
+    """``-1`` in ``receiver_facet`` marks a volume point among surface ones, row by row.
+
+    Each row must come out exactly as it would in a build of its own kind: the surface row with
+    its facet's normal, the volume row with none. And the surface row must really be in the
+    projected measure -- checked against the sampler with the facet's normal on the pair it
+    hides most partly, since agreement between two builds alone would pass if both had lost it.
+    """
+    surfaces = _reactor()
+    on_wall = 3
+    wall_point = np.asarray(surfaces.centroid)[on_wall]
+    points = np.stack([wall_point, VOLUME_POINTS[0]])
+    _, mixed = _volume_mask(points, receiver_facet=np.array([on_wall, -1]))
+    _, volume = _volume_mask(points[1:])
+    _, surface = _volume_mask(points[:1], receiver_facet=np.array([on_wall]))
+    assert np.array_equal(mixed[1], volume[0])
+    assert np.array_equal(mixed[0], surface[0])
+
+    vertices = np.asarray(surfaces.vertices)
+    partial = np.where((mixed[0] > 0.05) & (mixed[0] < 0.95), np.abs(mixed[0] - 0.5), np.inf)
+    source = int(np.argmin(partial))
+    assert np.isfinite(partial[source]), "the fixture has moved: the wall sees no partial shadow"
+    sampled = sampled_fraction(
+        wall_point,
+        np.asarray(surfaces.normal)[on_wall],
+        vertices[source],
+        vertices[len(inward_box(2)) :],
+        samples=400_000,
+    )
+    assert mixed[0, source] == pytest.approx(sampled, abs=SAMPLER_FLOOR)
 
 
 def test_a_source_coplanar_with_the_receiver_hides_nothing():

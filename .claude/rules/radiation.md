@@ -473,7 +473,9 @@ difference over the 1,285,221 lit cells **median 0, p99 1.8e-16, max 4.4e-16**; 
 cells (never compared before) agree to 6.8e-21 W/m² absolute. Build 65 s, field **1,170 s** — about
 twice the hand-chunked 557 s, because `fluence_rate` also gathers the reflected set, which with black
 walls carries nothing (its own docstring already says so: reflectance is traced, so there is nothing
-to branch on). Solve: 3 restart cycles.
+to branch on). Solve: 3 restart cycles. ⚠️ Since #524 the two sets share one geometric pass
+(`summed_fluence_rate`), so the reflected set costs a weighted sum rather than a second gather; the
+1,170 s predates that and #522, and has not been re-measured on this case.
 
 ⚠️ **Peak memory footprint 11.15 GB, and it is the FIELD phase, not the build.** It was first
 recorded here as "8.5 GB of it is the transfer build", which was an inference from a separately
@@ -485,8 +487,12 @@ the footprint read 4.10 GB after the build, 5.92 after one `fluence_rate` and 7.
 second call. **Most of it is JAX's compile and trace caches, not arrays**: `jax.clear_caches()` plus
 `gc.collect()` between the two calls took the footprint from 5.91 to **2.74 GB** (the kept transfer
 plus base), and the second call rebuilt ~2.9 GB (67 s per call, uncontended). Every call re-traces and
-recompiles the per-chunk programs. The fix (compile each pass once, taking big arrays as arguments
-rather than closure constants) is #522/#524's. ⚠️ **A peak on a platform whose allocator
+recompiled the per-chunk programs. **Fixed by #522** (merged): `streamed_fluence_rate` compiles its
+per-chunk gather once per call, taking the live values and each chunk's mask as arguments. On the same
+100,000 cells at `66501ac`, three identical calls settled at 4.36 / 4.83 / 4.57 GB (peaks 5.77 / 6.54
+GB within a call, about one 4M-pair pass above), 40-42 s each against 67 s, field unchanged
+(median 0, max 4.3e-16 against `G_aquaflux.npy`). The whole-run peak on the full mesh has not been
+re-measured with both #521 and #522 in. ⚠️ **A peak on a platform whose allocator
 keeps freed pages is attributed only by sampling between phases in one process** — subtracting a phase
 measured in another process from a whole-run total is exactly how the wrong attribution got written.
 
@@ -549,9 +555,8 @@ survives here as a role — a body passed in `occluders=` — not as a type.
 
 ## ⚠️ AN OCCLUDER DECLARES WHETHER IT CAN BE TRACED, AND COMPILING ONE THAT CANNOT IS A CRASH
 
-`Body.traceable` (in `aquaflux/solids/bodies.py`; a `ClassVar`, defaulting to `False`, following
-`SelfOcclusion.serves_volume_receivers`) says whether a body's answers are a pure array
-expression. `build_visibility` compiles the bodies that say they can be and calls the rest
+`Body.traceable` (in `aquaflux/solids/bodies.py`; a `ClassVar`, defaulting to `False`) says whether
+a body's answers are a pure array expression. `build_visibility` compiles the bodies that say they can be and calls the rest
 directly.
 
 Both directions are load-bearing, and they pull opposite ways:
@@ -731,17 +736,17 @@ a mask silently missing it looks exactly like one that includes it.
 **A model builds TWO masks — facet to facet, and facet to volume receiver — and they are routed
 separately** (`RadiationSettings.visibility_options()` for the first,
 `receiver_visibility_options()` for the second). `receiver_occlusion` overrides the second; unset,
-it follows `self_occlusion` wherever that strategy declares `serves_volume_receivers` (the ray test
-and `NoOcclusion` do), so "off" and "ray test" still apply to both masks alike. A strategy that
-cannot serve a point in the fluid (`SilhouetteOcclusion`) is *not passed on*, so the volume mask
-reaches `build_visibility`'s own default — the ray test — rather than a second copy of it. ⚠️ **Until
-this split, `build_radiation_model` RAISED with the silhouette strategy selected** (#471 shipped it
-that way): one strategy went to both masks and the clip correctly refuses volume receivers. Nothing
-caught it because every silhouette test called `build_transfer` or the strategy directly and none
-built a model; `test_a_model_can_be_built_with_the_silhouette_strategy` does now. ⚠️ **So with the
-silhouette selected, the fluence rate in the fluid is still all-or-nothing per pair** — only the
-surface transfer gets the exact fraction. Teaching the clip the unprojected (volume) measure is
-the real fix and is a separate piece of work.
+it **follows `self_occlusion`**, so "off", "ray test" and "silhouette" apply to both masks alike, and
+unset stays unset (both reach `build_visibility`'s own default, the ray test). Since #479 every
+strategy serves a point in the fluid, so there is no longer a "can this strategy serve the volume"
+question to route on: ⚠️ **there is no `serves_volume_receivers` any more** — it existed only so the
+model could keep the silhouette clip, which then took only a *projected* share, away from volume
+receivers, and it was deleted with that limitation. (Before #480 split the routing, one strategy went
+to both masks and `build_radiation_model` RAISED with the silhouette selected; before #479 the split
+kept the fluence rate in the fluid all-or-nothing per pair under the silhouette. Both are history.)
+**Selecting the silhouette now clips every cell** — see the volume-receiver section under analytic
+occlusion for what that costs; `receiver_occlusion=RayCastOcclusion()` keeps the clip between facets
+only. `test_a_model_can_be_built_with_the_silhouette_strategy` pins that both masks hold fractions.
 
 **Exclusion is by index, never by tolerance.** Every ray leaves its facet's centroid, so the
 facet is always hit at zero distance. Excluding its whole *solid* would be wrong — a bent duct is
@@ -1252,10 +1257,10 @@ directions. With `rho = 0` the same fixture gives `G = P/(4 pi r^2)` exactly.
   profile imposed on the same object returns **zero** intensity along a point source's zero
   normal. The two guards overlap today; both stay, because the overlap is a property of
   `Lambertian` and not of the function, and the comment in `model.py` says so.
-- Transposing `_chunked`'s reshape from `(n_chunks, per_chunk)` to `(per_chunk, n_chunks)` is
-  inert: the padded array is flattened again in the same order whichever way it is factored, so
-  only the chunk partition changes. What *is* covered is losing a receiver off the padded end,
-  which needs a chunk size that does not divide the receiver count to show up at all.
+- `_chunked` no longer pads (#524): full chunks are sliced in place and a shorter remainder runs
+  as one more call. Losing or duplicating the remainder needs a chunk size that does not divide
+  the receiver count to show up at all, which is why `test_chunking_changes_nothing_about_the_answer`
+  uses 37 receivers.
 
 ## Documentation
 
@@ -1974,8 +1979,10 @@ exactly what a user does to improve accuracy.
 `_surviving_rows` returned `jnp.ones((n_receivers, n_facets))`, formed *before* any chunking — at a
 mesh's 1.6M cells against a 66k-facet CAD lamp that is ~850 GB, which no chunk size bounds. It went
 unnoticed because every study that hit it (the lamp ladder formed 17 GB of it) ran on macOS, which
-compresses an array of ones to almost nothing. It is now an empty tuple and the scan is handed the
-points alone; `test_a_scene_with_nothing_in_the_way_forms_no_array_the_size_of_the_problem` pins it.
+compresses an array of ones to almost nothing. It is now an empty tuple and only the points are cut
+into chunks; `test_a_scene_with_nothing_in_the_way_forms_no_array_the_size_of_the_problem` pins it.
+(The helper is `_shadow_rows` since #524, which hands the chunks the mask's own layers rather than a
+fraction formed whole — see the #524 entry below.)
 
 **The default is measured, not copied** (`validation/radiation_gather_pair_limit.py`: analytic
 Sozzi lamps of 8,704 / 67,584 / 270,336 facets, every point doing ~35M pairs, receivers uniform in
@@ -2027,6 +2034,53 @@ pins it on the compiled figure. The streamed path is bounded separately, and was
 the streamed-model section), so its tape holds a chunk's inputs rather than its mask rows. For a few
 scalar parameters `jax.jacfwd` also stays at forward memory.
 
+**ONE GEOMETRIC PASS FOR THE EMITTED AND REFLECTED FIELDS, AND NOTHING OF THE PROBLEM'S SIZE FORMED
+PER CALL (#524).** Three changes to the per-call path, all answer-preserving:
+
+- **`summed_fluence_rate(sets, ...)`** is the gather for several sets on one geometry: the solid
+  angle, emitter cosine, attenuation (a whole voxel walk under `VoxelAbsorption`) and surviving
+  fraction are formed once from the **first** set, and each set contributes only its radiance
+  weights. Each set's terms are summed first and the sets added after, in order, so it equals
+  adding `direct_fluence_rate` per set (`test_summing_sets_in_one_pass_is_summing_their_gathers`,
+  1e-14). `direct_fluence_rate`, `FrozenShadows` and the streamed `_compiled_gather` all go through
+  it. ⚠️ Sets whose concrete vertices differ are **refused**, not silently gathered with the first
+  set's geometry; traced vertices cannot be compared and are trusted — the model's reflected set is
+  `with_optics` of the traced set, so it carries the same tracer, and
+  `test_a_traced_geometry_is_let_through_so_a_lamp_can_be_moved_under_a_gradient` now checks that
+  gradient against two separate gathers. ⚠️ That test used to assert only `!= 0.0` on a uniformly
+  emitting closed box, whose interior field is uniform: its derivative under translation is zero
+  **to rounding**, and the fused pass rounded it to exactly 0. It now emits unevenly.
+- **The surviving fraction is formed per chunk** from the mask's own layers (`_shadow_rows` hands
+  `blocked` and `hidden_by_geometry` to `_chunked` with their receiver axes; `surviving_fraction` in
+  `visibility.py` is the one expression, also behind `Visibility.surviving`). Before, it was a
+  float64 array of the whole problem, 8 B/pair beyond the mask, formed eagerly per call — and
+  `_chunked` then **copied** it into a padded array. `_chunked` now slices chunks in place
+  (`lax.dynamic_slice_in_dim`) with the slice **inside** the checkpoint, so a gradient keeps a
+  chunk's start index rather than the chunk; with the slice outside, the gradient-memory test caught
+  24 B per receiver of saved chunks. Pinned by
+  `test_a_mask_is_cut_into_chunks_rather_than_turned_into_a_fraction_first`.
+- **`direct_irradiance(..., point_sources_only=True)`** gathers the point sources and never visits
+  an areal facet; `_point_source_irradiance` used to zero the areal emission and pay a clipped
+  projected solid angle for every facet pair. And `surface_irradiance` reuses `radiosity`'s
+  assembly (`_solve`) instead of assembling the transfer and gathering the point sources a second
+  time; the `(F^M - F) M` product is skipped when the two are one array (every areal source
+  Lambertian).
+
+Measured with `validation/radiation_fluence_rate_call.py` (4,096-facet analytic lamp, reflectance
+0.3, 3,954 receivers, one sleeve as a `Cylinder`, `NoOcclusion`; jax 0.10.2, CPU, x64, macOS arm64,
+11 cores, nothing else running, 2026-09-24; "before" is `66501ac`, i.e. #522 applied), warm calls,
+every checksum identical before and after:
+
+| medium | held mask | streamed mask |
+|---|---|---|
+| `UniformAbsorption(35.67)` | 0.55 → 0.37-0.42 s | 0.70 → 0.47 s |
+| graded `VoxelAbsorption`, 12 × 12 × 16 | ~219 → ~170 s | ~200 → ~158 s |
+
+⚠️ **The graded rows are dominated by what this did NOT touch**: `TransferMatrix.assemble` walks all
+`n^2` facet pairs through the grid unchunked on every call (#528) — 16.8M pairs here against the
+gather's 16.2M — so the saved second receiver walk shows as ~1.3x rather than ~2x. Graded calls
+also spread ~15% call to call on this machine; read the ratio, not the seconds.
+
 ## ANALYTIC OCCLUSION: BUILT as `SilhouetteOcclusion` — exact per blocker, once six defects were out
 
 Neither sampling treatment above moves the worst pair, because both sample a step function. The
@@ -2055,12 +2109,70 @@ matches the whole at 1e-16 — a triangulated surface *is* a tiling), and **only
 triangles are summed** (on a closed 384-triangle tube, summing every triangle gives exactly 2.0 —
 the far wall counted too; front-facing gives 1.33e-15 against dense truth).
 
-⚠️ **EVERY RECEIVER MUST SIT ON A FACET.** The fraction is of a *projected* solid angle, which needs
-the receiver's normal; a volume point has none, and the unprojected measure a volume gather uses is
-a different quantity. `SilhouetteOcclusion.field` raises for `receiver_facet=None` and for any
-`-1`, naming `RayCastOcclusion` — an error, because silently falling back inside the strategy
-would be the plausible brighter field this subsystem keeps warning about. The model does the
-routing instead, openly: see `receiver_occlusion` above.
+### VOLUME RECEIVERS: the share of the PLAIN solid angle (#479, 2026-09-25)
+
+A receiver on a facet takes its share of the *projected* solid angle `∫ cos θ dω` (what an irradiance
+weights by); **a point in the fluid, which has no normal, takes its share of the plain solid angle
+`∫ dω`** (what the fluence-rate gather weights by, `radiance × solid_angle`). `receiver_normal=None` is
+how a volume receiver says so, all the way down: `source_view`, `covered_by`, `covered_fraction` and
+`may_occlude` accept it, and `SilhouetteOcclusion.field` treats `receiver_facet=None` — or `-1` in any
+row — as a volume point (it used to raise for both). One choice, `silhouette._measure`, picks the
+integral for the whole, the covered part and the blocker-extent clamp together, so a share cannot be
+taken of one measure against another.
+
+- **The clip is unchanged; only the integral differs.** A volume point has no front half-space, so
+  `_in_view` pads the source (and the depth-cut blocker) with a repeated corner instead of clipping —
+  the same widths `4 … 8`, so one clip serves both. The tangent-plane cull in `_survivors` is skipped;
+  the cone and source-plane culls stay.
+- **The unprojected integral is `solid_angle._signed_loop_area`**: a fan from the loop's first vertex,
+  each term the `signed_solid_angle` closed form (`2·arctan2(a·(b×c), 1+a·b+a·c+b·c)`). Signed and
+  additive, negates with the winding; repeated slots and an emptied (all-zero) loop contribute exactly
+  nothing. Valid for a convex loop inside an open hemisphere, which every clip of a triangle seen from
+  off its plane is. **Not** an angle-excess sum: a sliver keeps its digits — the pole/equator triangle
+  of area exactly `φ` reads right to 1e-12 relative at `φ = 1e-9`.
+- Tests, each mutation-checked: fan = triangle closed form from each starting corner; additivity over a
+  4-way split and a quadrilateral; the thin loop; the sampler agreeing in both measures (the sampler in
+  `radiation_references.py` takes `receiver_normal=None` for the plain weighting `|cos_s|/d²`); an
+  **oblique** fixture where the two measures' shares differ by 0.117 (on-axis fixtures cannot tell them
+  apart — the same trap as the missing receiver cosine); a volume receiver seeing behind any plane
+  through it; field-level volume rows against the sampler on the sleeved box; a mixed `[facet, -1]`
+  build matching each kind's own build **and** the surface row matching the *projected* sampler. That
+  last assertion was added because **"every row volume" survived the suite without it**: the
+  projected measure was pinned only through `covered_fraction`, never through `field()`. Dismissed, not
+  covered: the extent clamp on the volume path (same logic as the surface path, which is covered).
+
+**MEASURED** — `validation/radiation_volume_silhouette.py`, two-sleeve reactor (`two_sleeve_reactor`,
+walls black so only the volume mask is judged, sleeves Lambertian `M = 1`), lattice water points clear
+of walls and sleeves, union reference 4096 samples/pair (plain weighting, `segment_is_cut`, a gap real
+past 3σ + 1e-3), jax 0.10.2, CPU, x64, macOS arm64, 11 cores, run alone under `run_case.sh`,
+2026-09-25, uncommitted #479 working tree on `b2b792c`:
+
+- **Per pair** (288 facets, 300 edge cells of 948 with a partly hidden sleeve facet, all 21,604 pairs
+  either mask hides): clip exact within the reference on **all but 3** — those 3 over (the overlap
+  over-count, worst +0.036), none under; mean |gap| **0.0003**. The ray mask: mean |gap| 0.0106,
+  **worst 0.876** on one pair. 2,000 control pairs neither mask hides: the reference finds **no**
+  missed shadow.
+- **Fluence rate at the edge cells** against the reference field (same public `fluence_rate`, hidden
+  shares injected): silhouette mean / p95 / worst |rel| **0.0005 / 0.0019 / 0.0046**; ray mask
+  **0.0215 / 0.0764 / 0.1419**. Over all 2,552 points the ray mask sits 0.9% mean, 14.2% worst from the
+  clip. So the worst cell improves ~30x; the mean ~40x.
+- **Cost of the volume mask alone** (warm, `build_visibility`, silhouette vs ray without a grid):
+
+| facets | receivers | clip s | ray s | clip ms/receiver | ratio | cull survivors/receiver | of n² |
+|---|---|---|---|---|---|---|---|
+| 288 | 464 | 6.0 | 0.4 | 12.9 | 14 | 10,183 | 12.3% |
+| 288 | 1,632 | 20.8 | 0.7 | 12.7 | 30 | 9,824 | 11.8% |
+| 560 | 464 | 12.1 | 0.8 | 26.2 | 15 | 22,727 | 7.3% |
+| 560 | 1,632 | 40.8 | 1.5 | 25.0 | 27 | 21,433 | 6.8% |
+
+  Linear in receivers (constant ms/receiver), **roughly linear in facets** rather than quadratic, because
+  the cull's survival falls as the mesh refines (12% → 7% of `n²`). The per-receiver loop is a Python
+  loop over compiled calls, so the fixed per-receiver overhead is in these figures.
+  ⚠️ **Extrapolation, flagged as one:** at that rate a 100k-cell field against ~560 facets is ~40 min,
+  and it grows with facet count; the ray mask is 15-30x cheaper. So selecting the silhouette now makes
+  a mesh-scale model expensive — `receiver_occlusion=RayCastOcclusion()` is the escape, and the Sozzi
+  lamp (convex, `NoOcclusion`) is unaffected. Batching receivers per compiled call is the obvious lever
+  and is not built.
 
 ⚠️ **WHERE IT OVER-COUNTS, STATED EXACTLY: the angular overlap between two front-facing
 silhouettes.** Each blocker is clipped against the *source*, not against what is still unblocked,

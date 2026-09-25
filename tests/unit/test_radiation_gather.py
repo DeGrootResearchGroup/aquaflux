@@ -13,7 +13,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.radiation.absorption import UniformAbsorption, VoxelAbsorption
-from aquaflux.radiation.gather import direct_fluence_rate, direct_irradiance
+from aquaflux.radiation.gather import (
+    direct_fluence_rate,
+    direct_irradiance,
+    summed_fluence_rate,
+)
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian
 from aquaflux.radiation.subdivide import refine_for_receivers
 from aquaflux.radiation.surfaces import Surfaces
@@ -408,18 +412,21 @@ def test_a_limit_of_no_pairs_is_refused(pair_limit):
         direct_irradiance(surfaces, probes, probes, pair_limit=pair_limit)
 
 
-def _scan_inputs(monkeypatch):
-    """Record the arrays each traced gather scans over, by watching the scan, not replacing it."""
+def _chunk_slices(monkeypatch):
+    """Record every chunk the gather cuts: the whole array's shape, the axis cut and the size.
+
+    Watches the slicing rather than replacing it, so the gather still computes its answer.
+    """
     from aquaflux.radiation import gather
 
     seen = []
-    real = gather.lax.scan
+    real = gather._slice
 
-    def watched(body, carry, arrays):
-        seen.append([tuple(array.shape) for array in arrays])
-        return real(body, carry, arrays)
+    def watched(array, axis, start, size):
+        seen.append((tuple(array.shape), axis, size))
+        return real(array, axis, start, size)
 
-    monkeypatch.setattr(gather.lax, "scan", watched)
+    monkeypatch.setattr(gather, "_slice", watched)
     return seen
 
 
@@ -431,15 +438,14 @@ def test_a_chunk_holds_as_many_receivers_as_fit_the_pair_limit(monkeypatch, n_fa
     facet count, and against a finely divided lamp the default formed a chunk of gigabytes. Same
     limit, same receivers, two facet counts -- the chunk's receiver count must fall by the ratio.
     """
-    seen = _scan_inputs(monkeypatch)
+    seen = _chunk_slices(monkeypatch)
     rng = np.random.default_rng(1)
     surfaces = point_source(rng.uniform(-0.1, 0.1, (n_facets, 3)))
     direct_fluence_rate(surfaces, rng.uniform(1.0, 2.0, (40, 3)), pair_limit=10)
-    (points_shape,) = seen[0]
-    n_chunks, per_chunk = points_shape[:2]
+    sizes = [size for _, _, size in seen]
+    per_chunk = sizes[0]
     assert per_chunk == 10 // n_facets
-    assert per_chunk * n_facets <= 10
-    assert n_chunks * per_chunk >= 40
+    assert all(size <= per_chunk for size in sizes)
 
 
 def test_a_scene_with_nothing_in_the_way_forms_no_array_the_size_of_the_problem(monkeypatch):
@@ -447,13 +453,107 @@ def test_a_scene_with_nothing_in_the_way_forms_no_array_the_size_of_the_problem(
 
     A row of ones per receiver used to stand in for "nothing occludes", formed whole: at a mesh's
     cells against a finely divided lamp that is hundreds of gigabytes, which the chunking that
-    follows could not bound. So the scan must be handed the points alone.
+    follows could not bound. So the only arrays cut into chunks are the points (and normals).
     """
-    seen = _scan_inputs(monkeypatch)
+    seen = _chunk_slices(monkeypatch)
     probes = np.random.default_rng(2).uniform(1.0, 2.0, (40, 3))
     direct_fluence_rate(point_source([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]]), probes, pair_limit=8)
     direct_irradiance(point_source([[0.0, 0.0, 0.0]]), probes, probes, pair_limit=8)
-    assert [len(arrays) for arrays in seen] == [1, 2], seen
+    assert {shape for shape, _, _ in seen} == {(40, 3)}, seen
+
+
+def test_a_mask_is_cut_into_chunks_rather_than_turned_into_a_fraction_first(monkeypatch):
+    """The surviving fraction is formed per chunk, from the mask's own layers.
+
+    Formed before chunking it would be a floating-point array the size of the whole problem --
+    eight bytes a pair on top of a one-byte mask -- and padding the mask to whole chunks would
+    copy it again. So what is cut must be the mask itself, along its receiver axis, and nothing
+    of the problem's size may be formed from it first.
+    """
+    from aquaflux.radiation.visibility import Visibility, build_visibility
+    from aquaflux.solids import Cylinder
+
+    source = point_source([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]])
+    probes = np.random.default_rng(4).uniform([3.0, -1.0, -1.0], [4.0, 1.0, 1.0], (40, 3))
+    sleeve = Cylinder(centre=[2.0, 0.0, 0.0], axis=[0, 0, 1], radius=0.5, half_length=3.0)
+    mask = build_visibility([sleeve], source, probes)
+    whole = []
+    monkeypatch.setattr(Visibility, "surviving", lambda self, t: whole.append(t))
+    seen = _chunk_slices(monkeypatch)
+    field = direct_fluence_rate(source, probes, visibility=mask, transmittance=[0.3], pair_limit=8)
+    assert not whole, "the surviving fraction was formed for the whole mask"
+    assert {(shape, axis) for shape, axis, _ in seen} == {
+        ((40, 3), 0),
+        ((1, 40, 2), 1),
+        ((40, 2), 0),
+    }, seen
+    # And the answer is the one the whole-mask fraction gives.
+    monkeypatch.undo()
+    reference = direct_fluence_rate(
+        source, probes, visibility=mask, transmittance=[0.3], pair_limit=10_000
+    )
+    np.testing.assert_allclose(np.asarray(field), np.asarray(reference), rtol=1e-15)
+    assert float(np.asarray(field).min()) < float(np.asarray(field).max()), "nothing is shadowed"
+
+
+def _mixed_set():
+    """Two areal profiles and a point source, so every branch of the gather is exercised."""
+    panel = rectangle_triangles([0.0, 0.0, 0.0], [0.2, 0.0, 0.0], [0.0, 0.2, 0.0])
+    vertices = np.concatenate([panel, np.full((1, 3, 3), 0.05)])
+    return Surfaces.from_triangles(
+        vertices,
+        emission=[3.0, 5.0, 0.0],
+        power=[0.0, 0.0, POWER],
+        profiles=(CosinePower(4.0), Lambertian(), Isotropic()),
+        profile_index=[0, 1, 2],
+    )
+
+
+def test_summing_sets_in_one_pass_is_summing_their_gathers():
+    """One geometric pass for several sets must give what gathering each and adding does.
+
+    The fixture's sets differ in profiles as well as values -- the second is re-read as
+    Lambertian, as the reflected field is -- so a set's weights cannot be read off another's
+    grouping, and there are enough receivers for several chunks and a shorter remainder.
+    """
+    first = _mixed_set()
+    second = first.with_optics(emission=[1.0, 2.0, 0.0], power=0.0, profiles=(Lambertian(),))
+    probes = np.random.default_rng(5).uniform([-0.1, -0.1, 0.2], [0.3, 0.3, 0.6], (23, 3))
+    medium = UniformAbsorption(3.0)
+    apart = direct_fluence_rate(first, probes, absorption=medium) + direct_fluence_rate(
+        second, probes, absorption=medium
+    )
+    together = summed_fluence_rate((first, second), probes, absorption=medium, pair_limit=12)
+    np.testing.assert_allclose(np.asarray(together), np.asarray(apart), rtol=1e-14)
+
+
+def test_sets_that_do_not_share_their_geometry_are_refused():
+    first = _mixed_set()
+    moved = first.with_geometry(np.asarray(first.vertices) + 0.01)
+    with pytest.raises(ValueError, match="must share their geometry"):
+        summed_fluence_rate((first, moved), np.array([[0.1, 0.1, 0.5]]))
+
+
+def test_the_point_sources_alone_are_gathered_without_visiting_a_facet(monkeypatch):
+    """What a surface solve needs from outside its transfer: the point sources' arrivals only.
+
+    Weighting the areal facets by zero gave the same number and paid for every one of them -- a
+    clipped projected solid angle per pair -- so the areal branch must not run at all.
+    """
+    from aquaflux.radiation import gather
+
+    surfaces = _mixed_set()
+    probes = np.array([[0.1, 0.1, 0.5], [0.3, -0.1, 0.4]])
+    normals = np.array([[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]])
+    dark = surfaces.with_optics(emission=0.0)
+    expected = direct_irradiance(dark, probes, normals)
+    visited = []
+    real = gather.projected_solid_angle
+    monkeypatch.setattr(gather, "projected_solid_angle", lambda *a: visited.append(1) or real(*a))
+    alone = direct_irradiance(surfaces, probes, normals, point_sources_only=True)
+    assert not visited, "the areal facets were visited"
+    np.testing.assert_allclose(np.asarray(alone), np.asarray(expected), rtol=1e-15)
+    assert float(np.asarray(alone).min()) > 0.0
 
 
 def test_no_receivers_gives_no_answers():
