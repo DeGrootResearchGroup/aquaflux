@@ -132,17 +132,39 @@ def test_a_surface_wound_inconsistently_reads_as_neither_inside_nor_outside():
 
 
 def test_chunking_the_points_changes_nothing():
-    """``work_limit`` bounds the point-by-facet intermediate, which is the whole memory cost.
+    """``pair_limit`` bounds the point-by-facet intermediate, which is the whole memory cost.
     A limit below the facet count still has to make progress rather than divide to a chunk of
     zero points and loop forever.
     """
     vertices = inward_box(2)
     points = np.concatenate([INSIDE, OUTSIDE])
     whole = enclosure_winding(vertices, points)
-    for work_limit in (1, 97, 10_000_000):
+    for pair_limit in (1, 97, 10_000_000):
         np.testing.assert_allclose(
-            enclosure_winding(vertices, points, work_limit=work_limit), whole, rtol=1e-14
+            enclosure_winding(vertices, points, pair_limit=pair_limit), whole, rtol=1e-14
         )
+
+
+def test_a_pass_is_bounded_in_point_by_facet_pairs(monkeypatch):
+    """Invariance alone cannot see the bound -- every chunking gives the same answer -- so this
+    watches the passes: a limit of three points' worth of pairs must give passes of three points,
+    where reading the limit as a point count would give one pass of all of them."""
+    from aquaflux.radiation import checks
+
+    shapes = []
+    real = checks.signed_solid_angle
+
+    def watched(points, vertices):
+        shapes.append(points.shape[0])
+        return real(points, vertices)
+
+    monkeypatch.setattr(checks, "signed_solid_angle", watched)
+    vertices = inward_box(2)
+    points = np.concatenate([INSIDE, OUTSIDE])
+    assert len(points) > 3, "the fixture must need more than one pass"
+    enclosure_winding(vertices, points, pair_limit=3 * len(vertices))
+    assert max(shapes) == 3, shapes
+    assert sum(shapes) == len(points), shapes
 
 
 def test_no_points_and_no_facets_are_both_answered_rather_than_raising():

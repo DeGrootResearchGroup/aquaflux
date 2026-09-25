@@ -12,6 +12,11 @@ state can be viewed beside the solution it is validated against, post-processed 
 or used to restart a run. :func:`write_vtu` instead writes the mesh *and* its fields as one
 self-contained VTK XML file, which needs no case to write into and so is the path for a mesh that
 came from anywhere; :func:`write_pvd` indexes a series of those as one transient dataset.
+
+Geometry comes in from computer-aided design (CAD) as well as from meshes: :mod:`aquaflux.io.cad`
+reads a STEP drawing into exact :mod:`aquaflux.solids` bodies — each checked against the drawing
+before it is handed out — and into emitting triangles. It needs the optional CAD kernel and keeps
+its own namespace, so importing this package never requires it.
 """
 
 from __future__ import annotations

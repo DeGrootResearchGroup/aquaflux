@@ -375,36 +375,85 @@ def test_sources_of_different_kinds_are_all_summed():
 # ---------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("chunk_size", [1, 7, 64, 10_000])
-def test_chunking_changes_nothing_about_the_answer(chunk_size):
+@pytest.mark.parametrize("pair_limit", [1, 7, 64, 10_000])
+def test_chunking_changes_nothing_about_the_answer(pair_limit):
     """Chunking is a memory strategy; it must not be a numerical one.
 
     The last chunk is padded rather than shortened so the traced body compiles once, and the
-    padding must not leak into the result -- a chunk size that does not divide the receiver
-    count is the case that catches it, which is why 37 receivers and a chunk of 7.
+    padding must not leak into the result -- a chunk that does not divide the receiver count is
+    the case that catches it, which is why 37 receivers against two facets, and limits giving
+    chunks of one, three and thirty-two.
     """
     rng = np.random.default_rng(0)
     probes = rng.uniform(0.5, 2.0, (37, 3))
     surfaces = point_source([[0.0, 0.0, 0.0], [0.1, 0.2, 0.3]])
-    reference = np.asarray(direct_fluence_rate(surfaces, probes, chunk_size=1_000_000))
+    reference = np.asarray(direct_fluence_rate(surfaces, probes, pair_limit=1_000_000))
     np.testing.assert_allclose(
-        np.asarray(direct_fluence_rate(surfaces, probes, chunk_size=chunk_size)),
+        np.asarray(direct_fluence_rate(surfaces, probes, pair_limit=pair_limit)),
         reference,
         rtol=1e-15,
     )
 
 
-@pytest.mark.parametrize("chunk_size", [0, -1])
-def test_a_chunk_of_no_receivers_is_refused(chunk_size):
+@pytest.mark.parametrize("pair_limit", [0, -1])
+def test_a_limit_of_no_pairs_is_refused(pair_limit):
     """Zero divides the receiver count into an infinite number of chunks, so the unguarded
     version raises a ``ZeroDivisionError`` from inside the padding arithmetic — an error that
     names nothing the caller passed."""
     probes = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
     surfaces = point_source([[0.0, 0.0, 0.0]])
-    with pytest.raises(ValueError, match="chunk_size must be at least 1 receiver"):
-        direct_fluence_rate(surfaces, probes, chunk_size=chunk_size)
-    with pytest.raises(ValueError, match="chunk_size must be at least 1 receiver"):
-        direct_irradiance(surfaces, probes, probes, chunk_size=chunk_size)
+    with pytest.raises(ValueError, match="pair_limit must be at least 1"):
+        direct_fluence_rate(surfaces, probes, pair_limit=pair_limit)
+    with pytest.raises(ValueError, match="pair_limit must be at least 1"):
+        direct_irradiance(surfaces, probes, probes, pair_limit=pair_limit)
+
+
+def _scan_inputs(monkeypatch):
+    """Record the arrays each traced gather scans over, by watching the scan, not replacing it."""
+    from aquaflux.radiation import gather
+
+    seen = []
+    real = gather.lax.scan
+
+    def watched(body, carry, arrays):
+        seen.append([tuple(array.shape) for array in arrays])
+        return real(body, carry, arrays)
+
+    monkeypatch.setattr(gather.lax, "scan", watched)
+    return seen
+
+
+@pytest.mark.parametrize("n_facets", [1, 5])
+def test_a_chunk_holds_as_many_receivers_as_fit_the_pair_limit(monkeypatch, n_facets):
+    """The bound is on PAIRS, so a finer emitter gets fewer receivers per chunk, not a larger one.
+
+    This is the whole of the defect it replaces: a receiver count left each chunk's size to the
+    facet count, and against a finely divided lamp the default formed a chunk of gigabytes. Same
+    limit, same receivers, two facet counts -- the chunk's receiver count must fall by the ratio.
+    """
+    seen = _scan_inputs(monkeypatch)
+    rng = np.random.default_rng(1)
+    surfaces = point_source(rng.uniform(-0.1, 0.1, (n_facets, 3)))
+    direct_fluence_rate(surfaces, rng.uniform(1.0, 2.0, (40, 3)), pair_limit=10)
+    (points_shape,) = seen[0]
+    n_chunks, per_chunk = points_shape[:2]
+    assert per_chunk == 10 // n_facets
+    assert per_chunk * n_facets <= 10
+    assert n_chunks * per_chunk >= 40
+
+
+def test_a_scene_with_nothing_in_the_way_forms_no_array_the_size_of_the_problem(monkeypatch):
+    """With no mask, nothing per receiver-and-facet may be formed before chunking.
+
+    A row of ones per receiver used to stand in for "nothing occludes", formed whole: at a mesh's
+    cells against a finely divided lamp that is hundreds of gigabytes, which the chunking that
+    follows could not bound. So the scan must be handed the points alone.
+    """
+    seen = _scan_inputs(monkeypatch)
+    probes = np.random.default_rng(2).uniform(1.0, 2.0, (40, 3))
+    direct_fluence_rate(point_source([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]]), probes, pair_limit=8)
+    direct_irradiance(point_source([[0.0, 0.0, 0.0]]), probes, probes, pair_limit=8)
+    assert [len(arrays) for arrays in seen] == [1, 2], seen
 
 
 def test_no_receivers_gives_no_answers():

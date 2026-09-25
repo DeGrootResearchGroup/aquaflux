@@ -49,6 +49,11 @@ GATED_MODULES: dict[str, tuple[str, str]] = {
         "petsc4py",
         "field-split coupled solve; mostly fast tier",
     ),
+    "unit/test_cad_step.py": (
+        "OCP",
+        "STEP reading through the OpenCASCADE kernel; fast tier. CI installs it through the `test` "
+        "extra, so this gate removes coverage only from a local environment without the `cad` extra",
+    ),
 }
 
 #: Distributions that CI does not install, so every gate above naming one is dead there.

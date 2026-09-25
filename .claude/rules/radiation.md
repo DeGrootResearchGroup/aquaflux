@@ -24,7 +24,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `profiles.py` — `Isotropic`, `Lambertian`, `CosinePower` | **BUILT** |
 | `gather.py` — `direct_fluence_rate` and `direct_irradiance` | **BUILT** |
 | `absorption.py` — `UniformAbsorption`, `VoxelAbsorption` | **BUILT** |
-| `occluders.py` — the primitive library (`HalfSpace`, `Sphere`, `Cylinder`, `Cone`, `Box`), the CSG algebra (`Union`, `Intersection`, `Difference`) and the fluid-region occluder (`Outside`) | **BUILT** |
+| the solid bodies (`Body`, primitives, CSG, `Outside`) — **moved to `aquaflux/solids/`**, see `.claude/rules/solids.md` | **BUILT** |
 | `visibility.py` — the frozen shadow mask | **BUILT** |
 | `triangles.py` — watertight ray-triangle intersection | **BUILT** |
 | `self_occlusion.py` — the `SelfOcclusion` strategies: ray cast, silhouette clip, none | **BUILT** |
@@ -405,129 +405,28 @@ body at production size, stored as bytes. Packing to bits is the obvious eightfo
 ever matters. ⚠️ **At MESH scale it cannot be held at all**: 1.6M cells against 7,516 lamp facets
 is **12 GB per body**, so a real case could not be built through the model. `direct_fluence_rate`
 therefore also takes `occluders=` (and `self_occlusion=`) **instead of** a built mask: it then
-builds each chunk's mask, gathers, and drops it, so peak memory is the chunk's
-(`chunk_size x n_facets`, a few hundred MB at the 4096 default) rather than the problem's. The two
+builds each chunk's mask, gathers, and drops it, so peak memory is the chunk's (at most
+`pair_limit` receiver-by-facet pairs, 1.5-1.9 GB of footprint at the 4M default — see the #509
+section below) rather than the problem's. The two
 are mutually exclusive and giving both raises — with both, the mask doing the work would silently
 be the streamed one. **Streaming rebuilds the mask every call**, so a sweep over one frozen scene
 still wants the model's frozen mask, which is also what carries `dG/dt` for a body's
 transmittance. ⚠️ `build_radiation_model` does **not** stream yet (#489): a mesh-scale field goes
 through the gather directly, as `validation/sozzi_radiation/compare_fluence.py` does.
 
-## ⚠️ FORM THE CYLINDER'S DISCRIMINANT AS `a(r^2 - h^2)`, NEVER AS `b^2 - a c`
+## The solid bodies moved to `aquaflux/solids/` (their record is `.claude/rules/solids.md`)
 
-**One home: `_Tube` in `occluders.py`**, shared with `_Ball` through `_positive_definite_span`,
-and reached by every body with a round side — a cylinder, a lamp's spherical tip, a vessel
-composed of either. ⚠️ **`_Taper` cannot have it**: a cone's quadratic is *indefinite*, so there
-is no positive-definite form to build a closest-approach distance from, and a `Cone` whose
-surface a ray must graze is better described as a `Cylinder` — which is why equal end radii are
-refused rather than quietly accepted.
-
-The naive form subtracts two nearly equal numbers exactly when a ray almost grazes the surface,
-which at *any* precision throws away most of the significant digits. Measured over eighteen
-near-tangential cases — three source distances, offsets a few parts in `1e9` to `1e13` either
-side of the radius — the naive form misclassifies **eight**, and every one in the dangerous
-direction: it reports a discriminant of exactly zero for a ray that does pass inside, so **light
-leaks through a body that should stop it**. The reformulation, which builds the closest-approach
-distance as a vector difference, gets all eighteen right.
-
-This is the ordinary geometry here, not a corner case: a sleeve sits at essentially the radius of
-the lamp facets it surrounds.
-
-Three more pieces of hygiene, each pinned by a mutation: clamp the hit to the segment (a body
-beyond the receiver does not occlude), exclude a sliver next to the source **sized as a fraction
-of the facet's own `sqrt(area)`** rather than absolutely (one length scale in the module; a fixed
-epsilon gives self-shadowing when small and light leaks when large), and clip the cylinder to its
-flat ends.
-
-**A point inside a body is refused at build.** It is embedded in the solid, not shadowed by it,
-and nothing computed there means anything. Both facets and receivers are checked.
-
-**Do not represent a body twice.** A sleeve that is already an emitting surface must not also be
-an occluder: every ray would leave a facet lying exactly on an occluder, and the emitter's own
-convexity already makes the source-side clamp an exact visibility test for it.
-
-## BLOCKING GEOMETRY AS CAD PRIMITIVES: three layers, and why the middle one is intervals
-
-`occluders.py` is a primitive library, a constructive-solid-geometry algebra over it, and a way
-to describe a vessel by the fluid it holds. The whole of it rests on **one property**, and
-naming that property is what keeps it from being a zoo of special cases.
-
-| layer | what it promises | who implements it |
-|---|---|---|
-| `Occluder` | answers `blocks` and `contains` | anything, including host code over triangles |
-| `Solid` | its inside, along a line, is a **bounded union of intervals** in the line's parameter | every body here |
-| `ConvexSolid` | that union is a **single** interval | `HalfSpace`, `Sphere`, `Cylinder`, `Cone`, `Box` |
-
-**Why the interval is the right middle layer.** Blocking is then "does any interval overlap the
-segment"; `Union` pools intervals, `Intersection` overlaps them pairwise, `Difference` cuts each
-of one body's by another's — so there is one implementation of each operation rather than one
-intersection routine per pair of shapes. The count is a static property of the body (`Union` of
-three convex bodies has three), the same for every ray, so nothing here is a search with a
-data-dependent length and the whole mask stays a single array expression.
-
-**A convex body is a list of inequalities, and that is the deduplication that matters.** Private
-`_Plane`, `_Tube`, `_Ball` and `_Taper` each supply two views of one `f(x) <= 0` — a signed
-distance at a point and an interval along a line. A cylinder is a tube and two planes, a box is
-six planes, a cone is a taper and two planes. So `contains` and the interval **cannot disagree
-about where a surface is**: they are two readings of the same inequalities. And the
-grazing-robust cylinder quadratic below has exactly one home, reached by every body with a round
-side.
-
-⚠️ **`Difference` takes a CONVEX hole**, because the complement of a hole in several pieces
-cannot be written down without sorting and merging its intervals first. `A - (B + C)` is
-`Difference(Difference(A, B), C)`; each cut doubles the interval count, which is the honest
-price. The constructor refuses a multi-interval hole and says this.
-
-## THE FLUID AS REGIONS: `Outside`, and why it beats a hand-derived occluder
-
-A reactor wall is awkward to write as a solid and trivial to write as the *water it holds*.
-`Outside(chamber, inlet, riser)` is everything those three regions are not, and a segment is
-clear exactly when they **cover it end to end** — an interval-covering test over the pooled
-intervals, with no opening identified and no shadow edge derived.
-
-**This is strictly more general than the hand-derived alternative it replaces.** The
-`BranchOpenings` closure in `validation/sozzi_radiation/compare_fluence.py` works out, for that
-one reactor, where each pipe's opening is and what crossing it means. `Outside` needs three
-cylinders and the same three lines describe a chamber-pipe-elbow chain of any length.
-
-**Correctness does not need convexity; cheapness does.** Any `Solid` may be a region — the test
-pools every region's intervals and asks whether together they leave a gap. A *convex* region
-contributes one interval, which is why a chain of chambers and pipes costs a handful of
-comparisons per ray. Convexity is also where the shortcut comes from: two points inside one
-convex region have a clear segment between them by definition, with nothing to test at all.
-
-⚠️ **NEIGHBOURING REGIONS MUST OVERLAP OR TOUCH — A GAP BETWEEN THEM READS AS SOLID**, and reads
-that way silently, as a shadow rather than as an error: the reactor simply goes dark up that
-pipe. A pipe standing on a chamber is described by extending its cylinder *into* the chamber, not
-by stopping it at the chamber's surface, where a curved junction leaves slivers of neither
-region. The overlap is inside the chamber anyway, so it adds nothing to the fluid.
-
-⚠️ **The covering test examines each interval's FAR END, not just the segment's start, and the
-comparison there is STRICT.** Coverage can only first fail at the start or at the right-hand end
-of some interval, and at each of those the pool must *continue past*, not merely reach. Dropping
-either half reports a gap as covered: with only the start examined, a gap beyond it is never
-looked at; with a non-strict comparison, an interval's own far end is trivially satisfied by
-that same interval and no gap is ever found. Both are pinned by
-`test_a_gap_between_two_regions_reads_as_solid`. Sorting the intervals would be the textbook
-covering sweep and is the wrong choice here — a sort over the last axis of a
-receivers-by-facets array materializes a permutation the size of the whole mask, where the
-pairwise test fuses into the reduction and forms nothing.
-
-⚠️ **`Outside` needs the margin at BOTH ENDS of a segment, and that is the same defect that
-once shipped for facet-to-facet rays.** A facet centroid used as a receiver sits exactly on the
-wall the regions are bounded by, so a rounding puts it outside and leaves an infinitesimal
-uncovered sliver at `t = 1`. Over an enclosure that is not a small error but a shadow
-everywhere. `min_distance` is therefore applied at the far end as well as the near one.
-
-**`contains` means "outside every region", which is the right answer for a surface that bounds
-fluid** — a point there is embedded in the wall, and the build-time guard should refuse it. It
-carries a `tolerance`, a length, because a mesh never lands exactly on the surface its cells were
-snapped to and a cell centre a rounding outside a region is a discretization rather than a cell
-in the metal. It applies to that test only: where a *segment* is clear is decided with no slack.
+The analytic primitives, the constructive-solid-geometry (CSG) algebra, `Outside`, the
+grazing-robust cylinder discriminant and the `Body` contract (`blocks`, `contains`, `traceable`) were
+written here, in `radiation/occluders.py`, and none of them names any radiation: they are plain
+geometry. They now live in `aquaflux/solids/bodies.py` and radiation imports them. ⚠️ **There is no
+`aquaflux.radiation.occluders` module and no `Occluder` class any more** — the contract is
+`aquaflux.solids.Body`, and `aquaflux.radiation` does not re-export the bodies. The word *occluder*
+survives here as a role — a body passed in `occluders=` — not as a type.
 
 ## ⚠️ AN OCCLUDER DECLARES WHETHER IT CAN BE TRACED, AND COMPILING ONE THAT CANNOT IS A CRASH
 
-`Occluder.traceable` (a `ClassVar`, defaulting to `False`, following
+`Body.traceable` (in `aquaflux/solids/bodies.py`; a `ClassVar`, defaulting to `False`, following
 `SelfOcclusion.serves_volume_receivers`) says whether a body's answers are a pure array
 expression. `build_visibility` compiles the bodies that say they can be and calls the rest
 directly.
@@ -544,7 +443,7 @@ Both directions are load-bearing, and they pull opposite ways:
   same rate as the work it does. Handed a tracer it raises `TracerArrayConversionError`.
 
 ⚠️ **Compiling the mask build unconditionally breaks the hybrid, which is the point of having
-both kinds.** Measured directly: a host-side `Occluder` through `build_visibility` raises under a
+both kinds.** Measured directly: a host-side `Body` through `build_visibility` raises under a
 blanket `filter_jit`. `test_a_host_side_blocker_and_a_primitive_stand_in_one_scene` puts one of
 each in one scene and goes red if the compile is made unconditional. ⚠️ Note what was **not**
 affected and was first reported as though it were: `RayCastOcclusion(grid=...)` is a
@@ -673,51 +572,6 @@ prediction, and do **not** subtract the two to infer what the gather alone costs
 ⚠️ **The harness falls back to sampling the three cylinders when `work/case` is absent**, and
 says which it used in its summary. Those runs are reproducible anywhere but are a different
 receiver population, and the 97.1% above is what that fallback reports — do not mix the two.
-
-**Two mutation rounds over `occluders.py`, 23 mutations, 22 red.** Each broke one line and the
-suite was rerun (`PYTHONDONTWRITEBYTECODE=1`, per the bytecode trap recorded above). Red: both
-halves of the covering test, the far-end margin, the taper's branch selection, the box's own
-axes, the difference's second piece, the intersection's overlap, the grazing discriminant, the
-segment's far end, the near-origin exclusion, the cylinder's end caps, the convex signed
-distance, the plane's solid side, the union's pooling and its nearest-body distance, the
-difference's hole sign, the tolerance, the covering result's sense, the cone's slope, the ball's
-centre, and the unconditional compile.
-
-⚠️ **ONE MUTATION WAS INVALID, AND A MUTATION THAT GOES RED FOR THE WRONG REASON IS WORSE THAN NO
-MUTATION — IT READS AS COVERAGE.** Written as `0.0 * solid_side[0]` it multiplied an infinity and
-produced a NaN rather than removing the cut, so what it tested was NaN propagation; its red said
-nothing about the line it was aimed at, and taken at face value it would have retired a real
-question as answered. **Check that a mutation's failure comes from the mechanism you intended**,
-not merely that the suite went red — the rerun with a clean removal is what found the survivor
-below.
-
-**The one genuine survivor is DISMISSED, with a measurement rather than an argument**: the
-taper's solid-nappe cut changes no answer reachable through `Cone`, because non-negative end
-radii put the mirror nappe beyond an end cap — 0 disagreements in 160,000 rays over four cone
-shapes (a true cone, a frustum whose apex is far outside it, a tilted narrowing one, a steep
-one). It is kept so the inequality means on its own what it says, since on a bare taper the two
-differ on 7.2% of the same rays. What is *not* redundant is the branch selection beside it, whose
-mutation is red.
-
-## What is NOT built here, and why each was left out rather than forgotten
-
-- **Torus.** An elbow is a torus and the bent-duct case wants one, but a torus *tube is not
-  convex*, so it does not fit the convex-region machinery, and its ray intersection is a quartic
-  whose branchless solution is accurate enough only with care that is its own piece of work.
-  `Solid.intervals` already returns `interval_count` intervals rather than one, so a torus
-  reporting two slots in with no re-cut of the algebra. Approximating an elbow by a fan of convex
-  wedges is available and is **not** the answer: it reintroduces exactly the faceting error
-  primitives exist to remove.
-- **A STEP reader.** Deferred as its own decision: `pythonocc`/`cadquery` are heavy dependencies
-  for a package with nothing of that kind, and a hand-written reader for the primitive subset is
-  a partial reader of a large format. The primitives are already the neutral description such a
-  loader would emit — each is an `equinox.Module` whose constructor keywords are its full
-  parameterization, so a case file mapping a name and a few numbers onto a class is a dispatch
-  table and nothing more.
-- **Trimmed patches.** A B-rep face is a bounded piece of an analytic surface cut by edge loops
-  in parameter space, so a real CAD import is a closed-form hit *plus* a point-in-trim test.
-  Nothing here does the second, which is why the triangle path stays the fallback rather than a
-  formality.
 
 ## The emitting surface occludes too, and that half is opaque
 
@@ -1168,7 +1022,7 @@ on the same 1,635,909-cell mesh and writes a VTU + plots). Full numbers and conf
 interreflection, so the field is the direct gather from the lamp alone (7,516 facets) — building a
 model would have formed a 61k-facet transfer and a ~6e14-test wall mask. Visibility is exact and
 O(receivers x facets): the fluid is three convex cylinders, so a pipe cell sees a lamp point exactly
-when the segment passes that pipe's opening (a custom `Occluder` in the harness, checked against
+when the segment passes that pipe's opening (a custom `Body` in the harness, checked against
 brute-force sampling: 0 disagreements in 8000). And `build_visibility`'s dense
 (occluders x receivers x facets) mask is ~12 GB per occluder at this size, so the harness gathers in
 20k-receiver chunks. **A user-facing driver needs all three of these for a real reactor** — the
@@ -1258,7 +1112,7 @@ directions. With `rho = 0` the same fixture gives `G = P/(4 pi r^2)` exactly.
   profile imposed on the same object returns **zero** intensity along a point source's zero
   normal. The two guards overlap today; both stay, because the overlap is a property of
   `Lambertian` and not of the function, and the comment in `model.py` says so.
-- Transposing `_chunked`'s reshape from `(n_chunks, chunk_size)` to `(chunk_size, n_chunks)` is
+- Transposing `_chunked`'s reshape from `(n_chunks, per_chunk)` to `(per_chunk, n_chunks)` is
   inert: the padded array is flattened again in the same order whichever way it is factored, so
   only the chunk partition changes. What *is* covered is losing a receiver off the padded end,
   which needs a chunk size that does not divide the receiver count to show up at all.
@@ -1303,7 +1157,7 @@ over a region. Run `check_winding` first; this check cannot substitute for it an
 
 **Cost is `n_points × n_facets`**, the same product the receiver visibility build already pays, so
 it is affordable but not free — which is why `build_radiation_model` does **not** call it. Analytic
-occluder bodies do refuse interior points at the visibility build, because `Occluder.contains` is
+occluder bodies do refuse interior points at the visibility build, because `Body.contains` is
 O(1) per point; a triangle soup has no such shortcut. Wiring it into the model by default would
 change a shipped behaviour and roughly double that build, so it is an explicit call.
 
@@ -1944,15 +1798,64 @@ its triangles are irregular and its area is 0.5% under the true cylinder. Rescal
 emitted power removes the area part and gives 1.45% / 0.58%, so roughly half the STL's
 rest-of-chamber error is the inscribed-area deficit rather than the sampling.
 
+**The lamp read from the CAD drawing is the cheap way to get it** (`CadModel.triangles`, 2026-09-24,
+same reference and cells, table in `validation/sozzi_radiation/README.md`): every vertex on the true
+surface, facets bounded in size along the lamp. At `chord=1e-4, facet_size=2.5e-3` it is **66,011
+facets, 0.16% / 1.75% near the lamp and 0.04% elsewhere**, against the analytic 64 x 512's 67,584
+facets, 0.15% / 0.98% and 0.07% — equal near the lamp at equal count, better away from it. ⚠️ The
+near-lamp error follows the spacing ALONG the lamp (`facet_size`), not around it (`chord`): halving
+the chord at a 5 mm facet size bought 0.74% → 0.60% for 63% more facets.
+
 ⚠️ **The mesh's own patches are the expensive way to get this**: the snapped `lampWall` patch
 carries **48,550** faces (and the body patch 329,028), which buys about what a 25,728-facet
 analytic lamp buys for 6.5x the rays. Any patch-built `Surfaces` wants a merge or facet-size
 control in front of it.
 
-⚠️ **The gather's `chunk_size` is a number of RECEIVERS, and at these facet counts that is a
-trap**: the default 4,096 against a 270,336-facet lamp forms a chunk of ~9 GB, which killed the
-first run of this study silently. Bound the entries instead — the harness uses
-`chunk_size = 4_000_000 // n_facets`.
+## A PASS IS BOUNDED IN RECEIVER-BY-FACET PAIRS, NOT RECEIVERS (#509, 2026-09-24)
+
+`pair_limit` (default `work.DEFAULT_PAIR_LIMIT`, 4,000,000) bounds every loop that visits
+receivers: the gather's traced chunks (`direct_fluence_rate`, `direct_irradiance`), the streamed
+path's per-pass mask, `build_visibility`'s body test, `RayCastOcclusion`'s passes and
+`enclosure_winding`. **One helper, `work.receivers_per_pass(pair_limit, per_receiver)`, turns it into
+a receiver count** — `checks.py` used to hand-write the same division. `RadiationSettings.
+gather_chunk_size` is now `gather_pair_limit`. ⚠️ **There is no `chunk_size` on any of these any
+more**: renamed rather than reinterpreted, so an old caller fails with a `TypeError` instead of
+silently getting a different chunk. `work_limit` keeps its meaning — rays × triangles in the
+intersection test — which is a different unit. **The transfer build's `chunk_size` (receiving facets,
+default 256) was deliberately left**: it has the same shape of trap, but an `n^2` transfer at a
+facet count where it would bite is unaffordable anyway.
+
+**Why.** A receiver count left a pass's size to the facet count: the old default 4,096 receivers
+against a 270,336-facet lamp is a ~9 GB pass, which killed the first run of `lamp_resolution.py`
+silently (an out-of-memory kill has no traceback naming the setting), and refining the emitter is
+exactly what a user does to improve accuracy.
+
+⚠️ **A SECOND, WORSE WHOLE-PROBLEM ARRAY WAS FOUND AND REMOVED IN THE SAME CHANGE.** With no mask,
+`_surviving_rows` returned `jnp.ones((n_receivers, n_facets))`, formed *before* any chunking — at a
+mesh's 1.6M cells against a 66k-facet CAD lamp that is ~850 GB, which no chunk size bounds. It went
+unnoticed because every study that hit it (the lamp ladder formed 17 GB of it) ran on macOS, which
+compresses an array of ones to almost nothing. It is now an empty tuple and the scan is handed the
+points alone; `test_a_scene_with_nothing_in_the_way_forms_no_array_the_size_of_the_problem` pins it.
+
+**The default is measured, not copied** (`validation/radiation_gather_pair_limit.py`: analytic
+Sozzi lamps of 8,704 / 67,584 / 270,336 facets, every point doing ~35M pairs, receivers uniform in
+the chamber, `UniformAbsorption(35.67)`; each point in its own process for its peak memory
+footprint, two alternating passes, fastest kept, repeat spread ≤ 1.1 except two points at 1.5 / 1.8;
+jax 0.10.2, CPU, x64, macOS arm64, 11 cores, 2026-09-24):
+
+| path | 1M pairs | 4M | 16M | 64M |
+|---|---|---|---|---|
+| gather alone, s (8.7k / 67.6k / 270k facets) | 0.33 / 0.38 / 0.40 | 0.32 / 0.61 / 0.41 | 0.39 / 0.77 / 0.83 | 0.38 / 0.63 / 0.65 |
+| gather alone, peak footprint | 0.36-0.43 GB | 0.82-0.95 GB | 2.6-2.8 GB | 5.0-5.3 GB |
+| streamed with `Outside`, s | 3.3 / 3.5 / 3.7 | 1.14 / 1.43 / 1.36 | 0.68 / 0.92 / 1.00 | 1.9 / 2.4 / 1.3 |
+| streamed, peak footprint | 0.88-0.93 GB | 1.5-1.9 GB | 4.3-4.6 GB | 7.0-7.3 GB |
+
+4M is as fast as any limit for the traced gather within the spread and keeps every path under 2 GB.
+⚠️ **The streamed path would be 1.4-1.7x faster at 16M, at 2.3-2.8x the footprint**, and its cost at
+small limits is *per-pass host overhead* (a mask build and a fresh gather call per pass), not
+arithmetic — 1M is ~3x slower than 4M on it for the same pairs. That is the lever for #489: the
+streamed pass and the traced chunk inside it want different sizes, and today one limit sets both.
+Every checksum agreed across all 48 points: how the work is cut changes nothing about the answer.
 
 ## ANALYTIC OCCLUSION: BUILT as `SilhouetteOcclusion` — exact per blocker, once six defects were out
 

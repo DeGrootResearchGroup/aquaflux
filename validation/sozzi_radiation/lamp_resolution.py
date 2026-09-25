@@ -24,6 +24,14 @@ So the ladder is run twice: as the case would run it (fixed exitance, so the are
 included) and rescaled to equal emitted power (so only the shape and the absorption sampling
 remain).
 
+**The lamp read from the reactor's CAD drawing** is a further set of rungs when the CAD kernel is
+installed: the drawing's ``lamp`` solid triangulated by :meth:`aquaflux.io.cad.CadModel.triangles`
+at several chord tolerances and facet sizes. Every vertex of those lies on the drawing's surface
+and their facets are bounded in size, so they are the rungs a user of a STEP file would actually
+run. The drawing's lamp has a base disc the analytic lamp and the case's patch both leave out, for
+the reason given in :func:`lamp`; it is dropped here too, so every rung radiates from the same
+surface. (It could not light a cell anyway: its normal points into the end wall.)
+
 Run with ``validation/run_case.sh validation/sozzi_radiation/lamp_resolution.py``.
 """
 
@@ -58,6 +66,20 @@ EXITANCE, ABSORPTION = 696.42, 35.67
 #: (sectors around the lamp, slices along it). The last is the reference.
 LADDER = ((8, 16), (16, 32), (24, 64), (32, 128), (48, 256), (64, 512), (128, 1024))
 SAMPLE = 4000
+#: (chord tolerance, facet size) in metres, for the lamp read from the drawing. The chord sets the
+#: spacing around the lamp -- about 50 sectors at 2e-5 on a 10 mm radius -- and the facet size the
+#: spacing along it.
+DRAWING_LADDER = (
+    (1e-4, 0.02),
+    (2e-5, 0.01),
+    (2e-5, 0.005),
+    (5e-6, 0.0025),
+    # A coarse chord with a fine facet: spacing along the lamp, not around it, is what the cells
+    # nearest it are sensitive to.
+    (1e-4, 0.005),
+    (1e-4, 0.0025),
+)
+DRAWING = HERE.parent / "uvreactor_openfoam" / "of_case" / "SozziTaghipour.step"
 
 
 def _say(message: str) -> None:
@@ -103,6 +125,22 @@ def lamp(sectors: int, slices: int) -> np.ndarray:
     return np.array(faces)
 
 
+def drawing_lamps() -> list[tuple[str, np.ndarray]]:
+    """The drawing's lamp at each rung of :data:`DRAWING_LADDER`, base disc removed; [] without CAD."""
+    try:
+        from aquaflux.io.cad import Placement, read_step
+    except ImportError:
+        _say("CAD kernel not installed: the rungs read from the drawing are skipped")
+        return []
+    cad = read_step(DRAWING, Placement(matrix=[[0, 1, 0], [1, 0, 0], [0, 0, 1]]))
+    rungs = []
+    for chord, size in DRAWING_LADDER:
+        triangles = cad.triangles("lamp", chord=chord, facet_size=size)
+        on_base = np.all(np.abs(triangles[:, :, 0]) < 1e-9, axis=1)
+        rungs.append((f"drawing, chord {chord:g} m, facets {size:g} m", triangles[~on_base]))
+    return rungs
+
+
 def field(vertices: np.ndarray, receivers: np.ndarray) -> tuple[np.ndarray, float]:
     """``G`` at the receivers from a lamp of these facets, and the power it emits."""
     surfaces = Surfaces.from_triangles(vertices, emission=EXITANCE)
@@ -117,15 +155,12 @@ def field(vertices: np.ndarray, receivers: np.ndarray) -> tuple[np.ndarray, floa
     if (outward > 0).mean() < 0.5:
         surfaces = Surfaces.from_triangles(vertices[:, ::-1, :], emission=EXITANCE)
     power = float(np.sum(np.asarray(surfaces.area)) * EXITANCE)
-    # ⚠️ The gather's chunk is a number of RECEIVERS, so at these facet counts the default
-    # 4096 would form a chunk of 4096 x 270,000 entries -- about 9 GB, which is what killed the
-    # first run of this study. Bound the entries instead, as the intersection test does.
+    # The gather bounds each chunk by receiver-by-facet pairs, so the 270,336-facet reference
+    # runs at its default. (It once counted receivers, and its default then formed a 9 GB chunk
+    # against this lamp -- which is what killed the first run of this study.)
     values = np.asarray(
         direct_fluence_rate(
-            surfaces,
-            jnp.asarray(receivers),
-            absorption=UniformAbsorption(ABSORPTION),
-            chunk_size=max(1, int(4_000_000 // len(vertices))),
+            surfaces, jnp.asarray(receivers), absorption=UniformAbsorption(ABSORPTION)
         )
     )
     return values, power
@@ -168,6 +203,7 @@ def main() -> None:
     arms = [("the case's STL", stl)] + [
         (f"{sectors}x{slices}", lamp(sectors, slices)) for sectors, slices in LADDER[:-1]
     ]
+    arms += drawing_lamps()
     for name, vertices in arms:
         started = time.perf_counter()
         values, power = field(vertices, points)

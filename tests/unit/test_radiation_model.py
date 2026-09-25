@@ -17,10 +17,10 @@ from aquaflux.radiation.model import (
     radiosity,
     surface_irradiance,
 )
-from aquaflux.radiation.occluders import Cylinder
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian
 from aquaflux.radiation.self_occlusion import NoOcclusion, RayCastOcclusion, SilhouetteOcclusion
 from aquaflux.radiation.surfaces import Surfaces
+from aquaflux.solids import Cylinder
 from aquaflux.solve import relative_residual_gmres
 
 from tests.unit.radiation_references import (
@@ -589,8 +589,8 @@ def test_an_unset_setting_is_not_passed_on_at_all():
     ):
         assert getattr(RadiationSettings(), options)() == {}, options
     assert RadiationSettings(receiver_quadrature=3).transfer_options() == {"receiver_quadrature": 3}
-    assert RadiationSettings(gather_chunk_size=8).transfer_options() == {}
-    assert RadiationSettings(gather_chunk_size=8).gather_options() == {"chunk_size": 8}
+    assert RadiationSettings(gather_pair_limit=8).transfer_options() == {}
+    assert RadiationSettings(gather_pair_limit=8).gather_options() == {"pair_limit": 8}
     shadowed = RadiationSettings(self_occlusion=RayCastOcclusion())
     assert shadowed.visibility_options() == {"self_occlusion": RayCastOcclusion()}
     assert shadowed.transfer_options() == {"self_occlusion": RayCastOcclusion()}
@@ -662,7 +662,7 @@ def test_a_setting_reaches_the_transfer_build():
     )
 
 
-def test_the_gather_chunk_size_reaches_the_gather():
+def test_the_gather_pair_limit_reaches_the_gather():
     """A setting that is accepted and then dropped is worse than one that is not offered.
 
     Bounding peak memory has no effect on the answer by design, so invariance alone cannot tell
@@ -672,11 +672,13 @@ def test_the_gather_chunk_size_reaches_the_gather():
     surfaces = box(2, emission=3.0, reflectance=0.5)
     points = np.array([[0.5, 0.5, 0.5], [0.2, 0.3, 0.7], [0.9, 0.1, 0.5], [0.4, 0.8, 0.2]])
     whole, _ = fluence_rate(_volume_model(surfaces, points), surfaces)
-    in_threes, _ = fluence_rate(_volume_model(surfaces, points, gather_chunk_size=3), surfaces)
-    np.testing.assert_allclose(np.asarray(whole), np.asarray(in_threes), rtol=1e-14)
+    in_threes = _volume_model(surfaces, points, gather_pair_limit=3 * surfaces.n_facets)
+    np.testing.assert_allclose(
+        np.asarray(whole), np.asarray(fluence_rate(in_threes, surfaces)[0]), rtol=1e-14
+    )
 
-    with pytest.raises(ValueError, match="chunk_size must be at least 1 receiver"):
-        fluence_rate(_volume_model(surfaces, points, gather_chunk_size=0), surfaces)
+    with pytest.raises(ValueError, match="pair_limit must be at least 1"):
+        fluence_rate(_volume_model(surfaces, points, gather_pair_limit=0), surfaces)
 
 
 def test_the_two_masks_are_built_against_the_same_bodies():
@@ -843,7 +845,7 @@ def test_the_field_comes_back_in_the_receivers_own_order():
     surfaces = _lamp_in_a_box(reflectance=0.5)
     points = np.concatenate([AROUND_THE_LAMP, [[0.1, 0.9, 0.3], [0.7, 0.2, 0.8]]])
     shuffle = np.array([3, 0, 4, 2, 1])
-    in_twos = {"gather_chunk_size": 2}
+    in_twos = {"gather_pair_limit": 2 * surfaces.n_facets}
     straight, _ = fluence_rate(_volume_model(surfaces, points, **in_twos), surfaces)
     shuffled, _ = fluence_rate(_volume_model(surfaces, points[shuffle], **in_twos), surfaces)
     np.testing.assert_allclose(np.asarray(straight)[shuffle], np.asarray(shuffled), rtol=1e-14)

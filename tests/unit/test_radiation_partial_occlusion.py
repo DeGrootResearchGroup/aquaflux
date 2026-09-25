@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from aquaflux.radiation.occluders import Cylinder
 from aquaflux.radiation.self_occlusion import NoOcclusion
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.transfer import build_transfer
+from aquaflux.solids import Cylinder
 
 from tests.unit.radiation_references import area_average_onto, facing_plates, quad_of_facet
 

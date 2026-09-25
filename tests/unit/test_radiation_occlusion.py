@@ -7,10 +7,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.radiation.gather import direct_fluence_rate
-from aquaflux.radiation.occluders import Cylinder, HalfSpace
 from aquaflux.radiation.profiles import Isotropic
+from aquaflux.radiation.self_occlusion import NoOcclusion
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.visibility import Visibility, build_visibility
+from aquaflux.solids import Body, Cylinder, HalfSpace, Sphere
 
 POWER = 100.0
 NO_OFFSET = jnp.zeros(())
@@ -306,7 +307,7 @@ def test_streaming_the_bodies_gives_what_a_built_mask_gives(transmittance):
     built = build_visibility([sleeve()], source, probes)
     held = direct_fluence_rate(source, probes, visibility=built, transmittance=transmittance)
     streamed = direct_fluence_rate(
-        source, probes, occluders=[sleeve()], transmittance=transmittance, chunk_size=8
+        source, probes, occluders=[sleeve()], transmittance=transmittance, pair_limit=8
     )
     np.testing.assert_array_equal(np.asarray(streamed), np.asarray(held))
     assert float(np.asarray(held).min()) < float(np.asarray(held).max()), "nothing is shadowed"
@@ -316,7 +317,7 @@ def test_streaming_never_builds_a_mask_wider_than_a_chunk(monkeypatch):
     """The memory claim, pinned mechanically rather than by timing or by peak RSS.
 
     A mask is ``receivers x facets`` per body, so what bounds it is the number of receivers each
-    build is handed. At mesh scale that is the difference between tens of gigabytes and a few
+    build is handed -- eight here, because the source is one facet and the limit eight pairs. At mesh scale that is the difference between tens of gigabytes and a few
     hundred megabytes, and it is invisible in the answer -- which is why this checks the calls
     rather than the field.
     """
@@ -331,14 +332,46 @@ def test_streaming_never_builds_a_mask_wider_than_a_chunk(monkeypatch):
 
     monkeypatch.setattr(gather, "build_visibility", watched)
     source, probes = point_source(), _probe_line(37)
-    direct_fluence_rate(source, probes, occluders=[sleeve()], chunk_size=8)
+    direct_fluence_rate(source, probes, occluders=[sleeve()], pair_limit=8)
     assert handed == [8, 8, 8, 8, 5], handed
+
+
+def test_streaming_and_the_body_test_count_pairs_not_receivers(monkeypatch):
+    """Four facets and a limit of eight pairs: two receivers per streamed mask and per body test.
+
+    With a one-facet source a pair limit and a receiver count are the same number, so the test
+    above cannot tell them apart; this one can.
+    """
+    from aquaflux.radiation import gather, visibility
+
+    handed, tested = [], []
+    real_build, real_blocked = gather.build_visibility, visibility._blocked_by
+
+    def watched_build(occluders, surfaces, points, **options):
+        handed.append(np.asarray(points).shape[0])
+        return real_build(occluders, surfaces, points, **options)
+
+    def watched_blocked(bodies, origin, target, near):
+        tested.append(target.shape[0])
+        return real_blocked(bodies, origin, target, near)
+
+    monkeypatch.setattr(gather, "build_visibility", watched_build)
+    monkeypatch.setattr(visibility, "_blocked_by", watched_blocked)
+    source = point_source(
+        np.array([[0.0, 0.0, 0.0], [0.0, 0.1, 0.0], [0.0, 0.0, 0.1], [0.0, -0.1, 0.0]])
+    )
+    direct_fluence_rate(source, _probe_line(7), occluders=[sleeve()], pair_limit=8)
+    assert handed == [2, 2, 2, 1], handed
+    # The mask build bounds its own body test the same way. Called directly, because through the
+    # streamed path it is only ever handed a chunk that already fits, and its bound never binds.
+    tested.clear()
+    build_visibility([sleeve()], source, _probe_line(7), pair_limit=8)
+    assert tested == [2, 2, 2, 1], tested
 
 
 def test_streaming_with_no_bodies_still_streams_the_surface_s_own_shadowing():
     """An empty sequence is a scene with nothing but the emitting surface in it, which shadows
     itself -- not a scene with the mask switched off."""
-    from aquaflux.radiation.self_occlusion import NoOcclusion
 
     panel = Surfaces.from_triangles(
         np.concatenate(
@@ -350,7 +383,7 @@ def test_streaming_with_no_bodies_still_streams_the_surface_s_own_shadowing():
         emission=[1000.0, 0.0],
     )
     probes = np.array([[3.0, 0.0, 0.0], [3.0, 2.0, 0.0]])
-    shadowed = direct_fluence_rate(panel, probes, occluders=[], chunk_size=1)
+    shadowed = direct_fluence_rate(panel, probes, occluders=[], pair_limit=1)
     clear = direct_fluence_rate(panel, probes, occluders=[], self_occlusion=NoOcclusion())
     assert float(shadowed[0]) == 0.0, "the panel in the way should hide the emitter"
     assert float(clear[0]) > 0.0, "with self-occlusion off the emitter is visible again"
@@ -364,3 +397,50 @@ def test_a_built_mask_and_the_bodies_together_are_refused():
             source, probes, visibility=build_visibility([sleeve()], source, probes),
             occluders=[sleeve()],
         )  # fmt: skip
+
+
+class _HostBody(Body):
+    """A blocker answered on the host, as a triangulated one is: numpy, and index bookkeeping.
+
+    Stands in for the triangle path, whose grid walk drops rays as they are settled and so
+    cannot be traced. What matters here is only that it touches ``numpy`` on its arguments,
+    which is what raises under a trace.
+    """
+
+    def contains(self, position) -> jnp.ndarray:
+        """A zero-thickness sheet has no interior, so nothing is inside it."""
+        return jnp.zeros(jnp.asarray(position).shape[:-1], dtype=bool)
+
+    def blocks(self, origin, target, min_distance) -> jnp.ndarray:
+        """Blocks whatever starts on the far side of ``x = 0``."""
+        del min_distance
+        source, _ = np.broadcast_arrays(
+            np.asarray(origin, dtype=float), np.asarray(target, dtype=float)
+        )
+        live = np.flatnonzero(np.ones(source.shape[:-1]).ravel())
+        out = np.zeros(source.shape[:-1], dtype=bool).ravel()
+        out[live] = source.reshape(-1, 3)[live, 0] < 0.0
+        return jnp.asarray(out.reshape(source.shape[:-1]))
+
+
+def test_a_host_side_blocker_and_a_primitive_stand_in_one_scene():
+    """The hybrid: a vessel described as primitives beside whatever really is a triangle soup.
+
+    ⚠️ **Compiling the mask build unconditionally breaks this, and breaks it by raising.** A
+    primitive wants compiling — several inequalities across a receivers-by-facets array
+    materialize every intermediate otherwise — and a host-side blocker cannot be traced at all.
+    Whoever builds the mask therefore reads each body's own declaration. Without that, the only
+    bodies that work are the ones this module happens to ship.
+    """
+    vertices = np.array([[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]])
+    emitters = Surfaces.from_triangles(vertices, emission=1.0)
+    points = np.array([[0.0, 0.0, 1.0], [0.0, 0.0, -1.0]])
+    primitive = Sphere(centre=[0.0, 0.0, 5.0], radius=0.1)
+    assert primitive.traceable and not _HostBody().traceable
+
+    mask = build_visibility(
+        [primitive, _HostBody()], emitters, points, self_occlusion=NoOcclusion()
+    )
+    assert mask.blocked.shape == (2, 2, 1)
+    assert not np.asarray(mask.blocked[0]).any(), "the sphere is nowhere near these segments"
+    assert not np.asarray(mask.blocked[1]).any(), "the facet centroid is not at negative x"

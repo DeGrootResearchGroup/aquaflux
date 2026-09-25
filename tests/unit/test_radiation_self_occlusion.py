@@ -7,11 +7,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.radiation.gather import direct_fluence_rate
-from aquaflux.radiation.occluders import Cylinder
 from aquaflux.radiation.self_occlusion import NoOcclusion, RayCastOcclusion
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.triangles import _call_shape, _edge_function, segment_is_cut
 from aquaflux.radiation.visibility import build_visibility
+from aquaflux.solids import Cylinder
 from scipy.spatial import ConvexHull
 
 from tests.unit.radiation_references import (
@@ -518,3 +518,29 @@ def test_the_grid_changes_what_the_ray_test_COSTS_and_not_what_it_ANSWERS(grid):
     np.testing.assert_array_equal(np.asarray(culled.fraction), np.asarray(plain.fraction))
     blocked = np.asarray(plain.fraction) > 0.0
     assert 0.2 < blocked.mean() < 0.9, f"fixture is one-sided: {blocked.mean()}"
+
+
+def test_the_ray_test_passes_are_bounded_in_pairs_not_receivers(monkeypatch):
+    """One ray per receiver-and-facet pair, so a pass is bounded by pairs whatever the facets."""
+    from aquaflux.radiation import self_occlusion
+
+    rays = []
+    real = self_occlusion.segment_is_cut
+
+    def watched(origin, target, *args, **kwargs):
+        rays.append(origin.shape[0])
+        return real(origin, target, *args, **kwargs)
+
+    monkeypatch.setattr(self_occlusion, "segment_is_cut", watched)
+    rng = np.random.default_rng(3)
+    for n_facets in (1, 4):
+        rays.clear()
+        corners = rng.uniform(-0.1, 0.1, (n_facets, 3, 3))
+        surfaces = Surfaces.from_triangles(corners, emission=1.0)
+        build_visibility(
+            [], surfaces, rng.uniform(1.0, 2.0, (30, 3)),
+            self_occlusion=RayCastOcclusion(pair_limit=12),
+        )  # fmt: skip
+        assert max(rays) <= 12, rays
+        assert rays[0] == (12 // n_facets) * n_facets, rays
+        assert sum(rays) == 30 * n_facets, "every pair is still cast"

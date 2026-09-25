@@ -42,6 +42,7 @@ from aquaflux.radiation.self_occlusion import (
     RayCastOcclusion,
     SelfOcclusion,
 )
+from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, receivers_per_pass
 
 __all__ = ["Visibility", "build_visibility"]
 
@@ -60,7 +61,7 @@ def _compiled_blocks(body, origin, target, near):
     walking a grid of triangles, dropping rays as they are settled — cannot be traced at all,
     and deliberately so.
 
-    So this is applied only where :attr:`~aquaflux.radiation.occluders.Occluder.traceable` says
+    So this is applied only where :attr:`~aquaflux.solids.Body.traceable` says
     it may be, which is a declaration on the body rather than a guess from its type. The two
     kinds are meant to compose in one scene: a vessel described as primitives, with whatever
     genuinely is a triangle soup standing beside it.
@@ -171,7 +172,7 @@ def build_visibility(
     receiver_facet=None,
     self_occlusion: SelfOcclusion | None = None,
     offset_scale: float = 1e-6,
-    chunk_size: int = 4096,
+    pair_limit: int = DEFAULT_PAIR_LIMIT,
 ) -> Visibility:
     """Work out, once, which bodies lie between which sources and which receivers.
 
@@ -181,7 +182,7 @@ def build_visibility(
 
     Parameters
     ----------
-    occluders : sequence of Occluder
+    occluders : sequence of aquaflux.solids.Body
         The analytic bodies. An empty sequence is fine; the surface's own triangles are handled
         separately.
     surfaces : Surfaces
@@ -216,10 +217,10 @@ def build_visibility(
         "use the default", which is on. Switching it off is rarely right: a surface that does not
         shadow itself is the defect this module exists to fix, and a mask silently missing it
         looks exactly like one that includes it.
-    chunk_size : int, optional
-        Receivers per pass of the analytic-body test, bounding its peak memory. Each
-        self-occlusion strategy carries its own chunking, because what has to be bounded differs
-        between them.
+    pair_limit : int, optional
+        Receiver-by-facet pairs per pass of the analytic-body test, bounding its peak memory
+        whatever the facet count. Each self-occlusion strategy carries its own bound, because
+        what has to be bounded differs between them.
 
     Returns
     -------
@@ -253,9 +254,10 @@ def build_visibility(
     # area and no surface to shadow itself with, so it needs no exclusion.
     near = offset_scale * jnp.sqrt(surfaces.area)
 
+    per_pass = receivers_per_pass(pair_limit, n_facets)
     primitive_rows = []
-    for start in range(0, n_receivers, chunk_size):
-        receivers = points[start : start + chunk_size]
+    for start in range(0, n_receivers, per_pass):
+        receivers = points[start : start + per_pass]
         origin = surfaces.centroid[None, :, :]
         target = receivers[:, None, :]
         if occluders:

@@ -1,12 +1,10 @@
-"""Solid bodies that stand between a source and a receiver.
+"""Solid bodies, and the two questions asked of them: does a segment pass through, is a point inside.
 
-An occluder answers one question about a straight segment: does the segment pass through this
-body? That is all the gather needs, because a body's *effect* on the light — opaque, or a
-partly transmitting sleeve — is carried separately as a transmittance, and the two are split
-deliberately. The geometry is fixed when the model is built and the intersection test is a hard
-yes or no; the transmittance is a number that varies from one evaluation to the next and that a
-design study differentiates with respect to. Keeping them apart is what lets the expensive,
-discontinuous half be computed once and the smooth half stay live.
+A :class:`Body` answers those two questions and nothing else. It says nothing about what the
+body *does* to whatever crosses it — how much light a sleeve lets through, say — because that is
+the consumer's business and usually a quantity it wants to vary and differentiate, while the
+geometry is fixed. Keeping them apart is what lets the expensive, discontinuous half (which
+segments cross which bodies) be computed once and the smooth half stay live.
 
 **The bodies here are analytic primitives, and that is a structural choice rather than a cheaper
 one.** A cylinder answers "does this segment hit me" with a formula: a few dozen arithmetic
@@ -22,8 +20,9 @@ carries none.
 
 **Three layers, each doing one thing.**
 
-:class:`Occluder` is the contract the gather sees: :meth:`~Occluder.blocks` and
-:meth:`~Occluder.contains`. Anything answering those two questions can stand in the light.
+:class:`Body` is the contract a consumer sees: :meth:`~Body.blocks` and :meth:`~Body.contains`.
+Anything answering those two questions can stand in the way, including a body answered on the
+host from triangles rather than by a formula.
 
 :class:`Solid` narrows it to a body whose inside, seen along a line, is a **bounded union of
 intervals** in the line's parameter. That is the property every operation here rests on: blocking
@@ -44,10 +43,10 @@ not a sampled approximation. :class:`Outside` is the one that matters most in pr
 wall is most naturally described by the *fluid it holds*, and a segment is then clear exactly when
 the fluid's regions cover it end to end.
 
-⚠️ **Do not represent a body twice.** A sleeve that is already an emitting surface must not also
-be added here: every ray would then leave a facet lying exactly on an occluder, which is the
-degenerate configuration that ray-tracing tools warn about, and the emitter's own convexity
-already makes the source-side cosine clamp an exact visibility test for it.
+⚠️ **Do not represent one surface twice.** A body whose surface is also, elsewhere, a set of
+triangles the segments start from — a lamp sleeve that is also the emitting surface of a
+radiation model — must not be passed as a body as well: every segment would then leave a point
+lying exactly on a body's surface, the degenerate configuration ray-tracing tools warn about.
 """
 
 from __future__ import annotations
@@ -63,6 +62,7 @@ import jax.numpy as jnp
 from aquaflux.vectors import dot, norm_squared
 
 __all__ = [
+    "Body",
     "Box",
     "Cone",
     "ConvexSolid",
@@ -70,7 +70,6 @@ __all__ = [
     "Difference",
     "HalfSpace",
     "Intersection",
-    "Occluder",
     "Outside",
     "Solid",
     "Sphere",
@@ -78,7 +77,7 @@ __all__ = [
 ]
 
 
-class Occluder(eqx.Module):
+class Body(eqx.Module):
     """A solid body, and the test for whether a segment passes through it."""
 
     #: Whether this body's answers are a pure array expression, so a caller may compile them.
@@ -90,7 +89,7 @@ class Occluder(eqx.Module):
     #: several inequalities forms several receiver-by-facet intermediates, and eagerly every one
     #: of them is written to memory. Since the two kinds are meant to stand in one scene
     #: together, whoever builds the mask has to be told which it is holding. The default is the
-    #: safe answer, so a bespoke occluder is merely not compiled rather than broken.
+    #: safe answer, so a bespoke body is merely not compiled rather than broken.
     traceable: ClassVar[bool] = False
 
     @abc.abstractmethod
@@ -441,7 +440,7 @@ class _Taper(eqx.Module):
 # ---------------------------------------------------------------------------------------------
 
 
-class Solid(Occluder):
+class Solid(Body):
     """A body whose inside, seen along a line, is a bounded union of intervals.
 
     Everything else here is written against that one property. Blocking is "does any interval
@@ -950,7 +949,7 @@ def _covers(enter, exit_, lower, upper) -> jnp.ndarray:
     return jnp.all(continued | ~inside, axis=-1)
 
 
-class Outside(Occluder):
+class Outside(Body):
     """Everything that is not fluid — a vessel described by what it holds rather than by its wall.
 
     This is the cheapest and most accurate way to shadow a real reactor, and it is a different
@@ -979,10 +978,10 @@ class Outside(Occluder):
     Attributes
     ----------
     regions : tuple of Solid
-        The fluid. Their union is everything this occluder is *not*.
+        The fluid. Their union is everything this body is *not*.
     tolerance : jnp.ndarray
         How far outside every region a point must be, as a length, before
-        :meth:`~Occluder.contains` calls it embedded in the wall. A mesh never lands exactly on
+        :meth:`~Body.contains` calls it embedded in the wall. A mesh never lands exactly on
         the surface its cells were snapped to, so a cell centre a rounding outside a region is a
         discretization, not a cell in the metal. Applies only to that test: where a *segment* is
         clear is decided by the geometry with no slack, and the margin it needs at its two ends
@@ -1000,7 +999,7 @@ class Outside(Occluder):
 
     @property
     def fluid(self) -> Solid:
-        """The regions as one body — what this occluder is the outside of."""
+        """The regions as one body — what this body is the outside of."""
         return Union(*self.regions)
 
     def contains(self, position) -> jnp.ndarray:
