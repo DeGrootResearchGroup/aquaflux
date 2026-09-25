@@ -70,11 +70,16 @@ def _absolute(path: pathlib.Path, module: str | None, level: int) -> list[str]:
     return [*package[: len(package) - (level - 1)], *(module.split(".") if module else [])]
 
 
+#: What may import the case layer: itself, and the command-line entry point, which runs a case file and so
+#: sits above everything. Nothing else is above it.
+ABOVE_THE_CASE_LAYER = frozenset({"case", "__main__.py"})
+
+
 def test_nothing_below_the_case_layer_imports_it() -> None:
     offenders = [
         f"{path.relative_to(PACKAGE)}:{line} imports {'.' * level}{module}"
         for path in sorted(PACKAGE.rglob("*.py"))
-        if path.relative_to(PACKAGE).parts[0] != "case"
+        if path.relative_to(PACKAGE).parts[0] not in ABOVE_THE_CASE_LAYER
         for line, module, level in _imports(path)
         if _absolute(path, module, level)[:2] == ["aquaflux", "case"]
     ]

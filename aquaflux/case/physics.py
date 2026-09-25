@@ -16,13 +16,21 @@ from __future__ import annotations
 
 import abc
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
+
+import numpy as np
 
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import AdvectionScheme
 from aquaflux.flow import MomentumContinuity, sheared_patches
-from aquaflux.turbulence import CoupledRANS, ScalarVariableTransform, SSTModel, SSTTurbulence
+from aquaflux.turbulence import (
+    CoupledRANS,
+    ScalarVariableTransform,
+    SSTModel,
+    SSTTurbulence,
+    coupled_fields,
+)
 
 from .boundaries import PatchCondition
 
@@ -72,6 +80,39 @@ class Physics(abc.ABC):
             The problem's assembler, in the form its initializer and its solve take.
         """
 
+    @abc.abstractmethod
+    def output_fields(self, problem: object, solution: object) -> dict[str, np.ndarray]:
+        """The converged fields a run writes, by name.
+
+        Parameters
+        ----------
+        problem : object
+            What :meth:`build` returned.
+        solution : object
+            What the case's solve returned for it.
+
+        Returns
+        -------
+        dict of {str: np.ndarray}
+            The physical fields -- a vector ``(n_cells, dim)``, a scalar ``(n_cells,)`` -- under the
+            names a file's field writers select by. The pressure is the solved one, not re-based.
+        """
+
+    @abc.abstractmethod
+    def progress_fields(self, problem: object) -> Callable[[object], Mapping[str, object]] | None:
+        """What a march's log reports the change of at each step, or ``None`` for nothing.
+
+        Parameters
+        ----------
+        problem : object
+            What :meth:`build` returned.
+
+        Returns
+        -------
+        callable or None
+            ``state -> {name: field}``, over the state the march iterates on.
+        """
+
 
 @dataclasses.dataclass(frozen=True)
 class Laminar(Physics):
@@ -94,6 +135,15 @@ class Laminar(Physics):
     def build(self, spec: CaseSpec, mesh: Mesh, geometry: MeshGeometry) -> MomentumContinuity:
         """The flow assembler -- see :meth:`Physics.build`."""
         return _momentum(spec, mesh, geometry)
+
+    def output_fields(self, problem: MomentumContinuity, solution: object) -> dict[str, np.ndarray]:
+        """``U`` and ``p`` -- see :meth:`Physics.output_fields`."""
+        velocity, pressure = problem.unpack(solution)
+        return {"U": np.asarray(velocity), "p": np.asarray(pressure)}
+
+    def progress_fields(self, problem: MomentumContinuity) -> None:
+        """None: the log reports the residual alone -- see :meth:`Physics.progress_fields`."""
+        del problem
 
 
 @dataclasses.dataclass(frozen=True)
@@ -189,6 +239,24 @@ class RANS(Physics):
         return CoupledRANS.build(
             momentum, turbulence, k_transform=self.k_variable, omega_transform=self.omega_variable
         )
+
+    def output_fields(self, problem: CoupledRANS, solution: object) -> dict[str, np.ndarray]:
+        """``U``, ``p``, ``k``, ``omega`` and the eddy viscosity ``nut`` -- see :meth:`Physics.output_fields`."""
+        flow, k, omega = solution
+        momentum = problem.momentum
+        velocity, pressure = momentum.unpack(flow)
+        nut = problem.turbulence.closure_fields(momentum.velocity_fields(flow), k, omega).nu_t
+        return {
+            "U": np.asarray(velocity),
+            "p": np.asarray(pressure),
+            "k": np.asarray(k),
+            "omega": np.asarray(omega),
+            "nut": np.asarray(nut),
+        }
+
+    def progress_fields(self, problem: CoupledRANS) -> Callable[[object], Mapping[str, object]]:
+        """The physical velocity components, pressure, ``k``, ``omega`` and ``nu_t`` -- see :meth:`Physics.progress_fields`."""
+        return coupled_fields(problem)
 
 
 def _set(**settings: object) -> dict[str, object]:

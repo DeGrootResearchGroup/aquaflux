@@ -66,6 +66,7 @@ from .boundaries import FixedTurbulence, Inlet, IntensityLength, Outlet, PatchCo
 from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
 from .mesh_source import GeometricGrading, MeshSource, OpenFOAMMesh, StructuredGrid
+from .outputs import Checkpoints, OpenFOAMTime, Outputs, Vtk
 from .physics import RANS, Laminar, Physics
 from .solver import CoupledMarch, FlowMarch, RootSolve, Segregated, SolverSpec, ViscosityRamp
 
@@ -135,6 +136,9 @@ class CaseSpec:
         How the case is solved -- :class:`~aquaflux.case.CoupledMarch`, :class:`~aquaflux.case.FlowMarch`
         or :class:`~aquaflux.case.Segregated`. Unset, its physics' march with the library's own
         settings (see :meth:`~aquaflux.case.CheckedCase.solve`).
+    outputs : Outputs
+        What a run writes and where (see :func:`~aquaflux.case.run_case`); unset, the fields as VTK and
+        the log, in ``results/`` beside the case file.
 
     Raises
     ------
@@ -144,7 +148,8 @@ class CaseSpec:
         If there are no boundary patches, if the physics refuses one (a turbulence setting in a laminar
         case, an inlet with no inflow turbulence in a Reynolds-averaged one), or if the pressure level
         is not fixed exactly once: a closed domain with no ``pressure_datum``, or a datum beside an
-        outlet; or if the solver cannot solve this physics or hold this drive.
+        outlet; if the solver cannot solve this physics or hold this drive; or if an output writes an
+        OpenFOAM time directory for a mesh that is not an OpenFOAM one.
     """
 
     mesh: MeshSource
@@ -156,6 +161,7 @@ class CaseSpec:
     pressure_datum: PressureDatum | None = None
     sources: tuple[SourceSpec, ...] = ()
     solver: SolverSpec | None = None
+    outputs: Outputs = dataclasses.field(default_factory=Outputs)
 
     def __post_init__(self) -> None:
         for name, family in (
@@ -163,6 +169,7 @@ class CaseSpec:
             ("fluid", Fluid),
             ("physics", Physics),
             ("numerics", Numerics),
+            ("outputs", Outputs),
         ):
             if not isinstance(getattr(self, name), family):
                 raise TypeError(
@@ -208,6 +215,13 @@ class CaseSpec:
         )
         if self.solver is not None:
             self.solver.refuse_for(self.physics, self.drive)
+        if not isinstance(self.mesh, OpenFOAMMesh) and any(
+            isinstance(writer, OpenFOAMTime) for writer in self.outputs.fields
+        ):
+            raise ValueError(
+                "outputs.fields: an OpenFOAMTime writes into an OpenFOAM case, whose mesh must be the "
+                f"case's own, but the mesh is a {type(self.mesh).__name__}. Write the fields as Vtk."
+            )
 
     def check_against(self, mesh: Mesh) -> None:
         """Refuse this case on ``mesh`` unless its patches fit it exactly.
@@ -425,8 +439,15 @@ _CASE_MAPPING = SettingsMapping(
         GmresSolve,
         DirectSolve,
         *PRECONDITIONER_SPEC_MAPPING.kinds,
+        Outputs,
+        Vtk,
+        OpenFOAMTime,
+        Checkpoints,
     ]
 )
+
+#: The sections with one form each, whose ``kind`` a file may leave out.
+_ONE_FORM_SECTIONS = (("fluid", Fluid), ("numerics", Numerics), ("outputs", Outputs))
 
 #: The case's own kind name. A case file does not write it: the whole document is the case.
 _CASE_KIND = CaseSpec.__name__
@@ -457,7 +478,8 @@ def case_spec_from_mapping(mapping: Mapping[str, object]) -> CaseSpec:
         numerics:
           momentum_advection: {kind: LimitedUpwind, limiter: {kind: VenkatakrishnanLimiter}}
 
-    The ``fluid`` and ``numerics`` sections have one form each, so their ``kind`` may be left out.
+    The ``fluid``, ``numerics`` and ``outputs`` sections have one form each, so their ``kind`` may be
+    left out.
 
     Parameters
     ----------
@@ -484,7 +506,7 @@ def case_spec_from_mapping(mapping: Mapping[str, object]) -> CaseSpec:
             f"a case file's top level is the case itself and names no kind, got kind {mapping['kind']!r}."
         )
     sections = dict(mapping)
-    for section, kind in (("fluid", Fluid), ("numerics", Numerics)):
+    for section, kind in _ONE_FORM_SECTIONS:
         if isinstance(sections.get(section), Mapping) and "kind" not in sections[section]:
             sections[section] = {"kind": kind.__name__, **sections[section]}
     return _CASE_MAPPING.from_mapping({**sections, "kind": _CASE_KIND})
@@ -517,6 +539,7 @@ def case_spec_to_mapping(spec: CaseSpec) -> dict[str, object]:
         raise TypeError(f"only a CaseSpec is written as a case, got {type(spec).__name__}.")
     mapping = _CASE_MAPPING.to_mapping(spec)
     del mapping["kind"]
-    for section in ("fluid", "numerics"):
-        del mapping[section]["kind"]
+    for section, _ in _ONE_FORM_SECTIONS:
+        if section in mapping:
+            del mapping[section]["kind"]
     return mapping

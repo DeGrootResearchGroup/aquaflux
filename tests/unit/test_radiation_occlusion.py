@@ -346,13 +346,13 @@ def test_streaming_never_builds_a_mask_wider_than_a_chunk(monkeypatch):
     from aquaflux.radiation import gather
 
     handed = []
-    real = gather.build_visibility
+    real = gather._unchecked_visibility
 
     def watched(occluders, surfaces, points, **options):
         handed.append(np.asarray(points).shape[0])
         return real(occluders, surfaces, points, **options)
 
-    monkeypatch.setattr(gather, "build_visibility", watched)
+    monkeypatch.setattr(gather, "_unchecked_visibility", watched)
     source, probes = point_source(), _probe_line(37)
     direct_fluence_rate(source, probes, occluders=[sleeve()], pair_limit=8)
     assert handed == [8, 8, 8, 8, 5], handed
@@ -367,7 +367,7 @@ def test_streaming_and_the_body_test_count_pairs_not_receivers(monkeypatch):
     from aquaflux.radiation import gather, visibility
 
     handed, tested = [], []
-    real_build, real_blocked = gather.build_visibility, visibility._blocked_by
+    real_build, real_blocked = gather._unchecked_visibility, visibility._blocked_by
 
     def watched_build(occluders, surfaces, points, **options):
         handed.append(np.asarray(points).shape[0])
@@ -377,7 +377,7 @@ def test_streaming_and_the_body_test_count_pairs_not_receivers(monkeypatch):
         tested.append(target.shape[0])
         return real_blocked(bodies, origin, target, near)
 
-    monkeypatch.setattr(gather, "build_visibility", watched_build)
+    monkeypatch.setattr(gather, "_unchecked_visibility", watched_build)
     monkeypatch.setattr(visibility, "_blocked_by", watched_blocked)
     source = point_source(
         np.array([[0.0, 0.0, 0.0], [0.0, 0.1, 0.0], [0.0, 0.0, 0.1], [0.0, -0.1, 0.0]])

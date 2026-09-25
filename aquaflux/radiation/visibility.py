@@ -131,6 +131,15 @@ class Visibility(eqx.Module):
         several did they may or may not overlap in angle -- a tiling of one flat wall does not,
         and is the common benign case -- so this reports "not proven", not "wrong". Always
         ``False`` from a ray test, whose ``or`` is idempotent.
+    clear_behind : bool
+        Whether pairs whose source faces away from the receiver were recorded clear in
+        :attr:`hidden_by_geometry` without being tested, as the ray test does for receivers in
+        the volume. Such a pair carries no light from a source that is dark behind itself -- a
+        :attr:`~aquaflux.radiation.profiles.Profile.dark_behind` profile -- so nothing it could
+        hide reaches the receiver, and the mask there reads "blocked, where it matters". A
+        gather through a mask with this set therefore **refuses** a set with any areal facet
+        whose profile is not dark behind: through that facet's back the recorded clear would be
+        taken at its word.
 
     Notes
     -----
@@ -144,6 +153,7 @@ class Visibility(eqx.Module):
     receivers: jnp.ndarray
     hidden_by_geometry: jnp.ndarray
     overlapping: jnp.ndarray
+    clear_behind: bool = eqx.field(static=True, default=False)
 
     @property
     def n_occluders(self) -> int:
@@ -301,10 +311,37 @@ def build_visibility(
     """
     points = jnp.asarray(points, dtype=float)
     occluders = tuple(occluders)
+    refuse_points_inside(occluders, surfaces, points)
+    return _unchecked_visibility(
+        occluders,
+        surfaces,
+        points,
+        receiver_facet=receiver_facet,
+        self_occlusion=self_occlusion,
+        offset_scale=offset_scale,
+        pair_limit=pair_limit,
+    )
+
+
+def _unchecked_visibility(
+    occluders,
+    surfaces,
+    points,
+    *,
+    receiver_facet=None,
+    self_occlusion: SelfOcclusion | None = None,
+    offset_scale: float = 1e-6,
+    pair_limit: int = DEFAULT_PAIR_LIMIT,
+) -> Visibility:
+    """:func:`build_visibility` without its refusal of points inside a body.
+
+    For a caller that has already refused the whole scene and builds one mask per pass of it --
+    a stream, which would otherwise check every facet again for every pass.
+    """
+    points = jnp.asarray(points, dtype=float)
+    occluders = tuple(occluders)
     strategy = RayCastOcclusion() if self_occlusion is None else self_occlusion
     n_receivers, n_facets = points.shape[0], surfaces.n_facets
-
-    refuse_points_inside(occluders, surfaces, points)
 
     # Relative to the facet's own size, per the `offset_scale` note above. A point source has no
     # area and no surface to shadow itself with, so it needs no exclusion.
@@ -333,4 +370,5 @@ def build_visibility(
         receivers=points,
         hidden_by_geometry=geometry.fraction,
         overlapping=geometry.overlapping,
+        clear_behind=geometry.clear_behind,
     )

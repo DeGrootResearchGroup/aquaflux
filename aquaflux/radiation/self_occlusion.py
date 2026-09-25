@@ -41,6 +41,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from aquaflux.radiation.checks import open_facets
+from aquaflux.radiation.clipping import decidable_heights
 from aquaflux.radiation.grid import TriangleGrid
 from aquaflux.radiation.silhouette import (
     angular_cone,
@@ -78,10 +79,17 @@ class OcclusionField(eqx.Module):
         tiled blocker covers a pair with several of its triangles without any of them
         overlapping. It is a count taken in the pass that already runs, so it costs nothing,
         but it is not a detector for the over-count.
+    clear_behind : bool
+        Whether a pair whose source faces away from its receiver was recorded clear without
+        being tested. Such a pair carries no light from a source that is dark behind itself, so
+        whatever a test found there would be multiplied by zero; see
+        :attr:`~aquaflux.radiation.visibility.Visibility.clear_behind` for what it asks of a
+        caller.
     """
 
     fraction: jnp.ndarray
     overlapping: jnp.ndarray
+    clear_behind: bool = eqx.field(static=True, default=False)
 
 
 class SelfOcclusion(eqx.Module):
@@ -112,6 +120,25 @@ class SelfOcclusion(eqx.Module):
         -------
         OcclusionField
         """
+
+    def prepared(self, surfaces) -> SelfOcclusion:
+        """This strategy with whatever it can work out from ``surfaces`` alone done once.
+
+        For a caller that builds many masks of one surface -- a stream building one per pass of
+        receivers -- so that work depending only on the surface is not repeated for every pass.
+        The answers are the same either way. Unless a strategy has such work, it is itself.
+
+        Parameters
+        ----------
+        surfaces : Surfaces
+            The emitting set the masks will be built for.
+
+        Returns
+        -------
+        SelfOcclusion
+        """
+        del surfaces
+        return self
 
 
 class NoOcclusion(SelfOcclusion):
@@ -159,89 +186,130 @@ class RayCastOcclusion(SelfOcclusion):
         and, through that, its speed. It bounds the grid's passes too: a step of the walk tests
         every live ray against everything its voxel holds, which without a bound is one array of
         every pair in that step.
-    grid : bool or int or tuple of int
+    grid : bool or int or tuple of int or TriangleGrid
         Cull each ray's candidates with a uniform grid over the triangles. ``False`` (the
         default) tests everything; ``True`` sizes the grid from the triangle count; an integer
-        or a triple sets its resolution per axis. **Off by default** because it is a change of
-        cost, not of answers, and the answers are what the shipped path is trusted for -- but a
-        real reactor is unusable without it.
+        or a triple sets its resolution per axis; a built
+        :class:`~aquaflux.radiation.grid.TriangleGrid` is used as it is, and must be of the
+        surface's own triangles. **Off by default** because it is a change of cost, not of
+        answers, and the answers are what the shipped path is trusted for -- but a real reactor
+        is unusable without it.
+
+    Notes
+    -----
+    **For receivers in the volume, a pair whose source faces away is not cast at all** when
+    every areal facet's profile is :attr:`~aquaflux.radiation.profiles.Profile.dark_behind`:
+    the gather weights that pair by the source's radiance towards the receiver, which is then
+    exactly zero, so the ray's answer could only ever be multiplied by nothing. It is recorded
+    clear, and the mask says so (:attr:`OcclusionField.clear_behind`). A lamp sees about half of
+    each receiver from behind, so this is a large share of the rays. The test is on the sign of
+    the receiver's height above the facet's plane, the same quantity the gather's cosine is, and
+    a height too close to zero for its sign to be trusted is cast rather than skipped. Receivers
+    on facets -- the surface-to-surface transfer -- are always cast in full: the transfer's
+    weights do not vanish behind a source.
     """
 
     pair_limit: int = DEFAULT_PAIR_LIMIT
     work_limit: int = 4_000_000
-    grid: bool | int | tuple[int, int, int] = False
+    grid: bool | int | tuple[int, int, int] | TriangleGrid = False
 
     def field(self, surfaces, points, near, receiver_facet) -> OcclusionField:
         """Cast the rays. See :meth:`SelfOcclusion.field`."""
-        n_receivers, n_facets = points.shape[0], surfaces.n_facets
-        grid = (
-            TriangleGrid.build(
-                np.asarray(surfaces.vertices),
-                resolution=None if self.grid is True else self.grid,
-            )
-            if self.grid is not False
-            else None
-        )
-        facet = jnp.arange(n_facets)
-        # Every ray must ignore the facet it leaves; one aimed at a facet centroid must ignore
-        # that facet too, or it is blocked by its own destination.
-        source_of = jnp.broadcast_to(facet[None, :], (n_receivers, n_facets))
-        if receiver_facet is None:
-            exclusions = source_of[..., None]
-        else:
-            target_of = jnp.broadcast_to(
-                jnp.asarray(receiver_facet, dtype=int)[:, None], (n_receivers, n_facets)
-            )
-            exclusions = jnp.stack([source_of, target_of], axis=-1)
-
+        n_receivers, n_facets = int(points.shape[0]), int(surfaces.n_facets)
+        grid = self._triangle_grid(surfaces)
+        clear_behind = receiver_facet is None and surfaces.dark_behind
+        centroid = np.asarray(surfaces.centroid)
+        near = np.asarray(near, dtype=float)
+        on_facet = None if receiver_facet is None else np.asarray(receiver_facet, dtype=int)
+        blocked = np.zeros((n_receivers, n_facets), dtype=bool)
         per_pass = receivers_per_pass(self.pair_limit, n_facets)
-        rows = []
         for start in range(0, n_receivers, per_pass):
-            receivers = points[start : start + per_pass]
-            rays = receivers.shape[0]
-            flat = (rays * n_facets, 3)
-            origin = surfaces.centroid[None, :, :]
-            target = receivers[:, None, :]
-            if grid is not None:
-                rows.append(
-                    jnp.asarray(
-                        grid.blocks(
-                            np.broadcast_to(
-                                np.asarray(surfaces.centroid)[None, :, :], (rays, n_facets, 3)
-                            ).reshape(flat),
-                            np.broadcast_to(
-                                np.asarray(receivers)[:, None, :], (rays, n_facets, 3)
-                            ).reshape(flat),
-                            np.broadcast_to(np.asarray(near), (rays, n_facets)).reshape(-1),
-                            exclude=np.asarray(exclusions[start : start + per_pass]).reshape(
-                                -1, exclusions.shape[-1]
-                            ),
-                            work_limit=self.work_limit,
-                        ).reshape(rays, n_facets)
-                    )
-                )
+            receivers = np.asarray(points[start : start + per_pass], dtype=float)
+            if clear_behind:
+                cast = ~_facing_away(surfaces, receivers)
+            else:
+                cast = np.ones((len(receivers), n_facets), dtype=bool)
+            row, source = np.nonzero(cast)
+            if len(row) == 0:
                 continue
-            rows.append(
-                segment_is_cut(
-                    jnp.broadcast_to(origin, (rays, n_facets, 3)).reshape(flat),
-                    jnp.broadcast_to(target, (rays, n_facets, 3)).reshape(flat),
-                    surfaces.vertices,
-                    jnp.broadcast_to(near, (rays, n_facets)).reshape(-1),
-                    exclude=exclusions[start : start + per_pass].reshape(-1, exclusions.shape[-1]),
-                    work_limit=self.work_limit,
-                ).reshape(rays, n_facets)
+            # Every ray must ignore the facet it leaves; one aimed at a facet centroid must
+            # ignore that facet too, or it is blocked by its own destination. Formed for this
+            # pass's rays alone, from the two indices, rather than for the whole problem.
+            exclude = (
+                source[:, None]
+                if on_facet is None
+                else np.stack([source, on_facet[start + row]], axis=1)
             )
-        blocked = (
-            jnp.concatenate(rows, axis=0)
-            if rows
-            else jnp.zeros((n_receivers, n_facets), dtype=bool)
-        )
+            origin, target = centroid[source], receivers[row]
+            if grid is not None:
+                hit = grid.blocks(
+                    origin, target, near[source], exclude=exclude, work_limit=self.work_limit
+                )
+            else:
+                hit = segment_is_cut(
+                    origin,
+                    target,
+                    surfaces.vertices,
+                    near[source],
+                    exclude=exclude,
+                    work_limit=self.work_limit,
+                )
+            blocked[start + row, source] = np.asarray(hit)
         # A bit, widened to the fraction the rest of the package consumes. One ray can only ever
         # say all or nothing, so no pair it reports is ever an addition of two answers.
         return OcclusionField(
-            fraction=blocked.astype(float),
-            overlapping=jnp.zeros_like(blocked, dtype=bool),
+            fraction=jnp.asarray(blocked, dtype=float),
+            overlapping=jnp.zeros((n_receivers, n_facets), dtype=bool),
+            clear_behind=clear_behind,
         )
+
+    def prepared(self, surfaces) -> RayCastOcclusion:
+        """With its grid built, so a stream of masks builds it once. See :meth:`SelfOcclusion.prepared`."""
+        grid = self._triangle_grid(surfaces)
+        return self if grid is None else eqx.tree_at(lambda strategy: strategy.grid, self, grid)
+
+    def _triangle_grid(self, surfaces) -> TriangleGrid | None:
+        """The grid the rays are culled with, built here unless it was given built."""
+        if self.grid is False:
+            return None
+        if isinstance(self.grid, TriangleGrid):
+            vertices = np.asarray(surfaces.vertices)
+            if self.grid.vertices.shape != vertices.shape or not np.array_equal(
+                self.grid.vertices, vertices
+            ):
+                msg = (
+                    "the grid given was built over other triangles than this surface's own; a "
+                    "grid decides which triangles a ray is tested against, so one of other "
+                    "triangles misses the shadows this surface casts"
+                )
+                raise ValueError(msg)
+            return self.grid
+        return TriangleGrid.build(
+            np.asarray(surfaces.vertices), resolution=None if self.grid is True else self.grid
+        )
+
+
+def _facing_away(surfaces, receivers) -> np.ndarray:
+    """Which (receiver, facet) pairs are certainly behind an areal facet: ``(n_receivers, n_facets)``.
+
+    The receiver's height above the facet's own plane, with a sign that cannot be trusted
+    resolved to zero -- which keeps the pair -- so a pair is dropped only where rounding could
+    not have put the receiver on the other side. A point source has a zero normal, so every
+    height is zero and none of its pairs is ever dropped; it is excluded by its label as well.
+    """
+    behind = _behind(
+        jnp.asarray(surfaces.normal), jnp.asarray(surfaces.centroid), jnp.asarray(receivers)
+    )
+    return np.asarray(behind) & ~np.asarray(surfaces.is_point_source)[None, :]
+
+
+@jax.jit
+def _behind(normal, centroid, receivers):
+    """Whether each receiver lies certainly behind each facet's plane."""
+    height = decidable_heights(
+        receivers[:, None, None, :], normal[None, :, :], through=centroid[None, :, :]
+    )
+    return height[..., 0] < 0.0
 
 
 class SilhouetteOcclusion(SelfOcclusion):

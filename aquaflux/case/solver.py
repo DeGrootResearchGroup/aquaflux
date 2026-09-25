@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import abc
 import dataclasses
+import warnings
 from collections.abc import Callable, Mapping
 from typing import Literal
 
@@ -34,10 +35,13 @@ from aquaflux.solve import (
     DualTimeLoop,
     LinearSolverSpec,
     LinearSolveSettings,
+    MarchLogger,
     MaterializedJacobian,
     RetryPolicy,
     RootSolveSettings,
     ShiftStrengthControl,
+    StateCheckpointer,
+    combine_observers,
 )
 from aquaflux.turbulence import (
     BlockDiagonal,
@@ -59,6 +63,7 @@ from .physics import RANS, Laminar, Physics, _set
 __all__ = [
     "CoupledMarch",
     "FlowMarch",
+    "NotConverged",
     "RootSolve",
     "Segregated",
     "SolverSpec",
@@ -66,9 +71,33 @@ __all__ = [
 ]
 
 
+class NotConverged(RuntimeError):
+    """A solve stopped without reaching its stopping test, so it has no converged fields to give."""
+
+
 @dataclasses.dataclass(frozen=True)
 class SolverSpec(abc.ABC):
     """How a case is solved: :class:`CoupledMarch`, :class:`FlowMarch` or :class:`Segregated`."""
+
+    @abc.abstractmethod
+    def observers_for(
+        self, logger: MarchLogger, checkpointer: StateCheckpointer | None
+    ) -> dict[str, object]:
+        """The observer keywords that attach ``logger`` and ``checkpointer`` to this solve.
+
+        Parameters
+        ----------
+        logger : MarchLogger
+            Writes one row per outer step.
+        checkpointer : StateCheckpointer or None
+            Receives each step and its state -- anything with a ``StateCheckpointer``'s
+            ``on_checkpoint(report, state)``; ``None`` for nothing.
+
+        Returns
+        -------
+        dict
+            Keywords for :meth:`solve`; empty for a solve that cannot be observed.
+        """
 
     @abc.abstractmethod
     def refuse_for(self, physics: Physics, drive: DriveSpec | None) -> None:
@@ -198,6 +227,21 @@ class _March(SolverSpec):
             raise ValueError(
                 f"{type(self).__name__}.max_steps must be >= 1, got {self.max_steps!r}."
             )
+
+    def observers_for(
+        self, logger: MarchLogger, checkpointer: StateCheckpointer | None
+    ) -> dict[str, object]:
+        """Each step to the log and the checkpoints, retries and inner iterations to the log -- see :meth:`SolverSpec.observers_for`."""
+        observers = {
+            "on_checkpoint": logger.on_checkpoint
+            if checkpointer is None
+            else combine_observers(logger.on_checkpoint, checkpointer.on_checkpoint),
+            "on_retry": logger.on_retry,
+        }
+        # The inner-loop observer exists only with an inner loop to observe; the step refuses it otherwise.
+        if self.dual_time is not None:
+            observers["inner_observer"] = logger.on_inner
+        return observers
 
     def _march_settings(self) -> dict[str, object]:
         """The set march settings, by the library solve's keyword -- each field's own name."""
@@ -354,6 +398,19 @@ class CoupledMarch(_March):
         _refuse_a_held_bulk_velocity(
             "CoupledMarch", drive, "Solve it with a Segregated solver, which holds it."
         )
+
+    def observers_for(
+        self, logger: MarchLogger, checkpointer: StateCheckpointer | None
+    ) -> dict[str, object]:
+        """The march's, the preconditioner's refreshes and the ramp's anchor too -- see :meth:`SolverSpec.observers_for`."""
+        observers = super().observers_for(logger, checkpointer)
+        if isinstance(self.preconditioner, MaterializedJacobian):
+            observers["session_options"] = {"observer": logger.on_refresh}
+        if self.continuation is not None:
+            observers["point_setup"] = lambda companion, seed_state, point: logger.note(
+                f"[{point.label}]"
+            )
+        return observers
 
     def settings(self) -> dict[str, object]:
         """The keywords of :func:`~aquaflux.turbulence.solve_coupled` this march sets.
@@ -532,6 +589,10 @@ class RootSolve:
         )
 
 
+#: The start of the warning :func:`~aquaflux.turbulence.solve_segregated` gives when it runs out of sweeps.
+_SEGREGATED_NOT_CONVERGED = "segregated coupling did not reach"
+
+
 @dataclasses.dataclass(frozen=True)
 class Segregated(SolverSpec):
     """Solve a Reynolds-averaged case by alternating the flow and the closure, by :func:`~aquaflux.turbulence.solve_segregated`.
@@ -584,6 +645,13 @@ class Segregated(SolverSpec):
             if value is not None and not isinstance(value, family):
                 raise TypeError(f"Segregated.{name} got {value!r}.")
 
+    def observers_for(
+        self, logger: MarchLogger, checkpointer: StateCheckpointer | None
+    ) -> dict[str, object]:
+        """None: the segregated loop takes no observer -- see :meth:`SolverSpec.observers_for`."""
+        del logger, checkpointer
+        return {}
+
     def refuse_for(self, physics: Physics, drive: DriveSpec | None) -> None:
         """Refuse a laminar case -- see :meth:`SolverSpec.refuse_for`."""
         del drive
@@ -601,6 +669,11 @@ class Segregated(SolverSpec):
         -------
         tuple of jnp.ndarray
             The converged ``(flow, k, omega)``.
+
+        Raises
+        ------
+        NotConverged
+            If the sweeps ran out before a sweep changed the fields by less than ``increment_tol``.
         """
         if observers:
             raise TypeError(f"Segregated takes no observers, got {sorted(observers)}.")
@@ -616,20 +689,29 @@ class Segregated(SolverSpec):
             if self.scalar_solve is None
             else {"root_solve": self.scalar_solve.root_solve_settings()}
         )
-        return solve_segregated(
-            momentum,
-            turbulence,
-            build_flow_solve(momentum, **flow_root),
-            scalar_pseudo_transient_solve(**scalar_root),
-            *sst_initial_fields(momentum, turbulence),
-            max_sweeps=self.sweeps,
-            **_set(
-                relaxation=self.relaxation,
-                relaxation_max=self.relaxation_max,
-                increment_tol=self.increment_tol,
-                scalar_preconditioner=self.scalar_preconditioner,
-            ),
-        )
+        # The loop warns and returns its fields when it runs out of sweeps; a case's solve refuses an
+        # unconverged result instead, as the marches do.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "error", message=_SEGREGATED_NOT_CONVERGED, category=UserWarning
+            )
+            try:
+                return solve_segregated(
+                    momentum,
+                    turbulence,
+                    build_flow_solve(momentum, **flow_root),
+                    scalar_pseudo_transient_solve(**scalar_root),
+                    *sst_initial_fields(momentum, turbulence),
+                    max_sweeps=self.sweeps,
+                    **_set(
+                        relaxation=self.relaxation,
+                        relaxation_max=self.relaxation_max,
+                        increment_tol=self.increment_tol,
+                        scalar_preconditioner=self.scalar_preconditioner,
+                    ),
+                )
+            except UserWarning as warning:
+                raise NotConverged(str(warning)) from None
 
 
 def solver_for(spec: object) -> SolverSpec:

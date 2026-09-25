@@ -1,6 +1,7 @@
 ---
 paths:
   - "aquaflux/case/**"
+  - "aquaflux/__main__.py"
   - "validation/*/case.yaml"
   - "validation/*/cases/*.yaml"
 ---
@@ -26,12 +27,12 @@ must run from its file alone.** Consequences, each already decided:
 - **The validation `compare.py` scripts are developer harnesses** that *read* case files and compare
   against a reference. Where a reference fixes a value (the OpenFOAM channel's ν), the file states it and
   the harness **checks** the file against the reference rather than filling it in.
-- **The solver section (BUILT 2026-09-24), then a `run` entry point plus outputs, are the critical path**:
-  until the second exists a user still has to write the three lines that read, build and solve a file,
-  and to write the results out. Every validation harness now takes its solve from its file.
+- **The solver section (BUILT 2026-09-24) and `aquaflux run case.yaml` with an outputs section (BUILT
+  2026-09-25) were the critical path**: a case now runs from its file alone. Every validation harness
+  takes its solve from its file. What still needs code is a starting state (#544).
 - Do not call the harnesses "drivers" to the project owner — it collides with the *drive* (`MassFlow`).
 
-## Status — phases A–D and the solver section BUILT (2026-09-24); a `run` entry point and outputs are NOT
+## Status — phases A–D, the solver section and `run` with outputs BUILT (2026-09-24/25)
 
 The construction order #374 records is A spec → B topology → C geometry → D equations → E state →
 F frozen solver → G drive.
@@ -60,9 +61,14 @@ F frozen solver → G drive.
 | `fluid.py` | `Fluid` |
 | `physics.py` | `Physics` → `Laminar` / `RANS` |
 | `boundaries.py` | `PatchCondition` → `Inlet` / `Outlet` / `Wall`; `InletTurbulence` → `FixedTurbulence` |
-| `solver.py` | `SolverSpec` → `CoupledMarch` / `FlowMarch` (both on the private `_March`, their shared settings) / `Segregated`; `ViscosityRamp`; `RootSolve`; `solver_for(spec)` |
+| `solver.py` | `SolverSpec` → `CoupledMarch` / `FlowMarch` (both on the private `_March`, their shared settings) / `Segregated`; `ViscosityRamp`; `RootSolve`; `solver_for(spec)`; `NotConverged`; each kind's `observers_for(logger, checkpointer)` |
+| `outputs.py` | `Outputs(directory, fields, log, checkpoints)`; `FieldWriter` → `Vtk` / `OpenFOAMTime`; `Checkpoints` |
+| `run.py` | `prepare_run(path, overwrite)` → `PreparedRun.run(terminal)` → `RunRecord` |
+| `aquaflux/__main__.py` | the `aquaflux check` / `aquaflux run` command (console script `aquaflux`) — the ONE module outside `case/` allowed to import it |
 
-- **`case/` is the TOP layer: nothing else in `aquaflux` imports it**, pinned by
+- **`case/` is the TOP layer: nothing else in `aquaflux` imports it** — except `aquaflux/__main__.py`,
+  the command-line entry point, which runs a case file and so sits above everything (project owner,
+  2026-09-25; `ABOVE_THE_CASE_LAYER` in the test) — pinned by
   `tests/unit/test_layering.py::test_nothing_below_the_case_layer_imports_it` (resolves relative imports,
   mutation-checked in all three import forms). The description must not become a dependency of the thing
   it describes.
@@ -166,8 +172,6 @@ constructor refusal re-raised with the path prepended** (so `Inlet`'s bad veloci
 ## What a file cannot describe yet — and where each goes
 
 - **A starting state** (#544) — no `initial` section, no checkpoint loader, and the ramp takes no seed.
-- **Where results go** — a `run` entry point (`python -m aquaflux run case.yaml`) and an outputs section
-  (VTK, OpenFOAM time directories, checkpoints). The next PR.
 - **A laminar case holding a bulk velocity (#541)** — `FlowMarch` refuses one (`solve_flow_march` refuses a
   `MassFlow` drive) and there is no laminar segregated solve; `bulk_velocity_flow_solve` exists but is a
   bordered Newton, not a march.
@@ -298,6 +302,53 @@ by construction), and not passing `drive` (the only nameable drive is the builde
   file (pitzDaily, bfs3d, all five channel files). The recorder tests also pin every dispatch branch.
   That a solve really runs is `tests/integration/test_case_solve.py` (a laminar channel from a file,
   bit-identical to the direct `solve_flow_march` call with the same settings, ~45 s).
+
+## Running a case (2026-09-25) — binding decisions
+
+- **`aquaflux check case.yaml` / `aquaflux run case.yaml [--overwrite]`** (also `python -m aquaflux`).
+  Exit status: `0` converged (or checked), `1` a run whose solve stopped short, `2` a refused file (reason
+  on stderr, no traceback). Only reading/checking errors map to `2` — `prepare_run` does all of that
+  before `run()` starts, so an error from inside a solve still surfaces as a traceback rather than as a
+  one-line "refused file".
+- **`prepare_run` is the cheap stop**: read, refuse an occupied output directory (or an existing
+  `OpenFOAMTime` target), resolve the solver (a bulk-velocity case with no solver is refused HERE), and
+  check the mesh — all before any geometry. `--overwrite` replaces the files the run writes and clears
+  `checkpoints/` (whose names collide across runs); anything else in the directory is left alone.
+- **`outputs` is optional; its default writes `results/fields.vtu` + `results/march.log`** (project owner,
+  2026-09-25). `Outputs` is a `default_factory` field, so a file stating none round-trips with no section.
+  Like `fluid`/`numerics`, the section may omit its `kind`; nested values (`Checkpoints`, writers) may not.
+- **Two writers, both the library's**: `Vtk` → `write_vtu` (any mesh) and `OpenFOAMTime` →
+  `write_openfoam_time` (writes into the named OpenFOAM case, not the output directory; refused at read
+  unless the mesh is an `OpenFOAMMesh`). `OpenFOAMTime.case` is **required**, not derived: pitzDaily's
+  mesh path is `runs/kwsst/polyMesh`, not a `constant/polyMesh` layout, so the case directory cannot be
+  recovered from it. `time` is a string (quote it). Each writer's `fields` selects by name, because an
+  OpenFOAM template may not hold every field (`nut`).
+- **What is written is each physics' `output_fields(problem, solution)`** — `U`, `p` (the SOLVED pressure,
+  not `coupled_fields`' gauge-free one), and under RANS `k`, `omega`, `nut`; the log's per-step field
+  changes are `progress_fields(problem)` (`coupled_fields` for RANS, none for laminar).
+- **Each solver kind attaches the log and the checkpoints itself** (`observers_for`): a march wires
+  `on_checkpoint` (log + checkpointer, via `combine_observers`), `on_retry`, and `inner_observer` only
+  with a dual-time loop; `CoupledMarch` adds the session's refresh observer and the ramp's point label;
+  `Segregated` gets nothing (#543). The runner never names a library keyword itself.
+- **A solve that stops short is a record, not an error**: `NotConverged` (the case layer's, raised by
+  `Segregated` from the loop's own warning — a stopgap until #543) and `EquinoxRuntimeError` (the marches'
+  non-root refusal) end the run with `converged: false`, no fields, but the log, checkpoints and records
+  written. Any other exception propagates. `_SEGREGATED_NOT_CONVERGED` is matched against the loop's
+  warning by its opening words, and a test asserts those words are in `solve_segregated`'s source.
+- **Provenance**: `case.yaml` is the spec as it ran — `solver_for(spec)` written out, relative mesh and
+  `OpenFOAMTime.case` paths **re-based on the output directory** (`os.path.relpath`), `outputs.directory`
+  `"."` — so the copy reads and checks where it lies. `run.yaml` records case path, aquaflux version,
+  commit and whether tracked files were modified (`git -C <package dir>`; `null` outside a checkout),
+  start time, seconds, solver kind, converged, steps and last residual (counted by `_StepCount` on
+  `on_checkpoint`; `null` for `Segregated`), message, and what was written.
+- **Tests**: `tests/unit/test_case_run.py` (section reading/refusals, writer selection, both physics'
+  output fields, observer wiring per kind, the segregated refusal, `prepare_run`'s refusals and overwrite,
+  the command's exit statuses, `python -m aquaflux --help`); `tests/integration/test_case_run.py` (a
+  laminar channel run: files, the checkpoint equal to the direct `solve_flow_march` root bit for bit, the
+  records; a run that stops short; an `OpenFOAMTime` directory on the slab fixture read back against the
+  direct solve's pressure, and the re-based record re-checked). ⚠️ The two-cell slab leaves the default
+  `MultipleCorrectionGradient` underdetermined and the potential-flow initializer's Laplace operator
+  NaN — that test states `CompactGreenGauss`.
 
 ## The case files in the repository
 

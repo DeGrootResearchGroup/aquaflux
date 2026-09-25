@@ -52,8 +52,9 @@ SUBPACKAGE_GROUPS = {
         ("Reading, writing and checking a case file", ["case_file", "spec"]),
         (
             "The sections of a case",
-            ["mesh_source", "fluid", "physics", "boundaries", "forcing", "solver"],
+            ["mesh_source", "fluid", "physics", "boundaries", "forcing", "solver", "outputs"],
         ),
+        ("Running a case file", ["run"]),
     ],
     "mesh": [
         ("The mesh and its geometry", ["mesh", "geometry", "cell", "face", "connectivity"]),
