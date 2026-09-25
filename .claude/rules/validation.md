@@ -227,6 +227,19 @@ cannot be written. The guard is what catches the next module that does branch.
   before being retracted. Use the factorization's own stored pivots (`Ilu0.pivots` did this until it was deleted, #371); and note
   a host factorization may store the pivot itself where PETSc stores its **reciprocal**, so a census ported between the two reports the inverse
   of what it claims.
+- **⚠️ A HARNESS THAT SPAWNS A CHILD MUST FORWARD `kill` TO IT — use `validation/peak_footprint.py`,
+  never a bare `subprocess.run`.** Harnesses that read a peak memory footprint re-execute themselves under
+  `/usr/bin/time -l`. Launched with `subprocess.run`, a plain `kill <pid>` of the parent (what
+  `run_case.sh` documents, and what its wrapper forwards) killed **only the parent**: the `/usr/bin/time`
+  child and its Python grandchild were reparented to launchd and ran on holding several GB, **invisible to
+  `run_case.sh --status`** because the run-file's pid was dead. Observed 2026-09-24 with
+  `sozzi_radiation/model_at_mesh_scale.py`. `run_with_footprint` starts the child in its own session and
+  forwards SIGTERM/SIGHUP/SIGINT to the whole group (SIGINT because a new session also leaves the
+  terminal's foreground group, so Ctrl-C would otherwise stop reaching it), then dies by the same signal;
+  it returns the exit status and the parsed `peak memory footprint`. Verified by killing a parent over a
+  `sleep` child: no survivors, exit 143; with the forward disabled both processes survive. **`kill -9`
+  still orphans** (uncatchable) — stop runs with `kill`. After any interrupted run, check
+  `pgrep -fl "usr/bin/time"` rather than trusting `--status`.
 - **Print one line per outer step, flushed.** A harness that collects reports and prints at the end is
   indistinguishable from a hung one, and cost thirty minutes of a run that could not have converged.
 - **State the operating point before measuring.** A harness whose banner prints `? cells` is one whose
