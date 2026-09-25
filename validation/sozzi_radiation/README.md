@@ -4,6 +4,64 @@
 runs its discrete-ordinates (DOM) solver at several angular resolutions. See its docstring for the
 case and the environment it needs.
 
+## Dose: what the fluence-rate differences are worth to a particle (2026-09-25, `dose_comparison.py`)
+
+The reactor is designed against dose, not `G`. `dose_comparison.py` solves the tutorial's own flow
+and runs of-optical-radiation's Lagrangian tracker (`radiationDose`) once per fluence rate, so the
+fluence rate is the only thing that changes between runs. **The particles are the same particles**:
+the tracker's generator is seeded, one stream per thread on a static schedule, and dose does not
+feed back into the motion, so all four runs end every one of the 9,998 particles at the same time
+and point — checked by the harness, which refuses to compare otherwise. Each comparison below is
+therefore paired, particle by particle.
+
+| `G` | mean | p1 / p5 / p50 / p95 | min – max | LR k=0.1 | LR k=0.2 | LR k=0.5 |
+|---|---|---|---|---|---|---|
+| aquaflux | 62.37 | 18.8 / 20.7 / 42.2 / 182.3 | 16.6 – 541 | 1.459 | 2.523 | 5.310 |
+| DOM 256 | 62.56 | 18.5 / 20.4 / 42.0 / 184.3 | 16.3 – 559 | 1.451 | 2.504 | 5.256 |
+| DOM 64 | 62.00 | 12.6 / 18.6 / 41.6 / 183.0 | 7.5 – 566 | 1.389 | 2.282 | 4.063 |
+| DOM 256, its own patch values | 63.48 | 18.5 / 20.4 / 42.0 / 189.6 | 16.3 – 610 | 1.452 | 2.505 | 5.258 |
+| Sozzi & Taghipour (2006) | 68 | | ~21 – ~270 | 1.87 | | |
+
+Dose in mJ/cm², log reduction (LR) `-log10 mean(exp(-k D))` over all particles (all escaped).
+Per particle, DOM / aquaflux at percentiles 1 / 10 / 50 / 90 / 99: **DOM 256 0.940 / 0.975 / 0.999 /
+1.018 / 1.041; DOM 64 0.584 / 0.865 / 0.987 / 1.099 / 1.343.**
+
+- **The mean dose cannot see the ray effect.** The three compared fields agree to 0.9%
+  (DOM's own patch values add 1.5%), as the volume-mean `G` did (0.09%): energy misplaced rather than lost averages out along
+  a path.
+- **The low-dose tail can, and it is what disinfection depends on.** DOM 64 puts its least-exposed
+  particles at 7.5 mJ/cm² against 16.6, and its 1st percentile at 12.6 against 18.8, so its log
+  reduction falls short by 5% at k = 0.1 and by **23% at k = 0.5** — a sensitive organism's
+  inactivation is set by the few particles that dodge the light. DOM 256 is within 1.1% of aquaflux
+  at every k measured (0.01 – 0.5). The per-particle spread is widest at low dose (`dose_paired.png`).
+- **DOM 256 converging on aquaflux is the evidence, as it was for `G`.** Quadrupling DOM's directions
+  shrinks the per-particle 1–99% band from 0.58–1.34 to 0.94–1.04 around aquaflux.
+- **Patch values move the high-dose tail only.** The tracker interpolates `G` from cell and boundary
+  values and aquaflux computes cells only, so the three compared fields carry `zeroGradient` on every
+  patch. Keeping DOM 256's own patch values instead raises its 99th-percentile ratio from 1.041 to
+  1.093 and its mean by 1.5% — the particles that graze the lamp — and moves no log reduction by more
+  than 0.002.
+- **The gap to the paper is common to every `G`** (mean 62–63.5 against 68, LR 1.45 against 1.87, a
+  maximum near 550 against ~270), so it lies in the flow, the tracker or the model and not in the
+  fluence rate. The tutorial's own record for DOM 64 (LR ~1.39, mean ~64) is reproduced: 1.389 and
+  62.0 (63.5 at 256 with DOM's patch values).
+
+Outputs in `work/dose/compare/`: `dose_distribution.png`, `dose_paired.png`, `log_reduction.png`,
+`summary.json`, and `sozzi_fluence_rates.vtu` holding the three `G` fields and
+`log10 |G_DOM - G_aquaflux|`; each run's `trajectories.vtk` (every 20th vertex, per-vertex dose)
+sits in `work/dose/runs/<name>/`, and `work/dose/case` opens in ParaView for `U`.
+
+Configuration: of-optical-radiation `726714d`, image `oor:local` built from its `Dockerfile` (OpenFOAM
+13, arm64), Docker's full allocation (11 cores, 18 GB) on Apple Silicon. Flow: the tutorial's
+`incompressibleFluid` PIMPLE with local time stepping, realizable k-epsilon, inlet 5.51 m/s (25 US
+gal/min), 8 MPI ranks (scotch); stopped by its residual control after **514 iterations, 837 s**, with
+the kinematic pressure drop 45.10 m²/s² varying 0.23% over the last 100. Tracker: the tutorial's
+`postProcess.dict` (10,000 requested → 9,998 seeded at the inlet, seed 42, discrete random walk
+`Cl` 0.15, `dtMax` 5 ms, CFL 0.5, wall reflection) plus `trajectoryStride 20`, 8 OpenMP threads; about
+34 s per run. `G`: aquaflux's is `compare_fluence.py`'s field (the case's `lampWall.stl`, 7,516
+facets, exact visibility through the pipe openings); DOM's are the 64- and 256-direction runs above.
+Lamp exitance 696.42 W/m², absorption 35.67 /m, walls black.
+
 ## The reactor as CAD primitives (2026-09-23, `primitive_occlusion.py`)
 
 `compare_fluence.py` shadows this reactor with `BranchOpenings`: a closure that knows, for this
