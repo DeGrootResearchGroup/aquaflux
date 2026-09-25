@@ -55,7 +55,9 @@ def build() -> dict:
     return {
         "facets": int(lamp.n_facets),
         "seconds": round(seconds, 1),
-        "stored_GB": round(sum(np.asarray(a).nbytes for a in arrays) / 1e9, 2),
+        # A mask stores the surface's own layer at the narrowest type that holds it, and not at
+        # all where the surface hides nothing -- so a missing layer is counted as the nothing it is.
+        "stored_GB": round(sum(np.asarray(a).nbytes for a in arrays if a is not None) / 1e9, 2),
         "one_n_by_n_float_GB": round(np.asarray(transfer.geometric).nbytes / 1e9, 3),
     }
 

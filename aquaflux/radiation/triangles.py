@@ -26,8 +26,9 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
-__all__ = ["segment_is_cut"]
+__all__ = ["pairs_are_cut", "segment_is_cut"]
 
 
 def _edge_function(first, second, third, fourth):
@@ -240,12 +241,7 @@ def segment_is_cut(origin, target, vertices, min_distance, *, exclude=None, work
     -------
     jnp.ndarray of bool, shape ``(n_rays,)``
     """
-    origin = jnp.asarray(origin, dtype=float)
-    direction = jnp.asarray(target, dtype=float) - origin
-    length = jnp.sqrt(jnp.sum(direction * direction, axis=-1))
-    near = jnp.asarray(min_distance) / jnp.where(length == 0.0, 1.0, length)
-
-    vertices = jnp.asarray(vertices, dtype=float)
+    origin, direction, near = _segments(origin, target, min_distance)
     if exclude is None:
         # One sentinel row standing for every ray, rather than a second kernel without the
         # exclusion in it: -1 is already this function's "exclude nothing here" slot, and
@@ -254,7 +250,102 @@ def segment_is_cut(origin, target, vertices, min_distance, *, exclude=None, work
     else:
         exclude = jnp.asarray(exclude)
         exclude = exclude[:, None] if exclude.ndim == 1 else exclude
-    n_rays, n_triangles = origin.shape[0], vertices.shape[0]
+
+    def chunk(rays: slice, pad: int):
+        # The sentinel has one row for all of them and so is not sliced alongside the rays.
+        excluded = exclude if exclude.shape[0] == 1 else _repeat_last(exclude[rays], pad)
+        return (
+            _repeat_last(origin[rays], pad),
+            _repeat_last(direction[rays], pad),
+            _repeat_last(near[rays], pad),
+            excluded,
+        )
+
+    return _cut_in_chunks(origin.shape[0], vertices, work_limit, chunk)
+
+
+def pairs_are_cut(
+    receivers,
+    sources,
+    min_distance,
+    vertices,
+    receiver,
+    source,
+    *,
+    target=None,
+    work_limit=4_000_000,
+):
+    """Whether any triangle lies across each (source, receiver) pair's segment, by index.
+
+    :func:`segment_is_cut` for segments named rather than given: pair ``k`` runs from
+    ``sources[source[k]]`` to ``receivers[receiver[k]]``. Each ray is formed only when the chunk it
+    falls in is tested, so a pass holds two indices a pair rather than every segment's endpoints,
+    direction, margin and exclusions -- about a hundred bytes a pair, formed whole, the other way.
+    Formed by the same operations :func:`segment_is_cut` applies to a whole array, so each ray is
+    the same numbers, and so is each answer.
+
+    Parameters
+    ----------
+    receivers : array_like, shape ``(n_receivers, 3)``
+        Segment ends.
+    sources : array_like, shape ``(n_sources, 3)``
+        Segment origins -- the source facets' centroids.
+    min_distance : array_like, shape ``(n_sources,)``
+        Each source's margin, in length units, as for :func:`segment_is_cut`.
+    vertices : jnp.ndarray, shape ``(n_triangles, 3, 3)``
+        The blocking triangles.
+    receiver, source : array_like of int, shape ``(n_pairs,)``
+        Each pair's receiver and source.
+    target : array_like of int, shape ``(n_receivers,)``, optional
+        The triangle each receiver sits on, excluded from its rays as the source is; omitted, only
+        the source is excluded.
+    work_limit : int, optional
+        As for :func:`segment_is_cut`.
+
+    Returns
+    -------
+    jnp.ndarray of bool, shape ``(n_pairs,)``
+    """
+    receivers = jnp.asarray(receivers, dtype=float)
+    sources = jnp.asarray(sources, dtype=float)
+    min_distance = jnp.asarray(min_distance, dtype=float)
+    receiver, source = np.asarray(receiver), np.asarray(source)
+    on = None if target is None else np.asarray(target)
+
+    def chunk(pairs: slice, pad: int):
+        by_receiver = _repeat_last(jnp.asarray(receiver[pairs]), pad)
+        by_source = _repeat_last(jnp.asarray(source[pairs]), pad)
+        origin, direction, near = _segments(
+            sources[by_source], receivers[by_receiver], min_distance[by_source]
+        )
+        excluded = (
+            by_source[:, None]
+            if on is None
+            else jnp.stack([by_source, _repeat_last(jnp.asarray(on[receiver[pairs]]), pad)], 1)
+        )
+        return origin, direction, near, excluded
+
+    return _cut_in_chunks(len(receiver), vertices, work_limit, chunk)
+
+
+def _segments(origin, target, min_distance):
+    """Each segment's origin, its direction, and its margin as a share of its length."""
+    origin = jnp.asarray(origin, dtype=float)
+    direction = jnp.asarray(target, dtype=float) - origin
+    length = jnp.sqrt(jnp.sum(direction * direction, axis=-1))
+    near = jnp.asarray(min_distance) / jnp.where(length == 0.0, 1.0, length)
+    return origin, direction, near
+
+
+def _cut_in_chunks(n_rays: int, vertices, work_limit: int, chunk):
+    """Test ``n_rays`` rays in compiled blocks, the rays of each chunk formed by ``chunk``.
+
+    ``chunk(rays, pad)`` returns one chunk's ``(origin, direction, near, exclude)``, its rays
+    ``rays`` with the last repeated ``pad`` more times; see :func:`segment_is_cut` for how the
+    chunks and blocks are sized.
+    """
+    vertices = jnp.asarray(vertices, dtype=float)
+    n_triangles = vertices.shape[0]
     if n_rays == 0 or n_triangles == 0:
         return jnp.zeros(n_rays, dtype=bool)
 
@@ -263,27 +354,17 @@ def segment_is_cut(origin, target, vertices, min_distance, *, exclude=None, work
 
     pieces = []
     for first in range(0, n_rays, ray_chunk):
-        rays = slice(first, first + ray_chunk)
         count = min(ray_chunk, n_rays - first)
         # A chunk shorter than the full one -- the last, or the only one when there are few rays
         # -- is padded to a power of two by repeating its last ray, so a caller whose ray counts
         # vary from pass to pass compiles a few shapes rather than one per pass. The padding's
         # answers are dropped.
         pad = min(padded_length(count), full_chunk) - count if count < full_chunk else 0
-        # The sentinel has one row for all of them and so is not sliced alongside the rays.
-        excluded = exclude if exclude.shape[0] == 1 else _repeat_last(exclude[rays], pad)
-        chunk_origin = _repeat_last(origin[rays], pad)
-        chunk_direction = _repeat_last(direction[rays], pad)
-        chunk_near = _repeat_last(near[rays], pad)
+        origin, direction, near, excluded = chunk(slice(first, first + count), pad)
         cut = jnp.zeros(count + pad, dtype=bool)
         for start in range(0, n_triangles, block_size):
             cut = cut | _block_is_cut(
-                chunk_origin,
-                chunk_direction,
-                chunk_near,
-                vertices[start : start + block_size],
-                start,
-                excluded,
+                origin, direction, near, vertices[start : start + block_size], start, excluded
             )
         pieces.append(cut[:count])
     return jnp.concatenate(pieces)

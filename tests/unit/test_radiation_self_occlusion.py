@@ -525,13 +525,13 @@ def _watch_rays(monkeypatch):
     from aquaflux.radiation import self_occlusion
 
     rays = []
-    real = self_occlusion.segment_is_cut
+    real = self_occlusion.pairs_are_cut
 
-    def watched(origin, target, *args, **kwargs):
-        rays.append(origin.shape[0])
-        return real(origin, target, *args, **kwargs)
+    def watched(receivers, sources, near, vertices, receiver, source, **kwargs):
+        rays.append(len(receiver))
+        return real(receivers, sources, near, vertices, receiver, source, **kwargs)
 
-    monkeypatch.setattr(self_occlusion, "segment_is_cut", watched)
+    monkeypatch.setattr(self_occlusion, "pairs_are_cut", watched)
     return rays
 
 
@@ -735,3 +735,115 @@ def test_ray_counts_that_vary_from_call_to_call_share_their_compiled_programs():
         np.testing.assert_array_equal(np.asarray(cut), one_by_one)
     # 9, 11, 13 and 16 rays all pad to 16, and a single ray to 1: two programs, not five.
     assert _block_is_cut._cache_size() - before <= 2
+
+
+# ---------------------------------------------------------------------------------------
+# What a mask stores
+# ---------------------------------------------------------------------------------------
+
+
+def _stored_bytes(mask) -> int:
+    """Bytes the mask's own arrays hold, leaving out the receiver positions it carries."""
+    return sum(
+        leaf.nbytes
+        for leaf in jax.tree.leaves(mask)
+        if hasattr(leaf, "nbytes") and leaf is not mask.receivers
+    )
+
+
+def test_each_strategy_stores_its_answer_at_the_narrowest_type_that_holds_it():
+    """A ray test can only say all or nothing, and no occlusion says nothing at all.
+
+    Held as floating point with a flag beside it, the surface's own layer cost nine bytes a pair
+    whatever produced it, on top of one per body -- ten, for a scene with one body -- when a ray
+    test's answer is one bit and ``NoOcclusion``'s is none.
+    """
+    from aquaflux.radiation.self_occlusion import SilhouetteOcclusion
+
+    surfaces, receivers = _lamp_in_a_sleeved_box()
+    body = Cylinder(centre=[0.3, 0.0, 0.0], axis=[0, 0, 1], radius=0.04, half_length=0.4)
+    pairs = len(receivers) * surfaces.n_facets
+
+    none = build_visibility([body], surfaces, receivers, self_occlusion=NoOcclusion())
+    assert none.hidden_by_geometry is None and none.overlapping is None
+    assert _stored_bytes(none) == pairs, "the body's layer and nothing else"
+
+    ray = build_visibility([body], surfaces, receivers, self_occlusion=RayCastOcclusion())
+    assert ray.hidden_by_geometry.dtype == jnp.bool_ and ray.overlapping is None
+    assert _stored_bytes(ray) == 2 * pairs
+
+    with pytest.warns(UserWarning, match="free edge"):  # the tubes are open-ended
+        clip = build_visibility([], surfaces, receivers[:3], self_occlusion=SilhouetteOcclusion())
+    assert clip.hidden_by_geometry.dtype == jnp.float64 and clip.overlapping.dtype == jnp.bool_
+
+
+def test_a_mask_held_as_bits_gives_the_field_it_gave_as_a_fraction():
+    """The narrow mask is widened where it is read, so the field is the same to the last bit."""
+    import equinox as eqx
+
+    surfaces, receivers = _lamp_in_a_sleeved_box()
+    body = Cylinder(centre=[0.3, 0.0, 0.0], axis=[0, 0, 1], radius=0.04, half_length=0.4)
+    mask = build_visibility([body], surfaces, receivers)
+    as_fraction = eqx.tree_at(
+        lambda m: (m.hidden_by_geometry, m.overlapping),
+        mask,
+        (
+            jnp.asarray(mask.hidden_by_geometry, dtype=float),
+            jnp.zeros(mask.hidden_by_geometry.shape, dtype=bool),
+        ),
+        is_leaf=lambda leaf: leaf is None,
+    )
+    bits = direct_fluence_rate(surfaces, receivers, visibility=mask, transmittance=[0.3])
+    widened = direct_fluence_rate(surfaces, receivers, visibility=as_fraction, transmittance=[0.3])
+    np.testing.assert_array_equal(bits, widened)
+    assert np.asarray(mask.hidden_by_geometry).mean() > 0.02, "the surface must hide something"
+    assert np.asarray(mask.blocked).mean() > 0.01, "and the body something"
+
+
+def test_a_pass_forms_its_rays_a_chunk_at_a_time_not_all_at_once(monkeypatch):
+    """Without a grid, a pass holds two indices a pair and forms rays only for the chunk under test.
+
+    Every ray's endpoints, direction, margin and exclusions formed for the whole pass is about a
+    hundred bytes a pair -- 400 MB at the default pair limit. Watched where the rays are formed:
+    no call may form more of them than one compiled chunk tests, however large the pass.
+    """
+    from aquaflux.radiation import triangles
+
+    formed = []
+    real = triangles._segments
+
+    def watched(origin, target, min_distance):
+        formed.append(len(origin))
+        return real(origin, target, min_distance)
+
+    monkeypatch.setattr(triangles, "_segments", watched)
+    surfaces, receivers = _lamp_in_a_sleeved_box()
+    work_limit = 50 * surfaces.n_facets
+    build_visibility(
+        [], surfaces, receivers, self_occlusion=RayCastOcclusion(work_limit=work_limit),
+        receiver_facet=np.full(len(receivers), -1),
+    )  # fmt: skip
+    chunk, _ = triangles._call_shape(work_limit, surfaces.n_facets, work_limit)
+    assert len(receivers) * surfaces.n_facets > 10 * chunk, "a pass must span many chunks"
+    assert max(formed) <= chunk, (max(formed), chunk)
+    assert sum(formed) >= len(receivers) * surfaces.n_facets, "every pair was still formed"
+
+
+def test_the_grid_walk_is_handed_one_pass_of_exclusions_at_a_time(monkeypatch):
+    """With a grid the walk needs a whole pass's rays, but never more than a pass's."""
+    from aquaflux.radiation import self_occlusion
+
+    handed = []
+    real = self_occlusion._exclusions
+
+    def watched(source, row, on_facet):
+        handed.append(len(source))
+        return real(source, row, on_facet)
+
+    monkeypatch.setattr(self_occlusion, "_exclusions", watched)
+    surfaces, receivers = _lamp_in_a_sleeved_box()
+    pair_limit = 5 * surfaces.n_facets
+    build_visibility(
+        [], surfaces, receivers, self_occlusion=RayCastOcclusion(grid=True, pair_limit=pair_limit),
+    )  # fmt: skip
+    assert len(handed) > 3 and max(handed) <= pair_limit, (len(handed), max(handed))

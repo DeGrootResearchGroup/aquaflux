@@ -417,8 +417,10 @@ receivers and the gather checks them.
 a forgotten argument look like a working occlusion model that happens to do nothing.
 
 **Memory:** the mask is `(n_occluders, n_receivers, n_facets)` — a hundred million entries per
-body at production size, stored as bytes. Packing to bits is the obvious eightfold saving if it
-ever matters. ⚠️ **At MESH scale it cannot be held at all**: 1.6M cells against 7,516 lamp facets
+body at production size, stored as bytes — plus the surface's own layer, which since #525 is
+nothing under `NoOcclusion`, one byte a pair from the ray test, and a float (and a flag) only from
+the silhouette clip; it was nine bytes a pair whatever produced it. Packing to bits is the obvious
+eightfold saving if it ever matters. ⚠️ **At MESH scale it cannot be held at all**: 1.6M cells against 7,516 lamp facets
 is **12 GB per body**, so a real case could not be built through the model. `direct_fluence_rate`
 therefore also takes `occluders=` (and `self_occlusion=`) **instead of** a built mask: it then
 builds each chunk's mask, gathers, and drops it, so peak memory is the chunk's (at most
@@ -1698,6 +1700,68 @@ the ~20% spread this machine carries. ⚠️ **`RayCastOcclusion(grid=...)` brea
 — it stops at the first blocker, so its cost depends on what the rays hit and no single ladder
 transfers between scenes. Every figure in this section is the ungridded path.
 
+## A MASK STORES ITS ANSWER AT THE NARROWEST TYPE, AND A PASS HOLDS INDICES (#525, 2026-09-25)
+
+**`hidden_by_geometry` and `overlapping` are stored at what the strategy can say.** The surface's
+own layer was a float64 fraction and a bool flag for every strategy, 9 B/pair on top of 1 B per
+body, although a ray test only ever says 0 or 1, `NoOcclusion` only 0, and `overlapping` is only
+ever set by the silhouette clip and read by nothing in the package. Now:
+
+| strategy | `hidden_by_geometry` | `overlapping` |
+|---|---|---|
+| `NoOcclusion` | `None` | `None` |
+| `RayCastOcclusion` | bool | `None` |
+| `SilhouetteOcclusion` | float64 | bool |
+
+`surviving_fraction` widens the layer (`jnp.asarray(..., dtype=float)`) and skips it when `None`;
+the gather hands `in_passes` only the layers that exist, so the widening is per chunk and never the
+size of the problem. **Bit-identical**: `1.0 - float(bool)` is the float it replaced. ⚠️ **Code that
+reads `hidden_by_geometry` must allow `None` and a bool** — `np.asarray(None)` is an object array
+whose `np.any` is `False`, which reads as "nothing hidden" and happens to be right, but
+`.nbytes`, `.shape` and arithmetic are not. The transfer's own mask (#525 item 4) is built the same
+way and comes out the same. `validation/sozzi_radiation/transfer_build_peak.py` skips a `None`
+layer when summing what the transfer stores.
+
+**The brute-force pass forms rays a chunk at a time** (#525 item 2).
+`triangles.pairs_are_cut(receivers, sources, min_distance, vertices, receiver, source, target=)`
+takes a pass's pairs as indices; its chunk callback gathers the endpoints, forms the segments through
+`_segments` — the same eager operations `segment_is_cut` applies to a whole array, so every ray is
+the same numbers — and builds the exclusions, for one compiled chunk's rays only. Both entry points
+share `_cut_in_chunks`. ⚠️ **The rays are formed eagerly, not inside the compiled kernel, on
+purpose**: the issue warned that compiling the margin's division could move its last bit, and a
+margin decides a hit. The grid path still takes whole-pass endpoints and exclusions
+(`self_occlusion._exclusions`), because its walk is host code that steps every ray.
+
+Measured with `validation/radiation_mask_storage.py` (`radiation_receiver_ray_mask.py`'s 4,992-facet
+annular reactor, one `Cylinder` just inside the sleeve as a body, each build in its own process
+under `/usr/bin/time -l`; jax 0.10.2, CPU, x64, macOS arm64, 11 cores, run alone, two rounds
+alternating before and after; "before" is #550's branch, `3735118`, 2026-09-25), every checksum
+identical:
+
+| arm | stored per pair | peak footprint | seconds |
+|---|---|---|---|
+| `NoOcclusion`, 40,000 receivers | 10 → **1** B | 4.21 → **2.40** GB | 1.7 / 1.4 → 1.2 / 1.1 |
+| `RayCastOcclusion`, 2,000 receivers, no grid | 10 → **2** B | 1.50-1.52 → **1.01-1.02** GB | 109.2 / 96.9 → 107.8 / 98.7 |
+
+The ray-cast time does not move: the two rounds spread 12% within each side. ⚠️ A first single
+run read +8% for it and a footprint of 7.40 → 5.60 GB for `NoOcclusion`; the harness then checked
+its answer with `mask.surviving`, which forms a float of the whole mask, so that footprint was the
+check's, and the +8% was inside the spread. Both were discarded, and the checksum now reads the
+stored arrays. The `NoOcclusion` row is the Sozzi case's own configuration: a held mask there is
+now a byte a pair per body, which moves the receiver count at which a model has to stream, not
+whether a 1.6M-cell mesh fits (12 GB per body still does not).
+
+Tests, mutation-checked: `test_each_strategy_stores_its_answer_at_the_narrowest_type_that_holds_it`
+(types, and the stored bytes exactly 1 and 2 per pair), `test_a_mask_held_as_bits_gives_the_field_it_gave_as_a_fraction`
+(the bool mask against itself widened to float, `array_equal`),
+`test_a_pass_forms_its_rays_a_chunk_at_a_time_not_all_at_once` (no call of `_segments` forms more
+rays than one compiled chunk), `test_the_grid_walk_is_handed_one_pass_of_exclusions_at_a_time`.
+Seven mutations, all red: the ray test storing a float, `NoOcclusion` storing zeros, the surface
+layer dropped from the gather, the rays formed for the whole pass, the target facet not excluded
+(an existing transfer test), a pass's pair indices misaligned, and the widening replaced by a
+logical `not` -- which is the same number for a bool, so only the silhouette's half-hidden test
+(`test_the_surviving_fraction_lets_a_half_hidden_pair_through_by_half`) can see it.
+
 ## THE RECEIVER RAY MASK CASTS ONLY FACING PAIRS, AND THE GRID TAKES INDICES (#526, 2026-09-25)
 
 Three changes to `RayCastOcclusion` for receivers in the volume. The field is unchanged: every
@@ -1723,8 +1787,8 @@ is how a test builds the full mask to compare against.
 
 **The cull needed two things it did not ask for.** Casting only the kept pairs means each pass forms
 its exclusions for its own rays, from the two indices, so **the whole-problem `(n_receivers,
-n_facets[, 2])` exclusion array of #525 item 1 is gone** as a side effect; #525's other items are
-untouched. And a pass's ray count now differs from every other pass's, so `segment_is_cut` pads a
+n_facets[, 2])` exclusion array of #525 item 1 is gone** as a side effect; the rest of #525 is the
+section above. And a pass's ray count now differs from every other pass's, so `segment_is_cut` pads a
 chunk shorter than the full one to a power of two (repeating its last ray, answers dropped) — without
 that, every pass compiles its own programs.
 
