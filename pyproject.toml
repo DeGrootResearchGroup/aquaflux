@@ -112,6 +112,10 @@ cad = ["cadquery-ocp-novtk==8.0.1.0.0"]
 # CMake (`PETSC_CONFIGURE_OPTIONS="--download-suitesparse"`).
 petsc = ["petsc4py>=3.20"]
 
+[project.scripts]
+# `aquaflux check case.yaml` / `aquaflux run case.yaml`; `python -m aquaflux` is the same command.
+aquaflux = "aquaflux.__main__:main"
+
 [project.urls]
 Repository = "https://github.com/DeGrootResearchGroup/aquaflux"
 

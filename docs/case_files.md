@@ -215,6 +215,33 @@ solver:
   scalar_preconditioner: {kind: ScalarAir}
 ```
 
+**`outputs`** — what a run writes, and where. Every part is optional; with no section at all a
+run writes the fields as VTK and the log into `results/` beside the case file.
+
+```yaml
+outputs:
+  directory: results                    # relative to the case file
+  log: march.log                        # the march's per-step table; null for the terminal only
+  checkpoints: {kind: Checkpoints, every: 1, keep: 3}
+  fields:
+    - {kind: Vtk, file: fields.vtu}
+    - {kind: OpenFOAMTime, case: of_case, time: "1000", fields: [U, p]}
+```
+
+- {class}`~aquaflux.case.Vtk` writes the converged fields as one VTK unstructured-grid file,
+  for any mesh.
+- {class}`~aquaflux.case.OpenFOAMTime` writes them as a time directory of an OpenFOAM case —
+  `case` is that case's directory, relative to the case file — taking each field's dimensions
+  and boundary conditions from the file of the same name in its `template_time` directory
+  (`0` unless given), so the result restarts in the solver the case is set up for. It needs an
+  OpenFOAM mesh, and a template for every field it writes. Quote `time`: a bare number reads as
+  a number.
+- Each writer's `fields` names what it writes — `U` and `p`, and under `RANS` also `k`, `omega`
+  and `nut`; left out, all of them. The pressure is the solved one.
+- {class}`~aquaflux.case.Checkpoints` writes the march's state every `every` steps into
+  `checkpoints/`, keeping the latest `keep`, so a run that stops has not lost its work. The
+  segregated solve takes no steps a checkpoint could be written at.
+
 ## What is checked, and when
 
 When the file is **read**:
@@ -226,7 +253,8 @@ When the file is **read**:
   turbulence at every inlet of a `RANS` one;
 - the pressure level is fixed exactly once — by an `Outlet`, or, with none, by a
   `pressure_datum`;
-- the solver solves this physics, and can hold its drive.
+- the solver solves this physics, and can hold its drive;
+- an `OpenFOAMTime` output has an OpenFOAM mesh to write for.
 
 When the case is **checked** against its mesh ({meth}`~aquaflux.case.CaseFile.check`):
 
@@ -296,11 +324,42 @@ A solve can be watched without being changed: keywords that only observe it — 
 file's settings. A keyword that is one of the solve's settings is refused, whether the file
 sets it or leaves it at its default, so code that runs a case cannot change what the case says.
 
+## Running a case
+
+The `aquaflux` command runs a file from start to finish:
+
+```bash
+aquaflux check case.yaml            # read the file and check it against its mesh, in seconds
+aquaflux run case.yaml              # read, check, build, solve, and write the outputs
+aquaflux run case.yaml --overwrite  # replace an earlier run's results
+```
+
+`python -m aquaflux` is the same command. A run writes, into the output directory:
+
+- the converged fields, by each of the section's writers;
+- the log, one row per outer step, echoed to the terminal as it goes;
+- the checkpoints, when asked for;
+- `case.yaml`, the case as it ran — the solver written out even when the file left it to the
+  default, and its relative paths re-based so the copy reads where it lies;
+- `run.yaml`, a record of the run: the aquaflux version and the commit it ran from, when it
+  started and how long it took, the solver, how many steps it took, where its residual ended,
+  whether it converged, and what it wrote.
+
+`run` exits with status 0 when the solve converges. A solve that stops short of its stopping
+test writes no fields — what it holds is not a solution — but still writes its log, its
+checkpoints and `run.yaml`, and exits with status 1. A file that is refused exits with status
+2, with the reason. A run refuses an output directory that already holds results unless given
+`--overwrite`, which replaces the files the run writes and clears its old checkpoints.
+
+In code, {func}`~aquaflux.case.prepare_run` reads and checks a file for a run and
+{meth}`~aquaflux.case.PreparedRun.run` runs it, returning a {class}`~aquaflux.case.RunRecord`.
+
 ## What a case file cannot describe yet
 
 - **A boundary profile** — an inlet velocity or value varying across the patch. Those are
   functions of position, built in code.
-- **Where the results go** — the solve returns its fields; writing them out is done in code.
+- **A starting state** — every solve starts from its own initial condition; a run cannot
+  resume from its checkpoints yet.
 - **A laminar case holding a bulk velocity** — the flow march solves with the force fixed, and
   no laminar solve holds the constraint from a file.
 
