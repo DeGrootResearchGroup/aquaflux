@@ -39,6 +39,7 @@ from __future__ import annotations
 import abc
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import lax
@@ -235,27 +236,37 @@ class VoxelAbsorption(Absorption):
         first_crossing = jnp.where(moving & ahead, parameter_at(next_index), jnp.inf)
         last_crossing = jnp.where(moving, parameter_at(outermost), -jnp.inf)
 
+        def at(parameter):
+            return self.sample(origin + offset * parameter[..., None])
+
+        # ⚠️ The running total and the field at the piece's near end are CARRIED, not collected.
+        # Returning each piece from the scan stacks all of them, one per step of the fixed budget,
+        # before a single sum -- the walk's largest array by far -- and each piece's near end is
+        # the previous one's far end, so sampling it again repeats a third of the lookups for the
+        # same value. Each step is also checkpointed: a gradient then keeps the carry per step and
+        # recomputes the lookups on the way back, rather than keeping every lookup's gather
+        # indices and weights for all the steps at once.
+        @jax.checkpoint
         def advance(carry, _):
-            here, next_face = carry
+            here, next_face, near, total = carry
             there = jnp.minimum(jnp.min(next_face, axis=-1), 1.0)
             there = jnp.maximum(there, here)
-            middle = 0.5 * (here + there)
-            weights = self.sample(origin + offset * here[..., None])
-            weights = weights + 4.0 * self.sample(origin + offset * middle[..., None])
-            weights = weights + self.sample(origin + offset * there[..., None])
-            piece = (there - here) * length * weights / 6.0
+            far = at(there)
+            weights = near + 4.0 * at(0.5 * (here + there)) + far
+            total = total + (there - here) * length * weights / 6.0
             used = next_face <= there[..., None]
             next_face = jnp.where(used, next_face + crossing_interval, next_face)
             next_face = jnp.where(next_face > last_crossing + 1e-12, jnp.inf, next_face)
-            return (there, next_face), piece
+            return (there, next_face, far, total), None
 
-        _, pieces = lax.scan(
+        start = jnp.zeros_like(length)
+        (_, _, _, total), _ = lax.scan(
             advance,
-            (jnp.zeros_like(length), first_crossing),
+            (start, first_crossing, at(start), jnp.zeros_like(length)),
             None,
             length=self.max_crossings,
         )
-        return jnp.sum(pieces, axis=0)
+        return total
 
 
 def grid_covers(field: VoxelAbsorption, points) -> bool:
