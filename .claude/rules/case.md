@@ -26,12 +26,12 @@ must run from its file alone.** Consequences, each already decided:
 - **The validation `compare.py` scripts are developer harnesses** that *read* case files and compare
   against a reference. Where a reference fixes a value (the OpenFOAM channel's ν), the file states it and
   the harness **checks** the file against the reference rather than filling it in.
-- **The solver section and a `run` entry point plus outputs are on the critical path**, not follow-ups:
-  until they exist a user still has to write a script. ⚠️ Until then the channel harnesses keep one solver
-  setting per configuration in code (the segregated solve's `sweeps`) — a known gap, not a precedent.
+- **The solver section (BUILT 2026-09-24), then a `run` entry point plus outputs, are the critical path**:
+  until the second exists a user still has to write the three lines that read, build and solve a file,
+  and to write the results out. Every validation harness now takes its solve from its file.
 - Do not call the harnesses "drivers" to the project owner — it collides with the *drive* (`MassFlow`).
 
-## Status — phases A–D BUILT (2026-09-24); the solver section is NOT
+## Status — phases A–D and the solver section BUILT (2026-09-24); a `run` entry point and outputs are NOT
 
 The construction order #374 records is A spec → B topology → C geometry → D equations → E state →
 F frozen solver → G drive.
@@ -42,22 +42,25 @@ F frozen solver → G drive.
 - **C–D:** `CheckedCase.build()` computes the geometry once and hands it to `spec.physics.build(spec,
   mesh, geometry)`, which returns **the problem the initializers and solves already take** —
   `MomentumContinuity` for `Laminar`, `CoupledRANS` for `RANS` — never a case-specific wrapper (#375) and
-  never a built step (#374: the step is rebuilt from mid-march states at every Reynolds rung and refresh,
-  so the solver section, when it exists, must be a `state -> NewtonStrategy` builder). ~8 s on pitzDaily
-  including the wall distance (same run).
-- **E onward are the driver's**: `hybrid_initialize(problem)` and the march, configured in code.
+  never a built step (#374: the step is rebuilt from mid-march states at every Reynolds rung and refresh).
+  ~8 s on pitzDaily including the wall distance (same run).
+- **E–F:** `CheckedCase.solve(problem, **observers)` runs `solver_for(spec)` — the file's `solver`, or the
+  physics' march with every setting unset. #374's "`state -> step` builder" needed no new builder: the
+  library solves already rebuild the step from **specs** at every rung and refresh, so the solver section
+  turns into the solve's keyword arguments and never into a built step. See "The solver section" below.
 
 ## The layout, and why each part is where it is
 
 | module | holds |
 |---|---|
-| `spec.py` | `CaseSpec` (mesh, fluid, physics, boundaries, numerics, drive), `Numerics`, the one `SettingsMapping` registry `_CASE_MAPPING`, `case_spec_from_mapping` / `_to_mapping`, `CaseSpec.check_against(mesh)` |
+| `spec.py` | `CaseSpec` (mesh, fluid, physics, boundaries, numerics, drive, pressure datum, sources, solver), `Numerics`, the one `SettingsMapping` registry `_CASE_MAPPING`, `case_spec_from_mapping` / `_to_mapping`, `CaseSpec.check_against(mesh)` |
 | `case_file.py` | the YAML parse (`_CaseLoader`), `read_case` / `write_case`, `CaseFile`, `CheckedCase` |
 | `mesh_source.py` | `MeshSource.read(directory) -> Mesh` → `OpenFOAMMesh` (read) / `StructuredGrid` + `AxisGrading` → `GeometricGrading` (generated) |
 | `forcing.py` | `DriveSpec` → `BulkVelocity` (builds `flow.MassFlow`); `SourceSpec` → `BodyForce` (builds `flow.UniformBodyForce`) |
 | `fluid.py` | `Fluid` |
 | `physics.py` | `Physics` → `Laminar` / `RANS` |
 | `boundaries.py` | `PatchCondition` → `Inlet` / `Outlet` / `Wall`; `InletTurbulence` → `FixedTurbulence` |
+| `solver.py` | `SolverSpec` → `CoupledMarch` / `FlowMarch` (both on the private `_March`, their shared settings) / `Segregated`; `ViscosityRamp`; `RootSolve`; `solver_for(spec)` |
 
 - **`case/` is the TOP layer: nothing else in `aquaflux` imports it**, pinned by
   `tests/unit/test_layering.py::test_nothing_below_the_case_layer_imports_it` (resolves relative imports,
@@ -138,11 +141,17 @@ constructor refusal re-raised with the path prepended** (so `Inlet`'s bad veloci
 
 ## What a file cannot describe yet — and where each goes
 
-- **The solver section** (march, preconditioner, convergence, Reynolds schedule) — a `state -> step`
-  builder per #374. The preconditioner part already reads through `preconditioner_spec_from_mapping`.
-  The validation drivers carry closures no file can state (`point_setup`, the damping tapers reading a
-  residual at each rung's seed, the Reynolds companion function, logger metrics); decide which become
-  named values and which stay code.
+- **A starting state** (#544) — no `initial` section, no checkpoint loader, and the ramp takes no seed.
+- **Where results go** — a `run` entry point (`python -m aquaflux run case.yaml`) and an outputs section
+  (VTK, OpenFOAM time directories, checkpoints). The next PR.
+- **A laminar case holding a bulk velocity (#541)** — `FlowMarch` refuses one (`solve_flow_march` refuses a
+  `MassFlow` drive) and there is no laminar segregated solve; `bulk_velocity_flow_solve` exists but is a
+  bordered Newton, not a march.
+- **A coupled march holding a bulk velocity (#541)** — `CoupledMarch` refuses one and points at `Segregated`.
+  `solve_coupled_mass_flow` exists, but it is the older `RootSolver` path: `BlockDiagonal` only, no dual
+  time, no retry, no step control, no ramp. Routing a file there would publish a surface that silently
+  cannot take half the section's settings; the gap is the library's (#277/#448 made the march generic but
+  not the bordered constraint).
 - **A 3D structured grid** — `structured_grid_3d` has neither grading nor periodic axes, so `StructuredGrid`
   is 2D only rather than half-supporting a uniform 3D box no case needs.
 - **Other source kinds** — a `sources:` section beyond `BodyForce` waits on #362 (sources declaring their
@@ -222,6 +231,53 @@ by construction), and not passing `drive` (the only nameable drive is the builde
   normalization, the drive's direction/seed/dimension, the force's sign/count/dimension, and the build
   dropping the drive or the sources).
 
+## The solver section (2026-09-24) — binding decisions
+
+- **Three kinds, each the library solve of the same shape.** `CoupledMarch` → `solve_coupled`, or
+  `solve_reynolds_ramp` when `continuation` is set; `FlowMarch` → `solve_flow_march`; `Segregated` →
+  `solve_segregated` (flow solve `bulk_velocity_flow_solve` under a `MassFlow` drive, else
+  `reused_flow_solve`; scalar solve `scalar_pseudo_transient_solve`; start `sst_initial_fields`). Each
+  refuses the physics it does not solve (`refuse_for(physics, drive)`, run in `CaseSpec.__post_init__`) and
+  the two marches refuse a `BulkVelocity` drive, which they would hold at its starting force.
+- **The shared march settings are ONE dataclass, `_March`, that both marches derive from** — `max_steps`,
+  `convergence`, `preconditioner`, `dual_time`, `linear_solve`, `step_control`, `retry` — so a setting added
+  there reaches both (Principle 2's sibling rule, at the file surface). `CoupledMarch` adds the closure's:
+  `turbulence_damping` (→ `shift=CoupledShiftSettings(turbulence_damping=...)`), `positivity_floor`,
+  `positivity_projection`, `continuation`.
+- **The library's own settings values are read directly** — `Convergence` (+ `RowScaled`/`BlockScaled`/
+  `Euclidean`), `DualTimeLoop`, `LinearSolveSettings`, the three dual-time controls (equinox modules are
+  dataclasses; their float fields read), `RetryPolicy`, and every coupled-preconditioner kind via
+  `turbulence.PRECONDITIONER_SPEC_MAPPING.kinds` (made public for this, so a kind added there reaches a
+  case file). Case-side values exist only where no library value fits: `ViscosityRamp` (the ramp's
+  arguments are loose keywords, and its `companion` is a function — `scale: flow|both` names
+  `scale_momentum_only` / `scale_both_blocks`), and `RootSolve` (`RootSolveSettings` holds `lineax`
+  solvers; `test_a_root_solve_states_every_setting_of_the_librarys_root_solve` pins the two field lists
+  equal, so they cannot drift). `RetryPolicy.solver` became a `LinearSolverSpec` so that no case value was
+  needed there (see `solve-globalization.md`).
+- **Unset means the library's default, never one restated here** (`_set`). The file-level consequence:
+  a pitzDaily file with **no** solver section runs `CoupledMarch()` — a single-step march with no ramp —
+  which is the recorded reachability crawl and does not converge in `max_steps`. The shipped default was
+  not changed (that needs the project owner, #542); the validation files state their calibrated values.
+- **A script can observe a solve, never configure it.** `solve(problem, **observers)` refuses any keyword
+  that is one of the solve's settings **whether the file sets it or not** (`_owned()`, derived from the
+  `_March` fields plus `shift`/`positivity_*`/`homotopy`) — an unset setting is still the file's, since its
+  default is part of what the file says. A materialized-Jacobian preconditioner is **opened as a session
+  here** (`open_session(spec, problem, **session_options)`), so a harness passes the session's *observers*
+  (`observer`, `reports`, `on_build`, the wrappers) rather than a session of its own that might hold other
+  settings; `session_options` beside a `BlockDiagonal` is refused. A `point_setup` may be passed to observe
+  a ramp's anchor, and is refused if it returns any settings. `Segregated` takes no observers, because
+  `solve_segregated` has none, and it only WARNS when it runs out of sweeps (#543).
+- ⚠️ **`station_step` and `jacobian_gradient_sweeps` are NOT in `_owned()` and are not file settings.**
+  The pitzDaily harness's study arms need them; they reach the library through that harness's own study
+  path, not through `solve(**observers)`. `station_step` reshapes the path, so passing it as an "observer"
+  would be a configuration back door — the harness does not, and nothing else should.
+- **Why the parity is on the keywords, not on a pytree.** The solve's arguments are specs and settings
+  values, so `tests/unit/test_case_solver.py` replaces each library solve with a recorder and compares
+  what the case hands it with a **frozen copy** of what each harness passed by hand before it read its
+  file (pitzDaily, bfs3d, all five channel files). The recorder tests also pin every dispatch branch.
+  That a solve really runs is `tests/integration/test_case_solve.py` (a laminar channel from a file,
+  bit-identical to the direct `solve_flow_march` call with the same settings, ~45 s).
+
 ## The case files in the repository
 
 - **`validation/pitzdaily_openfoam/case.yaml` IS what `compare.py` solves.** `compare.case_spec(model=,
@@ -233,15 +289,32 @@ by construction), and not passing `drive` (the only nameable drive is the builde
   which is what every harness reads. `U_IN` and `NU` (the comparison's scales, read by
   `compare_reynolds_continuation.py`) are read out of the file; `RHO`, `K_IN`, `OMEGA_IN`, `WALLS`,
   `K_WALL_BC` are gone. The reasons for each choice moved into the file's comments.
-- **`validation/bfs3d_openfoam/case.yaml` states bfs3d at its driver's defaults and is NOT read by it** —
-  kept hand-built as the parity reference. Switching that driver is a separate decision: it is where most
-  of the `BFS3D_*` environment configuration lives.
+- **`validation/pitzdaily_openfoam/compare.py` solves with the file's solver.** `SOLVER =
+  _solver_with_overrides(CASE.spec.solver)` applies each set `PITZ_*` march variable as an **edit** of the
+  file's solver (unset = the file), and every module constant its probes import (`INNER_STEPS`, `CONTROL`,
+  `RETRY`, `STENCIL_REACH`, `LEADING_INVERSE`, ...) is read back from `SOLVER`, keeping its measurement
+  record beside it. The default run is `solver.solve(coupled, session_options={observer}, point_setup=<log
+  the label>, inner_observer=..., on_checkpoint=..., on_retry=...)`. **Script-only study arms** (project
+  owner, 2026-09-24: kept, labelled, off by default) — the rung ladder (`PITZ_RAMP=off`, with
+  `BETA_START_WARM` and `SEED_REPAIR`), `PITZ_TURB_TAPER`, `PITZ_TURB_DAMPING_TARGET` and capped Jacobian
+  gradient sweeps — run through `_solve_study_arm`, which starts from `SOLVER.settings()` and calls the
+  library directly; the banner names the arm in force.
+- **`validation/bfs3d_openfoam/case.yaml` states bfs3d at its driver's defaults, and bfs3d now SOLVES with
+  its solver section** while still assembling the *problem* by hand (the parity reference). Every march
+  constant defaults to the file's value and a `BFS3D_*` variable overrides it; `SOLVER` is reassembled from
+  those constants and **the module refuses to import if, with no `BFS3D_*` variable set, it differs from
+  `FILE_SOLVER`** — the check that the constants still read the file. The ladder arm (`BFS3D_RAMP=off`)
+  is its one script-only study arm.
+- **Both step scripts are pinned** by `test_each_step_case_script_runs_its_files_solver_when_no_override_is_set`,
+  which imports each in a subprocess with the `PITZ_*`/`BFS3D_*` variables removed.
 - **`validation/turbulent_channel/cases/re{20000,45000,240000}.yaml` and
   `validation/turbulent_channel_openfoam/cases/{low,high}.yaml` are what the channel harnesses solve** —
-  one file per configuration, each stating ν as the harness used to compute it, to the last bit. The
-  OpenFOAM harness refuses to compare if the file's ν is not the OpenFOAM run's `nu_of / Ubar` (at
-  U_bulk = 1). Both harnesses now read the channel height, bulk velocity and column stride (`nx`) from
-  the file rather than restating them.
+  one file per configuration, each stating ν as the harness used to compute it, to the last bit, and its
+  `Segregated` solve (sweeps, relaxation, the direct flow solve, the scalar budget and stop, `ScalarAir` for
+  the law-of-the-wall study). The harnesses hold **no** solver setting any more — they call
+  `checked.solve(coupled)`. The OpenFOAM harness refuses to compare if the file's ν is not the OpenFOAM
+  run's `nu_of / Ubar` (at U_bulk = 1). Both read the channel height, bulk velocity and column stride
+  (`nx`) from the file rather than restating them.
 - **`tests/unit/test_channel_case_files.py` is their parity check, in the FAST tier** — the meshes are
   generated, so nothing is gitignored. Each file is compared as one pytree against a frozen copy of the
   harnesses' old hand assembly, with one deliberate difference: the harnesses held the viscosity as a

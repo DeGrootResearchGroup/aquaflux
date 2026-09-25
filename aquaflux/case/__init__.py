@@ -38,6 +38,7 @@ from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
 from .mesh_source import AxisGrading, GeometricGrading, MeshSource, OpenFOAMMesh, StructuredGrid
 from .physics import RANS, Laminar, Physics
+from .solver import CoupledMarch, FlowMarch, RootSolve, Segregated, SolverSpec, ViscosityRamp
 from .spec import CaseSpec, Numerics, case_spec_from_mapping, case_spec_to_mapping
 
 __all__ = [
@@ -48,8 +49,10 @@ __all__ = [
     "CaseFile",
     "CaseSpec",
     "CheckedCase",
+    "CoupledMarch",
     "DriveSpec",
     "FixedTurbulence",
+    "FlowMarch",
     "Fluid",
     "GeometricGrading",
     "Inlet",
@@ -61,8 +64,12 @@ __all__ = [
     "Outlet",
     "PatchCondition",
     "Physics",
+    "RootSolve",
+    "Segregated",
+    "SolverSpec",
     "SourceSpec",
     "StructuredGrid",
+    "ViscosityRamp",
     "Wall",
     "case_spec_from_mapping",
     "case_spec_to_mapping",

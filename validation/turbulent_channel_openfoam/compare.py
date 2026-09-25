@@ -46,16 +46,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import aquaflux  # noqa: F401  (enables x64)
-import lineax as lx
 import numpy as np
 from aquaflux.case import read_case
-from aquaflux.flow import bulk_velocity_flow_solve
-from aquaflux.solve import Convergence, RootSolveSettings
-from aquaflux.turbulence import (
-    scalar_pseudo_transient_solve,
-    solve_segregated,
-    sst_initial_fields,
-)
 
 HERE = Path(__file__).resolve().parent
 RUNS = HERE / "runs"
@@ -64,7 +56,7 @@ U_BAR, H = 0.1335, 2.0  # OpenFOAM meanVelocityForce Ubar; full height (half-hei
 KAPPA, B_LOG = 0.41, 5.2
 
 # One aquaflux case file per OpenFOAM run, under cases/: its mesh keeps the first cell y+ < 1 at that
-# Re_tau, and its viscosity is the OpenFOAM run's, normalized to U_bulk = 1.
+# Re_tau, its viscosity is the OpenFOAM run's, normalized to U_bulk = 1, and it states how it is solved.
 CASES = ["low", "high"]
 
 
@@ -135,42 +127,14 @@ def solve_aquaflux(name, nu_of):
             f"cases/{name}.yaml states nu = {nu!r}, but the OpenFOAM run's nu = {nu_of!r} gives "
             f"{expected!r} at U_bulk = 1: the two are not the same case."
         )
-    coupled = case_file.check().build()
+    checked = case_file.check()
+    coupled = checked.build()
     momentum, turbulence = coupled.momentum, coupled.turbulence
     mesh, geom = momentum.mesh, momentum.geometry
-    ny = spec.mesh.cells[1]
-    direct = lx.AutoLinearSolver(well_posed=True)
-
-    # The body force is a solve unknown enforcing <U_x> = 1 (a bordered Newton with beta as a scalar
-    # Lagrange multiplier), so the bulk velocity is held exactly at every sweep -- no feedback
-    # controller that could overshoot while the eddy viscosity is still developing.
-    solve_flow = bulk_velocity_flow_solve(
-        momentum, root_solve=RootSolveSettings(linear_solver=direct)
-    )
-
-    # Seed from the hybrid IC. A uniform k leaves the first sweep's residual essentially unchanged
-    # for ~30 pseudo-transient steps, so the SER schedule's beta never relaxes and the scalar march
-    # burns its budget before the residual moves; the hybrid start descends from the first step.
-    flow0, k0, omega0 = sst_initial_fields(momentum, turbulence)
-    sweeps = 90 if ny < 150 else 140
-    flow, k, omega = solve_segregated(
-        momentum,
-        turbulence,
-        solve_flow,
-        # The default (max_steps=40, rtol=1e-10) exhausts its step budget on the stiff cold-start
-        # k/omega sweeps here and raises rather than returning an unconverged field; this budget and
-        # tolerance carry both Reynolds numbers.
-        scalar_pseudo_transient_solve(
-            root_solve=RootSolveSettings(
-                max_steps=200, convergence=Convergence(rtol=1e-8, atol=1e-10)
-            )
-        ),
-        flow0,
-        k0,
-        omega0,
-        max_sweeps=sweeps,
-        relaxation=0.9,
-    )
+    # The file's segregated solve: the body force is a solve unknown enforcing <U_x> = 1 (a bordered
+    # Newton with the force as a scalar Lagrange multiplier), so the bulk velocity is held exactly at
+    # every sweep, and it starts from the hybrid initial condition.
+    flow, k, omega = checked.solve(coupled)
     velocity, _ = momentum.unpack(flow)
     c = np.asarray(geom.cell.centroid)
     idx = np.arange(0, mesh.n_cells, spec.mesh.cells[0])  # one wall-normal column

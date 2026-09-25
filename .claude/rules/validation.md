@@ -503,6 +503,20 @@ has a written answer*, a question that has been got wrong from the process table
 written answer first. The cost of not doing so, measured here, was four wrong claims in one evening
 between two sessions that were each checking the other's work.
 
+## Every case with a case file now SOLVES from it (2026-09-24)
+
+The channel harnesses call `checked.solve(coupled)` and hold no solver setting; pitzDaily and bfs3d read
+their march from `case.yaml`'s `solver` section, with each `PITZ_*` / `BFS3D_*` march variable an **edit**
+of it (see `.claude/rules/case.md` → "The case files in the repository"). Two consequences for anyone
+writing a harness:
+- **A module constant a probe imports (`compare.INNER_STEPS`, `compare.CONTROL`, `compare.PRECONDITIONER`,
+  ...) is now read back from the file**, not a literal. Change the value in `case.yaml`, never in the
+  script — bfs3d refuses to import when its reassembled `SOLVER` differs from the file's with no override
+  set, and a fast-tier test imports both scripts that way.
+- **A setting cannot be passed to a case's `solve` as a keyword** — it is refused. A study that varies one
+  edits the spec (`dataclasses.replace`), as the `PITZ_*` overrides do; one that varies something no file
+  can state is a script-only study arm that calls the library itself (pitzDaily's `_solve_study_arm`).
+
 ## The channel studies read case files (2026-09-24) — and their tracked report was stale
 
 `turbulent_channel` and `turbulent_channel_openfoam` build each configuration from a file under `cases/`

@@ -62,6 +62,20 @@ What to take from it, none of which is specific to that mechanism:
 
 ## Globalization — Newton step, continuation, line search
 
+- **`RetryPolicy.solver` is a SETTINGS VALUE, `LinearSolverSpec` (`solve/linear_solver_spec.py`, 2026-09-24,
+  #437), not a `lineax` solver.** `GmresSolve(rtol, restart, stagnation_iters, max_restarts)` builds
+  `relative_residual_gmres(...)` (the Euclidean relative stop the only two callers used,
+  `relative_residual_gmres(1e-4, restart=40)`); `DirectSolve()` builds `lx.AutoLinearSolver(well_posed=True)`.
+  The reason is the case file: a `lineax` object is not plain data, so a policy holding one could not be
+  read by `SettingsMapping`, and `RetryPolicy` is now a case-file kind as it stands. `newton_march` builds
+  the solver **once per march** (`tight_solver`) and hands that one object to every divergence retry.
+  ⚠️ **Only this field moved.** `RootSolveSettings.linear_solver` / `.adjoint_solver` and
+  `solve_coupled(adjoint_solver=)` still take `lineax` solvers; the case layer's `RootSolve` builds them from
+  `LinearSolverSpec`s. Moving those too touches ~12 call sites and was left out of scope. The unit tests'
+  `"tight"` marker survives as a `LinearSolverSpec` test double (`_TightSolve.build() -> "tight"`), which is
+  also what pins the build: a march passing the spec itself, unbuilt, reaches the step as a non-`"tight"`
+  object and the retry tests go red.
+
 - **`ShiftedStep` is the shared body of the two shifted Newton steps (`solve/continuation.py`, BUILT
   2026-08-15).** `PseudoTransientStep` and `DualTimeStep` differ entirely in `stepper()` — what one
   *outer step* means — and not at all in how they are configured or interrogated. The eight fields they

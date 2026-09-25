@@ -71,6 +71,7 @@ from .preconditioner import (
     scalar_transport_shift_diagonal,
 )
 from .preconditioner_spec import (
+    PRECONDITIONER_SPEC_MAPPING,
     BlockDiagonal,
     preconditioner_spec_from_mapping,
     preconditioner_spec_to_mapping,
@@ -100,6 +101,7 @@ from .strain import strain_rate_magnitude
 from .transport import SSTClosureFields, SSTTurbulence, WallFixedResidual
 
 __all__ = [
+    "PRECONDITIONER_SPEC_MAPPING",
     "AdaptiveReynoldsSchedule",
     "AirAmgPreconditioner",
     "BetaTaperedDamping",

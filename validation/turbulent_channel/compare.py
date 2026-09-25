@@ -16,7 +16,7 @@ realized von Karman constant. This distinguishes a real log law from a profile t
 the log line, and it is read without a fitting window (which the buffer and wake would contaminate).
 
 Each Reynolds number is a case file under ``cases/`` -- mesh, fluid, physics, walls, numerics, the
-held bulk velocity and the pressure datum -- which this script reads, solves and reduces.
+held bulk velocity, the pressure datum and the solver -- which this script reads, solves and reduces.
 
 Run from the repo root:  ``python3 validation/turbulent_channel/compare.py``
 """
@@ -33,31 +33,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import aquaflux  # noqa: F401  (enables x64)
-import lineax as lx
 import numpy as np
 from aquaflux.case import read_case
-from aquaflux.flow import bulk_velocity_flow_solve
-from aquaflux.solve import Convergence, RootSolveSettings
-from aquaflux.turbulence import (
-    ScalarAir,
-    bulk_velocity,
-    scalar_pseudo_transient_solve,
-    solve_segregated,
-    sst_initial_fields,
-)
+from aquaflux.turbulence import bulk_velocity
 
 HERE = Path(__file__).resolve().parent
 FIGS = HERE / "figures"
 
 KAPPA, B_LOG = 0.41, 5.2
 
-# One case file per Reynolds number, with the segregated solve's outer-sweep budget for it. The
-# budget is a solver setting and not the case's, so it is not in the file.
-CASES = [
-    dict(case="cases/re20000.yaml", sweeps=100),
-    dict(case="cases/re45000.yaml", sweeps=110),
-    dict(case="cases/re240000.yaml", sweeps=150),
-]
+# One case file per Reynolds number: its mesh, its viscosity and how it is solved.
+CASES = ["cases/re20000.yaml", "cases/re45000.yaml", "cases/re240000.yaml"]
 
 
 def law_of_the_wall(yplus: np.ndarray) -> np.ndarray:
@@ -76,54 +62,23 @@ def dean_u_tau(Re_b: float, u_b: float) -> float:
     return u_b * np.sqrt(0.073 * Re_b**-0.25 / 2.0)
 
 
-def solve_case(case, sweeps):
+def solve_case(case):
     case_file = read_case(HERE / case)
     spec = case_file.spec
-    coupled = case_file.check().build()
-    momentum, turbulence = coupled.momentum, coupled.turbulence
+    checked = case_file.check()
+    coupled = checked.build()
+    momentum = coupled.momentum
     mesh, geom = momentum.mesh, momentum.geometry
     # The bulk velocity, the channel height (full height H, half-height h = H / 2, which Re_tau is
     # based on) and the viscosity are the case file's; Re_b = U_b H / nu follows from them.
     u_b, H = spec.drive.target, spec.mesh.lengths[1]
     nu = spec.fluid.kinematic_viscosity
     Re_b = u_b * H / nu
-    direct = lx.AutoLinearSolver(
-        well_posed=True
-    )  # tiny (nx=4) coupled system: a direct solve is exact
-
-    # The body force is a solve unknown enforcing <U_x> = U_b (a bordered Newton with beta as a scalar
-    # Lagrange multiplier), so the bulk velocity is held exactly at every sweep -- no feedback
-    # controller that could overshoot while the eddy viscosity is still developing.
-    solve_flow = bulk_velocity_flow_solve(
-        momentum, root_solve=RootSolveSettings(linear_solver=direct)
-    )
-
-    # Seed from the hybrid IC. A uniform k leaves the first sweep's residual essentially unchanged
-    # for ~30 pseudo-transient steps, so the SER schedule's beta never relaxes and the scalar march
-    # exhausts its budget before the residual moves; the hybrid start descends from the first step.
-    flow0, k0, omega0 = sst_initial_fields(momentum, turbulence)
+    # The file's segregated solve: the body force is a solve unknown enforcing <U_x> = U_b (a
+    # bordered Newton with the force as a scalar Lagrange multiplier), so the bulk velocity is held
+    # exactly at every sweep, and it starts from the hybrid initial condition.
     t0 = time.time()
-    flow, _, _ = solve_segregated(
-        momentum,
-        turbulence,
-        solve_flow,
-        # At near-wall aspect ratios of ~10^3 the k/omega operators are ill-conditioned (condition
-        # number grows like AR^2), so the scalar solve needs the mesh-independent convection-diffusion
-        # AMG; the default rtol=1e-10 sits below that operator's noise floor, so loosen it to 1e-8; and
-        # the pseudo-transient march needs a deeper step budget at this aspect ratio (a generous
-        # backstop -- the solve exits on tolerance -- not a per-case knob).
-        scalar_pseudo_transient_solve(
-            root_solve=RootSolveSettings(
-                max_steps=400, convergence=Convergence(rtol=1e-8, atol=1e-10)
-            )
-        ),
-        flow0,
-        k0,
-        omega0,
-        max_sweeps=sweeps,
-        relaxation=0.9,
-        scalar_preconditioner=ScalarAir(),
-    )
+    flow, _, _ = checked.solve(coupled)
     dt = time.time() - t0
 
     velocity, _ = momentum.unpack(flow)
@@ -272,7 +227,7 @@ def _report(results, failed=()):
     for case, exc in failed:
         lines += [
             "",
-            f"- **{case['case']}**: the segregated solve did not converge "
+            f"- **{case}**: the segregated solve did not converge "
             f"(`{exc}`) and is omitted above. Tracked in issue #99.",
         ]
     (HERE / "report.md").write_text("\n".join(lines) + "\n")
@@ -282,12 +237,12 @@ def _report(results, failed=()):
 def main():
     results, failed = [], []
     for case in CASES:
-        print(f"solving {case['case']} ...", flush=True)
+        print(f"solving {case} ...", flush=True)
         # A case whose segregated solve does not converge is recorded and skipped rather than
         # aborting: one failure should not discard the cases that did converge, nor leave the
         # tracked report and figures describing an earlier run.
         try:
-            r = solve_case(**case)
+            r = solve_case(case)
         except Exception as exc:  # any solver failure is reported, not swallowed
             failed.append((case, type(exc).__name__))
             print(f"  DID NOT CONVERGE ({type(exc).__name__}) -- skipped", flush=True)

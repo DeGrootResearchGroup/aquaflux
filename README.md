@@ -72,11 +72,12 @@ applies anywhere you want gradients through a flow solve.
   the CAD kernel with `pip install "aquaflux[cad]"`.
 - **Distributed memory** — domain decomposition (including a SCOTCH partitioner)
   and halo exchange for a sharded residual.
-- **Case files** — describe a case's mesh, fluid, physics, boundary patches and
-  numerics in one YAML file (`aquaflux.case.read_case`). Each boundary patch is
-  stated once for every field, every setting is checked where it appears, and a
-  case can be checked against its mesh without building anything. The solve
-  itself is still configured in code.
+- **Case files** — describe a case's mesh, fluid, physics, boundary patches,
+  numerics and solver in one YAML file (`aquaflux.case.read_case`). Each boundary
+  patch is stated once for every field, every setting is checked where it appears,
+  a case can be checked against its mesh without building anything, and
+  `CheckedCase.solve` runs the solve the file describes. Writing the results out
+  is still done in code.
 
 ## Installation
 

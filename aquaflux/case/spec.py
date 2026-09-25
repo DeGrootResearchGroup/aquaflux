@@ -45,14 +45,29 @@ from aquaflux.schemes import (
     SweptGradientSolve,
     VenkatakrishnanLimiter,
 )
-from aquaflux.solve import SettingsMapping
-from aquaflux.turbulence import DirectScalars, LogScalars, SSTModel
+from aquaflux.solve import (
+    BlockScaled,
+    CflResidualDualTimeControl,
+    Convergence,
+    DirectSolve,
+    DualTimeControl,
+    DualTimeLoop,
+    Euclidean,
+    GmresSolve,
+    LinearSolveSettings,
+    ResidualRatioDualTimeControl,
+    RetryPolicy,
+    RowScaled,
+    SettingsMapping,
+)
+from aquaflux.turbulence import PRECONDITIONER_SPEC_MAPPING, DirectScalars, LogScalars, SSTModel
 
 from .boundaries import FixedTurbulence, Inlet, Outlet, PatchCondition, Wall
 from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
 from .mesh_source import GeometricGrading, MeshSource, OpenFOAMMesh, StructuredGrid
 from .physics import RANS, Laminar, Physics
+from .solver import CoupledMarch, FlowMarch, RootSolve, Segregated, SolverSpec, ViscosityRamp
 
 __all__ = ["CaseSpec", "Numerics", "case_spec_from_mapping", "case_spec_to_mapping"]
 
@@ -115,6 +130,10 @@ class CaseSpec:
         Where the pressure level is fixed in a domain no patch fixes it in -- a closed domain, such as
         a lid-driven cavity: a :class:`~aquaflux.flow.PinnedPoint`. Required exactly when no patch is
         an :class:`~aquaflux.case.Outlet`, and refused otherwise.
+    solver : SolverSpec or None
+        How the case is solved -- :class:`~aquaflux.case.CoupledMarch`, :class:`~aquaflux.case.FlowMarch`
+        or :class:`~aquaflux.case.Segregated`. Unset, its physics' march with the library's own
+        settings (see :meth:`~aquaflux.case.CheckedCase.solve`).
 
     Raises
     ------
@@ -124,7 +143,7 @@ class CaseSpec:
         If there are no boundary patches, if the physics refuses one (a turbulence setting in a laminar
         case, an inlet with no inflow turbulence in a Reynolds-averaged one), or if the pressure level
         is not fixed exactly once: a closed domain with no ``pressure_datum``, or a datum beside an
-        outlet.
+        outlet; or if the solver cannot solve this physics or hold this drive.
     """
 
     mesh: MeshSource
@@ -135,6 +154,7 @@ class CaseSpec:
     drive: DriveSpec | None = None
     pressure_datum: PressureDatum | None = None
     sources: tuple[SourceSpec, ...] = ()
+    solver: SolverSpec | None = None
 
     def __post_init__(self) -> None:
         for name, family in (
@@ -160,6 +180,10 @@ class CaseSpec:
             raise TypeError(
                 f"CaseSpec.pressure_datum must be a PressureDatum, got {self.pressure_datum!r}."
             )
+        if self.solver is not None and not isinstance(self.solver, SolverSpec):
+            raise TypeError(
+                f"CaseSpec.solver must be a solver such as CoupledMarch(), got {self.solver!r}."
+            )
         if not self.boundaries:
             raise ValueError("a case names at least one boundary patch.")
         for patch, condition in self.boundaries.items():
@@ -181,6 +205,8 @@ class CaseSpec:
             self.pressure_datum,
             "the case",
         )
+        if self.solver is not None:
+            self.solver.refuse_for(self.physics, self.drive)
 
     def check_against(self, mesh: Mesh) -> None:
         """Refuse this case on ``mesh`` unless its patches fit it exactly.
@@ -280,8 +306,11 @@ def _datum_misfits(datum: PinnedPoint, mesh: Mesh) -> list[str]:
     return []
 
 
-#: Every value a case file may name, at any level. The schemes are the library's own classes, read and
-#: written as they are; the boundary kinds are case-file values that describe a patch for every field.
+#: Every value a case file may name, at any level. The schemes, the march settings and the
+#: preconditioners are the library's own classes, read and written as they are -- the preconditioners
+#: taken from the coupled preconditioner's own registry, so a kind added there reaches a case file the day
+#: it is added; the boundary kinds and the solvers are case-file values that describe a patch for every
+#: field and a solve for every setting.
 _CASE_MAPPING = SettingsMapping(
     [
         CaseSpec,
@@ -312,6 +341,24 @@ _CASE_MAPPING = SettingsMapping(
         BulkVelocity,
         BodyForce,
         PinnedPoint,
+        CoupledMarch,
+        FlowMarch,
+        Segregated,
+        ViscosityRamp,
+        RootSolve,
+        Convergence,
+        Euclidean,
+        RowScaled,
+        BlockScaled,
+        DualTimeLoop,
+        LinearSolveSettings,
+        DualTimeControl,
+        ResidualRatioDualTimeControl,
+        CflResidualDualTimeControl,
+        RetryPolicy,
+        GmresSolve,
+        DirectSolve,
+        *PRECONDITIONER_SPEC_MAPPING.kinds,
     ]
 )
 
@@ -323,7 +370,7 @@ def case_spec_from_mapping(mapping: Mapping[str, object]) -> CaseSpec:
     """Read a case from the nested mapping a case file parses to.
 
     The top level holds the sections -- ``mesh``, ``fluid``, ``physics``, ``boundaries``, ``numerics``
-    and optionally ``drive`` -- and names no ``kind``, since the whole document is the case. Below it,
+    and optionally ``drive``, ``sources``, ``pressure_datum`` and ``solver`` -- and names no ``kind``, since the whole document is the case. Below it,
     each value is a mapping whose ``kind`` names its class, except ``boundaries``, which maps each patch
     name to that patch's condition::
 

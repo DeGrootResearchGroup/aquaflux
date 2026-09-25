@@ -34,6 +34,7 @@ from aquaflux.solve import (
 from aquaflux.solve.lu_preconditioner import LU_BACKENDS
 from aquaflux.solve.multigrid import _PROLONGATION_SMOOTHING
 from aquaflux.turbulence import (
+    PRECONDITIONER_SPEC_MAPPING,
     BlockDiagonal,
     ScalarAir,
     ScalarBlock,
@@ -42,7 +43,6 @@ from aquaflux.turbulence import (
     preconditioner_spec_from_mapping,
     preconditioner_spec_to_mapping,
 )
-from aquaflux.turbulence.preconditioner_spec import _SPEC_MAPPING
 
 #: One spec per shape a case file can take, together holding every value class at least once.
 _SPECS = [
@@ -82,7 +82,7 @@ _SPECS = [
 def _held_classes(value: object, into: set[type]) -> set[type]:
     into.add(type(value))
     for setting in vars(value).values():
-        if type(setting) in _SPEC_MAPPING.kinds:
+        if type(setting) in PRECONDITIONER_SPEC_MAPPING.kinds:
             _held_classes(setting, into)
     return into
 
@@ -122,7 +122,7 @@ def _public_value_classes() -> set[type]:
 
 def test_the_mapping_accepts_every_public_value_a_spec_can_hold() -> None:
     """A value class added to a family but not to the mapping would be unwritable in a case file."""
-    assert set(_SPEC_MAPPING.kinds) == _public_value_classes()
+    assert set(PRECONDITIONER_SPEC_MAPPING.kinds) == _public_value_classes()
 
 
 def test_the_census_scans_every_subpackage_not_only_the_ones_a_spec_imports() -> None:
@@ -135,7 +135,7 @@ def test_the_round_trip_specs_hold_every_accepted_class() -> None:
     held: set[type] = set()
     for spec in _SPECS:
         _held_classes(spec, held)
-    assert held == set(_SPEC_MAPPING.kinds)
+    assert held == set(PRECONDITIONER_SPEC_MAPPING.kinds)
 
 
 @pytest.mark.parametrize("spec", _SPECS, ids=repr)
@@ -313,7 +313,7 @@ def test_the_solve_registry_does_not_know_the_turbulence_only_kinds() -> None:
 
 
 def test_the_coupled_registry_extends_the_solve_one_rather_than_restating_it() -> None:
-    assert set(MATERIALIZED_MAPPING.kinds) < set(_SPEC_MAPPING.kinds)
+    assert set(MATERIALIZED_MAPPING.kinds) < set(PRECONDITIONER_SPEC_MAPPING.kinds)
 
 
 def test_a_bare_block_inverse_spec_round_trips_through_the_solve_registry() -> None:
@@ -401,6 +401,6 @@ def test_every_field_of_every_spec_is_one_the_mapping_can_check() -> None:
     constants, so this is really a test that importing the package still works -- written out because
     what it pins is a property of every spec class, not of the import.
     """
-    for mapping in (_SPEC_MAPPING, MATERIALIZED_MAPPING):
+    for mapping in (PRECONDITIONER_SPEC_MAPPING, MATERIALIZED_MAPPING):
         rebuilt = SettingsMapping(mapping.kinds)
         assert rebuilt.kinds == mapping.kinds

@@ -726,6 +726,8 @@ def newton_march(
     # finishing inner iterations whose results this loop is about to discard. One number each, set in
     # one place: a step that took its own copy would be a second spelling to keep in step with this one.
     strategy = retry.with_inner_abort(strategy)
+    # Built once, so every divergence retry of the march hands the step the same solver.
+    tight_solver = None if retry.solver is None else retry.solver.build()
 
     state = phi0
     current = float(residual_norm_0)
@@ -937,7 +939,7 @@ def newton_march(
         # more damping (the factors are already fresh at this (state, β), so re-preconditioning is a no-op).
         # This fires only if the step is STILL diverged after the escalation loop -- or if escalation was
         # unavailable (no threshold set, or no β leaf) -- redoing the SAME step from the SAME pre-step
-        # state with `retry.solver`.
+        # state with the tighter solver `retry.solver` names.
         # One retry; a still-diverged step breaks below as it would without a retry. A policy with no
         # `solver` (the default) is byte-identical, and the exact-LU path never triggers this.
         diverged_retry = retry.solver is not None and retry.has_diverged(residual_norm, reference)
@@ -949,7 +951,7 @@ def newton_march(
                 # `NewtonStrategy` in full. Unchanged beta here in any case; nothing escalated.
                 on_retry("solver", retries + 1, float(_shift_of(active_step) or 0.0))
             outcome, residual_norm = _march_step(
-                active_step, step_residual, prestep_state, residual_norm_0, retry.solver
+                active_step, step_residual, prestep_state, residual_norm_0, tight_solver
             )
         # Carry an escalated β forward into the control. The escalation raised β because the control had
         # driven it too low for this operator; without carrying that back, the next `next_step` recomputes

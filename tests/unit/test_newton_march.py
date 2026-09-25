@@ -25,6 +25,7 @@ from aquaflux.solve import (
     CycleGrowthTrigger,
     DampedNewtonStep,
     DualTimeControl,
+    LinearSolverSpec,
     PseudoTransientStep,
     RetryPolicy,
     ShiftTerm,
@@ -198,6 +199,16 @@ def test_a_march_whose_residual_is_already_infinite_does_not_report_converged() 
     assert result.reports == ()
 
 
+class _TightSolve(LinearSolverSpec):
+    """Names the ``"tight"`` marker solver the test steps below branch on, in place of a real GMRES."""
+
+    def build(self):
+        return "tight"
+
+
+_TIGHT = _TightSolve()
+
+
 class _PoisonUnlessTight(eqx.Module):
     """A step that poisons the state (non-finite) unless solved with the ``"tight"`` solver.
 
@@ -239,7 +250,7 @@ def test_march_retries_a_diverged_step_with_the_tighter_solver() -> None:
     assert not bool(jnp.isfinite(poisoned.reports[-1].residual_norm))
 
     recovered = newton_march(
-        step, residual, phi0, max_steps=5, rtol=1e-10, atol=1e-12, retry=RetryPolicy(solver="tight")
+        step, residual, phi0, max_steps=5, rtol=1e-10, atol=1e-12, retry=RetryPolicy(solver=_TIGHT)
     )
     assert recovered.converged
     assert jnp.allclose(recovered.state, 0.0, atol=1e-8)
@@ -258,7 +269,7 @@ def test_march_does_not_retry_a_finite_step() -> None:
     common = dict(max_steps=50, rtol=1e-10, atol=1e-12)
 
     plain = newton_march(step, residual, phi0, **common)
-    with_retry = newton_march(step, residual, phi0, retry=RetryPolicy(solver="tight"), **common)
+    with_retry = newton_march(step, residual, phi0, retry=RetryPolicy(solver=_TIGHT), **common)
 
     assert with_retry.converged and plain.converged
     assert jnp.allclose(with_retry.state, root, atol=1e-8)
@@ -756,7 +767,7 @@ def test_march_escalates_beta_before_the_tight_divergence_retry() -> None:
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry=RetryPolicy(solver="tight", on_alpha=0.5, beta_factor=2.0, cycles_limit=2),
+        retry=RetryPolicy(solver=_TIGHT, on_alpha=0.5, beta_factor=2.0, cycles_limit=2),
     )
     assert result.converged
     assert jnp.allclose(result.state, 0.0, atol=1e-8)
@@ -780,7 +791,7 @@ def test_march_falls_back_to_the_tight_retry_when_escalation_cannot_fix_divergen
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry=RetryPolicy(solver="tight", on_alpha=0.5, beta_factor=2.0, cycles_limit=2),
+        retry=RetryPolicy(solver=_TIGHT, on_alpha=0.5, beta_factor=2.0, cycles_limit=2),
     )
     assert result.converged
     assert jnp.allclose(result.state, 0.0, atol=1e-8)
@@ -968,7 +979,7 @@ def test_escalates_reports_whether_the_step_length_threshold_is_set() -> None:
     assert RetryPolicy(abort_above_cycles=10, on_alpha=0.01).escalates
     assert not RetryPolicy().escalates
     # A tighter solver is the divergence FALLBACK, not an escalation trigger.
-    assert not RetryPolicy(solver="tight").escalates
+    assert not RetryPolicy(solver=_TIGHT).escalates
 
 
 def test_escalate_preserves_the_shift_leafs_dtype_and_weak_type() -> None:
@@ -1241,7 +1252,7 @@ def test_the_divergence_retry_works_on_a_step_with_no_shift() -> None:
         rtol=1e-10,
         atol=1e-12,
         solver="loose",
-        retry=RetryPolicy(solver="tight"),
+        retry=RetryPolicy(solver=_TIGHT),
         on_retry=lambda reason, attempt, beta: seen.append((reason, beta)),
     )
 

@@ -50,7 +50,10 @@ PUBLIC_SUBPACKAGES = [
 SUBPACKAGE_GROUPS = {
     "case": [
         ("Reading, writing and checking a case file", ["case_file", "spec"]),
-        ("The sections of a case", ["mesh_source", "fluid", "physics", "boundaries", "forcing"]),
+        (
+            "The sections of a case",
+            ["mesh_source", "fluid", "physics", "boundaries", "forcing", "solver"],
+        ),
     ],
     "mesh": [
         ("The mesh and its geometry", ["mesh", "geometry", "cell", "face", "connectivity"]),
@@ -75,7 +78,10 @@ SUBPACKAGE_GROUPS = {
             ],
         ),
         ("Observing and checkpointing a march", ["march_log", "checkpoint", "refresh_timing"]),
-        ("Linear solves and residual measures", ["linear", "norm", "convergence", "shift_basis"]),
+        (
+            "Linear solves and residual measures",
+            ["linear", "linear_solver_spec", "norm", "convergence", "shift_basis"],
+        ),
         (
             "Preconditioners",
             [

@@ -51,6 +51,7 @@ from .preconditioner import (
 )
 
 __all__ = [
+    "PRECONDITIONER_SPEC_MAPPING",
     "BlockDiagonal",
     "preconditioner_spec_from_mapping",
     "preconditioner_spec_to_mapping",
@@ -128,11 +129,11 @@ class BlockDiagonal(SettingsValue):
 #: The two families a coupled march can be preconditioned by -- the values a spec file describes.
 _SPEC_FAMILIES = (BlockDiagonal, MaterializedJacobian)
 
-#: Every value a spec file may name, at any level: the two families, the materialized inverses and the
+#: Every value a spec file may name, at any level -- read by a whole case file's registry too: the two families, the materialized inverses and the
 #: probe, and the block inverses, velocity blocks and scalar blocks nested inside them. The materialized
 #: side is **derived from** :data:`~aquaflux.solve.MATERIALIZED_MAPPING` rather than listed again, so a
 #: kind added there reaches this registry -- and the laminar one -- the day it is added.
-_SPEC_MAPPING = SettingsMapping(
+PRECONDITIONER_SPEC_MAPPING = SettingsMapping(
     [
         BlockDiagonal,
         *MATERIALIZED_MAPPING.kinds,
@@ -195,7 +196,7 @@ def preconditioner_spec_from_mapping(
         If the outermost kind is not one of the two families, or a nested value is of the wrong kind for
         its field.
     """
-    spec = _SPEC_MAPPING.from_mapping(mapping)
+    spec = PRECONDITIONER_SPEC_MAPPING.from_mapping(mapping)
     _refuse_non_spec(spec, "a spec file describes")
     return spec
 
@@ -223,4 +224,4 @@ def preconditioner_spec_to_mapping(spec: BlockDiagonal | MaterializedJacobian) -
         If ``spec`` is not one of the two families.
     """
     _refuse_non_spec(spec, "only")
-    return _SPEC_MAPPING.to_mapping(spec)
+    return PRECONDITIONER_SPEC_MAPPING.to_mapping(spec)

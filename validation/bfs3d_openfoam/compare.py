@@ -70,6 +70,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
+from aquaflux.case import CoupledMarch, ViscosityRamp, read_case
 from aquaflux.discretization import FirstOrderUpwind, LimitedUpwind
 from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, VelocityInlet
 from aquaflux.io import read_openfoam
@@ -81,7 +82,6 @@ from aquaflux.schemes import (
 )
 from aquaflux.solve import (
     AirReduction,
-    CflResidualDualTimeControl,
     Convergence,
     DualTimeLoop,
     FieldSplit,
@@ -97,11 +97,9 @@ from aquaflux.solve import (
     StateCheckpointer,
     combine_metrics,
     combine_observers,
-    relative_residual_gmres,
 )
 from aquaflux.turbulence import (
     CoupledRANS,
-    CoupledShiftSettings,
     GeometricReynoldsSchedule,
     LogScalars,
     SSTModel,
@@ -112,7 +110,6 @@ from aquaflux.turbulence import (
     scale_both_blocks,
     scale_momentum_only,
     solve_reynolds_continuation,
-    solve_reynolds_ramp,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -126,14 +123,23 @@ RHO, NU = 1.0, 1e-5
 U_IN, K_IN, OMEGA_IN = 10.0, 0.375, 1600.0
 H = 0.01  # step height
 WALLS = ["upperWall", "lowerWall", "sideWalls"]
+
+#: How this case is solved: the solver section of `case.yaml`. Every march setting below defaults to the
+#: file's value and a `BFS3D_*` variable overrides it for a study; `SOLVER`, assembled from them at the
+#: end of the configuration, is checked to be exactly the file's when none is set. The case's problem is
+#: still assembled by hand here, which is what makes it the independent reference the file's physics is
+#: checked against (`validation/case_file_parity.py`).
+FILE_SOLVER = read_case(HERE / "case.yaml").spec.solver
+_FILE_RAMP = FILE_SOLVER.continuation
+_FILE_INVERSE = FILE_SOLVER.preconditioner.inverse
 # The coupled Newton march budget. Stiff, separating, 3D, high-Re case on a wall-function mesh; the cap
 # is generous so the march exits on the tolerance, not the count.
 # --- the solve configuration, each part measured on this case (see the README) -------------------
-MAX_STEPS = 150  # per continuation rung
+MAX_STEPS = FILE_SOLVER.max_steps  # per march segment
 # ABSOLUTE stop on the row-scaled residual. That measure is already a fractional change per equation,
 # so dividing it again by |R0| makes the bar a property of the initial guess -- and under continuation
 # every rung re-bases |R0|, which let a later rung stop looser than an earlier one had already reached.
-RTOL, ATOL = 0.0, 1e-5
+RTOL, ATOL = FILE_SOLVER.convergence.rtol, FILE_SOLVER.convergence.atol
 # Reynolds continuation: `n` lower-Re points one decade apart, anchored at Re/10**n, then the target.
 # A direct solve (0) does NOT converge here, so some continuation is required. Whether the Re/100 anchor
 # earns its keep was measured rather than assumed, and the answer is genuinely mixed -- read both halves
@@ -246,7 +252,7 @@ RAMP = os.environ.get("BFS3D_RAMP", "continuous")
 #: need only be traversable and end exactly at the target, which it does, the target being the caller's
 #: own assembler by identity -- but a result quoted from an intermediate station is not a lower-Reynolds
 #: solution.
-RAMP_SCALE = os.environ.get("BFS3D_RAMP_SCALE", "flow")
+RAMP_SCALE = os.environ.get("BFS3D_RAMP_SCALE", _FILE_RAMP.scale)
 _RAMP_SCALINGS = {"both": scale_both_blocks, "flow": scale_momentum_only}
 if RAMP_SCALE not in _RAMP_SCALINGS:
     raise SystemExit(f"BFS3D_RAMP_SCALE={RAMP_SCALE!r} is not one of {sorted(_RAMP_SCALINGS)}")
@@ -293,7 +299,7 @@ RAMP_COMPANION = _RAMP_SCALINGS[RAMP_SCALE]
 #: sibling shows the same past ITS optimum (handover 2.81e-3 / 5.80e-3 / 1.01e-2 at gamma 2 / 5 / 10,
 #: target 71 / 110 / 229). So a cheap ramp past the optimum is borrowed, not earned -- judge this knob
 #: on the TOTAL, never on a phase.
-TURB_DAMPING = float(os.environ.get("BFS3D_TURB_DAMPING", "5.0"))
+TURB_DAMPING = float(os.environ.get("BFS3D_TURB_DAMPING", FILE_SOLVER.turbulence_damping))
 #: How many geometric viscosity stations the ramp walks (`BFS3D_RAMP_STATIONS`), one outer step each.
 #:
 #: ⚠️ 12, NOT the 24 this case used before damping existed -- and the two knobs INTERACT, so they were
@@ -327,13 +333,15 @@ TURB_DAMPING = float(os.environ.get("BFS3D_TURB_DAMPING", "5.0"))
 #:
 #: Below 12 the curve is flat (8 stations is 1063s against 12's 1059s at gamma 3) and the handover
 #: residual keeps degrading, so 12 is the coarse end of a plateau rather than a peak.
-RAMP_STATIONS = int(os.environ.get("BFS3D_RAMP_STATIONS", "12"))
-RAMP_STEPS_PER_STATION = int(os.environ.get("BFS3D_RAMP_STEPS", "1"))
+RAMP_STATIONS = int(os.environ.get("BFS3D_RAMP_STATIONS", _FILE_RAMP.stations))
+RAMP_STEPS_PER_STATION = int(os.environ.get("BFS3D_RAMP_STEPS", _FILE_RAMP.steps_per_station))
 #: `None` takes `ViscosityRampHomotopy`'s derived default (the station's own viscosity ratio raised to
 #: a fitted exponent, and exactly 1.0 at one step per station, where re-damping every step would make
 #: the shift run away rather than damp).
 RAMP_REDAMPING = (
-    float(os.environ["BFS3D_RAMP_REDAMPING"]) if "BFS3D_RAMP_REDAMPING" in os.environ else None
+    float(os.environ["BFS3D_RAMP_REDAMPING"])
+    if "BFS3D_RAMP_REDAMPING" in os.environ
+    else _FILE_RAMP.redamping
 )
 # The dual-time inner loop: at most `INNER_STEPS` shifted Newton iterations per outer timestep, stopping
 # once `|G|` has fallen to `INNER_TOL` of the step's own starting residual.
@@ -363,17 +371,18 @@ RAMP_REDAMPING = (
 #
 # Each point is ONE march and this case has no measured march-level noise floor, so the 1e-2/5e-2 gap
 # (4%) rests on the step and cycle counts, which are contention-immune, rather than on the wall clock.
-INNER_STEPS = int(os.environ.get("BFS3D_INNER_STEPS", "5"))
+INNER_STEPS = int(os.environ.get("BFS3D_INNER_STEPS", FILE_SOLVER.dual_time.inner_steps))
 # `1` (or less) selects the single shifted step rather than a one-iteration loop: `DualTimeLoop` refuses
 # fewer than two inner steps, because the single step is a different step, with its own escalation ladder.
 DUAL_TIME = INNER_STEPS > 1
-INNER_TOL = float(os.environ.get("BFS3D_INNER_TOL", "1e-2"))
+INNER_TOL = float(os.environ.get("BFS3D_INNER_TOL", FILE_SOLVER.dual_time.inner_tol))
 # Preconditioner bundle. ILU(1) DIVERGES at the low shifts this march's tail runs at (ground truth: 303
 # negative pivots at beta = 0.02, zero for ILU(0)); zero fill converges at every shift tested and builds
 # 3-4x faster. ILU(0) is the weaker smoother, so the extra sweeps pay more than they did for ILU(1).
 # coarse=None stalls at every low shift. The beta floor is PRECONDITIONER-ONLY: the V-cycle is built at
 # max(beta, floor) while the march solves at its own beta, so the root and the adjoint are unchanged.
-FILL_LEVELS, SWEEPS, COARSE_EQ_LIMIT, PC_BETA_FLOOR = 0, 4, 2000, 0.05
+FILL_LEVELS, SWEEPS, COARSE_EQ_LIMIT = 0, 4, 2000
+PC_BETA_FLOOR = FILE_SOLVER.preconditioner.refit_beta_floor
 # How far each COLUMN of the Jacobian is probed. The coloured probe costs one directional derivative per
 # (colour, column field) and the colour count climbs steeply with the reach -- 11 colours at reach one,
 # 39 at two, 94 at three on this mesh -- so probing a column further than it reaches is pure cost. The
@@ -443,7 +452,7 @@ FILL_LEVELS, SWEEPS, COARSE_EQ_LIMIT, PC_BETA_FLOOR = 0, 4, 2000, 0.05
 # `BFS3D_COLUMN_REACH` takes a comma-separated reach per column ("3,3,3,3,2,2"), or `0` for a uniform
 # reach-three probe. Re-measure before shortening any column on a case that changes the schemes or the
 # split; none of this is inheritable.
-_DEFAULT_COLUMN_REACH = "3,3,3,3,2,2"  # [u, v, w, p, k, omega]
+_DEFAULT_COLUMN_REACH = ",".join(map(str, FILE_SOLVER.preconditioner.probe.column_reach or (0,)))
 _column_reach = os.environ.get("BFS3D_COLUMN_REACH", _DEFAULT_COLUMN_REACH)
 if _column_reach in ("", "0"):
     COLUMN_REACH = None  # uniform, at the widest reach the assembler asks for
@@ -478,7 +487,9 @@ else:
 # total comes from more, cheaper steps. It also triggers ~4 more cost-driven refreshes (9.7% of inner
 # solves cross the threshold against 9.0%), which hands back ~42 s of the ~980 s saved.
 # `BFS3D_FIELD_SPLIT=0` restores the monolithic V-cycle for an A/B.
-FIELD_SPLIT = os.environ.get("BFS3D_FIELD_SPLIT", "1") not in ("", "0")
+FIELD_SPLIT = os.environ.get(
+    "BFS3D_FIELD_SPLIT", "1" if isinstance(_FILE_INVERSE, FieldSplit) else "0"
+) not in ("", "0")
 # Which inverse the trailing [k, omega] block gets: "jacobi" (default), the traced nodal hierarchy with a
 # Jacobi-class level smoother, or "air", the reduction-based (lAIR) hierarchy. The host GAMG V-cycle this
 # case originally ran here lost a controlled pair to "jacobi" -- 2893 s / 72 steps against 2124 s / 67, to
@@ -505,6 +516,17 @@ if TURBULENCE_INVERSE not in _TURBULENCE_INVERSES:
 #: here is deliberately independent of `COARSE_EQ_LIMIT` (which also sizes the flow block's own coarse
 #: grid): this arm wants a SMALL coarse grid, since the point is bounding the dense coarse solve at a
 #: much larger mesh, not matching the host V-cycle's global-coupling capacity.
+_FILE_TRAILING = (
+    _FILE_INVERSE.trailing if isinstance(_FILE_INVERSE, FieldSplit) else JacobiSmoothed()
+)
+
+
+def _environment_flag(name, file_value):
+    """A ``0``/``1`` flag from the environment, or the file's value when it is unset."""
+    value = os.environ.get(name)
+    return bool(file_value) if value is None else value not in ("", "0")
+
+
 JACOBI_TRAILING = {
     # Kept off by default, and kept exposed. With NO positivity floor this flag decides whether the case
     # converges at all: an otherwise-identical pair of marches came out opposite, the rescaled one losing
@@ -518,19 +540,25 @@ JACOBI_TRAILING = {
     # Default OFF, which is NOT the class default: on this case it is the difference between a march
     # that converges every rung and one that stalls. `BFS3D_NATIVE_EQUILIBRATE=1` selects the rescaled
     # arm for an A/B of the flag itself.
-    "equilibrate": os.environ.get("BFS3D_NATIVE_EQUILIBRATE", "0") not in ("", "0"),
+    "equilibrate": _environment_flag("BFS3D_NATIVE_EQUILIBRATE", _FILE_TRAILING.equilibrate),
     # Deepened past the class's own two levels -- see the module docstring above this dict for the full
     # rationale and the full-march measurement. `BFS3D_NATIVE_MAX_LEVELS=2 BFS3D_NATIVE_MAX_COARSE=2000
     # BFS3D_NATIVE_STRENGTH_THRESHOLD=0.0 BFS3D_NATIVE_AGGRESSIVE_LEVELS=1` restores the class's own
     # (pre-scaling) two-level, single-aggressive-coarsening arm for re-adjudicating the trade.
-    "max_levels": int(os.environ.get("BFS3D_NATIVE_MAX_LEVELS", "20")),
-    "max_coarse": int(os.environ.get("BFS3D_NATIVE_MAX_COARSE", "200")),
-    "strength_threshold": float(os.environ.get("BFS3D_NATIVE_STRENGTH_THRESHOLD", "0.25")),
-    "aggressive_levels": int(os.environ.get("BFS3D_NATIVE_AGGRESSIVE_LEVELS", "0")),
+    "max_levels": int(os.environ.get("BFS3D_NATIVE_MAX_LEVELS", _FILE_TRAILING.max_levels)),
+    "max_coarse": int(os.environ.get("BFS3D_NATIVE_MAX_COARSE", _FILE_TRAILING.max_coarse)),
+    "strength_threshold": float(
+        os.environ.get("BFS3D_NATIVE_STRENGTH_THRESHOLD", _FILE_TRAILING.strength_threshold)
+    ),
+    "aggressive_levels": int(
+        os.environ.get("BFS3D_NATIVE_AGGRESSIVE_LEVELS", _FILE_TRAILING.aggressive_levels)
+    ),
     # Measured to make no clear difference on this block once the strength threshold is on (a matched
     # A/B on the same hard state converged in 5 cycles without it against 11 with it), unlike the flow
     # saddle where it was worth ~1.7x. Off by default; `BFS3D_NATIVE_AVOID_SINGLETONS=1` turns it on.
-    "avoid_singletons": os.environ.get("BFS3D_NATIVE_AVOID_SINGLETONS", "0") not in ("", "0"),
+    "avoid_singletons": _environment_flag(
+        "BFS3D_NATIVE_AVOID_SINGLETONS", _FILE_TRAILING.avoid_singletons
+    ),
     # A nonzero `strength_threshold` reads the operator's values, so a plain refresh re-coarsens from
     # scratch and can move the hierarchy's shapes -- retracing the compiled cycle every refresh (the
     # `BFS3D_FLOW_FROZEN_COARSENING` comment on the flow inverse below names the same mechanism, and the
@@ -538,7 +566,9 @@ JACOBI_TRAILING = {
     # against ~4 s frozen). On by default at the coarse-space-quality cost
     # `HierarchyBlockInverse.frozen_coarsening` documents; `BFS3D_NATIVE_FROZEN_COARSENING=0` re-coarsens
     # every refresh for re-adjudicating that trade.
-    "frozen_coarsening": os.environ.get("BFS3D_NATIVE_FROZEN_COARSENING", "1") not in ("", "0"),
+    "frozen_coarsening": _environment_flag(
+        "BFS3D_NATIVE_FROZEN_COARSENING", _FILE_TRAILING.frozen_coarsening
+    ),
 }
 #: Write every trailing sub-block to disk just BEFORE its inverse is built, keeping only the last.
 #: The build refuses a singular cell block, and that refusal fires from a mid-step refresh whose
@@ -681,21 +711,17 @@ if FLOW_INVERSE != "simplesmooth":
 #: own build cost -- an isolated single build of the same recipe took ~1 s); frozen, it stayed at
 #: ~4 s across every refresh in a full 3-rung march. `BFS3D_FLOW_FROZEN_COARSENING=0` restores the
 #: class default (re-coarsen every refresh) for re-adjudicating the trade against coarse-space quality.
+_FILE_LEADING = _FILE_INVERSE.leading if isinstance(_FILE_INVERSE, FieldSplit) else SimpleSmoothed()
 LEADING_SETTINGS = dict(
-    sweeps=int(os.environ.get("BFS3D_FLOW_SWEEPS", "2")),
-    pressure_sweeps=2,
-    strength_threshold=0.25,
-    avoid_singletons=True,
-    aggressive_levels=0,
-    max_levels=5,
-    max_coarse=500,
-    block_splitting=True,
-    omega=1.0,
-    frozen_coarsening=os.environ.get("BFS3D_FLOW_FROZEN_COARSENING", "1") not in ("", "0"),
+    _FILE_LEADING.settings(),
+    sweeps=int(os.environ.get("BFS3D_FLOW_SWEEPS", _FILE_LEADING.sweeps)),
+    frozen_coarsening=_environment_flag(
+        "BFS3D_FLOW_FROZEN_COARSENING", _FILE_LEADING.frozen_coarsening
+    ),
     shape_headroom=(
         float(os.environ["BFS3D_FLOW_SHAPE_HEADROOM"])
         if os.environ.get("BFS3D_FLOW_SHAPE_HEADROOM")
-        else None
+        else _FILE_LEADING.shape_headroom
     ),
 )
 
@@ -794,7 +820,9 @@ def _jacobi_trailing_description() -> str:
 # than ~0.35 at 1e-08), not a cure -- and 1e-06 is one decade from this case's own live near-wall `k`.
 # The structural fix is to stop one cell setting a GLOBAL step length at all; see the discussion of
 # clipping the correction per cell rather than capping the step, which leaves the cap at 1.
-K_POSITIVITY_FLOOR = float(os.environ.get("BFS3D_K_POSITIVITY_FLOOR", "1e-8") or 0.0)
+K_POSITIVITY_FLOOR = float(
+    os.environ.get("BFS3D_K_POSITIVITY_FLOOR", FILE_SOLVER.positivity_floor) or 0.0
+)
 
 #: Clip each cell's OWN `k` correction rather than capping the whole step by the worst cell
 #: (`BFS3D_K_POSITIVITY_PROJECTION=1`). ⚠️ **OFF HERE, and deliberately, against the library default and
@@ -853,7 +881,9 @@ K_POSITIVITY_FLOOR = float(os.environ.get("BFS3D_K_POSITIVITY_FLOOR", "1e-8") or
 #: It composes with the cap rather than replacing it: applied first, it leaves every decreasing cell
 #: with `|dk| <= tau (k + floor)`, so the cap computes exactly 1 and the `limit` aside below keeps
 #: reporting (as "nothing bound") instead of going silent.
-K_POSITIVITY_PROJECTION = os.environ.get("BFS3D_K_POSITIVITY_PROJECTION", "") not in ("", "0")
+K_POSITIVITY_PROJECTION = _environment_flag(
+    "BFS3D_K_POSITIVITY_PROJECTION", FILE_SOLVER.positivity_projection
+)
 
 
 # The inexact-Newton stop for each inner linear solve, measured in the ROW-SCALED `coupled_scaled_norm`
@@ -866,12 +896,14 @@ K_POSITIVITY_PROJECTION = os.environ.get("BFS3D_K_POSITIVITY_PROJECTION", "") no
 # admissible ball -- and the step length is decided by a MINIMUM over cells, an extreme order statistic
 # that a norm-based tolerance does not control. Tightening it trades cycles per step for a correction
 # that is closer to the true shifted-Newton direction.
-FORWARD_RTOL = float(os.environ.get("BFS3D_FORWARD_RTOL", "0.3"))
+FORWARD_RTOL = float(os.environ.get("BFS3D_FORWARD_RTOL", FILE_SOLVER.linear_solve.rtol))
 
 
-CYCLE_BUDGET = 42  # summed per step: a cost cap, so summed is what it should cap
+CYCLE_BUDGET = (
+    FILE_SOLVER.dual_time.cycle_budget
+)  # summed per step: a cost cap, so summed is what it should cap
 RETRY_ON_CYCLES = (
-    10  # PER SOLVE: a summed trigger is ~6x more sensitive for a 5-inner step than a 1-inner one
+    FILE_SOLVER.retry.abort_above_cycles  # PER SOLVE: a summed trigger is ~6x more sensitive for a 5-inner step than a 1-inner one
 )
 # The step-length bailout, which catches the failure the cycle count cannot see: solves that stay CHEAP
 # while the step achieves nothing, because a positivity cap or a non-descending direction leaves almost
@@ -893,7 +925,7 @@ RETRY_ON_CYCLES = (
 # It fires ONCE in the whole march, and the two lower rungs come out identical to the cycle -- the
 # trigger is inert wherever the line search is healthy, so the entire saving is the target rung
 # (29 steps / 1131 s -> 21 / 932). `BFS3D_RETRY_ON_ALPHA=0 ...` disables it.
-RETRY_ON_ALPHA = float(os.environ.get("BFS3D_RETRY_ON_ALPHA", "0.01")) or None
+RETRY_ON_ALPHA = float(os.environ.get("BFS3D_RETRY_ON_ALPHA", FILE_SOLVER.retry.on_alpha)) or None
 # The forward GMRES restart length, and the reason it is worth varying: a restarted GMRES tests
 # convergence only at restart boundaries, so a solve that needs three matrix-vector products still pays
 # a full restart's worth. Cycle counts cannot see that -- such a solve reports one cycle either way --
@@ -908,9 +940,9 @@ RETRY_ON_ALPHA = float(os.environ.get("BFS3D_RETRY_ON_ALPHA", "0.01")) or None
 # by passing a whole solver as `linear_solve`: the builder's default also carries a loose row-scaled stop that a
 # hand-built solver would silently replace, which measures something else entirely.
 BASELINE_RESTART = 15  # the coupled AMG builder's own default
-FORWARD_RESTART = int(os.environ.get("BFS3D_FORWARD_RESTART", str(BASELINE_RESTART)))
+FORWARD_RESTART = int(os.environ.get("BFS3D_FORWARD_RESTART", FILE_SOLVER.linear_solve.restart))
 _RESTART_SCALE = BASELINE_RESTART / FORWARD_RESTART
-RETRY_BETA_FACTOR = 2.0
+RETRY_BETA_FACTOR = FILE_SOLVER.retry.beta_factor
 #: The retry threshold the march actually uses, scaled with the restart like every other cycle-denominated
 #: setting above. Computed once because the forward solver's restart CAP is derived from it: a solve that
 #: passes this without reaching target has already doomed its attempt, so letting it run further only
@@ -969,7 +1001,9 @@ DUMP_STEP_LIMIT_KEEP = int(os.environ.get("BFS3D_DUMP_STEP_LIMIT_KEEP", "12"))
 # despite the trap being written down. A default nobody wants is a trap, not a setting: the fix is the
 # default, not another warning. The scheduled cadence it was measured against has since been deleted, so
 # `BFS3D_REFRESH_ON_CYCLES=0` now switches the cost trigger off and leaves only the per-rung refit.
-REFRESH_ON_CYCLES = int(os.environ.get("BFS3D_REFRESH_ON_CYCLES", "3"))
+REFRESH_ON_CYCLES = int(
+    os.environ.get("BFS3D_REFRESH_ON_CYCLES", FILE_SOLVER.dual_time.refresh_on_cycles or 0)
+)
 #: Freeze the k-production cap's `k` in the Jacobian (`SSTTurbulence.explicit_production_limiter`).
 #: The library default is `True`, so this case ran with it ON until this knob existed.
 #:
@@ -1032,9 +1066,52 @@ if K_WALL not in _K_WALL_BCS:
     raise SystemExit(f"BFS3D_K_WALL={K_WALL!r} is not one of {sorted(_K_WALL_BCS)}")
 K_WALL_BC = _K_WALL_BCS[K_WALL]
 
-CONTROL = CflResidualDualTimeControl(
-    beta_start=0.5, beta_min=0.005, grow=1.5, backoff=2.0, grow_above=0.5, backoff_below=0.25
+CONTROL = FILE_SOLVER.step_control
+
+#: The march this run takes: the case file's solver with the environment's overrides applied, as the
+#: one value the solve is handed. With no `BFS3D_*` variable set it must be exactly the file's -- which
+#: is what makes a run at the defaults the case file's solve, and is checked here rather than assumed.
+SOLVER = CoupledMarch(
+    max_steps=MAX_STEPS,
+    convergence=Convergence(rtol=RTOL, atol=ATOL),
+    preconditioner=PRECONDITIONER,
+    dual_time=(
+        DualTimeLoop(
+            inner_steps=INNER_STEPS,
+            inner_tol=INNER_TOL,
+            cycle_budget=round(CYCLE_BUDGET * _RESTART_SCALE),
+            refresh_on_cycles=REFRESH_ON_CYCLES or None,
+        )
+        if DUAL_TIME
+        else None
+    ),
+    linear_solve=LinearSolveSettings(
+        rtol=FORWARD_RTOL, restart=FORWARD_RESTART, max_restarts=FORWARD_MAX_RESTARTS
+    ),
+    step_control=CONTROL,
+    retry=RetryPolicy(
+        solver=FILE_SOLVER.retry.solver,
+        abort_above_cycles=RETRY_ON_CYCLES_SCALED,
+        on_alpha=RETRY_ON_ALPHA,
+        beta_factor=RETRY_BETA_FACTOR,
+    ),
+    turbulence_damping=TURB_DAMPING,
+    positivity_floor=K_POSITIVITY_FLOOR,
+    positivity_projection=K_POSITIVITY_PROJECTION,
+    continuation=ViscosityRamp(
+        anchor=SCHEDULE.anchor(N_POINTS) if "BFS3D_N_POINTS" in os.environ else _FILE_RAMP.anchor,
+        stations=RAMP_STATIONS,
+        steps_per_station=RAMP_STEPS_PER_STATION,
+        scale=RAMP_SCALE,
+        redamping=RAMP_REDAMPING,
+    ),
 )
+if not any(name.startswith("BFS3D_") for name in os.environ) and SOLVER != FILE_SOLVER:
+    raise SystemExit(
+        "bfs3d_openfoam/compare.py assembles a different solver from case.yaml's with no BFS3D_* "
+        f"override set: the settings above have drifted from the file.\n  file: {FILE_SOLVER}\n  "
+        f"here: {SOLVER}"
+    )
 
 _STEP_LIMIT_DUMPS = 0
 #: The shift and the anchor of the step currently being taken. The limiter is called with only
@@ -1279,7 +1356,9 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         Write a rolling state checkpoint per step here. Worth setting for any long run: without it a
         failure at the last step discards every step before it.
     **solve_kwargs
-        Forwarded to :func:`~aquaflux.turbulence.solve_reynolds_continuation`, overriding the defaults.
+        Further observers of the solve (an ``on_step``, say), passed beside the log's own. The solve's
+        settings are :data:`SOLVER`'s -- the case file's, with any ``BFS3D_*`` override -- and one passed
+        here is refused.
     """
     case = build_case()
     coupled, momentum, turbulence, geom = (
@@ -1316,6 +1395,12 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
     # per-step refresh counts were dug out by hand.
     logger.note("[configuration]")
     for name, value in (
+        (
+            "solver",
+            "case.yaml's"
+            if SOLVER == FILE_SOLVER
+            else "case.yaml's, edited by BFS3D_* overrides (the values below)",
+        ),
         ("field split", FIELD_SPLIT),
         # WHICH INVERSE the trailing block gets, before how it is smoothed -- a setting that once cost
         # a finding. Two runs differing only in this wrote banners identical to the character, so
@@ -1446,9 +1531,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             step = dataclasses.replace(step, step_limit=_DumpingStepLimit(step.step_limit))
         return step
 
-    session = open_session(
-        PRECONDITIONER,
-        coupled,
+    session_options = dict(
         observer=logger.on_refresh,
         on_build=on_build,
         precondition_wrapper=_recording_precondition if DUMP_STEP_LIMIT else None,
@@ -1456,61 +1539,44 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
     )
 
     def point_setup(companion, seed_state, point):
-        """Label each rung and record it for `on_build`; everything else is in the options below."""
+        """Label each rung and record it for `on_build`; every setting is the case file's."""
         logger.note(f"[{point.label}]")
         rung.update(companion=companion, seed_state=seed_state)
         return {}
 
-    options = (
+    observers = (
         dict(
-            preconditioner=session,
-            shift=CoupledShiftSettings(turbulence_damping=TURB_DAMPING),
-            dual_time=DualTimeLoop(
-                inner_steps=INNER_STEPS,
-                inner_tol=INNER_TOL,
-                cycle_budget=round(CYCLE_BUDGET * _RESTART_SCALE),
-                refresh_on_cycles=REFRESH_ON_CYCLES or None,
-            )
-            if DUAL_TIME
-            else None,
-            linear_solve=LinearSolveSettings(
-                rtol=FORWARD_RTOL, restart=FORWARD_RESTART, max_restarts=FORWARD_MAX_RESTARTS
-            ),
-            positivity_floor=K_POSITIVITY_FLOOR,
-            positivity_projection=K_POSITIVITY_PROJECTION,
-            inner_observer=inner_observer if DUAL_TIME else None,
-            max_steps=MAX_STEPS,
-            convergence=Convergence(rtol=RTOL, atol=ATOL),
-            schedule=SCHEDULE,
-            intermediate=Convergence(atol=ATOL),  # every rung stops at the same ABSOLUTE bar
-            step_control=CONTROL,
-            point_setup=point_setup,
             on_checkpoint=on_checkpoint,
             on_retry=logger.on_retry,
-            retry=RetryPolicy(
-                solver=relative_residual_gmres(1e-4, restart=40),
-                abort_above_cycles=RETRY_ON_CYCLES_SCALED,
-                on_alpha=RETRY_ON_ALPHA,
-                beta_factor=RETRY_BETA_FACTOR,
-            ),
+            # The inner-loop observer exists only with an inner loop to observe.
+            **({"inner_observer": inner_observer} if SOLVER.dual_time is not None else {}),
         )
         | solve_kwargs
     )
     try:
         if RAMP == "continuous":
-            # The SAME viscosity span the ladder walks, and the SAME `point_setup` and options, so the
-            # two arms differ in how the span is walked and in nothing else.
-            flow, k, omega = solve_reynolds_ramp(
-                coupled,
-                anchor=SCHEDULE.anchor(N_POINTS),
-                stations=RAMP_STATIONS,
-                steps_per_station=RAMP_STEPS_PER_STATION,
-                redamping=RAMP_REDAMPING,
-                companion=RAMP_COMPANION,
-                **options,
+            # The case's solve: the file's march, with the environment's study overrides. The session is
+            # opened from its preconditioner, once, and the ramp re-points it at each station.
+            flow, k, omega = SOLVER.solve(
+                coupled, session_options=session_options, point_setup=point_setup, **observers
             )
         else:
-            flow, k, omega = solve_reynolds_continuation(coupled, N_POINTS, **options)
+            # A script-only study arm: the SAME span walked as a ladder of converged rungs, from the
+            # SAME settings -- the file's, taken whole -- so the two arms differ in how the span is
+            # walked and in nothing else.
+            settings = SOLVER.settings()
+            settings["preconditioner"] = open_session(
+                settings["preconditioner"], coupled, **session_options
+            )
+            flow, k, omega = solve_reynolds_continuation(
+                coupled,
+                N_POINTS,
+                **settings,
+                schedule=SCHEDULE,
+                intermediate=Convergence(atol=ATOL),  # every rung stops at the same ABSOLUTE bar
+                point_setup=point_setup,
+                **observers,
+            )
     finally:
         if log_file is not None:
             log_file.close()

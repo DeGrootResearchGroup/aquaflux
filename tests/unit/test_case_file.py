@@ -121,7 +121,8 @@ def test_the_shipped_pitzdaily_file_reads_as_the_case_its_driver_builds_and_fits
     from the case (or a reader that misreads one) fails, not only a file that fails to parse.
     """
     case = read_case(PITZDAILY)
-    assert case.spec == _rans_case()
+    # The solver section is compared against what its script used to pass, in test_case_solver.py.
+    assert dataclasses.replace(case.spec, solver=None) == _rans_case()
     assert case.directory == PITZDAILY.parent
     checked = case.check()
     assert (checked.mesh.n_cells, checked.mesh.dim) == (12225, 2)
@@ -228,7 +229,11 @@ def test_a_boundaries_table_given_in_code_is_frozen_and_copied() -> None:
             ValueError,
             r"RANS at 'physics' needs 'advection'",
         ),
-        (_sections(solver={"kind": "Anything"}), ValueError, r"CaseSpec has no field 'solver'"),
+        (
+            _sections(solvers={"kind": "CoupledMarch"}),
+            ValueError,
+            r"CaseSpec has no field 'solvers'",
+        ),
         ({k: v for k, v in _sections().items() if k != "fluid"}, ValueError, r"needs 'fluid'"),
     ],
     ids=[
