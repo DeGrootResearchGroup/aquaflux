@@ -113,6 +113,17 @@ F frozen solver → G drive.
   coordinates only; a point inside the box but outside a non-convex domain is harmless — any cell may
   carry a datum). `MassFlow` is still not a registered drive: the channels also need a structured-grid
   mesh source.
+- **Inlet turbulence is `FixedTurbulence(k, omega)` or `IntensityLength(intensity, length)` (2026-09-25).**
+  `k = 1.5 (I |U|)^2` (`|U|` the inflow SPEED, so direction does not matter), `omega = sqrt(k) /
+  (beta_star^(1/4) L)` — the OpenFOAM `turbulentIntensityKineticEnergyInlet` / `turbulentMixingLength
+  FrequencyInlet` pair. **`C_mu` is the case's own `SSTModel.beta_star` (project owner, 2026-09-25), not
+  a fixed 0.09**, so a file that changes the model constant cannot disagree with its inlet; this is why
+  `PatchCondition.turbulence_closures(model)` and `InletTurbulence.inflow(velocity, model)` take the model,
+  and `RANS.build` hands every patch the SAME model it builds the closure with. A zero inflow speed is
+  refused (no turbulence to take an intensity of). The step cases' files stay `FixedTurbulence`: their
+  OpenFOAM `omega` values are rounded (`IntensityLength(0.05, 0.1 h)` gives 440.17 against pitzDaily's
+  440.15, `(0.05, 0.07 H1)` 1597.19 against bfs3d's "~1600"), so switching would change the problem.
+  Mutation-checked 8/8, including the build ignoring the case's model and the inlet ignoring it.
 - **A moving wall is `Wall` with an optional `velocity` (decided by the project owner, 2026-09-24), not
   its own kind.** A moving wall is a wall in every other respect — no through-flow, a wall to the closure,
   the same `k` option — so one kind keeps those shared by construction. `flow_closure()` is
@@ -161,8 +172,6 @@ constructor refusal re-raised with the path prepended** (so `Inlet`'s bad veloci
 - **Other source kinds** — a `sources:` section beyond `BodyForce` waits on #362 (sources declaring their
   inputs); `BodyForce` reads no field and no gradient, so it needs nothing #362 would add.
 - **Patch types / `inGroups`** (#364) — would let a file say "all walls" instead of listing each patch.
-- **`IntensityLength`** inlet turbulence (`inlet_k` / `inlet_omega`) — `InletTurbulence.inflow(velocity)`
-  already takes the velocity for it.
 - **A passive-scalar case referring to another case's converged flow** (#375; `bfs3d_species` imports the
   flow driver by path today) — a dependency edge between cases, not a field on one.
 - **Profiles** (`DirichletField`, a callable) — not plain data; a named-profile kind if ever needed.
@@ -170,8 +179,8 @@ constructor refusal re-raised with the path prepended** (so `Inlet`'s bad veloci
 ## How the build derives what the drivers used to restate (binding)
 
 - **Each patch kind builds its own closures**: `PatchCondition.flow_closure()` (`Inlet` → `VelocityInlet`,
-  `Outlet` → `PressureOutlet`, `Wall` → `NoSlipWall`, or `MovingWall` when it has a `velocity`) and `turbulence_closures()` → `(k, omega)`
-  (`Inlet` → both `Dirichlet` from `InletTurbulence.inflow(velocity)`; `Outlet` → both `ZeroGradient`;
+  `Outlet` → `PressureOutlet`, `Wall` → `NoSlipWall`, or `MovingWall` when it has a `velocity`) and `turbulence_closures(model)` → `(k, omega)`
+  (`Inlet` → both `Dirichlet` from `InletTurbulence.inflow(velocity, model)`; `Outlet` → both `ZeroGradient`;
   `Wall` → `k` by `Wall.k` (`ZeroGradient` unset, `Dirichlet(0)` for `zero`) and a **placeholder**
   `ZeroGradient` for `omega`, which the closure fixes in the wall cells instead). That table is what every
   validation driver wrote by hand.

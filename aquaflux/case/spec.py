@@ -62,7 +62,7 @@ from aquaflux.solve import (
 )
 from aquaflux.turbulence import PRECONDITIONER_SPEC_MAPPING, DirectScalars, LogScalars, SSTModel
 
-from .boundaries import FixedTurbulence, Inlet, Outlet, PatchCondition, Wall
+from .boundaries import FixedTurbulence, Inlet, IntensityLength, Outlet, PatchCondition, Wall
 from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
 from .mesh_source import GeometricGrading, MeshSource, OpenFOAMMesh, StructuredGrid
@@ -341,6 +341,7 @@ _CASE_MAPPING = SettingsMapping(
         Outlet,
         Wall,
         FixedTurbulence,
+        IntensityLength,
         Numerics,
         FirstOrderUpwind,
         LimitedUpwind,

@@ -26,11 +26,13 @@ from typing import Literal
 
 from aquaflux.boundary import BoundaryCondition, Dirichlet, ZeroGradient
 from aquaflux.flow import FlowBoundary, MovingWall, NoSlipWall, PressureOutlet, VelocityInlet
+from aquaflux.turbulence import SSTModel
 
 __all__ = [
     "FixedTurbulence",
     "Inlet",
     "InletTurbulence",
+    "IntensityLength",
     "Outlet",
     "PatchCondition",
     "Wall",
@@ -69,19 +71,21 @@ def _refuse_a_velocity_of_the_wrong_dimension(
 class InletTurbulence(abc.ABC):
     """The turbulence an inlet admits, for a Reynolds-averaged case.
 
-    One implementation today, :class:`FixedTurbulence`, prescribing ``k`` and ``omega`` outright. The
-    inflow velocity is handed in because a turbulence given as an intensity and a length scale is
-    defined relative to it.
+    :class:`FixedTurbulence` prescribes ``k`` and ``omega`` outright; :class:`IntensityLength` gives
+    them as a turbulence intensity and a length scale, relative to the inflow velocity and the model's
+    own constants -- which is why both are handed in.
     """
 
     @abc.abstractmethod
-    def inflow(self, velocity: tuple[float, ...]) -> tuple[float, float]:
+    def inflow(self, velocity: tuple[float, ...], model: SSTModel) -> tuple[float, float]:
         """The ``(k, omega)`` admitted through an inlet at ``velocity``.
 
         Parameters
         ----------
         velocity : tuple of float
             The inlet's prescribed velocity.
+        model : SSTModel
+            The case's turbulence model, whose constants relate a length scale to ``omega``.
 
         Returns
         -------
@@ -117,10 +121,62 @@ class FixedTurbulence(InletTurbulence):
         if self.omega <= 0:
             raise ValueError(f"FixedTurbulence.omega must be > 0, got {self.omega!r}.")
 
-    def inflow(self, velocity: tuple[float, ...]) -> tuple[float, float]:
-        """``(k, omega)`` as given, whatever the velocity."""
-        del velocity
+    def inflow(self, velocity: tuple[float, ...], model: SSTModel) -> tuple[float, float]:
+        """``(k, omega)`` as given, whatever the velocity and the model."""
+        del velocity, model
         return self.k, self.omega
+
+
+@dataclasses.dataclass(frozen=True)
+class IntensityLength(InletTurbulence):
+    """Inflow turbulence given as an intensity and a length scale, the way it is usually known.
+
+    ``k = 1.5 (I |U|)^2`` for an intensity ``I`` of the inflow speed ``|U|`` (the turbulent kinetic
+    energy of velocity fluctuations of r.m.s. ``I |U|`` in each of three directions), and
+    ``omega = sqrt(k) / (C_mu^(1/4) L)`` for a turbulence length scale ``L`` (the mixing-length
+    relation), with ``C_mu`` the model's ``beta_star``. A 5% intensity and a length scale of a tenth of
+    the inlet height is a common choice for a developed inflow.
+
+    Attributes
+    ----------
+    intensity : float
+        The r.m.s. velocity fluctuation as a fraction of the inflow speed, ``> 0`` -- ``0.05`` for 5%.
+    length : float
+        The turbulence length scale, ``> 0``, in the mesh's length units.
+
+    Raises
+    ------
+    ValueError
+        If either is not a positive, finite number.
+    """
+
+    intensity: float
+    length: float
+
+    def __post_init__(self) -> None:
+        for name in ("intensity", "length"):
+            value = getattr(self, name)
+            if not (math.isfinite(value) and value > 0):
+                raise ValueError(
+                    f"IntensityLength.{name} must be a positive, finite number, got {value!r}."
+                )
+
+    def inflow(self, velocity: tuple[float, ...], model: SSTModel) -> tuple[float, float]:
+        """``k`` from the intensity of the inflow speed, ``omega`` from ``k`` and the length scale.
+
+        Raises
+        ------
+        ValueError
+            If the inflow velocity is zero, which carries no turbulence an intensity could be taken of.
+        """
+        speed = math.hypot(*velocity)
+        if speed == 0.0:
+            raise ValueError(
+                "IntensityLength gives turbulence relative to the inflow speed, and this inlet's "
+                "velocity is zero; state it as FixedTurbulence(k, omega) instead."
+            )
+        k = 1.5 * (self.intensity * speed) ** 2
+        return k, math.sqrt(k) / (model.beta_star**0.25 * self.length)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -140,8 +196,13 @@ class PatchCondition(abc.ABC):
         """
 
     @abc.abstractmethod
-    def turbulence_closures(self) -> tuple[BoundaryCondition, BoundaryCondition]:
+    def turbulence_closures(self, model: SSTModel) -> tuple[BoundaryCondition, BoundaryCondition]:
         """The ``(k, omega)`` closures on this patch, for a Reynolds-averaged case.
+
+        Parameters
+        ----------
+        model : SSTModel
+            The case's turbulence model.
 
         Returns
         -------
@@ -207,7 +268,7 @@ class Inlet(PatchCondition):
         """A :class:`~aquaflux.flow.VelocityInlet` at :attr:`velocity`."""
         return VelocityInlet(velocity=self.velocity)
 
-    def turbulence_closures(self) -> tuple[Dirichlet, Dirichlet]:
+    def turbulence_closures(self, model: SSTModel) -> tuple[Dirichlet, Dirichlet]:
         """The inflow ``k`` and ``omega``, each prescribed.
 
         Raises
@@ -220,7 +281,7 @@ class Inlet(PatchCondition):
             raise ValueError(
                 "this inlet gives no inflow turbulence, so it has no k or omega closure to build."
             )
-        k, omega = self.turbulence.inflow(self.velocity)
+        k, omega = self.turbulence.inflow(self.velocity, model)
         return Dirichlet(k), Dirichlet(omega)
 
     def turbulence_settings(self) -> tuple[str, ...]:
@@ -260,8 +321,9 @@ class Outlet(PatchCondition):
         """A :class:`~aquaflux.flow.PressureOutlet` at :attr:`pressure`."""
         return PressureOutlet(pressure=self.pressure)
 
-    def turbulence_closures(self) -> tuple[ZeroGradient, ZeroGradient]:
+    def turbulence_closures(self, model: SSTModel) -> tuple[ZeroGradient, ZeroGradient]:
         """``k`` and ``omega`` leave with the flow: a zero gradient for each."""
+        del model
         return ZeroGradient(), ZeroGradient()
 
 
@@ -301,12 +363,13 @@ class Wall(PatchCondition):
         """A :class:`~aquaflux.flow.NoSlipWall`, or a :class:`~aquaflux.flow.MovingWall` at :attr:`velocity`."""
         return NoSlipWall() if self.velocity is None else MovingWall(velocity=self.velocity)
 
-    def turbulence_closures(self) -> tuple[BoundaryCondition, ZeroGradient]:
+    def turbulence_closures(self, model: SSTModel) -> tuple[BoundaryCondition, ZeroGradient]:
         """``k`` by :attr:`k` (a zero gradient when unset), and the placeholder ``omega`` closure.
 
         ``omega`` is fixed in the cells next to the wall rather than at its faces, so its face closure
         is never read; a zero gradient stands in for it.
         """
+        del model
         k = Dirichlet(0.0) if self.k == "zero" else ZeroGradient()
         return k, ZeroGradient()
 

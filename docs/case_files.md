@@ -121,6 +121,18 @@ wall distance from, all follow from this one statement. A moving wall — the dr
 cavity, `{kind: Wall, velocity: [1.0, 0.0]}` — is a wall in every other respect: it passes no
 fluid, and it is a wall to the turbulence closure.
 
+An inlet's `turbulence` is given either outright or the way it is usually known:
+
+- {class}`~aquaflux.case.FixedTurbulence` — `k` and `omega` as values;
+- {class}`~aquaflux.case.IntensityLength` — a turbulence `intensity` (the r.m.s. velocity
+  fluctuation as a fraction of the inflow speed, `0.05` for 5%) and a `length` scale, giving
+  `k = 1.5 (I |U|)^2` and `omega = sqrt(k) / (C_mu^(1/4) L)`, with `C_mu` the case's own SST
+  constant `beta_star`:
+
+  ```yaml
+  turbulence: {kind: IntensityLength, intensity: 0.05, length: 2.54e-3}
+  ```
+
 **`numerics`** — the discretization choices common to every case: `momentum_advection`
 (required, since a flow with no advection is Stokes flow rather than a default) and
 `gradient` (the cell-gradient reconstruction, for every field; unset,
