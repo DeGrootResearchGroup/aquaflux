@@ -26,6 +26,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.ops import segment_max, segment_min, segment_sum
 
+from aquaflux import ragged
 from aquaflux.vectors import scale
 
 
@@ -523,13 +524,10 @@ class FaceNodeConnectivity(eqx.Module):
         faces = np.asarray(faces, dtype=np.int64).reshape(-1)
         if faces.size and (faces.min() < 0 or faces.max() >= self.n_faces):
             raise ValueError(f"face index outside [0, {self.n_faces})")
-        counts = np.asarray(self.counts)[faces]
-        offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
-        # Each selected face's incidences, in order: its first incidence in this connectivity,
-        # then the next `count - 1`.
-        first = np.asarray(self.offsets)[:-1][faces]
-        rows = np.repeat(first - offsets[:-1], counts) + np.arange(offsets[-1])
-        return FaceNodeConnectivity.from_csr(offsets, np.asarray(self.face_node_indices)[rows])
+        nodes, _, counts = ragged.rows(
+            np.asarray(self.offsets), np.asarray(self.face_node_indices), faces
+        )
+        return FaceNodeConnectivity.from_csr(np.concatenate([[0], np.cumsum(counts)]), nodes)
 
     def gather_node_coords(self, node_coords: jnp.ndarray) -> jnp.ndarray:
         """Node coordinates for every incidence, in CSR order, shape ``(n_incidences, dim)``."""

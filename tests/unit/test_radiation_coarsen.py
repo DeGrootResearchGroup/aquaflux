@@ -61,7 +61,9 @@ def test_the_distance_to_a_triangle_is_to_its_face_its_edge_or_its_corner():
     triangle = np.array([[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]])
     points = np.array([[0.2, 0.2, 0.5], [0.5, -1.0, 0.0], [-3.0, -4.0, 0.0], [1.0, 1.0, 0.0]])
     expected = [0.5, 1.0, 5.0, np.sqrt(0.5)]
-    np.testing.assert_allclose(_point_triangle_distance(points, triangle)[:, 0], expected)
+    np.testing.assert_allclose(
+        _point_triangle_distance(points[:, None], triangle[None])[:, 0], expected
+    )
 
 
 def test_a_flat_surface_coarsens_far_and_keeps_its_area_exactly():
@@ -86,7 +88,9 @@ def test_every_coarse_vertex_is_an_input_vertex(cylinder):
 def test_the_bounds_hold_measured_independently_of_the_bookkeeping(cylinder):
     """The chord is re-measured from scratch: every input vertex against the whole coarse surface."""
     tube, coarse = cylinder
-    distance = _point_triangle_distance(np.unique(tube.reshape(-1, 3), axis=0), coarse.vertices)
+    distance = _point_triangle_distance(
+        np.unique(tube.reshape(-1, 3), axis=0)[:, None], coarse.vertices[None]
+    )
     assert distance.min(axis=1).max() <= 5e-5
     assert coarse.chord.max() <= 5e-5
     assert coarse.longest_edge.max() <= 4e-3 * (1 + 1e-12)
@@ -142,7 +146,7 @@ def test_the_angle_bounds_a_curved_surface_where_the_chord_would_not():
     tube = open_cylinder(sectors=40, slices=8, length=0.01)
     coarse = coarsen_to_size(tube, max_edge=0.02, chord=2e-3, angle=0.2)
     centroid = tube.mean(axis=1)
-    nearest = _point_triangle_distance(centroid, coarse.vertices).argmin(axis=1)
+    nearest = _point_triangle_distance(centroid[:, None], coarse.vertices[None]).argmin(axis=1)
 
     def unit(v):
         n = np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0])

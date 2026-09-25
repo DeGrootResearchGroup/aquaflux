@@ -27,6 +27,8 @@ from collections.abc import Sequence
 
 import numpy as np
 
+from aquaflux import ragged
+
 from .mesh import Mesh
 
 # Faces normal to the extruded axis are constant along it to within this fraction of the mesh
@@ -122,24 +124,6 @@ def collapse_extruded_direction(mesh: Mesh, removed_patch_names: Sequence[str]) 
     )
 
 
-def _ragged_subset(
-    offsets: np.ndarray, indices: np.ndarray, faces: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Gather a subset of CSR rows without a per-row Python loop.
-
-    ``faces`` need not be contiguous or sorted. Returns the selected rows' node indices
-    concatenated in ``faces`` order, the output row each one belongs to (``0`` to
-    ``faces.size - 1``, the position within ``faces`` rather than the original face index), and
-    each row's length.
-    """
-    counts = offsets[faces + 1] - offsets[faces]
-    starts = offsets[faces]
-    total = int(counts.sum())
-    row = np.repeat(np.arange(faces.size), counts)
-    position = np.arange(total) - np.repeat(np.cumsum(counts) - counts, counts)
-    return indices[np.repeat(starts, counts) + position], row, counts
-
-
 def _extruded_axis(
     removed: list[str],
     cap_faces: np.ndarray,
@@ -155,7 +139,7 @@ def _extruded_axis(
     named patches beforehand, so it makes no difference whether the caps arrive as two separate
     patches or as one patch spanning both planes.
     """
-    node_ids, row, counts = _ragged_subset(offsets, indices, cap_faces)
+    node_ids, row, counts = ragged.rows(offsets, indices, cap_faces)
     coords = node_coords[node_ids]
     dim = node_coords.shape[1]
 
@@ -233,7 +217,7 @@ def _side_faces_to_edges(
     vectorized per-face distinct-value count with no per-face Python loop) and takes the first
     value of each of the (required) two distinct runs.
     """
-    node_ids, row, _counts = _ragged_subset(offsets, indices, kept_faces)
+    node_ids, row, _counts = ragged.rows(offsets, indices, kept_faces)
     mapped = node_map[node_ids]
 
     # Sort by (row, value) so each face's nodes are contiguous and its distinct values run in

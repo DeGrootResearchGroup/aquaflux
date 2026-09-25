@@ -125,7 +125,7 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
   - **Both internal per-face Python loops (axis inference, side-quad→edge reduction) are vectorized
     (issue #112, fixed 2026-09-14) — no per-face loop remains in this module.** Both used to iterate
     `cap_faces`/`kept_faces` in Python, each doing several numpy calls per face. A shared
-    `_ragged_subset` helper flattens an arbitrary (non-contiguous) subset of CSR rows the same way
+    `ragged.rows` helper (`aquaflux/ragged.py`, the numpy-only leaf shared with `FaceNodeConnectivity.select` and the radiation coarsener; it was `collapse.py`'s private `_ragged_subset`) flattens an arbitrary (non-contiguous) subset of CSR rows the same way
     `FaceNodeConnectivity.from_csr` flattens every row, so both loops reduce to one vectorized pass:
     axis inference becomes an unbuffered per-face min/max (`np.minimum.at`/`np.maximum.at`, the same
     idiom `aquaflux/io/openfoam/cyclic.py::_face_centroids` uses for its per-face vertex-mean sum) and
