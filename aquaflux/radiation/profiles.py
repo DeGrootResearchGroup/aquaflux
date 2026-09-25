@@ -27,6 +27,7 @@ traced -- the compiled code contains no branch on which kind is in use.
 from __future__ import annotations
 
 import abc
+from typing import ClassVar
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -43,7 +44,21 @@ class Profile(eqx.Module):
     ``radiance_per_exitance(c) * c == intensity_fraction(c)`` wherever ``c > 0``. They are both
     defined rather than one deriving the other because the derivation divides by ``c``, and the
     division is exactly cancellable in the case that matters most.
+
+    Attributes
+    ----------
+    dark_behind : bool
+        Whether an areal facet with this distribution sends exactly nothing into the half-space
+        behind it: ``radiance_per_exitance(c)`` is exactly zero for every ``c <= 0``, not merely
+        small. A class-level declaration, ``False`` unless a subclass says otherwise, because what
+        reads it skips work on the strength of it: a shadow mask for points in the volume casts
+        no ray for a pair whose source faces away, since the gather multiplies whatever that ray
+        would say by zero. Declared rather than tested, since a test on sample directions cannot
+        prove a zero everywhere, and a subclass that is dark behind and does not say so only
+        costs rays.
     """
+
+    dark_behind: ClassVar[bool] = False
 
     @abc.abstractmethod
     def intensity_fraction(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
@@ -104,6 +119,8 @@ class Lambertian(Profile):
     by, and its radiance per unit exitance is the constant ``1 / pi``.
     """
 
+    dark_behind: ClassVar[bool] = True
+
     def intensity_fraction(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
         """``max(cos theta, 0) / pi``."""
         return jnp.maximum(jnp.asarray(cos_theta, dtype=float), 0.0) / jnp.pi
@@ -129,6 +146,8 @@ class CosinePower(Profile):
         The exponent ``n``, a differentiable leaf. Must be at least one: below that the
         radiance is unbounded at grazing incidence, which is not a surface emitter.
     """
+
+    dark_behind: ClassVar[bool] = True
 
     exponent: jnp.ndarray
 

@@ -198,3 +198,29 @@ def test_the_default_resolution_is_sized_by_the_TRIANGLES_AREA_not_the_boxs_volu
     occupied = np.diff(grid.starts)
     assert (occupied > 0).sum() > 300, f"the shell landed in {(occupied > 0).sum()} voxels"
     assert occupied[occupied > 0].mean() < 40.0, occupied[occupied > 0].mean()
+
+
+def test_calls_with_different_ray_counts_share_their_compiled_programs(monkeypatch):
+    """A ray-cast pass hands the grid only its facing pairs, so no two passes need have the same
+    ray count. The rays reach the kernel padded to a power of two, like the candidate pairs, so a
+    stream of such calls compiles a handful of programs rather than a set of its own per call."""
+    from aquaflux.radiation import grid as grid_module
+
+    shapes = []
+    real = grid_module._indexed_pair_is_cut
+
+    def watched(rays, ray, triangle):
+        shapes.append(rays.origin.shape[0])
+        return real(rays, ray, triangle)
+
+    monkeypatch.setattr(grid_module, "_indexed_pair_is_cut", watched)
+    rng = np.random.default_rng(13)
+    vertices = scattered_triangles(60, rng)
+    grid = TriangleGrid.build(vertices, resolution=2)
+    origin, target = rays_through(700, rng)
+    near = np.zeros(len(origin))
+    for count in (520, 555, 590):
+        found = grid.blocks(origin[:count], target[:count], near[:count])
+        expected = brute(origin[:count], target[:count], vertices, near[:count])
+        np.testing.assert_array_equal(found, expected)
+    assert set(shapes) == {1024}, sorted(set(shapes))

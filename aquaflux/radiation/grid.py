@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import dataclasses
 
+import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -181,6 +183,20 @@ class TriangleGrid:
         alive, entry = _enters_grid(origin, direction, self.low, self.spacing, self.resolution)
         if not np.any(alive):
             return blocked
+        # Every ray's data and every triangle go to the kernel once per call; a step of the walk
+        # then sends only which ray meets which triangle, as two indices, and the kernel gathers
+        # the rest itself. Gathering them here instead copied about 150 bytes a candidate pair
+        # on the host, three times over, which was most of a walk's time.
+        # Padded to a power of two, like the pairs below, so calls with different ray counts
+        # share their compiled programs; no pair ever names a padding ray.
+        spare = padded_length(len(origin)) - len(origin)
+        rays = _Rays(
+            origin=jnp.asarray(_pad(origin, spare)),
+            direction=jnp.asarray(_pad(direction, spare)),
+            near=jnp.asarray(_pad(near, spare)),
+            exclude=jnp.asarray(_pad(exclude, spare)),
+            vertices=jnp.asarray(self.vertices),
+        )
 
         ray = np.flatnonzero(alive)
         voxel, until, step, delta = _walk_state(
@@ -192,7 +208,7 @@ class TriangleGrid:
             flat = (voxel[:, 0] * self.resolution[1] + voxel[:, 1]) * self.resolution[2] + voxel[
                 :, 2
             ]
-            hit = self._test(ray, flat, origin, direction, near, exclude, work_limit)
+            hit = self._test(ray, flat, rays, work_limit)
             blocked[ray[hit]] = True
             axis = np.argmin(until, axis=1)
             rows = np.arange(len(ray))
@@ -212,7 +228,7 @@ class TriangleGrid:
             )
         return blocked
 
-    def _test(self, ray, flat, origin, direction, near, exclude, work_limit) -> np.ndarray:
+    def _test(self, ray, flat, rays, work_limit) -> np.ndarray:
         """Test each live ray against the triangles of the voxel it is in."""
         first, last = self.starts[flat], self.starts[flat + 1]
         held = last - first
@@ -225,25 +241,47 @@ class TriangleGrid:
             group, repeats = busy[start:stop], counts[start:stop]
             # Compressed-sparse-row expansion: one (ray, triangle) pair per triangle held by the
             # voxel that ray is in, without a Python loop over the rays or the voxels.
-            owner = np.repeat(group, repeats)
-            offsets = np.arange(repeats.sum()) - np.repeat(np.cumsum(repeats) - repeats, repeats)
+            opens = np.cumsum(repeats) - repeats
+            offsets = np.arange(repeats.sum()) - np.repeat(opens, repeats)
             candidate = self.triangles[np.repeat(first[group], repeats) + offsets]
-            of_ray = ray[owner]
+            of_ray = np.repeat(ray[group], repeats)
             # Padded to a power of two so a walk compiles a couple of dozen programs rather than
             # one per step; the padding repeats a real pair and its answer is dropped.
             pad = padded_length(len(candidate)) - len(candidate)
             struck = np.asarray(
-                _pair_is_cut(
-                    jnp.asarray(_pad(origin[of_ray], pad)),
-                    jnp.asarray(_pad(direction[of_ray], pad)),
-                    jnp.asarray(_pad(near[of_ray], pad)),
-                    jnp.asarray(_pad(self.vertices[candidate], pad)),
-                    jnp.asarray(_pad(candidate, pad)),
-                    jnp.asarray(_pad(exclude[of_ray], pad)),
+                _indexed_pair_is_cut(
+                    rays,
+                    jnp.asarray(_pad(of_ray.astype(np.int32), pad)),
+                    jnp.asarray(_pad(candidate.astype(np.int32), pad)),
                 )
             )[: len(candidate)]
-            np.logical_or.at(hit, owner, struck)
+            # A ray's candidates are contiguous, in the order of its group, so each ray's answer
+            # is one reduction over its own run.
+            hit[group] |= np.logical_or.reduceat(struck, opens)
         return hit
+
+
+class _Rays(eqx.Module):
+    """One call's rays and triangles, held by the kernel for the whole walk."""
+
+    origin: jnp.ndarray
+    direction: jnp.ndarray
+    near: jnp.ndarray
+    exclude: jnp.ndarray
+    vertices: jnp.ndarray
+
+
+@jax.jit
+def _indexed_pair_is_cut(rays: _Rays, ray, triangle):
+    """Whether each ray ``ray[k]`` meets triangle ``triangle[k]``, gathering both here."""
+    return _pair_is_cut(
+        rays.origin[ray],
+        rays.direction[ray],
+        rays.near[ray],
+        rays.vertices[triangle],
+        triangle,
+        rays.exclude[ray],
+    )
 
 
 def _work_groups(counts: np.ndarray, work_limit: int):

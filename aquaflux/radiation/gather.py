@@ -33,7 +33,12 @@ import numpy as np
 from aquaflux.radiation.absorption import Absorption
 from aquaflux.radiation.solid_angle import projected_solid_angle, solid_angle
 from aquaflux.radiation.surfaces import Surfaces
-from aquaflux.radiation.visibility import Visibility, build_visibility, surviving_fraction
+from aquaflux.radiation.visibility import (
+    Visibility,
+    _unchecked_visibility,
+    refuse_points_inside,
+    surviving_fraction,
+)
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, in_passes, receivers_per_pass
 from aquaflux.vectors import dot
 
@@ -78,7 +83,7 @@ def _groups(surfaces: Surfaces) -> list[tuple[object, np.ndarray, np.ndarray]]:
     return partition
 
 
-def _shadow_rows(visibility, transmittance, points) -> tuple:
+def _shadow_rows(visibility, transmittance, points, sets) -> tuple:
     """What the chunks need to form the fraction getting past the intervening bodies.
 
     ``(array, axis)`` pairs for :func:`~aquaflux.radiation.work.in_passes` — the mask's own layers, each cut along its
@@ -104,9 +109,30 @@ def _shadow_rows(visibility, transmittance, points) -> tuple:
         msg = f"visibility must be a Visibility; got {type(visibility).__name__}"
         raise TypeError(msg)
     visibility.for_receivers(points)
+    if visibility.clear_behind:
+        _refuse_light_from_behind(sets)
     if transmittance is None:
         transmittance = jnp.zeros(visibility.n_occluders)
     return ((visibility.blocked, 1), (visibility.hidden_by_geometry, 0)), transmittance
+
+
+def _refuse_light_from_behind(sets) -> None:
+    """Raise if a set lights anything from behind a facet, which a mask has recorded as clear.
+
+    A mask built with :attr:`~aquaflux.radiation.visibility.Visibility.clear_behind` never
+    tested a pair whose source faces away from its receiver, so it is right only where such a
+    pair carries nothing: every areal facet must be dark behind itself. Checked here, at the
+    gather, against the optics actually used rather than the ones the mask was built with.
+    """
+    for surfaces in sets:
+        if not surfaces.dark_behind:
+            msg = (
+                "an areal facet emits with a profile that is not declared dark behind itself, "
+                "through a shadow mask that left every pair facing away from its receiver "
+                "untested. Build the mask again with these profiles in the surface set, or set "
+                "dark_behind on a profile that sends nothing backwards."
+            )
+            raise ValueError(msg)
 
 
 def _surviving(layers, transmittance):
@@ -226,13 +252,20 @@ def streamed_fluence_rate(
     if points.shape[0] == 0:
         return jnp.zeros(0)
     live = (tuple(sets), absorption, transmittance)
+    options = {
+        **({} if visibility_options is None else dict(visibility_options)),
+        **({} if self_occlusion is None else {"self_occlusion": self_occlusion}),
+    }
+    # What depends on the scene and not on the pass is done once, here: the refusal of points
+    # inside a body, over every point at once, and whatever the strategy can prepare from the
+    # surface alone -- the grid over its triangles, which is otherwise rebuilt for every pass.
+    refuse_points_inside(occluders, shadow_geometry, points)
+    if options.get("self_occlusion") is not None:
+        options["self_occlusion"] = options["self_occlusion"].prepared(shadow_geometry)
     shadows = _Shadows(
         geometry=shadow_geometry,
         occluders=tuple(occluders),
-        options={
-            **({} if visibility_options is None else dict(visibility_options)),
-            **({} if self_occlusion is None else {"self_occlusion": self_occlusion}),
-        },
+        options=options,
         gather=_compiled_gather(live, pair_limit),
     )
     return jnp.concatenate(
@@ -280,7 +313,7 @@ class _Shadows(eqx.Module):
 
     def mask(self, points) -> Visibility:
         """The mask for these receivers."""
-        return build_visibility(self.occluders, self.geometry, points, **self.options)
+        return _unchecked_visibility(self.occluders, self.geometry, points, **self.options)
 
 
 def _chunk_total(live, points, shadows: _Shadows):
@@ -454,7 +487,7 @@ def summed_fluence_rate(
     """
     sets = tuple(sets)
     geometry = _one_geometry(sets)
-    layers, transmittance = _shadow_rows(visibility, transmittance, points)
+    layers, transmittance = _shadow_rows(visibility, transmittance, points, sets)
     points = jnp.asarray(points, dtype=float)
     plans = [_groups(surfaces) for surfaces in sets]
     areal_all = np.flatnonzero(~geometry.is_point_source)
@@ -597,7 +630,7 @@ def direct_irradiance(
         If ``normals`` and ``points`` disagree in shape, if ``pair_limit`` is less than one, or
         if the visibility mask was built for a different set of receivers.
     """
-    layers, transmittance = _shadow_rows(visibility, transmittance, points)
+    layers, transmittance = _shadow_rows(visibility, transmittance, points, (surfaces,))
     points = jnp.asarray(points, dtype=float)
     normals = jnp.asarray(normals, dtype=float)
     if normals.shape != points.shape:
