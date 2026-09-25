@@ -32,7 +32,15 @@ wall distance from, all follow from that one statement.
 
 from __future__ import annotations
 
-from .boundaries import FixedTurbulence, Inlet, InletTurbulence, Outlet, PatchCondition, Wall
+from .boundaries import (
+    FixedTurbulence,
+    Inlet,
+    InletTurbulence,
+    IntensityLength,
+    Outlet,
+    PatchCondition,
+    Wall,
+)
 from .case_file import CaseFile, CheckedCase, read_case, write_case
 from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
@@ -57,6 +65,7 @@ __all__ = [
     "GeometricGrading",
     "Inlet",
     "InletTurbulence",
+    "IntensityLength",
     "Laminar",
     "MeshSource",
     "Numerics",

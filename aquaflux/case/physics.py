@@ -163,15 +163,18 @@ class RANS(Physics):
         property model the fluid gives, and the same gradient reconstruction.
         """
         momentum = _momentum(spec, mesh, geometry)
+        model = SSTModel() if self.model is None else self.model
+        # The model is the one the closure is built with, so an inlet's length scale reads its constants.
         closures = {
-            name: condition.turbulence_closures() for name, condition in spec.boundaries.items()
+            name: condition.turbulence_closures(model)
+            for name, condition in spec.boundaries.items()
         }
         options = _set(
             gradient_scheme=spec.numerics.gradient,
             explicit_production_limiter=self.explicit_production_limiter,
         )
         turbulence = SSTTurbulence.build(
-            SSTModel() if self.model is None else self.model,
+            model,
             mesh,
             geometry,
             self.advection,

@@ -23,6 +23,7 @@ from aquaflux.case import (
     Fluid,
     GeometricGrading,
     Inlet,
+    IntensityLength,
     Numerics,
     OpenFOAMMesh,
     Outlet,
@@ -303,7 +304,7 @@ def test_a_rans_case_with_inflow_turbulence_and_no_wall_setting_loads() -> None:
         ),
     )
     spec = case_spec_from_mapping(sections)
-    assert spec.boundaries["left"].turbulence.inflow((1.0, 0.0)) == (0.1, 10.0)
+    assert spec.boundaries["left"].turbulence.inflow((1.0, 0.0), SSTModel()) == (0.1, 10.0)
     assert spec.boundaries["top"] == Wall()
 
 
@@ -987,3 +988,88 @@ def test_the_default_drive_is_not_a_kind_a_file_names() -> None:
     """Unset means driven by the boundaries and sources; there is no second spelling of that default."""
     with pytest.raises(ValueError, match=r"unknown kind 'BoundaryDriven' at 'drive'"):
         case_spec_from_mapping(_sections(drive={"kind": "BoundaryDriven"}))
+
+
+# --- inflow turbulence as an intensity and a length scale -----------------------------------------
+
+
+def test_an_intensity_and_length_scale_give_the_step_cases_inflow() -> None:
+    """The two backward-facing steps state 5% intensity with a length scale of 0.1 h and 0.07 H1.
+
+    Their OpenFOAM cases give k = 0.375 and omega = 440.15 (pitzDaily) and ~1600 (bfs3d, whose
+    ``0.orig/omega`` writes the same relation out), so those are the answers to reproduce.
+    """
+    model = SSTModel()
+    k, omega = IntensityLength(intensity=0.05, length=0.1 * 0.0254).inflow((10.0, 0.0), model)
+    assert k == 0.375
+    assert omega == pytest.approx(440.15, rel=1e-4)
+    _, omega = IntensityLength(intensity=0.05, length=7e-4).inflow((10.0, 0.0, 0.0), model)
+    assert omega == pytest.approx(1600.0, rel=2e-3)
+
+
+def test_the_intensity_is_of_the_inflow_speed_whatever_its_direction() -> None:
+    model = SSTModel()
+    along = IntensityLength(intensity=0.1, length=0.01).inflow((5.0, 0.0, 0.0), model)
+    oblique = IntensityLength(intensity=0.1, length=0.01).inflow((3.0, 0.0, 4.0), model)
+    assert along == pytest.approx(oblique, rel=1e-15)
+    assert along[0] == pytest.approx(1.5 * 0.5**2, rel=1e-15)
+
+
+def test_the_length_scale_is_read_against_the_cases_own_model_constant() -> None:
+    turbulence = IntensityLength(intensity=0.05, length=0.01)
+    _, default = turbulence.inflow((10.0, 0.0), SSTModel())
+    _, stiffer = turbulence.inflow((10.0, 0.0), dataclasses.replace(SSTModel(), beta_star=0.16))
+    assert stiffer / default == pytest.approx((0.09 / 0.16) ** 0.25, rel=1e-14)
+
+
+@pytest.mark.parametrize(
+    ("turbulence", "match"),
+    [
+        (
+            {"kind": "IntensityLength", "intensity": 0.0, "length": 0.01},
+            r"intensity must be a positive",
+        ),
+        (
+            {"kind": "IntensityLength", "intensity": 0.05, "length": -1.0},
+            r"length must be a positive",
+        ),
+        ({"kind": "IntensityLength", "intensity": 0.05, "length": ".inf"}, r"length"),
+        ({"kind": "IntensityLength", "intensity": 0.05}, r"needs 'length'"),
+    ],
+    ids=["no-intensity", "negative-length", "infinite-length", "no-length"],
+)
+def test_an_intensity_or_length_that_gives_no_turbulence_is_refused(turbulence, match) -> None:
+    if turbulence.get("length") == ".inf":
+        turbulence = {**turbulence, "length": float("inf")}
+    inlet = {"kind": "Inlet", "velocity": [1.0, 0.0], "turbulence": turbulence}
+    rans = {"kind": "RANS", "advection": {"kind": "FirstOrderUpwind"}}
+    with pytest.raises(ValueError, match=match):
+        case_spec_from_mapping(_sections(physics=rans, boundaries=_boundaries(left=inlet)))
+
+
+def test_an_intensity_of_a_still_inflow_is_refused() -> None:
+    with pytest.raises(ValueError, match=r"this inlet's velocity is zero"):
+        IntensityLength(intensity=0.05, length=0.01).inflow((0.0, 0.0), SSTModel())
+
+
+def test_an_intensity_length_inlet_builds_the_problem_its_k_and_omega_would() -> None:
+    """The whole build, against the same case stated with the k and omega the relation gives.
+
+    A non-default model constant, so a build that read its own default instead of the case's model --
+    or that fixed the constant at 0.09 -- builds a different omega and fails the comparison.
+    """
+    model = {"kind": "SSTModel", "beta_star": 0.1}
+    rans = {"kind": "RANS", "advection": {"kind": "FirstOrderUpwind"}, "model": model}
+    speed, intensity, length = 1.0, 0.04, 0.02
+    k = 1.5 * (intensity * speed) ** 2
+    omega = k**0.5 / (0.1**0.25 * length)
+
+    def built(turbulence):
+        inlet = {"kind": "Inlet", "velocity": [speed, 0.0], "turbulence": turbulence}
+        spec = case_spec_from_mapping(
+            _sections(physics=rans, fluid=_SLAB_FLUID, boundaries={**_SLAB_PATCHES, "left": inlet})
+        )
+        return CaseFile(spec, REPO).check().build()
+
+    stated = {"kind": "IntensityLength", "intensity": intensity, "length": length}
+    _same_problem(built(stated), built({"kind": "FixedTurbulence", "k": k, "omega": omega}))
