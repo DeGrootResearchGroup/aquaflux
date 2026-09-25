@@ -50,7 +50,7 @@ from aquaflux.radiation.silhouette import (
     covered_by,
     source_view,
 )
-from aquaflux.radiation.triangles import padded_length, segment_is_cut
+from aquaflux.radiation.triangles import padded_length, pairs_are_cut
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, receivers_per_pass
 
 __all__ = [
@@ -67,14 +67,20 @@ class OcclusionField(eqx.Module):
 
     Attributes
     ----------
-    fraction : jnp.ndarray, shape ``(n_receivers, n_facets)``
+    fraction : jnp.ndarray, shape ``(n_receivers, n_facets)``, or None
         Of each source's view -- its projected solid angle from a receiver on a facet, its plain
-        solid angle from one in the volume -- how much the surface's own triangles hide. Zero or
-        one from a ray test; anywhere in between from the silhouette clip.
-    overlapping : jnp.ndarray of bool, shape ``(n_receivers, n_facets)``
+        solid angle from one in the volume -- how much the surface's own triangles hide.
+        **Stored at the narrowest type that holds it**, because it is the size of the whole
+        problem: floating point from the silhouette clip, which measures anything in between;
+        boolean from a ray test, which can only say all or nothing, and whose eight bytes a pair
+        as a float held one bit; and ``None`` where nothing is hidden at all
+        (:class:`NoOcclusion`). Whoever reads it widens it; see
+        :func:`~aquaflux.radiation.visibility.surviving_fraction`.
+    overlapping : jnp.ndarray of bool, shape ``(n_receivers, n_facets)``, or None
         Whether more than one blocker covered part of this pair, so their fractions were added
-        and **may** have been double counted. Always ``False`` from a ray test, whose ``or`` is
-        idempotent. It proves a pair exact where it is ``False``; where it is ``True`` it proves
+        and **may** have been double counted. ``None`` from a ray test, whose ``or`` is
+        idempotent, so no pair it reports is ever such an addition, and from
+        :class:`NoOcclusion`. It proves a pair exact where it is ``False``; where it is ``True`` it proves
         nothing, and on a meshed body it is ``True`` for nearly every hidden pair, because a
         tiled blocker covers a pair with several of its triangles without any of them
         overlapping. It is a count taken in the pass that already runs, so it costs nothing,
@@ -87,8 +93,8 @@ class OcclusionField(eqx.Module):
         caller.
     """
 
-    fraction: jnp.ndarray
-    overlapping: jnp.ndarray
+    fraction: jnp.ndarray | None
+    overlapping: jnp.ndarray | None
     clear_behind: bool = eqx.field(static=True, default=False)
 
 
@@ -157,8 +163,7 @@ class NoOcclusion(SelfOcclusion):
 
     def field(self, surfaces, points, near, receiver_facet) -> OcclusionField:
         """Nothing hides anything. See :meth:`SelfOcclusion.field`."""
-        shape = (int(points.shape[0]), int(surfaces.n_facets))
-        return OcclusionField(fraction=jnp.zeros(shape), overlapping=jnp.zeros(shape, dtype=bool))
+        return OcclusionField(fraction=None, overlapping=None)
 
 
 class RayCastOcclusion(SelfOcclusion):
@@ -179,8 +184,10 @@ class RayCastOcclusion(SelfOcclusion):
     Attributes
     ----------
     pair_limit : int
-        Receiver-by-facet pairs per pass, bounding the peak memory of the build: a pass forms
-        one ray per pair, and its origins, targets and exclusions with it.
+        Receiver-by-facet pairs per pass, bounding the peak memory of the build: a pass holds
+        which pairs it casts, as two indices each, and without a grid forms their rays a chunk
+        of the intersection test at a time; with one, the walk needs every ray's endpoints and
+        exclusions for the whole pass.
     work_limit : int
         Ray-by-triangle entries per pass, which is what bounds the intersection test's memory
         and, through that, its speed. It bounds the grid's passes too: a step of the walk tests
@@ -232,35 +239,33 @@ class RayCastOcclusion(SelfOcclusion):
             row, source = np.nonzero(cast)
             if len(row) == 0:
                 continue
-            # Every ray must ignore the facet it leaves; one aimed at a facet centroid must
-            # ignore that facet too, or it is blocked by its own destination. Formed for this
-            # pass's rays alone, from the two indices, rather than for the whole problem.
-            exclude = (
-                source[:, None]
-                if on_facet is None
-                else np.stack([source, on_facet[start + row]], axis=1)
-            )
-            origin, target = centroid[source], receivers[row]
+            on_this_pass = None if on_facet is None else on_facet[start : start + per_pass]
             if grid is not None:
+                # The grid walk is host code that steps every ray, so it needs every ray's
+                # endpoints at once; the brute-force test below forms them a chunk at a time.
                 hit = grid.blocks(
-                    origin, target, near[source], exclude=exclude, work_limit=self.work_limit
+                    centroid[source],
+                    receivers[row],
+                    near[source],
+                    exclude=_exclusions(source, row, on_this_pass),
+                    work_limit=self.work_limit,
                 )
             else:
-                hit = segment_is_cut(
-                    origin,
-                    target,
+                hit = pairs_are_cut(
+                    receivers,
+                    centroid,
+                    near,
                     surfaces.vertices,
-                    near[source],
-                    exclude=exclude,
+                    row,
+                    source,
+                    target=on_this_pass,
                     work_limit=self.work_limit,
                 )
             blocked[start + row, source] = np.asarray(hit)
-        # A bit, widened to the fraction the rest of the package consumes. One ray can only ever
-        # say all or nothing, so no pair it reports is ever an addition of two answers.
+        # A bit, kept as one: whoever reads it widens it. One ray can only ever say all or
+        # nothing, so no pair it reports is ever an addition of two answers.
         return OcclusionField(
-            fraction=jnp.asarray(blocked, dtype=float),
-            overlapping=jnp.zeros((n_receivers, n_facets), dtype=bool),
-            clear_behind=clear_behind,
+            fraction=jnp.asarray(blocked), overlapping=None, clear_behind=clear_behind
         )
 
     def prepared(self, surfaces) -> RayCastOcclusion:
@@ -287,6 +292,15 @@ class RayCastOcclusion(SelfOcclusion):
         return TriangleGrid.build(
             np.asarray(surfaces.vertices), resolution=None if self.grid is True else self.grid
         )
+
+
+def _exclusions(source: np.ndarray, row: np.ndarray, on_facet) -> np.ndarray:
+    """What each ray ignores: the facet it leaves and, when its receiver sits on one, that facet.
+
+    Leaving out the second blocks every ray aimed at a facet centroid on its own destination.
+    Formed for one pass's rays, from their indices, rather than for the whole problem.
+    """
+    return source[:, None] if on_facet is None else np.stack([source, on_facet[row]], axis=1)
 
 
 def _facing_away(surfaces, receivers) -> np.ndarray:

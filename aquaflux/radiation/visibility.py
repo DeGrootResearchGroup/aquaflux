@@ -93,7 +93,9 @@ def surviving_fraction(blocked, hidden_by_geometry, transmittance) -> jnp.ndarra
     Parameters
     ----------
     blocked : jnp.ndarray of bool, shape ``(n_occluders, n_receivers, n_facets)``
-    hidden_by_geometry : jnp.ndarray, shape ``(n_receivers, n_facets)``
+    hidden_by_geometry : jnp.ndarray, shape ``(n_receivers, n_facets)``, or None
+        Boolean or floating point, and widened here -- one chunk at a time from the gather, so
+        the widened copy is never the size of the problem. ``None`` hides nothing.
     transmittance : array_like, shape ``(n_occluders,)``
         What fraction each body transmits, in ``[0, 1]``. Differentiable.
 
@@ -103,7 +105,10 @@ def surviving_fraction(blocked, hidden_by_geometry, transmittance) -> jnp.ndarra
     """
     transmittance = jnp.broadcast_to(jnp.asarray(transmittance, dtype=float), (blocked.shape[0],))
     attenuation = 1.0 - blocked * (1.0 - transmittance[:, None, None])
-    return jnp.prod(attenuation, axis=0) * (1.0 - hidden_by_geometry)
+    surviving = jnp.prod(attenuation, axis=0)
+    if hidden_by_geometry is None:
+        return surviving
+    return surviving * (1.0 - jnp.asarray(hidden_by_geometry, dtype=float))
 
 
 class Visibility(eqx.Module):
@@ -115,22 +120,24 @@ class Visibility(eqx.Module):
         Whether each body lies across the segment from each facet to each receiver.
     receivers : jnp.ndarray, shape ``(n_receivers, 3)``
         The receiver positions this mask was built for.
-    hidden_by_geometry : jnp.ndarray, shape ``(n_receivers, n_facets)``
+    hidden_by_geometry : jnp.ndarray, shape ``(n_receivers, n_facets)``, or None
         What fraction of each source the emitting surface's **own triangles** hide from each
         receiver. Kept apart from :attr:`blocked` because it carries no transmittance: the
         surface set is the reactor's walls and bodies, and those are opaque. A partly
         transmitting body belongs in :attr:`blocked`, as an analytic primitive.
 
-        A **fraction** rather than a flag, so the two self-occlusion strategies share one field
-        and nothing downstream branches on which ran: a ray test returns only zeros and ones,
-        while the silhouette clip returns what it measures. It costs eight bytes a pair where a
-        flag cost one.
-    overlapping : jnp.ndarray of bool, shape ``(n_receivers, n_facets)``
+        A **fraction**, so the self-occlusion strategies share one field and nothing downstream
+        branches on which ran -- but stored at the narrowest type that holds it, because it is
+        the size of the whole problem: floating point from the silhouette clip, boolean from a
+        ray test (one byte a pair where a float of zeros and ones took eight), and ``None`` when
+        the surface does not shadow itself. :func:`surviving_fraction` widens it.
+    overlapping : jnp.ndarray of bool, shape ``(n_receivers, n_facets)``, or None
         Whether more than one blocker contributed to :attr:`hidden_by_geometry` here, so their
         fractions were **added**. Exactness is proven for a pair where exactly one did; where
         several did they may or may not overlap in angle -- a tiling of one flat wall does not,
-        and is the common benign case -- so this reports "not proven", not "wrong". Always
-        ``False`` from a ray test, whose ``or`` is idempotent.
+        and is the common benign case -- so this reports "not proven", not "wrong". ``None``
+        where no pair can be such an addition: from a ray test, whose ``or`` is idempotent, and
+        where nothing is hidden at all.
     clear_behind : bool
         Whether pairs whose source faces away from the receiver were recorded clear in
         :attr:`hidden_by_geometry` without being tested, as the ray test does for receivers in
@@ -151,8 +158,8 @@ class Visibility(eqx.Module):
 
     blocked: jnp.ndarray
     receivers: jnp.ndarray
-    hidden_by_geometry: jnp.ndarray
-    overlapping: jnp.ndarray
+    hidden_by_geometry: jnp.ndarray | None
+    overlapping: jnp.ndarray | None
     clear_behind: bool = eqx.field(static=True, default=False)
 
     @property

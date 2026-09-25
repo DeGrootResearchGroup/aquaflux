@@ -86,12 +86,13 @@ def _groups(surfaces: Surfaces) -> list[tuple[object, np.ndarray, np.ndarray]]:
 def _shadow_rows(visibility, transmittance, points, sets) -> tuple:
     """What the chunks need to form the fraction getting past the intervening bodies.
 
-    ``(array, axis)`` pairs for :func:`~aquaflux.radiation.work.in_passes` — the mask's own layers, each cut along its
-    receiver axis — and **not** the fraction itself: formed here it would be a floating-point
-    array the size of the whole problem, eight bytes a pair on top of the mask, before any
-    chunking could bound it. Each chunk forms its own share instead, in
+    ``(array, axis)`` pairs for :func:`~aquaflux.radiation.work.in_passes` — the mask's own
+    layers, each cut along its receiver axis — and **not** the fraction itself: formed here it
+    would be a floating-point array the size of the whole problem, eight bytes a pair on top of
+    the mask, before any chunking could bound it. Each chunk forms its own share instead, in
     :func:`~aquaflux.radiation.visibility.surviving_fraction`, the one expression
-    :meth:`~aquaflux.radiation.visibility.Visibility.surviving` also evaluates.
+    :meth:`~aquaflux.radiation.visibility.Visibility.surviving` also evaluates. The surface's own
+    layer is left out where the mask holds none, because the surface hides nothing.
 
     **Empty when nothing occludes, and deliberately not a row of ones**, for the same reason.
 
@@ -113,7 +114,10 @@ def _shadow_rows(visibility, transmittance, points, sets) -> tuple:
         _refuse_light_from_behind(sets)
     if transmittance is None:
         transmittance = jnp.zeros(visibility.n_occluders)
-    return ((visibility.blocked, 1), (visibility.hidden_by_geometry, 0)), transmittance
+    layers = [(visibility.blocked, 1)]
+    if visibility.hidden_by_geometry is not None:
+        layers.append((visibility.hidden_by_geometry, 0))
+    return tuple(layers), transmittance
 
 
 def _refuse_light_from_behind(sets) -> None:
@@ -136,8 +140,14 @@ def _refuse_light_from_behind(sets) -> None:
 
 
 def _surviving(layers, transmittance):
-    """A chunk's surviving fraction from its mask layers, or ``None`` where nothing occludes."""
-    return surviving_fraction(*layers, transmittance) if layers else None
+    """A chunk's surviving fraction from its mask layers, or ``None`` where nothing occludes.
+
+    The layers are the bodies' and, unless the surface hides nothing, its own.
+    """
+    if not layers:
+        return None
+    blocked, *hidden = layers
+    return surviving_fraction(blocked, hidden[0] if hidden else None, transmittance)
 
 
 def _masked(surviving, facets):

@@ -328,8 +328,8 @@ def test_the_surviving_fraction_lets_a_half_hidden_pair_through_by_half():
     half = type(mask)(
         blocked=mask.blocked,
         receivers=mask.receivers,
-        hidden_by_geometry=jnp.full_like(mask.hidden_by_geometry, 0.25),
-        overlapping=mask.overlapping,
+        hidden_by_geometry=jnp.full((surfaces.n_facets, surfaces.n_facets), 0.25),
+        overlapping=None,
     )
     assert np.allclose(np.asarray(half.surviving(jnp.zeros(0))), 0.75)
 
