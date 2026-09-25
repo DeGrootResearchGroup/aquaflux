@@ -608,15 +608,13 @@ def test_self_occlusion_reaches_both_masks_when_it_can_serve_both(strategy):
     assert settings.receiver_visibility_options() == {"self_occlusion": strategy}
 
 
-def test_a_strategy_that_cannot_serve_a_point_in_the_fluid_leaves_the_receivers_to_their_default():
-    """The silhouette clip needs a receiver normal, so the volume mask must not be handed it.
-
-    It is dropped rather than replaced, so the volume mask reaches its own default instead of a
-    second copy of that default written in the settings.
-    """
+def test_the_receivers_follow_the_facets_strategy_unless_told_otherwise():
+    """Both masks from one choice, so they cannot disagree about whether the surface shadows
+    itself; unset stays unset, so the volume mask reaches its own default rather than a copy."""
     settings = RadiationSettings(self_occlusion=SilhouetteOcclusion())
     assert settings.visibility_options() == {"self_occlusion": SilhouetteOcclusion()}
-    assert settings.receiver_visibility_options() == {}
+    assert settings.receiver_visibility_options() == {"self_occlusion": SilhouetteOcclusion()}
+    assert RadiationSettings().receiver_visibility_options() == {}
 
 
 def test_an_explicit_receiver_strategy_wins():
@@ -631,11 +629,10 @@ def test_an_explicit_receiver_strategy_wins():
 def test_a_model_can_be_built_with_the_silhouette_strategy():
     """The documented way to select the strategy must build a model, with each mask served right.
 
-    Before ``receiver_occlusion`` existed this raised: the model handed one strategy to both
-    masks, and the silhouette clip refuses the volume receivers. The fixture is non-convex, so
-    the facet mask must hold fractions strictly between nought and one -- which only the clip
-    produces -- while the receiver mask holds only noughts and ones, some of them ones: the ray
-    test, and not self-occlusion switched off.
+    The fixture is non-convex, so both masks must hold fractions strictly between nought and one
+    -- which only the clip produces: the volume receivers take their share of the plain solid
+    angle, the facets of the projected one. The ray test would give only noughts and ones, and
+    self-occlusion switched off only noughts.
     """
     sleeve = closed_drum(8, radius=0.15, half_height=0.3) + np.array([0.5, 0.5, 0.5])
     surfaces = Surfaces.from_triangles(
@@ -648,8 +645,7 @@ def test_a_model_can_be_built_with_the_silhouette_strategy():
     facets = np.asarray(model.transfer.visibility.hidden_by_geometry)
     assert np.any((facets > 1e-6) & (facets < 1.0 - 1e-6)), "the facet mask is not the clip's"
     volume = np.asarray(model.receiver_shadows.visibility.hidden_by_geometry)
-    assert np.all((volume == 0.0) | (volume == 1.0)), "the receiver mask is not the ray test's"
-    assert volume.any(), "the receiver mask shadows nothing, so self-occlusion was switched off"
+    assert np.any((volume > 1e-6) & (volume < 1.0 - 1e-6)), "the receiver mask is not the clip's"
 
 
 def test_a_setting_reaches_the_transfer_build():

@@ -106,7 +106,7 @@ class PrecomputedOcclusion(SelfOcclusion):
 
 
 def union_reference(surfaces: Surfaces, receiver, source, samples: int = SAMPLES, seed: int = 0):
-    """The hidden share of each source, seen from each receiver, with no double counting.
+    """The hidden share of each source, seen from each receiver facet, with no double counting.
 
     Parameters
     ----------
@@ -119,38 +119,67 @@ def union_reference(surfaces: Surfaces, receiver, source, samples: int = SAMPLES
     tuple of np.ndarray, each shape ``(n_pairs,)``
         The hidden share and its standard error.
     """
+    centroid = np.asarray(surfaces.centroid)
+    normal = np.asarray(surfaces.normal)
+    return union_hidden(
+        surfaces, centroid[receiver], normal[receiver], source, receiver, samples, seed
+    )
+
+
+def union_hidden(surfaces: Surfaces, points, normals, source, own, samples=SAMPLES, seed=0):
+    """The union-reference hidden share for arbitrary receivers, on a surface or in the volume.
+
+    Parameters
+    ----------
+    surfaces : Surfaces
+    points : np.ndarray, shape ``(n_pairs, 3)``
+        Each pair's receiver position.
+    normals : np.ndarray, shape ``(n_pairs, 3)``, or None
+        Each receiver's normal, weighting by the projected solid angle; ``None`` for receivers in
+        the volume, weighted by the plain solid angle ``|cos_s| / d**2``.
+    source : np.ndarray of int, shape ``(n_pairs,)``
+    own : np.ndarray of int, shape ``(n_pairs,)``
+        A facet each ray ignores besides its source -- the receiver's own; for a volume receiver,
+        pass the source again.
+
+    Returns
+    -------
+    tuple of np.ndarray, each shape ``(n_pairs,)``
+        The hidden share and its standard error.
+    """
     rng = np.random.default_rng(seed)
     u, v = rng.random(samples), rng.random(samples)
     outside = u + v > 1.0
     u, v = np.where(outside, 1.0 - u, u), np.where(outside, 1.0 - v, v)
 
     vertices = np.asarray(surfaces.vertices)
-    normal = np.asarray(surfaces.normal)
-    centroid = np.asarray(surfaces.centroid)
+    facet_normal = np.asarray(surfaces.normal)
     triangles = jnp.asarray(vertices)
+    points = np.asarray(points, dtype=float)
 
-    hidden = np.empty(len(receiver))
-    error = np.empty(len(receiver))
-    for start in range(0, len(receiver), BATCH):
-        r, s = receiver[start : start + BATCH], source[start : start + BATCH]
+    hidden = np.empty(len(source))
+    error = np.empty(len(source))
+    for start in range(0, len(source), BATCH):
+        s, o = source[start : start + BATCH], own[start : start + BATCH]
+        here = points[start : start + BATCH]
         a, b, c = vertices[s, 0], vertices[s, 1], vertices[s, 2]
-        points = (
+        samples_at = (
             a[:, None] + u[None, :, None] * (b - a)[:, None] + v[None, :, None] * (c - a)[:, None]
         )
-        offset = points - centroid[r][:, None, :]
+        offset = samples_at - here[:, None, :]
         squared = np.sum(offset * offset, axis=-1)
         unit = offset / np.sqrt(squared)[..., None]
-        weight = (
-            np.clip(np.einsum("pnd,pd->pn", unit, normal[r]), 0.0, None)
-            * np.abs(np.einsum("pnd,pd->pn", unit, normal[s]))
-            / squared
-        )
-        n_pairs = len(r)
-        exclude = np.stack([np.repeat(s, samples), np.repeat(r, samples)], axis=-1)
+        weight = np.abs(np.einsum("pnd,pd->pn", unit, facet_normal[s])) / squared
+        if normals is not None:
+            weight = weight * np.clip(
+                np.einsum("pnd,pd->pn", unit, np.asarray(normals)[start : start + BATCH]), 0.0, None
+            )
+        n_pairs = len(s)
+        exclude = np.stack([np.repeat(s, samples), np.repeat(o, samples)], axis=-1)
         blocked = np.asarray(
             segment_is_cut(
-                points.reshape(-1, 3),
-                np.repeat(centroid[r], samples, axis=0),
+                samples_at.reshape(-1, 3),
+                np.repeat(here, samples, axis=0),
                 triangles,
                 np.full(n_pairs * samples, 1e-9),
                 exclude=exclude,

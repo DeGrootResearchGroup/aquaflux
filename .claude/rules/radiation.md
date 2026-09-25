@@ -555,9 +555,8 @@ survives here as a role — a body passed in `occluders=` — not as a type.
 
 ## ⚠️ AN OCCLUDER DECLARES WHETHER IT CAN BE TRACED, AND COMPILING ONE THAT CANNOT IS A CRASH
 
-`Body.traceable` (in `aquaflux/solids/bodies.py`; a `ClassVar`, defaulting to `False`, following
-`SelfOcclusion.serves_volume_receivers`) says whether a body's answers are a pure array
-expression. `build_visibility` compiles the bodies that say they can be and calls the rest
+`Body.traceable` (in `aquaflux/solids/bodies.py`; a `ClassVar`, defaulting to `False`) says whether
+a body's answers are a pure array expression. `build_visibility` compiles the bodies that say they can be and calls the rest
 directly.
 
 Both directions are load-bearing, and they pull opposite ways:
@@ -737,17 +736,17 @@ a mask silently missing it looks exactly like one that includes it.
 **A model builds TWO masks — facet to facet, and facet to volume receiver — and they are routed
 separately** (`RadiationSettings.visibility_options()` for the first,
 `receiver_visibility_options()` for the second). `receiver_occlusion` overrides the second; unset,
-it follows `self_occlusion` wherever that strategy declares `serves_volume_receivers` (the ray test
-and `NoOcclusion` do), so "off" and "ray test" still apply to both masks alike. A strategy that
-cannot serve a point in the fluid (`SilhouetteOcclusion`) is *not passed on*, so the volume mask
-reaches `build_visibility`'s own default — the ray test — rather than a second copy of it. ⚠️ **Until
-this split, `build_radiation_model` RAISED with the silhouette strategy selected** (#471 shipped it
-that way): one strategy went to both masks and the clip correctly refuses volume receivers. Nothing
-caught it because every silhouette test called `build_transfer` or the strategy directly and none
-built a model; `test_a_model_can_be_built_with_the_silhouette_strategy` does now. ⚠️ **So with the
-silhouette selected, the fluence rate in the fluid is still all-or-nothing per pair** — only the
-surface transfer gets the exact fraction. Teaching the clip the unprojected (volume) measure is
-the real fix and is a separate piece of work.
+it **follows `self_occlusion`**, so "off", "ray test" and "silhouette" apply to both masks alike, and
+unset stays unset (both reach `build_visibility`'s own default, the ray test). Since #479 every
+strategy serves a point in the fluid, so there is no longer a "can this strategy serve the volume"
+question to route on: ⚠️ **there is no `serves_volume_receivers` any more** — it existed only so the
+model could keep the silhouette clip, which then took only a *projected* share, away from volume
+receivers, and it was deleted with that limitation. (Before #480 split the routing, one strategy went
+to both masks and `build_radiation_model` RAISED with the silhouette selected; before #479 the split
+kept the fluence rate in the fluid all-or-nothing per pair under the silhouette. Both are history.)
+**Selecting the silhouette now clips every cell** — see the volume-receiver section under analytic
+occlusion for what that costs; `receiver_occlusion=RayCastOcclusion()` keeps the clip between facets
+only. `test_a_model_can_be_built_with_the_silhouette_strategy` pins that both masks hold fractions.
 
 **Exclusion is by index, never by tolerance.** Every ray leaves its facet's centroid, so the
 facet is always hit at zero distance. Excluding its whole *solid* would be wrong — a bent duct is
@@ -2110,12 +2109,70 @@ matches the whole at 1e-16 — a triangulated surface *is* a tiling), and **only
 triangles are summed** (on a closed 384-triangle tube, summing every triangle gives exactly 2.0 —
 the far wall counted too; front-facing gives 1.33e-15 against dense truth).
 
-⚠️ **EVERY RECEIVER MUST SIT ON A FACET.** The fraction is of a *projected* solid angle, which needs
-the receiver's normal; a volume point has none, and the unprojected measure a volume gather uses is
-a different quantity. `SilhouetteOcclusion.field` raises for `receiver_facet=None` and for any
-`-1`, naming `RayCastOcclusion` — an error, because silently falling back inside the strategy
-would be the plausible brighter field this subsystem keeps warning about. The model does the
-routing instead, openly: see `receiver_occlusion` above.
+### VOLUME RECEIVERS: the share of the PLAIN solid angle (#479, 2026-09-25)
+
+A receiver on a facet takes its share of the *projected* solid angle `∫ cos θ dω` (what an irradiance
+weights by); **a point in the fluid, which has no normal, takes its share of the plain solid angle
+`∫ dω`** (what the fluence-rate gather weights by, `radiance × solid_angle`). `receiver_normal=None` is
+how a volume receiver says so, all the way down: `source_view`, `covered_by`, `covered_fraction` and
+`may_occlude` accept it, and `SilhouetteOcclusion.field` treats `receiver_facet=None` — or `-1` in any
+row — as a volume point (it used to raise for both). One choice, `silhouette._measure`, picks the
+integral for the whole, the covered part and the blocker-extent clamp together, so a share cannot be
+taken of one measure against another.
+
+- **The clip is unchanged; only the integral differs.** A volume point has no front half-space, so
+  `_in_view` pads the source (and the depth-cut blocker) with a repeated corner instead of clipping —
+  the same widths `4 … 8`, so one clip serves both. The tangent-plane cull in `_survivors` is skipped;
+  the cone and source-plane culls stay.
+- **The unprojected integral is `solid_angle._signed_loop_area`**: a fan from the loop's first vertex,
+  each term the `signed_solid_angle` closed form (`2·arctan2(a·(b×c), 1+a·b+a·c+b·c)`). Signed and
+  additive, negates with the winding; repeated slots and an emptied (all-zero) loop contribute exactly
+  nothing. Valid for a convex loop inside an open hemisphere, which every clip of a triangle seen from
+  off its plane is. **Not** an angle-excess sum: a sliver keeps its digits — the pole/equator triangle
+  of area exactly `φ` reads right to 1e-12 relative at `φ = 1e-9`.
+- Tests, each mutation-checked: fan = triangle closed form from each starting corner; additivity over a
+  4-way split and a quadrilateral; the thin loop; the sampler agreeing in both measures (the sampler in
+  `radiation_references.py` takes `receiver_normal=None` for the plain weighting `|cos_s|/d²`); an
+  **oblique** fixture where the two measures' shares differ by 0.117 (on-axis fixtures cannot tell them
+  apart — the same trap as the missing receiver cosine); a volume receiver seeing behind any plane
+  through it; field-level volume rows against the sampler on the sleeved box; a mixed `[facet, -1]`
+  build matching each kind's own build **and** the surface row matching the *projected* sampler. That
+  last assertion was added because **"every row volume" survived the suite without it**: the
+  projected measure was pinned only through `covered_fraction`, never through `field()`. Dismissed, not
+  covered: the extent clamp on the volume path (same logic as the surface path, which is covered).
+
+**MEASURED** — `validation/radiation_volume_silhouette.py`, two-sleeve reactor (`two_sleeve_reactor`,
+walls black so only the volume mask is judged, sleeves Lambertian `M = 1`), lattice water points clear
+of walls and sleeves, union reference 4096 samples/pair (plain weighting, `segment_is_cut`, a gap real
+past 3σ + 1e-3), jax 0.10.2, CPU, x64, macOS arm64, 11 cores, run alone under `run_case.sh`,
+2026-09-25, uncommitted #479 working tree on `b2b792c`:
+
+- **Per pair** (288 facets, 300 edge cells of 948 with a partly hidden sleeve facet, all 21,604 pairs
+  either mask hides): clip exact within the reference on **all but 3** — those 3 over (the overlap
+  over-count, worst +0.036), none under; mean |gap| **0.0003**. The ray mask: mean |gap| 0.0106,
+  **worst 0.876** on one pair. 2,000 control pairs neither mask hides: the reference finds **no**
+  missed shadow.
+- **Fluence rate at the edge cells** against the reference field (same public `fluence_rate`, hidden
+  shares injected): silhouette mean / p95 / worst |rel| **0.0005 / 0.0019 / 0.0046**; ray mask
+  **0.0215 / 0.0764 / 0.1419**. Over all 2,552 points the ray mask sits 0.9% mean, 14.2% worst from the
+  clip. So the worst cell improves ~30x; the mean ~40x.
+- **Cost of the volume mask alone** (warm, `build_visibility`, silhouette vs ray without a grid):
+
+| facets | receivers | clip s | ray s | clip ms/receiver | ratio | cull survivors/receiver | of n² |
+|---|---|---|---|---|---|---|---|
+| 288 | 464 | 6.0 | 0.4 | 12.9 | 14 | 10,183 | 12.3% |
+| 288 | 1,632 | 20.8 | 0.7 | 12.7 | 30 | 9,824 | 11.8% |
+| 560 | 464 | 12.1 | 0.8 | 26.2 | 15 | 22,727 | 7.3% |
+| 560 | 1,632 | 40.8 | 1.5 | 25.0 | 27 | 21,433 | 6.8% |
+
+  Linear in receivers (constant ms/receiver), **roughly linear in facets** rather than quadratic, because
+  the cull's survival falls as the mesh refines (12% → 7% of `n²`). The per-receiver loop is a Python
+  loop over compiled calls, so the fixed per-receiver overhead is in these figures.
+  ⚠️ **Extrapolation, flagged as one:** at that rate a 100k-cell field against ~560 facets is ~40 min,
+  and it grows with facet count; the ray mask is 15-30x cheaper. So selecting the silhouette now makes
+  a mesh-scale model expensive — `receiver_occlusion=RayCastOcclusion()` is the escape, and the Sozzi
+  lamp (convex, `NoOcclusion`) is unaffected. Batching receivers per compiled call is the obvious lever
+  and is not built.
 
 ⚠️ **WHERE IT OVER-COUNTS, STATED EXACTLY: the angular overlap between two front-facing
 silhouettes.** Each blocker is clipped against the *source*, not against what is still unblocked,

@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import abc
 import warnings
-from typing import ClassVar
 
 import equinox as eqx
 import jax
@@ -68,8 +67,9 @@ class OcclusionField(eqx.Module):
     Attributes
     ----------
     fraction : jnp.ndarray, shape ``(n_receivers, n_facets)``
-        Of each source's projected solid angle, how much the surface's own triangles hide. Zero
-        or one from a ray test; anywhere in between from the silhouette clip.
+        Of each source's view -- its projected solid angle from a receiver on a facet, its plain
+        solid angle from one in the volume -- how much the surface's own triangles hide. Zero or
+        one from a ray test; anywhere in between from the silhouette clip.
     overlapping : jnp.ndarray of bool, shape ``(n_receivers, n_facets)``
         Whether more than one blocker covered part of this pair, so their fractions were added
         and **may** have been double counted. Always ``False`` from a ray test, whose ``or`` is
@@ -85,13 +85,11 @@ class OcclusionField(eqx.Module):
 
 
 class SelfOcclusion(eqx.Module):
-    """How a surface's own triangles are tested for standing in the light."""
+    """How a surface's own triangles are tested for standing in the light.
 
-    #: Whether this strategy can answer for receivers lying on no facet -- points in the fluid,
-    #: which have no surface normal. A model builds two masks, one between facets and one from
-    #: facets to its volume receivers, and reads this to decide whether the strategy that
-    #: serves the first can serve the second too.
-    serves_volume_receivers: ClassVar[bool] = True
+    Every strategy answers for both kinds of receiver: points on a facet, as the surface-to-surface
+    transfer uses, and points in the fluid, as the volume gather does.
+    """
 
     @abc.abstractmethod
     def field(self, surfaces, points, near, receiver_facet) -> OcclusionField:
@@ -258,14 +256,13 @@ class SilhouetteOcclusion(SelfOcclusion):
     contributed, which includes every tiling, so it proves pairs exact rather than finding the
     wrong ones.
 
-    ⚠️ **Every receiver must sit on a facet.** The fraction is of a *projected* solid angle, so
-    it needs the receiver's own normal to project onto, and a point in the fluid has none. That
-    is not a limitation of the clip but of the quantity: a volume gather weights sources by
-    their unprojected solid angle, which is a different measure and would need a different
-    kernel. A model selected with this strategy therefore serves its volume receivers with the
-    ray test (see :class:`~aquaflux.radiation.model.RadiationSettings`, ``receiver_occlusion``),
-    so the fluence rate in the fluid still sees each sleeve as all or nothing per pair; the
-    exact fraction reaches the surface-to-surface transfer, which carries the interreflection.
+    **The fraction is of the measure the receiver gathers in.** A receiver on a facet takes its
+    share of the source's *projected* solid angle, about that facet's normal, because that is
+    what an irradiance weights by; a point in the fluid has no normal and takes its share of the
+    *plain* solid angle, which is what a fluence rate weights by. The clip is the same for both --
+    it works in direction space -- and only the contour integral taken of the covered region
+    differs. So a fluence rate in the water sees a sleeve's shadow edge as the fraction it is,
+    rather than all or nothing per pair.
 
     **Three passes per receiver**, and the middle one is what makes the cost bearable: build
     each triangle's bounding cone and each source's clipped view (both ``n`` per receiver, not
@@ -304,55 +301,44 @@ class SilhouetteOcclusion(SelfOcclusion):
         conceivable range, each of which is reused by every receiver that lands in its bucket.
     """
 
-    serves_volume_receivers: ClassVar[bool] = False
-
     work_chunk: int = 262_144
     two_sided: tuple[str, ...] = ()
 
     def field(self, surfaces, points, near, receiver_facet) -> OcclusionField:
         """Clip the survivors. See :meth:`SelfOcclusion.field`."""
-        if receiver_facet is None:
-            msg = (
-                "SilhouetteOcclusion needs each receiver's own surface normal, and "
-                "`receiver_facet` says which facet supplies it. Receivers in the volume have no "
-                "normal and no projected solid angle to take a fraction of, so use "
-                "RayCastOcclusion for a volume gather."
-            )
-            raise ValueError(msg)
-        facet_of = np.asarray(receiver_facet, dtype=int)
-        if np.any(facet_of < 0):
-            stray = int(np.sum(facet_of < 0))
-            msg = (
-                f"{stray} receiver(s) lie on no facet (`receiver_facet` is -1 there). "
-                "SilhouetteOcclusion takes a fraction of a projected solid angle and so needs a "
-                "normal at every receiver; use RayCastOcclusion for those points."
-            )
-            raise ValueError(msg)
+        n_receivers = int(points.shape[0])
+        # A receiver on no facet -- every one, when there are no facets to name -- is a point in
+        # the volume: it has no normal, and takes its share of the plain solid angle instead.
+        facet_of = (
+            np.full(n_receivers, -1)
+            if receiver_facet is None
+            else np.asarray(receiver_facet, dtype=int)
+        )
 
         vertices = surfaces.vertices
         normal = surfaces.normal
         centroid = surfaces.centroid
         n_facets = int(surfaces.n_facets)
-        n_receivers = int(points.shape[0])
-        index = np.arange(n_facets)
         either_side = self._either_side(surfaces)
 
         fraction = np.zeros((n_receivers, n_facets))
         blockers = np.zeros((n_receivers, n_facets), dtype=np.int32)
         for row in range(n_receivers):
+            own = facet_of[row]
+            facing = None if own < 0 else normal[own]
             source, blocker = self._candidates(
-                points[row], normal[facet_of[row]], vertices, centroid, normal, near, either_side
+                points[row], facing, vertices, centroid, normal, near, either_side
             )
-            # A facet never blocks itself, and never blocks the facet the receiver sits on.
-            legal = (source != blocker) & (blocker != facet_of[row]) & (source != facet_of[row])
+            # A facet never blocks itself, and never blocks the facet the receiver sits on -- a
+            # test that is vacuous for a receiver on no facet, whose index is -1.
+            legal = (source != blocker) & (blocker != own) & (source != own)
             source, blocker = source[legal], blocker[legal]
             if not len(source):
                 continue
-            covered, hit = self._clip(points[row], normal[facet_of[row]], vertices, source, blocker)
+            covered, hit = self._clip(points[row], facing, vertices, source, blocker)
             np.add.at(fraction[row], source, covered)
             np.add.at(blockers[row], source, hit.astype(np.int32))
 
-        del index
         return OcclusionField(
             fraction=jnp.clip(jnp.asarray(fraction), 0.0, 1.0),
             # More than one blocker contributed, so the two areas were ADDED. They may or may
@@ -391,7 +377,11 @@ class SilhouetteOcclusion(SelfOcclusion):
     @staticmethod
     @jax.jit
     def _survivors(receiver, receiver_normal, vertices, centroid, normal, near, either_side):
-        """Which (source, blocker) pairs could possibly matter, as a dense mask."""
+        """Which (source, blocker) pairs could possibly matter, as a dense mask.
+
+        ``receiver_normal`` is ``None`` for a receiver in the volume, which sees every way and so
+        has no tangent plane to cull behind.
+        """
         relative = vertices - receiver
         cone = angular_cone(relative)
         source_cone = tuple(x[:, None] if x.ndim == 1 else x[:, None, :] for x in cone)
@@ -403,7 +393,8 @@ class SilhouetteOcclusion(SelfOcclusion):
             relative[None, :, :, :], view.support[:, None, :], view.through[:, None, :]
         )
         # A blocker entirely behind the receiver's own tangent plane blocks nothing in front.
-        keep &= ~jnp.all(jnp.sum(relative * receiver_normal, axis=-1) < 0.0, axis=-1)[None, :]
+        if receiver_normal is not None:
+            keep &= ~jnp.all(jnp.sum(relative * receiver_normal, axis=-1) < 0.0, axis=-1)[None, :]
         # Front-facing only: a sight line leaving a wetted surface and re-entering crosses
         # front-facing geometry exactly once, so the back faces would double the count. A
         # declared sheet is crossed once from either side, so it counts from both.

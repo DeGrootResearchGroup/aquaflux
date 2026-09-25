@@ -15,6 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.radiation import projected_solid_angle, signed_solid_angle, solid_angle
+from aquaflux.radiation.solid_angle import _signed_loop_area
 
 from tests.unit.radiation_references import (
     PYVIEWFACTOR_PARALLEL_SQUARES,
@@ -314,3 +315,57 @@ def test_both_kernels_survive_jit_and_reverse_mode_differentiation():
     gradient = jax.grad(brightness)(point)
     assert jnp.all(jnp.isfinite(gradient))
     assert float(jnp.linalg.norm(gradient)) > 0.0
+
+
+def _padded(loop, width=7):
+    """A loop in ``width`` slots, the extra ones repeating its last vertex as a clip leaves them."""
+    loop = np.asarray(loop, dtype=float)
+    return np.concatenate([loop, np.repeat(loop[..., -1:, :], width - loop.shape[-2], axis=-2)], -2)
+
+
+def test_the_loop_area_of_a_triangle_is_its_solid_angle_from_whichever_vertex_it_starts():
+    """Three corners in seven slots, started at each corner in turn, give the triangle's own value.
+
+    A different starting vertex is a different fan, so agreement is between three different
+    decompositions of the region and the closed form itself, not one decomposition twice.
+    """
+    rng = np.random.default_rng(3)
+    triangles = rng.normal(size=(200, 3, 3)) + np.array([0.0, 0.0, 2.0])
+    expected = np.asarray(signed_solid_angle(np.zeros(3), triangles))
+    for start in range(3):
+        loop = _padded(np.roll(triangles, -start, axis=-2))
+        assert np.allclose(np.asarray(_signed_loop_area(jnp.asarray(loop))), expected, atol=1e-14)
+
+
+def test_the_loop_area_is_additive_and_negates_with_the_winding():
+    """What lets a covered region be subtracted: a partition sums to the whole, signs and all."""
+    a, b, c = np.array([[-0.9, -1.2, 2.0], [0.9, -1.2, 2.0], [0.0, 1.4, 2.0]])
+    ab, bc, ca = (a + b) / 2, (b + c) / 2, (c + a) / 2
+    pieces = np.array([[a, ab, ca], [ab, b, bc], [ca, bc, c], [ab, bc, ca]])
+    whole = float(_signed_loop_area(jnp.asarray(_padded([a, b, c]))))
+    parts = np.asarray(_signed_loop_area(jnp.asarray(_padded(pieces))))
+    assert parts.sum() == pytest.approx(whole, rel=1e-13)
+    assert float(_signed_loop_area(jnp.asarray(_padded([a, c, b])))) == pytest.approx(-whole)
+    # A quadrilateral -- two of the pieces joined -- is one loop, not two triangles.
+    quad = np.array([a, b, bc, ca])
+    assert float(_signed_loop_area(jnp.asarray(_padded(quad)))) == pytest.approx(
+        parts[0] + parts[1] + parts[3], rel=1e-13
+    )
+
+
+@pytest.mark.parametrize("width", [1e-3, 1e-6, 1e-9])
+def test_a_thin_loop_keeps_its_digits(width):
+    """A sliver from a clip is exactly where an angle-excess formula loses everything.
+
+    The spherical triangle on the pole and two equator points ``phi`` apart has area exactly
+    ``phi``, and with extra vertices along the equator -- a great circle, so they change nothing
+    -- it is a many-sided loop as a clip leaves it. Held to a relative 1e-12 at every width.
+    """
+    equator = [[np.cos(t), np.sin(t), 0.0] for t in np.linspace(0.0, width, 5)]
+    loop = np.array([[0.0, 0.0, 1.0], *equator])
+    assert float(_signed_loop_area(jnp.asarray(loop))) == pytest.approx(width, rel=1e-12)
+
+
+def test_an_emptied_loop_has_no_area():
+    """A clip that keeps nothing hands back zeros, and they must contribute nothing."""
+    assert float(_signed_loop_area(jnp.zeros((7, 3)))) == 0.0

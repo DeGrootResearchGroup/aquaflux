@@ -579,7 +579,7 @@ def profile_cumulant_bias(source, receiver_point, exponent: float, subdivisions=
 
 
 def sampled_fraction(receiver, receiver_normal, source, blockers, samples=200_000, seed=0):
-    """Brute force: area-sample the source, weight by the projected solid angle, ray-test.
+    """Brute force: area-sample the source, weight by its solid-angle measure, ray-test.
 
     The independent reference for the analytic silhouette clip -- a different algorithm
     entirely, so agreement between them is evidence rather than a tautology. It converges like
@@ -590,12 +590,13 @@ def sampled_fraction(receiver, receiver_normal, source, blockers, samples=200_00
     weighted by the receiver cosine alone answer a different question, and the gap does not
     vanish with more samples -- it plateaus, which reads exactly like a real discrepancy in
     whatever is being judged. Both source and receiver cosines and the inverse square are
-    needed.
+    needed. For a receiver in the volume -- ``receiver_normal`` of ``None`` -- the measure is the
+    plain solid angle, and only the source cosine and the inverse square remain.
 
     Parameters
     ----------
     receiver : array_like, shape ``(3,)``
-    receiver_normal : array_like, shape ``(3,)``
+    receiver_normal : array_like, shape ``(3,)``, or None
     source : array_like, shape ``(3, 3)``
     blockers : array_like, shape ``(3, 3)`` or ``(n, 3, 3)``
     samples : int, optional
@@ -604,7 +605,8 @@ def sampled_fraction(receiver, receiver_normal, source, blockers, samples=200_00
     Returns
     -------
     float
-        The blocked share of the source's projected solid angle, in ``[0, 1]``.
+        The blocked share of the source's projected solid angle -- or of its plain solid angle,
+        for a receiver in the volume -- in ``[0, 1]``.
     """
     rng = np.random.default_rng(seed)
     a, b, c = np.asarray(source, dtype=float)
@@ -619,7 +621,9 @@ def sampled_fraction(receiver, receiver_normal, source, blockers, samples=200_00
     unit = offset / np.sqrt(squared)[:, None]
     source_normal = np.cross(b - a, c - a)
     source_normal /= np.linalg.norm(source_normal)
-    weight = np.abs(unit @ np.asarray(receiver_normal)) * np.abs(unit @ source_normal) / squared
+    weight = np.abs(unit @ source_normal) / squared
+    if receiver_normal is not None:
+        weight = weight * np.abs(unit @ np.asarray(receiver_normal))
 
     blocked = np.zeros(samples, dtype=bool)
     for p0, p1, p2 in np.atleast_3d(np.asarray(blockers, dtype=float)).reshape(-1, 3, 3):

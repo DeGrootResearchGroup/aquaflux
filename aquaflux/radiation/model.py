@@ -137,7 +137,8 @@ class RadiationSettings(eqx.Module):
         :class:`~aquaflux.radiation.self_occlusion.SilhouetteOcclusion` to clip exact fractions
         instead, which resolves a partly shadowed pair rather than rounding it to the nearer
         answer, at a cost that rises steeply with facet count. It also governs the volume
-        receivers unless ``receiver_occlusion`` says otherwise -- see there.
+        receivers unless ``receiver_occlusion`` says otherwise, where the clip's fraction is of
+        each source's plain solid angle rather than its projected one.
     stream_receiver_mask : bool or None
         Whether the receivers' shadow mask is built chunk by chunk at every call rather than
         held whole. Unset, it is held: built once, and read by every call. The whole mask is one
@@ -149,11 +150,10 @@ class RadiationSettings(eqx.Module):
         :mod:`~aquaflux.radiation.receiver_shadows`.
     receiver_occlusion : SelfOcclusion or None
         How the facets are tested for shadowing the volume receivers. Unset, the receivers
-        follow ``self_occlusion`` wherever that strategy can serve a point in the fluid, so
-        switching self-occlusion off, or choosing the ray test, applies to both masks alike.
-        Where it cannot -- the silhouette clip takes a share of a *projected* solid angle and
-        needs a receiver normal that a point in the fluid does not have -- the receivers fall
-        to the volume mask's own default, one ray per pair. Set this to choose differently.
+        follow ``self_occlusion``, so switching self-occlusion off, or choosing the ray test or
+        the silhouette clip, applies to both masks alike. Set this to choose differently -- the
+        ray test for the volume beside the clip between facets, say, where a mesh's cells are
+        too many to clip one by one.
     """
 
     receiver_quadrature: int | TriangleQuadrature | None = eqx.field(static=True, default=None)
@@ -176,15 +176,11 @@ class RadiationSettings(eqx.Module):
 
         Derived from ``self_occlusion`` unless ``receiver_occlusion`` is set, because building
         the two masks from separate choices is how they come to disagree about whether the
-        surface shadows itself -- which is not visible in either mask on its own. A strategy
-        that cannot serve a point in the fluid is not passed on at all, so the volume mask
-        reaches its own default rather than a second copy of it written here.
+        surface shadows itself -- which is not visible in either mask on its own.
         """
         if self.receiver_occlusion is not None:
             return {"self_occlusion": self.receiver_occlusion}
-        if self.self_occlusion is None or not self.self_occlusion.serves_volume_receivers:
-            return {}
-        return {"self_occlusion": self.self_occlusion}
+        return self.visibility_options()
 
     def transfer_options(self) -> dict:
         """The subset :func:`~aquaflux.radiation.transfer.build_transfer` reads."""
