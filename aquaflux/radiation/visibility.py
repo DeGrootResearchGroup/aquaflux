@@ -44,7 +44,7 @@ from aquaflux.radiation.self_occlusion import (
 )
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, receivers_per_pass
 
-__all__ = ["Visibility", "build_visibility"]
+__all__ = ["Visibility", "build_visibility", "refuse_points_inside"]
 
 
 @eqx.filter_jit
@@ -164,6 +164,38 @@ class Visibility(eqx.Module):
         return self.blocked
 
 
+def refuse_points_inside(occluders, surfaces, points) -> None:
+    """Raise if a facet centroid or a receiver lies inside any of the bodies.
+
+    Such a point is embedded in the solid, not shadowed by it, and every answer computed there
+    would be meaningless rather than merely small. Shared by the mask build and by a model that
+    streams its masks, which builds none at build time and must still refuse the scene then
+    rather than on its first call.
+
+    Parameters
+    ----------
+    occluders : sequence of aquaflux.solids.Body
+    surfaces : Surfaces
+    points : array_like, shape ``(n_receivers, 3)``
+
+    Raises
+    ------
+    ValueError
+        Naming the body and the first few offending points.
+    """
+    for index, body in enumerate(occluders):
+        for name, position in (("facet", surfaces.centroid), ("receiver", points)):
+            inside = np.flatnonzero(np.asarray(body.contains(position)))
+            if len(inside):
+                msg = (
+                    f"{len(inside)} {name}(s) lie inside occluder {index} "
+                    f"({type(body).__name__}; first few: {inside[:8].tolist()}). A point inside "
+                    "a solid body is embedded in it, not shadowed by it, and nothing computed "
+                    "there means anything. Move the body, or remove the points."
+                )
+                raise ValueError(msg)
+
+
 def build_visibility(
     occluders,
     surfaces,
@@ -238,17 +270,7 @@ def build_visibility(
     strategy = RayCastOcclusion() if self_occlusion is None else self_occlusion
     n_receivers, n_facets = points.shape[0], surfaces.n_facets
 
-    for index, body in enumerate(occluders):
-        for name, position in (("facet", surfaces.centroid), ("receiver", points)):
-            inside = np.flatnonzero(np.asarray(body.contains(position)))
-            if len(inside):
-                msg = (
-                    f"{len(inside)} {name}(s) lie inside occluder {index} "
-                    f"({type(body).__name__}; first few: {inside[:8].tolist()}). A point inside "
-                    "a solid body is embedded in it, not shadowed by it, and nothing computed "
-                    "there means anything. Move the body, or remove the points."
-                )
-                raise ValueError(msg)
+    refuse_points_inside(occluders, surfaces, points)
 
     # Relative to the facet's own size, per the `offset_scale` note above. A point source has no
     # area and no surface to shadow itself with, so it needs no exclusion.

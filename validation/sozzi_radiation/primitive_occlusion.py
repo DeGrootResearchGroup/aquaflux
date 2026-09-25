@@ -85,8 +85,12 @@ CHUNK = 2_000
 #: curved junction leaves slivers of neither region unless one region is carried through it. The
 #: overlap is inside the chamber, so it adds nothing to the fluid and costs nothing to describe.
 REACH_BACK = 0.02
-#: Where the pipes end. Beyond the meshed case's own extent, so the regions cannot cut a cell off.
-INLET_END, RISER_TOP = 1.10, 0.40
+#: Where the pipes end: past the meshed case's own extent (it reaches x = 1.739 and z = 0.894, the
+#: drawing's full 850 mm pipes), so the regions cannot cut a cell off. ⚠️ These were once 1.10 and
+#: 0.40 under the same claim, which was false: 206,713 of the mesh's 1,635,909 cells lay beyond them,
+#: and the receiver sampler below -- which keeps only cells inside the regions -- silently dropped
+#: every one, all of them pipe cells.
+INLET_END, RISER_TOP = 1.75, 0.90
 
 
 def _say(message: str) -> None:

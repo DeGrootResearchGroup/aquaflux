@@ -647,7 +647,7 @@ def test_a_model_can_be_built_with_the_silhouette_strategy():
     )
     facets = np.asarray(model.transfer.visibility.hidden_by_geometry)
     assert np.any((facets > 1e-6) & (facets < 1.0 - 1e-6)), "the facet mask is not the clip's"
-    volume = np.asarray(model.receiver_visibility.hidden_by_geometry)
+    volume = np.asarray(model.receiver_shadows.visibility.hidden_by_geometry)
     assert np.all((volume == 0.0) | (volume == 1.0)), "the receiver mask is not the ray test's"
     assert volume.any(), "the receiver mask shadows nothing, so self-occlusion was switched off"
 
@@ -694,7 +694,9 @@ def test_the_two_masks_are_built_against_the_same_bodies():
     behind = np.array([[0.9, 0.5, 0.5]])
     model = _volume_model(surfaces, behind, occluders=[sleeve])
     assert int(jnp.sum(model.transfer.visibility.blocked)) > 0, "the body shadows no facet"
-    assert int(jnp.sum(model.receiver_visibility.blocked)) > 0, "the body shadows no receiver"
+    assert int(jnp.sum(model.receiver_shadows.visibility.blocked)) > 0, (
+        "the body shadows no receiver"
+    )
 
 
 # ---------------------------------------------------------------------------------------
@@ -737,7 +739,7 @@ def test_the_field_inside_a_uniform_closed_box_is_four_times_its_radiosity(refle
     np.testing.assert_allclose(np.asarray(field), 4.0 * exitance / (1.0 - reflectance), rtol=1e-12)
 
     emitted_only = direct_fluence_rate(
-        surfaces, INSIDE_THE_BOX, visibility=model.receiver_visibility
+        surfaces, INSIDE_THE_BOX, visibility=model.receiver_shadows.visibility
     )
     np.testing.assert_allclose(np.asarray(emitted_only), 4.0 * exitance, rtol=1e-12)
 

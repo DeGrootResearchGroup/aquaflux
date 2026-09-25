@@ -410,9 +410,65 @@ builds each chunk's mask, gathers, and drops it, so peak memory is the chunk's (
 section below) rather than the problem's. The two
 are mutually exclusive and giving both raises — with both, the mask doing the work would silently
 be the streamed one. **Streaming rebuilds the mask every call**, so a sweep over one frozen scene
-still wants the model's frozen mask, which is also what carries `dG/dt` for a body's
-transmittance. ⚠️ `build_radiation_model` does **not** stream yet (#489): a mesh-scale field goes
-through the gather directly, as `validation/sozzi_radiation/compare_fluence.py` does.
+still wants the model's frozen mask when it fits. The model streams too since #489 — see the
+next section.
+
+## A MODEL CAN STREAM ITS RECEIVER MASK — explicit, frozen by default (#489, 2026-09-24)
+
+`RadiationSettings(stream_receiver_mask=True)` makes `build_radiation_model` keep the *recipe* for
+the receiver mask instead of the mask: `RadiationModel.receiver_shadows` is a `ReceiverShadows`
+strategy (`receiver_shadows.py`) — `FrozenShadows(visibility)` (the default; `.visibility` is the
+mask, and there is **no `RadiationModel.receiver_visibility` any more**) or `StreamedShadows(geometry,
+occluders, visibility_options)`. `fluence_rate` asks the strategy for the emitted and reflected fields
+together, so **one mask per chunk serves both gathers** (building one per set doubled the dominant
+cost). **Explicit, not automatic, by the user's decision (2026-09-24)**: which one to use trades
+memory against repeated work, and only the caller knows which they can afford. ⚠️ **It is a memory
+choice, not a differentiability one** — both paths give the same field and the same gradients.
+
+**The gradient is bounded by the chunk too, and that is the non-obvious half.** Reverse mode holds
+every chunk's receiver-by-facet intermediates until the backward pass — the whole problem's worth,
+however small the chunks. `gather.streamed_fluence_rate` makes each chunk an `eqx.filter_custom_vjp`
+that saves only its inputs and, in the backward pass, rebuilds its mask and recomputes its gather by
+`eqx.filter_vjp`: a second mask build and a second gather per chunk, memory for one. It works
+because the mask builds run **eagerly under `jax.grad`** — the geometry is concrete, so the host code
+inside the rules is never traced (verified before building: host code in a custom VJP's forward and
+backward rules gives the right gradient). ⚠️ **Not compilable with `jit`**, for the same reason; the
+model's call path never was. `direct_fluence_rate(occluders=...)` now goes through the same function
+with one set, so its gradients are bounded as well.
+
+**Masks come from the BUILD-TIME geometry** (`StreamedShadows.geometry`), not the call's surface set:
+under a gradient with respect to a vertex the call's vertices are traced and a mask cannot be built
+from them, so building from the call's set would make the streamed model undifferentiable in
+geometry where the frozen one is not — the shadows-frozen rule, kept. A receiver inside a body is
+refused **at build** (`visibility.refuse_points_inside`, shared with `build_visibility`), not on the
+first call, though no mask is built then.
+
+Pinned in `tests/unit/test_radiation_streamed_model.py`: field and every gradient (emission,
+reflectance, absorption coefficient, transmittance; one also against a finite difference) equal the
+frozen model's; one mask build per chunk forward (`[4, 4, 3]`); forward then reverse-order rebuilds
+under a gradient (`[4, 4, 3, 3, 4, 4]`); a vertex gradient equal to the frozen one; refusal at build.
+Seven mutations, all red: no custom VJP, a mask per set, masks from the call's geometry, no refusal,
+the setting ignored, a backward pass dropping the medium, the reflected set not gathered.
+
+**MEASURED (2026-09-24): the whole Sozzi field through the public model, streamed**
+(`validation/sozzi_radiation/model_at_mesh_scale.py`): all 1,635,909 cells, the case's
+`lampWall.stl` (7,516 facets), the water as `cad.fluid(...)` read from the drawing,
+`RadiationSettings(self_occlusion=NoOcclusion(), stream_receiver_mask=True)`, `UniformAbsorption(35.67)`,
+black walls; jax 0.10.2, CPU, x64, macOS arm64, 11 cores, OCP 8.0.1 on CPython 3.13, default
+`pair_limit` (4M). Against `compare_fluence.py`'s hand-chunked field (`G_aquaflux.npy`): relative
+difference over the 1,285,221 lit cells **median 0, p99 1.8e-16, max 4.4e-16**; the 206,713 far pipe
+cells (never compared before) agree to 6.8e-21 W/m² absolute. Build 65 s, field **1,170 s** — about
+twice the hand-chunked 557 s, because `fluence_rate` also gathers the reflected set, which with black
+walls carries nothing (its own docstring already says so: reflectance is traced, so there is nothing
+to branch on). Solve: 3 restart cycles.
+
+⚠️ **Peak memory footprint 11.15 GB — and 8.5 GB of it is the TRANSFER BUILD, not the stream.**
+Measured separately in its own process: `build_transfer` alone on these 7,516 facets peaks at
+**8.33 GB**, the whole model build at 8.54 GB, against 0.45 GB for one of the transfer's `n^2`
+arrays. So the receiver mask is gone (it would have been 12 GB per body on top) and the stream adds
+~2.6 GB, consistent with #518's 1.5-1.9 GB at 4M pairs; what remains is the facet-to-facet build
+holding ~18 of its own arrays at its peak — for a scene whose black walls exchange nothing. That is
+its own issue, not #489's.
 
 ## The solid bodies moved to `aquaflux/solids/` (their record is `.claude/rules/solids.md`)
 
@@ -456,9 +512,24 @@ assumed. The seam is the occluder list alone.
 Configuration: `Outside(chamber, inlet, riser)` at the tutorial's dimensions (`R_BODY` 0.0445,
 `X_BODY_END` 0.889, `R_PIPE` 0.00955, `X_RISER` 0.04765), against `BranchOpenings` from
 `compare_fluence.py`; the case's own `lampWall.stl` (7,516 facets); **24,000 receivers drawn
-uniformly from the meshed case's 1,635,909 cell centres** (22,250 chamber, 1,200 riser, 640
-inlet); exitance 696.42 W/m², `UniformAbsorption(35.67)`, `NoOcclusion()` for the surface's own
-triangles; jax/jaxlib 0.10.2, CPU, x64, macOS arm64, 11 cores.
+uniformly from the meshed case's 1,635,909 cell centres** (19,437 chamber, 2,214 inlet, 2,433 riser);
+exitance 696.42 W/m², `UniformAbsorption(35.67)`, `NoOcclusion()` for the surface's own triangles;
+jax/jaxlib 0.10.2, CPU, x64, macOS arm64, 11 cores.
+
+⚠️ **THE HAND-TYPED PIPES STOPPED 640 mm SHORT, AND THE SAMPLER THAT SHOULD HAVE NOTICED DROPPED
+THE CELLS INSTEAD (found 2026-09-24, #489).** `primitive_occlusion.py` ended the inlet and riser at
+x = 1.10 and z = 0.40 under a comment calling that "beyond the meshed case's own extent"; the mesh
+runs to 1.739 and 0.894, the drawing's full 850 mm pipes. Its receiver sampler keeps only cells
+*inside* the regions under test, so the 206,713 cells beyond them (13% of the mesh, every one a pipe
+cell) were silently never sampled — a check filtering its population by the very thing it is
+checking hides its own coverage gaps. Found when the whole mesh went through a model whose build
+refuses any receiver outside the water. Both ends are now 1.75 / 0.90; every figure below is from the
+corrected run unless it says otherwise. **Check a region's extent against the mesh's, not against a
+comment.**
+
+The timing table was measured on the earlier, truncated population (22,250 / 640 / 1,200); the
+primitive arm is one branch-free expression whose per-ray cost does not depend on where the
+receivers are, and it is kept as measured rather than re-quoted from a single corrected pass.
 
 | | rays/s | 180M rays | repeat spread over 3 passes |
 |---|---|---|---|
@@ -469,8 +540,9 @@ triangles; jax/jaxlib 0.10.2, CPU, x64, macOS arm64, 11 cores.
   the median, the 99th percentile *and* the maximum — not "to rounding", bit for bit. The two
   describe the same ideal cylinders, so unlike the triangle comparison there is no faceting to
   explain a difference away, and a disagreement would have been a defect in one of them. The
-  1,840 pipe receivers are where the mask does anything at all, and they carry 13.8M of those
-  pairs, so the agreement is not an artifact of testing mostly-clear geometry.
+  4,647 pipe receivers are where the mask does anything at all, and they carry 34.9M of those
+  pairs, so the agreement is not an artifact of testing mostly-clear geometry. (It held on the
+  truncated population too; it now also covers the far pipe cells that one never sampled.)
 - **The general construction costs 1.39x the bespoke one**, which is the honest price of not being
   told where the openings are: three regions of three inequalities each plus the covering test,
   against two hand-written quadratics. ⚠️ **That figure needs the three passes to be worth
@@ -484,16 +556,17 @@ triangles; jax/jaxlib 0.10.2, CPU, x64, macOS arm64, 11 cores.
   numerically a different one at the rim, exactly where a disagreement would live. Re-run against
   it: still 0 pairs. So `Outside` matches two independent spellings of the bespoke occluder, not
   one.
-- **92.8% of pairs lie in one convex region** (92.7% chamber, 0.07% riser, 0% inlet — the lamp is
-  in the chamber, so no facet is in the inlet). ⚠️ **The test does not skip those pairs**: it is
+- **81.1% of pairs lie in one convex region** (81.0% chamber, 0.13% riser, 0% inlet — the lamp is
+  in the chamber, so no facet is in the inlet). The 92.8% once recorded here was the truncated
+  population's. ⚠️ **The test does not skip those pairs**: it is
   one branch-free expression, so every pair pays the same handful of comparisons. What convexity
   buys is that the handful is all there is.
 
-⚠️ **THAT SHARE IS A PROPERTY OF WHERE THE RECEIVERS ARE, AND SAMPLING THE FLUID BY VOLUME GETS
-IT WRONG.** Drawn uniformly from the *geometry* rather than from the mesh it is **97.1%** — 4.3
-points high, because the snapped mesh refines near the walls and near the lamp, which is exactly
-where the pairs that are *not* in one region live. Quote the cell-centre figure; a volume-uniform
-sample is not the population the field is computed on.
+⚠️ **THAT SHARE IS A PROPERTY OF WHERE THE RECEIVERS ARE** — the cell-centre population the field
+is computed on, not a volume-uniform sample of the geometry, because the snapped mesh refines near
+the walls and the lamp, which is where the pairs that are *not* in one region live. A volume-uniform
+figure recorded here (97.1%) was taken on the same truncated pipes and is deleted, not corrected;
+quote the cell-centre figure.
 
 **Against the triangle grid**, which is the comparison the primitive path exists for. ⚠️ **A
 ratio here needs THREE axes named before it means anything**: which analytic arm is the numerator
@@ -571,7 +644,7 @@ prediction, and do **not** subtract the two to infer what the gather alone costs
 
 ⚠️ **The harness falls back to sampling the three cylinders when `work/case` is absent**, and
 says which it used in its summary. Those runs are reproducible anywhere but are a different
-receiver population, and the 97.1% above is what that fallback reports — do not mix the two.
+receiver population, and its convex share is not the cell-centre one — do not mix the two.
 
 ## The emitting surface occludes too, and that half is opaque
 

@@ -44,14 +44,12 @@ import equinox as eqx
 import jax.numpy as jnp
 from aquaflux.radiation import (
     OcclusionField,
-    RadiationModel,
     RadiationSettings,
     RayCastOcclusion,
     SelfOcclusion,
     SilhouetteOcclusion,
     Surfaces,
-    build_transfer,
-    build_visibility,
+    build_radiation_model,
     projected_solid_angle,
     segment_is_cut,
     surface_irradiance,
@@ -305,13 +303,16 @@ def irradiance_effect(surfaces: Surfaces, fraction, flagged_group) -> None:
         ("corrected", PrecomputedOcclusion(jnp.asarray(corrected))),
         ("ray mask", RayCastOcclusion()),
     ):
-        # Assembled directly: the volume-receiver mask is irrelevant to a surface quantity, and
-        # the ray mask serves it whatever the facet strategy is.
-        model = RadiationModel(
-            receivers=jnp.asarray(probe),
-            transfer=build_transfer(surfaces, self_occlusion=strategy),
-            receiver_visibility=build_visibility((), surfaces, probe),
-            settings=RadiationSettings(),
+        # The volume-receiver mask is irrelevant to a surface quantity, so the one probe point is
+        # shadowed by the ray mask whatever the facet strategy is. (This was once assembled by
+        # hand from `RadiationModel(...)`, which stopped working when the model gained its
+        # geometry fingerprint; the builder computes that itself.)
+        model = build_radiation_model(
+            probe,
+            surfaces,
+            settings=RadiationSettings(
+                self_occlusion=strategy, receiver_occlusion=RayCastOcclusion()
+            ),
         )
         fields[name] = np.asarray(surface_irradiance(model, surfaces)[0])
 

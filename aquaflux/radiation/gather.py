@@ -25,6 +25,7 @@ being built and the compiled code contains no test of which kind a facet is.
 
 from __future__ import annotations
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -37,7 +38,7 @@ from aquaflux.radiation.visibility import Visibility, build_visibility
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, receivers_per_pass
 from aquaflux.vectors import dot
 
-__all__ = ["direct_fluence_rate", "direct_irradiance"]
+__all__ = ["direct_fluence_rate", "direct_irradiance", "streamed_fluence_rate"]
 
 
 def _groups(surfaces: Surfaces) -> list[tuple[object, np.ndarray, np.ndarray]]:
@@ -165,35 +166,134 @@ def _emitter_cosine(surfaces: Surfaces, facets: np.ndarray, receivers: jnp.ndarr
     return dot(offset, normal[None, :, :]) / distance, distance_squared
 
 
-def _streamed(
-    surfaces, points, *, occluders, self_occlusion, absorption, transmittance, pair_limit
+def streamed_fluence_rate(
+    sets,
+    points,
+    *,
+    shadow_geometry: Surfaces,
+    occluders,
+    self_occlusion=None,
+    visibility_options=None,
+    absorption: Absorption | None = None,
+    transmittance=None,
+    pair_limit: int = DEFAULT_PAIR_LIMIT,
 ):
-    """Gather chunk by chunk, building each chunk's visibility and letting it go.
+    """The summed fluence rate of several surface sets, each chunk's shadow mask built and dropped.
 
-    The chunk loop is on the host rather than traced, because building a mask is host work --
-    it compacts candidate pairs and refuses receivers inside a body -- and a traced loop could
-    not call it. Each chunk's gather is the ordinary traced one.
+    The streamed counterpart of passing a built mask to :func:`direct_fluence_rate`: memory is set
+    by the chunk rather than by the receiver count, in the forward pass **and** in a gradient.
+
+    **One mask per chunk serves every set.** The sets share their geometry — an emitted field and
+    the reflected one it bounces into, say — so they cast the same shadows, and building the mask
+    once per set would double the dominant cost for nothing.
+
+    **A gradient keeps nothing per pair.** Reverse mode would ordinarily hold every chunk's
+    receiver-by-facet intermediates until the backward pass, which at a mesh's cells is the size
+    of the whole problem however small the chunks are. Each chunk is instead a custom
+    vector-Jacobian product that saves only its inputs and, on the way back, rebuilds its mask and
+    recomputes its gather. So a gradient costs a second mask build and a second gather per chunk,
+    and memory for one chunk. Emission, power, reflectance, the absorbing medium and each body's
+    transmittance are all reached; the bodies' geometry is not, as everywhere shadows are frozen.
+
+    Parameters
+    ----------
+    sets : sequence of Surfaces
+        The sets whose fields are summed. Their optics and their vertices are read live; their
+        geometry must be ``shadow_geometry``'s, or the shadows are cast from somewhere else.
+    points : array_like, shape ``(n_points, 3)``
+        Receiver positions.
+    shadow_geometry : Surfaces
+        The geometry the masks are built from, **concrete**: building a mask is host work and
+        cannot see a traced vertex. A model passes the geometry it was built for, which is what
+        lets a gradient with respect to a lamp's position be taken with the shadows frozen.
+    occluders : sequence of aquaflux.solids.Body
+        The bodies in the way. May be empty, which still streams the surface's own shadowing.
+    self_occlusion : SelfOcclusion, optional
+        How the surface shadows itself, as in
+        :func:`~aquaflux.radiation.visibility.build_visibility`.
+    visibility_options : mapping, optional
+        Further keywords for :func:`~aquaflux.radiation.visibility.build_visibility`.
+    absorption, transmittance, pair_limit
+        As for :func:`direct_fluence_rate`. ``pair_limit`` bounds each streamed chunk and each
+        traced chunk inside it.
+
+    Returns
+    -------
+    jnp.ndarray, shape ``(n_points,)``
+        Fluence rate in W/m².
+
+    Notes
+    -----
+    Not compilable with ``jit``: the chunk loop and the mask builds are host work, which a traced
+    loop could not call.
     """
     points = jnp.asarray(points, dtype=float)
-    per_chunk = receivers_per_pass(pair_limit, surfaces.n_facets)
+    per_chunk = receivers_per_pass(pair_limit, shadow_geometry.n_facets)
     if points.shape[0] == 0:
         return jnp.zeros(0)
-    pieces = []
-    for start in range(0, points.shape[0], per_chunk):
-        chunk = points[start : start + per_chunk]
-        mask = build_visibility(occluders, surfaces, chunk, self_occlusion=self_occlusion)
-        pieces.append(
-            direct_fluence_rate(
-                surfaces,
-                chunk,
-                absorption=absorption,
-                visibility=mask,
-                transmittance=transmittance,
-                pair_limit=pair_limit,
-            )
+    shadows = _Shadows(
+        geometry=shadow_geometry,
+        occluders=tuple(occluders),
+        options={
+            **({} if visibility_options is None else dict(visibility_options)),
+            **({} if self_occlusion is None else {"self_occlusion": self_occlusion}),
+        },
+    )
+    live = (tuple(sets), absorption, transmittance)
+    return jnp.concatenate(
+        [
+            _shadowed_chunk(live, points[start : start + per_chunk], shadows, pair_limit)
+            for start in range(0, points.shape[0], per_chunk)
+        ]
+    )
+
+
+class _Shadows(eqx.Module):
+    """What a chunk's mask is built from: fixed for a whole stream, and never differentiated."""
+
+    geometry: Surfaces
+    occluders: tuple
+    options: dict
+
+    def mask(self, points) -> Visibility:
+        """The mask for these receivers."""
+        return build_visibility(self.occluders, self.geometry, points, **self.options)
+
+
+def _chunk_total(live, points, shadows: _Shadows, pair_limit: int):
+    """One chunk's summed field, with its own mask."""
+    sets, absorption, transmittance = live
+    mask = shadows.mask(points)
+    return sum(
+        direct_fluence_rate(
+            surfaces,
+            points,
+            absorption=absorption,
+            visibility=mask,
+            transmittance=transmittance,
+            pair_limit=pair_limit,
         )
-        del mask
-    return jnp.concatenate(pieces)
+        for surfaces in sets
+    )
+
+
+@eqx.filter_custom_vjp
+def _shadowed_chunk(live, points, shadows, pair_limit):
+    """One chunk, differentiated by recomputing it rather than by keeping its intermediates."""
+    return _chunk_total(live, points, shadows, pair_limit)
+
+
+@_shadowed_chunk.def_fwd
+def _shadowed_chunk_fwd(perturbed, live, points, shadows, pair_limit):
+    del perturbed
+    return _chunk_total(live, points, shadows, pair_limit), None
+
+
+@_shadowed_chunk.def_bwd
+def _shadowed_chunk_bwd(residuals, cotangent, perturbed, live, points, shadows, pair_limit):
+    del residuals, perturbed
+    _, pull = eqx.filter_vjp(lambda value: _chunk_total(value, points, shadows, pair_limit), live)
+    return pull(cotangent)[0]
 
 
 def direct_fluence_rate(
@@ -278,9 +378,10 @@ def direct_fluence_rate(
                 "here from `occluders`, and the one passed in would do nothing."
             )
             raise ValueError(msg)
-        return _streamed(
-            surfaces,
+        return streamed_fluence_rate(
+            (surfaces,),
             points,
+            shadow_geometry=surfaces,
             occluders=() if occluders is None else occluders,
             self_occlusion=self_occlusion,
             absorption=absorption,

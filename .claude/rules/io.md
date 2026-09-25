@@ -551,12 +551,15 @@ first two ways of doing it were wrong.**
 **MEASURED (2026-09-24): the fluid read from the drawing shadows the Sozzi reactor exactly as the
 hand-derived occluder does** (`validation/sozzi_radiation/primitive_occlusion.py`, third arm): **0 of
 180,384,000 pairs** masked differently and `G` equal to 0.0 relative at median, p99 and max, on
-24,000 cells drawn from the meshed case's 1,635,909 (22,250 chamber / 640 inlet / 1,200 riser), the
+24,000 cells drawn from the meshed case's 1,635,909 (19,437 chamber / 2,214 inlet / 2,433 riser, after
+the hand-typed pipes' truncation was fixed — see `.claude/rules/radiation.md`; the first run's population
+was 22,250 / 640 / 1,200 and also gave 0), the
 case's `lampWall.stl` (7,516 facets), exitance 696.42 W/m², absorption 35.67 /m; jax 0.10.2, CPU, x64,
 macOS arm64, 11 cores, `cadquery-ocp-novtk` 8.0.1.0.0, CPython 3.13. The drawing's cylinders differ
-from the hand-typed ones in *parameters* (850 mm pipes against the meshed domain's cut at x = 1.10 /
-z = 0.40, and the riser carried into the chamber by recognition rather than by `REACH_BACK`), and the
-mask on the mesh's receivers is identical. Read-and-check took 0.8 s. The three arms' single-pass
+from the hand-typed ones in *parameters* (the riser carried into the chamber by recognition rather than
+by `REACH_BACK`), and the mask on the mesh's receivers is identical. ⚠️ An earlier version of this
+entry said the meshed domain cut the pipes at x = 1.10 / z = 0.40; that was the hand-typed pipes' cut,
+not the mesh's, which runs the full 850 mm. Read-and-check took 0.8 s. The three arms' single-pass
 timings (8.7 / 12.8 / 11.0 s) are one pass each and are **not** a ratio to quote (#513).
 
 ## Deferred (additive; no seam changes)

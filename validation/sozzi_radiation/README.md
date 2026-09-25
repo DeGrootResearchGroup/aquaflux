@@ -19,8 +19,15 @@ no shadow edge is derived, so the same three lines describe a chamber–pipe–e
 length.
 
 Configuration: the case's own `lampWall.stl` (7,516 facets), 24,000 receivers drawn uniformly
-from the mesh's 1,635,909 cell centres (22,250 chamber, 1,200 riser, 640 inlet), exitance
+from the mesh's 1,635,909 cell centres (19,437 chamber, 2,214 inlet, 2,433 riser), exitance
 696.42 W/m², absorption 35.67 /m, jax 0.10.2, CPU, x64, macOS arm64, 11 cores.
+
+⚠️ **Corrected 2026-09-24.** The harness's hand-typed pipes used to stop at x = 1.10 / z = 0.40 while
+the mesh's run to 1.739 / 0.894, and its sampler keeps only cells inside the regions, so it silently
+never sampled the 206,713 far pipe cells (13% of the mesh). They now end at 1.75 / 0.90 and the
+figures below are from the corrected run, except the timing table, which was measured on the old
+population (22,250 / 640 / 1,200) — the primitive arm's per-ray cost does not depend on where the
+receivers are.
 
 | | rays/s | 180M rays | repeat spread over 3 passes |
 |---|---|---|---|
@@ -30,7 +37,7 @@ from the mesh's 1,635,909 cell centres (22,250 chamber, 1,200 riser, 640 inlet),
 **0 of 180 million pairs masked differently**, and `G` agrees to `0.0` relative at the median, the
 99th percentile and the maximum. Both describe the same ideal cylinders, so there is no faceting
 to explain a difference away and a disagreement would have meant a defect in one of them. The
-1,840 pipe receivers carry 13.8M of those pairs — the only place the mask does anything — so the
+4,647 pipe receivers carry 34.9M of those pairs — the only place the mask does anything — so the
 agreement is not an artifact of testing mostly-clear geometry, and it survives `BranchOpenings`
 being reformulated — the same comparison against its `crossing_ratio` rewrite is still 0 pairs, so
 `Outside` matches two independent spellings of the bespoke test. The general construction costs
@@ -48,10 +55,11 @@ primitive arm is one branch-free expression, so its own rate does not depend on 
 the grid's internal comparisons (measured in one process, repeating to 1.10×) as sharp. Running
 both arms in one process is what would make the ratios as solid as the square.
 
-92.8% of pairs lie inside one convex region, where a straight segment cannot leave and nothing has
-to be tested at all. ⚠️ That share depends on where the receivers are, and sampling the fluid by
-*volume* gets it wrong — 97.1% — because the snapped mesh refines near the walls and near the
-lamp, which is where the pairs that are not in one region live. Quote the cell-centre figure.
+81.1% of pairs lie inside one convex region, where a straight segment cannot leave and nothing has
+to be tested at all (92.8% was once recorded here, from the truncated population). ⚠️ That share
+depends on where the receivers are — the snapped mesh refines near the walls and near the lamp,
+which is where the pairs that are not in one region live — so quote the cell-centre figure, never a
+volume-uniform sample of the geometry.
 
 `BranchOpenings` stays. It was derived independently, so it is the reference the general
 construction is checked against, and a general construction agreeing with a bespoke one stops
@@ -71,9 +79,9 @@ to the case's frame, and both harnesses take it as a further arm when the CAD ke
 the drawing in 0.8 s — its boundary lies within **0.75 µm** of the drawing's against the declared
 10 µm — and, on the same 24,000 cells, 7,516-facet STL lamp and 180,384,000 rays as the two arms
 above, masks **0 pairs differently** from `BranchOpenings`, with `G` equal to 0.0 relative at the
-median, p99 and max. Its cylinders are the drawing's, not the hand-typed ones — the pipes run 850 mm
-where the hand-written ones stop at the meshed domain, and the riser is carried into the chamber by
-recognition — so the parameters differ by design and the mask on the mesh's cells is identical.
+median, p99 and max — on the corrected population too. Its cylinders are the drawing's, not the
+hand-typed ones — the riser is carried into the chamber by recognition rather than by a chosen
+`REACH_BACK` — so the parameters differ by design and the mask on the mesh's cells is identical.
 Single-pass times: `BranchOpenings` 8.7 s, hand-typed `Outside` 12.8 s, drawing `Outside` 11.0 s —
 one pass each, so not a ratio to quote (#513).
 
@@ -103,6 +111,17 @@ the same 8,000 cells, in the same process as the ladder above:
 
 Configuration: jax 0.10.2, CPU, x64, macOS arm64, 11 cores; `cadquery-ocp-novtk` 8.0.1.0.0 on
 CPython 3.13; `work/case` and `work/cell_centres.npy` from the meshed case of the DOM run below.
+
+## The whole field through the public model, shadows streamed (2026-09-24, `model_at_mesh_scale.py`)
+
+`build_radiation_model(cells, lamp, occluders=[cad.fluid(...)], settings=RadiationSettings(
+stream_receiver_mask=True, self_occlusion=NoOcclusion()))` then `fluence_rate(...)`, on all 1,635,909
+cells with the case's `lampWall.stl`, against `compare_fluence.py`'s hand-chunked field: **max relative
+difference 4.4e-16** over the 1,285,221 lit cells (median 0, p99 1.8e-16), and 6.8e-21 W/m² at the
+206,713 far pipe cells. Build 65 s; field 1,170 s, about twice the hand-chunked run because the model
+also gathers the (here empty) reflected field. Peak footprint 11.15 GB, of which the facet-to-facet
+transfer build alone is 8.33 GB (measured in its own process) — the receiver mask, which held whole
+would add 12 GB, is not held. Configuration as in the table above, plus OCP 8.0.1 on CPython 3.13.
 
 ## Measured (2026-09-22)
 

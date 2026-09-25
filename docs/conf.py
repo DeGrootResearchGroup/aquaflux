@@ -119,7 +119,10 @@ SUBPACKAGE_GROUPS = {
         ("Emitting surfaces", ["surfaces", "profiles", "stl", "subdivide", "checks"]),
         ("Direct gathers and the medium between", ["gather", "absorption"]),
         ("Surface-to-surface transfer", ["transfer", "quadrature"]),
-        ("What stands in the way", ["visibility", "self_occlusion", "triangles"]),
+        (
+            "What stands in the way",
+            ["visibility", "receiver_shadows", "self_occlusion", "triangles", "work"],
+        ),
         ("Solid-angle kernels", ["solid_angle"]),
     ],
     "io.cad": [
