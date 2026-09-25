@@ -16,6 +16,7 @@ from aquaflux.flow import (
     MomentumContinuity,
     MovingWall,
     NoSlipWall,
+    PinnedPoint,
     PressureOutlet,
     UniformBodyForce,
     VelocityInlet,
@@ -35,7 +36,7 @@ from aquaflux.schemes import CompactGreenGauss
 H, LX, RHO = 1.0, 2.0, 1.0
 
 
-def _build(boundary, *, mu=0.1, body_force=None, periodic=False, pin=None):
+def _build(boundary, *, mu=0.1, body_force=None, periodic=False, datum=None):
     kw = {"periodic": ("x",)} if periodic else {}
     mesh = structured_grid_2d(6, 16, lx=LX, ly=H, named_boundaries=True, **kw)
     sources = () if body_force is None else (UniformBodyForce(jnp.asarray(body_force)),)
@@ -46,7 +47,7 @@ def _build(boundary, *, mu=0.1, body_force=None, periodic=False, pin=None):
         BoundaryConditions(boundary),
         gradient_scheme=CompactGreenGauss(),
         sources=sources,
-        pressure_pin=pin,
+        pressure_datum=datum,
     )
 
 
@@ -56,7 +57,7 @@ def _periodic_channel(mu, beta):
         mu=mu,
         body_force=(beta, 0.0),
         periodic=True,
-        pin=0,
+        datum=PinnedPoint((0.0, 0.0)),
     )
 
 
@@ -100,7 +101,9 @@ def test_body_force_speed_caps_at_the_friction_velocity_scaling() -> None:
 
 
 def test_body_force_speed_is_zero_without_a_force() -> None:
-    channel = _build({"bottom": NoSlipWall(), "top": NoSlipWall()}, periodic=True, pin=0)
+    channel = _build(
+        {"bottom": NoSlipWall(), "top": NoSlipWall()}, periodic=True, datum=PinnedPoint((0.0, 0.0))
+    )
     assert float(body_force_speed(channel)) == 0.0
 
 
@@ -141,7 +144,12 @@ def test_characteristic_velocity_prefers_a_prescribed_velocity_over_a_body_force
 def test_characteristic_velocity_is_zero_when_nothing_drives_the_flow() -> None:
     """Every patch a stationary wall and no body force: nothing is making the fluid move."""
     walls = {name: NoSlipWall() for name in ("bottom", "top", "left", "right")}
-    assert float(jnp.linalg.norm(characteristic_velocity(_build(walls, pin=0)))) == 0.0
+    assert (
+        float(
+            jnp.linalg.norm(characteristic_velocity(_build(walls, datum=PinnedPoint((0.0, 0.0)))))
+        )
+        == 0.0
+    )
 
 
 def test_only_solid_patches_shear_the_flow() -> None:
@@ -165,7 +173,7 @@ def test_body_force_velocity_ignores_a_moving_wall() -> None:
             "left": NoSlipWall(),
             "right": NoSlipWall(),
         },
-        pin=0,
+        datum=PinnedPoint((0.0, 0.0)),
     )
     assert float(jnp.linalg.norm(body_force_velocity(cavity))) == 0.0
     # The characteristic velocity still reports the lid speed — the two answer different questions.
@@ -181,5 +189,7 @@ def test_friction_velocity_closes_the_force_balance() -> None:
 
 def test_friction_velocity_is_zero_without_a_body_force() -> None:
     """No force, nothing for the wall drag to balance -- so no scale, and the estimate stays unused."""
-    channel = _build({"bottom": NoSlipWall(), "top": NoSlipWall()}, periodic=True, pin=0)
+    channel = _build(
+        {"bottom": NoSlipWall(), "top": NoSlipWall()}, periodic=True, datum=PinnedPoint((0.0, 0.0))
+    )
     assert float(friction_velocity(channel)) == 0.0

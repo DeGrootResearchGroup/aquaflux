@@ -26,7 +26,7 @@ boundary conditions:
 import aquaflux  # noqa: F401  (enables 64-bit mode)
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import FirstOrderUpwind
-from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall
+from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall, PinnedPoint
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 
@@ -48,7 +48,7 @@ cavity = MomentumContinuity.build(
     PropertyModel({"viscosity": Constant(0.01), "density": Constant(1.0)}),
     boundary,
     advection_scheme=FirstOrderUpwind(),
-    pressure_pin=0,        # a closed domain fixes the pressure datum at one cell
+    pressure_datum=PinnedPoint((0.0, 0.0)),  # a closed domain fixes its pressure level at a point
 )
 
 state = cavity.initial_state()          # the flat [velocity..., pressure] vector
@@ -239,7 +239,7 @@ def cavity_at(viscosity):
         PropertyModel({"viscosity": Constant(viscosity), "density": Constant(1.0)}),
         boundary,                      # the BoundaryConditions built above
         advection_scheme=FirstOrderUpwind(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
     )
 
 precond = BlockPreconditioner.build(cavity_at(0.01)).factory()   # built once, outside grad
@@ -426,14 +426,14 @@ a {class}`~aquaflux.flow.Drive`, and there are two:
   and the residual one row belonging to no cell.
 
 ```python
-from aquaflux.flow import MassFlow, MomentumContinuity, bulk_velocity_flow_solve
+from aquaflux.flow import MassFlow, MomentumContinuity, PinnedPoint, bulk_velocity_flow_solve
 
 momentum = MomentumContinuity.build(
     mesh,
     geometry,
     properties,
     boundary,
-    pressure_pin=0,  # a periodic channel has no outlet to set the pressure level
+    pressure_datum=PinnedPoint((0.0, 0.0)),  # a periodic channel has no outlet to set the level
     drive=MassFlow(target=1.0, force=0.004),  # `force` is only where the multiplier starts
 )
 solve = bulk_velocity_flow_solve(momentum)

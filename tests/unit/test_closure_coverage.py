@@ -35,6 +35,7 @@ from aquaflux.flow import (
     MomentumContinuity,
     MovingWall,
     NoSlipWall,
+    PinnedPoint,
     PressureOutlet,
     VelocityInlet,
 )
@@ -180,7 +181,9 @@ def test_the_flow_build_refuses_a_scalar_closure() -> None:
         {n: (Dirichlet(0.0) if n == "top" else NoSlipWall()) for n in mesh.face_patches.names}
     )
     with pytest.raises(ValueError, match=r"MomentumContinuity.build.*'top'"):
-        MomentumContinuity.build(mesh, mesh.geometry(), properties, boundary, pressure_pin=0)
+        MomentumContinuity.build(
+            mesh, mesh.geometry(), properties, boundary, pressure_datum=PinnedPoint((0.0, 0.0))
+        )
 
 
 # --- the two blocks agree about which patches are walls -------------------------------------------
@@ -194,7 +197,11 @@ def _cavity_blocks(wall_patches, *, lid=True):
     walls = {n: NoSlipWall() for n in ("bottom", "left", "right")}
     walls["top"] = MovingWall(velocity=(1.0, 0.0)) if lid else NoSlipWall()
     momentum = MomentumContinuity.build(
-        mesh, geometry, properties, BoundaryConditions(walls), pressure_pin=0
+        mesh,
+        geometry,
+        properties,
+        BoundaryConditions(walls),
+        pressure_datum=PinnedPoint((0.0, 0.0)),
     )
     every = tuple(mesh.face_patches.names)
     turbulence = SSTTurbulence.build(

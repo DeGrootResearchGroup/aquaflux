@@ -27,6 +27,7 @@ from aquaflux.flow import (
     MassFlow,
     MomentumContinuity,
     NoSlipWall,
+    PinnedPoint,
     bulk_velocity_flow_solve,
 )
 from aquaflux.mesh import graded_nodes, structured_grid_2d
@@ -66,7 +67,7 @@ def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=100):
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
         drive=MassFlow(target=U_B, force=beta0),
     )
     turbulence = SSTTurbulence.build(

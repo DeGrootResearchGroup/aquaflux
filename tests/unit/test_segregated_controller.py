@@ -13,7 +13,7 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.boundary import BoundaryConditions
-from aquaflux.flow import MomentumContinuity, NoSlipWall
+from aquaflux.flow import MomentumContinuity, NoSlipWall, PinnedPoint
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
@@ -37,7 +37,7 @@ def test_bulk_velocity_is_the_volume_weighted_mean() -> None:
         PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         gradient_scheme=CompactGreenGauss(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
     )
     # A non-uniform streamwise field on a graded mesh: the volume weighting matters.
     n = mesh.n_cells

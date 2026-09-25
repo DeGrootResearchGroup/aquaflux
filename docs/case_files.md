@@ -89,10 +89,12 @@ is described once, for every field:
 |---|---|---|---|
 | {class}`~aquaflux.case.Inlet` | `velocity`, prescribed | follows the interior | requires `turbulence`, the inflow `k` and `omega` |
 | {class}`~aquaflux.case.Outlet` | follows the interior | `pressure`, prescribed | `k` and `omega` follow the interior |
-| {class}`~aquaflux.case.Wall` | no slip | follows the interior | a wall for the closure; `k: zero_gradient` (default) or `k: zero` |
+| {class}`~aquaflux.case.Wall` | no slip — at rest, or at `velocity` for a moving wall | follows the interior | a wall for the closure; `k: zero_gradient` (default) or `k: zero` |
 
 The closures each equation needs, and the set of walls the turbulence closure measures its
-wall distance from, all follow from this one statement.
+wall distance from, all follow from this one statement. A moving wall — the driven lid of a
+cavity, `{kind: Wall, velocity: [1.0, 0.0]}` — is a wall in every other respect: it passes no
+fluid, and it is a wall to the turbulence closure.
 
 **`numerics`** — the discretization choices common to every case: `momentum_advection`
 (required, since a flow with no advection is Stokes flow rather than a default) and
@@ -101,6 +103,19 @@ wall distance from, all follow from this one statement.
 
 **`drive`** — what sets the flow in motion. Unset, and the only value a file can name today,
 it is {class}`~aquaflux.flow.BoundaryDriven`: the boundary conditions do.
+
+**`pressure_datum`** — where the pressure level is fixed, in a domain that no patch fixes it
+in. Incompressible flow determines the pressure only up to a constant; an `Outlet` supplies
+the level, and a domain with none — a lid-driven cavity, say — needs it fixed somewhere else:
+
+```yaml
+pressure_datum: {kind: PinnedPoint, point: [0.0, 0.0], value: 0.0}
+```
+
+The cell nearest `point` has its pressure held at `value` (0 unless given). Which cell that
+is changes the pressure only by a constant, and a point names the same place however the mesh
+is numbered. A datum is **required** when no patch is an `Outlet` and **refused** when one is:
+without one the system is singular, and beside an outlet it would fix the level twice.
 
 ## What is checked, and when
 
@@ -111,7 +126,8 @@ When the file is **read**:
 - every required setting is present;
 - the physics accepts the boundaries — no turbulence setting in a laminar case, and inflow
   turbulence at every inlet of a `RANS` one;
-- some patch fixes the pressure level (an `Outlet`).
+- the pressure level is fixed exactly once — by an `Outlet`, or, with none, by a
+  `pressure_datum`.
 
 When the case is **checked** against its mesh ({meth}`~aquaflux.case.CaseFile.check`):
 
@@ -119,7 +135,9 @@ When the case is **checked** against its mesh ({meth}`~aquaflux.case.CaseFile.ch
 - every patch named is a boundary patch of the mesh, and every boundary face lies in a named
   patch — a face given no condition would otherwise keep a zero face value, a boundary
   condition nobody chose;
-- each patch fits the mesh — an inlet velocity has one component per dimension.
+- each patch fits the mesh — an inlet or wall velocity has one component per dimension;
+- a pressure datum's point has one coordinate per dimension and lies within the mesh's
+  bounding box.
 
 Every problem found is reported at once.
 
@@ -171,10 +189,8 @@ the stopping test — is configured against it in code.
 
 ## What a case file cannot describe yet
 
-- **A closed domain.** A domain with no `Outlet` has a free pressure level and needs a datum,
-  which a file cannot state yet; such a case (a lid-driven cavity, a streamwise-periodic
-  channel held at a bulk velocity) is built in code, with
-  `MomentumContinuity.build(pressure_pin=...)`.
+- **A streamwise-periodic channel.** It needs a structured-grid mesh source and a body-force
+  or bulk-velocity drive, which a file cannot name yet; it is built in code.
 - **A boundary profile** — an inlet velocity or value varying across the patch. Those are
   functions of position, built in code.
 - **The solve** — the march, its preconditioner and its convergence test. A case file

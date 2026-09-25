@@ -25,7 +25,7 @@ import math
 from typing import Literal
 
 from aquaflux.boundary import BoundaryCondition, Dirichlet, ZeroGradient
-from aquaflux.flow import FlowBoundary, NoSlipWall, PressureOutlet, VelocityInlet
+from aquaflux.flow import FlowBoundary, MovingWall, NoSlipWall, PressureOutlet, VelocityInlet
 
 __all__ = [
     "FixedTurbulence",
@@ -40,6 +40,29 @@ __all__ = [
 def _refuse_non_finite(owner: str, name: str, values: tuple[float, ...]) -> None:
     if not all(math.isfinite(value) for value in values):
         raise ValueError(f"{owner}.{name} must be finite, got {values!r}.")
+
+
+def _refuse_a_bad_velocity(owner: str, label: str, velocity: tuple[float, ...]) -> None:
+    """Refuse a patch velocity that is not two or three finite components.
+
+    ``owner`` names the class (``Inlet``), ``label`` the same thing in prose (``an inlet``).
+    """
+    if len(velocity) not in (2, 3):
+        raise ValueError(
+            f"{label} velocity has two or three components, got {len(velocity)}: {velocity!r}."
+        )
+    _refuse_non_finite(owner, "velocity", velocity)
+
+
+def _refuse_a_velocity_of_the_wrong_dimension(
+    velocity: tuple[float, ...], dim: int, patch: str, what: str
+) -> None:
+    """Refuse a patch velocity whose component count is not the mesh's dimension."""
+    if len(velocity) != dim:
+        raise ValueError(
+            f"boundaries.{patch}: the {what} velocity {velocity!r} has {len(velocity)} components, "
+            f"but the mesh is {dim}-dimensional."
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -104,17 +127,17 @@ class FixedTurbulence(InletTurbulence):
 class PatchCondition(abc.ABC):
     """What one boundary patch is: an :class:`Inlet`, an :class:`Outlet` or a :class:`Wall`.
 
-    Each answers the questions a case asks of its boundaries before anything is built, so that a
-    case's physics and its mesh can refuse what does not fit them.
+    Each builds the closures it stands for, and answers the questions a case asks of its boundaries
+    before anything is built, so that a case's physics and its mesh can refuse what does not fit them.
     """
 
     @abc.abstractmethod
-    def prescribes_pressure(self) -> bool:
-        """Whether this patch fixes the pressure level -- and so gives the domain its datum."""
-
-    @abc.abstractmethod
     def flow_closure(self) -> FlowBoundary:
-        """The flow's closure on this patch: its velocity, pressure and mass flux."""
+        """The flow's closure on this patch: its velocity, pressure and mass flux.
+
+        Everything the flow knows about the patch is asked of this closure rather than restated here --
+        whether it is a wall, and whether it fixes the pressure level.
+        """
 
     @abc.abstractmethod
     def turbulence_closures(self) -> tuple[BoundaryCondition, BoundaryCondition]:
@@ -173,21 +196,12 @@ class Inlet(PatchCondition):
     turbulence: InletTurbulence | None = None
 
     def __post_init__(self) -> None:
-        if len(self.velocity) not in (2, 3):
-            raise ValueError(
-                f"an inlet velocity has two or three components, got {len(self.velocity)}: "
-                f"{self.velocity!r}."
-            )
-        _refuse_non_finite("Inlet", "velocity", self.velocity)
+        _refuse_a_bad_velocity("Inlet", "an inlet", self.velocity)
         if self.turbulence is not None and not isinstance(self.turbulence, InletTurbulence):
             raise TypeError(
                 "Inlet.turbulence must be an inlet-turbulence value such as FixedTurbulence(k, omega), "
                 f"got {self.turbulence!r}."
             )
-
-    def prescribes_pressure(self) -> bool:
-        """``False`` -- an inlet's pressure follows the interior."""
-        return False
 
     def flow_closure(self) -> VelocityInlet:
         """A :class:`~aquaflux.flow.VelocityInlet` at :attr:`velocity`."""
@@ -219,11 +233,7 @@ class Inlet(PatchCondition):
 
     def refuse_for_dimension(self, dim: int, patch: str) -> None:
         """Refuse a velocity whose component count is not the mesh's dimension."""
-        if len(self.velocity) != dim:
-            raise ValueError(
-                f"boundaries.{patch}: the inlet velocity {self.velocity!r} has {len(self.velocity)} "
-                f"components, but the mesh is {dim}-dimensional."
-            )
+        _refuse_a_velocity_of_the_wrong_dimension(self.velocity, dim, patch, "inlet")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -246,10 +256,6 @@ class Outlet(PatchCondition):
     def __post_init__(self) -> None:
         _refuse_non_finite("Outlet", "pressure", (self.pressure,))
 
-    def prescribes_pressure(self) -> bool:
-        """``True`` -- an outlet fixes the pressure level."""
-        return True
-
     def flow_closure(self) -> PressureOutlet:
         """A :class:`~aquaflux.flow.PressureOutlet` at :attr:`pressure`."""
         return PressureOutlet(pressure=self.pressure)
@@ -261,10 +267,12 @@ class Outlet(PatchCondition):
 
 @dataclasses.dataclass(frozen=True)
 class Wall(PatchCondition):
-    """A stationary solid wall: no slip, no through-flow.
+    """A solid wall: no slip, no through-flow -- stationary, or moving in its own plane.
 
-    In a Reynolds-averaged case a wall is also where the closure measures its wall distance from and
-    fixes ``omega`` near.
+    A moving wall (the driven lid of a cavity) holds the fluid at its own velocity instead of at rest,
+    and is a wall in every other respect: it passes no fluid, and in a Reynolds-averaged case it is
+    where the closure measures its wall distance from and fixes ``omega`` near, exactly as a
+    stationary one is.
 
     Attributes
     ----------
@@ -272,17 +280,26 @@ class Wall(PatchCondition):
         The condition on the turbulent kinetic energy at the wall: a zero normal gradient, or a zero
         value. A turbulence setting, so a laminar case refuses it; unset, a Reynolds-averaged case takes
         the zero gradient.
+    velocity : tuple of float or None
+        The wall's velocity, one component per spatial dimension; unset, the wall is at rest. Any normal
+        component is ignored for continuity -- a wall, however it moves, passes no fluid.
+
+    Raises
+    ------
+    ValueError
+        If a velocity is given and does not have two or three finite components.
     """
 
     k: Literal["zero_gradient", "zero"] | None = None
+    velocity: tuple[float, ...] | None = None
 
-    def prescribes_pressure(self) -> bool:
-        """``False`` -- a wall's pressure follows the interior."""
-        return False
+    def __post_init__(self) -> None:
+        if self.velocity is not None:
+            _refuse_a_bad_velocity("Wall", "a wall", self.velocity)
 
-    def flow_closure(self) -> NoSlipWall:
-        """A :class:`~aquaflux.flow.NoSlipWall`."""
-        return NoSlipWall()
+    def flow_closure(self) -> NoSlipWall | MovingWall:
+        """A :class:`~aquaflux.flow.NoSlipWall`, or a :class:`~aquaflux.flow.MovingWall` at :attr:`velocity`."""
+        return NoSlipWall() if self.velocity is None else MovingWall(velocity=self.velocity)
 
     def turbulence_closures(self) -> tuple[BoundaryCondition, ZeroGradient]:
         """``k`` by :attr:`k` (a zero gradient when unset), and the placeholder ``omega`` closure.
@@ -296,3 +313,8 @@ class Wall(PatchCondition):
     def turbulence_settings(self) -> tuple[str, ...]:
         """``("k",)`` if the wall's ``k`` condition is given."""
         return () if self.k is None else ("k",)
+
+    def refuse_for_dimension(self, dim: int, patch: str) -> None:
+        """Refuse a wall velocity whose component count is not the mesh's dimension."""
+        if self.velocity is not None:
+            _refuse_a_velocity_of_the_wrong_dimension(self.velocity, dim, patch, "wall")

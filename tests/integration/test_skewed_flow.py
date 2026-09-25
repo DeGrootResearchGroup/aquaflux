@@ -29,6 +29,7 @@ from aquaflux.flow import (
     MomentumContinuity,
     MovingWall,
     NoSlipWall,
+    PinnedPoint,
     PressureOutlet,
     VelocityInlet,
 )
@@ -61,7 +62,9 @@ def _solve_couette(n: int = 8, perturb: float = 0.2, seed: int = 2):
             }
         ),
         gradient_scheme=CorrectedGreenGauss(),
-        pressure_pin=0,  # closed domain (all velocity Dirichlet): fix the pressure level
+        pressure_datum=PinnedPoint(
+            (0.0, 0.0)
+        ),  # closed domain (all velocity Dirichlet): fix the pressure level
     )
     # Stokes (no advection) so the residual is affine: one Newton step is exact.
     state = eqx.filter_jit(newton_step)(assembler.residual, assembler.initial_state())

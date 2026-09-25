@@ -15,7 +15,13 @@ import lineax as lx
 import numpy as np
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import FirstOrderUpwind
-from aquaflux.flow import BlockPreconditioner, MomentumContinuity, MovingWall, NoSlipWall
+from aquaflux.flow import (
+    BlockPreconditioner,
+    MomentumContinuity,
+    MovingWall,
+    NoSlipWall,
+    PinnedPoint,
+)
 from aquaflux.mesh import permute_cells
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
@@ -33,7 +39,12 @@ RHO, MU = 1.0, 0.02
 _NEWTON_STEPS = 5
 
 
-def _build(mesh, mu=MU, pin=0):
+#: The pressure datum, named by a place: under a renumbering of the cells it still finds the same
+#: physical cell, which an index would not.
+_DATUM = PinnedPoint((0.0, 0.0))
+
+
+def _build(mesh, mu=MU):
     """Build the lid-driven-cavity coupled p--U assembler on a given (possibly renumbered) mesh."""
     geom = mesh.geometry()
     return MomentumContinuity.build(
@@ -50,17 +61,15 @@ def _build(mesh, mu=MU, pin=0):
         ),
         gradient_scheme=CompactGreenGauss(),
         advection_scheme=FirstOrderUpwind(),
-        pressure_pin=pin,
+        pressure_datum=_DATUM,
     )
 
 
 def _cavity(n, mu=MU, perm=None):
     mesh = perturbed_grid_2d(n, n, perturb=0.15, named_boundaries=True)
-    pin = 0
     if perm is not None:
         mesh = permute_cells(mesh, perm)  # renumbered system P·J·Pᵀ
-        pin = int(np.asarray(perm)[0])
-    return _build(mesh, mu, pin)
+    return _build(mesh, mu)
 
 
 def _newton_linear_solve(asm, state, preconditioned):

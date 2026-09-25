@@ -236,9 +236,9 @@ def potential_flow(momentum: MomentumContinuity) -> jnp.ndarray:
     uniform. That case returns a plug at the characteristic speed the force sustains against the wall
     drag (:func:`~aquaflux.flow.scales.body_force_velocity`) — far closer to the developed flow than
     rest, which leaves a globalized solve to march the entire viscous spin-up. A domain driven only by
-    a moving wall is not this case (it has no net through-flow, so its potential really is zero), and
-    a domain driven by nothing returns the zero state. When there is no outlet but the
-    momentum carries a ``pressure_pin``, that cell pins the otherwise-singular Laplacian.
+    a moving wall is not this case (it has no net through-flow, so its potential really is zero). With
+    no outlet the assembler always carries a pressure datum (its build refuses one without), and that
+    cell pins the otherwise-singular Laplacian.
 
     Parameters
     ----------
@@ -288,8 +288,8 @@ def potential_flow(momentum: MomentumContinuity) -> jnp.ndarray:
         if float(jnp.linalg.norm(plug)) > 0.0:
             velocity = jnp.broadcast_to(plug, (mesh.n_cells, mesh.dim))
             return momentum.pack(velocity, jnp.zeros(mesh.n_cells))
-        if momentum.pressure_pin is None:
-            return momentum.initial_state()  # closed domain: no potential through-flow
+        # No outlet means the level is free, which the assembler's build requires a datum for; that
+        # same cell pins the potential's otherwise-singular Laplacian.
         fixed_cells = jnp.array([momentum.pressure_pin])
         fixed_values = jnp.array([0.0])
 

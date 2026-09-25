@@ -77,10 +77,19 @@ F frozen solver → G drive.
   already derives `molecular_viscosity` from a `PropertyModel` (it no longer takes a raw kinematic array),
   so #367's *code* gap is narrower than its text says; the density cross-check in `CoupledRANS.build`
   survives because the two assemblers are still handed two models.
-- **A closed domain is REFUSED at read, not left to solve a singular system.** No `Outlet` ⇒ the pressure
-  level is free ⇒ it needs a datum, and a file cannot state one until #500 (`PinnedPoint` / `PinnedPatch`)
-  exists. The message tells the reader to build such a case in code. This is also why `MassFlow` is not
-  a registered drive: both periodic channels are closed.
+- **The pressure level is fixed exactly once (#500, 2026-09-24).** A top-level `pressure_datum:
+  {kind: PinnedPoint, point: [...], value: ...}` is **required** when no patch is an `Outlet` and
+  **refused** beside one, checked at read by the flow's own `refuse_an_unsuitable_pressure_datum` over the
+  patches' `flow_closure()`s — so `PatchCondition.prescribes_pressure()` was **deleted**: which closure
+  fixes the level is the flow's knowledge (`FlowBoundary.prescribes_pressure()`), not restated here.
+  `check_against` refuses a point of the wrong dimension or outside the mesh's bounding box (node
+  coordinates only; a point inside the box but outside a non-convex domain is harmless — any cell may
+  carry a datum). `MassFlow` is still not a registered drive: the channels also need a structured-grid
+  mesh source.
+- **A moving wall is `Wall` with an optional `velocity` (decided by the project owner, 2026-09-24), not
+  its own kind.** A moving wall is a wall in every other respect — no through-flow, a wall to the closure,
+  the same `k` option — so one kind keeps those shared by construction. `flow_closure()` is
+  `NoSlipWall()` unset, `MovingWall(velocity)` set; `refuse_for_dimension` checks the velocity.
 - **`Numerics.momentum_advection` and `RANS.advection` are REQUIRED.** `MomentumContinuity.build`'s
   `advection_scheme=None` means *Stokes flow* — a different problem, not a default — so a file cannot
   reach it by omission. `RANS.advection` is required because `SSTTurbulence.build` takes it positionally.
@@ -116,7 +125,7 @@ constructor refusal re-raised with the path prepended** (so `Inlet`'s bad veloci
   The validation drivers carry closures no file can state (`point_setup`, the damping tapers reading a
   residual at each rung's seed, the Reynolds companion function, logger metrics); decide which become
   named values and which stay code.
-- **The pressure datum** (#500), then **`MassFlow`** and a structured-grid mesh source (the channels).
+- **`MassFlow`** / a `UniformBodyForce` source and a structured-grid mesh source (the channels).
 - **Patch types / `inGroups`** (#364) — would let a file say "all walls" instead of listing each patch.
 - **`IntensityLength`** inlet turbulence (`inlet_k` / `inlet_omega`) — `InletTurbulence.inflow(velocity)`
   already takes the velocity for it.
@@ -127,7 +136,7 @@ constructor refusal re-raised with the path prepended** (so `Inlet`'s bad veloci
 ## How the build derives what the drivers used to restate (binding)
 
 - **Each patch kind builds its own closures**: `PatchCondition.flow_closure()` (`Inlet` → `VelocityInlet`,
-  `Outlet` → `PressureOutlet`, `Wall` → `NoSlipWall`) and `turbulence_closures()` → `(k, omega)`
+  `Outlet` → `PressureOutlet`, `Wall` → `NoSlipWall`, or `MovingWall` when it has a `velocity`) and `turbulence_closures()` → `(k, omega)`
   (`Inlet` → both `Dirichlet` from `InletTurbulence.inflow(velocity)`; `Outlet` → both `ZeroGradient`;
   `Wall` → `k` by `Wall.k` (`ZeroGradient` unset, `Dirichlet(0)` for `zero`) and a **placeholder**
   `ZeroGradient` for `omega`, which the closure fixes in the wall cells instead). That table is what every

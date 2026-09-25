@@ -53,6 +53,7 @@ from aquaflux.solve import FieldLayout
 from aquaflux.vectors import dot, scale
 
 from .boundary import FLOW_FIELDS
+from .datum import PressureDatum, refuse_an_unsuitable_pressure_datum
 from .drive import BOUNDARY_DRIVEN, Drive
 from .rhie_chow import (
     advective_momentum_flux,
@@ -210,11 +211,12 @@ class MomentumContinuity(eqx.Module):
     interp_factor, normal_distance : jnp.ndarray
         Face interpolation factor ``g`` and normal distance ``d . n`` (precomputed geometry).
     pressure_pin : int or None
-        Cell whose continuity equation is replaced by ``p = pressure_pin_value`` (static). Required
-        for a closed domain (all-wall, no pressure outlet), where the pressure level is otherwise
-        free; ``None`` for a domain with a pressure outlet.
+        The cell whose continuity equation is replaced by ``p = pressure_pin_value`` (static): the
+        cell the build's ``pressure_datum`` resolved to, in this mesh's numbering. Set exactly when no
+        patch prescribes the pressure, so the level is otherwise free; ``None`` for a domain with a
+        pressure outlet.
     pressure_pin_value : float
-        The pressure imposed at :attr:`pressure_pin`.
+        The pressure imposed at :attr:`pressure_pin`, the datum's value.
     drive : Drive
         What sets this flow in motion, and what that makes of the state.
         :class:`~aquaflux.flow.BoundaryDriven` — the default — means the motion comes from the
@@ -256,8 +258,7 @@ class MomentumContinuity(eqx.Module):
         *,
         gradient_scheme: GradientScheme = DEFAULT_GRADIENT_SCHEME,
         advection_scheme: AdvectionScheme | None = None,
-        pressure_pin: int | None = None,
-        pressure_pin_value: float = 0.0,
+        pressure_datum: PressureDatum | None = None,
         drive: Drive = BOUNDARY_DRIVEN,
         sources: tuple[MomentumSource, ...] = (),
     ) -> MomentumContinuity:
@@ -275,9 +276,12 @@ class MomentumContinuity(eqx.Module):
         reconstruction's first pass has to be prepared from the operator that pass actually applies,
         and the boundary conditions enter that operator differently for each of them.
 
-        ``pressure_pin`` fixes the pressure at one cell (its continuity equation is replaced by
-        ``p = pressure_pin_value``) — required for a closed domain (all-wall, no pressure outlet, e.g.
-        a streamwise-periodic channel), where pressure is otherwise defined only up to a constant.
+        ``pressure_datum`` fixes the pressure level (a :class:`~aquaflux.flow.PinnedPoint`: the cell
+        nearest a point has its continuity equation replaced by ``p = value``). It is required exactly
+        when no patch prescribes the pressure -- a closed domain such as a lid-driven cavity or a
+        streamwise-periodic channel, where the pressure is otherwise defined only up to a constant --
+        and refused otherwise, since beside a :class:`~aquaflux.flow.PressureOutlet` it would
+        over-determine the level (:func:`~aquaflux.flow.refuse_an_unsuitable_pressure_datum`).
         ``drive`` says what sets the flow in motion (see :attr:`drive`); the default,
         :class:`~aquaflux.flow.BoundaryDriven`, adds no force of its own. ``sources`` is the tuple of
         :class:`~aquaflux.flow.MomentumSource` terms — buoyancy, porous drag, a rotating-frame term,
@@ -288,6 +292,7 @@ class MomentumContinuity(eqx.Module):
         """
         properties.require("viscosity", "density")
         refuse_a_closure_that_closes_other_fields(boundary, FLOW_FIELDS, "MomentumContinuity.build")
+        refuse_an_unsuitable_pressure_datum(boundary, pressure_datum, "MomentumContinuity.build")
         reject_unsupported_face_force(sources, geometry, properties, mesh)
         face_geometry, cell_geometry = geometry.face, geometry.cell
         face_cells = mesh.face_cells
@@ -324,8 +329,8 @@ class MomentumContinuity(eqx.Module):
             interp_factor=interp_factor,
             normal_distance=normal_distance,
             drive=drive,
-            pressure_pin=pressure_pin,
-            pressure_pin_value=pressure_pin_value,
+            pressure_pin=None if pressure_datum is None else pressure_datum.cell(geometry),
+            pressure_pin_value=0.0 if pressure_datum is None else pressure_datum.level,
             sources=sources,
         )
         # Bind each field AGAINST its own conditions, not merely against the geometry. A
@@ -1120,8 +1125,8 @@ class MomentumContinuity(eqx.Module):
     def _continuity_residual(self, mdot: jnp.ndarray, pressure: jnp.ndarray) -> jnp.ndarray:
         """Continuity cell residual: the net Rhie--Chow mass flux ``Σ mdot_f``, shape ``(n_cells,)``.
 
-        In a closed domain (``pressure_pin`` set) the pinned cell's continuity equation is replaced
-        by ``p = pressure_pin_value`` to fix the otherwise-free pressure level.
+        In a closed domain (the build was given a ``pressure_datum``) the pinned cell's continuity
+        equation is replaced by ``p = pressure_pin_value`` to fix the otherwise-free pressure level.
         """
         residual = self.mesh.face_cells.scatter_conservative(mdot)
         if self.pressure_pin is not None:

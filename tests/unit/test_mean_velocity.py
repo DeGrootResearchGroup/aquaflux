@@ -25,6 +25,7 @@ from aquaflux.flow import (
     MassFlow,
     MomentumContinuity,
     NoSlipWall,
+    PinnedPoint,
     bulk_velocity_flow_solve,
 )
 from aquaflux.flow.mean_velocity import _bordered_preconditioner
@@ -46,7 +47,7 @@ def _channel(beta_initial: float) -> MomentumContinuity:
         PropertyModel({"viscosity": Constant(RHO * MU), "density": Constant(RHO)}),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         gradient_scheme=CompactGreenGauss(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
         drive=MassFlow(target=U_TARGET, force=beta_initial),
     )
 
@@ -152,7 +153,7 @@ def test_preconditioned_iterative_solve_matches_the_direct_solve() -> None:
         PropertyModel({"viscosity": Constant(RHO * MU), "density": Constant(RHO)}),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         gradient_scheme=CompactGreenGauss(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
         drive=MassFlow(target=U_TARGET, force=0.05),
     )
     preconditioner = BlockPreconditioner.build(momentum).factory()
@@ -188,7 +189,7 @@ def test_a_solve_refuses_an_assembler_that_is_not_mass_flow_driven() -> None:
         PropertyModel({"viscosity": Constant(RHO * MU), "density": Constant(RHO)}),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         gradient_scheme=CompactGreenGauss(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
     )
     assert isinstance(momentum.drive, BoundaryDriven)
     with pytest.raises(TypeError, match="MassFlow"):
@@ -204,7 +205,7 @@ def _laminar_channel(mu: float) -> MomentumContinuity:
         PropertyModel({"viscosity": Constant(RHO * mu), "density": Constant(RHO)}),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         gradient_scheme=CompactGreenGauss(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
         drive=MassFlow(target=U_TARGET, force=0.05),
     )
 

@@ -25,6 +25,7 @@ from aquaflux.flow import (
     ConvectionTwoLevel,
     MomentumContinuity,
     NoSlipWall,
+    PinnedPoint,
     VelocityBlock,
     ViscousMultilevel,
 )
@@ -55,6 +56,7 @@ def _closed() -> MomentumContinuity:
         PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
         BoundaryConditions({side: NoSlipWall() for side in ("top", "bottom", "left", "right")}),
         gradient_scheme=CompactGreenGauss(),
+        pressure_datum=PinnedPoint((0.0, 0.0)),  # closed: the level needs a datum
     )
 
 

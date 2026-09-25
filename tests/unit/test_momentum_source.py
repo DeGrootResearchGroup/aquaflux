@@ -30,6 +30,7 @@ from aquaflux.flow import (
     MomentumContinuity,
     MomentumSource,
     NoSlipWall,
+    PinnedPoint,
     UniformBodyForce,
 )
 from aquaflux.flow.rhie_chow import momentum_diagonal
@@ -70,7 +71,7 @@ def case():
         PropertyModel({"viscosity": Constant(1e-3), "density": Constant(1.0)}),
         BoundaryConditions({name: NoSlipWall() for name in mesh.face_patches.names}),
         gradient_scheme=CompactGreenGauss(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
     )
     state = (
         momentum.initial_state()
@@ -128,7 +129,7 @@ def test_a_uniform_source_and_a_solved_drive_are_the_same_term(case) -> None:
         momentum.properties,
         walls,
         gradient_scheme=momentum.gradient_scheme,
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
         drive=MassFlow(target=1.0, force=beta),
     )
     via_source = momentum.build(
@@ -137,7 +138,7 @@ def test_a_uniform_source_and_a_solved_drive_are_the_same_term(case) -> None:
         momentum.properties,
         walls,
         gradient_scheme=momentum.gradient_scheme,
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
         sources=(UniformBodyForce(jnp.asarray(force)),),
     )
 
@@ -159,7 +160,7 @@ def test_sources_are_subtracted_and_compose_additively(case) -> None:
             momentum.properties,
             boundary,
             gradient_scheme=momentum.gradient_scheme,
-            pressure_pin=0,
+            pressure_datum=PinnedPoint((0.0, 0.0)),
             sources=sources,
         )
 
@@ -182,7 +183,7 @@ def test_no_sources_is_the_unsourced_residual(case) -> None:
         momentum.properties,
         boundary,
         gradient_scheme=momentum.gradient_scheme,
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
     )
     empty = momentum.build(
         momentum.mesh,
@@ -190,7 +191,7 @@ def test_no_sources_is_the_unsourced_residual(case) -> None:
         momentum.properties,
         boundary,
         gradient_scheme=momentum.gradient_scheme,
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
         sources=(),
     )
 
@@ -258,7 +259,7 @@ def _stokes_case(sources=()):
         PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
         BoundaryConditions({side: NoSlipWall() for side in ("top", "bottom", "left", "right")}),
         gradient_scheme=CompactGreenGauss(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
         sources=sources,
     )
 
@@ -379,6 +380,6 @@ def test_a_declared_face_force_is_refused_rather_than_silently_dropped() -> None
             PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
             BoundaryConditions({name: NoSlipWall() for name in mesh.face_patches.names}),
             gradient_scheme=CompactGreenGauss(),
-            pressure_pin=0,
+            pressure_datum=PinnedPoint((0.0, 0.0)),
             sources=(_SpatiallyVaryingForce(),),
         )

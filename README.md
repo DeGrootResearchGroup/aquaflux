@@ -104,7 +104,13 @@ import aquaflux  # enables JAX float64
 import jax.numpy as jnp
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import FirstOrderUpwind
-from aquaflux.flow import BlockPreconditioner, MomentumContinuity, MovingWall, NoSlipWall
+from aquaflux.flow import (
+    BlockPreconditioner,
+    MomentumContinuity,
+    MovingWall,
+    NoSlipWall,
+    PinnedPoint,
+)
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.solve import DampedNewtonStep, RootSolver
@@ -126,7 +132,8 @@ def cavity(viscosity):
             }
         ),
         advection_scheme=FirstOrderUpwind(),
-        pressure_pin=0,
+        # A closed domain has no outlet to set the pressure level, so it is fixed at a point.
+        pressure_datum=PinnedPoint((0.0, 0.0)),
     )
 
 

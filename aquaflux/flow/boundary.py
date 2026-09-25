@@ -389,6 +389,16 @@ class FlowBoundary(eqx.Module):
         """
         return False
 
+    def prescribes_pressure(self) -> bool:
+        """Whether this patch prescribes the pressure, and so fixes its level for the whole domain (static).
+
+        True for a :class:`PressureOutlet` alone. Incompressible flow determines the pressure only up
+        to a constant, so a domain with no such patch has a free level and needs a pressure datum --
+        and one with such a patch must not be given one. Both follow from this, through
+        :func:`~aquaflux.flow.refuse_an_unsuitable_pressure_datum`.
+        """
+        return False
+
 
 class NoSlipWall(FlowBoundary):
     """A stationary solid wall: zero velocity, zero-gradient pressure, no through-flow."""
@@ -586,3 +596,6 @@ class PressureOutlet(FlowBoundary):
         # Zero-gradient velocity: the viscous flux mu(u_owner - u_owner)/(d.n) vanishes, so only the
         # upwind outflow convective diagonal remains.
         return convective_owner
+
+    def prescribes_pressure(self):
+        return True

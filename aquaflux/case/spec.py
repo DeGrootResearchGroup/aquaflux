@@ -12,9 +12,9 @@ sets the flow in motion). A setting that belongs to one physics lives inside it,
 one its physics would ignore.
 
 A spec that is constructed is already consistent on its own terms: its physics has accepted its
-boundaries, and some patch fixes the pressure level. What it cannot know until its mesh is read -- that
-every boundary face has a patch, and that each patch fits the mesh's dimension -- is checked by
-:meth:`CaseSpec.check_against`.
+boundaries, and its pressure level is fixed exactly once -- by an outlet, or, in a closed domain, by
+its ``pressure_datum``. What it cannot know until its mesh is read -- that every boundary face has a
+patch, and that each patch and the datum fit the mesh -- is checked by :meth:`CaseSpec.check_against`.
 """
 
 from __future__ import annotations
@@ -23,8 +23,17 @@ import dataclasses
 import types
 from collections.abc import Mapping
 
+import numpy as np
+
+from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import AdvectionScheme, FirstOrderUpwind, LimitedUpwind
-from aquaflux.flow import BoundaryDriven, Drive
+from aquaflux.flow import (
+    BoundaryDriven,
+    Drive,
+    PinnedPoint,
+    PressureDatum,
+    refuse_an_unsuitable_pressure_datum,
+)
 from aquaflux.mesh import Mesh
 from aquaflux.schemes import (
     CompactGreenGauss,
@@ -99,6 +108,10 @@ class CaseSpec:
     drive : Drive or None
         What sets the flow in motion; unset, :class:`~aquaflux.flow.BoundaryDriven` -- the boundary
         conditions do. A case file can name no other drive yet.
+    pressure_datum : PressureDatum or None
+        Where the pressure level is fixed in a domain no patch fixes it in -- a closed domain, such as
+        a lid-driven cavity: a :class:`~aquaflux.flow.PinnedPoint`. Required exactly when no patch is
+        an :class:`~aquaflux.case.Outlet`, and refused otherwise.
 
     Raises
     ------
@@ -106,9 +119,9 @@ class CaseSpec:
         If a section is not a value of its family.
     ValueError
         If there are no boundary patches, if the physics refuses one (a turbulence setting in a laminar
-        case, an inlet with no inflow turbulence in a Reynolds-averaged one), or if no patch fixes the
-        pressure level. A domain whose pressure level is free needs a datum, which a case file cannot
-        yet state; such a case is built in code, with ``MomentumContinuity.build(pressure_pin=...)``.
+        case, an inlet with no inflow turbulence in a Reynolds-averaged one), or if the pressure level
+        is not fixed exactly once: a closed domain with no ``pressure_datum``, or a datum beside an
+        outlet.
     """
 
     mesh: MeshSource
@@ -117,6 +130,7 @@ class CaseSpec:
     boundaries: Mapping[str, PatchCondition]
     numerics: Numerics
     drive: Drive | None = None
+    pressure_datum: PressureDatum | None = None
 
     def __post_init__(self) -> None:
         for name, family in (
@@ -131,6 +145,10 @@ class CaseSpec:
                 )
         if self.drive is not None and not isinstance(self.drive, Drive):
             raise TypeError(f"CaseSpec.drive must be a Drive, got {self.drive!r}.")
+        if self.pressure_datum is not None and not isinstance(self.pressure_datum, PressureDatum):
+            raise TypeError(
+                f"CaseSpec.pressure_datum must be a PressureDatum, got {self.pressure_datum!r}."
+            )
         if not self.boundaries:
             raise ValueError("a case names at least one boundary patch.")
         for patch, condition in self.boundaries.items():
@@ -143,20 +161,24 @@ class CaseSpec:
         # through the caller's reference.
         object.__setattr__(self, "boundaries", types.MappingProxyType(dict(self.boundaries)))
         self.physics.refuse_boundaries(self.boundaries)
-        if not any(condition.prescribes_pressure() for condition in self.boundaries.values()):
-            raise ValueError(
-                "no boundary patch fixes the pressure (none is an Outlet), so the pressure level is free "
-                "and the case needs a datum -- which a case file cannot state yet. Build a closed domain "
-                "in code, with MomentumContinuity.build(pressure_pin=...)."
-            )
+        # The flow's own rule, asked of the closures the patches will build: which of them fixes the
+        # pressure level is the flow's knowledge, so it is not restated for the case.
+        refuse_an_unsuitable_pressure_datum(
+            BoundaryConditions(
+                {name: condition.flow_closure() for name, condition in self.boundaries.items()}
+            ),
+            self.pressure_datum,
+            "the case",
+        )
 
     def check_against(self, mesh: Mesh) -> None:
         """Refuse this case on ``mesh`` unless its patches fit it exactly.
 
         Every patch named must be a boundary patch of the mesh; every boundary face must lie in a named
         patch (a face nobody gave a condition would keep a zero face value, which is a boundary condition
-        nobody chose); and each patch's settings must fit the mesh's dimension. Needs the mesh's topology
-        only, not its geometry.
+        nobody chose); each patch's settings must fit the mesh's dimension; and a pressure datum's point
+        must have one coordinate per dimension and lie within the mesh's bounding box. Needs the mesh's
+        topology and node coordinates only, not its geometry.
 
         Parameters
         ----------
@@ -200,8 +222,34 @@ class CaseSpec:
                 condition.refuse_for_dimension(mesh.dim, patch)
             except ValueError as error:
                 problems.append(str(error))
+        if isinstance(self.pressure_datum, PinnedPoint):
+            problems.extend(_datum_misfits(self.pressure_datum, mesh))
         if problems:
             raise ValueError("the case does not fit its mesh: " + "; ".join(problems) + ".")
+
+
+def _datum_misfits(datum: PinnedPoint, mesh: Mesh) -> list[str]:
+    """How a pinned point fails to fit ``mesh``: a wrong dimension, or a place outside its bounding box.
+
+    The bounding box is the cheap test available before any geometry: a point outside it is certainly
+    outside the domain, and its nearest cell would be an arbitrary cell on the boundary. A point inside
+    the box but outside a non-convex domain is not caught, and is harmless -- the datum only sets a
+    level, so any cell may carry it.
+    """
+    point = datum.point
+    if len(point) != mesh.dim:
+        return [
+            f"pressure_datum: the point {point!r} has {len(point)} coordinates, but the mesh is "
+            f"{mesh.dim}-dimensional"
+        ]
+    nodes = np.asarray(mesh.node_coords)
+    low, high = nodes.min(axis=0), nodes.max(axis=0)
+    if np.any(np.asarray(point) < low) or np.any(np.asarray(point) > high):
+        return [
+            f"pressure_datum: the point {point!r} lies outside the mesh, whose bounding box is "
+            f"{tuple(low.tolist())} to {tuple(high.tolist())}"
+        ]
+    return []
 
 
 #: Every value a case file may name, at any level. The schemes are the library's own classes, read and
@@ -232,6 +280,7 @@ _CASE_MAPPING = SettingsMapping(
         OwnerGradient,
         SkewCorrectedGradient,
         BoundaryDriven,
+        PinnedPoint,
     ]
 )
 

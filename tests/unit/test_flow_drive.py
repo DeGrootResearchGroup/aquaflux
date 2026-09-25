@@ -28,6 +28,7 @@ from aquaflux.flow import (
     MomentumContinuity,
     MomentumSource,
     NoSlipWall,
+    PinnedPoint,
     UniformBodyForce,
     mass_flow_drive,
     refuse_a_constraint_this_solve_cannot_hold,
@@ -51,7 +52,7 @@ def _channel(drive=None, sources=()):
         PropertyModel({"viscosity": Constant(RHO * MU), "density": Constant(RHO)}),
         BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
         gradient_scheme=CompactGreenGauss(),
-        pressure_pin=0,
+        pressure_datum=PinnedPoint((0.0, 0.0)),
         sources=sources,
         **({} if drive is None else {"drive": drive}),
     )

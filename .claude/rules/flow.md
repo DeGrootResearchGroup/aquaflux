@@ -30,6 +30,27 @@ Engineering Principles.
   reconciliation. Its docstring claimed the first only, and said it "never enters the residual" —
   false since the wall model landed, corrected in #355. It is also this package's `is_wall` predicate:
   do not add a second one.
+- **`datum.py` — `PressureDatum` → `PinnedPoint(point, value=0.0)`; `refuse_an_unsuitable_pressure_datum`
+  (2026-09-24, #500).** `MomentumContinuity.build(pressure_datum=...)` **replaces `pressure_pin=` /
+  `pressure_pin_value=`** (no alias). The datum is a *place*: the cell whose centroid is nearest `point`
+  (ties to the lowest index), resolved once at build into the assembler's static `pressure_pin` field —
+  which keeps its name, since it IS the pinned cell, and which the Schur geometry, the SIMPLE kernels
+  and `potential_flow` read unchanged. A point survives `permute_cells` and a remesh, which an index did
+  not (`test_flow_preconditioner` used to recompute the index after renumbering; now the same point just
+  works — pinned by `test_a_point_pins_the_same_physical_cell_however_the_cells_are_numbered`).
+  - **Whether a datum is needed is DERIVED and enforced both ways**, by
+    `refuse_an_unsuitable_pressure_datum(boundary, datum, caller)`, called from the build: none of the
+    closures `prescribes_pressure()` (declared on `FlowBoundary`, `True` for `PressureOutlet` alone) ⇒ a
+    datum is required (else the system is singular); some does ⇒ a datum is refused (it would
+    over-determine the level). The case file asks the same function through each patch's flow closure.
+  - ⚠️ **The refusal found 15 fast-tier tests (in three files) building a closed domain with NO datum** — assemblers built
+    "only for their geometry" or their viscosity, never solved, so the singular system was never met. They
+    now carry one. A dry run of the slow + validation tiers (every build stopped just after the check)
+    found no others. `pressure_pin_value` had no caller outside the build.
+  - **Why no `PinnedPatch` or mean-pressure datum**: a patch "datum" either pins an arbitrary cell (a point
+    does that) or holds a patch mean — a row coupling every face of the patch, which the coloured probe and
+    the Schur preconditioner do not handle. No `PinnedCell` either: a point does everything an index does
+    and survives renumbering.
 - **`drive.py` — `Drive` → `BoundaryDriven` / `MassFlow` (2026-09-23, #375).** What forces the
   momentum equation, and what that makes of the state. `MomentumContinuity.drive` **replaces the
   `body_force` leaf**, which meant a prescribed input on one case and a live solve unknown on another
@@ -440,11 +461,11 @@ Engineering Principles.
 - **Convection — BUILT.** `advection_scheme=` turns on momentum convection (`mdot·u`, upwind or
   limited), which makes the residual **nonlinear** (mass flux and advected velocity both depend
   on velocity). `a_P`'s convective part uses a lagged velocity-flux estimate (breaks the
-  `a_P`↔`mdot` circularity). Closed domains pin the pressure at one cell (`pressure_pin=`).
+  `a_P`↔`mdot` circularity). Closed domains fix the pressure level with `pressure_datum=PinnedPoint(...)` (see `datum.py` above).
 - **Body force — BUILT.** `sources=(UniformBodyForce(f),)` adds a uniform per-volume force to the
   momentum residual (subtracted per component: `R = flux − β·V`). Sign: with `p = p̃ + G·x`, `β>0`
   drives `+x` and the mean gradient is `G = −β`. Its `force` is a differentiable leaf, and it drives a
-  **streamwise-periodic** channel (`structured_grid_2d(periodic=("x",))` + `pressure_pin`): verified
+  **streamwise-periodic** channel (`structured_grid_2d(periodic=("x",))` + a `pressure_datum`): verified
   against exact fully-developed Poiseuille in `test_periodic_channel.py`. A uniform force needs no
   Rhie–Chow term and does not enter continuity. A force that is *solved for* rather than prescribed is
   a `MassFlow` drive instead — see the bullet above and the constraint below.
@@ -546,8 +567,9 @@ Engineering Principles.
   the velocity-scale bullet below). A moving-lid cavity is deliberately *not* that case (no net
   through-flow → its potential really is zero; a plug would violate the stationary walls), so the test
   `test_potential_flow_is_zero_on_a_closed_domain` is the guard — do not widen the fallback to
-  `characteristic_velocity`, which reports the *lid* speed. Otherwise closed domains return the zero
-  state (or pin `pressure_pin`). Usable to warm-start **any** solve (flow-only, segregated, coupled).
+  `characteristic_velocity`, which reports the *lid* speed. A closed domain always carries a datum (the build
+  refuses one without), and its cell pins the potential's Laplacian; the old "no pin, return rest" branch
+  is gone because it can no longer be reached. Usable to warm-start **any** solve (flow-only, segregated, coupled).
   ⚠️ **It takes NO `gradient_scheme` argument and must not be given one back (#361).** It
   reconstructs `grad phi` with `momentum.gradient_scheme` — the scheme that assembler will be solved
   with, in its condition-free form, which the potential's own `ResidualAssembler` then re-binds
