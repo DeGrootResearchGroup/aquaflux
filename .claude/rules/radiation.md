@@ -462,13 +462,67 @@ twice the hand-chunked 557 s, because `fluence_rate` also gathers the reflected 
 walls carries nothing (its own docstring already says so: reflectance is traced, so there is nothing
 to branch on). Solve: 3 restart cycles.
 
-⚠️ **Peak memory footprint 11.15 GB — and 8.5 GB of it is the TRANSFER BUILD, not the stream.**
-Measured separately in its own process: `build_transfer` alone on these 7,516 facets peaks at
-**8.33 GB**, the whole model build at 8.54 GB, against 0.45 GB for one of the transfer's `n^2`
-arrays. So the receiver mask is gone (it would have been 12 GB per body on top) and the stream adds
-~2.6 GB, consistent with #518's 1.5-1.9 GB at 4M pairs; what remains is the facet-to-facet build
-holding ~18 of its own arrays at its peak — for a scene whose black walls exchange nothing. That is
-its own issue, not #489's.
+⚠️ **Peak memory footprint 11.15 GB, and it is the FIELD phase, not the build.** It was first
+recorded here as "8.5 GB of it is the transfer build", which was an inference from a separately
+measured 8.33 GB `build_transfer` peak and was **wrong**: #521 halved that build to 4.07 GB (model build
+4.31 GB) and the same whole run then peaked at **11.07 GB**. The field agreed with the previous run to
+every digit (the same median, p99, max and far-pipe figures), so this is a memory measurement and not a
+change in the answer. The field phase grows **with each call**, not per pass: on 100,000 sampled cells
+the footprint read 4.10 GB after the build, 5.92 after one `fluence_rate` and 7.16 after an identical
+second call. **Most of it is JAX's compile and trace caches, not arrays**: `jax.clear_caches()` plus
+`gc.collect()` between the two calls took the footprint from 5.91 to **2.74 GB** (the kept transfer
+plus base), and the second call rebuilt ~2.9 GB (67 s per call, uncontended). Every call re-traces and
+recompiles the per-chunk programs. The fix (compile each pass once, taking big arrays as arguments
+rather than closure constants) is #522/#524's. ⚠️ **A peak on a platform whose allocator
+keeps freed pages is attributed only by sampling between phases in one process** — subtracting a phase
+measured in another process from a whole-run total is exactly how the wrong attribution got written.
+
+## THE TRANSFER BUILD IS FILLED IN PLACE, NOT ASSEMBLED (#521, 2026-09-24)
+
+`build_transfer` peaked at **8.33 GB** on the Sozzi lamp (7,516 facets; one `n x n` float array is
+0.45 GB) and now peaks at **4.07 GB** (the whole model build: 8.54 → 4.31 GB). ⚠️ **The whole-field run's
+peak did not move** (11.15 → 11.07 GB). It is set by the streamed field phase (see the #489 section
+above), so this halves what a model *build* costs and not yet what a mesh-scale field costs. Measured with
+`validation/sozzi_radiation/transfer_build_peak.py` — `build_transfer` alone in its own process under
+`/usr/bin/time -l`, the water as the three hand-typed cylinders, `NoOcclusion()`, default
+`chunk_size` 256; jax 0.10.2, CPU, x64, macOS arm64, 11 cores.
+
+**Why the old one peaked at ~18 arrays.** ⚠️ **On this backend freed memory is not handed back**, so a
+build's peak footprint is the *running total* of everything it ever formed, not what is alive at the
+worst instant — measured by sampling the footprint (`proc_pid_rusage`, `phys_footprint`) between
+steps with each step forced to complete: dropping every temporary at the end moved it by nothing.
+Increments, in order: solid-angle rows collected in a list then concatenated and divided by `pi`
+(+2.2 GB), the diagonal and point-source masks applied as two more whole-matrix passes (+1.0), an
+`(n, n, 3)` offset array (+1.4), separation from it via its square and a safe-divisor copy (+1.8),
+the source cosine (+0.9), then the facet shadow pass (+0.3, reusing freed pages). ⚠️ **Without forcing
+each step to complete the attribution is wrong**: JAX dispatches asynchronously, and the first
+decomposition blamed 4.5 GB on the shadow pass that was really the steps before it.
+
+**What replaced it.** `_row_block` is one compiled pass computing, for `chunk_size` receiving facets
+against all facets, the solid angles (scanned over the quadrature points as before), both masks by
+*global* row index, the offsets, separations and cosines — so nothing larger than a block is formed.
+`_written` puts each block into three buffers of the final `n x n` size by a `dynamic_update_slice`
+that **donates** the buffers (in place on CPU: 30 blocks into a 0.45 GB buffer added 0.03 GB, no
+warning). The last block starts at `n - chunk_size` rather than being padded, because trimming a
+padded buffer is a whole-matrix copy (measured: +0.46 GB). Inputs are `stop_gradient`ed at the
+start rather than the outputs at the end, so a build under a trace (the frozen-geometry test builds
+under `jax.grad`) still works and still differentiates to zero.
+
+**Remaining 4.07 GB** = 0.15 base + 1.36 kept + ~1 GB of one block's quadrature working set (2.49 GB
+after the blocks) + ~1.5 GB for the facet shadow pass with the three-cylinder `Outside` at the 4M
+default pair limit. Not bit-identical to the old build: at one block size the solid angles and
+masks are identical and separation/cosine differ by ≤ 3.3e-16 (a compiled `dot`, see `CLAUDE.md`);
+across block sizes same-wall pairs whose transfer is zero come back as ~1e-17 dust that moves with
+the block shape, so tests compare to a rounding of the O(1) row sums. Speed is unchanged, measured
+in one process with the two alternating: old 61.2 / 62.4 s, new 63.6 / 62.5 s for the solid-angle
+pass (a cross-process single run had read 63 against 89 s — noise, and a reminder).
+
+⚠️ **A point source is left out by its LABEL, and only a labelled facet with an area can show it.**
+The kernel returns zero for a zero-area triangle, so a mask indexed wrongly passed every point-source
+fixture; `test_a_point_source_is_left_out_by_its_label_not_by_its_area` labels a wall triangle.
+Mutations: last block dropped, rows indexed locally, the point-source mask by local row, the
+diagonal kept, the gradient not stopped at the inputs — all red; the donation removed is
+green by design (memory only, pinned by the harness, not a test).
 
 ## The solid bodies moved to `aquaflux/solids/` (their record is `.claude/rules/solids.md`)
 

@@ -119,9 +119,10 @@ stream_receiver_mask=True, self_occlusion=NoOcclusion()))` then `fluence_rate(..
 cells with the case's `lampWall.stl`, against `compare_fluence.py`'s hand-chunked field: **max relative
 difference 4.4e-16** over the 1,285,221 lit cells (median 0, p99 1.8e-16), and 6.8e-21 W/m² at the
 206,713 far pipe cells. Build 65 s; field 1,170 s, about twice the hand-chunked run because the model
-also gathers the (here empty) reflected field. Peak footprint 11.15 GB, of which the facet-to-facet
-transfer build alone is 8.33 GB (measured in its own process) — the receiver mask, which held whole
-would add 12 GB, is not held. Configuration as in the table above, plus OCP 8.0.1 on CPython 3.13.
+also gathers the (here empty) reflected field. Peak footprint 11.15 GB, repeated at 11.07 GB after the
+transfer build was cut from 8.33 to 4.07 GB (`transfer_build_peak.py`). So the peak is set by computing
+the field, not by building the model. The receiver mask, which would add 12 GB if held whole, is not
+held. Configuration as in the table above, plus OCP 8.0.1 on CPython 3.13.
 
 ## Measured (2026-09-22)
 

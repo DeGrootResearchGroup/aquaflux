@@ -195,6 +195,88 @@ def test_point_sources_take_no_part_in_the_transfer():
     np.testing.assert_allclose(matrix[:, -1], 0.0, atol=0.0)
 
 
+def _box_with_a_lamp():
+    """48 wall facets and a point source in the middle: 49 rows, which few block sizes divide.
+
+    The point source sits LAST and a wall facet first, so a block that masks the point source or
+    the diagonal by its own local row index rather than the global one gets the wrong rows.
+    """
+    vertices = np.concatenate([inward_box(2), np.full((1, 3, 3), 0.5)])
+    return Surfaces.from_triangles(
+        vertices, profiles=(Lambertian(), Isotropic()), profile_index=[0] * 48 + [1]
+    )
+
+
+@pytest.mark.parametrize("chunk_size", [5, 7, 48])
+def test_the_matrix_does_not_depend_on_how_its_rows_are_blocked(chunk_size):
+    """Blocking is a memory strategy; it must not be a numerical one.
+
+    None of these sizes divides 49, so each build ends with a block that starts early and
+    recomputes rows its predecessor already wrote -- the one piece of index arithmetic the
+    blocked build has. Agreement is to a rounding of the O(1) row sums and not bit for bit: a
+    different block shape compiles to a differently fused program, and a pair of facets on one
+    wall, whose transfer is zero, comes back as dust of order 1e-17 that moves with it. A wrong
+    row, or a mask applied at the wrong index, is off by the size of a transfer factor.
+    """
+    surfaces = _box_with_a_lamp()
+    whole = build_transfer(surfaces, self_occlusion=NoOcclusion(), chunk_size=1000)
+    blocked = build_transfer(surfaces, self_occlusion=NoOcclusion(), chunk_size=chunk_size)
+    for name in ("geometric", "source_cosine", "separation"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(blocked, name)), np.asarray(getattr(whole, name)), rtol=0, atol=1e-15
+        )
+    matrix = np.asarray(blocked.geometric)
+    assert np.all(np.diag(matrix) == 0.0), "a facet transfers nothing to itself"
+    assert np.count_nonzero(matrix > 1e-6) > 0.5 * 48 * 47, "the walls do see one another"
+    assert np.all(matrix[-1] == 0.0) and np.all(matrix[:, -1] == 0.0), "nor does a point source"
+
+
+def test_no_block_handed_to_the_compiled_pass_exceeds_the_chunk(monkeypatch):
+    """What bounds the build's working set, pinned by the blocks it computes rather than by timing."""
+    from aquaflux.radiation import transfer
+
+    rows_seen = []
+    real = transfer._row_block
+
+    def watched(geometry, sample, weight, start, *, rows):
+        rows_seen.append((int(start), rows))
+        return real(geometry, sample, weight, start, rows=rows)
+
+    monkeypatch.setattr(transfer, "_row_block", watched)
+    build_transfer(_box_with_a_lamp(), self_occlusion=NoOcclusion(), chunk_size=7)
+    assert all(rows == 7 for _, rows in rows_seen), rows_seen
+    covered = set()
+    for start, rows in rows_seen:
+        covered.update(range(start, start + rows))
+    assert covered == set(range(49)), "every row is computed, and none beyond the matrix"
+
+
+@pytest.mark.parametrize("chunk_size", [7, 1000])
+def test_a_point_source_is_left_out_by_its_label_not_by_its_area(chunk_size):
+    """A facet labelled a point source takes no part in the transfer even when it has an area.
+
+    The kernel already returns nothing for a zero-area triangle, so a point source built the usual
+    way cannot show whether the label is honoured -- the mask could vanish and every fixture of
+    that kind would still pass. A traced lamp keeps its labels given explicitly, so a labelled
+    facet may well have an area. Put one late in the set so that, blocked by seven, it lies in a
+    block that does not start at zero.
+    """
+    labelled = 45
+    surfaces = Surfaces.from_triangles(
+        inward_box(2),
+        profiles=(Lambertian(), Isotropic()),
+        profile_index=[1 if i == labelled else 0 for i in range(48)],
+        point_sources=[labelled],
+    )
+    assert float(np.asarray(surfaces.area)[labelled]) > 0.0, "the fixture must have an area"
+    matrix = np.asarray(
+        build_transfer(surfaces, self_occlusion=NoOcclusion(), chunk_size=chunk_size).geometric
+    )
+    np.testing.assert_array_equal(matrix[labelled, :], 0.0)
+    np.testing.assert_array_equal(matrix[:, labelled], 0.0)
+    assert np.count_nonzero(matrix[labelled - 1] > 1e-6) > 10, "its neighbour still transfers"
+
+
 #: Walton's obstructed view factor: two directly opposed unit squares one unit apart, with a
 #: centred 0.5 x 0.5 square blocker parallel to them, three quarters of the way from the first
 #: to the second (Walton, NISTIR 6925, the "Shapiro" test). Reproduced independently to
