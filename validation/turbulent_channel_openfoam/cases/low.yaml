@@ -1,0 +1,33 @@
+# Turbulent channel matched to OpenFOAM's `low` run (of_case/run_of.sh: nu = 2e-5, Ubar = 0.1335).
+#
+# The same bulk Reynolds number Re_b = Ubar H / nu_of, solved normalized to U_bulk = 1, so
+# nu = nu_of / Ubar. The discretization matches OpenFOAM's term by term: momentum `linearUpwind`
+# (second-order upwind, unlimited), k/omega `upwind`, uncorrected Green-Gauss gradients.
+
+mesh:
+  kind: StructuredGrid
+  cells: [4, 96]
+  lengths: [1.0, 2.0]
+  periodic: [x]
+  grading:
+    y: {kind: GeometricGrading, growth: 1.09}
+
+fluid:
+  density: 1.0
+  kinematic_viscosity: 0.000149812734082397
+
+physics:
+  kind: RANS
+  advection: {kind: FirstOrderUpwind}
+
+boundaries:
+  bottom: {kind: Wall, k: zero}
+  top: {kind: Wall, k: zero}
+
+numerics:
+  momentum_advection: {kind: LimitedUpwind}
+  gradient: {kind: CompactGreenGauss}
+
+drive: {kind: BulkVelocity, target: 1.0, direction: x, initial_force: 0.004}
+
+pressure_datum: {kind: PinnedPoint, point: [0.0, 0.0]}

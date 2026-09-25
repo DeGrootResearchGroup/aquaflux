@@ -15,34 +15,31 @@ locally: a genuine logarithmic layer shows a *flat plateau* in ``Xi``, and the p
 realized von Karman constant. This distinguishes a real log law from a profile that merely crosses
 the log line, and it is read without a fitting window (which the buffer and wake would contaminate).
 
+Each Reynolds number is a case file under ``cases/`` -- mesh, fluid, physics, walls, numerics, the
+held bulk velocity and the pressure datum -- which this script reads, solves and reduces.
+
 Run from the repo root:  ``python3 validation/turbulent_channel/compare.py``
 """
 
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
+
+# Running a script puts the script's directory on `sys.path`, not the working directory, so without
+# this the documented invocation from the repository root cannot import `aquaflux` from a plain
+# checkout -- and the case launcher (`validation/run_case.sh`) cannot run it at all.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import aquaflux  # noqa: F401  (enables x64)
 import lineax as lx
 import numpy as np
-from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
-from aquaflux.discretization import FirstOrderUpwind
-from aquaflux.flow import (
-    MassFlow,
-    MomentumContinuity,
-    NoSlipWall,
-    PinnedPoint,
-    bulk_velocity_flow_solve,
-)
-from aquaflux.mesh import graded_nodes, structured_grid_2d
-from aquaflux.properties import Constant, PropertyModel
-from aquaflux.schemes import CompactGreenGauss
+from aquaflux.case import read_case
+from aquaflux.flow import bulk_velocity_flow_solve
 from aquaflux.solve import Convergence, RootSolveSettings
 from aquaflux.turbulence import (
     ScalarAir,
-    SSTModel,
-    SSTTurbulence,
     bulk_velocity,
     scalar_pseudo_transient_solve,
     solve_segregated,
@@ -52,14 +49,14 @@ from aquaflux.turbulence import (
 HERE = Path(__file__).resolve().parent
 FIGS = HERE / "figures"
 
-RHO, U_B, H = 1.0, 1.0, 2.0  # full height H = 2 -> half-height h = 1; Re_tau based on h
 KAPPA, B_LOG = 0.41, 5.2
 
-# (Re_b, ny, growth, beta0, sweeps) per case; Re_b = U_b H / nu sets nu, the constraint solves for beta.
+# One case file per Reynolds number, with the segregated solve's outer-sweep budget for it. The
+# budget is a solver setting and not the case's, so it is not in the file.
 CASES = [
-    dict(Re_b=20000, ny=96, growth=1.09, beta0=0.004, sweeps=100),
-    dict(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=110),
-    dict(Re_b=240000, ny=224, growth=1.052, beta0=0.00175, sweeps=150),
+    dict(case="cases/re20000.yaml", sweeps=100),
+    dict(case="cases/re45000.yaml", sweeps=110),
+    dict(case="cases/re240000.yaml", sweeps=150),
 ]
 
 
@@ -74,41 +71,22 @@ def reichardt(yplus: np.ndarray) -> np.ndarray:
     )
 
 
-def dean_u_tau(Re_b: float) -> float:
+def dean_u_tau(Re_b: float, u_b: float) -> float:
     """Dean's correlation for a channel: c_f = 0.073 Re_b^-0.25, u_tau = U_b sqrt(c_f/2)."""
-    return U_B * np.sqrt(0.073 * Re_b**-0.25 / 2.0)
+    return u_b * np.sqrt(0.073 * Re_b**-0.25 / 2.0)
 
 
-def solve_case(Re_b, ny, growth, beta0, sweeps):
-    nu = U_B * H / Re_b
-    y = graded_nodes(ny, H, growth)
-    mesh = structured_grid_2d(
-        4, ny, lx=1.0, ly=H, periodic=("x",), named_boundaries=True, y_nodes=y
-    )
-    geom = mesh.geometry()
-    model = SSTModel()
-    properties = PropertyModel({"viscosity": Constant(RHO * nu), "density": Constant(RHO)})
-    momentum = MomentumContinuity.build(
-        mesh,
-        geom,
-        properties,
-        BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
-        gradient_scheme=CompactGreenGauss(),
-        advection_scheme=FirstOrderUpwind(),
-        pressure_datum=PinnedPoint((0.0, 0.0)),
-        drive=MassFlow(target=U_B, force=beta0),
-    )
-    turbulence = SSTTurbulence.build(
-        model,
-        mesh,
-        geom,
-        FirstOrderUpwind(),
-        properties,
-        gradient_scheme=CompactGreenGauss(),
-        wall_patches=["bottom", "top"],
-        k_boundary=BoundaryConditions({"bottom": Dirichlet(0.0), "top": Dirichlet(0.0)}),
-        omega_boundary=BoundaryConditions({"bottom": ZeroGradient(), "top": ZeroGradient()}),
-    )
+def solve_case(case, sweeps):
+    case_file = read_case(HERE / case)
+    spec = case_file.spec
+    coupled = case_file.check().build()
+    momentum, turbulence = coupled.momentum, coupled.turbulence
+    mesh, geom = momentum.mesh, momentum.geometry
+    # The bulk velocity, the channel height (full height H, half-height h = H / 2, which Re_tau is
+    # based on) and the viscosity are the case file's; Re_b = U_b H / nu follows from them.
+    u_b, H = spec.drive.target, spec.mesh.lengths[1]
+    nu = spec.fluid.kinematic_viscosity
+    Re_b = u_b * H / nu
     direct = lx.AutoLinearSolver(
         well_posed=True
     )  # tiny (nx=4) coupled system: a direct solve is exact
@@ -150,7 +128,8 @@ def solve_case(Re_b, ny, growth, beta0, sweeps):
 
     velocity, _ = momentum.unpack(flow)
     c = np.asarray(geom.cell.centroid)
-    idx = np.arange(0, mesh.n_cells, 4)  # one wall-normal column (x-homogeneous)
+    # One wall-normal column (x-homogeneous): cells are numbered x fastest, so every nx-th cell.
+    idx = np.arange(0, mesh.n_cells, spec.mesh.cells[0])
     yc, u = c[idx, 1], np.asarray(velocity[:, 0])[idx]
     half = H / 2.0
     u_tau = float(np.sqrt(nu * u[0] / yc[0]))  # near-wall cell in the sublayer -> molecular stress
@@ -167,7 +146,7 @@ def solve_case(Re_b, ny, growth, beta0, sweeps):
         u_bulk=float(bulk_velocity(momentum, flow, 0)),
         u_tau=u_tau,
         Re_tau=float(Re_tau),
-        u_tau_dean=dean_u_tau(Re_b),
+        u_tau_dean=dean_u_tau(Re_b, u_b),
         yplus=yplus,
         uplus=uplus,
         xi=xi,
@@ -293,7 +272,7 @@ def _report(results, failed=()):
     for case, exc in failed:
         lines += [
             "",
-            f"- **Re_b = {case['Re_b']} (ny = {case['ny']})**: the segregated solve did not converge "
+            f"- **{case['case']}**: the segregated solve did not converge "
             f"(`{exc}`) and is omitted above. Tracked in issue #99.",
         ]
     (HERE / "report.md").write_text("\n".join(lines) + "\n")
@@ -303,7 +282,7 @@ def _report(results, failed=()):
 def main():
     results, failed = [], []
     for case in CASES:
-        print(f"solving Re_b={case['Re_b']} (ny={case['ny']}) ...", flush=True)
+        print(f"solving {case['case']} ...", flush=True)
         # A case whose segregated solve does not converge is recorded and skipped rather than
         # aborting: one failure should not discard the cases that did converge, nor leave the
         # tracked report and figures describing an earlier run.

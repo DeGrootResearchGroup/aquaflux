@@ -1,0 +1,37 @@
+# Fully-developed turbulent channel at Re_b = U_b H / nu = 240000, against the log law.
+#
+# Streamwise-periodic, wall-resolved (the first cell's y+ < 1), k-omega SST, the bulk velocity held
+# at U_b = 1 by a solved body force. Full height H = 2 (half-height h = 1, which Re_tau is based on).
+# nu = U_b H / Re_b.
+
+mesh:
+  kind: StructuredGrid
+  cells: [4, 224]
+  lengths: [1.0, 2.0]
+  periodic: [x]
+  # Wall-normal cells growing by 1.052 from each wall toward the centre.
+  grading:
+    y: {kind: GeometricGrading, growth: 1.052}
+
+fluid:
+  density: 1.0
+  kinematic_viscosity: 8.333333333333334e-06
+
+physics:
+  kind: RANS
+  advection: {kind: FirstOrderUpwind}
+
+boundaries:
+  bottom: {kind: Wall, k: zero}
+  top: {kind: Wall, k: zero}
+
+numerics:
+  momentum_advection: {kind: FirstOrderUpwind}
+  gradient: {kind: CompactGreenGauss}
+
+# The body force is solved for so that <U_x> = 1 holds exactly at every step; initial_force is where
+# that solve starts.
+drive: {kind: BulkVelocity, target: 1.0, direction: x, initial_force: 0.00175}
+
+# A periodic channel has no outlet to set the pressure level, so it is fixed at a point.
+pressure_datum: {kind: PinnedPoint, point: [0.0, 0.0]}
