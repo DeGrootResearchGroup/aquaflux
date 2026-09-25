@@ -177,6 +177,40 @@ def test_the_optical_depth_is_differentiable_in_the_absorbance_field():
     assert float(jacobian[cell]) == pytest.approx(finite_difference, rel=1e-6)
 
 
+def _walk_working_memory(n: int, pairs: int = 512):
+    """Compiled working bytes per segment of the walk on an ``n``-cube grid, forward and reverse."""
+    rng = np.random.default_rng(4)
+    origin = jnp.asarray(rng.uniform(0.0, 1.0, (pairs, 3)))
+    target = jnp.asarray(rng.uniform(0.0, 1.0, (pairs, 3)))
+    coefficient = jnp.asarray(rng.uniform(0.5, 4.0, (n, n, n)))
+
+    def depth(values):
+        return VoxelAbsorption(values, 0.0, 1.0 / n).optical_depth(origin, target)
+
+    def per_pair(function):
+        compiled = jax.jit(function).lower(coefficient).compile()
+        return compiled.memory_analysis().temp_size_in_bytes / pairs
+
+    return per_pair(depth), per_pair(jax.grad(lambda values: jnp.sum(depth(values))))
+
+
+def test_the_walk_s_working_memory_does_not_grow_with_the_number_of_cells_it_crosses():
+    """Forward, a segment's working set is its carry, whatever the grid; reverse, a carry a step.
+
+    The walk runs a fixed ``nx + ny + nz + 1`` steps. Collected as a stacked array of pieces and
+    summed afterwards, its forward memory grew by eight bytes a segment per step -- about 1 kB a
+    segment on a 32-cube grid, 4 GB in one of the gather's 4M-pair chunks; carried as a running
+    total it is flat. Under a gradient every step must keep something for the way back, so that
+    grows with the steps regardless; kept as the carry alone it is tens of bytes a step, against
+    the ~500 each step cost when every lookup's indices and weights were kept instead.
+    """
+    coarse_forward, _ = _walk_working_memory(4)
+    fine_forward, fine_reverse = _walk_working_memory(32)
+    assert fine_forward <= 1.1 * coarse_forward, (coarse_forward, fine_forward)
+    steps = 3 * 32 + 1
+    assert fine_reverse / steps < 100.0, fine_reverse / steps
+
+
 def test_the_optical_depth_is_differentiable_in_the_segment_endpoints():
     """Moving a source changes how much water its light crosses, smoothly."""
     field = graded_field()

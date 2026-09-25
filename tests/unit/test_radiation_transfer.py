@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import warnings
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
+from aquaflux.radiation.absorption import UniformAbsorption, VoxelAbsorption
 from aquaflux.radiation.profiles import Isotropic, Lambertian
 from aquaflux.radiation.self_occlusion import (
     NoOcclusion,
@@ -365,3 +368,64 @@ def test_declaring_every_sheet_silences_the_warning():
 def test_a_misspelt_sheet_is_refused_rather_than_left_one_sided():
     with pytest.raises(ValueError, match=r"two_sided names no body.*\['blokcer'\]"):
         _obstructed_squares(2, SilhouetteOcclusion(two_sided=("plates", "blokcer")))
+
+
+# ---------------------------------------------------------------------------------------
+# A graded medium between facets
+# ---------------------------------------------------------------------------------------
+
+
+def _graded_box(divisions: int = 3):
+    """A closed unit box, its frozen transfer, and a medium graded across it cell by cell."""
+    surfaces = box(divisions)
+    transfer = build_transfer(surfaces, self_occlusion=NoOcclusion())
+    rng = np.random.default_rng(3)
+    medium = VoxelAbsorption(rng.uniform(0.5, 2.0, (4, 3, 5)), 0.0, 1.0 / np.array([4, 3, 5]))
+    return surfaces, transfer, medium
+
+
+def test_a_graded_medium_attenuates_each_pair_by_its_own_walk_however_the_pairs_are_cut():
+    """Every pair walked once, lined up with its row, whether the walk is one pass or many.
+
+    The reference walks all the pairs at once and multiplies the frozen geometry by the result,
+    which is what the assemble is for. A pass of 7 receiving facets does not divide the box's 54,
+    so a lost or doubled remainder, or a pass whose rows land in the wrong place, shows as a
+    wrong row; the medium is graded, so rows are not interchangeable.
+    """
+    surfaces, transfer, medium = _graded_box()
+    centroid = jnp.asarray(surfaces.centroid)
+    depth = medium.optical_depth(centroid[None, :, :], centroid[:, None, :])
+    expected = transfer.geometric * jnp.exp(-depth)
+    for pair_limit in (7 * surfaces.n_facets, surfaces.n_facets**2):
+        reflected, _ = transfer.assemble(surfaces, medium, pair_limit=pair_limit)
+        np.testing.assert_allclose(reflected, expected, rtol=1e-13, atol=1e-16)
+
+
+def test_a_uniform_grid_walked_between_facets_is_the_closed_form():
+    """The walk against the frozen separations, which never walk: a second, independent path."""
+    surfaces, transfer, _ = _graded_box()
+    walked = VoxelAbsorption(np.full((4, 3, 5), 1.7), 0.0, 1.0 / np.array([4, 3, 5]))
+    reflected, _ = transfer.assemble(surfaces, walked, pair_limit=7 * surfaces.n_facets)
+    closed_form, _ = transfer.assemble(surfaces, UniformAbsorption(1.7))
+    np.testing.assert_allclose(reflected, closed_form, rtol=1e-12, atol=1e-16)
+
+
+def test_the_walk_between_facets_is_bounded_by_the_pair_limit_not_the_facet_count():
+    """Walked whole, the working set is several arrays of every facet pair; in passes, of a pass.
+
+    Read from the compiled program's working memory, which is exact. The two builds differ only
+    in the limit, so the difference is the pass and nothing else.
+    """
+    surfaces, transfer, medium = _graded_box(4)
+
+    def working(pair_limit):
+        def assembled(coefficient):
+            field = VoxelAbsorption(coefficient, medium.origin, medium.spacing)
+            return transfer.assemble(surfaces, field, pair_limit=pair_limit)[0]
+
+        compiled = jax.jit(assembled).lower(medium.coefficient).compile()
+        return compiled.memory_analysis().temp_size_in_bytes
+
+    whole = working(surfaces.n_facets**2)
+    in_passes = working(8 * surfaces.n_facets)
+    assert in_passes < 0.2 * whole, (in_passes, whole)

@@ -82,6 +82,7 @@ from aquaflux.radiation.self_occlusion import SelfOcclusion
 from aquaflux.radiation.solid_angle import projected_solid_angle
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.visibility import Visibility, build_visibility
+from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, in_passes
 from aquaflux.vectors import dot
 
 #: Points per receiving facet in the default transfer build. Six is where the measured
@@ -135,7 +136,9 @@ class TransferMatrix(eqx.Module):
         """Number of facets."""
         return int(self.geometric.shape[0])
 
-    def assemble(self, surfaces, absorption=None, transmittance=None):
+    def assemble(
+        self, surfaces, absorption=None, transmittance=None, *, pair_limit=DEFAULT_PAIR_LIMIT
+    ):
         """The reflected and emitted transfer matrices, for one set of optical values.
 
         Both are elementwise products against the frozen arrays, which is what keeps a
@@ -153,6 +156,11 @@ class TransferMatrix(eqx.Module):
             separations in closed form; anything else re-walks every pair.
         transmittance : array_like, shape ``(n_occluders,)``, optional
             What each analytic body lets through. Defaults to opaque.
+        pair_limit : int, optional
+            Facet pairs one pass of a non-uniform medium's walk may form. The walk is the only
+            part of this that visits geometry again, and formed whole it is several of its own
+            working arrays per pair across all ``n^2`` pairs at once; walked a block of receiving
+            facets at a time, it is that for one block. Unused for a uniform medium.
 
         Returns
         -------
@@ -171,11 +179,14 @@ class TransferMatrix(eqx.Module):
             # with respect to the coefficient is exact.
             through = jnp.exp(-absorption.coefficient * self.separation)
         else:
-            through = jnp.exp(
-                absorption.optical_depth(
-                    surfaces.centroid[None, :, :], surfaces.centroid[:, None, :]
-                )
-                * -1.0
+            centroid = jnp.asarray(surfaces.centroid)
+            through = in_passes(
+                ((centroid, 0),),
+                pair_limit,
+                self.n_facets,
+                lambda receiving: jnp.exp(
+                    -absorption.optical_depth(centroid[None, :, :], receiving[:, None, :])
+                ),
             )
         common = self.geometric * surviving * through
 

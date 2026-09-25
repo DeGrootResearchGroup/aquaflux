@@ -127,7 +127,8 @@ class RadiationSettings(eqx.Module):
         Receiving facets per pass of the ``n^2`` transfer build, bounding its peak memory.
     gather_pair_limit : int or None
         Receiver-by-facet pairs per pass of the volume gather, bounding its peak memory whatever
-        the facet count. Counted in pairs rather than receivers because a pass's size is their
+        the facet count. It bounds the other per-call pass over pairs too: under a non-uniform
+        medium, the walk between every pair of facets, whose receivers are the facets. Counted in pairs rather than receivers because a pass's size is their
         product, and a receiver count would leave it to how finely the emitter is divided. A
         separate setting from the one above because the two loops are over different things —
         facets against facets, and receivers against facets.
@@ -427,7 +428,9 @@ def _solve(model, surfaces, absorption, transmittance, external_irradiance, solv
     _check_geometry(model, surfaces)
     emission = jnp.asarray(surfaces.emission, dtype=float)
     reflectance = jnp.asarray(surfaces.reflectance, dtype=float)
-    reflected, emitted = model.transfer.assemble(surfaces, absorption, transmittance)
+    reflected, emitted = model.transfer.assemble(
+        surfaces, absorption, transmittance, **model.settings.gather_options()
+    )
 
     # The two matrices are one array whenever every areal source is Lambertian, and then their
     # difference is an n^2 array of zeros: skip forming it rather than multiply by it.
