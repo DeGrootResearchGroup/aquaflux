@@ -27,6 +27,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `absorption.py` — `UniformAbsorption`, `VoxelAbsorption` | **BUILT** |
 | the solid bodies (`Body`, primitives, CSG, `Outside`) — **moved to `aquaflux/solids/`**, see `.claude/rules/solids.md` | **BUILT** |
 | `visibility.py` — the frozen shadow mask | **BUILT** |
+| `culling.py` — how the analytic-body layer is decided: `EveryPair` (default) or `ShaftCulling` (tiles certified clear, #554) | **BUILT** (prototype: "clear" certificates, analytic bodies only) |
 | `triangles.py` — watertight ray-triangle intersection | **BUILT** |
 | `self_occlusion.py` — the `SelfOcclusion` strategies: ray cast, silhouette clip, none | **BUILT** |
 | `silhouette.py` — the exact covered fraction of a source, and the conservative cone cull | **BUILT** |
@@ -635,9 +636,10 @@ receivers are, and it is kept as measured rather than re-quoted from a single co
   one.
 - **81.1% of pairs lie in one convex region** (81.0% chamber, 0.13% riser, 0% inlet — the lamp is
   in the chamber, so no facet is in the inlet). The 92.8% once recorded here was the truncated
-  population's. ⚠️ **The test does not skip those pairs**: it is
+  population's. ⚠️ **The default test (`EveryPair`) does not skip those pairs**: it is
   one branch-free expression, so every pair pays the same handful of comparisons. What convexity
-  buys is that the handful is all there is.
+  buys is that the handful is all there is. **`ShaftCulling` (#554, below) is what skips them** — a
+  whole tile at a time, from `Outside.clearance`.
 
 ⚠️ **THAT SHARE IS A PROPERTY OF WHERE THE RECEIVERS ARE** — the cell-centre population the field
 is computed on, not a volume-uniform sample of the geometry, because the snapped mesh refines near
@@ -1843,6 +1845,75 @@ and, in `test_radiation_grid.py`, `test_calls_with_different_ray_counts_share_th
 Culling facet receivers too fails an existing transfer test. **Dismissed**: dropping the point-source
 label from the cull is inert — a point source's zero normal already gives it zero heights — and the
 label stays because a source's kind is read from its label, never inferred.
+
+## SHAFT CULLING: BUILT as `ShaftCulling` — tiles certified clear, off by default (#554, 2026-09-25)
+
+`culling.py` holds the analytic-body layer's strategy family, `BodyCulling.blocked(bodies, sources,
+near, receivers, pair_limit)`: **`EveryPair`** (the default, and the reference — the old
+`visibility._blocked_by` loop, moved here with `_compiled_blocks`, now `_body_blocks` per body) and
+**`ShaftCulling(receiver_block=32, source_cluster=32)`**. Selected by `build_visibility(...,
+body_culling=)` or `RadiationSettings(body_culling=)`, which feeds **both** masks a model builds (and
+survives `receiver_occlusion` overriding the self-occlusion half). Streamed masks get it through the
+same options dict, but then the grouping is per streamed chunk, over whatever order the receivers
+arrive in.
+
+**How.** Receivers and facet centroids are each ordered along a Morton curve (`spatial_order`, 10 bits
+an axis) and cut into fixed-size groups (`_Groups`, the last padded by repeating its own last member,
+which changes neither a max-summary nor a written answer). Per body, each group is summarized by the
+column-wise max of `body.clearance` (the witness contract is in `.claude/rules/solids.md`); a tile is
+**certified clear** where any column of `max(receiver summary, source summary)` is negative. Undecided
+tiles are gathered into batches of one shape (`pair_limit // (block * cluster)` tiles, padded to a power
+of two with `padded_length`) and answered by the same compiled `body.blocks` the reference uses, so the
+two agree **bit for bit** on every pair either tests. Host orchestration, compiled leaf — the
+`TriangleGrid` lesson. A body with no witnesses (anything answered from triangles, `traceable=False`)
+is tested everywhere.
+
+**Scope, as agreed: "clear" certificates only, analytic bodies only.** Not built, and tracked in #554:
+**B** a `TriangleGrid` certificate (shaft bounding box over empty voxels only — where the 88 h lives,
+and blocked on #510 for receivers); **C** "fully hidden" certificates, which would also let the gather
+skip dark tiles; **D** distance-based level of detail for the gather, which changes answers and needs
+its own error measurement. ⚠️ **`spatial_order` is generic point ordering living in a physics package**
+(Principle 3.6) — kept private-ish to `culling.py` for the prototype; it should move to a neutral leaf
+when a second consumer appears.
+
+**MEASURED** (`validation/sozzi_radiation/body_culling.py`, all arms in one process on one ray set,
+warm-up then two alternating passes, fastest kept): `Outside(chamber, inlet, riser)` at the
+tutorial's dimensions, the **analytic 32 x 128 lamp (8,704 facets)** and **24,000 receivers sampled
+uniformly inside the three cylinders** — ⚠️ **the case mesh was absent, so this is NOT the cell-centre
+population** the 81.1% above is measured on (deepest-inside region 22,034 chamber / 1,013 inlet / 953
+riser); 208.9M pairs, 3.90% blocked; offset scale 1e-6; jax 0.10.2, CPU, x64, **Linux x86_64, 4 cores**
+(a cloud container, not the usual macOS arm64 machine), run directly with output redirected (not
+through `run_case.sh`, which needs `vm_stat`), 2026-09-25, uncommitted #554 tree on `0c3a78c`:
+
+| arm | certified | fastest s | spread | vs every pair | mask |
+|---|---|---|---|---|---|
+| `EveryPair` | — | 42.63 | 1.01x | 1.00x | reference |
+| 16 x 16 | 91.0% | 5.22 | 1.06x | 8.17x | identical |
+| **32 x 32** (default) | **90.3%** | **4.58** | 1.01x | **9.30x** | identical |
+| 64 x 64 | 89.1% | 5.49 | 1.08x | 7.77x | identical |
+| 32 x 128 | 90.3% | 4.80 | 1.02x | 8.88x | identical |
+
+- **The speed-up is close to its ceiling**: with 9.7% of pairs left to test, pure savings would be
+  ~10.3x; 9.3x means the grouping, summaries and scatter cost ~10% of what remains. Group size barely
+  matters between 16 and 128 — the certified share moves 89-91% — so the default was not tuned further.
+- ⚠️ **Expect less on the mesh's cell centres**: the snapped mesh refines towards the walls and the
+  lamp, which is where the uncertifiable pairs are, and the one-convex-region share there is 81.1%
+  against this population's ~91%. At 81% certified the ceiling is ~5x. **Not measured** — the case
+  mesh was not in this environment; re-run the harness where `work/case` exists before quoting a
+  mesh-scale figure.
+- The `EveryPair` rate here (4.9M pairs/s) is ~4x below the 20.7M recorded for the same test on the
+  11-core machine; it is the within-run ratio that is the finding, not either rate.
+
+**Tests** (`tests/unit/test_radiation_culling.py`, each mutation-checked): bit equality with
+`EveryPair` at group sizes 32x32, 7x5, 1x1, 64x3 on a scene where every one of four body kinds
+(`Outside` chamber+pipe, `Box` baffle, `Sphere`, `Difference` ring) blocks some pairs and each has
+certified tiles; certified ⊆ clear; an all-open chamber certified exactly `n_r x n_f` with padded
+groups (a padding-counting `certified_pairs` goes red); one-tile batches with padding; a witness-less
+eager body; the settings plumbing; Morton z-order on a cube's corners; locality; group padding.
+**Mutation pass (9, 8 red):** tile min for max, group min for max, a transposed write-back, padding
+counted, identity order, swapped bit interleave, testing the certified tiles instead of the rest,
+padding with the first member. **Dismissed:** one extra tile per batch (`per_batch + 1`) — it changes
+only how many tiles one compiled call holds, i.e. memory, never an answer.
 
 ## GRID ACCELERATION: BUILT as `TriangleGrid` — a HOST walk, off by default
 

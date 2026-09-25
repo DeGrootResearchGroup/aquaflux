@@ -81,6 +81,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from aquaflux.radiation.absorption import Absorption
+from aquaflux.radiation.culling import BodyCulling
 from aquaflux.radiation.gather import direct_irradiance
 from aquaflux.radiation.profiles import Lambertian
 from aquaflux.radiation.quadrature import TriangleQuadrature
@@ -155,6 +156,10 @@ class RadiationSettings(eqx.Module):
         the silhouette clip, applies to both masks alike. Set this to choose differently -- the
         ray test for the volume beside the clip between facets, say, where a mesh's cells are
         too many to clip one by one.
+    body_culling : BodyCulling or None
+        How the analytic bodies' layer of both masks is worked out. Unset, every body is tested
+        against every pair. Pass :class:`~aquaflux.radiation.culling.ShaftCulling` to decide
+        whole tiles of pairs a body can prove it misses -- the same masks, for fewer tests.
     """
 
     receiver_quadrature: int | TriangleQuadrature | None = eqx.field(static=True, default=None)
@@ -163,6 +168,7 @@ class RadiationSettings(eqx.Module):
     stream_receiver_mask: bool | None = eqx.field(static=True, default=None)
     self_occlusion: SelfOcclusion | None = eqx.field(static=True, default=None)
     receiver_occlusion: SelfOcclusion | None = eqx.field(static=True, default=None)
+    body_culling: BodyCulling | None = eqx.field(static=True, default=None)
 
     def _passed(self, **named):
         """Drop the unset entries, so each reaches its own default rather than a copy of it."""
@@ -170,7 +176,7 @@ class RadiationSettings(eqx.Module):
 
     def visibility_options(self) -> dict:
         """The subset the facet-to-facet shadow mask reads."""
-        return self._passed(self_occlusion=self.self_occlusion)
+        return self._passed(self_occlusion=self.self_occlusion, body_culling=self.body_culling)
 
     def receiver_visibility_options(self) -> dict:
         """The subset the volume-receiver shadow mask reads.
@@ -180,7 +186,10 @@ class RadiationSettings(eqx.Module):
         surface shadows itself -- which is not visible in either mask on its own.
         """
         if self.receiver_occlusion is not None:
-            return {"self_occlusion": self.receiver_occlusion}
+            return {
+                **self.visibility_options(),
+                "self_occlusion": self.receiver_occlusion,
+            }
         return self.visibility_options()
 
     def transfer_options(self) -> dict:

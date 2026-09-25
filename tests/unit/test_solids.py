@@ -16,6 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.solids import (
+    Body,
     Box,
     Cone,
     Cylinder,
@@ -454,3 +455,218 @@ def test_a_body_survives_being_traced_with_its_geometry_as_arguments():
     )
     assert eager.any() and not eager.all(), "the fixture must exercise both answers"
     assert np.array_equal(eager, compiled)
+
+
+# ---------------------------------------------------------------------------------------
+# Clearance: a body vouching for a whole convex hull at once
+# ---------------------------------------------------------------------------------------
+
+
+def _directions(count: int, seed: int = 0) -> np.ndarray:
+    """Random directions of random lengths, so a support that ignores the length is caught."""
+    rng = np.random.default_rng(seed)
+    return rng.normal(size=(count, 3)) * rng.uniform(0.2, 3.0, size=(count, 1))
+
+
+def _inside_samples(body, count: int = 200_000, seed: int = 1) -> np.ndarray:
+    """Points of ``body`` found by rejection from a box around every fixture."""
+    rng = np.random.default_rng(seed)
+    trial = rng.uniform(-2.0, 2.0, size=(count, 3))
+    return trial[np.asarray(body.contains(jnp.asarray(trial)))]
+
+
+@pytest.mark.parametrize("name", [name for name in _bodies() if name != "half space"])
+def test_the_support_is_never_exceeded_by_any_point_of_the_body(name):
+    """An upper bound, for primitives and compositions alike: no inside point reaches further.
+
+    Sampling the inside is independent of the support formula, so a formula that under-reaches
+    along any direction -- a union taking the nearer member, a box read along the wrong edges --
+    shows here as a sampled point beyond it.
+    """
+    body = _bodies()[name]
+    inside = _inside_samples(body)
+    assert len(inside) > 1000
+    directions = _directions(64)
+    support = np.asarray(body.support(jnp.asarray(directions)))
+    reached = (inside @ directions.T).max(axis=0)
+    assert np.all(reached <= support + 1e-12)
+
+
+def _rim(centre, axis, radius, count=20_000) -> np.ndarray:
+    """Dense points on the circle of a disc."""
+    axis = np.asarray(axis, dtype=float) / np.linalg.norm(axis)
+    first = np.cross(axis, [1.0, 0.0, 0.0] if abs(axis[0]) < 0.9 else [0.0, 1.0, 0.0])
+    first /= np.linalg.norm(first)
+    second = np.cross(axis, first)
+    angle = np.linspace(0.0, 2.0 * np.pi, count, endpoint=False)
+    return (
+        np.asarray(centre)
+        + radius * np.cos(angle)[:, None] * first
+        + radius * np.sin(angle)[:, None] * second
+    )
+
+
+def test_a_round_body_s_support_is_reached_on_the_rims_of_its_two_ends():
+    """Exact, not merely a bound: the furthest point of a cylinder or a frustum is on an end rim.
+
+    Both are the convex hull of their two end discs, so dense rim points reach the support to
+    within the sampling's angular resolution. A formula that bounded loosely -- the radius added
+    at full length whatever the direction, say -- would pass the bound test above and fail here.
+    """
+    directions = _directions(64, seed=3)
+    cylinder = Cylinder([0.1, 0.0, -0.2], [0.3, 1.0, 0.2], 0.5, 0.9)
+    frustum = Cone([0.1, 0.0, 0.0], [0.0, 0.3, 1.0], 0.5, 0.6, 0.2)
+    for body, rims in (
+        (cylinder, [(end, 0.5) for end in (-0.9, 0.9)]),
+        (frustum, [(-0.5, 0.6), (0.5, 0.2)]),
+    ):
+        axis = np.asarray(body.axis)
+        points = np.concatenate(
+            [_rim(np.asarray(body.centre) + along * axis, axis, r) for along, r in rims]
+        )
+        support = np.asarray(body.support(jnp.asarray(directions)))
+        reached = (points @ directions.T).max(axis=0)
+        np.testing.assert_allclose(reached, support, rtol=0, atol=1e-6)
+    sphere = Sphere([0.3, -0.1, 0.2], 0.7)
+    surface = np.asarray(sphere.centre) + 0.7 * _directions(200_000, seed=5) / np.linalg.norm(
+        _directions(200_000, seed=5), axis=1, keepdims=True
+    )
+    length = np.linalg.norm(directions, axis=1)
+    np.testing.assert_allclose(
+        (surface @ directions.T).max(axis=0) / length,
+        np.asarray(sphere.support(jnp.asarray(directions))) / length,
+        rtol=0,
+        atol=1e-3,
+    )
+
+
+def test_a_parallelepiped_s_support_is_its_furthest_corner():
+    """The eight corners solved for directly, on a box whose axes are not perpendicular.
+
+    A rectangular box has its edges along its own axes, so reading the support along the axes
+    rather than along the edges -- the rows of ``axes`` rather than the columns of its inverse --
+    is right there and wrong here; only a skewed box tells the two apart.
+    """
+    axes = np.array([[1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 0.3, 1.0]])
+    box = Box([0.2, -0.1, 0.4], [0.3, 0.2, 0.1], axes=axes)
+    unit_axes = np.asarray(box.axes)
+    corners = np.array(
+        [
+            np.asarray(box.centre)
+            + np.linalg.solve(unit_axes, (2 * np.array(signs) - 1) * np.asarray(box.half_sizes))
+            for signs in np.ndindex(2, 2, 2)
+        ]
+    )
+    directions = _directions(64, seed=4)
+    np.testing.assert_allclose(
+        np.asarray(box.support(jnp.asarray(directions))),
+        (corners @ directions.T).max(axis=0),
+        rtol=0,
+        atol=1e-12,
+    )
+
+
+def _certified(body, cloud) -> bool:
+    """Whether ``body`` vouches for the hull of ``cloud``: some witness negative at every point."""
+    witnesses = np.asarray(body.clearance(jnp.asarray(cloud, dtype=float)))
+    return bool(witnesses.shape[-1]) and bool(np.any(witnesses.max(axis=0) < 0.0))
+
+
+@pytest.mark.parametrize("name", list(_bodies()))
+def test_a_certified_hull_holds_no_point_of_the_body(name):
+    """The guarantee itself, swept over random clouds: a certified hull never touches the body.
+
+    Each cloud is a few points around a random centre; where the body certifies it, points drawn
+    throughout its hull -- random convex combinations, not only the cloud itself, since a hull
+    can pass through a body its corners all miss -- are checked with ``contains``, and segments
+    between cloud points with ``blocks``. Both halves are required to be exercised: some clouds
+    certified, and some that touch the body, which a certificate must never cover.
+    """
+    body = _bodies()[name]
+    rng = np.random.default_rng(11)
+    n_clouds, size, n_hull = 400, 5, 400
+    centre = rng.uniform(-1.2, 1.2, (n_clouds, 1, 3))
+    clouds = centre + rng.normal(size=(n_clouds, size, 3)) * rng.uniform(
+        0.02, 0.8, (n_clouds, 1, 1)
+    )
+    hull = np.einsum("chk,ckd->chd", rng.dirichlet(np.ones(size), (n_clouds, n_hull)), clouds)
+    touching = np.asarray(body.contains(jnp.asarray(hull))).any(axis=1)
+    witnesses = np.asarray(body.clearance(jnp.asarray(clouds)))
+    certified = np.any(witnesses.max(axis=1) < 0.0, axis=-1)
+    assert not np.any(certified & touching)
+    start, finish = clouds[:, [0, 1, 2, 3]], clouds[:, [4, 3, 1, 0]]
+    crossed = np.asarray(
+        body.blocks(jnp.asarray(start), jnp.asarray(finish), jnp.zeros(start.shape[:-1]))
+    )
+    assert not np.any(crossed[certified])
+    assert certified.sum() > 20, certified.sum()
+    assert touching.sum() > 20, touching.sum()
+
+
+def test_a_union_is_cleared_only_when_every_one_of_its_bodies_is():
+    """A cloud clear of one lobe but inside the other is not certified.
+
+    A union reaches as far as its furthest member; bounding it by the nearer one would vouch for
+    the cloud here, which sits inside the second sphere.
+    """
+    union = Union(Sphere([-1.0, 0.0, 0.0], 0.3), Sphere([1.0, 0.0, 0.0], 0.3))
+    cloud = np.array([[1.0, 0.0, 0.0], [1.1, 0.05, 0.0], [0.95, 0.0, 0.05]])
+    assert Sphere([-1.0, 0.0, 0.0], 0.3).clearance(jnp.asarray(cloud)).max(axis=0).min() < 0.0
+    assert not _certified(union, cloud)
+    assert _certified(union, cloud + np.array([0.0, 0.0, 1.0]))
+
+
+def test_an_intersection_is_cleared_by_any_one_of_its_bodies():
+    """A cloud inside the sphere but beyond the box misses the intersection, and is certified."""
+    sphere, box = Sphere([0.0, 0.0, 0.0], 1.0), Box([2.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+    cloud = np.array([[-0.5, 0.0, 0.0], [-0.4, 0.2, 0.1], [-0.6, -0.1, 0.2]])
+    assert not _certified(sphere, cloud)
+    assert _certified(Intersection(sphere, box), cloud)
+
+
+def test_a_face_is_a_witness_but_a_cloud_touching_it_is_not_vouched_for():
+    """Beyond a half-space's plane is certified; on the plane is left to the exact test.
+
+    A half-space reaches infinitely along every fixed direction but its normal, so its face is
+    its only witness -- and the margin keeps a cloud that merely touches the solid from being
+    vouched for, where the segment test would call a touching segment blocked.
+    """
+    wall = HalfSpace([0.0, 0.0, 1.0], [0.0, 0.0, 1.0])
+    beyond = np.array([[0.0, 0.0, 1.001], [5.0, -3.0, 3.0], [-4.0, 7.0, 1.001]])
+    assert _certified(wall, beyond)
+    # On the plane, and a rounding beyond it: neither is a gap worth vouching for. The plane is
+    # off the origin so that its projection, and with it the rounding, is not zero.
+    on_plane = beyond * np.array([1.0, 1.0, 0.0]) + np.array([0.0, 0.0, 1.0])
+    assert not _certified(wall, on_plane)
+    assert not _certified(wall, on_plane + np.array([0.0, 0.0, 1e-15]))
+
+
+def test_an_outside_vouches_for_points_in_one_convex_region_and_not_across_two():
+    """The chamber-and-pipe fluid: points all in the chamber are certified; chamber plus pipe is not.
+
+    Every point of the second cloud is in the water, so a certificate asking only that -- each
+    point in *some* region -- would vouch for it; but the hull cuts through the chamber's roof
+    beside the pipe, and a segment between two of its points is blocked.
+    """
+    fluid = _reactor()
+    chamber = np.array([[0.1, 0.0, 0.0], [0.9, 0.05, -0.02], [0.5, -0.06, 0.07]])
+    assert _certified(fluid, chamber)
+    across = np.array([[0.8, 0.0, 0.0], [0.2, 0.0, 0.9], [0.5, 0.05, 0.0]])
+    assert not np.asarray(fluid.contains(jnp.asarray(across))).any()
+    assert blocks(fluid, across[0], across[1], 1e-9)
+    assert not _certified(fluid, across)
+
+
+def test_a_body_that_cannot_vouch_for_anything_has_no_witnesses():
+    """The default, for a body answered some other way: no columns, so nothing is ever certified."""
+
+    class Bespoke(Body):
+        def blocks(self, origin, target, min_distance):
+            return jnp.zeros(jnp.broadcast_shapes(origin.shape, target.shape)[:-1], dtype=bool)
+
+        def contains(self, position):
+            return jnp.zeros(position.shape[:-1], dtype=bool)
+
+    witnesses = Bespoke().clearance(jnp.zeros((7, 3)))
+    assert witnesses.shape == (7, 0)
+    assert not _certified(Bespoke(), np.zeros((3, 3)))

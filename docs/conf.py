@@ -129,7 +129,7 @@ SUBPACKAGE_GROUPS = {
         ("Surface-to-surface transfer", ["transfer", "quadrature"]),
         (
             "What stands in the way",
-            ["visibility", "receiver_shadows", "self_occlusion", "triangles", "work"],
+            ["visibility", "culling", "receiver_shadows", "self_occlusion", "triangles", "work"],
         ),
         ("Solid-angle kernels", ["solid_angle"]),
     ],
