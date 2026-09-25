@@ -1,9 +1,10 @@
 # bfs3d -- the 3D backward-facing step, described as a case file.
 #
-# This states the case compare.py builds in code, at that driver's defaults: the corrected
-# Green-Gauss gradient, k zero-gradient at the walls, the production limiter on. It does not describe
-# the march, and compare.py does not read it: that driver stays hand-assembled, which is what lets
-# validation/case_file_parity.py use it as the independent reference this file is checked against.
+# This states the case compare.py builds in code, at its defaults: the corrected Green-Gauss
+# gradient, k zero-gradient at the walls, the production limiter on. compare.py still assembles the
+# problem by hand -- which is what lets validation/case_file_parity.py use it as the independent
+# reference this file is checked against -- but it solves it with the solver below. The measurements
+# behind each march setting are recorded beside its override in compare.py.
 
 mesh:
   kind: OpenFOAMMesh
@@ -34,3 +35,39 @@ numerics:
     kind: LimitedUpwind
     limiter: {kind: VenkatakrishnanLimiter}
   gradient: {kind: CorrectedGreenGauss}
+
+solver:
+  kind: CoupledMarch
+  max_steps: 150
+  convergence: {kind: Convergence, rtol: 0.0, atol: 1.0e-05}
+  # The field split of the materialized Jacobian, [u, v, w, p] then [k, omega]. The probe's per-column
+  # reach is licensed by the split alone: a flow-first split never applies the flow's dependence on
+  # k and omega, so their shortened columns are never read.
+  preconditioner:
+    kind: MaterializedJacobian
+    inverse:
+      kind: FieldSplit
+      leading: {kind: SimpleSmoothed, sweeps: 2, pressure_sweeps: 2, omega: 1.0, aggressive_levels: 0,
+        avoid_singletons: true, block_splitting: true, strength_threshold: 0.25, max_levels: 5, max_coarse: 500,
+        frozen_coarsening: true}
+      trailing: {kind: JacobiSmoothed, max_coarse: 200, aggressive_levels: 0, equilibrate: false, avoid_singletons: false,
+        strength_threshold: 0.25, max_levels: 20, frozen_coarsening: true}
+    probe:
+      kind: JacobianProbeSpec
+      column_reach: [3, 3, 3, 3, 2, 2]
+    refit_beta_floor: 0.05
+  dual_time: {kind: DualTimeLoop, inner_steps: 5, inner_tol: 0.01, cycle_budget: 42, refresh_on_cycles: 3}
+  linear_solve: {kind: LinearSolveSettings, rtol: 0.3, restart: 15, max_restarts: 14}
+  step_control: {kind: CflResidualDualTimeControl, beta_start: 0.5, beta_min: 0.005}
+  retry:
+    kind: RetryPolicy
+    solver: {kind: GmresSolve, rtol: 0.0001, restart: 40}
+    abort_above_cycles: 10
+    on_alpha: 0.01
+  turbulence_damping: 5.0
+  # k kept above 1e-8 by shortening the step, rather than projected back after it.
+  positivity_floor: 1.0e-08
+  positivity_projection: false
+  # 12 stations here where the 2D case takes 16: a station change forces a preconditioner rebuild,
+  # which costs a third of a step on this mesh and a sixth on the 2D one.
+  continuation: {kind: ViscosityRamp, anchor: 100.0, stations: 12, steps_per_station: 1, scale: flow}

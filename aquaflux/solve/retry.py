@@ -18,8 +18,8 @@ from __future__ import annotations
 import dataclasses
 
 import jax.numpy as jnp
-import lineax as lx
 
+from .linear_solver_spec import LinearSolverSpec
 from .strategy import NewtonStrategy, StepOutcome
 
 #: Retry reasons whose response is to RAISE the pseudo-transient shift. The others redo the step at the
@@ -62,9 +62,9 @@ class RetryPolicy:
 
     Attributes
     ----------
-    solver : lineax.AbstractLinearSolver or None
-        A **tighter** linear solver for redoing a step that is still diverged after any shift
-        escalation. With an *inexact* preconditioner the loose default Krylov tolerance can leave the
+    solver : LinearSolverSpec or None
+        A **tighter** linear solver, by its settings (a :class:`~aquaflux.solve.GmresSolve`), for
+        redoing a step that is still diverged after any shift escalation. With an *inexact* preconditioner the loose default Krylov tolerance can leave the
         correction non-finite on the stiff operator an aggressive step produces, where the same solve
         taken tightly is finite. The step is redone from the same pre-step state, so only the Krylov
         tolerance changes -- the preconditioner is already matched to this state and shift. ``None``
@@ -118,7 +118,7 @@ class RetryPolicy:
     thresholds were set.
     """
 
-    solver: lx.AbstractLinearSolver | None = None
+    solver: LinearSolverSpec | None = None
     divergence_cap: float = float("inf")
     abort_above_cycles: int | None = None
     on_alpha: float | None = None

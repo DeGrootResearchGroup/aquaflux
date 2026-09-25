@@ -314,6 +314,9 @@ Many entries below are dated history written against the old API. Read them thro
     `SettingsValue`s with `None`-unset fields; **`FieldSplit` and `MaterializedJacobian` are not** — both
     have required fields (`leading`/`trailing`, `inverse`) and `probe` defaults to `JacobianProbeSpec()`.
     `solve_coupled`, `coupled_step`, `open_session` and both Reynolds drivers take them.
+    - **Their registry is PUBLIC, `PRECONDITIONER_SPEC_MAPPING` (was the private `_SPEC_MAPPING`, renamed
+      2026-09-24)**, because the case file's registry (`case/spec.py`) takes its preconditioner kinds from
+      `PRECONDITIONER_SPEC_MAPPING.kinds` rather than listing them a second time.
     - **`preconditioner_spec_from_mapping` / `preconditioner_spec_to_mapping` read and write one as a
       nested plain mapping** (`kind` = class name at every level, a field at its default omitted, a list
       read as a tuple), over the generic `solve.SettingsMapping`. **The kind vocabulary is the class

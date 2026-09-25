@@ -221,6 +221,7 @@ from .materialized_spec import (
 )
 from .monolithic_policy import FrozenTransposeFactory, MonolithicFactorShiftPolicy
 from .shifted_step import LinearSolveRegime, LinearSolveSettings, resolve_linear_solve, shifted_step
+from .linear_solver_spec import DirectSolve, GmresSolve, LinearSolverSpec
 from .retry import ESCALATING_REASONS, NO_RETRIES, RetryPolicy
 from .shift_basis import LocalCourantBasis, ShiftBasis, ShiftSettings, VelocityShiftParts
 from .sparse_jacobian import (
@@ -273,6 +274,7 @@ __all__ = [
     "Convergence",
     "CycleGrowthTrigger",
     "DampedNewtonStep",
+    "DirectSolve",
     "DivergenceGuard",
     "DualTimeControl",
     "DualTimeLoop",
@@ -286,6 +288,7 @@ __all__ = [
     "FrozenTransposeFactory",
     "GlobalDofs",
     "Globalization",
+    "GmresSolve",
     "HierarchyBlockInverse",
     "HostFactors",
     "HostPreconditioner",
@@ -297,6 +300,7 @@ __all__ = [
     "LineSearchGrowth",
     "LinearSolveRegime",
     "LinearSolveSettings",
+    "LinearSolverSpec",
     "LocalCourantBasis",
     "MarchLogger",
     "MarchResult",

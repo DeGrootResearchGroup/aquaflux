@@ -1,14 +1,14 @@
 # Case files
 
-A case file describes a whole case — its mesh, fluid, physics, boundary patches and
-numerics — as one YAML document, which {func}`~aquaflux.case.read_case` reads into a
+A case file describes a whole case — its mesh, fluid, physics, boundary patches, numerics,
+and how it is solved — as one YAML document, which {func}`~aquaflux.case.read_case` reads into a
 {class}`~aquaflux.case.CaseSpec`. Every setting is checked where it appears, so a misspelt
 name, a value of the wrong form, or a setting the case's physics would never read is refused
 with the path to it, rather than loading and failing (or being silently ignored) later.
 
 Reading a file and checking it against its mesh builds no equation and computes no geometry,
 so a case can be checked in about the time its mesh takes to read; building it then assembles
-the equations.
+the equations, and solving it runs the solve the file describes.
 
 ## An example
 
@@ -44,15 +44,23 @@ numerics:
     kind: LimitedUpwind
     limiter: {kind: VenkatakrishnanLimiter}
   gradient: {kind: MultipleCorrectionGradient}
+
+solver:
+  kind: CoupledMarch
+  convergence: {kind: Convergence, rtol: 0.0, atol: 1.0e-5}
+  dual_time: {kind: DualTimeLoop, inner_steps: 5, inner_tol: 0.01}
+  step_control: {kind: CflResidualDualTimeControl, beta_start: 0.5, beta_min: 0.005}
+  continuation: {kind: ViscosityRamp, anchor: 100.0, stations: 16, steps_per_station: 1, scale: flow}
 ```
 
 ```python
 from aquaflux.case import read_case
 
-case = read_case("case.yaml")   # the file, checked on its own terms
-checked = case.check()          # its mesh read, and the case checked against it
-checked.mesh.n_cells            # 12225
-coupled = checked.build()       # the coupled flow and SST closure, ready to solve
+case = read_case("case.yaml")         # the file, checked on its own terms
+checked = case.check()                # its mesh read, and the case checked against it
+checked.mesh.n_cells                  # 12225
+coupled = checked.build()             # the coupled flow and SST closure
+flow, k, omega = checked.solve(coupled)   # marched as the solver section says
 ```
 
 Each value in the file is a mapping whose `kind` names what it is, and whose other keys are
@@ -152,6 +160,61 @@ is changes the pressure only by a constant, and a point names the same place how
 is numbered. A datum is **required** when no patch is an `Outlet` and **refused** when one is:
 without one the system is singular, and beside an outlet it would fix the level twice.
 
+**`solver`** — how the case is solved. It names one of three solves, and every setting in it
+is optional unless noted: an unset one leaves that solve's own default in force. Unset
+altogether, a `RANS` case is marched by `CoupledMarch` and a `Laminar` one by `FlowMarch`, each
+with every setting at its default.
+
+| kind | physics | solves by |
+|---|---|---|
+| {class}`~aquaflux.case.CoupledMarch` | `RANS` | one coupled march of the flow and the closure ({func}`~aquaflux.turbulence.solve_coupled`) |
+| {class}`~aquaflux.case.FlowMarch` | `Laminar` | one coupled march of the flow ({func}`~aquaflux.flow.solve_flow_march`) |
+| {class}`~aquaflux.case.Segregated` | `RANS` | alternating the flow and the closure ({func}`~aquaflux.turbulence.solve_segregated`) |
+
+The two marches share their settings, each a value of the solver library written in the file:
+
+- `max_steps` — the outer-step cap;
+- `convergence` — the stopping test, {class}`~aquaflux.solve.Convergence`: a `measure`
+  (`RowScaled`, `BlockScaled` or `Euclidean`) and its `rtol` and `atol`;
+- `preconditioner` — {class}`~aquaflux.solve.MaterializedJacobian`, or for `CoupledMarch`
+  {class}`~aquaflux.turbulence.BlockDiagonal`, with the settings
+  {func}`~aquaflux.turbulence.preconditioner_spec_from_mapping` reads;
+- `dual_time` — run each outer step as an inner loop, {class}`~aquaflux.solve.DualTimeLoop`;
+- `linear_solve` — each step's Krylov regime, {class}`~aquaflux.solve.LinearSolveSettings`;
+- `step_control` — how the pseudo-time shift adapts: {class}`~aquaflux.solve.DualTimeControl`,
+  {class}`~aquaflux.solve.ResidualRatioDualTimeControl` or
+  {class}`~aquaflux.solve.CflResidualDualTimeControl`;
+- `retry` — when a bad step is redone, {class}`~aquaflux.solve.RetryPolicy`, whose tighter
+  `solver` is a {class}`~aquaflux.solve.GmresSolve`.
+
+`CoupledMarch` adds the closure's: `turbulence_damping` (a multiplier on the `k` and `omega`
+rows' shift), `positivity_floor` and `positivity_projection` (how `k` is kept positive), and
+`continuation` — {class}`~aquaflux.case.ViscosityRamp`, which starts the march at `anchor` times
+the case's viscosity and walks it down to the case's in `stations` geometric steps, each held
+for `steps_per_station` outer steps, keeping the state and the preconditioner throughout. Its
+`scale` says which viscosity a station scales: the flow's only (`flow`), or the flow's and the
+closure's (`both`, the default). A high-Reynolds-number case needs one: from a cold start at
+its own viscosity the march integrates a long transient before the flow develops.
+
+`Segregated` takes `sweeps` (required: the most it may take), `relaxation` and
+`relaxation_max` (the closure update's under-relaxation), `increment_tol` (the change over a
+sweep at which it stops), `flow_solve` and `scalar_solve` ({class}`~aquaflux.case.RootSolve`:
+each Newton solve's `max_steps`, `convergence` and `linear_solver`, a
+{class}`~aquaflux.solve.GmresSolve` or a {class}`~aquaflux.solve.DirectSolve`), and
+`scalar_preconditioner`. It is the solve that holds a `BulkVelocity`: the two marches solve the
+fields with the force fixed, so they refuse one rather than converge at the force's starting
+guess.
+
+```yaml
+solver:
+  kind: Segregated
+  sweeps: 100
+  relaxation: 0.9
+  flow_solve: {kind: RootSolve, linear_solver: {kind: DirectSolve}}
+  scalar_solve: {kind: RootSolve, max_steps: 400}
+  scalar_preconditioner: {kind: ScalarAir}
+```
+
 ## What is checked, and when
 
 When the file is **read**:
@@ -162,7 +225,8 @@ When the file is **read**:
 - the physics accepts the boundaries — no turbulence setting in a laminar case, and inflow
   turbulence at every inlet of a `RANS` one;
 - the pressure level is fixed exactly once — by an `Outlet`, or, with none, by a
-  `pressure_datum`.
+  `pressure_datum`;
+- the solver solves this physics, and can hold its drive.
 
 When the case is **checked** against its mesh ({meth}`~aquaflux.case.CaseFile.check`):
 
@@ -200,10 +264,9 @@ the same assembler the initializers and the solves already take:
 | `RANS` | {class}`~aquaflux.turbulence.CoupledRANS`, holding the flow and the SST closure |
 
 ```python
-from aquaflux.turbulence import solve_coupled
-
-coupled = read_case("case.yaml").check().build()
-flow, k, omega = solve_coupled(coupled)          # starts from hybrid_initialize(coupled)
+checked = read_case("case.yaml").check()
+coupled = checked.build()
+flow, k, omega = checked.solve(coupled)          # the solver section's march
 ```
 
 Nothing is stated twice on the way. Each patch builds its own closures — the flow's, and under
@@ -220,17 +283,26 @@ the one property model the fluid gives, so the flow and the closure cannot descr
 walls or different fluids. The geometry is computed once, here — this is where loading a case
 starts to cost something, where checking it did not.
 
-The result is the problem, not a solve: how it is marched — the preconditioner, the continuation,
-the stopping test — is configured against it in code.
+## Solving the case
+
+{meth}`~aquaflux.case.CheckedCase.solve` solves the built problem as the `solver` section says,
+and returns the converged fields — `(flow, k, omega)` for a `RANS` case, the flow state for a
+`Laminar` one. What the file holds is settings, never a built solve: a march fits its
+preconditioner to the state it has reached, again at each continuation station and each
+refresh, and each fit is made from the file's settings.
+
+A solve can be watched without being changed: keywords that only observe it — `on_step`,
+`on_checkpoint`, `on_retry`, `inner_observer` — are passed to the library solve beside the
+file's settings. A keyword that is one of the solve's settings is refused, whether the file
+sets it or leaves it at its default, so code that runs a case cannot change what the case says.
 
 ## What a case file cannot describe yet
 
 - **A boundary profile** — an inlet velocity or value varying across the patch. Those are
   functions of position, built in code.
-- **The solve** — the march, its preconditioner and its convergence test. A case file
-  describes the problem; the solve is configured in code, and
-  {func}`~aquaflux.turbulence.preconditioner_spec_from_mapping` reads the preconditioner's
-  part from a mapping of the same form.
+- **Where the results go** — the solve returns its fields; writing them out is done in code.
+- **A laminar case holding a bulk velocity** — the flow march solves with the force fixed, and
+  no laminar solve holds the constraint from a file.
 
 ## Writing a case
 

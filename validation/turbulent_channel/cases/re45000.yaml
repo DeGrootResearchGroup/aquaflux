@@ -35,3 +35,24 @@ drive: {kind: BulkVelocity, target: 1.0, direction: x, initial_force: 0.0035}
 
 # A periodic channel has no outlet to set the pressure level, so it is fixed at a point.
 pressure_datum: {kind: PinnedPoint, point: [0.0, 0.0]}
+
+# Solved by alternating the flow and the closure, which is the solve that holds the bulk velocity.
+solver:
+  kind: Segregated
+  # The most outer sweeps; the solve stops earlier once a sweep changes the fields by less than its
+  # increment tolerance.
+  sweeps: 110
+  relaxation: 0.9
+  # The channel is four cells wide, so the bordered flow system is small enough to factor exactly.
+  flow_solve:
+    kind: RootSolve
+    linear_solver: {kind: DirectSolve}
+  # At near-wall aspect ratios of ~10^3 the k and omega operators are ill-conditioned (their condition
+  # number grows like the aspect ratio squared), so they need the mesh-independent convection-diffusion
+  # multigrid, a tolerance above that operator's noise floor, and a deeper step budget -- a backstop,
+  # since the solve stops on its tolerance.
+  scalar_solve:
+    kind: RootSolve
+    max_steps: 400
+    convergence: {kind: Convergence, rtol: 1.0e-8, atol: 1.0e-10}
+  scalar_preconditioner: {kind: ScalarAir}

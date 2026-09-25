@@ -91,19 +91,11 @@ from aquaflux.schemes import (
 from aquaflux.solve import (
     CflResidualDualTimeControl,
     Convergence,
-    DualTimeLoop,
     FieldSplit,
-    JacobianProbeSpec,
-    JacobiSmoothed,
-    LinearSolveSettings,
     MarchLogger,
-    MaterializedJacobian,
     MonolithicVCycle,
-    RetryPolicy,
-    SimpleSmoothed,
     StateCheckpointer,
     combine_observers,
-    relative_residual_gmres,
 )
 from aquaflux.turbulence import (
     BetaTaperedDamping,
@@ -130,15 +122,114 @@ RUNS = HERE / "runs" / "kwsst"
 TRANSIENT = HERE / "of_transient" / "0.14"
 FIGS = HERE / "figures"
 
-# The case itself -- mesh, fluid, physics, boundary patches, numerics -- is stated once, in
-# `case.yaml` beside this script (the pitzDaily operating point of the OpenFOAM `0/` and `constant/`:
-# U_in = 10 m/s, nu = 1e-5, k_in = 0.375, omega_in = 440.15, rho = 1). This driver adds the march and
-# the comparison; the two scales the comparison normalizes by are read back out of the file rather
-# than restated beside it.
+# The case itself -- mesh, fluid, physics, boundary patches, numerics and how it is solved -- is
+# stated once, in `case.yaml` beside this script (the pitzDaily operating point of the OpenFOAM `0/` and
+# `constant/`: U_in = 10 m/s, nu = 1e-5, k_in = 0.375, omega_in = 440.15, rho = 1). This script adds
+# the comparison, what observes the march (its log and checkpoints), the `PITZ_*` study overrides as
+# edits of the file, and the study arms no file can state; the two scales the comparison normalizes by
+# are read back out of the file rather than restated beside it.
 CASE_FILE = HERE / "case.yaml"
 CASE = read_case(CASE_FILE)
 U_IN = float(CASE.spec.boundaries["inlet"].velocity[0])
 NU = CASE.spec.fluid.kinematic_viscosity
+
+#: The monolithic V-cycle's smoother, read only by the `PITZ_FIELD_SPLIT=0` arm; the record of how these
+#: were chosen is beside `PC_BETA_FLOOR` below.
+FILL_LEVELS, SWEEPS, COARSE_EQ_LIMIT = 1, 4, 2000
+_RAMP_SCALINGS = {"both": scale_both_blocks, "flow": scale_momentum_only}
+
+
+def _environment(name, convert):
+    """``PITZ_<name>`` converted, or ``None`` when it is unset or empty -- the file's value then stands."""
+    value = os.environ.get(f"PITZ_{name}", "")
+    return None if value == "" else convert(value)
+
+
+def _solver_with_overrides(solver):
+    """The case file's solver, with each ``PITZ_*`` march setting that is set applied as an edit of it.
+
+    A study arm is a different file: the environment edits the one the case states rather than holding
+    a second copy of its settings, so what no variable overrides is exactly the file. The measurements
+    behind each value are recorded beside the constant below that reads it back.
+    """
+    ramp = solver.continuation
+    n_points, ratio = _environment("N_POINTS", int), _environment("RATIO", float)
+    if n_points is not None or ratio is not None:
+        # The ladder arm's own anchor, so the two arms span one range (see `N_POINTS`).
+        ramp = dataclasses.replace(
+            ramp, anchor=(10.0 if ratio is None else ratio) ** (2 if n_points is None else n_points)
+        )
+    scale = _environment("RAMP_SCALE", str)
+    if scale is not None and scale not in _RAMP_SCALINGS:
+        raise SystemExit(f"PITZ_RAMP_SCALE={scale!r} is not one of {sorted(_RAMP_SCALINGS)}")
+    ramp = dataclasses.replace(
+        ramp,
+        **{
+            name: value
+            for name, value in (
+                ("scale", scale),
+                ("stations", _environment("RAMP_STATIONS", int)),
+                ("steps_per_station", _environment("RAMP_STEPS", int)),
+                ("redamping", _environment("RAMP_REDAMPING", float)),
+            )
+            if value is not None
+        },
+    )
+    edits = {"continuation": ramp}
+    preconditioner = solver.preconditioner
+    sweeps = _environment("FLOW_SWEEPS", int)
+    if sweeps is not None:
+        inverse = preconditioner.inverse
+        preconditioner = dataclasses.replace(
+            preconditioner,
+            inverse=dataclasses.replace(
+                inverse, leading=dataclasses.replace(inverse.leading, sweeps=sweeps)
+            ),
+        )
+    probe = dict(
+        stencil_reach=_environment("STENCIL_REACH", int),
+        gradient_sweeps=_environment("PROBE_GRADIENT_SWEEPS", lambda v: int(v) or None),
+    )
+    probe = {name: value for name, value in probe.items() if value is not None}
+    if probe:
+        preconditioner = dataclasses.replace(
+            preconditioner, probe=dataclasses.replace(preconditioner.probe, **probe)
+        )
+    if _environment("FIELD_SPLIT", str) == "0":
+        preconditioner = dataclasses.replace(
+            preconditioner,
+            inverse=MonolithicVCycle(
+                smoother_fill_levels=FILL_LEVELS,
+                smoother_sweeps=SWEEPS,
+                coarse_eq_limit=COARSE_EQ_LIMIT,
+            ),
+        )
+    edits["preconditioner"] = preconditioner
+    damping = _environment("TURB_DAMPING", float)
+    if damping is not None:
+        edits["turbulence_damping"] = damping
+    projection = _environment("K_POSITIVITY_PROJECTION", lambda v: v != "0")
+    if projection is not None:
+        edits |= {
+            "positivity_projection": projection,
+            "positivity_floor": 0.0 if projection else 1e-8,
+        }
+    beta_start = _environment("BETA_START", float)
+    if beta_start is not None:
+        edits["step_control"] = dataclasses.replace(solver.step_control, beta_start=beta_start)
+    refresh = _environment("REFRESH_ON_CYCLES", int)
+    if refresh is not None:
+        edits["dual_time"] = dataclasses.replace(
+            solver.dual_time, refresh_on_cycles=refresh or None
+        )
+    retry = _environment("RETRY_ON_CYCLES", int)
+    if retry is not None:
+        edits["retry"] = dataclasses.replace(solver.retry, abort_above_cycles=retry)
+    return dataclasses.replace(solver, **edits)
+
+
+#: The march this run takes: the file's, with the study overrides of the environment applied.
+SOLVER = _solver_with_overrides(CASE.spec.solver)
 STEP_X, STEP_Y = 0.0, 0.0  # the step lip; the lower wall drops to y = -0.0254 for x > 0
 # The coupled Newton march budget. This is a stiff, separating, high-Re case on a wall-function mesh
 # (aquaflux's SST is wall-resolving), so it converges to an engineering tolerance rather than machine
@@ -148,11 +239,12 @@ STEP_X, STEP_Y = 0.0, 0.0  # the step lip; the lower wall drops to y = -0.0254 f
 #: the cheap anchor rung -- whose only job is to hand the next one a warm start -- is asked for a
 #: harder solve than the target rung ever needs. Run briefly with `rtol = 1e-6` here, rung 1's target
 #: came out at 8.7e-08 against the 1e-05 the sibling case asks of any rung.
-MAX_STEPS = 150  # per continuation rung
-RTOL, ATOL = 0.0, 1e-5
+MAX_STEPS = SOLVER.max_steps  # per march segment
+RTOL, ATOL = SOLVER.convergence.rtol, SOLVER.convergence.atol
 
 # ---------------------------------------------------------------------------------------------
-# The march configuration.
+# The march configuration -- each value read back from the case file's solver (`SOLVER`), beside the
+# record of how it was chosen. A `PITZ_*` variable overrides one as an edit of the file.
 #
 # ⚠️ THIS CASE RAN FOR A LONG TIME ON A SINGLE-STEP PSEUDO-TRANSIENT MARCH WITH NO DUAL-TIME INNER
 # LOOP, NO COURANT CONTROL, NO RETRY LADDER AND NO PER-STEP LOG. All of that was built and calibrated
@@ -162,7 +254,7 @@ RTOL, ATOL = 0.0, 1e-5
 # needing on the order of eight hundred outer steps to develop the recirculation against a two
 # hundred step cap: it could not converge however long it was left.
 #
-# The values below are the three-dimensional case's, because that is where each was measured. Two are
+# The values were first the three-dimensional case's, because that is where each was measured. Two are
 # load-bearing enough to name:
 #
 #   * `POSITIVITY_FLOOR` -- without it the step limiter's room is a purely RELATIVE quantity, so a
@@ -259,7 +351,7 @@ RAMP = os.environ.get("PITZ_RAMP", "continuous")
 #: `ceil(ln(beta_start / BETA_MIN) / ln(grow))` steps reaching it -- 12 at these values -- and after
 #: that `beta` is pinned and stops carrying any information about the march's phase. `TURB_TAPER` keys
 #: on exactly that descent, so the two must be read together.
-BETA_MIN = 0.005
+BETA_MIN = SOLVER.step_control.beta_min
 
 #: How much harder the `k`/`omega` rows are damped than the flow rows (`PITZ_TURB_DAMPING`): the shift
 #: STRENGTH on those rows is multiplied by this, so they run at an effective `TURB_DAMPING * beta`
@@ -298,7 +390,7 @@ BETA_MIN = 0.005
 #: divergence. Past the optimum it stops removing the closure's work and merely defers it: the
 #: end-of-ramp residual degrades 2.81e-3 / 5.80e-3 / 1.01e-2 at gamma 2 / 5 / 10 while the target
 #: station's cost rises 71 / 110 / 229, so a cheap ramp bought that way is borrowed, not earned.
-TURB_DAMPING = float(os.environ.get("PITZ_TURB_DAMPING", "3.0"))
+TURB_DAMPING = SOLVER.turbulence_damping
 #: Taper the ratio from `TURB_DAMPING` down to 1 instead of holding it constant (`PITZ_TURB_TAPER`,
 #: the taper's exponent; `0`, the default, keeps the constant). `PITZ_TURB_TAPER_KEY` picks WHAT the
 #: release is keyed on -- `residual` (the default) or `beta`.
@@ -387,10 +479,7 @@ _TURB_DAMPING_SHAPE = (
         else " (constant)"
     )
 )
-RAMP_SCALE = os.environ.get("PITZ_RAMP_SCALE", "flow")
-_RAMP_SCALINGS = {"both": scale_both_blocks, "flow": scale_momentum_only}
-if RAMP_SCALE not in _RAMP_SCALINGS:
-    raise SystemExit(f"PITZ_RAMP_SCALE={RAMP_SCALE!r} is not one of {sorted(_RAMP_SCALINGS)}")
+RAMP_SCALE = SOLVER.continuation.scale
 RAMP_COMPANION = _RAMP_SCALINGS[RAMP_SCALE]
 #: How many geometric viscosity stations the ramp walks (`PITZ_RAMP_STATIONS`), one outer step each.
 #:
@@ -419,8 +508,8 @@ RAMP_COMPANION = _RAMP_SCALINGS[RAMP_SCALE]
 #:     momentum-only, 24, gamma 1          264         -11%  scaling
 #:     momentum-only, 16, gamma 1          227         -14%  stations
 #:     momentum-only, 16, gamma 3          196         -14%  damping
-RAMP_STATIONS = int(os.environ.get("PITZ_RAMP_STATIONS", "16"))
-RAMP_STEPS_PER_STATION = int(os.environ.get("PITZ_RAMP_STEPS", "1"))
+RAMP_STATIONS = SOLVER.continuation.stations
+RAMP_STEPS_PER_STATION = SOLVER.continuation.steps_per_station
 
 #: ⚠️ RE-DAMP ON ENTERING EACH STATION, AND THIS IS LOAD-BEARING RATHER THAN A KNOB. Within a station
 #: the control divides the shift by `grow` every step (1.5 ** 3 = 3.375 per station here). Unopposed,
@@ -436,21 +525,19 @@ RAMP_STEPS_PER_STATION = int(os.environ.get("PITZ_RAMP_STEPS", "1"))
 #: mismatch's size is not the discriminator either: this same march converged at beta = 0.005 against
 #: the same 0.05 preconditioner (a 10x mismatch) with alpha = 1.000, where 4.2x was fatal mid-ramp.
 #: The wall belongs to `(state, beta)`. Damping while the problem MOVES is the distinction.
-RAMP_REDAMPING = (
-    float(os.environ["PITZ_RAMP_REDAMPING"]) if "PITZ_RAMP_REDAMPING" in os.environ else None
-)
+RAMP_REDAMPING = SOLVER.continuation.redamping
 
 #: The dual-time inner loop. `inner_tol` 1e-2 rather than a tighter value: measured on the
 #: three-dimensional case, 1e-3 bought nothing over 1e-2 while costing a third of the march.
-INNER_STEPS, INNER_TOL = 5, 1e-2
+INNER_STEPS, INNER_TOL = SOLVER.dual_time.inner_steps, SOLVER.dual_time.inner_tol
 
 #: The inexact-Newton stop per inner linear solve, in the row-scaled measure, and the Krylov restart.
 #: `FORWARD_MAX_RESTARTS` bounds a single solve: past the retry threshold the attempt is going to be
 #: discarded anyway, so running it to a stagnation is work thrown away. Strictly above the threshold,
 #: because the march's test is `>`, and a cap landing exactly on it would accept a truncated direction
 #: instead of escalating.
-FORWARD_RTOL, FORWARD_RESTART = 0.3, 15
-FORWARD_MAX_RESTARTS = 14
+FORWARD_RTOL, FORWARD_RESTART = SOLVER.linear_solve.rtol, SOLVER.linear_solve.restart
+FORWARD_MAX_RESTARTS = SOLVER.linear_solve.max_restarts
 
 #: ⚠️ **THIS WHOLE BUNDLE IS UNREACHABLE AT THE CURRENT DEFAULTS — see `_ILU_SMOOTHER_LIVE` below.**
 #: Every measurement in it was taken when the leading `[u, v, p]` block was inverted by the incomplete-LU
@@ -488,13 +575,13 @@ FORWARD_MAX_RESTARTS = 14
 #:   * `PC_BETA_FLOOR` 0.05 -- the V-cycle is built at `max(beta, floor)` while the march still solves
 #:     at its own shift. The OPERATOR is untouched, so the converged root and the adjoint are
 #:     unchanged, and the mismatch saturates instead of growing as the shift falls.
-FILL_LEVELS, SWEEPS, COARSE_EQ_LIMIT, PC_BETA_FLOOR = 1, 4, 2000, 0.05
+PC_BETA_FLOOR = SOLVER.preconditioner.refit_beta_floor
 
 #: The field split: the `[u, v, p]` saddle and the `[k, omega]` transported pair get their own
 #: hierarchies, because a saddle and an advection-diffusion-reaction pair coarsen differently. Measured
 #: 31% faster end to end on the sibling case -- while taking MORE Krylov cycles, because two smaller
 #: V-cycles plus one sparse coupling product apply far more cheaply than one six-field V-cycle.
-FIELD_SPLIT = os.environ.get("PITZ_FIELD_SPLIT", "1") not in ("", "0")
+FIELD_SPLIT = isinstance(SOLVER.preconditioner.inverse, FieldSplit)
 
 #: Clip each cell's own correction rather than scaling the whole step by the worst cell. **ON since
 #: 2026-08-25**, because on this case the plain global cap was measured losing a march outright.
@@ -511,7 +598,7 @@ FIELD_SPLIT = os.environ.get("PITZ_FIELD_SPLIT", "1") not in ("", "0")
 #: 437 cycles / 73 steps against 664.0 s / 459 cycles / 67 steps, both `x_r/h` 8.069. Two gradient
 #: reconstructions whose costs differ sharply under the cap land within 0.5 % of each other under it.
 #: `PITZ_K_POSITIVITY_PROJECTION=0` restores the cap.
-POSITIVITY_PROJECTION = os.environ.get("PITZ_K_POSITIVITY_PROJECTION", "1") not in ("", "0")
+POSITIVITY_PROJECTION = SOLVER.positivity_projection
 
 #: Buys the step limiter out of a numerically dead cell instead of letting one cell ratchet the
 #: global step cap toward zero. ⚠️ Only meaningful with the cap active (`PITZ_K_POSITIVITY_PROJECTION=0`
@@ -520,7 +607,7 @@ POSITIVITY_PROJECTION = os.environ.get("PITZ_K_POSITIVITY_PROJECTION", "1") not 
 #: its value -- a floor set alongside the default projection was always inert, and the coupled march now
 #: refuses that combination rather than silently doing nothing (#365). It is a march setting of
 #: `coupled_step`, so it applies whichever preconditioner the march runs.
-K_POSITIVITY_FLOOR = 1e-8 if not POSITIVITY_PROJECTION else 0.0
+K_POSITIVITY_FLOOR = SOLVER.positivity_floor
 
 #: ⚠️ THE WALL CONDITION ON `k`, AND IT IS A CHOICE OF PROBLEM RATHER THAN OF SOLVER. Turbulent
 #: fluctuations vanish at a no-slip wall, so `k -> 0` and `Dirichlet(0)` is the textbook condition --
@@ -583,18 +670,8 @@ if os.environ.get("PITZ_FLOW_ORDER"):
 #: oppositely (see `FILL_LEVELS`) and coarsens about three times per level where this one manages
 #: seven, so `strength_threshold` and `sweeps` in particular are open questions on this mesh rather
 #: than values to trust. `PITZ_FLOW_SWEEPS` is exposed for that reason.
-SIMPLE_FLOW = dict(
-    sweeps=int(os.environ.get("PITZ_FLOW_SWEEPS", "2")),
-    pressure_sweeps=2,
-    strength_threshold=0.25,
-    avoid_singletons=True,
-    aggressive_levels=0,
-    max_levels=5,
-    max_coarse=500,
-    block_splitting=True,
-    omega=1.0,
-)
-LEADING_INVERSE = SimpleSmoothed(**SIMPLE_FLOW)
+LEADING_INVERSE = SOLVER.preconditioner.inverse.leading if FIELD_SPLIT else None
+SIMPLE_FLOW = LEADING_INVERSE.settings() if FIELD_SPLIT else {}
 
 #: Whether `FILL_LEVELS` / `SWEEPS` / `COARSE_EQ_LIMIT` reach the preconditioner at all.
 #:
@@ -608,7 +685,7 @@ _ILU_SMOOTHER_LIVE = not FIELD_SPLIT
 #: The trailing `[k, omega]` block's inverse: the differentiable-framework nodal hierarchy, which the
 #: sibling case defaults to after a controlled pair measured it ahead of the host V-cycle (67 steps and
 #: 2124 s against 72 and 2893, to the same reattachment length).
-JACOBI_TRAILING = {"max_coarse": COARSE_EQ_LIMIT, "equilibrate": False}
+JACOBI_TRAILING = SOLVER.preconditioner.inverse.trailing.settings() if FIELD_SPLIT else {}
 
 #: ⚠️ THE PROBED JACOBIAN IS EXACT ONLY AT REACH 5 ON THIS MESH, AND AT REACH 3 ON THE SIBLING'S --
 #: WITH IDENTICAL SCHEMES. The cause is the mesh, not the dimension, and it generalizes.
@@ -653,17 +730,13 @@ JACOBI_TRAILING = {"max_coarse": COARSE_EQ_LIMIT, "equilibrate": False}
 #: which enters the residual only through gradients and so inherits the sweep-extended stencil
 #: undiluted. Because a colouring is collision-free only for its own pattern, that is corruption of near
 #: entries rather than truncation -- which is what the two-pass scheme has nothing of.
-STENCIL_REACH = int(os.environ.get("PITZ_STENCIL_REACH", "3"))
+STENCIL_REACH = SOLVER.preconditioner.probe.stencil_reach
 
 #: Cap the gradient's Richardson sweeps FOR THE PROBE ONLY. The sweeps are what carry the stencil out
 #: on a skewed mesh, so narrowing them shortens the reach the residual needs -- and only the
 #: preconditioner's materialize sees the narrowed copy, the Krylov matvec keeping the exact jvp of the
 #: full residual, so the converged state and its adjoint are untouched. `None` is byte-identical.
-PROBE_GRADIENT_SWEEPS = (
-    int(os.environ["PITZ_PROBE_GRADIENT_SWEEPS"])
-    if os.environ.get("PITZ_PROBE_GRADIENT_SWEEPS")
-    else None
-)
+PROBE_GRADIENT_SWEEPS = SOLVER.preconditioner.probe.gradient_sweeps
 
 #: Cap the gradient's Richardson sweeps in the copy of the residual the FORWARD JACOBIAN is
 #: differentiated from -- the Krylov operator of every shifted solve. Not the residual: the march is
@@ -713,10 +786,10 @@ if GRADIENT is not None and GRADIENT not in _GRADIENTS:
 #: five-field value here is unmeasured, and the record is emphatic that shortening the pressure column
 #: diverged that case at step one. Uniform reach costs more probes and is always correct, so it is what
 #: this case uses until someone measures the shortened one HERE.
-COLUMN_REACH = None
+COLUMN_REACH = SOLVER.preconditioner.probe.column_reach
 
 #: A cost cap on the inner loop, so a doomed attempt is cut short rather than run to a stagnation.
-CYCLE_BUDGET = 42
+CYCLE_BUDGET = SOLVER.dual_time.cycle_budget
 
 #: Grow the pseudo-timestep while the inner line search is comfortable; brake on a clipped step or a
 #: rising residual. Without a control beta never ramps and the march cannot develop at all.
@@ -728,7 +801,7 @@ CYCLE_BUDGET = 42
 #: escalates beta on a bad step, so a struggling march is driven the wrong way -- which is worth
 #: knowing before reading an escalation as evidence about the preconditioner. Override per run so the
 #: value lands in the run record; the default is unchanged.
-BETA_START = float(os.environ.get("PITZ_BETA_START", "0.5"))
+BETA_START = SOLVER.step_control.beta_start
 
 #: The starting shift for a **warm** rung -- one seeded by a converged root a Reynolds step below it,
 #: rather than by the cold hybrid initialization the lowest rung starts from.
@@ -779,27 +852,17 @@ def _seed_projection(companion, state, point):
 
 
 def dual_time_control(beta_start: float) -> CflResidualDualTimeControl:
-    """The case's dual-time control at a chosen starting shift.
-
-    One construction site for the control's settings, so the cold and warm rungs differ in the single
-    value that is meant to differ between them and cannot drift apart in the rest.
+    """The case's dual-time control at a chosen starting shift -- the file's, with only that changed.
 
     Parameters
     ----------
     beta_start : float
         The shift strength the rung's first step runs at, before the control adapts it.
     """
-    return CflResidualDualTimeControl(
-        beta_start=beta_start,
-        beta_min=BETA_MIN,
-        grow=1.5,
-        backoff=2.0,
-        grow_above=0.5,
-        backoff_below=0.25,
-    )
+    return dataclasses.replace(SOLVER.step_control, beta_start=beta_start)
 
 
-CONTROL = dual_time_control(BETA_START)
+CONTROL = SOLVER.step_control
 
 #: ⚠️ REFRESH THE FROZEN PRECONDITIONER, ON SOLVE COST, EXACTLY AS THE THREE-DIMENSIONAL CASE DOES.
 #: Frozen at the cold reference state for a whole march, the preconditioner goes stale precisely as the
@@ -814,7 +877,7 @@ CONTROL = dual_time_control(BETA_START)
 #: being discarded. Capped at one refresh per step. Reacting to cost rather than predicting staleness
 #: is deliberate: a diagnostic on the sibling case refuted every cheap STATIC predictor of a bad step,
 #: so detect-then-react is the honest design.
-REFRESH_ON_CYCLES = int(os.environ.get("PITZ_REFRESH_ON_CYCLES", "3"))
+REFRESH_ON_CYCLES = SOLVER.dual_time.refresh_on_cycles or 0
 
 #: How many per-step state checkpoints to keep, when `solve_aquaflux` is given a `checkpoint_dir`.
 #: A rolling few is enough for the usual purpose -- recovering the CONVERGED state, which no other
@@ -837,13 +900,8 @@ CHECKPOINT_KEEP = int(os.environ.get("PITZ_CHECKPOINT_KEEP", "3"))
 #: iterate.
 #: ⚠️ The default is UNCHANGED at 10, which suited the (since removed) `petsc` arm; the zero-fill
 #: `hostilu` arm wanted ~25. Neither measurement was retaken for `simplesmooth`.
-RETRY_ON_CYCLES = int(os.environ.get("PITZ_RETRY_ON_CYCLES", "10"))
-RETRY = RetryPolicy(
-    solver=relative_residual_gmres(1e-4, restart=40),
-    abort_above_cycles=RETRY_ON_CYCLES,
-    on_alpha=0.01,
-    beta_factor=2.0,
-)
+RETRY = SOLVER.retry
+RETRY_ON_CYCLES = RETRY.abort_above_cycles
 
 
 # --- OpenFOAM ascii internalField parsing (nonuniform scalar / vector list) ---
@@ -984,6 +1042,25 @@ def _gradient_scheme_label(scheme):
     return f"{type(scheme).__name__}" + (f" (swept {sweeps})" if sweeps is not None else "")
 
 
+def _study_arms(jacobian_gradient_sweeps):
+    """The script-only study arms in force, by name -- none of them a setting a case file can state.
+
+    Each is an instrument kept so a recorded finding can be re-run, and every one is off by default, so
+    the default run is exactly the case file's solve. An arm here starts from the file's march settings
+    and calls the library itself, because what it varies is not something the file's solver can say.
+    """
+    return [
+        name
+        for name, active in (
+            ("the rung ladder (PITZ_RAMP=off)", RAMP != "continuous"),
+            ("a tapered closure damping (PITZ_TURB_TAPER)", bool(TURB_TAPER)),
+            ("a target-station damping (PITZ_TURB_DAMPING_TARGET)", bool(TURB_DAMPING_TARGET)),
+            ("capped Jacobian gradient sweeps", jacobian_gradient_sweeps is not None),
+        )
+        if active
+    ]
+
+
 def solve_aquaflux(
     *,
     log_path=None,
@@ -991,9 +1068,13 @@ def solve_aquaflux(
     gradient_scheme=None,
     stencil_reach=None,
     jacobian_gradient_sweeps=None,
-    **solve_kwargs,
+    **observers,
 ):
     """Solve the coupled RANS system on the imported OpenFOAM mesh; return fields + geometry.
+
+    The solve is the case file's (:data:`SOLVER`, with the environment's study overrides). This adds
+    only what observes it -- the per-step log, the checkpoints -- and, when a script-only study arm is
+    set (:func:`_study_arms`), that arm.
 
     Parameters
     ----------
@@ -1005,27 +1086,23 @@ def solve_aquaflux(
         converged operator -- the adjoint's, in particular, which is the one the march itself never
         exercises -- has to re-run the whole march to ask its question.
     gradient_scheme : GradientScheme, optional
-        Overrides :data:`GRADIENT_SWEEPS` for this solve; see :func:`build_case`. ``None`` takes the
-        case's own scheme.
+        Overrides the case's gradient reconstruction for this solve; see :func:`build_case`.
     stencil_reach : int, optional
-        Overrides :data:`STENCIL_REACH` for this solve. A study that varies the residual's own sweep
-        count has to move this with it -- the sweeps are what carry the residual's stencil, and a
-        probe shorter than that stencil folds the far coupling onto near entries.
+        Overrides the probe's stencil reach for this solve, as an edit of the file's preconditioner. A
+        study that varies the residual's own sweep count has to move this with it -- the sweeps are what
+        carry the residual's stencil, and a probe shorter than that stencil folds the far coupling onto
+        near entries.
     jacobian_gradient_sweeps : int, optional
-        Overrides :data:`JACOBIAN_GRADIENT_SWEEPS` for this solve.
-    **solve_kwargs
-        Forwarded to :func:`~aquaflux.turbulence.solve_coupled`, overriding the defaults set here.
-        This is the seam a solver study uses to instrument or reconfigure the march -- an ``on_step``
-        observer, a ``refresh_trigger``, a different ``method``.
+        Overrides :data:`JACOBIAN_GRADIENT_SWEEPS` for this solve -- a study arm.
+    **observers
+        Further observers of the solve (an ``on_step``, say); a setting of the case is refused.
 
     Notes
     -----
-    The three overrides above exist so a sweep can run every arm **in one process**, back to back on
-    one machine, rather than as N invocations whose wall clocks are not comparable. They default to the
-    module constants, so an unparameterized call is the case exactly as it ships.
+    The overrides above exist so a sweep can run every arm **in one process**, back to back on one
+    machine, rather than as N invocations whose wall clocks are not comparable. Unset, they leave the
+    case exactly as the file states it.
     """
-    if stencil_reach is None:
-        stencil_reach = STENCIL_REACH
     if jacobian_gradient_sweeps is None:
         jacobian_gradient_sweeps = JACOBIAN_GRADIENT_SWEEPS
     case = build_case(gradient_scheme=gradient_scheme)
@@ -1035,6 +1112,18 @@ def solve_aquaflux(
         case["turbulence"],
         case["geom"],
     )
+    solver = case["spec"].solver
+    if stencil_reach is not None:
+        preconditioner = solver.preconditioner
+        solver = dataclasses.replace(
+            solver,
+            preconditioner=dataclasses.replace(
+                preconditioner,
+                probe=dataclasses.replace(preconditioner.probe, stencil_reach=stencil_reach),
+            ),
+        )
+    probe = solver.preconditioner.probe
+    study = _study_arms(jacobian_gradient_sweeps)
     # One line per outer step, flushed, to `log_path` or stdout. A march nobody can read until it
     # finishes costs its whole wall time to tell you something it knew in the third minute -- and a
     # crawling march is indistinguishable from a hung one without it.
@@ -1051,6 +1140,8 @@ def solve_aquaflux(
     # worse than being wrong, because a wrong finding gets corrected and an unanchored one gets cited.
     logger.note("[configuration]")
     for _name, _value in (
+        ("case file", f"{CASE_FILE.name}, solver {type(solver).__name__}"),
+        ("script-only study arms", ", ".join(study) or "none -- the case file's solve"),
         ("dual-time inner steps / tol", f"{INNER_STEPS} / {INNER_TOL}"),
         ("k positivity floor", K_POSITIVITY_FLOOR),
         ("inner forward rtol (row-scaled) / restart", f"{FORWARD_RTOL} / {FORWARD_RESTART}"),
@@ -1071,12 +1162,13 @@ def solve_aquaflux(
         # comparison whose arms cannot be told apart afterwards is not a measurement.
         (
             "viscosity ramp",
-            # ⚠️ `RAMP_REDAMPING` is None unless the environment sets it -- the homotopy derives the
-            # value -- so this must not format it as a number. It did, and the case could not start at
-            # its OWN DEFAULT: every arm of the schedule sweep set the variable explicitly, so the one
-            # configuration nobody passed was the one nobody ran.
+            # ⚠️ `RAMP_REDAMPING` is None unless the file or the environment sets it -- the homotopy
+            # derives the value -- so this must not format it as a number. It did, and the case could
+            # not start at its OWN DEFAULT: every arm of the schedule sweep set the variable explicitly,
+            # so the one configuration nobody passed was the one nobody ran.
             f"{RAMP_STATIONS} stations x {RAMP_STEPS_PER_STATION} steps "
-            f"({RAMP_STATIONS * RAMP_STEPS_PER_STATION} ramp steps), redamping "
+            f"({RAMP_STATIONS * RAMP_STEPS_PER_STATION} ramp steps), anchor "
+            f"{solver.continuation.anchor:g}, redamping "
             f"{'derived' if RAMP_REDAMPING is None else format(RAMP_REDAMPING, 'g')}"
             f", scaling {RAMP_SCALE}"
             f", turbulence damping {TURB_DAMPING:g}"
@@ -1109,54 +1201,89 @@ def solve_aquaflux(
             f"{FLOW_INVERSE} {SIMPLE_FLOW}",
         ),
         ("trailing inverse", f"jacobi_smoothed {JACOBI_TRAILING}" if FIELD_SPLIT else "n/a"),
-        ("probe stencil reach", stencil_reach),
+        ("probe stencil reach", probe.stencil_reach),
         ("gradient scheme", _gradient_scheme_label(case["spec"].numerics.gradient)),
-        ("probe gradient sweeps", PROBE_GRADIENT_SWEEPS or "full (the scheme's own)"),
+        ("probe gradient sweeps", probe.gradient_sweeps or "full (the scheme's own)"),
         (
             "JACOBIAN gradient sweeps",
             jacobian_gradient_sweeps or "full -- the exact Jacobian of the residual",
         ),
-        ("probe column reach", COLUMN_REACH or "uniform"),
+        ("probe column reach", probe.column_reach or "uniform"),
         ("forward restart / max restarts", f"{FORWARD_RESTART} / {FORWARD_MAX_RESTARTS}"),
         ("k positivity projection", POSITIVITY_PROJECTION),
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
     ):
         logger.note(f"  {_name}: {_value}")
 
-    # The refresh hook, built ONCE and pointed at each rung in turn. It re-fits on its first call and
-    # after each `rebind`; between those the cycle trigger is the only thing that rebuilds.
-    # Built once and shared by the engine and the refresh hook: the coloured-probe plan is the single
-    # largest allocation this case makes, and building it twice doubles that for nothing.
-    # One session for the whole march: it builds the probe once, and every rung glues in the same inverse
-    # and refresh hook, re-pointed at the rung's own companion -- FITTED per rung, not a fresh object.
-    preconditioner = MaterializedJacobian(
-        (
-            FieldSplit(LEADING_INVERSE, JacobiSmoothed(**JACOBI_TRAILING))
-            if FIELD_SPLIT
-            else MonolithicVCycle(
-                smoother_fill_levels=FILL_LEVELS,
-                smoother_sweeps=SWEEPS,
-                coarse_eq_limit=COARSE_EQ_LIMIT,
-            )
-        ),
-        probe=JacobianProbeSpec(
-            stencil_reach=stencil_reach,
-            column_reach=COLUMN_REACH,
-            gradient_sweeps=PROBE_GRADIENT_SWEEPS,
-        ),
-        refit_beta_floor=PC_BETA_FLOOR,
+    checkpoints = (
+        StateCheckpointer(checkpoint_dir, every=1, keep=CHECKPOINT_KEEP)
+        if checkpoint_dir is not None
+        else None
     )
-    session = open_session(preconditioner, coupled, observer=logger.on_refresh)
+    observers = (
+        dict(
+            inner_observer=logger.on_inner,
+            on_checkpoint=(
+                logger.on_checkpoint
+                if checkpoints is None
+                else combine_observers(logger.on_checkpoint, checkpoints.on_checkpoint)
+            ),
+            on_retry=logger.on_retry,
+        )
+        | observers
+    )
+    try:
+        if not study:
+            # The case file's solve. The session is opened from the file's preconditioner, one for the
+            # whole march, and the ramp re-points it at each station; the log only listens to it.
+            flow, k, omega = solver.solve(
+                coupled,
+                session_options={"observer": logger.on_refresh},
+                point_setup=lambda companion, seed_state, point: logger.note(f"[{point.label}]"),
+                **observers,
+            )
+        else:
+            flow, k, omega = _solve_study_arm(
+                coupled, solver, logger, jacobian_gradient_sweeps, observers
+            )
+    finally:
+        if log_file is not sys.stdout:
+            log_file.close()
+    velocity, pressure = momentum.unpack(flow)
+    nu_t = turbulence.closure_fields(momentum.velocity_fields(flow), k, omega).nu_t
+    return dict(
+        centroid=np.asarray(geom.cell.centroid),
+        U=np.asarray(velocity),
+        p=np.asarray(pressure),
+        k=np.asarray(k),
+        omega=np.asarray(omega),
+        nut=np.asarray(nu_t),
+    )
+
+
+def _solve_study_arm(coupled, solver, logger, jacobian_gradient_sweeps, observers):
+    """Run a script-only study arm (see :func:`_study_arms`) from the case file's march settings.
+
+    Everything the file states is taken from ``solver`` -- its settings are the keywords a study arm
+    starts from -- and only what the arm varies is added here: a rung ladder instead of the ramp, a
+    per-rung closure damping, a per-station one, or a capped Jacobian.
+    """
+    settings = solver.settings()
+    # One session for the whole march: it builds the probe once, and every rung glues in the same
+    # inverse and refresh hook, re-pointed at the rung's own companion -- FITTED per rung, not a fresh
+    # object.
+    settings["preconditioner"] = open_session(
+        settings["preconditioner"], coupled, observer=logger.on_refresh
+    )
 
     def _damping(companion, seed_state, beta_start):
         """Constant, or tapered from `TURB_DAMPING` down to 1 on the chosen key.
 
         The `beta` key's endpoints are the rung's OWN control endpoints, taken from the same values the
-        control is built from a few lines below: a taper whose span disagreed with the control's would
-        still run, and would reach 1 somewhere the march never visits, with nothing to detect it. The
-        `residual` key's reference is the closure residual at the state this rung OPENS from, so the
-        taper measures progress from where the march actually starts rather than from a state it never
-        visits.
+        control is built from: a taper whose span disagreed with the control's would still run, and
+        would reach 1 somewhere the march never visits, with nothing to detect it. The `residual` key's
+        reference is the closure residual at the state this rung OPENS from, so the taper measures
+        progress from where the march actually starts rather than from a state it never visits.
         """
         if not TURB_TAPER:
             return TURB_DAMPING
@@ -1175,12 +1302,7 @@ def solve_aquaflux(
         )
 
     def point_setup(companion, seed_state, point):
-        """Configure what varies between Reynolds rungs: the closure damping and the starting shift.
-
-        The preconditioner is not among them -- the continuation re-points the shared session at each
-        rung's companion -- and every other march setting is the same on every rung, so it is in the
-        options below.
-        """
+        """Configure what varies between Reynolds rungs: the closure damping and the starting shift."""
         logger.note(f"[{point.label}]")
         beta_start = BETA_START if point.index == 1 else BETA_START_WARM
         # The lowest rung (`index == 1`) is the one that self-starts from the hybrid initialization;
@@ -1193,12 +1315,6 @@ def solve_aquaflux(
             ),
             step_control=dual_time_control(beta_start),
         )
-
-    checkpoints = (
-        StateCheckpointer(checkpoint_dir, every=1, keep=CHECKPOINT_KEEP)
-        if checkpoint_dir is not None
-        else None
-    )
 
     def station_damping(step, station, arrived):
         """Damp the closure's rows harder while the viscosity ramp is walking than at the target.
@@ -1217,70 +1333,34 @@ def solve_aquaflux(
             lambda s: s.shift_policy.base.turbulence_damping, step, ConstantDamping(ratio)
         )
 
-    solve_options = (
-        dict(
-            preconditioner=session,
-            dual_time=DualTimeLoop(
-                inner_steps=INNER_STEPS,
-                inner_tol=INNER_TOL,
-                cycle_budget=CYCLE_BUDGET,
-                refresh_on_cycles=REFRESH_ON_CYCLES or None,
-            ),
-            linear_solve=LinearSolveSettings(
-                rtol=FORWARD_RTOL, restart=FORWARD_RESTART, max_restarts=FORWARD_MAX_RESTARTS
-            ),
+    options = (
+        settings
+        | dict(
             jacobian_gradient_sweeps=jacobian_gradient_sweeps,
-            positivity_floor=K_POSITIVITY_FLOOR,
-            positivity_projection=POSITIVITY_PROJECTION,
-            inner_observer=logger.on_inner,
-            max_steps=MAX_STEPS,
             # `None` unless a target ratio was asked for, which keeps a single-ratio march unchanged.
             station_step=station_damping if TURB_DAMPING_TARGET else None,
-            convergence=Convergence(rtol=RTOL, atol=ATOL),
             intermediate=Convergence(atol=ATOL),  # every rung stops at the same ABSOLUTE bar
             schedule=GeometricReynoldsSchedule(ratio=RATIO),
-            step_control=CONTROL,
-            retry=RETRY,
             point_setup=point_setup,
             seed_projection=_seed_projection if SEED_REPAIR != "off" else None,
-            on_checkpoint=(
-                logger.on_checkpoint
-                if checkpoints is None
-                else combine_observers(logger.on_checkpoint, checkpoints.on_checkpoint)
-            ),
-            on_retry=logger.on_retry,
         )
-        | solve_kwargs
+        | observers
     )
-    try:
-        if RAMP == "continuous":
-            # The SAME viscosity span the ladder walks (its anchor sits `RATIO ** N_POINTS` below the
-            # target) and the SAME `point_setup` and options, so the two arms differ in how the span is
-            # walked and in nothing else. That is what makes them comparable.
-            flow, k, omega = solve_reynolds_ramp(
-                coupled,
-                anchor=RATIO**N_POINTS,
-                stations=RAMP_STATIONS,
-                steps_per_station=RAMP_STEPS_PER_STATION,
-                redamping=RAMP_REDAMPING,
-                companion=RAMP_COMPANION,
-                **solve_options,
-            )
-        else:
-            flow, k, omega = solve_reynolds_continuation(coupled, N_POINTS, **solve_options)
-    finally:
-        if log_file is not sys.stdout:
-            log_file.close()
-    velocity, pressure = momentum.unpack(flow)
-    nu_t = turbulence.closure_fields(momentum.velocity_fields(flow), k, omega).nu_t
-    return dict(
-        centroid=np.asarray(geom.cell.centroid),
-        U=np.asarray(velocity),
-        p=np.asarray(pressure),
-        k=np.asarray(k),
-        omega=np.asarray(omega),
-        nut=np.asarray(nu_t),
-    )
+    if RAMP == "continuous":
+        # The SAME viscosity span the ladder walks (its anchor sits `RATIO ** N_POINTS` below the
+        # target) and the SAME `point_setup` and options, so the two arms differ in how the span is
+        # walked and in nothing else. That is what makes them comparable.
+        ramp = solver.continuation
+        return solve_reynolds_ramp(
+            coupled,
+            anchor=ramp.anchor,
+            stations=ramp.stations,
+            steps_per_station=ramp.steps_per_station,
+            redamping=ramp.redamping,
+            companion=RAMP_COMPANION,
+            **options,
+        )
+    return solve_reynolds_continuation(coupled, N_POINTS, **options)
 
 
 def reattachment_length(centroid, u_x):

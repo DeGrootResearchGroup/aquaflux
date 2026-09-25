@@ -1,10 +1,11 @@
 # pitzDaily -- the 2D backward-facing step, described as a case file.
 #
-# This is the case compare.py solves: its build_case() reads this file, applies any study override
-# (PITZ_GRADIENT, PITZ_K_WALL, or a model / gradient passed in code) as an edit of it, and builds it
-# with aquaflux.case. The march -- the Reynolds ramp, the preconditioner, the step control -- stays in
-# compare.py. validation/case_file_parity.py checks that this file builds the same problem, bit for
-# bit, as the case compare.py used to assemble by hand.
+# This is the case compare.py solves, and how it solves it: compare.py reads this file, applies any
+# study override (a PITZ_* setting in the environment, or a model / gradient passed in code) as an
+# edit of it, builds it with aquaflux.case and solves it with the solver below. The measurements
+# behind each march setting are recorded beside its override in compare.py.
+# validation/case_file_parity.py checks that this file builds the same problem, bit for bit, as the
+# case compare.py used to assemble by hand.
 
 mesh:
   kind: OpenFOAMMesh
@@ -50,3 +51,52 @@ numerics:
   # The two-face-pass reconstruction: quadratic-exact with no solve, and its residual reaches exactly
   # distance 3 across the cell graph, which is what makes the driver's probe at reach 3 exact.
   gradient: {kind: MultipleCorrectionGradient}
+
+solver:
+  kind: CoupledMarch
+  # Per march segment; the march stops on its tolerance well before it.
+  max_steps: 150
+  # An absolute bar, in the row-scaled measure the march steers by, so the stop does not depend on
+  # how far the ramp's first station opened from its root.
+  convergence: {kind: Convergence, rtol: 0.0, atol: 1.0e-05}
+  # The materialized coupled Jacobian, split into the [u, v, p] saddle and the [k, omega] block: a
+  # SIMPLE-smoothed hierarchy for the saddle (which never eliminates the matrix, so it does not depend
+  # on an elimination order) and a Jacobi-smoothed one for the closure. Refitted at a shift no lower
+  # than 0.05.
+  preconditioner:
+    kind: MaterializedJacobian
+    inverse:
+      kind: FieldSplit
+      leading: {kind: SimpleSmoothed, sweeps: 2, pressure_sweeps: 2, omega: 1.0, aggressive_levels: 0,
+        avoid_singletons: true, block_splitting: true, strength_threshold: 0.25, max_levels: 5, max_coarse: 500}
+      trailing: {kind: JacobiSmoothed, max_coarse: 2000, equilibrate: false}
+    # The multiple-correction gradient's residual reaches exactly distance 3, so a probe at reach 3 is
+    # exact.
+    probe: {kind: JacobianProbeSpec, stencil_reach: 3}
+    refit_beta_floor: 0.05
+  # Each outer step a dual-time inner loop of up to five Newton iterations, stopping at a hundredth of
+  # the step's starting residual; the preconditioner is refitted mid-step once a solve takes 3 restart
+  # cycles.
+  dual_time: {kind: DualTimeLoop, inner_steps: 5, inner_tol: 0.01, cycle_budget: 42, refresh_on_cycles: 3}
+  # An inexact-Newton stop on each inner solve; the restart cap sits above the retry threshold below,
+  # so a solve past it is escalated rather than accepted truncated.
+  linear_solve: {kind: LinearSolveSettings, rtol: 0.3, restart: 15, max_restarts: 14}
+  # Grow the pseudo-timestep while the inner loop takes full steps and the residual is not rising.
+  step_control: {kind: CflResidualDualTimeControl, beta_start: 0.5, beta_min: 0.005}
+  # Redo a step whose line search collapses at twice the shift; a step still non-finite after that is
+  # redone with a tight solve.
+  retry:
+    kind: RetryPolicy
+    solver: {kind: GmresSolve, rtol: 0.0001, restart: 40}
+    abort_above_cycles: 10
+    on_alpha: 0.01
+  # The k and omega rows damped three times harder than the flow's: the ramp weakens the momentum
+  # equation's nonlinearity directly, while the closure's stiff sources are what the shift addresses.
+  turbulence_damping: 3.0
+  # k is projected back to zero after a step rather than the step being shortened to keep it positive.
+  positivity_floor: 0.0
+  positivity_projection: true
+  # From a cold start at the case's viscosity the march integrates a long transient to develop the
+  # recirculation. Start at a hundred times the viscosity -- the momentum equation's only, so the
+  # closure keeps its target near-wall omega -- and walk it down in 16 stations of one step each.
+  continuation: {kind: ViscosityRamp, anchor: 100.0, stations: 16, steps_per_station: 1, scale: flow}

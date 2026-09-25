@@ -305,6 +305,8 @@ paths:
     - **`newton_march` takes the whole policy; a refresh policy would NOT be passed the same way.** The
       march uses all six, so the object is the smallest sufficient collaborator there. Do not extend this
       to arguments a callee does not need in full.
+  - ⚠️ `retry.solver` is a `LinearSolverSpec` (settings), built once per march into `tight_solver`
+    — see `solve-globalization.md`. Every `retry.solver` below means the solver it builds.
   - **Reactive divergence retry — `retry.solver` recovers a step an INEXACT preconditioner poisons,
     without tightening every step (BUILT).** An *inexact* preconditioner can return a
     non-finite correction on the stiff operator an aggressive Courant overshoot produces, where the

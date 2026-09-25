@@ -16,9 +16,10 @@ equation is built, so a file can be checked in about the time its mesh takes to 
 :meth:`CheckedCase.build` is the other half: the geometry, then the equations.
 
 What a case builds is its problem -- the assembler an initializer and a solve take -- and never a
-solve. A solve's frozen preconditioner is fitted to a state, and a march re-fits it from states the
-file never sees (at each step of a Reynolds continuation, at each refresh), so it is configured
-against the built problem rather than read from here.
+built solve. :meth:`CheckedCase.solve` solves that problem with the case's solver settings: a solve's
+frozen preconditioner is fitted to a state, and a march re-fits it from states the file never sees (at
+each station of a viscosity ramp, at each refresh), so what the file holds is the settings every such
+fit is made with.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ import yaml
 
 from aquaflux.mesh import Mesh
 
+from .solver import solver_for
 from .spec import CaseSpec, case_spec_from_mapping, case_spec_to_mapping
 
 __all__ = ["CaseFile", "CheckedCase", "read_case", "write_case"]
@@ -107,6 +109,32 @@ class CheckedCase:
             Reynolds-averaged one.
         """
         return self.spec.physics.build(self.spec, self.mesh, self.mesh.geometry())
+
+    def solve(self, problem: object, **observers: object) -> object:
+        """Solve ``problem`` with the case's solver (see :meth:`~aquaflux.case.SolverSpec.solve`).
+
+        Parameters
+        ----------
+        problem : object
+            What :meth:`build` returned for this case.
+        **observers
+            Observers of the solve, passed to the library solve beside the case's settings; a keyword
+            that is one of its settings is refused.
+
+        Returns
+        -------
+        object
+            The converged fields: ``(flow, k, omega)`` for a Reynolds-averaged case, the flow state for
+            a laminar one.
+
+        Raises
+        ------
+        ValueError
+            If the case states no solver and its physics' default cannot solve it.
+        TypeError
+            If an observer keyword is one of the solve's settings.
+        """
+        return solver_for(self.spec).solve(problem, **observers)
 
 
 @dataclasses.dataclass(frozen=True)

@@ -31,3 +31,19 @@ numerics:
 drive: {kind: BulkVelocity, target: 1.0, direction: x, initial_force: 0.004}
 
 pressure_datum: {kind: PinnedPoint, point: [0.0, 0.0]}
+
+# Solved by alternating the flow and the closure, which is the solve that holds the bulk velocity.
+solver:
+  kind: Segregated
+  sweeps: 90
+  relaxation: 0.9
+  # The channel is four cells wide, so the bordered flow system is small enough to factor exactly.
+  flow_solve:
+    kind: RootSolve
+    linear_solver: {kind: DirectSolve}
+  # The k and omega solves' own step budget runs out on the stiff cold-start sweeps here; this budget
+  # and tolerance carry both Reynolds numbers.
+  scalar_solve:
+    kind: RootSolve
+    max_steps: 200
+    convergence: {kind: Convergence, rtol: 1.0e-8, atol: 1.0e-10}
