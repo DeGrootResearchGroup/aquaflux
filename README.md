@@ -76,8 +76,8 @@ applies anywhere you want gradients through a flow solve.
   numerics and solver in one YAML file (`aquaflux.case.read_case`). Each boundary
   patch is stated once for every field, every setting is checked where it appears,
   a case can be checked against its mesh without building anything, and
-  `CheckedCase.solve` runs the solve the file describes. Writing the results out
-  is still done in code.
+  `aquaflux run case.yaml` solves it and writes its fields (VTK or an OpenFOAM
+  time directory), its log and a record of the run.
 
 ## Installation
 
