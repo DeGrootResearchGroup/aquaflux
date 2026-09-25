@@ -87,6 +87,13 @@ def _chunked(arrays, pair_limit: int, per_receiver: int, body):
     ``pair_limit`` pairs, so the working set is set by the limit and not by how finely the emitter
     happens to be divided. The last chunk is padded rather than made smaller, so the traced body
     is compiled once.
+
+    ⚠️ **The body is checkpointed, and that is what makes the limit hold for a gradient too.** A
+    scan's reverse pass otherwise keeps every chunk's intermediates for the backward sweep, so a
+    gradient's memory grows with the receiver count -- about 25 bytes a pair -- whatever the
+    limit says, and at a mesh's cells against a finely divided lamp that is terabytes.
+    Checkpointed, each chunk is recomputed on the way back instead, for roughly two thirds more
+    time on the gradient and nothing on a forward evaluation, whose values it does not change.
     """
     per_chunk = receivers_per_pass(pair_limit, per_receiver)
     arrays = [jnp.asarray(array) for array in arrays]
@@ -102,6 +109,9 @@ def _chunked(arrays, pair_limit: int, per_receiver: int, body):
         )
         for array in arrays
     ]
+    # prevent_cse=False is the setting for a checkpoint inside a scan, which already stops the
+    # recomputation from being merged back into the forward pass.
+    body = jax.checkpoint(body, prevent_cse=False)
     _, out = lax.scan(lambda carry, chunk: (carry, body(*chunk)), None, tuple(shaped))
     return out.reshape(-1)[:n_points]
 
@@ -195,6 +205,14 @@ def streamed_fluence_rate(
     and memory for one chunk. Emission, power, reflectance, the absorbing medium and each body's
     transmittance are all reached; the bodies' geometry is not, as everywhere shadows are frozen.
 
+    **The gather is compiled once per call and reused by every chunk**, forward and backward. Run
+    eagerly it would be traced again for each chunk, with its arrays formed one operation at a
+    time, and at a finely divided emitter -- tens of thousands of chunks of a few dozen receivers
+    -- that overhead is most of the cost. The live values and each chunk's mask are its
+    **arguments**, not constants it closes over, so a compiled program holds no copy of them;
+    only the sets' labels, which decide its shape, are closed over. A shorter last chunk compiles
+    once more, which is cheaper than building a mask for padding receivers.
+
     Parameters
     ----------
     sets : sequence of Surfaces
@@ -224,13 +242,14 @@ def streamed_fluence_rate(
 
     Notes
     -----
-    Not compilable with ``jit``: the chunk loop and the mask builds are host work, which a traced
-    loop could not call.
+    Not compilable with ``jit`` as a whole: the chunk loop and the mask builds are host work,
+    which a traced loop could not call.
     """
     points = jnp.asarray(points, dtype=float)
     per_chunk = receivers_per_pass(pair_limit, shadow_geometry.n_facets)
     if points.shape[0] == 0:
         return jnp.zeros(0)
+    live = (tuple(sets), absorption, transmittance)
     shadows = _Shadows(
         geometry=shadow_geometry,
         occluders=tuple(occluders),
@@ -238,61 +257,81 @@ def streamed_fluence_rate(
             **({} if visibility_options is None else dict(visibility_options)),
             **({} if self_occlusion is None else {"self_occlusion": self_occlusion}),
         },
+        gather=_compiled_gather(live, pair_limit),
     )
-    live = (tuple(sets), absorption, transmittance)
     return jnp.concatenate(
         [
-            _shadowed_chunk(live, points[start : start + per_chunk], shadows, pair_limit)
+            _shadowed_chunk(live, points[start : start + per_chunk], shadows)
             for start in range(0, points.shape[0], per_chunk)
         ]
     )
 
 
+def _compiled_gather(live, pair_limit: int):
+    """The summed gather of every set against one chunk's mask, as one compiled program.
+
+    The live values are split into their floating-point arrays, which the program takes as
+    arguments and a gradient reaches, and everything else, which it closes over. What is closed
+    over is exactly what must stay concrete: which profile each facet emits with decides the
+    traced program's shape, so it cannot be an argument. Built once per stream, so every chunk of
+    that stream reuses the one program.
+    """
+    _, labels = eqx.partition(live, eqx.is_inexact_array)
+
+    @jax.jit
+    def gather(values, points, mask):
+        sets, absorption, transmittance = eqx.combine(values, labels)
+        return sum(
+            direct_fluence_rate(
+                surfaces,
+                points,
+                absorption=absorption,
+                visibility=mask,
+                transmittance=transmittance,
+                pair_limit=pair_limit,
+            )
+            for surfaces in sets
+        )
+
+    return gather
+
+
 class _Shadows(eqx.Module):
-    """What a chunk's mask is built from: fixed for a whole stream, and never differentiated."""
+    """What a chunk's mask is built from, and the gather it feeds: fixed for a whole stream, and
+    never differentiated."""
 
     geometry: Surfaces
     occluders: tuple
     options: dict
+    gather: object = eqx.field(static=True)
 
     def mask(self, points) -> Visibility:
         """The mask for these receivers."""
         return build_visibility(self.occluders, self.geometry, points, **self.options)
 
 
-def _chunk_total(live, points, shadows: _Shadows, pair_limit: int):
+def _chunk_total(live, points, shadows: _Shadows):
     """One chunk's summed field, with its own mask."""
-    sets, absorption, transmittance = live
-    mask = shadows.mask(points)
-    return sum(
-        direct_fluence_rate(
-            surfaces,
-            points,
-            absorption=absorption,
-            visibility=mask,
-            transmittance=transmittance,
-            pair_limit=pair_limit,
-        )
-        for surfaces in sets
-    )
+    values, _ = eqx.partition(live, eqx.is_inexact_array)
+    return shadows.gather(values, points, shadows.mask(points))
 
 
 @eqx.filter_custom_vjp
-def _shadowed_chunk(live, points, shadows, pair_limit):
+def _shadowed_chunk(live, points, shadows):
     """One chunk, differentiated by recomputing it rather than by keeping its intermediates."""
-    return _chunk_total(live, points, shadows, pair_limit)
+    return _chunk_total(live, points, shadows)
 
 
 @_shadowed_chunk.def_fwd
-def _shadowed_chunk_fwd(perturbed, live, points, shadows, pair_limit):
+def _shadowed_chunk_fwd(perturbed, live, points, shadows):
     del perturbed
-    return _chunk_total(live, points, shadows, pair_limit), None
+    return _chunk_total(live, points, shadows), None
 
 
 @_shadowed_chunk.def_bwd
-def _shadowed_chunk_bwd(residuals, cotangent, perturbed, live, points, shadows, pair_limit):
+def _shadowed_chunk_bwd(residuals, cotangent, perturbed, live, points, shadows):
     del residuals, perturbed
-    _, pull = eqx.filter_vjp(lambda value: _chunk_total(value, points, shadows, pair_limit), live)
+    _, pull = eqx.filter_vjp(lambda value: _chunk_total(value, points, shadows), live)
     return pull(cotangent)[0]
 
 
@@ -388,9 +427,9 @@ def direct_fluence_rate(
             transmittance=transmittance,
             pair_limit=pair_limit,
         )
+    rows = _surviving_rows(visibility, transmittance, points)
     points = jnp.asarray(points, dtype=float)
     partition = _groups(surfaces)
-    rows = _surviving_rows(visibility, transmittance, points)
 
     def at(receivers, *surviving_all):
         total = jnp.zeros(receivers.shape[0])
@@ -472,13 +511,13 @@ def direct_irradiance(
         If ``normals`` and ``points`` disagree in shape, if ``pair_limit`` is less than one, or
         if the visibility mask was built for a different set of receivers.
     """
+    rows = _surviving_rows(visibility, transmittance, points)
     points = jnp.asarray(points, dtype=float)
     normals = jnp.asarray(normals, dtype=float)
     if normals.shape != points.shape:
         msg = f"normals must match points in shape; got {normals.shape} and {points.shape}"
         raise ValueError(msg)
     partition = _groups(surfaces)
-    rows = _surviving_rows(visibility, transmittance, points)
 
     def at(receivers, receiver_normal, *surviving_all):
         total = jnp.zeros(receivers.shape[0])

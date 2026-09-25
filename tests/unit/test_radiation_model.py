@@ -868,6 +868,28 @@ def test_a_body_in_the_way_darkens_the_cells_behind_it():
     np.testing.assert_allclose(np.asarray(clear), 4.0 * 3.0, rtol=1e-12)
 
 
+def test_the_field_compiles_with_the_model_closed_over():
+    """A sweep over a built model can be compiled, which is how a design study will run it.
+
+    Two things stopped it: the receiver check compared positions with a staged ``jnp`` test and
+    read the result on the host, and the reflected pass re-read the set as Lambertian through a
+    ``jnp`` array that the trace staged, so the gather could not partition on it. The fixture has
+    a point source, two profiles and a body in the way, so every branch of the assembly runs.
+    """
+    surfaces = _lamp_in_a_box(reflectance=0.5)
+    sleeve = Cylinder(centre=[0.3, 0.7, 0.3], axis=[0, 0, 1], radius=0.05, half_length=0.1)
+    model = _volume_model(surfaces, AROUND_THE_LAMP, occluders=[sleeve])
+
+    def field(reflectance, transmittance):
+        lit = surfaces.with_optics(reflectance=reflectance)
+        return fluence_rate(model, lit, transmittance=transmittance)[0]
+
+    values = (jnp.asarray(surfaces.reflectance), jnp.asarray([0.3]))
+    np.testing.assert_allclose(
+        np.asarray(jax.jit(field)(*values)), np.asarray(field(*values)), rtol=1e-12
+    )
+
+
 def test_the_gradient_of_the_field_in_reflectance_is_exact():
     """The whole point of the package: a derivative that reaches through the interreflection
     solve *and* the volume gather, not merely through one of them."""

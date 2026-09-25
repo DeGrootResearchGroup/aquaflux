@@ -78,8 +78,12 @@ class Surfaces(eqx.Module):
         light needs each facet's own distribution even though every *reflected* ray leaves
         Lambertian. The host-side partition this induces is also what lets the gather resolve
         the distribution once per kind at trace time rather than branching per facet.
-    profile_index : jnp.ndarray of int, shape ``(n_facets,)``
-        Which entry of :attr:`profiles` each facet emits with.
+    profile_index : numpy.ndarray of int, shape ``(n_facets,)``
+        Which entry of :attr:`profiles` each facet emits with. A **numpy** array rather than a
+        JAX one because it is a label that decides the shape of the traced program, like
+        :attr:`point_source_index`: inside a trace every ``jnp`` operation is staged even on a
+        concrete input, so a JAX array built there would arrive at the gather as a tracer and
+        could not be partitioned on.
     point_source_index : tuple of int
         Which facets are point sources rather than emitting surfaces — static metadata, not a
         leaf, because it selects a code path. Stored as the indices rather than a mask so that
@@ -94,7 +98,7 @@ class Surfaces(eqx.Module):
     emission: jnp.ndarray
     power: jnp.ndarray
     reflectance: jnp.ndarray
-    profile_index: jnp.ndarray
+    profile_index: np.ndarray
     solid_names: tuple[str, ...] = eqx.field(static=True)
     profiles: tuple[Profile, ...] = ()
     point_source_index: tuple[int, ...] = eqx.field(static=True, default=())
@@ -199,13 +203,15 @@ class Surfaces(eqx.Module):
             msg = "profiles must contain at least one Profile"
             raise ValueError(msg)
         if profile_index is None:
-            profile_index = jnp.zeros(n_facets, dtype=jnp.int32)
-        else:
-            profile_index = jnp.asarray(profile_index, dtype=jnp.int32)
-            if profile_index.shape != (n_facets,):
-                msg = f"profile_index must have shape ({n_facets},); got {profile_index.shape}"
-                raise ValueError(msg)
-            in_range(profile_index, len(profiles), "profile_index", "profile")
+            profile_index = np.zeros(n_facets, dtype=np.int32)
+        elif not isinstance(profile_index, jax.core.Tracer):
+            # Left traced when it is: the gather then refuses it with the reason, where a numpy
+            # conversion here would fail with no explanation.
+            profile_index = np.asarray(profile_index, dtype=np.int32)
+        if profile_index.shape != (n_facets,):
+            msg = f"profile_index must have shape ({n_facets},); got {profile_index.shape}"
+            raise ValueError(msg)
+        in_range(profile_index, len(profiles), "profile_index", "profile")
 
         if point_sources is None:
             if isinstance(twice_area, jax.core.Tracer):
@@ -410,4 +416,6 @@ class Surfaces(eqx.Module):
         # Replacing the catalogue changes the pytree's structure when its length changes, which
         # is past what tree_at substitutes, so the whole record is rebuilt instead. Every other
         # field is carried across by reference, so the geometry is shared rather than recomputed.
-        return dataclasses.replace(updated, profiles=catalogue, profile_index=jnp.asarray(index))
+        return dataclasses.replace(
+            updated, profiles=catalogue, profile_index=index.astype(np.int32, copy=False)
+        )

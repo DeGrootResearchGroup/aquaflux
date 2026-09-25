@@ -35,6 +35,7 @@ them.
 from __future__ import annotations
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -152,12 +153,26 @@ class Visibility(eqx.Module):
         ValueError
             If the points differ, in count or in position. A mask used with the wrong receivers
             puts every shadow in the wrong place and raises no error of its own.
+
+        Notes
+        -----
+        The positions are compared in numpy, and only when both sets are concrete. Inside a
+        trace a ``jnp`` comparison is staged even on concrete inputs, and reading a staged
+        result on the host is an error — so a check written with ``jnp`` would make every
+        caller untraceable. A mask and receivers closed over by a traced function are still
+        concrete and are still checked; only a traced set of points, which cannot be read,
+        goes by its shape alone.
         """
-        points = jnp.asarray(points, dtype=float)
-        if points.shape != self.receivers.shape or not bool(jnp.all(points == self.receivers)):
+        given = points if isinstance(points, jax.core.Tracer) else np.asarray(points, dtype=float)
+        mismatched = given.shape != self.receivers.shape
+        if not mismatched and not any(
+            isinstance(side, jax.core.Tracer) for side in (given, self.receivers)
+        ):
+            mismatched = not np.array_equal(given, np.asarray(self.receivers))
+        if mismatched:
             msg = (
                 "this visibility mask was built for different receivers "
-                f"(mask {tuple(self.receivers.shape)}, given {tuple(points.shape)}). The mask is "
+                f"(mask {tuple(self.receivers.shape)}, given {tuple(given.shape)}). The mask is "
                 "indexed by receiver, so using it with another set silently moves every shadow."
             )
             raise ValueError(msg)
