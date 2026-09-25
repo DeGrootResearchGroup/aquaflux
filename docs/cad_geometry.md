@@ -100,6 +100,29 @@ facets and a median error of 0.16% within 5 mm of the lamp and 0.04% elsewhere, 
 Because the vertices lie on the true surface, the lamp's area is not inscribed, and
 {func}`~aquaflux.radiation.lamp_exitance` then makes it radiate exactly its rating.
 
+### With reflecting walls: the whole model, its shadows streamed
+
+The gather above is the whole field when the walls are black. Where they reflect, build the model,
+which also solves the interreflection between facets. At a mesh's cells its receiver shadow mask —
+one entry per cell, facet and body — is too large to hold, so ask for it to be built chunk by chunk
+at each call instead:
+
+```python
+from aquaflux.radiation import RadiationSettings, build_radiation_model, fluence_rate
+
+model = build_radiation_model(
+    cell_centres, lamp, occluders=[water],
+    settings=RadiationSettings(self_occlusion=NoOcclusion(), stream_receiver_mask=True),
+)
+G, cycles = fluence_rate(model, lamp, absorption=UniformAbsorption(absorption_from_uvt(70.0)))
+```
+
+Streaming changes memory, not the answer or its derivatives: a gradient through `fluence_rate` is
+kept to one chunk's memory as well, by rebuilding each chunk's mask on the way back. On the Sozzi
+reactor the streamed model reproduces the hand-built field above to 4.4e-16 relative on all
+1,635,909 cells. Leave `stream_receiver_mask` unset for a scene whose mask fits, where holding it
+once makes every later call cheaper.
+
 ## What is checked, and what is refused
 
 Recognition reads each solid's faces — which surface each lies on, which side of it the solid is

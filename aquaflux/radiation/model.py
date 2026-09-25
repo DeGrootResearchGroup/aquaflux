@@ -81,13 +81,13 @@ import jax.numpy as jnp
 import numpy as np
 
 from aquaflux.radiation.absorption import Absorption
-from aquaflux.radiation.gather import direct_fluence_rate, direct_irradiance
+from aquaflux.radiation.gather import direct_irradiance
 from aquaflux.radiation.profiles import Lambertian
 from aquaflux.radiation.quadrature import TriangleQuadrature
+from aquaflux.radiation.receiver_shadows import FrozenShadows, ReceiverShadows, StreamedShadows
 from aquaflux.radiation.self_occlusion import SelfOcclusion
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.transfer import TransferMatrix, build_transfer
-from aquaflux.radiation.visibility import Visibility, build_visibility
 from aquaflux.solve import relative_residual_gmres, solve_linear
 
 __all__ = [
@@ -138,6 +138,15 @@ class RadiationSettings(eqx.Module):
         instead, which resolves a partly shadowed pair rather than rounding it to the nearer
         answer, at a cost that rises steeply with facet count. It also governs the volume
         receivers unless ``receiver_occlusion`` says otherwise -- see there.
+    stream_receiver_mask : bool or None
+        Whether the receivers' shadow mask is built chunk by chunk at every call rather than
+        held whole. Unset, it is held: built once, and read by every call. The whole mask is one
+        entry per receiver, facet and body — 12 GB per body at a reactor mesh's 1.6 million cells
+        against a 7,516-facet lamp — so a mesh-scale model must stream it. Streaming keeps memory
+        to one chunk in a gradient as well as in the forward pass, and costs a mask build per
+        call (two per call under a gradient). Both give the same field and the same gradients;
+        the choice is between memory and repeated work. See
+        :mod:`~aquaflux.radiation.receiver_shadows`.
     receiver_occlusion : SelfOcclusion or None
         How the facets are tested for shadowing the volume receivers. Unset, the receivers
         follow ``self_occlusion`` wherever that strategy can serve a point in the fluid, so
@@ -150,6 +159,7 @@ class RadiationSettings(eqx.Module):
     receiver_quadrature: int | TriangleQuadrature | None = eqx.field(static=True, default=None)
     transfer_chunk_size: int | None = eqx.field(static=True, default=None)
     gather_pair_limit: int | None = eqx.field(static=True, default=None)
+    stream_receiver_mask: bool | None = eqx.field(static=True, default=None)
     self_occlusion: SelfOcclusion | None = eqx.field(static=True, default=None)
     receiver_occlusion: SelfOcclusion | None = eqx.field(static=True, default=None)
 
@@ -206,9 +216,13 @@ class RadiationModel(eqx.Module):
         everything :func:`fluence_rate` returns.
     transfer : TransferMatrix
         Facet-to-facet geometry, including the facet-side shadow mask.
-    receiver_visibility : Visibility
-        Which bodies stand between which facets and which *receivers*. A second mask from the
-        one inside ``transfer``, built for these points rather than for the facet centroids.
+    receiver_shadows : ReceiverShadows
+        Which bodies stand between which facets and which *receivers* — a second mask from the
+        one inside ``transfer``, for these points rather than for the facet centroids — held
+        whole (:class:`~aquaflux.radiation.receiver_shadows.FrozenShadows`, whose ``visibility``
+        is the mask) or built per chunk at each call
+        (:class:`~aquaflux.radiation.receiver_shadows.StreamedShadows`), as
+        ``RadiationSettings.stream_receiver_mask`` chose.
     settings : RadiationSettings
         What the build was told, kept so a later call chunks the gather the same way and so a
         result can say what produced it.
@@ -220,7 +234,7 @@ class RadiationModel(eqx.Module):
 
     receivers: jnp.ndarray
     transfer: TransferMatrix
-    receiver_visibility: Visibility
+    receiver_shadows: ReceiverShadows
     settings: RadiationSettings
     geometry: str = eqx.field(static=True)
 
@@ -274,7 +288,9 @@ def build_radiation_model(
     -----
     The cost is ``n_facets^2`` for the transfer plus ``n_facets * n_receivers`` for the receiver
     mask, in both time and memory. The facet count is what limits the surface system; the
-    receiver count only multiplies the cheaper of the two.
+    receiver count only multiplies the cheaper of the two — until it is a mesh's cells, when the
+    receiver mask cannot be held: then set ``RadiationSettings(stream_receiver_mask=True)``, and
+    it is built per chunk at every call instead, in memory for one chunk.
 
     Both masks are built against the same bodies, so a body that shadows a facet also shadows
     the cells behind it. Building them separately — the trap this function exists to close — is
@@ -290,7 +306,8 @@ def build_radiation_model(
     transfer = build_transfer(
         surfaces, occluders=occluders, **settings.transfer_options(), **visibility_options
     )
-    receiver_visibility = build_visibility(
+    shadows = StreamedShadows if settings.stream_receiver_mask else FrozenShadows
+    receiver_shadows = shadows.build(
         occluders,
         surfaces,
         receivers,
@@ -300,7 +317,7 @@ def build_radiation_model(
     return RadiationModel(
         receivers=receivers,
         transfer=transfer,
-        receiver_visibility=receiver_visibility,
+        receiver_shadows=receiver_shadows,
         settings=settings,
         geometry=_geometry_fingerprint(surfaces),
     )
@@ -552,14 +569,6 @@ def fluence_rate(
         external_irradiance=external_irradiance,
         solver=solver,
     )
-    gather = model.settings.gather_options()
-    common = {
-        "absorption": absorption,
-        "visibility": model.receiver_visibility,
-        "transmittance": transmittance,
-        **gather,
-    }
-    emitted = direct_fluence_rate(surfaces, model.receivers, **common)
 
     # What is left over after each facet's own emission is its reflected part, and that leaves
     # Lambertian whatever the source emitted like -- so it is re-gathered as a separate set with
@@ -578,4 +587,13 @@ def fluence_rate(
         power=jnp.zeros(surfaces.n_facets),
         profiles=(Lambertian(),),
     )
-    return emitted + direct_fluence_rate(bounced, model.receivers, **common), cycles
+    # Both sets are gathered through one set of shadows -- they share the geometry -- which for a
+    # streamed mask is what keeps it to one build per chunk rather than one per set.
+    field = model.receiver_shadows.fluence_rate(
+        (surfaces, bounced),
+        model.receivers,
+        absorption=absorption,
+        transmittance=transmittance,
+        **model.settings.gather_options(),
+    )
+    return field, cycles

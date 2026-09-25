@@ -122,6 +122,7 @@ from aquaflux.radiation.self_occlusion import (
     SilhouetteOcclusion,
 )
 from aquaflux.radiation.quadrature import TriangleQuadrature, triangle_quadrature
+from aquaflux.radiation.receiver_shadows import FrozenShadows, ReceiverShadows, StreamedShadows
 from aquaflux.radiation.solid_angle import (
     projected_solid_angle,
     signed_solid_angle,
@@ -143,6 +144,7 @@ from aquaflux.radiation.visibility import Visibility, build_visibility
 __all__ = [
     "Absorption",
     "CosinePower",
+    "FrozenShadows",
     "Isotropic",
     "Lambertian",
     "NoOcclusion",
@@ -151,8 +153,10 @@ __all__ = [
     "RadiationModel",
     "RadiationSettings",
     "RayCastOcclusion",
+    "ReceiverShadows",
     "SelfOcclusion",
     "SilhouetteOcclusion",
+    "StreamedShadows",
     "Subdivision",
     "Surfaces",
     "TransferMatrix",
