@@ -2,6 +2,7 @@
 paths:
   - "aquaflux/case/**"
   - "validation/*/case.yaml"
+  - "validation/*/cases/*.yaml"
 ---
 
 # Rules — `aquaflux/case/` (a whole case described in one YAML file)
@@ -13,6 +14,22 @@ paths:
 
 Tracking issue: #437. Design constraints it is held to: #374 (a loaded case yields a builder, never a
 built solver) and #375 (no flat case object — a small core plus two discriminators).
+
+## ⚠️ THE CASE FILE IS THE USER'S WHOLE INTERFACE (binding — project owner, 2026-09-24)
+
+**Users do not write scripts. Everything a normal user would want to set belongs in the file, and a case
+must run from its file alone.** Consequences, each already decided:
+- **"Keep it in the script" is never the answer for a user setting** — solver/march settings, initial
+  guesses (`BulkVelocity.initial_force`), sources, outputs all go in the file.
+- **One file per configuration; a sweep is a set of files.** The channel studies have one file per
+  Reynolds number rather than one file a script edits.
+- **The validation `compare.py` scripts are developer harnesses** that *read* case files and compare
+  against a reference. Where a reference fixes a value (the OpenFOAM channel's ν), the file states it and
+  the harness **checks** the file against the reference rather than filling it in.
+- **The solver section and a `run` entry point plus outputs are on the critical path**, not follow-ups:
+  until they exist a user still has to write a script. ⚠️ Until then the channel harnesses keep one solver
+  setting per configuration in code (the segregated solve's `sweeps`) — a known gap, not a precedent.
+- Do not call the harnesses "drivers" to the project owner — it collides with the *drive* (`MassFlow`).
 
 ## Status — phases A–D BUILT (2026-09-24); the solver section is NOT
 
@@ -36,7 +53,8 @@ F frozen solver → G drive.
 |---|---|
 | `spec.py` | `CaseSpec` (mesh, fluid, physics, boundaries, numerics, drive), `Numerics`, the one `SettingsMapping` registry `_CASE_MAPPING`, `case_spec_from_mapping` / `_to_mapping`, `CaseSpec.check_against(mesh)` |
 | `case_file.py` | the YAML parse (`_CaseLoader`), `read_case` / `write_case`, `CaseFile`, `CheckedCase` |
-| `mesh_source.py` | `MeshSource` → `OpenFOAMMesh` |
+| `mesh_source.py` | `MeshSource.read(directory) -> Mesh` → `OpenFOAMMesh` (read) / `StructuredGrid` + `AxisGrading` → `GeometricGrading` (generated) |
+| `forcing.py` | `DriveSpec` → `BulkVelocity` (builds `flow.MassFlow`); `SourceSpec` → `BodyForce` (builds `flow.UniformBodyForce`) |
 | `fluid.py` | `Fluid` |
 | `physics.py` | `Physics` → `Laminar` / `RANS` |
 | `boundaries.py` | `PatchCondition` → `Inlet` / `Outlet` / `Wall`; `InletTurbulence` → `FixedTurbulence` |
@@ -50,8 +68,8 @@ F frozen solver → G drive.
   `turbulence/`). It does not fit these values: a patch kind is one statement for *every* field — flow,
   `k`, `omega`, wall membership — so no single package owns it, and a `Physics` base shared by a
   `Laminar` in `flow/` and a `RANS` in `turbulence/` would need a home below both that `case/` then
-  imports from — a cycle through `case/__init__`. The **schemes, SST constants, variable transforms and
-  `BoundaryDriven` are the library's own classes**, read directly (they are plain dataclasses whose
+  imports from — a cycle through `case/__init__`. The **schemes, SST constants and variable transforms are
+  the library's own classes**, read directly (they are plain dataclasses whose
   annotations `SettingsMapping` can check); only what a file needs that no library class expresses gets a
   case value.
 - **The top level names no `kind`** — the whole document is the case — and `fluid` / `numerics` may
@@ -125,7 +143,10 @@ constructor refusal re-raised with the path prepended** (so `Inlet`'s bad veloci
   The validation drivers carry closures no file can state (`point_setup`, the damping tapers reading a
   residual at each rung's seed, the Reynolds companion function, logger metrics); decide which become
   named values and which stay code.
-- **`MassFlow`** / a `UniformBodyForce` source and a structured-grid mesh source (the channels).
+- **A 3D structured grid** — `structured_grid_3d` has neither grading nor periodic axes, so `StructuredGrid`
+  is 2D only rather than half-supporting a uniform 3D box no case needs.
+- **Other source kinds** — a `sources:` section beyond `BodyForce` waits on #362 (sources declaring their
+  inputs); `BodyForce` reads no field and no gradient, so it needs nothing #362 would add.
 - **Patch types / `inGroups`** (#364) — would let a file say "all walls" instead of listing each patch.
 - **`IntensityLength`** inlet turbulence (`inlet_k` / `inlet_omega`) — `InletTurbulence.inflow(velocity)`
   already takes the velocity for it.
@@ -177,6 +198,30 @@ require an array leaf to be matched by an array leaf. **15 of 15 build mutations
 equivalent mutations dismissed**: building a second, equal `PropertyModel` for the closure (value-identical
 by construction), and not passing `drive` (the only nameable drive is the builder's own default).
 
+## Periodic channels: the mesh source, the drive and the sources (2026-09-24)
+
+- **`MeshSource.read(directory) -> Mesh` is the contract**, not `reader()`: a generated grid has nothing to
+  read. `OpenFOAMMesh` keeps its `reader()` and implements `read` through it.
+- **`StructuredGrid(cells, lengths, periodic, grading)`** builds `structured_grid_2d(named_boundaries=True)`
+  — a file always gets the side-named patches, minus a periodic axis's two sides. `periodic` is
+  `tuple[Literal["x"], ...]` because the generator supports `x` only; `grading` is a table keyed by axis.
+  A whole-number float cell count (`96.0`) is normalized to an int, since the settings mapping accepts one
+  in an int position.
+- **The drive is a case-side family, `DriveSpec` → `BulkVelocity(target, direction, initial_force)`,** and
+  the library's `BoundaryDriven` is **no longer a kind a file names**: unset *is* boundary-driven, and a
+  second spelling of the default was removed rather than kept. `BulkVelocity` exists (instead of
+  registering `flow.MassFlow`) because `MassFlow.force` is an array leaf the mapping cannot check;
+  `direction` is `x`/`y`/`z`, mapped to the index. `initial_force` is the multiplier's seed — state, not
+  problem — kept in the file under the user-interface rule above, and documented as a guess.
+- **`sources: [BodyForce(force)]`** → `UniformBodyForce`. Named `BodyForce`, not `UniformBodyForce`, so
+  the case vocabulary and the flow's classes do not share a name (the mapping's registry would allow it;
+  a reader would not).
+- **Each has `refuse_for_dimension`, and `check_against` runs every one** — patches, drive, sources — from
+  one list, reporting all misfits at once.
+- **Mutation-checked: 21 of 21 RED** (grid periodic/grading/naming, every refusal, the float-count
+  normalization, the drive's direction/seed/dimension, the force's sign/count/dimension, and the build
+  dropping the drive or the sources).
+
 ## The case files in the repository
 
 - **`validation/pitzdaily_openfoam/case.yaml` IS what `compare.py` solves.** `compare.case_spec(model=,
@@ -191,6 +236,17 @@ by construction), and not passing `drive` (the only nameable drive is the builde
 - **`validation/bfs3d_openfoam/case.yaml` states bfs3d at its driver's defaults and is NOT read by it** —
   kept hand-built as the parity reference. Switching that driver is a separate decision: it is where most
   of the `BFS3D_*` environment configuration lives.
+- **`validation/turbulent_channel/cases/re{20000,45000,240000}.yaml` and
+  `validation/turbulent_channel_openfoam/cases/{low,high}.yaml` are what the channel harnesses solve** —
+  one file per configuration, each stating ν as the harness used to compute it, to the last bit. The
+  OpenFOAM harness refuses to compare if the file's ν is not the OpenFOAM run's `nu_of / Ubar` (at
+  U_bulk = 1). Both harnesses now read the channel height, bulk velocity and column stride (`nx`) from
+  the file rather than restating them.
+- **`tests/unit/test_channel_case_files.py` is their parity check, in the FAST tier** — the meshes are
+  generated, so nothing is gitignored. Each file is compared as one pytree against a frozen copy of the
+  harnesses' old hand assembly, with one deliberate difference: the harnesses held the viscosity as a
+  Python float, a case file holds it as an array (see "One `PropertyModel`" above); a test shows the two
+  evaluate to identical values, so the difference is in the pytree only. ~36 s, dominated by the five builds.
 - `tests/unit/test_case_file.py::test_the_shipped_pitzdaily_file_reads_as_the_case_its_driver_builds_and_fits_its_mesh`
   still compares the pitzDaily file against a `CaseSpec` written in the test — now a **second** copy rather
   than a third, and it catches the reader misreading the file, not a physics change (a changed file value

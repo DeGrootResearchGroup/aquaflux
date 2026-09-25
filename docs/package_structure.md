@@ -163,8 +163,9 @@ cfd/                                  # repo root
 │   ├── case/                         # a whole case described in one YAML file (top layer: nothing else imports it)
 │   │   ├── spec.py                   #   CaseSpec (mesh/fluid/physics/boundaries/numerics/drive) + Numerics; case_spec_from/to_mapping; check_against(mesh)
 │   │   ├── case_file.py              #   read_case / write_case (YAML 1.2 scalars, duplicate keys refused); CaseFile.check() -> CheckedCase
-│   │   ├── mesh_source.py            #   MeshSource -> OpenFOAMMesh (a path relative to the case file)
+│   │   ├── mesh_source.py            #   MeshSource.read(directory) -> Mesh: OpenFOAMMesh (read) / StructuredGrid + GeometricGrading (generated)
 │   │   ├── fluid.py                  #   Fluid: density and exactly one of the kinematic / dynamic viscosity
+│   │   ├── forcing.py                #   DriveSpec -> BulkVelocity (builds MassFlow); SourceSpec -> BodyForce (builds UniformBodyForce)
 │   │   ├── physics.py                #   Physics -> Laminar / RANS (k-omega SST settings live inside RANS)
 │   │   └── boundaries.py             #   PatchCondition -> Inlet / Outlet / Wall, one per patch for every field; FixedTurbulence
 │   └── parallel/                     # distributed memory: decomposition and halo exchange (the concern kept out of Mesh)

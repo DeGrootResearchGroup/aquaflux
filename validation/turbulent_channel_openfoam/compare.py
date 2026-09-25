@@ -36,28 +36,22 @@ Run (after ``run_of.sh``) from the repo root:
 from __future__ import annotations
 
 import re
+import sys
 import time
 from pathlib import Path
+
+# Running a script puts the script's directory on `sys.path`, not the working directory, so without
+# this the documented invocation from the repository root cannot import `aquaflux` from a plain
+# checkout -- and the case launcher (`validation/run_case.sh`) cannot run it at all.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import aquaflux  # noqa: F401  (enables x64)
 import lineax as lx
 import numpy as np
-from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
-from aquaflux.discretization import FirstOrderUpwind, LimitedUpwind
-from aquaflux.flow import (
-    MassFlow,
-    MomentumContinuity,
-    NoSlipWall,
-    PinnedPoint,
-    bulk_velocity_flow_solve,
-)
-from aquaflux.mesh import graded_nodes, structured_grid_2d
-from aquaflux.properties import Constant, PropertyModel
-from aquaflux.schemes import CompactGreenGauss
+from aquaflux.case import read_case
+from aquaflux.flow import bulk_velocity_flow_solve
 from aquaflux.solve import Convergence, RootSolveSettings
 from aquaflux.turbulence import (
-    SSTModel,
-    SSTTurbulence,
     scalar_pseudo_transient_solve,
     solve_segregated,
     sst_initial_fields,
@@ -69,8 +63,9 @@ FIGS = HERE / "figures"
 U_BAR, H = 0.1335, 2.0  # OpenFOAM meanVelocityForce Ubar; full height (half-height h = 1)
 KAPPA, B_LOG = 0.41, 5.2
 
-# aquaflux wall-normal mesh per OF case (matched to keep the first cell y+ < 1 at that Re_tau).
-CASES = [("low", 96, 1.09), ("high", 224, 1.052)]
+# One aquaflux case file per OpenFOAM run, under cases/: its mesh keeps the first cell y+ < 1 at that
+# Re_tau, and its viscosity is the OpenFOAM run's, normalized to U_bulk = 1.
+CASES = ["low", "high"]
 
 
 # --- OpenFOAM field parsing (ascii nonuniform internalField) ---
@@ -127,43 +122,23 @@ def read_openfoam_case(name):
     )
 
 
-def solve_aquaflux(nu_of, ny, growth):
-    """aquaflux SST at the OF Reynolds number (Re_b = Ubar H / nu_of), normalized to U_bulk = 1."""
-    nu = H / (U_BAR * H / nu_of)  # nu_aqua giving the same Re_b at U_bulk = 1
-    y = graded_nodes(ny, H, growth)
-    mesh = structured_grid_2d(
-        4, ny, lx=1.0, ly=H, periodic=("x",), named_boundaries=True, y_nodes=y
-    )
-    geom = mesh.geometry()
-    model = SSTModel()
-    properties = PropertyModel({"viscosity": Constant(nu), "density": Constant(1.0)})
-    momentum = MomentumContinuity.build(
-        mesh,
-        geom,
-        properties,
-        BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
-        # Momentum advection is second-order linear upwind (the upwind cell reconstructed to the face
-        # with its own gradient, unlimited), matching OpenFOAM's `Gauss linearUpwind grad(U)`.
-        # First-order upwind here adds a numerical viscosity that thickens the profile and depresses
-        # the realized kappa, which is a discretization difference rather than a model one.
-        gradient_scheme=CompactGreenGauss(),
-        advection_scheme=LimitedUpwind(),
-        pressure_datum=PinnedPoint((0.0, 0.0)),
-        drive=MassFlow(target=1.0, force=0.004),
-    )
-    turbulence = SSTTurbulence.build(
-        model,
-        mesh,
-        geom,
-        # k and omega stay first-order upwind, matching OpenFOAM's `Gauss upwind` on both
-        # scalars (only its momentum divergence is second order).
-        FirstOrderUpwind(),
-        properties,
-        gradient_scheme=CompactGreenGauss(),
-        wall_patches=["bottom", "top"],
-        k_boundary=BoundaryConditions({"bottom": Dirichlet(0.0), "top": Dirichlet(0.0)}),
-        omega_boundary=BoundaryConditions({"bottom": ZeroGradient(), "top": ZeroGradient()}),
-    )
+def solve_aquaflux(name, nu_of):
+    """aquaflux SST on ``cases/<name>.yaml``, the OF run's Re_b (= Ubar H / nu_of) normalized to U_bulk = 1."""
+    case_file = read_case(HERE / "cases" / f"{name}.yaml")
+    spec = case_file.spec
+    nu = spec.fluid.kinematic_viscosity
+    # The case file states the viscosity; the OpenFOAM run it is compared against has its own. They
+    # must be the same Reynolds number, or the comparison measures the difference between the two.
+    expected = H / (U_BAR * H / nu_of)
+    if not np.isclose(nu, expected, rtol=1e-12, atol=0.0):
+        raise SystemExit(
+            f"cases/{name}.yaml states nu = {nu!r}, but the OpenFOAM run's nu = {nu_of!r} gives "
+            f"{expected!r} at U_bulk = 1: the two are not the same case."
+        )
+    coupled = case_file.check().build()
+    momentum, turbulence = coupled.momentum, coupled.turbulence
+    mesh, geom = momentum.mesh, momentum.geometry
+    ny = spec.mesh.cells[1]
     direct = lx.AutoLinearSolver(well_posed=True)
 
     # The body force is a solve unknown enforcing <U_x> = 1 (a bordered Newton with beta as a scalar
@@ -198,11 +173,11 @@ def solve_aquaflux(nu_of, ny, growth):
     )
     velocity, _ = momentum.unpack(flow)
     c = np.asarray(geom.cell.centroid)
-    idx = np.arange(0, mesh.n_cells, 4)
+    idx = np.arange(0, mesh.n_cells, spec.mesh.cells[0])  # one wall-normal column
     yc, u = c[idx, 1], np.asarray(velocity[:, 0])[idx]
     order = np.argsort(yc)
     yplus, uplus, xi, u_tau, Re_tau = _wall_unit_profile(yc[order], u[order], nu)
-    nu_t = np.asarray(turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega))
+    nu_t = np.asarray(turbulence.eddy_viscosity(momentum.velocity_fields(flow).gradient, k, omega))
     return dict(
         code="aquaflux",
         nu=nu,
@@ -349,7 +324,7 @@ def main():
     if not (RUNS / "low").exists():
         raise SystemExit(f"OpenFOAM results not found in {RUNS}; run of_case/run_of.sh first.")
     pairs, unconverged = [], []
-    for name, ny, growth in CASES:
+    for name in CASES:
         of = read_openfoam_case(name)
         print(
             f"OpenFOAM {name}: Re_tau={of['Re_tau']:.0f} kappa={of['kappa']:.3f} nu_t/nu={of['nut_ratio']:.0f}",
@@ -360,7 +335,7 @@ def main():
         # aborting the study: the points that did converge are still a valid comparison, and losing
         # them would also leave the tracked report and figure describing a previous run.
         try:
-            aq = solve_aquaflux(of["nu"], ny, growth)
+            aq = solve_aquaflux(name, of["nu"])
         except Exception as exc:  # any solver failure is reported, not swallowed
             unconverged.append((name, of["Re_tau"], type(exc).__name__))
             print(

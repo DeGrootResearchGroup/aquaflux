@@ -55,12 +55,13 @@ import importlib
 import sys
 from pathlib import Path
 
-import numpy as np
-from aquaflux.turbulence import UnpreconditionedScalars
-
 VALIDATION = Path(__file__).resolve().parent
 ROOT = VALIDATION.parent
+# Before the `aquaflux` import: run as a script, only this file's directory is on `sys.path`.
 sys.path.insert(0, str(ROOT))
+
+import numpy as np  # noqa: E402
+from aquaflux.turbulence import UnpreconditionedScalars  # noqa: E402
 
 #: Viscosity-scale ratios to report, as a geometric schedule's ``ratio``. ``10`` is the shipped
 #: one-decade spacing; the rest are the finer ladders it would be traded for.

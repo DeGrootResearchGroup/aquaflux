@@ -50,7 +50,7 @@ PUBLIC_SUBPACKAGES = [
 SUBPACKAGE_GROUPS = {
     "case": [
         ("Reading, writing and checking a case file", ["case_file", "spec"]),
-        ("The sections of a case", ["mesh_source", "fluid", "physics", "boundaries"]),
+        ("The sections of a case", ["mesh_source", "fluid", "physics", "boundaries", "forcing"]),
     ],
     "mesh": [
         ("The mesh and its geometry", ["mesh", "geometry", "cell", "face", "connectivity"]),

@@ -1,7 +1,7 @@
 # Turbulent channel: aquaflux k-omega SST vs the law of the wall
 
 Fully-developed plane channel, **streamwise-periodic** (two no-slip walls, periodic in x,
-driven to a fixed bulk velocity by the mass-flow controller). The flow is x-homogeneous, so
+driven to a fixed bulk velocity by a mass-flow constraint). The flow is x-homogeneous, so
 `nx = 4`; the wall-normal mesh is graded to `y+ < 1`. Half-height `h = H/2 = 1`, so `Re_tau`
 is `u_tau h / nu`. Molecular wall stress `tau_w = nu (du/dy)|_wall` from the near-wall cell
 (which sits in the viscous sublayer, `y+ < 1`).
@@ -12,7 +12,7 @@ is `u_tau h / nu`. Molecular wall stress `tau_w = nu (du/dy)|_wall` from the nea
 |---|---|
 | Geometry | plane channel, height `H = 2`, streamwise-periodic |
 | Turbulence | k-omega SST (`SSTTurbulence`, segregated Picard driver) |
-| Forcing | uniform body force, mass-flow controller to `U_bulk = 1` |
+| Forcing | uniform body force, mass-flow constraint to `U_bulk = 1` |
 | Advection | first-order upwind (momentum + k/omega) |
 | Flow solve | coupled Newton, direct linear solve (tiny system) |
 
@@ -22,6 +22,7 @@ is `u_tau h / nu`. Molecular wall stress `tau_w = nu (du/dy)|_wall` from the nea
 |---|---|---|---|---|
 | 538 | 0.0538 | 0.0554 | 0.39 | 0.340 |
 | 1093 | 0.0486 | 0.0501 | 0.54 | 0.361 |
+| 4946 | 0.0412 | 0.0406 | 0.44 | 0.382 |
 
 See `figures/law_of_the_wall.png`.
 
@@ -54,5 +55,3 @@ gap -- is best settled by a **direct same-model, same-mesh comparison against Op
 (the pattern used in `validation/skewed_cavity`: solve an OpenFOAM channel tutorial, read its
 mesh into aquaflux via `read_openfoam`, and compare the profiles cell-for-cell). That
 comparison is the next step.
-
-- **Re_b = 240000 (ny = 224)**: the segregated solve did not converge (`EquinoxRuntimeError`) and is omitted above. Tracked in issue #99.

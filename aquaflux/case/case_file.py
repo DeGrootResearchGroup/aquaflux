@@ -140,7 +140,7 @@ class CaseFile:
         FileNotFoundError
             If the mesh cannot be found.
         """
-        mesh = self.spec.mesh.reader(self.directory).read().validate()
+        mesh = self.spec.mesh.read(self.directory).validate()
         self.spec.check_against(mesh)
         return CheckedCase(spec=self.spec, mesh=mesh)
 

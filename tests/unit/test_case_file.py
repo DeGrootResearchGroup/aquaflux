@@ -15,14 +15,18 @@ import yaml
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.case import (
     RANS,
+    BodyForce,
+    BulkVelocity,
     CaseFile,
     CaseSpec,
     FixedTurbulence,
     Fluid,
+    GeometricGrading,
     Inlet,
     Numerics,
     OpenFOAMMesh,
     Outlet,
+    StructuredGrid,
     Wall,
     case_spec_from_mapping,
     case_spec_to_mapping,
@@ -31,16 +35,18 @@ from aquaflux.case import (
 )
 from aquaflux.discretization import FirstOrderUpwind, LimitedUpwind
 from aquaflux.flow import (
+    MassFlow,
     MomentumContinuity,
     MovingWall,
     NoSlipWall,
     PinnedPoint,
     PressureOutlet,
+    UniformBodyForce,
     VelocityInlet,
 )
 from aquaflux.io import read_openfoam
 from aquaflux.io.openfoam.cyclic import DEFAULT_MATCH_TOLERANCE
-from aquaflux.mesh import Mesh, MeshGeometry
+from aquaflux.mesh import Mesh, MeshGeometry, graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import (
     CorrectedGreenGauss,
@@ -814,3 +820,165 @@ def test_an_unset_setting_leaves_the_builders_default_in_force() -> None:
         ),
     )
     _same_problem(built, reference)
+
+
+# --- generated meshes, a held bulk velocity, a prescribed force -------------------------------
+
+
+def _channel_sections(**overrides: object) -> dict[str, object]:
+    """A laminar periodic channel, as a file would state it."""
+    sections = {
+        "mesh": {
+            "kind": "StructuredGrid",
+            "cells": [4, 6],
+            "lengths": [1.0, 2.0],
+            "periodic": ["x"],
+            "grading": {"y": {"kind": "GeometricGrading", "growth": 1.3}},
+        },
+        "fluid": {"density": 1.0, "kinematic_viscosity": 0.1},
+        "physics": {"kind": "Laminar"},
+        "boundaries": {"bottom": {"kind": "Wall"}, "top": {"kind": "Wall"}},
+        "numerics": {"momentum_advection": {"kind": "FirstOrderUpwind"}},
+        "drive": {"kind": "BulkVelocity", "target": 1.0, "direction": "x", "initial_force": 0.01},
+        "pressure_datum": {"kind": "PinnedPoint", "point": [0.0, 0.0]},
+    }
+    return {**sections, **overrides}
+
+
+def test_a_structured_grid_generates_the_mesh_its_settings_describe() -> None:
+    grid = StructuredGrid(
+        cells=(4, 6),
+        lengths=(1.0, 2.0),
+        periodic=("x",),
+        grading={"y": GeometricGrading(growth=1.3)},
+    )
+    mesh = grid.read(REPO)
+    reference = structured_grid_2d(
+        4,
+        6,
+        1.0,
+        2.0,
+        named_boundaries=True,
+        periodic=("x",),
+        y_nodes=graded_nodes(6, 2.0, 1.3),
+    )
+    _same_problem(mesh, reference)
+    # A periodic axis's two sides are an interior seam, not patches.
+    assert {"bottom", "top"} <= set(mesh.face_patches.names)
+    assert not {"left", "right"} & set(mesh.face_patches.names)
+
+
+def test_a_grading_toward_one_wall_reaches_the_generator() -> None:
+    grid = StructuredGrid(
+        cells=(2, 5), lengths=(1.0, 1.0), grading={"y": GeometricGrading(1.5, both_sides=False)}
+    )
+    y = np.unique(np.asarray(grid.read(REPO).node_coords)[:, 1])
+    np.testing.assert_allclose(y, graded_nodes(5, 1.0, 1.5, both_sides=False))
+
+
+def test_a_whole_number_cell_count_written_as_a_float_is_a_count() -> None:
+    assert StructuredGrid(cells=(4.0, 6.0), lengths=(1.0, 1.0)).cells == (4, 6)
+
+
+@pytest.mark.parametrize(
+    ("build", "match"),
+    [
+        (lambda: StructuredGrid(cells=(2, 2, 2), lengths=(1.0, 1.0, 1.0)), "two-dimensional"),
+        (lambda: StructuredGrid(cells=(0, 2), lengths=(1.0, 1.0)), "cell counts must be >= 1"),
+        (lambda: StructuredGrid(cells=(2, 2), lengths=(1.0, -1.0)), "lengths must be positive"),
+        (
+            lambda: StructuredGrid(cells=(1, 2), lengths=(1.0, 1.0), periodic=("x",)),
+            "needs at least two cells",
+        ),
+        (
+            lambda: StructuredGrid(cells=(2, 2), lengths=(1.0, 1.0), periodic=("x", "x")),
+            "named twice as periodic",
+        ),
+        (
+            lambda: StructuredGrid(
+                cells=(2, 2), lengths=(1.0, 1.0), grading={"z": GeometricGrading(1.1)}
+            ),
+            r"grading names axes \('x', 'y'\), got \['z'\]",
+        ),
+        (lambda: GeometricGrading(growth=0.0), "growth must be a positive"),
+        (lambda: BulkVelocity(target=float("nan")), "BulkVelocity.target must be finite"),
+        (lambda: BodyForce(force=(1.0,)), "two or three components, got 1"),
+    ],
+    ids=[
+        "three-dimensional",
+        "no-cells",
+        "negative-length",
+        "one-periodic-cell",
+        "periodic-twice",
+        "grading-an-axis-it-lacks",
+        "zero-growth",
+        "non-finite-target",
+        "one-component-force",
+    ],
+)
+def test_a_generated_mesh_or_forcing_that_cannot_exist_is_refused(build, match) -> None:
+    with pytest.raises(ValueError, match=match):
+        build()
+
+
+def test_a_bulk_velocity_builds_the_mass_flow_drive_it_describes() -> None:
+    drive = BulkVelocity(target=2.5, direction="y", initial_force=0.3).drive()
+    assert isinstance(drive, MassFlow)
+    assert (drive.target, drive.flow_direction, float(drive.force)) == (2.5, 1, 0.3)
+    unset = BulkVelocity(target=1.0).drive()
+    assert (unset.flow_direction, float(unset.force)) == (0, 0.0)  # MassFlow's own defaults
+
+
+def test_a_body_force_builds_the_uniform_source_it_describes() -> None:
+    source = BodyForce(force=(0.004, -0.5)).momentum_source()
+    assert isinstance(source, UniformBodyForce)
+    np.testing.assert_array_equal(np.asarray(source.force), [0.004, -0.5])
+
+
+def test_a_periodic_channel_reads_round_trips_and_builds_as_written_by_hand(tmp_path: Path) -> None:
+    sections = _channel_sections(sources=[{"kind": "BodyForce", "force": [0.002, 0.0]}])
+    spec = case_spec_from_mapping(sections)
+    path = tmp_path / "case.yaml"
+    write_case(spec, path)
+    assert read_case(path).spec == spec
+
+    mesh = structured_grid_2d(
+        4, 6, 1.0, 2.0, named_boundaries=True, periodic=("x",), y_nodes=graded_nodes(6, 2.0, 1.3)
+    )
+    reference = MomentumContinuity.build(
+        mesh,
+        mesh.geometry(),
+        PropertyModel({"viscosity": Constant(jnp.asarray(0.1)), "density": Constant(1.0)}),
+        BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
+        advection_scheme=FirstOrderUpwind(),
+        pressure_datum=PinnedPoint((0.0, 0.0)),
+        drive=MassFlow(target=1.0, flow_direction=0, force=0.01),
+        sources=(UniformBodyForce(jnp.asarray((0.002, 0.0))),),
+    )
+    _same_problem(CaseFile(spec, tmp_path).check().build(), reference)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        (
+            {"drive": {"kind": "BulkVelocity", "target": 1.0, "direction": "z"}},
+            r"drive: the bulk velocity is held along z, but the mesh is 2-dimensional",
+        ),
+        (
+            {"sources": [{"kind": "BodyForce", "force": [1.0, 0.0, 0.0]}]},
+            r"sources\[0\]: the body force .* has 3 components",
+        ),
+    ],
+    ids=["a-direction-the-mesh-lacks", "a-force-of-the-wrong-dimension"],
+)
+def test_forcing_that_does_not_fit_the_mesh_is_refused_when_checked(overrides, match) -> None:
+    case = CaseFile(case_spec_from_mapping(_channel_sections(**overrides)), REPO)
+    with pytest.raises(ValueError, match=match):
+        case.check()
+
+
+def test_the_default_drive_is_not_a_kind_a_file_names() -> None:
+    """Unset means driven by the boundaries and sources; there is no second spelling of that default."""
+    with pytest.raises(ValueError, match=r"unknown kind 'BoundaryDriven' at 'drive'"):
+        case_spec_from_mapping(_sections(drive={"kind": "BoundaryDriven"}))

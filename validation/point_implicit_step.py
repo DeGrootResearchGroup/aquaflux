@@ -52,13 +52,14 @@ import importlib
 import sys
 from pathlib import Path
 
-import numpy as np
-import scipy.sparse as sp
-from aquaflux.initialization import hybrid_initialize
-from aquaflux.turbulence import UnpreconditionedScalars
-
 VALIDATION = Path(__file__).resolve().parent
+# Before the `aquaflux` imports: run as a script, only this file's directory is on `sys.path`.
 sys.path.insert(0, str(VALIDATION.parent))
+
+import numpy as np  # noqa: E402
+import scipy.sparse as sp  # noqa: E402
+from aquaflux.initialization import hybrid_initialize  # noqa: E402
+from aquaflux.turbulence import UnpreconditionedScalars  # noqa: E402
 
 #: Step lengths tried along every direction, logarithmic over many decades.
 #:

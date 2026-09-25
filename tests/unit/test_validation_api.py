@@ -53,6 +53,7 @@ import ast
 import importlib
 import inspect
 import symtable
+import sys
 from pathlib import Path
 
 import pytest
@@ -331,6 +332,72 @@ def _conditional_reads(source: str, label: str) -> list[str]:
                 f"branch at line {guard.lineno}"
             )
     return offenders
+
+
+def _missing_bootstrap(path: Path) -> list[str]:
+    """``[path]`` if it runs as a script and imports ``aquaflux`` before putting the repository on ``sys.path``.
+
+    Run as a script, only the script's own directory is on ``sys.path``, so from a plain checkout its
+    first ``aquaflux`` import fails -- and ``validation/run_case.sh`` cannot launch it at all. A module
+    without a ``__main__`` entry point is imported by another script, whose own bootstrap serves it.
+    """
+    tree = ast.parse(path.read_text())
+    runnable = any(
+        isinstance(node, ast.If) and "__main__" in ast.unparse(node.test) for node in tree.body
+    )
+    bootstrap = first_import = None
+    for node in tree.body:
+        if isinstance(node, ast.Import | ast.ImportFrom) and first_import is None:
+            modules = (
+                [alias.name for alias in node.names]
+                if isinstance(node, ast.Import)
+                else [node.module or ""]
+            )
+            if any(module.split(".")[0] == "aquaflux" for module in modules):
+                first_import = node.lineno
+        if bootstrap is None and "sys.path.insert" in ast.unparse(node):
+            bootstrap = node.lineno
+    if runnable and first_import is not None and (bootstrap is None or bootstrap > first_import):
+        return [str(path.relative_to(_VALIDATION))]
+    return []
+
+
+@pytest.mark.skipif(not _cases(), reason="this checkout carries no validation cases")
+def test_every_runnable_case_can_import_the_package_it_runs() -> None:
+    """A script that imports ``aquaflux`` before the repository is on ``sys.path`` cannot be launched.
+
+    Two channel studies and two harnesses were in this state -- including one this module's own
+    docstring names as a motivating break -- with every check here green, because none looked.
+    """
+    offenders = [problem for path in _cases() for problem in _missing_bootstrap(path)]
+    assert offenders == [], (
+        "these validation scripts import aquaflux before putting the repository on sys.path, so "
+        "they cannot run from a plain checkout or through validation/run_case.sh:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_the_bootstrap_checker_sees_a_script_that_lacks_one(tmp_path: Path, monkeypatch) -> None:
+    """It must fire on the defect, and not on a helper module another script imports."""
+    monkeypatch.setattr(sys.modules[__name__], "_VALIDATION", tmp_path)
+    broken = tmp_path / "broken.py"
+    broken.write_text("import aquaflux\n\nif __name__ == '__main__':\n    pass\n")
+    late = tmp_path / "late.py"
+    late.write_text(
+        "import sys\nimport aquaflux\nsys.path.insert(0, '..')\n\n"
+        "if __name__ == '__main__':\n    pass\n"
+    )
+    helper = tmp_path / "helper.py"
+    helper.write_text("import aquaflux\n")
+    fixed = tmp_path / "fixed.py"
+    fixed.write_text(
+        "import sys\nsys.path.insert(0, '..')\nimport aquaflux\n\n"
+        "if __name__ == '__main__':\n    pass\n"
+    )
+    assert _missing_bootstrap(broken) == ["broken.py"]
+    assert _missing_bootstrap(late) == ["late.py"]
+    assert _missing_bootstrap(helper) == []
+    assert _missing_bootstrap(fixed) == []
 
 
 @pytest.mark.skipif(not _cases(), reason="this checkout carries no validation cases")

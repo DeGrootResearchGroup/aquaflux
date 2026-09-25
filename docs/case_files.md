@@ -61,10 +61,27 @@ one form each, so they need no `kind`, and the top level is the case itself.
 
 ## The sections
 
-**`mesh`** — where the mesh is read from. {class}`~aquaflux.case.OpenFOAMMesh` reads an
-OpenFOAM polyMesh, or a case directory holding `constant/polyMesh`; a relative `path` is taken
-from the directory the case file sits in. A case one cell thick between `empty` patches reads
-as a two-dimensional mesh, and those patches are not named in the file.
+**`mesh`** — where the mesh comes from, read or generated:
+
+- {class}`~aquaflux.case.OpenFOAMMesh` reads an OpenFOAM polyMesh, or a case directory holding
+  `constant/polyMesh`; a relative `path` is taken from the directory the case file sits in. A
+  case one cell thick between `empty` patches reads as a two-dimensional mesh, and those patches
+  are not named in the file.
+- {class}`~aquaflux.case.StructuredGrid` generates a two-dimensional structured grid on the box
+  `[0, lx] x [0, ly]`, with patches named by side — `left`, `right`, `bottom`, `top`. An axis
+  listed as `periodic` wraps around, and its two sides are not patches at all; an axis given a
+  `grading` has its cells sized by it
+  ({class}`~aquaflux.case.GeometricGrading`: finest at the walls, growing by `growth`):
+
+  ```yaml
+  mesh:
+    kind: StructuredGrid
+    cells: [4, 96]
+    lengths: [1.0, 2.0]
+    periodic: [x]
+    grading:
+      y: {kind: GeometricGrading, growth: 1.09}
+  ```
 
 **`fluid`** — a constant-density fluid, stated once for every equation. Give the `density`
 and **exactly one** of `kinematic_viscosity` and `dynamic_viscosity`: the other follows from
@@ -101,8 +118,26 @@ fluid, and it is a wall to the turbulence closure.
 `gradient` (the cell-gradient reconstruction, for every field; unset,
 {data}`~aquaflux.schemes.DEFAULT_GRADIENT_SCHEME`).
 
-**`drive`** — what sets the flow in motion. Unset, and the only value a file can name today,
-it is {class}`~aquaflux.flow.BoundaryDriven`: the boundary conditions do.
+**`drive`** — what sets the flow in motion when the boundary conditions do not. Unset, they
+do. A streamwise-periodic channel prescribes the velocity nowhere, and is held at a bulk
+(volume-averaged) velocity instead, by a uniform streamwise force solved for with the flow:
+
+```yaml
+drive: {kind: BulkVelocity, target: 1.0, direction: x, initial_force: 0.004}
+```
+
+{class}`~aquaflux.case.BulkVelocity` holds `target` along `direction` (default `x`).
+`initial_force` is where the solve for the force starts — a guess, not a setting of the
+problem: the force it converges to does not depend on it, though how quickly it gets there can.
+
+**`sources`** — terms added to the momentum balance. {class}`~aquaflux.case.BodyForce` is a
+prescribed uniform force per unit volume, the other way to drive a periodic channel — at a
+fixed force, with the bulk velocity whatever it sustains:
+
+```yaml
+sources:
+  - {kind: BodyForce, force: [0.004, 0.0]}
+```
 
 **`pressure_datum`** — where the pressure level is fixed, in a domain that no patch fixes it
 in. Incompressible flow determines the pressure only up to a constant; an `Outlet` supplies
@@ -135,7 +170,8 @@ When the case is **checked** against its mesh ({meth}`~aquaflux.case.CaseFile.ch
 - every patch named is a boundary patch of the mesh, and every boundary face lies in a named
   patch — a face given no condition would otherwise keep a zero face value, a boundary
   condition nobody chose;
-- each patch fits the mesh — an inlet or wall velocity has one component per dimension;
+- each patch fits the mesh — an inlet or wall velocity has one component per dimension — and so
+  do the drive's direction and each source's force;
 - a pressure datum's point has one coordinate per dimension and lies within the mesh's
   bounding box.
 
@@ -189,8 +225,6 @@ the stopping test — is configured against it in code.
 
 ## What a case file cannot describe yet
 
-- **A streamwise-periodic channel.** It needs a structured-grid mesh source and a body-force
-  or bulk-velocity drive, which a file cannot name yet; it is built in code.
 - **A boundary profile** — an inlet velocity or value varying across the patch. Those are
   functions of position, built in code.
 - **The solve** — the march, its preconditioner and its convergence test. A case file

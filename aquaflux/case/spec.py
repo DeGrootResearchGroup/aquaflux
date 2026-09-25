@@ -20,6 +20,7 @@ patch, and that each patch and the datum fit the mesh -- is checked by :meth:`Ca
 from __future__ import annotations
 
 import dataclasses
+import functools
 import types
 from collections.abc import Mapping
 
@@ -28,8 +29,6 @@ import numpy as np
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import AdvectionScheme, FirstOrderUpwind, LimitedUpwind
 from aquaflux.flow import (
-    BoundaryDriven,
-    Drive,
     PinnedPoint,
     PressureDatum,
     refuse_an_unsuitable_pressure_datum,
@@ -51,7 +50,8 @@ from aquaflux.turbulence import DirectScalars, LogScalars, SSTModel
 
 from .boundaries import FixedTurbulence, Inlet, Outlet, PatchCondition, Wall
 from .fluid import Fluid
-from .mesh_source import MeshSource, OpenFOAMMesh
+from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
+from .mesh_source import GeometricGrading, MeshSource, OpenFOAMMesh, StructuredGrid
 from .physics import RANS, Laminar, Physics
 
 __all__ = ["CaseSpec", "Numerics", "case_spec_from_mapping", "case_spec_to_mapping"]
@@ -105,9 +105,12 @@ class CaseSpec:
         given.
     numerics : Numerics
         The discretization choices common to every physics.
-    drive : Drive or None
-        What sets the flow in motion; unset, :class:`~aquaflux.flow.BoundaryDriven` -- the boundary
-        conditions do. A case file can name no other drive yet.
+    drive : DriveSpec or None
+        What drives the flow when its boundary conditions do not -- :class:`~aquaflux.case.BulkVelocity`,
+        a bulk velocity held by a solved force. Unset, the boundary conditions and the sources do.
+    sources : tuple of SourceSpec
+        Terms added to the momentum balance -- :class:`~aquaflux.case.BodyForce`, a prescribed uniform
+        force. Empty by default.
     pressure_datum : PressureDatum or None
         Where the pressure level is fixed in a domain no patch fixes it in -- a closed domain, such as
         a lid-driven cavity: a :class:`~aquaflux.flow.PinnedPoint`. Required exactly when no patch is
@@ -129,8 +132,9 @@ class CaseSpec:
     physics: Physics
     boundaries: Mapping[str, PatchCondition]
     numerics: Numerics
-    drive: Drive | None = None
+    drive: DriveSpec | None = None
     pressure_datum: PressureDatum | None = None
+    sources: tuple[SourceSpec, ...] = ()
 
     def __post_init__(self) -> None:
         for name, family in (
@@ -143,8 +147,15 @@ class CaseSpec:
                 raise TypeError(
                     f"CaseSpec.{name} must be a {family.__name__}, got {getattr(self, name)!r}."
                 )
-        if self.drive is not None and not isinstance(self.drive, Drive):
-            raise TypeError(f"CaseSpec.drive must be a Drive, got {self.drive!r}.")
+        if self.drive is not None and not isinstance(self.drive, DriveSpec):
+            raise TypeError(
+                f"CaseSpec.drive must be a drive such as BulkVelocity(target), got {self.drive!r}."
+            )
+        for source in self.sources:
+            if not isinstance(source, SourceSpec):
+                raise TypeError(
+                    f"CaseSpec.sources holds momentum sources such as BodyForce(force), got {source!r}."
+                )
         if self.pressure_datum is not None and not isinstance(self.pressure_datum, PressureDatum):
             raise TypeError(
                 f"CaseSpec.pressure_datum must be a PressureDatum, got {self.pressure_datum!r}."
@@ -176,8 +187,9 @@ class CaseSpec:
 
         Every patch named must be a boundary patch of the mesh; every boundary face must lie in a named
         patch (a face nobody gave a condition would keep a zero face value, which is a boundary condition
-        nobody chose); each patch's settings must fit the mesh's dimension; and a pressure datum's point
-        must have one coordinate per dimension and lie within the mesh's bounding box. Needs the mesh's
+        nobody chose); each patch's, the drive's and each source's settings must fit the mesh's
+        dimension; and a pressure datum's point must have one coordinate per dimension and lie within the
+        mesh's bounding box. Needs the mesh's
         topology and node coordinates only, not its geometry.
 
         Parameters
@@ -217,9 +229,25 @@ class CaseSpec:
                 for name, count in uncovered.items()
             )
             problems.append(f"no condition is given for the boundary faces of {listed}")
-        for patch, condition in self.boundaries.items():
+        # Everything with a dimension of its own, each checked against the mesh's.
+        refusals = [
+            *(
+                functools.partial(condition.refuse_for_dimension, mesh.dim, patch)
+                for patch, condition in self.boundaries.items()
+            ),
+            *(
+                []
+                if self.drive is None
+                else [functools.partial(self.drive.refuse_for_dimension, mesh.dim)]
+            ),
+            *(
+                functools.partial(source.refuse_for_dimension, mesh.dim, index)
+                for index, source in enumerate(self.sources)
+            ),
+        ]
+        for refuse in refusals:
             try:
-                condition.refuse_for_dimension(mesh.dim, patch)
+                refuse()
             except ValueError as error:
                 problems.append(str(error))
         if isinstance(self.pressure_datum, PinnedPoint):
@@ -258,6 +286,8 @@ _CASE_MAPPING = SettingsMapping(
     [
         CaseSpec,
         OpenFOAMMesh,
+        StructuredGrid,
+        GeometricGrading,
         Fluid,
         Laminar,
         RANS,
@@ -279,7 +309,8 @@ _CASE_MAPPING = SettingsMapping(
         MultipleCorrectionGradient,
         OwnerGradient,
         SkewCorrectedGradient,
-        BoundaryDriven,
+        BulkVelocity,
+        BodyForce,
         PinnedPoint,
     ]
 )

@@ -113,7 +113,22 @@ block: whether a given change reaches a case is exactly the judgement a script c
 ## ⚠️ What the static guard CANNOT catch
 
 `tests/unit/test_validation_api.py` is a static check — it reads the cases with `ast` and never builds
-a mesh. **A green run there does not mean the cases work.** It is blind to:
+a mesh. **A green run there does not mean the cases work.**
+
+✅ **It now also checks the bootstrap (2026-09-24):** every script with a `__main__` entry point that
+imports `aquaflux` must put the repository root on `sys.path` *before* that import
+(`test_every_runnable_case_can_import_the_package_it_runs`). Four scripts failed it —
+`turbulent_channel/compare.py`, `turbulent_channel_openfoam/compare.py`, `continuation_seed_error.py`,
+`point_implicit_step.py` — so **none of them could be launched through `run_case.sh`**, with every check
+here green, although this module's own docstring names a missing bootstrap as a motivating break. Found by
+running a channel study through the runner, not by the guard. All four are fixed.
+
+It is still blind to:
+
+- **A method that no longer exists on an object the case holds.** `turbulent_channel_openfoam/compare.py`
+  called `momentum.velocity_gradient(flow)` after that method became `velocity_fields(flow).gradient`, so
+  its OpenFOAM comparison raised `AttributeError` *after* every solve — found 2026-09-24 by running it.
+  The guard checks imported names and keyword arguments, never attribute access on a returned object.
 
 - **Semantic breaks.** A parameter that still exists and now means something different, a default that
   moved, a type that changed under an unchanged name. Break 1 above is exactly this, and the guard
@@ -474,6 +489,18 @@ the most valuable thing it produces is not the log but that *"is this run mine, 
 has a written answer*, a question that has been got wrong from the process table alone. Reach for the
 written answer first. The cost of not doing so, measured here, was four wrong claims in one evening
 between two sessions that were each checking the other's work.
+
+## The channel studies read case files (2026-09-24) — and their tracked report was stale
+
+`turbulent_channel` and `turbulent_channel_openfoam` build each configuration from a file under `cases/`
+(see `.claude/rules/case.md`). ⚠️ **`turbulent_channel/report.md` dated from 2026-07-20 and said Re_b =
+240000 "did not converge (issue #99)".** It converges on today's code: Re_tau 4946, u_tau 0.0412 (Dean
+0.0406), kappa 0.382, 116 s — and **`main`'s own hand-built script gives the identical numbers** (run in
+isolation, 121 s), so it was fixed by some solver change since July, not by the case-file switch. The
+regenerated report is committed. The other two rows reproduced exactly (Re_tau 538 / 1093, kappa 0.340 /
+0.361). The OpenFOAM study's aquaflux `low` side reproduces its report exactly (Re_tau 380, u_tau
+0.0569, nu_t/nu 50.4, kappa 0.340); its OpenFOAM results are gitignored and were not on the machine, so
+the full comparison was not rerun. One run each, macOS arm64, 2026-09-24.
 
 ## `bfs3d_species` — the newest case, and what it depends on
 

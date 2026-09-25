@@ -35,17 +35,23 @@ from __future__ import annotations
 from .boundaries import FixedTurbulence, Inlet, InletTurbulence, Outlet, PatchCondition, Wall
 from .case_file import CaseFile, CheckedCase, read_case, write_case
 from .fluid import Fluid
-from .mesh_source import MeshSource, OpenFOAMMesh
+from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
+from .mesh_source import AxisGrading, GeometricGrading, MeshSource, OpenFOAMMesh, StructuredGrid
 from .physics import RANS, Laminar, Physics
 from .spec import CaseSpec, Numerics, case_spec_from_mapping, case_spec_to_mapping
 
 __all__ = [
     "RANS",
+    "AxisGrading",
+    "BodyForce",
+    "BulkVelocity",
     "CaseFile",
     "CaseSpec",
     "CheckedCase",
+    "DriveSpec",
     "FixedTurbulence",
     "Fluid",
+    "GeometricGrading",
     "Inlet",
     "InletTurbulence",
     "Laminar",
@@ -55,6 +61,8 @@ __all__ = [
     "Outlet",
     "PatchCondition",
     "Physics",
+    "SourceSpec",
+    "StructuredGrid",
     "Wall",
     "case_spec_from_mapping",
     "case_spec_to_mapping",
