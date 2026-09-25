@@ -499,6 +499,38 @@ class FaceNodeConnectivity(eqx.Module):
             n_faces=n_faces,
         )
 
+    def select(self, faces) -> FaceNodeConnectivity:
+        """The connectivity of a subset of the faces, in the order given.
+
+        Node indices are unchanged, so the result reads the same ``node_coords`` as this one. A
+        build-time operation, for working on a few patches of a large mesh without traversing
+        every face.
+
+        Parameters
+        ----------
+        faces : array_like of int, shape ``(n_selected,)``
+            Indices of the faces to keep; row ``k`` of the result is face ``faces[k]``.
+
+        Returns
+        -------
+        FaceNodeConnectivity
+
+        Raises
+        ------
+        ValueError
+            If an index is outside ``[0, n_faces)``.
+        """
+        faces = np.asarray(faces, dtype=np.int64).reshape(-1)
+        if faces.size and (faces.min() < 0 or faces.max() >= self.n_faces):
+            raise ValueError(f"face index outside [0, {self.n_faces})")
+        counts = np.asarray(self.counts)[faces]
+        offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
+        # Each selected face's incidences, in order: its first incidence in this connectivity,
+        # then the next `count - 1`.
+        first = np.asarray(self.offsets)[:-1][faces]
+        rows = np.repeat(first - offsets[:-1], counts) + np.arange(offsets[-1])
+        return FaceNodeConnectivity.from_csr(offsets, np.asarray(self.face_node_indices)[rows])
+
     def gather_node_coords(self, node_coords: jnp.ndarray) -> jnp.ndarray:
         """Node coordinates for every incidence, in CSR order, shape ``(n_incidences, dim)``."""
         return node_coords[self.face_node_indices]

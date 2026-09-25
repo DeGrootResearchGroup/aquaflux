@@ -60,6 +60,7 @@ SUBPACKAGE_GROUPS = {
         ("The mesh and its geometry", ["mesh", "geometry", "cell", "face", "connectivity"]),
         ("Cell zones and face patches", ["groups"]),
         ("Building and transforming a mesh", ["structured", "collapse", "reorder"]),
+        ("Boundary patches as surfaces", ["surface"]),
         ("Quality and connectivity diagnostics", ["quality", "distance", "graph"]),
     ],
     "solve": [
@@ -123,7 +124,7 @@ SUBPACKAGE_GROUPS = {
     "radiation": [
         ("The radiation model", ["model"]),
         ("Engineering units", ["units"]),
-        ("Emitting surfaces", ["surfaces", "profiles", "stl", "subdivide", "checks"]),
+        ("Emitting surfaces", ["surfaces", "profiles", "stl", "subdivide", "coarsen", "checks"]),
         ("Direct gathers and the medium between", ["gather", "absorption"]),
         ("Surface-to-surface transfer", ["transfer", "quadrature"]),
         (

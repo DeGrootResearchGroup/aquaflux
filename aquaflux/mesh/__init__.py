@@ -36,6 +36,7 @@ from .reorder import (
     permute_cells,
 )
 from .structured import graded_nodes, structured_grid_2d, structured_grid_3d
+from .surface import PatchTriangles, patch_triangles
 
 __all__ = [
     "CellGeometry",
@@ -51,6 +52,7 @@ __all__ = [
     "LabelledGroups",
     "Mesh",
     "MeshGeometry",
+    "PatchTriangles",
     "PolygonFaceGeometry",
     "RandomReordering",
     "ReverseCuthillMcKee",
@@ -65,6 +67,7 @@ __all__ = [
     "graded_nodes",
     "index_dtype",
     "interior_mask",
+    "patch_triangles",
     "permute_cells",
     "structured_grid_2d",
     "structured_grid_3d",

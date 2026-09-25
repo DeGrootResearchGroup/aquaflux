@@ -262,8 +262,59 @@ inscribed area, nothing else. The STL is slightly worse than its count suggests 
 1.42% at 8,704) because its triangles are irregular and its area is 0.5% under the true cylinder;
 rescaling to equal emitted power gives 1.45% / 0.58%.
 
-The mesh's own patches are the expensive way to get this: the snapped `lampWall` patch carries
-48,550 faces for about what 25,728 analytic facets buy.
+## The lamp from the mesh's own patch (2026-09-25, `lamp_resolution.py`, #492)
+
+A user with only a mesh has the lamp already: the snapped `lampWall` patch. `patch_triangles` cuts
+its 48,550 faces into their 194,636 centre-fan triangles, facing into the water, and
+`coarsen_surfaces` coarsens them by edge collapse under a longest-edge and a chord bound (angle
+0.5 rad), holding the exact patch's emitted power. Same reference, cells, exitance and absorption as
+the ladder above, in the same process; every other rung reproduced that table to the digit.
+
+| lamp | facets | power W | near the lamp (<5 mm), median / p99 | rest of the chamber, median / p99 |
+|---|---|---|---|---|
+| the patch, exact | 194,636 | 35.1511 | 2.01% / 4.97% | 1.33% / 3.04% |
+| coarsened, edge 2.5 mm, chord 1e-4 m | 39,464 | 35.1511 | 2.31% / 5.93% | 1.40% / 3.07% |
+| coarsened, edge 4 mm, chord 1e-4 m | 18,292 | 35.1511 | 2.52% / 6.66% | 1.45% / 3.15% |
+| coarsened, edge 6 mm, chord 1e-4 m | 11,082 | 35.1511 | 2.79% / 7.93% | 1.48% / 3.23% |
+| coarsened, edge 4 mm, chord 2.5e-4 m | 15,569 | 35.1511 | 2.83% / 7.85% | 1.60% / 3.75% |
+| coarsened, edge 8 mm, chord 2.5e-4 m | 6,119 | 35.1511 | 3.62% / 10.75% | 1.74% / 4.12% |
+
+- **The patch is not the cylinder, and that dominates.** Its 194,636 facets sit 2.0% from the true
+  lamp near it — no better than the 7,516-facet STL (1.95%) — because its area is the STL's, shrunk
+  again by snapping: 0.050474 m², 0.8% under the true lamp, so it radiates 35.15 W at the case's
+  exitance. At equal power the gap is 1.20% near the lamp and 0.52% elsewhere, so it is shape as well
+  as area. Against the STL-built field, which is the other description of the *same* lamp, the exact
+  patch differs by **0.30% median / 3.65% p99** near it and **0.24% / 0.59%** elsewhere. #492 set
+  the bar at the STL's own discretization error from the DOM comparison below, median 0.44% / p99
+  4.1%; that was measured on a narrower band (1,500 cells within 5 mm at x = 0.39-0.41 m, against a
+  67,381-facet lamp), so read this as inside the bar on the nearest like-for-like band available,
+  not as a replicate of it.
+- **What coarsening costs, judged against the exact patch** (which isolates it from the patch's own
+  departure from the cylinder):
+
+  | coarsened | near the lamp, median / p99 | rest, median / p99 | realized longest edge, max / median | coarsening s |
+  |---|---|---|---|---|
+  | 2.5 mm, 1e-4 m | 0.30% / 2.06% | 0.07% / 0.28% | 2.50 / 2.20 mm | 78 |
+  | 4 mm, 1e-4 m | 0.53% / 3.15% | 0.13% / 0.34% | 4.00 / 3.18 mm | 93 |
+  | 6 mm, 1e-4 m | 0.75% / 4.38% | 0.16% / 0.42% | 6.00 / 4.35 mm | 124 |
+  | 4 mm, 2.5e-4 m | 0.86% / 4.28% | 0.32% / 0.89% | 4.00 / 3.46 mm | 72 |
+  | 8 mm, 2.5e-4 m | 1.64% / 7.18% | 0.46% / 1.16% | 8.00 / 5.91 mm | 109 |
+
+  At 4 mm and 1e-4 m the lamp has 18,292 facets — a tenth of the patch's, and 2.4x the STL's — for
+  a 0.53% median change near it, a quarter of the patch's own 2.0% from the cylinder. As with the
+  drawing's lamp, **the spacing along the lamp matters more than the chord**: loosening the chord
+  from 1e-4 to 2.5e-4 m at 4 mm saves 15% of the facets and adds 60% to the error near the lamp.
+  The realized chord and angle stayed inside their bounds on every rung (angle at most 0.44 rad); the
+  area fell by 0.2-0.6%, which the power-holding exitance puts back.
+- **Which surface to use.** Against DOM, the patch is exactly the surface the reference emits from, so
+  a patch-built lamp removes the area mismatch the STL comparison carried. Against the true lamp,
+  the drawing's lamp is better at every facet count (0.16% at 66,011 facets) because its vertices
+  are on the cylinder rather than on a mesher's approximation of it.
+
+Configuration: jax 0.10.2, CPU, x64, macOS arm64, 11 cores, nothing else running; two runs, every
+rung identical to the digit between them, coarsening times within 2%. Reading the 1.6M-cell mesh
+for its patch took ~8.5 min the first time (`work/lamp_patch.npy` caches the triangles after). The
+drawing's rungs were skipped: the CAD kernel is not installed in this interpreter.
 
 ## Shadowing arbitrary geometry (2026-09-23, `ray_acceleration_probe.py`, `grid_mask_check.py`)
 

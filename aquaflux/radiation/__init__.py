@@ -123,6 +123,7 @@ from aquaflux.radiation.self_occlusion import (
     SelfOcclusion,
     SilhouetteOcclusion,
 )
+from aquaflux.radiation.coarsen import Coarsening, coarsen_surfaces, coarsen_to_size
 from aquaflux.radiation.quadrature import TriangleQuadrature, triangle_quadrature
 from aquaflux.radiation.receiver_shadows import FrozenShadows, ReceiverShadows, StreamedShadows
 from aquaflux.radiation.solid_angle import (
@@ -145,6 +146,7 @@ from aquaflux.radiation.visibility import Visibility, build_visibility
 
 __all__ = [
     "Absorption",
+    "Coarsening",
     "CosinePower",
     "FrozenShadows",
     "Isotropic",
@@ -175,6 +177,8 @@ __all__ = [
     "check_points_outside",
     "check_profiles",
     "check_winding",
+    "coarsen_surfaces",
+    "coarsen_to_size",
     "direct_fluence_rate",
     "direct_irradiance",
     "enclosure_winding",

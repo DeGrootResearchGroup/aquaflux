@@ -100,6 +100,43 @@ facets and a median error of 0.16% within 5 mm of the lamp and 0.04% elsewhere, 
 Because the vertices lie on the true surface, the lamp's area is not inscribed, and
 {func}`~aquaflux.radiation.lamp_exitance` then makes it radiate exactly its rating.
 
+### Without a drawing: the lamp from the mesh's own patch
+
+A case meshed around the lamp already describes its surface: the lamp's boundary patch. Its faces
+can be used directly, which removes the second description of the lamp an STL or a drawing would
+otherwise be, and any disagreement between the two:
+
+```python
+from aquaflux.mesh import patch_triangles
+from aquaflux.radiation import coarsen_surfaces
+
+patch = patch_triangles(mesh, mesh.geometry(), ["lampWall"])     # facing into the water
+exact = Surfaces.from_triangles(patch.vertices, solid_id=patch.patch_id, solid_names=patch.patch_names)
+exact = exact.with_optics(emission=exact.per_facet({"lampWall": 696.42}))   # W/m^2
+
+lamp, record = coarsen_surfaces(exact, max_edge=4e-3, chord=1e-4)
+```
+
+{func}`~aquaflux.mesh.patch_triangles` cuts each face into the same triangles the mesh computes its
+face geometry from, so a planar face's triangles have exactly its area, and faces them into the
+domain from the mesh's own face normals rather than from the order the nodes were listed in. A patch
+snapped to a lamp carries the mesh's resolution rather than one chosen for radiation, and the gather
+costs cells times facets, so {func}`~aquaflux.radiation.coarsen_surfaces` coarsens it first: edges are
+collapsed until no triangle has an edge longer than `max_edge`, lies further than `chord` from the
+patch, or turns further than `angle` from it, with the patch's rim and any sharp crease kept. Every
+vertex it keeps is one of the patch's. Each body's exitance is raised by the small area the coarse
+facets lose, so the lamp radiates exactly what the patch did; `record` reports the realized edge,
+chord and angle per facet.
+
+On the Sozzi reactor (`validation/sozzi_radiation/lamp_resolution.py`) the 48,550-face lamp patch is
+194,636 triangles; at `max_edge=4e-3, chord=1e-4` it coarsens to 18,292 facets in about a minute and
+a half, changing the fluence rate by a median 0.53% within 5 mm of the lamp and 0.13% elsewhere. As
+for the drawing's lamp, the spacing along the lamp matters more than the chord. The patch itself is
+a snapped approximation of the lamp: against the true cylinder it is about as accurate as the STL
+the mesh was snapped to, so where a drawing is available its lamp is the more accurate emitter, and
+where the comparison is against a finite-volume radiation solve on the same mesh, the patch is
+exactly the surface that solve emits from.
+
 ### With reflecting walls: the whole model, its shadows streamed
 
 The gather above is the whole field when the walls are black. Where they reflect, build the model,

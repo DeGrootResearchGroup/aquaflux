@@ -275,9 +275,7 @@ class PolygonFaceGeometry(FaceGeometryScheme):
         rule is involved and none is approximated: the fan reproduces the polygon exactly, so the
         sum is the true surface integral over the warped face.
         """
-        pb = face_nodes.gather_node_coords(node_coords)
-        pc = face_nodes.perimeter_next(pb)
-        apex = face_nodes.vertex_mean(node_coords)[face_nodes.face_of_incidence]
+        apex, pb, pc = self.fan_triangles(node_coords, face_nodes)
         directed = 0.5 * jnp.cross(pb - apex, pc - apex, axis=-1)  # S_t = A_t * n_t
         offset = (apex + pb + pc) / 3.0 - centroid[face_nodes.face_of_incidence]
         moment = face_nodes.reduce_to_faces(offset[:, :, None] * directed[:, None, :])
@@ -288,6 +286,37 @@ class PolygonFaceGeometry(FaceGeometryScheme):
         winding = face_nodes.reduce_to_faces(directed)
         sign = jnp.where(jnp.sum(winding * normal, axis=-1) < 0.0, -1.0, 1.0)
         return moment * sign[:, None, None]
+
+    def fan_triangles(
+        self,
+        node_coords: jnp.ndarray,
+        face_nodes: FaceNodeConnectivity,
+        apex: jnp.ndarray | None = None,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """The centre-fan triangles themselves, one per face-node incidence.
+
+        Triangle ``k`` is ``(apex, v_k, v_next)`` for the ``k``-th incidence in CSR order, so the
+        triangles of face ``f`` are those whose ``face_nodes.face_of_incidence`` is ``f``. Their
+        winding follows each face's node order, not its oriented normal.
+
+        Parameters
+        ----------
+        node_coords : jnp.ndarray
+            Node coordinates, shape ``(n_nodes, 3)``.
+        face_nodes : FaceNodeConnectivity
+            The face→node gather/reduce operators.
+        apex : jnp.ndarray, optional
+            Per-face apex, shape ``(n_faces, 3)``; defaults to each face's vertex mean.
+
+        Returns
+        -------
+        (apex, start, end) : tuple of jnp.ndarray, each shape ``(n_incidences, 3)``
+            The apex of each triangle, and the start and end of its perimeter edge.
+        """
+        start = face_nodes.gather_node_coords(node_coords)
+        end = face_nodes.perimeter_next(start)
+        centre = apex if apex is not None else face_nodes.vertex_mean(node_coords)
+        return centre[face_nodes.face_of_incidence], start, end
 
     def centre_fan(
         self,
@@ -326,11 +355,7 @@ class PolygonFaceGeometry(FaceGeometryScheme):
         area-weighted centroid. ``total_triangle_area`` keeps the unsigned sum, purely for the
         planarity diagnostic.
         """
-        pb = face_nodes.gather_node_coords(node_coords)  # edge start vertex per triangle
-        pc = face_nodes.perimeter_next(pb)  # edge end vertex (perimeter-wrapped)
-        centre = apex if apex is not None else face_nodes.vertex_mean(node_coords)
-        pa = centre[face_nodes.face_of_incidence]  # apex per edge-triangle
-
+        pa, pb, pc = self.fan_triangles(node_coords, face_nodes, apex)
         directed = 0.5 * jnp.cross(pb - pa, pc - pa, axis=-1)  # (n_triangles, 3)
         tri_centroid = (pa + pb + pc) / 3.0
 
