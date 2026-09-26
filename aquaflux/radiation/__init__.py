@@ -106,6 +106,7 @@ from aquaflux.radiation.checks import (
     stored_normal_disagreement,
     winding_report,
 )
+from aquaflux.radiation.culling import BodyCulling, ShaftCulling, EveryPair
 from aquaflux.radiation.gather import direct_fluence_rate, direct_irradiance
 from aquaflux.radiation.model import (
     RadiationModel,
@@ -146,8 +147,10 @@ from aquaflux.radiation.visibility import Visibility, build_visibility
 
 __all__ = [
     "Absorption",
+    "BodyCulling",
     "Coarsening",
     "CosinePower",
+    "EveryPair",
     "FrozenShadows",
     "Isotropic",
     "Lambertian",
@@ -159,6 +162,7 @@ __all__ = [
     "RayCastOcclusion",
     "ReceiverShadows",
     "SelfOcclusion",
+    "ShaftCulling",
     "SilhouetteOcclusion",
     "StreamedShadows",
     "Subdivision",

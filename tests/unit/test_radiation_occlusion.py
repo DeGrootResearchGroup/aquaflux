@@ -364,21 +364,21 @@ def test_streaming_and_the_body_test_count_pairs_not_receivers(monkeypatch):
     With a one-facet source a pair limit and a receiver count are the same number, so the test
     above cannot tell them apart; this one can.
     """
-    from aquaflux.radiation import gather, visibility
+    from aquaflux.radiation import culling, gather
 
     handed, tested = [], []
-    real_build, real_blocked = gather._unchecked_visibility, visibility._blocked_by
+    real_build, real_blocked = gather._unchecked_visibility, culling._body_blocks
 
     def watched_build(occluders, surfaces, points, **options):
         handed.append(np.asarray(points).shape[0])
         return real_build(occluders, surfaces, points, **options)
 
-    def watched_blocked(bodies, origin, target, near):
+    def watched_blocked(body, origin, target, near):
         tested.append(target.shape[0])
-        return real_blocked(bodies, origin, target, near)
+        return real_blocked(body, origin, target, near)
 
     monkeypatch.setattr(gather, "_unchecked_visibility", watched_build)
-    monkeypatch.setattr(visibility, "_blocked_by", watched_blocked)
+    monkeypatch.setattr(culling, "_body_blocks", watched_blocked)
     source = point_source(
         np.array([[0.0, 0.0, 0.0], [0.0, 0.1, 0.0], [0.0, 0.0, 0.1], [0.0, -0.1, 0.0]])
     )

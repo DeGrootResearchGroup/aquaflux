@@ -162,6 +162,53 @@ one). It is kept so the inequality means on its own what it says, since on a bar
 differ on 7.2% of the same rays. What is *not* redundant is the branch selection beside it, whose
 mutation is red.
 
+## CLEARANCE: a body vouching for a whole convex hull (#554, 2026-09-25)
+
+`Body.clearance(position) -> (..., n_witnesses)` is the third question a body answers, after
+`blocks` and `contains`. **The contract, in one line: if every position of a set reads `w_i < 0` for
+one column `i`, no point of the set's convex hull is in the body** — so no segment between two of the
+positions meets it. A set is summarized by the column-wise max over its points and two sets merge by
+max, which is what lets a consumer (radiation's `ShaftCulling`) certify a whole tile of
+receiver-source pairs from two short rows without visiting a pair. It says "clear" or "don't know",
+never "blocked".
+
+| body | witnesses |
+|---|---|
+| `Body` (default, incl. anything answered from triangles) | none — zero columns, never certifies |
+| `Solid` | a separating plane along each of 26 fixed axes (the 3x3x3 stencil), placed by `support` |
+| `ConvexSolid` | its own `_Plane` faces (beyond a face is outside the whole body, and a half-space is convex), then the 26 |
+| `Intersection` | every member's witnesses concatenated (missing any member misses the intersection) |
+| `Difference` | the body's (missing the body misses what is left of it) |
+| `Outside` | one per **`ConvexSolid`** region: its `signed_distance` (the region is convex and is fluid) |
+
+**`Solid.support(direction)`** is the support function `max over the body of n . x`, an **upper
+bound** by contract, `inf` by default: exact for `Sphere` (`c.n + r|n|`), `Cylinder` and `Cone` (the
+convex hull of the two end discs; a disc reaches `p.n + r sqrt(|n|^2 - (n.a)^2)`), `Box` (the furthest
+corner, `c.n + sum_j h_j |n . E_j|` with `E = inv(axes)` — **the columns of the inverse, not the rows
+of `axes`**, which only a skewed box distinguishes); `Union` takes the max, `Intersection` the min (a
+bound), `Difference` the body's. `HalfSpace` stays `inf`: its face is its only witness.
+
+- **A curved inequality is never a witness.** The outside of a tube or a ball is not convex, so a
+  hull of points all outside a cylinder's round side can still cut through it. Only planes, and the
+  support-placed planes, qualify.
+- **A non-convex `Outside` region gives no witness.** A union of regions is not one: every point of a
+  chamber-plus-pipe cloud is in the water and the hull still cuts the chamber roof —
+  `test_an_outside_vouches_for_points_in_one_convex_region_and_not_across_two` pins exactly that
+  wrong answer.
+- **The margin is Shewchuk-style, sized from the magnitudes compared** (`_CLEARANCE_MARGIN = 1e-10`
+  times `sum |x_i||n_i| + |bound|` for a plane, times `|x|` for a region distance), so a hull that
+  touches a body or misses it by a rounding is left to the exact segment test. ⚠️ **Its first test was
+  wrong, not the code**: a plane *through the origin* with normal `(0,0,1)` computes `n . x` exactly,
+  so a 1e-15 gap there is real and certifying it is right. The test now puts the plane at `z = 1`,
+  where a rounding exists, and a zero margin goes red there.
+- **Mutation pass (10, all red):** union min for max; box read along `axes` for `inv(axes)`; the
+  cylinder's axial reach dropped; `Outside` witnessing the union's distance; zero margin; faces
+  dropped from `ConvexSolid`; `Intersection` using its first member only; `Difference` using the
+  hole's; the cone's tip disc at the base end; the sphere's radius not scaled by `|n|`. The soundness
+  sweep (`test_a_certified_hull_holds_no_point_of_the_body`, every fixture body) samples points
+  **throughout** each certified hull, not only its corners, since a hull can pass through a body all
+  its corners miss.
+
 ## What is NOT built here, and why each was left out rather than forgotten
 
 - **Torus.** An elbow is a torus and the bent-duct case wants one, but a torus *tube is not

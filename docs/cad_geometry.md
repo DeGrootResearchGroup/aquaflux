@@ -160,6 +160,18 @@ reactor the streamed model reproduces the hand-built field above to 4.4e-16 rela
 1,635,909 cells. Leave `stream_receiver_mask` unset for a scene whose mask fits, where holding it
 once makes every later call cheaper.
 
+Most of those segments never leave the water: a cell in the chamber and a facet of the lamp both lie
+inside the chamber's cylinder, and so does every segment between them. To use that, give the
+settings a {class}`~aquaflux.radiation.ShaftCulling` as `body_culling`. Cells and facets are grouped
+into compact blocks, and a body that can prove it misses the whole region between a block of cells and a block of
+facets clears every pair of that tile without testing one. Only the tiles no body can vouch for are
+tested pair by pair. The mask is identical, bit for bit, to the one testing every pair gives; only the
+number of segments tested changes. On receivers sampled uniformly in the Sozzi reactor's water,
+`validation/sozzi_radiation/body_culling.py` certifies about nine pairs in ten this way and builds the
+mask about nine times faster. A mesh refined towards its walls and lamp puts more of its cells where a
+tile cannot be vouched for, so expect less there. A body described by triangles vouches for
+nothing, and is tested pair by pair as before.
+
 ## What is checked, and what is refused
 
 Recognition reads each solid's faces — which surface each lies on, which side of it the solid is

@@ -39,48 +39,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from aquaflux.radiation.culling import BodyCulling, EveryPair
 from aquaflux.radiation.self_occlusion import (
     RayCastOcclusion,
     SelfOcclusion,
 )
-from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, receivers_per_pass
+from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT
 
 __all__ = ["Visibility", "build_visibility", "refuse_points_inside", "surviving_fraction"]
-
-
-@eqx.filter_jit
-def _compiled_blocks(body, origin, target, near):
-    """One body's layer of one chunk, as a single compiled expression.
-
-    ⚠️ **Compiling an analytic body is worth a great deal, and compiling a triangulated one
-    raises.** An analytic test is a few dozen arithmetic operations over a receivers-by-facets
-    array, and a body assembled from several inequalities — or a fluid described by several
-    regions — is several such arrays. Evaluated eagerly, every one of them is materialized in
-    turn, hundreds of megabytes each at a production chunk, and the mask's cost becomes the cost
-    of writing those intermediates rather than of the arithmetic. Compiled, they fuse into the
-    reduction at the end and none is ever formed. A body that answers on the host instead —
-    walking a grid of triangles, dropping rays as they are settled — cannot be traced at all,
-    and deliberately so.
-
-    So this is applied only where :attr:`~aquaflux.solids.Body.traceable` says
-    it may be, which is a declaration on the body rather than a guess from its type. The two
-    kinds are meant to compose in one scene: a vessel described as primitives, with whatever
-    genuinely is a triangle soup standing beside it.
-    """
-    return body.blocks(origin, target, near)
-
-
-def _blocked_by(bodies, origin, target, near):
-    """One chunk's layer of the mask, per body, compiling each where it says it can be."""
-    return jnp.stack(
-        [
-            _compiled_blocks(body, origin, target, near)
-            if body.traceable
-            else body.blocks(origin, target, near)
-            for body in bodies
-        ],
-        axis=0,
-    )
 
 
 def surviving_fraction(blocked, hidden_by_geometry, transmittance) -> jnp.ndarray:
@@ -254,14 +220,14 @@ def build_visibility(
     *,
     receiver_facet=None,
     self_occlusion: SelfOcclusion | None = None,
+    body_culling: BodyCulling | None = None,
     offset_scale: float = 1e-6,
     pair_limit: int = DEFAULT_PAIR_LIMIT,
 ) -> Visibility:
     """Work out, once, which bodies lie between which sources and which receivers.
 
-    Brute force over the bodies, which is correct practice at this count: a bounding-volume
-    hierarchy over a handful of primitives is a single leaf node, and the traversal would cost
-    more than the tests it saves.
+    The analytic bodies are tested pair by pair unless ``body_culling`` says otherwise; the
+    surface's own triangles are tested by ``self_occlusion``.
 
     Parameters
     ----------
@@ -300,6 +266,12 @@ def build_visibility(
         "use the default", which is on. Switching it off is rarely right: a surface that does not
         shadow itself is the defect this module exists to fix, and a mask silently missing it
         looks exactly like one that includes it.
+    body_culling : BodyCulling or None, optional
+        How the analytic bodies' layer is worked out. Unset, every body is tested against every
+        pair (:class:`~aquaflux.radiation.culling.EveryPair`). Pass
+        :class:`~aquaflux.radiation.culling.ShaftCulling` to decide whole tiles of pairs a body
+        can prove it misses and test only the rest -- the same mask, for fewer tests wherever
+        the scene has open space in it.
     pair_limit : int, optional
         Receiver-by-facet pairs per pass of the analytic-body test, bounding its peak memory
         whatever the facet count. Each self-occlusion strategy carries its own bound, because
@@ -325,6 +297,7 @@ def build_visibility(
         points,
         receiver_facet=receiver_facet,
         self_occlusion=self_occlusion,
+        body_culling=body_culling,
         offset_scale=offset_scale,
         pair_limit=pair_limit,
     )
@@ -337,6 +310,7 @@ def _unchecked_visibility(
     *,
     receiver_facet=None,
     self_occlusion: SelfOcclusion | None = None,
+    body_culling: BodyCulling | None = None,
     offset_scale: float = 1e-6,
     pair_limit: int = DEFAULT_PAIR_LIMIT,
 ) -> Visibility:
@@ -354,22 +328,11 @@ def _unchecked_visibility(
     # area and no surface to shadow itself with, so it needs no exclusion.
     near = offset_scale * jnp.sqrt(surfaces.area)
 
-    per_pass = receivers_per_pass(pair_limit, n_facets)
-    primitive_rows = []
-    for start in range(0, n_receivers, per_pass):
-        receivers = points[start : start + per_pass]
-        origin = surfaces.centroid[None, :, :]
-        target = receivers[:, None, :]
-        if occluders:
-            primitive_rows.append(_blocked_by(occluders, origin, target, near[None, :]))
-    # The fallback turns on whether any row was produced, not on whether one was asked for: a
-    # set with no receivers at all -- a surface-only study, which is a legal thing to build --
-    # runs no chunks, so the list is empty however the flags are set, and concatenating nothing
-    # raises rather than giving back an empty array.
+    culling = EveryPair() if body_culling is None else body_culling
     blocked = (
-        jnp.concatenate(primitive_rows, axis=1)
-        if primitive_rows
-        else jnp.zeros((len(occluders), n_receivers, n_facets), dtype=bool)
+        culling.blocked(occluders, surfaces.centroid, near, points, pair_limit)
+        if occluders
+        else jnp.zeros((0, n_receivers, n_facets), dtype=bool)
     )
     geometry = strategy.field(surfaces, points, near, receiver_facet)
     return Visibility(

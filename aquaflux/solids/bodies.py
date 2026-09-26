@@ -43,6 +43,15 @@ not a sampled approximation. :class:`Outside` is the one that matters most in pr
 wall is most naturally described by the *fluid it holds*, and a segment is then clear exactly when
 the fluid's regions cover it end to end.
 
+**A body can also vouch for a whole region of space at once** (:meth:`~Body.clearance`). A
+segment test answers for one segment; a consumer testing millions of segments between two
+compact groups of points -- a block of mesh cells and a patch of a lamp, say -- would rather ask
+once whether the body can come between the groups at all. Every segment between two points of a
+set lies in the set's convex hull, so a body that provably misses the hull blocks none of them.
+The evidence is a handful of *witness* functions whose negative region lies in a convex set
+disjoint from the body -- a separating half-space, or a convex region of fluid -- and it composes
+by taking maxima, which is what lets a consumer summarize each group once rather than each pair.
+
 ⚠️ **Do not represent one surface twice.** A body whose surface is also, elsewhere, a set of
 triangles the segments start from — a lamp sleeve that is also the emitting surface of a
 radiation model — must not be passed as a body as well: every segment would then leave a point
@@ -129,6 +138,90 @@ class Body(eqx.Module):
         -------
         jnp.ndarray of bool, shape ``(...)``
         """
+
+    def clearance(self, position) -> jnp.ndarray:
+        """Witnesses that a convex hull of positions misses this body.
+
+        Each column ``i`` is a function ``w_i`` with one guarantee: **if every position of a set
+        reads** ``w_i < 0`` **for the same** ``i``, **no point of the set's convex hull lies in the
+        body**, so no segment between two of those positions meets it. A column that reads
+        ``>= 0`` for some position says nothing -- the hull may or may not miss the body.
+
+        That guarantee is what makes the answer cheap to use in bulk. A set's summary is the
+        largest value each column takes over its positions, the summary of two sets together
+        is the larger of their two summaries, and the union is certified clear where any column
+        of the combined summary is negative. So a consumer asking about every pair of a block of
+        receivers and a cluster of sources summarizes each group once and never visits a pair.
+
+        Conservative by construction: a witness may fail to certify a hull that does miss the
+        body, never the other way round, and each is offset by a margin sized from the
+        magnitudes it compares, so a hull that misses the body only by a rounding is not
+        certified either. A body that cannot vouch for anything -- the default, and the right
+        answer for a triangulated surface answered on the host -- has no columns.
+
+        Parameters
+        ----------
+        position : jnp.ndarray, shape ``(..., 3)``
+
+        Returns
+        -------
+        jnp.ndarray, shape ``(..., n_witnesses)``
+        """
+        position = jnp.asarray(position, dtype=float)
+        return jnp.zeros((*position.shape[:-1], 0))
+
+
+#: Directions along which a separating plane between a convex hull and a body is looked for:
+#: the 26 neighbours of a cell in a 3 x 3 x 3 stencil, normalized. A fixed set, so a group of
+#: positions is summarized once against every body rather than once per pair of groups.
+_SEPARATING_AXES = jnp.asarray(
+    [
+        (x, y, z)
+        for x in (-1.0, 0.0, 1.0)
+        for y in (-1.0, 0.0, 1.0)
+        for z in (-1.0, 0.0, 1.0)
+        if (x, y, z) != (0.0, 0.0, 0.0)
+    ]
+)
+_SEPARATING_AXES = _SEPARATING_AXES / jnp.sqrt(norm_squared(_SEPARATING_AXES))[:, None]
+
+#: How far, relative to the magnitudes compared, a witness must clear its bound. Far above the
+#: rounding of a projection or a distance (a few units in 1e16) and far below any geometric gap
+#: worth certifying, so a hull that touches a body, or misses it only by a rounding, is left to
+#: the exact segment test rather than vouched for.
+_CLEARANCE_MARGIN = 1e-10
+
+
+def _exceeds(value, bound, magnitude):
+    """A witness that ``value > bound`` by more than a rounding of ``magnitude``: negative when so."""
+    return bound - value + _CLEARANCE_MARGIN * magnitude
+
+
+def _separating_witnesses(position, support):
+    """Witnesses from separating planes along :data:`_SEPARATING_AXES`, given the body's support.
+
+    A position with ``n . x > h(n)``, where ``h`` bounds the body's extent along ``n`` from above,
+    lies strictly beyond the body along ``n``; so does the hull of any set of such positions.
+    An infinite bound -- a direction the body is unbounded in -- never certifies anything.
+    """
+    position = jnp.asarray(position, dtype=float)[..., None, :]
+    along = dot(position, _SEPARATING_AXES)
+    return _exceeds(
+        along, support, _projection_magnitude(position, _SEPARATING_AXES) + jnp.abs(support)
+    )
+
+
+def _projection_magnitude(position, direction):
+    """What the rounding of ``position . direction`` is relative to: the sum of the terms' sizes."""
+    return dot(jnp.abs(position), jnp.abs(direction))
+
+
+def _disc_support(centre, axis, radius, direction):
+    """How far a flat disc reaches along ``direction``: its centre, plus its radius times the
+    length of the direction's part lying in the disc's plane."""
+    along = dot(direction, axis)
+    in_plane = jnp.sqrt(jnp.maximum(norm_squared(direction) - along**2, 0.0))
+    return dot(direction, centre) + radius * in_plane
 
 
 def _segment_parameters(origin, target):
@@ -499,6 +592,29 @@ class Solid(Body):
         jnp.ndarray, shape ``(...)``
         """
 
+    def support(self, direction) -> jnp.ndarray:
+        """An upper bound on how far the body reaches along each direction.
+
+        The support function ``h(n) = max over the body of n . x``, exact for a primitive and a
+        bound for a composition (an intersection reaches no further than its nearest member, a
+        difference no further than the body it is cut from). Infinite where no bound is known or
+        the body is unbounded that way -- the default, which is always true.
+
+        Parameters
+        ----------
+        direction : jnp.ndarray, shape ``(..., 3)``
+
+        Returns
+        -------
+        jnp.ndarray, shape ``(...)``
+        """
+        direction = jnp.asarray(direction, dtype=float)
+        return jnp.full(direction.shape[:-1], jnp.inf)
+
+    def clearance(self, position) -> jnp.ndarray:
+        """Separating planes along a fixed set of directions, placed by :meth:`support`."""
+        return _separating_witnesses(position, self.support(_SEPARATING_AXES))
+
     def contains(self, position) -> jnp.ndarray:
         """True where the position is on or inside the surface."""
         return self.signed_distance(position) <= 0.0
@@ -547,6 +663,32 @@ class ConvexSolid(Solid):
             _intersect, [bound.span(origin, direction) for bound in self.constraints]
         )
         return enter[..., None], exit_[..., None]
+
+    def clearance(self, position) -> jnp.ndarray:
+        """The body's own flat faces, then separating planes along the fixed directions.
+
+        Beyond a flat face is outside the whole body, since every inequality holds inside it, and
+        that region is a half-space -- convex -- so each face is a witness as it stands. It is the
+        only witness a :class:`HalfSpace` has, being unbounded along every fixed direction. A
+        curved inequality is not one: the outside of a tube is not convex.
+        """
+        position = jnp.asarray(position, dtype=float)
+        faces = [
+            _exceeds(
+                dot(position, bound.normal),
+                dot(bound.point, bound.normal),
+                _projection_magnitude(position, bound.normal)
+                + _projection_magnitude(bound.point, bound.normal),
+            )
+            for bound in self.constraints
+            if isinstance(bound, _Plane)
+        ]
+        return jnp.concatenate(
+            [jnp.stack(faces, axis=-1), super().clearance(position)]
+            if faces
+            else [super().clearance(position)],
+            axis=-1,
+        )
 
 
 # ---------------------------------------------------------------------------------------------
@@ -606,6 +748,11 @@ class Sphere(ConvexSolid):
         """The one ball."""
         return (_Ball(self.centre, self.radius),)
 
+    def support(self, direction) -> jnp.ndarray:
+        """The centre's reach, plus the radius times the direction's length."""
+        direction = jnp.asarray(direction, dtype=float)
+        return dot(direction, self.centre) + self.radius * jnp.sqrt(norm_squared(direction))
+
 
 class Cylinder(ConvexSolid):
     """A finite solid cylinder with flat ends — the shape of a lamp sleeve.
@@ -645,6 +792,12 @@ class Cylinder(ConvexSolid):
             _Plane(self.centre + end, self.axis),
             _Plane(self.centre - end, -self.axis),
         )
+
+    def support(self, direction) -> jnp.ndarray:
+        """The further of the two end discs: the body is their convex hull."""
+        direction = jnp.asarray(direction, dtype=float)
+        disc = _disc_support(self.centre, self.axis, self.radius, direction)
+        return disc + self.half_length * jnp.abs(dot(direction, self.axis))
 
 
 class Cone(ConvexSolid):
@@ -712,6 +865,15 @@ class Cone(ConvexSolid):
             _Plane(self.centre - end, -self.axis),
         )
 
+    def support(self, direction) -> jnp.ndarray:
+        """The further of the two end discs: a truncated cone is their convex hull."""
+        direction = jnp.asarray(direction, dtype=float)
+        end = self.half_length * self.axis
+        return jnp.maximum(
+            _disc_support(self.centre - end, self.axis, self.base_radius, direction),
+            _disc_support(self.centre + end, self.axis, self.tip_radius, direction),
+        )
+
 
 class Box(ConvexSolid):
     """A solid box — a baffle, a plate, a rectangular duct wall, a bounding volume.
@@ -746,6 +908,21 @@ class Box(ConvexSolid):
             for i in range(3)
             for sign in (1.0, -1.0)
         )
+
+    def support(self, direction) -> jnp.ndarray:
+        """The furthest corner.
+
+        A corner is where one plane of each facing pair meets, ``centre + E (s * half_sizes)``
+        for a choice of signs ``s``, where the columns of ``E`` -- the inverse of the matrix whose
+        rows are :attr:`axes` -- are the box's edge directions. Along ``n`` a corner reaches
+        ``n . centre + sum_j s_j half_sizes_j (n . E_j)``, and each sign is chosen independently,
+        so the furthest takes every term at its magnitude. Exact for a parallelepiped as well as
+        a rectangular box.
+        """
+        direction = jnp.asarray(direction, dtype=float)
+        edges = jnp.linalg.inv(self.axes)
+        reach = jnp.abs(direction @ edges) @ self.half_sizes
+        return dot(direction, self.centre) + reach
 
 
 # ---------------------------------------------------------------------------------------------
@@ -805,6 +982,10 @@ class Union(Solid):
             jnp.minimum, [body.signed_distance(position) for body in self.bodies]
         )
 
+    def support(self, direction) -> jnp.ndarray:
+        """The furthest reach of any body."""
+        return functools.reduce(jnp.maximum, [body.support(direction) for body in self.bodies])
+
 
 class Intersection(Solid):
     """Only what is inside all of several bodies — a plate cut to the shape of a duct.
@@ -848,6 +1029,14 @@ class Intersection(Solid):
         return functools.reduce(
             jnp.maximum, [body.signed_distance(position) for body in self.bodies]
         )
+
+    def support(self, direction) -> jnp.ndarray:
+        """No further than the nearest reach of any body -- a bound, not exact."""
+        return functools.reduce(jnp.minimum, [body.support(direction) for body in self.bodies])
+
+    def clearance(self, position) -> jnp.ndarray:
+        """Every body's witnesses: a hull that misses any one of them misses the intersection."""
+        return jnp.concatenate([body.clearance(position) for body in self.bodies], axis=-1)
 
 
 class Difference(Solid):
@@ -905,6 +1094,14 @@ class Difference(Solid):
         return jnp.maximum(
             self.body.signed_distance(position), -self.hole.signed_distance(position)
         )
+
+    def support(self, direction) -> jnp.ndarray:
+        """No further than the body the hole is cut from."""
+        return self.body.support(direction)
+
+    def clearance(self, position) -> jnp.ndarray:
+        """The body's witnesses: a hull that misses the body misses what is left of it."""
+        return self.body.clearance(position)
 
 
 def _covers(enter, exit_, lower, upper) -> jnp.ndarray:
@@ -1019,3 +1216,25 @@ class Outside(Body):
         enter, exit_ = self.fluid.intervals(origin, direction)
         near = jnp.asarray(min_distance) / length
         return ~_covers(enter, exit_, near, 1.0 - near)
+
+    def clearance(self, position) -> jnp.ndarray:
+        """One witness per convex region: every position strictly inside it.
+
+        A convex region holds the hull of any positions inside it, and a region is fluid, which
+        this body is the outside of -- so positions all inside one region have every segment
+        between them clear, the shortcut the class docstring describes, read off for a whole
+        group at once. The margin is sized from the position's own magnitude, since that is what
+        the rounding of a distance to a surface is relative to. A region that is not a
+        :class:`ConvexSolid` gives no witness: the hull of positions inside a non-convex region
+        can leave it.
+        """
+        position = jnp.asarray(position, dtype=float)
+        scale = jnp.sqrt(norm_squared(position))
+        witnesses = [
+            _exceeds(0.0, region.signed_distance(position), scale)
+            for region in self.regions
+            if isinstance(region, ConvexSolid)
+        ]
+        if not witnesses:
+            return super().clearance(position)
+        return jnp.stack(witnesses, axis=-1)
