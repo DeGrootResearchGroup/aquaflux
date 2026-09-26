@@ -25,6 +25,10 @@ def rays_through(count: int, rng, *, spread: float = 1.6):
     # division by a zero component would otherwise put an infinity into the stepping.
     origin[: count // 8, 1:] = 0.5
     target[: count // 8, 1:] = 0.5
+    # And some along y, so a walk or an intersection test that assumed the leading component is the
+    # largest -- dividing by a zero x -- is caught too.
+    origin[count // 8 : count // 4, [0, 2]] = 0.5
+    target[count // 8 : count // 4, [0, 2]] = 0.5
     return origin, target
 
 
@@ -159,24 +163,6 @@ def test_the_near_margin_is_read_in_LENGTH_units_not_as_a_share_of_the_segment()
     np.testing.assert_array_equal(found, brute(origin, target, vertices, near))
 
 
-def test_the_work_limit_bounds_the_pairs_it_holds_without_changing_the_answers():
-    """A step tests every live ray against everything its voxel holds, so the pairs of one step
-    are unbounded unless something bounds them -- and a coarse grid over many rays is exactly
-    where that bites: the first attempt to walk a reactor's wall was killed for memory, not
-    slow. Splitting a step into groups must be invisible in the answers, so the same walk is run
-    at limits far below one step's pairs and compared with the unsplit one.
-    """
-    rng = np.random.default_rng(13)
-    vertices = scattered_triangles(300, rng)
-    origin, target = rays_through(400, rng)
-    near = np.zeros(len(origin))
-    grid = TriangleGrid.build(vertices, resolution=4)
-    whole = grid.blocks(origin, target, near)
-    assert 0.2 < whole.mean() < 0.9, f"fixture is one-sided: {whole.mean()}"
-    for limit in (1, 17, 500):
-        np.testing.assert_array_equal(grid.blocks(origin, target, near, work_limit=limit), whole)
-
-
 def test_the_default_resolution_is_sized_by_the_TRIANGLES_AREA_not_the_boxs_volume():
     """The occupancy target is about a surface, because blocking triangles are a surface.
 
@@ -200,27 +186,58 @@ def test_the_default_resolution_is_sized_by_the_TRIANGLES_AREA_not_the_boxs_volu
     assert occupied[occupied > 0].mean() < 40.0, occupied[occupied > 0].mean()
 
 
-def test_calls_with_different_ray_counts_share_their_compiled_programs(monkeypatch):
-    """A ray-cast pass hands the grid only its facing pairs, so no two passes need have the same
-    ray count. The rays reach the kernel padded to a power of two, like the candidate pairs, so a
-    stream of such calls compiles a handful of programs rather than a set of its own per call."""
-    from aquaflux.radiation import grid as grid_module
+def test_no_ray_aimed_through_an_edge_or_a_vertex_escapes_a_closed_body():
+    """The watertight test's own fixture, walked: rays from inside a closed drum aimed exactly at
+    every vertex and every edge midpoint, carried on well past the wall.
 
-    shapes = []
-    real = grid_module._indexed_pair_is_cut
+    A ray through a feature two or more triangles share is claimed by exactly one of them only while
+    the edge function is exactly antisymmetric, and an ordinary test leaks on precisely these rays --
+    a pinhole in a closed surface, which a field shows as a bright spot rather than an error. Random
+    directions, as in the test above, essentially never hit a shared edge, so they cannot see it.
+    """
+    drum = closed_drum(48, radius=1.0, half_height=1.0)
+    corners = drum.reshape(-1, 3)
+    edges = 0.5 * (drum + np.roll(drum, -1, axis=1)).reshape(-1, 3)
+    aims = np.unique(np.concatenate([corners, edges]), axis=0)
+    origin = np.tile([0.1, -0.2, 0.05], (len(aims), 1))
+    target = origin + 3.0 * (aims - origin)
+    grid = TriangleGrid.build(drum)
+    assert grid.blocks(origin, target, np.zeros(len(aims))).all()
 
-    def watched(rays, ray, triangle):
-        shapes.append(rays.origin.shape[0])
-        return real(rays, ray, triangle)
 
-    monkeypatch.setattr(grid_module, "_indexed_pair_is_cut", watched)
-    rng = np.random.default_rng(13)
-    vertices = scattered_triangles(60, rng)
-    grid = TriangleGrid.build(vertices, resolution=2)
-    origin, target = rays_through(700, rng)
-    near = np.zeros(len(origin))
-    for count in (520, 555, 590):
-        found = grid.blocks(origin[:count], target[:count], near[:count])
-        expected = brute(origin[:count], target[:count], vertices, near[:count])
-        np.testing.assert_array_equal(found, expected)
-    assert set(shapes) == {1024}, sorted(set(shapes))
+def test_a_segment_ending_in_a_triangle_s_plane_is_blocked_by_it():
+    """The far end of the window is inclusive: a segment aimed at a point on a triangle it was not
+    told to ignore ends in that triangle, and is blocked by it. This is why a ray between two facet
+    centroids must exclude its target facet -- without the exclusion every such pair reads blocked --
+    and it is the rule the exclusion is written against.
+    """
+    vertices = np.array(
+        [
+            [[5.0, -1.0, -1.0], [5.0, 3.0, -1.0], [5.0, 0.0, 3.0]],
+            [[8.0, 4.0, 4.0], [8.0, 6.0, 4.0], [8.0, 5.0, 6.0]],  # off to the side, for extent
+        ]
+    )
+    origin = np.zeros((2, 3))
+    target = np.array([[5.0, 0.0, 0.0], [4.0, 0.0, 0.0]])  # on the first triangle, and short of it
+    found = TriangleGrid.build(vertices).blocks(origin, target, np.zeros(2))
+    assert found.tolist() == [True, False]
+    np.testing.assert_array_equal(found, brute(origin, target, vertices, np.zeros(2)))
+
+
+def test_a_hit_exactly_at_the_near_margin_does_not_count():
+    """The near end of the window is exclusive. Axis-aligned, so the hit distance is exact: a
+    triangle across the segment at 5 of its 10 units is at exactly half of it, and a margin of
+    exactly 5 must pass it by, while a margin a hair short must not.
+    """
+    vertices = np.array(
+        [
+            [[5.0, -1.0, -1.0], [5.0, 3.0, -1.0], [5.0, 0.0, 3.0]],
+            [[8.0, 4.0, 4.0], [8.0, 6.0, 4.0], [8.0, 5.0, 6.0]],
+        ]
+    )
+    origin = np.zeros((2, 3))
+    target = np.tile([10.0, 0.0, 0.0], (2, 1))
+    near = np.array([5.0, np.nextafter(5.0, 0.0)])
+    found = TriangleGrid.build(vertices).blocks(origin, target, near)
+    assert found.tolist() == [False, True]
+    np.testing.assert_array_equal(found, brute(origin, target, vertices, near))
