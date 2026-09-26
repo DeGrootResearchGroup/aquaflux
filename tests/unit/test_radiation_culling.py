@@ -20,6 +20,7 @@ from aquaflux.radiation import (
     ShaftCulling,
     Surfaces,
     build_visibility,
+    direct_fluence_rate,
 )
 from aquaflux.radiation.culling import _Curve, spatial_order
 from aquaflux.solids import Body, Box, Cylinder, Difference, Outside, Sphere
@@ -180,7 +181,9 @@ def test_a_built_mask_and_a_model_setting_reach_the_culling():
     """``build_visibility`` takes the strategy, and ``RadiationSettings`` hands it to both masks."""
     lamp = _lamp(12, 8)
     receivers = _receivers(150)
-    plain = build_visibility(_bodies(), lamp, receivers, self_occlusion=NoOcclusion())
+    plain = build_visibility(
+        _bodies(), lamp, receivers, self_occlusion=NoOcclusion(), body_culling=EveryPair()
+    )
     culled = build_visibility(
         _bodies(), lamp, receivers, self_occlusion=NoOcclusion(), body_culling=ShaftCulling()
     )
@@ -191,6 +194,30 @@ def test_a_built_mask_and_a_model_setting_reach_the_culling():
         "body_culling": ShaftCulling(),
         "self_occlusion": NoOcclusion(),
     }
+
+
+def test_an_unset_strategy_is_shaft_culling_for_a_built_mask_and_a_streamed_one(monkeypatch):
+    """Leaving ``body_culling`` unset culls, whether the mask is built whole or chunk by chunk.
+
+    Asked of the strategy that answers rather than of the mask, because the mask is the same
+    whichever answers -- which is the point of culling, and why no comparison of masks could
+    tell the default apart from :class:`EveryPair`.
+    """
+    asked = []
+    original = ShaftCulling.blocked
+
+    def recording(self, *args, **kwargs):
+        asked.append(self)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ShaftCulling, "blocked", recording)
+    lamp = _lamp(12, 8)
+    receivers = _receivers(150)
+    build_visibility(_bodies(), lamp, receivers, self_occlusion=NoOcclusion())
+    assert asked == [ShaftCulling()]
+    direct_fluence_rate(lamp, receivers, occluders=_bodies(), self_occlusion=NoOcclusion())
+    assert len(asked) > 1
+    assert all(strategy == ShaftCulling() for strategy in asked)
 
 
 def test_a_group_size_ladder_that_cannot_be_refined_is_refused():

@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from aquaflux.radiation.culling import EveryPair
 from aquaflux.radiation.gather import direct_fluence_rate
 from aquaflux.radiation.profiles import Isotropic
 from aquaflux.radiation.self_occlusion import NoOcclusion
@@ -386,8 +387,9 @@ def test_streaming_and_the_body_test_count_pairs_not_receivers(monkeypatch):
     assert handed == [2, 2, 2, 1], handed
     # The mask build bounds its own body test the same way. Called directly, because through the
     # streamed path it is only ever handed a chunk that already fits, and its bound never binds.
+    # Every pair is named, not left to the default: shaft culling tests tiles, not receiver passes.
     tested.clear()
-    build_visibility([sleeve()], source, _probe_line(7), pair_limit=8)
+    build_visibility([sleeve()], source, _probe_line(7), pair_limit=8, body_culling=EveryPair())
     assert tested == [2, 2, 2, 1], tested
 
 

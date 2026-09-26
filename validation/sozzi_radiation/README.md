@@ -179,8 +179,44 @@ difference 4.4e-16** over the 1,285,221 lit cells (median 0, p99 1.8e-16), and 6
 206,713 far pipe cells. Build 65 s; field 1,170 s, about twice the hand-chunked run because the model
 also gathers the (here empty) reflected field. Peak footprint 11.15 GB, repeated at 11.07 GB after the
 transfer build was cut from 8.33 to 4.07 GB (`transfer_build_peak.py`). So the peak is set by computing
-the field, not by building the model. The receiver mask, which would add 12 GB if held whole, is not
+the field, not by building the model. (Measured before the radiation speed-ups of 2026-09-24 to 26; the next
+section re-measures it.) The receiver mask, which would add 12 GB if held whole, is not
 held. Configuration as in the table above, plus OCP 8.0.1 on CPython 3.13.
+
+## The whole field, before and after the radiation speed-ups (2026-09-26, `model_at_mesh_scale.py`)
+
+The run above, repeated on the same 1,635,909 cells and 7,516-facet `lampWall.stl`, at the commit
+before the radiation performance merges of 2026-09-24 to 26 and at the main that followed them.
+Each run matches `compare_fluence.py`'s field to **4.4e-16** relative over the 1,285,221 lit cells,
+so only the time differs.
+
+| code | how the bodies' layer is decided | build s | field s | vs before | peak footprint |
+|---|---|---|---|---|---|
+| before (`99c472c`) | every pair (its only strategy) | 65.2 | **1138.4** | 1.00x | 10.94 GB |
+| main (`e12f214`) | every pair, `EveryPair()` | 60.0 | **471.7** | 2.41x | 5.57 GB |
+| main + #561 (default flipped) | the new default, `ShaftCulling()` = ladder (32, 8, 2) | 57.6 | **313.5** | 3.63x | 6.49 GB |
+| main (`e12f214`) | `ShaftCulling`, ladder (32, 8) | 57.3 | **251.9** | 4.52x | 5.48 GB |
+
+- **Without culling, main is 2.4x faster on its own**, and its peak is half. Which merges buy which
+  part is not separated here; the mask's narrower storage (#525) is the likely source of the memory.
+- **Culling is worth 1.50x at the default ladder and 1.87x stopping at eight**, measured on the mesh's
+  own cell centres. The volume-sampled population the culling harness uses gave 5-9x, and the rules
+  predicted less here because the mesh refines towards the walls and the lamp. The field also pays
+  for the gather, which culling does not touch, so this is not the mask's own speed-up.
+- **The third level of the default ladder costs 1.24x on this analytic scene**, as `body_culling.py`
+  found on sampled receivers (5.35x against 8.53x). The default keeps it because it is worth ~2.7x
+  on a triangulated wall; `ShaftCulling(receiver_blocks=(32, 8), source_clusters=(32, 8))` is the
+  choice for a scene of analytic bodies alone.
+
+Configuration: jax/jaxlib 0.10.2, CPU, x64, macOS arm64, 11 cores, 19 GB; black walls, absorption
+35.67 /m, exitance 696.42 W/m², `NoOcclusion` self-occlusion, `stream_receiver_mask=True`. The water
+is the hand-typed `Outside(chamber, inlet, riser)` — the CAD kernel was not installed, and the two
+mask these cells identically (above). One arm per process, run one after another through
+`validation/run_case.sh` in one session with nothing else heavy running (`--force` past its free-page
+check, which saw 3 GB strictly free while `memory_pressure` reported 40% free). The "before" row
+predates this harness's `SOZZI_CULLING` switch and ran from an equivalent scratch copy of it with
+the same settings; the two unculled-main and (32, 8) arms were each also run once that way, at
+471.5 s and 251.4 s, so repeats agree to 0.2%. Each other row is one run.
 
 ## Measured (2026-09-22)
 
