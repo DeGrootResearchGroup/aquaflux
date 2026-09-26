@@ -1271,7 +1271,7 @@ directions. With `rho = 0` the same fixture gives `G = P/(4 pi r^2)` exactly.
   normal. The two guards overlap today; both stay, because the overlap is a property of
   `Lambertian` and not of the function, and the comment in `model.py` says so.
 - `work.in_passes` (`_chunked` in `gather.py` until #528) no longer pads (#524): full chunks are sliced in place and a shorter remainder runs
-  as one more call. Losing or duplicating the remainder needs a chunk size that does not divide
+  as a scan of one step (a bare call until 2026-09-26, see "PER-CALL COMPILES" below). Losing or duplicating the remainder needs a chunk size that does not divide
   the receiver count to show up at all, which is why `test_chunking_changes_nothing_about_the_answer`
   uses 37 receivers.
 
@@ -2413,6 +2413,51 @@ over after, in `coarsen_surfaces`), and **both steps in one change as separate c
   0.73% / 4.35%. Loosening the chord 1e-4 → 2.5e-4 at 4 mm saves 16% of the facets for +70% error
   near the lamp: **size along the lamp, keep the chord at 1e-4**, as for the drawing's lamp. The exact
   patch against the STL-built field: 0.30% / 3.65% near the lamp, 0.24% / 0.59% elsewhere.
+
+## PER-CALL COMPILES: THE REMAINDER CHUNK AND THE RADIOSITY SOLVE (2026-09-26)
+
+Found in a survey of what in the package still ran op by op (after #530), and fixed:
+
+- **`work.in_passes` ran its short last chunk as a bare call.** The full chunks were one `lax.scan`,
+  which is compiled as a whole even when nothing around it is; the remainder was `run(remainder)(start)`,
+  a `jax.checkpoint` called outside any trace, which evaluates the body **one operation at a time**. A
+  remainder can be nearly a full chunk. It is now a scan of one step (`scanned(remainder, 1, ...)`),
+  so both are compiled and nothing is padded. Every held-mask gather and the graded-medium transfer
+  walk go through it.
+- **`model._solve` handed `solve_linear` a new operator closure on every call**, and `lx.linear_solve`
+  (itself compiled) retraced and recompiled for each one — `eqx.Partial` over a module-level matvec was
+  tried and only halved it, because `FunctionLinearOperator` still converts the closure per call. The
+  solve is now `_interreflection(reflected, reflectance, source, solver)`, an `eqx.filter_jit` function
+  that builds the operator inside itself, so it is traced once per matrix size and solver settings.
+  Gradients are unchanged (the implicit adjoint is `lineax`'s, inside the compiled function), and the
+  existing reflectance / emission gradient tests pass against finite differences.
+
+**MEASURED** (`validation/radiation_per_call_compile.py`; "before" is `main` at `3e54fe1`, "after"
+the working tree, the same harness run back to back in one sitting — **two processes**, so read the
+large ratios and not the small ones; jax 0.10.2, CPU, x64, Linux x86_64, 4 cores, nothing else running,
+2026-09-26):
+
+| | before | after |
+|---|---|---|
+| gather, 3 full chunks + 488-receiver remainder (4,096 facets, 976 a pass): plain call | 1.78 s | **1.07 s** |
+| same call inside `jax.jit` | 0.99 s | 0.78 s |
+| `radiosity` repeat call, 768 facets | 0.51-0.54 s | **0.048 s** (11x) |
+| `radiosity` repeat call, 3,072 facets | 1.02-1.33 s | **0.58-0.62 s** |
+
+Answers identical in every arm. ⚠️ **A plain gather is still 1.3-1.4x the jit-wrapped one** (and 2.4x
+when there is only one chunk): the scan's body is a new closure on every call, so the scan is traced and
+compiled again each time. Removing that needs the gather's program cached **across** calls — the live
+values as arguments and the labels that shape the program as a hashable key, as `_compiled_gather` does
+within one stream — which is a larger change and was not made. ⚠️ **`build_radiation_model` returns
+before its asynchronous work finishes** (0.8 s to return, ~32 s more to finish at 3,072 facets, on this
+machine), so the first thing timed after a build absorbs the rest of it; the harness waits on the model
+first, and any first-call figure that did not is the build's.
+
+Tests, each mutation-checked (reverting either fix turns its test red):
+`test_every_chunk_runs_inside_a_scan_including_a_short_last_one` (`test_radiation_work.py`: scan lengths
+`[3]`, `[3, 1]`, `[1]`, rows in order) and `test_a_second_solve_of_the_same_size_reuses_the_compiled_program`
+(`test_radiation_model.py`: after `jax.clear_caches()`, two calls with different emission trace
+`solve_linear` once).
 
 ## A PASS IS BOUNDED IN RECEIVER-BY-FACET PAIRS, NOT RECEIVERS (#509, 2026-09-24)
 

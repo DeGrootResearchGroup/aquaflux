@@ -458,13 +458,40 @@ def _solve(model, surfaces, absorption, transmittance, external_irradiance, solv
     if arriving is not None:
         source = source + reflectance * arriving
 
+    outgoing, cycles = _interreflection(
+        reflected, reflectance, source, solver or relative_residual_gmres(_DEFAULT_RTOL)
+    )
+    return _Solved(outgoing, cycles, reflected, emitted, arriving)
+
+
+@eqx.filter_jit
+def _interreflection(reflected, reflectance, source, solver):
+    """Solve ``(I - diag(rho) F) B = source`` as one compiled program, reused from call to call.
+
+    The operator is built here, inside the compiled function, rather than by the caller. A solve
+    handed a new operator closure is traced and compiled again on every call, which for a few
+    hundred facets costs an order of magnitude more than the solve itself; compiled here, it is
+    traced once per matrix size and solver settings and every later call reuses the program.
+
+    Parameters
+    ----------
+    reflected : jnp.ndarray, shape ``(n_facets, n_facets)``
+        ``F``, the transfer carrying each facet's reflected output.
+    reflectance : jnp.ndarray, shape ``(n_facets,)``
+    source : jnp.ndarray, shape ``(n_facets,)``
+        The right-hand side.
+    solver : lineax.AbstractLinearSolver
+
+    Returns
+    -------
+    tuple of (jnp.ndarray, jnp.ndarray)
+        The radiosity, ``(n_facets,)``, and the solver's restart-cycle count.
+    """
+
     def matvec(x):
         return x - reflectance * (reflected @ x)
 
-    outgoing, cycles = solve_linear(
-        matvec, source, solver=solver or relative_residual_gmres(_DEFAULT_RTOL)
-    )
-    return _Solved(outgoing, cycles, reflected, emitted, arriving)
+    return solve_linear(matvec, source, solver=solver)
 
 
 def surface_irradiance(

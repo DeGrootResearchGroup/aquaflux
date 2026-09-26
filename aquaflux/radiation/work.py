@@ -71,7 +71,8 @@ def in_passes(arrays, pair_limit: int, per_receiver: int, body):
     **Chunks are sliced out of the arrays where they lie**, not cut from a padded copy: a shadow
     mask is the size of the whole problem, and padding it to a whole number of chunks would copy
     it. The full chunks run as one scan, compiled once; a shorter remainder, if there is one, runs
-    after it as one more call of the same body.
+    after it as a second scan of one step, so it is compiled too rather than run one operation at
+    a time.
 
     ⚠️ **The body is checkpointed, and that is what makes the limit hold for a gradient too.** A
     scan's reverse pass otherwise keeps every chunk's intermediates for the backward sweep, so a
@@ -98,15 +99,21 @@ def in_passes(arrays, pair_limit: int, per_receiver: int, body):
             prevent_cse=False,
         )
 
+    def scanned(size, count, first):
+        chunk = run(size)
+        _, out = lax.scan(
+            lambda carry, index: (carry, chunk(first + index * size)), None, jnp.arange(count)
+        )
+        return out.reshape(-1, *out.shape[2:])
+
     pieces = []
     if n_full:
-        full_chunk = run(per_chunk)
-        _, full = lax.scan(
-            lambda carry, index: (carry, full_chunk(index * per_chunk)), None, jnp.arange(n_full)
-        )
-        pieces.append(full.reshape(-1, *full.shape[2:]))
+        pieces.append(scanned(per_chunk, n_full, 0))
     if remainder:
-        pieces.append(run(remainder)(n_full * per_chunk))
+        # A scan of one step rather than a bare call: a scan is compiled as a whole even when
+        # nothing around it is, whereas a bare call runs the body one operation at a time -- and
+        # a remainder can be nearly a full chunk.
+        pieces.append(scanned(remainder, 1, n_full * per_chunk))
     return pieces[0] if len(pieces) == 1 else jnp.concatenate(pieces)
 
 
