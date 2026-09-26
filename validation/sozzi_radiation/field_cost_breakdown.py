@@ -279,8 +279,8 @@ def instrument_call(timers: Timers, n_facets: int, pairs: dict) -> None:
         return mask
 
     culling.ShaftCulling.blocked = counted_blocked
-    culling._body_blocks = timers.wrap(
-        "call / field / chunk / mask / bodies / test tiles / compiled test", culling._body_blocks
+    culling._tile_blocks = timers.wrap(
+        "call / field / chunk / mask / bodies / test tiles / compiled test", culling._tile_blocks
     )
 
 

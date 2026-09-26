@@ -79,6 +79,33 @@ def _body_blocks(body, origin, target, near):
     return body.blocks(origin, target, near)
 
 
+@eqx.filter_jit
+def _compiled_tile_blocks(body, sources, near, receivers, rows, cols):
+    """One body's answer for a batch of tiles, the tiles' points gathered inside the program.
+
+    Handed the points whole and each tile's indices, rather than each tile's points gathered on
+    the host: at the finest tiles a pair is a few points' worth of arithmetic, and gathering and
+    copying every tile's points before the call cost a sizeable share of the call itself. The
+    gathered values are the same, so the answers are too.
+    """
+    return body.blocks(
+        sources[cols][:, None, :, :], receivers[rows][:, :, None, :], near[cols][:, None, :]
+    )
+
+
+def _tile_blocks(body, sources, near, receivers, rows, cols):
+    """One body's answer for each pair of each tile, shape ``(n_tiles, block, cluster)``.
+
+    ``rows`` and ``cols``, shapes ``(n_tiles, block)`` and ``(n_tiles, cluster)``, index
+    ``receivers`` and ``sources``. A body that answers on the host is handed the gathered points.
+    """
+    if body.traceable:
+        return _compiled_tile_blocks(body, sources, near, receivers, rows, cols)
+    return body.blocks(
+        sources[cols][:, None, :, :], receivers[rows][:, :, None, :], near[cols][:, None, :]
+    )
+
+
 class BodyCulling(eqx.Module):
     """How the analytic bodies' layer of a shadow mask is worked out.
 
@@ -562,6 +589,9 @@ class ShaftCulling(BodyCulling):
         """
         per_tile = rows.shape[1] * cols.shape[1]
         per_batch = max(1, pair_limit // per_tile)
+        points = (sources, near, receivers)
+        if body.traceable:
+            points = tuple(jnp.asarray(array) for array in points)
         for start in range(0, len(rows), per_batch):
             batch_rows = rows[start : start + per_batch]
             batch_cols = cols[start : start + per_batch]
@@ -569,12 +599,7 @@ class ShaftCulling(BodyCulling):
             pad = np.repeat(np.arange(len(batch_rows))[-1:], width - len(batch_rows))
             take = np.concatenate([np.arange(len(batch_rows)), pad])
             batch_rows, batch_cols = batch_rows[take], batch_cols[take]
-            answer = _body_blocks(
-                body,
-                jnp.asarray(sources[batch_cols])[:, None, :, :],
-                jnp.asarray(receivers[batch_rows])[:, :, None, :],
-                jnp.asarray(near[batch_cols])[:, None, :],
-            )
+            answer = _tile_blocks(body, *points, batch_rows, batch_cols)
             out[batch_rows[:, :, None], batch_cols[:, None, :]] = np.asarray(answer)
 
 

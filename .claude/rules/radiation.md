@@ -1940,6 +1940,21 @@ on the analytic Sozzi-like scene (24,000 sampled receivers, 8,704 facets, 53 chu
 default ladder; jax 0.10.2, Linux x86_64, 4 cores, one process, three alternating passes): streamed
 field median **21.96 → 20.67 s** (~6%), fields bit-identical — in line with the ~14 s of 317 s the
 Sozzi whole-field breakdown (#564) charged to per-chunk facet clearance and summaries.
+**The leftover tiles' points are gathered inside the compiled test** (2026-09-26, `_tile_blocks` /
+`_compiled_tile_blocks`): a traceable body gets the points whole (converted to device arrays once per
+`_test_tiles` call) and each tile's `rows`/`cols` indices, instead of every tile's points gathered and
+copied on the host before the call; a host body (`TriangleBody`) still gets gathered points. The
+write-back into the mask stays a numpy scatter — **scattering on the device inside the same program was
+measured and was slower** (median 1.89 against 1.63 s on the same tiles, no buffer donation). Measured on
+the leftover tiles of 4,000 sampled receivers x 8,704 facets at the default ladder (720,086 2x2 tiles; 4
+cores, alternating): tile test median 1.86 → 1.41 s in one run, 1.63 → 1.52 s in another; whole streamed
+field (24,000 receivers, 53 chunks, four alternating passes) median **27.37 → 26.53 s (~3%, inside this
+container's spread — one pass reversed)**. The stand-in tests only ~9% of its pairs; on the Sozzi mesh
+the leftover test is 59% of the call (#564), so the saving there should be larger — **not measured**.
+Fields bit-identical. Mutation: a reversed tile order goes red; handing each pair a neighbouring
+facet's `near` (1e-6 x sqrt(area)) survives — **dismissed**, the margin is too small to change an answer
+on any fixture, as it was for the host path. #564's harness now times `_tile_blocks` as `test tiles /
+compiled test`.
 
 **How.** Receivers and facet centroids are each ordered along a Morton curve (`spatial_order`, 10 bits
 an axis) and padded to a whole number of the coarsest groups by repeating the last point (`_Curve`;
