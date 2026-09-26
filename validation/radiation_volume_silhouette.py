@@ -202,7 +202,7 @@ def cost(divisions: int, sectors: int, per_side: int) -> None:
                 surfaces.normal,
                 near,
                 jnp.zeros(n, dtype=bool),
-            )[0]
+            )[1]
         )
         for k in range(0, len(points), max(1, len(points) // 50))
     ]

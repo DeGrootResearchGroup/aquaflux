@@ -30,11 +30,13 @@ centroids for a transfer build, so ``n_receivers == n_facets == n_triangles`` an
 ``n^3``. Doubling the mesh costs eight times the build. Any judgement about affordability that
 is made at one facet count transfers to another only through that cube.
 
-Run with ``validation/run_case.sh validation/radiation_mask_build_cost.py``.
+Run with ``validation/run_case.sh validation/radiation_mask_build_cost.py``; set
+``RADIATION_SILHOUETTE_ONLY=1`` to run only the silhouette's two sections.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -46,9 +48,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
-from aquaflux.radiation.self_occlusion import RayCastOcclusion, SilhouetteOcclusion
+from aquaflux.radiation.self_occlusion import (
+    RayCastOcclusion,
+    SilhouetteOcclusion,
+    _PairPipeline,
+)
 from aquaflux.radiation.surfaces import Surfaces
-from aquaflux.radiation.triangles import segment_is_cut
+from aquaflux.radiation.triangles import padded_length, segment_is_cut
 from aquaflux.radiation.visibility import build_visibility
 from tests.unit.radiation_references import closed_drum, inward_box
 
@@ -177,6 +183,75 @@ def silhouette_ladder(cases) -> None:
         )
 
 
+def second_stage(cases, sampled: int = 30) -> None:
+    """What the silhouette's second-stage rejection removes, and that it removes nothing real.
+
+    For a sample of receivers on each rung: the pairs the cone cull keeps, how many of those the
+    second stage (``covers_nothing``) rejects, and -- clipping the rejected pairs anyway -- the
+    largest share any of them covers and the largest per-source sum, both of which must sit at
+    the clip's own floor. The unit tests sweep this exhaustively on small reactors; this is the
+    same check at the sizes a build actually runs.
+    """
+    print("\n### SilhouetteOcclusion: the second stage on the cone cull's survivors\n", flush=True)
+    print(
+        f"{'facets':>7} {'receivers':>9} {'cull kept':>12} {'rejected':>9} "
+        f"{'worst rejected':>15} {'worst source sum':>17}",
+        flush=True,
+    )
+    strategy = SilhouetteOcclusion()
+    for divisions, sectors in cases:
+        surfaces = reactor(divisions, sectors)
+        n = surfaces.n_facets
+        vertices = jnp.asarray(surfaces.vertices)
+        centroid = jnp.asarray(surfaces.centroid)
+        normal = np.asarray(surfaces.normal)
+        either_side = jnp.zeros(n, dtype=bool)
+        kept_total, rejected_total, worst, worst_sum = 0, 0, 0.0, 0.0
+        rows = range(0, n, max(1, n // sampled))
+        for row in rows:
+            view, source, blocker = strategy._candidates(
+                np.asarray(centroid[row]),
+                normal[row],
+                vertices,
+                centroid,
+                jnp.asarray(normal),
+                jnp.zeros(n),
+                either_side,
+            )
+            legal = (source != blocker) & (source != row) & (blocker != row)
+            source, blocker = source[legal], blocker[legal]
+            # Padded to a power of two, repeating the last pair, so a handful of compiled shapes
+            # serve every receiver -- one program per distinct pair count exhausts memory -- and
+            # the padding's answers are cut off.
+            count = len(source)
+            index = np.minimum(np.arange(padded_length(count)), count - 1)
+            receiver = np.broadcast_to(np.asarray(centroid[row]), (len(index), 3))
+            facing = np.broadcast_to(normal[row], (len(index), 3))
+            pair_view = view.take(source[index])
+            worth = np.asarray(
+                _PairPipeline._worth_clipping(
+                    vertices, receiver, facing, pair_view, source[index], blocker[index]
+                )
+            )[:count]
+            covered = np.asarray(
+                _PairPipeline._covered(
+                    vertices, receiver, facing, pair_view, source[index], blocker[index]
+                )[0]
+            )[:count]
+            rejected = np.where(worth, 0.0, covered)
+            per_source = np.zeros(n)
+            np.add.at(per_source, source, rejected)
+            kept_total += len(source)
+            rejected_total += int(np.count_nonzero(~worth))
+            worst = max(worst, float(rejected.max(initial=0.0)))
+            worst_sum = max(worst_sum, float(per_source.max()))
+        print(
+            f"{n:7,} {len(rows):9,} {kept_total / len(rows):12,.0f} "
+            f"{100.0 * rejected_total / max(1, kept_total):8.1f}% {worst:15.2e} {worst_sum:17.2e}",
+            flush=True,
+        )
+
+
 def _minutes(seconds: float) -> str:
     """Seconds as the unit a build-time decision is actually made in."""
     if seconds < 90.0:
@@ -292,6 +367,12 @@ if __name__ == "__main__":
 
     print(__doc__.split("Run with")[0].strip(), flush=True)
 
+    # The silhouette's sections alone, for a change to the clip that leaves the ray mask alone.
+    if os.environ.get("RADIATION_SILHOUETTE_ONLY"):
+        silhouette_ladder(cases)
+        second_stage(cases[:4])
+        sys.exit(0)
+
     # The full range at the SHIPPED default, which is the number a user actually pays.
     ladder(cases, 4_000_000)
 
@@ -302,6 +383,7 @@ if __name__ == "__main__":
 
     # The measured replacement for the extrapolated columns above. Run to the same top rung.
     silhouette_ladder(cases)
+    second_stage(cases[:4])
 
     geometry_independence(11, 20, 4_000_000)
     throughput_against_ray_count(1532, 4_000_000)

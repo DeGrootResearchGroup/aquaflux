@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import abc
 import warnings
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 import equinox as eqx
 import jax
@@ -44,14 +46,17 @@ from aquaflux.radiation.checks import open_facets
 from aquaflux.radiation.clipping import decidable_heights
 from aquaflux.radiation.grid import TriangleGrid
 from aquaflux.radiation.silhouette import (
+    SourceView,
     angular_cone,
     beyond_source_plane,
     cones_may_overlap,
     covered_by,
+    covers_nothing,
     source_view,
 )
 from aquaflux.radiation.triangles import padded_length, pairs_are_cut
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, receivers_per_pass
+from aquaflux.vectors import dot
 
 __all__ = [
     "NoOcclusion",
@@ -346,11 +351,24 @@ class SilhouetteOcclusion(SelfOcclusion):
     differs. So a fluence rate in the water sees a sleeve's shadow edge as the fraction it is,
     rather than all or nothing per pair.
 
-    **Three passes per receiver**, and the middle one is what makes the cost bearable: build
-    each triangle's bounding cone and each source's clipped view (both ``n`` per receiver, not
-    ``n**2``); cull every (source, blocker) pair whose cones cannot overlap; then clip only the
-    survivors. The cull's survival falls as the mesh refines -- a finer pair sweeps a narrower
-    pencil -- which is what keeps this from costing ``n**3``.
+    **Four passes**, and the middle two are what make the cost bearable. Per receiver: build each
+    triangle's bounding cone and each source's clipped view (``n`` each, not ``n**2``), keeping
+    only the sources that subtend something and the blockers that could stand in front of this
+    receiver; then cull every surviving (source, blocker) pair whose cones cannot overlap or whose
+    blocker lies beyond the source (:func:`~aquaflux.radiation.silhouette.may_occlude`'s bounds).
+    Then, over the pairs of many receivers at once: reject every pair that certainly covers
+    nothing (:func:`~aquaflux.radiation.silhouette.covers_nothing`) -- most of what the cones let
+    through, on a meshed enclosure -- and clip only what is left. The cone cull's survival falls
+    as the mesh refines, since a finer pair sweeps a narrower pencil, which is what keeps this from
+    costing ``n**3``.
+
+    **The last two passes pack pairs from many receivers into chunks of one fixed size**, each
+    carrying its own receiver and its source's view, so every chunk but the very last is full and
+    one compiled program serves them all; the last is padded to a power of two. Packing per
+    receiver instead pads every receiver's pairs, which on a meshed body wastes a large share of
+    the clip on padding. Chunks run on :attr:`threads` threads: one compiled call keeps only part
+    of a multi-core processor busy, and several at once keep more of it. The answer does not depend
+    on either, since every pair is clipped by the same program and summed in the same order.
 
     **Which blockers count, and why it has to be declared.** A blocker counts only from the
     side it faces, unless its body is named in :attr:`two_sided`. On a closed, consistently
@@ -368,22 +386,24 @@ class SilhouetteOcclusion(SelfOcclusion):
     Attributes
     ----------
     work_chunk : int
-        The largest number of surviving (source, blocker) pairs clipped per compiled call, which
-        is what bounds this pass's memory.
+        (Source, blocker) pairs rejected or clipped per compiled call, which bounds those passes'
+        memory: each of :attr:`threads` calls in flight holds one chunk's working set.
+    pair_limit : int
+        (Source, blocker) pairs one compiled call of the cull may form for a receiver, which bounds
+        the cull's memory the same way ``pair_limit`` bounds every receiver-by-facet pass in this
+        package: the candidates are tiled into blocks of sources against all candidate blockers.
+    threads : int
+        How many compiled calls of the reject and clip passes run at once, and how many receivers
+        ahead the cull works.
     two_sided : tuple of str
         Bodies, by their name in :attr:`~aquaflux.radiation.surfaces.Surfaces.solid_names`, that
         block from both sides: zero-thickness sheets. Empty by default. Naming a closed body here
         makes it block twice, which errs dark.
-
-        Chunks are padded up to a **power of two** rather than to this length. Padding every
-        chunk to the cap compiles exactly one program, which sounds like the thing to want and
-        is not: a body whose receivers have sixty candidates each would then clip a quarter of a
-        million pairs apiece, thousands of times the real work. Rounding up to a power of two
-        wastes at most half a chunk and costs a couple of dozen compiled shapes across any
-        conceivable range, each of which is reused by every receiver that lands in its bucket.
     """
 
-    work_chunk: int = 262_144
+    work_chunk: int = 32_768
+    pair_limit: int = DEFAULT_PAIR_LIMIT
+    threads: int = 4
     two_sided: tuple[str, ...] = ()
 
     def field(self, surfaces, points, near, receiver_facet) -> OcclusionField:
@@ -396,30 +416,50 @@ class SilhouetteOcclusion(SelfOcclusion):
             if receiver_facet is None
             else np.asarray(receiver_facet, dtype=int)
         )
-
-        vertices = surfaces.vertices
-        normal = surfaces.normal
-        centroid = surfaces.centroid
         n_facets = int(surfaces.n_facets)
         either_side = self._either_side(surfaces)
+        vertices = jnp.asarray(surfaces.vertices, dtype=float)
+        centroid = jnp.asarray(surfaces.centroid, dtype=float)
+        normal = jnp.asarray(surfaces.normal, dtype=float)
+        near = jnp.asarray(near, dtype=float)
+        receivers = np.asarray(points, dtype=float)
+        facet_normal = np.asarray(surfaces.normal, dtype=float)
 
         fraction = np.zeros((n_receivers, n_facets))
         blockers = np.zeros((n_receivers, n_facets), dtype=np.int32)
-        for row in range(n_receivers):
+
+        def candidates(row):
             own = facet_of[row]
-            facing = None if own < 0 else normal[own]
-            source, blocker = self._candidates(
-                points[row], facing, vertices, centroid, normal, near, either_side
+            facing = None if own < 0 else facet_normal[own]
+            return self._candidates(
+                receivers[row], facing, vertices, centroid, normal, near, either_side
             )
-            # A facet never blocks itself, and never blocks the facet the receiver sits on -- a
-            # test that is vacuous for a receiver on no facet, whose index is -1.
-            legal = (source != blocker) & (blocker != own) & (source != own)
-            source, blocker = source[legal], blocker[legal]
-            if not len(source):
-                continue
-            covered, hit = self._clip(points[row], facing, vertices, source, blocker)
-            np.add.at(fraction[row], source, covered)
-            np.add.at(blockers[row], source, hit.astype(np.int32))
+
+        with ThreadPoolExecutor(max_workers=max(1, self.threads)) as pool:
+            # Surface and volume receivers take different measures, so they are clipped by
+            # different programs and packed into different chunks.
+            pipelines = {
+                on_facet: _PairPipeline(
+                    pool,
+                    self.work_chunk,
+                    max(1, self.threads),
+                    vertices,
+                    receivers,
+                    facet_normal[np.maximum(facet_of, 0)] if on_facet else None,
+                    fraction,
+                    blockers,
+                )
+                for on_facet in (True, False)
+            }
+            for row, (view, source, blocker) in _ahead(pool, candidates, n_receivers, self.threads):
+                own = facet_of[row]
+                # A facet never blocks itself, and never blocks the facet the receiver sits on --
+                # a test that is vacuous for a receiver on no facet, whose index is -1.
+                legal = (source != blocker) & (blocker != own) & (source != own)
+                if np.any(legal):
+                    pipelines[own >= 0].add(row, view, source[legal], blocker[legal])
+            for pipeline in pipelines.values():
+                pipeline.finish()
 
         return OcclusionField(
             fraction=jnp.clip(jnp.asarray(fraction), 0.0, 1.0),
@@ -454,70 +494,273 @@ class SilhouetteOcclusion(SelfOcclusion):
                 "RayCastOcclusion.",
                 stacklevel=3,
             )
-        return declared
+        return jnp.asarray(declared)
 
     @staticmethod
     @jax.jit
-    def _survivors(receiver, receiver_normal, vertices, centroid, normal, near, either_side):
-        """Which (source, blocker) pairs could possibly matter, as a dense mask.
+    def _per_triangle(receiver, receiver_normal, vertices, centroid, normal, near, either_side):
+        """Everything the cull needs that is one value per triangle, not one per pair.
 
-        ``receiver_normal`` is ``None`` for a receiver in the volume, which sees every way and so
-        has no tangent plane to cull behind.
+        Returns each triangle's bounding cone, each source's view, which sources subtend anything
+        at all, and which triangles could block from here. ``receiver_normal`` is ``None`` for a
+        receiver in the volume, which sees every way and so has no tangent plane to cull behind.
         """
         relative = vertices - receiver
         cone = angular_cone(relative)
-        source_cone = tuple(x[:, None] if x.ndim == 1 else x[:, None, :] for x in cone)
-        blocker_cone = tuple(x[None, :] if x.ndim == 1 else x[None, :, :] for x in cone)
-
         view = source_view(receiver, receiver_normal, vertices)
-        keep = cones_may_overlap(source_cone, blocker_cone)
-        keep &= ~beyond_source_plane(
-            relative[None, :, :, :], view.support[:, None, :], view.through[:, None, :]
-        )
-        # A blocker entirely behind the receiver's own tangent plane blocks nothing in front.
-        if receiver_normal is not None:
-            keep &= ~jnp.all(jnp.sum(relative * receiver_normal, axis=-1) < 0.0, axis=-1)[None, :]
         # Front-facing only: a sight line leaving a wetted surface and re-entering crosses
         # front-facing geometry exactly once, so the back faces would double the count. A
         # declared sheet is crossed once from either side, so it counts from both.
-        facing = (jnp.sum(normal * (receiver - centroid), axis=-1) > 0.0) | either_side
+        facing = (dot(normal, receiver - centroid) > 0.0) | either_side
         # The near margin keeps a facet from shadowing its own immediate neighbourhood, the same
         # role it plays for the ray test.
         far_enough = jnp.linalg.norm(receiver - centroid, axis=-1) > near
-        return keep & (facing & far_enough)[None, :]
-
-    def _candidates(self, receiver, receiver_normal, vertices, centroid, normal, near, either_side):
-        """The surviving pairs, compacted on the host -- legal because the mask is frozen."""
-        keep = np.asarray(
-            self._survivors(
-                receiver, receiver_normal, vertices, centroid, normal, near, either_side
-            )
-        )
-        return np.nonzero(keep)
-
-    def _clip(self, receiver, receiver_normal, vertices, source, blocker):
-        """Run the exact clip over the candidate list, in fixed-size padded chunks."""
-        covered = np.zeros(len(source))
-        hit = np.zeros(len(source), dtype=bool)
-        for start in range(0, len(source), self.work_chunk):
-            stop = min(start + self.work_chunk, len(source))
-            piece = slice(start, stop)
-            # Padded up to a power of two, so one compiled program serves every chunk of that
-            # size; the padding repeats a real item and its answer is discarded.
-            pad = padded_length(stop - start) - (stop - start)
-            take_source = np.pad(source[piece], (0, pad), mode="edge")
-            take_blocker = np.pad(blocker[piece], (0, pad), mode="edge")
-            part, struck = self._clip_chunk(
-                receiver, receiver_normal, vertices, take_source, take_blocker
-            )
-            covered[piece] = np.asarray(part)[: stop - start]
-            hit[piece] = np.asarray(struck)[: stop - start]
-        return covered, hit
+        may_block = facing & far_enough
+        # A blocker entirely behind the receiver's own tangent plane blocks nothing in front.
+        if receiver_normal is not None:
+            may_block &= ~jnp.all(dot(relative, receiver_normal) < 0.0, axis=-1)
+        return cone, view, view.subtends(), may_block
 
     @staticmethod
     @jax.jit
-    def _clip_chunk(receiver, receiver_normal, vertices, source, blocker):
-        """One compiled pass over a fixed number of (source, blocker) pairs."""
-        view = source_view(receiver, receiver_normal, jnp.take(vertices, source, axis=0))
+    def _cull(receiver, vertices, cone, view, source, blocker):
+        """Which of a block of (source, blocker) pairs could possibly matter, as a dense mask.
+
+        ``source`` is a column of source indices and ``blocker`` a row of blocker indices, so the
+        mask is ``(len(source), len(blocker))``.
+        """
+        source_cone = tuple(
+            jnp.take(x, source, axis=0)[:, None] if x.ndim == 1 else x[source][:, None, :]
+            for x in cone
+        )
+        blocker_cone = tuple(
+            jnp.take(x, blocker, axis=0)[None, :] if x.ndim == 1 else x[blocker][None, :, :]
+            for x in cone
+        )
         to_blocker = jnp.take(vertices, blocker, axis=0) - receiver
+        keep = cones_may_overlap(source_cone, blocker_cone)
+        return keep & ~beyond_source_plane(
+            to_blocker[None, :, :, :],
+            jnp.take(view.support, source, axis=0)[:, None, :],
+            jnp.take(view.through, source, axis=0)[:, None, :],
+        )
+
+    def _candidates(self, receiver, receiver_normal, vertices, centroid, normal, near, either_side):
+        """The pairs the cull keeps for one receiver, compacted on the host, and its views.
+
+        Legal to compact on the host because the mask is frozen. The candidates are the sources
+        that subtend something against the triangles that could block from here -- a list of each,
+        found in one pass over the triangles -- and the cull is run over them in blocks of
+        sources, so no call forms more than :attr:`pair_limit` pairs.
+
+        Returns
+        -------
+        tuple of (SourceView, np.ndarray, np.ndarray)
+            Every source's view, on the host, shape ``(n_facets, ...)``; and the kept pairs as
+            parallel arrays of source and blocker indices.
+        """
+        cone, view, subtends, may_block = self._per_triangle(
+            receiver, receiver_normal, vertices, centroid, normal, near, either_side
+        )
+        view = jax.tree.map(np.asarray, view)
+        sources = np.flatnonzero(np.asarray(subtends))
+        blockers = np.flatnonzero(np.asarray(may_block))
+        if not len(sources) or not len(blockers):
+            empty = np.zeros(0, dtype=int)
+            return view, empty, empty
+        # Both padded to powers of two, so a couple of dozen compiled shapes serve every receiver;
+        # the padding repeats a real index and its answers are cut off below.
+        width = padded_length(len(blockers))
+        rows = min(padded_length(len(sources)), _power_of_two_at_most(self.pair_limit // width))
+        padded_blockers = np.pad(blockers, (0, width - len(blockers)), mode="edge")
+        found_source, found_blocker = [], []
+        for start in range(0, len(sources), rows):
+            block = sources[start : start + rows]
+            keep = np.asarray(
+                self._cull(
+                    receiver,
+                    vertices,
+                    cone,
+                    view,
+                    np.pad(block, (0, rows - len(block)), mode="edge"),
+                    padded_blockers,
+                )
+            )[: len(block), : len(blockers)]
+            i, j = np.nonzero(keep)
+            found_source.append(block[i])
+            found_blocker.append(blockers[j])
+        return view, np.concatenate(found_source), np.concatenate(found_blocker)
+
+
+def _power_of_two_at_most(count: int) -> int:
+    """The largest power of two not above ``count``, and at least one."""
+    return 1 << max(0, int(count).bit_length() - 1) if count > 0 else 1
+
+
+def _ahead(pool, work, count: int, lookahead: int):
+    """``(index, work(index))`` for every index in order, with up to ``lookahead`` computed ahead.
+
+    Lets the per-receiver cull of the next receivers run on the pool while this one's pairs are
+    handed on, without changing the order anything is consumed in.
+    """
+    pending = deque()
+    for index in range(count):
+        pending.append((index, pool.submit(work, index)))
+        if len(pending) > max(0, lookahead):
+            done, future = pending.popleft()
+            yield done, future.result()
+    while pending:
+        done, future = pending.popleft()
+        yield done, future.result()
+
+
+class _Pairs:
+    """(Receiver, source, blocker) triples in flight, with each one's source view.
+
+    Plain host arrays, one entry per pair, so that pairs from any number of receivers can be cut
+    into chunks of one size: each pair carries everything the reject and clip passes read that is
+    not the global vertex table.
+    """
+
+    __slots__ = ("blocker", "row", "source", "view")
+
+    def __init__(self, row, source, blocker, view: SourceView):
+        self.row = row
+        self.source = source
+        self.blocker = blocker
+        self.view = view
+
+    def __len__(self) -> int:
+        return len(self.row)
+
+    def take(self, index) -> _Pairs:
+        """The pairs ``index`` picks: a slice, a boolean mask or an index array."""
+        return _Pairs(
+            self.row[index], self.source[index], self.blocker[index], self.view.take(index)
+        )
+
+    @staticmethod
+    def joined(parts) -> _Pairs:
+        """One set of pairs from several, in order."""
+        if len(parts) == 1:
+            return parts[0]
+        return _Pairs(
+            np.concatenate([part.row for part in parts]),
+            np.concatenate([part.source for part in parts]),
+            np.concatenate([part.blocker for part in parts]),
+            jax.tree.map(lambda *xs: np.concatenate(xs), *[part.view for part in parts]),
+        )
+
+
+class _PairPipeline:
+    """Reject, then clip, the culled pairs of many receivers in chunks of one fixed size.
+
+    Pairs accumulate as receivers are culled. Once a stage holds a chunk per thread, its whole
+    chunks run -- concurrently, on the pool -- and the remainder waits for the next receivers, so
+    no chunk is padded until the very last. The clip's answers are summed into the caller's arrays
+    in the order the pairs arrived, whatever order the chunks finish in.
+    """
+
+    def __init__(self, pool, chunk, threads, vertices, receivers, normals, fraction, blockers):
+        self._pool = pool
+        self._chunk = max(1, int(chunk))
+        self._wave = self._chunk * threads
+        self._vertices = vertices
+        self._receivers = receivers
+        self._normals = normals
+        self._fraction = fraction
+        self._blockers = blockers
+        self._culled: list[_Pairs] = []
+        self._kept: list[_Pairs] = []
+        self._n_culled = 0
+        self._n_kept = 0
+
+    def add(self, row, view: SourceView, source, blocker):
+        """Take one receiver's culled pairs, and every source's view from it."""
+        pairs = _Pairs(np.full(len(source), row), source, blocker, view.take(source))
+        self._culled.append(pairs)
+        self._n_culled += len(pairs)
+        if self._n_culled >= self._wave:
+            self._reject(final=False)
+
+    def finish(self):
+        """Run whatever is left, padding the last chunk of each stage."""
+        self._reject(final=True)
+        self._clip(final=True)
+
+    def _reject(self, final: bool):
+        ready, self._culled, self._n_culled = self._split(self._culled, final)
+        if ready is not None:
+            worth = np.concatenate(self._run(self._worth_clipping, ready))
+            kept = ready.take(worth)
+            if len(kept):
+                self._kept.append(kept)
+                self._n_kept += len(kept)
+        if final or self._n_kept >= self._wave:
+            self._clip(final)
+
+    def _clip(self, final: bool):
+        ready, self._kept, self._n_kept = self._split(self._kept, final)
+        if ready is None:
+            return
+        answers = self._run(self._covered, ready)
+        covered = np.concatenate([part for part, _ in answers])
+        hit = np.concatenate([struck for _, struck in answers])
+        np.add.at(self._fraction, (ready.row, ready.source), covered)
+        np.add.at(self._blockers, (ready.row, ready.source), hit.astype(np.int32))
+
+    def _split(self, parts, final: bool):
+        """The pairs ready to run -- whole chunks, or everything when final -- and the rest."""
+        if not parts:
+            return None, [], 0
+        pairs = _Pairs.joined(parts)
+        ready = len(pairs) if final else (len(pairs) // self._chunk) * self._chunk
+        if ready == 0:
+            return None, [pairs], len(pairs)
+        rest = pairs.take(slice(ready, None))
+        return pairs.take(slice(0, ready)), ([rest] if len(rest) else []), len(rest)
+
+    def _run(self, kernel, pairs: _Pairs):
+        """``kernel`` over ``pairs`` a chunk at a time, on the pool, answers in order."""
+        futures = [
+            self._pool.submit(self._call, kernel, pairs.take(slice(start, start + self._chunk)))
+            for start in range(0, len(pairs), self._chunk)
+        ]
+        return [future.result() for future in futures]
+
+    def _call(self, kernel, pairs: _Pairs):
+        """One compiled call, on a chunk padded to full size -- or, the last one, a power of two.
+
+        The padding repeats a real pair and its answers are discarded.
+        """
+        count = len(pairs)
+        size = self._chunk if count == self._chunk else min(self._chunk, padded_length(count))
+        index = np.minimum(np.arange(size), count - 1)
+        padded = pairs.take(index)
+        normal = None if self._normals is None else self._normals[padded.row]
+        answer = kernel(
+            self._vertices,
+            self._receivers[padded.row],
+            normal,
+            padded.view,
+            padded.source,
+            padded.blocker,
+        )
+        return jax.tree.map(lambda x: np.asarray(x)[:count], answer)
+
+    @staticmethod
+    @jax.jit
+    def _worth_clipping(vertices, receiver, receiver_normal, view, source, blocker):
+        """Which pairs might cover something, so are worth clipping."""
+        del receiver_normal
+        to_source = jnp.take(vertices, source, axis=0) - receiver[:, None, :]
+        to_blocker = jnp.take(vertices, blocker, axis=0) - receiver[:, None, :]
+        return ~covers_nothing(view, to_source, to_blocker)
+
+    @staticmethod
+    @jax.jit
+    def _covered(vertices, receiver, receiver_normal, view, source, blocker):
+        """The clip itself: each pair's covered fraction, and whether it covered anything."""
+        del source
+        to_blocker = jnp.take(vertices, blocker, axis=0) - receiver[:, None, :]
         return covered_by(view, receiver_normal, to_blocker)

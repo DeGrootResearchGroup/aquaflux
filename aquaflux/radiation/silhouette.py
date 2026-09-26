@@ -69,6 +69,7 @@ __all__ = [
     "cones_may_overlap",
     "covered_by",
     "covered_fraction",
+    "covers_nothing",
     "may_occlude",
     "source_plane",
     "source_view",
@@ -142,6 +143,38 @@ class SourceView(eqx.Module):
     whole: jnp.ndarray
     support: jnp.ndarray
     through: jnp.ndarray
+
+    def subtends(self):
+        """Whether the source's measure is a quantity rather than the rounding dust of a zero.
+
+        Below :data:`_EXTENT_FLOOR` the source is being seen edge-on: it subtends nothing, and no
+        fraction of it can be hidden. Asked here, once, because both the cull and the clip must
+        give the same answer to it.
+
+        Returns
+        -------
+        jnp.ndarray of bool, shape ``(...)``
+        """
+        return jnp.abs(self.whole) > _EXTENT_FLOOR
+
+    def take(self, index):
+        """The views of the pairs ``index`` picks along the leading axis.
+
+        Parameters
+        ----------
+        index : array of int, shape ``(k,)``
+
+        Returns
+        -------
+        SourceView
+            With leading dimension ``k``.
+        """
+        return SourceView(
+            loop=self.loop[index],
+            whole=self.whole[index],
+            support=self.support[index],
+            through=self.through[index],
+        )
 
 
 def _measure(receiver_normal, loop):
@@ -224,32 +257,10 @@ def covered_by(view: SourceView, receiver_normal, to_blocker):
     # a straddling blocker: 1.0000 against a sampled 0.6396. For a planar source the cut is
     # exact: a point occludes a direction precisely when it is on the receiver's side of the
     # source's supporting plane.
-    height = decidable_heights(to_blocker, view.support, through=view.through)
+    height = _depth_heights(view, to_blocker)
     near = clip_to_halfspace(to_blocker, height, _BLOCKER_WIDTH)
-
-    # ⚠️ A BLOCKER COPLANAR WITH THE SOURCE OCCLUDES NOTHING, AND IN A MESHED ENCLOSURE THAT IS
-    # THE COMMON CASE -- every other triangle of the same flat wall. Every height is then a
-    # mathematical zero, which the filtered heights above report as an exact zero rather than as
-    # noise of arbitrary sign; this reads that report. Measured before the two together: 119 of
-    # 2304 pairs of a closed box changed with the chunk size alone, one of them by the whole of
-    # its value.
-    scale = jnp.max(jnp.linalg.norm(to_blocker, axis=-1), axis=-1)
-    in_front = jnp.max(height, axis=-1) > _DEGENERATE * scale
-
-    # The blocker's winding as seen from HERE decides which side of each edge plane is inside,
-    # so the orientation is read off rather than assumed: an imported file's winding is whatever
-    # its exporter wrote, and a triangle's apparent winding flips as the receiver crosses its
-    # plane in any case. Taken from the UNCUT triangle, whose triple product is well conditioned;
-    # the cut polygon can carry repeated vertices, and clipping preserves winding anyway.
-    # The triple product is six times the volume of the tetrahedron on the receiver and the
-    # blocker, so it vanishes when the receiver lies in the blocker's plane -- again the common
-    # case, for every triangle sharing the receiver's own facet. Then `sign` is zero, every edge
-    # plane is zero, every clip is a no-op, and the source reads as wholly covered by a triangle
-    # seen exactly edge-on. Compared against its own scale rather than to zero.
-    volume = dot(to_blocker[..., 0, :], jnp.cross(to_blocker[..., 1, :], to_blocker[..., 2, :]))
-    edge_on = jnp.abs(volume) <= _DEGENERATE * jnp.prod(
-        jnp.linalg.norm(to_blocker, axis=-1), axis=-1
-    )
+    in_front = _in_front(to_blocker, height)
+    volume, edge_on = _orientation(to_blocker)
     facing = jnp.sign(volume)[..., None]
     # A four-wide loop holding a triangle carries a repeated slot, and the cut can leave a second
     # one; the edge through a repeat has no plane, and `spanning_plane` returns the exact zero
@@ -284,14 +295,135 @@ def covered_by(view: SourceView, receiver_normal, to_blocker):
     # Measured without this guard on a sleeved reactor: 13 pairs of coplanar sleeve triangles
     # read anywhere from 0.06 to a fully hidden 1.0, where the truth is that they exchange no
     # light at all.
-    magnitude = jnp.abs(view.whole)
-    subtends = magnitude > _EXTENT_FLOOR
-    fraction = jnp.minimum(jnp.abs(covered), extent) / jnp.where(subtends, magnitude, 1.0)
+    subtends = view.subtends()
+    fraction = jnp.minimum(jnp.abs(covered), extent) / jnp.where(subtends, jnp.abs(view.whole), 1.0)
     # Nothing of the blocker strictly in front of the source, or a blocker seen exactly edge-on:
     # either way it covers nothing, and saying so here is what keeps the degenerate cases out of
     # the sign tests above rather than at their mercy.
     fraction = jnp.where(in_front & ~edge_on & subtends, fraction, 0.0)
     return jnp.clip(fraction, 0.0, 1.0), fraction > _COVERAGE_FLOOR
+
+
+def _depth_heights(view: SourceView, to_blocker):
+    """Heights of a blocker's corners above the source's supporting plane, towards the receiver.
+
+    Filtered (:func:`~aquaflux.radiation.clipping.decidable_heights`), so a corner lying in the
+    source's plane -- every shared vertex of a meshed wall -- reads an exact zero.
+    """
+    return decidable_heights(to_blocker, view.support, through=view.through)
+
+
+def _in_front(to_blocker, height):
+    """Whether any of a blocker lies strictly in front of the source's plane.
+
+    ⚠️ A BLOCKER COPLANAR WITH THE SOURCE OCCLUDES NOTHING, AND IN A MESHED ENCLOSURE THAT IS THE
+    COMMON CASE -- every other triangle of the same flat wall. Every height is then a
+    mathematical zero, which the filtered heights report as an exact zero rather than as noise of
+    arbitrary sign; this reads that report. Measured before the two together: 119 of 2304 pairs
+    of a closed box changed with the chunk size alone, one of them by the whole of its value.
+    """
+    scale = jnp.max(jnp.linalg.norm(to_blocker, axis=-1), axis=-1)
+    return jnp.max(height, axis=-1) > _DEGENERATE * scale
+
+
+def _orientation(triangle):
+    """A triangle's winding as seen from the receiver, and whether it is seen edge-on.
+
+    The winding decides which side of each edge plane is inside, so it is read off rather than
+    assumed: an imported file's winding is whatever its exporter wrote, and a triangle's apparent
+    winding flips as the receiver crosses its plane in any case. Taken from the uncut triangle,
+    whose triple product is well conditioned.
+
+    The triple product is six times the volume of the tetrahedron on the receiver and the
+    triangle, so it vanishes when the receiver lies in the triangle's plane -- the common case,
+    for every triangle sharing the receiver's own facet. Its sign is then zero, every edge plane
+    is zero and every clip a no-op, so a triangle seen exactly edge-on would read as covering the
+    whole source. It is compared against its own scale rather than against zero.
+
+    Returns
+    -------
+    tuple of (jnp.ndarray, jnp.ndarray)
+        The triple product, and whether it is indistinguishable from zero, both shape ``(...)``.
+    """
+    volume = dot(triangle[..., 0, :], jnp.cross(triangle[..., 1, :], triangle[..., 2, :]))
+    edge_on = jnp.abs(volume) <= _DEGENERATE * jnp.prod(jnp.linalg.norm(triangle, axis=-1), axis=-1)
+    return volume, edge_on
+
+
+def _outside_an_edge_plane(triangle, other):
+    """Whether every corner of ``other`` lies strictly outside one edge plane of ``triangle``.
+
+    The directions a triangle occupies, seen from the receiver, are the intersection of the three
+    half-spaces through the receiver bounded by its edge planes, each oriented inwards by the
+    triangle's winding. Corners of the other triangle all strictly outside one of them put the
+    whole of its directions -- every positive combination of its corners -- in the open half-space
+    beyond that plane, so the two share no direction and no clip of one by the other can keep
+    anything. A separating-axis test restricted to the face planes: conservative, because it can
+    miss a separation, never invent one.
+
+    Heights are filtered and the comparison is strict, so a corner on the plane -- a shared edge --
+    never separates, and a triangle seen edge-on, whose planes mean nothing, separates nothing.
+    """
+    volume, edge_on = _orientation(triangle)
+    facing = jnp.sign(volume)[..., None]
+    outside = [
+        jnp.all(
+            decidable_heights(
+                other, spanning_plane(triangle[..., k, :], triangle[..., (k + 1) % 3, :]) * facing
+            )
+            < 0.0,
+            axis=-1,
+        )
+        for k in range(3)
+    ]
+    return ~edge_on & (outside[0] | outside[1] | outside[2])
+
+
+def covers_nothing(view: SourceView, to_source, to_blocker):
+    """Certainly: this blocker covers none of this source, so clipping the pair would give zero.
+
+    The **second stage of the cull**, after :func:`may_occlude`'s bounding cones and planes, and
+    run on the pairs those keep: it answers exactly where they only bound, so it rejects most of
+    what they let through -- on a sleeved box, nine pairs in ten of the cone cull's survivors cover
+    nothing -- at a fraction of what clipping them costs. Four reasons, each **exact** in the sense
+    that the clip would have returned zero for the pair:
+
+    * the source subtends nothing (it is seen edge-on), which :func:`covered_by` maps to zero;
+    * nothing of the blocker lies strictly in front of the source's plane -- every neighbour of
+      the source on its own flat wall, and every blocker merely touching that plane, which the
+      cone cull's raw-sign plane test lets through;
+    * the blocker is seen edge-on, which :func:`covered_by` also maps to zero;
+    * a face plane of either triangle separates their directions.
+
+    The first three read the very predicates :func:`covered_by` zeroes a pair by, so they cannot
+    disagree with it except within rounding of their own thresholds, where the coverage is a few
+    parts in ``1e12``. The fourth reads filtered heights with a strict sign, so a configuration
+    degenerate in exact arithmetic -- a shared edge, a coplanar pair -- is kept for the clip to
+    decide.
+
+    Parameters
+    ----------
+    view : SourceView
+        From :func:`source_view`, for this (receiver, source) pair.
+    to_source : jnp.ndarray, shape ``(..., 3, 3)``
+        The source's corners relative to the receiver, uncut. The directions the clip measures
+        are a subset of these, so separating from the uncut triangle is conservative.
+    to_blocker : jnp.ndarray, shape ``(..., 3, 3)``
+        The blocker's corners relative to the receiver.
+
+    Returns
+    -------
+    jnp.ndarray of bool, shape ``(...)``
+        ``True`` where the pair certainly covers nothing and need not be clipped.
+    """
+    _, edge_on = _orientation(to_blocker)
+    return (
+        ~view.subtends()
+        | ~_in_front(to_blocker, _depth_heights(view, to_blocker))
+        | edge_on
+        | _outside_an_edge_plane(to_source, to_blocker)
+        | _outside_an_edge_plane(to_blocker, to_source)
+    )
 
 
 def covered_fraction(receiver, receiver_normal, source, blocker):
