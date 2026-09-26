@@ -31,6 +31,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `triangles.py` — watertight ray-triangle intersection | **BUILT** |
 | `self_occlusion.py` — the `SelfOcclusion` strategies: ray cast, silhouette clip, none | **BUILT** |
 | `silhouette.py` — the exact covered fraction of a source, the conservative cone cull, and the exact second-stage rejection (`covers_nothing`) | **BUILT** |
+| `clusters.py` — `FacetClusters`, facets grouped along their Morton order for the silhouette's clustered cull | **BUILT** |
 | `clipping.py` — convex clipping with filtered (decidable) sign tests, shared with `solid_angle.py` | **BUILT** |
 | `transfer.py` — the frozen facet-to-facet geometry | **BUILT** |
 | `quadrature.py` — symmetric triangle rules for the receiving facet | **BUILT** |
@@ -2875,12 +2876,12 @@ Surface and volume receivers go to separate pipelines, since they take different
 
 **4. The cull is bounded in pairs** (`pair_limit`, default `DEFAULT_PAIR_LIMIT`): `_per_triangle` reduces
 the sources to those that subtend and the blockers to those that face, are far enough, and are not
-wholly behind the receiver's tangent plane — index lists in `O(n)` — and `_cull` runs over them in
-blocks of sources against all candidate blockers, both padded to powers of two, so no call forms more
-than `pair_limit` pairs. ⚠️ **This bounds the cull's memory, not its cost**: it is still
-`O(|sources| x |blockers|)` per receiver, host `np.nonzero` included. The clustered cull the issue
-sketched (bounding cones per spatial cluster, expanding surviving cluster pairs, compaction on device)
-is **not built**.
+wholly behind the receiver's tangent plane — index lists in `O(n)` — and the cull ran over them in
+blocks of sources against all candidate blockers (a `_cull` step; there is no such method any more,
+the clustered `_cluster_pairs` / `_member_pairs` replaced it in #555), so no call formed more than
+`pair_limit` pairs. ⚠️ **This bounded the cull's memory, not its cost**: it was still
+`O(|sources| x |blockers|)` per receiver, host `np.nonzero` included. #555 replaced the dense blocks
+with a clustered cull — next section, and read it before expecting much from it.
 
 **MEASURED** with `validation/radiation_mask_build_cost.py` (`silhouette_ladder` and the new
 `second_stage`; `RADIATION_SILHOUETTE_ONLY=1` runs just those), same box-plus-sleeve reactor, receivers at
@@ -2929,3 +2930,58 @@ dropping the edge-on guard inside the separating test changes no answer — a tr
 blocker `covers_nothing` already rejects, or a source that subtends nothing — and it stays because it
 is what keeps the predicate honest on its own.
 
+### THE CULL RUNS ON CLUSTERS FIRST (#555, 2026-09-26) — worth 1.24x at 3,184 facets, and why no more
+
+**Measured first, on #556's code** (`silhouette_stages`, serial, 4-core Linux container, jax 0.10.2):
+the cull was **54%** of a 3,184-facet build (35.5% on device, 18.4% host compaction), 45% at 1,532;
+the reject pass 22%, the clip 11%. So the ceiling for any cull change there was ~2.2x.
+
+**What was built, as the issue wrote it.** `FacetClusters.build` (`clusters.py`) groups facets into
+runs of `cluster_size` (default 32) along the Morton order of their centroids, with a bounding sphere
+each. Per receiver, `_cluster_bounds` gives each cluster an **enclosing cone** per role
+(`silhouette.enclosing_cone`: cap on the mean member axis reaching `angle(axis, member axis) +
+member half-angle`, `arctan2` throughout; an unusable member or a cap reaching a right angle makes the
+cluster unusable). `_cluster_pairs` rejects cluster pairs whose cones cannot overlap or whose blocker
+sphere lies beyond every eligible source's plane in the source cluster; `_member_pairs` runs the
+unchanged member test (cones, `beyond_source_plane`) over the survivors. Both stages are bounded by
+`pair_limit`. **The kept set is exactly the dense cull's** — pinned set for set, each pair once, at
+cluster sizes 1 / 5 / 32, surface and volume receivers
+(`test_the_clustered_cull_keeps_exactly_what_testing_every_pair_keeps`). Pairs come out grouped by
+cluster pair, **not sorted**: the sort cost 10.6 of ~54 ms per receiver, and order only moves a sum by a
+rounding — measured 4.4e-16 at most against #556, no `overlapping` flag changed.
+
+**MEASURED** (same container, both arms in one sitting, default settings, two warm builds each):
+
+| facets | #556 | clustered | |
+|---|---|---|---|
+| 1,532 | 44.0-44.5 s | 40.1-42.4 s | ~1.05x (with the sort) |
+| 2,448 | 113.8-115.3 s | 109.4-112.3 s | 1.03x |
+| 3,184 | 225.5-229.2 s | 182.4-183.7 s | **1.24x** |
+
+⚠️ **WHY SO LITTLE: 40% OF CLUSTER PAIRS SURVIVE.** At 3,184 facets (100 clusters, receivers every
+97th facet): 3,839 of ~9,600 cluster pairs pass, so the member test still sees ~3.9M pairs against the
+dense 6.7M, to keep ~101,600. A 32-facet patch seen from inside the enclosure subtends tens of degrees,
+and a circular cap around an elongated patch overlaps many others. The device cull roughly halved
+(133 → ~72 s serial at 3,184) and the host side grew (69 → ~89 s: `np.nonzero` over the batch masks,
+15 ms a receiver, and — until removed — the sort).
+
+**Measured and rejected, so they are not retried:**
+- **Other cluster sizes**: 4 / 8 / 16 / 32 / 64 facets gave 67.2 / 61.4 / 48.0 / 54.2 / 63.7 ms a
+  receiver for the whole cull (with the sort), against ~63 ms dense. Small clusters make the cluster
+  stage quadratic in clusters; large ones loosen the bound. 16 was best by ~10% and was not adopted on
+  one scene.
+- **Compaction on the device**: `jnp.nonzero(size=...)` after a device-side count took **114.5 ms**
+  against numpy's **14.8 ms**, transfer included, on a 4096 × 32 × 32 mask at 2.5% density. On CPU
+  the host is the place for it.
+
+**The lever left is depth, not width**: a second level (clusters of 32 split into groups of ~8, tested
+only within surviving cluster pairs) would cut the member tests by roughly the survival ratio at each
+level. Not built — it is beyond what #555 specified.
+
+Tests, mutation-checked (8 mutations, 7 red): dropping the member half-angle from the enclosing cap,
+the sphere radius, or flipping the sphere test fails the exactness test; ignoring `pair_limit` in
+either stage fails `test_the_cull_forms_no_more_pairs_per_call_than_its_limit` (now watching both
+stages); losing the Morton order fails `test_clusters_are_compact_rather_than_arbitrary`.
+**Dismissed**: not propagating a member's unusable flag to its cluster changes nothing observable —
+every unusable member also has a cone cosine at or below the floor, so its own half-angle already pushes
+the enclosing cap to a right angle and flags the cluster — and the guard stays as the explicit rule.

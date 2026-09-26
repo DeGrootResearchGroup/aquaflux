@@ -25,6 +25,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from aquaflux.radiation.clusters import FacetClusters
 from aquaflux.radiation.self_occlusion import (
     NoOcclusion,
     RayCastOcclusion,
@@ -35,6 +36,7 @@ from aquaflux.radiation.silhouette import (
     covered_by,
     covered_fraction,
     covers_nothing,
+    enclosing_cone,
     may_occlude,
     source_view,
 )
@@ -676,23 +678,136 @@ def test_the_cull_forms_no_more_pairs_per_call_than_its_limit(monkeypatch):
     """The per-receiver cull is bounded in pairs, like every receiver-by-facet pass here.
 
     It used to form a dense ``n x n`` mask per receiver whatever the facet count -- hundreds of
-    megabytes a receiver on a fine surface, with nothing to bound it.
+    megabytes a receiver on a fine surface, with nothing to bound it. Both of its stages count:
+    the cluster pairs, each carrying one height per source member, and the member pairs.
     """
-    calls = []
-    cull = SilhouetteOcclusion._cull
+    formed = []
+    cluster_pairs = SilhouetteOcclusion._cluster_pairs
+    member_pairs = SilhouetteOcclusion._member_pairs
 
-    def watched(receiver, vertices, cone, view, source, blocker):
-        calls.append(len(source) * len(blocker))
-        return cull(receiver, vertices, cone, view, source, blocker)
+    def watched_clusters(receiver, view, members, *rest):
+        rows, cols = rest[-2], rest[-1]
+        formed.append(len(rows) * len(cols) * members.shape[1])
+        return cluster_pairs(receiver, view, members, *rest)
 
-    monkeypatch.setattr(SilhouetteOcclusion, "_cull", staticmethod(watched))
+    def watched_members(receiver, vertices, cone, view, members, *rest):
+        formed.append(len(rest[-1]) * members.shape[1] ** 2)
+        return member_pairs(receiver, vertices, cone, view, members, *rest)
+
+    monkeypatch.setattr(SilhouetteOcclusion, "_cluster_pairs", staticmethod(watched_clusters))
+    monkeypatch.setattr(SilhouetteOcclusion, "_member_pairs", staticmethod(watched_members))
     surfaces = _reactor()
     build_visibility(
         (),
         surfaces,
         surfaces.centroid,
         receiver_facet=np.arange(surfaces.n_facets),
-        self_occlusion=SilhouetteOcclusion(pair_limit=256),
+        self_occlusion=SilhouetteOcclusion(pair_limit=256, cluster_size=8),
     )
-    assert max(calls) <= 256
-    assert len(calls) > surfaces.n_facets, "every receiver's cull fitted one call: nothing tiled"
+    assert max(formed) <= 256
+    assert len(formed) > 2 * surfaces.n_facets, "every receiver's cull fitted one call each"
+
+
+def test_an_enclosing_cone_contains_every_direction_its_members_do():
+    """Sampled rather than argued: directions drawn inside each member cap must lie inside the
+    group's cap, or a cluster pair could be rejected with a member pair that overlaps."""
+    rng = np.random.default_rng(7)
+    triangles = rng.normal(size=(40, 3, 3)) * 0.2 + np.array([0.0, 0.0, 1.0])
+    cone = angular_cone(jnp.asarray(triangles))
+    members = jnp.asarray(np.arange(40).reshape(5, 8))
+    (axis, cos_half, _, bad), present = enclosing_cone(cone, members, jnp.ones(40, dtype=bool))
+    assert np.all(np.asarray(present)) and not np.any(np.asarray(bad))
+    # Directions inside each triangle: positive combinations of its corners.
+    weights = rng.dirichlet(np.ones(3), size=(40, 200))
+    directions = np.einsum("tsk,tkd->tsd", weights, triangles)
+    directions /= np.linalg.norm(directions, axis=-1, keepdims=True)
+    group = np.repeat(np.arange(5), 8)
+    cosine = np.einsum("tsd,td->ts", directions, np.asarray(axis)[group])
+    assert np.all(cosine >= np.asarray(cos_half)[group][:, None] - 1e-12)
+
+
+def test_an_enclosing_cone_is_as_unusable_as_its_worst_member():
+    """A member whose own cone bounds nothing must make its group overlap everything."""
+    flat = np.array([[[1.0, 0.0, 0.0], [-1.0, 0.5, 0.0], [-1.0, -0.5, 0.0]]])
+    ordinary = np.array([[[0.2, 0.0, 3.0], [-0.1, 0.2, 3.0], [-0.1, -0.2, 3.0]]])
+    cone = angular_cone(jnp.asarray(np.concatenate([ordinary, flat, ordinary])))
+    members = jnp.asarray([[0, 2], [0, 1], [1, -1]])
+    eligible = jnp.asarray([True, True, True])
+    (_, _, _, bad), present = enclosing_cone(cone, members, eligible)
+    assert list(np.asarray(bad)) == [False, True, True]
+    # An ineligible member is left out of the bound, unusable or not.
+    # An ineligible member is left out of the bound, unusable or not; a group with no eligible
+    # member is marked absent, and its cone means nothing.
+    (_, _, _, bad), present = enclosing_cone(cone, members, jnp.asarray([True, False, True]))
+    assert list(np.asarray(present)) == [True, True, False]
+    assert list(np.asarray(bad)[:2]) == [False, False]
+
+
+def _dense_cull(strategy, receiver, facing, surfaces):
+    """What the cull keeps without clusters: the member test over every eligible pair."""
+    n = surfaces.n_facets
+    cone, view, subtends, may_block = strategy._per_triangle(
+        receiver,
+        facing,
+        jnp.asarray(surfaces.vertices),
+        jnp.asarray(surfaces.centroid),
+        jnp.asarray(surfaces.normal),
+        jnp.zeros(n),
+        jnp.zeros(n, dtype=bool),
+    )
+    everything = FacetClusters(
+        members=np.arange(n)[None, :], centre=np.zeros((1, 3)), radius=np.full(1, np.inf)
+    )
+    keep = np.asarray(
+        strategy._member_pairs(
+            receiver,
+            jnp.asarray(surfaces.vertices),
+            cone,
+            view,
+            jnp.asarray(everything.members),
+            subtends,
+            may_block,
+            np.zeros(1, dtype=int),
+            np.zeros(1, dtype=int),
+        )
+    )[0]
+    return np.nonzero(keep)
+
+
+@pytest.mark.parametrize("cluster_size", [1, 5, 32])
+@pytest.mark.parametrize("kind", ["surface", "volume"])
+def test_the_clustered_cull_keeps_exactly_what_testing_every_pair_keeps(cluster_size, kind):
+    """The cluster stage may only skip pairs the member test rejects -- never one it keeps.
+
+    Compared set for set against the member test over every pair of the surface at once (a single
+    cluster holding every facet, with a sphere nothing is beyond), and each pair must come out
+    once. A cluster size of one bounds each facet by its own cone; the others exercise the
+    enclosing cones and spheres.
+    """
+    surfaces = _reactor(**FINE_REACTOR)
+    strategy = SilhouetteOcclusion(cluster_size=cluster_size, pair_limit=4096)
+    clusters = FacetClusters.build(np.asarray(surfaces.vertices), cluster_size)
+    centroid = np.asarray(surfaces.centroid)
+    normal = np.asarray(surfaces.normal)
+    if kind == "surface":
+        receivers = [(centroid[r], normal[r]) for r in range(0, surfaces.n_facets, 23)]
+    else:
+        receivers = [(point, None) for point in VOLUME_POINTS]
+    kept = 0
+    for point, facing in receivers:
+        _, source, blocker = strategy._candidates(
+            point,
+            facing,
+            jnp.asarray(surfaces.vertices),
+            jnp.asarray(surfaces.centroid),
+            jnp.asarray(surfaces.normal),
+            jnp.zeros(surfaces.n_facets),
+            jnp.zeros(surfaces.n_facets, dtype=bool),
+            clusters,
+        )
+        dense_source, dense_blocker = _dense_cull(strategy, point, facing, surfaces)
+        found = source * surfaces.n_facets + blocker
+        assert len(np.unique(found)) == len(found), "a pair came out twice"
+        assert np.array_equal(np.sort(found), dense_source * surfaces.n_facets + dense_blocker)
+        kept += len(source)
+    assert kept > 0, "the fixture has moved: nothing survives the cull, so nothing is compared"
