@@ -193,9 +193,10 @@ if [ "$TIER" = "fast" ] && [ "$JOBS" != "0" ] && ! python3 -c "import xdist" 2>/
 fi
 if [ "$TIER" = "fast" ] && [ "$JOBS" != "0" ]; then
   PARALLEL=(-n "$JOBS" --dist loadfile --max-worker-restart=0)
-  # One thread per worker, so N workers do not each try to use the whole machine. Appended, so a
-  # caller's existing XLA_FLAGS survives.
+  # One thread per worker -- BLAS, Numba's parallel loops and XLA alike -- so N workers do not each
+  # try to use the whole machine. Appended, so a caller's existing XLA_FLAGS survives.
   export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+  export NUMBA_NUM_THREADS="${NUMBA_NUM_THREADS:-1}"
   export XLA_FLAGS="${XLA_FLAGS:-} --xla_cpu_multi_thread_eigen=false"
 fi
 

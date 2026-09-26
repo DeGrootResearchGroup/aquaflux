@@ -218,6 +218,75 @@ predates this harness's `SOZZI_CULLING` switch and ran from an equivalent scratc
 the same settings; the two unculled-main and (32, 8) arms were each also run once that way, at
 471.5 s and 251.4 s, so repeats agree to 0.2%. Each other row is one run.
 
+## Where the whole-field call spends its time (2026-09-26, `field_cost_breakdown.py`)
+
+The default-culling arm above (313.5 s), broken into its pieces: the same model and call, each piece
+wrapped in a timer that waits for its result. Instrumented, the call took **316.8 s** (1% over the
+plain run) and repeated to 0.3 s.
+
+| piece | s | share of call |
+|---|---|---|
+| **shadow masks**, one per chunk (3,076 chunks of ~532 cells) | **243.9** | **77%** |
+| · pair-by-pair test of the tiles culling could not certify | 186.7 | 59% |
+| ·· the compiled body test (695 calls) | 141.8 | 45% |
+| ·· host work around it: index gathers, padding, writing answers into the mask | 44.8 | 14% |
+| · deciding which tiles are certified | 45.5 | 14% |
+| ·· lamp-facet clearance, the same 7,516 facets recomputed every chunk | 12.6 | 4% |
+| ·· receiver clearance | 12.1 | 4% |
+| ·· tile certificates | 14.3 | 5% |
+| · curve ordering (3.2 s), mask allocation and conversion (~8.5 s) | ~12 | 4% |
+| **fluence gather**, compiled | **66.5** | **21%** |
+| surface solve: transfer assembly 0.3 s, interreflection 1.2 s | 1.5 | 0.5% |
+
+The build (57 s) is the transfer's row blocks, **56.4 s** — the 7,516 x 7,516 facet-to-facet geometry;
+its shadow mask takes **0.2 s**, because culling certifies every lamp-to-lamp pair.
+
+- **Culling is at its ceiling on this geometry.** It certifies **81.0%** of the 12.3 billion
+  receiver-facet pairs — the share lying inside one convex region (81.1%, above). The rest cross
+  between chamber and pipe, where no clearance certificate can hold, so finer or smarter tiling
+  cannot reduce what is tested.
+- **Padding is not the cost.** The 2.33 billion pairs in undecided tiles become 2.56 billion
+  tested (+9.6%) after each batch is padded to a power of two.
+- **The leftover pairs are tested slowly.** 2.56 billion in 141.8 s is ~18 M pairs/s, against
+  ~30 M pairs/s for testing every pair on the lamp's own facet mask (1.85 s for 56.5 M pairs,
+  separate process, so approximate). The finest tiles are 2 x 2, so each compiled batch is many
+  tiny blocks; the (32, 8) ladder, finest 8 x 8, is faster overall (251.9 s).
+- **Where time could come back**: testing the leftover pairs at every-pair speed and batching the
+  host work (up to ~100 s together); computing the lamp side once per call instead of once per
+  chunk (~14 s); a "fully hidden" certificate, the only way to test fewer pairs. The gather is the
+  physics. Those two changes would plausibly land the call near 175-200 s — an estimate, not a
+  measurement.
+
+**How much a "fully hidden" certificate could remove** (a second run, with the harness counting, per
+chunk and along the strategy's own curve, the pairs in tiles whose every pair is blocked):
+
+| | pairs | of all pairs | of the 2.33 billion in undecided tiles |
+|---|---|---|---|
+| blocked by the water's walls | 1,185,423,023 | 9.6% | 50.8% |
+| in wholly blocked 32 x 32 tiles | 985,667,984 | 8.0% | **42.3%** |
+| in wholly blocked 8 x 8 tiles | 1,121,866,464 | 9.1% | **48.1%** |
+| in wholly blocked 2 x 2 tiles | 1,173,627,432 | 9.5% | **50.3%** |
+
+- **A dark-tile certificate could at most halve what is tested.** About half the undecided pairs are
+  blocked, and nearly all of those sit in tiles that are dark throughout, even at 32 x 32. The other
+  half are clear pairs that today's clearance certificate cannot vouch for, because it proves a tile
+  clear only inside one convex region and these pairs cross from the chamber into a pipe. A
+  certificate on the plane of the port where the pipe meets the chamber could in principle decide
+  crossing tiles of both kinds -- clear where the shaft passes wholly through the opening, dark where
+  it passes wholly outside it -- so the dark-only figure below is not the ceiling of every
+  certificate, only of that one.
+- **So its ceiling is roughly 70-90 s of the call**: half of the 141.8 s compiled test and of its
+  44.8 s host work, plus the gather skipping the 9.6% of pairs that are dark. That is an upper bound
+  on the pairs such a certificate could skip, not a prediction of what one would prove.
+- The count is harness work (73.1 s, timed on its own outside the bodies' layer); with it subtracted
+  the call was 317.7 s, and every other piece repeated the table above to within 0.4 s.
+
+Configuration: as the section above (main `392f935`, the new default culling, water as the
+hand-typed cylinders, `NoOcclusion`, streamed receiver mask), run through `validation/run_case.sh`
+with nothing else heavy running. The build rows come from a separate 3,000-cell run after the
+row-block timer was added (the build does not depend on the receivers); without that timer the
+row blocks' work, still running asynchronously, was charged to the facet mask as 30 s.
+
 ## Measured (2026-09-22)
 
 Configuration: of-optical-radiation `726714d`, image built locally from its `Dockerfile`
