@@ -1992,6 +1992,20 @@ bodies, no call). ⚠️ **The default ladder's third level still costs 1.24x on
 — the phase-B finding, now confirmed on the real population — and is kept for the ~2.7x it buys on a
 triangle wall; a per-body ladder remains the fix, **not built**. Full table in the Sozzi README.
 
+**WHERE THE CALL'S TIME GOES under the new default (2026-09-26, `validation/sozzi_radiation/
+field_cost_breakdown.py`)**, same configuration as MESH SCALE, main `392f935`; call 316.8 s
+instrumented (313.5 plain), repeated to 0.3 s. **Masks 243.9 s (77%)**: pair tests of uncertified
+tiles 186.7 (compiled test 141.8 in 695 calls + 44.8 host gathers/padding/scatter), certification 45.5
+(lamp-facet clearance 12.6 — **recomputed identically every one of 3,076 chunks** —, receiver
+clearance 12.1, `_vouched`/`_vouched_pairs` 14.3), curve order 3.2, mask alloc/convert ~8.5. **Gather
+66.5 s (21%)**; radiosity 1.5. Build: `_row_blocks` 56.4 s, facet mask 0.2 s (100% certified).
+**Certified 81.0% of 12.3G pairs = the one-convex-region share (81.1%)**, so clearance certificates are
+at their ceiling here and only a "fully hidden" certificate (phase C) can cut the tested count; padding
+adds only 9.6% (2.33G → 2.56G). ⚠️ **The leftover test runs at ~18M pairs/s on 2x2 tiles against ~30M
+for `EveryPair`** (separate processes, approximate) — the concrete levers are a denser layout for the
+leftover pairs plus batched host work (up to ~100 s) and caching the source side per call (~14 s),
+neither built. Full table in the Sozzi README.
+
 **Tests** (`tests/unit/test_radiation_culling.py`, each mutation-checked): bit equality with
 `EveryPair` at group sizes 32x32, 7x5, 1x1, 64x3 on a scene where every one of four body kinds
 (`Outside` chamber+pipe, `Box` baffle, `Sphere`, `Difference` ring) blocks some pairs and each has
