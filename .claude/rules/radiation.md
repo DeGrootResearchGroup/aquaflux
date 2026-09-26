@@ -2005,6 +2005,15 @@ adds only 9.6% (2.33G → 2.56G). ⚠️ **The leftover test runs at ~18M pairs/
 for `EveryPair`** (separate processes, approximate) — the concrete levers are a denser layout for the
 leftover pairs plus batched host work (up to ~100 s) and caching the source side per call (~14 s),
 neither built. Full table in the Sozzi README.
+**Phase C's ceiling, measured (2026-09-26, same harness and configuration, a second run; the other
+pieces repeated to 0.4 s, call less the count 317.7 s).** Blocked pairs 1.185G = **9.6% of all, 50.8% of
+the 2.33G in undecided tiles**; pairs in wholly blocked tiles along the strategy's curve: 32x32
+985.7M, 8x8 1,121.9M, 2x2 1,173.6M = **42.3% / 48.1% / 50.3% of the undecided pairs**. So a "fully
+hidden" certificate could at most halve what is tested — worth roughly 70-90 s of the call (half the
+compiled test and its host work, plus the gather skipping dark pairs) — and the other half are clear
+pairs crossing between regions that no certificate of either kind can remove. An upper bound on what
+could be skipped, not a prediction of what a certificate would prove. (The count itself cost 73.1 s,
+harness time, timed outside the bodies' layer.)
 
 **Tests** (`tests/unit/test_radiation_culling.py`, each mutation-checked): bit equality with
 `EveryPair` at group sizes 32x32, 7x5, 1x1, 64x3 on a scene where every one of four body kinds

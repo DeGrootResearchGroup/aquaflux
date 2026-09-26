@@ -257,6 +257,25 @@ its shadow mask takes **0.2 s**, because culling certifies every lamp-to-lamp pa
   physics. Those two changes would plausibly land the call near 175-200 s — an estimate, not a
   measurement.
 
+**How much a "fully hidden" certificate could remove** (a second run, with the harness counting, per
+chunk and along the strategy's own curve, the pairs in tiles whose every pair is blocked):
+
+| | pairs | of all pairs | of the 2.33 billion in undecided tiles |
+|---|---|---|---|
+| blocked by the water's walls | 1,185,423,023 | 9.6% | 50.8% |
+| in wholly blocked 32 x 32 tiles | 985,667,984 | 8.0% | **42.3%** |
+| in wholly blocked 8 x 8 tiles | 1,121,866,464 | 9.1% | **48.1%** |
+| in wholly blocked 2 x 2 tiles | 1,173,627,432 | 9.5% | **50.3%** |
+
+- **A dark-tile certificate could at most halve what is tested.** About half the undecided pairs are
+  blocked, and nearly all of those sit in tiles that are dark throughout, even at 32 x 32. The other
+  half are clear pairs that no clearance certificate can vouch for, and would still be tested.
+- **So its ceiling is roughly 70-90 s of the call**: half of the 141.8 s compiled test and of its
+  44.8 s host work, plus the gather skipping the 9.6% of pairs that are dark. That is an upper bound
+  on the pairs such a certificate could skip, not a prediction of what one would prove.
+- The count is harness work (73.1 s, timed on its own outside the bodies' layer); with it subtracted
+  the call was 317.7 s, and every other piece repeated the table above to within 0.4 s.
+
 Configuration: as the section above (main `392f935`, the new default culling, water as the
 hand-typed cylinders, `NoOcclusion`, streamed receiver mask), run through `validation/run_case.sh`
 with nothing else heavy running. The build rows come from a separate 3,000-cell run after the
