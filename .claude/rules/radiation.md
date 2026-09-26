@@ -2010,8 +2010,15 @@ pieces repeated to 0.4 s, call less the count 317.7 s).** Blocked pairs 1.185G =
 the 2.33G in undecided tiles**; pairs in wholly blocked tiles along the strategy's curve: 32x32
 985.7M, 8x8 1,121.9M, 2x2 1,173.6M = **42.3% / 48.1% / 50.3% of the undecided pairs**. So a "fully
 hidden" certificate could at most halve what is tested — worth roughly 70-90 s of the call (half the
-compiled test and its host work, plus the gather skipping dark pairs) — and the other half are clear
-pairs crossing between regions that no certificate of either kind can remove. An upper bound on what
+compiled test and its host work, plus the gather skipping dark pairs). The other half are clear pairs
+that **today's** certificate cannot vouch for: it proves a tile clear only inside one convex region
+(81.0% certified against the 81.1% one-region share), so what is left are pairs crossing between
+regions — chamber to inlet or riser. ⚠️ **They are not beyond any certificate.** Whether a crossing
+pair is clear or blocked depends on whether it passes through the **port** where the pipe meets the
+chamber, so a port-plane certificate — the shaft crossing the port's plane wholly inside the opening
+(and each side's part inside its own region) is clear, wholly outside it is dark — could decide
+tiles of **both** kinds, with a ceiling of most of the ~187 s leftover-pair test rather than half of
+it. Not designed or built; the record of what #554 phase C is worth. An upper bound on what
 could be skipped, not a prediction of what a certificate would prove. (The count itself cost 73.1 s,
 harness time, timed outside the bodies' layer.)
 

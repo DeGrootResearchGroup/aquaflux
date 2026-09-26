@@ -269,7 +269,12 @@ chunk and along the strategy's own curve, the pairs in tiles whose every pair is
 
 - **A dark-tile certificate could at most halve what is tested.** About half the undecided pairs are
   blocked, and nearly all of those sit in tiles that are dark throughout, even at 32 x 32. The other
-  half are clear pairs that no clearance certificate can vouch for, and would still be tested.
+  half are clear pairs that today's clearance certificate cannot vouch for, because it proves a tile
+  clear only inside one convex region and these pairs cross from the chamber into a pipe. A
+  certificate on the plane of the port where the pipe meets the chamber could in principle decide
+  crossing tiles of both kinds -- clear where the shaft passes wholly through the opening, dark where
+  it passes wholly outside it -- so the dark-only figure below is not the ceiling of every
+  certificate, only of that one.
 - **So its ceiling is roughly 70-90 s of the call**: half of the 141.8 s compiled test and of its
   44.8 s host work, plus the gather skipping the 9.6% of pairs that are dark. That is an upper bound
   on the pairs such a certificate could skip, not a prediction of what one would prove.
