@@ -21,8 +21,9 @@ same -- the mesh refines towards the walls and the lamp, which is where the unce
 are -- so the summary says which was used, and a certified share from one is not a figure for the
 other.
 
-``SOZZI_RECEIVERS`` overrides the sample size; ``SOZZI_CULLING_SIZES`` the group sizes, as
-``block:cluster`` pairs separated by commas.
+``SOZZI_RECEIVERS`` overrides the sample size; ``SOZZI_CULLING_SIZES`` the arms, separated by
+semicolons, each ``blocks:clusters`` with its coarse-to-fine sizes separated by commas -- the
+default ``32:32;32,8:32,8;64,16:64,16`` is one level at 32 and two refinement ladders.
 """
 
 from __future__ import annotations
@@ -45,10 +46,18 @@ import numpy as np  # noqa: E402
 from aquaflux.radiation import EveryPair, ShaftCulling  # noqa: E402
 from primitive_occlusion import OUT, fluid, lamp, receivers  # noqa: E402
 
-SIZES = [
-    tuple(int(part) for part in pair.split(":"))
-    for pair in os.environ.get("SOZZI_CULLING_SIZES", "16:16,32:32,64:64,32:128").split(",")
-]
+
+def culling_arms(spec: str) -> dict[str, ShaftCulling]:
+    """The shaft-culling arms a ``blocks:clusters;blocks:clusters`` specification names."""
+    arms = {}
+    for arm in spec.split(";"):
+        blocks, clusters = (tuple(int(size) for size in side.split(",")) for side in arm.split(":"))
+        name = "shaft " + "/".join(f"{b}x{c}" for b, c in zip(blocks, clusters, strict=True))
+        arms[name] = ShaftCulling(receiver_blocks=blocks, source_clusters=clusters)
+    return arms
+
+
+SIZES = os.environ.get("SOZZI_CULLING_SIZES", "32:32;32,8:32,8;64,16:64,16")
 #: The mask build's own default margin at the source end, as a fraction of sqrt(facet area).
 OFFSET_SCALE = 1e-6
 PASSES = 2
@@ -85,10 +94,7 @@ def main() -> None:
         f"{os.cpu_count()} cores"
     )
 
-    arms = {"every pair": EveryPair()} | {
-        f"shaft {block}x{cluster}": ShaftCulling(receiver_block=block, source_cluster=cluster)
-        for block, cluster in SIZES
-    }
+    arms = {"every pair": EveryPair()} | culling_arms(SIZES)
     reference = None
     results = {}
     for name, arm in arms.items():

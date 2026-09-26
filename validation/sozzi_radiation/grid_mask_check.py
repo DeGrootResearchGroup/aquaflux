@@ -4,7 +4,8 @@
 so a cell in a pipe sees a lamp point exactly when the segment between them leaves the chamber
 through that pipe's opening (:class:`~compare_fluence.BranchOpenings`). That is exact, and it is
 a description of one reactor rather than a method. This runs the general method against it --
-the vessel wall as the 53,500 triangles its STL actually is, culled by
+the vessel wall as the 53,500 triangles its STL actually is, a
+:class:`~aquaflux.radiation.TriangleBody` culled by its
 :class:`~aquaflux.radiation.grid.TriangleGrid` -- and asks whether the two agree.
 
 **They cannot agree exactly, and the disagreement is the measurement.** The analytic occluder
@@ -37,19 +38,17 @@ sys.path.insert(0, str(HERE.parents[1]))
 sys.path.insert(0, str(HERE))
 
 import aquaflux  # noqa: E402,F401  (enables x64)
-import equinox as eqx  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 from aquaflux.io import read_openfoam  # noqa: E402
 from aquaflux.radiation import (  # noqa: E402
     NoOcclusion,
+    TriangleBody,
     UniformAbsorption,
     build_visibility,
     direct_fluence_rate,
     read_stl,
 )
-from aquaflux.radiation.grid import TriangleGrid  # noqa: E402
-from aquaflux.solids import Body  # noqa: E402
 from compare_fluence import (  # noqa: E402
     ABSORPTION,
     CASE,
@@ -68,39 +67,6 @@ RESOLUTION = os.environ.get("SOZZI_GRID")
 
 def _say(message: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
-
-
-class WallTriangles(Body):
-    """The vessel wall as the triangles it really is, culled by a uniform grid.
-
-    Attributes
-    ----------
-    grid : TriangleGrid
-        Held as static: the mask is frozen and built on the host, and this body carries plain
-        arrays rather than anything traced.
-    """
-
-    grid: TriangleGrid = eqx.field(static=True)
-
-    def contains(self, position) -> jnp.ndarray:
-        """Nothing is inside this body, and here that is exact rather than a simplification.
-
-        The wall is a zero-thickness sheet bounding the fluid: the metal is on its far side, so
-        no cell and no lamp facet is embedded in it. The guard this stands in for -- refusing a
-        scene whose points sit inside a solid -- is still applied to this run by the analytic
-        arm, whose own ``contains`` is exact for the three cylinders.
-        """
-        return jnp.zeros(jnp.asarray(position).shape[:-1], dtype=bool)
-
-    def blocks(self, origin, target, min_distance) -> jnp.ndarray:
-        """See :meth:`aquaflux.solids.Body.blocks`."""
-        source, receiver = np.broadcast_arrays(
-            np.asarray(origin, dtype=float), np.asarray(target, dtype=float)
-        )
-        shape = source.shape[:-1]
-        near = np.broadcast_to(np.asarray(min_distance, dtype=float), shape)
-        blocked = self.grid.blocks(source.reshape(-1, 3), receiver.reshape(-1, 3), near.reshape(-1))
-        return jnp.asarray(blocked.reshape(shape))
 
 
 def receivers(rng) -> tuple[np.ndarray, np.ndarray]:
@@ -141,7 +107,13 @@ def main() -> None:
 
     wall = np.asarray(read_stl(CASE / "constant" / "triSurface" / "bodyWall.stl").vertices)
     started = time.perf_counter()
-    grid = TriangleGrid.build(wall, resolution=None if RESOLUTION is None else int(RESOLUTION))
+    # A sheet: the wall bounds the fluid, the metal is on its far side, and no cell or lamp facet
+    # is embedded in it. The guard that refuses a point inside a solid is still applied to this
+    # run by the analytic arm, whose own `contains` is exact for the three cylinders.
+    body = TriangleBody.build(
+        wall, sheet=True, resolution=None if RESOLUTION is None else int(RESOLUTION)
+    )
+    grid = body.grid
     held = np.diff(grid.starts)
     _say(
         f"grid over {len(wall)} wall triangles: {tuple(int(n) for n in grid.resolution)}, "
@@ -149,7 +121,7 @@ def main() -> None:
         f"built in {time.perf_counter() - started:.1f} s"
     )
 
-    bodies = {"analytic": BranchOpenings(), "grid": WallTriangles(grid=grid)}
+    bodies = {"analytic": BranchOpenings(), "grid": body}
     fields = {name: np.empty(len(points)) for name in bodies}
     differing = np.zeros(len(points), dtype=int)
     seconds = dict.fromkeys(bodies, 0.0)

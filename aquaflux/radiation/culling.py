@@ -37,6 +37,7 @@ pair-by-pair strategy uses, so the two agree bit for bit on every pair either on
 from __future__ import annotations
 
 import abc
+import itertools
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -191,91 +192,159 @@ def spatial_order(points) -> np.ndarray:
     return np.argsort(key, kind="stable")
 
 
-class _Groups(eqx.Module):
-    """Points cut into groups of one fixed size along the space-filling curve.
+class _Curve(eqx.Module):
+    """Points ordered along the space-filling curve, and cut into groups at several sizes.
+
+    Every size divides the one before it, so each group at one size is a whole number of groups
+    at the next: a group that cannot be decided is split into its children along the same curve,
+    and nothing is re-ordered on the way down.
 
     Attributes
     ----------
-    members : np.ndarray of int, shape ``(n_groups, size)``
-        The point indices in each group. The last group is padded by repeating its last real
-        member, which changes neither its summary (a maximum) nor any answer written back for it
-        (the repeated pair is the same pair, so it is written the same value twice).
-    counts : np.ndarray of int, shape ``(n_groups,)``
-        How many members of each group are real.
+    order : np.ndarray of int, shape ``(n_padded,)``
+        The point indices in curve order, padded to a whole number of the coarsest groups by
+        repeating the last point. Repetition changes neither a group's summary (a maximum) nor any
+        answer written back for it (the repeated pair is the same pair, written the same value
+        twice).
+    n_points : int
+        How many of :attr:`order` are real.
     """
 
-    members: np.ndarray
-    counts: np.ndarray
+    order: np.ndarray
+    n_points: int = eqx.field(static=True)
 
     @classmethod
-    def along_curve(cls, points, size: int) -> _Groups:
-        """Cut ``points`` into consecutive runs of ``size`` along :func:`spatial_order`."""
+    def of(cls, points, coarsest: int) -> _Curve:
+        """``points`` in curve order, padded to a whole number of groups of ``coarsest``."""
         order = spatial_order(points)
-        n_groups = -(-len(order) // size)
-        padded = np.concatenate([order, np.repeat(order[-1:], n_groups * size - len(order))])
-        counts = np.full(n_groups, size)
-        counts[-1] = len(order) - (n_groups - 1) * size
-        return cls(members=padded.reshape(n_groups, size), counts=counts)
+        padded = -(-len(order) // coarsest) * coarsest
+        return cls(
+            order=np.concatenate([order, np.repeat(order[-1:], padded - len(order))]),
+            n_points=len(order),
+        )
 
-    def summary(self, witnesses: np.ndarray) -> np.ndarray:
-        """Each group's largest value of each witness, shape ``(n_groups, n_witnesses)``."""
-        return witnesses[self.members].max(axis=1)
+    def members(self, size: int) -> np.ndarray:
+        """The point indices of each group of ``size``, shape ``(n_groups, size)``."""
+        return self.order.reshape(-1, size)
+
+    def counts(self, size: int) -> np.ndarray:
+        """How many members of each group of ``size`` are real, shape ``(n_groups,)``."""
+        start = np.arange(len(self.order) // size) * size
+        return np.clip(self.n_points - start, 0, size)
+
+    def summary(self, features: np.ndarray, size: int) -> np.ndarray:
+        """Each group's column-wise maximum of ``features``, shape ``(n_groups, n_features)``."""
+        return features[self.members(size)].max(axis=1)
 
 
-def _clear_tiles(receiver_summary, source_summary) -> np.ndarray:
-    """Which tiles one body is certified to miss, shape ``(n_receiver_groups, n_source_groups)``.
+def _vouched(body, receiver_summary, source_summary) -> np.ndarray:
+    """Which tiles of every receiver group against every source group ``body`` vouches for.
 
-    A tile's summary is the larger of its two groups' summaries, and it is clear where any
-    witness of that summary is negative -- see :meth:`~aquaflux.solids.Body.clearance`. Formed a
-    band of receiver groups at a time, so the tiles-by-witnesses comparison never holds more than
+    Shape ``(n_receiver_groups, n_source_groups)``. A tile's summary is the larger of its two
+    groups' summaries -- see :meth:`~aquaflux.solids.Body.clearance`. Formed a band of receiver
+    groups at a time, so the tiles-by-features array never holds more than
     :data:`~aquaflux.radiation.work.DEFAULT_PAIR_LIMIT` entries whatever the scene's size.
     """
     n_rows, n_cols = len(receiver_summary), len(source_summary)
-    n_witnesses = receiver_summary.shape[-1]
+    n_features = receiver_summary.shape[-1]
     clear = np.zeros((n_rows, n_cols), dtype=bool)
-    if n_witnesses == 0:
+    if n_features == 0:
         return clear
-    band = receivers_per_pass(DEFAULT_PAIR_LIMIT, n_cols * n_witnesses)
+    band = receivers_per_pass(DEFAULT_PAIR_LIMIT, n_cols * n_features)
     for start in range(0, n_rows, band):
         tile = np.maximum(
             receiver_summary[start : start + band, None, :], source_summary[None, :, :]
         )
-        clear[start : start + band] = np.any(tile < 0.0, axis=-1)
+        clear[start : start + band] = np.asarray(body.vouches(tile))
     return clear
+
+
+def _vouched_pairs(body, receiver_summary, source_summary, rows, cols) -> np.ndarray:
+    """Which of the listed tiles ``body`` vouches for, shape ``(n_tiles,)``.
+
+    The same test as :func:`_vouched`, over a list of tiles rather than every combination, and
+    in batches of the same bound.
+    """
+    clear = np.zeros(len(rows), dtype=bool)
+    n_features = receiver_summary.shape[-1]
+    if n_features == 0:
+        return clear
+    batch = receivers_per_pass(DEFAULT_PAIR_LIMIT, n_features)
+    for start in range(0, len(rows), batch):
+        tile = np.maximum(
+            receiver_summary[rows[start : start + batch]],
+            source_summary[cols[start : start + batch]],
+        )
+        clear[start : start + batch] = np.asarray(body.vouches(tile))
+    return clear
+
+
+def _check_sizes(name: str, sizes) -> None:
+    """Refuse a group-size ladder that is empty, not positive, or does not nest."""
+    if len(sizes) == 0:
+        msg = f"ShaftCulling.{name} needs at least one group size"
+        raise ValueError(msg)
+    if any(size < 1 for size in sizes):
+        msg = f"ShaftCulling.{name} sizes must be at least 1; got {sizes}"
+        raise ValueError(msg)
+    if any(coarse % fine for coarse, fine in itertools.pairwise(sizes)):
+        msg = (
+            f"ShaftCulling.{name} sizes must each divide the one before, so that an undecided "
+            f"group splits into whole groups of the next size; got {sizes}"
+        )
+        raise ValueError(msg)
 
 
 class ShaftCulling(BodyCulling):
     """Decide whole tiles of pairs where a body can prove it misses them; test the rest.
 
-    Receivers and sources are each ordered along a space-filling curve and cut into groups of a
-    fixed size. For each body and each (receiver block, source cluster) tile, the body's
-    :meth:`~aquaflux.solids.Body.clearance` witnesses are compared between the two groups'
-    summaries; a tile any witness certifies is recorded clear without a segment being tested,
-    and every other tile is tested pair by pair by the compiled body test. The mask is the one
-    :class:`EveryPair` builds -- only the number of segments tested differs.
+    Receivers and sources are each ordered along a space-filling curve and cut into groups. For
+    each body and each (receiver block, source cluster) tile, the body's
+    :meth:`~aquaflux.solids.Body.clearance` features are merged between the two groups'
+    summaries and handed to :meth:`~aquaflux.solids.Body.vouches`; a tile it vouches for is
+    recorded clear without a segment being tested. **A tile it cannot vouch for is split** into
+    the tiles of the next, smaller group sizes and asked again -- a narrower shaft is easier to
+    vouch for -- and only the tiles still undecided at the finest size are tested pair by pair by
+    the compiled body test. The mask is the one :class:`EveryPair` builds; only the number of
+    segments tested differs.
 
-    What it saves is the share of pairs lying in certified tiles, and that is a property of the
-    scene: most of a chamber seen from inside its own convex region, none of a bent duct seen
-    across its bend. A body that offers no witnesses -- one answered from triangles -- is tested
-    pair by pair everywhere, at a small cost for the grouping.
+    What it saves is the share of pairs lying in vouched-for tiles, and that is a property of
+    the scene: most of a chamber seen from inside its own convex region, none of a bent duct seen
+    across its bend. A body that offers no features is tested pair by pair everywhere, at a
+    small cost for the grouping.
 
     Attributes
     ----------
-    receiver_block : int
-        Receivers per block. Smaller blocks make narrower shafts, which more bodies can vouch
-        for, and more tiles to compare.
-    source_cluster : int
-        Sources per cluster, with the same trade.
+    receiver_blocks : tuple of int
+        Receivers per block, coarsest first; each divides the one before. Smaller blocks make
+        narrower shafts, which more bodies can vouch for, and more tiles to compare -- which is
+        why refinement only ever splits the tiles the coarser size could not decide.
+    source_clusters : tuple of int
+        Sources per cluster at the same levels, with the same trade. As many sizes as
+        ``receiver_blocks``.
+
+    Notes
+    -----
+    **How far to refine depends on what a pair costs to test.** Each level costs a comparison per
+    tile it asks about and saves the tests of the pairs it vouches for, so it pays where testing a
+    pair is expensive -- a walk through a grid of triangles -- and can cost more than it saves
+    where the test is a few comparisons, as an analytic body's is. The default refines to pairs of
+    two, for the expensive case; a scene of analytic bodies alone is served as well or better by
+    stopping at eight (``receiver_blocks=(32, 8)``, ``source_clusters=(32, 8)``).
     """
 
-    receiver_block: int = eqx.field(static=True, default=32)
-    source_cluster: int = eqx.field(static=True, default=32)
+    receiver_blocks: tuple = eqx.field(static=True, default=(32, 8, 2))
+    source_clusters: tuple = eqx.field(static=True, default=(32, 8, 2))
 
     def __check_init__(self):
-        for name in ("receiver_block", "source_cluster"):
-            if getattr(self, name) < 1:
-                msg = f"ShaftCulling.{name} must be at least 1; got {getattr(self, name)}"
-                raise ValueError(msg)
+        _check_sizes("receiver_blocks", self.receiver_blocks)
+        _check_sizes("source_clusters", self.source_clusters)
+        if len(self.receiver_blocks) != len(self.source_clusters):
+            msg = (
+                "ShaftCulling needs as many source cluster sizes as receiver block sizes, one of "
+                f"each per level; got {self.receiver_blocks} and {self.source_clusters}"
+            )
+            raise ValueError(msg)
 
     def blocked(
         self, bodies, sources, near, receivers, pair_limit: int = DEFAULT_PAIR_LIMIT
@@ -287,17 +356,18 @@ class ShaftCulling(BodyCulling):
         mask = np.zeros((len(bodies), len(receivers), len(sources)), dtype=bool)
         if len(receivers) == 0 or len(sources) == 0:
             return jnp.asarray(mask)
-        blocks = _Groups.along_curve(receivers, self.receiver_block)
-        clusters = _Groups.along_curve(sources, self.source_cluster)
+        blocks = _Curve.of(receivers, self.receiver_blocks[0])
+        clusters = _Curve.of(sources, self.source_clusters[0])
+        block, cluster = self.receiver_blocks[-1], self.source_clusters[-1]
         for index, body in enumerate(bodies):
-            rows, cols = np.nonzero(~self._clear_tiles(body, sources, receivers, blocks, clusters))
+            rows, cols = self._undecided(body, sources, receivers, blocks, clusters)
             self._test_tiles(
                 body,
                 sources,
                 near,
                 receivers,
-                blocks.members[rows],
-                clusters.members[cols],
+                blocks.members(block)[rows],
+                clusters.members(cluster)[cols],
                 pair_limit,
                 out=mask[index],
             )
@@ -307,7 +377,7 @@ class ShaftCulling(BodyCulling):
         """How many source-receiver pairs each body is certified to miss without a test.
 
         The measure of what the strategy saves on a given scene: the pairs it does not test are
-        these, per body.
+        these, per body, whichever level of refinement vouched for them.
 
         Parameters
         ----------
@@ -323,33 +393,61 @@ class ShaftCulling(BodyCulling):
         receivers = np.asarray(receivers, dtype=float)
         if len(receivers) == 0 or len(sources) == 0:
             return np.zeros(len(bodies), dtype=np.int64)
-        blocks = _Groups.along_curve(receivers, self.receiver_block)
-        clusters = _Groups.along_curve(sources, self.source_cluster)
-        weight = np.outer(blocks.counts, clusters.counts)
-        return np.array(
-            [
-                int(weight[self._clear_tiles(body, sources, receivers, blocks, clusters)].sum())
-                for body in bodies
-            ],
-            dtype=np.int64,
-        )
+        blocks = _Curve.of(receivers, self.receiver_blocks[0])
+        clusters = _Curve.of(sources, self.source_clusters[0])
+        row_counts = blocks.counts(self.receiver_blocks[-1])
+        col_counts = clusters.counts(self.source_clusters[-1])
+        certified = []
+        for body in bodies:
+            rows, cols = self._undecided(body, sources, receivers, blocks, clusters)
+            tested = int(np.sum(row_counts[rows] * col_counts[cols]))
+            certified.append(len(receivers) * len(sources) - tested)
+        return np.array(certified, dtype=np.int64)
 
-    @staticmethod
-    def _clear_tiles(body, sources, receivers, blocks, clusters) -> np.ndarray:
-        """Which tiles ``body`` is certified to miss."""
-        return _clear_tiles(
-            blocks.summary(np.asarray(body.clearance(receivers))),
-            clusters.summary(np.asarray(body.clearance(sources))),
+    def _undecided(self, body, sources, receivers, blocks, clusters):
+        """The finest-level tiles ``body`` could not vouch for, as ``(rows, cols)`` group indices.
+
+        Every tile at the coarsest level is asked; each one refused is split into its children at
+        the next level, those whose groups hold any real point are asked, and so on. A child made
+        wholly of padding is dropped rather than asked: it holds no pair.
+        """
+        features = np.asarray(body.clearance(receivers)), np.asarray(body.clearance(sources))
+        levels = list(zip(self.receiver_blocks, self.source_clusters, strict=True))
+        block, cluster = levels[0]
+        rows, cols = np.nonzero(
+            ~_vouched(
+                body,
+                blocks.summary(features[0], block),
+                clusters.summary(features[1], cluster),
+            )
         )
+        for coarse, (block, cluster) in itertools.pairwise(levels):
+            split_rows, split_cols = coarse[0] // block, coarse[1] // cluster
+            children_rows = rows[:, None, None] * split_rows + np.arange(split_rows)[:, None]
+            children_cols = cols[:, None, None] * split_cols + np.arange(split_cols)[None, :]
+            rows, cols = (
+                side.ravel() for side in np.broadcast_arrays(children_rows, children_cols)
+            )
+            real = (blocks.counts(block)[rows] > 0) & (clusters.counts(cluster)[cols] > 0)
+            rows, cols = rows[real], cols[real]
+            refused = ~_vouched_pairs(
+                body,
+                blocks.summary(features[0], block),
+                clusters.summary(features[1], cluster),
+                rows,
+                cols,
+            )
+            rows, cols = rows[refused], cols[refused]
+        return rows, cols
 
     def _test_tiles(self, body, sources, near, receivers, rows, cols, pair_limit, out):
         """Test the undecided tiles pair by pair, writing each answer into ``out`` in place.
 
-        Tiles go in batches of one shape, padded to a power of two by repeating the last tile, so
-        a pass compiles a couple of programs however many tiles it has; the repeated tile writes
-        its own answer again.
+        ``rows`` and ``cols`` hold each tile's point indices. Tiles go in batches of one shape,
+        padded to a power of two by repeating the last tile, so a pass compiles a couple of
+        programs however many tiles it has; the repeated tile writes its own answer again.
         """
-        per_tile = self.receiver_block * self.source_cluster
+        per_tile = rows.shape[1] * cols.shape[1]
         per_batch = max(1, pair_limit // per_tile)
         for start in range(0, len(rows), per_batch):
             batch_rows = rows[start : start + per_batch]

@@ -27,7 +27,8 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `absorption.py` — `UniformAbsorption`, `VoxelAbsorption` | **BUILT** |
 | the solid bodies (`Body`, primitives, CSG, `Outside`) — **moved to `aquaflux/solids/`**, see `.claude/rules/solids.md` | **BUILT** |
 | `visibility.py` — the frozen shadow mask | **BUILT** |
-| `culling.py` — how the analytic-body layer is decided: `EveryPair` (default) or `ShaftCulling` (tiles certified clear, #554) | **BUILT** (prototype: "clear" certificates, analytic bodies only) |
+| `culling.py` — how the bodies' layer is decided: `EveryPair` (default) or `ShaftCulling` (tiles certified clear, refined coarse to fine, #554) | **BUILT** ("clear" certificates only; analytic and triangle bodies) |
+| `triangle_body.py` — `TriangleBody`, a `Body` of triangles over a `TriangleGrid`, with `contains` decided per piece (#510) | **BUILT** |
 | `triangles.py` — watertight ray-triangle intersection | **BUILT** |
 | `self_occlusion.py` — the `SelfOcclusion` strategies: ray cast, silhouette clip, none | **BUILT** |
 | `silhouette.py` — the exact covered fraction of a source, the conservative cone cull, and the exact second-stage rejection (`covers_nothing`) | **BUILT** |
@@ -1903,33 +1904,41 @@ label stays because a source's kind is read from its label, never inferred.
 
 ## SHAFT CULLING: BUILT as `ShaftCulling` — tiles certified clear, off by default (#554, 2026-09-25)
 
-`culling.py` holds the analytic-body layer's strategy family, `BodyCulling.blocked(bodies, sources,
+`culling.py` holds the bodies' layer's strategy family, `BodyCulling.blocked(bodies, sources,
 near, receivers, pair_limit)`: **`EveryPair`** (the default, and the reference — the old
 `visibility._blocked_by` loop, moved here with `_compiled_blocks`, now `_body_blocks` per body) and
-**`ShaftCulling(receiver_block=32, source_cluster=32)`**. Selected by `build_visibility(...,
+**`ShaftCulling(receiver_blocks=(32, 8, 2), source_clusters=(32, 8, 2))`** — coarse-to-fine
+group-size ladders since #554 phase B (default chosen by measurement, below); ⚠️ **there is no `receiver_block` / `source_cluster` any more**, and the
+first version's default was one level at 32 x 32. Selected by `build_visibility(...,
 body_culling=)` or `RadiationSettings(body_culling=)`, which feeds **both** masks a model builds (and
 survives `receiver_occlusion` overriding the self-occlusion half). Streamed masks get it through the
 same options dict, but then the grouping is per streamed chunk, over whatever order the receivers
 arrive in.
 
 **How.** Receivers and facet centroids are each ordered along a Morton curve (`spatial_order`, 10 bits
-an axis) and cut into fixed-size groups (`_Groups`, the last padded by repeating its own last member,
-which changes neither a max-summary nor a written answer). Per body, each group is summarized by the
-column-wise max of `body.clearance` (the witness contract is in `.claude/rules/solids.md`); a tile is
-**certified clear** where any column of `max(receiver summary, source summary)` is negative. Undecided
-tiles are gathered into batches of one shape (`pair_limit // (block * cluster)` tiles, padded to a power
-of two with `padded_length`) and answered by the same compiled `body.blocks` the reference uses, so the
-two agree **bit for bit** on every pair either tests. Host orchestration, compiled leaf — the
-`TriangleGrid` lesson. A body with no witnesses (anything answered from triangles, `traceable=False`)
-is tested everywhere.
+an axis) and padded to a whole number of the coarsest groups by repeating the last point (`_Curve`;
+repetition changes neither a max-summary nor a written answer). Each size in a ladder divides the one
+before, so a group at one level is a whole number of groups at the next, read off the same order. Per
+body, each group is summarized by the column-wise max of `body.clearance`, and a tile is **certified
+clear** where `body.vouches(max(receiver summary, source summary))` (the contract is in
+`.claude/rules/solids.md`). **A tile refused at one level is split into its children at the next**
+(`_undecided`; children made wholly of padding are dropped, not asked) and asked again; only tiles
+still refused at the finest level are gathered into batches of one shape (`pair_limit // (block *
+cluster)` tiles, padded to a power of two with `padded_length`) and answered by the same compiled
+`body.blocks` the reference uses, so the two agree **bit for bit** on every pair either tests. Host
+orchestration, compiled leaf — the `TriangleGrid` lesson. `certified_pairs` is every pair less those
+in the finest refused tiles, so it counts what refinement vouched for at any level. A body with no
+features is tested everywhere.
 
-**Scope, as agreed: "clear" certificates only, analytic bodies only.** Not built, and tracked in #554:
-**B** a `TriangleGrid` certificate (shaft bounding box over empty voxels only — where the 88 h lives,
-and blocked on #510 for receivers); **C** "fully hidden" certificates, which would also let the gather
-skip dark tiles; **D** distance-based level of detail for the gather, which changes answers and needs
-its own error measurement. ⚠️ **`spatial_order` is generic point ordering living in a physics package**
-(Principle 3.6) — kept private-ish to `culling.py` for the prototype; it should move to a neutral leaf
-when a second consumer appears.
+**Scope.** Phase A (analytic bodies, one level) and phase B (triangle bodies via #510's
+`TriangleBody`, plus refinement for every body) are built; both give "clear" certificates only. Not
+built, tracked in #554: **C** "fully hidden" certificates, which would also let the gather skip dark
+tiles; **D** distance-based level of detail for the gather, which changes answers and needs its own
+error measurement. ⚠️ **The facet-to-facet ray mask (`RayCastOcclusion`, self-occlusion) is NOT
+culled**: its shafts start on the wall they are tested against, so every tile touches the wall's own
+triangles and no box certificate can vouch for one — that needs per-ray exclusions carried into the
+certificate, and is not designed. ⚠️ **`spatial_order` is generic point ordering living in a physics
+package** (Principle 3.6) — it should move to a neutral leaf when a second consumer appears.
 
 **MEASURED** (`validation/sozzi_radiation/body_culling.py`, all arms in one process on one ray set,
 warm-up then two alternating passes, fastest kept): `Outside(chamber, inlet, riser)` at the
@@ -1944,7 +1953,7 @@ through `run_case.sh`, which needs `vm_stat`), 2026-09-25, uncommitted #554 tree
 |---|---|---|---|---|---|
 | `EveryPair` | — | 42.63 | 1.01x | 1.00x | reference |
 | 16 x 16 | 91.0% | 5.22 | 1.06x | 8.17x | identical |
-| **32 x 32** (default) | **90.3%** | **4.58** | 1.01x | **9.30x** | identical |
+| **32 x 32** (the phase-A default; one level) | **90.3%** | **4.58** | 1.01x | **9.30x** | identical |
 | 64 x 64 | 89.1% | 5.49 | 1.08x | 7.77x | identical |
 | 32 x 128 | 90.3% | 4.80 | 1.02x | 8.88x | identical |
 
@@ -1969,6 +1978,87 @@ eager body; the settings plumbing; Morton z-order on a cube's corners; locality;
 counted, identity order, swapped bit interleave, testing the certified tiles instead of the rest,
 padding with the first member. **Dismissed:** one extra tile per batch (`per_batch + 1`) — it changes
 only how many tiles one compiled call holds, i.e. memory, never an answer.
+
+### PHASE B (#554, 2026-09-26): refinement, and triangle bodies vouching through an occupancy grid
+
+**Decided with the user before building** (three questions, all answered with the recommended
+option): #510 goes in the same change; the triangle certificate is **bounding box + refinement**
+(not box alone, not a k-DOP); and the clearance contract is **generalized** (`Body.vouches`, see
+`solids.md`) rather than special-casing triangles inside the strategy.
+
+**Why refinement, measured before building** (a scratch probe, since folded into the harness below):
+the plain box certificate over the walk grid vouched for **44%** of chamber pairs at 32x32 groups on a
+64 x 400 triangulated chamber, against **100%** for the exact convex-region test on the same pairs —
+a diagonal shaft's box pokes out through a round wall whatever the voxel size (59% at ~3.6 mm and
+still 59% at ~1.8 mm), and only smaller groups move it (65-81% at 4x4).
+
+**The occupancy grid is not the walk grid.** `TriangleBody.occupancy` is a second `TriangleGrid` at
+`_CLEARANCE_REFINEMENT = 4` times the walk resolution per axis (halved as a whole past
+`grid._MAX_VOXELS`), read only through `holds_any` (a summed-volume table, `occupied_below`, eight
+lookups per box). The walk wants ~10 triangles a voxel; a certificate wants voxels small enough that
+one beside a wall is not occupied — on the test fixture the default walk grid was 2x2x2 and vouched for
+**nothing** until the occupancy grid was split out.
+
+**MEASURED** — `validation/sozzi_radiation/triangle_culling.py`: the chamber alone as a closed cylinder
+of **51,328 triangles** (64 sides x 400 slices plus caps, wound to face the water — the case's
+`bodyWall.stl` was absent, so **no pipe openings and no shadows**: 0.00% of pairs blocked); walk grid
+(125, 12, 12), occupancy (500, 48, 48); analytic 24 x 64 lamp (3,360 facets); **5,476 receivers on a
+2 mm lattice in a 6 mm slab at mid-chamber** (dense on purpose — a block of 32 is only compact where
+receivers are, and a scattered sample of the same count would understate every arm); 18.4M pairs; one
+process, warm-up then two alternating passes, fastest kept; jax 0.10.2, CPU, x64, Linux x86_64, 4
+cores, run directly with output redirected, 2026-09-26, uncommitted phase-B tree on `3e54fe1`:
+
+| arm | certified | fastest s | spread | vs every pair | mask |
+|---|---|---|---|---|---|
+| `EveryPair` (grid walk) | — | 227.4 | 1.06x | 1.00x | reference |
+| 32x32 | 37.0% | 206.9 | 1.00x | 1.10x | identical |
+| 32 → 8 | 70.9% | 123.3 | 1.03x | 1.84x | identical |
+| **32 → 8 → 2** (the default) | **89.3%** | **45.8** | 1.00x | **4.96x** | identical |
+
+And the analytic `Outside` harness (`body_culling.py`, same configuration as the phase-A table above,
+run straight after, same machine) at the same ladders: 32x32 **7.84x** (90.3%), 32 → 8 **8.53x**
+(91.3%), 32 → 8 → 2 **5.35x** (91.7%), all identical. ⚠️ **So the best ladder depends on the body's
+per-pair cost**, and neither default is right for both: the third level saves ~2.7x on the triangle
+walk and costs ~1.6x on the cheap analytic test, whose finest-level tile bookkeeping outweighs the few
+pairs it vouches for. **The default is (32, 8, 2)**, chosen on absolute time — it saves minutes where
+the 88 h lives and costs ~3 s where the analytic mask already runs in seconds — and the docstring says
+to stop at 8 for analytic-only scenes. A per-body choice (refine only for bodies whose test is dear)
+is the obvious improvement and is **not built**. ⚠️ Every triangle figure is on a shadowless chamber:
+on the real wall, pairs crossing a pipe opening can never be vouched for, so the share falls with the
+pipe-cell fraction; **re-run with `work/case` present before quoting a mesh-scale figure**, and note
+that both 32x32 figures here and in the phase-A table were ONE level.
+
+**`TriangleBody`** (`triangle_body.py`, #510; exported, in radiation beside the grid because
+`solids/` may import nothing outside itself). `build(vertices, *, sheet=None, resolution=None,
+clearance_resolution=None, tolerance=None)`. `blocks` broadcasts to the grid walk (`traceable=False`).
+**`contains` is decided per connected piece** (`checks._surface_pieces`, split out of `open_facets`):
+an open piece is a sheet with no inside; a closed piece is solid on the side its normals point away
+from — the emitting-surface convention — so an outward-wound piece (positive signed volume) is a lump
+and an inward-wound one is a vessel, solid outside it. One formula covers both and nesting:
+**solid where `enclosure_winding(closed pieces) + n_inward > 0.5`** (outward winding reads +1 inside,
+inward -1, measured). Points outside a closed piece's bounding box skip that piece's winding — done
+by `enclosure_winding` itself since #530 (merged into this branch; `TriangleBody` had its own global-box
+shortcut, deleted as a duplicate). `sheet=True` overrides to no inside (a welded sheet reads closed); `sheet=False` refuses
+an open piece; a closed piece enclosing no volume (a triangle and its reverse) is refused rather than
+guessed. `grid_mask_check.py` now uses `TriangleBody.build(wall, sheet=True)` in place of its local
+`WallTriangles` (identical answers by construction: same grid, same all-False `contains`; **not
+re-run here**, the case is absent). **Not done from #510's list**: the CAD reader's triangle fallback
+(`io.md`).
+
+**Tests** (`tests/unit/test_radiation_triangle_body.py`; culling ladders in
+`test_radiation_culling.py`): the walk against `segment_is_cut` over broadcast pair shapes; `contains`
+on water / sleeve / just-inside-the-wall / metal (the last outside the bounding box), and a drum wound
+inward as a cavity; an open vessel as a sheet; both overrides; the flat refusal; `holds_any` sound
+against points **sampled on the triangles** over 3,000 boxes (and >300 of them empty, so it is not
+vacuous); `vouches` sound against the brute test on compact clouds; a `Box` primitive and a
+`TriangleBody` in one scene, culled and not, identical; refinement vouching for more than one level
+with the mask unchanged; bit equality at ladders (32,8) and (24,6,1)/(8,4,2). **Mutation pass (15, 13
+red):** inward count dropped, the bounding-box shortcut forced (since deleted — see above), volume sign flipped, open pieces treated
+as closed, flat refusal off, box corners swapped, features `[x, x]`, occupancy = walk grid, the `+ 1`
+on the box's far index, one inclusion-exclusion sign, children not scaled, refinement skipped,
+refused filter dropped. **Dismissed:** the box margin at zero (it guards a rounding no fixture can
+reach; kept), and dropping the all-padding child filter (such tiles repeat real points, so testing
+them gives correct duplicates and costs only work).
 
 ## GRID ACCELERATION: BUILT as `TriangleGrid` — a HOST walk, off by default
 
@@ -2189,7 +2279,10 @@ geometry that exists only as triangles and not the path a real reactor should ta
 **What it does not fix: the RAY COUNT, which is the binding cost at mesh scale.** 1.6M cells
 against 7,516 facets is 1.2e10 segments however cheaply each is answered. The grid makes scenes
 up to a few times 1e8 rays practical; beyond that the facet count has to come down (the lamp
-ladder, next) or the mask has to be built on a coarser emitter than the gather uses.
+ladder, next) or the mask has to be built on a coarser emitter than the gather uses. ⚠️ **Since #554 phase
+B there is a third way, which cuts the rays WALKED rather than the rays asked about**: a
+`TriangleBody` under `ShaftCulling` vouches for whole tiles, 89% of pairs and 4.96x on a shadowless
+triangulated chamber (the SHAFT CULLING section above) — on the real wall, less, by the pipe-cell share.
 
 ## HOW MANY FACETS AN EMITTER NEEDS — measured, because it sets the price of everything
 

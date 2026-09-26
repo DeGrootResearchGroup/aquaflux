@@ -43,14 +43,15 @@ not a sampled approximation. :class:`Outside` is the one that matters most in pr
 wall is most naturally described by the *fluid it holds*, and a segment is then clear exactly when
 the fluid's regions cover it end to end.
 
-**A body can also vouch for a whole region of space at once** (:meth:`~Body.clearance`). A
-segment test answers for one segment; a consumer testing millions of segments between two
-compact groups of points -- a block of mesh cells and a patch of a lamp, say -- would rather ask
-once whether the body can come between the groups at all. Every segment between two points of a
-set lies in the set's convex hull, so a body that provably misses the hull blocks none of them.
-The evidence is a handful of *witness* functions whose negative region lies in a convex set
-disjoint from the body -- a separating half-space, or a convex region of fluid -- and it composes
-by taking maxima, which is what lets a consumer summarize each group once rather than each pair.
+**A body can also vouch for a whole region of space at once** (:meth:`~Body.clearance` and
+:meth:`~Body.vouches`). A segment test answers for one segment; a consumer testing millions of
+segments between two compact groups of points -- a block of mesh cells and a patch of a lamp, say
+-- would rather ask once whether the body can come between the groups at all. Every segment
+between two points of a set lies in the set's convex hull, so a body that provably misses the hull
+blocks none of them. The evidence here is a handful of *witness* functions whose negative region
+lies in a convex set disjoint from the body -- a separating half-space, or a convex region of fluid
+-- and it composes by taking maxima, which is what lets a consumer summarize each group once rather
+than each pair.
 
 ⚠️ **Do not represent one surface twice.** A body whose surface is also, elsewhere, a set of
 triangles the segments start from — a lamp sleeve that is also the emitting surface of a
@@ -140,24 +141,27 @@ class Body(eqx.Module):
         """
 
     def clearance(self, position) -> jnp.ndarray:
-        """Witnesses that a convex hull of positions misses this body.
+        """Per-position features from which :meth:`vouches` decides whether a hull misses this body.
 
-        Each column ``i`` is a function ``w_i`` with one guarantee: **if every position of a set
-        reads** ``w_i < 0`` **for the same** ``i``, **no point of the set's convex hull lies in the
-        body**, so no segment between two of those positions meets it. A column that reads
-        ``>= 0`` for some position says nothing -- the hull may or may not miss the body.
+        A set of positions is summarized by the **largest value each column takes over it**, so
+        the summary of two sets together is the larger of their two summaries -- which is what
+        makes the answer cheap to use in bulk: a consumer asking about every pair of a block of
+        receivers and a cluster of sources summarizes each group once, merges the two short rows
+        per tile, and never visits a pair. The guarantee lives in :meth:`vouches`: **where it
+        reads true on a set's summary, no point of the set's convex hull lies in the body**, so no
+        segment between two of those positions meets it.
 
-        That guarantee is what makes the answer cheap to use in bulk. A set's summary is the
-        largest value each column takes over its positions, the summary of two sets together
-        is the larger of their two summaries, and the union is certified clear where any column
-        of the combined summary is negative. So a consumer asking about every pair of a block of
-        receivers and a cluster of sources summarizes each group once and never visits a pair.
+        What the columns mean is the body's own business. For the bodies here each is a witness
+        function whose negative region lies in a convex set disjoint from the body -- a
+        separating half-space, a convex region of fluid -- and the default :meth:`vouches` asks
+        whether any of them is negative across the set. A body answered some other way can carry
+        other features: a triangle soup's bounding coordinates, say, whose maxima are the set's
+        bounding box.
 
-        Conservative by construction: a witness may fail to certify a hull that does miss the
-        body, never the other way round, and each is offset by a margin sized from the
-        magnitudes it compares, so a hull that misses the body only by a rounding is not
-        certified either. A body that cannot vouch for anything -- the default, and the right
-        answer for a triangulated surface answered on the host -- has no columns.
+        Conservative by construction: a body may fail to vouch for a hull that does miss it,
+        never the other way round, and each witness is offset by a margin sized from the
+        magnitudes it compares, so a hull that misses the body only by a rounding is not vouched
+        for either. A body that cannot vouch for anything -- the default -- has no columns.
 
         Parameters
         ----------
@@ -165,10 +169,28 @@ class Body(eqx.Module):
 
         Returns
         -------
-        jnp.ndarray, shape ``(..., n_witnesses)``
+        jnp.ndarray, shape ``(..., n_features)``
         """
         position = jnp.asarray(position, dtype=float)
         return jnp.zeros((*position.shape[:-1], 0))
+
+    def vouches(self, summary) -> jnp.ndarray:
+        """Whether a set of positions whose merged :meth:`clearance` is ``summary`` misses the body.
+
+        True only where no point of the set's convex hull lies in the body. The default reads
+        each column as a witness and vouches where any is negative; with no columns it never
+        vouches.
+
+        Parameters
+        ----------
+        summary : array_like, shape ``(..., n_features)``
+            The column-wise maximum of :meth:`clearance` over the set.
+
+        Returns
+        -------
+        jnp.ndarray of bool, shape ``(...)``
+        """
+        return jnp.any(jnp.asarray(summary) < 0.0, axis=-1)
 
 
 #: Directions along which a separating plane between a convex hull and a body is looked for:
