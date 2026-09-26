@@ -12,7 +12,7 @@ two approximations a cluster makes cost on their own and together.
 (``primitive_occlusion.fluid``), the case's lamp STL if the case is present and otherwise the
 analytic 32 x 128 lamp, exitance ``EXITANCE``, ``UniformAbsorption(ABSORPTION)``, the lamp's own
 facets not occluding (it is convex; its emitter cosine gate is its visibility). Receivers are
-sampled uniformly inside each region separately -- ``SOZZI_CLUSTER_RECEIVERS`` gives the chamber,
+sampled uniformly inside each region separately, outside the lamp -- ``SOZZI_CLUSTER_RECEIVERS`` gives the chamber,
 inlet and riser counts, default ``3000,1500,1500`` -- because the pipes are where the shadows are
 and a volume-uniform sample holds very few of them. A receiver belongs to the chamber if it is
 inside the chamber, else to the pipe it is in.
@@ -123,8 +123,18 @@ class _Leaves:
             self.radius[row] = np.linalg.norm(corners - centre, axis=1).max()
 
 
-def sample(rng, water) -> tuple[np.ndarray, np.ndarray]:
-    """``COUNTS`` receivers in the chamber, the inlet and the riser, and each one's region index."""
+def sample(rng, water, lamp_vertices) -> tuple[np.ndarray, np.ndarray]:
+    """``COUNTS`` receivers in the chamber, the inlet and the riser, and each one's region index.
+
+    ⚠️ **The lamp is not part of ``water``** -- ``Outside`` is the vessel -- so points inside the
+    lamp's own cylinder are removed here. The first version kept them: about 4.5% of the chamber
+    sample sat inside the lamp, where the field is ~1e-27 of its value outside, and their relative
+    errors (noise on nothing) set the chamber's tail. The lamp's axis is along ``x`` through the
+    origin; the exclusion is its circumscribed cylinder, so the sliver between the faceted lamp and
+    that circle is excluded too.
+    """
+    lamp_radius = float(np.hypot(lamp_vertices[..., 1], lamp_vertices[..., 2]).max())
+    lamp_low, lamp_high = float(lamp_vertices[..., 0].min()), float(lamp_vertices[..., 0].max())
     box = np.array([[0.0, -R_BODY, -R_BODY], [INLET_END, R_BODY, RISER_TOP]])
     points, labels = [], []
     for index, count in enumerate(COUNTS):
@@ -136,7 +146,10 @@ def sample(rng, water) -> tuple[np.ndarray, np.ndarray]:
                 [np.asarray(region.signed_distance(jnp.asarray(trial))) for region in water.regions]
             )
             region = np.where(depth[0] <= 0.0, 0, np.where(depth[1] <= 0.0, 1, 2))
-            found.append(trial[wet & (region == index)])
+            in_lamp = (np.hypot(trial[:, 1], trial[:, 2]) <= lamp_radius) & (
+                (trial[:, 0] >= lamp_low) & (trial[:, 0] <= lamp_high)
+            )
+            found.append(trial[wet & ~in_lamp & (region == index)])
         points.append(np.concatenate(found)[:count])
         labels.append(np.full(count, index))
     return np.concatenate(points), np.concatenate(labels)
@@ -162,7 +175,7 @@ def main() -> None:
     rng = np.random.default_rng(0)
     water = fluid()
     surfaces, lamp_source = lamp()
-    points, region = sample(rng, water)
+    points, region = sample(rng, water, np.asarray(surfaces.vertices))
     medium = UniformAbsorption(ABSORPTION)
     vertices = np.asarray(surfaces.vertices)
     centroid = np.asarray(surfaces.centroid)

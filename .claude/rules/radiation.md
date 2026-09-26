@@ -2634,8 +2634,15 @@ cone cull itself.
 |---|---|---|---|---|---|
 | 4 | 0.0043 | 0.15 | 3.4% / 12.2% | 0.32% | 0.905; 2e-5 / 0.29% / 0.32% |
 | 16 | 0.0069 | 0.25 | 4.2% / 25.3% | 1.0% | 0.859; 6e-6 / 0.58% / 0.86% |
-| 64 | 0.0117 | 0.42 | 24.2% / 40.0% | 4.2% | 0.754; 2e-7 / 3.9% / 4.1% |
-| 256 | 0.0137 | 0.49 | 24.3% / 42.6% | 11.8% | 0.703; 5e-8 / 26.5% / 26.8% |
+| 64 | 0.0117 | 0.42 | 24.2% / 40.0% | 4.2% | 0.750; 2e-7 / 0.17% / 0.33% |
+| 256 | 0.0137 | 0.49 | 24.3% / 42.6% | 11.8% | 0.699; 5e-8 / 5e-6 / 4e-5 |
+
+⚠️ **The chamber sample first included points INSIDE THE LAMP** (the lamp is not part of `Outside`), ~4.5%
+of the chamber sample, where `G` is ~1e-27 and every relative error is noise on nothing; they set the
+64- and 256-facet rows' chamber tails, recorded first as 3.9% / 4.1% and 26.5% / 26.8%. `sample` now
+excludes the lamp's circumscribed cylinder, and the table is the re-run (every other entry reproduced
+to its printed digits). A harness sampling "the fluid" from a vessel body must subtract every solid
+inside it; `primitive_occlusion.receivers` has the same property when the case mesh is absent.
 
 **Three findings, each a design constraint.**
 
@@ -2663,11 +2670,50 @@ cone cull itself.
    normals per cluster, as lightcuts does for oriented lights), which removes the gate straddle and the
    first-order term together. Not yet measured.
 
-**What it buys, as an estimate**: at size 16 beyond 16 radii, 86% of lit (receiver, cluster) pairs
-become one term instead of 16, i.e. roughly `0.14 + 0.86/16 = 0.19` of the per-pair work (~5x) for the
-chamber errors in the table — the same order as the 32 x 128 lamp's own discretization error (1.4%
-median near the lamp, 0.4% elsewhere). An adaptive cut chooses per pair and should do better; that is
-what building it would measure.
+**Then measured (2026-09-26): orientation grouping, the one-term cluster, and the contribution tail.**
+`validation/sozzi_radiation/cluster_approximation.py` and `contribution_tail.py`, same scene, sample
+(lamp excluded) and machine as above; control 4.2e-16. The one-term cluster is `(M/pi) max(S.u, 0)
+exp(-a d) / d^2` with `S` the vector area; a cluster is used only where it is wholly visible (an
+oracle standing in for a shaft certificate) and beyond `tau` radii. "Work" is (exact pairs kept +
+cluster terms) over the exact gather's lit pairs; "hidden" credits a fully hidden certificate
+(#554 C) with skipping a wholly hidden cluster at the cost of one term. Errors are one-term, `G`
+relative, p99 per region:
+
+| clustering (tau = 8) | gate straddle | work (with hidden) | chamber work | chamber / inlet / riser p99 |
+|---|---|---|---|---|
+| position, 16 facets | 39% | 0.52 (0.20) | 0.24 | 2.3% / 4.1% / 3.1% |
+| position, 64 facets | 69% | 0.52 (0.17) | 0.23 | 8.4% / 11% / 5.8% |
+| oriented, 16, cone 30 deg | 17% | 0.60 (0.28) | 0.37 | 2.2% / 2.5% / 0.8% |
+| optical a R <= 0.25, cone 30 | 8.7% | 0.67 (0.47) | 0.50 | 2.7% / 1.9% / 1.7% |
+| optical a R <= 0.25, cone 15 | 3.3% | 0.71 (0.54) | 0.56 | 1.5% / 1.3% / 0.3% |
+| optical a R <= 0.1, cone 30 | 0.1% | 0.96 (0.96) | 0.99 | 0.7% / 0.8% / 0.07% |
+
+- **Orientation grouping does what was predicted to the gate** (39% -> 3%) and to the error, but
+  **the saving collapses with it**: grouped by member count, oriented clusters are long strips along
+  the lamp (radius 1-6 cm) that few receivers are far enough from; bounded by optical radius instead,
+  they hold ~2.5 facets (a*R <= 0.25) or one (a*R <= 0.1 — **a facet of this lamp is already a*R ~
+  0.12**). In water this absorbing, a cluster cannot be much bigger than a facet: **at ~1% error the
+  cluster approximation buys ~2x in the chamber, at 2-4% ~4x.** That is the lamp's own discretization
+  error, so it is spending the accuracy budget, not saving work for free.
+- **The one-term solid angle roughly doubles the error** of keeping the members' exact solid angles
+  and gates (e.g. chamber p99 0.89% -> 2.3% at position 16), and makes no difference to the work.
+- **Fully hidden clusters are an exact saving, and they are all in the pipes**: skipping them alone
+  leaves 0.16 of the work in the riser, 1.00 in the chamber and the inlet (whose cells see the lamp
+  end-on through the opening, partly). Weighted to the mesh's 19% pipe cells that is ~10% overall.
+- **THE LEVER THAT FITS THIS WATER IS AN ERROR-BOUNDED CUTOFF, NOT A CLUSTER APPROXIMATION.**
+  `contribution_tail.py`, sorting each receiver's exact terms (an **oracle** — the ceiling a cutoff
+  can reach): a chamber cell's lit pairs are 38% of all its pairs, and it needs **13% / 20% / 27% /
+  43%** of those to reach `G` within 1e-2 / 1e-3 / 1e-4 / 1e-6 (median; p90 17% / 26% / 36% / 58%).
+  A riser cell needs 1.7% of its lit pairs at every tolerance. So at 1e-4 a chamber cell is ~10% of
+  its pairs — **~10x, exact to the tolerance and with no approximation of any kept term**. A practical
+  cutoff decides from upper bounds over (receiver block, facet cluster) tiles — the bounding sphere
+  gives `Omega <= pi R^2 / (d - R)^2` and `exp(-a (d - R))` — against a lower bound on `G` from the
+  near field, and keeps more than the oracle. ⚠️ **`a` is live** (a traced, differentiable parameter),
+  so the cutoff must be decided per call or against a stated lower bound on `a`, and the dropped terms'
+  share of `dG/da` must be bounded as well as of `G`. Clearer water (smaller `a`) shrinks this lever and
+  grows the cluster one; the two are the same error-bounded cut with different terms dominating.
+
+**What it buys** is measured in the section just above (the cluster approximation ~2-4x; the error-bounded cutoff's ceiling ~10x); the ~5x estimate that stood here is deleted.
 
 ## PER-CALL COMPILES: THE REMAINDER CHUNK AND THE RADIOSITY SOLVE (2026-09-26)
 
