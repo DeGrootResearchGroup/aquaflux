@@ -1293,9 +1293,14 @@ the overall sign set by whether the file is wound outward or inward — so `chec
 tests the **magnitude** against 0.5, a threshold with nothing behind it to tune because the
 quantity it cuts takes only two values.
 
-Measured on a unit box at 12, 48 and 192 facets: `1.0` to the last bit at a point a thousandth of
-a box-width from a wall, and `~1e-16` just outside. There is no near-field regime where it
-degrades, which is what disqualifies the two obvious alternatives:
+Measured on a unit box at 12, 48 and 192 facets, at x = 0.999 (a thousandth of a box-width from a
+wall): **87 / 0 / 0 ulp from `1` eagerly and 25 / 0 / 0 compiled**, and at most 2 ulp at two further
+interior points (`validation/radiation_enclosure_winding.py`, 2026-09-26; ~2e-14 at worst). Outside,
+the drum in the same harness read at most 2.1e-14 eagerly — and exactly `0.0` now outside a closed
+piece's box, where it is no longer summed (next section). ⚠️ **The record used to say "`1.0` to the
+last bit"; re-measured under #530 that does not hold even eagerly** on the 12-facet box — the claim
+was unfalsifiable (no harness) and is replaced, not annotated. There is no near-field regime where
+it degrades, which is what disqualifies the two obvious alternatives:
 
 | test | why not |
 |---|---|
@@ -1318,6 +1323,56 @@ it is affordable but not free — which is why `build_radiation_model` does **no
 occluder bodies do refuse interior points at the visibility build, because `Body.contains` is
 O(1) per point; a triangle soup has no such shortcut. Wiring it into the model by default would
 change a shipped behaviour and roughly double that build, so it is an explicit call.
+
+## THE WINDING CHECK IS COMPILED, AND A CLOSED PIECE IS SKIPPED OUTSIDE ITS BOX (#530, 2026-09-26)
+
+**Compiled per pass.** `_summed_signed_solid_angle` is one `jax.jit` program per pass; the host loop
+(`_signed_total`) cuts the points by `pair_limit` and pads a short last pass to a power of two
+(`triangles.padded_length`, repeating its last point, answers dropped), so a scene compiles one
+program per distinct piece size plus a few remainder shapes. Eagerly each kernel operation wrote a
+whole pass of pairs to memory. The docstring note that this loop was "deliberately not the padded
+scan … padding would be cost with nothing to buy" is gone with it: the padding is what bounds the
+number of compiled shapes.
+
+**A closed piece is summed only at points inside its own bounding box.** The surface is split into
+`_pieces` (the same pieces `open_facets` uses — refactored out of it, one home), and
+`_closed_pieces` flags a piece whose **own triangles walk every edge as often one way as the other**
+— i.e. it is a 2-cycle, so its winding number is an integer, locally constant off the surface and 0
+on the unbounded complement of its box. ⚠️ **This is deliberately stricter than the issue's wording
+("`open_facets` reports closed and its winding is consistent")**: `open_facets` reads a sheet welded
+in all the way round as closed, and the weld also splits the box into two halves that read closed
+too — none of which bounds anything alone, so skipping them would give a wrong number
+(`test_a_sheet_welded_into_a_closed_body_is_summed_everywhere`). The cycle test subsumes both
+halves of the issue's condition and catches that case. Open, inconsistent and welded pieces are
+summed everywhere, so the open-surface warning in `check_points_outside` is unaffected. A new
+`tolerance=` keyword on `enclosure_winding` and `check_points_outside` sets the vertex merge the
+pieces are found through; a piece closed only to within it is skipped as if closed exactly.
+
+**MEASURED** (`validation/radiation_enclosure_winding.py`: `closed_drum(2000)`, 8,000 facets × 4,000
+points uniform in a cube three drum-widths across, 3.7% inside the drum's box, default 4M
+`pair_limit`, all arms in one process, warm-up then two alternating passes, fastest kept; jax 0.10.2,
+CPU, x64, **Linux x86_64, 4 cores, 16 GB** (a cloud container, not the usual macOS machine), run
+directly with output redirected — `run_case.sh` needs `vm_stat` — nothing else running, 2026-09-26):
+
+| arm | fastest s | Mpair/s | spread | vs eager |
+|---|---|---|---|---|
+| eager per-pass loop (the old code) | 12.25 | 2.6 | 1.02x | 1.00x |
+| compiled kernel, no skip | 1.49 | 21.5 | 1.06x | **8.2x** |
+| shipped (compiled + skip) | 0.125 | 256 | 1.11x | **98x** |
+
+The skip alone is 11.9x against a 27x ceiling (1 / 3.7%); the rest is the host topology pass and the
+in-box points. Inside/outside identical across all three arms, max |winding difference| 2.1e-13, and
+the 3,853 points outside the box read exactly `0.0` (eager's largest there: 2.1e-14). The issue's own
+probe read 24 → 169 Mpair/s (~7x) for the compile on a contended macOS machine; the ratio agrees,
+the rates are not comparable across the two machines.
+
+Tests (`tests/unit/test_radiation_enclosure.py`), mutation-checked, 7 of 8 red: the cycle test
+replaced by `open_facets` semantics, never skipping, the direction ignored, only the first closed
+piece handled, `+=` for `=` where an open and a closed piece overlap, one box drawn round the whole
+surface, and the padding repeating the wrong point. **Dismissed**: a strict rather than inclusive
+box test — a point on a closed piece's box face is either on the surface (winding undefined) or
+outside it (0 either way), so no input tells them apart; it stays inclusive because the surface can
+lie on the box.
 
 ## The two engineering-unit conversions, and the numbers that make them worth having
 
@@ -1981,8 +2036,9 @@ an open piece is a sheet with no inside; a closed piece is solid on the side its
 from — the emitting-surface convention — so an outward-wound piece (positive signed volume) is a lump
 and an inward-wound one is a vessel, solid outside it. One formula covers both and nesting:
 **solid where `enclosure_winding(closed pieces) + n_inward > 0.5`** (outward winding reads +1 inside,
-inward -1, measured). Points outside the closed pieces' bounding box skip the winding (it is exactly
-zero there). `sheet=True` overrides to no inside (a welded sheet reads closed); `sheet=False` refuses
+inward -1, measured). Points outside a closed piece's bounding box skip that piece's winding — done
+by `enclosure_winding` itself since #530 (merged into this branch; `TriangleBody` had its own global-box
+shortcut, deleted as a duplicate). `sheet=True` overrides to no inside (a welded sheet reads closed); `sheet=False` refuses
 an open piece; a closed piece enclosing no volume (a triangle and its reverse) is refused rather than
 guessed. `grid_mask_check.py` now uses `TriangleBody.build(wall, sheet=True)` in place of its local
 `WallTriangles` (identical answers by construction: same grid, same all-False `contains`; **not
@@ -1997,7 +2053,7 @@ against points **sampled on the triangles** over 3,000 boxes (and >300 of them e
 vacuous); `vouches` sound against the brute test on compact clouds; a `Box` primitive and a
 `TriangleBody` in one scene, culled and not, identical; refinement vouching for more than one level
 with the mask unchanged; bit equality at ladders (32,8) and (24,6,1)/(8,4,2). **Mutation pass (15, 13
-red):** inward count dropped, bounding-box shortcut forced, volume sign flipped, open pieces treated
+red):** inward count dropped, the bounding-box shortcut forced (since deleted — see above), volume sign flipped, open pieces treated
 as closed, flat refusal off, box corners swapped, features `[x, x]`, occupancy = walk grid, the `+ 1`
 on the box's far index, one inclusion-exclusion sign, children not scaled, refinement skipped,
 refused filter dropped. **Dismissed:** the box margin at zero (it guards a rounding no fixture can

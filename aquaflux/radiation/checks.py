@@ -18,12 +18,14 @@ from __future__ import annotations
 import dataclasses
 import warnings
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
 from aquaflux.radiation.solid_angle import signed_solid_angle
+from aquaflux.radiation.triangles import padded_length
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, receivers_per_pass
 
 __all__ = [
@@ -254,6 +256,21 @@ def _surface_pieces(vertices, *, tolerance: float | None = None) -> tuple[np.nda
     if n_facets == 0:
         return np.zeros(0, dtype=int), np.zeros(0, dtype=bool)
     edges = _edge_uses(vertices, tolerance)
+    piece = _pieces(edges)
+    on_rim = np.zeros(n_facets, dtype=bool)
+    on_rim[edges.facet_of_use[edges.boundary[edges.edge_of_use]]] = True
+    open_piece = np.zeros(int(piece.max()) + 1, dtype=bool)
+    open_piece[piece[on_rim]] = True
+    return piece, open_piece
+
+
+def _pieces(edges: _EdgeUses) -> np.ndarray:
+    """Label each facet with its connected piece, as :func:`open_facets` defines one.
+
+    A piece is the set of triangles reachable from one another across edges shared by exactly
+    two triangles. Returns one label per facet, ``(n_facets,)``, numbered from zero.
+    """
+    n_facets = len(edges.edge_of_use) // 3
     facet = edges.facet_of_use
     shared = (edges.uses == 2)[edges.edge_of_use]
     # The two triangles on each two-use edge, found by sorting the uses of those edges by edge.
@@ -261,11 +278,30 @@ def _surface_pieces(vertices, *, tolerance: float | None = None) -> tuple[np.nda
     ends = facet[shared][order].reshape(-1, 2)
     links = coo_matrix((np.ones(len(ends)), (ends[:, 0], ends[:, 1])), shape=(n_facets, n_facets))
     _, piece = connected_components(links, directed=False)
-    on_rim = np.zeros(n_facets, dtype=bool)
-    on_rim[facet[edges.boundary[edges.edge_of_use]]] = True
-    open_piece = np.zeros(int(piece.max()) + 1, dtype=bool)
-    open_piece[piece[on_rim]] = True
-    return piece, open_piece
+    return piece
+
+
+def _closed_pieces(edges: _EdgeUses, piece: np.ndarray) -> np.ndarray:
+    """Which pieces are closed, consistently wound surfaces, one flag per piece.
+
+    The test is that every edge's traversals **within the piece** cancel -- each edge is walked
+    as often one way as the other by the piece's own triangles. That is exactly the condition
+    under which the piece's summed signed solid angle is an integer everywhere off the surface
+    and zero at infinity, so it is stricter than :func:`open_facets` on purpose: a sheet whose
+    rim is welded to another surface has no free edge, and reads as closed there, but its rim
+    edges are each walked once by its own triangles, so it fails this. A reversed triangle
+    walks a shared edge the same way as its neighbour and fails it too.
+    """
+    n_pieces = int(piece.max(initial=-1)) + 1
+    live = ~edges.degenerate[edges.edge_of_use]
+    # One key per (piece, edge) combination, flattened to a single integer so a 1-D unique does
+    # the grouping.
+    key = piece[edges.facet_of_use[live]] * len(edges.pairs) + edges.edge_of_use[live]
+    keys, inverse = np.unique(key, return_inverse=True)
+    net = np.bincount(inverse.reshape(-1), weights=edges.direction[live], minlength=len(keys))
+    closed = np.ones(n_pieces, dtype=bool)
+    closed[keys[net != 0] // len(edges.pairs)] = False
+    return closed
 
 
 def check_winding(vertices, *, tolerance: float | None = None) -> WindingReport:
@@ -384,7 +420,13 @@ def check_profiles(surfaces) -> None:
         raise ValueError(msg)
 
 
-def enclosure_winding(vertices, points, *, pair_limit: int = DEFAULT_PAIR_LIMIT) -> np.ndarray:
+def enclosure_winding(
+    vertices,
+    points,
+    *,
+    pair_limit: int = DEFAULT_PAIR_LIMIT,
+    tolerance: float | None = None,
+) -> np.ndarray:
     """Winding number of a closed triangulated surface about each point.
 
     The signed solid angles of every facet, summed at a point and divided by ``4 pi``. For a
@@ -392,14 +434,22 @@ def enclosure_winding(vertices, points, *, pair_limit: int = DEFAULT_PAIR_LIMIT)
     ``0`` at one outside it, the overall sign fixed by whether the surface is wound outward or
     inward — so it is the **magnitude** that answers the question.
 
-    Exact rather than asymptotic: on a unit box it reads ``1.0`` to the last bit a thousandth of
-    a box-width from a wall, at every refinement, with no tolerance to tune.
+    Exact rather than asymptotic: on a unit box it reads ``1`` to within about ``1e-14`` a
+    thousandth of a box-width from a wall, at every refinement, with no tolerance to tune.
 
     **On an open surface it reads somewhere in between, and that is the useful behaviour.** A
     bare disc measures ``±0.45`` just off its face. Open surfaces are legal here — a gather
     never has to decide which side of one it is on — so a test that answered a confident bit
     would be answering a question the geometry has not got. A value far from both ``0`` and
     ``±1`` means the surface is not closed, and that is worth reporting rather than rounding.
+
+    **A closed piece is not summed at points outside its bounding box.** The surface is split
+    into connected pieces, and a piece whose own triangles walk every edge as often one way as
+    the other bounds a region: its winding number is an integer, constant off the surface and
+    zero far away, so it is exactly ``0`` everywhere outside the box that holds it. Such a
+    piece contributes that ``0`` there without being evaluated. Any other piece — open, wound
+    inconsistently, or welded to another along its rim — is summed at every point, so the
+    in-between readings above are unaffected.
 
     Parameters
     ----------
@@ -409,21 +459,19 @@ def enclosure_winding(vertices, points, *, pair_limit: int = DEFAULT_PAIR_LIMIT)
         Where to ask — cell centres, usually.
     pair_limit : int, optional
         Point-by-facet pairs per pass. The product is the whole memory cost, so it is cut into
-        chunks of points; the arithmetic is identical either way.
+        chunks of points; the answer is the same either way, to rounding.
+    tolerance : float, optional
+        Distance within which two vertex positions are the same point, when the surface is
+        split into pieces. Defaults to ``1e-9`` of the model's overall extent, as in
+        :func:`open_facets`. A piece whose seams close only to within it is skipped as though
+        they closed exactly; what that leaves out is the solid angle of the gaps.
 
     Returns
     -------
     numpy.ndarray, shape ``(n_points,)``
-
-    Notes
-    -----
-    The chunking here is a plain host-side loop, deliberately **not** the padded
-    :func:`~aquaflux.radiation.gather` scan: that one exists so a traced body compiles once for
-    a gather that runs on every solve, while this runs once, outside any trace, where the
-    padding would be cost with nothing to buy.
     """
-    vertices = jnp.asarray(vertices, dtype=float)
-    points = jnp.asarray(points, dtype=float)
+    vertices = np.asarray(vertices, dtype=float)
+    points = np.asarray(points, dtype=float)
     if points.ndim != 2 or points.shape[1] != 3:
         msg = f"points must be (n_points, 3); got {tuple(points.shape)}"
         raise ValueError(msg)
@@ -431,20 +479,88 @@ def enclosure_winding(vertices, points, *, pair_limit: int = DEFAULT_PAIR_LIMIT)
     if n_points == 0 or n_facets == 0:
         return np.zeros(n_points)
 
-    chunk = receivers_per_pass(pair_limit, n_facets)
-    totals = [
-        np.asarray(
-            jnp.sum(
-                signed_solid_angle(points[first : first + chunk, None, :], vertices[None, ...]),
-                axis=-1,
-            )
+    edges = _edge_uses(vertices, tolerance)
+    piece = _pieces(edges)
+    closed = _closed_pieces(edges, piece)
+
+    winding = np.zeros(n_points)
+    everywhere = ~closed[piece]
+    if np.any(everywhere):
+        winding += _signed_total(points, vertices[everywhere], pair_limit)
+    # Each closed piece's facets, grouped by one sort rather than a scan of every facet per piece.
+    in_closed = np.flatnonzero(~everywhere)
+    in_closed = in_closed[np.argsort(piece[in_closed], kind="stable")]
+    groups = np.split(in_closed, np.flatnonzero(np.diff(piece[in_closed])) + 1)
+    for facets in groups:
+        if len(facets) == 0:
+            continue
+        corners = vertices[facets].reshape(-1, 3)
+        # Inclusive at the box's faces: a point on one may lie on the surface itself.
+        near = np.flatnonzero(
+            np.all((points >= corners.min(axis=0)) & (points <= corners.max(axis=0)), axis=1)
         )
-        for first in range(0, n_points, chunk)
-    ]
-    return np.concatenate(totals) / (4.0 * np.pi)
+        if len(near):
+            winding[near] += _signed_total(points[near], vertices[facets], pair_limit)
+    return winding / (4.0 * np.pi)
 
 
-def check_points_outside(vertices, points, *, pair_limit: int = DEFAULT_PAIR_LIMIT) -> np.ndarray:
+def _signed_total(points: np.ndarray, vertices: np.ndarray, pair_limit: int) -> np.ndarray:
+    """The signed solid angle of all of ``vertices`` summed at each point, in bounded passes.
+
+    Each pass is one compiled call of :func:`_summed_signed_solid_angle`. A pass shorter than
+    the full one — the last, or the only one — is padded to a power of two by repeating its last
+    point, so pieces with different numbers of nearby points compile a few shapes rather than
+    one each; the padding's answers are dropped.
+
+    Parameters
+    ----------
+    points : np.ndarray, shape ``(n_points, 3)``
+    vertices : np.ndarray, shape ``(n_facets, 3, 3)``
+    pair_limit : int
+
+    Returns
+    -------
+    np.ndarray, shape ``(n_points,)``
+    """
+    n_points = len(points)
+    chunk = receivers_per_pass(pair_limit, len(vertices))
+    facets = jnp.asarray(vertices)
+    totals = []
+    for first in range(0, n_points, chunk):
+        count = min(chunk, n_points - first)
+        size = chunk if count == chunk else min(chunk, padded_length(count))
+        index = first + np.minimum(np.arange(size), count - 1)
+        totals.append(np.asarray(_summed_signed_solid_angle(points[index], facets))[:count])
+    return np.concatenate(totals)
+
+
+@jax.jit
+def _summed_signed_solid_angle(points: jnp.ndarray, vertices: jnp.ndarray) -> jnp.ndarray:
+    """The signed solid angle of every facet summed at each point, as one compiled program.
+
+    Compiled rather than run operation by operation because the kernel's intermediates are one
+    entry per point-by-facet pair: eagerly, each is written out to memory in full and read back
+    by the next operation, where compiled they fuse into one pass over the pairs.
+
+    Parameters
+    ----------
+    points : jnp.ndarray, shape ``(n_points, 3)``
+    vertices : jnp.ndarray, shape ``(n_facets, 3, 3)``
+
+    Returns
+    -------
+    jnp.ndarray, shape ``(n_points,)``
+    """
+    return jnp.sum(signed_solid_angle(points[:, None, :], vertices[None, ...]), axis=-1)
+
+
+def check_points_outside(
+    vertices,
+    points,
+    *,
+    pair_limit: int = DEFAULT_PAIR_LIMIT,
+    tolerance: float | None = None,
+) -> np.ndarray:
     """Refuse points the surface encloses — a cell centre embedded in the solid.
 
     A receiver inside the metal is a meshing error, not a dark corner: it is not shadowed by
@@ -468,7 +584,7 @@ def check_points_outside(vertices, points, *, pair_limit: int = DEFAULT_PAIR_LIM
         The surface's triangles.
     points : array_like, shape ``(n_points, 3)``
         Where the field is wanted.
-    pair_limit : int, optional
+    pair_limit, tolerance : optional
         Passed through to :func:`enclosure_winding`.
 
     Returns
@@ -487,7 +603,7 @@ def check_points_outside(vertices, points, *, pair_limit: int = DEFAULT_PAIR_LIM
         If nothing is enclosed but the surface does not appear to be closed, so the pass
         establishes less than it seems to.
     """
-    winding = enclosure_winding(vertices, points, pair_limit=pair_limit)
+    winding = enclosure_winding(vertices, points, pair_limit=pair_limit, tolerance=tolerance)
     inside = np.flatnonzero(np.abs(winding) > 0.5)
     if len(inside):
         msg = (

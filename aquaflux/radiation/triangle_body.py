@@ -162,19 +162,15 @@ class TriangleBody(Body):
         """Whether each position is in the solid the closed pieces bound.
 
         Exact, from the winding number (:func:`~aquaflux.radiation.checks.enclosure_winding`),
-        and only paid for where it can matter: a closed surface's winding is zero outside its
-        bounding box, so positions there are outside every outward piece and inside every inward
-        one without a solid angle computed.
+        which skips each closed piece at the positions outside its own bounding box, where its
+        winding is exactly zero -- so a position far from every piece costs no solid angle.
         """
         position = np.asarray(position, dtype=float)
         shape = position.shape[:-1]
         flat = position.reshape(-1, 3)
         winding = np.zeros(len(flat))
-        if len(self.enclosing):
-            corners = self.enclosing.reshape(-1, 3)
-            near = np.all((flat >= corners.min(axis=0)) & (flat <= corners.max(axis=0)), axis=1)
-            if np.any(near):
-                winding[near] = enclosure_winding(self.enclosing, flat[near])
+        if len(self.enclosing) and len(flat):
+            winding = enclosure_winding(self.enclosing, flat)
         return jnp.asarray((winding + self.inward_pieces > 0.5).reshape(shape))
 
     def blocks(self, origin, target, min_distance) -> jnp.ndarray:
