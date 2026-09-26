@@ -134,8 +134,9 @@ def signed_solid_angle(point: jnp.ndarray, vertices: jnp.ndarray) -> jnp.ndarray
 
     Two properties make it the right test for surfaces that arrive from a file:
 
-    * **It is exact, not asymptotic.** The measured winding number of a unit box is ``1.0`` to
-      the last bit at a point a thousandth of a box-width from a wall, at every refinement.
+    * **It is exact, not asymptotic.** The measured winding number of a unit box is ``1`` to
+      within about ``1e-14`` at a point a thousandth of a box-width from a wall, at every
+      refinement — rounding in the sum, with no near-field regime where it degrades.
     * **It degrades continuously on an open surface** rather than answering confidently. A bare
       disc reads ``±0.45`` just off its face — nowhere near either ``0`` or ``±1`` — so a value
       in between is itself the diagnostic that the surface is not closed. A ray-parity test has
