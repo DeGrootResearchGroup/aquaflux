@@ -39,7 +39,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from aquaflux.radiation.culling import BodyCulling, ShaftCulling
+from aquaflux.radiation.culling import BodyCulling, culling_or_default
 from aquaflux.radiation.self_occlusion import (
     RayCastOcclusion,
     SelfOcclusion,
@@ -331,7 +331,7 @@ def _unchecked_visibility(
     # area and no surface to shadow itself with, so it needs no exclusion.
     near = offset_scale * jnp.sqrt(surfaces.area)
 
-    culling = ShaftCulling() if body_culling is None else body_culling
+    culling = culling_or_default(body_culling)
     blocked = (
         culling.blocked(occluders, surfaces.centroid, near, points, pair_limit)
         if occluders
