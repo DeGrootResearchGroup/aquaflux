@@ -194,7 +194,7 @@ so only the time differs.
 |---|---|---|---|---|---|
 | before (`99c472c`) | every pair (its only strategy) | 65.2 | **1138.4** | 1.00x | 10.94 GB |
 | main (`e12f214`) | every pair, `EveryPair()` | 60.0 | **471.7** | 2.41x | 5.57 GB |
-| main + #PRNUM (default flipped) | the new default, `ShaftCulling()` = ladder (32, 8, 2) | 57.6 | **313.5** | 3.63x | 6.49 GB |
+| main + #561 (default flipped) | the new default, `ShaftCulling()` = ladder (32, 8, 2) | 57.6 | **313.5** | 3.63x | 6.49 GB |
 | main (`e12f214`) | `ShaftCulling`, ladder (32, 8) | 57.3 | **251.9** | 4.52x | 5.48 GB |
 
 - **Without culling, main is 2.4x faster on its own**, and its peak is half. Which merges buy which
