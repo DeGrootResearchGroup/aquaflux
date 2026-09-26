@@ -1990,7 +1990,8 @@ so main's unculled path alone is 2.41x. The default flipped on this measurement:
 change, the cost falls on every scene with open space, and a scene with no body pays nothing (no
 bodies, no call). ⚠️ **The default ladder's third level still costs 1.24x on an analytic-only scene**
 — the phase-B finding, now confirmed on the real population — and is kept for the ~2.7x it buys on a
-triangle wall; a per-body ladder remains the fix, **not built**. Full table in the Sozzi README.
+triangle wall. A per-body ladder was investigated and deliberately **not built** — see "WHY THE
+FINEST LEVEL COSTS AN ANALYTIC BODY" below. Full table in the Sozzi README.
 
 **Tests** (`tests/unit/test_radiation_culling.py`, each mutation-checked): bit equality with
 `EveryPair` at group sizes 32x32, 7x5, 1x1, 64x3 on a scene where every one of four body kinds
@@ -2085,7 +2086,10 @@ between runs, so every comparison below is within one process, alternating arms.
   walk — where the ~88 h projection lives — a factor of ~2.4 over the next best ladder. Every
   mechanism for choosing per body carries a cost (`traceable` standing in for "cheap per ray", a
   contract term only the culling reads, or a machine-measured cost constant) out of proportion to the
-  seconds it would save. Revisit only if a mesh-scale measurement shows the analytic penalty mattering.
+  seconds it would save. **At mesh scale the penalty is ~62 s of a 314 s whole field** (the 1.24x
+  above: `ShaftCulling()` 313.5 s against (32, 8) 251.9 s, all 1,635,909 Sozzi cells, macOS arm64,
+  11 cores) — seen by the user before this was decided. A caller whose scene holds analytic bodies
+  alone passes `ShaftCulling(receiver_blocks=(32, 8), source_clusters=(32, 8))` and gets it back.
 
 **`TriangleBody`** (`triangle_body.py`, #510; exported, in radiation beside the grid because
 `solids/` may import nothing outside itself). `build(vertices, *, sheet=None, resolution=None,
