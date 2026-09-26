@@ -31,6 +31,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from aquaflux.radiation.absorption import Absorption
+from aquaflux.radiation.culling import culling_or_default
 from aquaflux.radiation.solid_angle import projected_solid_angle, solid_angle
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.visibility import (
@@ -267,11 +268,16 @@ def streamed_fluence_rate(
         **({} if self_occlusion is None else {"self_occlusion": self_occlusion}),
     }
     # What depends on the scene and not on the pass is done once, here: the refusal of points
-    # inside a body, over every point at once, and whatever the strategy can prepare from the
-    # surface alone -- the grid over its triangles, which is otherwise rebuilt for every pass.
+    # inside a body, over every point at once, and whatever the strategies can prepare from the
+    # surface alone -- the grid over its triangles, and the bodies' summaries of its facet
+    # clusters, which are otherwise rebuilt for every pass.
     refuse_points_inside(occluders, shadow_geometry, points)
     if options.get("self_occlusion") is not None:
         options["self_occlusion"] = options["self_occlusion"].prepared(shadow_geometry)
+    if occluders:
+        options["body_culling"] = culling_or_default(options.get("body_culling")).prepared(
+            tuple(occluders), shadow_geometry.centroid
+        )
     shadows = _Shadows(
         geometry=shadow_geometry,
         occluders=tuple(occluders),

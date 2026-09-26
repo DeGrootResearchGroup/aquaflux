@@ -1925,8 +1925,22 @@ always built from concrete geometry, so the model path never takes the hand-off.
 Chosen by `build_visibility(..., body_culling=)` or `RadiationSettings(body_culling=)` — pass
 `EveryPair()` for the unculled reference — which feeds **both** masks a model builds (and
 survives `receiver_occlusion` overriding the self-occlusion half). Streamed masks get it through the
-same options dict, but then the grouping is per streamed chunk, over whatever order the receivers
-arrive in.
+same options dict, but then the **receivers'** grouping is per streamed chunk, over whatever order the
+receivers arrive in. **The facets' side is formed once per call** (2026-09-26):
+`BodyCulling.prepared(bodies, sources)` (default: itself) returns, for `ShaftCulling`, a copy carrying
+`sources=_Groups` — the facets' curve order and every body's clearance summary of every cluster at
+every level, formed by `_Groups.of` — and `streamed_fluence_rate` calls it beside
+`self_occlusion.prepared`, through `culling_or_default` (the one home of "unset means
+`ShaftCulling()`", also used by `_unchecked_visibility`). `_Groups` is a frozen `eq=False` dataclass of
+host arrays, not a pytree, like `TriangleGrid`, so it rides through the chunk's custom VJP untouched.
+⚠️ **A prepared strategy refuses other sources or other bodies** (`_Groups.serves`, by VALUE: the
+sources by `array_equal`, the bodies leaf by leaf on the host after an identity shortcut — a body
+comes back from the custom VJP as a new object, so identity alone refused the stream's own bodies;
+`eqx.tree_equal` was avoided because it dispatches an eager device op per leaf, once per chunk). Measured
+on the analytic Sozzi-like scene (24,000 sampled receivers, 8,704 facets, 53 chunks, `NoOcclusion`,
+default ladder; jax 0.10.2, Linux x86_64, 4 cores, one process, three alternating passes): streamed
+field median **21.96 → 20.67 s** (~6%), fields bit-identical — in line with the ~14 s of 317 s the
+Sozzi whole-field breakdown (#564) charged to per-chunk facet clearance and summaries.
 
 **How.** Receivers and facet centroids are each ordered along a Morton curve (`spatial_order`, 10 bits
 an axis) and padded to a whole number of the coarsest groups by repeating the last point (`_Curve`;
