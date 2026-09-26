@@ -16,7 +16,8 @@ for are tested pair by pair, exactly as before.
 **The proof is conservative, so the mask is the same mask.** A body's
 :meth:`~aquaflux.solids.Body.clearance` says "clear" or "don't know", never "blocked", and
 "don't know" falls back to the exact per-pair test. What changes is the cost, never the answer --
-which is why this is selectable rather than the default, the same footing as the triangle grid.
+which is why it is the default wherever a mask is built, with every-pair testing kept as the
+reference it is checked against.
 The tempting shortcut -- one segment from a cluster's centre to a block's centre, taken as
 representative -- is **not** a proof: it lights up whatever small shadow falls between the two
 centres, silently.
@@ -40,6 +41,7 @@ import abc
 import itertools
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -115,7 +117,8 @@ class EveryPair(BodyCulling):
     Brute force over the bodies, which is correct practice at the count a scene has: a
     bounding-volume hierarchy over a handful of primitives is a single leaf node, and its
     traversal would cost more than the tests it saves. What it cannot exploit is coherence
-    between neighbouring *pairs*, which is what :class:`ShaftCulling` is for.
+    between neighbouring *pairs*, which is what :class:`ShaftCulling`, the default, is for. Pass
+    this strategy explicitly to build a mask without culling -- the same mask, for more tests.
     """
 
     def blocked(
@@ -311,7 +314,14 @@ class ShaftCulling(BodyCulling):
     What it saves is the share of pairs lying in vouched-for tiles, and that is a property of
     the scene: most of a chamber seen from inside its own convex region, none of a bent duct seen
     across its bend. A body that offers no features is tested pair by pair everywhere, at a
-    small cost for the grouping.
+    small cost for the grouping. This is the strategy a mask is built with when none is chosen,
+    at the default group sizes below.
+
+    **Under a trace it tests every pair instead.** The grouping and the certificates are host
+    work, so they need concrete positions; where a body's geometry or a point is traced -- a mask
+    built inside ``jax.grad`` of a body's radius, say -- the answer is handed to
+    :class:`EveryPair`, which gives the same mask and can be traced. Nothing is lost by it: the
+    mask is a step function of that geometry, so its derivative is zero either way.
 
     Attributes
     ----------
@@ -350,6 +360,11 @@ class ShaftCulling(BodyCulling):
         self, bodies, sources, near, receivers, pair_limit: int = DEFAULT_PAIR_LIMIT
     ) -> jnp.ndarray:
         """See :meth:`BodyCulling.blocked`."""
+        if any(
+            isinstance(leaf, jax.core.Tracer)
+            for leaf in jax.tree.leaves((bodies, sources, near, receivers))
+        ):
+            return EveryPair().blocked(bodies, sources, near, receivers, pair_limit)
         sources = np.asarray(sources, dtype=float)
         near = np.asarray(near, dtype=float)
         receivers = np.asarray(receivers, dtype=float)

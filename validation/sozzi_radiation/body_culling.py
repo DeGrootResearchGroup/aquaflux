@@ -4,7 +4,7 @@ The fluid is ``Outside(chamber, inlet, riser)``, three cylinders, as in ``primit
 and the lamp is the case's own STL (or the analytic 32 x 128 lamp when the case is absent). The
 mask is built two ways in **one process on one ray set**:
 
-- :class:`~aquaflux.radiation.EveryPair`: every body against every pair -- the shipped default;
+- :class:`~aquaflux.radiation.EveryPair`: every body against every pair -- the reference;
 - :class:`~aquaflux.radiation.ShaftCulling`, at several group sizes: receivers and facet
   centroids grouped along a space-filling curve, a tile certified clear wherever every point of
   it lies in one convex region, and only the remaining tiles tested pair by pair.
