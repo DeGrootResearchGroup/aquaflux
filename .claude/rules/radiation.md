@@ -29,7 +29,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `visibility.py` — the frozen shadow mask | **BUILT** |
 | `triangles.py` — watertight ray-triangle intersection | **BUILT** |
 | `self_occlusion.py` — the `SelfOcclusion` strategies: ray cast, silhouette clip, none | **BUILT** |
-| `silhouette.py` — the exact covered fraction of a source, and the conservative cone cull | **BUILT** |
+| `silhouette.py` — the exact covered fraction of a source, the conservative cone cull, and the exact second-stage rejection (`covers_nothing`) | **BUILT** |
 | `clipping.py` — convex clipping with filtered (decidable) sign tests, shared with `solid_angle.py` | **BUILT** |
 | `transfer.py` — the frozen facet-to-facet geometry | **BUILT** |
 | `quadrature.py` — symmetric triangle rules for the receiving facet | **BUILT** |
@@ -1134,7 +1134,7 @@ and all four were mutation-checked (seven one-line mutations, each red on its ow
   toward it.
 
 ⚠️ **FIXED BY DECLARATION: the silhouette strategy used to ignore a ONE-SIDED sheet from behind.**
-It counts only blockers facing the receiver (`facing` in `SilhouetteOcclusion._survivors`), which
+It counts only blockers facing the receiver (`facing` in `SilhouetteOcclusion._per_triangle`), which
 is exact on a closed, consistently wound surface — a blocked sight line enters it through exactly
 one front face — and back faces are excluded because they would double the count. A lone
 zero-thickness sheet, though, has the medium on both sides: seen from behind it hid nothing, and
@@ -2427,7 +2427,7 @@ taken of one measure against another.
 
 - **The clip is unchanged; only the integral differs.** A volume point has no front half-space, so
   `_in_view` pads the source (and the depth-cut blocker) with a repeated corner instead of clipping —
-  the same widths `4 … 8`, so one clip serves both. The tangent-plane cull in `_survivors` is skipped;
+  the same widths `4 … 8`, so one clip serves both. The tangent-plane cull in `_per_triangle` is skipped;
   the cone and source-plane culls stay.
 - **The unprojected integral is `solid_angle._signed_loop_area`**: a fan from the loop's first vertex,
   each term the `signed_solid_angle` closed form (`2·arctan2(a·(b×c), 1+a·b+a·c+b·c)`). Signed and
@@ -2472,12 +2472,15 @@ past 3σ + 1e-3), jax 0.10.2, CPU, x64, macOS arm64, 11 cores, run alone under `
 
   Linear in receivers (constant ms/receiver), **roughly linear in facets** rather than quadratic, because
   the cull's survival falls as the mesh refines (12% → 7% of `n²`). The per-receiver loop is a Python
-  loop over compiled calls, so the fixed per-receiver overhead is in these figures.
+  loop over compiled calls, so the fixed per-receiver overhead is in these figures. ⚠️ **All of this
+  table predates #527** (the second stage, packing across receivers, threads) and has not been re-run;
+  its survivors column counts the cone cull's survivors, and the harness's `_candidates` now also
+  drops sources that subtend nothing, so a re-run reads a little lower there.
   ⚠️ **Extrapolation, flagged as one:** at that rate a 100k-cell field against ~560 facets is ~40 min,
   and it grows with facet count; the ray mask is 15-30x cheaper. So selecting the silhouette now makes
   a mesh-scale model expensive — `receiver_occlusion=RayCastOcclusion()` is the escape, and the Sozzi
-  lamp (convex, `NoOcclusion`) is unaffected. Batching receivers per compiled call is the obvious lever
-  and is not built.
+  lamp (convex, `NoOcclusion`) is unaffected. Batching receivers per compiled call was the obvious lever
+  and is built since #527 (packed chunks); the extrapolation above predates it.
 
 ⚠️ **WHERE IT OVER-COUNTS, STATED EXACTLY: the angular overlap between two front-facing
 silhouettes.** Each blocker is clipped against the *source*, not against what is still unblocked,
@@ -2665,7 +2668,9 @@ whole build per gradient.
 Both strategies timed by `validation/radiation_mask_build_cost.py` (`silhouette_ladder`) on the same
 box-plus-sleeve reactor, same receivers (facet centroids), same run, median of warmed builds (three;
 two above 2000 facets). JAX 0.10.2, CPU, x64, macOS arm64, 11 cores, 19 GB, nothing else running,
-default `work_limit` and `work_chunk`. Two runs, and **the ratio moved because the denominator did**:
+default `work_limit` and the then-default `work_chunk` of 262,144, **before #527** (per-receiver padded
+chunks, no second stage, one thread — see the next section for what changed and by how much). Two runs,
+and **the ratio moved because the denominator did**:
 the ray mask's call shape was fixed between them (triangles first; see the `work_limit` section).
 
 | facets | ray, rays-first (09-20) | ray, triangles-first (09-21) | silhouette (09-20 / 09-21) | ratio now |
@@ -2700,7 +2705,101 @@ the whole build, both arms, at the size the answer is for, and re-time the ratio
 changes.**
 
 **Power-of-two chunk padding** (`triangles.padded_length`, called `_bucket` while it lived in
-`self_occlusion.py` alone): padding every chunk to `work_chunk` compiled one program
-and clipped a quarter of a million pairs for a receiver with sixty candidates; padding to the next
-power of two wastes at most half a chunk and compiles a couple of dozen shapes. It took the
-silhouette tests from 110 s to 19 s and is in every figure above.
+`self_occlusion.py` alone), as it stood for the table above: each receiver's pairs were clipped in
+their own chunks, and padding every chunk to `work_chunk` compiled one program and clipped a quarter
+of a million pairs for a receiver with sixty candidates, so chunks were padded to the next power of
+two instead. That took the silhouette tests from 110 s to 19 s — and still averaged 1.41x the real
+pairs at 832 facets (the issue's probe), because "at most half a chunk" is the worst case and the
+average is what costs. ⚠️ **Since #527 chunks are packed across receivers and only a build's last
+chunk is padded** (next section); `padded_length` now shapes the cull's blocks and that last chunk.
+
+### THE CLIP SEES ONLY PAIRS THAT MIGHT COVER SOMETHING, PACKED ACROSS RECEIVERS (#527, 2026-09-25)
+
+The clip was ~96% of the silhouette build, and **almost every pair it clipped covered nothing**: the
+cone cull bounds, it does not decide. Four changes, the answers unchanged to the chunk-shape rounding.
+
+**1. A second, exact stage before the clip: `silhouette.covers_nothing(view, to_source, to_blocker)`**,
+run on the cone cull's survivors. Four reasons, each a pair the clip would return zero for:
+
+- the source subtends nothing (`SourceView.subtends()`, the one home of the `_EXTENT_FLOOR` test, read by
+  `covered_by` too);
+- nothing of the blocker strictly in front of the source's plane (`_in_front` on `_depth_heights`, the
+  predicate `covered_by` zeroes a pair by — the cone cull's `beyond_source_plane` is a raw `< 0`, so a
+  blocker touching or coplanar with the source plane, i.e. every neighbour on the source's own wall,
+  got through it);
+- the blocker seen edge-on (`_orientation`, shared with `covered_by`'s winding);
+- a **face-plane separating axis** (`_outside_an_edge_plane`, both ways): all three corners of one
+  triangle strictly outside one inward edge plane of the other's direction cone, filtered heights,
+  strict `< 0`, skipped when that triangle is edge-on. The uncut triangles are used, which is
+  conservative: the directions the clip measures are a subset of them.
+
+The first three are `covered_by`'s own zeroing predicates, factored out so the two cannot drift; they
+can disagree only within rounding of their own thresholds, where coverage is a few parts in 1e12.
+
+**2. The source view is computed once per receiver** (in `_per_triangle`, for all `n` sources) and
+gathered per pair, rather than rebuilt inside every clip chunk.
+
+**3. Pairs are packed across receivers** (`_PairPipeline`): every pair carries its receiver row and its
+source's view, so pairs of many receivers fill chunks of one size (`work_chunk`, now **32,768**, down from
+262,144 — a chunk is now always full, so its size bounds memory and no longer trades against padding),
+and only the last chunk of a build is padded (to a power of two). Reject and clip chunks run on
+`threads` (default 4) Python threads, and the per-receiver cull runs `threads` receivers ahead; answers
+are scattered in arrival order, so **the thread count changes no bit** (pinned, `array_equal`).
+Surface and volume receivers go to separate pipelines, since they take different measures.
+
+**4. The cull is bounded in pairs** (`pair_limit`, default `DEFAULT_PAIR_LIMIT`): `_per_triangle` reduces
+the sources to those that subtend and the blockers to those that face, are far enough, and are not
+wholly behind the receiver's tangent plane — index lists in `O(n)` — and `_cull` runs over them in
+blocks of sources against all candidate blockers, both padded to powers of two, so no call forms more
+than `pair_limit` pairs. ⚠️ **This bounds the cull's memory, not its cost**: it is still
+`O(|sources| x |blockers|)` per receiver, host `np.nonzero` included. The clustered cull the issue
+sketched (bounding cones per spatial cluster, expanding surviving cluster pairs, compaction on device)
+is **not built**.
+
+**MEASURED** with `validation/radiation_mask_build_cost.py` (`silhouette_ladder` and the new
+`second_stage`; `RADIATION_SILHOUETTE_ONLY=1` runs just those), same box-plus-sleeve reactor, receivers at
+the facet centroids, median of three warm builds. ⚠️ **NOT the machine the table above was taken on**:
+a Linux cloud container, 4 cores, 16 GB, jax 0.10.2, CPU, x64, nothing else running, 2026-09-25;
+"before" is `main` at `0c3a78c` from a worktree, run between two "after" runs in one sitting. Read the
+ratios, not the seconds, against the 11-core table above.
+
+| facets | clip before | clip after (two runs) | speedup | ray mask (same runs) |
+|---|---|---|---|---|
+| 224 | 5.56 s | 1.22 / 1.33 s | 4.4x | 0.33-0.45 s |
+| 480 | 24.78 s | 4.01 / 4.00 s | 6.2x | 3.25-4.01 s |
+| 832 | 100.74 s | 11.78 / 11.95 s | 8.5x | 16.68-19.80 s |
+| 1,532 | 384.05 s | 45.38 / 45.17 s | **8.5x** | 109.45-111.26 s |
+
+- **On this machine the clip is now cheaper than the ray mask from 832 facets up** (0.41x at 1,532).
+  Do not carry that to the 11-core machine without re-running there: the ray mask's share of cores
+  differs between the two, and the old clip used only ~2 of the 4 cores here (load average ~2 through
+  the "before" run), which is part of what the threads recover.
+- **The second stage rejects 84.0 / 89.0 / 91.7 / 93.9% of the cone cull's survivors** at 224 / 480 /
+  832 / 1,532 facets (30-32 sampled receivers each; the cull's survivors already exclude sources that
+  subtend nothing), and **every rejected pair, clipped anyway, covers exactly 0.0** — worst pair and
+  worst per-source sum both `0.00e+00`. The share grows with the mesh, as the issue predicted.
+- **Answers**, every receiver at 224 / 364 / 480 facets and every 7th at 832, against `main`: max
+  |difference| 1.4e-13 per pair and per row, **no `overlapping` flag changed**.
+- **`work_chunk`**, at 832 facets, same container: 32,768 builds in 12.2 / 11.4 s against 16.5 / 16.1 s
+  at 262,144, and one compiled clip call's XLA temp is 57 MB against 452 MB (the reject call 24 against
+  189 MB), with `threads` of them in flight.
+
+Tests, each mutation-checked: `test_the_second_stage_never_rejects_a_pair_that_covers_something`
+(exhaustive over every pair of every receiver of the 80-facet reactor and every 13th of the 364-facet
+one, surface and volume, and that it rejects over half the cone cull's survivors — flipping the edge
+planes' orientation fails it), `test_the_second_stage_rejects_what_the_cones_cannot` and
+`test_a_source_behind_a_surface_receiver_is_rejected_for_subtending_nothing` (one fixture per reason,
+each kept by the cone cull and rejected by that reason **alone** — deleting any one reason fails its
+fixture), `test_a_blocker_sharing_only_an_edge_of_the_source_s_directions_is_kept` (a non-strict
+separation fails it), `test_how_the_pairs_are_scheduled_does_not_change_the_answer` (threads
+bit-identical, the cull's tiling to 1e-12, surface and volume receivers in one build) and
+`test_the_cull_forms_no_more_pairs_per_call_than_its_limit`. The existing chunk-size test catches a
+dropped remainder; untrimmed cull padding fails the scheduling test. ⚠️ **The first fixture for "a
+source that subtends nothing" was a source in the receiver's own plane, and deleting the subtends
+clause left it green**: the source's plane then passes through the receiver, its oriented normal is
+the zero vector, and the depth test rejects the pair too. The fixture that isolates the reason is a
+source wholly behind a surface receiver with a blocker straddling the tangent plane. **Dismissed**:
+dropping the edge-on guard inside the separating test changes no answer — a triangle seen edge-on is a
+blocker `covers_nothing` already rejects, or a source that subtends nothing — and it stays because it
+is what keeps the predicate honest on its own.
+

@@ -32,8 +32,11 @@ from aquaflux.radiation.self_occlusion import (
 )
 from aquaflux.radiation.silhouette import (
     angular_cone,
+    covered_by,
     covered_fraction,
+    covers_nothing,
     may_occlude,
+    source_view,
 )
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.visibility import build_visibility
@@ -233,6 +236,70 @@ def test_the_cull_does_reject_most_of_what_it_sees():
         ]
     )
     assert kept < 0.5, f"the cull keeps {100 * kept:.0f}% of blockers and is not culling"
+
+
+#: One pair per reason the second stage rejects on, each built so that the cone cull KEEPS it --
+#: a rejection only the second stage can make -- and so that the clip gives an exact zero.
+SECOND_STAGE_REJECTS = {
+    # A neighbour on the source's own flat wall, sharing an edge: the cull's raw-sign plane test
+    # keeps it, because its heights above the source's plane are exactly zero, not negative.
+    "a blocker in the source's own plane": (
+        SOURCE,
+        np.array([[1.0, -1.0, 4.0], [0.0, 1.5, 4.0], [2.0, 1.5, 4.0]]),
+    ),
+    # In a plane through the receiver, so seen exactly edge-on, and squarely across the source.
+    "a blocker seen edge-on": (
+        SOURCE,
+        np.array([[0.0, -1.0, 1.0], [0.0, 1.0, 1.0], [0.0, 0.0, 3.0]]),
+    ),
+    # Just beyond one edge of the source in direction, but inside the source's bounding cap: the
+    # cones overlap, and only the source's edge plane separates the two.
+    "a face plane that separates them": (
+        SOURCE,
+        0.5 * np.array([[0.65, 0.35, 4.0], [0.9, 0.0, 4.0], [0.75, 0.5, 4.0]]),
+    ),
+}
+
+
+@pytest.mark.parametrize("name", SECOND_STAGE_REJECTS)
+@pytest.mark.parametrize("normal", [NORMAL, None], ids=["on a surface", "in the volume"])
+def test_the_second_stage_rejects_what_the_cones_cannot(name, normal):
+    """Three of the four reasons, on a pair the cone cull lets through and the clip zeroes."""
+    source, blocker = SECOND_STAGE_REJECTS[name]
+    assert bool(may_occlude(RECEIVER, normal, source, blocker)), "the cull already rejects this"
+    assert float(covered_fraction(RECEIVER, normal, source, blocker)[0]) == 0.0
+    view = source_view(RECEIVER, normal, source)
+    assert bool(covers_nothing(view, source - RECEIVER, blocker - RECEIVER))
+
+
+def test_a_source_behind_a_surface_receiver_is_rejected_for_subtending_nothing():
+    """The first reason, alone: a surface receiver sees nothing behind its own tangent plane.
+
+    The source lies wholly behind the receiver, so its projected solid angle is zero; the
+    blocker straddles the receiver's plane, so the cone cull keeps it, stands in front of the
+    source, is not edge-on, and shares directions with it -- so no other reason rejects the pair.
+    Surface only: a point in the volume faces every way, and a source subtends nothing from one
+    only when the point is in the source's own plane, which the depth test already rejects.
+    """
+    source = SOURCE * np.array([1.0, 1.0, -1.0])
+    blocker = np.array([[-0.4, -3.0, -2.0], [0.4, -3.0, -2.0], [0.0, 3.0, 1.0]])
+    assert bool(may_occlude(RECEIVER, NORMAL, source, blocker)), "the cull already rejects this"
+    assert float(covered_fraction(RECEIVER, NORMAL, source, blocker)[0]) == 0.0
+    view = source_view(RECEIVER, NORMAL, source)
+    assert bool(covers_nothing(view, source - RECEIVER, blocker - RECEIVER))
+
+
+def test_a_blocker_sharing_only_an_edge_of_the_source_s_directions_is_kept():
+    """The separating test is strict: corners ON an edge plane never separate.
+
+    A blocker whose directions touch the source's along a shared edge and lie beyond it
+    otherwise covers nothing either -- but "touching" is exactly the degenerate configuration a
+    rounding could tip, so it is left for the clip, which decides it with filtered signs.
+    """
+    touching = np.array([[1.0, -1.0, 4.0], [0.0, 1.5, 4.0], [2.0, 1.5, 4.0]]) * 0.5
+    view = source_view(RECEIVER, NORMAL, SOURCE)
+    assert not bool(covers_nothing(view, SOURCE - RECEIVER, touching - RECEIVER))
+    assert float(covered_fraction(RECEIVER, NORMAL, SOURCE, touching)[0]) < 1e-12
 
 
 def _reactor(divisions=2, sectors=8):
@@ -516,3 +583,116 @@ def test_the_work_chunk_does_not_change_the_answer():
     ]
     assert np.max(np.abs(answers[0] - answers[1])) < 1e-9
     assert np.max(np.abs(answers[0] - answers[2])) < 1e-9
+
+
+@jax.jit
+def _every_pair(receiver, receiver_normal, vertices):
+    """For one receiver and every (source, blocker) pair: the clip, both culls' verdicts."""
+    n = vertices.shape[0]
+    to = vertices - receiver
+    view = jax.tree.map(
+        lambda x: jnp.broadcast_to(x[:, None], (n, n, *x.shape[1:])),
+        source_view(receiver, receiver_normal, vertices),
+    )
+    to_source = jnp.broadcast_to(to[:, None], (n, n, 3, 3))
+    to_blocker = jnp.broadcast_to(to[None, :], (n, n, 3, 3))
+    covered, _ = covered_by(view, receiver_normal, to_blocker)
+    rejected = covers_nothing(view, to_source, to_blocker)
+    kept = may_occlude(receiver, receiver_normal, vertices[:, None, :, :], vertices[None, :, :, :])
+    return covered, rejected, kept
+
+
+@pytest.mark.parametrize(
+    "reactor, stride",
+    [({}, 1), (FINE_REACTOR, 13)],
+    ids=["80 facets, every receiver", "364 facets, every 13th receiver"],
+)
+@pytest.mark.parametrize("kind", ["surface", "volume"])
+def test_the_second_stage_never_rejects_a_pair_that_covers_something(reactor, stride, kind):
+    """The second stage's one invariant, swept exhaustively, as the cone cull's is above.
+
+    Every (source, blocker) pair of every receiver swept, with the second stage's verdict set
+    against what the clip actually finds. A pair it rejects must cover nothing -- to the floor
+    below which the clip itself does not count a blocker as contributing -- and it must reject
+    most of what the cone cull keeps, or it is conservative for free and buys nothing.
+
+    Both reactors, because degenerate configurations need a fine enough mesh to appear: the
+    364-facet one is where the clip's sign filters were each shown to be load-bearing. Both
+    kinds of receiver, because a volume receiver's source is not clipped to a half-space.
+    """
+    surfaces = _reactor(**reactor)
+    vertices = jnp.asarray(surfaces.vertices)
+    centroid = np.asarray(surfaces.centroid)
+    normal = np.asarray(surfaces.normal)
+    n = surfaces.n_facets
+    if kind == "surface":
+        receivers = [(centroid[r], normal[r], r) for r in range(0, n, stride)]
+    else:
+        receivers = [(point, None, -1) for point in VOLUME_POINTS]
+
+    wrongly, rejected_of_kept, kept_total = 0.0, 0, 0
+    for point, facing, own in receivers:
+        covered, rejected, kept = (np.asarray(x) for x in _every_pair(point, facing, vertices))
+        legal = ~np.eye(n, dtype=bool)
+        if own >= 0:
+            legal[own, :] = legal[:, own] = False
+        wrongly = max(wrongly, float(np.max(np.where(rejected & legal, covered, 0.0))))
+        rejected_of_kept += int(np.sum(rejected & kept & legal))
+        kept_total += int(np.sum(kept & legal))
+    assert wrongly <= 1e-12, f"the second stage rejected a pair covering {wrongly:.3g}"
+    assert rejected_of_kept > 0.5 * kept_total, (
+        f"it rejects only {rejected_of_kept} of the cone cull's {kept_total} survivors"
+    )
+
+
+def test_how_the_pairs_are_scheduled_does_not_change_the_answer():
+    """Threads, chunk packing and the cull's tiling bound cost; none of them moves a number.
+
+    The thread count must not change a single bit: every chunk is the same program on the same
+    pairs, and the answers are summed in the order the pairs arrived. The cull's tiling changes
+    only which compiled shape evaluates each pair's elementwise test, so it is held to a
+    rounding. Mixed surface and volume receivers put both pipelines in one build.
+    """
+    surfaces = _reactor()
+    points = np.concatenate([np.asarray(surfaces.centroid), VOLUME_POINTS])
+    facets = np.concatenate([np.arange(surfaces.n_facets), np.full(len(VOLUME_POINTS), -1)])
+
+    def hidden(strategy):
+        mask = build_visibility(
+            (), surfaces, jnp.asarray(points), receiver_facet=facets, self_occlusion=strategy
+        )
+        return np.asarray(mask.hidden_by_geometry), np.asarray(mask.overlapping)
+
+    base, base_overlap = hidden(SilhouetteOcclusion(work_chunk=97, threads=4))
+    serial, serial_overlap = hidden(SilhouetteOcclusion(work_chunk=97, threads=1))
+    assert np.array_equal(base, serial) and np.array_equal(base_overlap, serial_overlap)
+    tiled, tiled_overlap = hidden(SilhouetteOcclusion(work_chunk=97, pair_limit=64))
+    assert np.max(np.abs(base - tiled)) < 1e-12
+    assert np.array_equal(base_overlap, tiled_overlap)
+    assert base.max() > 0.5, "the fixture has moved: nothing is hidden, so nothing is compared"
+
+
+def test_the_cull_forms_no_more_pairs_per_call_than_its_limit(monkeypatch):
+    """The per-receiver cull is bounded in pairs, like every receiver-by-facet pass here.
+
+    It used to form a dense ``n x n`` mask per receiver whatever the facet count -- hundreds of
+    megabytes a receiver on a fine surface, with nothing to bound it.
+    """
+    calls = []
+    cull = SilhouetteOcclusion._cull
+
+    def watched(receiver, vertices, cone, view, source, blocker):
+        calls.append(len(source) * len(blocker))
+        return cull(receiver, vertices, cone, view, source, blocker)
+
+    monkeypatch.setattr(SilhouetteOcclusion, "_cull", staticmethod(watched))
+    surfaces = _reactor()
+    build_visibility(
+        (),
+        surfaces,
+        surfaces.centroid,
+        receiver_facet=np.arange(surfaces.n_facets),
+        self_occlusion=SilhouetteOcclusion(pair_limit=256),
+    )
+    assert max(calls) <= 256
+    assert len(calls) > surfaces.n_facets, "every receiver's cull fitted one call: nothing tiled"
