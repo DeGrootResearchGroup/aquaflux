@@ -194,10 +194,10 @@ class RayCastOcclusion(SelfOcclusion):
         of the intersection test at a time; with one, the walk needs every ray's endpoints and
         exclusions for the whole pass.
     work_limit : int
-        Ray-by-triangle entries per pass, which is what bounds the intersection test's memory
-        and, through that, its speed. It bounds the grid's passes too: a step of the walk tests
-        every live ray against everything its voxel holds, which without a bound is one array of
-        every pair in that step.
+        Ray-by-triangle entries per compiled call of the every-triangle test, which is what
+        bounds that test's memory and, through that, its speed. The grid walk forms no such
+        entries -- it walks each ray to its first hit in a compiled loop -- so it does not read
+        this.
     grid : bool or int or tuple of int or TriangleGrid
         Cull each ray's candidates with a uniform grid over the triangles. ``False`` (the
         default) tests everything; ``True`` sizes the grid from the triangle count; an integer
@@ -246,14 +246,13 @@ class RayCastOcclusion(SelfOcclusion):
                 continue
             on_this_pass = None if on_facet is None else on_facet[start : start + per_pass]
             if grid is not None:
-                # The grid walk is host code that steps every ray, so it needs every ray's
-                # endpoints at once; the brute-force test below forms them a chunk at a time.
+                # The grid walk takes every ray of the pass at once; the brute-force test below
+                # forms them a chunk at a time.
                 hit = grid.blocks(
                     centroid[source],
                     receivers[row],
                     near[source],
                     exclude=_exclusions(source, row, on_this_pass),
-                    work_limit=self.work_limit,
                 )
             else:
                 hit = pairs_are_cut(

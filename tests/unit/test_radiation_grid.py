@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
-
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -11,18 +9,6 @@ from aquaflux.radiation.grid import TriangleGrid
 from aquaflux.radiation.triangles import segment_is_cut
 
 from tests.unit.radiation_references import closed_drum
-
-_HAS_NUMBA = importlib.util.find_spec("numba") is not None
-
-#: Both ways of walking a segment through the grid. They must give the same answers, so every
-#: contract test below runs on each; the compiled one needs Numba, which the ``test`` extra installs.
-WALKS = [
-    "array",
-    pytest.param(
-        "compiled",
-        marks=pytest.mark.skipif(not _HAS_NUMBA, reason="the compiled walk needs Numba"),
-    ),
-]
 
 
 def scattered_triangles(count: int, rng, *, scale: float = 0.25) -> np.ndarray:
@@ -58,9 +44,8 @@ def brute(origin, target, vertices, near, exclude=None) -> np.ndarray:
     )
 
 
-@pytest.mark.parametrize("walk", WALKS)
 @pytest.mark.parametrize("resolution", [None, 1, 3, 16, (2, 7, 5)])
-def test_the_grid_answers_exactly_what_testing_every_triangle_answers(resolution, walk):
+def test_the_grid_answers_exactly_what_testing_every_triangle_answers(resolution):
     """The whole contract. A grid decides what is worth testing, never what counts as a hit, so
     any disagreement with the unaccelerated test is a defect however small -- and the ones a
     walk gets wrong are systematic: a triangle in a voxel the walk skips is missed on every ray
@@ -73,14 +58,13 @@ def test_the_grid_answers_exactly_what_testing_every_triangle_answers(resolution
     origin, target = rays_through(3000, rng)
     near = np.zeros(len(origin))
     grid = TriangleGrid.build(vertices, resolution=resolution)
-    found = grid.blocks(origin, target, near, walk=walk)
+    found = grid.blocks(origin, target, near)
     expected = brute(origin, target, vertices, near)
     assert 0.2 < expected.mean() < 0.9, f"fixture is one-sided: {expected.mean()}"
     np.testing.assert_array_equal(found, expected)
 
 
-@pytest.mark.parametrize("walk", WALKS)
-def test_the_grid_honours_the_exclusions_and_the_near_margin(walk):
+def test_the_grid_honours_the_exclusions_and_the_near_margin():
     """Both ends of the distance window, since the grid re-tests them on its own candidates.
 
     A ray leaving a triangle's own plane must ignore that triangle, and one aimed at a point on
@@ -95,13 +79,12 @@ def test_the_grid_honours_the_exclusions_and_the_near_margin(walk):
     exclude = np.stack([np.zeros(len(origin), dtype=int), np.arange(len(origin))], axis=1)
     grid = TriangleGrid.build(vertices)
     np.testing.assert_array_equal(
-        grid.blocks(origin, target, near, exclude=exclude, walk=walk),
+        grid.blocks(origin, target, near, exclude=exclude),
         brute(origin, target, vertices, near, exclude),
     )
 
 
-@pytest.mark.parametrize("walk", WALKS)
-def test_a_segment_that_never_enters_the_grid_is_not_blocked(walk):
+def test_a_segment_that_never_enters_the_grid_is_not_blocked():
     """Cheap and common: a probe out beyond the vessel, or a lamp whose box the cell misses.
 
     Answered without walking, so it must be answered correctly without walking.
@@ -110,11 +93,10 @@ def test_a_segment_that_never_enters_the_grid_is_not_blocked(walk):
     grid = TriangleGrid.build(scattered_triangles(50, rng))
     origin = np.array([[-5.0, -5.0, -5.0], [3.0, 3.0, 3.0]])
     target = np.array([[-4.0, -5.0, -5.0], [4.0, 3.0, 3.0]])
-    assert not grid.blocks(origin, target, np.zeros(2), walk=walk).any()
+    assert not grid.blocks(origin, target, np.zeros(2)).any()
 
 
-@pytest.mark.parametrize("walk", WALKS)
-def test_no_ray_escapes_a_closed_body_through_the_grid(walk):
+def test_no_ray_escapes_a_closed_body_through_the_grid():
     """The property the shadow mask exists for, on geometry whose facets meet edge to edge:
     every segment from inside a closed drum to a point outside it is blocked. A grid that
     registered a triangle in too few voxels leaks exactly here, and a leak is a bright spot in
@@ -126,7 +108,7 @@ def test_no_ray_escapes_a_closed_body_through_the_grid(walk):
     outside = 4.0 * rng.normal(size=(400, 3))
     outside /= np.linalg.norm(outside, axis=1, keepdims=True) / 4.0
     grid = TriangleGrid.build(drum)
-    assert grid.blocks(inside, outside, np.zeros(len(inside)), walk=walk).all()
+    assert grid.blocks(inside, outside, np.zeros(len(inside))).all()
 
 
 def test_the_default_resolution_follows_the_triangle_count_and_the_shape_of_the_box():
@@ -153,8 +135,7 @@ def test_a_grid_needs_triangles_and_a_positive_resolution():
         TriangleGrid.build(scattered_triangles(4, rng), resolution=0)
 
 
-@pytest.mark.parametrize("walk", WALKS)
-def test_the_near_margin_is_read_in_LENGTH_units_not_as_a_share_of_the_segment(walk):
+def test_the_near_margin_is_read_in_LENGTH_units_not_as_a_share_of_the_segment():
     """``min_distance`` is a length, as :func:`segment_is_cut` takes it, and the grid must read
     it the same way -- it divides by the segment's length before comparing.
 
@@ -175,29 +156,11 @@ def test_the_near_margin_is_read_in_LENGTH_units_not_as_a_share_of_the_segment(w
     origin = np.zeros((2, 3))
     target = np.tile([10.0, 0.0, 0.0], (2, 1))
     near = np.array([3.0, 7.0])
-    found = TriangleGrid.build(vertices).blocks(origin, target, near, walk=walk)
+    found = TriangleGrid.build(vertices).blocks(origin, target, near)
     # Pinned against the geometry itself, not only against the unaccelerated path, so the two
     # cannot be wrong together.
     assert found.tolist() == [True, False]
     np.testing.assert_array_equal(found, brute(origin, target, vertices, near))
-
-
-def test_the_work_limit_bounds_the_pairs_it_holds_without_changing_the_answers():
-    """A step tests every live ray against everything its voxel holds, so the pairs of one step
-    are unbounded unless something bounds them -- and a coarse grid over many rays is exactly
-    where that bites: the first attempt to walk a reactor's wall was killed for memory, not
-    slow. Splitting a step into groups must be invisible in the answers, so the same walk is run
-    at limits far below one step's pairs and compared with the unsplit one.
-    """
-    rng = np.random.default_rng(13)
-    vertices = scattered_triangles(300, rng)
-    origin, target = rays_through(400, rng)
-    near = np.zeros(len(origin))
-    grid = TriangleGrid.build(vertices, resolution=4)
-    whole = grid.blocks(origin, target, near)
-    assert 0.2 < whole.mean() < 0.9, f"fixture is one-sided: {whole.mean()}"
-    for limit in (1, 17, 500):
-        np.testing.assert_array_equal(grid.blocks(origin, target, near, work_limit=limit), whole)
 
 
 def test_the_default_resolution_is_sized_by_the_TRIANGLES_AREA_not_the_boxs_volume():
@@ -223,34 +186,7 @@ def test_the_default_resolution_is_sized_by_the_TRIANGLES_AREA_not_the_boxs_volu
     assert occupied[occupied > 0].mean() < 40.0, occupied[occupied > 0].mean()
 
 
-def test_calls_with_different_ray_counts_share_their_compiled_programs(monkeypatch):
-    """A ray-cast pass hands the grid only its facing pairs, so no two passes need have the same
-    ray count. The rays reach the kernel padded to a power of two, like the candidate pairs, so a
-    stream of such calls compiles a handful of programs rather than a set of its own per call."""
-    from aquaflux.radiation import grid as grid_module
-
-    shapes = []
-    real = grid_module._indexed_pair_is_cut
-
-    def watched(rays, ray, triangle):
-        shapes.append(rays.origin.shape[0])
-        return real(rays, ray, triangle)
-
-    monkeypatch.setattr(grid_module, "_indexed_pair_is_cut", watched)
-    rng = np.random.default_rng(13)
-    vertices = scattered_triangles(60, rng)
-    grid = TriangleGrid.build(vertices, resolution=2)
-    origin, target = rays_through(700, rng)
-    near = np.zeros(len(origin))
-    for count in (520, 555, 590):
-        found = grid.blocks(origin[:count], target[:count], near[:count])
-        expected = brute(origin[:count], target[:count], vertices, near[:count])
-        np.testing.assert_array_equal(found, expected)
-    assert set(shapes) == {1024}, sorted(set(shapes))
-
-
-@pytest.mark.parametrize("walk", WALKS)
-def test_no_ray_aimed_through_an_edge_or_a_vertex_escapes_a_closed_body(walk):
+def test_no_ray_aimed_through_an_edge_or_a_vertex_escapes_a_closed_body():
     """The watertight test's own fixture, walked: rays from inside a closed drum aimed exactly at
     every vertex and every edge midpoint, carried on well past the wall.
 
@@ -266,41 +202,10 @@ def test_no_ray_aimed_through_an_edge_or_a_vertex_escapes_a_closed_body(walk):
     origin = np.tile([0.1, -0.2, 0.05], (len(aims), 1))
     target = origin + 3.0 * (aims - origin)
     grid = TriangleGrid.build(drum)
-    assert grid.blocks(origin, target, np.zeros(len(aims)), walk=walk).all()
+    assert grid.blocks(origin, target, np.zeros(len(aims))).all()
 
 
-def test_an_unknown_walk_is_refused():
-    grid = TriangleGrid.build(scattered_triangles(4, np.random.default_rng(1)))
-    with pytest.raises(ValueError, match="walk must be 'array' or 'compiled'"):
-        grid.blocks(np.zeros((1, 3)), np.ones((1, 3)), np.zeros(1), walk="gpu")
-
-
-def test_the_compiled_walk_without_numba_says_how_to_get_it(monkeypatch):
-    """Numba is optional, so its absence must name the extra that brings it rather than surface as
-    a bare import error from deep inside a mask build."""
-    import builtins
-
-    from aquaflux.radiation import grid_walk
-
-    real_import = builtins.__import__
-
-    def without_numba(name, *args, **kwargs):
-        if name == "numba":
-            raise ImportError("No module named 'numba'")
-        return real_import(name, *args, **kwargs)
-
-    grid_walk._kernel.cache_clear()
-    monkeypatch.setattr(builtins, "__import__", without_numba)
-    grid = TriangleGrid.build(scattered_triangles(4, np.random.default_rng(1)))
-    try:
-        with pytest.raises(ImportError, match=r"aquaflux\[numba\]"):
-            grid.blocks(np.zeros((1, 3)) - 1.0, np.ones((1, 3)) * 2.0, np.zeros(1), walk="compiled")
-    finally:
-        grid_walk._kernel.cache_clear()
-
-
-@pytest.mark.parametrize("walk", WALKS)
-def test_a_segment_ending_in_a_triangle_s_plane_is_blocked_by_it(walk):
+def test_a_segment_ending_in_a_triangle_s_plane_is_blocked_by_it():
     """The far end of the window is inclusive: a segment aimed at a point on a triangle it was not
     told to ignore ends in that triangle, and is blocked by it. This is why a ray between two facet
     centroids must exclude its target facet -- without the exclusion every such pair reads blocked --
@@ -314,13 +219,12 @@ def test_a_segment_ending_in_a_triangle_s_plane_is_blocked_by_it(walk):
     )
     origin = np.zeros((2, 3))
     target = np.array([[5.0, 0.0, 0.0], [4.0, 0.0, 0.0]])  # on the first triangle, and short of it
-    found = TriangleGrid.build(vertices).blocks(origin, target, np.zeros(2), walk=walk)
+    found = TriangleGrid.build(vertices).blocks(origin, target, np.zeros(2))
     assert found.tolist() == [True, False]
     np.testing.assert_array_equal(found, brute(origin, target, vertices, np.zeros(2)))
 
 
-@pytest.mark.parametrize("walk", WALKS)
-def test_a_hit_exactly_at_the_near_margin_does_not_count(walk):
+def test_a_hit_exactly_at_the_near_margin_does_not_count():
     """The near end of the window is exclusive. Axis-aligned, so the hit distance is exact: a
     triangle across the segment at 5 of its 10 units is at exactly half of it, and a margin of
     exactly 5 must pass it by, while a margin a hair short must not.
@@ -334,6 +238,6 @@ def test_a_hit_exactly_at_the_near_margin_does_not_count(walk):
     origin = np.zeros((2, 3))
     target = np.tile([10.0, 0.0, 0.0], (2, 1))
     near = np.array([5.0, np.nextafter(5.0, 0.0)])
-    found = TriangleGrid.build(vertices).blocks(origin, target, near, walk=walk)
+    found = TriangleGrid.build(vertices).blocks(origin, target, near)
     assert found.tolist() == [False, True]
     np.testing.assert_array_equal(found, brute(origin, target, vertices, near))

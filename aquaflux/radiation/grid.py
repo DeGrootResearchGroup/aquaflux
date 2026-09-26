@@ -12,21 +12,19 @@ voxels hold, stopping at the first triangle that blocks it. **Measured on that r
 triangles in the average occupied voxel and a segment enters 65 of them, so it tests **52
 triangles instead of 53,500** -- and, stopping early, reaches a blocker after about **5**.
 
-⚠️ **This is deliberately NOT a traced kernel, and that is the whole reason it works.** The
+⚠️ **The walk is deliberately NOT a traced kernel, and that is the whole reason it works.** The
 mask is frozen: it is built once from geometry alone, so none of the constraints that shape the
 rest of this package apply to it. A traced walk would need a static trip count and a static
 number of triangles per voxel, and would therefore pay the *worst* case on every ray -- 183
-steps times 36 triangles, **6,588 tests a ray**, worse than the brute force it replaces. The
-walk here is ordinary host code over the rays still in flight, which shrinks as they hit
-something or run out; only the intersection test itself is traced, on the compacted
-(ray, triangle) pairs, through the same predicate the unaccelerated path uses.
+steps times 36 triangles, **6,588 tests a ray**, worse than the brute force it replaces.
 
-**Two walks, one set of answers.** That array walk pays for every step in whole-array operations
-over every ray still in flight -- about 150-180 ns per ray per voxel step, profiled on a
-51,200-triangle cylindrical wall, which is most of its time, and which is why a finer grid makes it
-slower: fewer triangles tested, more steps taken. ``walk="compiled"``
-(:mod:`~aquaflux.radiation.grid_walk`, which needs Numba) walks each ray to its end in one compiled
-loop instead, visiting the same voxels and testing the same triangles in the same order.
+⚠️ **Nor is it array code, which prices every step instead.** A walk written as whole-array
+passes over the rays still in flight -- which this one was -- spends about 150-180 ns per ray per
+voxel step on that bookkeeping (profiled on a 51,200-triangle cylindrical wall), most of its
+time, so refining its grid made it *slower*: fewer triangles tested, more steps taken. Here each
+ray is walked to its first hit by one compiled loop (:mod:`~aquaflux.radiation.grid_walk`), with
+its state in registers and nothing formed per step, which measured 17-37x faster on the same
+rays with identical answers.
 
 **What it does not do.** It does not reduce the number of *rays*, which at mesh scale is the
 binding cost: 1.6M cells against 7,516 facets is 1.2e10 segments however cheaply each is
@@ -38,12 +36,9 @@ from __future__ import annotations
 
 import dataclasses
 
-import equinox as eqx
-import jax
-import jax.numpy as jnp
 import numpy as np
 
-from aquaflux.radiation.triangles import _pair_is_cut, padded_length
+from aquaflux.radiation.grid_walk import walk_to_first_hit
 
 __all__ = ["TriangleGrid"]
 
@@ -208,20 +203,14 @@ class TriangleGrid:
         )
         return held > 0
 
-    def blocks(
-        self,
-        origin,
-        target,
-        min_distance,
-        *,
-        exclude=None,
-        work_limit: int = 4_000_000,
-        walk: str = "array",
-    ) -> np.ndarray:
+    def blocks(self, origin, target, min_distance, *, exclude=None) -> np.ndarray:
         """Whether any triangle lies across each segment, testing only what the grid selects.
 
         The contract is :func:`~aquaflux.radiation.triangles.segment_is_cut`'s, and the answers
-        are the same: the grid decides what is *worth* testing, never what counts as a hit.
+        are the same: the grid decides what is *worth* testing, never what counts as a hit. Each
+        segment is walked to its first hit, or its end, by
+        :func:`~aquaflux.radiation.grid_walk.walk_to_first_hit`, so nothing the size of the rays
+        times the triangles a step visits is ever formed, and no work limit is needed.
 
         Parameters
         ----------
@@ -231,19 +220,6 @@ class TriangleGrid:
             How far from ``origin`` a hit must be before it counts, in length units.
         exclude : array_like of int, shape ``(n_rays,)`` or ``(n_rays, k)``, optional
             Triangles each ray ignores; ``-1`` excludes nothing.
-        work_limit : int, optional
-            Most (ray, triangle) pairs to hold at once, as
-            :func:`~aquaflux.radiation.triangles.segment_is_cut` bounds its own block. A step of
-            the walk tests every live ray against everything its voxel holds, so without a bound
-            a coarse grid over many rays builds one array of every pair in that step -- which is
-            how a grid runs a machine out of memory rather than saving it work. The compiled walk
-            forms no pairs and ignores it.
-        walk : {"array", "compiled"}, optional
-            How the segments are walked. ``"array"`` (the default) steps every ray still in
-            flight together, as whole-array operations, and tests each step's pairs in one traced
-            call. ``"compiled"`` walks each ray to its end in one compiled loop
-            (:mod:`~aquaflux.radiation.grid_walk`, which needs Numba), visiting the same voxels
-            and testing the same triangles, so the answers agree.
 
         Returns
         -------
@@ -261,145 +237,18 @@ class TriangleGrid:
         length = np.sqrt(np.sum(direction * direction, axis=-1))
         near = near / np.where(length == 0.0, 1.0, length)
         blocked = np.zeros(len(origin), dtype=bool)
-        if walk not in ("array", "compiled"):
-            msg = f"walk must be 'array' or 'compiled'; got {walk!r}"
-            raise ValueError(msg)
         alive, entry = _enters_grid(origin, direction, self.low, self.spacing, self.resolution)
-        if not np.any(alive):
-            return blocked
-        max_steps = int(self.resolution.sum()) + 3
-        if walk == "compiled":
-            from aquaflux.radiation.grid_walk import walk_to_first_hit
-
-            ray = np.flatnonzero(alive)
-            state = _walk_state(
-                origin[ray], direction[ray], entry[ray], self.low, self.spacing, self.resolution
-            )
-            return walk_to_first_hit(ray, *state, origin, direction, near, exclude, self, max_steps)
-        # Every ray's data and every triangle go to the kernel once per call; a step of the walk
-        # then sends only which ray meets which triangle, as two indices, and the kernel gathers
-        # the rest itself. Gathering them here instead copied about 150 bytes a candidate pair
-        # on the host, three times over, which was most of a walk's time.
-        # Padded to a power of two, like the pairs below, so calls with different ray counts
-        # share their compiled programs; no pair ever names a padding ray.
-        spare = padded_length(len(origin)) - len(origin)
-        rays = _Rays(
-            origin=jnp.asarray(_pad(origin, spare)),
-            direction=jnp.asarray(_pad(direction, spare)),
-            near=jnp.asarray(_pad(near, spare)),
-            exclude=jnp.asarray(_pad(exclude, spare)),
-            vertices=jnp.asarray(self.vertices),
-        )
-
         ray = np.flatnonzero(alive)
+        if len(ray) == 0:
+            return blocked
         voxel, until, step, delta = _walk_state(
             origin[ray], direction[ray], entry[ray], self.low, self.spacing, self.resolution
         )
-        for _ in range(max_steps):
-            if len(ray) == 0:
-                break
-            flat = (voxel[:, 0] * self.resolution[1] + voxel[:, 1]) * self.resolution[2] + voxel[
-                :, 2
-            ]
-            hit = self._test(ray, flat, rays, work_limit)
-            blocked[ray[hit]] = True
-            axis = np.argmin(until, axis=1)
-            rows = np.arange(len(ray))
-            leaving = until[rows, axis]
-            # Done when it hit something, when the next crossing is past the far end, or when
-            # the walk would leave the grid.
-            moved = voxel[rows, axis] + step[rows, axis]
-            keep = ~hit & (leaving <= 1.0) & (moved >= 0) & (moved < self.resolution[axis])
-            voxel[rows, axis] = moved
-            until[rows, axis] = leaving + delta[rows, axis]
-            ray, voxel, until, step, delta = (
-                ray[keep],
-                voxel[keep],
-                until[keep],
-                step[keep],
-                delta[keep],
-            )
-        return blocked
-
-    def _test(self, ray, flat, rays, work_limit) -> np.ndarray:
-        """Test each live ray against the triangles of the voxel it is in."""
-        first, last = self.starts[flat], self.starts[flat + 1]
-        held = last - first
-        busy = np.flatnonzero(held)
-        hit = np.zeros(len(ray), dtype=bool)
-        if len(busy) == 0:
-            return hit
-        counts = held[busy]
-        for start, stop in _work_groups(counts, work_limit):
-            group, repeats = busy[start:stop], counts[start:stop]
-            # Compressed-sparse-row expansion: one (ray, triangle) pair per triangle held by the
-            # voxel that ray is in, without a Python loop over the rays or the voxels.
-            opens = np.cumsum(repeats) - repeats
-            offsets = np.arange(repeats.sum()) - np.repeat(opens, repeats)
-            candidate = self.triangles[np.repeat(first[group], repeats) + offsets]
-            of_ray = np.repeat(ray[group], repeats)
-            # Padded to a power of two so a walk compiles a couple of dozen programs rather than
-            # one per step; the padding repeats a real pair and its answer is dropped.
-            pad = padded_length(len(candidate)) - len(candidate)
-            struck = np.asarray(
-                _indexed_pair_is_cut(
-                    rays,
-                    jnp.asarray(_pad(of_ray.astype(np.int32), pad)),
-                    jnp.asarray(_pad(candidate.astype(np.int32), pad)),
-                )
-            )[: len(candidate)]
-            # A ray's candidates are contiguous, in the order of its group, so each ray's answer
-            # is one reduction over its own run.
-            hit[group] |= np.logical_or.reduceat(struck, opens)
-        return hit
-
-
-class _Rays(eqx.Module):
-    """One call's rays and triangles, held by the kernel for the whole walk."""
-
-    origin: jnp.ndarray
-    direction: jnp.ndarray
-    near: jnp.ndarray
-    exclude: jnp.ndarray
-    vertices: jnp.ndarray
-
-
-@jax.jit
-def _indexed_pair_is_cut(rays: _Rays, ray, triangle):
-    """Whether each ray ``ray[k]`` meets triangle ``triangle[k]``, gathering both here."""
-    return _pair_is_cut(
-        rays.origin[ray],
-        rays.direction[ray],
-        rays.near[ray],
-        rays.vertices[triangle],
-        triangle,
-        rays.exclude[ray],
-    )
-
-
-def _work_groups(counts: np.ndarray, work_limit: int):
-    """Slices of a per-voxel triangle count whose pairs each fit ``work_limit``.
-
-    Yields ``(start, stop)`` index pairs. A single voxel holding more than the limit is its own
-    group rather than being dropped -- the limit bounds what is held at once where it can, and
-    a grid coarse enough to break it is the caller's to re-size.
-    """
-    total = int(counts.sum())
-    if total <= work_limit or len(counts) == 1:
-        yield 0, len(counts)
-        return
-    running = np.cumsum(counts)
-    start = 0
-    while start < len(counts):
-        taken = int(running[start - 1]) if start else 0
-        stop = max(int(np.searchsorted(running, taken + work_limit, side="right")), start + 1)
-        yield start, stop
-        start = stop
-
-
-def _pad(array: np.ndarray, pad: int) -> np.ndarray:
-    """Repeat the last entry ``pad`` times, so a traced call sees a shape it has compiled."""
-    return array if pad == 0 else np.concatenate([array, np.repeat(array[-1:], pad, axis=0)])
+        # A DDA visits at most nx + ny + nz - 2 voxels, so this bound is never what ends a walk.
+        max_steps = int(self.resolution.sum()) + 3
+        return walk_to_first_hit(
+            ray, voxel, until, step, delta, origin, direction, near, exclude, self, max_steps
+        )
 
 
 def _resolution(extent, area: float, n_triangles: int, resolution) -> np.ndarray:

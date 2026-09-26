@@ -42,6 +42,12 @@ dependencies = [
     "diffrax>=0.7",
     "numpy>=1.24",
     "scipy>=1.10",
+    # Numba: compiled host loops for work whose value is in what it SKIPS, which neither a traced
+    # JAX loop (static trip count, so every item pays the worst case) nor numpy passes (a whole-array
+    # pass per step over every item still in flight) can do cheaply. Its consumer is the triangle
+    # grid's walk (`aquaflux/radiation/grid_walk.py`), each ray walked to its first hit. 0.61 is the
+    # first release with wheels for Python 3.13.
+    "numba>=0.61",
     # filelock: the inter-process lock JAX's *bounded* persistent compilation cache takes
     # when evicting. It is a hard dependency rather than an optional one because of how its
     # absence presents: with a size bound set and filelock missing, every cache read and
@@ -76,8 +82,6 @@ test = [
     # carried here and those tests run there -- unlike `petsc`, whose absence from CI is a recorded
     # cost (tests/unit/test_optional_dependency_skips.py).
     "aquaflux[cad]",
-    # The compiled grid walk's tests need Numba; it has wheels for every interpreter CI runs.
-    "aquaflux[numba]",
 ]
 # `docs` is the Sphinx toolchain for the site under `docs/` — MyST Markdown pages,
 # the pydata theme, and the copy-button extension; autodoc imports the package
@@ -104,10 +108,6 @@ docs = [
 # installed beside `cadquery`, which brings the VTK build of the same module. Wheels exist for
 # CPython 3.11-3.14 on Linux, macOS and Windows, and none for 3.10, which is why the floor is 3.11.
 cad = ["cadquery-ocp-novtk==8.0.1.0.0"]
-# `numba` compiles the triangle grid's walk (`TriangleGrid.blocks(walk="compiled")`,
-# `aquaflux/radiation/grid_walk.py`): each segment walked to its first hit in one compiled loop rather
-# than as a numpy pass per voxel step over every ray. Imported only when that walk is asked for.
-numba = ["numba>=0.60"]
 # `petsc` (petsc4py) backs two coupled preconditioners. For the complete-LU
 # (`coupled_lu_continuation`) it is the optional fast backend — UMFPACK (SuiteSparse) factors the coupled
 # Jacobian roughly an order of magnitude faster than the threshold-ILU on a moderate 2D mesh; without it

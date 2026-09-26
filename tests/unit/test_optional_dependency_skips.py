@@ -172,10 +172,6 @@ CONDITIONALLY_SKIPPED: dict[str, str] = {
     "unit/test_lu_preconditioner.py": "the UMFPACK backend's refactor, when PETSc is absent",
     "unit/test_openfoam_fields.py": "one ordering case, when the generated grid is already ordered",
     "unit/test_partitioner.py": "the Scotch binding and command-line partitioners",
-    "unit/test_radiation_grid.py": (
-        "the compiled grid walk's arm of each contract test, when Numba is absent; CI installs it "
-        "through the `test` extra"
-    ),
     "unit/test_sibling_builders.py": "the tool is in the repository, not the installed package",
     "unit/test_validation_api.py": "a checkout carrying no validation cases",
 }

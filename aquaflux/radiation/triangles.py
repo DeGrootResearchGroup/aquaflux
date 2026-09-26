@@ -122,28 +122,16 @@ def padded_length(count: int) -> int:
 def _counts_as_hit(distance, meets, near, index, exclude):
     """Which of the hits a ray-triangle test found actually block the segment.
 
-    The geometry is in :func:`_watertight_hit`; this is the rest of the rule, shared by the
-    block kernel and the grid-culled one so the two cannot drift: a hit counts when it lies
+    The geometry is in :func:`_watertight_hit`; this is the rest of the rule: a hit counts when it lies
     **past** the origin's margin, **at or before** the far end (a segment ending exactly in a
     facet's plane is blocked by it, which is why the far end is inclusive), and on a triangle
     the ray was not told to ignore. Shapes broadcast, so ``index`` may be a block's column of
-    triangle indices or one index per pair.
+    triangle indices or one index per pair. The triangle grid's compiled walk
+    (:mod:`aquaflux.radiation.grid_walk`) carries its own copy of this rule and of the geometry,
+    since a compiled loop cannot call a traced function; the grid's tests hold the two equal.
     """
     hit = meets & (distance > near) & (distance <= 1.0)
     return hit & jnp.all(index[..., None] != exclude, axis=-1)
-
-
-@jax.jit
-def _pair_is_cut(origin, direction, near, vertices, index, exclude):
-    """Whether each ray meets the ONE triangle paired with it.
-
-    The grid-culled path tests a compacted list of (ray, triangle) pairs rather than every ray
-    against every triangle of a block, because with a grid each ray has its own candidates. The
-    predicate is the same one: :func:`_watertight_hit` for the geometry and
-    :func:`_counts_as_hit` for the window and the exclusions.
-    """
-    distance, meets = _watertight_hit(origin, direction, vertices)
-    return _counts_as_hit(distance, meets, near, index, exclude)
 
 
 @jax.jit
