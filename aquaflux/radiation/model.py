@@ -157,9 +157,11 @@ class RadiationSettings(eqx.Module):
         ray test for the volume beside the clip between facets, say, where a mesh's cells are
         too many to clip one by one.
     body_culling : BodyCulling or None
-        How the analytic bodies' layer of both masks is worked out. Unset, every body is tested
-        against every pair. Pass :class:`~aquaflux.radiation.culling.ShaftCulling` to decide
-        whole tiles of pairs a body can prove it misses -- the same masks, for fewer tests.
+        How the bodies' layer of both masks is worked out. Unset, whole tiles of pairs a body can
+        prove it misses are decided without a test
+        (:class:`~aquaflux.radiation.culling.ShaftCulling` at its default group sizes). Pass
+        :class:`~aquaflux.radiation.culling.EveryPair` to test every body against every pair --
+        the same masks, for more tests -- or a ``ShaftCulling`` with other group sizes.
     """
 
     receiver_quadrature: int | TriangleQuadrature | None = eqx.field(static=True, default=None)

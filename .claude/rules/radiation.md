@@ -27,7 +27,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `absorption.py` — `UniformAbsorption`, `VoxelAbsorption` | **BUILT** |
 | the solid bodies (`Body`, primitives, CSG, `Outside`) — **moved to `aquaflux/solids/`**, see `.claude/rules/solids.md` | **BUILT** |
 | `visibility.py` — the frozen shadow mask | **BUILT** |
-| `culling.py` — how the bodies' layer is decided: `EveryPair` (default) or `ShaftCulling` (tiles certified clear, refined coarse to fine, #554) | **BUILT** ("clear" certificates only; analytic and triangle bodies) |
+| `culling.py` — how the bodies' layer is decided: `ShaftCulling` (the default since 2026-09-26; tiles certified clear, refined coarse to fine, #554) or `EveryPair` (the reference) | **BUILT** ("clear" certificates only; analytic and triangle bodies) |
 | `triangle_body.py` — `TriangleBody`, a `Body` of triangles over a `TriangleGrid`, with `contains` decided per piece (#510) | **BUILT** |
 | `triangles.py` — watertight ray-triangle intersection | **BUILT** |
 | `self_occlusion.py` — the `SelfOcclusion` strategies: ray cast, silhouette clip, none | **BUILT** |
@@ -482,7 +482,9 @@ twice the hand-chunked 557 s, because `fluence_rate` also gathers the reflected 
 walls carries nothing (its own docstring already says so: reflectance is traced, so there is nothing
 to branch on). Solve: 3 restart cycles. ⚠️ Since #524 the two sets share one geometric pass
 (`summed_fluence_rate`), so the reflected set costs a weighted sum rather than a second gather; the
-1,170 s predates that and #522, and has not been re-measured on this case.
+1,170 s predates that and #522. **Re-measured 2026-09-26** (MESH SCALE under SHAFT CULLING below): the
+pre-speed-up code `99c472c` reproduces it at 1,138 s / 10.94 GB, main `e12f214` takes 472 s / 5.57 GB
+testing every pair and 314 s under the new default culling.
 
 ⚠️ **Peak memory footprint 11.15 GB, and it is the FIELD phase, not the build.** It was first
 recorded here as "8.5 GB of it is the transfer build", which was an inference from a separately
@@ -511,7 +513,8 @@ peak did not move** (11.15 → 11.07 GB). It is set by the streamed field phase 
 above), so this halves what a model *build* costs and not yet what a mesh-scale field costs. Measured with
 `validation/sozzi_radiation/transfer_build_peak.py` — `build_transfer` alone in its own process under
 `/usr/bin/time -l`, the water as the three hand-typed cylinders, `NoOcclusion()`, default
-`chunk_size` 256; jax 0.10.2, CPU, x64, macOS arm64, 11 cores.
+`chunk_size` 256, bodies tested by `EveryPair` (the default until 2026-09-26); jax 0.10.2, CPU, x64,
+macOS arm64, 11 cores.
 
 **Why the old one peaked at ~18 arrays.** ⚠️ **On this backend freed memory is not handed back**, so a
 build's peak footprint is the *running total* of everything it ever formed, not what is alive at the
@@ -637,10 +640,10 @@ receivers are, and it is kept as measured rather than re-quoted from a single co
   one.
 - **81.1% of pairs lie in one convex region** (81.0% chamber, 0.13% riser, 0% inlet — the lamp is
   in the chamber, so no facet is in the inlet). The 92.8% once recorded here was the truncated
-  population's. ⚠️ **The default test (`EveryPair`) does not skip those pairs**: it is
+  population's. ⚠️ **Testing every pair (`EveryPair`) does not skip those pairs**: it is
   one branch-free expression, so every pair pays the same handful of comparisons. What convexity
-  buys is that the handful is all there is. **`ShaftCulling` (#554, below) is what skips them** — a
-  whole tile at a time, from `Outside.clearance`.
+  buys is that the handful is all there is. **`ShaftCulling` (#554, below; the default since
+  2026-09-26) is what skips them** — a whole tile at a time, from `Outside.clearance`.
 
 ⚠️ **THAT SHARE IS A PROPERTY OF WHERE THE RECEIVERS ARE** — the cell-centre population the field
 is computed on, not a volume-uniform sample of the geometry, because the snapped mesh refines near
@@ -1902,15 +1905,24 @@ Culling facet receivers too fails an existing transfer test. **Dismissed**: drop
 label from the cull is inert — a point source's zero normal already gives it zero heights — and the
 label stays because a source's kind is read from its label, never inferred.
 
-## SHAFT CULLING: BUILT as `ShaftCulling` — tiles certified clear, off by default (#554, 2026-09-25)
+## SHAFT CULLING: BUILT as `ShaftCulling` — tiles certified clear, THE DEFAULT since 2026-09-26 (#554)
 
 `culling.py` holds the bodies' layer's strategy family, `BodyCulling.blocked(bodies, sources,
-near, receivers, pair_limit)`: **`EveryPair`** (the default, and the reference — the old
+near, receivers, pair_limit)`: **`EveryPair`** (the reference, and the default until 2026-09-26 — the old
 `visibility._blocked_by` loop, moved here with `_compiled_blocks`, now `_body_blocks` per body) and
 **`ShaftCulling(receiver_blocks=(32, 8, 2), source_clusters=(32, 8, 2))`** — coarse-to-fine
 group-size ladders since #554 phase B (default chosen by measurement, below); ⚠️ **there is no `receiver_block` / `source_cluster` any more**, and the
-first version's default was one level at 32 x 32. Selected by `build_visibility(...,
-body_culling=)` or `RadiationSettings(body_culling=)`, which feeds **both** masks a model builds (and
+first version's default was one level at 32 x 32. **An unset `body_culling` is `ShaftCulling()`**
+(the one line is `_unchecked_visibility`'s, so a built mask, a streamed chunk and both of a model's
+masks all get it; pinned by `test_an_unset_strategy_is_shaft_culling_for_a_built_mask_and_a_streamed_one`).
+⚠️ **Under a trace `ShaftCulling.blocked` hands off to `EveryPair`** (any leaf of bodies, sources,
+near or receivers a `jax.core.Tracer`): its grouping and certificates are numpy host work and raised
+`TracerArrayConversionError` on a mask built inside `jax.grad` of a body's radius — found by
+`test_the_gradient_with_respect_to_a_body_s_GEOMETRY_is_exactly_zero` when the default flipped, and
+pinned by it (red without the hand-off). Same mask, zero derivative either way; the model's masks are
+always built from concrete geometry, so the model path never takes the hand-off.
+Chosen by `build_visibility(..., body_culling=)` or `RadiationSettings(body_culling=)` — pass
+`EveryPair()` for the unculled reference — which feeds **both** masks a model builds (and
 survives `receiver_occlusion` overriding the self-occlusion half). Streamed masks get it through the
 same options dict, but then the grouping is per streamed chunk, over whatever order the receivers
 arrive in.
@@ -1960,13 +1972,25 @@ through `run_case.sh`, which needs `vm_stat`), 2026-09-25, uncommitted #554 tree
 - **The speed-up is close to its ceiling**: with 9.7% of pairs left to test, pure savings would be
   ~10.3x; 9.3x means the grouping, summaries and scatter cost ~10% of what remains. Group size barely
   matters between 16 and 128 — the certified share moves 89-91% — so the default was not tuned further.
-- ⚠️ **Expect less on the mesh's cell centres**: the snapped mesh refines towards the walls and the
-  lamp, which is where the uncertifiable pairs are, and the one-convex-region share there is 81.1%
-  against this population's ~91%. At 81% certified the ceiling is ~5x. **Not measured** — the case
-  mesh was not in this environment; re-run the harness where `work/case` exists before quoting a
-  mesh-scale figure.
+- ⚠️ **Less on the mesh's cell centres, as predicted** (the mesh refines towards the walls and the lamp,
+  where the uncertifiable pairs are; one-convex-region share 81.1% there against ~91% here). The
+  whole-field figure is below, under MESH SCALE; it times the field, not the mask alone.
 - The `EveryPair` rate here (4.9M pairs/s) is ~4x below the 20.7M recorded for the same test on the
   11-core machine; it is the within-run ratio that is the finding, not either rate.
+
+**MESH SCALE, and why it became the default (2026-09-26).** `validation/sozzi_radiation/
+model_at_mesh_scale.py` (its `SOZZI_CULLING` switch picks the arm), the public model on all 1,635,909
+cell centres, the case's 7,516-facet `lampWall.stl`, hand-typed `Outside(chamber, inlet, riser)` (no
+CAD kernel installed), `NoOcclusion`, `stream_receiver_mask=True`, black walls; one arm per process, in
+sequence through `run_case.sh`, jax 0.10.2, CPU, x64, macOS arm64, 11 cores, 19 GB; main `e12f214`.
+Field seconds: `EveryPair` **471.7**, `ShaftCulling()` (32, 8, 2) **313.5** (1.50x), (32, 8) **251.9**
+(1.87x); fields identical to 4.4e-16; `EveryPair` and (32, 8) repeated at 471.5 and 251.4 in an
+earlier run of the same day. The pre-speed-up code (`99c472c`) took **1138.4** s at the same settings,
+so main's unculled path alone is 2.41x. The default flipped on this measurement: the mask cannot
+change, the cost falls on every scene with open space, and a scene with no body pays nothing (no
+bodies, no call). ⚠️ **The default ladder's third level still costs 1.24x on an analytic-only scene**
+— the phase-B finding, now confirmed on the real population — and is kept for the ~2.7x it buys on a
+triangle wall; a per-body ladder remains the fix, **not built**. Full table in the Sozzi README.
 
 **Tests** (`tests/unit/test_radiation_culling.py`, each mutation-checked): bit equality with
 `EveryPair` at group sizes 32x32, 7x5, 1x1, 64x3 on a scene where every one of four body kinds

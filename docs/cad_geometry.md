@@ -161,8 +161,8 @@ reactor the streamed model reproduces the hand-built field above to 4.4e-16 rela
 once makes every later call cheaper.
 
 Most of those segments never leave the water: a cell in the chamber and a facet of the lamp both lie
-inside the chamber's cylinder, and so does every segment between them. To use that, give the
-settings a {class}`~aquaflux.radiation.ShaftCulling` as `body_culling`. Cells and facets are grouped
+inside the chamber's cylinder, and so does every segment between them. The model uses that by
+default, with {class}`~aquaflux.radiation.ShaftCulling` deciding the bodies' layer. Cells and facets are grouped
 into compact blocks, and a body that can prove it misses the whole region between a block of cells
 and a block of facets clears every pair of that tile without testing one. A tile it cannot vouch for
 is split into smaller tiles and asked again, and only what is still undecided at the smallest size
@@ -172,7 +172,10 @@ water, `validation/sozzi_radiation/body_culling.py` certifies about nine pairs i
 builds the mask five to nine times faster -- the most when refinement stops at groups of eight,
 which is what the class documentation recommends for a scene of analytic bodies alone. A mesh
 refined towards its walls and lamp puts more of its cells where a tile cannot be vouched for, so
-expect less there.
+expect less there: on the reactor's own 1,635,909 cell centres the whole streamed field is computed
+1.5 times faster than testing every pair at the default group sizes, and 1.9 times faster stopping
+at eight (`ShaftCulling(receiver_blocks=(32, 8), source_clusters=(32, 8))`). To test every pair
+instead, pass {class}`~aquaflux.radiation.EveryPair` as `body_culling`; the mask is the same.
 
 Geometry that exists only as triangles -- a vessel wall from an STL file, a sculpted baffle -- goes
 in the same list of occluders as a {class}`~aquaflux.radiation.TriangleBody`. Its segments are

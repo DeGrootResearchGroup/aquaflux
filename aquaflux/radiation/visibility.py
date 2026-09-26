@@ -39,7 +39,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from aquaflux.radiation.culling import BodyCulling, EveryPair
+from aquaflux.radiation.culling import BodyCulling, ShaftCulling
 from aquaflux.radiation.self_occlusion import (
     RayCastOcclusion,
     SelfOcclusion,
@@ -226,8 +226,9 @@ def build_visibility(
 ) -> Visibility:
     """Work out, once, which bodies lie between which sources and which receivers.
 
-    The analytic bodies are tested pair by pair unless ``body_culling`` says otherwise; the
-    surface's own triangles are tested by ``self_occlusion``.
+    The bodies are decided a tile of pairs at a time where they can prove they miss it, and pair
+    by pair elsewhere, unless ``body_culling`` says otherwise; the surface's own triangles are
+    tested by ``self_occlusion``.
 
     Parameters
     ----------
@@ -267,11 +268,13 @@ def build_visibility(
         shadow itself is the defect this module exists to fix, and a mask silently missing it
         looks exactly like one that includes it.
     body_culling : BodyCulling or None, optional
-        How the analytic bodies' layer is worked out. Unset, every body is tested against every
-        pair (:class:`~aquaflux.radiation.culling.EveryPair`). Pass
-        :class:`~aquaflux.radiation.culling.ShaftCulling` to decide whole tiles of pairs a body
-        can prove it misses and test only the rest -- the same mask, for fewer tests wherever
-        the scene has open space in it.
+        How the bodies' layer is worked out. Unset, it is
+        :class:`~aquaflux.radiation.culling.ShaftCulling` at its default group sizes: whole tiles
+        of pairs a body can prove it misses are decided without a test, and only the rest are
+        tested -- the same mask as testing every pair, for fewer tests wherever the scene has
+        open space in it. Pass :class:`~aquaflux.radiation.culling.EveryPair` to test every body
+        against every pair, or a ``ShaftCulling`` with other group sizes (see its notes on
+        scenes of analytic bodies alone).
     pair_limit : int, optional
         Receiver-by-facet pairs per pass of the analytic-body test, bounding its peak memory
         whatever the facet count. Each self-occlusion strategy carries its own bound, because
@@ -328,7 +331,7 @@ def _unchecked_visibility(
     # area and no surface to shadow itself with, so it needs no exclusion.
     near = offset_scale * jnp.sqrt(surfaces.area)
 
-    culling = EveryPair() if body_culling is None else body_culling
+    culling = ShaftCulling() if body_culling is None else body_culling
     blocked = (
         culling.blocked(occluders, surfaces.centroid, near, points, pair_limit)
         if occluders
