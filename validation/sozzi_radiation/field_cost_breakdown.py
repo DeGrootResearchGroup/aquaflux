@@ -24,6 +24,15 @@ difference reported, not assumed away. Timers nest: each is inclusive of the one
 the summary gives each stage's share of its parent and what is left of the parent outside its
 named children.
 
+**How much a "fully hidden" certificate could remove.** Culling certifies only tiles that are
+wholly *clear*; every other pair is tested. For each chunk the harness also reads the bodies' mask
+it has just built and, at each group size of the ladder, counts the pairs lying in tiles whose
+every pair is blocked -- tiles formed exactly as the strategy forms them, along the same curve.
+Those are the pairs a certificate that proved a tile wholly dark could leave untested at that size,
+so the count is the ceiling for any such certificate, not a prediction of what one would reach.
+It is timed under its own name (``hidden-tile count``), outside the bodies' layer, so the layer's
+own figures are not charged for it; subtract it from the call to compare with a plain run.
+
 ``SOZZI_CULLING`` chooses the bodies' layer as in ``model_at_mesh_scale.py`` (unset: the library
 default). ``SOZZI_RECEIVERS`` takes the first *n* cells in mesh order instead of all of them, for a
 quick check of the harness itself; a figure quoted from this file is from the whole mesh.
@@ -120,8 +129,41 @@ TREE = {
     "call / field / chunk / mask / bodies / test tiles / compiled test": (
         "call / field / chunk / mask / bodies / test tiles"
     ),
+    "call / field / chunk / mask / hidden-tile count": "call / field / chunk / mask",
     "call / field / chunk / gather": "call / field / chunk",
 }
+
+
+def hidden_tile_pairs(blocked, receivers, sources, receiver_blocks, source_clusters) -> dict:
+    """Pairs lying in wholly blocked tiles, at each level of a ladder, and the blocked pairs.
+
+    ``blocked`` is the bodies' mask for one chunk, shape ``(n_bodies, n_receivers, n_sources)``;
+    a pair counts as blocked where any body blocks it. Tiles are formed as
+    :class:`~aquaflux.radiation.ShaftCulling` forms them: each side ordered along the space-filling
+    curve and padded to a whole number of the coarsest groups by repeating its last point, which
+    changes no tile's all-blocked answer (a repeated pair has the same answer twice). Only real
+    pairs are counted.
+    """
+    import numpy as np
+    from aquaflux.radiation.culling import spatial_order
+
+    dark = np.asarray(blocked).any(axis=0)
+    counts = {"blocked": int(dark.sum())}
+    sides = []
+    for points, coarsest in ((receivers, receiver_blocks[0]), (sources, source_clusters[0])):
+        order = spatial_order(points)
+        padded = -(-len(order) // coarsest) * coarsest
+        sides.append(np.concatenate([order, np.repeat(order[-1:], padded - len(order))]))
+    ordered = dark[sides[0]][:, sides[1]]
+    real = np.outer(
+        np.arange(len(sides[0])) < len(receivers), np.arange(len(sides[1])) < len(sources)
+    )
+    for block, cluster in zip(receiver_blocks, source_clusters, strict=True):
+        n_rows, n_cols = len(sides[0]) // block, len(sides[1]) // cluster
+        whole = ordered.reshape(n_rows, block, n_cols, cluster).all(axis=(1, 3))
+        in_whole = np.repeat(np.repeat(whole, block, axis=0), cluster, axis=1)
+        counts[f"in wholly blocked {block}x{cluster} tiles"] = int((in_whole & real).sum())
+    return counts
 
 
 def instrument_build(timers: Timers) -> None:
@@ -210,7 +252,14 @@ def instrument_call(timers: Timers, n_facets: int, pairs: dict) -> None:
 
     def counted_blocked(self, bodies, sources, near, receivers, *args, **kwargs):
         pairs["all"] += len(bodies) * len(receivers) * len(sources)
-        return blocked(self, bodies, sources, near, receivers, *args, **kwargs)
+        mask = blocked(self, bodies, sources, near, receivers, *args, **kwargs)
+        started = time.perf_counter()
+        for name, count in hidden_tile_pairs(
+            mask, receivers, sources, self.receiver_blocks, self.source_clusters
+        ).items():
+            pairs[name] = pairs.get(name, 0) + count
+        timers.add("call / field / chunk / mask / hidden-tile count", time.perf_counter() - started)
+        return mask
 
     culling.ShaftCulling.blocked = counted_blocked
     culling._body_blocks = timers.wrap(
@@ -308,6 +357,20 @@ def main() -> None:
         )
     for name, count in pairs.items():
         print(f"pairs {name}: {count:,} ({count / max(pairs['all'], 1):.1%} of all)", flush=True)
+    undecided = max(pairs["in undecided tiles"], 1)
+    for name, count in pairs.items():
+        if name.startswith("in wholly blocked"):
+            print(
+                f"a fully-hidden certificate at {name.split()[-2]} could leave untested at most "
+                f"{count / undecided:.1%} of the pairs in undecided tiles",
+                flush=True,
+            )
+    counting = timers.seconds("call / field / chunk / mask / hidden-tile count")
+    print(
+        f"call less the hidden-tile count (compare with a plain run): "
+        f"{timers.seconds('call') - counting:.1f} s",
+        flush=True,
+    )
     RESULT.write_text(
         json.dumps(
             {
