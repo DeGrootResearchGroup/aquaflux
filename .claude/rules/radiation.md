@@ -2018,8 +2018,11 @@ clearance 12.1, `_vouched`/`_vouched_pairs` 14.3), curve order 3.2, mask alloc/c
 at their ceiling here and only a "fully hidden" certificate (phase C) can cut the tested count; padding
 adds only 9.6% (2.33G → 2.56G). ⚠️ **The leftover test runs at ~18M pairs/s on 2x2 tiles against ~30M
 for `EveryPair`** (separate processes, approximate) — the concrete levers are a denser layout for the
-leftover pairs plus batched host work (up to ~100 s) and caching the source side per call (~14 s),
-neither built. Full table in the Sozzi README.
+leftover pairs plus batched host work (up to ~100 s; ⚠️ the "denser layout" half is refuted — see WHY THE
+FINEST LEVEL COSTS AN ANALYTIC BODY) and caching the source side per call (~14 s, **built since** as
+`BodyCulling.prepared`, see the SHAFT CULLING section — this table predates it; the harness now times
+that work once under `call / field / prepare culling` and the receivers' side under
+`bodies / receiver groups`). Full table in the Sozzi README.
 **Phase C's ceiling, measured (2026-09-26, same harness and configuration, a second run; the other
 pieces repeated to 0.4 s, call less the count 317.7 s).** Blocked pairs 1.185G = **9.6% of all, 50.8% of
 the 2.33G in undecided tiles**; pairs in wholly blocked tiles along the strategy's curve: 32x32
