@@ -164,17 +164,27 @@ mutation is red.
 
 ## CLEARANCE: a body vouching for a whole convex hull (#554, 2026-09-25)
 
-`Body.clearance(position) -> (..., n_witnesses)` is the third question a body answers, after
-`blocks` and `contains`. **The contract, in one line: if every position of a set reads `w_i < 0` for
-one column `i`, no point of the set's convex hull is in the body** — so no segment between two of the
-positions meets it. A set is summarized by the column-wise max over its points and two sets merge by
-max, which is what lets a consumer (radiation's `ShaftCulling`) certify a whole tile of
+`Body.clearance(position) -> (..., n_features)` and `Body.vouches(summary) -> (...)` are the third
+question a body answers, after `blocks` and `contains`. **The contract: a set is summarized by the
+column-wise max of `clearance` over its points (two sets merge by max), and where `vouches` reads true
+on that summary, no point of the set's convex hull is in the body** — so no segment between two of the
+positions meets it. That is what lets a consumer (radiation's `ShaftCulling`) certify a whole tile of
 receiver-source pairs from two short rows without visiting a pair. It says "clear" or "don't know",
 never "blocked".
 
+**`vouches` was split out of `clearance` in #554 phase B**, because a triangle soup's certificate is a
+*box query* — its features are `[x, -x]`, whose maxima are the set's bounding box, and it vouches when
+that box overlaps no occupied voxel — which "some column negative" cannot express. The default
+`vouches` is exactly that old rule (`any(summary < 0)`, never with zero columns), so every body in
+this package reads its columns as **witnesses** as before and nothing here changed behaviour. ⚠️ A
+composition concatenates its members' columns (`Intersection`), which is only meaningful because
+every `Solid` uses the default `vouches`; a `Solid` that overrode it could not be composed this way.
+(`TriangleBody` is a `Body`, not a `Solid`, so it never enters a combinator.)
+
 | body | witnesses |
 |---|---|
-| `Body` (default, incl. anything answered from triangles) | none — zero columns, never certifies |
+| `Body` (default) | none — zero columns, never certifies |
+| radiation's `TriangleBody` (not in this package) | `[x, -x]` read as a bounding box, with its own `vouches`: no occupied voxel of a fine occupancy grid inside it |
 | `Solid` | a separating plane along each of 26 fixed axes (the 3x3x3 stencil), placed by `support` |
 | `ConvexSolid` | its own `_Plane` faces (beyond a face is outside the whole body, and a half-space is convex), then the 26 |
 | `Intersection` | every member's witnesses concatenated (missing any member misses the intersection) |
@@ -227,4 +237,5 @@ bound), `Difference` the body's. `HalfSpace` stays `inf`: its face is its only w
   in parameter space, and nothing here tests a point against a trim. The CAD reader avoids needing
   it by describing whole solids — a pipe cut to fit its vessel becomes its full cylinder carried into
   the vessel, checked exact together with it — and refuses what that cannot describe. The fallback
-  for such a solid is a triangle-backed body, which does not exist yet (#510).
+  for such a solid is a triangle-backed body: `aquaflux.radiation.TriangleBody` (#510), which lives in
+  radiation beside the grid it walks, since this package may import nothing outside itself.

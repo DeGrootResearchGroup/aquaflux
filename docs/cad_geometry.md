@@ -169,8 +169,16 @@ tested pair by pair. The mask is identical, bit for bit, to the one testing ever
 number of segments tested changes. On receivers sampled uniformly in the Sozzi reactor's water,
 `validation/sozzi_radiation/body_culling.py` certifies about nine pairs in ten this way and builds the
 mask about nine times faster. A mesh refined towards its walls and lamp puts more of its cells where a
-tile cannot be vouched for, so expect less there. A body described by triangles vouches for
-nothing, and is tested pair by pair as before.
+tile cannot be vouched for, so expect less there. A tile that cannot be vouched for is split into
+smaller tiles and asked again before anything is tested pair by pair.
+
+Geometry that exists only as triangles -- a vessel wall from an STL file, a sculpted baffle -- goes
+in the same list of occluders as a {class}`~aquaflux.radiation.TriangleBody`. Its segments are
+tested through a uniform grid over its triangles, and under shaft culling it vouches for any tile
+whose bounding box holds no occupied voxel of a finer grid. Which side of it is solid is read from
+the triangles: a piece with a free edge is a sheet with no inside, and a closed piece is solid on
+the side its normals point away from, so a vessel wound to face its water is solid outside it.
+Pass `sheet=True` when a closed surface is really a sheet.
 
 ## What is checked, and what is refused
 

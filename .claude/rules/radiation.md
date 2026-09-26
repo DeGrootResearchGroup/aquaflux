@@ -27,7 +27,8 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `absorption.py` — `UniformAbsorption`, `VoxelAbsorption` | **BUILT** |
 | the solid bodies (`Body`, primitives, CSG, `Outside`) — **moved to `aquaflux/solids/`**, see `.claude/rules/solids.md` | **BUILT** |
 | `visibility.py` — the frozen shadow mask | **BUILT** |
-| `culling.py` — how the analytic-body layer is decided: `EveryPair` (default) or `ShaftCulling` (tiles certified clear, #554) | **BUILT** (prototype: "clear" certificates, analytic bodies only) |
+| `culling.py` — how the bodies' layer is decided: `EveryPair` (default) or `ShaftCulling` (tiles certified clear, refined coarse to fine, #554) | **BUILT** ("clear" certificates only; analytic and triangle bodies) |
+| `triangle_body.py` — `TriangleBody`, a `Body` of triangles over a `TriangleGrid`, with `contains` decided per piece (#510) | **BUILT** |
 | `triangles.py` — watertight ray-triangle intersection | **BUILT** |
 | `self_occlusion.py` — the `SelfOcclusion` strategies: ray cast, silhouette clip, none | **BUILT** |
 | `silhouette.py` — the exact covered fraction of a source, the conservative cone cull, and the exact second-stage rejection (`covers_nothing`) | **BUILT** |
@@ -1848,33 +1849,41 @@ label stays because a source's kind is read from its label, never inferred.
 
 ## SHAFT CULLING: BUILT as `ShaftCulling` — tiles certified clear, off by default (#554, 2026-09-25)
 
-`culling.py` holds the analytic-body layer's strategy family, `BodyCulling.blocked(bodies, sources,
+`culling.py` holds the bodies' layer's strategy family, `BodyCulling.blocked(bodies, sources,
 near, receivers, pair_limit)`: **`EveryPair`** (the default, and the reference — the old
 `visibility._blocked_by` loop, moved here with `_compiled_blocks`, now `_body_blocks` per body) and
-**`ShaftCulling(receiver_block=32, source_cluster=32)`**. Selected by `build_visibility(...,
+**`ShaftCulling(receiver_blocks=(32, 8), source_clusters=(32, 8))`** — coarse-to-fine group-size
+ladders since #554 phase B; ⚠️ **there is no `receiver_block` / `source_cluster` any more**, and the
+first version's default was one level at 32 x 32. Selected by `build_visibility(...,
 body_culling=)` or `RadiationSettings(body_culling=)`, which feeds **both** masks a model builds (and
 survives `receiver_occlusion` overriding the self-occlusion half). Streamed masks get it through the
 same options dict, but then the grouping is per streamed chunk, over whatever order the receivers
 arrive in.
 
 **How.** Receivers and facet centroids are each ordered along a Morton curve (`spatial_order`, 10 bits
-an axis) and cut into fixed-size groups (`_Groups`, the last padded by repeating its own last member,
-which changes neither a max-summary nor a written answer). Per body, each group is summarized by the
-column-wise max of `body.clearance` (the witness contract is in `.claude/rules/solids.md`); a tile is
-**certified clear** where any column of `max(receiver summary, source summary)` is negative. Undecided
-tiles are gathered into batches of one shape (`pair_limit // (block * cluster)` tiles, padded to a power
-of two with `padded_length`) and answered by the same compiled `body.blocks` the reference uses, so the
-two agree **bit for bit** on every pair either tests. Host orchestration, compiled leaf — the
-`TriangleGrid` lesson. A body with no witnesses (anything answered from triangles, `traceable=False`)
-is tested everywhere.
+an axis) and padded to a whole number of the coarsest groups by repeating the last point (`_Curve`;
+repetition changes neither a max-summary nor a written answer). Each size in a ladder divides the one
+before, so a group at one level is a whole number of groups at the next, read off the same order. Per
+body, each group is summarized by the column-wise max of `body.clearance`, and a tile is **certified
+clear** where `body.vouches(max(receiver summary, source summary))` (the contract is in
+`.claude/rules/solids.md`). **A tile refused at one level is split into its children at the next**
+(`_undecided`; children made wholly of padding are dropped, not asked) and asked again; only tiles
+still refused at the finest level are gathered into batches of one shape (`pair_limit // (block *
+cluster)` tiles, padded to a power of two with `padded_length`) and answered by the same compiled
+`body.blocks` the reference uses, so the two agree **bit for bit** on every pair either tests. Host
+orchestration, compiled leaf — the `TriangleGrid` lesson. `certified_pairs` is every pair less those
+in the finest refused tiles, so it counts what refinement vouched for at any level. A body with no
+features is tested everywhere.
 
-**Scope, as agreed: "clear" certificates only, analytic bodies only.** Not built, and tracked in #554:
-**B** a `TriangleGrid` certificate (shaft bounding box over empty voxels only — where the 88 h lives,
-and blocked on #510 for receivers); **C** "fully hidden" certificates, which would also let the gather
-skip dark tiles; **D** distance-based level of detail for the gather, which changes answers and needs
-its own error measurement. ⚠️ **`spatial_order` is generic point ordering living in a physics package**
-(Principle 3.6) — kept private-ish to `culling.py` for the prototype; it should move to a neutral leaf
-when a second consumer appears.
+**Scope.** Phase A (analytic bodies, one level) and phase B (triangle bodies via #510's
+`TriangleBody`, plus refinement for every body) are built; both give "clear" certificates only. Not
+built, tracked in #554: **C** "fully hidden" certificates, which would also let the gather skip dark
+tiles; **D** distance-based level of detail for the gather, which changes answers and needs its own
+error measurement. ⚠️ **The facet-to-facet ray mask (`RayCastOcclusion`, self-occlusion) is NOT
+culled**: its shafts start on the wall they are tested against, so every tile touches the wall's own
+triangles and no box certificate can vouch for one — that needs per-ray exclusions carried into the
+certificate, and is not designed. ⚠️ **`spatial_order` is generic point ordering living in a physics
+package** (Principle 3.6) — it should move to a neutral leaf when a second consumer appears.
 
 **MEASURED** (`validation/sozzi_radiation/body_culling.py`, all arms in one process on one ray set,
 warm-up then two alternating passes, fastest kept): `Outside(chamber, inlet, riser)` at the
@@ -1889,7 +1898,7 @@ through `run_case.sh`, which needs `vm_stat`), 2026-09-25, uncommitted #554 tree
 |---|---|---|---|---|---|
 | `EveryPair` | — | 42.63 | 1.01x | 1.00x | reference |
 | 16 x 16 | 91.0% | 5.22 | 1.06x | 8.17x | identical |
-| **32 x 32** (default) | **90.3%** | **4.58** | 1.01x | **9.30x** | identical |
+| **32 x 32** (the phase-A default; one level) | **90.3%** | **4.58** | 1.01x | **9.30x** | identical |
 | 64 x 64 | 89.1% | 5.49 | 1.08x | 7.77x | identical |
 | 32 x 128 | 90.3% | 4.80 | 1.02x | 8.88x | identical |
 

@@ -222,10 +222,37 @@ def open_facets(vertices, *, tolerance: float | None = None) -> np.ndarray:
     -------
     np.ndarray of bool, shape ``(n_facets,)``
     """
+    piece, open_piece = _surface_pieces(vertices, tolerance=tolerance)
+    return open_piece[piece]
+
+
+def _surface_pieces(vertices, *, tolerance: float | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """The connected pieces of a triangle set, and which of them are open.
+
+    The pieces :func:`open_facets` reads: triangles reachable from one another across edges
+    shared by exactly two triangles. Exposed for a caller that needs to treat each piece on its
+    own -- a closed piece bounds a solid on one side, an open one is a sheet -- with the same
+    caveats as :func:`open_facets` about what topology cannot see.
+
+    Parameters
+    ----------
+    vertices : array_like, shape ``(n_facets, 3, 3)``
+        Triangle vertices.
+    tolerance : float, optional
+        Distance within which two vertex positions are the same point. Defaults to ``1e-9`` of
+        the model's overall extent.
+
+    Returns
+    -------
+    piece : np.ndarray of int, shape ``(n_facets,)``
+        Which piece each facet belongs to, numbered from zero.
+    open_piece : np.ndarray of bool, shape ``(n_pieces,)``
+        Whether each piece has a free edge.
+    """
     vertices = np.asarray(vertices, dtype=float)
     n_facets = len(vertices)
     if n_facets == 0:
-        return np.zeros(0, dtype=bool)
+        return np.zeros(0, dtype=int), np.zeros(0, dtype=bool)
     edges = _edge_uses(vertices, tolerance)
     facet = edges.facet_of_use
     shared = (edges.uses == 2)[edges.edge_of_use]
@@ -238,7 +265,7 @@ def open_facets(vertices, *, tolerance: float | None = None) -> np.ndarray:
     on_rim[facet[edges.boundary[edges.edge_of_use]]] = True
     open_piece = np.zeros(int(piece.max()) + 1, dtype=bool)
     open_piece[piece[on_rim]] = True
-    return open_piece[piece]
+    return piece, open_piece
 
 
 def check_winding(vertices, *, tolerance: float | None = None) -> WindingReport:

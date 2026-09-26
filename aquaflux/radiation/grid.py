@@ -71,6 +71,10 @@ class TriangleGrid:
         a row-pointer array plus a flat index array.
     triangles : np.ndarray of int
         Triangle indices, grouped by voxel.
+    occupied_below : np.ndarray of int, shape ``resolution + 1``
+        A summed-volume table of the occupied voxels: entry ``[i, j, k]`` counts the occupied
+        voxels with every index below ``(i, j, k)``, so how many a box of voxels holds is eight
+        lookups whatever its size (:meth:`holds_any`).
     """
 
     vertices: np.ndarray
@@ -79,6 +83,7 @@ class TriangleGrid:
     resolution: np.ndarray
     starts: np.ndarray
     triangles: np.ndarray
+    occupied_below: np.ndarray
 
     @property
     def n_voxels(self) -> int:
@@ -132,6 +137,10 @@ class TriangleGrid:
         voxel_of, triangle_of = _spans(span_low, span_high, counts)
         order = np.argsort(voxel_of, kind="stable")
         per_voxel = np.bincount(voxel_of, minlength=int(np.prod(counts)))
+        occupied_below = np.zeros(tuple(counts + 1), dtype=np.int64)
+        occupied_below[1:, 1:, 1:] = (
+            (per_voxel > 0).reshape(tuple(counts)).cumsum(0).cumsum(1).cumsum(2)
+        )
         return cls(
             vertices=vertices,
             low=low,
@@ -139,7 +148,58 @@ class TriangleGrid:
             resolution=counts,
             starts=np.concatenate([[0], np.cumsum(per_voxel)]),
             triangles=triangle_of[order],
+            occupied_below=occupied_below,
         )
+
+    def holds_any(self, low, high) -> np.ndarray:
+        """Whether any triangle could meet each axis-aligned box: False only where none can.
+
+        A triangle is registered in every voxel its bounding box spans, so a triangle that
+        meets a box does so at a point lying in some voxel it is registered in -- one the box
+        overlaps. So a box overlapping no occupied voxel meets no triangle, exactly, and saying
+        so costs eight lookups in :attr:`occupied_below` however large the box. The voxel range
+        is found by the same truncation the registration uses, and the box is first widened by
+        a margin a billionth of the grid's extent, so a triangle a rounding outside a box does
+        not read as clear of a segment the exact test would call cut.
+
+        Parameters
+        ----------
+        low, high : array_like, shape ``(..., 3)``
+            Opposite corners of each box.
+
+        Returns
+        -------
+        np.ndarray of bool, shape ``(...)``
+        """
+        margin = 1e-9 * self.spacing * self.resolution
+        top = self.resolution - 1
+        first = np.clip(
+            ((np.asarray(low, dtype=float) - margin - self.low) / self.spacing).astype(int), 0, top
+        )
+        last = (
+            np.clip(
+                ((np.asarray(high, dtype=float) + margin - self.low) / self.spacing).astype(int),
+                0,
+                top,
+            )
+            + 1
+        )
+        table = self.occupied_below
+
+        def at(x, y, z):
+            return table[x[..., 0], y[..., 1], z[..., 2]]
+
+        held = (
+            at(last, last, last)
+            - at(first, last, last)
+            - at(last, first, last)
+            - at(last, last, first)
+            + at(first, first, last)
+            + at(first, last, first)
+            + at(last, first, first)
+            - at(first, first, first)
+        )
+        return held > 0
 
     def blocks(
         self, origin, target, min_distance, *, exclude=None, work_limit: int = 4_000_000

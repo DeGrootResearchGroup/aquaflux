@@ -135,6 +135,7 @@ from aquaflux.radiation.solid_angle import (
 from aquaflux.radiation.stl import TriangleSoup, read_stl
 from aquaflux.radiation.subdivide import Subdivision, refine_for_receivers, subdivide_to_width
 from aquaflux.radiation.surfaces import Surfaces
+from aquaflux.radiation.triangle_body import TriangleBody
 from aquaflux.radiation.transfer import (
     TransferMatrix,
     build_transfer,
@@ -168,6 +169,7 @@ __all__ = [
     "Subdivision",
     "Surfaces",
     "TransferMatrix",
+    "TriangleBody",
     "TriangleQuadrature",
     "TriangleSoup",
     "UniformAbsorption",

@@ -21,7 +21,7 @@ from aquaflux.radiation import (
     Surfaces,
     build_visibility,
 )
-from aquaflux.radiation.culling import _Groups, spatial_order
+from aquaflux.radiation.culling import _Curve, spatial_order
 from aquaflux.solids import Body, Box, Cylinder, Difference, Outside, Sphere
 
 #: The chamber is a cylinder along x, radius 0.1, from x = 0 to 1; the pipe stands on it at x = 0.2.
@@ -78,8 +78,18 @@ def _arms(sources, near, receivers, culling, bodies=None, pair_limit=4_000_000):
     return reference, culled
 
 
-@pytest.mark.parametrize(("block", "cluster"), [(32, 32), (7, 5), (1, 1), (64, 3)])
-def test_the_culled_mask_is_the_mask_every_pair_gives(block, cluster):
+@pytest.mark.parametrize(
+    ("blocks", "clusters"),
+    [
+        ((32,), (32,)),
+        ((7,), (5,)),
+        ((1,), (1,)),
+        ((64,), (3,)),
+        ((32, 8), (32, 8)),
+        ((24, 6, 1), (8, 4, 2)),
+    ],
+)
+def test_the_culled_mask_is_the_mask_every_pair_gives(blocks, clusters):
     """Bit for bit, with group sizes that divide nothing and one that makes every pair a tile.
 
     Every body blocks some pairs and leaves others clear, and at the default sizes each has tiles
@@ -89,7 +99,7 @@ def test_the_culled_mask_is_the_mask_every_pair_gives(block, cluster):
     lamp = _lamp()
     near = 1e-6 * np.sqrt(np.asarray(lamp.area))
     receivers = _receivers(500)
-    culling = ShaftCulling(receiver_block=block, source_cluster=cluster)
+    culling = ShaftCulling(receiver_blocks=blocks, source_clusters=clusters)
     reference, culled = _arms(lamp.centroid, near, receivers, culling)
     assert reference.any(axis=(1, 2)).all() and not reference.all(axis=(1, 2)).any()
     np.testing.assert_array_equal(culled, reference)
@@ -123,7 +133,7 @@ def test_an_open_chamber_is_certified_whole_and_counted_without_its_padding():
     rng = np.random.default_rng(0)
     receivers = rng.uniform([0.1, -0.05, -0.05], [0.9, 0.05, 0.05], (101, 3))
     sources = rng.uniform([0.1, -0.05, -0.05], [0.9, 0.05, 0.05], (37, 3))
-    culling = ShaftCulling(receiver_block=16, source_cluster=8)
+    culling = ShaftCulling(receiver_blocks=(16, 4), source_clusters=(8, 2))
     assert culling.certified_pairs([Outside(CHAMBER)], sources, receivers).tolist() == [101 * 37]
     reference, culled = _arms(sources, np.zeros(37), receivers, culling, bodies=[Outside(CHAMBER)])
     assert not reference.any()
@@ -135,7 +145,7 @@ def test_batches_cut_to_one_tile_and_padded_still_give_the_same_mask():
     lamp = _lamp(12, 8)
     near = 1e-6 * np.sqrt(np.asarray(lamp.area))
     receivers = _receivers(200)
-    culling = ShaftCulling(receiver_block=8, source_cluster=8)
+    culling = ShaftCulling(receiver_blocks=(8,), source_clusters=(8,))
     reference, culled = _arms(lamp.centroid, near, receivers, culling, pair_limit=50)
     assert reference.any()
     np.testing.assert_array_equal(culled, reference)
@@ -159,7 +169,7 @@ def test_a_body_with_no_witnesses_is_tested_everywhere_and_certified_nowhere():
     near = 1e-6 * np.sqrt(np.asarray(lamp.area))
     receivers = _receivers(150)
     body = _Opaque(Sphere(centre=[0.15, 0.05, -0.05], radius=0.02))
-    culling = ShaftCulling(receiver_block=8, source_cluster=8)
+    culling = ShaftCulling(receiver_blocks=(8,), source_clusters=(8,))
     reference, culled = _arms(lamp.centroid, near, receivers, culling, bodies=[body])
     assert reference.any()
     np.testing.assert_array_equal(culled, reference)
@@ -183,11 +193,16 @@ def test_a_built_mask_and_a_model_setting_reach_the_culling():
     }
 
 
-def test_a_group_size_below_one_is_refused():
-    with pytest.raises(ValueError, match="receiver_block must be at least 1"):
-        ShaftCulling(receiver_block=0)
-    with pytest.raises(ValueError, match="source_cluster must be at least 1"):
-        ShaftCulling(source_cluster=0)
+def test_a_group_size_ladder_that_cannot_be_refined_is_refused():
+    """Sizes must be positive, nest, and come one of each per level."""
+    with pytest.raises(ValueError, match="receiver_blocks sizes must be at least 1"):
+        ShaftCulling(receiver_blocks=(0,), source_clusters=(8,))
+    with pytest.raises(ValueError, match="source_clusters sizes must each divide"):
+        ShaftCulling(receiver_blocks=(32, 8), source_clusters=(32, 12))
+    with pytest.raises(ValueError, match="as many source cluster sizes"):
+        ShaftCulling(receiver_blocks=(32, 8), source_clusters=(32,))
+    with pytest.raises(ValueError, match="needs at least one group size"):
+        ShaftCulling(receiver_blocks=(), source_clusters=())
 
 
 def test_the_curve_visits_a_cube_s_corners_in_z_order():
@@ -214,10 +229,16 @@ def test_the_curve_keeps_neighbours_together():
     assert step < 0.2 * shuffled, (step, shuffled)
 
 
-def test_the_last_group_is_padded_with_its_own_last_member():
-    """Ten points in groups of four: counts four, four, two, and the padding repeats a real one."""
+def test_the_last_group_is_padded_with_its_own_last_member_at_every_size():
+    """Ten points padded to groups of four, then read in twos: the padding is a real point.
+
+    At the coarse size the counts are four, four, two; at the fine size the sixth group is all
+    padding and holds no real point, which is what lets refinement drop it rather than ask it.
+    """
     points = np.random.default_rng(6).uniform(0.0, 1.0, (10, 3))
-    groups = _Groups.along_curve(points, 4)
-    assert groups.counts.tolist() == [4, 4, 2]
-    assert sorted(groups.members[:, :4].ravel()[:10].tolist()) == list(range(10))
-    assert groups.members[2, 2] == groups.members[2, 1] == groups.members[2, 3]
+    curve = _Curve.of(points, 4)
+    assert curve.counts(4).tolist() == [4, 4, 2]
+    assert curve.counts(2).tolist() == [2, 2, 2, 2, 2, 0]
+    members = curve.members(4)
+    assert sorted(members.ravel()[:10].tolist()) == list(range(10))
+    assert members[2, 2] == members[2, 1] == members[2, 3]

@@ -472,9 +472,11 @@ optional-dependency census as gated on `OCP`.
   check the drawing's own solid stands in for it (a half-space has no finite kernel counterpart to
   build — mutation-checked: rebuilding it fails `test_a_polyhedron_takes_part_in_a_fluid_as_the_solid_it_is`).
 - Anything else — a torus, a spline patch, a non-convex planar solid — raises `UnrecognizedSolid`
-  naming every rule's reason. **There is no triangle fallback yet**: #510's triangle-backed occluder
-  does not exist, so an unrecognized solid is a documented refusal, which is what #505's acceptance
-  allows. When #510 lands, the fallback slots in behind the same refusal.
+  naming every rule's reason. **The reader does not fall back to triangles.** #510's triangle-backed
+  occluder now exists (`aquaflux.radiation.TriangleBody`, #554 phase B), but nothing here routes an
+  unrecognized solid to it: that is still a documented refusal, which is what #505's acceptance
+  allows. Wiring the fallback in behind the same refusal (the solid's own `CadModel.triangles`, as a
+  `TriangleBody`) is the remaining step, not built.
 
 **⚠️⚠️ THE CHECK IS BOUNDARY DISTANCE, NOT VOLUME — AND THE VOLUME VERSION WAS BUILT FIRST AND FAILED
 ON A CORRECT FILE.** Sample points on both boundaries (the union of the proposed bodies and the
