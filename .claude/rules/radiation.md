@@ -1990,7 +1990,8 @@ so main's unculled path alone is 2.41x. The default flipped on this measurement:
 change, the cost falls on every scene with open space, and a scene with no body pays nothing (no
 bodies, no call). ⚠️ **The default ladder's third level still costs 1.24x on an analytic-only scene**
 — the phase-B finding, now confirmed on the real population — and is kept for the ~2.7x it buys on a
-triangle wall; a per-body ladder remains the fix, **not built**. Full table in the Sozzi README.
+triangle wall. A per-body ladder was investigated and deliberately **not built** — see "WHY THE
+FINEST LEVEL COSTS AN ANALYTIC BODY" below. Full table in the Sozzi README.
 
 **Tests** (`tests/unit/test_radiation_culling.py`, each mutation-checked): bit equality with
 `EveryPair` at group sizes 32x32, 7x5, 1x1, 64x3 on a scene where every one of four body kinds
@@ -2046,11 +2047,49 @@ per-pair cost**, and neither default is right for both: the third level saves ~2
 walk and costs ~1.6x on the cheap analytic test, whose finest-level tile bookkeeping outweighs the few
 pairs it vouches for. **The default is (32, 8, 2)**, chosen on absolute time — it saves minutes where
 the 88 h lives and costs ~3 s where the analytic mask already runs in seconds — and the docstring says
-to stop at 8 for analytic-only scenes. A per-body choice (refine only for bodies whose test is dear)
-is the obvious improvement and is **not built**. ⚠️ Every triangle figure is on a shadowless chamber:
+to stop at 8 for analytic-only scenes. **A per-body depth was investigated and deliberately NOT built**
+(decided with the user, 2026-09-26, after the findings below; three mechanisms were offered — two ladders
+keyed on `traceable`, a per-ray cost declaration on `Body`, a per-level cost model — and all were
+declined). ⚠️ Every triangle figure is on a shadowless chamber:
 on the real wall, pairs crossing a pipe opening can never be vouched for, so the share falls with the
 pipe-cell fraction; **re-run with `work/case` present before quoting a mesh-scale figure**, and note
 that both 32x32 figures here and in the phase-A table were ONE level.
+
+**WHY THE FINEST LEVEL COSTS AN ANALYTIC BODY, AND WHY NO PER-BODY DEPTH (2026-09-26).** Same analytic
+`Outside` scene and configuration as the phase-A table (24,000 sampled receivers, 8,704 facets), same
+triangle chamber as above; jax 0.10.2, CPU, x64, Linux x86_64, 4 cores, scratch probes run directly on
+`main` at `e12f214`, all masks identical to `EveryPair`. This container's timings vary by up to ~1.5x
+between runs, so every comparison below is within one process, alternating arms.
+- **The certificates are not the cost**: `_undecided` takes 0.06 s at (32, 8) and 0.43 s at
+  (32, 8, 2). **The compiled pair test is**: inside real `blocked` calls it took 4.9 s at (32, 8) against
+  7.4 s at (32, 8, 2) for about the same number of tested pairs (18.1M against 17.3M), and the third
+  level vouches for only 0.4% more of all pairs.
+- **The per-pair cost of the compiled test rises on tiny tiles.** 4M random pairs, one compiled
+  `Outside` test, alternating shapes: median **278–309 ns/pair as (T, 2, 2) tiles**, against 203–229
+  at 8x8 and 194–213 at 32x32 (two runs). XLA on CPU vectorizes poorly when the axes before the
+  coordinate are tiny.
+- ⚠️ **Two fixes tried and refuted, so do not re-try them without a new reason:** (a) testing the
+  undecided pairs as a **flat pair list** (gathering both endpoints per pair) was slower at every
+  ladder, 365–432 ns/pair against 213–340 for tiles; (b) putting the **tile index innermost**, shape
+  (b, b, T), made no difference at 2x2 (median 298 against 293 ns/pair). A split of a tile test's time
+  into gather / compiled / write-back put gather + write-back at only 13–43 ns/pair.
+- **One ladder cannot serve both body kinds**:
+
+  | ladder | analytic `Outside`, full build (median of 6) | triangle chamber (fastest of 2; certified) |
+  |---|---|---|
+  | (32, 8) | 6.1 s | 110.8 s (70.9%) |
+  | (32, 8, 4) | **5.65 s** | 94.3 s (81.0%) |
+  | (32, 8, 2) — the default | 8.7 s | **39.1 s** (89.3%) |
+
+- **So the default stays (32, 8, 2) and nothing chooses per body.** The finest level costs the cheap
+  analytic mask seconds (~2.6 s here; proportional to tested pairs on a mesh) and saves the triangle
+  walk — where the ~88 h projection lives — a factor of ~2.4 over the next best ladder. Every
+  mechanism for choosing per body carries a cost (`traceable` standing in for "cheap per ray", a
+  contract term only the culling reads, or a machine-measured cost constant) out of proportion to the
+  seconds it would save. **At mesh scale the penalty is ~62 s of a 314 s whole field** (the 1.24x
+  above: `ShaftCulling()` 313.5 s against (32, 8) 251.9 s, all 1,635,909 Sozzi cells, macOS arm64,
+  11 cores) — seen by the user before this was decided. A caller whose scene holds analytic bodies
+  alone passes `ShaftCulling(receiver_blocks=(32, 8), source_clusters=(32, 8))` and gets it back.
 
 **`TriangleBody`** (`triangle_body.py`, #510; exported, in radiation beside the grid because
 `solids/` may import nothing outside itself). `build(vertices, *, sheet=None, resolution=None,
