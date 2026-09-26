@@ -2478,6 +2478,71 @@ over after, in `coarsen_surfaces`), and **both steps in one change as separate c
   near the lamp: **size along the lamp, keep the chord at 1e-4**, as for the drawing's lamp. The exact
   patch against the STL-built field: 0.30% / 3.65% near the lamp, 0.24% / 0.59% elsewhere.
 
+## MEASURED BEFORE BUILDING: emitter clusters for the gather, and where one ray per cluster fails (#565, 2026-09-26)
+
+Issue #565 proposes clustering the lamp's facets for distant receivers (lightcuts, a fast multipole
+method). A cluster pays only by skipping its members: one geometry term and **one shadow ray** per
+(receiver, cluster). ⚠️ **If a cluster's geometric sum is still formed member by member at build,
+visibility folds into it exactly and straddling costs nothing** — so the question is what one ray per
+cluster costs, and what one absorption evaluation per cluster costs. Measured with
+`validation/sozzi_radiation/cluster_visibility.py`.
+
+**Configuration.** `Outside(chamber, inlet, riser)` at the tutorial's dimensions, the analytic 32 x 128
+lamp (8,704 facets; the case was absent), `UniformAbsorption(35.67)`, lamp self-occlusion off (convex),
+**6,000 receivers sampled uniformly per region — 3,000 chamber, 1,500 inlet, 1,500 riser** (not the
+cell-centre population, and the pipes deliberately over-represented); clusters are **median-split
+leaves** (halve along the longest axis until at most `size` facets); jax 0.10.2, CPU, x64, Linux x86_64,
+4 cores, 2026-09-26. The per-pair weights are exact (`M rad Omega exp(-a d)` with the shadow bit from
+`build_visibility`), and **the control — their sum against `direct_fluence_rate` through the same mask —
+agrees to 2.1e-15**. The geometry term (the members' solid angles) is kept exact throughout; what a
+single-evaluation cluster solid angle costs is **not** measured here.
+
+⚠️ **`FacetClusters` (#555) was the first choice and is unusable for this, and possibly weak for #555
+itself.** Its Morton keys normalize each axis of the bounding box separately, so on a lamp 0.8 m long
+and 2 cm across the curve is anisotropic: runs of **4** facets reach a radius of **0.405 m** (half the
+lamp) and the median radius is 2.9x (size 4) to 7x (size 16) the median-split leaves'. Its clusters'
+bounding spheres, and so #555's cones, are that much wider than the geometry needs. Not measured on the
+cone cull itself.
+
+| cluster size | radius median (m) | a x radius | one ray per cluster, riser median / p99 | absorption at the cluster's point, inlet median | both, beyond 16 radii: pairs replaced; chamber median / p99 / max |
+|---|---|---|---|---|---|
+| 4 | 0.0043 | 0.15 | 3.4% / 12.2% | 0.32% | 0.905; 2e-5 / 0.29% / 0.32% |
+| 16 | 0.0069 | 0.25 | 4.2% / 25.3% | 1.0% | 0.859; 6e-6 / 0.58% / 0.86% |
+| 64 | 0.0117 | 0.42 | 24.2% / 40.0% | 4.2% | 0.754; 2e-7 / 3.9% / 4.1% |
+| 256 | 0.0137 | 0.49 | 24.3% / 42.6% | 11.8% | 0.703; 5e-8 / 26.5% / 26.8% |
+
+**Three findings, each a design constraint.**
+
+1. **Straddling is ZERO in the chamber and substantial in the pipes.** The chamber is one convex region,
+   so no (receiver, cluster) pair in it is partly shadowed, at any size or distance, and one ray per
+   cluster is exact there (errors at rounding). In the riser 1-29% of lit (receiver, cluster) pairs
+   straddle, depending on size and distance, and they carry **2-92% of the riser's `G`** — a pipe cell
+   sees the lamp only through the opening, so the few straddling clusters are much of what it sees. One
+   ray per cluster is therefore **unacceptable in the pipes** (3-24% median) and free in the chamber.
+   **So a straddling cluster must be refined, not given a visible share** — a share needs per-member
+   rays, which is the cost the cluster exists to avoid — and the place a cluster is known shadow-free
+   without rays is exactly what `ShaftCulling`'s certificates already compute (a tile certified clear).
+   The natural design: a cluster is usable only in a certified-clear tile, and refined to members
+   elsewhere.
+2. **The absorption error does NOT fall with distance.** In the inlet it is the same beyond 2 radii as
+   beyond 16, at every size, because `exp(-a d)` varies across a cluster by its **optical size** `a R`,
+   whatever the distance. So the distance-over-radius criterion a cut normally refines on **cannot bound
+   it**; the cut needs an `a R` bound too, and in this water (`a` = 35.67 /m) that keeps clusters to a
+   few millimetres (size <= 16 here).
+3. **A second-moment correction does not fix it — the error is first order, from the emitter gate.**
+   `exp(-a d + a^2 n.S.n / 2)` with the cluster's area-weighted covariance moved the inlet error at 64
+   facets only 4.2% -> 4.0%. The lamp's cosine gate lights only the members facing a receiver, so their
+   weighted centre sits off the area-weighted representative point; **19-100% of lit pairs straddle the
+   gate**, rising with size. Clusters should group by **orientation as well as position** (a cone of
+   normals per cluster, as lightcuts does for oriented lights), which removes the gate straddle and the
+   first-order term together. Not yet measured.
+
+**What it buys, as an estimate**: at size 16 beyond 16 radii, 86% of lit (receiver, cluster) pairs
+become one term instead of 16, i.e. roughly `0.14 + 0.86/16 = 0.19` of the per-pair work (~5x) for the
+chamber errors in the table — the same order as the 32 x 128 lamp's own discretization error (1.4%
+median near the lamp, 0.4% elsewhere). An adaptive cut chooses per pair and should do better; that is
+what building it would measure.
+
 ## PER-CALL COMPILES: THE REMAINDER CHUNK AND THE RADIOSITY SOLVE (2026-09-26)
 
 Found in a survey of what in the package still ran op by op (after #530), and fixed:
