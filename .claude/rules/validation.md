@@ -240,6 +240,13 @@ cannot be written. The guard is what catches the next module that does branch.
   `sleep` child: no survivors, exit 143; with the forward disabled both processes survive. **`kill -9`
   still orphans** (uncatchable) — stop runs with `kill`. After any interrupted run, check
   `pgrep -fl "usr/bin/time"` rather than trusting `--status`.
+- **⚠️ A TIMER THAT WAITS ON ITS OWN RESULT ALSO WAITS FOR EARLIER, UNTIMED WORK.** JAX dispatches
+  asynchronously, so a wrapper that calls `jax.block_until_ready` on a piece's output before stopping
+  its clock is charged whatever was dispatched before it and is still running. In
+  `sozzi_radiation/field_cost_breakdown.py` the facet shadow mask read **30 s** — it takes **0.2 s**; the
+  time was the transfer's row blocks, returned un-materialized just before it (2026-09-26, caught by a
+  standalone probe of the mask). A timer breakdown is only sound where the work before each timed piece
+  is timed too; when a small piece reads large, time it alone before believing it.
 - **Print one line per outer step, flushed.** A harness that collects reports and prints at the end is
   indistinguishable from a hung one, and cost thirty minutes of a run that could not have converged.
 - **State the operating point before measuring.** A harness whose banner prints `? cells` is one whose
