@@ -21,8 +21,8 @@ Every arm's answers are compared: inside/outside must agree exactly, and the lar
 the winding numbers is printed. Neither is a closure identity -- different summation orders can
 disagree, and a wrong skip would disagree by the whole of a piece's contribution.
 
-Run with ``validation/run_case.sh validation/radiation_enclosure_winding.py``. ``WINDING_SECTORS``
-(default 2000, i.e. 8,000 facets) and ``WINDING_POINTS`` (default 4,000) set the size.
+Run with ``validation/run_case.sh validation/radiation_enclosure_winding.py``. ``RADIATION_WINDING_SECTORS``
+(default 2000, i.e. 8,000 facets) and ``RADIATION_WINDING_POINTS`` (default 4,000) set the size.
 """
 
 from __future__ import annotations
@@ -43,8 +43,8 @@ from aquaflux.radiation.solid_angle import signed_solid_angle
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, receivers_per_pass
 from tests.unit.radiation_references import closed_drum, inward_box
 
-SECTORS = int(os.environ.get("WINDING_SECTORS", "2000"))
-POINTS = int(os.environ.get("WINDING_POINTS", "4000"))
+SECTORS = int(os.environ.get("RADIATION_WINDING_SECTORS", "2000"))
+POINTS = int(os.environ.get("RADIATION_WINDING_POINTS", "4000"))
 PASSES = 2
 
 
