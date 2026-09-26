@@ -441,6 +441,7 @@ backward compatibility becomes a real constraint and the calculus reverses.
 | Adjoint of the coupled solve | `custom_vjp` around the linear solve | exact, memory-flat gradient independent of iteration count |
 | Transient integration | Diffrax | traced, shared with aquakin |
 | Mesh | static connectivity arrays + `segment_sum` scatter | XLA-friendly graph/message-passing layout |
+| Compiled host loops | **Numba**, optional (`aquaflux[numba]`) | a loop whose value is in the work it SKIPS (a ray walked to its first hit) cannot be traced — a traced loop pays its worst case on every item — and as numpy passes it pays per step for every item still in flight. One consumer so far, a prototype: the triangle grid's `walk="compiled"` (`.claude/rules/radiation.md`), 17-37x the array walk with identical answers. Imported on first use; the `test` extra carries it so CI runs it. |
 | Case file | **PyYAML** (`aquaflux/case/`) | a case's mesh, fluid, physics, boundaries, numerics and solver in one YAML document, read by the YAML 1.2 rules for plain values (PyYAML's own 1.1 rules read `1e-5` as a string and `no` as a boolean) and validated per position by `solve.SettingsMapping` — so no pydantic. The equation DSL (YAML → AST emitting terms) is a different thing and is still the **last** layer, not built |
 | Bounded compilation cache | **filelock** (`aquaflux/__init__.py`) | `import aquaflux` points JAX's persistent on-disk compilation cache at `~/.cache/aquaflux/jax` and **bounds it**. JAX's default `jax_compilation_cache_max_size` is `-1`, which its LRU implementation reads as *no eviction* — an unbounded cache never prunes and only grows (one checkout reached 88 GiB across 2128 entries, 95% of it more than a week old, 42 of them ~1 GiB coupled-solve programs). Setting a byte bound turns real eviction on, and JAX takes an inter-process lock through `filelock` to do it. **⚠️ A BOUND WITHOUT `filelock` DISABLES THE CACHE ENTIRELY** — every read and write fails with a `UserWarning` and it stores nothing, which is worse than no bound, so the package checks and degrades to merely unbounded rather than silently dead. Override the size with `AQUAFLUX_COMPILATION_CACHE_MAX_GIB` (negative for no bound), the location with `AQUAFLUX_COMPILATION_CACHE_DIR`, or switch it off with `AQUAFLUX_DISABLE_COMPILATION_CACHE=1`. |
 
@@ -725,7 +726,7 @@ this machine into swap and suspends every application on it — CI reaches the s
 other side, sharding those tiers across jobs at `-n 1` rather than within one. Two details of the
 fast tier's parallelism are load-bearing. It distributes by **file** (`--dist loadfile`), so a
 module-scoped fixture is built once instead of once per worker and each file keeps its recorded test
-order; and it pins **one BLAS/XLA thread per worker**, because otherwise every worker grabs every
+order; and it pins **one BLAS/XLA (and Numba) thread per worker**, because otherwise every worker grabs every
 core and N workers × M cores thrashes instead of scaling. `FASTGATE_JOBS=<n>` sets the worker count
 and `FASTGATE_JOBS=0` (or your own `-n`) opts out — do that when bisecting a failure, since worker
 output is interleaved. Measured 2026-08-23 on an 11-core, 19 GB machine with the compiled ILU(0)

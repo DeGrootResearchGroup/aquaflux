@@ -21,6 +21,13 @@ walk here is ordinary host code over the rays still in flight, which shrinks as 
 something or run out; only the intersection test itself is traced, on the compacted
 (ray, triangle) pairs, through the same predicate the unaccelerated path uses.
 
+**Two walks, one set of answers.** That array walk pays for every step in whole-array operations
+over every ray still in flight -- about 150-180 ns per ray per voxel step, profiled on a
+51,200-triangle cylindrical wall, which is most of its time, and which is why a finer grid makes it
+slower: fewer triangles tested, more steps taken. ``walk="compiled"``
+(:mod:`~aquaflux.radiation.grid_walk`, which needs Numba) walks each ray to its end in one compiled
+loop instead, visiting the same voxels and testing the same triangles in the same order.
+
 **What it does not do.** It does not reduce the number of *rays*, which at mesh scale is the
 binding cost: 1.6M cells against 7,516 facets is 1.2e10 segments however cheaply each is
 answered. It makes scenes of up to a few times 1e8 rays practical; beyond that the ray count
@@ -202,7 +209,14 @@ class TriangleGrid:
         return held > 0
 
     def blocks(
-        self, origin, target, min_distance, *, exclude=None, work_limit: int = 4_000_000
+        self,
+        origin,
+        target,
+        min_distance,
+        *,
+        exclude=None,
+        work_limit: int = 4_000_000,
+        walk: str = "array",
     ) -> np.ndarray:
         """Whether any triangle lies across each segment, testing only what the grid selects.
 
@@ -222,7 +236,14 @@ class TriangleGrid:
             :func:`~aquaflux.radiation.triangles.segment_is_cut` bounds its own block. A step of
             the walk tests every live ray against everything its voxel holds, so without a bound
             a coarse grid over many rays builds one array of every pair in that step -- which is
-            how a grid runs a machine out of memory rather than saving it work.
+            how a grid runs a machine out of memory rather than saving it work. The compiled walk
+            forms no pairs and ignores it.
+        walk : {"array", "compiled"}, optional
+            How the segments are walked. ``"array"`` (the default) steps every ray still in
+            flight together, as whole-array operations, and tests each step's pairs in one traced
+            call. ``"compiled"`` walks each ray to its end in one compiled loop
+            (:mod:`~aquaflux.radiation.grid_walk`, which needs Numba), visiting the same voxels
+            and testing the same triangles, so the answers agree.
 
         Returns
         -------
@@ -240,9 +261,21 @@ class TriangleGrid:
         length = np.sqrt(np.sum(direction * direction, axis=-1))
         near = near / np.where(length == 0.0, 1.0, length)
         blocked = np.zeros(len(origin), dtype=bool)
+        if walk not in ("array", "compiled"):
+            msg = f"walk must be 'array' or 'compiled'; got {walk!r}"
+            raise ValueError(msg)
         alive, entry = _enters_grid(origin, direction, self.low, self.spacing, self.resolution)
         if not np.any(alive):
             return blocked
+        max_steps = int(self.resolution.sum()) + 3
+        if walk == "compiled":
+            from aquaflux.radiation.grid_walk import walk_to_first_hit
+
+            ray = np.flatnonzero(alive)
+            state = _walk_state(
+                origin[ray], direction[ray], entry[ray], self.low, self.spacing, self.resolution
+            )
+            return walk_to_first_hit(ray, *state, origin, direction, near, exclude, self, max_steps)
         # Every ray's data and every triangle go to the kernel once per call; a step of the walk
         # then sends only which ray meets which triangle, as two indices, and the kernel gathers
         # the rest itself. Gathering them here instead copied about 150 bytes a candidate pair
@@ -262,7 +295,7 @@ class TriangleGrid:
         voxel, until, step, delta = _walk_state(
             origin[ray], direction[ray], entry[ray], self.low, self.spacing, self.resolution
         )
-        for _ in range(int(self.resolution.sum()) + 3):
+        for _ in range(max_steps):
             if len(ray) == 0:
                 break
             flat = (voxel[:, 0] * self.resolution[1] + voxel[:, 1]) * self.resolution[2] + voxel[

@@ -76,6 +76,8 @@ test = [
     # carried here and those tests run there -- unlike `petsc`, whose absence from CI is a recorded
     # cost (tests/unit/test_optional_dependency_skips.py).
     "aquaflux[cad]",
+    # The compiled grid walk's tests need Numba; it has wheels for every interpreter CI runs.
+    "aquaflux[numba]",
 ]
 # `docs` is the Sphinx toolchain for the site under `docs/` — MyST Markdown pages,
 # the pydata theme, and the copy-button extension; autodoc imports the package
@@ -102,6 +104,10 @@ docs = [
 # installed beside `cadquery`, which brings the VTK build of the same module. Wheels exist for
 # CPython 3.11-3.14 on Linux, macOS and Windows, and none for 3.10, which is why the floor is 3.11.
 cad = ["cadquery-ocp-novtk==8.0.1.0.0"]
+# `numba` compiles the triangle grid's walk (`TriangleGrid.blocks(walk="compiled")`,
+# `aquaflux/radiation/grid_walk.py`): each segment walked to its first hit in one compiled loop rather
+# than as a numpy pass per voxel step over every ray. Imported only when that walk is asked for.
+numba = ["numba>=0.60"]
 # `petsc` (petsc4py) backs two coupled preconditioners. For the complete-LU
 # (`coupled_lu_continuation`) it is the optional fast backend — UMFPACK (SuiteSparse) factors the coupled
 # Jacobian roughly an order of magnitude faster than the threshold-ILU on a moderate 2D mesh; without it

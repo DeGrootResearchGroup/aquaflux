@@ -30,6 +30,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `culling.py` — how the bodies' layer is decided: `ShaftCulling` (the default since 2026-09-26; tiles certified clear, refined coarse to fine, #554) or `EveryPair` (the reference) | **BUILT** ("clear" certificates only; analytic and triangle bodies) |
 | `triangle_body.py` — `TriangleBody`, a `Body` of triangles over a `TriangleGrid`, with `contains` decided per piece (#510) | **BUILT** |
 | `triangles.py` — watertight ray-triangle intersection | **BUILT** |
+| `grid_walk.py` — the grid walk as one compiled (Numba) loop per ray, `TriangleGrid.blocks(walk="compiled")` | **PROTOTYPE** (optional, selected by nothing) |
 | `self_occlusion.py` — the `SelfOcclusion` strategies: ray cast, silhouette clip, none | **BUILT** |
 | `silhouette.py` — the exact covered fraction of a source, the conservative cone cull, and the exact second-stage rejection (`covers_nothing`) | **BUILT** |
 | `clipping.py` — convex clipping with filtered (decidable) sign tests, shared with `solid_angle.py` | **BUILT** |
@@ -2307,6 +2308,80 @@ ladder, next) or the mask has to be built on a coarser emitter than the gather u
 B there is a third way, which cuts the rays WALKED rather than the rays asked about**: a
 `TriangleBody` under `ShaftCulling` vouches for whole tiles, 89% of pairs and 4.96x on a shadowless
 triangulated chamber (the SHAFT CULLING section above) — on the real wall, less, by the pipe-cell share.
+
+### THE COMPILED WALK: `walk="compiled"`, one Numba loop per ray (prototype, 2026-09-26)
+
+**Why the array walk is slow, profiled before building** (a 51,200-triangle cylindrical wall, 0.05 m
+by 1.6 m, 200,000 rays between interior points, a fifth aimed out; cProfile plus a counter on the
+kernel; jax 0.10.2, CPU, x64, Linux x86_64, 4 cores): **the traced triangle test is 6-47% of the walk
+and the rest is host bookkeeping** — about **150-180 ns per ray per voxel step** of numpy passes over
+the live rays. That is why a finer grid is *slower* on it: default (10, 10, 161) → (32, 32, 512) cut
+the tests per ray 79 → 10 and raised the steps 54 → 171, and 55k → 37k rays/s. **93-99% of the steps
+land in empty voxels** on that scene. So the survey's comparison with production ray tracers (Embree:
+compiled per-ray traversal, BVH, 32-bit SIMD, threads) came down to the execution model first, and the
+data structure second — the former is adoptable without importing a ray tracer, and was.
+
+**What it is.** `TriangleGrid.blocks(..., walk="compiled")` hands the live rays' DDA state (from the
+same `_enters_grid` / `_walk_state` the array walk uses) to `grid_walk.walk_to_first_hit`, a
+`numba.njit(parallel=True)` loop, one ray per `prange` iteration, walked to its first hit or its end,
+same voxel order, same step cap (`sum(resolution) + 3`), same first-minimum tie rule as `argmin`. No
+pair array is formed, so `work_limit` does not apply to it. **Numba is an optional extra**
+(`aquaflux[numba]`, imported on first use with an error naming the extra), and the `test` extra carries
+it so CI runs both arms. `walk="array"` stays the default — **nothing selects the compiled walk yet**:
+`RayCastOcclusion(grid=...)` and `TriangleBody` still call `blocks` without it. Whether to make it the
+only walk (Numba a core dependency, the array walk deleted as dominated) is the decision this prototype
+was built to inform, and has not been taken.
+
+⚠️ **The intersection test is a SECOND IMPLEMENTATION of `_watertight_hit` + `_counts_as_hit`**,
+because a Numba loop cannot call a traced JAX function. Every contract test in `test_radiation_grid.py`
+runs on both walks against `segment_is_cut`, which is what keeps them one predicate; a change to one
+must be made to the other. If the compiled walk becomes the only one, the traced copy is still needed
+by the dense `_block_is_cut` path.
+
+**MEASURED** (`validation/radiation_grid_walk.py`, both walks in one process on the same rays, warm,
+two alternating passes, fastest kept; 200,000 rays; jax 0.10.2, numba 0.67.0, CPU, x64, **Linux x86_64,
+4 cores** (a cloud container), run directly with output redirected, nothing else running, 2026-09-26,
+uncommitted tree on `392f935`); grids are the default and 2x / 4x it per axis:
+
+| scene | grid | array rays/s | compiled rays/s | speed-up |
+|---|---|---|---|---|
+| long thin vessel (51,200 triangles, 13.8% blocked) | default 10x10x161 | 61,616 | 1,041,835 | **16.9x** |
+| | 20x20x322 | 55,098 | 1,186,686 | 21.5x |
+| | 40x40x644 | 26,540 | 854,825 | 32.2x |
+| annular reactor (sleeve + wall, 32,768 triangles, 63.6% blocked) | default 9x9x92 | 21,755 | 812,356 | **37.3x** |
+| | 18x18x184 | 35,407 | 1,026,089 | 29.0x |
+| | 36x36x368 | 41,407 | 1,021,659 | 24.7x |
+
+Answers identical in every row. The first compiled call of a process also compiles the loop: **2.0 s**.
+A scratch run of the vessel scene earlier the same day read 25.0 / 20.9 / 27.4 / 35.2x at 1 / 1.6 / 3.2 /
+6.4x the default — the same band, two processes. ⚠️ **Not measured on the Sozzi wall** (`bodyWall.stl`
+and `work/case` are absent here), and not on the 11-core machine; the 88 h mesh-scale figure above was
+extrapolated from 38,700 rays/s there, so what this buys at mesh scale is **not established** — re-run
+the harness, or `grid_mask_check.py` with the walk switched, before quoting one.
+
+**What is left, estimated rather than measured**: at ~1M rays/s on 4 cores a ray costs ~4 µs of one
+core, and ~80 triangle tests at a few tens of ns each account for most of that at the default grid — so
+empty-space skipping (#503) or a BVH now buys less than the per-step overhead suggested, and the
+triangle test's own cost is the next thing to profile.
+
+**Tests**, the contract tests parametrized over both walks (`WALKS`, the compiled arm skipped without
+Numba — declared in `test_optional_dependency_skips.py`), plus: rays aimed at every vertex and edge
+midpoint of a closed drum (the watertight fixture), a segment ending in a triangle's plane (far end
+inclusive), a hit exactly at the margin (near end exclusive, axis-aligned so the distance is exact),
+y-parallel segments added to `rays_through`, the unknown-walk refusal and the missing-Numba message.
+**Mutation pass on `grid_walk.py` (12, 7 red):** exclusions dropped, far end exclusive, near end
+inclusive, one-sided inside test, shear sign, and the leading axis fixed at x — that last one
+caught only once y-parallel segments were added to the fixture, every earlier one having a non-zero x. **Dismissed, each because it cannot change an answer:**
+no break on a hit and dropping the `leaving <= 1` walk bound (both only walk further — hits past the
+end fail the window anyway); the edge-on guard (`x / 0` gives `inf` or `nan`, which fails the window);
+one step short of the cap (a DDA visits at most `nx + ny + nz - 2` voxels, so the cap has slack); ties
+broken to the last axis (the tied crossing is a corner the ray touches at one point). ⚠️ **And the plain
+edge function in place of the averaged one survived, even with `fastmath={"contract"}`** — Numba did not
+fuse the products on this fixture. The averaged form stays, so the watertight guarantee does not rest on
+what a compiler happens to do; that is the lesson the traced kernel already paid for.
+
+**`NUMBA_NUM_THREADS=1`** is now set beside `OMP_NUM_THREADS` in `tools/fastgate.sh`'s parallel tier and
+in CI's environment, so xdist workers do not each start a pool the size of the machine.
 
 ## HOW MANY FACETS AN EMITTER NEEDS — measured, because it sets the price of everything
 

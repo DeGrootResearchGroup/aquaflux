@@ -42,11 +42,13 @@ concurrency:
       || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
-# Pin XLA/BLAS to a single thread per process so pytest-xdist workers do not
-# oversubscribe the runner's CPUs -- each JAX process otherwise grabs every core,
-# and N workers x M cores thrashes. With this, `-n auto` scales cleanly.
+# Pin XLA/BLAS (and Numba's parallel loops) to a single thread per process so
+# pytest-xdist workers do not oversubscribe the runner's CPUs -- each JAX process
+# otherwise grabs every core, and N workers x M cores thrashes. With this, `-n auto`
+# scales cleanly.
 env:
   OMP_NUM_THREADS: "1"
+  NUMBA_NUM_THREADS: "1"
   XLA_FLAGS: "--xla_cpu_multi_thread_eigen=false"
 
 jobs:
