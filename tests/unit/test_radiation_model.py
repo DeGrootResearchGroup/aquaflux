@@ -303,6 +303,32 @@ def _lit_box(**optics):
     )
 
 
+def test_a_second_solve_of_the_same_size_reuses_the_compiled_program(monkeypatch):
+    """Tracing a solve costs an order of magnitude more than running one at a few hundred facets,
+    so a model called repeatedly -- a sweep over emission, an optimizer's iterations -- must not
+    trace it again on each call. Watched through the linear solve, which is only entered while a
+    program is being traced."""
+    from aquaflux.radiation import model as model_module
+
+    traced = []
+    real = model_module.solve_linear
+
+    def watched(*args, **kwargs):
+        traced.append(1)
+        return real(*args, **kwargs)
+
+    jax.clear_caches()
+    monkeypatch.setattr(model_module, "solve_linear", watched)
+    surfaces = _lit_box(reflectance=0.6)
+    model = surface_model(surfaces)
+    first, _ = radiosity(model, surfaces)
+    second, _ = radiosity(
+        model, surfaces.with_optics(emission=2.0 * jnp.asarray(surfaces.emission))
+    )
+    assert len(traced) == 1
+    np.testing.assert_allclose(second, 2.0 * first, rtol=1e-12)
+
+
 def test_the_gradient_in_reflectance_is_exact():
     surfaces = _lit_box(reflectance=0.6)
     model = surface_model(surfaces)
