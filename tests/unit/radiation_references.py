@@ -216,6 +216,23 @@ def inward_box(divisions: int = 2) -> np.ndarray:
     return corrected
 
 
+def mid_box_sheet(divisions: int, *, span: float) -> np.ndarray:
+    """A sheet across the unit box at ``x = 0.5``, meshed ``divisions`` a side over ``span``.
+
+    With ``span`` 1 its rim lies on grid lines of :func:`inward_box` of the same divisions, so
+    every rim edge is shared with a wall: a sheet welded in all the way round.
+    """
+    edges = np.linspace(0.5 - span / 2, 0.5 + span / 2, divisions + 1)
+    triangles = []
+    for i in range(divisions):
+        for j in range(divisions):
+            a, b = edges[i], edges[i + 1]
+            c, d = edges[j], edges[j + 1]
+            triangles.append([[0.5, a, c], [0.5, b, c], [0.5, b, d]])
+            triangles.append([[0.5, a, c], [0.5, b, d], [0.5, a, d]])
+    return np.array(triangles)
+
+
 def box(divisions: int = 2, **optics) -> Surfaces:
     """A closed unit box as a surface set, inward-facing."""
     return Surfaces.from_triangles(inward_box(divisions), **optics)

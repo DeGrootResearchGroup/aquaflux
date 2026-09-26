@@ -11,6 +11,7 @@ from tests.unit.radiation_references import (
     cylinder_triangles,
     disc_triangles,
     inward_box,
+    mid_box_sheet,
     rectangle_triangles,
 )
 
@@ -145,26 +146,111 @@ def test_chunking_the_points_changes_nothing():
         )
 
 
+def _watch_passes(monkeypatch) -> list[np.ndarray]:
+    """Record the points each compiled pass of :func:`enclosure_winding` is handed."""
+    from aquaflux.radiation import checks
+
+    passes = []
+    real = checks._summed_signed_solid_angle
+
+    def watched(points, vertices):
+        passes.append(np.asarray(points))
+        return real(points, vertices)
+
+    monkeypatch.setattr(checks, "_summed_signed_solid_angle", watched)
+    return passes
+
+
+def _brute_force_winding(vertices, points) -> np.ndarray:
+    """Every facet summed at every point, with no pieces and no skipping."""
+    omega = signed_solid_angle(points[:, None, :], vertices[None, ...])
+    return np.asarray(omega).sum(axis=1) / (4.0 * np.pi)
+
+
 def test_a_pass_is_bounded_in_point_by_facet_pairs(monkeypatch):
     """Invariance alone cannot see the bound -- every chunking gives the same answer -- so this
     watches the passes: a limit of three points' worth of pairs must give passes of three points,
-    where reading the limit as a point count would give one pass of all of them."""
-    from aquaflux.radiation import checks
-
-    shapes = []
-    real = checks.signed_solid_angle
-
-    def watched(points, vertices):
-        shapes.append(points.shape[0])
-        return real(points, vertices)
-
-    monkeypatch.setattr(checks, "signed_solid_angle", watched)
+    where reading the limit as a point count would give one pass of all of them. The points are
+    all inside the box, so none is skipped for lying outside it."""
+    passes = _watch_passes(monkeypatch)
     vertices = inward_box(2)
-    points = np.concatenate([INSIDE, OUTSIDE])
-    assert len(points) > 3, "the fixture must need more than one pass"
+    points = np.random.default_rng(1).uniform(0.1, 0.9, (7, 3))
     enclosure_winding(vertices, points, pair_limit=3 * len(vertices))
-    assert max(shapes) == 3, shapes
-    assert sum(shapes) == len(points), shapes
+    assert [len(p) for p in passes] == [3, 3, 1]
+
+
+def test_a_short_last_pass_is_padded_to_a_power_of_two_and_its_padding_dropped(monkeypatch):
+    """A pass shorter than the full one would otherwise compile a program of its own shape, once
+    per piece and per point count. Padding it by repeating its last point keeps the shapes to a
+    few; the padding's answers must not reach the result."""
+    passes = _watch_passes(monkeypatch)
+    vertices = inward_box(2)
+    points = np.random.default_rng(2).uniform(0.1, 0.9, (13, 3))
+    winding = enclosure_winding(vertices, points, pair_limit=8 * len(vertices))
+    assert [len(p) for p in passes] == [8, 8]
+    np.testing.assert_array_equal(passes[1][5:], np.repeat(points[-1:], 3, axis=0))
+    np.testing.assert_allclose(np.abs(winding), 1.0, atol=1e-12)
+    assert winding.shape == (13,)
+
+
+def test_a_closed_piece_is_not_summed_outside_its_bounding_box(monkeypatch):
+    """Its winding number is exactly zero there, so it is answered without being evaluated --
+    and answered as an exact zero, where summing would leave a rounding of one."""
+    passes = _watch_passes(monkeypatch)
+    vertices = inward_box(2)
+    winding = enclosure_winding(vertices, np.concatenate([OUTSIDE, INSIDE]))
+    evaluated = np.unique(np.concatenate(passes), axis=0)
+    np.testing.assert_array_equal(evaluated, np.unique(INSIDE, axis=0))
+    np.testing.assert_array_equal(winding[: len(OUTSIDE)], 0.0)
+    np.testing.assert_allclose(np.abs(winding[len(OUTSIDE) :]), 1.0, atol=1e-12)
+
+
+def test_each_closed_piece_is_skipped_by_its_own_box(monkeypatch):
+    """Two boxes side by side: a point inside one lies outside the other's box, and one between
+    them lies outside both. Each box is summed at its own point alone -- a box drawn round the
+    whole surface would sum both at all three."""
+    passes = _watch_passes(monkeypatch)
+    first = inward_box(2)
+    second = first + np.array([2.0, 0.0, 0.0])
+    points = np.array([[0.5, 0.5, 0.5], [2.5, 0.5, 0.5], [1.5, 0.5, 0.5]])
+    winding = enclosure_winding(np.concatenate([first, second]), points)
+    np.testing.assert_allclose(np.abs(winding[:2]), [1.0, 1.0], atol=1e-12)
+    assert winding[2] == 0.0
+    assert sorted(p.tolist() for p in passes) == [[points[0].tolist()], [points[1].tolist()]]
+
+
+def test_an_open_piece_and_a_closed_one_add_where_both_are_summed():
+    """A free baffle inside a box: the box is closed and skipped outside itself, the baffle is
+    open and summed everywhere, and inside the box both contributions must arrive -- the answer
+    is still every facet summed at every point."""
+    vertices = np.concatenate([inward_box(2), mid_box_sheet(2, span=0.6)])
+    points = np.array([[0.25, 0.5, 0.5], [0.7, 0.45, 0.55], [1.5, 0.5, 0.5], [-0.3, 0.2, 0.9]])
+    winding = enclosure_winding(vertices, points)
+    np.testing.assert_allclose(winding, _brute_force_winding(vertices, points), atol=1e-12)
+    assert np.all(np.abs(winding[2:]) > 0.01), "the baffle is seen from outside the box"
+
+
+def test_a_sheet_welded_into_a_closed_body_is_summed_everywhere():
+    """Topology alone reads a sheet welded in all the way round as closed -- no edge of it is
+    free -- and so do the two halves of the box the weld splits. None of them bounds anything by
+    itself, so none may be skipped outside its own box: what is summed must be every facet at
+    every point."""
+    vertices = np.concatenate([inward_box(2), mid_box_sheet(2, span=1.0)])
+    points = np.array([[0.25, 0.5, 0.5], [0.75, 0.3, 0.6], [1.5, 0.5, 0.5]])
+    np.testing.assert_allclose(
+        enclosure_winding(vertices, points), _brute_force_winding(vertices, points), atol=1e-12
+    )
+
+
+def test_a_closed_surface_wound_inconsistently_is_summed_outside_its_box_too():
+    """A reversed cap leaves the cylinder closed in shape but not a winding cycle, so it reads
+    between the two answers outside it as well as inside; skipping it there would report the
+    confident zero it has not earned."""
+    flipped, _, _ = _capped_cylinder(consistent=False)
+    beyond = np.array([[0.0, 0.0, 0.8], [0.0, 0.0, -0.8]])
+    winding = enclosure_winding(flipped, beyond)
+    np.testing.assert_allclose(winding, _brute_force_winding(flipped, beyond), atol=1e-12)
+    assert np.all(np.abs(winding) > 0.01), "outside it, the reversed cap is still seen"
 
 
 def test_no_points_and_no_facets_are_both_answered_rather_than_raising():
