@@ -2930,7 +2930,7 @@ dropping the edge-on guard inside the separating test changes no answer — a tr
 blocker `covers_nothing` already rejects, or a source that subtends nothing — and it stays because it
 is what keeps the predicate honest on its own.
 
-### THE CULL RUNS ON CLUSTERS FIRST (#555, 2026-09-26) — worth 1.24x at 3,184 facets, and why no more
+### THE CULL RUNS ON CLUSTERS FIRST (#555, 2026-09-26) — worth 1.24x at 3,184 facets, and why no more (a second level measured slower)
 
 **Measured first, on #556's code** (`silhouette_stages`, serial, 4-core Linux container, jax 0.10.2):
 the cull was **54%** of a 3,184-facet build (35.5% on device, 18.4% host compaction), 45% at 1,532;
@@ -2974,9 +2974,24 @@ and a circular cap around an elongated patch overlaps many others. The device cu
   against numpy's **14.8 ms**, transfer included, on a 4096 × 32 × 32 mask at 2.5% density. On CPU
   the host is the place for it.
 
-**The lever left is depth, not width**: a second level (clusters of 32 split into groups of ~8, tested
-only within surviving cluster pairs) would cut the member tests by roughly the survival ratio at each
-level. Not built — it is beyond what #555 specified.
+**Re-measured after a container change, all arms in one sitting** (4 cores, but faster hardware than
+the table above — so compare within a table, never across): `main` (#556's cull) **172.5 / 177.3 s**
+at 3,184 facets against one level's **142.4 / 140.7 s** — the same 1.24x — and 86.4 / 87.6 against
+90.7 / 88.1 s at 2,448, even.
+
+⚠️ **A SECOND LEVEL WAS BUILT AND MEASURED, AND IT IS SLOWER — not shipped.** A `ClusterHierarchy` of
+sizes (32, 8), each level cut from one Morton order so a 32-cluster is exactly four 8-clusters, with the
+same pairwise cluster test at every level and only surviving pairs expanded. It kept exactly the dense
+set (the exactness test passed at (32, 8) and (20, 5, 1)). The probe that motivated it held up: of the
+3,839 surviving 32-cluster pairs per receiver, **29%** of their 8×8 children survived, so the member test
+fell **3.93M → 1.15M** pairs (3.4x). But the whole cull went only **~41 → ~33 ms** a receiver serially
+(1.24x, not the ~2x projected), and at the default 4 threads the build got **slower**: **158.5 / 158.6
+and 159.9 / 155.1 s** at 3,184 facets against one level's 141-142 s, and 83-96 s (a wide spread) at
+2,448. The profile blamed the round trips: each receiver makes twice as many small compiled calls, and
+most of the cull's time is `numpy.asarray` waiting on their results; under four threads those
+synchronizations contend with the reject and clip passes running beside them. **Fewer member tests are
+not worth more dispatches.** Anyone retrying depth needs the levels fused into one compiled call per
+receiver (or batched across receivers), not stacked as separate calls. Dropped as dominated.
 
 Tests, mutation-checked (8 mutations, 7 red): dropping the member half-angle from the enclosing cap,
 the sphere radius, or flipping the sphere test fails the exactness test; ignoring `pair_limit` in
