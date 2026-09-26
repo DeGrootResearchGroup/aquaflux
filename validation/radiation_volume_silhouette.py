@@ -40,6 +40,7 @@ from aquaflux.radiation import (
     build_visibility,
     fluence_rate,
 )
+from aquaflux.radiation.clusters import FacetClusters
 from radiation_overlap_overcount import PrecomputedOcclusion, two_sleeve_reactor, union_hidden
 
 #: Sleeve axes, radius and half-height, as `two_sleeve_reactor` builds them.
@@ -192,6 +193,7 @@ def cost(divisions: int, sectors: int, per_side: int) -> None:
         timings[name] = time.perf_counter() - start
 
     near = jnp.zeros(n)
+    clusters = FacetClusters.build(np.asarray(surfaces.vertices))
     survivors = [
         len(
             SilhouetteOcclusion()._candidates(
@@ -202,6 +204,7 @@ def cost(divisions: int, sectors: int, per_side: int) -> None:
                 surfaces.normal,
                 near,
                 jnp.zeros(n, dtype=bool),
+                clusters,
             )[1]
         )
         for k in range(0, len(points), max(1, len(points) // 50))

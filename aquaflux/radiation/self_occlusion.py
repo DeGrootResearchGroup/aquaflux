@@ -44,6 +44,7 @@ import numpy as np
 
 from aquaflux.radiation.checks import open_facets
 from aquaflux.radiation.clipping import decidable_heights
+from aquaflux.radiation.clusters import FacetClusters
 from aquaflux.radiation.grid import TriangleGrid
 from aquaflux.radiation.silhouette import (
     SourceView,
@@ -52,6 +53,7 @@ from aquaflux.radiation.silhouette import (
     cones_may_overlap,
     covered_by,
     covers_nothing,
+    enclosing_cone,
     source_view,
 )
 from aquaflux.radiation.triangles import padded_length, pairs_are_cut
@@ -355,7 +357,9 @@ class SilhouetteOcclusion(SelfOcclusion):
     triangle's bounding cone and each source's clipped view (``n`` each, not ``n**2``), keeping
     only the sources that subtend something and the blockers that could stand in front of this
     receiver; then cull every surviving (source, blocker) pair whose cones cannot overlap or whose
-    blocker lies beyond the source (:func:`~aquaflux.radiation.silhouette.may_occlude`'s bounds).
+    blocker lies beyond the source (:func:`~aquaflux.radiation.silhouette.may_occlude`'s bounds) --
+    on clusters of neighbouring facets first, so that pairs between two clusters whose bounds
+    cannot meet are rejected by one test, and pair by pair only within the clusters that remain.
     Then, over the pairs of many receivers at once: reject every pair that certainly covers
     nothing (:func:`~aquaflux.radiation.silhouette.covers_nothing`) -- most of what the cones let
     through, on a meshed enclosure -- and clip only what is left. The cone cull's survival falls
@@ -389,9 +393,13 @@ class SilhouetteOcclusion(SelfOcclusion):
         (Source, blocker) pairs rejected or clipped per compiled call, which bounds those passes'
         memory: each of :attr:`threads` calls in flight holds one chunk's working set.
     pair_limit : int
-        (Source, blocker) pairs one compiled call of the cull may form for a receiver, which bounds
-        the cull's memory the same way ``pair_limit`` bounds every receiver-by-facet pass in this
-        package: the candidates are tiled into blocks of sources against all candidate blockers.
+        Entries one compiled call of the cull may form for a receiver -- cluster pairs times the
+        cluster size, or member pairs -- which bounds the cull's memory the same way
+        ``pair_limit`` bounds every receiver-by-facet pass in this package.
+    cluster_size : int
+        Facets per cluster in the cull (:class:`~aquaflux.radiation.clusters.FacetClusters`).
+        Smaller clusters bound their members more tightly but make more cluster pairs to test;
+        the answer does not depend on it, only the cost.
     threads : int
         How many compiled calls of the reject and clip passes run at once, and how many receivers
         ahead the cull works.
@@ -403,6 +411,7 @@ class SilhouetteOcclusion(SelfOcclusion):
 
     work_chunk: int = 32_768
     pair_limit: int = DEFAULT_PAIR_LIMIT
+    cluster_size: int = 32
     threads: int = 4
     two_sided: tuple[str, ...] = ()
 
@@ -428,11 +437,13 @@ class SilhouetteOcclusion(SelfOcclusion):
         fraction = np.zeros((n_receivers, n_facets))
         blockers = np.zeros((n_receivers, n_facets), dtype=np.int32)
 
+        clusters = FacetClusters.build(np.asarray(surfaces.vertices), self.cluster_size)
+
         def candidates(row):
             own = facet_of[row]
             facing = None if own < 0 else facet_normal[own]
             return self._candidates(
-                receivers[row], facing, vertices, centroid, normal, near, either_side
+                receivers[row], facing, vertices, centroid, normal, near, either_side, clusters
             )
 
         with ThreadPoolExecutor(max_workers=max(1, self.threads)) as pool:
@@ -523,35 +534,92 @@ class SilhouetteOcclusion(SelfOcclusion):
 
     @staticmethod
     @jax.jit
-    def _cull(receiver, vertices, cone, view, source, blocker):
-        """Which of a block of (source, blocker) pairs could possibly matter, as a dense mask.
+    def _cluster_bounds(cone, members, subtends, may_block):
+        """Each cluster's enclosing cone as a source and as a blocker, and whether it is either."""
+        source_cone, has_source = enclosing_cone(cone, members, subtends)
+        blocker_cone, has_blocker = enclosing_cone(cone, members, may_block)
+        return source_cone, has_source, blocker_cone, has_blocker
 
-        ``source`` is a column of source indices and ``blocker`` a row of blocker indices, so the
-        mask is ``(len(source), len(blocker))``.
+    @staticmethod
+    @jax.jit
+    def _cluster_pairs(
+        receiver, view, members, subtends, source_cone, blocker_cone, centre, radius, rows, cols
+    ):
+        """Which (source cluster, blocker cluster) pairs could hold a pair worth keeping.
+
+        ``rows`` are source clusters and ``cols`` blocker clusters, so the mask is
+        ``(len(rows), len(cols))``. Two reasons to reject a cluster pair, each a bound on the
+        member test run after it: the enclosing cones cannot overlap, or the blocker cluster's
+        bounding sphere lies wholly beyond the supporting plane of every eligible source in the
+        source cluster -- so every blocker corner is beyond every such source.
         """
-        source_cone = tuple(
-            jnp.take(x, source, axis=0)[:, None] if x.ndim == 1 else x[source][:, None, :]
-            for x in cone
+        keep = cones_may_overlap(
+            tuple(x[rows][:, None] if x.ndim == 1 else x[rows][:, None, :] for x in source_cone),
+            tuple(x[cols][None, :] if x.ndim == 1 else x[cols][None, :, :] for x in blocker_cone),
         )
-        blocker_cone = tuple(
-            jnp.take(x, blocker, axis=0)[None, :] if x.ndim == 1 else x[blocker][None, :, :]
-            for x in cone
+        slot = jnp.maximum(members[rows], 0)
+        eligible = (members[rows] >= 0) & jnp.take(subtends, slot)
+        # Heights of each blocker cluster's centre above each source's plane: (rows, cols, k).
+        offset = (centre[cols] - receiver)[None, :, None, :] - view.through[slot][:, None, :, :]
+        height = dot(offset, view.support[slot][:, None, :, :])
+        beyond = jnp.all(
+            ~eligible[:, None, :] | (height + radius[cols][None, :, None] < 0.0), axis=-1
         )
-        to_blocker = jnp.take(vertices, blocker, axis=0) - receiver
-        keep = cones_may_overlap(source_cone, blocker_cone)
-        return keep & ~beyond_source_plane(
-            to_blocker[None, :, :, :],
-            jnp.take(view.support, source, axis=0)[:, None, :],
-            jnp.take(view.through, source, axis=0)[:, None, :],
-        )
+        return keep & ~beyond
 
-    def _candidates(self, receiver, receiver_normal, vertices, centroid, normal, near, either_side):
+    @staticmethod
+    @jax.jit
+    def _member_pairs(
+        receiver,
+        vertices,
+        cone,
+        view,
+        members,
+        subtends,
+        may_block,
+        source_cluster,
+        blocker_cluster,
+    ):
+        """The member test over every pair of each given cluster pair: ``(batch, k, k)``.
+
+        The same two tests the cull has always applied to a (source, blocker) pair -- their cones
+        can overlap, and the blocker is not wholly beyond the source's plane -- restricted to
+        members that are eligible in their role.
+        """
+        source = members[source_cluster]
+        blocker = members[blocker_cluster]
+        s, b = jnp.maximum(source, 0), jnp.maximum(blocker, 0)
+        eligible = ((source >= 0) & jnp.take(subtends, s))[:, :, None] & (
+            (blocker >= 0) & jnp.take(may_block, b)
+        )[:, None, :]
+        keep = cones_may_overlap(
+            tuple(x[s][:, :, None] if x.ndim == 1 else x[s][:, :, None, :] for x in cone),
+            tuple(x[b][:, None, :] if x.ndim == 1 else x[b][:, None, :, :] for x in cone),
+        )
+        to_blocker = jnp.take(vertices, b, axis=0) - receiver
+        keep &= ~beyond_source_plane(
+            to_blocker[:, None, :, :, :],
+            view.support[s][:, :, None, :],
+            view.through[s][:, :, None, :],
+        )
+        return eligible & keep
+
+    def _candidates(
+        self, receiver, receiver_normal, vertices, centroid, normal, near, either_side, clusters
+    ):
         """The pairs the cull keeps for one receiver, compacted on the host, and its views.
 
-        Legal to compact on the host because the mask is frozen. The candidates are the sources
-        that subtend something against the triangles that could block from here -- a list of each,
-        found in one pass over the triangles -- and the cull is run over them in blocks of
-        sources, so no call forms more than :attr:`pair_limit` pairs.
+        Legal to compact on the host because the mask is frozen. The cull runs on clusters first
+        (:class:`~aquaflux.radiation.clusters.FacetClusters`): each cluster's members are bounded
+        by one cone per role, cluster pairs are rejected whole where those bounds allow, and only
+        the members of the surviving cluster pairs are tested one by one. Every call forms at most
+        :attr:`pair_limit` entries. The kept pairs are exactly those the member test would keep
+        over all pairs -- the cluster stage only skips pairs that test would reject -- grouped by
+        cluster pair.
+
+        The compaction is on the host, which on a processor is the faster place for it: numpy's
+        ``nonzero`` over a batch's mask beats a compiled one with a bounded output several times
+        over, transfer included.
 
         Returns
         -------
@@ -562,34 +630,81 @@ class SilhouetteOcclusion(SelfOcclusion):
         cone, view, subtends, may_block = self._per_triangle(
             receiver, receiver_normal, vertices, centroid, normal, near, either_side
         )
-        view = jax.tree.map(np.asarray, view)
-        sources = np.flatnonzero(np.asarray(subtends))
-        blockers = np.flatnonzero(np.asarray(may_block))
-        if not len(sources) or not len(blockers):
-            empty = np.zeros(0, dtype=int)
-            return view, empty, empty
-        # Both padded to powers of two, so a couple of dozen compiled shapes serve every receiver;
-        # the padding repeats a real index and its answers are cut off below.
-        width = padded_length(len(blockers))
-        rows = min(padded_length(len(sources)), _power_of_two_at_most(self.pair_limit // width))
-        padded_blockers = np.pad(blockers, (0, width - len(blockers)), mode="edge")
-        found_source, found_blocker = [], []
-        for start in range(0, len(sources), rows):
-            block = sources[start : start + rows]
+        host_view = jax.tree.map(np.asarray, view)
+        empty = np.zeros(0, dtype=int)
+        members = jnp.asarray(clusters.members)
+        source_cone, has_source, blocker_cone, has_blocker = self._cluster_bounds(
+            cone, members, subtends, may_block
+        )
+        rows = np.flatnonzero(np.asarray(has_source))
+        cols = np.flatnonzero(np.asarray(has_blocker))
+        if not len(rows) or not len(cols):
+            return host_view, empty, empty
+
+        # Cluster pairs, in blocks of source clusters against every blocker cluster. Everything
+        # is padded to powers of two, repeating a real index whose answers are cut off, so a
+        # couple of dozen compiled shapes serve every receiver.
+        k = clusters.size
+        width = padded_length(len(cols))
+        height = min(
+            padded_length(len(rows)), _power_of_two_at_most(self.pair_limit // (width * k))
+        )
+        padded_cols = np.pad(cols, (0, width - len(cols)), mode="edge")
+        source_cluster, blocker_cluster = [], []
+        for start in range(0, len(rows), height):
+            block = rows[start : start + height]
             keep = np.asarray(
-                self._cull(
+                self._cluster_pairs(
+                    receiver,
+                    view,
+                    members,
+                    subtends,
+                    source_cone,
+                    blocker_cone,
+                    jnp.asarray(clusters.centre),
+                    jnp.asarray(clusters.radius),
+                    np.pad(block, (0, height - len(block)), mode="edge"),
+                    padded_cols,
+                )
+            )[: len(block), : len(cols)]
+            i, j = np.nonzero(keep)
+            source_cluster.append(block[i])
+            blocker_cluster.append(cols[j])
+        source_cluster = np.concatenate(source_cluster)
+        blocker_cluster = np.concatenate(blocker_cluster)
+        if not len(source_cluster):
+            return host_view, empty, empty
+
+        # Members of the surviving cluster pairs, a batch of cluster pairs per call.
+        batch = min(
+            padded_length(len(source_cluster)), _power_of_two_at_most(self.pair_limit // (k * k))
+        )
+        found_source, found_blocker = [], []
+        for start in range(0, len(source_cluster), batch):
+            these_sources = source_cluster[start : start + batch]
+            these_blockers = blocker_cluster[start : start + batch]
+            pad = batch - len(these_sources)
+            keep = np.asarray(
+                self._member_pairs(
                     receiver,
                     vertices,
                     cone,
                     view,
-                    np.pad(block, (0, rows - len(block)), mode="edge"),
-                    padded_blockers,
+                    members,
+                    subtends,
+                    may_block,
+                    np.pad(these_sources, (0, pad), mode="edge"),
+                    np.pad(these_blockers, (0, pad), mode="edge"),
                 )
-            )[: len(block), : len(blockers)]
-            i, j = np.nonzero(keep)
-            found_source.append(block[i])
-            found_blocker.append(blockers[j])
-        return view, np.concatenate(found_source), np.concatenate(found_blocker)
+            )[: len(these_sources)]
+            pair, i, j = np.nonzero(keep)
+            found_source.append(clusters.members[these_sources[pair], i])
+            found_blocker.append(clusters.members[these_blockers[pair], j])
+        # Clusters partition the facets, so each pair is found exactly once. They come out grouped
+        # by cluster pair rather than sorted: sorting them costs as much as a fifth of the cull,
+        # and their order only decides the order a source's shares are summed in, which moves the
+        # answer by a rounding and not by a pair.
+        return host_view, np.concatenate(found_source), np.concatenate(found_blocker)
 
 
 def _power_of_two_at_most(count: int) -> int:

@@ -70,6 +70,7 @@ __all__ = [
     "covered_by",
     "covered_fraction",
     "covers_nothing",
+    "enclosing_cone",
     "may_occlude",
     "source_plane",
     "source_view",
@@ -529,6 +530,58 @@ def cones_may_overlap(source_cone, blocker_cone):
     between = dot(source_axis, blocker_axis)
     limit = source_cos * blocker_cos - source_sin * blocker_sin
     return source_bad | blocker_bad | (between >= limit - _CONE_SLACK)
+
+
+def enclosing_cone(cone, members, eligible):
+    """A cone containing the cones of every eligible member of each group, and which groups have one.
+
+    For a cull over groups of triangles: two groups whose enclosing cones cannot overlap hold no
+    pair of members whose cones can, so every pair between them is rejected by one test. The
+    enclosing cap is centred on the mean of the members' axes and reaches, for each member, the
+    angle to its axis plus its own half-angle -- by the triangle inequality on the sphere, every
+    direction in a member's cap is then inside it. Angles are taken with ``arctan2``, which stays
+    accurate for the near-parallel axes a compact group has.
+
+    ⚠️ **An unusable member makes its group unusable**, and so does an enclosing cap reaching a
+    right angle -- the same rule as for a single cone, and for the same reason: a flagged cone
+    overlaps everything, or the cull stops being conservative.
+
+    Parameters
+    ----------
+    cone : tuple of jnp.ndarray
+        Per-triangle cones from :func:`angular_cone`, each of leading dimension ``n``.
+    members : jnp.ndarray of int, shape ``(m, k)``
+        Triangle indices of each of ``m`` groups, ``-1`` for an empty slot.
+    eligible : jnp.ndarray of bool, shape ``(n,)``
+        Which triangles take part; the rest are left out of every group's bound.
+
+    Returns
+    -------
+    tuple of (tuple of jnp.ndarray, jnp.ndarray)
+        The enclosing cones in the form :func:`angular_cone` returns, leading dimension ``m``,
+        and a boolean ``(m,)`` marking the groups with any eligible member at all -- a group
+        without one has no pairs to keep and its cone means nothing.
+    """
+    axis, cos_half, sin_half, unusable = cone
+    slot = jnp.maximum(members, 0)
+    valid = (members >= 0) & jnp.take(eligible, slot)
+    member_axis = jnp.take(axis, slot, axis=0)
+    total = jnp.sum(jnp.where(valid[..., None], member_axis, 0.0), axis=-2)
+    reach = jnp.linalg.norm(total, axis=-1)
+    centre = total / jnp.where(reach == 0.0, 1.0, reach)[..., None]
+    apart = jnp.arctan2(
+        jnp.linalg.norm(jnp.cross(centre[..., None, :], member_axis), axis=-1),
+        dot(centre[..., None, :], member_axis),
+    )
+    own = jnp.arctan2(jnp.take(sin_half, slot), jnp.take(cos_half, slot))
+    half = jnp.max(jnp.where(valid, apart + own, -jnp.inf), axis=-1) + _CONE_SLACK
+    bad = (
+        jnp.any(valid & jnp.take(unusable, slot), axis=-1)
+        | (reach <= _CONE_FLOOR)
+        | (half >= 0.5 * jnp.pi - _CONE_FLOOR)
+    )
+    half = jnp.clip(half, 0.0, 0.5 * jnp.pi)
+    return (centre, jnp.cos(half), jnp.sin(half), bad), jnp.any(valid, axis=-1)
 
 
 def source_plane(receiver, source):
