@@ -48,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
+from aquaflux.radiation.clusters import FacetClusters
 from aquaflux.radiation.self_occlusion import (
     RayCastOcclusion,
     SilhouetteOcclusion,
@@ -206,6 +207,7 @@ def second_stage(cases, sampled: int = 30) -> None:
         centroid = jnp.asarray(surfaces.centroid)
         normal = np.asarray(surfaces.normal)
         either_side = jnp.zeros(n, dtype=bool)
+        clusters = FacetClusters.build(np.asarray(surfaces.vertices), strategy.cluster_size)
         kept_total, rejected_total, worst, worst_sum = 0, 0, 0.0, 0.0
         rows = range(0, n, max(1, n // sampled))
         for row in rows:
@@ -217,6 +219,7 @@ def second_stage(cases, sampled: int = 30) -> None:
                 jnp.asarray(normal),
                 jnp.zeros(n),
                 either_side,
+                clusters,
             )
             legal = (source != blocker) & (source != row) & (blocker != row)
             source, blocker = source[legal], blocker[legal]
@@ -250,6 +253,77 @@ def second_stage(cases, sampled: int = 30) -> None:
             f"{100.0 * rejected_total / max(1, kept_total):8.1f}% {worst:15.2e} {worst_sum:17.2e}",
             flush=True,
         )
+
+
+def silhouette_stages(cases, threads: int = 1) -> None:
+    """Where one silhouette build spends its time: cull, reject, clip, and the host work around them.
+
+    Each compiled stage is wrapped to block and time itself, and the host work is what is left of
+    the Python around it. With ``threads`` above one the stages overlap, so the seconds are summed
+    over threads and are shares of the work, not of the wall clock. The wrappers are removed
+    afterwards.
+    """
+    import threading
+    from collections import defaultdict
+
+    spent = defaultdict(float)
+    lock = threading.Lock()
+
+    def timed(name, fn, block=True):
+        def run(*args, **kwargs):
+            start = time.perf_counter()
+            out = fn(*args, **kwargs)
+            if block:
+                out = jax.block_until_ready(out)
+            with lock:
+                spent[name] += time.perf_counter() - start
+            return out
+
+        return run
+
+    wrapped = {
+        (SilhouetteOcclusion, "_per_triangle"): "per triangle",
+        (SilhouetteOcclusion, "_cluster_bounds"): "cull (device)",
+        (SilhouetteOcclusion, "_cluster_pairs"): "cull (device)",
+        (SilhouetteOcclusion, "_member_pairs"): "cull (device)",
+        (_PairPipeline, "_worth_clipping"): "reject (device)",
+        (_PairPipeline, "_covered"): "clip (device)",
+    }
+    totals = {
+        (SilhouetteOcclusion, "_candidates"): "cull total",
+        (_PairPipeline, "_call"): "chunks",
+    }
+    saved = {key: key[0].__dict__[key[1]] for key in (*wrapped, *totals)}
+    try:
+        for (owner, name), label in wrapped.items():
+            setattr(owner, name, staticmethod(timed(label, getattr(owner, name))))
+        for (owner, name), label in totals.items():
+            setattr(owner, name, timed(label, getattr(owner, name), block=False))
+        print(f"\n### SilhouetteOcclusion stages, threads={threads}\n", flush=True)
+        for divisions, sectors in cases:
+            surfaces = reactor(divisions, sectors)
+            n = surfaces.n_facets
+            strategy = SilhouetteOcclusion(threads=threads)
+            facets = np.arange(n)
+
+            def build(s=surfaces, st=strategy, f=facets):
+                return build_visibility((), s, s.centroid, receiver_facet=f, self_occlusion=st)
+
+            jax.block_until_ready(build().hidden_by_geometry)
+            spent.clear()
+            start = time.perf_counter()
+            jax.block_until_ready(build().hidden_by_geometry)
+            wall = time.perf_counter() - start
+            row = dict(spent)
+            cull_total, chunks = row.pop("cull total"), row.pop("chunks")
+            row["cull (host)"] = cull_total - row["per triangle"] - row["cull (device)"]
+            row["chunks (host)"] = chunks - row["reject (device)"] - row["clip (device)"]
+            summed = sum(row.values())
+            shares = "  ".join(f"{k} {100 * v / summed:.1f}%" for k, v in row.items())
+            print(f"{n:7,} facets: wall {wall:8.2f} s  |  {shares}", flush=True)
+    finally:
+        for (owner, name), original in saved.items():
+            setattr(owner, name, original)
 
 
 def _minutes(seconds: float) -> str:
@@ -371,6 +445,7 @@ if __name__ == "__main__":
     if os.environ.get("RADIATION_SILHOUETTE_ONLY"):
         silhouette_ladder(cases)
         second_stage(cases[:4])
+        silhouette_stages(cases[2:])
         sys.exit(0)
 
     # The full range at the SHIPPED default, which is the number a user actually pays.

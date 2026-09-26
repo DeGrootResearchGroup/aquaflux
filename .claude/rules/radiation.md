@@ -33,6 +33,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `grid_walk.py` — the triangle grid's walk: each ray walked to its first hit by one compiled (Numba) loop | **BUILT** (the only walk since 2026-09-26) |
 | `self_occlusion.py` — the `SelfOcclusion` strategies: ray cast, silhouette clip, none | **BUILT** |
 | `silhouette.py` — the exact covered fraction of a source, the conservative cone cull, and the exact second-stage rejection (`covers_nothing`) | **BUILT** |
+| `clusters.py` — `FacetClusters`, facets grouped along their Morton order for the silhouette's clustered cull | **BUILT** |
 | `clipping.py` — convex clipping with filtered (decidable) sign tests, shared with `solid_angle.py` | **BUILT** |
 | `transfer.py` — the frozen facet-to-facet geometry | **BUILT** |
 | `quadrature.py` — symmetric triangle rules for the receiving facet | **BUILT** |
@@ -1989,7 +1990,8 @@ so main's unculled path alone is 2.41x. The default flipped on this measurement:
 change, the cost falls on every scene with open space, and a scene with no body pays nothing (no
 bodies, no call). ⚠️ **The default ladder's third level still costs 1.24x on an analytic-only scene**
 — the phase-B finding, now confirmed on the real population — and is kept for the ~2.7x it buys on a
-triangle wall; a per-body ladder remains the fix, **not built**. Full table in the Sozzi README.
+triangle wall. A per-body ladder was investigated and deliberately **not built** — see "WHY THE
+FINEST LEVEL COSTS AN ANALYTIC BODY" below. Full table in the Sozzi README.
 
 **Tests** (`tests/unit/test_radiation_culling.py`, each mutation-checked): bit equality with
 `EveryPair` at group sizes 32x32, 7x5, 1x1, 64x3 on a scene where every one of four body kinds
@@ -2045,11 +2047,49 @@ per-pair cost**, and neither default is right for both: the third level saves ~2
 walk and costs ~1.6x on the cheap analytic test, whose finest-level tile bookkeeping outweighs the few
 pairs it vouches for. **The default is (32, 8, 2)**, chosen on absolute time — it saves minutes where
 the 88 h lives and costs ~3 s where the analytic mask already runs in seconds — and the docstring says
-to stop at 8 for analytic-only scenes. A per-body choice (refine only for bodies whose test is dear)
-is the obvious improvement and is **not built**. ⚠️ Every triangle figure is on a shadowless chamber:
+to stop at 8 for analytic-only scenes. **A per-body depth was investigated and deliberately NOT built**
+(decided with the user, 2026-09-26, after the findings below; three mechanisms were offered — two ladders
+keyed on `traceable`, a per-ray cost declaration on `Body`, a per-level cost model — and all were
+declined). ⚠️ Every triangle figure is on a shadowless chamber:
 on the real wall, pairs crossing a pipe opening can never be vouched for, so the share falls with the
 pipe-cell fraction; **re-run with `work/case` present before quoting a mesh-scale figure**, and note
 that both 32x32 figures here and in the phase-A table were ONE level.
+
+**WHY THE FINEST LEVEL COSTS AN ANALYTIC BODY, AND WHY NO PER-BODY DEPTH (2026-09-26).** Same analytic
+`Outside` scene and configuration as the phase-A table (24,000 sampled receivers, 8,704 facets), same
+triangle chamber as above; jax 0.10.2, CPU, x64, Linux x86_64, 4 cores, scratch probes run directly on
+`main` at `e12f214`, all masks identical to `EveryPair`. This container's timings vary by up to ~1.5x
+between runs, so every comparison below is within one process, alternating arms.
+- **The certificates are not the cost**: `_undecided` takes 0.06 s at (32, 8) and 0.43 s at
+  (32, 8, 2). **The compiled pair test is**: inside real `blocked` calls it took 4.9 s at (32, 8) against
+  7.4 s at (32, 8, 2) for about the same number of tested pairs (18.1M against 17.3M), and the third
+  level vouches for only 0.4% more of all pairs.
+- **The per-pair cost of the compiled test rises on tiny tiles.** 4M random pairs, one compiled
+  `Outside` test, alternating shapes: median **278–309 ns/pair as (T, 2, 2) tiles**, against 203–229
+  at 8x8 and 194–213 at 32x32 (two runs). XLA on CPU vectorizes poorly when the axes before the
+  coordinate are tiny.
+- ⚠️ **Two fixes tried and refuted, so do not re-try them without a new reason:** (a) testing the
+  undecided pairs as a **flat pair list** (gathering both endpoints per pair) was slower at every
+  ladder, 365–432 ns/pair against 213–340 for tiles; (b) putting the **tile index innermost**, shape
+  (b, b, T), made no difference at 2x2 (median 298 against 293 ns/pair). A split of a tile test's time
+  into gather / compiled / write-back put gather + write-back at only 13–43 ns/pair.
+- **One ladder cannot serve both body kinds**:
+
+  | ladder | analytic `Outside`, full build (median of 6) | triangle chamber (fastest of 2; certified) |
+  |---|---|---|
+  | (32, 8) | 6.1 s | 110.8 s (70.9%) |
+  | (32, 8, 4) | **5.65 s** | 94.3 s (81.0%) |
+  | (32, 8, 2) — the default | 8.7 s | **39.1 s** (89.3%) |
+
+- **So the default stays (32, 8, 2) and nothing chooses per body.** The finest level costs the cheap
+  analytic mask seconds (~2.6 s here; proportional to tested pairs on a mesh) and saves the triangle
+  walk — where the ~88 h projection lives — a factor of ~2.4 over the next best ladder. Every
+  mechanism for choosing per body carries a cost (`traceable` standing in for "cheap per ray", a
+  contract term only the culling reads, or a machine-measured cost constant) out of proportion to the
+  seconds it would save. **At mesh scale the penalty is ~62 s of a 314 s whole field** (the 1.24x
+  above: `ShaftCulling()` 313.5 s against (32, 8) 251.9 s, all 1,635,909 Sozzi cells, macOS arm64,
+  11 cores) — seen by the user before this was decided. A caller whose scene holds analytic bodies
+  alone passes `ShaftCulling(receiver_blocks=(32, 8), source_clusters=(32, 8))` and gets it back.
 
 **`TriangleBody`** (`triangle_body.py`, #510; exported, in radiation beside the grid because
 `solids/` may import nothing outside itself). `build(vertices, *, sheet=None, resolution=None,
@@ -3133,12 +3173,12 @@ Surface and volume receivers go to separate pipelines, since they take different
 
 **4. The cull is bounded in pairs** (`pair_limit`, default `DEFAULT_PAIR_LIMIT`): `_per_triangle` reduces
 the sources to those that subtend and the blockers to those that face, are far enough, and are not
-wholly behind the receiver's tangent plane — index lists in `O(n)` — and `_cull` runs over them in
-blocks of sources against all candidate blockers, both padded to powers of two, so no call forms more
-than `pair_limit` pairs. ⚠️ **This bounds the cull's memory, not its cost**: it is still
-`O(|sources| x |blockers|)` per receiver, host `np.nonzero` included. The clustered cull the issue
-sketched (bounding cones per spatial cluster, expanding surviving cluster pairs, compaction on device)
-is **not built**.
+wholly behind the receiver's tangent plane — index lists in `O(n)` — and the cull ran over them in
+blocks of sources against all candidate blockers (a `_cull` step; there is no such method any more,
+the clustered `_cluster_pairs` / `_member_pairs` replaced it in #555), so no call formed more than
+`pair_limit` pairs. ⚠️ **This bounded the cull's memory, not its cost**: it was still
+`O(|sources| x |blockers|)` per receiver, host `np.nonzero` included. #555 replaced the dense blocks
+with a clustered cull — next section, and read it before expecting much from it.
 
 **MEASURED** with `validation/radiation_mask_build_cost.py` (`silhouette_ladder` and the new
 `second_stage`; `RADIATION_SILHOUETTE_ONLY=1` runs just those), same box-plus-sleeve reactor, receivers at
@@ -3187,3 +3227,73 @@ dropping the edge-on guard inside the separating test changes no answer — a tr
 blocker `covers_nothing` already rejects, or a source that subtends nothing — and it stays because it
 is what keeps the predicate honest on its own.
 
+### THE CULL RUNS ON CLUSTERS FIRST (#555, 2026-09-26) — worth 1.24x at 3,184 facets, and why no more (a second level measured slower)
+
+**Measured first, on #556's code** (`silhouette_stages`, serial, 4-core Linux container, jax 0.10.2):
+the cull was **54%** of a 3,184-facet build (35.5% on device, 18.4% host compaction), 45% at 1,532;
+the reject pass 22%, the clip 11%. So the ceiling for any cull change there was ~2.2x.
+
+**What was built, as the issue wrote it.** `FacetClusters.build` (`clusters.py`) groups facets into
+runs of `cluster_size` (default 32) along the Morton order of their centroids, with a bounding sphere
+each. Per receiver, `_cluster_bounds` gives each cluster an **enclosing cone** per role
+(`silhouette.enclosing_cone`: cap on the mean member axis reaching `angle(axis, member axis) +
+member half-angle`, `arctan2` throughout; an unusable member or a cap reaching a right angle makes the
+cluster unusable). `_cluster_pairs` rejects cluster pairs whose cones cannot overlap or whose blocker
+sphere lies beyond every eligible source's plane in the source cluster; `_member_pairs` runs the
+unchanged member test (cones, `beyond_source_plane`) over the survivors. Both stages are bounded by
+`pair_limit`. **The kept set is exactly the dense cull's** — pinned set for set, each pair once, at
+cluster sizes 1 / 5 / 32, surface and volume receivers
+(`test_the_clustered_cull_keeps_exactly_what_testing_every_pair_keeps`). Pairs come out grouped by
+cluster pair, **not sorted**: the sort cost 10.6 of ~54 ms per receiver, and order only moves a sum by a
+rounding — measured 4.4e-16 at most against #556, no `overlapping` flag changed.
+
+**MEASURED** (same container, both arms in one sitting, default settings, two warm builds each):
+
+| facets | #556 | clustered | |
+|---|---|---|---|
+| 1,532 | 44.0-44.5 s | 40.1-42.4 s | ~1.05x (with the sort) |
+| 2,448 | 113.8-115.3 s | 109.4-112.3 s | 1.03x |
+| 3,184 | 225.5-229.2 s | 182.4-183.7 s | **1.24x** |
+
+⚠️ **WHY SO LITTLE: 40% OF CLUSTER PAIRS SURVIVE.** At 3,184 facets (100 clusters, receivers every
+97th facet): 3,839 of ~9,600 cluster pairs pass, so the member test still sees ~3.9M pairs against the
+dense 6.7M, to keep ~101,600. A 32-facet patch seen from inside the enclosure subtends tens of degrees,
+and a circular cap around an elongated patch overlaps many others. The device cull roughly halved
+(133 → ~72 s serial at 3,184) and the host side grew (69 → ~89 s: `np.nonzero` over the batch masks,
+15 ms a receiver, and — until removed — the sort).
+
+**Measured and rejected, so they are not retried:**
+- **Other cluster sizes**: 4 / 8 / 16 / 32 / 64 facets gave 67.2 / 61.4 / 48.0 / 54.2 / 63.7 ms a
+  receiver for the whole cull (with the sort), against ~63 ms dense. Small clusters make the cluster
+  stage quadratic in clusters; large ones loosen the bound. 16 was best by ~10% and was not adopted on
+  one scene.
+- **Compaction on the device**: `jnp.nonzero(size=...)` after a device-side count took **114.5 ms**
+  against numpy's **14.8 ms**, transfer included, on a 4096 × 32 × 32 mask at 2.5% density. On CPU
+  the host is the place for it.
+
+**Re-measured after a container change, all arms in one sitting** (4 cores, but faster hardware than
+the table above — so compare within a table, never across): `main` (#556's cull) **172.5 / 177.3 s**
+at 3,184 facets against one level's **142.4 / 140.7 s** — the same 1.24x — and 86.4 / 87.6 against
+90.7 / 88.1 s at 2,448, even.
+
+⚠️ **A SECOND LEVEL WAS BUILT AND MEASURED, AND IT IS SLOWER — not shipped.** A `ClusterHierarchy` of
+sizes (32, 8), each level cut from one Morton order so a 32-cluster is exactly four 8-clusters, with the
+same pairwise cluster test at every level and only surviving pairs expanded. It kept exactly the dense
+set (the exactness test passed at (32, 8) and (20, 5, 1)). The probe that motivated it held up: of the
+3,839 surviving 32-cluster pairs per receiver, **29%** of their 8×8 children survived, so the member test
+fell **3.93M → 1.15M** pairs (3.4x). But the whole cull went only **~41 → ~33 ms** a receiver serially
+(1.24x, not the ~2x projected), and at the default 4 threads the build got **slower**: **158.5 / 158.6
+and 159.9 / 155.1 s** at 3,184 facets against one level's 141-142 s, and 83-96 s (a wide spread) at
+2,448. The profile blamed the round trips: each receiver makes twice as many small compiled calls, and
+most of the cull's time is `numpy.asarray` waiting on their results; under four threads those
+synchronizations contend with the reject and clip passes running beside them. **Fewer member tests are
+not worth more dispatches.** Anyone retrying depth needs the levels fused into one compiled call per
+receiver (or batched across receivers), not stacked as separate calls. Dropped as dominated.
+
+Tests, mutation-checked (8 mutations, 7 red): dropping the member half-angle from the enclosing cap,
+the sphere radius, or flipping the sphere test fails the exactness test; ignoring `pair_limit` in
+either stage fails `test_the_cull_forms_no_more_pairs_per_call_than_its_limit` (now watching both
+stages); losing the Morton order fails `test_clusters_are_compact_rather_than_arbitrary`.
+**Dismissed**: not propagating a member's unusable flag to its cluster changes nothing observable —
+every unusable member also has a cone cosine at or below the floor, so its own half-angle already pushes
+the enclosing cap to a right angle and flags the cluster — and the guard stays as the explicit rule.
