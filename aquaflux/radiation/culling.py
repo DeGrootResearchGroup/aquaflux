@@ -322,10 +322,19 @@ class ShaftCulling(BodyCulling):
     source_clusters : tuple of int
         Sources per cluster at the same levels, with the same trade. As many sizes as
         ``receiver_blocks``.
+
+    Notes
+    -----
+    **How far to refine depends on what a pair costs to test.** Each level costs a comparison per
+    tile it asks about and saves the tests of the pairs it vouches for, so it pays where testing a
+    pair is expensive -- a walk through a grid of triangles -- and can cost more than it saves
+    where the test is a few comparisons, as an analytic body's is. The default refines to pairs of
+    two, for the expensive case; a scene of analytic bodies alone is served as well or better by
+    stopping at eight (``receiver_blocks=(32, 8)``, ``source_clusters=(32, 8)``).
     """
 
-    receiver_blocks: tuple = eqx.field(static=True, default=(32, 8))
-    source_clusters: tuple = eqx.field(static=True, default=(32, 8))
+    receiver_blocks: tuple = eqx.field(static=True, default=(32, 8, 2))
+    source_clusters: tuple = eqx.field(static=True, default=(32, 8, 2))
 
     def __check_init__(self):
         _check_sizes("receiver_blocks", self.receiver_blocks)
