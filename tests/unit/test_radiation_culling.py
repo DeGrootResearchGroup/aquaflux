@@ -340,3 +340,120 @@ def test_the_last_group_is_padded_with_its_own_last_member_at_every_size():
     members = curve.members(4)
     assert sorted(members.ravel()[:10].tolist()) == list(range(10))
     assert members[2, 2] == members[2, 1] == members[2, 3]
+
+
+# --- Pairs behind their source ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("blocks", "clusters"), [((32, 8, 2), (32, 8, 2)), ((7,), (5,)), ((24, 6, 1), (8, 4, 2))]
+)
+def test_a_pair_behind_its_source_is_left_untested_and_recorded_clear_by_every_strategy(
+    blocks, clusters
+):
+    """With the sources' planes given, the mask is the full one with those pairs cleared.
+
+    Bit for bit, from both strategies -- so a tile the box test wrongly proved dark shows as a
+    lit pair recorded clear, and a pair left blocked behind its source as a difference from the
+    reference. The pairs cleared must include blocked ones, or nothing here could differ.
+    """
+    from aquaflux.radiation.back_faces import BackFaces
+
+    lamp = _lamp()
+    near = 1e-6 * np.sqrt(np.asarray(lamp.area))
+    receivers = _receivers(500)
+    facing = BackFaces.of(lamp)
+    behind = np.asarray(facing.every_pair(receivers))
+    full = np.asarray(EveryPair().blocked(_bodies(), lamp.centroid, near, receivers))
+    assert 0.3 < behind.mean() < 0.7, "a tube faces about half its facets away"
+    assert (full & behind).any(axis=(1, 2)).all(), "every body blocks some pairs behind"
+    culling = ShaftCulling(receiver_blocks=blocks, source_clusters=clusters)
+    for arm in (EveryPair(), culling):
+        mask = np.asarray(arm.blocked(_bodies(), lamp.centroid, near, receivers, facing=facing))
+        np.testing.assert_array_equal(mask, full & ~behind[None])
+    decided = culling.certified_pairs(_bodies(), lamp.centroid, receivers, facing=facing)
+    certified = culling.certified_pairs(_bodies(), lamp.centroid, receivers)
+    assert np.all(decided > certified), "tiles behind their sources went untested"
+
+
+def test_a_tile_is_proven_behind_only_where_every_one_of_its_pairs_is():
+    """The box test never says a tile is behind when the pair test would light one of its pairs.
+
+    Tiles of random receivers against random facets, with points placed in the facets' own
+    planes -- heights that are zero up to rounding, of either sign -- so a box test trusting a
+    rounded sign proves tiles the pair test keeps. And it must prove a good share of the tiles
+    that are clearly behind, or it is sound only by proving nothing.
+    """
+    from aquaflux.radiation.back_faces import BackFaces
+
+    rng = np.random.default_rng(4)
+    triangles = rng.uniform(-1.0, 1.0, (40, 3, 3))
+    surfaces = Surfaces.from_triangles(triangles, emission=1.0)
+    facing = BackFaces.of(surfaces)
+    centroid, normal = np.asarray(surfaces.centroid), np.asarray(surfaces.normal)
+    # Each tile's points in one facet's plane, pushed off it by a height of either sign.
+    n_tiles, block, cluster = 6000, 3, 2
+    facets = rng.integers(0, 40, (n_tiles, cluster))
+    tangent = 0.02 * rng.normal(size=(n_tiles, block, 3))
+    tangent -= (
+        np.einsum("tbk,tk->tb", tangent, normal[facets[:, 0]])[..., None]
+        * normal[facets[:, 0]][:, None, :]
+    )
+    offset = rng.choice([0.0, -1e-3, -0.3], (n_tiles, block, 1))
+    points = centroid[facets[:, 0]][:, None, :] + tangent + offset * normal[facets[:, 0]][:, None]
+    points = points.reshape(-1, 3)
+    groups = np.arange(len(points)).reshape(n_tiles, block)
+    proven = facing.tiles_behind(points, groups, facets)
+    pairs = np.asarray(facing.behind(points[groups][:, :, None, :], facets[:, None, :]))
+    wholly = pairs.all(axis=(1, 2))
+    assert np.all(wholly[proven]), "a tile proven behind holds a pair the gather would light"
+    heights = np.einsum(
+        "tbfk,tfk->tbf", points[groups][:, :, None, :] - centroid[facets][:, None], normal[facets]
+    )
+    clearly = (heights < -0.2).all(axis=(1, 2))
+    assert clearly.sum() > 50 and proven[clearly].mean() > 0.9, (clearly.sum(), proven.sum())
+    assert (offset == 0.0).all(axis=(1, 2)).any(), "the fixture must hold in-plane tiles"
+
+
+def test_a_mask_of_volume_receivers_asks_the_bodies_nothing_behind_a_source_dark_behind_itself():
+    """What a built mask does with it: the bodies' layer is clear behind, the mask says so, and
+    the field is exactly the field through a mask that asked about every pair.
+
+    A mask built with ``receiver_facet`` rows of ``-1`` -- receivers on no facet -- asks about
+    every pair, which is what it is compared with. The two must differ where it matters: some
+    pair behind its source is blocked in the full mask.
+    """
+    lamp = _lamp()
+    receivers = _receivers(400)
+    culled = build_visibility(_bodies(), lamp, receivers, self_occlusion=NoOcclusion())
+    full = build_visibility(
+        _bodies(), lamp, receivers, self_occlusion=NoOcclusion(),
+        receiver_facet=np.full(len(receivers), -1),
+    )  # fmt: skip
+    assert culled.clear_behind and not full.clear_behind
+    difference = np.asarray(culled.blocked) != np.asarray(full.blocked)
+    assert difference.any() and not np.asarray(culled.blocked)[difference].any()
+    transmittance = [0.0, 0.3, 0.5, 0.0]
+    np.testing.assert_array_equal(
+        direct_fluence_rate(lamp, receivers, visibility=culled, transmittance=transmittance),
+        direct_fluence_rate(lamp, receivers, visibility=full, transmittance=transmittance),
+    )
+
+
+def test_a_profile_lighting_behind_itself_is_refused_through_a_bodies_mask_that_did_not_look():
+    """The bodies' layer is right behind a source only if the source is dark there, so the
+    gather refuses a set whose profiles are not -- and a mask built with them asks every pair."""
+    from aquaflux.radiation.profiles import Lambertian
+
+    class Glowing(Lambertian):
+        dark_behind = False
+
+    lamp = _lamp()
+    receivers = _receivers(100)
+    mask = build_visibility(_bodies(), lamp, receivers, self_occlusion=NoOcclusion())
+    glowing = lamp.with_optics(profiles=[Glowing()])
+    with pytest.raises(ValueError, match="not declared dark behind itself"):
+        direct_fluence_rate(glowing, receivers, visibility=mask)
+    full = build_visibility(_bodies(), glowing, receivers, self_occlusion=NoOcclusion())
+    assert not full.clear_behind
+    direct_fluence_rate(glowing, receivers, visibility=full)

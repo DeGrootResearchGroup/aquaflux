@@ -28,6 +28,8 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | the solid bodies (`Body`, primitives, CSG, `Outside`) — **moved to `aquaflux/solids/`**, see `.claude/rules/solids.md` | **BUILT** |
 | `visibility.py` — the frozen shadow mask | **BUILT** |
 | `culling.py` — how the bodies' layer is decided: `ShaftCulling` (the default since 2026-09-26; tiles certified clear, refined coarse to fine, #554) or `EveryPair` (the reference) | **BUILT** ("clear" certificates only; analytic and triangle bodies) |
+| `back_faces.py` — `BackFaces`: which volume receivers lie certainly behind which facets, pair by pair (the ray mask's cut, #526) or a tile at a time from a box (the bodies' layer skips such pairs, 2026-09-27) | **BUILT** |
+| `lit_blocks.py` — the gather's layout: receivers in blocks of 8 along the curve, each against the facets its box is not proven to lie behind, in segments padded to a short width ladder (2026-09-27) | **BUILT** |
 | `triangle_body.py` — `TriangleBody`, a `Body` of triangles over a `TriangleGrid`, with `contains` decided per piece (#510) | **BUILT** |
 | `triangles.py` — watertight ray-triangle intersection | **BUILT** |
 | `grid_walk.py` — the triangle grid's walk: each ray walked to its first hit by one compiled (Numba) loop | **BUILT** (the only walk since 2026-09-26) |
@@ -1835,7 +1837,8 @@ checksum below is identical to 13 figures before and after.
 so a ray there could only be multiplied by nothing. Now `Profile.dark_behind` (a `ClassVar`, `False`
 on the base, `True` on those two) declares it, and `Surfaces.dark_behind` asks it of every areal facet's
 profile. When that holds and `receiver_facet is None`, `field` drops the pairs whose receiver is
-**certainly** behind the facet's plane — `clipping.decidable_heights` of the receiver above the plane
+**certainly** behind the facet's plane — `BackFaces.behind` (`back_faces.py`, since 2026-09-27; it was
+`self_occlusion._facing_away`, and there is no such function now), `clipping.decidable_heights` of the receiver above the plane
 through the centroid, a height too near zero to trust snapped to zero and **kept**, so rounding can
 never cull a pair the gather's own cosine would light. Point sources are never culled (zero normal, so
 zero height; and excluded by label). The dropped pairs are recorded clear, so
@@ -1908,7 +1911,7 @@ label stays because a source's kind is read from its label, never inferred.
 ## SHAFT CULLING: BUILT as `ShaftCulling` — tiles certified clear, THE DEFAULT since 2026-09-26 (#554)
 
 `culling.py` holds the bodies' layer's strategy family, `BodyCulling.blocked(bodies, sources,
-near, receivers, pair_limit)`: **`EveryPair`** (the reference, and the default until 2026-09-26 — the old
+near, receivers, pair_limit, *, facing=None)` (`facing` since 2026-09-27, see BACK FACES below): **`EveryPair`** (the reference, and the default until 2026-09-26 — the old
 `visibility._blocked_by` loop, moved here with `_compiled_blocks`, now `_body_blocks` per body) and
 **`ShaftCulling(receiver_blocks=(32, 8, 2), source_clusters=(32, 8, 2))`** — coarse-to-fine
 group-size ladders since #554 phase B (default chosen by measurement, below); ⚠️ **there is no `receiver_block` / `source_cluster` any more**, and the
@@ -2185,6 +2188,182 @@ on the box's far index, one inclusion-exclusion sign, children not scaled, refin
 refused filter dropped. **Dismissed:** the box margin at zero (it guards a rounding no fixture can
 reach; kept), and dropping the all-padding child filter (such tiles repeat real points, so testing
 them gives correct duplicates and costs only work).
+
+## BACK FACES: THE BODIES' LAYER SKIPS PAIRS BEHIND THEIR SOURCE (2026-09-27, from #565)
+
+**Exact, no tolerance — chosen over #565's cluster approximation by the user.** #565 measured an
+error-bounded cutoff at a ~10x oracle ceiling, but it needs an accuracy tolerance the user did not
+want exposed (it is not dimensionless in any natural way). A pair whose volume receiver lies behind a
+facet that is `dark_behind` carries exactly zero, so whether a body blocks it cannot change the field.
+#526 already skipped such pairs in the **ray mask**; this does the same in the **bodies' layer**, which
+is where the mesh-scale call spends its time (masks 77% of the 317 s Sozzi field, #564). Agreed order
+with the user: the mask first, then the gather (built since, see BACK FACES IN THE GATHER below).
+
+**How.** `BackFaces.of(surfaces)` holds the facets' centroids, normals and an `areal` label (point
+sources have no back). `_unchecked_visibility` passes it as `facing=` to `BodyCulling.blocked` exactly
+when #526's cut applies — `receiver_facet is None and surfaces.dark_behind` — and sets
+`Visibility.clear_behind` when there are bodies (the gather's refusal of a non-dark-behind set, #526,
+then covers this layer too). Both strategies record a pair behind its source **clear**, so they still
+build the same mask: `EveryPair` tests and then clears (`& ~facing.every_pair`); `ShaftCulling` drops,
+at every level of `_undecided` (after vouching at the coarsest, before it at the finer ones), each tile
+`BackFaces.tiles_behind` proves wholly behind, and clears the pairs behind within the tiles it tests.
+Under a trace the hand-off to `EveryPair` carries `facing` (it is in the tracer check's leaves).
+
+**The box test is conservative by construction, not by tuning.** The highest point of a receiver box
+above a facet's plane is the corner the normal points towards; a tile is proven only if that corner is
+below the plane by `_BOX_SLACK` = 3 × `clipping._SLACK` units of roundoff of `Σ reach·|n|`, with `reach`
+the box's farthest extent from the centroid per axis. That bounds every pair's own snapping allowance
+(16 units of `Σ|x−c||n|`) plus both rounding errors, so a proven tile's every pair is behind by the
+pair test too — verified, not only argued: `test_a_tile_is_proven_behind_only_where_every_one_of_its_pairs_is`.
+⚠️ **The first box test was numpy and cost more than it saved**: 2.4 s of a 4.6 s build (fancy
+indexing over ~4.3M finest tiles). It is one `numba.njit(parallel=True)` loop over tiles
+(`_boxes_behind`), stopping at a tile's first unproven facet: 2.74 → 0.44 s for `_undecided`. The
+grid walk's lesson again — a per-item loop whose value is what it skips wants compiled host code.
+
+**MEASURED** (`validation/sozzi_radiation/backface_share.py`; analytic 32 × 128 lamp, 8,704 facets;
+23,046 receivers uniform in the three cylinders **outside the lamp** — 954 inside it removed, since the
+vessel body does not exclude them; the case mesh was absent, so this is NOT the cell-centre population;
+`ShaftCulling()` at (32, 8, 2); jax 0.10.2, numba 0.67.0, CPU, x64, Linux x86_64, 4 cores, run directly
+with output redirected, nothing else running, 2026-09-27):
+
+- **Shares**: 64.9% of all pairs face away from their receiver (what the gather could skip); 8.6% of
+  pairs are undecided by the certificates (what is tested), and of those **74.2% face away, 72.9% lie in
+  finest tiles wholly facing away, 72.7% in tiles the box test proves** — so the box test reaches almost
+  every pair a per-pair skip would, and the ceiling on the tested count is ~3.7x.
+- **The bodies' layer, both arms in one process, warm-up then two alternating passes, fastest kept**:
+  every pair asked **6.81 s**, pairs behind skipped **2.03 s** — **3.35x** (spreads 1.08x / 1.02x); an
+  earlier run of the same harness read 7.22 / 2.01 s, 3.59x, with a 1.28x spread on the first arm. So
+  ~3.4-3.6x against the ~3.7x ceiling: the certificates, curve and tile bookkeeping are what is left.
+- 4,327,084 pairs the full mask blocks lie behind their source; the skipped mask is the full one with
+  exactly those cleared (`array_equal` against `full & ~behind`).
+- ⚠️ **Not re-measured at mesh scale** (`work/case` absent). The mesh population refines towards the
+  lamp and walls, so its shares differ; re-run `field_cost_breakdown.py` there before quoting a
+  whole-field saving.
+- ⚠️ **On the STREAMED field it is only ~1.1x** (18.6-20.1 s against `main`'s 21.6-22.0 s, same scene):
+  the mask is the smaller part of a streamed call, the gather the larger. See BACK FACES IN THE GATHER
+  below for the whole-field figures and the split.
+
+**Tests** (`tests/unit/test_radiation_culling.py`), mutation-checked, 10 of 11 red on the shipped code: both strategies at
+three ladders equal to the full mask with the pairs behind cleared, and more pairs decided with
+`facing` than without; the box test sound on 6,000 tiles with points in the facets' own planes (heights
+that round either way) and proving >90% of tiles clearly behind; a built mask clear behind, its
+`clear_behind` set, and the field bit-identical to the full mask's; a non-dark-behind profile refused
+through it. Red: the box slack at zero, the corner inverted, the box built from one receiver, a proven facet breaking out as proven, `EveryPair` not clearing, tested tiles
+not cleared, no tile drop at any level, none at the finer levels, `facing` not passed, `clear_behind`
+not set. **Dismissed**: `reach` as the nearer rather than the farther extent — it shrinks a rounding
+allowance, and a box whose highest corner lies within a few roundings of the plane while a far receiver
+does not is not constructible cheaply; kept as `max` because the soundness argument needs it. Dropping
+the `areal` check is inert (a point source's zero normal gives height 0, never proven), kept because a
+source's kind is read from its label.
+
+## BACK FACES IN THE GATHER: RECEIVERS IN BLOCKS, EACH AGAINST THE FACETS THAT CAN LIGHT IT (2026-09-27)
+
+The second half of the agreed order (mask first, then the gather). **Exact, no tolerance**: what is
+left out is exactly zero, so the field moves only by the order its terms are added in (≤ 5.4e-16
+relative, measured below) — a rounding, not a bit-for-bit identity, and tests say so with `rtol`.
+
+**The layout (`lit_blocks.py`).** `lit_segments(points, facets, facing, *, block=8, segments=None)`
+orders the points along the Morton curve, cuts them into blocks of `BLOCK = 8`, and lists per block
+the facets `BackFaces.lit_facets` does not prove it lies wholly behind (a two-pass Numba count/fill into
+compressed-sparse-row lists, sharing `_box_behind` with `tiles_behind`). Blocks are sorted by list
+length and cut into **segments**, each padded to `rounded_width` (four steps per doubling, capped at
+the facet count) — so a program's shapes come from a short ladder. `LitSegment(rows, facets, valid)`:
+a padded block row is `n_points` (the gather's scatter drops it); a padded list entry repeats the
+list's last facet with `valid` False. **Without planes, or with traced points, a block is listed
+against every facet as ONE shared row** (`LitSegment.shared`) — a copy per block would be ~R/8 × F
+indices, gigabytes at mesh scale.
+
+**The gather (`gather.py`).** `summed_fluence_rate(..., layout=None)` = `_point_fluence` (point
+sources, dense over their columns, as before) + `_segment_fluence` per segment of each `_ArealGroup`.
+A group is the areal facets that every set emits with one profile each (the sets may differ — a
+model's reflected set is Lambertian); a group is laid out by its planes only when **every** set's
+profile there is `dark_behind`, so there is no refusal path — a glowing group is simply listed in
+full. `areal_layout(points, geometry, groups, *, segments=None)` builds it; mask layers are read by
+`(row, facet)` gathers, and `surviving_fraction` now broadcasts over any gathering of pairs.
+`_emitter_cosine(centroid, normal, receivers)` and `_transmittance(absorption, source, receivers)`
+now take broadcast-ready arrays (the irradiance gather passes `[None]` / `[:, None]`); ⚠️ there is no
+`_compiled_gather` any more.
+
+**The streamed path.** Points are ordered along the curve once, then chunked, so each chunk is compact
+(and the result is scattered back by the order). Each chunk's layout is built on the host from the
+build-time geometry in `_chunk_total` with `_STREAM_SEGMENTS = 4` equal segments per group, and each
+piece is a **module-level** `jit`: `_point_part` and `_segment_part(segment, labels=, group=,
+pair_limit=)`. ⚠️ **The programs are cached ACROSS CALLS, keyed by `_Labels` — the non-floating part of
+the live values, hashed by content (treedef + each leaf's dtype, shape and bytes)**, which is the
+cross-call cache the PER-CALL COMPILES section recorded as not done. Without it a stream compiled its
+~14 segment shapes every call (3.7 s of a 15 s call here), which is what hid the saving the first
+time it was measured (1.03x).
+
+⚠️ **THREE TRAPS, each of which read as "the skip saves nothing"**:
+- **`jnp.asarray` inside a trace makes the points a tracer**, so a layout formed after the conversion
+  lists every facet. `summed_fluence_rate` now lays out from the points **as given**, and
+  `BackFaces.of` keeps concrete positions in numpy (`_kept`). Before the fix the held gather under
+  `jit` read 4.3 s for both arms; after, 1.9 s. Pinned by
+  `test_points_closed_over_by_a_compiled_function_are_still_laid_out_by_their_planes`.
+- **Per-call recompilation** (above).
+- **`lax.dynamic_slice` and `jnp.take`'s default `fill` mode each cost ~1.4x** over a clipped gather
+  of the same rows, in a probe of the per-pair kernel alone; in the shipped gather `work._slice` as a
+  clipped `take` was worth **1.16x without a mask, 1.25x with one** (12,000 receivers × 8,704 facets,
+  warm under `jit`, fields identical) — committed on its own (`63db3e8`). Swapping `_slice` for a
+  plain `take` measured nothing, because a plain `take` is `fill`.
+
+**A pre-existing bug fixed on the way**: `direct_fluence_rate(..., occluders=...)` could not be
+differentiated with respect to emission or a profile — it passed the call's own set as the shadow
+geometry, whose traced optics reached the chunk's custom VJP as an argument tangent ("Unexpected
+tangent"). It now passes `jax.lax.stop_gradient(surfaces)`; the model's streamed path never had the
+problem (it passes its build-time geometry). Pinned by
+`test_a_streamed_field_is_the_held_one_and_so_are_its_gradients`.
+
+**MEASURED** (analytic 32 × 128 lamp, 8,704 facets, `UniformAbsorption(35.67)`, `NoOcclusion`, the
+water `Outside(chamber, inlet, riser)`, receivers uniform in the three cylinders outside the lamp —
+the case mesh absent, so NOT the cell-centre population; jax 0.10.2, numba 0.67.0, CPU, x64, Linux
+x86_64, 4 cores, run directly, nothing else running, 2026-09-27):
+
+- **Held gather alone** (12,000 receivers, warm under `jit`, one process alternating): every facet
+  listed 4.1-4.5 s, facets behind left out **1.9-2.3 s** (~2.2x; the lists hold 0.47 of the pairs,
+  padded to 0.53).
+- **Whole streamed field** (`validation/sozzi_radiation/backface_gather.py`, 23,046 receivers, one
+  process, warm-up then two alternating passes, fastest kept): every facet listed **13.89 s**, facets
+  behind left out **10.69 s** (1.30x, spreads 1.01/1.02x); lists hold 0.421 of the pairs; field max
+  relative difference 5.4e-16.
+- **Against `main` (`d9f249b`)**, the same call in worktrees, repeat calls: `main` 21.6-22.0 s; the
+  mask skip alone (`5fb1384`) 18.6-20.1 s; this tree **10.8-11.1 s — ~2.0x**. Fields: 5.4e-16 against
+  `main`; the mask-skip tree bit-identical to `main`. Cross-process, so read the ratios.
+- **Where the streamed call's time goes now** (`validation/sozzi_radiation/streamed_cost_split.py`,
+  each piece blocked until ready, same scene and machine, two passes after a warm-up): at the default
+  chunk (51 chunks of ~460 receivers) mask **3.8 s**, gather segments **8.6-9.0 s**, layout 0.4 s,
+  13.4-13.5 s in all; as ONE streamed chunk with the traced chunk left at the default (a diagnostic,
+  not a setting) mask 3.1 s, segments **5.9-6.2 s**, 9.4-9.8 s. Blocking each piece serializes what
+  the unwrapped call overlaps (host mask work beside the previous chunk's device gather), which is why
+  its totals exceed the 10.8-11.1 s above. So **the gather's per-chunk layout is the lever** — four
+  equal segments of ~15 blocks pad to 0.56 and make small calls, where one layout over many blocks pads
+  to ~0.45 — and the mask's chunking is worth under 1 s.
+- ⚠️ **A first profile said the opposite ("the mask is 10.6 s of 11.5") and was the async-dispatch
+  trap**: the mask build's `np.asarray` of its inputs waited for the previous chunk's gather, still
+  running, and was charged for it. A streamed pass sized separately from the gather's traced chunk was
+  built on that reading and measured **no faster** (13.8-14.1 s at 16M and 64M pairs a chunk against
+  13.7 s at 4M, more memory), so it was reverted rather than shipped. Raising `pair_limit` to make one
+  chunk is not the same experiment: it enlarges the traced chunk too, and the segments then take 15 s.
+
+**Tests** (`tests/unit/test_radiation_lit_blocks.py`, each field against a pair-by-pair numpy sum
+that shares none of the layout): rows cover the points once and each list is exactly what the box
+test leaves (and leaves out >20% of pairs); a full listing is one shared row; equal segments share a
+block count and come sorted; the width ladder; the field with a body, a medium, two profile groups and
+a point source at two pair limits; a glowing group listed in full; traced receivers give the eager
+field; streamed = held, field and emission / absorption gradients; a stream compiles few segment
+programs; the layout under `jit`. `test_the_streamed_passes_share_one_compiled_gather` now also
+asserts a second call compiles nothing. The gradient-memory test moved to a 200-facet panel: the
+layout keeps ~8.5 B per **receiver** (its index and result, scattered back), which on the old
+two-facet panel was the whole figure — measured flat per pair at 200 facets (435 → 469 kB from 64 to
+4,096 receivers).
+**Mutation pass (14, 13 red):** facing ignored, padding counted valid, padded rows pointing at point 0,
+blocks unsorted, the width ladder uncapped, the valid mask dropped from the sum, the scatter clipping
+instead of dropping padding, a glowing group laid out by its planes, the streamed order not scattered
+back, every set given the first set's profile (caught by `test_radiation_model.py`), the lit count
+inverted, the attenuation dropped, and `_Labels` compared by identity. **Dismissed**: `_Labels` hashed by
+identity — measured inert: JAX found the cached program for an equal key with a different hash (a same
+scene traced once, a changed profile again, either way), so equality is what the cache rests on; the
+content hash stays because a hash must agree with equality.
 
 ## GRID ACCELERATION: BUILT as `TriangleGrid` — a compiled host walk, off by default
 
@@ -2703,8 +2882,9 @@ large ratios and not the small ones; jax 0.10.2, CPU, x64, Linux x86_64, 4 cores
 Answers identical in every arm. ⚠️ **A plain gather is still 1.3-1.4x the jit-wrapped one** (and 2.4x
 when there is only one chunk): the scan's body is a new closure on every call, so the scan is traced and
 compiled again each time. Removing that needs the gather's program cached **across** calls — the live
-values as arguments and the labels that shape the program as a hashable key, as `_compiled_gather` does
-within one stream — which is a larger change and was not made. ⚠️ **`build_radiation_model` returns
+values as arguments and the labels that shape the program as a hashable key. ⚠️ **Done for the
+STREAMED path since 2026-09-27** (`_Labels`, see BACK FACES IN THE GATHER); a plain held-mask call still
+compiles per call. ⚠️ **`build_radiation_model` returns
 before its asynchronous work finishes** (0.8 s to return, ~32 s more to finish at 3,072 facets, on this
 machine), so the first thing timed after a build absorbs the rest of it; the harness waits on the model
 first, and any first-call figure that did not is the build's.
@@ -2763,7 +2943,8 @@ arithmetic — 1M is ~3x slower than 4M on it for the same pairs. That is the le
 streamed pass and the traced chunk inside it want different sizes, and today one limit sets both.
 Every checksum agreed across all 48 points: how the work is cut changes nothing about the answer.
 ⚠️ **This table predates #522**, which compiles `streamed_fluence_rate`'s per-chunk gather once per
-call (`_compiled_gather`: the live floats and the chunk's mask are arguments, only the labels that
+call (`_compiled_gather` then — since 2026-09-27 the module-level `_point_part` / `_segment_part`, cached
+across calls too: the live floats and the chunk's mask are arguments, only the labels that
 shape the program are closed over) instead of re-tracing it eagerly every chunk.
 `validation/radiation_compiled_gather.py` (4,096-facet analytic lamp, 3,944 receivers in 20 chunks,
 one sleeve as a `Cylinder`, `NoOcclusion`, `UniformAbsorption(35.67)`, jax 0.10.2, CPU, x64, macOS
@@ -2801,7 +2982,7 @@ PER CALL (#524).** Three changes to the per-call path, all answer-preserving:
   fraction are formed once from the **first** set, and each set contributes only its radiance
   weights. Each set's terms are summed first and the sets added after, in order, so it equals
   adding `direct_fluence_rate` per set (`test_summing_sets_in_one_pass_is_summing_their_gathers`,
-  1e-14). `direct_fluence_rate`, `FrozenShadows` and the streamed `_compiled_gather` all go through
+  1e-14). `direct_fluence_rate`, `FrozenShadows` and the streamed gather (then `_compiled_gather`) all go through
   it. ⚠️ Sets whose concrete vertices differ are **refused**, not silently gathered with the first
   set's geometry; traced vertices cannot be compared and are trusted — the model's reflected set is
   `with_optics` of the traced set, so it carries the same tracer, and

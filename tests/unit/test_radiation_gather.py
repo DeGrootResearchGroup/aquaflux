@@ -651,8 +651,28 @@ def test_a_gradient_s_memory_is_bounded_by_the_pair_limit_not_the_receiver_count
     at a mesh's cells against a finely divided lamp, terabytes -- however small the limit.
     Pinned on the compiled program's own working-memory figure, which is exact and immune to
     what else the machine is doing, at sixteen times the receivers and the same limit.
+
+    On a panel of two hundred facets: a gather keeps a few bytes per *receiver* whatever it
+    does -- its result, and the index each result is scattered back by -- and against a panel of
+    two facets those were the whole figure, which a limit on *pairs* cannot and should not bound.
     """
-    surfaces = _narrow_panel()
+    corners = np.linspace(0.0, 0.2, 11)
+    squares = [
+        (corners[i], corners[i + 1], corners[j], corners[j + 1])
+        for i in range(10)
+        for j in range(10)
+    ]
+    panel = np.array(
+        [
+            triangle
+            for x0, x1, y0, y1 in squares
+            for triangle in (
+                [[x0, y0, 0.0], [x1, y0, 0.0], [x1, y1, 0.0]],
+                [[x0, y0, 0.0], [x1, y1, 0.0], [x0, y1, 0.0]],
+            )
+        ]
+    )
+    surfaces = Surfaces.from_triangles(panel, emission=5.0, profiles=(CosinePower(4.0),))
     pair_limit = 16 * surfaces.n_facets
     medium = UniformAbsorption(2.0)
 

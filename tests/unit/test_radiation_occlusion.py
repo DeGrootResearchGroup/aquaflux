@@ -394,12 +394,14 @@ def test_streaming_and_the_body_test_count_pairs_not_receivers(monkeypatch):
 
 
 def test_the_streamed_passes_share_one_compiled_gather(monkeypatch):
-    """Each pass's gather is compiled once per call and reused, not traced again per pass.
+    """Each pass's gather is compiled once and reused -- across passes, and across calls.
 
     Run eagerly, a pass re-traces the gather and forms its arrays one operation at a time, and at
     a finely divided emitter a streamed field is tens of thousands of passes -- so that overhead
     is most of the cost. The partition by profile runs once per trace, which makes it the count:
-    five passes here, of which the last is shorter and compiles once more.
+    five passes here, of which the last is shorter and compiles once more. A second call on the
+    same scene, with its own copy of the surface set, compiles nothing: the programs are keyed on
+    what the labels hold, not on which object holds them.
     """
     from aquaflux.radiation import gather
 
@@ -411,6 +413,9 @@ def test_the_streamed_passes_share_one_compiled_gather(monkeypatch):
         return real(surfaces)
 
     monkeypatch.setattr(gather, "_groups", watched)
+    jax.clear_caches()
+    direct_fluence_rate(point_source(), _probe_line(37), occluders=[sleeve()], pair_limit=8)
+    assert len(traced) == 2, traced
     direct_fluence_rate(point_source(), _probe_line(37), occluders=[sleeve()], pair_limit=8)
     assert len(traced) == 2, traced
 

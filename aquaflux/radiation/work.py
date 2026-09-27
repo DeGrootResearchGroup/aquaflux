@@ -118,5 +118,12 @@ def in_passes(arrays, pair_limit: int, per_receiver: int, body):
 
 
 def _slice(array, axis: int, start, size: int):
-    """``size`` receivers of ``array`` along its receiver axis, from ``start``."""
-    return lax.dynamic_slice_in_dim(array, start, size, axis=axis)
+    """``size`` receivers of ``array`` along its receiver axis, from ``start``.
+
+    ⚠️ **A gather of those rows, not a dynamic slice, and with the indices clipped** -- the same
+    rows either way, bit for bit. On the CPU backend a chunk cut by ``lax.dynamic_slice`` made
+    the whole gather about a fifth slower, and ``jnp.take``'s default out-of-bounds mode, which
+    fills with a placeholder and so tests every index, cost about as much again; a clipped
+    gather costs neither. The rows are always in bounds here, so clipping never changes one.
+    """
+    return jnp.take(array, start + jnp.arange(size), axis=axis, mode="clip")

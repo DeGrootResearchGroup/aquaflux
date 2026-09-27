@@ -28,6 +28,15 @@ largest value each witness takes over its points. The summary of a tile is the l
 groups' summaries, so a tile is certified by comparing two short rows -- the pairs themselves are
 never visited.
 
+**A pair behind its source need not be asked about at all.** For receivers in the volume and
+sources dark behind themselves, a pair whose receiver lies behind its facet's plane carries no
+light, so whether a body blocks it cannot change the field. Given the facets' planes
+(:class:`~aquaflux.radiation.back_faces.BackFaces`), every strategy records such a pair clear --
+the pair-by-pair one after testing, the tiled one without: a tile whose receivers' bounding box
+lies wholly behind every facet of its cluster is dropped at whichever level that is first
+proven, before any body is asked, and a pair behind its source inside a tile that is tested is
+cleared after. The masks the strategies build therefore stay the same mask.
+
 **The grouping is host work; the fallback test is compiled.** Ordering points along a
 space-filling curve and cutting the order into groups is a sort, and deciding which tiles need
 testing is a comparison over tiles; both run in numpy, off any trace. The undecided tiles are
@@ -46,6 +55,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from aquaflux.radiation.back_faces import BackFaces
 from aquaflux.radiation.triangles import padded_length
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, receivers_per_pass
 
@@ -115,7 +125,14 @@ class BodyCulling(eqx.Module):
 
     @abc.abstractmethod
     def blocked(
-        self, bodies, sources, near, receivers, pair_limit: int = DEFAULT_PAIR_LIMIT
+        self,
+        bodies,
+        sources,
+        near,
+        receivers,
+        pair_limit: int = DEFAULT_PAIR_LIMIT,
+        *,
+        facing: BackFaces | None = None,
     ) -> jnp.ndarray:
         """Whether each body lies across the segment from each source to each receiver.
 
@@ -132,6 +149,11 @@ class BodyCulling(eqx.Module):
             Where each segment ends.
         pair_limit : int, optional
             Source-receiver pairs one compiled test may form, bounding its peak memory.
+        facing : BackFaces, optional
+            The sources' planes, given when a pair whose receiver lies behind its source carries
+            no light -- every areal source dark behind itself, and the receivers in the volume.
+            Such a pair is then recorded **clear without being tested**, by every strategy
+            alike, so the masks they build stay the same mask. Omitted, every pair is decided.
 
         Returns
         -------
@@ -171,28 +193,31 @@ class EveryPair(BodyCulling):
     """
 
     def blocked(
-        self, bodies, sources, near, receivers, pair_limit: int = DEFAULT_PAIR_LIMIT
+        self,
+        bodies,
+        sources,
+        near,
+        receivers,
+        pair_limit: int = DEFAULT_PAIR_LIMIT,
+        *,
+        facing: BackFaces | None = None,
     ) -> jnp.ndarray:
         """See :meth:`BodyCulling.blocked`."""
         sources = jnp.asarray(sources, dtype=float)
         near = jnp.asarray(near, dtype=float)
         receivers = jnp.asarray(receivers, dtype=float)
         per_pass = receivers_per_pass(pair_limit, sources.shape[0])
-        rows = [
-            jnp.stack(
+        rows = []
+        for start in range(0, receivers.shape[0], per_pass):
+            chunk = receivers[start : start + per_pass]
+            row = jnp.stack(
                 [
-                    _body_blocks(
-                        body,
-                        sources[None, :, :],
-                        receivers[start : start + per_pass, None, :],
-                        near[None, :],
-                    )
+                    _body_blocks(body, sources[None, :, :], chunk[:, None, :], near[None, :])
                     for body in bodies
                 ],
                 axis=0,
             )
-            for start in range(0, receivers.shape[0], per_pass)
-        ]
+            rows.append(row if facing is None else row & ~facing.every_pair(chunk)[None])
         if not rows:
             return jnp.zeros((len(bodies), 0, sources.shape[0]), dtype=bool)
         return jnp.concatenate(rows, axis=1)
@@ -462,14 +487,21 @@ class ShaftCulling(BodyCulling):
             raise ValueError(msg)
 
     def blocked(
-        self, bodies, sources, near, receivers, pair_limit: int = DEFAULT_PAIR_LIMIT
+        self,
+        bodies,
+        sources,
+        near,
+        receivers,
+        pair_limit: int = DEFAULT_PAIR_LIMIT,
+        *,
+        facing: BackFaces | None = None,
     ) -> jnp.ndarray:
         """See :meth:`BodyCulling.blocked`."""
         if any(
             isinstance(leaf, jax.core.Tracer)
-            for leaf in jax.tree.leaves((bodies, sources, near, receivers))
+            for leaf in jax.tree.leaves((bodies, sources, near, receivers, facing))
         ):
-            return EveryPair().blocked(bodies, sources, near, receivers, pair_limit)
+            return EveryPair().blocked(bodies, sources, near, receivers, pair_limit, facing=facing)
         sources = np.asarray(sources, dtype=float)
         near = np.asarray(near, dtype=float)
         receivers = np.asarray(receivers, dtype=float)
@@ -480,7 +512,7 @@ class ShaftCulling(BodyCulling):
         clusters = self._source_groups(bodies, sources)
         block, cluster = self.receiver_blocks[-1], self.source_clusters[-1]
         for index, body in enumerate(bodies):
-            rows, cols = self._undecided(index, body, blocks, clusters)
+            rows, cols = self._undecided(index, body, blocks, clusters, facing, receivers)
             self._test_tiles(
                 body,
                 sources,
@@ -489,6 +521,7 @@ class ShaftCulling(BodyCulling):
                 blocks.curve.members(block)[rows],
                 clusters.curve.members(cluster)[cols],
                 pair_limit,
+                facing,
                 out=mask[index],
             )
         return jnp.asarray(mask)
@@ -521,17 +554,20 @@ class ShaftCulling(BodyCulling):
             raise ValueError(msg)
         return self.sources
 
-    def certified_pairs(self, bodies, sources, receivers) -> np.ndarray:
-        """How many source-receiver pairs each body is certified to miss without a test.
+    def certified_pairs(self, bodies, sources, receivers, *, facing=None) -> np.ndarray:
+        """How many source-receiver pairs each body decides without a test.
 
         The measure of what the strategy saves on a given scene: the pairs it does not test are
-        these, per body, whichever level of refinement vouched for them.
+        these, per body, whichever level of refinement vouched for them -- and, given
+        ``facing``, those in tiles proven to lie wholly behind their sources.
 
         Parameters
         ----------
         bodies : sequence of aquaflux.solids.Body
         sources : array_like, shape ``(n_sources, 3)``
         receivers : array_like, shape ``(n_receivers, 3)``
+        facing : BackFaces, optional
+            As for :meth:`BodyCulling.blocked`.
 
         Returns
         -------
@@ -547,22 +583,34 @@ class ShaftCulling(BodyCulling):
         col_counts = clusters.curve.counts(self.source_clusters[-1])
         certified = []
         for index, body in enumerate(bodies):
-            rows, cols = self._undecided(index, body, blocks, clusters)
+            rows, cols = self._undecided(index, body, blocks, clusters, facing, receivers)
             tested = int(np.sum(row_counts[rows] * col_counts[cols]))
             certified.append(len(receivers) * len(sources) - tested)
         return np.array(certified, dtype=np.int64)
 
-    def _undecided(self, index, body, blocks, clusters):
-        """The finest-level tiles ``body`` could not vouch for, as ``(rows, cols)`` group indices.
+    def _undecided(self, index, body, blocks, clusters, facing=None, receivers=None):
+        """The finest-level tiles left to test, as ``(rows, cols)`` group indices.
 
         ``index`` is the body's place in both groups' summaries. Every tile at the coarsest level
         is asked; each one refused is split into its children at the next level, those whose
         groups hold any real point are asked, and so on. A child made wholly of padding is
-        dropped rather than asked: it holds no pair.
+        dropped rather than asked: it holds no pair. Given ``facing`` (and the ``receivers``), a
+        tile whose receivers lie wholly behind its sources is dropped at whichever level that is
+        first proven, before the body is asked -- it carries no light, so it needs no answer.
         """
+
+        def lit(rows, cols, block, cluster):
+            if facing is None:
+                return rows, cols
+            dark = facing.tiles_behind(
+                receivers, blocks.curve.members(block)[rows], clusters.curve.members(cluster)[cols]
+            )
+            return rows[~dark], cols[~dark]
+
         receiver_summaries, source_summaries = blocks.summaries[index], clusters.summaries[index]
         levels = list(zip(self.receiver_blocks, self.source_clusters, strict=True))
         rows, cols = np.nonzero(~_vouched(body, receiver_summaries[0], source_summaries[0]))
+        rows, cols = lit(rows, cols, *levels[0])
         for level, (coarse, (block, cluster)) in enumerate(itertools.pairwise(levels), start=1):
             split_rows, split_cols = coarse[0] // block, coarse[1] // cluster
             children_rows = rows[:, None, None] * split_rows + np.arange(split_rows)[:, None]
@@ -573,19 +621,21 @@ class ShaftCulling(BodyCulling):
             real = (blocks.curve.counts(block)[rows] > 0) & (
                 clusters.curve.counts(cluster)[cols] > 0
             )
-            rows, cols = rows[real], cols[real]
+            rows, cols = lit(rows[real], cols[real], block, cluster)
             refused = ~_vouched_pairs(
                 body, receiver_summaries[level], source_summaries[level], rows, cols
             )
             rows, cols = rows[refused], cols[refused]
         return rows, cols
 
-    def _test_tiles(self, body, sources, near, receivers, rows, cols, pair_limit, out):
+    def _test_tiles(self, body, sources, near, receivers, rows, cols, pair_limit, facing, out):
         """Test the undecided tiles pair by pair, writing each answer into ``out`` in place.
 
         ``rows`` and ``cols`` hold each tile's point indices. Tiles go in batches of one shape,
         padded to a power of two by repeating the last tile, so a pass compiles a couple of
-        programs however many tiles it has; the repeated tile writes its own answer again.
+        programs however many tiles it has; the repeated tile writes its own answer again. Given
+        ``facing``, a pair whose receiver lies behind its source is written clear, as
+        :class:`EveryPair` writes it.
         """
         per_tile = rows.shape[1] * cols.shape[1]
         per_batch = max(1, pair_limit // per_tile)
@@ -600,6 +650,9 @@ class ShaftCulling(BodyCulling):
             take = np.concatenate([np.arange(len(batch_rows)), pad])
             batch_rows, batch_cols = batch_rows[take], batch_cols[take]
             answer = _tile_blocks(body, *points, batch_rows, batch_cols)
+            if facing is not None:
+                targets = points[2][batch_rows][:, :, None, :]
+                answer = answer & ~facing.behind(targets, batch_cols[:, None, :])
             out[batch_rows[:, :, None], batch_cols[:, None, :]] = np.asarray(answer)
 
 

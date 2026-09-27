@@ -133,7 +133,12 @@ TREE = {
         "call / field / chunk / mask / bodies / test tiles"
     ),
     "call / field / chunk / mask / hidden-tile count": "call / field / chunk / mask",
-    "call / field / chunk / gather": "call / field / chunk",
+    "call / field / chunk / mask / bodies / undecided tiles / tiles behind": (
+        "call / field / chunk / mask / bodies / undecided tiles"
+    ),
+    "call / field / chunk / gather layout": "call / field / chunk",
+    "call / field / chunk / gather / point sources": "call / field / chunk",
+    "call / field / chunk / gather / areal segments": "call / field / chunk",
 }
 
 
@@ -207,9 +212,18 @@ def instrument_call(timers: Timers, n_facets: int, pairs: dict) -> None:
     gather._unchecked_visibility = timers.wrap(
         "call / field / chunk / mask", gather._unchecked_visibility
     )
-    compiled = gather._compiled_gather
-    gather._compiled_gather = lambda *args: timers.wrap(
-        "call / field / chunk / gather", compiled(*args)
+    gather._CompiledParts.points = timers.wrap(
+        "call / field / chunk / gather / point sources", gather._CompiledParts.points
+    )
+    gather._CompiledParts.segment = timers.wrap(
+        "call / field / chunk / gather / areal segments", gather._CompiledParts.segment
+    )
+    gather.areal_layout = timers.wrap("call / field / chunk / gather layout", gather.areal_layout)
+    from aquaflux.radiation.back_faces import BackFaces
+
+    BackFaces.tiles_behind = timers.wrap(
+        "call / field / chunk / mask / bodies / undecided tiles / tiles behind",
+        BackFaces.tiles_behind,
     )
     for strategy in (culling.EveryPair, culling.ShaftCulling):
         strategy.blocked = timers.wrap("call / field / chunk / mask / bodies", strategy.blocked)

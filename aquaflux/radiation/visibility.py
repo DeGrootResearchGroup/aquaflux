@@ -39,6 +39,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from aquaflux.radiation.back_faces import BackFaces
 from aquaflux.radiation.culling import BodyCulling, culling_or_default
 from aquaflux.radiation.self_occlusion import (
     RayCastOcclusion,
@@ -58,8 +59,10 @@ def surviving_fraction(blocked, hidden_by_geometry, transmittance) -> jnp.ndarra
 
     Parameters
     ----------
-    blocked : jnp.ndarray of bool, shape ``(n_occluders, n_receivers, n_facets)``
-    hidden_by_geometry : jnp.ndarray, shape ``(n_receivers, n_facets)``, or None
+    blocked : jnp.ndarray of bool, shape ``(n_occluders, *pairs)``
+        Laid out as the whole mask, ``pairs`` being ``(n_receivers, n_facets)``, or as any
+        gathering of its pairs.
+    hidden_by_geometry : jnp.ndarray, shape ``pairs``, or None
         Boolean or floating point, and widened here -- one chunk at a time from the gather, so
         the widened copy is never the size of the problem. ``None`` hides nothing.
     transmittance : array_like, shape ``(n_occluders,)``
@@ -70,7 +73,8 @@ def surviving_fraction(blocked, hidden_by_geometry, transmittance) -> jnp.ndarra
     jnp.ndarray, shape ``(n_receivers, n_facets)``
     """
     transmittance = jnp.broadcast_to(jnp.asarray(transmittance, dtype=float), (blocked.shape[0],))
-    attenuation = 1.0 - blocked * (1.0 - transmittance[:, None, None])
+    per_body = transmittance.reshape(-1, *([1] * (blocked.ndim - 1)))
+    attenuation = 1.0 - blocked * (1.0 - per_body)
     surviving = jnp.prod(attenuation, axis=0)
     if hidden_by_geometry is None:
         return surviving
@@ -105,9 +109,10 @@ class Visibility(eqx.Module):
         where no pair can be such an addition: from a ray test, whose ``or`` is idempotent, and
         where nothing is hidden at all.
     clear_behind : bool
-        Whether pairs whose source faces away from the receiver were recorded clear in
-        :attr:`hidden_by_geometry` without being tested, as the ray test does for receivers in
-        the volume. Such a pair carries no light from a source that is dark behind itself -- a
+        Whether pairs whose source faces away from the receiver were recorded clear without
+        being tested -- in :attr:`blocked`, as every mask of receivers in the volume does when
+        each areal source is dark behind itself, and in :attr:`hidden_by_geometry`, as the ray
+        test does in the same case. Such a pair carries no light from a source that is dark behind itself -- a
         :attr:`~aquaflux.radiation.profiles.Profile.dark_behind` profile -- so nothing it could
         hide reaches the receiver, and the mask there reads "blocked, where it matters". A
         gather through a mask with this set therefore **refuses** a set with any areal facet
@@ -331,9 +336,12 @@ def _unchecked_visibility(
     # area and no surface to shadow itself with, so it needs no exclusion.
     near = offset_scale * jnp.sqrt(surfaces.area)
 
+    # A receiver in the volume behind a source that is dark behind itself gets nothing from it,
+    # so the bodies need not be asked about that pair; the mask then says it did not ask.
+    facing = BackFaces.of(surfaces) if receiver_facet is None and surfaces.dark_behind else None
     culling = culling_or_default(body_culling)
     blocked = (
-        culling.blocked(occluders, surfaces.centroid, near, points, pair_limit)
+        culling.blocked(occluders, surfaces.centroid, near, points, pair_limit, facing=facing)
         if occluders
         else jnp.zeros((0, n_receivers, n_facets), dtype=bool)
     )
@@ -343,5 +351,5 @@ def _unchecked_visibility(
         receivers=points,
         hidden_by_geometry=geometry.fraction,
         overlapping=geometry.overlapping,
-        clear_behind=geometry.clear_behind,
+        clear_behind=geometry.clear_behind or (facing is not None and bool(occluders)),
     )

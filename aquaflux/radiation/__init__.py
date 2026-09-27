@@ -96,6 +96,7 @@ convergence, so the number of bounces is not a parameter.
 from __future__ import annotations
 
 from aquaflux.radiation.absorption import Absorption, UniformAbsorption, VoxelAbsorption
+from aquaflux.radiation.back_faces import BackFaces
 from aquaflux.radiation.checks import (
     WindingReport,
     check_points_outside,
@@ -148,6 +149,7 @@ from aquaflux.radiation.visibility import Visibility, build_visibility
 
 __all__ = [
     "Absorption",
+    "BackFaces",
     "BodyCulling",
     "Coarsening",
     "CosinePower",
