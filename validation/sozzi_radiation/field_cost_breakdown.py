@@ -273,14 +273,16 @@ def instrument_call(timers: Timers, n_facets: int, pairs: dict) -> None:
         "call / field / chunk / mask / bodies / test tiles", culling.ShaftCulling._test_tiles
     )
 
-    def counted_test_tiles(self, body, sources, near, receivers, rows, cols, pair_limit, out):
+    def counted_test_tiles(
+        self, body, sources, near, receivers, rows, cols, pair_limit, facing, out
+    ):
         # The same batching arithmetic as the strategy's own, to count what it tests.
         per_tile = rows.shape[1] * cols.shape[1]
         per_batch = max(1, pair_limit // per_tile)
         batches = [min(per_batch, len(rows) - start) for start in range(0, len(rows), per_batch)]
         pairs["in undecided tiles"] += len(rows) * per_tile
         pairs["tested, padding included"] += sum(padded_length(n) for n in batches) * per_tile
-        return test_tiles(self, body, sources, near, receivers, rows, cols, pair_limit, out)
+        return test_tiles(self, body, sources, near, receivers, rows, cols, pair_limit, facing, out)
 
     culling.ShaftCulling._test_tiles = counted_test_tiles
     blocked = culling.ShaftCulling.blocked
