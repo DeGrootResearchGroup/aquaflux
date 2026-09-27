@@ -153,6 +153,33 @@ def test_batches_cut_to_one_tile_and_padded_still_give_the_same_mask():
     np.testing.assert_array_equal(culled, reference)
 
 
+def test_a_body_is_asked_to_vouch_only_at_a_few_batch_lengths(monkeypatch):
+    """Tiles asked about in batches padded to a power of two, so eager certificates reuse programs.
+
+    The number of tiles a level asks about changes with every pass; asked as it stands, nearly
+    every call would be a shape the body's eager operations had not met, and compile anew. Several
+    passes of different sizes here must all reach the body at power-of-two lengths -- and still
+    give the mask every pair gives, so no padded tile's answer is written back.
+    """
+    lengths = []
+    original = Outside.vouches
+
+    def recording(self, summary):
+        lengths.append(len(summary))
+        return original(self, summary)
+
+    monkeypatch.setattr(Outside, "vouches", recording)
+    lamp = _lamp()
+    near = 1e-6 * np.sqrt(np.asarray(lamp.area))
+    culling = ShaftCulling(receiver_blocks=(24, 6, 1), source_clusters=(8, 4, 2))
+    for count, seed in ((150, 3), (211, 4), (97, 5)):
+        receivers = _receivers(count, seed=seed)
+        reference, culled = _arms(lamp.centroid, near, receivers, culling)
+        np.testing.assert_array_equal(culled, reference)
+    assert len(lengths) > 6
+    assert all(length & (length - 1) == 0 for length in lengths), sorted(set(lengths))
+
+
 class _Opaque(Body):
     """A sphere answered eagerly with no witnesses: a body that cannot vouch for anything."""
 
