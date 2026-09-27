@@ -26,7 +26,7 @@ DEFAULT_PAIR_LIMIT = 4_000_000
 
 #: Receiver-by-facet pairs one step of a traced loop forms, however high the pair limit: the
 #: traced loop's own bound, set by speed rather than by memory. See :func:`in_passes`.
-PASS_PAIRS = 1 << 17
+PASS_PAIRS = 1 << 16
 
 
 def receivers_per_pass(pair_limit: int, per_receiver: int) -> int:
