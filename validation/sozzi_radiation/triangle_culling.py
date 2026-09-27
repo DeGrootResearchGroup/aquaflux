@@ -1,7 +1,8 @@
 """How much of a TRIANGULATED wall's shadow mask shaft culling decides without walking a ray.
 
-``grid_mask_check.py`` measured the triangulated wall's mask at ~39k rays/s, the one piece of the
-Sozzi calculation that costs hours rather than minutes. This measures what
+``grid_mask_check.py`` first measured the triangulated wall's mask at ~39k rays/s, the one piece of
+the Sozzi calculation that then cost hours rather than minutes (with the compiled walk and default
+culling the whole triangulated field now takes about an hour). This measures what
 :class:`~aquaflux.radiation.ShaftCulling` saves on it: a tile of cells and lamp facets whose
 bounding box overlaps no occupied voxel of the wall's occupancy grid is recorded clear without a
 ray being walked, and a tile that fails is split and asked again.

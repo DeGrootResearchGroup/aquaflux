@@ -2108,7 +2108,8 @@ run straight after, same machine) at the same ladders: 32x32 **7.84x** (90.3%), 
 per-pair cost**, and neither default is right for both: the third level saves ~2.7x on the triangle
 walk and costs ~1.6x on the cheap analytic test, whose finest-level tile bookkeeping outweighs the few
 pairs it vouches for. **The default is (32, 8, 2)**, chosen on absolute time — it saves minutes where
-the 88 h lives and costs ~3 s where the analytic mask already runs in seconds — and the docstring says
+the triangle walk dominates (62 min for the whole Sozzi field since #571, TRIANGULATED WALL AT MESH
+SCALE below) and costs ~3 s where the analytic mask already runs in seconds — and the docstring says
 to stop at 8 for analytic-only scenes. **A per-body depth was investigated and deliberately NOT built**
 (decided with the user, 2026-09-26, after the findings below; three mechanisms were offered — two ladders
 keyed on `traceable`, a per-ray cost declaration on `Body`, a per-level cost model — and all were
@@ -2145,7 +2146,7 @@ between runs, so every comparison below is within one process, alternating arms.
 
 - **So the default stays (32, 8, 2) and nothing chooses per body.** The finest level costs the cheap
   analytic mask seconds (~2.6 s here; proportional to tested pairs on a mesh) and saves the triangle
-  walk — where the ~88 h projection lives — a factor of ~2.4 over the next best ladder. Every
+  walk — which dominates a triangulated field — a factor of ~2.4 over the next best ladder. Every
   mechanism for choosing per body carries a cost (`traceable` standing in for "cheap per ray", a
   contract term only the culling reads, or a machine-measured cost constant) out of proportion to the
   seconds it would save. **At mesh scale the penalty is ~62 s of a 314 s whole field** (the 1.24x
@@ -2396,15 +2397,18 @@ voxel size along the axis the rays actually traverse -- which is why the populat
 and beats it at every corner here. Not changed: one scene, and the sizing rule should not be
 rewritten around it. Recorded as the thing to test in #503. For scale in the other
 direction, the *entire* field with analytic occlusion -- all 1,635,909 cells, gather arithmetic
-included -- takes **557 s** (`run-20260922-125655.log`), while the grid mask alone extrapolates
-to **88 h** at the 38,700 rays/s measured here. **The triangulated mask costs about 600x
-everything else in the calculation put together**, which is why the grid is the fallback for
-geometry that exists only as triangles and not the path a real reactor should take (issue #501).
+included -- takes **557 s** (`run-20260922-125655.log`). The grid mask alone then extrapolated to
+88 h (1.23e10 rays at 38,711 rays/s, array walk, every pair); **measured since, the whole field with
+the triangulated wall takes 3,720.6 s against 313.7 s with the cylinders — 11.9x, not ~600x** (the
+compiled walk and default culling; TRIANGULATED WALL AT MESH SCALE below). Primitives remain the
+path a real reactor should take — exact at the rim as well as 12x cheaper — and the grid the
+fallback for geometry that exists only as triangles (issue #501).
 
 **What it does not fix: the RAY COUNT, which is the binding cost at mesh scale.** 1.6M cells
-against 7,516 facets is 1.2e10 segments however cheaply each is answered. The grid makes scenes
-up to a few times 1e8 rays practical; beyond that the facet count has to come down (the lamp
-ladder, next) or the mask has to be built on a coarser emitter than the gather uses. ⚠️ **Since #554 phase
+against 7,516 facets is 1.2e10 segments however cheaply each is answered. On the array walk the grid
+made scenes up to a few times 1e8 rays practical; with the compiled walk and default culling the Sozzi
+field's 1.2e10 take ~62 min (~3.3M pairs/s overall, measured below), so an hour-scale mesh is now
+practical and the facet count (the lamp ladder, next) or a coarser shadow emitter is what goes further. ⚠️ **Since #554 phase
 B there is a third way, which cuts the rays WALKED rather than the rays asked about**: a
 `TriangleBody` under `ShaftCulling` vouches for whole tiles, 89% of pairs and 4.96x on a shadowless
 triangulated chamber (the SHAFT CULLING section above) — on the real wall, less, by the pipe-cell share.
@@ -2454,11 +2458,8 @@ setup was still inside the triangle loop); grids are the default and 2x / 4x it 
 
 Answers identical in every row. The first compiled call of a process also compiles the loop: **2.0 s**.
 A scratch run of the vessel scene earlier the same day read 25.0 / 20.9 / 27.4 / 35.2x at 1 / 1.6 / 3.2 /
-6.4x the default — the same band, two processes. ⚠️ **Not measured on the Sozzi wall** (`bodyWall.stl`
-and `work/case` are absent here), and not on the 11-core machine; the 88 h mesh-scale figure above was
-extrapolated from 38,700 rays/s there, so what this buys at mesh scale is **not established** — re-run
-`grid_mask_check.py` (which walks the wall through `TriangleBody`, so it takes this walk as it
-stands) before quoting one.
+6.4x the default — the same band, two processes. On the Sozzi wall and the 11-core machine it has
+since been measured: see TRIANGULATED WALL AT MESH SCALE below.
 
 **Through the paths users call, `main` against this branch** (`main` at `392f935` in a worktree, then
 the branch, back to back on the same 4-core container, two processes, so read the ratios; jax 0.10.2,
@@ -2505,6 +2506,39 @@ what a compiler happens to do; that is the lesson the traced kernel already paid
 
 **`NUMBA_NUM_THREADS=1`** is now set beside `OMP_NUM_THREADS` in `tools/fastgate.sh`'s parallel tier and
 in CI's environment, so xdist workers do not each start a pool the size of the machine.
+
+### THE TRIANGULATED WALL AT MESH SCALE, MEASURED (2026-09-26) — 62 min, not 88 h
+
+Replaces the 88 h extrapolation (1.23e10 rays at 38,711 rays/s, 2026-09-23, array walk, `EveryPair`).
+Configuration throughout: main `f96e923` unless stated, jax 0.10.2, numba 0.67.0, CPU, x64, macOS arm64,
+11 cores; 7,516-facet `lampWall.stl`, `NoOcclusion`, streamed receiver mask, default culling; one run
+per row through `run_case.sh`, nothing else heavy running. Full tables in the Sozzi README. ⚠️ **All
+measured before #575** (`BodyCulling.prepared`, the in-program tile gather): neither reaches the
+triangle wall's cost (facet clearance ~0 s for it per chunk, `TriangleBody` keeps the host gather), so
+the 62 min should stand; the 313.7 s analytic row may have moved. Not re-measured.
+
+- **Whole field** (`model_at_mesh_scale.py`, `SOZZI_WATER=triangles` = `bodyWall.stl` as a
+  `TriangleBody` sheet, all 1,635,909 cells): **3,720.6 s** field, 58.0 s build, **5.58 GB** peak; the
+  cylinders on the same commit 313.7 s / 56.9 s / 6.03 GB (313.5 s before #562/#563/#571). Chamber
+  cells match the analytic field to **4.4e-16** (1,277,672 lit); lit pipe cells 1.42% / 5.83% / 13.5%
+  median / p99 / max (the inscribed-polygon rim, as `grid_mask_check.py` found).
+- **`grid_mask_check.py` re-run**: 40,000 pipe + 4,000 chamber cells (the old run 20,000 pipe), 330.7M
+  rays, triangulated arm 282.2 s = **1,171,912 rays/s (~30x)**, extrapolated 2.91 h; answers unchanged
+  (89.2 pairs/pipe cell differ, `G` 1.20 / 8.90 / 54.1%, chamber 0, 99.995% within 10% of the rim).
+  ⚠️ **Its extrapolation overstates the measured whole field ~3x** — its receivers are 91% pipe cells,
+  the dearest rays. Quote the whole-field figure, never a pipe-heavy rate times the mesh.
+- **#571 on the real wall** (`triangle_culling.py`, `bodyWall.stl`, 5,476-receiver slab, 3,360 facets,
+  18.4M pairs, `a0b8e18` → `53074d2`): every pair 47.4 → 3.4 s (13.9x); 32x32 39.7 → 2.6; 32→8 28.3 →
+  1.8; default 16.7 → 1.2 s (13.9x); certified 31.6 / 59.5 / 77.2%. ⚠️ **0.00% of that slab's pairs are
+  blocked**, so it times the walk and checks no answer.
+- **Where it goes** (`field_cost_breakdown.py`, every 16th cell): masks 98% of the call, the compiled
+  walk of uncertified tiles 85%, certificates 6%, gather 1.6%. **Only 25.2% of pairs certified**
+  (analytic cylinders: 81.0%) — a round wall's occupied voxels surround every shaft not near the axis;
+  padding adds 20%; wholly blocked tiles hold at most 12.9% of the undecided pairs, so a "fully
+  hidden" certificate buys little on this wall. ⚠️ **A strided sample understates culling** (blocks
+  spread 16x wider): the whole mesh ran 3,720.6 s where 16x the sample's 284.3 s is 4,549 s. So the
+  lever for triangle-only geometry is a certificate that vouches for more of the chamber (the convex
+  region a triangulated vessel encloses, #568), or a cheaper walk (#572, #503) — neither built.
 
 ## HOW MANY FACETS AN EMITTER NEEDS — measured, because it sets the price of everything
 

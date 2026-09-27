@@ -20,6 +20,15 @@ against every pair (:class:`~aquaflux.radiation.EveryPair`); or a ladder of grou
 facets. The masks are identical whichever is chosen, so the fields agree to the last bit and only
 the time differs. Each arm writes its own summary, ``model_at_mesh_scale[-<arm>].json``.
 
+**The water can be the vessel's triangles instead** (``SOZZI_WATER=triangles``): the case's own
+``bodyWall.stl`` as a :class:`~aquaflux.radiation.TriangleBody` sheet, walked through its grid, as
+``grid_mask_check.py`` builds it -- the general method for geometry that exists only as triangles.
+Its pipe openings are polygons inscribed in the design circles, so the field then differs from the
+hand-built one in the pipes by the STL's idea of a circle, and the summary gives the chamber and the
+pipes separately; the chamber should still agree exactly. ``SOZZI_RECEIVERS`` keeps every *k*-th
+cell, about that many in all, for a quick check of memory and of the harness; the summary names the
+count, and a figure quoted from this file is from the whole mesh.
+
 **What must agree, and why exactly.** The lamp (the case's ``lampWall.stl``), the exitance and the
 medium are the same; the walls are black, so the reflected pass the model adds carries only the
 interreflection solve's own residual. The shadows differ in *description* — the hand-built field
@@ -52,7 +61,10 @@ sys.path.insert(0, str(HERE.parent))
 
 WORK = HERE / "work"
 CULLING = os.environ.get("SOZZI_CULLING", "")
-RESULT = WORK / "compare" / f"model_at_mesh_scale{'-' + CULLING if CULLING else ''}.json"
+WATER = os.environ.get("SOZZI_WATER", "")
+RECEIVERS = int(os.environ.get("SOZZI_RECEIVERS", 0))
+ARM = "-".join(part for part in (WATER, CULLING, str(RECEIVERS) if RECEIVERS else "") if part)
+RESULT = WORK / "compare" / f"model_at_mesh_scale{'-' + ARM if ARM else ''}.json"
 
 
 def _say(message: str) -> None:
@@ -71,6 +83,30 @@ def culling_settings() -> dict:
     return {"body_culling": ShaftCulling(receiver_blocks=ladder, source_clusters=ladder)}
 
 
+def water():
+    """The occluding water ``SOZZI_WATER`` names, and a description of it for the summary.
+
+    Unset: the CAD drawing's three cylinders, or the hand-typed ones without the CAD kernel.
+    ``triangles``: the case's ``bodyWall.stl`` as a triangle sheet -- the fluid is on its near side
+    and the metal on its far side, and no cell or lamp facet is embedded in it.
+    """
+    import numpy as np
+    from aquaflux.radiation import TriangleBody, read_stl
+    from compare_fluence import CASE
+    from primitive_occlusion import fluid, from_drawing
+
+    if WATER == "triangles":
+        wall = np.asarray(read_stl(CASE / "constant" / "triSurface" / "bodyWall.stl").vertices)
+        return TriangleBody.build(wall, sheet=True), f"bodyWall.stl, {len(wall)} triangles"
+    if WATER:
+        msg = f"SOZZI_WATER must be unset or 'triangles'; got {WATER!r}"
+        raise SystemExit(msg)
+    drawn = from_drawing()
+    if drawn is not None:
+        return drawn, "the CAD drawing"
+    return fluid(), "three hand-typed cylinders (no CAD kernel)"
+
+
 def run() -> dict:
     """Build the model and compute the field, in this process."""
     import aquaflux  # noqa: F401  (enables x64)
@@ -83,15 +119,14 @@ def run() -> dict:
         fluence_rate,
     )
     from compare_fluence import ABSORPTION, lamp_surfaces
-    from primitive_occlusion import fluid, from_drawing
 
     cells = np.load(WORK / "cell_centres.npy")
     reference = np.load(WORK / "compare" / "G_aquaflux.npy")
+    if RECEIVERS:
+        stride = max(1, len(cells) // RECEIVERS)
+        cells, reference = cells[::stride], reference[::stride]
     lamp = lamp_surfaces()
-    water = from_drawing()
-    source = "the CAD drawing"
-    if water is None:
-        water, source = fluid(), "three hand-typed cylinders (no CAD kernel)"
+    body, source = water()
     culling = culling_settings()
     described = repr(culling.get("body_culling", "library default"))
     _say(f"{len(cells)} cells, {lamp.n_facets} lamp facets, water from {source}, {described}")
@@ -100,7 +135,7 @@ def run() -> dict:
     model = build_radiation_model(
         cells,
         lamp,
-        occluders=[water],
+        occluders=[body],
         # A convex lamp cannot shadow itself, so its own triangles are not ray-tested; that is the
         # same choice the hand-built field makes.
         settings=RadiationSettings(
@@ -120,6 +155,18 @@ def run() -> dict:
     relative = np.abs(field - reference)[lit] / reference[lit]
     radius = np.hypot(cells[:, 1], cells[:, 2])
     far = (cells[:, 0] > 1.10) | (cells[:, 2] > 0.40)
+    chamber = (radius <= 0.0445) & (cells[:, 0] <= 0.889)
+
+    def compared(where):
+        """The relative difference over the lit cells in ``where``."""
+        chosen = np.abs(field - reference)[lit & where] / reference[lit & where]
+        return {
+            "cells": int((lit & where).sum()),
+            "median": float(np.median(chosen)),
+            "p99": float(np.percentile(chosen, 99)),
+            "max": float(chosen.max()),
+        }
+
     return {
         "cells": len(cells),
         "water": source,
@@ -135,10 +182,12 @@ def run() -> dict:
             "p99": float(np.percentile(relative, 99)),
             "max": float(relative.max()),
         },
+        "relative_difference_over_lit_chamber_cells": compared(chamber),
+        "relative_difference_over_lit_pipe_cells": compared(~chamber),
         "max_absolute_difference_W_m2": float(np.abs(field - reference).max()),
         "far_pipe_cells": int(far.sum()),
         "far_pipe_max_absolute_difference_W_m2": float(np.abs(field - reference)[far].max()),
-        "chamber_mean_G": float(field[(radius <= 0.0445) & (cells[:, 0] <= 0.889)].mean()),
+        "chamber_mean_G": float(field[chamber].mean()),
     }
 
 

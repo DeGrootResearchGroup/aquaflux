@@ -34,9 +34,10 @@ so the count is the ceiling for any such certificate, not a prediction of what o
 It is timed under its own name (``hidden-tile count``), outside the bodies' layer, so the layer's
 own figures are not charged for it; subtract it from the call to compare with a plain run.
 
-``SOZZI_CULLING`` chooses the bodies' layer as in ``model_at_mesh_scale.py`` (unset: the library
-default). ``SOZZI_RECEIVERS`` takes the first *n* cells in mesh order instead of all of them, for a
-quick check of the harness itself; a figure quoted from this file is from the whole mesh.
+``SOZZI_CULLING`` chooses the bodies' layer and ``SOZZI_WATER`` the occluding water, both as in
+``model_at_mesh_scale.py`` (unset: the library default, and the three cylinders). ``SOZZI_RECEIVERS``
+keeps every *k*-th cell, about that many in all, for a quick check of the harness itself; a figure
+quoted from this file is from the whole mesh.
 
 Run with ``validation/run_case.sh validation/sozzi_radiation/field_cost_breakdown.py``. Needs
 ``work/case`` (for the lamp) and ``work/cell_centres.npy``. Writes
@@ -60,7 +61,9 @@ sys.path.insert(0, str(HERE.parent))
 WORK = HERE / "work"
 CULLING = os.environ.get("SOZZI_CULLING", "")
 RECEIVERS = int(os.environ.get("SOZZI_RECEIVERS", 0))
-RESULT = WORK / "compare" / f"field_cost_breakdown{'-' + CULLING if CULLING else ''}.json"
+WATER = os.environ.get("SOZZI_WATER", "")
+ARM = "-".join(part for part in (WATER, CULLING, str(RECEIVERS) if RECEIVERS else "") if part)
+RESULT = WORK / "compare" / f"field_cost_breakdown{'-' + ARM if ARM else ''}.json"
 
 
 def _say(message: str) -> None:
@@ -185,7 +188,7 @@ def instrument_call(timers: Timers, n_facets: int, pairs: dict) -> None:
     Applied only once the model is built, because the transfer's own mask goes through the same
     culling code, and would otherwise be charged to the field's chunks.
     """
-    from aquaflux.radiation import culling, gather, model, receiver_shadows
+    from aquaflux.radiation import TriangleBody, culling, gather, model, receiver_shadows
     from aquaflux.radiation.triangles import padded_length
     from aquaflux.solids import Outside
 
@@ -233,12 +236,13 @@ def instrument_call(timers: Timers, n_facets: int, pairs: dict) -> None:
     culling._Curve.of = classmethod(
         by_side(culling._Curve.of.__func__, 1, None, f"{groups} / curve order")
     )
-    Outside.clearance = by_side(
-        Outside.clearance,
-        1,
-        "call / field / prepare culling / lamp-facet clearance",
-        f"{groups} / clearance",
-    )
+    for kind in (Outside, TriangleBody):
+        kind.clearance = by_side(
+            kind.clearance,
+            1,
+            "call / field / prepare culling / lamp-facet clearance",
+            f"{groups} / clearance",
+        )
     culling.ShaftCulling._undecided = timers.wrap(
         "call / field / chunk / mask / bodies / undecided tiles", culling.ShaftCulling._undecided
     )
@@ -320,17 +324,13 @@ def main() -> None:
         fluence_rate,
     )
     from compare_fluence import ABSORPTION, lamp_surfaces
-    from model_at_mesh_scale import culling_settings
-    from primitive_occlusion import fluid, from_drawing
+    from model_at_mesh_scale import culling_settings, water
 
     cells = np.load(WORK / "cell_centres.npy")
     if RECEIVERS:
-        cells = cells[:RECEIVERS]
+        cells = cells[:: max(1, len(cells) // RECEIVERS)]
     lamp = lamp_surfaces()
-    water = from_drawing()
-    source = "the CAD drawing"
-    if water is None:
-        water, source = fluid(), "three hand-typed cylinders (no CAD kernel)"
+    body, source = water()
     chosen = culling_settings()
     described = repr(chosen.get("body_culling", "library default"))
     _say(f"{len(cells)} cells, {lamp.n_facets} lamp facets, water from {source}, {described}")
@@ -342,7 +342,7 @@ def main() -> None:
     model = build_radiation_model(
         cells,
         lamp,
-        occluders=[water],
+        occluders=[body],
         settings=RadiationSettings(
             self_occlusion=NoOcclusion(), stream_receiver_mask=True, **chosen
         ),
