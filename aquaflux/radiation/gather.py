@@ -25,13 +25,18 @@ being built and the compiled code contains no test of which kind a facet is.
 
 from __future__ import annotations
 
+import dataclasses
+import functools
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from aquaflux.radiation.absorption import Absorption
-from aquaflux.radiation.culling import culling_or_default
+from aquaflux.radiation.back_faces import BackFaces
+from aquaflux.radiation.culling import culling_or_default, spatial_order
+from aquaflux.radiation.lit_blocks import lit_segments
 from aquaflux.radiation.solid_angle import projected_solid_angle, solid_angle
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.visibility import (
@@ -171,22 +176,20 @@ def _transmittance(absorption, source: jnp.ndarray, receivers: jnp.ndarray) -> j
     """
     if absorption is None:
         return jnp.asarray(1.0)
-    return jnp.exp(-absorption.optical_depth(source[None, :, :], receivers[:, None, :]))
+    return jnp.exp(-absorption.optical_depth(source, receivers))
 
 
-def _emitter_cosine(surfaces: Surfaces, facets: np.ndarray, receivers: jnp.ndarray):
-    """Cosine at each emitting facet of the angle to each receiver, and the separation.
+def _emitter_cosine(centroid, normal, receivers):
+    """Cosine at each emitting facet of the angle to each receiver, and the separation squared.
 
-    Shapes are ``(n_receivers, n_facets)``; the cosine is measured at the *source*, between its
-    outward normal and the direction to the receiver, which is what an angular distribution is
-    a function of.
+    The three arrays broadcast together, their last axis the three coordinates; the cosine is
+    measured at the *source*, between its outward normal and the direction to the receiver,
+    which is what an angular distribution is a function of.
     """
-    centroid = jnp.take(surfaces.centroid, facets, axis=0)
-    normal = jnp.take(surfaces.normal, facets, axis=0)
-    offset = receivers[:, None, :] - centroid[None, :, :]
+    offset = receivers - centroid
     distance_squared = dot(offset, offset)
     distance = jnp.sqrt(jnp.where(distance_squared == 0.0, 1.0, distance_squared))
-    return dot(offset, normal[None, :, :]) / distance, distance_squared
+    return dot(offset, normal) / distance, distance_squared
 
 
 def streamed_fluence_rate(
@@ -282,40 +285,115 @@ def streamed_fluence_rate(
         geometry=shadow_geometry,
         occluders=tuple(occluders),
         options=options,
-        gather=_compiled_gather(live, pair_limit),
+        gather=_compiled_parts(live, pair_limit),
     )
-    return jnp.concatenate(
+    # The chunks are cut from the points in space-filling-curve order, so each is a compact
+    # region: its blocks' boxes are small, its tiles' shafts narrow, and both decide more.
+    order = spatial_order(np.asarray(points))
+    ordered = points[order]
+    field = jnp.concatenate(
         [
-            _shadowed_chunk(live, points[start : start + per_chunk], shadows)
+            _shadowed_chunk(live, ordered[start : start + per_chunk], shadows)
             for start in range(0, points.shape[0], per_chunk)
         ]
     )
+    return jnp.zeros(points.shape[0]).at[order].set(field)
 
 
-def _compiled_gather(live, pair_limit: int):
-    """The summed gather of every set against one chunk's mask, as one compiled program.
+#: Segments each streamed chunk's blocks are cut into, per areal group. More pad less, fewer
+#: compile less: a chunk's segments are compiled by shape, and equal segments keep the shapes to
+#: the width ladder. Four padded a sampled Sozzi-like scene to 0.56 of every pair, against 0.75
+#: for one and 0.59 for eight.
+_STREAM_SEGMENTS = 4
 
-    The live values are split into their floating-point arrays, which the program takes as
-    arguments and a gradient reaches, and everything else, which it closes over. What is closed
-    over is exactly what must stay concrete: which profile each facet emits with decides the
-    traced program's shape, so it cannot be an argument. Built once per stream, so every chunk of
-    that stream reuses the one program.
+
+class _Labels:
+    """The part of a stream's live values that decides its programs' shapes, hashable by content.
+
+    Which profile each facet emits with, which facets are point sources, the kinds of profile and
+    medium: everything but the floating-point values a gradient reaches. Hashed by what it holds
+    rather than by identity, so two calls on the same scene -- each with its own copy of the
+    surface set -- find the same compiled programs instead of compiling their own.
     """
+
+    def __init__(self, labels):
+        self.labels = labels
+        leaves, treedef = jax.tree.flatten(labels)
+        self._key = (treedef, tuple(_content(leaf) for leaf in leaves))
+
+    def __hash__(self) -> int:
+        return hash(self._key)
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, _Labels) and self._key == other._key
+
+
+def _content(leaf):
+    """A hashable stand-in for one label: an array by its type, shape and bytes."""
+    if isinstance(leaf, jax.core.Tracer):
+        return ("traced", id(leaf))
+    if isinstance(leaf, np.ndarray | jax.Array):
+        array = np.asarray(leaf)
+        return (array.dtype.str, array.shape, array.tobytes())
+    try:
+        hash(leaf)
+    except TypeError:
+        return ("unhashable", id(leaf))
+    return leaf
+
+
+def _unpacked(values, points, mask, labels: _Labels):
+    """The sets, medium, mask layers and transmittance of one chunk, inside its program."""
+    sets, absorption, transmittance = eqx.combine(values, labels.labels)
+    layers, transmittance = _shadow_rows(mask, transmittance, points, sets)
+    return sets, absorption, layers, transmittance
+
+
+@functools.partial(jax.jit, static_argnames=("labels", "pair_limit"))
+def _point_part(values, points, mask, *, labels: _Labels, pair_limit: int):
+    """A chunk's point sources, compiled once per scene and chunk size."""
+    sets, absorption, layers, transmittance = _unpacked(values, points, mask, labels)
+    return _point_fluence(sets, points, layers, absorption, transmittance, pair_limit)
+
+
+@functools.partial(jax.jit, static_argnames=("labels", "group", "pair_limit"))
+def _segment_part(values, points, mask, segment, *, labels: _Labels, group: int, pair_limit: int):
+    """One segment of a chunk's areal blocks, compiled once per scene and segment shape."""
+    sets, absorption, layers, transmittance = _unpacked(values, points, mask, labels)
+    return _segment_fluence(
+        sets, _areal_groups(sets)[group], points, layers, absorption, transmittance, segment,
+        pair_limit,
+    )  # fmt: skip
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class _CompiledParts:
+    """The gather of every set against one chunk's mask, in pieces each compiled once.
+
+    ``points`` gathers the point sources; ``segment`` one segment of the areal blocks, by the
+    index of its group. Both take the live values and the chunk's mask as arguments; the labels,
+    which decide the programs' shapes, are static and hashed by content, and a segment's shape
+    comes from the width ladder -- so a scene compiles a handful of programs however many chunks
+    and however many calls it has.
+    """
+
+    labels: _Labels
+    pair_limit: int
+
+    def points(self, values, points, mask):
+        return _point_part(values, points, mask, labels=self.labels, pair_limit=self.pair_limit)
+
+    def segment(self, values, points, mask, group, segment):
+        return _segment_part(
+            values, points, mask, segment, labels=self.labels, group=group,
+            pair_limit=self.pair_limit,
+        )  # fmt: skip
+
+
+def _compiled_parts(live, pair_limit: int) -> _CompiledParts:
+    """The compiled pieces of a stream's gather. See :class:`_CompiledParts`."""
     _, labels = eqx.partition(live, eqx.is_inexact_array)
-
-    @jax.jit
-    def gather(values, points, mask):
-        sets, absorption, transmittance = eqx.combine(values, labels)
-        return summed_fluence_rate(
-            sets,
-            points,
-            absorption=absorption,
-            visibility=mask,
-            transmittance=transmittance,
-            pair_limit=pair_limit,
-        )
-
-    return gather
+    return _CompiledParts(labels=_Labels(labels), pair_limit=pair_limit)
 
 
 class _Shadows(eqx.Module):
@@ -325,7 +403,7 @@ class _Shadows(eqx.Module):
     geometry: Surfaces
     occluders: tuple
     options: dict
-    gather: object = eqx.field(static=True)
+    gather: _CompiledParts = eqx.field(static=True)
 
     def mask(self, points) -> Visibility:
         """The mask for these receivers."""
@@ -333,9 +411,20 @@ class _Shadows(eqx.Module):
 
 
 def _chunk_total(live, points, shadows: _Shadows):
-    """One chunk's summed field, with its own mask."""
+    """One chunk's summed field, with its own mask and its own layout.
+
+    The layout is formed from the stream's geometry, which is concrete, and from the sets' labels
+    alone, so it is the same forward and on the way back, when the values are traced.
+    """
     values, _ = eqx.partition(live, eqx.is_inexact_array)
-    return shadows.gather(values, points, shadows.mask(points))
+    mask = shadows.mask(points)
+    groups = _areal_groups(live[0])
+    layout = areal_layout(points, shadows.geometry, groups, segments=_STREAM_SEGMENTS)
+    total = shadows.gather.points(values, points, mask)
+    for index, segments in enumerate(layout):
+        for segment in segments:
+            total = total + shadows.gather.segment(values, points, mask, index, segment)
+    return total
 
 
 @eqx.filter_custom_vjp
@@ -442,7 +531,10 @@ def direct_fluence_rate(
         return streamed_fluence_rate(
             (surfaces,),
             points,
-            shadow_geometry=surfaces,
+            # The masks are built from positions alone; with the gradient stopped, a traced
+            # emission or profile here is not a tangent carried into every chunk's custom
+            # vector-Jacobian product, which accepts one only through the live values.
+            shadow_geometry=jax.lax.stop_gradient(surfaces),
             occluders=() if occluders is None else occluders,
             self_occlusion=self_occlusion,
             absorption=absorption,
@@ -467,6 +559,7 @@ def summed_fluence_rate(
     visibility: Visibility | None = None,
     transmittance=None,
     pair_limit: int = DEFAULT_PAIR_LIMIT,
+    layout=None,
 ):
     """The summed fluence rate of several surface sets **on one geometry**, in one pass.
 
@@ -490,6 +583,11 @@ def summed_fluence_rate(
         from each set.
     points, absorption, visibility, transmittance, pair_limit
         As for :func:`direct_fluence_rate`.
+    layout : tuple, optional
+        Which facets each block of receivers is gathered against, from :func:`areal_layout`
+        for these points and these sets. Unset, it is formed here -- which reads the positions,
+        and so lists every facet when they are traced. A caller whose points are traced but
+        known elsewhere passes the layout formed from them.
 
     Returns
     -------
@@ -500,54 +598,189 @@ def summed_fluence_rate(
     ------
     ValueError
         If no set is given, or if the sets do not share their geometry.
+
+    Notes
+    -----
+    **A facet is not gathered at a receiver it certainly sends nothing to.** For every facet
+    whose profile in every set is dark behind itself, receivers are grouped in small compact
+    blocks and a facet whose plane a block's bounding box lies wholly behind is left off that
+    block's list (:mod:`~aquaflux.radiation.lit_blocks`). Around a lamp that is about half the
+    pairs. What is left off is exactly zero, so the field is the full gather's up to the order
+    its terms are added in -- a rounding, not a bit-for-bit identity.
     """
     sets = tuple(sets)
     geometry = _one_geometry(sets)
     layers, transmittance = _shadow_rows(visibility, transmittance, points, sets)
+    groups = _areal_groups(sets)
+    if layout is None:
+        # Laid out from the points as given: inside a trace even a concrete array becomes a
+        # tracer once it passes through jnp, and a traced position cannot be read.
+        layout = areal_layout(points, geometry, groups)
     points = jnp.asarray(points, dtype=float)
-    plans = [_groups(surfaces) for surfaces in sets]
-    areal_all = np.flatnonzero(~geometry.is_point_source)
+    total = _point_fluence(sets, points, layers, absorption, transmittance, pair_limit)
+    for group, segments in zip(groups, layout, strict=True):
+        for segment in segments:
+            total = total + _segment_fluence(
+                sets, group, points, layers, absorption, transmittance, segment, pair_limit
+            )
+    return total
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class _ArealGroup:
+    """Areal facets every set emits from with one profile each: the unit a layout is made for.
+
+    The sets share their geometry and may differ in their profiles -- a model's reflected set is
+    Lambertian whatever the lamp emits like -- so the areal facets are split by the profile each
+    set gives them, and each piece is gathered with a profile that is a concrete object per set.
+    Host metadata, never traced, so a plain record rather than a pytree.
+    """
+
+    facets: np.ndarray
+    profiles: tuple
+
+    @property
+    def dark_behind(self) -> bool:
+        """Whether every set's profile here sends nothing behind its facets."""
+        return all(profile.dark_behind for profile in self.profiles)
+
+
+def _areal_groups(sets) -> tuple[_ArealGroup, ...]:
+    """The areal facets split by the profile each set emits them with, on the host."""
+    for surfaces in sets:
+        if isinstance(surfaces.profile_index, jax.core.Tracer):
+            _groups(surfaces)  # raises, saying why the index must be concrete
+    geometry = sets[0]
+    areal = np.flatnonzero(~geometry.is_point_source)
+    keys = np.stack([np.asarray(surfaces.profile_index)[areal] for surfaces in sets], axis=1)
+    kinds, which = np.unique(keys, axis=0, return_inverse=True)
+    return tuple(
+        _ArealGroup(
+            facets=areal[np.asarray(which).ravel() == index],
+            profiles=tuple(
+                surfaces.profiles[int(kind)] for surfaces, kind in zip(sets, key, strict=True)
+            ),
+        )
+        for index, key in enumerate(kinds)
+    )
+
+
+def areal_layout(points, geometry: Surfaces, groups, *, segments=None) -> tuple:
+    """How the areal facets are gathered at ``points``: per group, its blocks and their lists.
+
+    A facet is left off a block's list only where it certainly sends the block nothing -- the
+    block lies behind its plane and every set's profile there is dark behind -- and only where
+    both the positions and the geometry can be read. Otherwise every facet is listed, and the
+    gather does the full work in the same layout.
+
+    Parameters
+    ----------
+    points : array_like, shape ``(n_points, 3)``
+    geometry : Surfaces
+        The facets' positions; the planes are read from them when they are concrete.
+    groups : sequence
+        The areal groups, from the sets being gathered.
+    segments : int, optional
+        As for :func:`~aquaflux.radiation.lit_blocks.lit_segments`.
+
+    Returns
+    -------
+    tuple of tuple of LitSegment
+        One tuple of segments per group.
+    """
+    readable = not any(
+        isinstance(array, jax.core.Tracer) for array in (points, geometry.centroid, geometry.normal)
+    )
+    facing = BackFaces.of(geometry) if readable else None
+    return tuple(
+        lit_segments(
+            points,
+            group.facets,
+            facing if group.dark_behind else None,
+            segments=segments,
+        )
+        for group in groups
+    )
+
+
+def _point_fluence(sets, points, layers, absorption, transmittance, pair_limit):
+    """What every set's point sources deliver at ``points``, ``(n_points,)``: every pair gathered."""
+    geometry = sets[0]
     point_all = np.flatnonzero(geometry.is_point_source)
+    if not len(point_all) or points.shape[0] == 0:
+        return jnp.zeros(points.shape[0])
+    plans = [_groups(surfaces) for surfaces in sets]
+    centroid = jnp.take(geometry.centroid, point_all, axis=0)
+    normal = jnp.take(geometry.normal, point_all, axis=0)
+    # Only the point sources' columns of the mask are read, so only they are widened.
+    column_layers = tuple(
+        (jnp.take(array, point_all, axis=array.ndim - 1), axis) for array, axis in layers
+    )
 
     def at(receivers, *chunk_layers):
-        surviving_all = _surviving(chunk_layers, transmittance)
-        if len(areal_all):
-            areal_cosine, _ = _emitter_cosine(geometry, areal_all, receivers)
-            omega = solid_angle(
-                receivers[:, None, :], jnp.take(geometry.vertices, areal_all, axis=0)[None, ...]
-            )
-            areal_surviving = _transmittance(
-                absorption, jnp.take(geometry.centroid, areal_all, axis=0), receivers
-            ) * _masked(surviving_all, areal_all)
-        if len(point_all):
-            point_cosine, distance_squared = _emitter_cosine(geometry, point_all, receivers)
-            point_surviving = _transmittance(
-                absorption, jnp.take(geometry.centroid, point_all, axis=0), receivers
-            ) * _masked(surviving_all, point_all)
-        totals = []
+        cosine, distance_squared = _emitter_cosine(centroid[None], normal[None], receivers[:, None])
+        surviving = _transmittance(absorption, centroid[None], receivers[:, None, :])
+        shadows = _surviving(chunk_layers, transmittance)
+        if shadows is not None:
+            surviving = surviving * shadows
+        total = jnp.zeros(receivers.shape[0])
         for surfaces, partition in zip(sets, plans, strict=True):
-            total = jnp.zeros(receivers.shape[0])
-            for profile, areal, point in partition:
-                if len(areal):
-                    pick = _columns(areal, areal_all)
-                    radiance = jnp.take(surfaces.emission, areal) * profile.radiance_per_exitance(
-                        pick(areal_cosine)
-                    )
-                    total = total + jnp.sum(radiance * pick(omega) * pick(areal_surviving), axis=1)
+            for profile, _, point in partition:
                 if len(point):
                     pick = _columns(point, point_all)
-                    fraction = profile.intensity_fraction(pick(point_cosine))
                     total = total + jnp.sum(
                         jnp.take(surfaces.power, point)
-                        * fraction
-                        * pick(point_surviving)
+                        * profile.intensity_fraction(pick(cosine))
+                        * pick(surviving)
                         / pick(distance_squared),
                         axis=1,
                     )
-            totals.append(total)
-        return sum(totals)
+        return total
 
-    return in_passes(((points, 0), *layers), pair_limit, geometry.n_facets, at)
+    return in_passes(((points, 0), *column_layers), pair_limit, len(point_all), at)
+
+
+def _segment_fluence(sets, group, points, layers, absorption, transmittance, segment, pair_limit):
+    """What one segment's blocks receive from their listed facets, as ``(n_points,)``.
+
+    Each block is gathered against its own list: the receivers are gathered by their rows, the
+    facets by their indices, and the mask at both -- so nothing is formed for a pair off the
+    list. Entries past a block's list, and padding receivers, contribute exactly zero; a padding
+    receiver's row is one past the last point and its result is dropped.
+    """
+    geometry = sets[0]
+    n_points = points.shape[0]
+    rows = jnp.asarray(segment.rows)
+    lists = (jnp.asarray(segment.facets), jnp.asarray(segment.valid))
+
+    def at(block_rows, *block_lists):
+        block_facets, block_valid = lists if segment.shared else block_lists
+        row = jnp.minimum(block_rows, n_points - 1)
+        receivers = jnp.take(points, row, axis=0, mode="clip")[:, :, None, :]
+        centroid = jnp.take(geometry.centroid, block_facets, axis=0, mode="clip")[:, None]
+        normal = jnp.take(geometry.normal, block_facets, axis=0, mode="clip")[:, None]
+        vertices = jnp.take(geometry.vertices, block_facets, axis=0, mode="clip")[:, None]
+        cosine, _ = _emitter_cosine(centroid, normal, receivers)
+        weight = solid_angle(receivers, vertices) * _transmittance(absorption, centroid, receivers)
+        if layers:
+            pair = (row[:, :, None], block_facets[:, None, :])
+            blocked, *hidden = (array for array, _ in layers)
+            weight = weight * surviving_fraction(
+                blocked[:, pair[0], pair[1]], hidden[0][pair] if hidden else None, transmittance
+            )
+        weight = jnp.where(block_valid[:, None, :], weight, 0.0)
+        total = jnp.zeros(block_rows.shape)
+        for surfaces, profile in zip(sets, group.profiles, strict=True):
+            emission = jnp.take(surfaces.emission, block_facets, axis=0, mode="clip")[:, None, :]
+            total = total + jnp.sum(
+                emission * profile.radiance_per_exitance(cosine) * weight, axis=2
+            )
+        return total
+
+    per_block = segment.block * segment.width
+    arrays = ((rows, 0),) if segment.shared else ((rows, 0), (lists[0], 0), (lists[1], 0))
+    received = in_passes(arrays, pair_limit, per_block, at)
+    return jnp.zeros(n_points).at[rows.ravel()].add(received.ravel(), mode="drop")
 
 
 def _one_geometry(sets) -> Surfaces:
@@ -659,7 +892,11 @@ def direct_irradiance(
         total = jnp.zeros(receivers.shape[0])
         for profile, areal, point in partition:
             if len(areal) and not point_sources_only:
-                cosine, _ = _emitter_cosine(surfaces, areal, receivers)
+                cosine, _ = _emitter_cosine(
+                    jnp.take(surfaces.centroid, areal, axis=0)[None],
+                    jnp.take(surfaces.normal, areal, axis=0)[None],
+                    receivers[:, None, :],
+                )
                 radiance = jnp.take(surfaces.emission, areal) * profile.radiance_per_exitance(
                     cosine
                 )
@@ -669,7 +906,9 @@ def direct_irradiance(
                     jnp.take(surfaces.vertices, areal, axis=0)[None, ...],
                 )
                 surviving = _transmittance(
-                    absorption, jnp.take(surfaces.centroid, areal, axis=0), receivers
+                    absorption,
+                    jnp.take(surfaces.centroid, areal, axis=0)[None],
+                    receivers[:, None, :],
                 ) * _masked(surviving_all, areal)
                 total = total + jnp.sum(radiance * projected * surviving, axis=1)
             if len(point):
@@ -682,9 +921,9 @@ def direct_irradiance(
                     -dot(offset, receiver_normal[:, None, :]) / distance, 0.0
                 )
                 fraction = profile.intensity_fraction(source_cosine / distance)
-                surviving = _transmittance(absorption, centroid, receivers) * _masked(
-                    surviving_all, point
-                )
+                surviving = _transmittance(
+                    absorption, centroid[None], receivers[:, None, :]
+                ) * _masked(surviving_all, point)
                 total = total + jnp.sum(
                     jnp.take(surfaces.power, point)
                     * fraction

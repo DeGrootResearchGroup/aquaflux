@@ -59,8 +59,10 @@ def surviving_fraction(blocked, hidden_by_geometry, transmittance) -> jnp.ndarra
 
     Parameters
     ----------
-    blocked : jnp.ndarray of bool, shape ``(n_occluders, n_receivers, n_facets)``
-    hidden_by_geometry : jnp.ndarray, shape ``(n_receivers, n_facets)``, or None
+    blocked : jnp.ndarray of bool, shape ``(n_occluders, *pairs)``
+        Laid out as the whole mask, ``pairs`` being ``(n_receivers, n_facets)``, or as any
+        gathering of its pairs.
+    hidden_by_geometry : jnp.ndarray, shape ``pairs``, or None
         Boolean or floating point, and widened here -- one chunk at a time from the gather, so
         the widened copy is never the size of the problem. ``None`` hides nothing.
     transmittance : array_like, shape ``(n_occluders,)``
@@ -71,7 +73,8 @@ def surviving_fraction(blocked, hidden_by_geometry, transmittance) -> jnp.ndarra
     jnp.ndarray, shape ``(n_receivers, n_facets)``
     """
     transmittance = jnp.broadcast_to(jnp.asarray(transmittance, dtype=float), (blocked.shape[0],))
-    attenuation = 1.0 - blocked * (1.0 - transmittance[:, None, None])
+    per_body = transmittance.reshape(-1, *([1] * (blocked.ndim - 1)))
+    attenuation = 1.0 - blocked * (1.0 - per_body)
     surviving = jnp.prod(attenuation, axis=0)
     if hidden_by_geometry is None:
         return surviving
