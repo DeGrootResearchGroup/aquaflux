@@ -1958,6 +1958,22 @@ Fields bit-identical. Mutation: a reversed tile order goes red; handing each pai
 facet's `near` (1e-6 x sqrt(area)) survives — **dismissed**, the margin is too small to change an answer
 on any fixture, as it was for the host path. #564's harness now times `_tile_blocks` as `test tiles /
 compiled test`.
+⚠️ **A body's certificate is asked on batches padded to a power of two** (2026-09-27, `_vouches`, used by
+`_vouched` and `_vouched_pairs`). `Body.vouches` is, by default, a few **eager** `jnp` operations, and an
+eager operation compiles once per shape: on the analytic `Outside` a batch length never seen before cost
+**111 ms** against **0.6 ms** for a repeated one (median of 20, 20,000 tiles, 3 features; jax 0.10.2,
+Linux, 4 cores). The tiles asked about change with every pass and level — more so since #578 drops the
+tiles behind their facets before asking — so nearly every call compiled. Padded by repeating the last
+tile (answers dropped), the lengths come from a short ladder. **Found because #579 measured the
+certificates at 53.5 s on the Sozzi mesh against #564's 14.3 s** while the tiles they were asked about
+had fallen; `validation/sozzi_radiation/certificate_levels.py` counts calls, tiles asked and refused, and
+seconds per level (and #578's behind-the-facets drops), at any commit. On the analytic stand-in (24,000
+sampled receivers, 8,704 facets, default ladder, fresh process each, two runs per arm): certificates
+**3.13–3.43 → 1.29–1.33 s**, level 1 alone 1.60–1.69 → 0.31–0.33 s, identical tile counts at every level.
+**Not yet measured on the mesh** — re-run `certificate_levels.py` (and `field_cost_breakdown.py`) there.
+Pinned by `test_a_body_is_asked_to_vouch_only_at_a_few_batch_lengths` (red without the padding, and red
+keeping the wrong end of the padded answers). On the same stand-in the first call of #578's
+`BackFaces.tiles_behind` costs ~2 s — its Numba loop compiling — once per process.
 
 **How.** Receivers and facet centroids are each ordered along a Morton curve (`spatial_order`, 10 bits
 an axis) and padded to a whole number of the coarsest groups by repeating the last point (`_Curve`;

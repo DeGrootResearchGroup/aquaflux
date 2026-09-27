@@ -366,6 +366,23 @@ class _Groups:
         )
 
 
+def _vouches(body, tiles) -> np.ndarray:
+    """``body.vouches`` for each tile, asked on a batch padded to a power of two along its first axis.
+
+    A body's certificate is ordinarily a few array operations run eagerly, and an eager operation
+    is compiled once per shape it meets. The number of tiles asked about changes with every pass
+    and every level of refinement, so asked as it stands nearly every call is a shape not seen
+    before, and compiling it costs far more than answering it. Padded by repeating the last tile
+    to one of a few lengths, the calls share their compiled programs; the padding's answers are
+    dropped.
+    """
+    count = len(tiles)
+    width = padded_length(count)
+    if width > count:
+        tiles = np.concatenate([tiles, np.repeat(tiles[-1:], width - count, axis=0)])
+    return np.asarray(body.vouches(tiles))[:count]
+
+
 def _vouched(body, receiver_summary, source_summary) -> np.ndarray:
     """Which tiles of every receiver group against every source group ``body`` vouches for.
 
@@ -384,7 +401,7 @@ def _vouched(body, receiver_summary, source_summary) -> np.ndarray:
         tile = np.maximum(
             receiver_summary[start : start + band, None, :], source_summary[None, :, :]
         )
-        clear[start : start + band] = np.asarray(body.vouches(tile))
+        clear[start : start + band] = _vouches(body, tile)
     return clear
 
 
@@ -404,7 +421,7 @@ def _vouched_pairs(body, receiver_summary, source_summary, rows, cols) -> np.nda
             receiver_summary[rows[start : start + batch]],
             source_summary[cols[start : start + batch]],
         )
-        clear[start : start + batch] = np.asarray(body.vouches(tile))
+        clear[start : start + batch] = _vouches(body, tile)
     return clear
 
 
