@@ -10,6 +10,7 @@ anyway would pass while saving nothing.
 
 from __future__ import annotations
 
+import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -216,8 +217,78 @@ def test_an_unset_strategy_is_shaft_culling_for_a_built_mask_and_a_streamed_one(
     build_visibility(_bodies(), lamp, receivers, self_occlusion=NoOcclusion())
     assert asked == [ShaftCulling()]
     direct_fluence_rate(lamp, receivers, occluders=_bodies(), self_occlusion=NoOcclusion())
-    assert len(asked) > 1
-    assert all(strategy == ShaftCulling() for strategy in asked)
+    streamed = asked[1:]
+    assert streamed
+    # The stream prepares the default once for its facets, so it is the default plus that.
+    assert all(
+        strategy.sources is not None
+        and eqx.tree_at(lambda s: s.sources, strategy, None) == ShaftCulling()
+        for strategy in streamed
+    )
+
+
+def test_a_prepared_strategy_gives_every_pass_the_mask_an_unprepared_one_does():
+    """The facets' side formed once serves pass after pass, with the same masks and counts.
+
+    Asymmetric ladders and four bodies, so a prepared side summarized at the receivers' sizes,
+    or one body's summaries served for another's, certifies different tiles and shows.
+    """
+    lamp = _lamp()
+    near = 1e-6 * np.sqrt(np.asarray(lamp.area))
+    plain = ShaftCulling(receiver_blocks=(24, 6, 1), source_clusters=(8, 4, 2))
+    prepared = plain.prepared(_bodies(), lamp.centroid)
+    assert prepared.sources is not None and plain.sources is None
+    for seed in (3, 4, 5):
+        receivers = _receivers(200, seed=seed)
+        reference, culled = _arms(lamp.centroid, near, receivers, prepared)
+        np.testing.assert_array_equal(culled, reference)
+        np.testing.assert_array_equal(
+            prepared.certified_pairs(_bodies(), lamp.centroid, receivers),
+            plain.certified_pairs(_bodies(), lamp.centroid, receivers),
+        )
+
+
+def test_a_prepared_strategy_refuses_other_sources_or_bodies_and_accepts_rebuilt_ones():
+    """Summaries of other geometry would certify the wrong tiles, so they are refused.
+
+    A body rebuilt from its own leaves -- as a custom gradient hands it back -- is the same body.
+    """
+    lamp = _lamp(12, 8)
+    near = 1e-6 * np.sqrt(np.asarray(lamp.area))
+    receivers = _receivers(60)
+    prepared = ShaftCulling().prepared(_bodies(), lamp.centroid)
+    rebuilt = eqx.combine(*eqx.partition(_bodies(), eqx.is_array))
+    reference, culled = _arms(lamp.centroid, near, receivers, prepared, bodies=rebuilt)
+    np.testing.assert_array_equal(culled, reference)
+    moved = [
+        *_bodies()[:1],
+        Box(centre=[0.6, 0.0, 0.07], half_sizes=[0.01, 0.1, 0.02]),
+        *_bodies()[2:],
+    ]
+    with pytest.raises(ValueError, match="prepared for other sources or other bodies"):
+        prepared.blocked(moved, lamp.centroid, near, receivers)
+    with pytest.raises(ValueError, match="prepared for other sources or other bodies"):
+        prepared.blocked(_bodies(), np.asarray(lamp.centroid) + 1e-3, near, receivers)
+
+
+def test_a_stream_summarizes_its_facets_once_not_once_per_chunk(monkeypatch):
+    """The facets' clearance is asked for once per call, however many chunks the call has."""
+    lamp = _lamp(12, 8)
+    receivers = _receivers(150)
+    asked = []
+    original = Outside.clearance
+
+    def recording(self, position):
+        asked.append(len(position))
+        return original(self, position)
+
+    monkeypatch.setattr(Outside, "clearance", recording)
+    direct_fluence_rate(
+        lamp, receivers, occluders=_bodies(), self_occlusion=NoOcclusion(), pair_limit=4_000
+    )
+    receiver_calls = [n for n in asked if n != lamp.n_facets]
+    assert len(receiver_calls) > 2  # several chunks
+    assert asked.count(lamp.n_facets) == 1
 
 
 def test_a_group_size_ladder_that_cannot_be_refined_is_refused():
