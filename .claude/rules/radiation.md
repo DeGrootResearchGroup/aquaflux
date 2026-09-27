@@ -1926,8 +1926,37 @@ always built from concrete geometry, so the model path never takes the hand-off.
 Chosen by `build_visibility(..., body_culling=)` or `RadiationSettings(body_culling=)` — pass
 `EveryPair()` for the unculled reference — which feeds **both** masks a model builds (and
 survives `receiver_occlusion` overriding the self-occlusion half). Streamed masks get it through the
-same options dict, but then the grouping is per streamed chunk, over whatever order the receivers
-arrive in.
+same options dict, but then the **receivers'** grouping is per streamed chunk, over whatever order the
+receivers arrive in. **The facets' side is formed once per call** (2026-09-26):
+`BodyCulling.prepared(bodies, sources)` (default: itself) returns, for `ShaftCulling`, a copy carrying
+`sources=_Groups` — the facets' curve order and every body's clearance summary of every cluster at
+every level, formed by `_Groups.of` — and `streamed_fluence_rate` calls it beside
+`self_occlusion.prepared`, through `culling_or_default` (the one home of "unset means
+`ShaftCulling()`", also used by `_unchecked_visibility`). `_Groups` is a frozen `eq=False` dataclass of
+host arrays, not a pytree, like `TriangleGrid`, so it rides through the chunk's custom VJP untouched.
+⚠️ **A prepared strategy refuses other sources or other bodies** (`_Groups.serves`, by VALUE: the
+sources by `array_equal`, the bodies leaf by leaf on the host after an identity shortcut — a body
+comes back from the custom VJP as a new object, so identity alone refused the stream's own bodies;
+`eqx.tree_equal` was avoided because it dispatches an eager device op per leaf, once per chunk). Measured
+on the analytic Sozzi-like scene (24,000 sampled receivers, 8,704 facets, 53 chunks, `NoOcclusion`,
+default ladder; jax 0.10.2, Linux x86_64, 4 cores, one process, three alternating passes): streamed
+field median **21.96 → 20.67 s** (~6%), fields bit-identical — in line with the ~14 s of 317 s the
+Sozzi whole-field breakdown (#564) charged to per-chunk facet clearance and summaries.
+**The leftover tiles' points are gathered inside the compiled test** (2026-09-26, `_tile_blocks` /
+`_compiled_tile_blocks`): a traceable body gets the points whole (converted to device arrays once per
+`_test_tiles` call) and each tile's `rows`/`cols` indices, instead of every tile's points gathered and
+copied on the host before the call; a host body (`TriangleBody`) still gets gathered points. The
+write-back into the mask stays a numpy scatter — **scattering on the device inside the same program was
+measured and was slower** (median 1.89 against 1.63 s on the same tiles, no buffer donation). Measured on
+the leftover tiles of 4,000 sampled receivers x 8,704 facets at the default ladder (720,086 2x2 tiles; 4
+cores, alternating): tile test median 1.86 → 1.41 s in one run, 1.63 → 1.52 s in another; whole streamed
+field (24,000 receivers, 53 chunks, four alternating passes) median **27.37 → 26.53 s (~3%, inside this
+container's spread — one pass reversed)**. The stand-in tests only ~9% of its pairs; on the Sozzi mesh
+the leftover test is 59% of the call (#564), so the saving there should be larger — **not measured**.
+Fields bit-identical. Mutation: a reversed tile order goes red; handing each pair a neighbouring
+facet's `near` (1e-6 x sqrt(area)) survives — **dismissed**, the margin is too small to change an answer
+on any fixture, as it was for the host path. #564's harness now times `_tile_blocks` as `test tiles /
+compiled test`.
 
 **How.** Receivers and facet centroids are each ordered along a Morton curve (`spatial_order`, 10 bits
 an axis) and padded to a whole number of the coarsest groups by repeating the last point (`_Curve`;
@@ -2006,8 +2035,11 @@ clearance 12.1, `_vouched`/`_vouched_pairs` 14.3), curve order 3.2, mask alloc/c
 at their ceiling here and only a "fully hidden" certificate (phase C) can cut the tested count; padding
 adds only 9.6% (2.33G → 2.56G). ⚠️ **The leftover test runs at ~18M pairs/s on 2x2 tiles against ~30M
 for `EveryPair`** (separate processes, approximate) — the concrete levers are a denser layout for the
-leftover pairs plus batched host work (up to ~100 s) and caching the source side per call (~14 s),
-neither built. Full table in the Sozzi README.
+leftover pairs plus batched host work (up to ~100 s; ⚠️ the "denser layout" half is refuted — see WHY THE
+FINEST LEVEL COSTS AN ANALYTIC BODY) and caching the source side per call (~14 s, **built since** as
+`BodyCulling.prepared`, see the SHAFT CULLING section — this table predates it; the harness now times
+that work once under `call / field / prepare culling` and the receivers' side under
+`bodies / receiver groups`). Full table in the Sozzi README.
 **Phase C's ceiling, measured (2026-09-26, same harness and configuration, a second run; the other
 pieces repeated to 0.4 s, call less the count 317.7 s).** Blocked pairs 1.185G = **9.6% of all, 50.8% of
 the 2.33G in undecided tiles**; pairs in wholly blocked tiles along the strategy's curve: 32x32

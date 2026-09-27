@@ -47,6 +47,7 @@ pair-by-pair strategy uses, so the two agree bit for bit on every pair either on
 from __future__ import annotations
 
 import abc
+import dataclasses
 import itertools
 
 import equinox as eqx
@@ -86,6 +87,33 @@ def _body_blocks(body, origin, target, near):
     if body.traceable:
         return _compiled_blocks(body, origin, target, near)
     return body.blocks(origin, target, near)
+
+
+@eqx.filter_jit
+def _compiled_tile_blocks(body, sources, near, receivers, rows, cols):
+    """One body's answer for a batch of tiles, the tiles' points gathered inside the program.
+
+    Handed the points whole and each tile's indices, rather than each tile's points gathered on
+    the host: at the finest tiles a pair is a few points' worth of arithmetic, and gathering and
+    copying every tile's points before the call cost a sizeable share of the call itself. The
+    gathered values are the same, so the answers are too.
+    """
+    return body.blocks(
+        sources[cols][:, None, :, :], receivers[rows][:, :, None, :], near[cols][:, None, :]
+    )
+
+
+def _tile_blocks(body, sources, near, receivers, rows, cols):
+    """One body's answer for each pair of each tile, shape ``(n_tiles, block, cluster)``.
+
+    ``rows`` and ``cols``, shapes ``(n_tiles, block)`` and ``(n_tiles, cluster)``, index
+    ``receivers`` and ``sources``. A body that answers on the host is handed the gathered points.
+    """
+    if body.traceable:
+        return _compiled_tile_blocks(body, sources, near, receivers, rows, cols)
+    return body.blocks(
+        sources[cols][:, None, :, :], receivers[rows][:, :, None, :], near[cols][:, None, :]
+    )
 
 
 class BodyCulling(eqx.Module):
@@ -131,6 +159,27 @@ class BodyCulling(eqx.Module):
         -------
         jnp.ndarray of bool, shape ``(n_bodies, n_receivers, n_sources)``
         """
+
+    def prepared(self, bodies, sources) -> BodyCulling:
+        """This strategy with whatever it can work out from the bodies and sources alone done once.
+
+        For a caller that builds many masks against one set of sources -- a stream building one
+        per pass of receivers -- so that work depending only on the sources is not repeated for
+        every pass. The answers are the same either way. Unless a strategy has such work, it is
+        itself.
+
+        Parameters
+        ----------
+        bodies : sequence of aquaflux.solids.Body
+        sources : array_like, shape ``(n_sources, 3)``
+            The sources every later :meth:`blocked` call will be given.
+
+        Returns
+        -------
+        BodyCulling
+        """
+        del bodies, sources
+        return self
 
 
 class EveryPair(BodyCulling):
@@ -265,6 +314,58 @@ class _Curve(eqx.Module):
         return features[self.members(size)].max(axis=1)
 
 
+@dataclasses.dataclass(frozen=True, eq=False)
+class _Groups:
+    """One side of the tiles: its points along the curve, and each body's group summaries.
+
+    Plain host arrays rather than a pytree, as the triangle grid is: nothing here is traced or
+    differentiated, so a strategy carrying one through a custom gradient carries it untouched.
+
+    Attributes
+    ----------
+    points : np.ndarray, shape ``(n_points, 3)``
+        The points grouped.
+    bodies : tuple of aquaflux.solids.Body
+        The bodies the summaries are for.
+    curve : _Curve
+        The points in curve order, padded to whole groups of the coarsest size.
+    summaries : tuple of tuple of np.ndarray
+        ``summaries[b][level]`` is body ``b``'s summary of every group at that level, shape
+        ``(n_groups, n_features)`` -- the column-wise maximum of its clearance features.
+    """
+
+    points: np.ndarray
+    bodies: tuple
+    curve: _Curve
+    summaries: tuple
+
+    @classmethod
+    def of(cls, bodies, points, sizes) -> _Groups:
+        """``points`` grouped at each of ``sizes``, coarsest first, and summarized per body."""
+        curve = _Curve.of(points, sizes[0])
+        summaries = []
+        for body in bodies:
+            features = np.asarray(body.clearance(points))
+            summaries.append(tuple(curve.summary(features, size) for size in sizes))
+        return cls(points=points, bodies=tuple(bodies), curve=curve, summaries=tuple(summaries))
+
+    def serves(self, bodies, points) -> bool:
+        """Whether these are the bodies and points the groups were formed from.
+
+        By value, not identity: a body passed through a custom gradient comes back as a new
+        object holding the same leaves. Compared on the host, leaf by leaf, since a stream asks
+        once per pass and an eager device comparison per leaf would cost more than it guards.
+        """
+        if points.shape != self.points.shape or not np.array_equal(points, self.points):
+            return False
+        given, given_structure = jax.tree.flatten(tuple(bodies))
+        held, held_structure = jax.tree.flatten(self.bodies)
+        return given_structure == held_structure and all(
+            a is b or np.array_equal(np.asarray(a), np.asarray(b))
+            for a, b in zip(given, held, strict=True)
+        )
+
+
 def _vouched(body, receiver_summary, source_summary) -> np.ndarray:
     """Which tiles of every receiver group against every source group ``body`` vouches for.
 
@@ -357,6 +458,9 @@ class ShaftCulling(BodyCulling):
     source_clusters : tuple of int
         Sources per cluster at the same levels, with the same trade. As many sizes as
         ``receiver_blocks``.
+    sources : _Groups or None
+        The sources' side of the tiles, formed once by :meth:`prepared`; unset, it is formed by
+        every call. Either way the mask is the same.
 
     Notes
     -----
@@ -370,6 +474,7 @@ class ShaftCulling(BodyCulling):
 
     receiver_blocks: tuple = eqx.field(static=True, default=(32, 8, 2))
     source_clusters: tuple = eqx.field(static=True, default=(32, 8, 2))
+    sources: _Groups | None = None
 
     def __check_init__(self):
         _check_sizes("receiver_blocks", self.receiver_blocks)
@@ -403,23 +508,51 @@ class ShaftCulling(BodyCulling):
         mask = np.zeros((len(bodies), len(receivers), len(sources)), dtype=bool)
         if len(receivers) == 0 or len(sources) == 0:
             return jnp.asarray(mask)
-        blocks = _Curve.of(receivers, self.receiver_blocks[0])
-        clusters = _Curve.of(sources, self.source_clusters[0])
+        blocks = _Groups.of(bodies, receivers, self.receiver_blocks)
+        clusters = self._source_groups(bodies, sources)
         block, cluster = self.receiver_blocks[-1], self.source_clusters[-1]
         for index, body in enumerate(bodies):
-            rows, cols = self._undecided(body, sources, receivers, blocks, clusters, facing)
+            rows, cols = self._undecided(index, body, blocks, clusters, facing, receivers)
             self._test_tiles(
                 body,
                 sources,
                 near,
                 receivers,
-                blocks.members(block)[rows],
-                clusters.members(cluster)[cols],
+                blocks.curve.members(block)[rows],
+                clusters.curve.members(cluster)[cols],
                 pair_limit,
                 facing,
                 out=mask[index],
             )
         return jnp.asarray(mask)
+
+    def prepared(self, bodies, sources) -> ShaftCulling:
+        """With the sources' side of the tiles formed once. See :meth:`BodyCulling.prepared`.
+
+        What a pass needs of the sources -- their order along the curve and every body's
+        clearance summary of every cluster at every level -- depends on the sources and the
+        bodies alone, so a stream of passes forms it here rather than once per pass.
+        """
+        sources = np.asarray(sources, dtype=float)
+        if len(sources) == 0 or any(
+            isinstance(leaf, jax.core.Tracer) for leaf in jax.tree.leaves((bodies, sources))
+        ):
+            return self
+        groups = _Groups.of(bodies, sources, self.source_clusters)
+        return eqx.tree_at(lambda strategy: strategy.sources, self, groups, is_leaf=_is_none)
+
+    def _source_groups(self, bodies, sources) -> _Groups:
+        """The sources' side: as prepared, if it was, else formed now."""
+        if self.sources is None:
+            return _Groups.of(bodies, sources, self.source_clusters)
+        if not self.sources.serves(bodies, sources):
+            msg = (
+                "this ShaftCulling was prepared for other sources or other bodies than it was "
+                "given; its clusters' summaries would certify tiles against the wrong geometry, "
+                "so prepare it again for these, or use one that was not prepared"
+            )
+            raise ValueError(msg)
+        return self.sources
 
     def certified_pairs(self, bodies, sources, receivers, *, facing=None) -> np.ndarray:
         """How many source-receiver pairs each body decides without a test.
@@ -444,23 +577,24 @@ class ShaftCulling(BodyCulling):
         receivers = np.asarray(receivers, dtype=float)
         if len(receivers) == 0 or len(sources) == 0:
             return np.zeros(len(bodies), dtype=np.int64)
-        blocks = _Curve.of(receivers, self.receiver_blocks[0])
-        clusters = _Curve.of(sources, self.source_clusters[0])
-        row_counts = blocks.counts(self.receiver_blocks[-1])
-        col_counts = clusters.counts(self.source_clusters[-1])
+        blocks = _Groups.of(bodies, receivers, self.receiver_blocks)
+        clusters = self._source_groups(bodies, sources)
+        row_counts = blocks.curve.counts(self.receiver_blocks[-1])
+        col_counts = clusters.curve.counts(self.source_clusters[-1])
         certified = []
-        for body in bodies:
-            rows, cols = self._undecided(body, sources, receivers, blocks, clusters, facing)
+        for index, body in enumerate(bodies):
+            rows, cols = self._undecided(index, body, blocks, clusters, facing, receivers)
             tested = int(np.sum(row_counts[rows] * col_counts[cols]))
             certified.append(len(receivers) * len(sources) - tested)
         return np.array(certified, dtype=np.int64)
 
-    def _undecided(self, body, sources, receivers, blocks, clusters, facing=None):
+    def _undecided(self, index, body, blocks, clusters, facing=None, receivers=None):
         """The finest-level tiles left to test, as ``(rows, cols)`` group indices.
 
-        Every tile at the coarsest level is asked; each one refused is split into its children at
-        the next level, those whose groups hold any real point are asked, and so on. A child made
-        wholly of padding is dropped rather than asked: it holds no pair. Given ``facing``, a
+        ``index`` is the body's place in both groups' summaries. Every tile at the coarsest level
+        is asked; each one refused is split into its children at the next level, those whose
+        groups hold any real point are asked, and so on. A child made wholly of padding is
+        dropped rather than asked: it holds no pair. Given ``facing`` (and the ``receivers``), a
         tile whose receivers lie wholly behind its sources is dropped at whichever level that is
         first proven, before the body is asked -- it carries no light, so it needs no answer.
         """
@@ -469,36 +603,27 @@ class ShaftCulling(BodyCulling):
             if facing is None:
                 return rows, cols
             dark = facing.tiles_behind(
-                receivers, blocks.members(block)[rows], clusters.members(cluster)[cols]
+                receivers, blocks.curve.members(block)[rows], clusters.curve.members(cluster)[cols]
             )
             return rows[~dark], cols[~dark]
 
-        features = np.asarray(body.clearance(receivers)), np.asarray(body.clearance(sources))
+        receiver_summaries, source_summaries = blocks.summaries[index], clusters.summaries[index]
         levels = list(zip(self.receiver_blocks, self.source_clusters, strict=True))
-        block, cluster = levels[0]
-        rows, cols = np.nonzero(
-            ~_vouched(
-                body,
-                blocks.summary(features[0], block),
-                clusters.summary(features[1], cluster),
-            )
-        )
-        rows, cols = lit(rows, cols, block, cluster)
-        for coarse, (block, cluster) in itertools.pairwise(levels):
+        rows, cols = np.nonzero(~_vouched(body, receiver_summaries[0], source_summaries[0]))
+        rows, cols = lit(rows, cols, *levels[0])
+        for level, (coarse, (block, cluster)) in enumerate(itertools.pairwise(levels), start=1):
             split_rows, split_cols = coarse[0] // block, coarse[1] // cluster
             children_rows = rows[:, None, None] * split_rows + np.arange(split_rows)[:, None]
             children_cols = cols[:, None, None] * split_cols + np.arange(split_cols)[None, :]
             rows, cols = (
                 side.ravel() for side in np.broadcast_arrays(children_rows, children_cols)
             )
-            real = (blocks.counts(block)[rows] > 0) & (clusters.counts(cluster)[cols] > 0)
+            real = (blocks.curve.counts(block)[rows] > 0) & (
+                clusters.curve.counts(cluster)[cols] > 0
+            )
             rows, cols = lit(rows[real], cols[real], block, cluster)
             refused = ~_vouched_pairs(
-                body,
-                blocks.summary(features[0], block),
-                clusters.summary(features[1], cluster),
-                rows,
-                cols,
+                body, receiver_summaries[level], source_summaries[level], rows, cols
             )
             rows, cols = rows[refused], cols[refused]
         return rows, cols
@@ -514,6 +639,9 @@ class ShaftCulling(BodyCulling):
         """
         per_tile = rows.shape[1] * cols.shape[1]
         per_batch = max(1, pair_limit // per_tile)
+        points = (sources, near, receivers)
+        if body.traceable:
+            points = tuple(jnp.asarray(array) for array in points)
         for start in range(0, len(rows), per_batch):
             batch_rows = rows[start : start + per_batch]
             batch_cols = cols[start : start + per_batch]
@@ -521,13 +649,26 @@ class ShaftCulling(BodyCulling):
             pad = np.repeat(np.arange(len(batch_rows))[-1:], width - len(batch_rows))
             take = np.concatenate([np.arange(len(batch_rows)), pad])
             batch_rows, batch_cols = batch_rows[take], batch_cols[take]
-            targets = jnp.asarray(receivers[batch_rows])[:, :, None, :]
-            answer = _body_blocks(
-                body,
-                jnp.asarray(sources[batch_cols])[:, None, :, :],
-                targets,
-                jnp.asarray(near[batch_cols])[:, None, :],
-            )
+            answer = _tile_blocks(body, *points, batch_rows, batch_cols)
             if facing is not None:
+                targets = points[2][batch_rows][:, :, None, :]
                 answer = answer & ~facing.behind(targets, batch_cols[:, None, :])
             out[batch_rows[:, :, None], batch_cols[:, None, :]] = np.asarray(answer)
+
+
+def _is_none(value) -> bool:
+    return value is None
+
+
+def culling_or_default(body_culling: BodyCulling | None) -> BodyCulling:
+    """The strategy a mask build uses: the one given, or :class:`ShaftCulling` if none was.
+
+    Parameters
+    ----------
+    body_culling : BodyCulling or None
+
+    Returns
+    -------
+    BodyCulling
+    """
+    return ShaftCulling() if body_culling is None else body_culling

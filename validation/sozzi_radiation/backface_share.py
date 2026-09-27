@@ -51,7 +51,7 @@ import jax  # noqa: E402
 import numpy as np  # noqa: E402
 from aquaflux.radiation import ShaftCulling  # noqa: E402
 from aquaflux.radiation.back_faces import BackFaces  # noqa: E402
-from aquaflux.radiation.culling import _Curve  # noqa: E402
+from aquaflux.radiation.culling import _Groups  # noqa: E402
 from primitive_occlusion import OUT, fluid, lamp, receivers  # noqa: E402
 
 
@@ -85,11 +85,12 @@ def main() -> None:
         f"{strategy.receiver_blocks}x{strategy.source_clusters}; jax {jax.__version__}, "
         f"{platform.system()} {platform.machine()}, {os.cpu_count()} cores"
     )
-    blocks = _Curve.of(points, strategy.receiver_blocks[0])
-    clusters = _Curve.of(centroid, strategy.source_clusters[0])
+    groups = _Groups.of([water], points, strategy.receiver_blocks)
+    clusters_groups = _Groups.of([water], centroid, strategy.source_clusters)
+    blocks, clusters = groups.curve, clusters_groups.curve
     block, cluster = strategy.receiver_blocks[-1], strategy.source_clusters[-1]
     started = time.perf_counter()
-    rows, cols = strategy._undecided(water, centroid, points, blocks, clusters)
+    rows, cols = strategy._undecided(0, water, groups, clusters_groups)
     _say(f"{len(rows)} undecided finest tiles, found in {time.perf_counter() - started:.1f} s")
     row_members = blocks.members(block)[rows]  # (n_tiles, block) receiver indices, padded
     col_members = clusters.members(cluster)[cols]  # (n_tiles, cluster) facet indices, padded

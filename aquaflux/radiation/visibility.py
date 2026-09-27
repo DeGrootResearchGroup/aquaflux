@@ -40,7 +40,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from aquaflux.radiation.back_faces import BackFaces
-from aquaflux.radiation.culling import BodyCulling, ShaftCulling
+from aquaflux.radiation.culling import BodyCulling, culling_or_default
 from aquaflux.radiation.self_occlusion import (
     RayCastOcclusion,
     SelfOcclusion,
@@ -336,7 +336,7 @@ def _unchecked_visibility(
     # A receiver in the volume behind a source that is dark behind itself gets nothing from it,
     # so the bodies need not be asked about that pair; the mask then says it did not ask.
     facing = BackFaces.of(surfaces) if receiver_facet is None and surfaces.dark_behind else None
-    culling = ShaftCulling() if body_culling is None else body_culling
+    culling = culling_or_default(body_culling)
     blocked = (
         culling.blocked(occluders, surfaces.centroid, near, points, pair_limit, facing=facing)
         if occluders

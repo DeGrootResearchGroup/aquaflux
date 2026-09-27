@@ -252,8 +252,10 @@ its shadow mask takes **0.2 s**, because culling certifies every lamp-to-lamp pa
   separate process, so approximate). The finest tiles are 2 x 2, so each compiled batch is many
   tiny blocks; the (32, 8) ladder, finest 8 x 8, is faster overall (251.9 s).
 - **Where time could come back**: testing the leftover pairs at every-pair speed and batching the
-  host work (up to ~100 s together); computing the lamp side once per call instead of once per
-  chunk (~14 s); a "fully hidden" certificate, the only way to test fewer pairs. The gather is the
+  host work (up to ~100 s together -- though a denser layout was since tried two ways and did
+  not help, so the host work is the part left); computing the lamp side once per call instead of
+  once per chunk (~14 s -- done since this table was measured, so a re-run times that work once,
+  under `prepare culling`); a "fully hidden" certificate, the only way to test fewer pairs. The gather is the
   physics. Those two changes would plausibly land the call near 175-200 s — an estimate, not a
   measurement.
 
