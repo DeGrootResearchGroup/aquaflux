@@ -532,14 +532,44 @@ each step to complete the attribution is wrong**: JAX dispatches asynchronously,
 decomposition blamed 4.5 GB on the shadow pass that was really the steps before it.
 
 **What replaced it.** `_row_block` is one compiled pass computing, for `chunk_size` receiving facets
-against all facets, the solid angles (scanned over the quadrature points as before), both masks by
-*global* row index, the offsets, separations and cosines — so nothing larger than a block is formed.
-`_written` puts each block into three buffers of the final `n x n` size by a `dynamic_update_slice`
-that **donates** the buffers (in place on CPU: 30 blocks into a 0.45 GB buffer added 0.03 GB, no
-warning). The last block starts at `n - chunk_size` rather than being padded, because trimming a
-padded buffer is a whole-matrix copy (measured: +0.46 GB). Inputs are `stop_gradient`ed at the
-start rather than the outputs at the end, so a build under a trace (the frozen-geometry test builds
-under `jax.grad`) still works and still differentiates to zero.
+(`index`), the solid angles against the facets in `columns` only (scanned over the quadrature points
+as before) scattered into rows of the full width, both masks by *global* index, and the offsets,
+separations and cosines against every facet — so nothing larger than a block is formed. `_written`
+puts each block's rows into three buffers of the final `n x n` size by a row scatter that **donates**
+the buffers (in place on CPU; the first version's `dynamic_update_slice` measured 30 blocks into a
+0.45 GB buffer at +0.03 GB, no warning). Buffers are never padded — trimming a padded buffer is a
+whole-matrix copy (measured: +0.46 GB) — so the last block is filled out by **repeating its last
+receiver**, which writes the same row twice. Inputs are `stop_gradient`ed at the start rather than
+the outputs at the end, so a build under a trace (the frozen-geometry test builds under `jax.grad`)
+still works and still differentiates to zero.
+
+**THE BUILD SKIPS SENDING FACETS WHOLLY BEHIND A BLOCK'S RECEIVERS (2026-09-27).** The kernel clips
+a sending triangle to the receiver's front half-space (`_clip_to_front`), so a triangle whose
+vertices all lie behind the plane through a receiver's quadrature point contributes **exactly zero**
+there. `_columns_in_front` (host numpy, per block) keeps every areal facet NOT behind the plane
+through **every** quadrature point of **every** areal receiver in the block, by a margin
+`_BEHIND_MARGIN = 1e-9` of `|v|.|n| + |p|.|n|` — seven orders outside the kernel's own snapping band
+(`clipping._SLACK`, 16 eps), so a vertex in the plane (every edge neighbour has two) is left to the
+kernel. ⚠️ **It must be every quadrature point, NOT the centroid**: the first version tested the
+plane through the centroid and dropped 7 pairs of a 2,176-facet lamp worth up to **1.2e-5** — the
+lamp holds triangles collinear to rounding whose stored normal is rounding noise tilted off their
+line, so their quadrature points lie up to ~2 mm off that plane (facets 2157, 2165, 2173 of
+`lamp_resolution.lamp(16, 64)`). **Blocks are cut along the Morton curve** (`culling.spatial_order`)
+so a block's receivers share their fronts; column lists are padded on `lit_blocks.rounded_width`'s
+capped ladder (a power-of-two pad first reached **8192 columns on a 4,160-facet scene**, doubling the
+work). Share of `n^2` kernel evaluations still made, 6-point rule: analytic 32 x 128 lamp (8,704
+facets) **26.9% at 256 rows, 15.5% at 64** (vs 92.3 / 90.1% in storage order); that lamp plus a
+64 x 60 generated chamber (16,512) **81.8 / 69.4%**. Measured builds (`_row_blocks` alone, fastest of
+two warm, one process per arm; jax 0.10.2, Linux x86_64, 4 cores; all three arrays bit-identical to
+`main` at `2810eea`): 16 x 64 lamp (2,176 facets) **17.26 s → 8.2 s at 256 rows, 4.48 s at 64**; that
+lamp plus a 32 x 30 chamber (4,160) **66.15 → 60.7 s at 256, 40.1 s at 64**. The default `chunk_size`
+is still 256 — **not measured on the Sozzi mesh** (its 7,516-facet `lampWall.stl`, #579's 56.8 s).
+Tests: `test_a_facet_is_dropped_only_where_the_kernel_returns_nothing_at_every_point` (per receiver,
+random triangles + tilted slivers, kernel at every point; red for the centroid plane, the margin's
+sign, and any-vertex-behind) and `test_pairs_wholly_behind_the_receiver_are_skipped_and_nothing_changes`
+(whole build vs every column, to the 1e-15 dust tolerance below, and < 40% of `n^2` evaluated on an
+open tube). The first of the two costs 5 s only because every receiver's kernel is one call — asked
+per receiver, each list a new eager shape, it cost 84 s.
 
 **Remaining 4.07 GB** = 0.15 base + 1.36 kept + ~1 GB of one block's quadrature working set (2.49 GB
 after the blocks) + ~1.5 GB for the facet shadow pass with the three-cylinder `Outside` at the 4M

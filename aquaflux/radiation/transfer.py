@@ -76,6 +76,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from aquaflux.radiation.absorption import UniformAbsorption
+from aquaflux.radiation.culling import spatial_order
+from aquaflux.radiation.lit_blocks import rounded_width
 from aquaflux.radiation.profiles import Lambertian
 from aquaflux.radiation.quadrature import TriangleQuadrature, triangle_quadrature
 from aquaflux.radiation.self_occlusion import SelfOcclusion
@@ -226,32 +228,45 @@ class _Geometry(eqx.Module):
     areal: jnp.ndarray
 
 
-@functools.partial(jax.jit, static_argnames="rows")
-def _row_block(geometry: _Geometry, sample, weight, start, *, rows: int):
-    """Every frozen quantity for ``rows`` receiving facets from ``start``, against all facets.
+#: How far behind a receiver's plane, relative to the size of the offsets involved, every vertex of
+#: a sending triangle must lie before the pair is skipped. The kernel clips a triangle to the
+#: receiver's front half-space and treats a height within a few machine epsilons of the plane as
+#: exactly zero; a triangle this far behind is clipped away whole, so its transfer is exactly zero
+#: whichever of the receiver's quadrature points it is measured from, and not computing it changes
+#: nothing. A vertex nearer the plane than this -- every neighbour sharing an edge has two -- is
+#: left to the kernel.
+_BEHIND_MARGIN = 1e-9
 
-    One compiled pass, so nothing it forms is larger than ``rows x n_facets`` (or that times three
-    for the offsets), and it is the only place each of the three quantities is computed.
+
+@jax.jit
+def _row_block(geometry: _Geometry, sample, weight, index, columns):
+    """Every frozen quantity for the receiving facets ``index``, the costly one at ``columns`` only.
+
+    One compiled pass, so nothing it forms is larger than ``len(index) x n_facets`` (or that times
+    three for the offsets), and it is the only place each of the three quantities is computed.
+    The geometric term, the costly one, is evaluated only against the sending facets in
+    ``columns`` and scattered into rows of the full width; every other facet lies wholly behind
+    every receiver of the block, where the term is exactly zero (:func:`_columns_in_front`). The
+    source cosine and the separation are cheap and are formed against every facet.
     """
-    n_facets = geometry.vertices.shape[0]
-    index = start + jnp.arange(rows)
     facing = geometry.normal[index]
+    triangles = geometry.vertices[columns]
 
     def accumulate(total, sampled):
         weight_q, point_q = sampled
         at_point = jax.vmap(
             lambda point, facing_i: jax.vmap(
                 lambda triangle: projected_solid_angle(point, facing_i, triangle)
-            )(geometry.vertices)
+            )(triangles)
         )(point_q, facing)
         return total + weight_q * at_point, None
 
     # Scanned rather than vmapped over the quadrature points so the live intermediate stays
-    # (rows, n_facets) whatever the rule costs, which is what lets ``chunk_size`` keep meaning
+    # (rows, columns) whatever the rule costs, which is what lets ``chunk_size`` keep meaning
     # the same thing it did with a single point per facet.
     solid, _ = jax.lax.scan(
         accumulate,
-        jnp.zeros((rows, n_facets)),
+        jnp.zeros((index.shape[0], columns.shape[0])),
         (weight, jnp.swapaxes(sample[index], 0, 1)),
     )
     # A facet cannot transfer to itself: every quadrature point lies in its own plane, where the
@@ -259,10 +274,14 @@ def _row_block(geometry: _Geometry, sample, weight, start, *, rows: int):
     # large. A planar triangle really does see none of itself, so this is the exact value and
     # not a repair. A point source has no surface to receive on and no area to emit from; it
     # reaches the facets through the ordinary gather instead, as an external irradiance.
-    keep = (index[:, None] != jnp.arange(n_facets)[None, :]) & (
-        geometry.areal[index][:, None] & geometry.areal[None, :]
+    keep = (index[:, None] != columns[None, :]) & (
+        geometry.areal[index][:, None] & geometry.areal[columns][None, :]
     )
-    geometric = jnp.where(keep, solid / jnp.pi, 0.0)
+    geometric = (
+        jnp.zeros((index.shape[0], geometry.vertices.shape[0]))
+        .at[:, columns]
+        .set(jnp.where(keep, solid / jnp.pi, 0.0))
+    )
 
     offset = geometry.centroid[index][:, None, :] - geometry.centroid[None, :, :]
     separation_squared = dot(offset, offset)
@@ -273,12 +292,37 @@ def _row_block(geometry: _Geometry, sample, weight, start, *, rows: int):
 
 
 @functools.partial(jax.jit, donate_argnums=0)
-def _written(buffers, block, start):
-    """``buffers`` with ``block`` written at row ``start``, in place: the buffers are donated."""
-    return tuple(
-        jax.lax.dynamic_update_slice(buffer, part, (start, 0))
-        for buffer, part in zip(buffers, block, strict=True)
+def _written(buffers, block, index):
+    """``buffers`` with ``block`` written at rows ``index``, in place: the buffers are donated."""
+    return tuple(buffer.at[index].set(part) for buffer, part in zip(buffers, block, strict=True))
+
+
+def _columns_in_front(vertices, sample, normal, areal, index) -> np.ndarray:
+    """The areal facets not wholly behind every areal receiver in ``index``, at every one of its points.
+
+    Host arithmetic over concrete positions, one block at a time. A facet is behind a receiver
+    where all three of its vertices lie below the plane through **each** of the receiver's
+    quadrature points, with the receiver's normal, by more than :data:`_BEHIND_MARGIN` of the
+    offsets involved. The kernel is evaluated at those points, so this is exactly its own
+    condition for returning nothing -- and it holds for any rule, and for a degenerate receiver
+    whose points do not share one plane with its stored normal. The margin is bounded above by
+    ``|v| . |n| + |p| . |n|``, so the test errs towards keeping a facet, never towards dropping
+    one the kernel would have counted.
+    """
+    rows = index[areal[index]]
+    if len(rows) == 0:
+        return np.zeros(0, dtype=np.int64)
+    facing = normal[rows]
+    # The lowest of each receiver's points along its own normal: a vertex below it by the margin
+    # is below every point's plane.
+    lowest = np.einsum("iqd,id->iq", sample[rows], facing).min(axis=1)
+    reach = np.einsum("iqd,id->iq", np.abs(sample[rows]), np.abs(facing)).max(axis=1)
+    height = np.einsum("jkd,id->ijk", vertices, facing) - lowest[:, None, None]
+    bound = _BEHIND_MARGIN * (
+        np.einsum("jkd,id->ijk", np.abs(vertices), np.abs(facing)) + reach[:, None, None]
     )
+    behind = np.all(height < -bound, axis=-1)
+    return np.flatnonzero(areal & ~np.all(behind, axis=0))
 
 
 def _row_blocks(geometry: _Geometry, sample, weight, rows: int):
@@ -293,20 +337,41 @@ def _row_blocks(geometry: _Geometry, sample, weight, rows: int):
     place by an update that donates the buffer, so nothing larger than a block exists besides the
     three arrays being kept.
 
-    The last block starts at ``n - rows`` rather than being padded, so every buffer is exactly
-    ``n x n`` and never needs trimming — a trim is a copy of the whole thing. Its first rows are
-    computed twice, which costs one block's arithmetic.
+    **The blocks are cut along a space-filling curve, and each evaluates the costly term only
+    against the facets that can lie in front of it.** A facet wholly behind a receiver's plane
+    contributes exactly nothing to that receiver (:func:`_columns_in_front`), and around a convex
+    lamp that is nearly every pair; a block of neighbouring receivers shares most of its planes'
+    fronts, so its list is short, where a block of facets in storage order may span the whole
+    surface and need nearly every column. The lists are padded to a ladder of a few widths per
+    doubling, never past the facet count (:func:`~aquaflux.radiation.lit_blocks.rounded_width`),
+    so the build compiles a handful of programs however the lists fall, and a list nearly as long
+    as the surface costs no more than the full row.
+
+    The last block is filled out by repeating its last receiver, and each list by repeating its
+    last facet; a repeated entry is the same pair, written the same value again.
     """
     n_facets = int(geometry.vertices.shape[0])
     if n_facets == 0:
         empty = jnp.zeros((0, 0))
         return empty, empty, empty
     rows = max(1, min(int(rows), n_facets))
+    vertices = np.asarray(geometry.vertices, dtype=float)
+    points = np.asarray(sample, dtype=float)
+    normal = np.asarray(geometry.normal, dtype=float)
+    areal = np.asarray(geometry.areal, dtype=bool)
+    order = spatial_order(np.asarray(geometry.centroid, dtype=float))
     buffers = tuple(jnp.zeros((n_facets, n_facets)) for _ in range(3))
-    starts = [*range(0, n_facets - rows, rows), n_facets - rows]
-    for start in starts:
-        block = _row_block(geometry, sample, weight, start, rows=rows)
-        buffers = _written(buffers, block, start)
+    for start in range(0, n_facets, rows):
+        index = order[start : start + rows]
+        index = np.concatenate([index, np.repeat(index[-1:], rows - len(index))])
+        columns = _columns_in_front(vertices, points, normal, areal, index)
+        if len(columns) == 0:
+            columns = index[:1]
+        width = rounded_width(len(columns), n_facets)
+        columns = np.concatenate([columns, np.repeat(columns[-1:], width - len(columns))])
+        index, columns = jnp.asarray(index), jnp.asarray(columns)
+        block = _row_block(geometry, sample, weight, index, columns)
+        buffers = _written(buffers, block, index)
     return buffers
 
 
