@@ -287,6 +287,74 @@ with nothing else heavy running. The build rows come from a separate 3,000-cell 
 row-block timer was added (the build does not depend on the receivers); without that timer the
 row blocks' work, still running asynchronously, was charged to the facet mask as 30 s.
 
+## The vessel wall as its triangles, at mesh scale (2026-09-26, `model_at_mesh_scale.py`, `grid_mask_check.py`, `triangle_culling.py`)
+
+The shadowing section below once extrapolated the triangulated wall's mask to tens of hours (88 h in
+the rules): 1.23e10 rays at the 38,711 rays/s `grid_mask_check.py` measured on 2026-09-23, with the
+array walk and every pair tested. Since then the walk is one compiled loop per ray (#571) and shaft
+culling is the default (#561). Measured now, **the whole field with the vessel wall as the 53,500
+triangles of `bodyWall.stl` takes 62 minutes.**
+
+**The whole field**, `SOZZI_WATER=triangles`: the wall as a `TriangleBody` sheet, every other setting
+as in the sections above, on all 1,635,909 cells, against the analytic cylinders on the same commit:
+
+| water | build s | field s | peak footprint |
+|---|---|---|---|
+| three analytic cylinders | 56.9 | **313.7** | 6.03 GB |
+| `bodyWall.stl`, 53,500 triangles | 58.0 | **3,720.6** | 5.58 GB |
+
+Against `compare_fluence.py`'s field, the triangles give the analytic answer to **4.4e-16** on all
+1,277,672 lit chamber cells. On the 7,549 lit pipe cells they differ by **1.42% median, 5.83% p99, 13.5%
+max** — the STL's pipe openings are polygons inscribed in the design circles (below) — and by at most
+3.1e-7 W/m² on the 206,713 far pipe cells. Memory stays flat: the mask is streamed a chunk at a time.
+
+**The same measurement `grid_mask_check.py` made**, on current main: 40,000 pipe cells plus 4,000 chamber
+cells (the 2026-09-23 run used 20,000 pipe cells), 330,704,000 rays. The triangulated arm took
+**282.2 s** — **1,171,912 rays/s** against 38,711, about 30x — which the harness extrapolates to 2.91 h
+for the whole mesh. Its answers are unchanged: 89.2 pairs per pipe cell masked differently from the
+analytic occluder (88.8 before), `G` 1.20% / 8.90% / 54.1% median / p99 / max in the pipes, **0** in the
+chamber, and 99.995% of disputed pairs crossing an opening within 10% of its rim. The extrapolation
+overstates the measured 62 minutes about threefold, because its receivers are 91% pipe cells — the
+dear rays — while the mesh is mostly chamber.
+
+**The walk alone, before and after #571** (`triangle_culling.py`, the real `bodyWall.stl`, a 2 mm
+lattice of 5,476 receivers in a 6 mm slab at mid-chamber, the analytic 24 x 64 lamp of 3,360 facets,
+18.4 million pairs; main `a0b8e18` then #571 `53074d2`, back to back, fastest of two passes, which
+agreed within 2%):
+
+| the wall's pairs decided by | main | #571 | speed-up | certified |
+|---|---|---|---|---|
+| every pair | 47.4 s | 3.4 s | 13.9x | — |
+| `ShaftCulling`, 32 x 32 | 39.7 s | 2.6 s | 15.3x | 31.6% |
+| `ShaftCulling`, 32 → 8 | 28.3 s | 1.8 s | 15.7x | 59.5% |
+| `ShaftCulling()`, 32 → 8 → 2 (the default) | 16.7 s | 1.2 s | 13.9x | 77.2% |
+
+⚠️ No pair in this slab is blocked (0.00%), so its "identical masks" compare two all-clear masks: it
+times the walk and checks no answer. `grid_mask_check.py` above is the answer check.
+
+**Where the 62 minutes go** (`field_cost_breakdown.py`, `SOZZI_WATER=triangles`, every 16th cell —
+102,245 — so read the shares, not the seconds): the call took 288.1 s, of which the shadow masks are
+**281.6 s (98%)** — the compiled walk of the tiles culling could not certify **245.2 s (85%)**, host
+work around it 12.2 s, tile certificates 16.1 s — and the gather **4.6 s (1.6%)**.
+
+- **The walk is the cost, and culling certifies little of it.** 25.2% of the sample's pairs were
+  certified (74.8% left in undecided tiles, 90.1% tested once batches are padded), against 81.0% for
+  the analytic cylinders on the whole mesh. The certificate for a triangle body is a tile's bounding
+  box meeting no occupied voxel, and a round wall's voxels surround every shaft that is not near the
+  axis.
+- ⚠️ **A strided sample understates culling.** Every 16th cell spreads each block of 32 over sixteen
+  times the volume, so fewer tiles are certified: the whole mesh took 3,720.6 s where sixteen times the
+  sample's 284.3 s would be 4,549 s. The shares are indicative; the whole-mesh time is the number.
+- **A "fully hidden" certificate would buy little here**: 9.9% of the sample's pairs are blocked, and
+  wholly blocked tiles hold 9.6% / 11.8% / 12.9% of the undecided pairs at 32x32 / 8x8 / 2x2.
+- The build (58 s) is the transfer's row blocks, 56.9 s; the triangulated facet mask adds 1.3 s.
+
+Configuration: main `f96e923` unless stated, jax/jaxlib 0.10.2, numba 0.67.0, CPU, x64, macOS arm64,
+11 cores, 19 GB; the case's 7,516-facet `lampWall.stl`, `NoOcclusion`, streamed receiver mask, black
+walls, library-default culling. Each row is one run through `validation/run_case.sh`, one at a time,
+with nothing else heavy running (`--force` past its free-page check, with `memory_pressure` reporting
+64-66% free). The analytic row matches the same arm measured before #562, #563 and #571 (313.5 s).
+
 ## Measured (2026-09-22)
 
 Configuration: of-optical-radiation `726714d`, image built locally from its `Dockerfile`
@@ -473,7 +541,8 @@ given different geometry.
 
 **The cost is the finding.** In that run the analytic arm took 6.9 s against the grid's 4,659.8 s
 on the same rays, and the whole field with analytic visibility takes 557 s where the triangulated
-mask alone extrapolates to tens of hours. Read any such ratio with its scene: the grid's cost is
+mask alone then extrapolated to tens of hours. (Measured since, with the compiled walk and shaft
+culling, the whole field with the triangulated wall takes 62 minutes; see the section above.) Read any such ratio with its scene: the grid's cost is
 set by how far a segment travels through empty voxels, so it depends on both the receivers and the
 voxel size. Measured in one process, 300,000 rays per corner, two alternating passes, fastest per
 corner:
