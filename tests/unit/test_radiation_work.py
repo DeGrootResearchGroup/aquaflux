@@ -53,3 +53,19 @@ def test_every_chunk_runs_inside_a_scan_including_a_short_last_one(monkeypatch, 
     out = in_passes(((points, 0),), 8, 2, lambda chunk: 2.0 * chunk[:, 0])
     assert lengths == scans
     np.testing.assert_array_equal(out, 2.0 * np.asarray(points)[:, 0])
+
+
+def test_a_step_forms_no_more_than_the_pass_bound_under_a_higher_limit(monkeypatch):
+    """The limit bounds what a step may form, and the pass bound what it does: past a core's
+    cache the same pairs cost about twice as long. A lower limit still wins, and the answer is
+    every row in order either way."""
+    lengths = _watch_scans(monkeypatch)
+    monkeypatch.setattr(work, "PASS_PAIRS", 4)
+    points = jnp.arange(36.0).reshape(12, 3)
+    # Two pairs a point: the limit alone would take four points a step, the bound takes two.
+    out = in_passes(((points, 0),), 8, 2, lambda chunk: 2.0 * chunk[:, 0])
+    assert lengths == [6]
+    np.testing.assert_array_equal(out, 2.0 * np.asarray(points)[:, 0])
+    lengths.clear()
+    in_passes(((points, 0),), 2, 2, lambda chunk: 2.0 * chunk[:, 0])
+    assert lengths == [12]

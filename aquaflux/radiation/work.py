@@ -24,6 +24,10 @@ __all__ = ["DEFAULT_PAIR_LIMIT", "in_passes", "receivers_per_pass"]
 #: Receiver-by-facet pairs one pass may form, when a caller does not say.
 DEFAULT_PAIR_LIMIT = 4_000_000
 
+#: Receiver-by-facet pairs one step of a traced loop forms, however high the pair limit: the
+#: traced loop's own bound, set by speed rather than by memory. See :func:`in_passes`.
+PASS_PAIRS = 1 << 17
+
 
 def receivers_per_pass(pair_limit: int, per_receiver: int) -> int:
     """How many receivers a pass takes so that it forms at most ``pair_limit`` pairs.
@@ -65,8 +69,8 @@ def in_passes(arrays, pair_limit: int, per_receiver: int, body):
     The receiver-by-source product is the whole cost of such a loop and would be the whole of its
     memory too if it were formed at once: a hundred thousand cells against a thousand facets is
     a hundred million entries per intermediate. A chunk takes as many receivers as keep it within
-    ``pair_limit`` pairs, so the working set is set by the limit and not by how finely the emitter
-    happens to be divided.
+    ``pair_limit`` pairs (and within :data:`PASS_PAIRS`, below), so the working set is set by the
+    limit and not by how finely the emitter happens to be divided.
 
     **Chunks are sliced out of the arrays where they lie**, not cut from a padded copy: a shadow
     mask is the size of the whole problem, and padding it to a whole number of chunks would copy
@@ -80,13 +84,20 @@ def in_passes(arrays, pair_limit: int, per_receiver: int, body):
     limit says, and at a mesh's cells against a finely divided lamp that is terabytes.
     Checkpointed, each chunk is recomputed on the way back instead, for roughly two thirds more
     time on the gradient and nothing on a forward evaluation, whose values it does not change.
+
+    ⚠️ **A step forms at most :data:`PASS_PAIRS` pairs, even under a higher ``pair_limit``.** A
+    chunk's intermediates are arrays of one entry per pair, and the compiled body writes each
+    out and reads it back; while they fit in a core's cache that traffic is cheap, and past it
+    the same pairs cost about twice as long. So the limit bounds how much a step may form and
+    this bounds how much it does -- a step count, not an answer, since each receiver's value is
+    formed from its own row either way.
     """
     arrays = [(jnp.asarray(array), axis) for array, axis in arrays]
     first, axis = arrays[0]
     n_points = first.shape[axis]
     if n_points == 0:
         return jnp.zeros(0)
-    per_chunk = min(receivers_per_pass(pair_limit, per_receiver), n_points)
+    per_chunk = min(receivers_per_pass(min(pair_limit, PASS_PAIRS), per_receiver), n_points)
     n_full, remainder = divmod(n_points, per_chunk)
 
     # The slicing is inside the checkpoint, so what a gradient keeps per chunk is the chunk's
