@@ -28,6 +28,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | the solid bodies (`Body`, primitives, CSG, `Outside`) — **moved to `aquaflux/solids/`**, see `.claude/rules/solids.md` | **BUILT** |
 | `visibility.py` — the frozen shadow mask | **BUILT** |
 | `culling.py` — how the bodies' layer is decided: `ShaftCulling` (the default since 2026-09-26; tiles certified clear, refined coarse to fine, #554) or `EveryPair` (the reference) | **BUILT** ("clear" certificates only; analytic and triangle bodies) |
+| `back_faces.py` — `BackFaces`: which volume receivers lie certainly behind which facets, pair by pair (the ray mask's cut, #526) or a tile at a time from a box (the bodies' layer skips such pairs, 2026-09-27) | **BUILT** |
 | `triangle_body.py` — `TriangleBody`, a `Body` of triangles over a `TriangleGrid`, with `contains` decided per piece (#510) | **BUILT** |
 | `triangles.py` — watertight ray-triangle intersection | **BUILT** |
 | `grid_walk.py` — the triangle grid's walk: each ray walked to its first hit by one compiled (Numba) loop | **BUILT** (the only walk since 2026-09-26) |
@@ -1835,7 +1836,8 @@ checksum below is identical to 13 figures before and after.
 so a ray there could only be multiplied by nothing. Now `Profile.dark_behind` (a `ClassVar`, `False`
 on the base, `True` on those two) declares it, and `Surfaces.dark_behind` asks it of every areal facet's
 profile. When that holds and `receiver_facet is None`, `field` drops the pairs whose receiver is
-**certainly** behind the facet's plane — `clipping.decidable_heights` of the receiver above the plane
+**certainly** behind the facet's plane — `BackFaces.behind` (`back_faces.py`, since 2026-09-27; it was
+`self_occlusion._facing_away`, and there is no such function now), `clipping.decidable_heights` of the receiver above the plane
 through the centroid, a height too near zero to trust snapped to zero and **kept**, so rounding can
 never cull a pair the gather's own cosine would light. Point sources are never culled (zero normal, so
 zero height; and excluded by label). The dropped pairs are recorded clear, so
@@ -1908,7 +1910,7 @@ label stays because a source's kind is read from its label, never inferred.
 ## SHAFT CULLING: BUILT as `ShaftCulling` — tiles certified clear, THE DEFAULT since 2026-09-26 (#554)
 
 `culling.py` holds the bodies' layer's strategy family, `BodyCulling.blocked(bodies, sources,
-near, receivers, pair_limit)`: **`EveryPair`** (the reference, and the default until 2026-09-26 — the old
+near, receivers, pair_limit, *, facing=None)` (`facing` since 2026-09-27, see BACK FACES below): **`EveryPair`** (the reference, and the default until 2026-09-26 — the old
 `visibility._blocked_by` loop, moved here with `_compiled_blocks`, now `_body_blocks` per body) and
 **`ShaftCulling(receiver_blocks=(32, 8, 2), source_clusters=(32, 8, 2))`** — coarse-to-fine
 group-size ladders since #554 phase B (default chosen by measurement, below); ⚠️ **there is no `receiver_block` / `source_cluster` any more**, and the
@@ -2152,6 +2154,71 @@ on the box's far index, one inclusion-exclusion sign, children not scaled, refin
 refused filter dropped. **Dismissed:** the box margin at zero (it guards a rounding no fixture can
 reach; kept), and dropping the all-padding child filter (such tiles repeat real points, so testing
 them gives correct duplicates and costs only work).
+
+## BACK FACES: THE BODIES' LAYER SKIPS PAIRS BEHIND THEIR SOURCE (2026-09-27, from #565)
+
+**Exact, no tolerance — chosen over #565's cluster approximation by the user.** #565 measured an
+error-bounded cutoff at a ~10x oracle ceiling, but it needs an accuracy tolerance the user did not
+want exposed (it is not dimensionless in any natural way). A pair whose volume receiver lies behind a
+facet that is `dark_behind` carries exactly zero, so whether a body blocks it cannot change the field.
+#526 already skipped such pairs in the **ray mask**; this does the same in the **bodies' layer**, which
+is where the mesh-scale call spends its time (masks 77% of the 317 s Sozzi field, #564). Agreed order
+with the user: the mask first, then the gather (not built yet — the gather still weights such pairs by
+zero rather than skipping them).
+
+**How.** `BackFaces.of(surfaces)` holds the facets' centroids, normals and an `areal` label (point
+sources have no back). `_unchecked_visibility` passes it as `facing=` to `BodyCulling.blocked` exactly
+when #526's cut applies — `receiver_facet is None and surfaces.dark_behind` — and sets
+`Visibility.clear_behind` when there are bodies (the gather's refusal of a non-dark-behind set, #526,
+then covers this layer too). Both strategies record a pair behind its source **clear**, so they still
+build the same mask: `EveryPair` tests and then clears (`& ~facing.every_pair`); `ShaftCulling` drops,
+at every level of `_undecided` (after vouching at the coarsest, before it at the finer ones), each tile
+`BackFaces.tiles_behind` proves wholly behind, and clears the pairs behind within the tiles it tests.
+Under a trace the hand-off to `EveryPair` carries `facing` (it is in the tracer check's leaves).
+
+**The box test is conservative by construction, not by tuning.** The highest point of a receiver box
+above a facet's plane is the corner the normal points towards; a tile is proven only if that corner is
+below the plane by `_BOX_SLACK` = 3 × `clipping._SLACK` units of roundoff of `Σ reach·|n|`, with `reach`
+the box's farthest extent from the centroid per axis. That bounds every pair's own snapping allowance
+(16 units of `Σ|x−c||n|`) plus both rounding errors, so a proven tile's every pair is behind by the
+pair test too — verified, not only argued: `test_a_tile_is_proven_behind_only_where_every_one_of_its_pairs_is`.
+⚠️ **The first box test was numpy and cost more than it saved**: 2.4 s of a 4.6 s build (fancy
+indexing over ~4.3M finest tiles). It is one `numba.njit(parallel=True)` loop over tiles
+(`_boxes_behind`), stopping at a tile's first unproven facet: 2.74 → 0.44 s for `_undecided`. The
+grid walk's lesson again — a per-item loop whose value is what it skips wants compiled host code.
+
+**MEASURED** (`validation/sozzi_radiation/backface_share.py`; analytic 32 × 128 lamp, 8,704 facets;
+23,046 receivers uniform in the three cylinders **outside the lamp** — 954 inside it removed, since the
+vessel body does not exclude them; the case mesh was absent, so this is NOT the cell-centre population;
+`ShaftCulling()` at (32, 8, 2); jax 0.10.2, numba 0.67.0, CPU, x64, Linux x86_64, 4 cores, run directly
+with output redirected, nothing else running, 2026-09-27):
+
+- **Shares**: 64.9% of all pairs face away from their receiver (what the gather could skip); 8.6% of
+  pairs are undecided by the certificates (what is tested), and of those **74.2% face away, 72.9% lie in
+  finest tiles wholly facing away, 72.7% in tiles the box test proves** — so the box test reaches almost
+  every pair a per-pair skip would, and the ceiling on the tested count is ~3.7x.
+- **The bodies' layer, both arms in one process, warm-up then two alternating passes, fastest kept**:
+  every pair asked **6.81 s**, pairs behind skipped **2.03 s** — **3.35x** (spreads 1.08x / 1.02x); an
+  earlier run of the same harness read 7.22 / 2.01 s, 3.59x, with a 1.28x spread on the first arm. So
+  ~3.4-3.6x against the ~3.7x ceiling: the certificates, curve and tile bookkeeping are what is left.
+- 4,327,084 pairs the full mask blocks lie behind their source; the skipped mask is the full one with
+  exactly those cleared (`array_equal` against `full & ~behind`).
+- ⚠️ **Not re-measured at mesh scale** (`work/case` absent). The mesh population refines towards the
+  lamp and walls, so its shares differ; re-run `field_cost_breakdown.py` there before quoting a
+  whole-field saving.
+
+**Tests** (`tests/unit/test_radiation_culling.py`), mutation-checked, 10 of 11 red on the shipped code: both strategies at
+three ladders equal to the full mask with the pairs behind cleared, and more pairs decided with
+`facing` than without; the box test sound on 6,000 tiles with points in the facets' own planes (heights
+that round either way) and proving >90% of tiles clearly behind; a built mask clear behind, its
+`clear_behind` set, and the field bit-identical to the full mask's; a non-dark-behind profile refused
+through it. Red: the box slack at zero, the corner inverted, the box built from one receiver, a proven facet breaking out as proven, `EveryPair` not clearing, tested tiles
+not cleared, no tile drop at any level, none at the finer levels, `facing` not passed, `clear_behind`
+not set. **Dismissed**: `reach` as the nearer rather than the farther extent — it shrinks a rounding
+allowance, and a box whose highest corner lies within a few roundings of the plane while a far receiver
+does not is not constructible cheaply; kept as `max` because the soundness argument needs it. Dropping
+the `areal` check is inert (a point source's zero normal gives height 0, never proven), kept because a
+source's kind is read from its label.
 
 ## GRID ACCELERATION: BUILT as `TriangleGrid` — a compiled host walk, off by default
 

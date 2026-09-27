@@ -132,6 +132,7 @@ SUBPACKAGE_GROUPS = {
             [
                 "visibility",
                 "culling",
+                "back_faces",
                 "triangle_body",
                 "receiver_shadows",
                 "self_occlusion",

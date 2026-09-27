@@ -42,8 +42,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from aquaflux.radiation.back_faces import BackFaces
 from aquaflux.radiation.checks import open_facets
-from aquaflux.radiation.clipping import decidable_heights
 from aquaflux.radiation.clusters import FacetClusters
 from aquaflux.radiation.grid import TriangleGrid
 from aquaflux.radiation.silhouette import (
@@ -232,6 +232,7 @@ class RayCastOcclusion(SelfOcclusion):
         n_receivers, n_facets = int(points.shape[0]), int(surfaces.n_facets)
         grid = self._triangle_grid(surfaces)
         clear_behind = receiver_facet is None and surfaces.dark_behind
+        facing = BackFaces.of(surfaces) if clear_behind else None
         centroid = np.asarray(surfaces.centroid)
         near = np.asarray(near, dtype=float)
         on_facet = None if receiver_facet is None else np.asarray(receiver_facet, dtype=int)
@@ -240,7 +241,7 @@ class RayCastOcclusion(SelfOcclusion):
         for start in range(0, n_receivers, per_pass):
             receivers = np.asarray(points[start : start + per_pass], dtype=float)
             if clear_behind:
-                cast = ~_facing_away(surfaces, receivers)
+                cast = ~np.asarray(facing.every_pair(receivers))
             else:
                 cast = np.ones((len(receivers), n_facets), dtype=bool)
             row, source = np.nonzero(cast)
@@ -307,29 +308,6 @@ def _exclusions(source: np.ndarray, row: np.ndarray, on_facet) -> np.ndarray:
     Formed for one pass's rays, from their indices, rather than for the whole problem.
     """
     return source[:, None] if on_facet is None else np.stack([source, on_facet[row]], axis=1)
-
-
-def _facing_away(surfaces, receivers) -> np.ndarray:
-    """Which (receiver, facet) pairs are certainly behind an areal facet: ``(n_receivers, n_facets)``.
-
-    The receiver's height above the facet's own plane, with a sign that cannot be trusted
-    resolved to zero -- which keeps the pair -- so a pair is dropped only where rounding could
-    not have put the receiver on the other side. A point source has a zero normal, so every
-    height is zero and none of its pairs is ever dropped; it is excluded by its label as well.
-    """
-    behind = _behind(
-        jnp.asarray(surfaces.normal), jnp.asarray(surfaces.centroid), jnp.asarray(receivers)
-    )
-    return np.asarray(behind) & ~np.asarray(surfaces.is_point_source)[None, :]
-
-
-@jax.jit
-def _behind(normal, centroid, receivers):
-    """Whether each receiver lies certainly behind each facet's plane."""
-    height = decidable_heights(
-        receivers[:, None, None, :], normal[None, :, :], through=centroid[None, :, :]
-    )
-    return height[..., 0] < 0.0
 
 
 class SilhouetteOcclusion(SelfOcclusion):

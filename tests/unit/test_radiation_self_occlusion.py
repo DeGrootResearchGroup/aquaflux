@@ -629,7 +629,7 @@ def test_a_receiver_in_a_facet_s_own_plane_is_cast_whatever_its_rounding_says():
     of either sign. A plain sign test drops the ones that round negative; the filtered one keeps
     all of them, as it must -- the gather's own cosine there is rounding of either sign too.
     """
-    from aquaflux.radiation.self_occlusion import _facing_away
+    from aquaflux.radiation.back_faces import BackFaces
 
     triangle = np.array([[[0.1, 0.2, 0.3], [1.3, 0.7, -0.4], [0.4, 1.9, 1.1]]])
     surfaces = Surfaces.from_triangles(triangle, emission=1.0)
@@ -642,9 +642,10 @@ def test_a_receiver_in_a_facet_s_own_plane_is_cast_whatever_its_rounding_says():
     )
     heights = (in_plane - np.asarray(surfaces.centroid)) @ np.asarray(surfaces.normal)[0]
     assert np.any(heights < 0.0), "the fixture must hold points that round below the plane"
-    assert not np.any(_facing_away(surfaces, in_plane))
+    facing = BackFaces.of(surfaces)
+    assert not np.any(np.asarray(facing.every_pair(in_plane)))
     behind = in_plane - 1e-3 * np.asarray(surfaces.normal)
-    assert np.all(_facing_away(surfaces, behind))
+    assert np.all(np.asarray(facing.every_pair(behind)))
 
 
 def test_a_point_source_is_never_left_untested():
@@ -797,7 +798,8 @@ def test_a_mask_held_as_bits_gives_the_field_it_gave_as_a_fraction():
     widened = direct_fluence_rate(surfaces, receivers, visibility=as_fraction, transmittance=[0.3])
     np.testing.assert_array_equal(bits, widened)
     assert np.asarray(mask.hidden_by_geometry).mean() > 0.02, "the surface must hide something"
-    assert np.asarray(mask.blocked).mean() > 0.01, "and the body something"
+    # Only pairs whose facet faces the receiver can be blocked, so a smaller share than it looks.
+    assert np.asarray(mask.blocked).mean() > 0.005, "and the body something"
 
 
 def test_a_pass_forms_its_rays_a_chunk_at_a_time_not_all_at_once(monkeypatch):

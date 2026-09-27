@@ -39,6 +39,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from aquaflux.radiation.back_faces import BackFaces
 from aquaflux.radiation.culling import BodyCulling, ShaftCulling
 from aquaflux.radiation.self_occlusion import (
     RayCastOcclusion,
@@ -105,9 +106,10 @@ class Visibility(eqx.Module):
         where no pair can be such an addition: from a ray test, whose ``or`` is idempotent, and
         where nothing is hidden at all.
     clear_behind : bool
-        Whether pairs whose source faces away from the receiver were recorded clear in
-        :attr:`hidden_by_geometry` without being tested, as the ray test does for receivers in
-        the volume. Such a pair carries no light from a source that is dark behind itself -- a
+        Whether pairs whose source faces away from the receiver were recorded clear without
+        being tested -- in :attr:`blocked`, as every mask of receivers in the volume does when
+        each areal source is dark behind itself, and in :attr:`hidden_by_geometry`, as the ray
+        test does in the same case. Such a pair carries no light from a source that is dark behind itself -- a
         :attr:`~aquaflux.radiation.profiles.Profile.dark_behind` profile -- so nothing it could
         hide reaches the receiver, and the mask there reads "blocked, where it matters". A
         gather through a mask with this set therefore **refuses** a set with any areal facet
@@ -331,9 +333,12 @@ def _unchecked_visibility(
     # area and no surface to shadow itself with, so it needs no exclusion.
     near = offset_scale * jnp.sqrt(surfaces.area)
 
+    # A receiver in the volume behind a source that is dark behind itself gets nothing from it,
+    # so the bodies need not be asked about that pair; the mask then says it did not ask.
+    facing = BackFaces.of(surfaces) if receiver_facet is None and surfaces.dark_behind else None
     culling = ShaftCulling() if body_culling is None else body_culling
     blocked = (
-        culling.blocked(occluders, surfaces.centroid, near, points, pair_limit)
+        culling.blocked(occluders, surfaces.centroid, near, points, pair_limit, facing=facing)
         if occluders
         else jnp.zeros((0, n_receivers, n_facets), dtype=bool)
     )
@@ -343,5 +348,5 @@ def _unchecked_visibility(
         receivers=points,
         hidden_by_geometry=geometry.fraction,
         overlapping=geometry.overlapping,
-        clear_behind=geometry.clear_behind,
+        clear_behind=geometry.clear_behind or (facing is not None and bool(occluders)),
     )
