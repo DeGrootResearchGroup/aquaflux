@@ -38,15 +38,17 @@ import jax.numpy as jnp
 import numpy as np
 
 from aquaflux.radiation.checks import _surface_pieces, enclosure_winding
-from aquaflux.radiation.grid import _MAX_VOXELS, TriangleGrid
+from aquaflux.radiation.grid import _MAX_VOXELS, TriangleGrid, _near_cubic_resolution
 from aquaflux.solids import Body
 
 __all__ = ["TriangleBody"]
 
-#: How much finer, per axis, the grid a body vouches from is than the grid its segments walk.
-#: The two want different voxels: a walk is fastest at about ten triangles a voxel, but a box is
-#: vouched for only if it overlaps no occupied voxel at all, and a voxel that size beside a wall
-#: is occupied however little of it the wall crosses. Measured on the Sozzi chamber's wall as
+#: How much finer, per axis, the grid a body vouches from is than a near-cubic grid of about ten
+#: triangles a voxel. A box is vouched for only if it overlaps no occupied voxel at all, and a
+#: voxel that size beside a wall is occupied however little of it the wall crosses. It is sized
+#: from the near-cubic grid, not from the grid segments walk: the walk's voxels take the box's
+#: proportions, long along a long vessel, and a long voxel beside a wall is occupied along its
+#: whole length. Measured on the Sozzi chamber's wall as
 #: triangles, a shaft's box over voxels of ~7 mm vouched for 44% of the pairs the exact test
 #: could, ~3.6 mm for 59% and ~1.8 mm for 59% -- the first halving is most of it.
 _CLEARANCE_REFINEMENT = 4
@@ -106,9 +108,9 @@ class TriangleBody(Body):
             Voxels per axis of the grid segments walk; see
             :meth:`~aquaflux.radiation.grid.TriangleGrid.build`.
         clearance_resolution : int or tuple of int, optional
-            Voxels per axis of the grid the body vouches from. Unset, four times the walking
-            grid's per axis, halved as a whole while it holds more voxels than a default grid
-            may.
+            Voxels per axis of the grid the body vouches from. Unset, four times a near-cubic
+            grid's of about ten triangles a voxel, per axis, halved as a whole while it holds
+            more voxels than a default grid may -- whatever the walking grid's resolution.
         tolerance : float, optional
             Distance within which two vertex positions are the same point when pieces are
             found; see :func:`~aquaflux.radiation.checks.open_facets`.
@@ -126,7 +128,7 @@ class TriangleBody(Body):
         vertices = np.ascontiguousarray(vertices, dtype=float)
         grid = TriangleGrid.build(vertices, resolution=resolution)
         if clearance_resolution is None:
-            clearance_resolution = _CLEARANCE_REFINEMENT * grid.resolution
+            clearance_resolution = _CLEARANCE_REFINEMENT * _near_cubic_resolution(vertices)
             while np.prod(clearance_resolution, dtype=float) > _MAX_VOXELS:
                 clearance_resolution = np.maximum(clearance_resolution // 2, 1)
         occupancy = TriangleGrid.build(vertices, resolution=tuple(clearance_resolution))

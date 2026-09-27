@@ -657,33 +657,32 @@ quote the cell-centre figure.
 
 **Against the triangle grid**, which is the comparison the primitive path exists for. ⚠️ **A
 ratio here needs THREE axes named before it means anything**: which analytic arm is the numerator
-(the general construction or the bespoke closure), where the receivers are (pipe cells walk much
-further through empty grid than randomly placed ones), and what resolution the grid is.
+(the general construction or the bespoke closure), where the receivers are (pipe cells cost the
+walk far more than chamber cells), and what grid the walk uses.
 
 Only the primitive arm was measured here, at **20.7M rays/s** — and being one branch-free
 expression it runs at that rate whatever the receivers are, which is what makes it comparable
-against any grid configuration. The grid's four corners are from #502's matched square (300,000
-rays per corner, one process, two alternating passes, fastest per corner):
+against any grid configuration. The grid's corners are the **compiled walk's**, from
+`grid_walk_direction.py` (300,640 cell-to-lamp segments per corner, one process, two alternating
+passes, fastest kept; `bodyWall.stl`; jax 0.10.2, numba 0.67.0, CPU, x64, macOS arm64, 11 cores,
+2026-09-27):
 
 | grid configuration | grid rays/s | primitives are |
 |---|---|---|
-| pipe cells, area-sized default `(212, 11, 114)` | 28,248 | **732x** |
-| random cells, area-sized default | 79,963 | **259x** |
-| pipe cells, 128³ | 92,038 | **225x** |
-| random cells, 128³ | 141,451 | **146x** |
+| pipe cells, near-cubic grid `(212, 11, 114)` (the default before #503) | 1,351,334 | **15x** |
+| cells drawn uniformly from the mesh, near-cubic grid | 2,755,017 | **7.5x** |
+| pipe cells, box-shaped default `(102, 102, 102)` | 2,648,106 | **7.8x** |
+| cells drawn uniformly from the mesh, box-shaped default | 4,332,899 | **4.8x** |
 
-**The two axes interact, so neither has a single factor.** Resolution is worth **3.26x** on pipe
-cells and **1.77x** on random ones; receiver placement is worth **2.83x** at the default grid and
-**1.54x** at 128³. The mechanism is voxel size *along the axis the rays actually traverse*: the
-area-sized default is near-cubic at 8.2 mm, while 128³ over this long box is 13.6 mm along `x` and
-much finer across, and pipe-cell rays run axially down the length of the chamber. ⚠️ That makes
-**near-cubic voxels look wrong for a long thin vessel** — the anisotropic 128³ beats the default
-at every corner of this square. One scene is not enough to rewrite the sizing rule, and #503 is
-where that is being taken up.
+⚠️ **The 146-732x once recorded here was the ARRAY walk's** (#502's matched square, 28,248-141,451
+rays/s) and is deleted: the compiled walk (#571) moved the corners by ~30-50x (across runs), so the primitive
+path's cost advantage *per ray* is now an order of magnitude, not three. What still separates them
+is exactness at the rim and whole-field cost after culling (TRIANGULATED WALL AT MESH SCALE below).
+Why the grid's rate depends on the receivers and the voxel shape is under THE WALK'S COST (#503).
 
-⚠️ **What licenses reading the square is the within-process repeat, not any closure.** Pass to
-pass the pipe corners repeated to 1.10x and the random corners to 1.01x, and every effect in it
-clears that. ⚠️ **A 2x2's "closure identity" is VACUOUS and was twice read as corroboration here** —
+⚠️ **What licensed reading #502's (array-walk) square was the within-process repeat, not any
+closure.** Pass to pass its pipe corners repeated to 1.10x and its random corners to 1.01x.
+⚠️ **A 2x2's "closure identity" is VACUOUS and was twice read as corroboration here** —
 once in this section and once in #502's script. Both paths through a 2x2 are `D/A` with the middle
 corner cancelling, so they agree for *any* four numbers, including four wrong ones. There is no
 independent second path. A printed check that cannot fail is the measurement-script form of the
@@ -693,14 +692,14 @@ of numbers and a tick) is more dangerous than the bare quantity would have been,
 phrasing is what stops the reader asking what it could ever have shown.
 
 ⚠️ **Cross-run division is the remaining soft spot in the four ratios above**: the primitive rate
-is from this harness and the grid rates from #502's square, and the same nominal measurement on
+is from this harness and the grid rates from `grid_walk_direction.py`, and the same nominal measurement on
 different days has come out well over 1.1x apart. So read the *column* of ratios as approximate and
 the grid's internal comparisons as sharp. Running both arms in one process is what would fix it,
 and is the reason to fold this harness into `grid_mask_check.py` as a third body rather than keep
 it beside it — at which point the caveat is deleted rather than carried.
 
-⚠️ **A WORKED EXAMPLE OF THE MISTAKE THIS WHOLE SECTION IS ABOUT, MADE WHILE WRITING IT.** The
-acceptance run put "pipe/default" at 38,711 and the square puts it at 28,248 — a factor of 1.37,
+⚠️ **A WORKED EXAMPLE OF THE MISTAKE THIS WHOLE SECTION IS ABOUT, MADE WHILE WRITING IT** (on the
+array walk, whose rates these are). The acceptance run put "pipe/default" at 38,711 and the square puts it at 28,248 — a factor of 1.37,
 which is also the spread once quoted between repeats, and it was written up here as two
 independent routes to one number and therefore as corroboration. **It is a product of two effects
 that happens to land there.** The acceptance run's receivers were not the square's pipe corner:
@@ -2083,11 +2082,17 @@ a diagonal shaft's box pokes out through a round wall whatever the voxel size (5
 still 59% at ~1.8 mm), and only smaller groups move it (65-81% at 4x4).
 
 **The occupancy grid is not the walk grid.** `TriangleBody.occupancy` is a second `TriangleGrid` at
-`_CLEARANCE_REFINEMENT = 4` times the walk resolution per axis (halved as a whole past
-`grid._MAX_VOXELS`), read only through `holds_any` (a summed-volume table, `occupied_below`, eight
-lookups per box). The walk wants ~10 triangles a voxel; a certificate wants voxels small enough that
-one beside a wall is not occupied — on the test fixture the default walk grid was 2x2x2 and vouched for
-**nothing** until the occupancy grid was split out.
+`_CLEARANCE_REFINEMENT = 4` times a **near-cubic** ten-a-voxel grid per axis
+(`grid._near_cubic_resolution`, halved as a whole past `grid._MAX_VOXELS`), read only through
+`holds_any` (a summed-volume table, `occupied_below`, eight lookups per box). A certificate wants
+voxels small enough that one beside a wall is not occupied — on the test fixture the walk grid was
+2x2x2 and vouched for **nothing** until the occupancy grid was split out. ⚠️ **It is sized from the
+near-cubic grid, NOT from the walk grid, since #503 (2026-09-27)**: the walk's default voxels now take
+the box's proportions (17 x 0.9 x 9.2 mm on the Sozzi wall), and a long voxel beside a wall is occupied
+along its whole length. Deriving it from the walk grid as before would have changed which pairs are
+certified along with the walk; derived this way, the Sozzi occupancy grid is the same (424, 22, 228) it
+was, so certification is unchanged there. An explicit `resolution=` no longer moves it either
+(`test_the_grid_a_body_vouches_from_is_near_cubic_whatever_the_walk_grid`).
 
 **MEASURED** — `validation/sozzi_radiation/triangle_culling.py`: the chamber alone as a closed cylinder
 of **51,328 triangles** (64 sides x 400 slices plus caps, wound to face the water — the case's
@@ -2446,29 +2451,15 @@ implementation from three broken ones.
    one voxel per ten triangles assumes a filled box. On the reactor wall — 53,500 triangles over
    ~0.3 m^2 inside a 1.74 x 0.09 x 0.94 m box — it built 5,350 voxels of which **298** were
    occupied, holding **217 triangles each** against the ten intended. Sizing from the triangles'
-   own area gives 6,537 occupied voxels holding 18.4 each, near cubic to 0.5%. (Entries per voxel
+   own area gives 6,537 occupied voxels holding 18.4 each, near cubic to 0.5% — the rule until #503;
+   the area still sets the count, and the voxels now take the box's shape. (Entries per voxel
    run about twice the target because a triangle registers in every voxel its bounding box spans;
    that is expected and the test's tolerance says so.)
 
-**Wall clock against resolution, on the reactor wall** (500,000 cell-to-facet rays, `bodyWall.stl`,
-jax 0.10.2, CPU, x64, macOS arm64, 11 cores; every arm agreed with every other bit for bit, which
-is also the cross-check on the work-limit chunking):
-
-| grid | run 1 | run 2 |
-|---|---|---|
-| area-sized default, (212, 11, 114) | 65,600 | 72,500 rays/s |
-| 32³ | 47,300 | — |
-| 64³ | 102,800 | — |
-| 128³ | 131,500 | 96,300 |
-| 192³ | 106,200 | — |
-| (424, 22, 228) | — | 85,900 |
-| (636, 33, 342) | — | 77,100 |
-
-⚠️ **Read the spread before the ranking: 128³ moved 1.37x between two identical runs.** What the
-two runs support is that a 128³-like grid is **1.3-1.8x** faster than the area-sized default and
-that finer than that is not better; the ordering among the three finer arms is inside the noise and
-is not established. `_TARGET_PER_VOXEL` was therefore left at ten — lowering it is not supported by
-this measurement, whatever the single fastest row says.
+⚠️ **A wall-clock-against-resolution table measured on the ARRAY walk stood here and is deleted**
+(its best arm, 128³, moved 1.37x between two identical runs — the trap worth keeping: read the
+spread before the ranking). The resolution question was re-asked on the compiled walk, and the
+default rule changed because of it: THE WALK'S COST (#503), below.
 
 **THE MASK IS EXACT ON A REAL REACTOR, AND THE ONLY DISAGREEMENT IS THE STL'S IDEA OF A
 CIRCLE.** `validation/sozzi_radiation/grid_mask_check.py` runs the general method -- the vessel
@@ -2503,13 +2494,13 @@ took **6.9 s** against the grid's **4,659.8 s** on those same 180M rays — **67
 the one arm-to-arm figure on record taken WITHIN a run**, both arms in one process on one ray
 set, which is why it is kept when the table that used to stand here was deleted. It is also the
 most favourable corner available: the *bespoke* arm, against the grid on this run's pipe-heavy
-receivers, at the area-sized default grid.
+receivers, at the near-cubic grid that was then the default.
 
 ⚠️ **A four-cell table stood here and has been DELETED rather than corrected (2026-09-24).** One
 of its cells was the 675x above; the other three divided numbers that were never measured
 together, and every quantity in it has a better-measured equivalent elsewhere in this file — the
 general arm and the bespoke arm under "MEASURED: the Sozzi reactor as three cylinders", the grid's
-corners in the matched square below. Three specific things were wrong with it, and they are worth
+corners re-measured on the compiled walk under THE WALK'S COST (#503). Three specific things were wrong with it, and they are worth
 knowing because each is a shape that recurs:
 
 - **It gave the bespoke arm a second value.** 26.1M rays/s here against 28.8M from three
@@ -2524,57 +2515,12 @@ knowing because each is a shape that recurs:
 which is the annotation failure this file warns about in general terms: a corrected cell beside
 three uncorrected ones reads as a maintained table. Supersede by deleting.
 
-⚠️ **THE RECEIVER POPULATION AND THE GRID RESOLUTION INTERACT, so neither has a single factor
-and two earlier attempts to give one here were wrong.** The first divided pipe cells on the
-area-sized default grid by random receivers on a **128³** grid and called the quotient a receiver
-effect -- two variables at once. The second decomposed it into 1.70/1.87x and 2.00/1.33x, which
-paired numbers from *different runs* on a machine whose spread at one of those corners is 1.37x,
-and rested on a corner -- pipe cells at 128³ -- that had never been measured. Both are deleted
-rather than annotated.
-
-**Measured properly: all four corners in one process, 300,000 rays each, alternating twice,
-fastest pass per corner** (`bodyWall.stl`, 53,500 triangles, jax 0.10.2, CPU, x64, macOS arm64,
-11 cores):
-
-| | area-sized default (212, 11, 114) | 128³ | resolution is worth |
-|---|---|---|---|
-| **pipe cells** (52% blocked) | 28,248 rays/s | 92,038 | **3.26x** |
-| **random cells** (10% blocked) | 79,963 | 141,451 | **1.77x** |
-| **population is worth** | **2.83x** | **1.54x** | |
-
-⚠️ **THE "CLOSURE CHECK" THIS SQUARE FIRST SHIPPED WITH IS VACUOUS, and it is the same defect as a
-test that cannot fail.** Both paths through a 2x2 -- `(B/A)(D/B)` and `(D/C)(C/A)` -- are `D/A`
-with the middle corner cancelling, so they agree for **any** four numbers, including four wrong
-ones. It was printed as `5.01 = 5.01` and read as corroboration; it corroborates nothing.
-
-**The phrasing is what did the damage, and that part generalizes past this table.** The line
-carried a `must agree` label, two numbers and a tick. A tautology dressed as an assertion is
-**worse than the bare quantity**, because the phrasing is precisely what stops a reader asking
-what it could ever have shown -- and there is no test runner watching a print statement the way
-one watches an assert. Before writing `must`, `expected` or a tick beside a computed pair, ask
-what inputs would make it disagree; if none would, it is a derived quantity and must be labelled
-as one. What
-makes this square worth more than the factors it replaces is not a check, it is that all four
-corners come from **one process, back to back**, so no ratio spans a run boundary.
-
-**What licenses reading these as real is the within-process repeat**, which is far tighter than the
-cross-run spread: pass to pass, the two pipe corners repeated to **1.10x** and the two random
-corners to **1.01x**, against **1.37x** between runs at one corner on different days. Every effect
-in the table (1.54x and up) clears the within-process figure; several effects in the *deleted*
-decompositions (1.33x, 1.70x) sat inside the cross-run band that produced them, which is why they
-could not have been resolved however carefully they were divided. **Alternate the passes and take
-the fastest per corner** -- a single pass gives a number that looks decisive and is not.
-
-**The interaction is the finding, and it confirms the distance story rather than weakening it.**
-The default grid is near cubic at 8.2 mm; a 128³ grid over this long box is 13.6 mm along x and
-much finer across. Pipe-cell rays run *axially*, the length of the chamber, so the coarse axial
-voxel is worth **3.26x** to them and only 1.77x to randomly aimed rays. What sets the cost is the
-voxel size along the axis the rays actually traverse -- which is why the population effect is
-2.83x on the near-cubic grid and only 1.54x once the axial steps are cheap.
-
-⚠️ **This makes the near-cubic default questionable for a long thin vessel** -- 128³ is anisotropic
-and beats it at every corner here. Not changed: one scene, and the sizing rule should not be
-rewritten around it. Recorded as the thing to test in #503. For scale in the other
+⚠️ **#502's matched square (receiver population x resolution, four corners in one process) was
+measured on the ARRAY walk and is deleted**, along with the "distance travelled through empty
+voxels" mechanism it was read as confirming; on the compiled walk that mechanism does not hold
+(THE WALK'S COST, #503, below). Two lessons it taught are kept where they generalize: a 2x2's
+closure identity is vacuous (`CLAUDE.md`, "A test that cannot fail"), and every arm of a
+comparison goes in one process, alternating passes, fastest kept. For scale in the other
 direction, the *entire* field with analytic occlusion -- all 1,635,909 cells, gather arithmetic
 included -- takes **557 s** (`run-20260922-125655.log`). The grid mask alone then extrapolated to
 88 h (1.23e10 rays at 38,711 rays/s, array walk, every pair); **measured since, the whole field with
@@ -2659,7 +2605,8 @@ same container, one process): the vessel peaks at 1-2x the default per axis (406
 ten-triangles-a-voxel target, tuned under the array walk, is **not** confirmed or refuted by one scene
 each, and is left as it is. Every row matched every triangle on its 5,000 checked rays. The per-ray
 frame hoist moved neither scene outside the cross-process band (1.35M against the prototype's 1.04M on
-the vessel, 0.76M against 0.81M on the reactor).
+the vessel, 0.76M against 0.81M on the reactor). ⚠️ **Those multiples were of the NEAR-CUBIC default, which #503 replaced** (the default is
+now box-shaped; `radiation_grid_walk.py` times both rules side by side since).
 
 **What is left, estimated rather than measured**: at ~1M rays/s on 4 cores a ray costs ~4 µs of one
 core, and ~80 triangle tests at a few tens of ns each account for most of that at the default grid — so
@@ -2694,7 +2641,9 @@ Configuration throughout: main `f96e923` unless stated, jax 0.10.2, numba 0.67.0
 per row through `run_case.sh`, nothing else heavy running. Full tables in the Sozzi README. ⚠️ **All
 measured before #575** (`BodyCulling.prepared`, the in-program tile gather): neither reaches the
 triangle wall's cost (facet clearance ~0 s for it per chunk, `TriangleBody` keeps the host gather), so
-the 62 min should stand; the 313.7 s analytic row may have moved. Not re-measured.
+the 62 min should stand; the 313.7 s analytic row may have moved. ⚠️ **The triangle-wall rows are on the
+OLD near-cubic walk grid**: re-measured after #575 on it at 3,705.2 s (so #575 indeed did not move it),
+and on the box-shaped default since #503 the field takes **2,914.3 s (48.6 min)** — THE WALK'S COST below.
 
 - **Whole field** (`model_at_mesh_scale.py`, `SOZZI_WATER=triangles` = `bodyWall.stl` as a
   `TriangleBody` sheet, all 1,635,909 cells): **3,720.6 s** field, 58.0 s build, **5.58 GB** peak; the
@@ -2718,6 +2667,84 @@ the 62 min should stand; the 313.7 s analytic row may have moved. Not re-measure
   spread 16x wider): the whole mesh ran 3,720.6 s where 16x the sample's 284.3 s is 4,549 s. So the
   lever for triangle-only geometry is a certificate that vouches for more of the chamber (the convex
   region a triangulated vessel encloses, #568), or a cheaper walk (#572, #503) — neither built.
+
+### THE WALK'S COST: TRIANGLES TESTED IN NARROW PASSAGES, AND THE VOXELS' SHAPE (#503, 2026-09-27)
+
+#503 proposed, in order: walk each segment from whichever end is nearer its blocker, then skip empty
+space (a distance field, a two-level grid, a BVH). **Both rest on premises the compiled walk does not
+have**, measured with `validation/sozzi_radiation/grid_walk_direction.py`: `bodyWall.stl` (53,500
+triangles), 7,516 lamp facets, 40 cells per population (outlet-pipe cells; chamber cells; cells drawn
+uniformly from the mesh) x every facet = 300,640 segments per corner, all corners in one process, two
+alternating warm passes, fastest kept; jax 0.10.2, numba 0.67.0, CPU, x64, macOS arm64, 11 cores.
+
+- **Direction is worth nothing: 0.95-1.06x** cell->lamp against lamp->cell, over 15 grids and all
+  three populations, answers identical (the reversed arm has no margin at the lamp end and changed no
+  answer). The blocked segments were never the cost — they stop within ~2 occupied voxels either way.
+  ⚠️ So the issue's "a large asymmetry" prediction, reasoned from the geometry, is refuted.
+- **Empty space is not the cost.** A harness-side copy of the walk with counters (checked ray for ray
+  against `TriangleGrid.blocks`) at the old near-cubic default `(212, 11, 114)`: a clear pipe-cell
+  segment steps **106.5** voxels, **35.6** occupied, and tests **787** triangles (539 distinct); a
+  chamber segment tests 70. The pipe is 9.55 mm in radius against 8.2 mm voxels, so a segment down a
+  pipe tests the wall's triangles in every voxel. Empty-space skipping skips the cheap part;
+  mailboxing (not re-testing a triangle) is worth ~1.5x at most. **Neither (2)-(4) of #503 is built.**
+- **Refining near-cubic voxels is flat**: 1x-4x per axis took pipe-cell tests 444 -> 139 per segment
+  and steps 64 -> 255 at a constant 1.27-1.48M segments/s — a compiled step costs about 1.6 triangle
+  tests here, so the target of ~10 triangles a voxel (tuned when a step cost 150-180 ns of numpy) is
+  neither better nor worse refined. ⚠️ That flatness is the evidence against "just lower the target".
+- **The voxels' SHAPE moves it.** Long along the chamber, fine across (the y axis crosses both pipes):
+
+| grid | voxel (mm) | pipe cells /s | any cell /s | chamber cells /s |
+|---|---|---|---|---|
+| near-cubic `(212, 11, 114)`, the old default | 8.2 x 8.1 x 8.2 | 1,351,334 | 2,755,017 | 4,494,977 |
+| box-shaped `(102, 102, 102)`, **the new default** | 17.0 x 0.9 x 9.2 | **2,648,106** (1.96x) | **4,332,899** (1.57x) | 4,624,531 (1.03x) |
+| `(64, 128, 128)`, the best tried | 27.2 x 0.7 x 7.3 | 3,911,954 (2.89x) | 4,659,643 (1.69x) | 4,040,810 |
+
+**THE NEW DEFAULT (`grid._resolution`)**: equal voxel counts per axis — each voxel in the proportions
+of the triangles' bounding box, edges capped at `_MAX_ASPECT = 32` to one another (the Sozzi box is
+19:1) — and `_VOXEL_BUDGET = 4` times the voxels of the near-cubic grid at `_TARGET_PER_VOXEL`
+(`_near_cubic`, still sized from the triangles' AREA). An axis that would get under one voxel gets one
+and the others share the count (a flat surface is one voxel thick). **The derivation**: steps along an
+axis go as the segment's travel there over the edge, so at a fixed voxel count steps are fewest with
+edges proportional to that travel; a mask pairs every receiver with every facet, so segments spread
+like the box. ⚠️ **Where it can mislead**: the box is the triangles', not the segments' — a flat floor
+lit from above, a vessel off the axes (whose box is near-cubic, so the rule degrades toward the old
+one). Speed only: the grid never decides what counts as a hit, and `resolution=` overrides it.
+**Across scenes** (`validation/radiation_grid_walk.py`, which now times the near-cubic rule beside the
+default; 200,000 rays, one process, two alternating passes; same machine, 2026-09-27; every arm matched
+every triangle on its 5,000 checked rays):
+
+| scene | new default | old near-cubic default | near-cubic at the new default's voxel count | new default at 0.5x / 2x per axis |
+|---|---|---|---|---|
+| long thin vessel (51,200 triangles) | 40³: 5,651,873 /s | 10x10x161: 4,248,758 (**1.33x**) | 16x16x255: 4,499,168 (**1.26x**) | 5,578,165 / 4,636,010 |
+| annular reactor (32,768 triangles) | 31³: 4,582,308 | 9x9x92: 2,562,123 (**1.79x**) | 14x14x146: 3,276,703 (**1.40x**) | 3,723,699 / 4,641,821 |
+
+So the default's budget sits on the annular reactor's plateau (2x per axis is 1% faster) and near the
+vessel's (0.5x is 1% slower, 2x 18% slower), while on the Sozzi wall `(64, 128, 128)` — about twice the
+default's voxels — was 1.48x faster still on pipe cells: `_VOXEL_BUDGET = 4` is a compromise, not an
+optimum.
+
+**The occupancy grid did NOT follow** (`TriangleBody.occupancy`, above): it stays 4x a near-cubic grid,
+so certification on the Sozzi wall is unchanged and the mesh-scale run below isolates the walk.
+
+**AT MESH SCALE, the grid alone** (`model_at_mesh_scale.py`, `SOZZI_WATER=triangles`, all 1,635,909
+cells, default culling, the same commit for both arms (#503 branch on `d7899ac`, so #575 in), the old
+grid through `SOZZI_GRID=212:11:114`, two processes back to back, 2026-09-27): field **3,705.2 s** on the
+old near-cubic grid against **2,914.3 s** on the new default — **1.27x**, fields identical to every
+printed digit (chamber max 4.4e-16 against the cylinders, pipes median 1.42% / max 13.5%), build 58.0 s
+both, peak footprint 5.87 / 6.35 GB. The 3,720.6 s recorded under TRIANGULATED WALL AT MESH SCALE
+(pre-#575) and this 3,705.2 s agree, so #575 did not move this call. ⚠️ **Why 1.27x and not the
+1.57-1.96x the sampled segments showed**: the walk is ~85% of the call, but the segments it walks are
+the ones certification leaves — pairs crossing between regions and pairs near the wall — not a uniform
+sample. Chamber-cell segments gained only 1.03x, which is the likely reason; not decomposed.
+
+**Tests** (`test_radiation_grid.py`, `test_radiation_triangle_body.py`):
+`test_the_default_voxels_take_the_boxs_proportions_and_its_triangle_count` (replaces the near-cubic
+test), `test_no_default_voxel_is_more_than_the_cap_longer_than_it_is_wide` (a 200:1 box and a flat
+surface), `test_the_grid_a_body_vouches_from_is_near_cubic_whatever_the_walk_grid`. **Mutation pass
+(5 mutations, all red)**: the near-cubic rule back, the aspect cap removed, the voxel budget at 1x, the
+occupancy grid from the walk grid, and dropping the flat-axis refit — ⚠️ **that last one first SURVIVED**:
+the flat test checked only the per-axis counts, and without the refit the flat axis's near-zero extent
+blew the other two counts up to the voxel cap. It now also bounds the total against the budget.
 
 ## HOW MANY FACETS AN EMITTER NEEDS — measured, because it sets the price of everything
 
