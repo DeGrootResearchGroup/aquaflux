@@ -220,6 +220,9 @@ the same settings; the two unculled-main and (32, 8) arms were each also run onc
 
 ## Where the whole-field call spends its time (2026-09-26, `field_cost_breakdown.py`)
 
+⚠️ Measured before #575 (the facets' side of culling formed once per call) and #578 (pairs behind
+their lamp facet skipped); the call as it stands now is in the next section.
+
 The default-culling arm above (313.5 s), broken into its pieces: the same model and call, each piece
 wrapped in a timer that waits for its result. Instrumented, the call took **316.8 s** (1% over the
 plain run) and repeated to 0.3 s.
@@ -288,6 +291,55 @@ hand-typed cylinders, `NoOcclusion`, streamed receiver mask), run through `valid
 with nothing else heavy running. The build rows come from a separate 3,000-cell run after the
 row-block timer was added (the build does not depend on the receivers); without that timer the
 row blocks' work, still running asynchronously, was charged to the facet mask as 30 s.
+
+## Where the whole-field call spends its time after #575 and #578 (2026-09-27, `field_cost_breakdown.py`)
+
+The same harness and configuration as the section above, re-run on `main` at `2810eea`, which adds
+#575 (the lamp facets' side of shaft culling formed once per call) and #578 (a pair whose receiver
+lies behind its lamp facet is recorded clear without being tested, in the shadow mask and in the
+gather). Whole mesh (1,635,909 cells, 7,516 lamp facets), default culling, water as the hand-typed
+cylinders (no CAD kernel installed), `NoOcclusion`, streamed receiver mask, run through
+`validation/run_case.sh` with nothing else heavy running; jax 0.10.2, numba 0.67.0, CPU, x64, macOS
+arm64, 11 cores. One run; the harness's counting of wholly blocked tiles is on, as in the second run
+above, so the two compare like for like.
+
+| piece | before (`392f935`) s | now (`2810eea`) s |
+|---|---|---|
+| **call, less the harness's counting** | **317.7** | **210.6** (1.51x) |
+| shadow masks, less the counting | 243.9 | 147.4 |
+| · the bodies' layer | — | 146.6 |
+| ·· pair-by-pair test of the tiles culling could not decide | 186.7 | 64.7 |
+| ··· the compiled body test | 141.8 (695 calls) | 51.4 (604 calls) |
+| ·· deciding which tiles are undecided (certificates, and tiles behind: 5.4 s) | 45.5 | 65.5 |
+| ·· receiver clearance and curve order | (in the row above) | 13.2 |
+| fluence gather: areal segments 44.1, layout 5.9, point sources 0.2 | 66.5 | 50.2 |
+| surface solve | 1.5 | 1.4 |
+| the harness's own count of wholly blocked tiles | 73.1 | 72.5 |
+
+The build is unchanged: **57.3 s**, the transfer's row blocks 56.8 s and its facet mask 0.2 s.
+
+| pairs | before | now |
+|---|---|---|
+| all | 12.30 billion | 12,295,492,044 |
+| in tiles culling could not decide | 2.33 billion (18.9%) | **760,043,420 (6.2%)** |
+| tested, padding included | 2.56 billion | 901,783,552 (7.3%) |
+| blocked | 1,185,423,023 (9.6%) | 562,087,592 (4.6%) |
+
+- **The tested pairs fell 2.8x, because a pair behind its lamp facet is no longer tested.** Before,
+  81.0% of pairs were certified clear and the rest tested; now 93.8% are decided without a test, the
+  extra share being tiles proven wholly behind their facets. The pair test fell with them, 186.7 →
+  64.7 s.
+- **Deciding now costs as much as testing.** Tile certificates and the behind-test are 65.5 s against
+  64.7 s of pair tests. The mask as a whole is 147 s of a 211 s call, 70%, against 77% before.
+- **"Blocked" halved because the pairs behind are now recorded clear**, not because any geometry
+  changed: a pair that faces away from its facet carries exactly zero whatever blocks it.
+- **What a "fully hidden" certificate could still skip**, counted as above along the strategy's
+  curve: wholly blocked tiles hold 383,775,196 pairs at 32 x 32, 506,200,308 at 8 x 8 and 550,288,962
+  at 2 x 2 -- **50.5%, 66.6% and 72.4%** of the pairs in undecided tiles, against 42.3%, 48.1% and
+  50.3% before. The undecided set is smaller and darker, so such a certificate would now reach most of
+  it, but the whole of it is 65 s of test.
+- ⚠️ **Read the 1.51x as one run against one run**, on the same machine a day apart: this machine has
+  varied more than 1.1x between runs, so the ratio is good to about that.
 
 ## The vessel wall as its triangles, at mesh scale (2026-09-26, `model_at_mesh_scale.py`, `grid_mask_check.py`, `triangle_culling.py`)
 

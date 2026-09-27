@@ -2058,6 +2058,22 @@ it. Not designed or built; the record of what #554 phase C is worth. An upper bo
 could be skipped, not a prediction of what a certificate would prove. (The count itself cost 73.1 s,
 harness time, timed outside the bodies' layer.)
 
+**THE SAME CALL AFTER #575 AND #578, MEASURED (2026-09-27, same harness and configuration, main
+`2810eea`, one run, counting on; macOS arm64, 11 cores, jax 0.10.2, numba 0.67.0).** Call less the
+count **210.6 s against 317.7** (1.51x, one run against one, a day apart). Masks less the count 147.4 s
+(70%): pair tests 64.7 (compiled 51.4 in 604 calls), undecided-tile decisions 65.5 (certificates 53.5,
+tiles behind 5.4), receiver groups 13.2 (clearance 12.2); lamp-facet clearance ~0 (formed once per call
+since #575). Gather 50.2 s (areal segments 44.1, layout 5.9). Build 57.3 s, unchanged. **Undecided
+pairs 760.0M = 6.2% of all, against 2.33G (18.9%)**; tested with padding 901.8M. Blocked 562.1M (4.6%) —
+halved because pairs behind their facet are now recorded clear, not because geometry changed. Wholly
+blocked tiles: 383.8M / 506.2M / 550.3M at 32x32 / 8x8 / 2x2 = **50.5% / 66.6% / 72.4% of the undecided
+pairs** (was 42.3 / 48.1 / 50.3%). ⚠️ **So the mask is now split evenly between DECIDING tiles and
+TESTING them** (65.5 against 64.7 s): the certificates, not the pair test, are half of what is left, and
+phase C's whole target is now ~65 s of test. **Harness fix in the same change**: #578 gave
+`ShaftCulling._test_tiles` a `facing` argument and the harness's counting wrapper still took the old
+signature, so the harness crashed on `main` ("got multiple values for argument 'out'") — the
+monkeypatched-private-method hazard: nothing in any test tier runs this harness. Table in the Sozzi README.
+
 **Tests** (`tests/unit/test_radiation_culling.py`, each mutation-checked): bit equality with
 `EveryPair` at group sizes 32x32, 7x5, 1x1, 64x3 on a scene where every one of four body kinds
 (`Outside` chamber+pipe, `Box` baffle, `Sphere`, `Difference` ring) blocks some pairs and each has
@@ -2236,9 +2252,9 @@ with output redirected, nothing else running, 2026-09-27):
   ~3.4-3.6x against the ~3.7x ceiling: the certificates, curve and tile bookkeeping are what is left.
 - 4,327,084 pairs the full mask blocks lie behind their source; the skipped mask is the full one with
   exactly those cleared (`array_equal` against `full & ~behind`).
-- ⚠️ **Not re-measured at mesh scale** (`work/case` absent). The mesh population refines towards the
-  lamp and walls, so its shares differ; re-run `field_cost_breakdown.py` there before quoting a
-  whole-field saving.
+- **Measured since at mesh scale**, on the cell-centre population (THE SAME CALL AFTER #575 AND #578,
+  under WHERE THE CALL'S TIME GOES): undecided pairs 18.9% → 6.2% of all, pair tests 186.7 → 64.7 s,
+  the whole call 317.7 → 210.6 s with #575 included.
 - ⚠️ **On the STREAMED field it is only ~1.1x** (18.6-20.1 s against `main`'s 21.6-22.0 s, same scene):
   the mask is the smaller part of a streamed call, the gather the larger. See BACK FACES IN THE GATHER
   below for the whole-field figures and the split.
