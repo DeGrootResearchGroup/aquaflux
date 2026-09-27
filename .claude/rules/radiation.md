@@ -2239,8 +2239,8 @@ with output redirected, nothing else running, 2026-09-27):
   lamp and walls, so its shares differ; re-run `field_cost_breakdown.py` there before quoting a
   whole-field saving.
 - ⚠️ **On the STREAMED field it is only ~1.1x** (18.6-20.1 s against `main`'s 21.6-22.0 s, same scene):
-  in streamed chunks of ~460 receivers the mask's time is per-chunk overhead, not tested pairs. See BACK
-  FACES IN THE GATHER below for the whole-field figures.
+  the mask is the smaller part of a streamed call, the gather the larger. See BACK FACES IN THE GATHER
+  below for the whole-field figures and the split.
 
 **Tests** (`tests/unit/test_radiation_culling.py`), mutation-checked, 10 of 11 red on the shipped code: both strategies at
 three ladders equal to the full mask with the pairs behind cleared, and more pairs decided with
@@ -2328,12 +2328,21 @@ x86_64, 4 cores, run directly, nothing else running, 2026-09-27):
 - **Against `main` (`d9f249b`)**, the same call in worktrees, repeat calls: `main` 21.6-22.0 s; the
   mask skip alone (`5fb1384`) 18.6-20.1 s; this tree **10.8-11.1 s — ~2.0x**. Fields: 5.4e-16 against
   `main`; the mask-skip tree bit-identical to `main`. Cross-process, so read the ratios.
-- ⚠️ **What is left is the MASK, and at streamed-chunk size it is overhead, not pairs**: 10.6 s of the
-  11.5 s call, 51 chunks of ~460 receivers, the culling running at ~20M pairs/s where one whole-call
-  mask of the same pairs runs at ~100M pairs/s (`backface_share.py`: 2.03 s). That is also why the
-  mask skip, 3.35x on a whole-call mask, is only ~1.1x on the streamed field. The lever is a streamed
-  mask pass larger than the gather's traced chunk (the #509 note that one limit sets both) — **not
-  built**.
+- **Where the streamed call's time goes now** (`validation/sozzi_radiation/streamed_cost_split.py`,
+  each piece blocked until ready, same scene and machine, two passes after a warm-up): at the default
+  chunk (51 chunks of ~460 receivers) mask **3.8 s**, gather segments **8.6-9.0 s**, layout 0.4 s,
+  13.4-13.5 s in all; as ONE streamed chunk with the traced chunk left at the default (a diagnostic,
+  not a setting) mask 3.1 s, segments **5.9-6.2 s**, 9.4-9.8 s. Blocking each piece serializes what
+  the unwrapped call overlaps (host mask work beside the previous chunk's device gather), which is why
+  its totals exceed the 10.8-11.1 s above. So **the gather's per-chunk layout is the lever** — four
+  equal segments of ~15 blocks pad to 0.56 and make small calls, where one layout over many blocks pads
+  to ~0.45 — and the mask's chunking is worth under 1 s.
+- ⚠️ **A first profile said the opposite ("the mask is 10.6 s of 11.5") and was the async-dispatch
+  trap**: the mask build's `np.asarray` of its inputs waited for the previous chunk's gather, still
+  running, and was charged for it. A streamed pass sized separately from the gather's traced chunk was
+  built on that reading and measured **no faster** (13.8-14.1 s at 16M and 64M pairs a chunk against
+  13.7 s at 4M, more memory), so it was reverted rather than shipped. Raising `pair_limit` to make one
+  chunk is not the same experiment: it enlarges the traced chunk too, and the segments then take 15 s.
 
 **Tests** (`tests/unit/test_radiation_lit_blocks.py`, each field against a pair-by-pair numpy sum
 that shares none of the layout): rows cover the points once and each list is exactly what the box
