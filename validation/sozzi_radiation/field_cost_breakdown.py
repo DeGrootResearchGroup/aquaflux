@@ -8,10 +8,11 @@ made of:
 
 - the build: the facet-to-facet transfer (its shadow mask separately) and the rest;
 - the surface solve: assembling the transfer and the interreflection solve;
-- the streamed field, per chunk: building the chunk's shadow mask -- and, inside it, each stage of
-  :class:`~aquaflux.radiation.ShaftCulling`: ordering points along the curve, the bodies'
-  clearance features, the tile certificates, and the pair-by-pair test of the tiles left over --
-  then the compiled gather.
+- the streamed field: preparing :class:`~aquaflux.radiation.ShaftCulling` once for the lamp's
+  facets (their order along the curve and the bodies' clearance summaries of every cluster), then,
+  per chunk, building the chunk's shadow mask -- and, inside it, grouping the chunk's receivers
+  (their curve order and clearance features), the tile certificates, and the pair-by-pair test of
+  the tiles left over -- then the compiled gather.
 
 Each piece is wrapped in a timer that waits for its result (``jax.block_until_ready``) before
 stopping the clock, so compiled work is charged to the piece that launched it rather than to
@@ -108,20 +109,19 @@ TREE = {
     "call / radiosity / solve": "call / radiosity",
     "call / field": "call",
     "call / field / refuse points inside": "call / field",
+    "call / field / prepare culling": "call / field",
+    "call / field / prepare culling / lamp-facet clearance": "call / field / prepare culling",
     "call / field / chunk": "call / field",
     "call / field / chunk / mask": "call / field / chunk",
     "call / field / chunk / mask / bodies": "call / field / chunk / mask",
-    "call / field / chunk / mask / bodies / curve order": "call / field / chunk / mask / bodies",
+    "call / field / chunk / mask / bodies / receiver groups": "call / field / chunk / mask / bodies",
+    "call / field / chunk / mask / bodies / receiver groups / curve order": (
+        "call / field / chunk / mask / bodies / receiver groups"
+    ),
+    "call / field / chunk / mask / bodies / receiver groups / clearance": (
+        "call / field / chunk / mask / bodies / receiver groups"
+    ),
     "call / field / chunk / mask / bodies / undecided tiles": "call / field / chunk / mask / bodies",
-    "call / field / chunk / mask / bodies / undecided tiles / clearance": (
-        "call / field / chunk / mask / bodies / undecided tiles"
-    ),
-    "call / field / chunk / mask / bodies / undecided tiles / clearance / lamp facets": (
-        "call / field / chunk / mask / bodies / undecided tiles / clearance"
-    ),
-    "call / field / chunk / mask / bodies / undecided tiles / clearance / receivers": (
-        "call / field / chunk / mask / bodies / undecided tiles / clearance"
-    ),
     "call / field / chunk / mask / bodies / undecided tiles / certificates": (
         "call / field / chunk / mask / bodies / undecided tiles"
     ),
@@ -210,20 +210,37 @@ def instrument_call(timers: Timers, n_facets: int, pairs: dict) -> None:
     )
     for strategy in (culling.EveryPair, culling.ShaftCulling):
         strategy.blocked = timers.wrap("call / field / chunk / mask / bodies", strategy.blocked)
-    culling._Curve.of = classmethod(
-        timers.wrap(
-            "call / field / chunk / mask / bodies / curve order", culling._Curve.of.__func__
+
+    def by_side(function, points_at: int, facets: str | None, receivers: str):
+        """``function`` timed under one name for the lamp's facets and another for receivers.
+
+        Told apart by how many points the call is given (the argument at ``points_at``), so a chunk
+        holding exactly as many receivers as the lamp has facets would be charged to the facets.
+        The facets' side is formed once per call, inside ``prepare culling``; left untimed
+        (``facets=None``) it is charged to that step's remainder.
+        """
+        of_facets = function if facets is None else timers.wrap(facets, function)
+        of_receivers = timers.wrap(receivers, function)
+        return lambda *args: (of_facets if len(args[points_at]) == n_facets else of_receivers)(
+            *args
         )
+
+    culling.ShaftCulling.prepared = timers.wrap(
+        "call / field / prepare culling", culling.ShaftCulling.prepared
+    )
+    groups = "call / field / chunk / mask / bodies / receiver groups"
+    culling._Groups.of = classmethod(by_side(culling._Groups.of.__func__, 2, None, groups))
+    culling._Curve.of = classmethod(
+        by_side(culling._Curve.of.__func__, 1, None, f"{groups} / curve order")
+    )
+    Outside.clearance = by_side(
+        Outside.clearance,
+        1,
+        "call / field / prepare culling / lamp-facet clearance",
+        f"{groups} / clearance",
     )
     culling.ShaftCulling._undecided = timers.wrap(
         "call / field / chunk / mask / bodies / undecided tiles", culling.ShaftCulling._undecided
-    )
-    clearance = "call / field / chunk / mask / bodies / undecided tiles / clearance"
-    of_facets = timers.wrap(f"{clearance} / lamp facets", Outside.clearance)
-    of_receivers = timers.wrap(f"{clearance} / receivers", Outside.clearance)
-    Outside.clearance = timers.wrap(
-        clearance,
-        lambda body, points: (of_facets if len(points) == n_facets else of_receivers)(body, points),
     )
     for name in ("_vouched", "_vouched_pairs"):
         setattr(
@@ -262,8 +279,8 @@ def instrument_call(timers: Timers, n_facets: int, pairs: dict) -> None:
         return mask
 
     culling.ShaftCulling.blocked = counted_blocked
-    culling._body_blocks = timers.wrap(
-        "call / field / chunk / mask / bodies / test tiles / compiled test", culling._body_blocks
+    culling._tile_blocks = timers.wrap(
+        "call / field / chunk / mask / bodies / test tiles / compiled test", culling._tile_blocks
     )
 
 
