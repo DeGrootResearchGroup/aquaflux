@@ -214,9 +214,9 @@ def _box_with_a_lamp():
 def test_the_matrix_does_not_depend_on_how_its_rows_are_blocked(chunk_size):
     """Blocking is a memory strategy; it must not be a numerical one.
 
-    None of these sizes divides 49, so each build ends with a block that starts early and
-    recomputes rows its predecessor already wrote -- the one piece of index arithmetic the
-    blocked build has. Agreement is to a rounding of the O(1) row sums and not bit for bit: a
+    None of these sizes divides 49, so each build ends with a block filled out by repeating its
+    last receiver, and every block's rows are drawn from along the space-filling curve rather
+    than in storage order -- the index arithmetic the blocked build has. Agreement is to a rounding of the O(1) row sums and not bit for bit: a
     different block shape compiles to a differently fused program, and a pair of facets on one
     wall, whose transfer is zero, comes back as dust of order 1e-17 that moves with it. A wrong
     row, or a mask applied at the wrong index, is off by the size of a transfer factor.
@@ -241,17 +241,146 @@ def test_no_block_handed_to_the_compiled_pass_exceeds_the_chunk(monkeypatch):
     rows_seen = []
     real = transfer._row_block
 
-    def watched(geometry, sample, weight, start, *, rows):
-        rows_seen.append((int(start), rows))
-        return real(geometry, sample, weight, start, rows=rows)
+    def watched(geometry, sample, weight, index, columns):
+        rows_seen.append(np.asarray(index))
+        return real(geometry, sample, weight, index, columns)
 
     monkeypatch.setattr(transfer, "_row_block", watched)
     build_transfer(_box_with_a_lamp(), self_occlusion=NoOcclusion(), chunk_size=7)
-    assert all(rows == 7 for _, rows in rows_seen), rows_seen
-    covered = set()
-    for start, rows in rows_seen:
-        covered.update(range(start, start + rows))
+    assert all(len(index) == 7 for index in rows_seen), [len(index) for index in rows_seen]
+    covered = set(np.concatenate(rows_seen).tolist())
     assert covered == set(range(49)), "every row is computed, and none beyond the matrix"
+
+
+def _slivers(rng, count):
+    """Triangles collinear to rounding whose rounded normals tilt off their lines.
+
+    Such a facet's quadrature points do not share a plane with its stored normal, so a test of
+    one plane per facet -- through its centroid, say -- is not the kernel's own condition.
+    """
+    from aquaflux.radiation.surfaces import Surfaces as _Surfaces
+
+    found = []
+    while len(found) < count:
+        start = rng.uniform(-0.5, 0.5, 3)
+        direction = rng.normal(size=3)
+        direction /= np.linalg.norm(direction)
+        triangle = np.array([start, start + 0.07 * direction, start + 0.2 * direction])
+        facet = _Surfaces.from_triangles(triangle[None], emission=1.0)
+        normal = np.asarray(facet.normal)[0]
+        if np.ptp((triangle - np.asarray(facet.centroid)[0]) @ normal) > 0.01:
+            found.append(triangle)
+    return np.asarray(found)
+
+
+def test_a_facet_is_dropped_only_where_the_kernel_returns_nothing_at_every_point():
+    """Every facet the build leaves out for a receiver has an exactly zero transfer to it.
+
+    Asked receiver by receiver, so no other receiver's list can cover for a wrong drop, on a
+    jumble of random triangles and slivers packed close together: the kernel is evaluated at
+    every quadrature point of every receiver against every dropped facet. And not vacuously --
+    some facets are dropped.
+    """
+    from aquaflux.radiation import transfer
+    from aquaflux.radiation.quadrature import triangle_quadrature
+    from aquaflux.radiation.solid_angle import projected_solid_angle
+
+    rng = np.random.default_rng(7)
+    random = rng.uniform(-0.5, 0.5, (40, 3, 3))
+    surfaces = Surfaces.from_triangles(np.concatenate([random, _slivers(rng, 12)]), emission=1.0)
+    vertices = np.asarray(surfaces.vertices)
+    normal = np.asarray(surfaces.normal)
+    areal = ~np.asarray(surfaces.is_point_source)
+    sample = np.asarray(triangle_quadrature(6).points(surfaces.vertices))
+    # Every receiver's every point against every facet, in one evaluation.
+    values = np.asarray(
+        projected_solid_angle(
+            jnp.asarray(sample)[:, :, None, :],
+            jnp.asarray(normal)[:, None, None, :],
+            jnp.asarray(vertices)[None, None, :, :, :],
+        )
+    )
+    dropped_any = 0
+    for receiver in range(surfaces.n_facets):
+        kept = transfer._columns_in_front(vertices, sample, normal, areal, np.array([receiver]))
+        dropped = np.setdiff1d(np.flatnonzero(areal), kept)
+        dropped_any += len(dropped)
+        wrongly = dropped[np.any(values[receiver][:, dropped] != 0.0, axis=0)]
+        assert len(wrongly) == 0, (receiver, wrongly)
+    assert dropped_any > 100, dropped_any
+
+
+def _tube_with_a_sliver():
+    """An open tube wound outward, whose facets see little of one another, plus one sliver.
+
+    Around a convex surface a facet lies behind the planes of all but its neighbours, so most
+    pairs are skipped -- and the answer must still be the one every pair computes. The sliver is
+    a triangle with collinear vertices, placed outside the tube where its facets face it: its
+    stored normal is arbitrary and its quadrature points do not share a plane with it, which is
+    how a test made from a facet's centroid alone drops pairs the kernel counts.
+    """
+    x = np.linspace(0.0, 1.0, 9)
+    angle = np.linspace(0.0, 2.0 * np.pi, 16, endpoint=False)
+    ring = 0.3 * np.stack([np.cos(angle), np.sin(angle)], axis=1)
+    faces = []
+    for i in range(8):
+        for j in range(16):
+            k = (j + 1) % 16
+            a, b = [x[i], *ring[j]], [x[i], *ring[k]]
+            c, d = [x[i + 1], *ring[k]], [x[i + 1], *ring[j]]
+            faces += [[a, b, c], [a, c, d]]
+    # Collinear to rounding, and chosen so that the normal its rounding produces tilts off its
+    # line: its vertices then lie centimetres from the plane the stored normal defines.
+    sliver = [
+        [
+            [0.46479603, 0.57655504, -0.03073228],
+            [0.52515985, 0.57133849, 0.00432476],
+            [0.6372641, 0.56165062, 0.0694307],
+        ]
+    ]
+    return Surfaces.from_triangles(np.concatenate([faces, sliver]), emission=1.0)
+
+
+def test_pairs_wholly_behind_the_receiver_are_skipped_and_nothing_changes(monkeypatch):
+    """Skipping the facets behind a block's receivers gives the matrix every pair gives.
+
+    The reference evaluates every column of every block, by replacing the list of facets in
+    front with every areal facet. The skip must also have skipped something: on a convex tube
+    the columns evaluated are a small share of the whole.
+    """
+    from aquaflux.radiation import transfer
+
+    surfaces = _tube_with_a_sliver()
+    evaluated = []
+    real = transfer._row_block
+
+    def counted(geometry, sample, weight, index, columns):
+        evaluated.append(len(index) * len(columns))
+        return real(geometry, sample, weight, index, columns)
+
+    monkeypatch.setattr(transfer, "_row_block", counted)
+    skipped = build_transfer(surfaces, self_occlusion=NoOcclusion(), chunk_size=8)
+    skipped_work = sum(evaluated)
+    monkeypatch.setattr(
+        transfer,
+        "_columns_in_front",
+        lambda vertices, sample, normal, areal, index: np.flatnonzero(areal),
+    )
+    every = build_transfer(surfaces, self_occlusion=NoOcclusion(), chunk_size=8)
+    # To a rounding of the O(1) row sums, as for any change of block shape: a pair with no
+    # transfer comes back from a differently fused program as dust of order 1e-17, and a skipped
+    # one as an exact zero. A pair wrongly skipped is off by the size of a transfer factor.
+    for name in ("geometric", "source_cosine", "separation"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(skipped, name)),
+            np.asarray(getattr(every, name)),
+            rtol=0,
+            atol=1e-15,
+        )
+    matrix = np.asarray(every.geometric)
+    assert np.count_nonzero(matrix[-1] > 1e-9) > 5, "the sliver sees the tube"
+    n = surfaces.n_facets
+    assert skipped_work < 0.4 * n * n, (skipped_work, n * n)
 
 
 @pytest.mark.parametrize("chunk_size", [7, 1000])
