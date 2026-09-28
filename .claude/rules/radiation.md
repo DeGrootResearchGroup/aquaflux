@@ -2001,7 +2001,8 @@ facet's `near` (1e-6 x sqrt(area)) survives — **dismissed**, the margin is too
 on any fixture, as it was for the host path. #564's harness times `_compiled_tile_blocks` as `test
 tiles / compiled test` and `_walked_tile_blocks` as `test tiles / walked test`.
 ⚠️ **A body's certificate is asked on batches padded to a power of two** (2026-09-27, `_vouches`, used by
-`_vouched` and `_vouched_pairs`). `Body.vouches` is, by default, a few **eager** `jnp` operations, and an
+`_vouched` and `_vouched_pairs`; since 2026-09-28 it pads the tiles' *indices* and asks
+`Body.vouches_tiles`). `Body.vouches` is, by default, a few **eager** `jnp` operations, and an
 eager operation compiles once per shape: on the analytic `Outside` a batch length never seen before cost
 **111 ms** against **0.6 ms** for a repeated one (median of 20, 20,000 tiles, 3 features; jax 0.10.2,
 Linux, 4 cores). The tiles asked about change with every pass and level — more so since #578 drops the
@@ -2042,6 +2043,28 @@ padding (a pair walked twice), for walking pairs behind their source, and for pa
 `field_cost_breakdown.py` now counts what each test is handed — `tested by a compiled body, padding
 included`, `walked by a host-answered body`, and `behind their source, inside tiles a host-answered body
 tested` — instead of re-deriving the padding from the batching arithmetic.
+**The triangle body's certificate is one compiled loop, and never forms a tile's summary** (2026-09-28,
+`TriangleBody.vouches_tiles` → `TriangleGrid.holds_any_in_unions`, `grid._unions_held`). The numpy
+certificate built each batch's merged summaries (`np.maximum` over the tiles), then clipped, truncated
+and looked them up in `occupied_below` a whole-array pass at a time, single-threaded. Now a
+`numba.njit(parallel=True)` loop over the tiles takes the two groups' boxes, forms their bounding box in
+registers, and makes the eight lookups. `holds_any` runs on the same loop (each box paired with itself),
+so the truncation, the margin and the table's corners have one home, `_voxel_span` and `_unions_held`.
+**Profiled first** on the stand-in above, widened to a 30 mm slab (21,648 receivers streamed in 19 chunks
+of 1,190, `prepared` culling, back faces; second pass of a fresh process; jax 0.10.2, numba 0.67.0,
+Linux x86_64, 4 cores): the certificates were **0.97 s** of a 17.4 s mask, of which `holds_any` was
+**0.71 s** (~144 ns a tile over 4.93M tiles) and building the merged tiles ~0.2 s. Afterwards, two
+processes per arm: certificates **0.97–0.99 → 0.05–0.08 s**, the whole refinement (`_undecided`)
+**1.50 → 0.56–0.62 s**, masks bit-identical (and the earlier 12 mm probe's too). The pair tests are
+~90% of this stand-in, so the whole mask moved only 16.1–17.4 → 15.4–15.8 s. On the mesh the
+certificates were 125.2 s of 1,465 s; **not measured there**. Pinned by
+`test_the_compiled_box_test_gives_the_answer_the_array_passes_give` (the box test against an
+independent whole-array one, on boxes whose faces sit on, a rounding off, or far from voxel edges),
+`test_a_union_of_two_boxes_is_tested_as_the_box_that_bounds_them` (some unions hold what neither box
+does) and `test_a_body_vouches_for_tiles_as_it_does_for_their_merged_summaries`. Mutation-checked: no
+low-side margin, a missing `+ 1` on the last voxel, a wrong table corner, a union that ignores one
+box's low corner on one axis, `rows` passed for `cols`, padding a host body's certificates, and not
+padding a traceable one's — each red.
 
 **How.** Receivers and facet centroids are each ordered along a Morton curve (`spatial_order`, 10 bits
 an axis) and padded to a whole number of the coarsest groups by repeating the last point (`_Curve`;

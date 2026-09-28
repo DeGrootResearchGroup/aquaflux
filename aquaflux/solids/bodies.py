@@ -68,6 +68,7 @@ from typing import ClassVar
 
 import equinox as eqx
 import jax.numpy as jnp
+import numpy as np
 
 from aquaflux.vectors import dot, norm_squared
 
@@ -191,6 +192,28 @@ class Body(eqx.Module):
         jnp.ndarray of bool, shape ``(...)``
         """
         return jnp.any(jnp.asarray(summary) < 0.0, axis=-1)
+
+    def vouches_tiles(self, first, second, rows, cols):
+        """:meth:`vouches` for each tile joining a set from ``first`` with a set from ``second``.
+
+        Tile ``t`` is the union of the set whose merged :meth:`clearance` is ``first[rows[t]]``
+        and the one whose merged clearance is ``second[cols[t]]``, so its summary is the larger
+        of the two, column by column. The default forms those summaries and asks :meth:`vouches`;
+        a body may answer without forming them, provided every answer is the same.
+
+        Parameters
+        ----------
+        first : array_like, shape ``(n_first, n_features)``
+        second : array_like, shape ``(n_second, n_features)``
+            Summaries of the sets tiles are made from.
+        rows, cols : array_like of int, shape ``(n_tiles,)``
+            Which summary of each set each tile joins.
+
+        Returns
+        -------
+        array of bool, shape ``(n_tiles,)``
+        """
+        return self.vouches(np.maximum(np.asarray(first)[rows], np.asarray(second)[cols]))
 
 
 #: Directions along which a separating plane between a convex hull and a body is looked for:
