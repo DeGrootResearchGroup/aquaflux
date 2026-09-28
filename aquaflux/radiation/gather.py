@@ -496,10 +496,12 @@ def direct_fluence_rate(
         What fraction each body lets through, in ``[0, 1]``. Differentiable, and defaulting to
         zero -- opaque -- so that a mask supplied without one blocks rather than passes.
     pair_limit : int, optional
-        Receiver-by-facet pairs per traced chunk, and per streamed mask. The pairs are what
-        cost memory, so a chunk holds as many receivers as fit and a finer emitter gets fewer of
-        them per chunk rather than a larger chunk. Trades peak memory against nothing; the
-        arithmetic is the same either way.
+        Receiver-by-facet pairs a traced chunk may form, and per streamed mask. The pairs are
+        what cost memory, so a chunk holds as many receivers as fit and a finer emitter gets fewer
+        of them per chunk rather than a larger chunk. Trades peak memory against nothing; the
+        arithmetic is the same either way. A traced chunk forms no more than
+        ``aquaflux.radiation.work.PASS_PAIRS`` however high this is set, because past a
+        core's cache the same pairs cost more.
 
     Returns
     -------

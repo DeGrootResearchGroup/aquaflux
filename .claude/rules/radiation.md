@@ -2442,9 +2442,10 @@ x86_64, 4 cores, run directly, nothing else running, 2026-09-27):
   13.4-13.5 s in all; as ONE streamed chunk with the traced chunk left at the default (a diagnostic,
   not a setting) mask 3.1 s, segments **5.9-6.2 s**, 9.4-9.8 s. Blocking each piece serializes what
   the unwrapped call overlaps (host mask work beside the previous chunk's device gather), which is why
-  its totals exceed the 10.8-11.1 s above. So **the gather's per-chunk layout is the lever** — four
-  equal segments of ~15 blocks pad to 0.56 and make small calls, where one layout over many blocks pads
-  to ~0.45 — and the mask's chunking is worth under 1 s.
+  its totals exceed the 10.8-11.1 s above. The mask's chunking is worth under 1 s. ⚠️ **The gap
+  between the two segment rows was read as padding and small calls (#577) and is neither**: it is the
+  size of one traced step — see A TRACED STEP IS BOUNDED BY CACHE below. Four equal segments pad to
+  0.53 and a layout cut by width pads to 0.47, which bought only ~10%.
 - ⚠️ **A first profile said the opposite ("the mask is 10.6 s of 11.5") and was the async-dispatch
   trap**: the mask build's `np.asarray` of its inputs waited for the previous chunk's gather, still
   running, and was charged for it. A streamed pass sized separately from the gather's traced chunk was
@@ -2471,6 +2472,70 @@ inverted, the attenuation dropped, and `_Labels` compared by identity. **Dismiss
 identity — measured inert: JAX found the cached program for an equal key with a different hash (a same
 scene traced once, a changed profile again, either way), so equality is what the cache rests on; the
 content hash stays because a hash must agree with equality.
+
+## A TRACED STEP IS BOUNDED BY CACHE, NOT ONLY BY MEMORY: `work.PASS_PAIRS` (#577, 2026-09-27)
+
+`work.in_passes` forms at most **`PASS_PAIRS = 2^16`** receiver-by-facet pairs a step, however high
+`pair_limit` is. `pair_limit` is still the memory bound (and still sets the streamed chunk and every
+host pass); `PASS_PAIRS` is the traced loop's speed bound. Answers do not change — each receiver's
+row is formed from its own inputs either way — and every checksum below agreed across bounds.
+Reaches every `in_passes` consumer: the areal segments, the point sources, `direct_irradiance` and the
+graded-medium transfer walk.
+
+**Why.** The compiled gather body writes each per-pair intermediate out and reads it back. On this
+machine the per-pair rate is ~23-26M pairs/s while a step forms up to ~230k pairs and falls to
+~12-15M pairs/s past ~300k (one segment kernel, 2,400-facet lists, blocks of 8: 12 blocks 24.6M/s,
+16 blocks 13.3M/s). **Pinned to one core the cliff is still there** (4 blocks 16.2M/s, 8+ blocks
+~7.9M/s), so it is the working set against a core's cache (2 MB L2 each here), not threading.
+
+⚠️ **#577 WAS FILED ON THE WRONG MECHANISM.** Its candidates (bucketed segments, a whole-stream plan,
+batched dispatches) all target padding and dispatch size. With held masks, the shipped four equal
+segments (0.529 of pairs, 204 calls) took 9.2-9.4 s, eight (0.550, 406 calls) 9.2-9.4 s, and a layout
+cut where the rounded width changes (0.468, 213 calls, far more compilation) 8.3-8.7 s. Padding and
+call count are worth ~10%; the step size is worth ~1.5x. Blocks per call only *looked* like the lever
+because a call of 15 blocks was one oversized step.
+
+⚠️ **TRAP: a patched bound in one process measures nothing after its first arm.** `_segment_part` is
+cached across calls under `_Labels` and `pair_limit`, neither of which carries the bound, so a second
+arm silently reuses the first one's program. A first probe read "no effect" (12.2-12.5 s for every
+cap) this way. `validation/sozzi_radiation/pass_pairs.py` runs each bound in its own process
+(`peak_footprint.run_forwarded`, so a `kill` of the parent stops the child).
+
+**MEASURED** (`pass_pairs.py`: analytic 32 x 128 lamp, 8,704 facets, `UniformAbsorption(35.67)`,
+`NoOcclusion`, `Outside(chamber, inlet, riser)`, 23,046 receivers uniform in the three cylinders
+outside the lamp — the case mesh absent, so NOT the cell-centre population; streamed gradient over the
+first 4,000 in emission; held gather 12,000 receivers against a mask built once; jax 0.10.2, numba
+0.67.0, CPU, x64, Linux x86_64, 4 cores, nothing else running, two alternating sweeps, fastest kept,
+spreads ≤ 1.11x, 2026-09-27):
+
+| bound (pairs a step) | 32k | 64k | 131k | 262k | 1M | 4M (= before) |
+|---|---|---|---|---|---|---|
+| streamed field, s | 8.76 | **8.43** | 8.60 | 10.73 | 12.03 | 12.21 |
+| streamed gradient, s | 8.37 | **7.93** | 8.99 | 9.81 | 12.21 | 12.07 |
+| held gather, eager, s | 6.38 | 6.17 | 6.63 | 6.25 | 6.58 | 6.36 |
+| held gather under `jit`, s | 2.22 | 2.12 | 2.14 | 1.89 | 2.21 | 2.53 |
+
+A flat floor from 32k to 131k; 64k is the fastest or tied on every path. **~1.45x on the streamed
+field and ~1.5x on its gradient; the held gather within its spread** — it gathers from a whole-problem
+mask, whose random reads are out of cache at any step size. Separately (own probes, same machine):
+`direct_irradiance` at 12,000 receivers 56 → 47 s; a `VoxelAbsorption` held gather (1,500 receivers,
+12 x 8 x 8 grid) 23.3 → 23.5 s, i.e. none.
+
+⚠️ **The bound is this machine's.** The #509 table (macOS arm64, 11 cores) found 1M-64M pairs a step
+equally fast, which says the cliff there is below 1M or absent — it never tried below 1M. **Re-run
+`pass_pairs.py` on the Mac before reading the 1.45x as portable**; the floor is broad, so a smaller bound
+than needed costs little.
+
+⚠️ **The transfer build does NOT take this bound, although it was built and agreed (2026-09-28).**
+Capping `_row_blocks` at `receivers_per_step(chunk_size * n, n)` rows measured ~1.2x (245-247 s at
+256 rows against 194-204 s at 4-8, 8,704-facet lamp, checksums identical) — but on the build before
+#582, which since evaluates each block only against the facets in front of it, so a block forms
+`rows x width` costly pairs, not `rows x n`. The cap and its numbers were withdrawn in the merge;
+re-measure on the new build before capping it by any count.
+
+**Pinned by** `test_a_step_forms_no_more_than_the_pass_bound_under_a_higher_limit`
+(`test_radiation_work.py`: scan length 6 for 12 points at a bound of 4 pairs and a limit of 8, and a
+lower limit still winning); reverting the `min(pair_limit, PASS_PAIRS)` turns it red.
 
 ## GRID ACCELERATION: BUILT as `TriangleGrid` — a compiled host walk, off by default
 
@@ -3065,7 +3130,9 @@ jax 0.10.2, CPU, x64, macOS arm64, 11 cores, 2026-09-24):
 | streamed with `Outside`, s | 3.3 / 3.5 / 3.7 | 1.14 / 1.43 / 1.36 | 0.68 / 0.92 / 1.00 | 1.9 / 2.4 / 1.3 |
 | streamed, peak footprint | 0.88-0.93 GB | 1.5-1.9 GB | 4.3-4.6 GB | 7.0-7.3 GB |
 
-4M is as fast as any limit for the traced gather within the spread and keeps every path under 2 GB.
+4M is as fast as any limit for the traced gather within the spread and keeps every path under 2 GB. ⚠️ **Since 2026-09-27 a traced step
+forms at most `work.PASS_PAIRS` (2^16) whatever the limit**, so the "gather alone" row no longer
+varies the traced step at all — see A TRACED STEP IS BOUNDED BY CACHE.
 ⚠️ **The streamed path would be 1.4-1.7x faster at 16M, at 2.3-2.8x the footprint**, and its cost at
 small limits is *per-pass host overhead* (a mask build and a fresh gather call per pass), not
 arithmetic — 1M is ~3x slower than 4M on it for the same pairs. That is the lever for #489: the
