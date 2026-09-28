@@ -1972,10 +1972,11 @@ on the analytic Sozzi-like scene (24,000 sampled receivers, 8,704 facets, 53 chu
 default ladder; jax 0.10.2, Linux x86_64, 4 cores, one process, three alternating passes): streamed
 field median **21.96 → 20.67 s** (~6%), fields bit-identical — in line with the ~14 s of 317 s the
 Sozzi whole-field breakdown (#564) charged to per-chunk facet clearance and summaries.
-**The leftover tiles' points are gathered inside the compiled test** (2026-09-26, `_tile_blocks` /
+**The leftover tiles' points are gathered inside the compiled test** (2026-09-26,
 `_compiled_tile_blocks`): a traceable body gets the points whole (converted to device arrays once per
 `_test_tiles` call) and each tile's `rows`/`cols` indices, instead of every tile's points gathered and
-copied on the host before the call; a host body (`TriangleBody`) still gets gathered points. The
+copied on the host before the call; a host body (`TriangleBody`) gets its pairs' points gathered, as a
+flat list (`_walked_tile_blocks`, below). The
 write-back into the mask stays a numpy scatter — **scattering on the device inside the same program was
 measured and was slower** (median 1.89 against 1.63 s on the same tiles, no buffer donation). Measured on
 the leftover tiles of 4,000 sampled receivers x 8,704 facets at the default ladder (720,086 2x2 tiles; 4
@@ -1985,8 +1986,8 @@ container's spread — one pass reversed)**. The stand-in tests only ~9% of its 
 the leftover test is 59% of the call (#564), so the saving there should be larger — **not measured**.
 Fields bit-identical. Mutation: a reversed tile order goes red; handing each pair a neighbouring
 facet's `near` (1e-6 x sqrt(area)) survives — **dismissed**, the margin is too small to change an answer
-on any fixture, as it was for the host path. #564's harness now times `_tile_blocks` as `test tiles /
-compiled test`.
+on any fixture, as it was for the host path. #564's harness times `_compiled_tile_blocks` as `test
+tiles / compiled test` and `_walked_tile_blocks` as `test tiles / walked test`.
 ⚠️ **A body's certificate is asked on batches padded to a power of two** (2026-09-27, `_vouches`, used by
 `_vouched` and `_vouched_pairs`). `Body.vouches` is, by default, a few **eager** `jnp` operations, and an
 eager operation compiles once per shape: on the analytic `Outside` a batch length never seen before cost
@@ -2001,8 +2002,34 @@ sampled receivers, 8,704 facets, default ladder, fresh process each, two runs pe
 **3.13–3.43 → 1.29–1.33 s**, level 1 alone 1.60–1.69 → 0.31–0.33 s, identical tile counts at every level.
 **Not yet measured on the mesh** — re-run `certificate_levels.py` (and `field_cost_breakdown.py`) there.
 Pinned by `test_a_body_is_asked_to_vouch_only_at_a_few_batch_lengths` (red without the padding, and red
-keeping the wrong end of the padded answers). On the same stand-in the first call of #578's
+keeping the wrong end of the padded answers). **A body that is not `traceable` is asked unpadded** — see
+the next paragraph. On the same stand-in the first call of #578's
 `BackFaces.tiles_behind` costs ~2 s — its Numba loop compiling — once per process.
+⚠️ **A host-answered body is handed no padding, and no pair behind its source** (2026-09-28,
+`_test_tiles` / `_walked_tile_blocks`, `_vouches`). Both paddings above exist so that *compiled* work
+reuses its programs. A body that is not `traceable` compiles nothing, and `TriangleBody`'s grid walk has
+no notion of a segment already walked, so every repeated tile was walked for real. The Sozzi
+triangulated-wall run (1,635,909 cells, main + #580 + #581) had **4,866,359,296** pairs tested against
+**3,654,843,680** in undecided tiles: 25% of the walk was padding, and the walk was 1,148.7 s of a
+1,465 s call. Now, for such a body, the behind test still runs on the padded batch (it is a jitted
+`BackFaces.behind`, so an unpadded batch would compile per shape), and the walk is handed only the
+batch's own pairs not behind their source, as one flat segment list; those behind are written clear, as
+before. Its certificates are asked unpadded (`TriangleBody.vouches` is numpy). Traceable bodies are
+unchanged. ⚠️ **This ties "not traceable" to "answers on the host"**, which is what `Body.traceable`'s
+own comment says it means; a bespoke body written in eager `jnp` and left at the default would now
+compile per batch shape — still correct, only slower. Measured on a stand-in (the generated 64 x 400
+triangulated chamber of `triangle_culling.py` plus four triangulated 4 mm rods at radius 25 mm, the
+lattice slab at 12 mm (9,471 receivers), the analytic 24 x 64 lamp (3,360 facets), `BackFaces` of the
+lamp, default ladder; jax 0.10.2, Linux x86_64, 4 cores, two processes per arm, three passes each):
+segments walked **8,388,608 → 6,303,619** — of main's, 1,659,372 were padding and 425,617 real pairs
+behind their facet (6,729,236 real pairs undecided) — and warm passes **14.05–16.06 s → 7.42–9.12 s**,
+masks bit-identical. The time fell more than the count; that was **not decomposed**. **Not measured on
+the mesh.** Pinned by
+`test_a_host_answered_body_walks_each_lit_pair_once_and_is_asked_about_no_padding`: red for walking
+padding (a pair walked twice), for walking pairs behind their source, and for padding the certificates.
+`field_cost_breakdown.py` now counts what each test is handed — `tested by a compiled body, padding
+included`, `walked by a host-answered body`, and `behind their source, inside tiles a host-answered body
+tested` — instead of re-deriving the padding from the batching arithmetic.
 
 **How.** Receivers and facet centroids are each ordered along a Morton curve (`spatial_order`, 10 bits
 an axis) and padded to a whole number of the coarsest groups by repeating the last point (`_Curve`;
@@ -2012,9 +2039,10 @@ body, each group is summarized by the column-wise max of `body.clearance`, and a
 clear** where `body.vouches(max(receiver summary, source summary))` (the contract is in
 `.claude/rules/solids.md`). **A tile refused at one level is split into its children at the next**
 (`_undecided`; children made wholly of padding are dropped, not asked) and asked again; only tiles
-still refused at the finest level are gathered into batches of one shape (`pair_limit // (block *
-cluster)` tiles, padded to a power of two with `padded_length`) and answered by the same compiled
-`body.blocks` the reference uses, so the two agree **bit for bit** on every pair either tests. Host
+still refused at the finest level are gathered into batches (`pair_limit // (block * cluster)` tiles)
+and answered by the same `body.blocks` the reference uses — a traceable body compiled, on the batch
+padded to a power of two with `padded_length`; a host body on the batch's own pairs not behind their
+source — so the two agree **bit for bit** on every pair either tests. Host
 orchestration, compiled leaf — the `TriangleGrid` lesson. `certified_pairs` is every pair less those
 in the finest refused tiles, so it counts what refinement vouched for at any level. A body with no
 features is tested everywhere.

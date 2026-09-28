@@ -103,19 +103,6 @@ def _compiled_tile_blocks(body, sources, near, receivers, rows, cols):
     )
 
 
-def _tile_blocks(body, sources, near, receivers, rows, cols):
-    """One body's answer for each pair of each tile, shape ``(n_tiles, block, cluster)``.
-
-    ``rows`` and ``cols``, shapes ``(n_tiles, block)`` and ``(n_tiles, cluster)``, index
-    ``receivers`` and ``sources``. A body that answers on the host is handed the gathered points.
-    """
-    if body.traceable:
-        return _compiled_tile_blocks(body, sources, near, receivers, rows, cols)
-    return body.blocks(
-        sources[cols][:, None, :, :], receivers[rows][:, :, None, :], near[cols][:, None, :]
-    )
-
-
 class BodyCulling(eqx.Module):
     """How the analytic bodies' layer of a shadow mask is worked out.
 
@@ -375,7 +362,13 @@ def _vouches(body, tiles) -> np.ndarray:
     before, and compiling it costs far more than answering it. Padded by repeating the last tile
     to one of a few lengths, the calls share their compiled programs; the padding's answers are
     dropped.
+
+    A body that answers on the host (not :attr:`~aquaflux.solids.Body.traceable`) compiles
+    nothing, so for it the padding would be answered for real and buy nothing; it is asked about
+    the tiles as they stand.
     """
+    if not body.traceable:
+        return np.asarray(body.vouches(tiles))
     count = len(tiles)
     width = padded_length(count)
     if width > count:
@@ -648,11 +641,17 @@ class ShaftCulling(BodyCulling):
     def _test_tiles(self, body, sources, near, receivers, rows, cols, pair_limit, facing, out):
         """Test the undecided tiles pair by pair, writing each answer into ``out`` in place.
 
-        ``rows`` and ``cols`` hold each tile's point indices. Tiles go in batches of one shape,
-        padded to a power of two by repeating the last tile, so a pass compiles a couple of
-        programs however many tiles it has; the repeated tile writes its own answer again. Given
-        ``facing``, a pair whose receiver lies behind its source is written clear, as
-        :class:`EveryPair` writes it.
+        ``rows`` and ``cols`` hold each tile's point indices. Given ``facing``, a pair whose
+        receiver lies behind its source is written clear, as :class:`EveryPair` writes it.
+
+        The tiles go in batches, and what is compiled is asked about each batch padded to a power
+        of two by repeating its last tile, so a pass compiles a couple of programs however many
+        tiles it has: the behind test always, and the body's own test where the body is
+        :attr:`~aquaflux.solids.Body.traceable`. A body that answers on the host compiles
+        nothing, and would answer every padding pair for real -- a grid walk has no notion of a
+        pair it has already walked -- so it is asked only about the batch's own pairs that are
+        not behind their source (:func:`_walked_tile_blocks`); a pair behind is written clear
+        either way.
         """
         per_tile = rows.shape[1] * cols.shape[1]
         per_batch = max(1, pair_limit // per_tile)
@@ -662,15 +661,43 @@ class ShaftCulling(BodyCulling):
         for start in range(0, len(rows), per_batch):
             batch_rows = rows[start : start + per_batch]
             batch_cols = cols[start : start + per_batch]
-            width = padded_length(len(batch_rows))
-            pad = np.repeat(np.arange(len(batch_rows))[-1:], width - len(batch_rows))
-            take = np.concatenate([np.arange(len(batch_rows)), pad])
-            batch_rows, batch_cols = batch_rows[take], batch_cols[take]
-            answer = _tile_blocks(body, *points, batch_rows, batch_cols)
+            count = len(batch_rows)
+            take = np.concatenate(
+                [np.arange(count), np.full(padded_length(count) - count, count - 1)]
+            )
+            padded_rows, padded_cols = batch_rows[take], batch_cols[take]
+            dark = None
             if facing is not None:
-                targets = points[2][batch_rows][:, :, None, :]
-                answer = answer & ~facing.behind(targets, batch_cols[:, None, :])
-            out[batch_rows[:, :, None], batch_cols[:, None, :]] = np.asarray(answer)
+                targets = points[2][padded_rows][:, :, None, :]
+                dark = np.asarray(facing.behind(targets, padded_cols[:, None, :]))[:count]
+            if body.traceable:
+                answer = _compiled_tile_blocks(body, *points, padded_rows, padded_cols)
+                answer = np.asarray(answer)[:count]
+            else:
+                answer = _walked_tile_blocks(body, *points, batch_rows, batch_cols, dark)
+            if dark is not None:
+                answer = answer & ~dark
+            out[batch_rows[:, :, None], batch_cols[:, None, :]] = answer
+
+
+def _walked_tile_blocks(body, sources, near, receivers, rows, cols, dark):
+    """A host-answered body's answer for each pair of each tile, shape ``(n_tiles, block, cluster)``.
+
+    ``rows`` and ``cols``, shapes ``(n_tiles, block)`` and ``(n_tiles, cluster)``, index
+    ``receivers`` and ``sources``. The body is handed only the pairs ``dark`` (same shape as the
+    answer, or None) does not mark, as one flat list of segments; a pair it marks reads clear.
+    Each segment's answer depends on that segment alone, so the answers are the ones a whole
+    tile's segments would get.
+    """
+    answer = np.zeros((len(rows), rows.shape[1], cols.shape[1]), dtype=bool)
+    tile, row, col = np.nonzero(answer == 0 if dark is None else ~dark)
+    if len(tile) == 0:
+        return answer
+    receiver, source = rows[tile, row], cols[tile, col]
+    answer[tile, row, col] = np.asarray(
+        body.blocks(sources[source], receivers[receiver], near[source])
+    )
+    return answer
 
 
 def _is_none(value) -> bool:
