@@ -294,6 +294,8 @@ row blocks' work, still running asynchronously, was charged to the facet mask as
 
 ## Where the whole-field call spends its time after #575 and #578 (2026-09-27, `field_cost_breakdown.py`)
 
+⚠️ Superseded as the current state by the section on `8fc66ac` below; kept as the record of #578.
+
 The same harness and configuration as the section above, re-run on `main` at `2810eea`, which adds
 #575 (the lamp facets' side of shaft culling formed once per call) and #578 (a pair whose receiver
 lies behind its lamp facet is recorded clear without being tested, in the shadow mask and in the
@@ -340,6 +342,61 @@ The build is unchanged: **57.3 s**, the transfer's row blocks 56.8 s and its fac
   it, but the whole of it is 65 s of test.
 - ⚠️ **Read the 1.51x as one run against one run**, on the same machine a day apart: this machine has
   varied more than 1.1x between runs, so the ratio is good to about that.
+
+## Where the whole-field call spends its time on `main` at `8fc66ac` (2026-09-27, `field_cost_breakdown.py`)
+
+Both waters, re-run on `main` at `8fc66ac` (#580 to #586 merged since the section above). Whole mesh
+(1,635,909 cells, 7,516 lamp facets), default culling, `NoOcclusion`, streamed receiver mask, the
+harness's counting of wholly blocked tiles on; run through `validation/run_case.sh` one after the
+other with nothing else heavy running; jax 0.10.2, numba 0.67.0, CPU, x64, macOS arm64, 11 cores. The
+"before" column is the same harness a few hours earlier on `main` at `bb573d5` with #581 merged in (so
+#580 and #581 in, #582 to #586 not); one run per column, so read the ratios as good to about 1.1×.
+
+**The three hand-typed cylinders** (no CAD kernel installed):
+
+| piece | before s | now s |
+|---|---|---|
+| **call, less the harness's counting** | **161.0** | **171.5** |
+| pair-by-pair test of undecided tiles (compiled test) | 64.3 (51.0) | 65.2 (52.9) |
+| deciding undecided tiles (certificates) | 16.3 (4.2) | 17.3 (5.1) |
+| receiver groups (clearance) | 13.1 (12.1) | 13.5 (12.5) |
+| gather: areal segments + layout | 44.0 + 5.8 | 50.8 + 6.0 |
+| build (transfer row blocks) | 56.9 (56.4) | 53.0 (52.4) |
+
+The pairs are the same in both: 760,043,420 in undecided tiles (6.2% of all), 901,783,552 tested with
+padding, 562,087,592 blocked. Nothing here clearly moved; the areal gather segments rose 44.0 → 50.8 s,
+not separated from the run-to-run spread with one run each. The certificates are 5 s, against 53.5 s
+in the section above, which is #580.
+
+**The vessel wall as the triangles of `bodyWall.stl`** (`SOZZI_WATER=triangles`, the default walk
+grid 102 × 102 × 102):
+
+| piece | before s | now s |
+|---|---|---|
+| **call, less the harness's counting** | **1,465.1** | **1,098.2** (1.33×) |
+| the walk | 1,148.7 | **864.8** |
+| host work around it | 73.0 | 66.4 |
+| tile certificates | 125.2 | **42.7** |
+| the rest of deciding undecided tiles (tiles behind 15.0 s now) | 40.2 | 39.6 |
+| gather: areal segments + layout | 44.2 + 6.0 | 49.7 + 6.1 |
+| build | 58.2 | 53.0 |
+
+| pairs | before | now |
+|---|---|---|
+| in undecided tiles | 3,654,843,680 (29.7%) | 3,654,843,680 (29.7%) |
+| walked | 4,866,359,296 (padding included) | **3,458,668,522 (28.1%)** |
+| behind their source inside the tiles walked, now written clear unwalked | — | 196,175,158 (1.6%) |
+| blocked | 568,869,127 (4.6%) | 568,869,127 (4.6%) |
+
+- **The walk no longer walks padding.** Before, a quarter of the pairs walked were repeated tiles
+  padding a batch to a power of two, which only compiled code needs; now the walk is handed exactly
+  the undecided pairs not behind their source. 1.41× fewer pairs, and the walk 1.33× faster, so its
+  rate is unchanged at about 4 M pairs/s.
+- **The certificates fell 125.2 → 42.7 s**, the triangle body's box test now one compiled loop.
+- **The walk is still 79% of the call, and what it is given is set by certification**: 29.7% of pairs
+  are left undecided here, against 6.2% with the cylinders. A certificate that decided more of them is
+  now the lever. A "fully hidden" one would not be: wholly blocked tiles hold at most 15.1% of the
+  undecided pairs (at 2 × 2).
 
 ## The vessel wall as its triangles, at mesh scale (2026-09-26, `model_at_mesh_scale.py`, `grid_mask_check.py`, `triangle_culling.py`)
 
