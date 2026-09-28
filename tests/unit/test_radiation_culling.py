@@ -403,6 +403,62 @@ def test_a_pair_behind_its_source_is_left_untested_and_recorded_clear_by_every_s
     assert np.all(decided > certified), "tiles behind their sources went untested"
 
 
+def _triangulated_box(centre, half_sizes) -> np.ndarray:
+    """A box's twelve triangles, wound outward, shape ``(12, 3, 3)``."""
+    corner = np.array([[i, j, k] for i in (-1, 1) for j in (-1, 1) for k in (-1, 1)], dtype=float)
+    corner = np.asarray(centre) + corner * np.asarray(half_sizes)
+    faces = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)]
+    return np.array(
+        [corner[[a, b, c]] for a, b, c, d in faces for a, b, c in ((a, b, c), (a, c, d))]
+    )
+
+
+def test_a_host_answered_body_walks_each_lit_pair_once_and_is_asked_about_no_padding(monkeypatch):
+    """A body that answers on the host is handed its pairs and tiles as they are, never padded.
+
+    A grid walk has no notion of a segment it has already walked, so a batch padded by repeating
+    its last tile, or a pair behind its source handed over only to be cleared afterwards, is paid
+    for in full. So every segment the body walks must be a distinct pair, none behind its source,
+    and at least one certificate batch must reach it at a length no padding would give -- with
+    the mask still the one every pair gives.
+    """
+    from aquaflux.radiation import TriangleBody
+    from aquaflux.radiation.back_faces import BackFaces
+
+    lamp = _lamp()
+    sources = np.asarray(lamp.centroid)
+    near = 1e-6 * np.sqrt(np.asarray(lamp.area))
+    receivers = _receivers(500)
+    facing = BackFaces.of(lamp)
+    body = TriangleBody.build(_triangulated_box([0.6, 0.0, 0.06], [0.01, 0.1, 0.02]))
+    reference = np.asarray(EveryPair().blocked([body], sources, near, receivers, facing=facing))
+    assert reference.any()
+    walked, asked = [], []
+    blocks, vouches = TriangleBody.blocks, TriangleBody.vouches
+
+    def recording_blocks(self, origin, target, min_distance):
+        walked.append(np.concatenate(np.broadcast_arrays(origin, target), axis=-1).reshape(-1, 6))
+        return blocks(self, origin, target, min_distance)
+
+    def recording_vouches(self, summary):
+        asked.append(len(summary))
+        return vouches(self, summary)
+
+    monkeypatch.setattr(TriangleBody, "blocks", recording_blocks)
+    monkeypatch.setattr(TriangleBody, "vouches", recording_vouches)
+    culled = np.asarray(ShaftCulling().blocked([body], sources, near, receivers, facing=facing))
+    np.testing.assert_array_equal(culled, reference)
+    segments = np.concatenate(walked)
+    assert 0 < len(segments) < len(sources) * len(receivers)
+    assert len(np.unique(segments, axis=0)) == len(segments), "a pair was walked twice"
+    source = {tuple(point): index for index, point in enumerate(sources)}
+    receiver = {tuple(point): index for index, point in enumerate(receivers)}
+    rows = np.array([receiver[tuple(point)] for point in segments[:, 3:]])
+    cols = np.array([source[tuple(point)] for point in segments[:, :3]])
+    assert not np.asarray(facing.every_pair(receivers))[rows, cols].any(), "a dark pair was walked"
+    assert any(length & (length - 1) for length in asked), sorted(set(asked))
+
+
 def test_a_tile_is_proven_behind_only_where_every_one_of_its_pairs_is():
     """The box test never says a tile is behind when the pair test would light one of its pairs.
 

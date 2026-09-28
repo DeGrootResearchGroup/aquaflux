@@ -132,6 +132,9 @@ TREE = {
     "call / field / chunk / mask / bodies / test tiles / compiled test": (
         "call / field / chunk / mask / bodies / test tiles"
     ),
+    "call / field / chunk / mask / bodies / test tiles / walked test": (
+        "call / field / chunk / mask / bodies / test tiles"
+    ),
     "call / field / chunk / mask / hidden-tile count": "call / field / chunk / mask",
     "call / field / chunk / mask / bodies / undecided tiles / tiles behind": (
         "call / field / chunk / mask / bodies / undecided tiles"
@@ -193,8 +196,8 @@ def instrument_call(timers: Timers, n_facets: int, pairs: dict) -> None:
     Applied only once the model is built, because the transfer's own mask goes through the same
     culling code, and would otherwise be charged to the field's chunks.
     """
+    import numpy as np
     from aquaflux.radiation import TriangleBody, culling, gather, model, receiver_shadows
-    from aquaflux.radiation.triangles import padded_length
     from aquaflux.solids import Outside
 
     model.radiosity = timers.wrap("call / radiosity", model.radiosity)
@@ -276,12 +279,7 @@ def instrument_call(timers: Timers, n_facets: int, pairs: dict) -> None:
     def counted_test_tiles(
         self, body, sources, near, receivers, rows, cols, pair_limit, facing, out
     ):
-        # The same batching arithmetic as the strategy's own, to count what it tests.
-        per_tile = rows.shape[1] * cols.shape[1]
-        per_batch = max(1, pair_limit // per_tile)
-        batches = [min(per_batch, len(rows) - start) for start in range(0, len(rows), per_batch)]
-        pairs["in undecided tiles"] += len(rows) * per_tile
-        pairs["tested, padding included"] += sum(padded_length(n) for n in batches) * per_tile
+        pairs["in undecided tiles"] += rows.size * cols.shape[1]
         return test_tiles(self, body, sources, near, receivers, rows, cols, pair_limit, facing, out)
 
     culling.ShaftCulling._test_tiles = counted_test_tiles
@@ -299,9 +297,32 @@ def instrument_call(timers: Timers, n_facets: int, pairs: dict) -> None:
         return mask
 
     culling.ShaftCulling.blocked = counted_blocked
-    culling._tile_blocks = timers.wrap(
-        "call / field / chunk / mask / bodies / test tiles / compiled test", culling._tile_blocks
+    # What each test is handed, counted from its own arguments: a compiled test is handed its
+    # batch padded to a power of two, the walk of a host-answered body only the batch's pairs
+    # that are not behind their source.
+    compiled_test = timers.wrap(
+        "call / field / chunk / mask / bodies / test tiles / compiled test",
+        culling._compiled_tile_blocks,
     )
+
+    def counted_compiled_test(body, sources, near, receivers, rows, cols):
+        pairs["tested by a compiled body, padding included"] += rows.size * cols.shape[1]
+        return compiled_test(body, sources, near, receivers, rows, cols)
+
+    walked_test = timers.wrap(
+        "call / field / chunk / mask / bodies / test tiles / walked test",
+        culling._walked_tile_blocks,
+    )
+
+    def counted_walked_test(body, sources, near, receivers, rows, cols, dark):
+        tile_pairs = rows.size * cols.shape[1]
+        behind = 0 if dark is None else int(np.count_nonzero(dark))
+        pairs["walked by a host-answered body"] += tile_pairs - behind
+        pairs["behind their source, inside tiles a host-answered body tested"] += behind
+        return walked_test(body, sources, near, receivers, rows, cols, dark)
+
+    culling._compiled_tile_blocks = counted_compiled_test
+    culling._walked_tile_blocks = counted_walked_test
 
 
 def summary(timers: Timers) -> list[dict]:
@@ -365,7 +386,13 @@ def main() -> None:
     )
     timers.add("build", time.perf_counter() - started)
     _say(f"model built in {timers.seconds('build'):.1f} s")
-    pairs = {"all": 0, "in undecided tiles": 0, "tested, padding included": 0}
+    pairs = {
+        "all": 0,
+        "in undecided tiles": 0,
+        "tested by a compiled body, padding included": 0,
+        "walked by a host-answered body": 0,
+        "behind their source, inside tiles a host-answered body tested": 0,
+    }
     instrument_call(timers, int(lamp.n_facets), pairs)
 
     started = time.perf_counter()
