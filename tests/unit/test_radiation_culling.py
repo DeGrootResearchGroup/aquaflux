@@ -410,18 +410,18 @@ def test_a_host_answered_body_walks_each_lit_pair_once_and_is_asked_about_no_pad
     reference = np.asarray(EveryPair().blocked([body], sources, near, receivers, facing=facing))
     assert reference.any()
     walked, asked = [], []
-    blocks, vouches = TriangleBody.blocks, TriangleBody.vouches
+    blocks, vouches_tiles = TriangleBody.blocks, TriangleBody.vouches_tiles
 
     def recording_blocks(self, origin, target, min_distance):
         walked.append(np.concatenate(np.broadcast_arrays(origin, target), axis=-1).reshape(-1, 6))
         return blocks(self, origin, target, min_distance)
 
-    def recording_vouches(self, summary):
-        asked.append(len(summary))
-        return vouches(self, summary)
+    def recording_vouches(self, first, second, rows, cols):
+        asked.append(len(rows))
+        return vouches_tiles(self, first, second, rows, cols)
 
     monkeypatch.setattr(TriangleBody, "blocks", recording_blocks)
-    monkeypatch.setattr(TriangleBody, "vouches", recording_vouches)
+    monkeypatch.setattr(TriangleBody, "vouches_tiles", recording_vouches)
     culled = np.asarray(ShaftCulling().blocked([body], sources, near, receivers, facing=facing))
     np.testing.assert_array_equal(culled, reference)
     segments = np.concatenate(walked)

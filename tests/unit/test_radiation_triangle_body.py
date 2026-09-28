@@ -137,6 +137,87 @@ def test_a_box_the_grid_calls_empty_holds_no_point_of_any_triangle():
     assert np.count_nonzero(~held) > 300, np.count_nonzero(~held)
 
 
+def _held_by_arrays(grid, low, high) -> np.ndarray:
+    """The box test written as whole-array passes, independently of the compiled loop."""
+    margin = 1e-9 * grid.spacing * grid.resolution
+    top = grid.resolution - 1
+    first = np.clip(((low - margin - grid.low) / grid.spacing).astype(int), 0, top)
+    last = np.clip(((high + margin - grid.low) / grid.spacing).astype(int), 0, top) + 1
+    table = grid.occupied_below
+    total = np.zeros(low.shape[:-1], dtype=np.int64)
+    for corner in np.ndindex(2, 2, 2):
+        index = [np.where(pick, first, last)[..., axis] for axis, pick in enumerate(corner)]
+        total += (-1) ** sum(corner) * table[index[0], index[1], index[2]]
+    return total > 0
+
+
+def _boxes_on_voxel_edges(grid, rng, count: int) -> tuple[np.ndarray, np.ndarray]:
+    """Boxes of every size whose faces sit on, a rounding either side of, or far from voxel edges."""
+    start = rng.integers(-2, grid.resolution + 2, (count, 1, 3))
+    edges = np.concatenate([start, start + rng.integers(0, 3, (count, 1, 3))], axis=1)
+    corners = grid.low + edges * grid.spacing
+    shift = rng.choice([0.0, 1e-13, -1e-13, 1e-6, -1e-6, 0.3], (count, 2, 3))
+    corners = corners + shift * grid.spacing
+    return corners.min(axis=1), corners.max(axis=1)
+
+
+def test_the_compiled_box_test_gives_the_answer_the_array_passes_give():
+    """Bit for bit, on boxes whose faces sit exactly on voxel edges or a rounding off them.
+
+    That is where a changed truncation, margin or table corner shows: a face on an edge decides
+    between two voxels, and the margin is what keeps a face a rounding inside a voxel counting it.
+    Boxes wholly outside the grid, and straddling its faces, are clipped the same way.
+    """
+    rng = np.random.default_rng(8)
+    grid = TriangleGrid.build(np.concatenate([_vessel(), _sleeve()]), resolution=(14, 9, 11))
+    low, high = _boxes_on_voxel_edges(grid, rng, 20_000)
+    reference = _held_by_arrays(grid, low, high)
+    assert min(np.count_nonzero(reference), np.count_nonzero(~reference)) > 500
+    np.testing.assert_array_equal(grid.holds_any(low, high), reference)
+    shaped = grid.holds_any(low.reshape(40, 500, 3), high.reshape(40, 500, 3))
+    np.testing.assert_array_equal(shaped, reference.reshape(40, 500))
+
+
+def test_a_union_of_two_boxes_is_tested_as_the_box_that_bounds_them():
+    """Pairs of boxes, some nested, some apart, some sharing a face: the bounding box's answer.
+
+    Two boxes far apart can each be empty while the box bounding them is not, so an answer that
+    tested each box, or either one, instead of their union shows as a difference here.
+    """
+    rng = np.random.default_rng(9)
+    grid = TriangleGrid.build(np.concatenate([_vessel(), _sleeve()]), resolution=(14, 9, 11))
+    first_low, first_high = _boxes_on_voxel_edges(grid, rng, 300)
+    second_low, second_high = _boxes_on_voxel_edges(grid, rng, 200)
+    rows = rng.integers(0, 300, 40_000)
+    cols = rng.integers(0, 200, 40_000)
+    union_low = np.minimum(first_low[rows], second_low[cols])
+    union_high = np.maximum(first_high[rows], second_high[cols])
+    reference = _held_by_arrays(grid, union_low, union_high)
+    either = _held_by_arrays(grid, first_low[rows], first_high[rows]) | _held_by_arrays(
+        grid, second_low[cols], second_high[cols]
+    )
+    assert np.any(reference & ~either), "some unions hold what neither box does"
+    held = grid.holds_any_in_unions(first_low, first_high, second_low, second_high, rows, cols)
+    np.testing.assert_array_equal(held, reference)
+
+
+def test_a_body_vouches_for_tiles_as_it_does_for_their_merged_summaries():
+    """The triangle body's own tile test against the default, which merges and asks ``vouches``."""
+    from aquaflux.solids import Body
+
+    body = TriangleBody.build(np.concatenate([_vessel(), _sleeve()]))
+    rng = np.random.default_rng(10)
+    clouds = _water(rng, 500, body)[:, None, :] + rng.normal(scale=0.03, size=(500, 5, 3))
+    summary = np.asarray(body.clearance(clouds)).max(axis=1)
+    first, second = summary[:300], summary[300:]
+    rows, cols = rng.integers(0, 300, 30_000), rng.integers(0, 200, 30_000)
+    reference = np.asarray(Body.vouches_tiles(body, first, second, rows, cols))
+    assert min(np.count_nonzero(reference), np.count_nonzero(~reference)) > 500
+    np.testing.assert_array_equal(
+        np.asarray(body.vouches_tiles(first, second, rows, cols)), reference
+    )
+
+
 def test_a_body_vouches_only_for_sets_whose_segments_are_all_clear():
     """Random compact clouds in the water: where the body vouches, no segment among them is cut."""
     triangles = np.concatenate([_vessel(), _sleeve()])

@@ -204,6 +204,21 @@ class TriangleBody(Body):
         summary = np.asarray(summary, dtype=float)
         return jnp.asarray(~self.occupancy.holds_any(-summary[..., 3:], summary[..., :3]))
 
+    def vouches_tiles(self, first, second, rows, cols) -> jnp.ndarray:
+        """See :meth:`aquaflux.solids.Body.vouches_tiles`: each tile's bounding box, never formed.
+
+        A summary is a set's upper corner and its lower corner negated, so a tile's box is the
+        bounding box of its two sets' boxes, and
+        :meth:`~aquaflux.radiation.grid.TriangleGrid.holds_any_in_unions` answers for it in one
+        compiled pass -- the answers :meth:`vouches` gives on the merged summaries.
+        """
+        first = np.asarray(first, dtype=float)
+        second = np.asarray(second, dtype=float)
+        held = self.occupancy.holds_any_in_unions(
+            -first[:, 3:], first[:, :3], -second[:, 3:], second[:, :3], rows, cols
+        )
+        return jnp.asarray(~held)
+
 
 def _signed_volumes(vertices: np.ndarray, piece: np.ndarray, n_pieces: int) -> np.ndarray:
     """Each piece's signed enclosed volume, positive where its normals point outward.

@@ -37,14 +37,15 @@ _PEAK = re.compile(r"(\d+)\s+peak memory footprint")
 
 @dataclass(frozen=True)
 class Measured:
-    """What a child run under :func:`run_with_footprint` returned.
+    """What a child run under :func:`run_with_footprint` or :func:`run_forwarded` returned.
 
     Attributes
     ----------
     returncode : int
         The child's exit status.
     peak_footprint_bytes : int or None
-        Its peak memory footprint, or ``None`` if ``/usr/bin/time`` did not report one.
+        Its peak memory footprint, or ``None`` if ``/usr/bin/time`` did not report one or was
+        not used.
     stdout, stderr : str or None
         The child's output when captured, else ``None`` (it went to the parent's streams).
     """
@@ -77,6 +78,40 @@ def run_with_footprint(command: list[str], *, capture_output: bool = False) -> M
     Measured
         The exit status, the peak footprint, and the captured output if asked for.
     """
+    with tempfile.NamedTemporaryFile(suffix=".time", delete=False) as timing:
+        record = Path(timing.name)
+    try:
+        ran = run_forwarded(
+            ["/usr/bin/time", "-l", "-o", str(record), *command], capture_output=capture_output
+        )
+        found = _PEAK.search(record.read_text())
+    finally:
+        record.unlink(missing_ok=True)
+    return Measured(ran.returncode, int(found.group(1)) if found else None, ran.stdout, ran.stderr)
+
+
+def run_forwarded(command: list[str], *, capture_output: bool = False) -> Measured:
+    """Run ``command`` as a child that a ``kill`` of this process stops too; no footprint.
+
+    What :func:`run_with_footprint` does without ``/usr/bin/time``, for a harness that runs each
+    measurement in a process of its own for another reason -- a compiled-program cache that would
+    otherwise carry one arm's program into the next -- and on a platform whose ``time`` has no
+    ``-l``.
+
+    Parameters
+    ----------
+    command : list of str
+        The program and its arguments.
+    capture_output : bool
+        Capture the child's stdout and stderr as text instead of letting them stream to the
+        parent's.
+
+    Returns
+    -------
+    Measured
+        The exit status and the captured output if asked for; ``peak_footprint_bytes`` is
+        ``None``.
+    """
     received: list[int] = []
     child: subprocess.Popen | None = None
 
@@ -87,28 +122,18 @@ def run_with_footprint(command: list[str], *, capture_output: bool = False) -> M
 
     previous = {sig: signal.signal(sig, forward) for sig in FORWARDED}
     try:
-        with tempfile.NamedTemporaryFile(suffix=".time", delete=False) as timing:
-            record = Path(timing.name)
+        pipe = subprocess.PIPE if capture_output else None
+        child = subprocess.Popen(
+            command, stdout=pipe, stderr=pipe, text=True, start_new_session=True
+        )
+        if received:  # a signal landed before the child existed to forward it to
+            _signal_group(child, received[0])
         try:
-            pipe = subprocess.PIPE if capture_output else None
-            child = subprocess.Popen(
-                ["/usr/bin/time", "-l", "-o", str(record), *command],
-                stdout=pipe,
-                stderr=pipe,
-                text=True,
-                start_new_session=True,
-            )
-            if received:  # a signal landed before the child existed to forward it to
-                _signal_group(child, received[0])
-            try:
-                stdout, stderr = child.communicate()
-            finally:
-                if child.poll() is None:  # the parent is leaving for some other reason
-                    _signal_group(child, signal.SIGTERM)
-                    child.wait()
-            found = _PEAK.search(record.read_text())
+            stdout, stderr = child.communicate()
         finally:
-            record.unlink(missing_ok=True)
+            if child.poll() is None:  # the parent is leaving for some other reason
+                _signal_group(child, signal.SIGTERM)
+                child.wait()
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
@@ -116,7 +141,7 @@ def run_with_footprint(command: list[str], *, capture_output: bool = False) -> M
         # The child is gone; leave the way the sender asked, with the default action of its signal.
         signal.signal(received[0], signal.SIG_DFL)
         os.kill(os.getpid(), received[0])
-    return Measured(child.returncode, int(found.group(1)) if found else None, stdout, stderr)
+    return Measured(child.returncode, None, stdout, stderr)
 
 
 def _signal_group(child: subprocess.Popen, signum: int) -> None:
