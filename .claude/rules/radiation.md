@@ -1320,6 +1320,18 @@ decision. It was reviewed at this point and kept entire: every export is somethi
 legitimately reach for, including the two solid-angle kernels, whose warning that they are **not
 interchangeable** is worth publishing rather than hiding.
 
+**The user guide is `docs/radiation.md`** (in the Guide toctree beside `cad_geometry.md`, which it
+links to rather than repeats: CAD import, the mesh-patch lamp, streaming and culling timings on the
+Sozzi mesh live there). ⚠️ **It restates defaults and measurements by value**, so a change to any of
+these makes it false and must update it in the same change: the six-point `receiver_quadrature`,
+`refine_for_receivers`' `max_ratio=0.25`, the GMRES global relative `1e-10`, `RayCastOcclusion` as
+the self-occlusion default and `ShaftCulling` as the culling default, opaque as the transmittance
+default, the 2.6%-at-eight-sectors inscribed-area undershoot, 95% UVT = 5.129 /m, and the Sozzi
+figures (0.09% volume mean; 0.36-1.65 / 0.886-1.076 at 64 / 256 directions; 0.44% median lamp
+discretization; dose mean 0.3%, log reduction within 1.1%, DOM-64 short by 23% at k = 0.5). Its
+worked example — `G = 80` in a 6x6x6 box mesh's own patches at `M = 10, rho = 0.5` — was run
+(2026-09-28) and holds to rounding.
+
 
 ## The winding number answers "is this cell inside the metal", and it is exact
 

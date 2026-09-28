@@ -11,6 +11,9 @@ exchange format every CAD tool writes) into a {class}`~aquaflux.io.cad.CadModel`
 - **triangles** of a solid's surface for an emitter, every vertex on the true surface and the facet
   size under your control.
 
+The radiation model itself — what it computes, its settings and its derivatives — is described in
+[Ultraviolet radiation](radiation.md).
+
 Reading needs the optional CAD kernel, OpenCASCADE through its Python binding:
 
 ```bash
