@@ -2419,6 +2419,19 @@ equally fast, which says the cliff there is below 1M or absent — it never trie
 `pass_pairs.py` on the Mac before reading the 1.45x as portable**; the floor is broad, so a smaller bound
 than needed costs little.
 
+**The transfer build's row blocks take the same bound** (the project owner's choice among leave it /
+cap it / change the default, 2026-09-28): `_row_blocks` computes `min(chunk_size,
+work.receivers_per_step(chunk_size * n, n))` rows a block, so `chunk_size` stays the memory bound and
+its default of 256 is unchanged. `work.receivers_per_step` is the one home of the rule; `in_passes`
+calls it too. Measured with `_row_blocks` alone (analytic 8,704-facet lamp, six-point quadrature,
+one process per size, second of two calls; same machine and date): 256 rows **245-247 s**, 64 242 s,
+32 219 s, 16 208 s, 8 194-204 s, 4 203 s — **~1.2x**, far less than the gather's, as expected of a
+build recorded as limited by moving geometry. The three matrices' checksums identical at 4, 8, 32 and
+256 rows. At this lamp the cap gives 7 rows. Not measured on the Mac, where the mesh-scale build is
+57 s (#579). Pinned by `test_a_block_takes_fewer_rows_than_the_chunk_where_they_would_outgrow_one_step`
+(`test_radiation_transfer.py`: 3 rows a block at a bound of 3 x 49 pairs under a chunk of 7, every row
+covered, the matrix the unblocked one); dropping the cap turns it red.
+
 **Pinned by** `test_a_step_forms_no_more_than_the_pass_bound_under_a_higher_limit`
 (`test_radiation_work.py`: scan length 6 for 12 points at a bound of 4 pairs and a limit of 8, and a
 lower limit still winning); reverting the `min(pair_limit, PASS_PAIRS)` turns it red.
@@ -2964,7 +2977,8 @@ gather_chunk_size` is now `gather_pair_limit`. ⚠️ **There is no `chunk_size`
 more**: renamed rather than reinterpreted, so an old caller fails with a `TypeError` instead of
 silently getting a different chunk. `work_limit` keeps its meaning — rays × triangles in the
 intersection test — which is a different unit. **The transfer build's `chunk_size` (receiving facets,
-default 256) was deliberately left**: it has the same shape of trap, but an `n^2` transfer at a
+default 256) was deliberately left** (still receiving facets; since 2026-09-28 a block takes fewer
+where 256 rows would pass `work.PASS_PAIRS` pairs): it has the same shape of trap, but an `n^2` transfer at a
 facet count where it would bite is unaffordable anyway.
 
 **Why.** A receiver count left a pass's size to the facet count: the old default 4,096 receivers

@@ -254,6 +254,35 @@ def test_no_block_handed_to_the_compiled_pass_exceeds_the_chunk(monkeypatch):
     assert covered == set(range(49)), "every row is computed, and none beyond the matrix"
 
 
+def test_a_block_takes_fewer_rows_than_the_chunk_where_they_would_outgrow_one_step(monkeypatch):
+    """The chunk bounds a block's memory; the step bound, shared with the gather, bounds what a
+    block forms, because past a core's cache the same arithmetic is slower. The matrix is the
+    same either way."""
+    from aquaflux.radiation import transfer, work
+
+    rows_seen = []
+    real = transfer._row_block
+
+    def watched(geometry, sample, weight, start, *, rows):
+        rows_seen.append((int(start), rows))
+        return real(geometry, sample, weight, start, rows=rows)
+
+    surfaces = _box_with_a_lamp()
+    whole = build_transfer(surfaces, self_occlusion=NoOcclusion(), chunk_size=1000)
+    monkeypatch.setattr(transfer, "_row_block", watched)
+    # Three rows of the 49 facets a step, under a chunk of seven.
+    monkeypatch.setattr(work, "PASS_PAIRS", 3 * 49)
+    stepped = build_transfer(surfaces, self_occlusion=NoOcclusion(), chunk_size=7)
+    assert all(rows == 3 for _, rows in rows_seen), rows_seen
+    covered = set()
+    for start, rows in rows_seen:
+        covered.update(range(start, start + rows))
+    assert covered == set(range(49))
+    np.testing.assert_allclose(
+        np.asarray(stepped.geometric), np.asarray(whole.geometric), rtol=0, atol=1e-15
+    )
+
+
 @pytest.mark.parametrize("chunk_size", [7, 1000])
 def test_a_point_source_is_left_out_by_its_label_not_by_its_area(chunk_size):
     """A facet labelled a point source takes no part in the transfer even when it has an area.

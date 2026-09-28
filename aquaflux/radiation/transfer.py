@@ -82,7 +82,7 @@ from aquaflux.radiation.self_occlusion import SelfOcclusion
 from aquaflux.radiation.solid_angle import projected_solid_angle
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.visibility import Visibility, build_visibility
-from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, in_passes
+from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, in_passes, receivers_per_step
 from aquaflux.vectors import dot
 
 #: Points per receiving facet in the default transfer build. Six is where the measured
@@ -301,7 +301,9 @@ def _row_blocks(geometry: _Geometry, sample, weight, rows: int):
     if n_facets == 0:
         empty = jnp.zeros((0, 0))
         return empty, empty, empty
-    rows = max(1, min(int(rows), n_facets))
+    # ``rows`` bounds a block's memory; a block computes fewer where that many rows would outgrow
+    # a core's cache, which is slower for the same arithmetic.
+    rows = max(1, min(int(rows), n_facets, receivers_per_step(int(rows) * n_facets, n_facets)))
     buffers = tuple(jnp.zeros((n_facets, n_facets)) for _ in range(3))
     starts = [*range(0, n_facets - rows, rows), n_facets - rows]
     for start in starts:
@@ -341,7 +343,9 @@ def build_transfer(
     chunk_size : int, optional
         Receiving facets per block of the build, bounding the working set beside the arrays kept.
         Its meaning is unchanged by the quadrature: the points are accumulated one at a time
-        within a block, so a finer rule costs time and not memory.
+        within a block, so a finer rule costs time and not memory. A block takes fewer where
+        this many rows would form more than ``aquaflux.radiation.work.receivers_per_step``
+        allows, which is faster for the same answer.
     **visibility_options
         Passed through to the visibility build.
 
