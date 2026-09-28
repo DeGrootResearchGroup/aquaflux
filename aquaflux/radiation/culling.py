@@ -353,35 +353,33 @@ class _Groups:
         )
 
 
-def _vouches(body, tiles) -> np.ndarray:
-    """``body.vouches`` for each tile, asked on a batch padded to a power of two along its first axis.
+def _vouches(body, first, second, rows, cols) -> np.ndarray:
+    """``body.vouches_tiles`` for each listed tile, shape ``(n_tiles,)``.
 
-    A body's certificate is ordinarily a few array operations run eagerly, and an eager operation
-    is compiled once per shape it meets. The number of tiles asked about changes with every pass
-    and every level of refinement, so asked as it stands nearly every call is a shape not seen
-    before, and compiling it costs far more than answering it. Padded by repeating the last tile
-    to one of a few lengths, the calls share their compiled programs; the padding's answers are
-    dropped.
+    A traceable body's certificate is ordinarily a few array operations run eagerly, and an
+    eager operation is compiled once per shape it meets. The number of tiles asked about changes
+    with every pass and every level of refinement, so asked as it stands nearly every call is a
+    shape not seen before, and compiling it costs far more than answering it. So for such a body
+    the tiles are padded to a power of two by repeating the last one, the calls share their
+    compiled programs, and the padding's answers are dropped.
 
     A body that answers on the host (not :attr:`~aquaflux.solids.Body.traceable`) compiles
     nothing, so for it the padding would be answered for real and buy nothing; it is asked about
     the tiles as they stand.
     """
-    if not body.traceable:
-        return np.asarray(body.vouches(tiles))
-    count = len(tiles)
-    width = padded_length(count)
-    if width > count:
-        tiles = np.concatenate([tiles, np.repeat(tiles[-1:], width - count, axis=0)])
-    return np.asarray(body.vouches(tiles))[:count]
+    count = len(rows)
+    if body.traceable and padded_length(count) > count:
+        take = np.concatenate([np.arange(count), np.full(padded_length(count) - count, count - 1)])
+        rows, cols = rows[take], cols[take]
+    return np.asarray(body.vouches_tiles(first, second, rows, cols))[:count]
 
 
 def _vouched(body, receiver_summary, source_summary) -> np.ndarray:
     """Which tiles of every receiver group against every source group ``body`` vouches for.
 
     Shape ``(n_receiver_groups, n_source_groups)``. A tile's summary is the larger of its two
-    groups' summaries -- see :meth:`~aquaflux.solids.Body.clearance`. Formed a band of receiver
-    groups at a time, so the tiles-by-features array never holds more than
+    groups' summaries -- see :meth:`~aquaflux.solids.Body.clearance`. Asked a band of receiver
+    groups at a time, so a body forming the tiles' summaries never holds more than
     :data:`~aquaflux.radiation.work.DEFAULT_PAIR_LIMIT` entries whatever the scene's size.
     """
     n_rows, n_cols = len(receiver_summary), len(source_summary)
@@ -391,10 +389,12 @@ def _vouched(body, receiver_summary, source_summary) -> np.ndarray:
         return clear
     band = receivers_per_pass(DEFAULT_PAIR_LIMIT, n_cols * n_features)
     for start in range(0, n_rows, band):
-        tile = np.maximum(
-            receiver_summary[start : start + band, None, :], source_summary[None, :, :]
+        stop = min(start + band, n_rows)
+        rows = np.repeat(np.arange(start, stop), n_cols)
+        cols = np.tile(np.arange(n_cols), stop - start)
+        clear[start:stop] = _vouches(body, receiver_summary, source_summary, rows, cols).reshape(
+            stop - start, n_cols
         )
-        clear[start : start + band] = _vouches(body, tile)
     return clear
 
 
@@ -410,11 +410,13 @@ def _vouched_pairs(body, receiver_summary, source_summary, rows, cols) -> np.nda
         return clear
     batch = receivers_per_pass(DEFAULT_PAIR_LIMIT, n_features)
     for start in range(0, len(rows), batch):
-        tile = np.maximum(
-            receiver_summary[rows[start : start + batch]],
-            source_summary[cols[start : start + batch]],
+        clear[start : start + batch] = _vouches(
+            body,
+            receiver_summary,
+            source_summary,
+            rows[start : start + batch],
+            cols[start : start + batch],
         )
-        clear[start : start + batch] = _vouches(body, tile)
     return clear
 
 

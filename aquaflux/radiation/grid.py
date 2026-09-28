@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import dataclasses
 
+import numba
 import numpy as np
 
 from aquaflux.radiation.grid_walk import walk_to_first_hit
@@ -185,35 +186,57 @@ class TriangleGrid:
         -------
         np.ndarray of bool, shape ``(...)``
         """
+        low = np.asarray(low, dtype=float)
+        shape = low.shape[:-1]
+        low = np.ascontiguousarray(low.reshape(-1, 3))
+        high = np.ascontiguousarray(np.broadcast_to(np.asarray(high, dtype=float), (*shape, 3)))
+        every = np.arange(len(low))
+        held = _unions_held(
+            low, high.reshape(-1, 3), every, low, high.reshape(-1, 3), every, *self._lookup
+        )
+        return held.reshape(shape)
+
+    def holds_any_in_unions(self, first_low, first_high, second_low, second_high, rows, cols):
+        """:meth:`holds_any` for the bounding box of each pair of boxes, without forming it.
+
+        Box ``t`` is the smallest box holding both ``first[rows[t]]`` and ``second[cols[t]]``: the
+        smaller of their low corners and the larger of their high ones. One compiled loop forms
+        each such box's corners and makes its eight lookups, so nothing the size of the pairs is
+        written out, and the answers are those :meth:`holds_any` gives on the boxes themselves.
+
+        Parameters
+        ----------
+        first_low, first_high : array_like, shape ``(n_first, 3)``
+            Opposite corners of the first set's boxes.
+        second_low, second_high : array_like, shape ``(n_second, 3)``
+            Opposite corners of the second set's boxes.
+        rows, cols : array_like of int, shape ``(n_pairs,)``
+            Which box of each set each pair joins.
+
+        Returns
+        -------
+        np.ndarray of bool, shape ``(n_pairs,)``
+        """
+
+        def corners(array):
+            return np.ascontiguousarray(array, dtype=float)
+
+        return _unions_held(
+            corners(first_low),
+            corners(first_high),
+            np.ascontiguousarray(rows, dtype=np.int64),
+            corners(second_low),
+            corners(second_high),
+            np.ascontiguousarray(cols, dtype=np.int64),
+            *self._lookup,
+        )
+
+    @property
+    def _lookup(self):
+        """What the compiled box test reads of the grid: corner, voxel size, margin, top, table."""
         margin = 1e-9 * self.spacing * self.resolution
-        top = self.resolution - 1
-        first = np.clip(
-            ((np.asarray(low, dtype=float) - margin - self.low) / self.spacing).astype(int), 0, top
-        )
-        last = (
-            np.clip(
-                ((np.asarray(high, dtype=float) + margin - self.low) / self.spacing).astype(int),
-                0,
-                top,
-            )
-            + 1
-        )
-        table = self.occupied_below
-
-        def at(x, y, z):
-            return table[x[..., 0], y[..., 1], z[..., 2]]
-
-        held = (
-            at(last, last, last)
-            - at(first, last, last)
-            - at(last, first, last)
-            - at(last, last, first)
-            + at(first, first, last)
-            + at(first, last, first)
-            + at(last, first, first)
-            - at(first, first, first)
-        )
-        return held > 0
+        top = (self.resolution - 1).astype(np.int64)
+        return self.low, self.spacing, margin, top, self.occupied_below
 
     def blocks(self, origin, target, min_distance, *, exclude=None) -> np.ndarray:
         """Whether any triangle lies across each segment, testing only what the grid selects.
@@ -261,6 +284,63 @@ class TriangleGrid:
         return walk_to_first_hit(
             ray, voxel, until, step, delta, origin, direction, near, exclude, self, max_steps
         )
+
+
+@numba.njit(inline="always")
+def _voxel_span(low, high, corner, spacing, margin, top):
+    """The voxels a box's extent along one axis overlaps, as ``first`` and one past ``last``.
+
+    The same truncation the registration uses, after widening by ``margin`` either side.
+    """
+    first = min(max(int((low - margin - corner) / spacing), 0), top)
+    last = min(max(int((high + margin - corner) / spacing), 0), top) + 1
+    return first, last
+
+
+@numba.njit(parallel=True)
+def _unions_held(
+    first_low, first_high, rows, second_low, second_high, cols, corner, spacing, margin, top, table
+):
+    """Whether any occupied voxel lies in the bounding box of each pair of boxes, shape ``(n_pairs,)``."""
+    held = np.empty(len(rows), dtype=np.bool_)
+    for pair in numba.prange(len(rows)):
+        row, col = rows[pair], cols[pair]
+        fx, lx = _voxel_span(
+            min(first_low[row, 0], second_low[col, 0]),
+            max(first_high[row, 0], second_high[col, 0]),
+            corner[0],
+            spacing[0],
+            margin[0],
+            top[0],
+        )
+        fy, ly = _voxel_span(
+            min(first_low[row, 1], second_low[col, 1]),
+            max(first_high[row, 1], second_high[col, 1]),
+            corner[1],
+            spacing[1],
+            margin[1],
+            top[1],
+        )
+        fz, lz = _voxel_span(
+            min(first_low[row, 2], second_low[col, 2]),
+            max(first_high[row, 2], second_high[col, 2]),
+            corner[2],
+            spacing[2],
+            margin[2],
+            top[2],
+        )
+        count = (
+            table[lx, ly, lz]
+            - table[fx, ly, lz]
+            - table[lx, fy, lz]
+            - table[lx, ly, fz]
+            + table[fx, fy, lz]
+            + table[fx, ly, fz]
+            + table[lx, fy, fz]
+            - table[fx, fy, fz]
+        )
+        held[pair] = count > 0
+    return held
 
 
 def _box_and_area(vertices):

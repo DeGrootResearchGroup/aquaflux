@@ -181,6 +181,17 @@ composition concatenates its members' columns (`Intersection`), which is only me
 every `Solid` uses the default `vouches`; a `Solid` that overrode it could not be composed this way.
 (`TriangleBody` is a `Body`, not a `Solid`, so it never enters a combinator.)
 
+**`Body.vouches_tiles(first, second, rows, cols)`** (2026-09-28) asks `vouches` of many tiles at once:
+tile `t` joins the set summarized by `first[rows[t]]` with the one summarized by `second[cols[t]]`. The
+default merges them (numpy `maximum`, on the host, so it compiles nothing) and calls `vouches`; a body
+may override it provided **every answer is the same**. That is the whole reason it exists: a
+consumer asking about millions of tiles need not form millions of merged rows. Radiation's
+`TriangleBody` overrides it with one compiled loop (see `.claude/rules/radiation.md`). Every `Solid`
+keeps the default, which is also why the merge rule — a column-wise max — is written in two places,
+here and in that loop; `test_a_body_vouches_for_tiles_as_it_does_for_their_merged_summaries` holds
+them equal. The consumer (`culling._vouches`) pads the tile *indices* to a power of two for a
+`traceable` body, so an eager `vouches` still meets only a few shapes.
+
 | body | witnesses |
 |---|---|
 | `Body` (default) | none — zero columns, never certifies |
