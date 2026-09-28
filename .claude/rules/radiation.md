@@ -1949,36 +1949,36 @@ Culling facet receivers too fails an existing transfer test. **Dismissed**: drop
 label from the cull is inert — a point source's zero normal already gives it zero heights — and the
 label stays because a source's kind is read from its label, never inferred.
 
-## ONE MORTON ORDERING, CUBIC CELLS (#574, 2026-09-28)
+## ONE MORTON ORDERING, PER-AXIS CELLS — cubic cells measured and REJECTED (#574, 2026-09-28)
 
 `aquaflux/morton.py::morton_order` is the only ordering of points in the package: shaft culling's
 receiver groups and lamp-facet clusters (`_Curve`), the gather's chunks and `lit_blocks`, the transfer
-build's row blocks, and `FacetClusters`. There were two copies before (`culling.spatial_order`, 10 bits;
-`clusters._morton_keys`, 21 bits) and **both scaled each axis to its own extent**, so on a lamp 0.8 m
-long and 2 cm across the curve's cells were 40x elongated and consecutive facets could sit half the lamp
-apart. Now: cubic cells on the box's longest side, 21 bits. Ordering only — shaft culling stays
-bit-identical to `EveryPair`, the other consumers write rows back by index.
-⚠️ **Every cost recorded in this file for shaft culling, the gather's layout, `lit_blocks` and the
-transfer build BEFORE 2026-09-28 was taken under the per-axis ordering.**
+build's row blocks, and `FacetClusters`. It is the former `culling.spatial_order` moved to a neutral leaf,
+**bit for bit** (10 bits, each axis scaled to its own extent — checked equal on four point sets), and
+`FacetClusters`' private 21-bit copy (`clusters._morton_keys`) is gone: its ordering moved from 21 to 10
+bits, which only reorders centroids sharing a 1/1024 cell, and nothing measured it.
 
-**Group compactness** (`validation/sozzi_radiation/curve_compactness.py`, deterministic; analytic 32 x 128
-lamp, 8,704 facets; 24,000 receivers sampled in the three cylinders, no case mesh): lamp groups of 32,
-radius median / max **0.069 / 0.404 m → 0.012 / 0.018 m**; of 2, 0.0031 / 0.403 → 0.0011 / 0.016 m.
-Receiver groups of 32, median 0.055 → 0.023 m (max ~0.9 m both ways: groups straddling two cylinders
-where the curve jumps).
+**#574 proposed cubic cells** (scale all axes by the longest extent), because per-axis cells on a lamp
+0.8 m long and 2 cm across let a group of four facets reach half the lamp. **Built, measured at mesh
+scale, and reverted.** Cubic groups ARE tighter in space — lamp groups of 32, radius median / max
+0.070 / 0.404 m per-axis against 0.013 / 0.018 m cubic — but they wrap further AROUND the cylinder, so
+their facets face many ways: median / 90th-percentile normal spread over groups of 32 is **8.8 / 38.5°
+per-axis against 51.7 / 162°** cubic (`validation/sozzi_radiation/curve_compactness.py`, deterministic,
+analytic 32 x 128 lamp). The "wholly behind these points" tests (`back_faces`, the transfer's
+`_columns_in_front`, `lit_blocks`) want a shared facing direction far more than compactness, and
+`Outside`'s one-region certificate did not need tighter lamp clusters (the whole lamp is in the chamber).
 
-**What it buys the mask — little, on this scene** (`body_culling.py`, `Outside(chamber, inlet, riser)`,
-same lamp and receivers, 208.9M pairs, no back faces; `main` 2b01660 against the branch, run
-alternately main/branch/main/branch in separate processes, fastest of two passes each; jax 0.10.2,
-Linux x86_64, 4 cores). Certified share: default ladder 32/8/2 **91.7% → 91.8%**, one level 32x32
-**90.3% → 90.9%** (deterministic). Ladder build 6.50 / 7.46 s → 5.63 / 6.11 s (spreads to 1.32x, so
-~15% at most, not separated from noise); one level 4.39 / 4.34 → 4.55 / 4.52 s. Every arm bit-identical.
-**Why so little:** `Outside`'s certificate asks only that a tile lie in one convex region, and the whole
-lamp sits inside the chamber, so a lamp cluster half the lamp long was already in one region; tightening
-it helps only where the receiver side decides. **Not measured, and where it could matter more:** the
-back-face drop (a compact cluster's normals agree, so more tiles lie wholly behind it), `lit_blocks`'
-column lists, the self-occlusion clustered cull #574 was filed against, and the mesh-scale call
-(`field_cost_breakdown.py` needs `work/case` and `work/cell_centres.npy`, i.e. an OpenFOAM mesh).
+**Mesh scale** (`field_cost_breakdown.py`, the user's macOS arm64 run, 2026-09-28: 1,635,909 cells,
+case `lampWall.stl` 7,516 facets, `Outside` from three hand-typed cylinders, library defaults, one run
+each; main `8fc66ac` against cubic merged onto it, `73ebe0e`, local): undecided pairs **760.0M → 798.2M
+(+5%)**, tested with padding 901.8M → 904.1M, transfer row blocks **51.8 → 57.9 s**, call less the
+hidden-tile count 171.3 → 177.1 s, wholly-blocked 32x32 tiles 50.5% → 38.6% of undecided pairs. A
+second cubic run (`020ae40`, which lacks #585/#586) gave the same counts and 57.9 s. On the sampled
+scene (`body_culling.py`, Linux, 4 cores, 208.9M pairs) certified share moved 91.7 → 91.8% and time
+within noise. **No gain anywhere, and a loss in the build — do not retry cubic cells as a fix for
+elongated lamps.** Grouping by facing direction as well as position is a separate, open idea: #589.
+Pinned: `tests/unit/test_morton.py`'s `test_a_run_around_a_long_thin_tube_faces_one_way` and
+`test_stretching_one_axis_does_not_change_the_order` are both red under cubic cells.
 
 ## SHAFT CULLING: BUILT as `ShaftCulling` — tiles certified clear, THE DEFAULT since 2026-09-26 (#554)
 
@@ -2097,8 +2097,8 @@ low-side margin, a missing `+ 1` on the last voxel, a wrong table corner, a unio
 box's low corner on one axis, `rows` passed for `cols`, padding a host body's certificates, and not
 padding a traceable one's — each red.
 
-**How.** Receivers and facet centroids are each ordered along a Morton curve (`aquaflux.morton.morton_order`: cubic
-cells, 21 bits along the box's longest side, since #574 — see the section on it) and padded to a whole number of the coarsest groups by repeating the last point (`_Curve`;
+**How.** Receivers and facet centroids are each ordered along a Morton curve (`aquaflux.morton.morton_order`, 10 bits
+an axis, each axis scaled to its own extent — cubic cells were measured and rejected, #574) and padded to a whole number of the coarsest groups by repeating the last point (`_Curve`;
 repetition changes neither a max-summary nor a written answer). Each size in a ladder divides the one
 before, so a group at one level is a whole number of groups at the next, read off the same order. Per
 body, each group is summarized by the column-wise max of `body.clearance`, and a tile is **certified
@@ -3762,7 +3762,7 @@ the reject pass 22%, the clip 11%. So the ceiling for any cull change there was 
 
 **What was built, as the issue wrote it.** `FacetClusters.build` (`clusters.py`) groups facets into
 runs of `cluster_size` (default 32) along the Morton order of their centroids (`aquaflux.morton.morton_order`
-since #574; before, a per-axis copy of its own), with a bounding sphere
+since #574; before, a 21-bit copy of its own), with a bounding sphere
 each. Per receiver, `_cluster_bounds` gives each cluster an **enclosing cone** per role
 (`silhouette.enclosing_cone`: cap on the mean member axis reaching `angle(axis, member axis) +
 member half-angle`, `arctan2` throughout; an unusable member or a cap reaching a right angle makes the
