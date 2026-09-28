@@ -102,16 +102,16 @@ being reformulated — the same comparison against its `crossing_ratio` rewrite 
 1.39× the bespoke one, which is the price of not being told where the openings are; single runs of
 the pair gave 1.67× and 1.48×, so the three passes are what make that a number.
 
-Against the triangle grid the primitive arm is 146–732× faster, and the span is over the *grid's*
-configurations rather than one number — from its worst measured corner (pipe-cell receivers on the
-area-sized default grid, 28,248 rays/s) to its best (random cells on a 128³ grid, 141,451). The
-two axes interact, so neither has a single factor: resolution is worth 3.26× on pipe cells and
-1.77× on random ones, receiver placement 2.83× at the default grid and 1.54× at 128³. The
-primitive arm is one branch-free expression, so its own rate does not depend on either.
+Against the triangle grid the primitive arm is 4.8–15× faster per ray, and the span is over the
+*grid's* configurations rather than one number: from pipe-cell receivers on the near-cubic grid
+that was the default until #503 (1.35M rays/s) to cells drawn uniformly from the mesh on the
+box-shaped grid that replaced it (4.33M). See "Walking the wall's triangles" below for why the
+grid's rate depends on both. The primitive arm is one branch-free expression, so its own rate does
+not depend on either.
 
-⚠️ Those ratios divide this harness's number by a separate run's, so read them as approximate and
-the grid's internal comparisons (measured in one process, repeating to 1.10×) as sharp. Running
-both arms in one process is what would make the ratios as solid as the square.
+⚠️ Those ratios divide this harness's number by a separate run's
+(`grid_walk_direction.py`), so read them as approximate. The 146–732× once quoted here was the
+array walk's, before #571 compiled it.
 
 81.1% of pairs lie inside one convex region, where a straight segment cannot leave and nothing has
 to be tested at all (92.8% was once recorded here, from the truncated population). ⚠️ That share
@@ -220,6 +220,9 @@ the same settings; the two unculled-main and (32, 8) arms were each also run onc
 
 ## Where the whole-field call spends its time (2026-09-26, `field_cost_breakdown.py`)
 
+⚠️ Measured before #575 (the facets' side of culling formed once per call) and #578 (pairs behind
+their lamp facet skipped); the call as it stands now is in the next section.
+
 The default-culling arm above (313.5 s), broken into its pieces: the same model and call, each piece
 wrapped in a timer that waits for its result. Instrumented, the call took **316.8 s** (1% over the
 plain run) and repeated to 0.3 s.
@@ -289,13 +292,64 @@ with nothing else heavy running. The build rows come from a separate 3,000-cell 
 row-block timer was added (the build does not depend on the receivers); without that timer the
 row blocks' work, still running asynchronously, was charged to the facet mask as 30 s.
 
+## Where the whole-field call spends its time after #575 and #578 (2026-09-27, `field_cost_breakdown.py`)
+
+The same harness and configuration as the section above, re-run on `main` at `2810eea`, which adds
+#575 (the lamp facets' side of shaft culling formed once per call) and #578 (a pair whose receiver
+lies behind its lamp facet is recorded clear without being tested, in the shadow mask and in the
+gather). Whole mesh (1,635,909 cells, 7,516 lamp facets), default culling, water as the hand-typed
+cylinders (no CAD kernel installed), `NoOcclusion`, streamed receiver mask, run through
+`validation/run_case.sh` with nothing else heavy running; jax 0.10.2, numba 0.67.0, CPU, x64, macOS
+arm64, 11 cores. One run; the harness's counting of wholly blocked tiles is on, as in the second run
+above, so the two compare like for like.
+
+| piece | before (`392f935`) s | now (`2810eea`) s |
+|---|---|---|
+| **call, less the harness's counting** | **317.7** | **210.6** (1.51x) |
+| shadow masks, less the counting | 243.9 | 147.4 |
+| · the bodies' layer | — | 146.6 |
+| ·· pair-by-pair test of the tiles culling could not decide | 186.7 | 64.7 |
+| ··· the compiled body test | 141.8 (695 calls) | 51.4 (604 calls) |
+| ·· deciding which tiles are undecided (certificates, and tiles behind: 5.4 s) | 45.5 | 65.5 |
+| ·· receiver clearance and curve order | (in the row above) | 13.2 |
+| fluence gather: areal segments 44.1, layout 5.9, point sources 0.2 | 66.5 | 50.2 |
+| surface solve | 1.5 | 1.4 |
+| the harness's own count of wholly blocked tiles | 73.1 | 72.5 |
+
+The build is unchanged: **57.3 s**, the transfer's row blocks 56.8 s and its facet mask 0.2 s.
+
+| pairs | before | now |
+|---|---|---|
+| all | 12.30 billion | 12,295,492,044 |
+| in tiles culling could not decide | 2.33 billion (18.9%) | **760,043,420 (6.2%)** |
+| tested, padding included | 2.56 billion | 901,783,552 (7.3%) |
+| blocked | 1,185,423,023 (9.6%) | 562,087,592 (4.6%) |
+
+- **The tested pairs fell 2.8x, because a pair behind its lamp facet is no longer tested.** Before,
+  81.0% of pairs were certified clear and the rest tested; now 93.8% are decided without a test, the
+  extra share being tiles proven wholly behind their facets. The pair test fell with them, 186.7 →
+  64.7 s.
+- **Deciding now costs as much as testing.** Tile certificates and the behind-test are 65.5 s against
+  64.7 s of pair tests. The mask as a whole is 147 s of a 211 s call, 70%, against 77% before.
+- **"Blocked" halved because the pairs behind are now recorded clear**, not because any geometry
+  changed: a pair that faces away from its facet carries exactly zero whatever blocks it.
+- **What a "fully hidden" certificate could still skip**, counted as above along the strategy's
+  curve: wholly blocked tiles hold 383,775,196 pairs at 32 x 32, 506,200,308 at 8 x 8 and 550,288,962
+  at 2 x 2 -- **50.5%, 66.6% and 72.4%** of the pairs in undecided tiles, against 42.3%, 48.1% and
+  50.3% before. The undecided set is smaller and darker, so such a certificate would now reach most of
+  it, but the whole of it is 65 s of test.
+- ⚠️ **Read the 1.51x as one run against one run**, on the same machine a day apart: this machine has
+  varied more than 1.1x between runs, so the ratio is good to about that.
+
 ## The vessel wall as its triangles, at mesh scale (2026-09-26, `model_at_mesh_scale.py`, `grid_mask_check.py`, `triangle_culling.py`)
 
 The shadowing section below once extrapolated the triangulated wall's mask to tens of hours (88 h in
 the rules): 1.23e10 rays at the 38,711 rays/s `grid_mask_check.py` measured on 2026-09-23, with the
 array walk and every pair tested. Since then the walk is one compiled loop per ray (#571) and shaft
 culling is the default (#561). Measured now, **the whole field with the vessel wall as the 53,500
-triangles of `bodyWall.stl` takes 62 minutes.**
+triangles of `bodyWall.stl` takes 62 minutes.** (Since #503 the walk's default grid takes the box's
+shape and the same field takes 48.6 minutes; see "Walking the wall's triangles" below. The tables
+here are on the old grid.)
 
 **The whole field**, `SOZZI_WATER=triangles`: the wall as a `TriangleBody` sheet, every other setting
 as in the sections above, on all 1,635,909 cells, against the analytic cylinders on the same commit:
@@ -548,18 +602,57 @@ given different geometry.
 **The cost is the finding.** In that run the analytic arm took 6.9 s against the grid's 4,659.8 s
 on the same rays, and the whole field with analytic visibility takes 557 s where the triangulated
 mask alone then extrapolated to tens of hours. (Measured since, with the compiled walk and shaft
-culling, the whole field with the triangulated wall takes 62 minutes; see the section above.) Read any such ratio with its scene: the grid's cost is
-set by how far a segment travels through empty voxels, so it depends on both the receivers and the
-voxel size. Measured in one process, 300,000 rays per corner, two alternating passes, fastest per
-corner:
+culling, the whole field with the triangulated wall takes 62 minutes; see the section above.) Read any such ratio with its scene: the
+grid's rate depends on the receivers and on the voxels' shape, measured in the next section.
 
-| | area-sized default grid (212, 11, 114) | 128 cubed |
-|---|---|---|
-| pipe cells | 28,248 rays/s | 92,038 |
-| randomly placed cells | 79,963 | 141,451 |
+## Walking the wall's triangles (2026-09-27, `grid_walk_direction.py`, #503)
 
-The two axes interact, so neither has a single factor. Pipe-cell rays run the length of the
-chamber, so the coarser axial voxel of the 128-cubed grid is worth 3.26x to them and 1.77x to
-randomly aimed rays: what sets the cost is the voxel size along the axis the rays actually
-traverse. Ratios taken across separate runs of this machine are not reliable to better than about
-1.4x; within one process, repeats here held to 1.01-1.10x.
+What does a segment cost the triangle grid's walk, and what moves it? The same cell-to-lamp
+segments, 40 cells per population against all 7,516 lamp facets (300,640 segments per corner), on
+the 53,500 triangles of `bodyWall.stl`: cells in the outlet pipes, in the chamber, and drawn
+uniformly from the mesh. Every corner is timed in one process, two alternating warm passes,
+fastest kept (jax 0.10.2, numba 0.67.0, CPU, x64, macOS arm64, 11 cores).
+
+**Which end the walk starts from makes no difference.** The reasoning was that the lamp sits in
+open water and a pipe cell's blocker is beside the cell, so a walk from the cell would stop sooner.
+Walked cell to lamp, the rate was 0.95–1.06× the lamp-to-cell rate at all 15 grids tried, for every
+population, with identical answers. The blocked segments were never the cost: they stop within
+about two occupied voxels whichever way they go.
+
+**Nor is empty space.** Per segment at the old default grid:
+
+| receivers | voxels stepped | of them occupied | triangles tested | distinct triangles |
+|---|---|---|---|---|
+| pipe cells, clear segments | 106.5 | 35.6 | 787 | 539 |
+| pipe cells, blocked segments | 12.8 | 1.7 | 26 | 23 |
+| chamber cells | 40.9 | 3.9 | 70 | 52 |
+
+A pipe is 9.55 mm in radius and a voxel was 8.2 mm, so a segment running down a pipe tests the
+pipe wall's triangles in every voxel it crosses. Skipping empty voxels would skip the cheap part,
+and skipping a triangle already tested ("mailboxing") would save about 1.5×.
+
+**What moves it is the voxels' shape.** Refining near-cubic voxels trades tests for steps at a
+constant rate: 1× to 4× per axis cut the tests on pipe cells from 444 to 139 per segment and
+raised the steps from 64 to 255, and the rate stayed at 1.27–1.48M segments/s. Voxels in the
+box's proportions -- long along the chamber, fine across it -- cut both:
+
+| grid | voxel (mm) | pipe cells | any cell | chamber cells |
+|---|---|---|---|---|
+| near-cubic `(212, 11, 114)`, the default until #503 | 8.2 × 8.1 × 8.2 | 1,351,334 /s | 2,755,017 | 4,494,977 |
+| box-shaped `(102, 102, 102)`, the default since | 17.0 × 0.9 × 9.2 | **2,648,106** | **4,332,899** | 4,624,531 |
+| `(64, 128, 128)` | 27.2 × 0.7 × 7.3 | 3,911,954 | 4,659,643 | 4,040,810 |
+
+So the default grid now gives every axis the same number of voxels -- four times as many voxels as
+the near-cubic rule, no edge more than 32 times another -- which is 1.96× on pipe cells, 1.57× on
+the mesh's own cells, and no change for chamber cells. Against the near-cubic default it replaced,
+the same rule was 1.33× and 1.79× on the two synthetic long vessels of
+`validation/radiation_grid_walk.py`. The best grid on this wall was not
+the default (`(64, 128, 128)`, 2.9× on pipe cells), which is one scene's optimum and not a rule.
+
+**On the whole field** (`model_at_mesh_scale.py` with `SOZZI_WATER=triangles`, all 1,635,909 cells,
+default culling, both arms on the same code, the old grid through `SOZZI_GRID=212:11:114`): the field
+took **3,705 s on the old grid and 2,914 s on the new one, 1.27×**, with the fields identical to
+every printed digit. Less than the sampled segments' 1.57–1.96× because the segments culling leaves
+to walk are not a uniform sample of the mesh's; the chamber cells, which gained least, are most of
+them.
+

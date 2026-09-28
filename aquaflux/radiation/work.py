@@ -62,8 +62,7 @@ def receivers_per_step(pair_limit: int, per_receiver: int) -> int:
 
     A step's intermediates are arrays of one entry per pair, and the compiled body writes each
     out and reads it back. While they fit in a core's cache that traffic is cheap; past it the
-    same pairs cost more -- about twice as long in the volume gather, a fifth more in the transfer
-    build. So the limit bounds how much a step *may* form, for memory, and this bounds how much it
+    same pairs cost more -- about twice as long in the volume gather. So the limit bounds how much a step *may* form, for memory, and this bounds how much it
     *does*. The count is a cut of the work, not of the answer: each receiver's row is formed from
     its own inputs either way.
 

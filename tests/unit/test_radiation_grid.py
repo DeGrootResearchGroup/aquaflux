@@ -5,7 +5,8 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.radiation.grid import TriangleGrid
+from aquaflux.radiation import grid as grid_module
+from aquaflux.radiation.grid import TriangleGrid, _near_cubic_resolution
 from aquaflux.radiation.triangles import segment_is_cut
 
 from tests.unit.radiation_references import closed_drum
@@ -111,20 +112,46 @@ def test_no_ray_escapes_a_closed_body_through_the_grid():
     assert grid.blocks(inside, outside, np.zeros(len(inside))).all()
 
 
-def test_the_default_resolution_follows_the_triangle_count_and_the_shape_of_the_box():
-    """Voxels near cubic, and about ten triangles in an occupied one -- the measured trade.
+def test_the_default_voxels_take_the_boxs_proportions_and_its_triangle_count():
+    """Voxels shaped like the box, and several times a near-cubic ten-a-voxel grid's in number.
 
-    A grid sized by axis rather than by extent walks a long thin domain in tiny steps across its
-    short axis, which is how a walk ends up costing more than the test it replaces.
+    A segment's steps along an axis go as its travel there over the voxel's edge, and segments
+    through a long box travel mostly along it, so near-cubic voxels walk them in many short steps.
+    A near-cubic rule -- the one this replaced -- gives this 8:1 box eight times the voxels along
+    its long axis and fails the first assertion.
     """
     rng = np.random.default_rng(2)
     stretched = scattered_triangles(4000, rng, scale=0.05) * np.array([8.0, 1.0, 1.0])
     grid = TriangleGrid.build(stretched)
-    spacing = grid.spacing
-    assert spacing.max() / spacing.min() < 1.5, f"voxels are not near cubic: {spacing}"
-    assert grid.resolution[0] > grid.resolution[1], "the long axis needs more voxels"
+    assert grid.resolution.max() - grid.resolution.min() <= 1, grid.resolution
+    box = np.ptp(stretched.reshape(-1, 3), axis=0)
+    np.testing.assert_allclose(grid.spacing / grid.spacing[0], box / box[0], rtol=0.05)
+    cubic = _near_cubic_resolution(stretched)
+    assert 3.0 < np.prod(grid.resolution) / np.prod(cubic) < 5.0, (grid.resolution, cubic)
     occupied = np.diff(grid.starts)
-    assert 2.0 < occupied[occupied > 0].mean() < 40.0, occupied[occupied > 0].mean()
+    assert 1.0 < occupied[occupied > 0].mean() < 40.0, occupied[occupied > 0].mean()
+
+
+def test_no_default_voxel_is_more_than_the_cap_longer_than_it_is_wide():
+    """A very flat or very long box is not cut into sheets: the edges stay within the cap.
+
+    Without the cap a 200:1 box gets 200:1 voxels, and a segment crossing the short way passes the
+    long edge of every voxel it enters. A flat surface gets one voxel through its thickness rather
+    than a count split over an axis it does not extend along.
+    """
+    rng = np.random.default_rng(6)
+    long = scattered_triangles(3000, rng, scale=0.01) * np.array([200.0, 1.0, 1.0])
+    spacing = TriangleGrid.build(long).spacing
+    assert spacing.max() / spacing.min() <= 1.1 * grid_module._MAX_ASPECT, spacing
+    assert spacing.max() / spacing.min() > 0.5 * grid_module._MAX_ASPECT, spacing
+    flat = scattered_triangles(3000, rng, scale=0.01)
+    flat[..., 2] = 0.5
+    resolution = TriangleGrid.build(flat).resolution
+    assert resolution[2] == 1 and resolution[0] > 10 and resolution[1] > 10, resolution
+    # And the count is still the budget's, spent over the two axes the surface extends along;
+    # solving for it over all three would divide by the flat axis's near-zero extent.
+    cubic = _near_cubic_resolution(flat)
+    assert 3.0 < np.prod(resolution) / np.prod(cubic) < 5.0, (resolution, cubic)
 
 
 def test_a_grid_needs_triangles_and_a_positive_resolution():

@@ -11,6 +11,10 @@ bookkeeping and so favoured coarse grids. A compiled step costs far less, so the
 may have moved; this is the instrument for asking. The array walk this replaced is at commit
 ``d9fc017``, where this harness timed both side by side (17-37x, identical answers).
 
+The default grid's voxels take the proportions of the triangles' bounding box (#503); two more
+arms time the near-cubic rule it replaced, once at its own voxel count and once scaled per axis to
+the default's, so the shape is compared at equal voxel counts as well as at the default's budget.
+
 Two scenes, both triangles only, no primitives:
 
 1. **a long thin vessel**: a cylindrical wall, 0.05 m in radius and 1.6 m long, 160 x 160 sectors
@@ -42,7 +46,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import aquaflux  # noqa: F401  (enables x64)
-from aquaflux.radiation.grid import TriangleGrid
+from aquaflux.radiation.grid import TriangleGrid, _near_cubic_resolution
 from aquaflux.radiation.triangles import segment_is_cut
 from tests.unit.radiation_references import cylinder_triangles
 
@@ -118,14 +122,20 @@ def main() -> None:
             f"alternating warm passes; the first {CHECKED:,} checked against every triangle\n",
             flush=True,
         )
-        print(f"{'grid':>18} {'x default':>9} {'rays/s':>11} {'blocked':>8} {'matches':>8}")
+        print(f"{'grid':>18} {'x default':>23} {'rays/s':>11} {'blocked':>8} {'matches':>8}")
         default = TriangleGrid.build(vertices).resolution
         grids = {
-            m: TriangleGrid.build(
+            f"{m:g}": TriangleGrid.build(
                 vertices, resolution=tuple(np.maximum(np.round(m * default), 1).astype(int))
             )
             for m in MULTIPLES
         }
+        cubic = _near_cubic_resolution(vertices)
+        scale = (np.prod(default, dtype=float) / np.prod(cubic, dtype=float)) ** (1.0 / 3.0)
+        grids["near-cubic"] = TriangleGrid.build(vertices, resolution=tuple(cubic))
+        grids["near-cubic, same voxels"] = TriangleGrid.build(
+            vertices, resolution=tuple(np.maximum(np.round(scale * cubic), 1).astype(int))
+        )
         for grid in grids.values():
             timed(
                 grid,
@@ -142,7 +152,7 @@ def main() -> None:
         for m, grid in grids.items():
             shape = "x".join(str(int(n)) for n in grid.resolution)
             print(
-                f"{shape:>18} {m:9g} {RAYS / best[m]:11,.0f} {answers[m].mean():8.3f} "
+                f"{shape:>18} {m:>23} {RAYS / best[m]:11,.0f} {answers[m].mean():8.3f} "
                 f"{np.array_equal(answers[m][sample], brute)!s:>8}",
                 flush=True,
             )
