@@ -1,0 +1,79 @@
+"""How compact the groups cut from the Morton curve are, with cubic cells and with per-axis cells.
+
+Every grouping of points in the radiation package -- shaft culling's receiver groups and lamp-facet
+clusters, the gather's chunks and lit blocks, the transfer build's row blocks, ``FacetClusters`` --
+is a run of consecutive points along :func:`aquaflux.morton.morton_order`. Until #574 the two copies
+of that ordering each scaled every axis of the bounding box to its own extent, so on a lamp far
+longer than it is wide the curve's cells were as elongated as the lamp. ``per_axis_order`` below is
+that previous ordering, kept here as the reference the fix is measured against; it is not used by
+the library.
+
+Reported, per point set and group size: the median and largest group radius (half the diagonal of
+the group's bounding box) under each ordering. Deterministic -- geometry only, no timing -- so a
+figure from here is reproducible exactly on any machine.
+
+Point sets: the lamp's facet centroids (the case STL when present, else the analytic 32 x 128 lamp)
+and the receivers of ``primitive_occlusion.py`` (the meshed case's cell centres when present, else
+points sampled inside the three cylinders); the summary says which.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1]))
+sys.path.insert(0, str(HERE))
+
+import aquaflux  # noqa: E402,F401  (enables x64)
+import numpy as np  # noqa: E402
+from aquaflux.morton import _BITS, _spread, morton_order  # noqa: E402
+from primitive_occlusion import OUT, fluid, lamp, receivers  # noqa: E402
+
+SIZES = (2, 8, 32, 64)
+
+
+def per_axis_order(points: np.ndarray) -> np.ndarray:
+    """The ordering before #574: each axis scaled to its own extent, so cells are the box's shape."""
+    low = points.min(axis=0)
+    extent = np.maximum(points.max(axis=0) - low, np.finfo(float).tiny)
+    levels = (1 << _BITS) - 1
+    cell = np.minimum(((points - low) / extent * levels).astype(np.int64), levels)
+    key = _spread(cell[:, 0]) | (_spread(cell[:, 1]) << 1) | (_spread(cell[:, 2]) << 2)
+    return np.argsort(key, kind="stable")
+
+
+def radii(points: np.ndarray, order: np.ndarray, size: int) -> tuple[float, float]:
+    """Median and largest radius of the whole groups of ``size`` cut from ``order``."""
+    whole = len(order) // size * size
+    groups = points[order[:whole]].reshape(-1, size, 3)
+    radius = 0.5 * np.linalg.norm(groups.max(axis=1) - groups.min(axis=1), axis=1)
+    return float(np.median(radius)), float(radius.max())
+
+
+def main() -> None:
+    surfaces, lamp_label = lamp()
+    points, receiver_label = receivers(np.random.default_rng(0), fluid())
+    sets = {"lamp facets": np.asarray(surfaces.centroid, dtype=float), "receivers": points}
+    rows = []
+    for name, cloud in sets.items():
+        extent = cloud.max(axis=0) - cloud.min(axis=0)
+        print(f"{name}: {len(cloud)} points, bounding box {np.round(extent, 4).tolist()} m")
+        for size in SIZES:
+            before = radii(cloud, per_axis_order(cloud), size)
+            after = radii(cloud, morton_order(cloud), size)
+            rows.append({"set": name, "size": size, "per_axis": before, "cubic": after})
+            print(
+                f"  groups of {size:>2}: radius median / max {before[0]:.4f} / {before[1]:.4f} m "
+                f"per-axis, {after[0]:.4f} / {after[1]:.4f} m cubic"
+            )
+    summary = {"lamp": lamp_label, "receivers": receiver_label, "rows": rows}
+    OUT.mkdir(parents=True, exist_ok=True)
+    (OUT / "curve_compactness.json").write_text(json.dumps(summary, indent=2))
+    print(f"lamp: {lamp_label}; receivers: {receiver_label}")
+
+
+if __name__ == "__main__":
+    main()

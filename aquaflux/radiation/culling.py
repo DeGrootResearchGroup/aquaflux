@@ -55,6 +55,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from aquaflux.morton import morton_order
 from aquaflux.radiation.back_faces import BackFaces
 from aquaflux.radiation.triangles import padded_length
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, receivers_per_pass
@@ -210,52 +211,6 @@ class EveryPair(BodyCulling):
         return jnp.concatenate(rows, axis=1)
 
 
-#: Levels per axis of the grid a point's place on the space-filling curve is read from. Ten bits
-#: an axis: finer than any group is worth ordering within, and a key of thirty bits.
-_ORDER_BITS = 10
-
-
-def _spread_bits(values: np.ndarray) -> np.ndarray:
-    """Each value's low :data:`_ORDER_BITS` bits, moved to every third bit position."""
-    values = values.astype(np.uint64)
-    spread = np.zeros_like(values)
-    for bit in range(_ORDER_BITS):
-        spread |= ((values >> np.uint64(bit)) & np.uint64(1)) << np.uint64(3 * bit)
-    return spread
-
-
-def spatial_order(points) -> np.ndarray:
-    """An ordering of points along a Morton (Z-order) curve, so neighbours in it are near in space.
-
-    The points' bounding box is divided into ``2**10`` levels per axis, each point's three level
-    numbers are interleaved bit by bit into one key, and the points are sorted by key. Any run of
-    consecutive points in that order then lies in a compact region -- which is what makes a run a
-    useful group to ask a question of once. Ties keep their input order, so the ordering is
-    reproducible.
-
-    Parameters
-    ----------
-    points : array_like, shape ``(n, 3)``
-
-    Returns
-    -------
-    np.ndarray of int, shape ``(n,)``
-        The indices of ``points`` in curve order.
-    """
-    points = np.asarray(points, dtype=float)
-    if len(points) == 0:
-        return np.zeros(0, dtype=np.int64)
-    low = points.min(axis=0)
-    extent = points.max(axis=0) - low
-    levels = (1 << _ORDER_BITS) - 1
-    scaled = np.where(extent > 0.0, (points - low) / np.where(extent > 0.0, extent, 1.0), 0.0)
-    cell = np.minimum((scaled * levels).astype(np.int64), levels)
-    key = (
-        _spread_bits(cell[:, 0]) | (_spread_bits(cell[:, 1]) << 1) | (_spread_bits(cell[:, 2]) << 2)
-    )
-    return np.argsort(key, kind="stable")
-
-
 class _Curve(eqx.Module):
     """Points ordered along the space-filling curve, and cut into groups at several sizes.
 
@@ -280,7 +235,7 @@ class _Curve(eqx.Module):
     @classmethod
     def of(cls, points, coarsest: int) -> _Curve:
         """``points`` in curve order, padded to a whole number of groups of ``coarsest``."""
-        order = spatial_order(points)
+        order = morton_order(points)
         padded = -(-len(order) // coarsest) * coarsest
         return cls(
             order=np.concatenate([order, np.repeat(order[-1:], padded - len(order))]),

@@ -47,6 +47,7 @@ cfd/                                  # repo root
 │
 ├── aquaflux/                         # the package
 │   ├── __init__.py                   # enables JAX x64 (process-wide); __version__; public API
+│   ├── morton.py                     # leaf: morton_order — points sorted along a Z-order curve with cubic cells, so a run of them is a compact patch
 │   ├── vectors.py                    # leaf: per-element vector algebra — dot / norm_squared / scale (buries axis/[:,None] bookkeeping; imported everywhere)
 │   ├── context.py                    # leaf: MeshContext (face_cells/geometry/properties) + FieldContext (mesh + one field's boundary_values/gradient) — below schemes/boundary so both can take it without a cycle
 │   ├── text_table.py                 # fixed-width ASCII tables for solver reports

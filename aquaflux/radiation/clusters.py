@@ -17,11 +17,9 @@ from __future__ import annotations
 import equinox as eqx
 import numpy as np
 
-__all__ = ["FacetClusters"]
+from aquaflux.morton import morton_order
 
-#: Bits of each coordinate interleaved into a Morton key: 3 x 21 = 63, the most a signed 64-bit
-#: key holds. Finer than any mesh this package builds, so ties are between coincident centroids.
-_MORTON_BITS = 21
+__all__ = ["FacetClusters"]
 
 
 class FacetClusters(eqx.Module):
@@ -68,7 +66,7 @@ class FacetClusters(eqx.Module):
             raise ValueError(msg)
         vertices = np.asarray(vertices, dtype=float)
         n = len(vertices)
-        order = np.argsort(_morton_keys(vertices.mean(axis=1)), kind="stable")
+        order = morton_order(vertices.mean(axis=1))
         n_clusters = -(-n // size)
         members = np.full(n_clusters * size, -1, dtype=np.int64)
         members[:n] = order
@@ -90,18 +88,3 @@ class FacetClusters(eqx.Module):
     def size(self) -> int:
         """Facet slots per cluster."""
         return int(self.members.shape[1])
-
-
-def _morton_keys(points: np.ndarray) -> np.ndarray:
-    """Each point's position along a Z-order curve through the points' bounding box."""
-    if len(points) == 0:
-        return np.zeros(0, dtype=np.int64)
-    lo = points.min(axis=0)
-    extent = np.maximum(points.max(axis=0) - lo, np.finfo(float).tiny)
-    cells = (1 << _MORTON_BITS) - 1
-    grid = np.clip(((points - lo) / extent * cells).astype(np.int64), 0, cells)
-    key = np.zeros(len(points), dtype=np.int64)
-    for bit in range(_MORTON_BITS):
-        for axis in range(3):
-            key |= ((grid[:, axis] >> bit) & 1) << (3 * bit + axis)
-    return key

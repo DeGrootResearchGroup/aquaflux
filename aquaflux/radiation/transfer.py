@@ -75,8 +75,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from aquaflux.morton import morton_order
 from aquaflux.radiation.absorption import UniformAbsorption
-from aquaflux.radiation.culling import spatial_order
 from aquaflux.radiation.lit_blocks import rounded_width
 from aquaflux.radiation.profiles import Lambertian
 from aquaflux.radiation.quadrature import TriangleQuadrature, triangle_quadrature
@@ -359,7 +359,7 @@ def _row_blocks(geometry: _Geometry, sample, weight, rows: int):
     points = np.asarray(sample, dtype=float)
     normal = np.asarray(geometry.normal, dtype=float)
     areal = np.asarray(geometry.areal, dtype=bool)
-    order = spatial_order(np.asarray(geometry.centroid, dtype=float))
+    order = morton_order(np.asarray(geometry.centroid, dtype=float))
     buffers = tuple(jnp.zeros((n_facets, n_facets)) for _ in range(3))
     for start in range(0, n_facets, rows):
         index = order[start : start + rows]

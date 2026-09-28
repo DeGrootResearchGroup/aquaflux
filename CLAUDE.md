@@ -538,6 +538,14 @@ per-group Cartesian product in flat form. The mesh's face-subset code (`FaceNode
 `collapse.py`) and the radiation coarsener's batched checks all use it; before it, the first two
 carried their own copy of `rows`. Reach for it before writing `np.repeat(..., counts)` index arithmetic.
 
+**Points are ordered along a space-filling curve in one leaf, `aquaflux/morton.py`** (numpy only, a
+neutral leaf like `ragged.py`): `morton_order(points)` sorts points along a Morton (Z-order) curve, so
+any run of consecutive points is a compact patch. The radiation package cuts every grouping of points
+from it — shaft culling's receiver groups and facet clusters, the gather's chunks and lit blocks, the
+transfer build's row blocks, `FacetClusters`. ⚠️ **Its cells are cubes on the bounding box's longest
+side**: two earlier copies (one per consumer) each scaled every axis to its own extent, which on a lamp
+forty times longer than it is wide let consecutive facets sit half the lamp apart (#574).
+
 **Frozen preconditioner operators are assembled in one place, `aquaflux/solve/frozen_operator.py`.**
 The AMG preconditioners coarsen a *frozen* linearization of a transport equation — a symmetric
 diffusive edge coupling, optionally plus first-order-upwind convection at a reference flux —

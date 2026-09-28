@@ -156,15 +156,13 @@ def hidden_tile_pairs(blocked, receivers, sources, receiver_blocks, source_clust
     pairs are counted.
     """
     import numpy as np
-    from aquaflux.radiation.culling import spatial_order
+    from aquaflux.radiation.culling import _Curve
 
     dark = np.asarray(blocked).any(axis=0)
     counts = {"blocked": int(dark.sum())}
     sides = []
     for points, coarsest in ((receivers, receiver_blocks[0]), (sources, source_clusters[0])):
-        order = spatial_order(points)
-        padded = -(-len(order) // coarsest) * coarsest
-        sides.append(np.concatenate([order, np.repeat(order[-1:], padded - len(order))]))
+        sides.append(_Curve.of(points, coarsest).order)
     ordered = dark[sides[0]][:, sides[1]]
     real = np.outer(
         np.arange(len(sides[0])) < len(receivers), np.arange(len(sides[1])) < len(sources)

@@ -554,7 +554,7 @@ kernel. ⚠️ **It must be every quadrature point, NOT the centroid**: the firs
 plane through the centroid and dropped 7 pairs of a 2,176-facet lamp worth up to **1.2e-5** — the
 lamp holds triangles collinear to rounding whose stored normal is rounding noise tilted off their
 line, so their quadrature points lie up to ~2 mm off that plane (facets 2157, 2165, 2173 of
-`lamp_resolution.lamp(16, 64)`). **Blocks are cut along the Morton curve** (`culling.spatial_order`)
+`lamp_resolution.lamp(16, 64)`). **Blocks are cut along the Morton curve** (`aquaflux.morton.morton_order`)
 so a block's receivers share their fronts; column lists are padded on `lit_blocks.rounded_width`'s
 capped ladder (a power-of-two pad first reached **8192 columns on a 4,160-facet scene**, doubling the
 work). Share of `n^2` kernel evaluations still made, 6-point rule: analytic 32 x 128 lamp (8,704
@@ -2043,8 +2043,8 @@ padding (a pair walked twice), for walking pairs behind their source, and for pa
 included`, `walked by a host-answered body`, and `behind their source, inside tiles a host-answered body
 tested` — instead of re-deriving the padding from the batching arithmetic.
 
-**How.** Receivers and facet centroids are each ordered along a Morton curve (`spatial_order`, 10 bits
-an axis) and padded to a whole number of the coarsest groups by repeating the last point (`_Curve`;
+**How.** Receivers and facet centroids are each ordered along a Morton curve (`aquaflux.morton.morton_order`: cubic
+cells, 21 bits along the box's longest side, since #574 — see the section on it) and padded to a whole number of the coarsest groups by repeating the last point (`_Curve`;
 repetition changes neither a max-summary nor a written answer). Each size in a ladder divides the one
 before, so a group at one level is a whole number of groups at the next, read off the same order. Per
 body, each group is summarized by the column-wise max of `body.clearance`, and a tile is **certified
@@ -2066,8 +2066,8 @@ tiles; **D** distance-based level of detail for the gather, which changes answer
 error measurement. ⚠️ **The facet-to-facet ray mask (`RayCastOcclusion`, self-occlusion) is NOT
 culled**: its shafts start on the wall they are tested against, so every tile touches the wall's own
 triangles and no box certificate can vouch for one — that needs per-ray exclusions carried into the
-certificate, and is not designed. ⚠️ **`spatial_order` is generic point ordering living in a physics
-package** (Principle 3.6) — it should move to a neutral leaf when a second consumer appears.
+certificate, and is not designed. The ordering is the neutral leaf `aquaflux/morton.py` since #574; there is no
+`culling.spatial_order` any more.
 
 **MEASURED** (`validation/sozzi_radiation/body_culling.py`, all arms in one process on one ray set,
 warm-up then two alternating passes, fastest kept): `Outside(chamber, inlet, riser)` at the
@@ -3640,7 +3640,8 @@ the cull was **54%** of a 3,184-facet build (35.5% on device, 18.4% host compact
 the reject pass 22%, the clip 11%. So the ceiling for any cull change there was ~2.2x.
 
 **What was built, as the issue wrote it.** `FacetClusters.build` (`clusters.py`) groups facets into
-runs of `cluster_size` (default 32) along the Morton order of their centroids, with a bounding sphere
+runs of `cluster_size` (default 32) along the Morton order of their centroids (`aquaflux.morton.morton_order`
+since #574; before, a per-axis copy of its own), with a bounding sphere
 each. Per receiver, `_cluster_bounds` gives each cluster an **enclosing cone** per role
 (`silhouette.enclosing_cone`: cap on the mean member axis reaching `angle(axis, member axis) +
 member half-angle`, `arctan2` throughout; an unusable member or a cap reaching a right angle makes the
