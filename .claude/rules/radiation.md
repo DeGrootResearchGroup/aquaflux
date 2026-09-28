@@ -2575,10 +2575,35 @@ mask, whose random reads are out of cache at any step size. Separately (own prob
 `direct_irradiance` at 12,000 receivers 56 → 47 s; a `VoxelAbsorption` held gather (1,500 receivers,
 12 x 8 x 8 grid) 23.3 → 23.5 s, i.e. none.
 
-⚠️ **The bound is this machine's.** The #509 table (macOS arm64, 11 cores) found 1M-64M pairs a step
-equally fast, which says the cliff there is below 1M or absent — it never tried below 1M. **Re-run
-`pass_pairs.py` on the Mac before reading the 1.45x as portable**; the floor is broad, so a smaller bound
-than needed costs little.
+**On the Mac the step size barely matters, and 2^16 stands** (`pass_pairs.py` on main `8fc66ac`, Apple
+M3 Pro — 11 cores, 5 performance + 6 efficiency, 16 MB L2 shared by the performance cluster, 18 GiB —
+macOS arm64, jax 0.10.2, numba 0.67.0, CPU, x64, run through `run_case.sh` with nothing else running,
+two alternating sweeps, fastest kept, 2026-09-28). ⚠️ **A different scene from the Linux table**: with
+`work/case` present the harness takes the case's `lampWall.stl` (**7,516 facets**) and **23,985 cell
+centres** of the meshed case (24,000 sampled outside the solid, 15 inside the lamp removed), so read the
+two tables' shapes against each other, never their seconds. Checksums identical to the last digit at
+every bound, in both sweeps, on every arm.
+
+| bound (pairs a step) | 32k | 64k | 131k | 262k | 1M | 4M (= before) |
+|---|---|---|---|---|---|---|
+| streamed field, s (spread) | **2.50** (1.10x) | 2.59 (1.07x) | **2.50** (1.00x) | 2.51 (1.00x) | 2.54 (1.01x) | 2.55 (1.02x) |
+| streamed gradient, s | 1.84 (1.08x) | 1.70 (1.18x) | 1.74 (1.00x) | **1.67** (1.01x) | 1.70 (1.00x) | 1.70 (1.03x) |
+| held gather, eager, s | **1.56** (1.14x) | 1.72 (1.09x) | 1.95 (1.01x) | 2.01 (1.03x) | 1.65 (1.02x) | 1.67 (1.00x) |
+| held gather under `jit`, s | 0.39 (1.34x) | 0.36 (1.01x) | 0.33 (1.03x) | 0.37 (1.00x) | 0.32 (1.04x) | **0.30** (1.02x) |
+
+- **No cliff anywhere from 32k to 4M on the streamed paths**: the field spans 2.50-2.59 s and the
+  gradient 1.67-1.84 s, and 64k sits within its own spread of the fastest on both. So #585's bound costs
+  nothing here, and it buys nothing either: the ~1.45x of the Linux box does not transfer. A per-machine
+  bound (from the cache size, or settable) would not help on this machine.
+- **The one arm where a larger step is faster beyond the spread is the held gather under `jit`**: 0.30 s
+  at 4M against 0.36 s at 64k, 1.2x, with spreads of 1.01-1.04x at both. It is 0.06 s here, and the held
+  path is not what the model's streamed call runs.
+- The eager held gather has a bump at 131k-262k (1.95-2.01 s, tight spreads) against 1.56-1.72 s either
+  side; not explained, and not on the streamed path.
+- **So the mesh-scale hint that led here was not the bound**: `field_cost_breakdown.py`'s areal segments
+  read 47.1 s without #585 and 52.9 s with it (one run each), but on this sweep the whole bound range moves
+  the streamed field by 4%. Read that 1.12x as the run-to-run spread of one run each, or as something in
+  #585 other than the bound; not separated.
 
 ⚠️ **The transfer build does NOT take this bound, although it was built and agreed (2026-09-28).**
 Capping `_row_blocks` at `receivers_per_step(chunk_size * n, n)` rows measured ~1.2x (245-247 s at
