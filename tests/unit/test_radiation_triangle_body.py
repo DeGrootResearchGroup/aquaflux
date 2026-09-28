@@ -199,3 +199,22 @@ def test_refinement_vouches_for_tiles_the_coarse_level_could_not():
         np.asarray(refined.blocked([vessel], sources, near, points)), reference
     )
     assert more <= np.count_nonzero(~reference)
+
+
+def test_the_grid_a_body_vouches_from_is_near_cubic_whatever_the_walk_grid():
+    """Certificates want small voxels in every direction, so they do not follow the walk's shape.
+
+    The walk's default voxels take the box's proportions, long along a long vessel; a long voxel
+    beside a wall is occupied along its whole length and would vouch for less. Deriving the
+    occupancy grid from the walk grid, as it once was, gives this 6:1 vessel 6:1 voxels there.
+    """
+    long_vessel = _vessel() * np.array([6.0, 1.0, 1.0])
+    for resolution in (None, (3, 40, 2)):
+        body = TriangleBody.build(long_vessel, resolution=resolution)
+        spacing = body.occupancy.spacing
+        assert spacing.max() / spacing.min() < 1.5, (resolution, spacing)
+        np.testing.assert_array_equal(
+            body.occupancy.resolution,
+            TriangleBody.build(long_vessel).occupancy.resolution,
+        )
+    assert TriangleBody.build(long_vessel).grid.spacing[0] > 3.0 * body.occupancy.spacing[0]

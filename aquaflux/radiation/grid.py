@@ -26,10 +26,17 @@ ray is walked to its first hit by one compiled loop (:mod:`~aquaflux.radiation.g
 its state in registers and nothing formed per step, which measured 17-37x faster on the same
 rays with identical answers.
 
+**Where its time goes.** Not in empty space: a compiled step through an empty voxel costs about
+as much as one or two triangle tests, and on that reactor a segment to a cell in an outlet pipe
+spent its time testing the pipe wall's triangles in every voxel it crossed, the pipe being about
+a voxel across. Which end a segment is walked from made no difference there either (0.95-1.06x).
+What moved the cost was the voxels' *shape*, which is why the default grid takes the proportions
+of the triangles' bounding box.
+
 **What it does not do.** It does not reduce the number of *rays*, which at mesh scale is the
 binding cost: 1.6M cells against 7,516 facets is 1.2e10 segments however cheaply each is
-answered. It makes scenes of up to a few times 1e8 rays practical; beyond that the ray count
-has to come down instead.
+answered. Cutting the rays walked is what the clearance certificates of a
+:class:`~aquaflux.radiation.TriangleBody` are for.
 """
 
 from __future__ import annotations
@@ -42,10 +49,21 @@ from aquaflux.radiation.grid_walk import walk_to_first_hit
 
 __all__ = ["TriangleGrid"]
 
-#: Triangles per occupied voxel a default grid aims for. Below about this the walk lengthens
-#: faster than the per-voxel work falls: on the measured reactor, going from 64 to 128 cubed
-#: halved the triangles tested per ray (121 to 52) while doubling the steps taken (33 to 65).
+#: Triangles per occupied voxel of the near-cubic grid a default grid's voxel count is scaled
+#: from (``_VOXEL_BUDGET``), and that a body's occupancy grid is refined from. Refining a
+#: near-cubic grid trades steps for tests: on the Sozzi reactor's wall, 1x to 4x per axis cut the
+#: triangles tested per segment 444 to 139 and raised the steps 64 to 255, at the same rate.
 _TARGET_PER_VOXEL = 10.0
+
+#: How many voxels a default grid spends, as a multiple of the near-cubic grid at
+#: ``_TARGET_PER_VOXEL``. On the two synthetic vessels of ``validation/radiation_grid_walk.py``,
+#: halving the voxels per axis cost 1% (long vessel) and 19% (annular reactor) and doubling them
+#: cost 18% and gained 1%; on the Sozzi wall a grid with about twice the voxels ran faster still.
+#: So it is a compromise across scenes, not any one scene's optimum.
+_VOXEL_BUDGET = 4.0
+
+#: Longest voxel edge over the shortest, in a default grid. The Sozzi reactor's box is 19:1.
+_MAX_ASPECT = 32.0
 
 #: Never build more voxels than this, whatever the triangle count asks for. The grid's own
 #: memory is one index per voxel plus one entry per (triangle, voxel it spans).
@@ -101,10 +119,12 @@ class TriangleGrid:
         vertices : array_like, shape ``(n_triangles, 3, 3)``
             The blocking triangles.
         resolution : int or tuple of int, optional
-            Voxels per axis. The default divides the surface's bounding box so that an occupied
-            voxel holds about ten triangles, which is where the measured trade between walk
-            length and per-voxel work sits, and keeps the axes' voxels near cubic so a long
-            thin domain is not walked in tiny steps across its short axis.
+            Voxels per axis. The default gives every axis about the same number of voxels, so
+            each voxel has the proportions of the surface's bounding box, no edge more than
+            32 times another; and it holds four times the voxels of a near-cubic grid sized so
+            an occupied voxel holds about ten triangles: a segment's steps along an axis go as its
+            travel there over the voxel's edge, and a shadow mask's segments spread through the
+            domain as its bounding box does.
 
         Returns
         -------
@@ -122,15 +142,7 @@ class TriangleGrid:
         if len(vertices) == 0:
             msg = "a grid needs at least one triangle"
             raise ValueError(msg)
-        corner = vertices.reshape(-1, 3)
-        low, high = corner.min(axis=0), corner.max(axis=0)
-        extent = np.maximum(high - low, np.finfo(float).tiny)
-        # A margin, so a triangle exactly on the far face still lands inside the grid.
-        low = low - 1e-9 * extent
-        extent = extent * (1.0 + 2e-9)
-        # Twice the area, since the cross product of two edges spans the parallelogram.
-        edges = np.cross(vertices[:, 1] - vertices[:, 0], vertices[:, 2] - vertices[:, 0])
-        area = 0.5 * float(np.sqrt(np.sum(edges * edges, axis=-1)).sum())
+        low, extent, area = _box_and_area(vertices)
         counts = _resolution(extent, area, len(vertices), resolution)
         spacing = extent / counts
 
@@ -251,17 +263,46 @@ class TriangleGrid:
         )
 
 
-def _resolution(extent, area: float, n_triangles: int, resolution) -> np.ndarray:
-    """Voxels per axis: what the caller asked for, or near-cubic voxels of the target size.
+def _box_and_area(vertices):
+    """The grid's corner and extent -- the triangles' bounding box, a hair wider -- and their area."""
+    corner = vertices.reshape(-1, 3)
+    low, high = corner.min(axis=0), corner.max(axis=0)
+    extent = np.maximum(high - low, np.finfo(float).tiny)
+    # A margin, so a triangle exactly on the far face still lands inside the grid.
+    low = low - 1e-9 * extent
+    extent = extent * (1.0 + 2e-9)
+    # Twice the area, since the cross product of two edges spans the parallelogram.
+    edges = np.cross(vertices[:, 1] - vertices[:, 0], vertices[:, 2] - vertices[:, 0])
+    return low, extent, 0.5 * float(np.sqrt(np.sum(edges * edges, axis=-1)).sum())
 
-    ⚠️ **The size comes from the triangles' AREA, not from the box's volume.** Blocking
-    triangles tile a surface, so the voxels they occupy are the ones their sheet passes
+
+def _resolution(extent, area: float, n_triangles: int, resolution) -> np.ndarray:
+    """Voxels per axis: what the caller asked for, or voxels shaped like the box.
+
+    **Why the box's shape, and not cubes.** A walk pays per voxel it steps through and per
+    triangle it tests. Along each axis the steps go as how far the segment travels along it over
+    the voxel's edge there, so for a given number of voxels the steps are fewest when each edge
+    is in proportion to that travel. A shadow mask pairs every receiver with every emitting
+    facet, so its segments spread through the domain as its bounding box does, and near-cubic
+    voxels in a long vessel make every axial segment take many short steps. Measured on three
+    long vessels -- a synthetic thin tube, a synthetic annular reactor, and the Sozzi reactor's
+    53,500-triangle wall walked by its real cell-to-lamp segments -- box-shaped voxels were
+    1.26-1.66x the near-cubic rate at the same voxel count, and this default was 1.33-1.96x the
+    near-cubic one it replaced, segments that stay in the open chamber being the exception at 1.03x
+    (``validation/radiation_grid_walk.py``,
+    ``validation/sozzi_radiation/grid_walk_direction.py``). The box is the triangles', not the
+    segments', which is where this can mislead: the edges are capped at ``_MAX_ASPECT`` to
+    one another so a very flat box is not cut into sheets a segment crossing it would test whole.
+
+    ⚠️ **The voxel COUNT still comes from the triangles' AREA, not from the box's volume.**
+    Blocking triangles tile a surface, so the voxels they occupy are the ones their sheet passes
     through: about ``area / size**2`` of them, however large the box around it. Dividing the
     *volume* into one voxel per ten triangles assumes the box is filled, and a thin shell in a
     long box is the opposite of that -- on a reactor's wall (53,500 triangles over ~0.3 m^2 in
     a 0.9 m box) it sized 5,350 voxels of which **298** were occupied, holding 217 triangles
     each against the ten intended, and a walk through those cost more memory than testing every
-    triangle would have.
+    triangle would have. The near-cubic grid of that size (``_near_cubic``) sets the count, and
+    ``_VOXEL_BUDGET`` times it is what the box-shaped grid spends.
     """
     if resolution is not None:
         counts = np.broadcast_to(np.asarray(resolution, dtype=int), (3,)).copy()
@@ -269,12 +310,64 @@ def _resolution(extent, area: float, n_triangles: int, resolution) -> np.ndarray
             msg = f"a grid resolution must be at least 1 voxel per axis; got {tuple(counts)}"
             raise ValueError(msg)
         return counts
+    voxels = _VOXEL_BUDGET * float(np.prod(_near_cubic(extent, area, n_triangles), dtype=float))
+    counts = _shaped_like(extent, voxels)
+    while np.prod(counts, dtype=float) > _MAX_VOXELS:
+        counts = np.maximum(counts // 2, 1)
+    return counts
+
+
+def _near_cubic(extent, area: float, n_triangles: int) -> np.ndarray:
+    """Voxels per axis of near-cubic voxels holding about ``_TARGET_PER_VOXEL`` triangles.
+
+    Sized from the triangles' area (see ``_resolution``), and never more than
+    ``_MAX_VOXELS`` voxels.
+    """
     wanted = max(n_triangles / _TARGET_PER_VOXEL, 1.0)
     size = float(np.sqrt(max(area, np.finfo(float).tiny) / wanted))
     counts = np.maximum(np.round(extent / max(size, np.finfo(float).tiny)), 1).astype(int)
     while np.prod(counts, dtype=float) > _MAX_VOXELS:
         counts = np.maximum(counts // 2, 1)
     return counts
+
+
+def _shaped_like(extent, voxels: float) -> np.ndarray:
+    """About ``voxels`` voxels in all, their edges in the box's proportions within the cap.
+
+    Each voxel edge is a common scale times its axis's extent, the shorter extents first raised
+    to ``_MAX_ASPECT`` below the longest. An axis that would get less than one voxel gets
+    exactly one -- a flat box is one voxel thick -- and the others share the count between them.
+    """
+    edge = np.maximum(extent, extent.max() / _MAX_ASPECT)
+    free = np.ones(3, dtype=bool)
+    while True:
+        # The scale at which the free axes' counts multiply to `voxels`. Their geometric mean
+        # is then at least one, so at least one of them is, and `free` never empties.
+        scale = (np.prod(extent[free] / edge[free]) / max(voxels, 1.0)) ** (1.0 / free.sum())
+        counts = np.where(free, extent / (scale * edge), 1.0)
+        if np.all(counts[free] >= 1.0):
+            return np.maximum(np.round(counts), 1).astype(int)
+        free &= counts >= 1.0
+
+
+def _near_cubic_resolution(vertices) -> np.ndarray:
+    """Voxels per axis of a near-cubic grid over these triangles, about ten in an occupied voxel.
+
+    What a grid read for which voxels are occupied, rather than walked, is sized from: a box is
+    clear of the surface only if it overlaps no occupied voxel, which wants voxels small in
+    every direction rather than long along the segments.
+
+    Parameters
+    ----------
+    vertices : array_like, shape ``(n_triangles, 3, 3)``
+
+    Returns
+    -------
+    np.ndarray of int, shape ``(3,)``
+    """
+    vertices = np.ascontiguousarray(vertices, dtype=float)
+    _, extent, area = _box_and_area(vertices)
+    return _near_cubic(extent, area, len(vertices))
 
 
 def _spans(span_low, span_high, counts):

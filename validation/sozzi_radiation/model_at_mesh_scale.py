@@ -25,7 +25,9 @@ the time differs. Each arm writes its own summary, ``model_at_mesh_scale[-<arm>]
 ``grid_mask_check.py`` builds it -- the general method for geometry that exists only as triangles.
 Its pipe openings are polygons inscribed in the design circles, so the field then differs from the
 hand-built one in the pipes by the STL's idea of a circle, and the summary gives the chamber and the
-pipes separately; the chamber should still agree exactly. ``SOZZI_RECEIVERS`` keeps every *k*-th
+pipes separately; the chamber should still agree exactly. ``SOZZI_GRID=a:b:c`` sets the walk
+grid's voxels per axis in place of the library's default, which the summary names either way.
+``SOZZI_RECEIVERS`` keeps every *k*-th
 cell, about that many in all, for a quick check of memory and of the harness; the summary names the
 count, and a figure quoted from this file is from the whole mesh.
 
@@ -62,8 +64,9 @@ sys.path.insert(0, str(HERE.parent))
 WORK = HERE / "work"
 CULLING = os.environ.get("SOZZI_CULLING", "")
 WATER = os.environ.get("SOZZI_WATER", "")
+GRID = os.environ.get("SOZZI_GRID", "")
 RECEIVERS = int(os.environ.get("SOZZI_RECEIVERS", 0))
-ARM = "-".join(part for part in (WATER, CULLING, str(RECEIVERS) if RECEIVERS else "") if part)
+ARM = "-".join(part for part in (WATER, GRID, CULLING, str(RECEIVERS) if RECEIVERS else "") if part)
 RESULT = WORK / "compare" / f"model_at_mesh_scale{'-' + ARM if ARM else ''}.json"
 
 
@@ -97,7 +100,11 @@ def water():
 
     if WATER == "triangles":
         wall = np.asarray(read_stl(CASE / "constant" / "triSurface" / "bodyWall.stl").vertices)
-        return TriangleBody.build(wall, sheet=True), f"bodyWall.stl, {len(wall)} triangles"
+        resolution = tuple(int(n) for n in GRID.split(":")) if GRID else None
+        body = TriangleBody.build(wall, sheet=True, resolution=resolution)
+        shape = "x".join(str(int(n)) for n in body.grid.resolution)
+        chosen = "SOZZI_GRID" if GRID else "default"
+        return body, f"bodyWall.stl, {len(wall)} triangles, {chosen} walk grid {shape}"
     if WATER:
         msg = f"SOZZI_WATER must be unset or 'triangles'; got {WATER!r}"
         raise SystemExit(msg)
