@@ -1949,6 +1949,37 @@ Culling facet receivers too fails an existing transfer test. **Dismissed**: drop
 label from the cull is inert — a point source's zero normal already gives it zero heights — and the
 label stays because a source's kind is read from its label, never inferred.
 
+## ONE MORTON ORDERING, CUBIC CELLS (#574, 2026-09-28)
+
+`aquaflux/morton.py::morton_order` is the only ordering of points in the package: shaft culling's
+receiver groups and lamp-facet clusters (`_Curve`), the gather's chunks and `lit_blocks`, the transfer
+build's row blocks, and `FacetClusters`. There were two copies before (`culling.spatial_order`, 10 bits;
+`clusters._morton_keys`, 21 bits) and **both scaled each axis to its own extent**, so on a lamp 0.8 m
+long and 2 cm across the curve's cells were 40x elongated and consecutive facets could sit half the lamp
+apart. Now: cubic cells on the box's longest side, 21 bits. Ordering only — shaft culling stays
+bit-identical to `EveryPair`, the other consumers write rows back by index.
+⚠️ **Every cost recorded in this file for shaft culling, the gather's layout, `lit_blocks` and the
+transfer build BEFORE 2026-09-28 was taken under the per-axis ordering.**
+
+**Group compactness** (`validation/sozzi_radiation/curve_compactness.py`, deterministic; analytic 32 x 128
+lamp, 8,704 facets; 24,000 receivers sampled in the three cylinders, no case mesh): lamp groups of 32,
+radius median / max **0.069 / 0.404 m → 0.012 / 0.018 m**; of 2, 0.0031 / 0.403 → 0.0011 / 0.016 m.
+Receiver groups of 32, median 0.055 → 0.023 m (max ~0.9 m both ways: groups straddling two cylinders
+where the curve jumps).
+
+**What it buys the mask — little, on this scene** (`body_culling.py`, `Outside(chamber, inlet, riser)`,
+same lamp and receivers, 208.9M pairs, no back faces; `main` 2b01660 against the branch, run
+alternately main/branch/main/branch in separate processes, fastest of two passes each; jax 0.10.2,
+Linux x86_64, 4 cores). Certified share: default ladder 32/8/2 **91.7% → 91.8%**, one level 32x32
+**90.3% → 90.9%** (deterministic). Ladder build 6.50 / 7.46 s → 5.63 / 6.11 s (spreads to 1.32x, so
+~15% at most, not separated from noise); one level 4.39 / 4.34 → 4.55 / 4.52 s. Every arm bit-identical.
+**Why so little:** `Outside`'s certificate asks only that a tile lie in one convex region, and the whole
+lamp sits inside the chamber, so a lamp cluster half the lamp long was already in one region; tightening
+it helps only where the receiver side decides. **Not measured, and where it could matter more:** the
+back-face drop (a compact cluster's normals agree, so more tiles lie wholly behind it), `lit_blocks`'
+column lists, the self-occlusion clustered cull #574 was filed against, and the mesh-scale call
+(`field_cost_breakdown.py` needs `work/case` and `work/cell_centres.npy`, i.e. an OpenFOAM mesh).
+
 ## SHAFT CULLING: BUILT as `ShaftCulling` — tiles certified clear, THE DEFAULT since 2026-09-26 (#554)
 
 `culling.py` holds the bodies' layer's strategy family, `BodyCulling.blocked(bodies, sources,
