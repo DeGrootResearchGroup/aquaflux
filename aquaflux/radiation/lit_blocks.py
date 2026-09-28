@@ -31,7 +31,7 @@ import equinox as eqx
 import jax
 import numpy as np
 
-from aquaflux.radiation.culling import spatial_order
+from aquaflux.morton import morton_order
 
 __all__ = ["LitSegment", "lit_segments", "rounded_width"]
 
@@ -136,7 +136,7 @@ def lit_segments(points, facets, facing=None, *, block: int = BLOCK, segments=No
     if facing is None or traced:
         order = np.arange(n_points)
     else:
-        order = spatial_order(np.asarray(points, dtype=float))
+        order = morton_order(np.asarray(points, dtype=float))
     n_blocks = -(-n_points // block)
     padded = np.concatenate([order, np.full(n_blocks * block - n_points, -1)])
     rows = np.where(padded < 0, n_points, padded).reshape(n_blocks, block)

@@ -554,7 +554,7 @@ kernel. ⚠️ **It must be every quadrature point, NOT the centroid**: the firs
 plane through the centroid and dropped 7 pairs of a 2,176-facet lamp worth up to **1.2e-5** — the
 lamp holds triangles collinear to rounding whose stored normal is rounding noise tilted off their
 line, so their quadrature points lie up to ~2 mm off that plane (facets 2157, 2165, 2173 of
-`lamp_resolution.lamp(16, 64)`). **Blocks are cut along the Morton curve** (`culling.spatial_order`)
+`lamp_resolution.lamp(16, 64)`). **Blocks are cut along the Morton curve** (`aquaflux.morton.morton_order`)
 so a block's receivers share their fronts; column lists are padded on `lit_blocks.rounded_width`'s
 capped ladder (a power-of-two pad first reached **8192 columns on a 4,160-facet scene**, doubling the
 work). Share of `n^2` kernel evaluations still made, 6-point rule: analytic 32 x 128 lamp (8,704
@@ -1949,6 +1949,37 @@ Culling facet receivers too fails an existing transfer test. **Dismissed**: drop
 label from the cull is inert — a point source's zero normal already gives it zero heights — and the
 label stays because a source's kind is read from its label, never inferred.
 
+## ONE MORTON ORDERING, PER-AXIS CELLS — cubic cells measured and REJECTED (#574, 2026-09-28)
+
+`aquaflux/morton.py::morton_order` is the only ordering of points in the package: shaft culling's
+receiver groups and lamp-facet clusters (`_Curve`), the gather's chunks and `lit_blocks`, the transfer
+build's row blocks, and `FacetClusters`. It is the former `culling.spatial_order` moved to a neutral leaf,
+**bit for bit** (10 bits, each axis scaled to its own extent — checked equal on four point sets), and
+`FacetClusters`' private 21-bit copy (`clusters._morton_keys`) is gone: its ordering moved from 21 to 10
+bits, which only reorders centroids sharing a 1/1024 cell, and nothing measured it.
+
+**#574 proposed cubic cells** (scale all axes by the longest extent), because per-axis cells on a lamp
+0.8 m long and 2 cm across let a group of four facets reach half the lamp. **Built, measured at mesh
+scale, and reverted.** Cubic groups ARE tighter in space — lamp groups of 32, radius median / max
+0.070 / 0.404 m per-axis against 0.013 / 0.018 m cubic — but they wrap further AROUND the cylinder, so
+their facets face many ways: median / 90th-percentile normal spread over groups of 32 is **8.8 / 38.5°
+per-axis against 51.7 / 162°** cubic (`validation/sozzi_radiation/curve_compactness.py`, deterministic,
+analytic 32 x 128 lamp). The "wholly behind these points" tests (`back_faces`, the transfer's
+`_columns_in_front`, `lit_blocks`) want a shared facing direction far more than compactness, and
+`Outside`'s one-region certificate did not need tighter lamp clusters (the whole lamp is in the chamber).
+
+**Mesh scale** (`field_cost_breakdown.py`, the user's macOS arm64 run, 2026-09-28: 1,635,909 cells,
+case `lampWall.stl` 7,516 facets, `Outside` from three hand-typed cylinders, library defaults, one run
+each; main `8fc66ac` against cubic merged onto it, `73ebe0e`, local): undecided pairs **760.0M → 798.2M
+(+5%)**, tested with padding 901.8M → 904.1M, transfer row blocks **51.8 → 57.9 s**, call less the
+hidden-tile count 171.3 → 177.1 s, wholly-blocked 32x32 tiles 50.5% → 38.6% of undecided pairs. A
+second cubic run (`020ae40`, which lacks #585/#586) gave the same counts and 57.9 s. On the sampled
+scene (`body_culling.py`, Linux, 4 cores, 208.9M pairs) certified share moved 91.7 → 91.8% and time
+within noise. **No gain anywhere, and a loss in the build — do not retry cubic cells as a fix for
+elongated lamps.** Grouping by facing direction as well as position is a separate, open idea: #589.
+Pinned: `tests/unit/test_morton.py`'s `test_a_run_around_a_long_thin_tube_faces_one_way` and
+`test_stretching_one_axis_does_not_change_the_order` are both red under cubic cells.
+
 ## SHAFT CULLING: BUILT as `ShaftCulling` — tiles certified clear, THE DEFAULT since 2026-09-26 (#554)
 
 `culling.py` holds the bodies' layer's strategy family, `BodyCulling.blocked(bodies, sources,
@@ -2069,8 +2100,8 @@ low-side margin, a missing `+ 1` on the last voxel, a wrong table corner, a unio
 box's low corner on one axis, `rows` passed for `cols`, padding a host body's certificates, and not
 padding a traceable one's — each red.
 
-**How.** Receivers and facet centroids are each ordered along a Morton curve (`spatial_order`, 10 bits
-an axis) and padded to a whole number of the coarsest groups by repeating the last point (`_Curve`;
+**How.** Receivers and facet centroids are each ordered along a Morton curve (`aquaflux.morton.morton_order`, 10 bits
+an axis, each axis scaled to its own extent — cubic cells were measured and rejected, #574) and padded to a whole number of the coarsest groups by repeating the last point (`_Curve`;
 repetition changes neither a max-summary nor a written answer). Each size in a ladder divides the one
 before, so a group at one level is a whole number of groups at the next, read off the same order. Per
 body, each group is summarized by the column-wise max of `body.clearance`, and a tile is **certified
@@ -2092,8 +2123,8 @@ tiles; **D** distance-based level of detail for the gather, which changes answer
 error measurement. ⚠️ **The facet-to-facet ray mask (`RayCastOcclusion`, self-occlusion) is NOT
 culled**: its shafts start on the wall they are tested against, so every tile touches the wall's own
 triangles and no box certificate can vouch for one — that needs per-ray exclusions carried into the
-certificate, and is not designed. ⚠️ **`spatial_order` is generic point ordering living in a physics
-package** (Principle 3.6) — it should move to a neutral leaf when a second consumer appears.
+certificate, and is not designed. The ordering is the neutral leaf `aquaflux/morton.py` since #574; there is no
+`culling.spatial_order` any more.
 
 **MEASURED** (`validation/sozzi_radiation/body_culling.py`, all arms in one process on one ray set,
 warm-up then two alternating passes, fastest kept): `Outside(chamber, inlet, riser)` at the
@@ -2562,10 +2593,35 @@ mask, whose random reads are out of cache at any step size. Separately (own prob
 `direct_irradiance` at 12,000 receivers 56 → 47 s; a `VoxelAbsorption` held gather (1,500 receivers,
 12 x 8 x 8 grid) 23.3 → 23.5 s, i.e. none.
 
-⚠️ **The bound is this machine's.** The #509 table (macOS arm64, 11 cores) found 1M-64M pairs a step
-equally fast, which says the cliff there is below 1M or absent — it never tried below 1M. **Re-run
-`pass_pairs.py` on the Mac before reading the 1.45x as portable**; the floor is broad, so a smaller bound
-than needed costs little.
+**On the Mac the step size barely matters, and 2^16 stands** (`pass_pairs.py` on main `8fc66ac`, Apple
+M3 Pro — 11 cores, 5 performance + 6 efficiency, 16 MB L2 shared by the performance cluster, 18 GiB —
+macOS arm64, jax 0.10.2, numba 0.67.0, CPU, x64, run through `run_case.sh` with nothing else running,
+two alternating sweeps, fastest kept, 2026-09-28). ⚠️ **A different scene from the Linux table**: with
+`work/case` present the harness takes the case's `lampWall.stl` (**7,516 facets**) and **23,985 cell
+centres** of the meshed case (24,000 sampled outside the solid, 15 inside the lamp removed), so read the
+two tables' shapes against each other, never their seconds. Checksums identical to the last digit at
+every bound, in both sweeps, on every arm.
+
+| bound (pairs a step) | 32k | 64k | 131k | 262k | 1M | 4M (= before) |
+|---|---|---|---|---|---|---|
+| streamed field, s (spread) | **2.50** (1.10x) | 2.59 (1.07x) | **2.50** (1.00x) | 2.51 (1.00x) | 2.54 (1.01x) | 2.55 (1.02x) |
+| streamed gradient, s | 1.84 (1.08x) | 1.70 (1.18x) | 1.74 (1.00x) | **1.67** (1.01x) | 1.70 (1.00x) | 1.70 (1.03x) |
+| held gather, eager, s | **1.56** (1.14x) | 1.72 (1.09x) | 1.95 (1.01x) | 2.01 (1.03x) | 1.65 (1.02x) | 1.67 (1.00x) |
+| held gather under `jit`, s | 0.39 (1.34x) | 0.36 (1.01x) | 0.33 (1.03x) | 0.37 (1.00x) | 0.32 (1.04x) | **0.30** (1.02x) |
+
+- **No cliff anywhere from 32k to 4M on the streamed paths**: the field spans 2.50-2.59 s and the
+  gradient 1.67-1.84 s, and 64k sits within its own spread of the fastest on both. So #585's bound costs
+  nothing here, and it buys nothing either: the ~1.45x of the Linux box does not transfer. A per-machine
+  bound (from the cache size, or settable) would not help on this machine.
+- **The one arm where a larger step is faster beyond the spread is the held gather under `jit`**: 0.30 s
+  at 4M against 0.36 s at 64k, 1.2x, with spreads of 1.01-1.04x at both. It is 0.06 s here, and the held
+  path is not what the model's streamed call runs.
+- The eager held gather has a bump at 131k-262k (1.95-2.01 s, tight spreads) against 1.56-1.72 s either
+  side; not explained, and not on the streamed path.
+- **So the mesh-scale hint that led here was not the bound**: `field_cost_breakdown.py`'s areal segments
+  read 47.1 s without #585 and 52.9 s with it (one run each), but on this sweep the whole bound range moves
+  the streamed field by 4%. Read that 1.12x as the run-to-run spread of one run each, or as something in
+  #585 other than the bound; not separated.
 
 ⚠️ **The transfer build does NOT take this bound, although it was built and agreed (2026-09-28).**
 Capping `_row_blocks` at `receivers_per_step(chunk_size * n, n)` rows measured ~1.2x (245-247 s at
@@ -3748,7 +3804,8 @@ the cull was **54%** of a 3,184-facet build (35.5% on device, 18.4% host compact
 the reject pass 22%, the clip 11%. So the ceiling for any cull change there was ~2.2x.
 
 **What was built, as the issue wrote it.** `FacetClusters.build` (`clusters.py`) groups facets into
-runs of `cluster_size` (default 32) along the Morton order of their centroids, with a bounding sphere
+runs of `cluster_size` (default 32) along the Morton order of their centroids (`aquaflux.morton.morton_order`
+since #574; before, a 21-bit copy of its own), with a bounding sphere
 each. Per receiver, `_cluster_bounds` gives each cluster an **enclosing cone** per role
 (`silhouette.enclosing_cone`: cap on the mean member axis reaching `angle(axis, member axis) +
 member half-angle`, `arctan2` throughout; an unusable member or a cap reaching a right angle makes the

@@ -33,9 +33,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from aquaflux.morton import morton_order
 from aquaflux.radiation.absorption import Absorption
 from aquaflux.radiation.back_faces import BackFaces
-from aquaflux.radiation.culling import culling_or_default, spatial_order
+from aquaflux.radiation.culling import culling_or_default
 from aquaflux.radiation.lit_blocks import lit_segments
 from aquaflux.radiation.solid_angle import projected_solid_angle, solid_angle
 from aquaflux.radiation.surfaces import Surfaces
@@ -289,7 +290,7 @@ def streamed_fluence_rate(
     )
     # The chunks are cut from the points in space-filling-curve order, so each is a compact
     # region: its blocks' boxes are small, its tiles' shafts narrow, and both decide more.
-    order = spatial_order(np.asarray(points))
+    order = morton_order(np.asarray(points))
     ordered = points[order]
     field = jnp.concatenate(
         [

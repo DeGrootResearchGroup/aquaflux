@@ -23,7 +23,7 @@ from aquaflux.radiation import (
     build_visibility,
     direct_fluence_rate,
 )
-from aquaflux.radiation.culling import _Curve, spatial_order
+from aquaflux.radiation.culling import _Curve
 from aquaflux.solids import Body, Box, Cylinder, Difference, Outside, Sphere
 
 #: The chamber is a cylinder along x, radius 0.1, from x = 0 to 1; the pipe stands on it at x = 0.2.
@@ -328,30 +328,6 @@ def test_a_group_size_ladder_that_cannot_be_refined_is_refused():
         ShaftCulling(receiver_blocks=(32, 8), source_clusters=(32,))
     with pytest.raises(ValueError, match="needs at least one group size"):
         ShaftCulling(receiver_blocks=(), source_clusters=())
-
-
-def test_the_curve_visits_a_cube_s_corners_in_z_order():
-    """The eight corners of a box, shuffled, come back ordered by ``x + 2y + 4z``.
-
-    That is the interleaving -- x in the lowest bit -- stated at the one resolution where it can
-    be read off by hand.
-    """
-    corners = np.array(list(np.ndindex(2, 2, 2)), dtype=float)[:, ::-1]  # rows as (x, y, z)
-    shuffled = corners[np.random.default_rng(2).permutation(8)]
-    ordered = shuffled[spatial_order(shuffled)]
-    keys = ordered @ np.array([1.0, 2.0, 4.0])
-    assert keys.tolist() == list(range(8))
-
-
-def test_the_curve_keeps_neighbours_together():
-    """Consecutive points along the curve are far closer than consecutive points of a shuffle."""
-    rng = np.random.default_rng(4)
-    points = rng.uniform(0.0, 1.0, (4096, 3))
-    order = spatial_order(points)
-    assert sorted(order.tolist()) == list(range(4096))
-    step = np.linalg.norm(np.diff(points[order], axis=0), axis=1).mean()
-    shuffled = np.linalg.norm(np.diff(points, axis=0), axis=1).mean()
-    assert step < 0.2 * shuffled, (step, shuffled)
 
 
 def test_the_last_group_is_padded_with_its_own_last_member_at_every_size():
