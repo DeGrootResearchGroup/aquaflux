@@ -2013,7 +2013,8 @@ had fallen; `validation/sozzi_radiation/certificate_levels.py` counts calls, til
 seconds per level (and #578's behind-the-facets drops), at any commit. On the analytic stand-in (24,000
 sampled receivers, 8,704 facets, default ladder, fresh process each, two runs per arm): certificates
 **3.13–3.43 → 1.29–1.33 s**, level 1 alone 1.60–1.69 → 0.31–0.33 s, identical tile counts at every level.
-**Not yet measured on the mesh** — re-run `certificate_levels.py` (and `field_cost_breakdown.py`) there.
+**On the mesh** (`field_cost_breakdown.py`, THE CALL ON `8fc66ac` below): the cylinders' certificates
+53.5 → **4.2 s** (main `bb573d5` + #581) and 5.1 s on `8fc66ac`, identical tile counts.
 Pinned by `test_a_body_is_asked_to_vouch_only_at_a_few_batch_lengths` (red without the padding, and red
 keeping the wrong end of the padded answers). **A body that is not `traceable` is asked unpadded** — see
 the next paragraph. On the same stand-in the first call of #578's
@@ -2036,8 +2037,9 @@ lattice slab at 12 mm (9,471 receivers), the analytic 24 x 64 lamp (3,360 facets
 lamp, default ladder; jax 0.10.2, Linux x86_64, 4 cores, two processes per arm, three passes each):
 segments walked **8,388,608 → 6,303,619** — of main's, 1,659,372 were padding and 425,617 real pairs
 behind their facet (6,729,236 real pairs undecided) — and warm passes **14.05–16.06 s → 7.42–9.12 s**,
-masks bit-identical. The time fell more than the count; that was **not decomposed**. **Not measured on
-the mesh.** Pinned by
+masks bit-identical. The time fell more than the count; that was **not decomposed**. **On the mesh**
+(THE CALL ON `8fc66ac` below): walked 4,866,359,296 → **3,458,668,522** pairs, the walk 1,148.7 →
+**864.8 s** (1.33x; rate unchanged at ~4M pairs/s). Pinned by
 `test_a_host_answered_body_walks_each_lit_pair_once_and_is_asked_about_no_padding`: red for walking
 padding (a pair walked twice), for walking pairs behind their source, and for padding the certificates.
 `field_cost_breakdown.py` now counts what each test is handed — `tested by a compiled body, padding
@@ -2057,7 +2059,8 @@ Linux x86_64, 4 cores): the certificates were **0.97 s** of a 17.4 s mask, of wh
 processes per arm: certificates **0.97–0.99 → 0.05–0.08 s**, the whole refinement (`_undecided`)
 **1.50 → 0.56–0.62 s**, masks bit-identical (and the earlier 12 mm probe's too). The pair tests are
 ~90% of this stand-in, so the whole mask moved only 16.1–17.4 → 15.4–15.8 s. On the mesh the
-certificates were 125.2 s of 1,465 s; **not measured there**. Pinned by
+certificates were 125.2 s of 1,465 s, and on `8fc66ac` **42.7 s** of 1,098 s (THE CALL ON `8fc66ac`
+below). Pinned by
 `test_the_compiled_box_test_gives_the_answer_the_array_passes_give` (the box test against an
 independent whole-array one, on boxes whose faces sit on, a rounding off, or far from voxel edges),
 `test_a_union_of_two_boxes_is_tested_as_the_box_that_bounds_them` (some unions hold what neither box
@@ -2181,6 +2184,21 @@ phase C's whole target is now ~65 s of test. **Harness fix in the same change**:
 `ShaftCulling._test_tiles` a `facing` argument and the harness's counting wrapper still took the old
 signature, so the harness crashed on `main` ("got multiple values for argument 'out'") — the
 monkeypatched-private-method hazard: nothing in any test tier runs this harness. Table in the Sozzi README.
+
+**THE CALL ON `8fc66ac` (#580-#586), MEASURED (2026-09-27, same harness, whole mesh, default culling,
+counting on, both waters back to back; macOS arm64, 11 cores, jax 0.10.2, numba 0.67.0; "before" is
+main `bb573d5` with #581 merged, a few hours earlier; one run each, so ~1.1x).** **Cylinders: 171.5 s
+against 161.0 — no clear change**; pairs identical (760.0M undecided, 6.2%); pair tests 65.2 (compiled
+52.9), undecided-tile decisions 17.3 (certificates 5.1, against 53.5 on `2810eea` — #580), receiver
+groups 13.5, areal gather 50.8 (44.0 before, not separated from the spread). **Triangulated wall
+(`bodyWall.stl`, walk grid 102³): 1,098.2 s against 1,465.1 (1.33x).** Walk **864.8 s** against 1,148.7
+(79% of the call), host work around it 66.4, certificates **42.7** against 125.2 (#586), rest of the
+decisions 39.6, gather 55.8, build 53.0. Pairs walked **3,458,668,522** against 4,866,359,296 with
+padding (#585: a host body walks no padding and no pair behind its source; 196.2M behind written clear
+unwalked); undecided unchanged at **3.65G = 29.7%**; blocked 568.9M either way. ⚠️ **The lever for a
+triangle body is now CERTIFICATION, not the walk**: 29.7% of pairs undecided against the cylinders'
+6.2%, walked at an unchanged ~4M pairs/s; a fully-hidden certificate reaches at most 15.1% of the
+undecided pairs (2x2). Tables in the Sozzi README.
 
 **Tests** (`tests/unit/test_radiation_culling.py`, each mutation-checked): bit equality with
 `EveryPair` at group sizes 32x32, 7x5, 1x1, 64x3 on a scene where every one of four body kinds
