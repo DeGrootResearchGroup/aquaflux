@@ -20,11 +20,26 @@ import jax.numpy as jnp
 from aquaflux.solve import BlockScaledNorm, NewtonStrategy, RowScaledNorm, block_reference_scales
 
 from .momentum import MomentumContinuity
+from .scales import characteristic_velocity
 
 __all__ = ["FlowMeasures", "flow_row_scales"]
 
 #: Keeps a row scale strictly positive so it can divide a residual row.
 _TINY = 1e-300
+
+#: The velocity field scale is never taken below this fraction of the characteristic speed. A state at
+#: rest has no speed of its own to scale by, and one just after it has so little that the rebuilt measure
+#: reads its first steps as changes of order one hundred times the start's -- past the divergence guard,
+#: so every step is rejected. A developed lid-driven cavity's mean speed is about a tenth of the lid's, so
+#: the floor stops binding well before convergence there.
+REST_SPEED_FRACTION = 0.05
+
+#: Each cell's continuity scale is never taken below this fraction of ``rho |U| A``, the throughput the
+#: characteristic speed would carry through the cell's faces. At rest the throughput is zero and any
+#: step's mass imbalance would otherwise be divided by ``_TINY``. On developed lid-driven cavities the
+#: floor binds only in a fraction of a percent of cells, the near-stagnant corners, where it lowers their
+#: share of the measure.
+REST_THROUGHPUT_FRACTION = 1e-4
 
 
 def flow_row_scales(
@@ -40,8 +55,14 @@ def flow_row_scales(
       residual is a mass imbalance, and the natural scale in the same units is the cell's mass
       throughput ``sum_f max(mdot_f, 0)``. Dividing by it needs no pressure difference, so it stays well
       posed on a periodic or closed domain where a pressure scale degenerates.
-    * **Field scales** are the mean velocity magnitude (zero from rest, where a row-scaled measure is undefined) for each velocity component and one for
+    * **Field scales** are the mean velocity magnitude for each velocity component and one for
       continuity, which is already dimensionless once divided by the throughput.
+    * **At and near rest** both scales would vanish, so each is floored by the characteristic speed
+      ``|U|`` the domain is driven at (:func:`~aquaflux.flow.characteristic_velocity`): the velocity field
+      scale at ``REST_SPEED_FRACTION`` ``|U|``, and each cell's throughput at
+      ``REST_THROUGHPUT_FRACTION`` ``rho |U| A``, with ``A`` the summed area of the cell's faces. The
+      floors are what let a march start from rest; on a developed flow the velocity floor does not bind
+      and the throughput floor binds only in near-stagnant cells.
 
     Parameters
     ----------
@@ -57,15 +78,38 @@ def flow_row_scales(
     tuple of jnp.ndarray
         ``(row_scale, field_scale)``: the per-row scale over the flow state, shape
         ``((dim + 1) n_cells,)``, and one field scale per flow field, shape ``(dim + 1,)``.
+
+    Raises
+    ------
+    ValueError
+        If the state is at rest and nothing drives the domain, so there is no speed to scale by.
     """
     velocity_diagonal, _pressure_diagonal = momentum.unpack(flow_diagonal)
     velocity, _pressure = momentum.unpack(flow_state)
     # Continuity's stand-in diagonal: the convective bucket is the per-cell mass throughput, in the same
     # units as the mass imbalance the row measures.
     throughput, _dissipative = momentum.momentum_matrix_diagonal_parts(velocity)
-    row_scale = momentum.pack(jnp.abs(velocity_diagonal) + _TINY, jnp.abs(throughput) + _TINY)
+    mean_speed = jnp.mean(jnp.abs(velocity))
+    speed = jnp.linalg.norm(characteristic_velocity(momentum))
+    if float(speed) == 0.0 and float(mean_speed) == 0.0:
+        raise ValueError(
+            "The row-scaled residual measure is undefined here: the flow state is at rest and nothing "
+            "drives the domain (no prescribed velocity and no body force), so there is no speed to scale "
+            "the velocity and continuity rows by. Measure this solve with Euclidean(), or start it from "
+            "a state with some flow in it."
+        )
+    area = momentum.geometry.face.area
+    cell_face_area = momentum.mesh.face_cells.scatter(area, area)
+    throughput_floor = REST_THROUGHPUT_FRACTION * momentum.density * speed * cell_face_area
+    row_scale = momentum.pack(
+        jnp.abs(velocity_diagonal) + _TINY,
+        jnp.maximum(jnp.abs(throughput), throughput_floor) + _TINY,
+    )
     field_scale = jnp.concatenate(
-        [jnp.full((momentum.mesh.dim,), jnp.mean(jnp.abs(velocity))), jnp.ones((1,))]
+        [
+            jnp.full((momentum.mesh.dim,), jnp.maximum(mean_speed, REST_SPEED_FRACTION * speed)),
+            jnp.ones((1,)),
+        ]
     )
     return row_scale, field_scale
 

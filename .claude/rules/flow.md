@@ -747,6 +747,26 @@ a control for a solver question: the control had to run on a weaker driver.
   shift's base diagonal, **continuity by the cell's mass throughput** (it has no diagonal), field scales the
   mean speed and one. `flow_row_scales` is that flow part, shared with `turbulence.coupled_scaled_norm`,
   which appends its `k`/`ω` rows — so the flow rows of the two measures cannot drift.
+- **Both of `flow_row_scales`' scales are floored by the characteristic speed `|U|` (#459, 2026-09-29),
+  so a march can start from rest**: the velocity field scale at `REST_SPEED_FRACTION = 0.05 |U|`, each
+  cell's throughput at `REST_THROUGHPUT_FRACTION = 1e-4 rho |U| A` (`A` its summed face area), and a
+  state at rest in a domain nothing drives (`|U| = 0`) is **refused** with an error naming `Euclidean()`.
+  **Why floors that stay on, not one applied only at rest** (all measured 2026-09-29 on the 16 x 16 lid
+  cavity at Re 100 from rest, `FirstOrderUpwind`, `CompactGreenGauss`, default `solve_flow_march`,
+  80-step cap): unfloored the reference measure is NaN; flooring the velocity scale only where the
+  velocity is exactly zero removes the NaN, but every step is still rejected, because the continuity
+  row divides the trial's mass imbalance by `1e-300`; flooring both only at exact rest gets step 0
+  accepted, and then the measure rebuilt at mean speed `0.01 |U|` reads **114x** the start, past
+  `DivergenceGuard`'s 10x cap, and all 79 later steps are rejected. With both floors held the march
+  converges in 18 steps. **The values:** on converged cavities (16² and 32² at Re 100, 32² at Re 400)
+  the mean speed is 0.10-0.11 `|U|`, so the velocity floor does not bind there; the throughput floor
+  binds in 0.0-0.7 % of cells (near-stagnant corners) at `1e-4`, against 0.0 % at `1e-5` and 2.3-3.3 % at
+  `1e-3`, while step 0 sits at 1.4x, 5.3x and 1.3x of the guard's cap respectively — `1e-4` was chosen
+  by the project owner for the margin. Pinned by `tests/unit/test_flow_row_scales.py` (the floors at
+  rest from their definition, the state's own scales once it has flow, the refusal and its limit) and
+  `test_a_lid_driven_cavity_marches_from_rest_under_the_default_measure`. ⚠️ `flow_row_scales` now reads
+  the characteristic speed with a concrete `float`, so it cannot run under a trace — it never did in the
+  march, which builds its measures on concrete values.
 - ⚠️ **`BlockScaled()` stalls (0 cycles, every step rejected) from the default `potential_flow` start**: it takes
   each block's scale from the start state's own residual, and potential flow is divergence-free, so the
   continuity block starts ~0 and every later step reads as an enormous relative increase. Measured
@@ -763,9 +783,9 @@ a control for a solver question: the control had to run on a weaker driver.
   converges in 13 steps** (Euclidean measure, 5.4e-9 and 5.8e-9). So the failure the issue reported is the
   single-step pseudo-transient march from rest — a configuration, not the mesh or the gradient scheme —
   and this march reaches the configuration that fixes it. **Not established:** the start state and
-  tolerance of the issue's original run were never recorded, so rest is a stand-in for it. ⚠️ The
-  default `RowScaled()` measure gives NaN from rest, because it divides by the mean speed and the mass
-  throughput (#459); use `Euclidean()` there. `MultipleCorrectionGradient` (with the corner-cell
+  tolerance of the issue's original run were never recorded, so rest is a stand-in for it. (These arms
+  were run with `Euclidean()` because the default `RowScaled()` was then NaN from rest; its floors now
+  let it start there (#459, above), and the duct has not been re-run under it.) `MultipleCorrectionGradient` (with the corner-cell
   fallback) does **not** converge on this duct with the same settings — an open question of #435, not of
   the flow-only path; its record is in `validation/tetrahedral_gradient_ab/README.md`.
 
