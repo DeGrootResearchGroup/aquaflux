@@ -73,10 +73,12 @@ import functools
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numba
 import numpy as np
 
 from aquaflux.morton import morton_order
 from aquaflux.radiation.absorption import UniformAbsorption
+from aquaflux.radiation.clipping import _SLACK
 from aquaflux.radiation.lit_blocks import rounded_width
 from aquaflux.radiation.profiles import Lambertian
 from aquaflux.radiation.quadrature import TriangleQuadrature, triangle_quadrature
@@ -228,14 +230,17 @@ class _Geometry(eqx.Module):
     areal: jnp.ndarray
 
 
-#: How far behind a receiver's plane, relative to the size of the offsets involved, every vertex of
-#: a sending triangle must lie before the pair is skipped. The kernel clips a triangle to the
-#: receiver's front half-space and treats a height within a few machine epsilons of the plane as
-#: exactly zero; a triangle this far behind is clipped away whole, so its transfer is exactly zero
-#: whichever of the receiver's quadrature points it is measured from, and not computing it changes
-#: nothing. A vertex nearer the plane than this -- every neighbour sharing an edge has two -- is
-#: left to the kernel.
-_BEHIND_MARGIN = 1e-9
+#: A projected solid angle, in steradians, below which a pair is left to be zero: one rounding of a
+#: transfer factor of order one. A sending triangle whose vertices all lie within rounding of a
+#: receiver's plane -- the strips of a faceted cylinder, whose normals are only as exact as their
+#: short edges allow -- comes out a few parts in ``1e14`` of its distance in front of it, and the
+#: kernel returns a sliver of order ``1e-17`` for it; this is what lets such a pair be skipped.
+_NEGLIGIBLE = 2.0**-52
+
+#: How close to a receiver's point, relative to the lengths involved, a point must come to count as
+#: lying on a facet in the receiver's own plane. Generous on purpose: a facet judged to hold the
+#: point is kept and evaluated, so the tolerance can only make the test keep more.
+_ON_FACET_TOLERANCE = 1e-9
 
 
 @jax.jit
@@ -245,8 +250,8 @@ def _row_block(geometry: _Geometry, sample, weight, index, columns):
     One compiled pass, so nothing it forms is larger than ``len(index) x n_facets`` (or that times
     three for the offsets), and it is the only place each of the three quantities is computed.
     The geometric term, the costly one, is evaluated only against the sending facets in
-    ``columns`` and scattered into rows of the full width; every other facet lies wholly behind
-    every receiver of the block, where the term is exactly zero (:func:`_columns_in_front`). The
+    ``columns`` and scattered into rows of the full width; every other facet lies behind or in the
+    plane of every receiver of the block, where the term is zero (:func:`_columns_in_front`). The
     source cosine and the separation are cheap and are formed against every facet.
     """
     facing = geometry.normal[index]
@@ -298,31 +303,188 @@ def _written(buffers, block, index):
 
 
 def _columns_in_front(vertices, sample, normal, areal, index) -> np.ndarray:
-    """The areal facets not wholly behind every areal receiver in ``index``, at every one of its points.
+    """The areal facets that can send anything to some areal receiver in ``index``.
 
-    Host arithmetic over concrete positions, one block at a time. A facet is behind a receiver
-    where all three of its vertices lie below the plane through **each** of the receiver's
-    quadrature points, with the receiver's normal, by more than :data:`_BEHIND_MARGIN` of the
-    offsets involved. The kernel is evaluated at those points, so this is exactly its own
-    condition for returning nothing -- and it holds for any rule, and for a degenerate receiver
-    whose points do not share one plane with its stored normal. The margin is bounded above by
-    ``|v| . |n| + |p| . |n|``, so the test errs towards keeping a facet, never towards dropping
-    one the kernel would have counted.
+    The kernel clips a sending triangle to the closed half-space in front of the receiving point,
+    after snapping any vertex height within rounding of the plane to exactly zero
+    (:func:`~aquaflux.radiation.clipping.decidable_heights`). So where **no** vertex is strictly in
+    front, what survives the clip lies in the receiver's own plane, where every direction has zero
+    obliquity: the projected solid angle is zero, and the kernel returns it as zero or as a
+    rounding of the zero that the contour sum of an in-plane loop is. Such a facet is left out.
+    That covers a facet wholly behind the plane and, around a faceted cylinder, the far larger
+    number lying **in** it -- every triangle of a flat strip is coplanar with the others -- which
+    a test for "strictly behind" kept and evaluated to produce zeros. A facet with a vertex in
+    front is kept unless a bound on what it can send (:func:`_projected_bound`) is below
+    :data:`_NEGLIGIBLE`: in floating point a coplanar strip is never quite coplanar, and without
+    this its far members would all be kept for slivers of order ``1e-17``. So a skipped pair's
+    transfer factor is zero or under one rounding of a factor of order one -- not bit for bit the
+    kernel's, which returns such a pair as dust of either sign's size.
+
+    ⚠️ **Except where the point lies on that in-plane part.** A receiving point inside a coplanar
+    triangle sees it as a whole hemisphere (the convention that makes each facet exclude itself),
+    and one on a shared edge or vertex is on the boundary of the contour. A valid mesh has
+    neither -- quadrature points are interior to their own facet -- but a degenerate triangle's
+    points need not be, so any such pair is kept and left to the kernel. The heights are snapped
+    with the clip's own bound, so the two agree on which vertices are in the plane.
+
+    Host arithmetic over concrete positions, one block at a time; the loop exits at the first
+    point that keeps a facet, so a facet in front of a block costs little and one behind or beside
+    every receiver costs the whole block.
     """
     rows = index[areal[index]]
     if len(rows) == 0:
         return np.zeros(0, dtype=np.int64)
-    facing = normal[rows]
-    # The lowest of each receiver's points along its own normal: a vertex below it by the margin
-    # is below every point's plane.
-    lowest = np.einsum("iqd,id->iq", sample[rows], facing).min(axis=1)
-    reach = np.einsum("iqd,id->iq", np.abs(sample[rows]), np.abs(facing)).max(axis=1)
-    height = np.einsum("jkd,id->ijk", vertices, facing) - lowest[:, None, None]
-    bound = _BEHIND_MARGIN * (
-        np.einsum("jkd,id->ijk", np.abs(vertices), np.abs(facing)) + reach[:, None, None]
+    keep = _any_in_front(
+        np.ascontiguousarray(vertices, dtype=float),
+        np.ascontiguousarray(sample[rows], dtype=float),
+        np.ascontiguousarray(normal[rows], dtype=float),
+        np.ascontiguousarray(areal, dtype=np.bool_),
+        _SLACK,
+        _ON_FACET_TOLERANCE,
     )
-    behind = np.all(height < -bound, axis=-1)
-    return np.flatnonzero(areal & ~np.all(behind, axis=0))
+    return np.flatnonzero(keep)
+
+
+@numba.njit(parallel=True)
+def _any_in_front(vertices, points, facing, areal, slack, tolerance):
+    """Per facet, whether any of ``points`` (with its receiver's normal) can receive from it."""
+    n_facets = vertices.shape[0]
+    keep = np.zeros(n_facets, dtype=np.bool_)
+    for facet in numba.prange(n_facets):
+        if not areal[facet]:
+            continue
+        triangle = vertices[facet]
+        for row in range(points.shape[0]):
+            normal = facing[row]
+            for point in points[row]:
+                if _can_receive(triangle, point, normal, slack, tolerance):
+                    keep[facet] = True
+                    break
+            if keep[facet]:
+                break
+    return keep
+
+
+@numba.njit
+def _can_receive(triangle, point, normal, slack, tolerance):
+    """Whether the kernel can return more than a rounding of zero for this triangle at this point."""
+    on_plane = np.zeros(3, dtype=np.bool_)
+    highest = 0.0
+    for k in range(3):
+        height = 0.0
+        bound = 0.0
+        for d in range(3):
+            offset = triangle[k, d] - point[d]
+            height += offset * normal[d]
+            bound += abs(offset) * abs(normal[d])
+        if abs(height) <= slack * bound:
+            on_plane[k] = True
+        elif height > highest:
+            highest = height
+    if highest > 0.0:
+        return _projected_bound(triangle, point, highest) > _NEGLIGIBLE
+    count = on_plane.sum()
+    if count == 0:
+        return False
+    if count == 3:
+        return _on_triangle(triangle, point, tolerance)
+    if count == 2:
+        first = 0 if on_plane[0] else 1
+        second = 2 if on_plane[2] else 1
+        return _on_segment(triangle[first], triangle[second], point, tolerance)
+    for k in range(3):
+        if on_plane[k]:
+            return _near(triangle[k], point, tolerance)
+    return True
+
+
+@numba.njit
+def _projected_bound(triangle, point, highest):
+    """An upper bound on the projected solid angle of a triangle rising at most ``highest`` in front.
+
+    Every point of the triangle is at least ``d`` from the receiving point, taken as the distance
+    to its centroid less the radius of a sphere about the centroid holding its vertices, so it
+    subtends at most ``area / d**2``; and every direction to it has an obliquity of at most
+    ``highest / d``. Where the triangle may come nearer than that sphere allows, there is no bound
+    and infinity is returned.
+    """
+    centroid = (triangle[0] + triangle[1] + triangle[2]) / 3.0
+    radius = 0.0
+    for k in range(3):
+        radius = max(radius, np.sqrt(((triangle[k] - centroid) ** 2).sum()))
+    distance = np.sqrt(((centroid - point) ** 2).sum()) - radius
+    if distance <= 0.0:
+        return np.inf
+    a = triangle[1] - triangle[0]
+    b = triangle[2] - triangle[0]
+    area = 0.5 * np.sqrt(
+        (a[1] * b[2] - a[2] * b[1]) ** 2
+        + (a[2] * b[0] - a[0] * b[2]) ** 2
+        + (a[0] * b[1] - a[1] * b[0]) ** 2
+    )
+    return area * highest / distance**3
+
+
+@numba.njit
+def _near(vertex, point, tolerance):
+    """Whether ``point`` is ``vertex``, to ``tolerance`` of their size."""
+    distance = 0.0
+    scale = 0.0
+    for d in range(3):
+        distance += (vertex[d] - point[d]) ** 2
+        scale += vertex[d] ** 2 + point[d] ** 2
+    return distance <= (tolerance**2) * scale
+
+
+@numba.njit
+def _on_segment(start, end, point, tolerance):
+    """Whether ``point`` lies on the segment from ``start`` to ``end``, to ``tolerance`` of its size."""
+    along = 0.0
+    length = 0.0
+    for d in range(3):
+        along += (point[d] - start[d]) * (end[d] - start[d])
+        length += (end[d] - start[d]) ** 2
+    if length == 0.0:
+        return _near(start, point, tolerance)
+    fraction = min(1.0, max(0.0, along / length))
+    distance = 0.0
+    for d in range(3):
+        distance += (start[d] + fraction * (end[d] - start[d]) - point[d]) ** 2
+    return distance <= (tolerance**2) * length
+
+
+@numba.njit
+def _on_triangle(triangle, point, tolerance):
+    """Whether ``point``, in the triangle's plane, lies inside it or on its boundary.
+
+    Each edge's side test is the triple product of the edge, the point's offset from the edge's
+    start and the triangle's own area vector, which is positive for every edge when the point is
+    inside whichever way the triangle is wound. A triangle of no area has no inside to test and is
+    reported as holding the point, so that the pair is kept.
+    """
+    a = triangle[1] - triangle[0]
+    b = triangle[2] - triangle[0]
+    area = np.array(
+        [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    )
+    area_squared = (area**2).sum()
+    if area_squared == 0.0:
+        return True
+    for k in range(3):
+        edge = triangle[(k + 1) % 3] - triangle[k]
+        offset = point - triangle[k]
+        cross = np.array(
+            [
+                edge[1] * offset[2] - edge[2] * offset[1],
+                edge[2] * offset[0] - edge[0] * offset[2],
+                edge[0] * offset[1] - edge[1] * offset[0],
+            ]
+        )
+        side = (cross * area).sum()
+        scale = np.sqrt((edge**2).sum() * (offset**2).sum() * area_squared)
+        if side < -tolerance * scale:
+            return False
+    return True
 
 
 def _row_blocks(geometry: _Geometry, sample, weight, rows: int):
@@ -338,9 +500,9 @@ def _row_blocks(geometry: _Geometry, sample, weight, rows: int):
     three arrays being kept.
 
     **The blocks are cut along a space-filling curve, and each evaluates the costly term only
-    against the facets that can lie in front of it.** A facet wholly behind a receiver's plane
-    contributes exactly nothing to that receiver (:func:`_columns_in_front`), and around a convex
-    lamp that is nearly every pair; a block of neighbouring receivers shares most of its planes'
+    against the facets that can lie in front of it.** A facet with no vertex in front of a receiver's
+    plane contributes nothing to that receiver (:func:`_columns_in_front`), and around a convex
+    lamp that is every pair but those of a degenerate facet; a block of neighbouring receivers shares most of its planes'
     fronts, so its list is short, where a block of facets in storage order may span the whole
     surface and need nearly every column. The lists are padded to a ladder of a few widths per
     doubling, never past the facet count (:func:`~aquaflux.radiation.lit_blocks.rounded_width`),

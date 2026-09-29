@@ -274,7 +274,11 @@ def _slivers(rng, count):
 
 
 def test_a_facet_is_dropped_only_where_the_kernel_returns_nothing_at_every_point():
-    """Every facet the build leaves out for a receiver has an exactly zero transfer to it.
+    """Every facet the build leaves out for a receiver sends it at most one rounding of a factor.
+
+    The kernel's value for a dropped pair is zero or dust: the slivers here have areas near
+    ``1e-18`` and send under ``1e-16``, and are dropped by the bound on what a triangle so close to
+    the receiver's plane can send. A pair dropped wrongly sends a real fraction of a hemisphere.
 
     Asked receiver by receiver, so no other receiver's list can cover for a wrong drop, on a
     jumble of random triangles and slivers packed close together: the kernel is evaluated at
@@ -305,7 +309,7 @@ def test_a_facet_is_dropped_only_where_the_kernel_returns_nothing_at_every_point
         kept = transfer._columns_in_front(vertices, sample, normal, areal, np.array([receiver]))
         dropped = np.setdiff1d(np.flatnonzero(areal), kept)
         dropped_any += len(dropped)
-        wrongly = dropped[np.any(values[receiver][:, dropped] != 0.0, axis=0)]
+        wrongly = dropped[np.any(values[receiver][:, dropped] > transfer._NEGLIGIBLE, axis=0)]
         assert len(wrongly) == 0, (receiver, wrongly)
     assert dropped_any > 100, dropped_any
 
@@ -381,6 +385,162 @@ def test_pairs_wholly_behind_the_receiver_are_skipped_and_nothing_changes(monkey
     assert np.count_nonzero(matrix[-1] > 1e-9) > 5, "the sliver sees the tube"
     n = surfaces.n_facets
     assert skipped_work < 0.4 * n * n, (skipped_work, n * n)
+
+
+def _plate_with_a_roof():
+    """A flat plate of coplanar triangles facing +z, and two triangles above it facing down.
+
+    Every plate triangle lies in every other's plane: the kernel returns a rounding of zero for
+    each such pair, and a test for "strictly behind" keeps them all.
+    """
+    faces = []
+    for i in range(4):
+        for j in range(4):
+            a, b, c, d = [i, j, 0.0], [i + 1, j, 0.0], [i + 1, j + 1, 0.0], [i, j + 1, 0.0]
+            faces += [[a, b, c], [a, c, d]]
+    roof = [[[0.0, 0.0, 1.0], [4.0, 4.0, 1.0], [4.0, 0.0, 1.0]]]
+    roof += [[[0.0, 0.0, 1.0], [0.0, 4.0, 1.0], [4.0, 4.0, 1.0]]]
+    return Surfaces.from_triangles(np.asarray(faces + roof, dtype=float), emission=1.0)
+
+
+def test_facets_in_the_receiver_s_own_plane_are_skipped_and_the_matrix_is_unchanged(monkeypatch):
+    """A plate triangle's list is itself and the roof: its coplanar neighbours send nothing.
+
+    Its own facet stays on the list, since its points lie inside it (where the kernel returns a
+    hemisphere, which the build then excludes). And the matrix built from the short lists is the
+    one every column gives, to the rounding a coplanar pair's zero is computed as.
+    """
+    from aquaflux.radiation import transfer
+    from aquaflux.radiation.quadrature import triangle_quadrature
+
+    surfaces = _plate_with_a_roof()
+    vertices = np.asarray(surfaces.vertices)
+    normal = np.asarray(surfaces.normal)
+    areal = ~np.asarray(surfaces.is_point_source)
+    sample = np.asarray(triangle_quadrature(6).points(surfaces.vertices))
+    roof = [surfaces.n_facets - 2, surfaces.n_facets - 1]
+    for receiver in (0, 13, 31):
+        kept = transfer._columns_in_front(vertices, sample, normal, areal, np.array([receiver]))
+        assert kept.tolist() == sorted([receiver, *roof]), (receiver, kept)
+
+    skipped = build_transfer(surfaces, self_occlusion=NoOcclusion(), chunk_size=8)
+    monkeypatch.setattr(
+        transfer,
+        "_columns_in_front",
+        lambda vertices, sample, normal, areal, index: np.flatnonzero(areal),
+    )
+    every = build_transfer(surfaces, self_occlusion=NoOcclusion(), chunk_size=8)
+    np.testing.assert_allclose(
+        np.asarray(skipped.geometric), np.asarray(every.geometric), rtol=0, atol=1e-15
+    )
+    assert np.asarray(every.geometric)[0, roof].sum() > 0.1, "the plate sees the roof"
+
+
+def test_a_long_strip_off_the_origin_is_skipped_despite_its_normals_rounding():
+    """On a lamp-shaped tube far from the origin, a facet's list is itself alone.
+
+    A faceted tube 0.8 long and 0.01 in radius, starting at x = 0.5: each flat strip of it is
+    coplanar, but the normals computed from its 2 mm edges at coordinates near 1 are only good to
+    about ``1e-13``, so the strip's far members come out that fraction of their distance in front
+    of a receiver's plane -- beyond the clip's snapping. The kernel returns dust for them, and the
+    bound on what they can send is what drops them; neighbours across a sector edge touch the plane
+    along that edge only and are dropped as in-plane. What is kept is the receiver's own facet and
+    at most its immediate neighbours, which lie too near for the bound to apply and so are left to
+    the kernel; nothing further along its strip, of which there are 128 members.
+    """
+    from aquaflux.radiation import transfer
+    from aquaflux.radiation.quadrature import triangle_quadrature
+
+    x = 0.5 + np.linspace(0.0, 0.8, 65)
+    angle = np.linspace(0.0, 2.0 * np.pi, 32, endpoint=False)
+    ring = 0.01 * np.stack([np.cos(angle), np.sin(angle)], axis=1)
+    faces = []
+    for i in range(64):
+        for j in range(32):
+            k = (j + 1) % 32
+            a, b = [x[i], *ring[j]], [x[i], *ring[k]]
+            c, d = [x[i + 1], *ring[k]], [x[i + 1], *ring[j]]
+            faces += [[a, b, c], [a, c, d]]
+    surfaces = Surfaces.from_triangles(np.asarray(faces), emission=1.0)
+    centroid, normal = np.asarray(surfaces.centroid), np.asarray(surfaces.normal)
+    assert np.all(np.einsum("ij,ij->i", normal[:, 1:], centroid[:, 1:]) > 0), "wound outward"
+    vertices = np.asarray(surfaces.vertices)
+    areal = ~np.asarray(surfaces.is_point_source)
+    sample = np.asarray(triangle_quadrature(6).points(surfaces.vertices))
+    for receiver in (0, 1001, 2047, 4095):
+        kept = transfer._columns_in_front(vertices, sample, normal, areal, np.array([receiver]))
+        assert receiver in kept
+        reach = np.linalg.norm(centroid[kept] - centroid[receiver], axis=1).max()
+        assert len(kept) <= 12 and reach < 0.03, (receiver, len(kept), reach)
+
+
+def test_the_bound_on_what_a_triangle_can_send_is_never_exceeded():
+    """``_projected_bound`` is at least the kernel's projected solid angle, triangle by triangle.
+
+    Random triangles in front of a receiving point at the origin facing +z, at every height from
+    grazing to steep. Where the bound is finite it must be an upper bound, or a pair could be
+    dropped that sends something; and it must be finite for a good share of them, or the test is
+    vacuous. Measuring the distance to the centroid alone, without the triangle's own radius,
+    exceeds the kernel for about one triangle in twenty here.
+    """
+    from aquaflux.radiation import transfer
+    from aquaflux.radiation.solid_angle import projected_solid_angle
+
+    rng = np.random.default_rng(3)
+    triangles = rng.uniform(-1.0, 1.0, (4000, 3, 3))
+    triangles[..., 2] = np.abs(triangles[..., 2]) * rng.uniform(0.0, 1.0, (4000, 1))
+    point, normal = np.zeros(3), np.array([0.0, 0.0, 1.0])
+    kernel = np.asarray(
+        projected_solid_angle(
+            jnp.asarray(point)[None], jnp.asarray(normal)[None], jnp.asarray(triangles)
+        )
+    )
+    bound = np.array(
+        [transfer._projected_bound(t, point, t[:, 2].max()) for t in triangles], dtype=float
+    )
+    finite = np.isfinite(bound)
+    assert finite.sum() > 500, finite.sum()
+    exceeded = np.flatnonzero(kernel[finite] > bound[finite] * (1.0 + 1e-12))
+    assert len(exceeded) == 0, exceeded
+
+
+@pytest.mark.parametrize(
+    ("heights", "point", "expected"),
+    [
+        # Two vertices in the plane, one behind: kept only with the point on that edge.
+        ([0.0, 0.0, -1.0], [0.5, 0.0, 0.0], True),
+        ([0.0, 0.0, -1.0], [0.5, 0.3, 0.0], False),
+        # One vertex in the plane: kept only with the point at it.
+        ([0.0, -1.0, -1.0], [0.0, 0.0, 0.0], True),
+        ([0.0, -1.0, -1.0], [0.2, 0.2, 0.0], False),
+        # All three in the plane: kept only with the point inside the triangle or on it.
+        ([0.0, 0.0, 0.0], [0.2, 0.2, 0.0], True),
+        ([0.0, 0.0, 0.0], [2.0, 2.0, 0.0], False),
+        # Wholly behind, and one vertex in front.
+        ([-1.0, -1.0, -1.0], [0.2, 0.2, 0.0], False),
+        ([0.0, 0.0, 1e-3], [5.0, 5.0, 0.0], True),
+    ],
+)
+def test_an_in_plane_facet_is_kept_where_the_receiving_point_lies_on_it(heights, point, expected):
+    """The in-plane guard, case by case, for a point on the z = 0 plane facing +z.
+
+    A triangle with no vertex in front clips to the part of it lying in the plane: nothing, a
+    vertex, an edge or the whole triangle. Only a point on that part can receive from it (the
+    whole triangle is the hemisphere a facet sees of itself), so the guard keeps exactly those.
+    """
+    from aquaflux.radiation import transfer
+    from aquaflux.radiation.clipping import _SLACK
+
+    triangle = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    triangle[:, 2] = heights
+    kept = transfer._can_receive(
+        triangle,
+        np.asarray(point, dtype=float),
+        np.array([0.0, 0.0, 1.0]),
+        _SLACK,
+        transfer._ON_FACET_TOLERANCE,
+    )
+    assert bool(kept) == expected
 
 
 @pytest.mark.parametrize("chunk_size", [7, 1000])
