@@ -4,7 +4,7 @@ Occlusion enters the gather as one more factor on each source-receiver term, and
 two halves because the halves behave completely differently.
 
 The bodies are of two kinds, stored separately. **Analytic bodies** — a sleeve, a baffle, a
-vessel composed from primitives, or the water a vessel holds — each carry their own
+vessel composed from primitives, or the fluid a vessel holds — each carry their own
 transmittance, so each needs its own layer of the mask. **The emitting surface's own triangles**
 are the reactor's walls and are opaque, so they collapse into one layer with no transmittance to
 carry. That second kind is what answers for a shape nobody has described analytically: the

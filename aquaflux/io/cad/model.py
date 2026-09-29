@@ -260,7 +260,7 @@ def read_step(path: str | os.PathLike, placement: Placement | None = None, **opt
     A reactor drawn with its axis along ``y`` and meshed with it along ``x``::
 
         cad = read_step("reactor.step", Placement(matrix=[[0, 1, 0], [1, 0, 0], [0, 0, 1]]))
-        water = cad.fluid("reactor_body", "inlet_pipe", "outlet_pipe")
+        fluid = cad.fluid("reactor_body", "inlet_pipe", "outlet_pipe")
         lamp = cad.triangles("lamp", chord=2e-5, facet_size=4e-3)
     """
     try:

@@ -137,25 +137,19 @@ def test_a_gradient_rebuilds_each_chunk_s_mask_rather_than_keeping_its_intermedi
     assert handed == [4, 4, 3, 3, 4, 4], handed
 
 
-def test_a_lamp_can_be_moved_under_a_gradient_with_the_shadows_frozen():
-    """The masks come from the geometry the model was built for, not from the call's vertices.
+def test_a_streamed_model_refuses_traced_vertices_as_a_held_one_does():
+    """Streaming changes where the mask lives, not what the model accepts: both refuse a lamp
+    moved under a gradient, whose reflected light the frozen transfer could not follow."""
+    for stream in (None, True):
+        model, surfaces = _model(stream=stream)
 
-    Under a gradient with respect to a vertex those vertices are traced, and a mask cannot be built
-    from a traced position -- so a stream that built its masks from the call's surface set could
-    not be differentiated in geometry at all, where a held mask can.
-    """
-    held, surfaces = _model(stream=None)
-    streamed, _ = _model(stream=True, gather_pair_limit=4 * surfaces.n_facets)
+        def total(lift, model=model, surfaces=surfaces):
+            moved = surfaces.with_geometry(jnp.asarray(surfaces.vertices).at[0, :, 2].add(lift))
+            field, _ = fluence_rate(model, moved)
+            return jnp.sum(field)
 
-    def total(model, lift):
-        moved = surfaces.with_geometry(jnp.asarray(surfaces.vertices).at[0, :, 2].add(lift))
-        field, _ = fluence_rate(model, moved)
-        return jnp.sum(field)
-
-    expected = jax.grad(lambda z: total(held, z))(0.0)
-    got = jax.grad(lambda z: total(streamed, z))(0.0)
-    np.testing.assert_allclose(float(got), float(expected), rtol=1e-10)
-    assert float(expected) != 0.0
+        with pytest.raises(TypeError, match="vertices are traced"):
+            jax.grad(total)(0.0)
 
 
 def test_a_receiver_inside_a_body_is_refused_at_build_not_at_the_first_call():

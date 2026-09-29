@@ -16,7 +16,7 @@ the same rate as the work done. So the body declares itself not
 surface with a free edge is a **sheet**: it has the same medium on both sides and no inside at
 all, so nothing is embedded in it. A **closed** piece bounds a region, and which side of it is
 solid is the side its triangles' normals point *away* from -- the convention an emitting surface
-already follows, since a lamp is wound to face the water and a vessel wall to face the fluid it
+already follows, since a lamp is wound to face the fluid and a vessel wall to face the fluid it
 holds. A closed piece wound outward (positive signed volume) is a solid lump, a sleeve, say;
 one wound inward is a vessel, solid everywhere *outside* it. Both are read from the triangles'
 winding number, which is exactly ``+1`` or ``-1`` inside a closed, consistently wound surface

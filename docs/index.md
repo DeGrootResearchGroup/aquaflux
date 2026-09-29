@@ -72,8 +72,9 @@ cells and faces (the mechanism boundary conditions and multi-region models build
 
 ## Ultraviolet radiation
 
-`aquaflux.radiation` computes the ultraviolet fluence rate in the water — by an exact gather over
-the lamp's emitting surface, with absorption, shadowing and diffuse reflection between the walls —
-at the same cell centres the flow is solved on, differentiable with respect to every optical input.
+`aquaflux.radiation` computes the ultraviolet fluence rate in the fluid being disinfected — water
+or air — by an exact gather over the lamp's emitting surface, with absorption, shadowing and
+diffuse reflection between the walls, at the same cell centres the flow is solved on,
+differentiable with respect to every optical input.
 See [Ultraviolet radiation](radiation.md) for the model and
 [Reactor geometry from CAD](cad_geometry.md) for reading a reactor's lamp and vessel from a drawing.

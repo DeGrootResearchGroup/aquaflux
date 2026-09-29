@@ -13,7 +13,7 @@ can use them::
 
     chamber = Cylinder(centre=[0.4, 0.0, 0.0], axis=[1.0, 0.0, 0.0], radius=0.05, half_length=0.4)
     riser = Cylinder(centre=[0.05, 0.0, 0.2], axis=[0.0, 0.0, 1.0], radius=0.01, half_length=0.25)
-    wall = Outside(chamber, riser)       # everything that is not water
+    wall = Outside(chamber, riser)       # everything that is not fluid
     wall.blocks(origin, target, min_distance)
 """
 

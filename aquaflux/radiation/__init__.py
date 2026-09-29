@@ -3,8 +3,9 @@
 The package computes the fluence rate — the radiant power arriving at a point from every
 direction, the quantity that governs ultraviolet disinfection — on the same unstructured mesh
 the flow is solved on, by summing the contribution of every emitting surface element at every
-receiver. Contributions are attenuated exponentially through the absorbing water, blocked by
-intervening geometry, and closed over diffuse reflection from the surfaces themselves.
+receiver. Contributions are attenuated exponentially through the absorbing medium — the water
+or air being disinfected — blocked by intervening geometry, and closed over diffuse reflection
+from the surfaces themselves.
 
 **What the method is.** A deterministic backward gather: at each receiver, the exact solid angle of
 every emitting triangle, weighted by its radiance, attenuated along the path, and gated by whatever
@@ -21,8 +22,8 @@ exactly, so it carries neither the statistical error nor the finite-volume scori
 Carlo estimate.
 
 Start at :func:`~aquaflux.radiation.model.build_radiation_model`, which freezes everything a
-scene's shape decides, and then ask the model for what you need. From a lamp rating and a water
-quality, the numbers a reactor engineer has::
+scene's shape decides, and then ask the model for what you need. For a water reactor, from a
+lamp rating and a water quality, the numbers a reactor engineer has::
 
     soup = read_stl("reactor.stl")        # bodies named "lamp", "wall", ...
     geometry = Surfaces.from_triangles(
@@ -38,7 +39,7 @@ quality, the numbers a reactor engineer has::
     G, cycles = fluence_rate(model, surfaces, absorption=water)   # W/m^2, one per cell centre
 
 The build is the expensive step and depends only on geometry, so a design study that sweeps lamp
-power, wall reflectance or water quality pays it once and solves many times — with the
+power, wall reflectance or the medium's absorbance pays it once and solves many times — with the
 derivatives reaching every one of the swept values. Optics are supplied per call through the
 surface set, which is why the set is passed again above; its geometry must be the one the model
 was built for, and a moved surface set is refused rather than silently mixed with the frozen
@@ -64,16 +65,16 @@ respect to mesh-node positions gets no contribution from the fluence rate.
 
 **What it does not model, and what that costs.**
 
-- **Refraction and reflection at a quartz sleeve.** Bolton (2000) puts the error of neglecting
-  them at a 6.5% reflection correction below 70% transmittance per centimetre, and up to 25%
-  above it. So this is a model for lower-transmittance water — wastewater, or the 70% water of
-  the Sozzi & Taghipour (2006) reactor benchmark — and carries a systematic error of that size at
-  drinking-water transmittances.
+- **Refraction and reflection at a quartz sleeve.** In water, Bolton (2000) puts the error of
+  neglecting them at a 6.5% reflection correction below 70% transmittance per centimetre, and up
+  to 25% above it. So for water this is a model for lower transmittances — wastewater, or the
+  70% water of the Sozzi & Taghipour (2006) reactor benchmark — and carries a systematic error of
+  that size at drinking-water transmittances.
 - **Specular reflection.** Walls reflect diffusely. At the same reflectivity, fully specular and
   fully diffuse walls have been measured 10–47% apart in log reduction (Hassanpour et al., 2023),
   so a reflectance is only half a description of a wall.
-- **Scattering by the water**, and **more than one waveband**: one absorbing, non-scattering
-  medium at one wavelength.
+- **Scattering by the medium** (particles in water, aerosols or droplets in air), and **more
+  than one waveband**: one absorbing, non-scattering medium at one wavelength.
 - **A source that is not diffuse** has its distribution evaluated along one direction per pair of
   facets, from centroid to centroid; energy balance is exact only for diffuse sources.
 - **Zero-thickness sheets** block from both sides only when named: see

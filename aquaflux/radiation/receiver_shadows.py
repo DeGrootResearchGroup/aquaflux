@@ -2,7 +2,8 @@
 
 A model's receivers — cell centres, usually — are shadowed by the same bodies as its facets, and
 the shadow is a receiver-by-facet mask per body. Held whole it is built once and every later call
-reads it, which is what a design study sweeping lamp power or water quality over one scene wants.
+reads it, which is what a design study sweeping lamp power or the medium's absorbance over one
+scene wants.
 But its size is the receiver count times the facet count per body: at a reactor mesh's 1.6 million
 cells against a lamp's 7,516 facets that is 12 GB per body, which cannot be held at all.
 
@@ -96,8 +97,8 @@ class StreamedShadows(ReceiverShadows):
     ----------
     geometry : Surfaces
         The surface set the model was built for. Masks are built from it rather than from the
-        sets a call supplies, so a gradient with respect to a lamp's position is taken with the
-        shadows frozen, as it is with a held mask.
+        sets a call supplies, so every call is shadowed by the build's geometry, as it is with a
+        held mask.
     occluders : tuple of aquaflux.solids.Body
         The bodies in the way.
     visibility_options : dict

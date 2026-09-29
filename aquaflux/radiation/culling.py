@@ -4,7 +4,7 @@ Every body is asked the same question of every source-receiver pair -- does it l
 segment between them -- and the answer is a hard yes or no fixed by geometry. Asked pair by pair,
 the cost is receivers times sources whatever the scene looks like, and most of it is spent
 re-deriving an answer the neighbouring pairs already gave: a cell in the middle of a chamber sees
-every facet of the lamp across open water, and so does the cell beside it.
+every facet of the lamp across open fluid, and so does the cell beside it.
 
 **Shaft culling** (Haines and Wallace, 1991) asks the question once for a whole *tile* of pairs.
 The receivers are grouped into compact blocks and the sources into compact clusters. Every
