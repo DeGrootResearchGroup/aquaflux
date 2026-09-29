@@ -615,7 +615,7 @@ Many entries below are dated history written against the old API. Read them thro
 ## Which patches are walls is stated twice, and reconciled at the coupled build (#355, 2026-09-24)
 
 - **Both cross-block consistency checks are METHODS ON THE CLOSURE, not inline in
-  `CoupledRANS.build`** — `refuse_a_density_the_flow_disagrees_with` and
+  `CoupledRANS.build`** — `refuse_a_fluid_the_flow_disagrees_with` and
   `refuse_a_wall_set_the_flow_disagrees_with`. Each compares a declaration the closure itself owns
   against the flow block's, so the closure is where they belong; the density one was inline until
   #355 and moved with the wall one so the two read as one pattern rather than two shapes.
@@ -1291,7 +1291,17 @@ Many entries below are dated history written against the old API. Read them thro
   the mismatch this guard exists for: the two `properties` arguments are still two separate models with
   no shared source unless a caller passes the same object to both (as every case and test now does), so
   the guard above stays in place rather than being deleted — consolidating the two builders behind one
-  is follow-on work the issue explicitly deferred. **`CoupledRANS.residual` assembles the Rhie–Chow flow fields once
+  is follow-on work the issue explicitly deferred.
+  **The guard compares the whole fluid, not only its density (#367, 2026-09-28):**
+  `SSTTurbulence.refuse_a_fluid_the_flow_disagrees_with` checks the density and then the kinematic
+  molecular viscosity, the flow's `viscosity / density` read from its **material** `properties` (so an
+  eddy viscosity the flow already carries never enters it) against the closure's `molecular_viscosity`.
+  A viscosity mismatch is the same silent defect as a density one: the closure runs at a different
+  Reynolds number from the flow it is coupled to while the flow block solves fine. Pinned by
+  `test_coupled_build_rejects_a_turbulence_viscosity_that_disagrees_with_the_flow_assembler`, whose
+  fixture keeps the densities equal so only the viscosity branch can raise. It runs only in
+  `CoupledRANS.build`: the Reynolds ramp's scaled companions are made by
+  `CoupledRANS.with_scaled_molecular_viscosity`, which moves both copies together. **`CoupledRANS.residual` assembles the Rhie–Chow flow fields once
   (#106):** it builds the `closure` first and takes `nu_t` from it (rather than a separate
   `eddy_viscosity` recomputing the same strain), then one `momentum.flow_fields(flow)` feeds both
   `residual_from_fields` and the `mdot` the scalars advect on — was 3× `_flow_fields` per eval, ~1.85×

@@ -323,11 +323,11 @@ class CoupledRANS(eqx.Module):
         ValueError
             If the two blocks describe different fluids or disagree about which patches are walls.
             Both are checked by the closure itself, which owns each declaration being compared --
-            see :meth:`~aquaflux.turbulence.SSTTurbulence.refuse_a_density_the_flow_disagrees_with`
+            see :meth:`~aquaflux.turbulence.SSTTurbulence.refuse_a_fluid_the_flow_disagrees_with`
             and :meth:`~aquaflux.turbulence.SSTTurbulence.refuse_a_wall_set_the_flow_disagrees_with`
             for what each mismatch costs.
         """
-        turbulence.refuse_a_density_the_flow_disagrees_with(momentum)
+        turbulence.refuse_a_fluid_the_flow_disagrees_with(momentum)
         turbulence.refuse_a_wall_set_the_flow_disagrees_with(momentum)
         return cls(
             momentum,

@@ -179,15 +179,8 @@ def _healthy_state(mesh, coupled, seed=0):
     return coupled.pack_state(flow, k, omega)
 
 
-def test_coupled_build_rejects_a_turbulence_density_that_disagrees_with_the_flow_assembler() -> (
-    None
-):
-    """SSTTurbulence and the flow assembler take separate PropertyModels with no shared source.
-
-    Nothing else checks that a caller supplied the same density to both -- if they disagree, the
-    k/omega volume flux (mdot / density) is silently wrong by that ratio in every SST consumer
-    while the flow block solves fine, since it never reads SSTTurbulence.density at all.
-    """
+def _build_across_two_fluids(turbulence_viscosity: float, turbulence_density: float) -> None:
+    """Couple a flow at ``RHO * NU`` / ``RHO`` to a closure built from its own, other fluid."""
     mesh = structured_grid_2d(4, 4, lx=1.0, ly=1.0, named_boundaries=True)
     geometry = mesh.geometry()
     gradient = CompactGreenGauss()
@@ -212,15 +205,47 @@ def test_coupled_build_rejects_a_turbulence_density_that_disagrees_with_the_flow
         mesh,
         geometry,
         FirstOrderUpwind(),
-        # deliberately a different density from the flow assembler's RHO = 1.0
-        PropertyModel({"viscosity": Constant(998.0 * NU), "density": Constant(998.0)}),
+        PropertyModel(
+            {"viscosity": Constant(turbulence_viscosity), "density": Constant(turbulence_density)}
+        ),
         gradient_scheme=gradient,
         wall_patches=list(WALLS),
         k_boundary=BoundaryConditions({w: Dirichlet(0.0) for w in WALLS}),
         omega_boundary=BoundaryConditions({w: ZeroGradient() for w in WALLS}),
     )
+    CoupledRANS.build(momentum, turbulence)
+
+
+def test_coupled_build_accepts_the_same_fluid_stated_twice() -> None:
+    """The control for the two refusals below: one fluid given to both builders couples."""
+    _build_across_two_fluids(RHO * NU, RHO)
+
+
+def test_coupled_build_rejects_a_turbulence_density_that_disagrees_with_the_flow_assembler() -> (
+    None
+):
+    """SSTTurbulence and the flow assembler take separate PropertyModels with no shared source.
+
+    Nothing else checks that a caller supplied the same density to both -- if they disagree, the
+    k/omega volume flux (mdot / density) is silently wrong by that ratio in every SST consumer
+    while the flow block solves fine, since it never reads SSTTurbulence.density at all. The
+    closure's kinematic viscosity is kept equal to the flow's, so only the density can raise.
+    """
     with pytest.raises(ValueError, match="does not match the flow assembler's density"):
-        CoupledRANS.build(momentum, turbulence)
+        _build_across_two_fluids(998.0 * NU, 998.0)
+
+
+def test_coupled_build_rejects_a_turbulence_viscosity_that_disagrees_with_the_flow_assembler() -> (
+    None
+):
+    """The molecular viscosity is stated to both builders too, and is checked the same way.
+
+    The densities agree, so only the viscosity can raise. A closure given a different viscosity --
+    typically a kinematic value converted by hand with the density lost -- runs the k/omega equations
+    at a different Reynolds number from the flow, and nothing downstream notices.
+    """
+    with pytest.raises(ValueError, match="does not match the flow assembler's viscosity / density"):
+        _build_across_two_fluids(2.0 * RHO * NU, RHO)
 
 
 def test_lu_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None:

@@ -102,8 +102,8 @@ F frozen solver → G drive.
   Either `kinematic_viscosity` or `dynamic_viscosity`, never both, never neither — the other follows from
   `density`. This makes #367's momentum/SST viscosity mismatch unwritable in a file. ⚠️ `SSTTurbulence.build`
   already derives `molecular_viscosity` from a `PropertyModel` (it no longer takes a raw kinematic array),
-  so #367's *code* gap is narrower than its text says; the density cross-check in `CoupledRANS.build`
-  survives because the two assemblers are still handed two models.
+  and `CoupledRANS.build` cross-checks both properties (#367, `refuse_a_fluid_the_flow_disagrees_with`),
+  because the two assemblers are still handed two models.
 - **The pressure level is fixed exactly once (#500, 2026-09-24).** A top-level `pressure_datum:
   {kind: PinnedPoint, point: [...], value: ...}` is **required** when no patch is an `Outlet` and
   **refused** beside one, checked at read by the flow's own `refuse_an_unsuitable_pressure_datum` over the

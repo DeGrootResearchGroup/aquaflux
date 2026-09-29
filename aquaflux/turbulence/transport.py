@@ -233,6 +233,12 @@ class WallFixedResidual(eqx.Module):
         return self.wall_fix.apply(self.assembler.residual(phi), phi)
 
 
+_SEPARATE_FLUIDS = (
+    "The two come from separate PropertyModels -- SSTTurbulence.build(properties=...) and "
+    "MomentumContinuity.build(properties=...) -- and nothing else checks that they agree. "
+)
+
+
 class SSTTurbulence(eqx.Module):
     """Assembles the k and omega SST transport residuals for a configured problem.
 
@@ -482,37 +488,57 @@ class SSTTurbulence(eqx.Module):
             ),
         )
 
-    def refuse_a_density_the_flow_disagrees_with(self, momentum: MomentumContinuity) -> None:
-        """Refuse a flow block whose density is not this closure's.
+    def refuse_a_fluid_the_flow_disagrees_with(self, momentum: MomentumContinuity) -> None:
+        """Refuse a flow block that does not describe this closure's fluid.
 
-        The two come from separate property models -- this closure's
-        ``properties`` argument and :meth:`~aquaflux.flow.MomentumContinuity.build`'s -- with nothing
-        forcing them to describe the same fluid, and nothing else catches a mismatch: the k/omega
-        volume flux (``mdot / density``) would then be wrong by that ratio in every consumer of this
-        closure -- both residuals, both AMGs, both shift diagonals -- with no other symptom, since the
-        flow block is unaffected and solves fine.
+        The two come from separate property models -- this closure's ``properties`` argument and
+        :meth:`~aquaflux.flow.MomentumContinuity.build`'s -- with nothing forcing them to describe the
+        same fluid, and nothing else catches a mismatch, because the flow block never reads this
+        closure's copy of either property and solves fine. Both properties are compared:
+
+        - a different **density** makes the k/omega volume flux (``mdot / density``) wrong by that
+          ratio in every consumer of this closure -- both residuals, both AMGs, both shift diagonals;
+        - a different **molecular viscosity** puts the closure at a different Reynolds number from
+          the flow it is coupled to: the k/omega diffusion, the wall-adjacent ``omega`` value and the
+          blending functions all read it. Each block states the fluid in its own form, dynamic ``mu``
+          in the flow's model and kinematic ``nu = mu / rho`` here, so a caller converting between
+          the two by hand is where a lost factor of the density comes from.
+
+        The flow's values are its molecular (material) ones, read from its property model, so an eddy
+        viscosity it already carries does not enter the comparison.
 
         Parameters
         ----------
         momentum : MomentumContinuity
-            The flow block this closure is about to be coupled to, read for its per-cell density.
+            The flow block this closure is about to be coupled to, read for its per-cell density and
+            molecular viscosity.
 
         Raises
         ------
         ValueError
-            If the densities differ, naming both.
+            If the densities differ or the kinematic molecular viscosities differ, naming both sides.
         """
-        flow_density = momentum.density
-        if bool(jnp.all(jnp.isclose(flow_density, self.density))):
-            return
-        raise ValueError(
-            f"SSTTurbulence.density ({self.density}) does not match the flow assembler's density "
-            f"(range [{float(jnp.min(flow_density))}, {float(jnp.max(flow_density))}]). The two come "
-            "from separate PropertyModels -- SSTTurbulence.build(properties=...) and "
-            "MomentumContinuity.build(properties=...) -- and nothing else checks that they agree: if "
-            "they don't, the k/omega volume flux (mdot / density) is wrong by that ratio in every SST "
-            "consumer, silently. Pass a PropertyModel with the same density to both."
-        )
+        fluid = momentum.properties.evaluate(momentum.mesh.cell_zones)
+        flow_density = fluid["density"]
+        if not bool(jnp.all(jnp.isclose(flow_density, self.density))):
+            raise ValueError(
+                f"SSTTurbulence.density ({self.density}) does not match the flow assembler's density "
+                f"(range [{float(jnp.min(flow_density))}, {float(jnp.max(flow_density))}]). "
+                + _SEPARATE_FLUIDS
+                + "If they don't, the k/omega volume flux (mdot / density) is wrong by that ratio in "
+                "every SST consumer, silently. Pass a PropertyModel with the same density to both."
+            )
+        flow_nu = fluid["viscosity"] / flow_density
+        if not bool(jnp.all(jnp.isclose(flow_nu, self.molecular_viscosity))):
+            raise ValueError(
+                "SSTTurbulence.molecular_viscosity (kinematic, range "
+                f"[{float(jnp.min(self.molecular_viscosity))}, "
+                f"{float(jnp.max(self.molecular_viscosity))}]) does not match the flow assembler's "
+                f"viscosity / density (range [{float(jnp.min(flow_nu))}, {float(jnp.max(flow_nu))}]). "
+                + _SEPARATE_FLUIDS
+                + "If they don't, the closure runs at a different Reynolds number from the flow it is "
+                "coupled to, silently. Pass a PropertyModel with the same dynamic viscosity to both."
+            )
 
     def refuse_a_wall_set_the_flow_disagrees_with(self, momentum: MomentumContinuity) -> None:
         """Refuse a flow block that does not call the same patches walls as this closure does.
