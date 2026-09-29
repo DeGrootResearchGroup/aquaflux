@@ -28,7 +28,7 @@ Stages, each skipped when its output already exists:
    because aquaflux's OpenFOAM reader refuses binary;
 3. for each requested DOM resolution: decompose, run ``opticalRadiationFoam`` in parallel,
    reconstruct, and keep ``G``, ``qin`` (the incident flux on every patch), the log and a
-   ``record.json`` under ``work/runs/<mesh>_nphi<P>_ntheta<T>/``.
+   ``record.json`` under ``work/runs/<mesh>_nphi<P>_ntheta<T>[_px<p>x<t>]/``.
 
 Environment:
 
@@ -45,10 +45,17 @@ Environment:
 
 ``RAY_STAGES``
     What to do, space-separated: ``mesh`` builds both meshes; a run is
-    ``<mesh>:<nPhi>x<nTheta>`` with ``<mesh>`` one of ``bunny`` and ``empty`` (e.g.
-    ``bunny:8x4 empty:8x4``), and builds its mesh first if needed; ``<mesh>+reflecting:<P>x<T>``
-    runs the room with its floor, ceiling and walls diffusely reflecting (``room.WALL_REFLECTANCE``)
-    and the bunny black, into ``runs/<mesh>_reflecting_nphi<P>_ntheta<T>/``. Default ``mesh``.
+    ``<mesh>:<nPhi>x<nTheta>[/<nPixelPhi>x<nPixelTheta>]`` with ``<mesh>`` one of ``bunny`` and
+    ``empty`` (e.g. ``bunny:8x4 empty:8x4/3x3``), and builds its mesh first if needed;
+    ``<mesh>+reflecting:<P>x<T>`` runs the room with its floor, ceiling and walls diffusely
+    reflecting (``room.WALL_REFLECTANCE``) and the bunny black, into
+    ``runs/<mesh>_reflecting_nphi<P>_ntheta<T>/``. Default ``mesh``.
+
+    **Pixels** are the Murthy-Mathur subdivision of each direction's bin, used to split the flux
+    of a bin that a face's plane cuts through (an "overhanging" bin). Without them (1 x 1, the
+    default) the whole bin goes one way, which on the cut cells of a snapped mesh sends it through
+    the wrong face. A run with other than 1 x 1 pixels carries ``_px<p>x<t>`` in its name, so a
+    1 x 1 run keeps its name and its result.
 
 Run with ``RAY_OOR_SOURCE=<checkout> RAY_BUNNY_STL=<stl> RAY_STAGES=<stages>
 validation/run_case.sh validation/ray_effects_room/generate_dom.py``.
@@ -309,8 +316,18 @@ def _reflecting(field: Path) -> None:
     )
 
 
-def run_dom(source: Path, name: str, n_phi: int, n_theta: int, *, reflecting: bool = False) -> None:
+def run_dom(
+    source: Path,
+    name: str,
+    n_phi: int,
+    n_theta: int,
+    *,
+    pixels: tuple[int, int] = (1, 1),
+    reflecting: bool = False,
+) -> None:
     run_name = f"{name}{'_reflecting' if reflecting else ''}_nphi{n_phi}_ntheta{n_theta}"
+    if pixels != (1, 1):
+        run_name += f"_px{pixels[0]}x{pixels[1]}"
     run = WORK / "runs" / run_name
     if (run / "record.json").exists():
         _say(f"{run_name}: already run")
@@ -346,6 +363,8 @@ def run_dom(source: Path, name: str, n_phi: int, n_theta: int, *, reflecting: bo
     properties = staging / "constant" / "opticalRadiationProperties"
     _set_entry(properties, "nPhi", str(n_phi))
     _set_entry(properties, "nTheta", str(n_theta))
+    _set_entry(properties, "nPixelPhi", str(pixels[0]))
+    _set_entry(properties, "nPixelTheta", str(pixels[1]))
     ranks = int(os.environ.get("RAY_NPROCS", "8"))
     _set_entry(staging / "system" / "decomposeParDict", "numberOfSubdomains", str(ranks))
 
@@ -386,6 +405,8 @@ def run_dom(source: Path, name: str, n_phi: int, n_theta: int, *, reflecting: bo
         "n_phi": n_phi,
         "n_theta": n_theta,
         "directions": rays,
+        "n_pixel_phi": int(_entry(properties, "nPixelPhi")),
+        "n_pixel_theta": int(_entry(properties, "nPixelTheta")),
         "lamp_power_W": power,
         "lamp_ies": room.IES_FILE.name,
         "of_optical_radiation_commit": _commit(source),
@@ -444,8 +465,13 @@ def main() -> None:
         if variant not in ("", "reflecting"):
             msg = f"unknown variant {variant!r} in {run!r}; the one variant is 'reflecting'"
             raise ValueError(msg)
+        resolution, _, pixel_text = resolution.partition("/")
         n_phi, n_theta = (int(v) for v in resolution.split("x"))
-        run_dom(source, name, n_phi, n_theta, reflecting=variant == "reflecting")
+        pixels = tuple(int(v) for v in pixel_text.split("x")) if pixel_text else (1, 1)
+        if len(pixels) != 2 or min(pixels) < 1:
+            msg = f"pixels in {run!r} must be <nPixelPhi>x<nPixelTheta>, each at least 1"
+            raise ValueError(msg)
+        run_dom(source, name, n_phi, n_theta, pixels=pixels, reflecting=variant == "reflecting")
     _say("done")
 
 

@@ -588,6 +588,16 @@ snapped mesh. Its README carries every number with its configuration. What to kn
   reflecting 256 run was stopped. ⚠️ Not quadratic in the directions, as was first said here: 64 -> 256
   multiplied a reflecting sweep by 4.7 and a black one by 4.1. The likely cost is the `reflective` BC's
   sum over every direction at each wall face, which is read from its code, not profiled.
+- **The error window decides the trend, so state it with the number.** Over the central 2 x 2 m the
+  DOM floor error ROSE with directions (L2 / peak 0.77 -> 1.76, 64 -> 256); over the whole floor it
+  FELL (2.03 -> 1.07), because at 64 every beam lands outside the window. "More directions made it
+  worse" was put on a slide from the window figure and had to be withdrawn. The README's table is
+  the window; the full-floor figures are in its bullets and in the talk's `export_room_data.py`.
+- **Pixels are a run parameter (`bunny:16x8/3x3`) and every record carries them**; runs before
+  2026-09-29 had 1 x 1 from the template, backfilled into their records and marked so. On this mesh
+  3 x 3 pixels change the floor error by nothing to four figures at 64 and 256 directions (only the
+  bunny's snapped cells have faces a bin overhangs). Do not read that as "pixels never matter": the
+  room is hex-dominant with axis-aligned faces and bin edges; a tet or polyhedral mesh is untested.
 
 ## Recovering a converged state (both cases)
 

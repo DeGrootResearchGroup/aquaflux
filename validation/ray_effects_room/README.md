@@ -104,6 +104,8 @@ area-weighted, as shares of the reference's peak.
 | bunny | aquaflux | exact, 17,920 lamp facets | 275 s | 3e-6 | 6e-5 |
 | bunny | DOM | 64 (36 sweeps) | 2,251 s | 0.77 | 1.0 |
 | bunny | DOM | 256 (38 sweeps) | 9,785 s | 1.76 | 6.0 |
+| bunny | DOM, 3x3 pixels | 64 (36 sweeps) | 2,767 s | 0.77 | 1.0 |
+| bunny | DOM, 3x3 pixels | 256 (38 sweeps) | void (swapping) | 1.76 | 6.0 |
 | empty | aquaflux | exact | 352 s | 5e-9 | 8e-9 |
 | empty | DOM | 64 (36 sweeps) | 1,285 s | 0.84 | 1.0 |
 | empty | DOM | 256 (38 sweeps) | 5,443 s | 1.77 | 5.6 |
@@ -113,7 +115,18 @@ area-weighted, as shares of the reference's peak.
   beams leave the lamp ~30 degrees from vertical: the floor's centre is dark and the bunny, within
   ~10 degrees of it, is missed (it absorbs -0.004 mW). At 256 the nearest beams are ~11-15 degrees
   out and land as a ring at ~0.8 m up to 6x the true peak, still skirting the bunny (0.64 mW).
-  Quadrupling the directions moved the error, not reduced it.
+  Within 1 m of the centre, quadrupling the directions raised the error; **over the whole floor it
+  halved it but left it above the peak**: L2 / peak 2.03 at 64 directions and 1.07 at 256 (worst
+  face 13.5 and 6.8 times the peak). At 64 every beam lands in 16 spots ~1.7 m out, 106 % of the
+  lamp's power in the 1.5-2 m band beside -19 % as negative irradiance: the bounded linearUpwind
+  scheme undershoots on either side of each beam (-9 % at 256).
+- **Murthy-Mathur pixelation does not change this.** Every run above except the two marked uses
+  1 x 1 pixels (the template's ``nPixelPhi 1; nPixelTheta 1``). With 3 x 3 the floor error is the
+  same to four figures at both resolutions; the fields differ only at the bunny's snapped cells,
+  by at most 1.7e-4 of the floor's peak and 4.4e-5 of G's maximum, because elsewhere the mesh's
+  faces are axis-aligned and so are the bins' edges, so no bin overhangs a face. At 64 directions
+  3 x 3 pixels cost 23 % more wall time; the 256-direction run's time is void, the host having
+  swapped throughout (8.9 min a sweep against 4.3).
 - **The fluence rate agrees the same way.** On the vertical slice aquaflux is 1.3e-4 of the
   reference's 99th percentile (L2) and on the horizontal 1.2e-6; DOM is 0.012 / 0.004 (64 / 256)
   vertically and 1.65 / 0.89 on the horizontal slice below the bunny. aquaflux at all 2,461,089

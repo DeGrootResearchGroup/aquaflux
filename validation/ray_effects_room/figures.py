@@ -57,17 +57,31 @@ def load(mesh: str) -> dict:
         }
     runs = sorted(
         (WORK / "runs").glob(f"{mesh}_nphi*"),
-        key=lambda p: json.loads((p / "record.json").read_text())["directions"],
+        key=_dom_order,
     )
     for run in runs:
         record = json.loads((run / "record.json").read_text())
         values = patches.patch_values(run / "qin", room.FLOOR_PATCH, n_cells, n_faces)
         fields[run.name] = {
             "E": values,
-            "label": f"DOM, {record['directions']} directions",
+            "label": _dom_label(record),
             "record": record,
         }
     return {"floor": floor, "fields": fields, "n_cells": n_cells}
+
+
+def _dom_label(record: dict) -> str:
+    """A DOM run's panel title: its directions and its pixels (every record states both)."""
+    return (
+        f"DOM, {record['directions']} directions, "
+        f"{record['n_pixel_phi']}x{record['n_pixel_theta']} pixels"
+    )
+
+
+def _dom_order(run: Path) -> tuple[int, int]:
+    """DOM runs by direction count, then by pixels per bin."""
+    record = json.loads((run / "record.json").read_text())
+    return record["directions"], record["n_pixel_phi"] * record["n_pixel_theta"]
 
 
 def _window(floor) -> np.ndarray:
@@ -251,12 +265,12 @@ def load_volume(mesh: str) -> dict | None:
     volume = {"aquaflux": {"G": stored_ours["G"], "label": "aquaflux"}}
     for run in sorted(
         (WORK / "runs").glob(f"{mesh}_nphi*"),
-        key=lambda p: json.loads((p / "record.json").read_text())["directions"],
+        key=_dom_order,
     ):
         record = json.loads((run / "record.json").read_text())
         volume[run.name] = {
             "G": parse_scalar_field(read_foam_body(run / "G"), len(cells["volume"]), {}),
-            "label": f"DOM, {record['directions']} directions",
+            "label": _dom_label(record),
         }
     slices = {}
     for name in room.SLICES:
@@ -304,10 +318,10 @@ def load_reflecting(mesh: str) -> tuple[dict, dict] | None:
     volume_fields = {"aquaflux": {"G": stored["G"], "label": label}}
     for run in sorted(
         (WORK / "runs").glob(f"{mesh}_reflecting_nphi*"),
-        key=lambda p: json.loads((p / "record.json").read_text())["directions"],
+        key=_dom_order,
     ):
         run_record = json.loads((run / "record.json").read_text())
-        text = f"DOM, {run_record['directions']} directions"
+        text = _dom_label(run_record)
         floor_fields[run.name] = {
             "E": patches.patch_values(run / "qin", room.FLOOR_PATCH, n_cells, len(floor["area"])),
             "label": text,
