@@ -20,7 +20,11 @@ Examples:
   python voronoi_bunny.py --cell 0.07 --strut 0.015 # bigger holes (ears get sparse)
   python voronoi_bunny.py --input my_animal.stl --size 0.8
 """
-import argparse, io, tarfile, urllib.request
+
+import argparse
+import io
+import tarfile
+import urllib.request
 from pathlib import Path
 
 import numpy as np
@@ -49,7 +53,7 @@ def surface_distance_grid(mesh, pitch, pad):
     is simply a band of thickness t centred on the surface (open edges, like
     the holes in the raw bunny's base, stay open).
     """
-    vox = mesh.voxelized(pitch)            # surface voxels only
+    vox = mesh.voxelized(pitch)  # surface voxels only
     surf = np.pad(vox.matrix, pad)
     udf = ndimage.distance_transform_edt(~surf) * pitch
     udf = ndimage.gaussian_filter(udf, sigma=1.0)
@@ -74,17 +78,18 @@ def poisson_disk_surface(mesh, spacing, seed):
 
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--input", type=Path, help="input mesh (default: Stanford bunny)")
     p.add_argument("--output", type=Path, default=Path("voronoi_bunny.stl"))
     p.add_argument("--size", type=float, default=0.6, help="largest extent [m]")
-    p.add_argument("--cell", type=float, default=0.045,
-                   help="target Voronoi cell (hole) spacing [m]")
+    p.add_argument(
+        "--cell", type=float, default=0.045, help="target Voronoi cell (hole) spacing [m]"
+    )
     p.add_argument("--strut", type=float, default=0.012, help="strut width [m]")
     p.add_argument("--shell", type=float, default=0.010, help="shell thickness [m]")
-    p.add_argument("--pitch", type=float, default=None,
-                   help="voxel size [m] (default: strut/4)")
+    p.add_argument("--pitch", type=float, default=None, help="voxel size [m] (default: strut/4)")
     p.add_argument("--seed", type=int, default=1)
     a = p.parse_args()
 
@@ -98,7 +103,7 @@ def main():
         mesh.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2, [1, 0, 0]))
     mesh.apply_translation([0, 0, -mesh.bounds[0, 2]])
 
-    print(f"Building distance field (pitch {pitch*1e3:.1f} mm) ...")
+    print(f"Building distance field (pitch {pitch * 1e3:.1f} mm) ...")
     pad = int(np.ceil(a.shell / pitch)) + 4
     udf, origin = surface_distance_grid(mesh, pitch, pad)
 
@@ -128,9 +133,11 @@ def main():
 
     out.export(a.output)
     ext = out.extents
-    print(f"Wrote {a.output}: {len(out.faces)} faces, "
-          f"{ext[0]:.3f} x {ext[1]:.3f} x {ext[2]:.3f} m, "
-          f"watertight={out.is_watertight}, dropped {len(parts)-1} fragments")
+    print(
+        f"Wrote {a.output}: {len(out.faces)} faces, "
+        f"{ext[0]:.3f} x {ext[1]:.3f} x {ext[2]:.3f} m, "
+        f"watertight={out.is_watertight}, dropped {len(parts) - 1} fragments"
+    )
 
 
 if __name__ == "__main__":
