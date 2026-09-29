@@ -1,0 +1,48 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       volScalarField;
+    object      I;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Template for the per-ray radiance fields. Every surface is black except the
+// lamp, an IES luminaire (Ushio Care222 B1) facing down. Its power is the
+// file's own integrated radiant flux, set by generate_dom.py.
+
+dimensions      [1 0 -3 0 0 0 0];
+
+internalField   uniform 0;
+
+boundaryField
+{
+    "(floor|ceiling|walls|bunny)"
+    {
+        type            reflective;
+        diffuseFraction 0;
+        reflectionCoef  0;
+        refValue        uniform 0;
+        refGradient     uniform 0;
+        valueFraction   uniform 1;
+        value           uniform 0;
+    }
+    lamp
+    {
+        type            iesEmitter;
+        nBands          1;
+        iesFile         "constant/lamp.ies";
+        power           (LAMP_POWER_W);
+        fixtureAxis     (0 0 -1);
+        fixtureUp       (1 0 0);
+        value           uniform 0;
+    }
+}
+
+// ************************************************************************* //

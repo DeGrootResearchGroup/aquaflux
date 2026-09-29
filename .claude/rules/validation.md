@@ -560,6 +560,35 @@ and the `Sc_t = 1` choice). Its dependency structure is unusual and is the thing
 and fail for a reason that has nothing to do with the change under test. This happened once and cost a
 28-minute gate run.
 
+## `ray_effects_room` — aquaflux against discrete ordinates in a far-UVC room (2026-09-28)
+
+A demonstration case, not a solver study: a 4 x 4 x 3 m room lit by a Care222 module (the
+OSLUV-measured `ushio_b1.ies`, committed with its MIT licence), a Voronoi-lattice bunny hanging in
+it, black walls (and a 0.5-reflecting variant); aquaflux, of-optical-radiation's DOM and an
+independent brute-force reference (`reference.py`, numpy + Embree, no aquaflux import) on one
+snapped mesh. Its README carries every number with its configuration. What to know before touching it:
+
+- **DOM needs of-optical-radiation's `add-incident-flux-output` branch** (`qin`, the exact-power
+  `iesEmitter`, no scatter snapshot); `generate_dom.py` records the commit beside every run.
+- **Killing the case must reach Docker.** A `kill` of `generate_dom.py` used to leave its container
+  running on, unseen by `run_case.sh`; containers are now named and stopped from a SIGTERM/SIGHUP
+  handler. The same shape as the `peak_footprint.py` trap above, one tool along.
+- **A mesh directory is not a finished mesh**: `snappyHexMesh` writes `polyMesh` before the lamp
+  patch is cut, so each meshing step leaves its own completion marker.
+- **The cell count is not `owner.max() + 1`**: the highest cells may appear only as a neighbour
+  (2-3 cells short on both meshes); `cells.npz`, written by OpenFOAM itself, is the authority.
+- **`test_validation_api.py` matched `from aquaflux...` by string prefix**, so a case's sibling
+  module named `aquaflux_floor` was taken for the package and every name imported from it reported
+  missing. It now matches the package or its submodules (`module == "aquaflux"` or
+  `startswith("aquaflux.")`), pinned by `test_a_sibling_module_whose_name_begins_with_aquaflux_is_not_the_package`.
+- **`run_case.sh` records `RAY_` settings** (added to its capture prefixes; `test_check_env_prefixes.py`
+  fails a case whose prefix is missing, which is how this was caught).
+- **A diffusely reflecting DOM sweep costs 3.3-3.8x a black one** (209 against 63 s at 64 directions,
+  984 against 257 s at 256, 8 ranks) and needs ~60 % more sweeps (57 against 36 at 64), so the
+  reflecting 256 run was stopped. ⚠️ Not quadratic in the directions, as was first said here: 64 -> 256
+  multiplied a reflecting sweep by 4.7 and a black one by 4.1. The likely cost is the `reflective` BC's
+  sum over every direction at each wall face, which is read from its code, not profiled.
+
 ## Recovering a converged state (both cases)
 
 Both `compare.py` files take `checkpoint_dir` and write a rolling per-step state through the shared
