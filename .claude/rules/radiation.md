@@ -1326,11 +1326,16 @@ Sozzi mesh live there). ⚠️ **It restates defaults and measurements by value*
 these makes it false and must update it in the same change: the six-point `receiver_quadrature`,
 `refine_for_receivers`' `max_ratio=0.25`, the GMRES global relative `1e-10`, `RayCastOcclusion` as
 the self-occlusion default and `ShaftCulling` as the culling default, opaque as the transmittance
-default, the 2.6%-at-eight-sectors inscribed-area undershoot, 95% UVT = 5.129 /m, and the Sozzi
+default, GMRES restart 120, point sources Isotropic-only (`check_profiles`), the 2.6%-at-eight-sectors inscribed-area undershoot, 95% UVT = 5.129 /m, and the Sozzi
 figures (0.09% volume mean; 0.36-1.65 / 0.886-1.076 at 64 / 256 directions; 0.44% median lamp
 discretization; dose mean 0.3%, log reduction within 1.1%, DOM-64 short by 23% at k = 0.5). Its
 worked example — `G = 80` in a 6x6x6 box mesh's own patches at `M = 10, rho = 0.5` — was run
-(2026-09-28) and holds to rounding.
+(2026-09-28) and holds to rounding. Its **Theory** section writes out every equation the code
+evaluates — the direct gather, both solid-angle kernels, `surviving_fraction`, the voxel walk,
+`F^geo`/`F`/`F^M`, the eliminated system, the two-gather `G`, the adjoint — and was checked
+(2026-09-29, 3x3x3 box of its own patches, CosinePower(4) lid so `F^M != F`, uniform `a = 2`)
+against `radiosity` / `surface_irradiance` / `fluence_rate` to 1e-16 relative, and `F^geo` rows
+against its stated six-point formula to 4e-17. A change to any of those formulas must update it.
 
 
 ## The winding number answers "is this cell inside the metal", and it is exact
