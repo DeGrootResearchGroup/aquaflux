@@ -1,12 +1,12 @@
 # Ultraviolet radiation
 
-An ultraviolet (UV) reactor disinfects water by exposing it to light from one or more lamps, and
-what an organism receives depends on the **fluence rate** at every point it passes: the radiant
-power arriving there from every direction, per unit area. `aquaflux.radiation` computes that field
-on the same points the flow is solved on — usually the cell centres — so it can drive a dose or
-reaction calculation directly, and because it is written in JAX, every number it returns can be
-differentiated with respect to lamp power, wall reflectance, water quality and the other optical
-inputs.
+An ultraviolet (UV) reactor disinfects a fluid — water, or air in a duct or a room — by exposing it
+to light from one or more lamps, and what an organism receives depends on the **fluence rate** at
+every point it passes: the radiant power arriving there from every direction, per unit area.
+`aquaflux.radiation` computes that field on the same points the flow is solved on — usually the
+cell centres — so it can drive a dose or reaction calculation directly, and because it is written
+in JAX, every number it returns can be differentiated with respect to lamp power, wall
+reflectance, the absorbance of the fluid and the other optical inputs.
 
 This page covers what the model computes and how, how to set up a scene, what is and is not
 differentiable, how to run it at the size of a real reactor mesh, and what it has been checked
@@ -21,8 +21,8 @@ surface:
 - each **emitting triangle** contributes its radiance times the exact, closed-form solid angle it
   subtends at the receiver — not an inverse-square approximation, which is badly wrong in the near
   field where the fluence rate is highest;
-- the contribution is **attenuated** along the straight path by the absorbing water
-  (Beer–Lambert);
+- the contribution is **attenuated** along the straight path by the absorbing medium — the water or
+  air being treated (Beer–Lambert);
 - it is **blocked**, wholly or in part, by any geometry standing in the way — lamp sleeves, baffles,
   the vessel wall, or the emitting surface itself where it is not convex;
 - and every surface that **reflects** re-emits what lands on it diffusely, which lights every other
@@ -62,9 +62,11 @@ surfaces = geometry.with_optics(
 )
 model = build_radiation_model(cell_centres, surfaces)              # cell_centres: (n_cells, 3)
 
-water = UniformAbsorption(absorption_from_uvt(70.0))               # 70% transmittance per cm
-G, cycles = fluence_rate(model, surfaces, absorption=water)        # W/m^2, one per cell centre
+medium = UniformAbsorption(absorption_from_uvt(70.0))              # water at 70% transmittance per cm
+G, cycles = fluence_rate(model, surfaces, absorption=medium)       # W/m^2, one per cell centre
 ```
+
+The medium here is water; for air, see [The medium](#the-medium).
 
 `G` is a plain `(n_cells,)` array in the order of `cell_centres`. `cycles` is the number of restart
 cycles the interreflection solve took: a solve that fails to converge raises, so the count is the
@@ -113,12 +115,12 @@ less than a fifth of the answer.
   "irradiance" or "intensity" for the fluence rate.
 - **The absorption coefficient is napierian, per metre** — the `a` in `exp(-a r)`. A *decadic*
   coefficient (paired with `10^(-A r)`) is smaller by `ln 10`, and a per-*centimetre* one by a
-  hundred; either, passed where a napierian per-metre one is expected, reads as clearer water
-  rather than as an error. {func}`~aquaflux.radiation.absorption_from_uvt` converts the number a
-  water-quality report carries — the percentage UV transmittance (UVT) through a one-centimetre
-  cell — into the right one: 95% UVT is 5.129 per metre. It takes a **percentage**, and refuses a
-  fraction such as `0.95`, which would otherwise be read as 0.95% and give a coefficient ninety
-  times too large.
+  hundred; either, passed where a napierian per-metre one is expected, reads as a clearer medium
+  rather than as an error. For water, {func}`~aquaflux.radiation.absorption_from_uvt` converts the
+  number a water-quality report carries — the percentage UV transmittance (UVT) through a
+  one-centimetre cell — into the right one: 95% UVT is 5.129 per metre. It takes a
+  **percentage**, and refuses a fraction such as `0.95`, which would otherwise be read as 0.95% and
+  give a coefficient ninety times too large.
 - **A lamp is specified by its rated UV output.** {func}`~aquaflux.radiation.lamp_exitance`
   divides each body's rating by the area of **its triangles**, not by the area of the shape they
   approximate, so the model radiates exactly the rated power at any refinement. Dividing by the
@@ -142,7 +144,7 @@ from a mesh's boundary patch ({func}`~aquaflux.mesh.patch_triangles`), or from a
 ([Reactor geometry from CAD](cad_geometry.md)).
 
 - **The normal comes from the winding**, by the right-hand rule, and a facet emits only on the side
-  its normal points to. So a lamp's triangles must face outward, into the water, and a vessel's
+  its normal points to. So a lamp's triangles must face outward, into the fluid, and a vessel's
   walls inward. A facet wound backwards emits nothing, silently —
   {func}`~aquaflux.radiation.check_winding` raises if any shared edge is traversed the same way by
   both of its triangles, which is how an inconsistently wound file shows itself, and
@@ -176,7 +178,8 @@ power; see [Reactor geometry from CAD](cad_geometry.md) for both on a real react
 
 ### The medium
 
-The water between facets and receivers is an {class}`~aquaflux.radiation.Absorption`:
+The fluid between facets and receivers — water or air — is an
+{class}`~aquaflux.radiation.Absorption`:
 
 - {class}`~aquaflux.radiation.UniformAbsorption` — one coefficient everywhere, applied in closed
   form;
@@ -186,8 +189,11 @@ The water between facets and receivers is an {class}`~aquaflux.radiation.Absorpt
   path's cost grows with the number of grid cells it crosses, so a coarse grid over a fine mesh is
   both cheaper and no less accurate.
 
-The medium is a call argument, not a build argument, and its coefficient is differentiable — cell
-by cell, for the voxel grid.
+Leaving `absorption` out gives the field in a non-absorbing medium. Air absorbs little at the 254 nm
+of a germicidal lamp, so an air-disinfection model often does that; pass an absorption where the
+paths are long enough, or the air carries enough absorbing gas or aerosol, for it to matter. The
+medium is a call argument, not a build argument, and its coefficient is differentiable — cell by
+cell, for the voxel grid.
 
 ### What stands in the way
 
@@ -196,7 +202,7 @@ Two kinds of geometry block light, and they are handled separately.
 **Bodies** are passed to the build as `occluders`: the exact solids of `aquaflux.solids` (a
 {class}`~aquaflux.solids.Cylinder` sleeve, a {class}`~aquaflux.solids.Sphere`, their
 {class}`~aquaflux.solids.Union` or {class}`~aquaflux.solids.Difference`, and
-{class}`~aquaflux.solids.Outside` for a vessel described by the water it holds), or a
+{class}`~aquaflux.solids.Outside` for a vessel or duct described by the fluid it holds), or a
 {class}`~aquaflux.radiation.TriangleBody` for geometry that exists only as triangles. An exact solid
 is both cheaper and more accurate than a triangulated one, which is why the CAD reader hands out
 solids. A body's **shape** is frozen into the model; what it **lets through** is a call argument:
@@ -204,11 +210,11 @@ solids. A body's **shape** is frozen into the model; what it **lets through** is
 ```python
 from aquaflux.solids import Cylinder
 
-# the sleeve of a neighbouring lamp, standing between this lamp and some of the water
+# the sleeve of a neighbouring lamp, standing between this lamp and some of the fluid
 sleeve = Cylinder(centre=[0.0, 0.0, 0.2], axis=[0.0, 0.0, 1.0], radius=0.0115, half_length=0.2)
 model = build_radiation_model(cell_centres, surfaces, occluders=[sleeve])
 
-G, _ = fluence_rate(model, surfaces, absorption=water, transmittance=[0.9])   # one per body
+G, _ = fluence_rate(model, surfaces, absorption=medium, transmittance=[0.9])   # one per body
 ```
 
 `transmittance` defaults to **opaque**, so a forgotten argument blocks rather than silently passes
@@ -257,9 +263,9 @@ system). Pass your own `solver` to change that. Three entry points read off the 
 ```python
 from aquaflux.radiation import radiosity, surface_irradiance
 
-B, _ = radiosity(model, surfaces, absorption=water)            # sent out by each facet, (n_facets,)
-H, _ = surface_irradiance(model, surfaces, absorption=water)   # landing on each facet,  (n_facets,)
-G, _ = fluence_rate(model, surfaces, absorption=water)         # in the volume,          (n_receivers,)
+B, _ = radiosity(model, surfaces, absorption=medium)            # sent out by each facet, (n_facets,)
+H, _ = surface_irradiance(model, surfaces, absorption=medium)   # landing on each facet,  (n_facets,)
+G, _ = fluence_rate(model, surfaces, absorption=medium)         # in the volume,          (n_receivers,)
 ```
 
 `surface_irradiance` is the dose on a wall — for fouling or a surface reaction — and returns `NaN`
@@ -283,8 +289,8 @@ study sweeps is supplied per call:
 | body shapes (which pairs they block) | body transmittance |
 | the self-shadowing strategy | the medium (`absorption`) |
 
-So a sweep over lamp power, wall reflectance or water quality pays the build once. The surface
-set is passed again at each call to supply those optics, and **its geometry must be the one the
+So a sweep over lamp power, wall reflectance or the medium's absorbance pays the build once. The
+surface set is passed again at each call to supply those optics, and **its geometry must be the one the
 model was built from**: the model records a fingerprint of the vertices and refuses a set that
 differs, since the field would otherwise be lit from one geometry through the shadows of another.
 Change optics with `surfaces.with_optics(...)`; move a lamp with
@@ -316,7 +322,7 @@ def mean_fluence_rate(reflectance, coefficient):
     G, _ = fluence_rate(model, optics, absorption=UniformAbsorption(coefficient))
     return G.mean()
 
-d_reflectance, d_absorption = jax.grad(mean_fluence_rate, argnums=(0, 1))(0.3, water.coefficient)
+d_reflectance, d_absorption = jax.grad(mean_fluence_rate, argnums=(0, 1))(0.3, medium.coefficient)
 ```
 
 Derivatives taken this way agree with finite differences.
@@ -351,7 +357,7 @@ settings make that affordable:
   from aquaflux.radiation import NoOcclusion, direct_fluence_rate
 
   G = direct_fluence_rate(
-      lamp, cell_centres, absorption=water, occluders=[vessel], self_occlusion=NoOcclusion()
+      lamp, cell_centres, absorption=medium, occluders=[vessel], self_occlusion=NoOcclusion()
   )
   ```
 
@@ -372,14 +378,14 @@ attaches to a scalar carried by the converged flow.
 
 ## What the model does not include
 
-- **Refraction and reflection at a quartz sleeve.** Bolton (2000) puts the error of neglecting
-  them at a 6.5% reflection correction below 70% UVT, and up to 25% above it. The model is
-  therefore best suited to lower-transmittance water — wastewater, or the 70% water of the Sozzi &
-  Taghipour (2006) benchmark — and carries a systematic error of that size at drinking-water
-  transmittances.
+- **Refraction and reflection at a quartz sleeve.** In water, Bolton (2000) puts the error of
+  neglecting them at a 6.5% reflection correction below 70% UVT, and up to 25% above it. For water
+  the model is therefore best suited to lower transmittances — wastewater, or the 70% water of the
+  Sozzi & Taghipour (2006) benchmark — and carries a systematic error of that size at
+  drinking-water transmittances.
 - **Specular reflection.** Walls reflect diffusely (see above).
-- **Scattering by the water, and more than one waveband.** The medium absorbs but does not
-  scatter, at one wavelength.
+- **Scattering by the medium, and more than one waveband.** The medium absorbs but does not
+  scatter — neither particles in water nor aerosols or droplets in air — at one wavelength.
 - **Exact energy balance for a non-diffuse source.** A cosine-power source's distribution is
   evaluated along one direction per pair of facets, centroid to centroid; energy is conserved
   exactly only for diffuse sources, and the error shrinks as the surface is refined.
@@ -400,7 +406,7 @@ is solved and differentiated. The notation used throughout:
 | $P_k$ | the radiant power of point source $k$ | W |
 | $\rho_j$ | a facet's diffuse reflectance | – |
 | $B_j$, $H_j$ | a facet's radiosity (all it sends out) and irradiance (all that lands on it) | W/m² |
-| $a(\mathbf{x})$ | the napierian absorption coefficient of the water | 1/m |
+| $a(\mathbf{x})$ | the napierian absorption coefficient of the medium (water or air) | 1/m |
 | $t_b$ | the transmittance of occluding body $b$ | – |
 
 ### The quantities
@@ -454,7 +460,7 @@ where
 - $\Omega_j(\mathbf{x})$ is the **exact solid angle** the triangle subtends at $\mathbf{x}$ (below);
 - $\cos\theta_j = \mathbf{n}_j \cdot (\mathbf{x} - \mathbf{c}_j) / |\mathbf{x} - \mathbf{c}_j|$
   is the emission angle, and $r_k = |\mathbf{x} - \mathbf{c}_k|$ the distance to a point source;
-- $T_j(\mathbf{x}) = \exp\!\left(-\int a\, ds\right)$ is the **transmittance of the water** along the
+- $T_j(\mathbf{x}) = \exp\!\left(-\int a\, ds\right)$ is the **transmittance of the medium** along the
   straight segment from $\mathbf{c}_j$ to $\mathbf{x}$;
 - $V_j(\mathbf{x}) \in [0, 1]$ is the fraction of the source's view that **gets past the geometry**
   in the way.
@@ -518,13 +524,13 @@ $$
   opaque. {class}`~aquaflux.radiation.RayCastOcclusion` casts the one segment and records $0$ or
   $1$. {class}`~aquaflux.radiation.SilhouetteOcclusion` clips the source's image on the sphere
   against each blocking triangle's silhouette and records the covered fraction of $\Omega_j$ for a
-  point in the water, or of $\Omega^\perp_j$ for a receiver on a facet. The covered shares of
+  point in the fluid, or of $\Omega^\perp_j$ for a receiver on a facet. The covered shares of
   separate blockers are added and capped at one, so two blockers covering the same part of a
   source are counted twice. {class}`~aquaflux.radiation.NoOcclusion` sets $h_j = 0$.
 
 Only $t_b$ is live. $\beta$ and $h$ are geometry, fixed when the model is built.
 
-### The water
+### The medium's absorption
 
 Along a segment of length $r$, the transmittance is $T = \exp(-\tau)$, with optical depth
 $\tau = \int_0^r a\, ds$:

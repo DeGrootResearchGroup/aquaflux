@@ -327,7 +327,7 @@ class SilhouetteOcclusion(SelfOcclusion):
     what an irradiance weights by; a point in the fluid has no normal and takes its share of the
     *plain* solid angle, which is what a fluence rate weights by. The clip is the same for both --
     it works in direction space -- and only the contour integral taken of the covered region
-    differs. So a fluence rate in the water sees a sleeve's shadow edge as the fraction it is,
+    differs. So a fluence rate in the fluid sees a sleeve's shadow edge as the fraction it is,
     rather than all or nothing per pair.
 
     **Four passes**, and the middle two are what make the cost bearable. Per receiver: build each

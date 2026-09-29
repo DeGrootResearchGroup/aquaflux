@@ -1,7 +1,7 @@
 """The transfer matrix: what fraction of what leaves each facet reaches every other one.
 
 Pure geometry. Nothing here knows what any surface emits, how much it reflects, or what the
-water between them absorbs — those are supplied per call to the solve in
+medium between them absorbs — those are supplied per call to the solve in
 :mod:`aquaflux.radiation.model`, which is what lets a design study pay this ``n^2`` build once
 and sweep the optics against it with the derivatives intact.
 
@@ -105,7 +105,7 @@ class TransferMatrix(eqx.Module):
     """The frozen geometry of facet-to-facet transfer.
 
     Everything here is a function of shape and position alone, costs ``n^2`` to build, and never
-    changes while a design study varies emission, reflectance or water quality. It is held
+    changes while a design study varies emission, reflectance or the medium's absorbance. It is held
     apart from those so the expensive build happens once and the derivatives still reach the
     things that move.
 

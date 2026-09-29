@@ -8,7 +8,7 @@ exactly that, as plain numbers, so the recognition rules can be written and test
 kernel installed, and the kernel stays behind one module.
 
 The side is recorded rather than inferred from a normal because it is the fact recognition turns
-on, and the one that is easy to get backwards. A pipe's wall seen from the water is a cylinder
+on, and the one that is easy to get backwards. A pipe's wall seen from the fluid is a cylinder
 whose solid lies *inside* it; the same cylinder seen as the bore of a sleeve has the solid
 *outside* it, and only the first is a convex piece that a :class:`~aquaflux.solids.Cylinder` can
 stand for.

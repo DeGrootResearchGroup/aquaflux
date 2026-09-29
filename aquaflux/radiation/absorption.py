@@ -1,9 +1,9 @@
-"""How much of a source's light survives the water between it and a receiver.
+"""How much of a source's light survives the medium between it and a receiver.
 
-Water absorbs ultraviolet light, and along a straight path the surviving fraction is
-``exp(-tau)`` with the **optical depth** ``tau`` the absorption coefficient integrated over the
-path. Everything in this module computes that one number for a segment; the gather multiplies
-each source's contribution by it.
+The water or air being disinfected absorbs ultraviolet light, and along a straight path the
+surviving fraction is ``exp(-tau)`` with the **optical depth** ``tau`` the absorption coefficient
+integrated over the path. Everything in this module computes that one number for a segment; the
+gather multiplies each source's contribution by it.
 
 Two cases, and the difference is not one of accuracy alone:
 
@@ -108,7 +108,7 @@ class VoxelAbsorption(Absorption):
     ----------
     coefficient : jnp.ndarray, shape ``(nx, ny, nz)``
         Absorption coefficient per cell, in inverse metres. A differentiable leaf: a gradient
-        with respect to it is a sensitivity to the water quality, cell by cell.
+        with respect to it is a sensitivity to the medium's absorbance, cell by cell.
     origin : jnp.ndarray, shape ``(3,)``
         Lower corner of the grid.
     spacing : jnp.ndarray, shape ``(3,)``
@@ -166,7 +166,7 @@ class VoxelAbsorption(Absorption):
 
         Clamped rather than zero-padded: a position outside the grid takes the value of the
         nearest boundary cell, so a segment that strays just past the edge attenuates like the
-        water at the edge rather than like vacuum. Interpolating rather than picking the nearest
+        medium at the edge rather than like vacuum. Interpolating rather than picking the nearest
         cell is what makes the result differentiable in position — a nearest-cell lookup is
         piecewise constant, so its derivative is zero almost everywhere and undefined on the
         faces between.

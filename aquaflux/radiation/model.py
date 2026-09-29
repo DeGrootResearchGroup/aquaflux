@@ -213,9 +213,9 @@ class RadiationModel(eqx.Module):
     """Everything about a scene that its shape alone decides, computed once.
 
     Built by :func:`build_radiation_model`. Holds no optical property and no medium: those are
-    supplied per call, so a design study that sweeps lamp power, wall reflectance or water
-    quality pays the ``n^2`` build once and the solve many times, with the derivatives reaching
-    every one of the swept values.
+    supplied per call, so a design study that sweeps lamp power, wall reflectance or the
+    medium's absorbance pays the ``n^2`` build once and the solve many times, with the
+    derivatives reaching every one of the swept values.
 
     Attributes
     ----------

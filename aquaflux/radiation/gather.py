@@ -6,7 +6,7 @@ sources, the opposite of tracing photons forward, and it is deterministic: the a
 point is a sum, not a sample, so it carries neither stochastic noise nor the bias that comes
 from scoring a photon's path length through a finite cell.
 
-Each term may be attenuated by the water it crosses, through an ``Absorption`` supplied by the
+Each term may be attenuated by the medium it crosses, through an ``Absorption`` supplied by the
 caller; with none, the field is the vacuum one, which is what every analytic reference case is
 stated in. Intervening bodies multiply the same terms by a surviving fraction, supplied as a
 pre-built visibility mask together with the live transmittance of each body.

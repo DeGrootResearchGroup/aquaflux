@@ -1352,6 +1352,13 @@ decision. It was reviewed at this point and kept entire: every export is somethi
 legitimately reach for, including the two solid-angle kernels, whose warning that they are **not
 interchangeable** is worth publishing rather than hiding.
 
+**UV disinfection of AIR is in scope as well as water** (project owner, 2026-09-29). Write the
+medium as "the medium" / "the fluid" (water or air) in the guide, the CAD page and the package's
+docstrings, and name water only where the content is genuinely water's: the UVT conversion
+(`absorption_from_uvt` and its 5.129 /m), Bolton's quartz-sleeve error figures, and the
+Sozzi & Taghipour (2006) case. Leaving `absorption` out is the non-absorbing medium, which the guide
+offers for air at 254 nm.
+
 **The user guide is `docs/radiation.md`** (in the Guide toctree beside `cad_geometry.md`, which it
 links to rather than repeats: CAD import, the mesh-patch lamp, streaming and culling timings on the
 Sozzi mesh live there). ⚠️ **It restates defaults and measurements by value**, so a change to any of

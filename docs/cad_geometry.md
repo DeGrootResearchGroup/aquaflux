@@ -23,7 +23,7 @@ pip install "aquaflux[cad]"
 ## Why exact bodies rather than triangles
 
 A shadow test asks, for every pair of a lamp facet and a cell, whether the straight line between
-them leaves the water. Against a cylinder that is a formula — a few dozen arithmetic operations, the
+them leaves the fluid. Against a cylinder that is a formula — a few dozen arithmetic operations, the
 same for every pair, compiled into one expression. Against a triangulated wall it is a search over
 thousands of triangles, and it is also *wrong* by the sliver between a round pipe and the polygon
 that stands in for it. On the Sozzi & Taghipour (2006) reactor the triangulated wall's mask costs
@@ -52,13 +52,13 @@ cad.names        # ('lamp', 'outlet_pipe', 'inlet_pipe', 'reactor_body')
   reflection such as the axis swap above — because a stretch would turn a cylinder into an elliptic
   one, which no body describes.
 
-## The water, as the vessel's shadow
+## The fluid, as the vessel's shadow
 
-A vessel's wall is awkward to write down as a solid; the water it holds is easy. So the shadowing
-body for a vessel is *everything that is not water*:
+A vessel's wall is awkward to write down as a solid; the fluid it holds — water in a reactor, air
+in a duct — is easy. So the shadowing body for a vessel is *everything that is not fluid*:
 
 ```python
-water = cad.fluid("reactor_body", "inlet_pipe", "outlet_pipe")   # an aquaflux.solids.Outside
+fluid = cad.fluid("reactor_body", "inlet_pipe", "outlet_pipe")   # an aquaflux.solids.Outside
 ```
 
 A sight line is clear exactly when the named solids cover it end to end. A pipe that joins the
@@ -88,7 +88,7 @@ G = direct_fluence_rate(
     lamp,
     cell_centres,                                   # (n_cells, 3), e.g. from the mesh
     absorption=UniformAbsorption(absorption_from_uvt(70.0)),
-    occluders=[water],
+    occluders=[fluid],
     self_occlusion=NoOcclusion(),                   # a convex lamp cannot shadow itself
 )
 ```
@@ -113,7 +113,7 @@ otherwise be, and any disagreement between the two:
 from aquaflux.mesh import patch_triangles
 from aquaflux.radiation import coarsen_surfaces
 
-patch = patch_triangles(mesh, mesh.geometry(), ["lampWall"])     # facing into the water
+patch = patch_triangles(mesh, mesh.geometry(), ["lampWall"])     # facing into the fluid
 exact = Surfaces.from_triangles(patch.vertices, solid_id=patch.patch_id, solid_names=patch.patch_names)
 exact = exact.with_optics(emission=exact.per_facet({"lampWall": 696.42}))   # W/m^2
 
@@ -151,7 +151,7 @@ at each call instead:
 from aquaflux.radiation import RadiationSettings, build_radiation_model, fluence_rate
 
 model = build_radiation_model(
-    cell_centres, lamp, occluders=[water],
+    cell_centres, lamp, occluders=[fluid],
     settings=RadiationSettings(self_occlusion=NoOcclusion(), stream_receiver_mask=True),
 )
 G, cycles = fluence_rate(model, lamp, absorption=UniformAbsorption(absorption_from_uvt(70.0)))
@@ -163,7 +163,7 @@ reactor the streamed model reproduces the hand-built field above to 4.4e-16 rela
 1,635,909 cells. Leave `stream_receiver_mask` unset for a scene whose mask fits, where holding it
 once makes every later call cheaper.
 
-Most of those segments never leave the water: a cell in the chamber and a facet of the lamp both lie
+Most of those segments never leave the fluid: a cell in the chamber and a facet of the lamp both lie
 inside the chamber's cylinder, and so does every segment between them. The model uses that by
 default, with {class}`~aquaflux.radiation.ShaftCulling` deciding the bodies' layer. Cells and facets are grouped
 into compact blocks, and a body that can prove it misses the whole region between a block of cells
@@ -189,7 +189,7 @@ far dearer than against a cylinder, which is where refinement pays: on the Sozzi
 vouches for nine pairs in ten and builds that wall's mask about five times faster, against less
 than twofold when refinement stops at eight. Which side of the body is solid is read from the
 triangles: a piece with a free edge is a sheet with no inside, and a closed piece is solid on the
-side its normals point away from, so a vessel wound to face its water is solid outside it. Pass
+side its normals point away from, so a vessel wound to face its fluid is solid outside it. Pass
 `sheet=True` when a closed surface is really a sheet.
 
 ## What is checked, and what is refused
@@ -221,7 +221,7 @@ shadowed by the wrong geometry produces a plausible field.
 ## Verified on a real drawing
 
 The Sozzi & Taghipour reactor's own drawing (an Onshape export; three vessel solids and the lamp)
-reads in under a second. Its water, checked against the drawing to 0.75 µm against a declared
+reads in under a second. Its water volume, checked against the drawing to 0.75 µm against a declared
 10 µm, shadows the reactor on 180 million lamp-to-cell sight lines **identically** to an occluder
 derived by hand for that reactor — not one sight line differs — even though the drawing's pipes run
 well beyond the meshed domain where the hand-typed ones stop at it. The harness is
