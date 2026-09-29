@@ -155,6 +155,32 @@ def test_rebuilding_the_measure_at_a_new_state_is_a_compilation_cache_hit():
     assert not jnp.allclose(a, b)
 
 
+def test_rebuilding_the_block_scaled_norm_at_new_scales_is_a_compilation_cache_hit():
+    """The block-scaled norm is rebuilt per march, so new scales must not trigger a recompile.
+
+    Its scales are an ordinary leaf for the same reason the row-scaled measure's are (the test above):
+    held as static metadata instead, every rebuild at a new reference state would change the tree's
+    structure and recompile whatever the norm is passed to. Built from tuples of Python floats, which
+    is how the march's builders make it, so the conversion to a (non-weak) array is exercised too.
+    """
+    traces = 0
+
+    @eqx.filter_jit
+    def measure(norm, residual):
+        nonlocal traces
+        traces += 1
+        return norm(residual)
+
+    residual = jnp.array([1.0, 3.0, 2.0, 6.0])
+    a = measure(BlockScaledNorm(sizes=(2, 2), scales=(1.0, 2.0)), residual)
+    after_first = traces
+    b = measure(BlockScaledNorm(sizes=(2, 2), scales=(3.0, 5.0)), residual)
+
+    assert traces == after_first, "rebuilding the scales retraced instead of hitting the cache"
+    assert float(b) == pytest.approx(np.hypot(np.hypot(1.0, 3.0) / 3.0, np.hypot(2.0, 6.0) / 5.0))
+    assert not jnp.allclose(a, b)
+
+
 def test_the_row_scaled_measure_is_the_euclidean_combination_of_its_own_per_block_view():
     """The reporting view and the number the solver steers on must be the same arithmetic, or a log
     would explain a convergence history the march never had."""

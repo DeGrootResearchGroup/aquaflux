@@ -89,17 +89,21 @@ import jax.numpy as jnp  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
 from aquaflux.initialization import hybrid_initialize
 from aquaflux.solve import (  # noqa: E402
+    DEFAULT_SHIFT_BASIS,
+    PROBE_BATCH_SIZE,
     AmgVCycle,
     MonolithicAmgPreconditioner,
+    batched_jacobian_matvec,
     block_stencil_gather_map,
     cell_major_permutation,
+    frozen_shift_diagonal,
+    jacobian_matvec,
     relative_residual_gmres,
     restart_cycles,
     solve_linear,
 )
 from aquaflux.solve.amg_preconditioner import ShiftedCellMajorOperator  # noqa: E402
-from aquaflux.turbulence.coupled import _DEFAULT_SHIFT_BASIS, _coupled_jacobian_plan, _monolithic_shift_source
-from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, frozen_shift_diagonal, jacobian_matvec
+from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _monolithic_shift_source
 
 #: The pseudo-transient shifts to probe, largest first. ``0.0`` is the adjoint's own operator: there is
 #: no shift to make the diagonal dominant, so a factorization that only works because of the shift is
@@ -484,7 +488,7 @@ def main():
     n_fields = coupled.layout.n_fields
     state = load_state(coupled, state_path)
     cache = {}  # this state's materialized Jacobians, by reach (see `jacobian`)
-    base = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS)
+    base = _monolithic_shift_source(coupled, state, DEFAULT_SHIFT_BASIS)
     rhs = -coupled.residual(state)
     for beta in BETAS:
         shift = frozen_shift_diagonal(base, beta, state)

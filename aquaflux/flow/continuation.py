@@ -62,8 +62,8 @@ import jax.numpy as jnp
 from aquaflux.solve import (
     DEFAULT_GLOBALIZATION,
     DEFAULT_ROOT_SOLVE,
+    DEFAULT_SHIFT_BASIS,
     Globalization,
-    LocalCourantBasis,
     PseudoTransientStep,
     RootSolveSettings,
     ShiftBasis,
@@ -153,7 +153,7 @@ class MomentumShiftPolicy(eqx.Module):
 
     assembler: MomentumContinuity
     preconditioner: BlockPreconditioner | None = None
-    shift_basis: ShiftBasis = LocalCourantBasis()
+    shift_basis: ShiftBasis = DEFAULT_SHIFT_BASIS
     velocity_shift_parts: VelocityShiftParts | None = None
 
     def shift_term(self, phi: jnp.ndarray, residual: jnp.ndarray | None = None) -> ShiftTerm:

@@ -81,7 +81,7 @@ def test_a_row_scaled_measure_is_built_at_every_state_from_the_step_it_is_handed
     norm = builder(step, later)
 
     assert measures.row_scaled_asked == [(step, later)]
-    assert norm.scales == (7.0,)
+    assert norm.scales.tolist() == [7.0]
 
 
 def test_a_block_scaled_measure_takes_the_initial_state_s_scales_once_and_holds_them() -> None:

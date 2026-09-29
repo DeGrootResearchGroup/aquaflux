@@ -129,6 +129,11 @@ class VelocityShiftParts(Protocol):
         """
 
 
+DEFAULT_SHIFT_BASIS = LocalCourantBasis()
+"""The shift basis a march uses when none is given: :class:`LocalCourantBasis` at its defaults, the full
+operator diagonal. Every builder that shifts a block reads it from here."""
+
+
 class ShiftSettings(eqx.Module):
     """How the velocity pseudo-time shift diagonal is formed, for every march that shifts a flow.
 
@@ -147,7 +152,7 @@ class ShiftSettings(eqx.Module):
     ----------
     basis : ShiftBasis or None
         How each block's shift diagonal is combined from its convective and dissipative parts. Unset,
-        :class:`LocalCourantBasis` with its defaults: the full operator diagonal.
+        :data:`DEFAULT_SHIFT_BASIS`: the full operator diagonal.
     velocity_parts : VelocityShiftParts or None
         Where the velocity shift's two diagonal buckets come from. Unset, the flow assembler's frozen
         momentum diagonal at the reference state.
