@@ -19,6 +19,12 @@ reflected ray in the model. Each profile therefore supplies the ratio itself, al
 :meth:`Profile.radiance_per_exitance`. For a Lambertian emitter it is the constant ``1/pi``,
 with nothing to cancel at run time.
 
+**A profile is asked about a direction, not an angle.** Its two methods take the unit direction
+from the source towards the receiver and the source facet's outward normal. Most distributions
+depend on nothing but the angle between the two -- :class:`AxisymmetricProfile`, which reduces
+the pair to its cosine and is written in terms of it -- but a measured luminaire does not: its
+intensity varies around its axis too (:class:`~aquaflux.radiation.photometry.PhotometricProfile`).
+
 The classes are ``equinox`` modules rather than a kind flag with a parameter bag, so a profile's
 parameters stay differentiable leaves and the choice of profile resolves when the program is
 traced -- the compiled code contains no branch on which kind is in use.
@@ -32,7 +38,9 @@ from typing import ClassVar
 import equinox as eqx
 import jax.numpy as jnp
 
-__all__ = ["CosinePower", "Isotropic", "Lambertian", "Profile"]
+from aquaflux.vectors import dot
+
+__all__ = ["AxisymmetricProfile", "CosinePower", "Isotropic", "Lambertian", "Profile"]
 
 _FOUR_PI = 4.0 * jnp.pi
 
@@ -41,27 +49,84 @@ class Profile(eqx.Module):
     """A normalized angular distribution of radiant intensity.
 
     Subclasses supply two views of the same distribution, and the pair must agree:
-    ``radiance_per_exitance(c) * c == intensity_fraction(c)`` wherever ``c > 0``. They are both
-    defined rather than one deriving the other because the derivation divides by ``c``, and the
-    division is exactly cancellable in the case that matters most.
+    ``radiance_per_exitance(d, n) * dot(d, n) == intensity_fraction(d, n)`` wherever
+    ``dot(d, n) > 0``. They are both defined rather than one deriving the other because the
+    derivation divides by the cosine, and the division is exactly cancellable in the case that
+    matters most.
 
     Attributes
     ----------
     dark_behind : bool
         Whether an areal facet with this distribution sends exactly nothing into the half-space
-        behind it: ``radiance_per_exitance(c)`` is exactly zero for every ``c <= 0``, not merely
-        small. A class-level declaration, ``False`` unless a subclass says otherwise, because what
-        reads it skips work on the strength of it: a shadow mask for points in the volume casts
-        no ray for a pair whose source faces away, since the gather multiplies whatever that ray
-        would say by zero. Declared rather than tested, since a test on sample directions cannot
-        prove a zero everywhere, and a subclass that is dark behind and does not say so only
-        costs rays.
+        behind it: ``radiance_per_exitance`` is exactly zero wherever ``dot(d, n) <= 0``, not
+        merely small. A class-level declaration, ``False`` unless a subclass says otherwise,
+        because what reads it skips work on the strength of it: a shadow mask for points in the
+        volume casts no ray for a pair whose source faces away, since the gather multiplies
+        whatever that ray would say by zero. Declared rather than tested, since a test on sample
+        directions cannot prove a zero everywhere, and a subclass that is dark behind and does
+        not say so only costs rays.
     """
 
     dark_behind: ClassVar[bool] = False
 
     @abc.abstractmethod
-    def intensity_fraction(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
+    def intensity_fraction(self, direction: jnp.ndarray, normal: jnp.ndarray) -> jnp.ndarray:
+        """Fraction of total power leaving per steradian towards ``direction``.
+
+        Parameters
+        ----------
+        direction : jnp.ndarray, shape ``(..., 3)``
+            Unit vector from the source towards the receiver.
+        normal : jnp.ndarray, shape ``(..., 3)``
+            The source facet's outward unit normal (zero on a point source). Broadcasts against
+            ``direction``.
+
+        Returns
+        -------
+        jnp.ndarray, shape ``(...)``
+            ``f(omega)`` in inverse steradians, integrating to one over the whole sphere.
+        """
+
+    @abc.abstractmethod
+    def radiance_per_exitance(self, direction: jnp.ndarray, normal: jnp.ndarray) -> jnp.ndarray:
+        """Radiance leaving a facet towards ``direction``, per unit of its exitance.
+
+        That is ``f / cos theta``, with ``cos theta = dot(direction, normal)``; the arguments are
+        those of :meth:`intensity_fraction`.
+
+        Returns
+        -------
+        jnp.ndarray, shape ``(...)``
+            ``L / M`` in inverse steradians, zero where the direction is behind the facet.
+        """
+
+    def refuse_normals(self, normals) -> str | None:
+        """Why facets with these normals cannot carry this profile, or ``None`` if they can.
+
+        Asked by :func:`~aquaflux.radiation.checks.check_profiles` of the areal facets that carry
+        the profile. Nothing is refused unless a subclass measures an angle that some normals
+        leave undefined.
+
+        Parameters
+        ----------
+        normals : array_like, shape ``(n, 3)``
+            Outward unit normals.
+        """
+        del normals
+        return None
+
+
+class AxisymmetricProfile(Profile):
+    """A distribution that depends only on the angle from the facet normal.
+
+    Written in terms of ``cos theta``: a subclass supplies :meth:`intensity_fraction_at` and
+    :meth:`radiance_per_exitance_at`, and the direction-based methods reduce a direction to its
+    cosine and delegate. The cosine forms are public because some consumers only ever hold the
+    cosine -- the surface transfer freezes one per pair of facets when it is built.
+    """
+
+    @abc.abstractmethod
+    def intensity_fraction_at(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
         """Fraction of total power leaving per steradian, at ``cos theta`` from the axis.
 
         Parameters
@@ -77,7 +142,7 @@ class Profile(eqx.Module):
         """
 
     @abc.abstractmethod
-    def radiance_per_exitance(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
+    def radiance_per_exitance_at(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
         """Radiance leaving a facet, per unit of its exitance — ``f(cos theta) / cos theta``.
 
         Returns
@@ -86,8 +151,16 @@ class Profile(eqx.Module):
             ``L / M`` in inverse steradians, zero where the direction is behind the facet.
         """
 
+    def intensity_fraction(self, direction: jnp.ndarray, normal: jnp.ndarray) -> jnp.ndarray:
+        """:meth:`intensity_fraction_at` the cosine of ``direction`` from ``normal``."""
+        return self.intensity_fraction_at(dot(direction, normal))
 
-class Isotropic(Profile):
+    def radiance_per_exitance(self, direction: jnp.ndarray, normal: jnp.ndarray) -> jnp.ndarray:
+        """:meth:`radiance_per_exitance_at` the cosine of ``direction`` from ``normal``."""
+        return self.radiance_per_exitance_at(dot(direction, normal))
+
+
+class Isotropic(AxisymmetricProfile):
     """Equal intensity in every direction — ``f = 1 / (4 pi)``.
 
     This is the profile of a **point source**, and the only one a point source may carry: a
@@ -96,11 +169,11 @@ class Isotropic(Profile):
     than a missing feature, and it says so instead of returning a number.
     """
 
-    def intensity_fraction(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
+    def intensity_fraction_at(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
         """Uniform over the sphere, and independent of direction."""
         return jnp.full_like(jnp.asarray(cos_theta, dtype=float), 1.0 / _FOUR_PI)
 
-    def radiance_per_exitance(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
+    def radiance_per_exitance_at(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
         """Not defined: an isotropic source is a point source and has no emitting surface."""
         msg = (
             "Isotropic is a point-source profile and has no radiance per unit exitance: a "
@@ -110,7 +183,7 @@ class Isotropic(Profile):
         raise NotImplementedError(msg)
 
 
-class Lambertian(Profile):
+class Lambertian(AxisymmetricProfile):
     """The diffuse emitter: constant radiance in every visible direction.
 
     ``f = max(cos theta, 0) / pi``, which is the cosine law — intensity falls off as the
@@ -121,17 +194,17 @@ class Lambertian(Profile):
 
     dark_behind: ClassVar[bool] = True
 
-    def intensity_fraction(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
+    def intensity_fraction_at(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
         """``max(cos theta, 0) / pi``."""
         return jnp.maximum(jnp.asarray(cos_theta, dtype=float), 0.0) / jnp.pi
 
-    def radiance_per_exitance(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
+    def radiance_per_exitance_at(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
         """``1 / pi`` in front of the facet and zero behind it — the cosine cancels exactly."""
         forward = jnp.asarray(cos_theta, dtype=float) > 0.0
         return jnp.where(forward, 1.0 / jnp.pi, 0.0)
 
 
-class CosinePower(Profile):
+class CosinePower(AxisymmetricProfile):
     """A narrowed beam: ``f = (n + 1) max(cos theta, 0)^n / (2 pi)``.
 
     The generalized-Lambertian form used throughout illumination optics, where the exponent is
@@ -171,12 +244,12 @@ class CosinePower(Profile):
             )
             raise ValueError(msg)
 
-    def intensity_fraction(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
+    def intensity_fraction_at(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
         """``(n + 1) max(cos theta, 0)^n / (2 pi)``."""
         forward = jnp.maximum(jnp.asarray(cos_theta, dtype=float), 0.0)
         return (self.exponent + 1.0) * forward**self.exponent / (2.0 * jnp.pi)
 
-    def radiance_per_exitance(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
+    def radiance_per_exitance_at(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
         """``(n + 1) max(cos theta, 0)^(n - 1) / (2 pi)`` — one power of the cosine cancelled."""
         cos_theta = jnp.asarray(cos_theta, dtype=float)
         forward = jnp.maximum(cos_theta, 0.0)

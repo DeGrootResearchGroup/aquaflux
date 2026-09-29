@@ -383,10 +383,14 @@ def check_profiles(surfaces) -> None:
     not appear in the field. Checked here, at build time, where the profile is a concrete object
     and the message can name the facet.
 
+    Each profile is also asked, through :meth:`~aquaflux.radiation.profiles.Profile.refuse_normals`,
+    whether the normals of the areal facets carrying it leave any angle it measures undefined --
+    a photometric table's horizontal angle about a normal parallel to its reference direction.
+
     Raises
     ------
     ValueError
-        If any facet carries a distribution that does not suit its kind.
+        If any facet carries a distribution that does not suit its kind or its normal.
     """
     from aquaflux.radiation.profiles import Isotropic
 
@@ -403,6 +407,13 @@ def check_profiles(surfaces) -> None:
             else np.flatnonzero(selected & is_point)
         )
         if len(offenders) == 0:
+            areal = np.flatnonzero(selected & ~is_point)
+            reason = (
+                profile.refuse_normals(np.asarray(surfaces.normal)[areal]) if len(areal) else None
+            )
+            if reason is not None:
+                msg = f"{type(profile).__name__} profile: {reason}"
+                raise ValueError(msg)
             continue
         if isotropic:
             msg = (

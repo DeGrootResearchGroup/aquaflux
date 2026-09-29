@@ -80,7 +80,7 @@ from aquaflux.morton import morton_order
 from aquaflux.radiation.absorption import UniformAbsorption
 from aquaflux.radiation.clipping import _SLACK
 from aquaflux.radiation.lit_blocks import rounded_width
-from aquaflux.radiation.profiles import Lambertian
+from aquaflux.radiation.profiles import AxisymmetricProfile, Lambertian
 from aquaflux.radiation.quadrature import TriangleQuadrature, triangle_quadrature
 from aquaflux.radiation.self_occlusion import SelfOcclusion
 from aquaflux.radiation.solid_angle import projected_solid_angle
@@ -214,7 +214,16 @@ class TransferMatrix(eqx.Module):
             sources = np.flatnonzero((index == kind) & areal)
             if not len(sources):
                 continue
-            weight = jnp.pi * profile.radiance_per_exitance(
+            if not isinstance(profile, AxisymmetricProfile):
+                msg = (
+                    f"{type(profile).__name__} depends on more than the angle from the facet "
+                    "normal, and the transfer freezes only that angle's cosine for each pair of "
+                    "facets, so it cannot carry this source's emission to the other surfaces. "
+                    "The direct gathers take any profile; for the surface transfer, give these "
+                    "facets an AxisymmetricProfile."
+                )
+                raise NotImplementedError(msg)
+            weight = jnp.pi * profile.radiance_per_exitance_at(
                 jnp.take(self.source_cosine, sources, axis=1)
             )
             relative = relative.at[:, sources].set(weight)

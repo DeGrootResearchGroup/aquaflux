@@ -180,17 +180,17 @@ def _transmittance(absorption, source: jnp.ndarray, receivers: jnp.ndarray) -> j
     return jnp.exp(-absorption.optical_depth(source, receivers))
 
 
-def _emitter_cosine(centroid, normal, receivers):
-    """Cosine at each emitting facet of the angle to each receiver, and the separation squared.
+def _emitter_direction(centroid, receivers):
+    """Unit direction from each emitting facet towards each receiver, and the separation squared.
 
-    The three arrays broadcast together, their last axis the three coordinates; the cosine is
-    measured at the *source*, between its outward normal and the direction to the receiver,
-    which is what an angular distribution is a function of.
+    The arrays broadcast together, their last axis the three coordinates. The direction is what a
+    source's angular distribution is asked about, together with the source's own normal. A
+    receiver exactly at a centroid gets a zero direction rather than a NaN one.
     """
     offset = receivers - centroid
     distance_squared = dot(offset, offset)
     distance = jnp.sqrt(jnp.where(distance_squared == 0.0, 1.0, distance_squared))
-    return dot(offset, normal) / distance, distance_squared
+    return offset / distance[..., None], distance_squared
 
 
 def streamed_fluence_rate(
@@ -722,7 +722,7 @@ def _point_fluence(sets, points, layers, absorption, transmittance, pair_limit):
     )
 
     def at(receivers, *chunk_layers):
-        cosine, distance_squared = _emitter_cosine(centroid[None], normal[None], receivers[:, None])
+        direction, distance_squared = _emitter_direction(centroid[None], receivers[:, None])
         surviving = _transmittance(absorption, centroid[None], receivers[:, None, :])
         shadows = _surviving(chunk_layers, transmittance)
         if shadows is not None:
@@ -734,7 +734,7 @@ def _point_fluence(sets, points, layers, absorption, transmittance, pair_limit):
                     pick = _columns(point, point_all)
                     total = total + jnp.sum(
                         jnp.take(surfaces.power, point)
-                        * profile.intensity_fraction(pick(cosine))
+                        * profile.intensity_fraction(pick(direction), pick(normal[None]))
                         * pick(surviving)
                         / pick(distance_squared),
                         axis=1,
@@ -764,7 +764,7 @@ def _segment_fluence(sets, group, points, layers, absorption, transmittance, seg
         centroid = jnp.take(geometry.centroid, block_facets, axis=0, mode="clip")[:, None]
         normal = jnp.take(geometry.normal, block_facets, axis=0, mode="clip")[:, None]
         vertices = jnp.take(geometry.vertices, block_facets, axis=0, mode="clip")[:, None]
-        cosine, _ = _emitter_cosine(centroid, normal, receivers)
+        direction, _ = _emitter_direction(centroid, receivers)
         weight = solid_angle(receivers, vertices) * _transmittance(absorption, centroid, receivers)
         if layers:
             pair = (row[:, :, None], block_facets[:, None, :])
@@ -777,7 +777,7 @@ def _segment_fluence(sets, group, points, layers, absorption, transmittance, seg
         for surfaces, profile in zip(sets, group.profiles, strict=True):
             emission = jnp.take(surfaces.emission, block_facets, axis=0, mode="clip")[:, None, :]
             total = total + jnp.sum(
-                emission * profile.radiance_per_exitance(cosine) * weight, axis=2
+                emission * profile.radiance_per_exitance(direction, normal) * weight, axis=2
             )
         return total
 
@@ -896,17 +896,15 @@ def direct_irradiance(
         total = jnp.zeros(receivers.shape[0])
         for profile, areal, point in partition:
             if len(areal) and not point_sources_only:
-                cosine, _ = _emitter_cosine(
-                    jnp.take(surfaces.centroid, areal, axis=0)[None],
-                    jnp.take(surfaces.normal, areal, axis=0)[None],
-                    receivers[:, None, :],
+                direction, _ = _emitter_direction(
+                    jnp.take(surfaces.centroid, areal, axis=0)[None], receivers[:, None, :]
                 )
                 radiance = jnp.take(surfaces.emission, areal) * profile.radiance_per_exitance(
-                    cosine
+                    direction, jnp.take(surfaces.normal, areal, axis=0)[None]
                 )
                 projected = projected_solid_angle(
                     receivers[:, None, :],
-                    jnp.broadcast_to(receiver_normal[:, None, :], (*cosine.shape, 3)),
+                    jnp.broadcast_to(receiver_normal[:, None, :], direction.shape),
                     jnp.take(surfaces.vertices, areal, axis=0)[None, ...],
                 )
                 surviving = _transmittance(
@@ -917,14 +915,13 @@ def direct_irradiance(
                 total = total + jnp.sum(radiance * projected * surviving, axis=1)
             if len(point):
                 centroid = jnp.take(surfaces.centroid, point, axis=0)
-                offset = receivers[:, None, :] - centroid[None, :, :]
-                distance_squared = dot(offset, offset)
-                distance = jnp.sqrt(jnp.where(distance_squared == 0.0, 1.0, distance_squared))
-                source_cosine = dot(offset, jnp.take(surfaces.normal, point, axis=0)[None, :, :])
-                receiver_cosine = jnp.maximum(
-                    -dot(offset, receiver_normal[:, None, :]) / distance, 0.0
+                direction, distance_squared = _emitter_direction(
+                    centroid[None, :, :], receivers[:, None, :]
                 )
-                fraction = profile.intensity_fraction(source_cosine / distance)
+                receiver_cosine = jnp.maximum(-dot(direction, receiver_normal[:, None, :]), 0.0)
+                fraction = profile.intensity_fraction(
+                    direction, jnp.take(surfaces.normal, point, axis=0)[None, :, :]
+                )
                 surviving = _transmittance(
                     absorption, centroid[None], receivers[:, None, :]
                 ) * _masked(surviving_all, point)
