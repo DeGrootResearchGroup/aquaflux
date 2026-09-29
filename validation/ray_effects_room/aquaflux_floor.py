@@ -154,6 +154,7 @@ def main() -> None:
             "backend": jax.default_backend(),
             "devices": [str(d) for d in jax.devices()],
             "host": platform.platform(),
+            "code": room.code_version(),
             "cpu_count": os.cpu_count(),
             "jax": jax.__version__,
         }

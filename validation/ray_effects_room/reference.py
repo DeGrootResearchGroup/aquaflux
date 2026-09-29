@@ -254,6 +254,7 @@ def main() -> None:
             "seconds": round(elapsed, 1),
             "slice_cells": {slice_name: len(chosen) for slice_name, (chosen, _) in slices.items()},
             "host": platform.platform(),
+            "code": room.code_version(),
             "python": sys.version.split()[0],
             "trimesh": trimesh.__version__,
         }

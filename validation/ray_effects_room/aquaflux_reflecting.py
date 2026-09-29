@@ -215,6 +215,7 @@ def main() -> None:
             },
             "backend": jax.default_backend(),
             "host": platform.platform(),
+            "code": room.code_version(),
             "cpu_count": os.cpu_count(),
             "jax": jax.__version__,
         }

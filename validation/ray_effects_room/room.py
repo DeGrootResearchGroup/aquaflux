@@ -7,6 +7,7 @@ cannot disagree about where the bunny stands or which patch is the floor.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,30 @@ MAP_HALF_WIDTH = 1.0  # m
 # floor. Each sits just off a face plane (the mesh's faces lie on multiples of 3.125 mm from the
 # walls), so it cuts exactly one layer of cells at every refinement level.
 SLICES = {"vertical": (1, 0.003), "horizontal": (2, 0.603)}  # name: (axis, coordinate in m)
+
+
+def code_version() -> dict:
+    """The aquaflux commit a result was computed at, for its record.
+
+    ``worktree_clean`` is ``False`` when tracked files differ from that commit, in which case
+    ``modified`` names them: a number from a dirty tree is not reproducible from the commit alone.
+    """
+
+    def git(*args: str) -> str:
+        # Not stripped: porcelain status lines start with a two-letter code whose first letter
+        # may be a space, and the path begins at column 3.
+        return subprocess.run(
+            ["git", "-C", str(HERE), *args], capture_output=True, text=True, check=True
+        ).stdout
+
+    modified = [
+        line[3:] for line in git("status", "--porcelain", "--untracked-files=no").splitlines()
+    ]
+    return {
+        "aquaflux_commit": git("rev-parse", "HEAD").strip(),
+        "worktree_clean": not modified,
+        "modified": modified,
+    }
 
 
 def slice_cells(centre: np.ndarray, volume: np.ndarray, name: str) -> np.ndarray:

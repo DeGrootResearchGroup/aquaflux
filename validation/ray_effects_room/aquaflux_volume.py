@@ -145,6 +145,7 @@ def main() -> None:
             "total_s": round(time.perf_counter() - started, 1),
             "backend": jax.default_backend(),
             "host": platform.platform(),
+            "code": room.code_version(),
             "cpu_count": os.cpu_count(),
             "jax": jax.__version__,
         }
