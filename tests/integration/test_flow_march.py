@@ -41,12 +41,16 @@ from aquaflux.solve import (
     RowScaled,
     SimpleSmoothed,
     assembler_residual,
+    newton_step,
 )
 
+from .test_cavity import _cavity
 from .test_channel_high_reynolds import _channel
 
 MU = 5e-3  # Re = 200 on the 24 x 16 channel: past the floor a bare Newton step reaches
 TIGHT = Convergence(measure=RowScaled(), rtol=0.0, atol=1e-9)
+#: Newton from rest reaches the 8 x 8, Re = 100 cavity's root in five steps; one more is the margin.
+NEWTON_STEPS_TO_THE_CAVITY_ROOT = 6
 
 
 def _reference_root(assembler):
@@ -225,8 +229,8 @@ def test_every_measure_a_convergence_can_name_is_supplied_and_converges(channel,
     each block's scale from the start state's own residual, and potential flow is divergence-free, so its
     continuity block starts ~0 and every later step reads as an enormous relative increase and is
     rejected. That is a property of the coarse measure on a start that already satisfies one block, not
-    of the march; the default ``RowScaled`` measure has no such sensitivity. ``RowScaled`` in turn
-    divides by the mean speed, so it needs a start with some flow in it: from rest that scale is zero.
+    of the march; the default ``RowScaled`` measure has no such sensitivity. ``RowScaled`` can start
+    from rest too, since its scales are floored by the driving speed (the cavity test below).
     """
     assembler, root = channel
     start = assembler.initial_state() if isinstance(measure, BlockScaled) else None
@@ -237,6 +241,27 @@ def test_every_measure_a_convergence_can_name_is_supplied_and_converges(channel,
         max_steps=150,
     )
     assert float(jnp.linalg.norm(state - root) / jnp.linalg.norm(root)) < 1e-5
+
+
+def test_a_lid_driven_cavity_marches_from_rest_under_the_default_measure() -> None:
+    """A state at rest is a legitimate start, and the default row-scaled measure must accept it.
+
+    Both of the measure's scales vanish at rest. Unfloored, the reference measure was NaN and the solve
+    failed at step 0. Floored only while the state was exactly at rest, the step after it rebuilt the
+    measure at about a hundredth of the lid speed and read 114x the start, past the divergence guard,
+    and every later step was rejected. The floors the characteristic speed sets hold through the
+    spin-up and release as the flow develops; the march must reach the root a plain Newton iteration
+    from rest reaches.
+    """
+    cavity = _cavity(8)
+    step = jax.jit(lambda state: newton_step(cavity.residual, state))  # one compile, not six
+    reference = cavity.initial_state()
+    for _ in range(NEWTON_STEPS_TO_THE_CAVITY_ROOT):
+        reference = step(reference)
+    assert float(jnp.linalg.norm(cavity.residual(reference))) < 1e-10
+
+    state = solve_flow_march(cavity, cavity.initial_state(), max_steps=40)
+    assert float(jnp.linalg.norm(state - reference) / jnp.linalg.norm(reference)) < 1e-6
 
 
 def test_globalization_reaches_the_flow_march_step(channel) -> None:
