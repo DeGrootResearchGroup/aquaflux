@@ -54,11 +54,18 @@ for.** The transfer matrix and both shadow masks were frozen from the build-time
 the direct gather reads the call-time vertices live -- so a moved surface set would give a field
 lit from the new position through shadows cast from the old one, plausible and wrong. The model
 therefore records a fingerprint of the geometry it was built for, and every call **refuses** a
-surface set whose concrete geometry differs: ``surfaces.with_optics(...)`` is the cheap way to
-sweep emission or reflectance, and moving a lamp with ``with_geometry`` needs a *new model*. The
-one exception is geometry under tracing -- a gradient with respect to a lamp's position -- which
-cannot be inspected and is what the live gather exists for: that derivative is taken with the
-shadows frozen, as every other frozen quantity here is.
+surface set whose geometry differs: ``surfaces.with_optics(...)`` is the cheap way to sweep
+emission or reflectance, and moving a lamp with ``with_geometry`` needs a *new model*.
+
+⚠️ **Geometry under tracing is refused too, and so there is no derivative with respect to where a
+lamp stands through this module.** A traced vertex cannot be fingerprinted, and it would not give
+the right answer if it were let through: the facet-to-facet transfer is frozen with the shadows, so
+a traced lamp position would reach the direct gather and nothing else. Such a gradient carries none
+of the reflected light's dependence on the lamp's position -- on a lamp in a duct with walls of
+reflectance 0.3 it had the wrong sign against a finite difference over rebuilt models -- while
+reading as a finished answer. A position derivative is available from
+:func:`~aquaflux.radiation.gather.direct_fluence_rate`, where there is no reflection for it to
+miss.
 
 ⚠️ **``G`` is a bare ``(n_receivers,)`` array in the receivers' own order**, because a cell field
 is a bare array in every other signature in this library. There is no field type to wrap it in
@@ -336,7 +343,9 @@ def _geometry_fingerprint(surfaces: Surfaces) -> str | None:
 
     Exact rather than toleranced: :meth:`~aquaflux.radiation.surfaces.Surfaces.with_optics`
     carries the same vertex array over, so a legitimate call matches bit for bit, and a surface
-    set that differs by any amount was not the one the shadows were cast from.
+    set that differs by any amount was not the one the shadows were cast from. A model built
+    from traced geometry records ``None``, which no concrete surface set matches; a call with
+    traced vertices is refused by :func:`_check_geometry` before it gets here.
     """
     if isinstance(surfaces.vertices, jax.core.Tracer):
         return None
@@ -346,9 +355,19 @@ def _geometry_fingerprint(surfaces: Surfaces) -> str | None:
 
 
 def _check_geometry(model: RadiationModel, surfaces: Surfaces) -> None:
-    """Refuse a surface set whose concrete geometry is not the one the model was built for."""
-    found = _geometry_fingerprint(surfaces)
-    if found is None or found == model.geometry:
+    """Refuse a surface set whose geometry is not the one the model was built for, or is traced."""
+    if isinstance(surfaces.vertices, jax.core.Tracer):
+        msg = (
+            "this surface set's vertices are traced, so the model cannot check they are the ones "
+            "it was built for -- and a derivative through them would be wrong: the facet-to-facet "
+            "transfer is frozen with the shadows, so the reflected light would lose its dependence "
+            "on where the lamp stands. For a derivative with respect to a source's position, use "
+            "direct_fluence_rate, which has no reflection to miss. If only the optics are traced, "
+            "close over the surface set and substitute them with surfaces.with_optics(...) inside "
+            "the traced function rather than passing the whole set as an argument."
+        )
+        raise TypeError(msg)
+    if _geometry_fingerprint(surfaces) == model.geometry:
         return
     msg = (
         f"this surface set's geometry is not the one the model was built for "
@@ -379,7 +398,8 @@ def radiosity(
     surfaces : Surfaces
         Supplies the live optical properties: emission, reflectance and profile parameters. Its
         geometry must be the one ``model`` was built from, and a different one is refused: the
-        point-source arrivals read it live, while the transfer and its mask are frozen.
+        point-source arrivals read it live, while the transfer and its mask are frozen. Traced
+        vertices are refused for the same reason (see the module documentation).
     absorption : Absorption, optional
         The medium between facets. A uniform coefficient is applied in closed form against the
         frozen separations; any other kind re-walks the geometry for every pair on every call,
@@ -387,8 +407,9 @@ def radiosity(
     transmittance : array_like, shape ``(n_occluders,)``, optional
         What each analytic body lets through. Defaults to opaque.
     external_irradiance : array_like, shape ``(n_facets,)``, optional
-        Irradiance on the facets from sources outside the surface system — point sources, which
-        have no area to participate in the transfer. Obtain it from the ordinary gather.
+        Irradiance on the facets from sources outside this surface set entirely, such as another
+        surface set's lamps, obtained from :func:`~aquaflux.radiation.gather.direct_irradiance`.
+        The set's own point sources are **not** this — they are added automatically.
     solver : lineax.AbstractLinearSolver, optional
         How to solve the system. The default is a matrix-free generalized minimal residual
         method stopping at a **global relative** residual of 1e-10. Supply your own to change
@@ -404,6 +425,13 @@ def radiosity(
         the solve rather than part of its answer: a non-convergent solve raises, so what it
         tells you is how hard this scene was, which is also what makes it the honest reading to
         quote beside a field. Drop it where only the field is wanted, ``B, _ = radiosity(...)``.
+
+    Raises
+    ------
+    ValueError
+        If the surface set's geometry is not the one the model was built from.
+    TypeError
+        If its vertices are traced.
 
     Notes
     -----
@@ -518,6 +546,13 @@ def surface_irradiance(
     -------
     tuple of (jnp.ndarray, jnp.ndarray)
         Irradiance per facet in W/m², and the solver's restart-cycle count.
+
+    Raises
+    ------
+    ValueError
+        If the surface set's geometry is not the one the model was built from.
+    TypeError
+        If its vertices are traced.
     """
     emission = jnp.asarray(surfaces.emission, dtype=float)
     solved = _solve(model, surfaces, absorption, transmittance, external_irradiance, solver)
@@ -592,6 +627,8 @@ def fluence_rate(
     surfaces : Surfaces
         Supplies the live optics. Its geometry must be the one ``model`` was built from, and a
         different one is refused: the direct gather reads it live, while the shadows are frozen.
+        Traced vertices are refused too, so there is no lamp-position derivative through this
+        function; take one through :func:`~aquaflux.radiation.gather.direct_fluence_rate`.
     absorption : Absorption, optional
         The medium. Applied both between facets and between facets and receivers.
     transmittance : array_like, shape ``(n_occluders,)``, optional
@@ -609,6 +646,13 @@ def fluence_rate(
         restart-cycle count. The count is returned for the same reason its two siblings return
         it — a field is not evidence of anything until the solve behind it is known to have
         converged.
+
+    Raises
+    ------
+    ValueError
+        If the surface set's geometry is not the one the model was built from.
+    TypeError
+        If its vertices are traced.
 
     Notes
     -----

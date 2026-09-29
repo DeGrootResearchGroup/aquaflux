@@ -1304,9 +1304,21 @@ is now a SHA-256 of the vertices plus the point-source labels (the labels decide
 the transfer leaves out, so they are geometry too); `radiosity` checks it, and
 `surface_irradiance` / `fluence_rate` reach it through `radiosity`. **Exact, not toleranced**:
 `with_optics` carries the build's own vertex array, so a legitimate call matches bit for bit; a
-1e-6 move is refused. **Traced geometry passes unchecked** — it cannot be inspected, and a
-gradient with respect to a lamp's position is what the live gather is for (taken with the
-shadows frozen). Mutation-checked; a separate check at the top of `surface_irradiance` was
+1e-6 move is refused. ⚠️ **Traced vertices are REFUSED at every call too (`TypeError`, since
+2026-09-29) — they used to pass unchecked, and the gradient they gave was wrong.** The docs promised
+a lamp-position derivative "with the shadows frozen", but the facet-to-facet transfer is frozen as
+well, so a traced lamp reached the direct gather only and the reflected light lost all dependence on
+the position. Measured by an independent new-user review, confirmed by rerunning it: 10 W lamp in a
+0.3 x 0.3 x 1 m duct, walls rho = 0.3, `NoOcclusion`, one receiver, lamp moved along z — traced
+`jax.grad` **-3.54 W/m^2 per m**, central difference over *rebuilt* models **+4.08 / +4.04** at
+h = 1e-3 / 1e-5; the traced value equalled the black-wall `direct_fluence_rate` gradient to 1e-15.
+The owner chose refusal over documenting it or making the transfer live. A model may still be
+**built** from traced vertices (its fingerprint is then `None`, which no concrete set matches;
+`test_the_expensive_geometry_is_frozen` does this). Position derivatives are
+`direct_fluence_rate` / `direct_irradiance`'s, FD-checked in `test_radiation_gather.py`. Pinned by
+`test_traced_vertices_are_refused_because_the_transfer_would_not_follow_them` (all three entry
+points) and `test_a_streamed_model_refuses_traced_vertices_as_a_held_one_does`; mutation-checked
+(disabling the refusal turns all four red). Mutation-checked; a separate check at the top of `surface_irradiance` was
 **dominated and deleted** — with a wrong-sized set `assemble` completes and `radiosity` refuses
 with the same message, so the extra check changed nothing any test could see.
 
@@ -1368,8 +1380,16 @@ the self-occlusion default and `ShaftCulling` as the culling default, opaque as 
 default, GMRES restart 120, point sources Isotropic-only (`check_profiles`), the 2.6%-at-eight-sectors inscribed-area undershoot, 95% UVT = 5.129 /m, and the Sozzi
 figures (0.09% volume mean; 0.36-1.65 / 0.886-1.076 at 64 / 256 directions; 0.44% median lamp
 discretization; dose mean 0.3%, log reduction within 1.1%, DOM-64 short by 23% at k = 0.5). Its
-worked example — `G = 80` in a 6x6x6 box mesh's own patches at `M = 10, rho = 0.5` — was run
-(2026-09-28) and holds to rounding. Its **Theory** section writes out every equation the code
+quick start — `G = 80` in a 6x6x6 box mesh's own patches at `M = 10, rho = 0.5` — was run
+(2026-09-28, and again 2026-09-29 after it became the quick start) and holds to rounding.
+**A new-user review (an independent agent with only the published pages and docstrings,
+2026-09-29) drove a second pass**: the runnable example moved first, the STL-units trap
+(`read_stl` does not scale; millimetre drawings are common), an Air disinfection section,
+irradiance at arbitrary oriented points *with* reflection (two `direct_irradiance` gathers, one of
+`B - M` as Lambertian — checked `E = B` in a glowing box), a point-source snippet, one-line call
+forms for the diagnostics, the closed-enclosure qualifier on the row sums, and the lamp-position
+derivative (now refused through the model; see "The surface set passed at call time"). Every new
+snippet was run. Its **Theory** section writes out every equation the code
 evaluates — the direct gather, both solid-angle kernels, `surviving_fraction`, the voxel walk,
 `F^geo`/`F`/`F^M`, the eliminated system, the two-gather `G`, the adjoint — and was checked
 (2026-09-29, 3x3x3 box of its own patches, CosinePower(4) lid so `F^M != F`, uniform `a = 2`)
@@ -3321,12 +3341,11 @@ PER CALL (#524).** Three changes to the per-call path, all answer-preserving:
   adding `direct_fluence_rate` per set (`test_summing_sets_in_one_pass_is_summing_their_gathers`,
   1e-14). `direct_fluence_rate`, `FrozenShadows` and the streamed gather (then `_compiled_gather`) all go through
   it. ⚠️ Sets whose concrete vertices differ are **refused**, not silently gathered with the first
-  set's geometry; traced vertices cannot be compared and are trusted — the model's reflected set is
-  `with_optics` of the traced set, so it carries the same tracer, and
-  `test_a_traced_geometry_is_let_through_so_a_lamp_can_be_moved_under_a_gradient` now checks that
-  gradient against two separate gathers. ⚠️ That test used to assert only `!= 0.0` on a uniformly
-  emitting closed box, whose interior field is uniform: its derivative under translation is zero
-  **to rounding**, and the fused pass rounded it to exactly 0. It now emits unevenly.
+  set's geometry; traced vertices cannot be compared and are trusted here. That is reached only
+  through the direct gathers now: the model refuses traced vertices before it gathers (see "The
+  surface set passed at call time" above). ⚠️ A translation test on a uniformly emitting closed
+  box reads zero to rounding — its interior field is uniform — so a "gradient is non-zero" check
+  there proves nothing; emit unevenly.
 - **The surviving fraction is formed per chunk** from the mask's own layers (`_shadow_rows` hands
   `blocked` and `hidden_by_geometry` to `_chunked` (now `work.in_passes`) with their receiver axes; `surviving_fraction` in
   `visibility.py` is the one expression, also behind `Visibility.surviving`). Before, it was a

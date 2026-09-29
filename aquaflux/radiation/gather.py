@@ -239,8 +239,9 @@ def streamed_fluence_rate(
         Receiver positions.
     shadow_geometry : Surfaces
         The geometry the masks are built from, **concrete**: building a mask is host work and
-        cannot see a traced vertex. A model passes the geometry it was built for, which is what
-        lets a gradient with respect to a lamp's position be taken with the shadows frozen.
+        cannot see a traced vertex. Building the masks from it rather than from ``sets`` is what
+        lets a gradient with respect to a source's position be taken here, with the shadows
+        frozen; a model passes the geometry it was built for.
     occluders : sequence of aquaflux.solids.Body
         The bodies in the way. May be empty, which still streams the surface's own shadowing.
     self_occlusion : SelfOcclusion, optional
@@ -458,7 +459,7 @@ def direct_fluence_rate(
     transmittance=None,
     pair_limit: int = DEFAULT_PAIR_LIMIT,
 ):
-    """Fluence rate at each receiver point, in vacuum.
+    """Fluence rate at each receiver point, straight from the sources, with no reflection.
 
     The zeroth angular moment of radiance over the whole sphere: the radiant power crossing a
     point from every direction, per unit area, in W/m². It carries **no receiver cosine** — see
@@ -836,7 +837,7 @@ def direct_irradiance(
     pair_limit: int = DEFAULT_PAIR_LIMIT,
     point_sources_only: bool = False,
 ):
-    """Irradiance on an oriented receiving surface at each point, in vacuum.
+    """Irradiance on an oriented receiving surface at each point, with no reflection.
 
     The first angular moment of radiance over the receiver's hemisphere: power per unit area of
     a surface facing a given way, in W/m². Directions arriving obliquely count for less, which

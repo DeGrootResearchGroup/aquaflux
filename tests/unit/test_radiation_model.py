@@ -986,41 +986,42 @@ def test_relabelling_which_facets_are_point_sources_is_refused():
         radiosity(model, relabelled)
 
 
-def test_a_traced_geometry_is_let_through_so_a_lamp_can_be_moved_under_a_gradient():
-    """The exception, and the reason for it: under tracing the geometry cannot be inspected,
-    and moving a source under a gradient is what the live gather is for. The derivative is taken
-    with the shadows frozen, like every other frozen quantity.
+@pytest.mark.parametrize("call", [radiosity, surface_irradiance, fluence_rate])
+def test_traced_vertices_are_refused_because_the_transfer_would_not_follow_them(call):
+    """A lamp moved under a gradient reaches the direct gather and nothing else.
 
-    The walls emit unevenly, because a uniformly emitting closed box has a uniform field inside
-    and translating it changes nothing: its derivative is zero to rounding, which a test asserting
-    "non-zero" would be reading. And the gradient is checked against the two gathers the field is
-    made of, taken separately, since the emitted and reflected fields share one geometric pass and
-    the reflected set's dependence on the vertices must survive that.
+    The facet-to-facet transfer is frozen with the shadows, so a traced position would carry none
+    of the reflected light's dependence on where the lamp stands -- measured on a lamp in a duct
+    with walls of reflectance 0.3, such a gradient had the wrong sign against a finite difference
+    over rebuilt models. Traced vertices also cannot be fingerprinted, so every entry point refuses
+    them and names the function that does take a position derivative.
     """
-    surfaces = box(2, reflectance=0.5)
-    surfaces = surfaces.with_optics(emission=1.0 + np.asarray(surfaces.centroid)[:, 2])
-    receiver = np.array([[0.4, 0.5, 0.6]])
+    surfaces = box(2, emission=1.0, reflectance=0.5)
     model = build_radiation_model(
-        receiver, surfaces, settings=RadiationSettings(self_occlusion=NoOcclusion())
+        np.array([[0.4, 0.5, 0.6]]),
+        surfaces,
+        settings=RadiationSettings(self_occlusion=NoOcclusion()),
     )
     base = jnp.asarray(surfaces.vertices)
-    lift = jnp.array([0.0, 0.0, 1.0])
 
     def total(shift):
-        field, _ = fluence_rate(model, surfaces.with_geometry(base + shift * lift))
-        return field[0]
+        field, _ = call(model, surfaces.with_geometry(base + shift))
+        return jnp.sum(field)
 
-    outgoing, _ = radiosity(model, surfaces)
+    with pytest.raises(TypeError, match=r"vertices are traced.*direct_fluence_rate"):
+        jax.grad(total)(jnp.asarray(0.0))
 
-    def separately(shift):
-        moved = surfaces.with_geometry(base + shift * lift)
-        bounced = moved.with_optics(emission=outgoing - moved.emission, profiles=(Lambertian(),))
-        visibility = model.receiver_shadows.visibility
-        return (
-            direct_fluence_rate(moved, receiver, visibility=visibility)
-            + direct_fluence_rate(bounced, receiver, visibility=visibility)
-        )[0]
 
-    gradient = float(jax.grad(total)(jnp.asarray(0.0)))
-    assert np.isfinite(gradient) and abs(gradient) > 1e-3
-    assert gradient == pytest.approx(float(jax.grad(separately)(jnp.asarray(0.0))), rel=1e-12)
+def test_a_traced_optic_on_the_build_geometry_is_still_differentiated():
+    """The refusal is of traced vertices only: optics substituted inside the trace, on the
+    build's own vertex array, are what every sensitivity through the model is taken on."""
+    surfaces = box(2, emission=1.0, reflectance=0.5)
+    model = surface_model(surfaces)
+
+    def total(rho):
+        field, _ = radiosity(model, surfaces.with_optics(reflectance=rho))
+        return jnp.sum(field)
+
+    # B = M / (1 - rho) on a uniform closed box, so dB/drho = M / (1 - rho)^2 on every facet.
+    expected = surfaces.n_facets * 1.0 / (1.0 - 0.5) ** 2
+    assert float(jax.grad(total)(jnp.asarray(0.5))) == pytest.approx(expected, rel=1e-8)

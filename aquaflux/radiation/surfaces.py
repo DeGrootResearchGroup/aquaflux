@@ -283,7 +283,11 @@ class Surfaces(eqx.Module):
         result is the same surface set in a new position.
 
         The vertices may be traced, which is the point: it is what lets a gradient reach a
-        source's position.
+        source's position through :func:`~aquaflux.radiation.gather.direct_fluence_rate` and
+        :func:`~aquaflux.radiation.gather.direct_irradiance`. A built
+        :class:`~aquaflux.radiation.model.RadiationModel` refuses traced vertices, because its
+        facet-to-facet transfer is frozen and the reflected light would lose its dependence on
+        the position.
         """
         vertices = jnp.asarray(vertices, dtype=float)
         if vertices.shape[0] != self.n_facets:

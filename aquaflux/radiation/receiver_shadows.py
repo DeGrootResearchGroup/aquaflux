@@ -97,8 +97,8 @@ class StreamedShadows(ReceiverShadows):
     ----------
     geometry : Surfaces
         The surface set the model was built for. Masks are built from it rather than from the
-        sets a call supplies, so a gradient with respect to a lamp's position is taken with the
-        shadows frozen, as it is with a held mask.
+        sets a call supplies, so every call is shadowed by the build's geometry, as it is with a
+        held mask.
     occluders : tuple of aquaflux.solids.Body
         The bodies in the way.
     visibility_options : dict
