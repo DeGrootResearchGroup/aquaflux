@@ -14,7 +14,7 @@ import inspect
 
 import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
-from aquaflux.solve import CompleteLu, LocalCourantBasis, MaterializedJacobian
+from aquaflux.solve import DEFAULT_SHIFT_BASIS, CompleteLu, LocalCourantBasis, MaterializedJacobian
 from aquaflux.turbulence import (
     BlockDiagonal,
     ConstantDamping,
@@ -25,7 +25,6 @@ from aquaflux.turbulence import (
     solve_reynolds_continuation,
 )
 from aquaflux.turbulence.coupled import (
-    _DEFAULT_SHIFT_BASIS,
     _resolved_shift,
     mass_flow_coupled_continuation,
 )
@@ -53,7 +52,7 @@ def test_every_coupled_builder_takes_the_value_and_none_of_the_keywords_it_repla
 
 def test_an_unset_shift_resolves_to_the_builders_defaults() -> None:
     basis, parts, damping = _resolved_shift(None)
-    assert basis is _DEFAULT_SHIFT_BASIS
+    assert basis is DEFAULT_SHIFT_BASIS
     assert parts is None
     assert damping == 1.0
     assert _resolved_shift(CoupledShiftSettings()) == _resolved_shift(None)

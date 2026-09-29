@@ -223,7 +223,13 @@ from .monolithic_policy import FrozenTransposeFactory, MonolithicFactorShiftPoli
 from .shifted_step import LinearSolveRegime, LinearSolveSettings, resolve_linear_solve, shifted_step
 from .linear_solver_spec import DirectSolve, GmresSolve, LinearSolverSpec
 from .retry import ESCALATING_REASONS, NO_RETRIES, RetryPolicy
-from .shift_basis import LocalCourantBasis, ShiftBasis, ShiftSettings, VelocityShiftParts
+from .shift_basis import (
+    DEFAULT_SHIFT_BASIS,
+    LocalCourantBasis,
+    ShiftBasis,
+    ShiftSettings,
+    VelocityShiftParts,
+)
 from .sparse_jacobian import (
     BlockColouring,
     ColumnProbePlan,
@@ -247,6 +253,7 @@ __all__ = [
     "BUILD_BETA",
     "DEFAULT_GLOBALIZATION",
     "DEFAULT_ROOT_SOLVE",
+    "DEFAULT_SHIFT_BASIS",
     "ESCALATING_REASONS",
     "FACTORIZATION_LINEAR_SOLVE",
     "MATERIALIZED_MAPPING",

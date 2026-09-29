@@ -65,11 +65,13 @@ class VenkatakrishnanLimiter(Limiter):
     Attributes
     ----------
     k : float
-        The softening constant ``K`` in ``eps^2 = vol K^3`` (static). Larger ``K`` limits less
-        (smoother, less bounded); ``K -> 0`` recovers a strict limiter.
+        The softening constant ``K`` in ``eps^2 = vol K^3``. Larger ``K`` limits less (smoother,
+        less bounded); ``K -> 0`` recovers a strict limiter. An ordinary pytree leaf, like the
+        closure constants of a turbulence model: the limiter only does arithmetic with it, so it can
+        be a differentiation target.
     """
 
-    k: float = eqx.field(static=True, default=5.0)
+    k: float = 5.0
 
     def limit(self, field, context):
         face_cells = context.mesh.face_cells

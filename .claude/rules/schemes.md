@@ -254,6 +254,12 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   holds). Physics-free (verified in `tests/unit/test_limiter.py`), injected into
   `LimitedUpwind(limiter=…)` in `discretization/advection.py`, and evaluated only when that scheme
   runs (a diffusion-only or first-order solve never forms `psi`). See `.claude/rules/discretization.md`.
+  **`k` is an ordinary pytree leaf, not a static field (#368, 2026-09-29)**, like `SSTModel`'s closure
+  constants: the limiter only does arithmetic with it, so it can be a differentiation target and moving
+  it does not change the tree's structure. Pinned (leaf membership and `eqx.filter_grad` against a
+  central difference on a step) by `test_the_softening_constant_is_a_differentiable_leaf`. Note that
+  under `filter_jit` a plain Python-float `k` is still hashed as static; pass an array to trace it.
+  #144 (what the softening *means*) is separate and still open.
   **The per-face unlimited increment gathers its neighbour-side position through
   `face_cells.neighbour_centroid`, not by indexing the cell centroid directly (issue #143, fixed
   2026-09-09).** A raw `cell_geometry.centroid[neighbour]` is the neighbour's true position, which

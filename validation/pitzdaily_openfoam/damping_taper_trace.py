@@ -40,9 +40,9 @@ sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
 from aquaflux.initialization import hybrid_initialize
+from aquaflux.solve import DEFAULT_SHIFT_BASIS
 from aquaflux.turbulence import turbulence_residual_norm  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
-    _DEFAULT_SHIFT_BASIS,
     _monolithic_shift_source,
     coupled_scaled_norm,
 )
@@ -70,7 +70,7 @@ def main() -> int:
     seed = coupled.state_from_physical(*hybrid_initialize(coupled))
     # The row scales the march itself steers by, frozen at the seed so every step is reported in
     # ONE measure -- a per-state rebuild would mix progress with a change of measure.
-    shift_policy = _monolithic_shift_source(coupled, seed, _DEFAULT_SHIFT_BASIS)
+    shift_policy = _monolithic_shift_source(coupled, seed, DEFAULT_SHIFT_BASIS)
     reference = float(turbulence_residual_norm(coupled.layout, coupled.residual(seed)))
     print(f"reference |R_turb| at the hybrid seed: {reference:.4e}")
     print(f"initial ratio {INITIAL:g}, exponent {EXPONENT:g}, {len(states)} checkpoints\n")

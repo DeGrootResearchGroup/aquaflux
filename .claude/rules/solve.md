@@ -496,6 +496,19 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     now calls it.
   - `block_reference_scales(layout, residual)` (`norm.py`) is the per-block scale a `BlockScaledNorm` is
     built from — one home for what `_coupled_block_scales` and the flow measure both need.
+  - **`BlockScaledNorm.scales` is an ordinary array leaf, not static (#368, 2026-09-29)** — only `sizes`
+    is static, as on `RowScaledNorm`, so rebuilding it at a new reference state is a compilation cache
+    hit rather than a recompile. It accepts any float sequence (the builders pass tuples) and stores
+    `jnp.asarray` of it; pinned by
+    `test_rebuilding_the_block_scaled_norm_at_new_scales_is_a_compilation_cache_hit`. The two classes
+    used to give opposite answers to the same question in one file.
+  - **`DEFAULT_SHIFT_BASIS` (`shift_basis.py`, exported) is the one default shift basis** —
+    `LocalCourantBasis()` at its defaults, the full operator diagonal. `SSTTurbulence`'s two shift
+    policies, `CoupledShiftPolicy`, `_coupled_shift_policy`, `_resolved_shift` and `MomentumShiftPolicy`
+    all default to that object; before #368, `turbulence/transport.py` and `turbulence/coupled.py` each
+    built a private `_DEFAULT_SHIFT_BASIS` and `flow/continuation.py` built a third inline. Pinned **by
+    identity** in `test_every_builder_that_shifts_a_block_defaults_to_the_one_shift_basis`, because an
+    equal copy would pass an equality check.
   - **`solve/` imports nothing outside itself** (`tests/unit/test_layering.py`, always-on): it is the layer
     that lets every residual run on this machinery.
 

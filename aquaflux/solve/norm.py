@@ -96,17 +96,22 @@ class BlockScaledNorm(eqx.Module):
     ----------
     sizes : tuple of int
         Length of each contiguous block, in order; must sum to the residual length (static).
-    scales : tuple of float
-        The positive per-block reference magnitude each block's norm is divided by (static);
-        typically the block's initial residual norm ``||R0_block||``.
+    scales : jnp.ndarray
+        The positive per-block reference magnitude each block's norm is divided by, shape
+        ``(len(sizes),)``; typically the block's initial residual norm ``||R0_block||``. Any sequence
+        of floats is accepted and stored as an array.
+
+    Only :attr:`sizes` is static. The scales are an ordinary leaf, as :class:`RowScaledNorm`'s are and
+    for the same reason: the measure is rebuilt at a new state, and a rebuild that changes only the
+    numbers over an unchanged block structure is then a compilation cache hit rather than a recompile.
     """
 
     sizes: tuple[int, ...] = eqx.field(static=True)
-    scales: tuple[float, ...] = eqx.field(static=True)
+    scales: jnp.ndarray = eqx.field(converter=jnp.asarray)
 
     def __call__(self, residual: jnp.ndarray) -> jnp.ndarray:
         """The block-scaled Euclidean norm of ``residual`` (shape ``(sum(sizes),)``)."""
-        relative = block_two_norms(residual, self.sizes) / jnp.asarray(self.scales)
+        relative = block_two_norms(residual, self.sizes) / self.scales
         return jnp.linalg.norm(relative)
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -131,3 +132,33 @@ def test_limiter_is_differentiable() -> None:
     assert float(jnp.abs(sens).max()) > 1e-6, (
         "a severed adjoint would report zero and pass a finiteness check"
     )
+
+
+def test_the_softening_constant_is_a_differentiable_leaf() -> None:
+    """``k`` is an ordinary pytree leaf, so a gradient taken with respect to the limiter reaches it.
+
+    Held as a static field it would be part of the tree's structure instead: it would not appear among
+    the leaves, the gradient module would carry no derivative for it, and changing it would recompile.
+    The value is checked against a central finite difference on a step, where the limiter is active
+    and ``psi`` therefore depends on ``k`` -- on a smooth field ``psi`` is ~1 whatever ``k`` is.
+    """
+    mesh = structured_grid_2d(12, 12)
+    geom = mesh.geometry()
+    scheme = CorrectedGreenGauss()
+    field = jnp.where(geom.cell.centroid[:, 0] < 0.5, 1.0, 0.0)
+    context = _context(mesh, geom, scheme.gradients(field, mesh, geom, jnp.zeros(mesh.n_faces)))
+
+    def loss(limiter):
+        return jnp.sum(limiter.limit(field, context))
+
+    limiter = VenkatakrishnanLimiter(k=jnp.asarray(0.5))
+    assert any(leaf is limiter.k for leaf in jax.tree_util.tree_leaves(limiter))
+
+    sensitivity = float(eqx.filter_grad(loss)(limiter).k)
+    step = 1e-6
+    finite_difference = float(
+        (loss(VenkatakrishnanLimiter(k=0.5 + step)) - loss(VenkatakrishnanLimiter(k=0.5 - step)))
+        / (2.0 * step)
+    )
+    assert abs(finite_difference) > 1e-3, "the fixture must make psi depend on k"
+    assert sensitivity == pytest.approx(finite_difference, rel=1e-5)

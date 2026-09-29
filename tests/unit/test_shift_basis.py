@@ -38,3 +38,45 @@ def test_the_basis_is_non_negative_for_non_negative_buckets() -> None:
     for weight in (0.0, 0.5, 1.0):
         got = LocalCourantBasis(dissipative_weight=weight).local_diagonal(convective, dissipative)
         assert bool(jnp.all(got >= 0.0))
+
+
+def test_every_builder_that_shifts_a_block_defaults_to_the_one_shift_basis() -> None:
+    """The default shift basis is one object, and every default that names a basis is that object.
+
+    Each module used to construct its own ``LocalCourantBasis()``, so changing the default meant
+    changing it in each, with nothing relating the copies. An equal-but-separate instance would still
+    pass an equality check, so the defaults are compared by identity.
+    """
+    import dataclasses
+    import inspect
+
+    from aquaflux.flow.continuation import MomentumShiftPolicy
+    from aquaflux.solve import DEFAULT_SHIFT_BASIS
+    from aquaflux.turbulence import SSTTurbulence
+    from aquaflux.turbulence.coupled import (
+        CoupledShiftPolicy,
+        _coupled_shift_policy,
+        _resolved_shift,
+    )
+
+    def field_default(module_class):
+        (field,) = (f for f in dataclasses.fields(module_class) if f.name == "shift_basis")
+        return field.default
+
+    defaults = {
+        "SSTTurbulence.k_shift_policy": inspect.signature(SSTTurbulence.k_shift_policy)
+        .parameters["shift_basis"]
+        .default,
+        "SSTTurbulence.omega_shift_policy": inspect.signature(SSTTurbulence.omega_shift_policy)
+        .parameters["shift_basis"]
+        .default,
+        "_coupled_shift_policy": inspect.signature(_coupled_shift_policy)
+        .parameters["shift_basis"]
+        .default,
+        "_resolved_shift": _resolved_shift(None)[0],
+        "CoupledShiftPolicy.shift_basis": field_default(CoupledShiftPolicy),
+        "MomentumShiftPolicy.shift_basis": field_default(MomentumShiftPolicy),
+    }
+    assert isinstance(DEFAULT_SHIFT_BASIS, LocalCourantBasis)
+    assert DEFAULT_SHIFT_BASIS == LocalCourantBasis(), "the default is the full operator diagonal"
+    assert {name for name, value in defaults.items() if value is not DEFAULT_SHIFT_BASIS} == set()

@@ -46,7 +46,7 @@ from aquaflux.flow.boundary import sheared_patches
 from aquaflux.mesh import distance_to_patches
 from aquaflux.properties import FieldProperty, PropertyModel
 from aquaflux.schemes import DEFAULT_GRADIENT_SCHEME, ImposedGradient
-from aquaflux.solve import LocalCourantBasis, ShiftBasis
+from aquaflux.solve import DEFAULT_SHIFT_BASIS, ShiftBasis
 from aquaflux.vectors import norm_squared
 
 from .boundary import (
@@ -75,11 +75,8 @@ from .sources import (
 )
 from .strain import safe_sqrt, strain_rate_magnitude
 
-# The default pseudo-time shift basis (full operator diagonal = uniform under-relaxation), held as a
-# module singleton so it is not reconstructed in each method's argument defaults.
-_DEFAULT_SHIFT_BASIS = LocalCourantBasis()
 # The default near-wall omega fixation row (the plain difference, right when omega is solved
-# directly); a module singleton for the same reason.
+# directly), held as a module singleton so it is not reconstructed in each method's argument defaults.
 _DEFAULT_FIXATION_ROW = DifferenceRow()
 
 if TYPE_CHECKING:
@@ -1170,7 +1167,7 @@ class SSTTurbulence(eqx.Module):
         reference: jnp.ndarray,
         *,
         preconditioner: ScalarTransportPreconditioner | None = None,
-        shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
+        shift_basis: ShiftBasis = DEFAULT_SHIFT_BASIS,
     ) -> ScalarShiftPolicy:
         """The pseudo-transient continuation policy for the k-equation solve.
 
@@ -1238,7 +1235,7 @@ class SSTTurbulence(eqx.Module):
         reference: jnp.ndarray,
         *,
         preconditioner: ScalarTransportPreconditioner | None = None,
-        shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
+        shift_basis: ShiftBasis = DEFAULT_SHIFT_BASIS,
     ) -> ScalarShiftPolicy:
         """The pseudo-transient continuation policy for the omega-equation solve.
 

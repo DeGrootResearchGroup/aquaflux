@@ -43,8 +43,8 @@ sys.path.insert(0, str(ROOT / "validation" / "pitzdaily_openfoam"))
 import compare  # noqa: E402
 import ilu0_remedy_sweep as sweep  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
-from aquaflux.turbulence.coupled import _DEFAULT_SHIFT_BASIS, _monolithic_shift_source
-from aquaflux.solve import frozen_shift_diagonal
+from aquaflux.solve import DEFAULT_SHIFT_BASIS, frozen_shift_diagonal
+from aquaflux.turbulence.coupled import _monolithic_shift_source
 from ilu_fill_probe import FIELDS2, FIELDS3  # noqa: E402
 
 
@@ -90,7 +90,7 @@ def main():
     n_fields = coupled.layout.n_fields
     names = FIELDS2 if coupled.momentum.mesh.dim == 2 else FIELDS3
     state = sweep.load_state(coupled, None)
-    base = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS)
+    base = _monolithic_shift_source(coupled, state, DEFAULT_SHIFT_BASIS)
     print(
         f"pitzDaily, {coupled.layout.n_cells} cells, {n_fields} fields, "
         f"|R| {float(jnp.linalg.norm(coupled.residual(state))):.4e}",

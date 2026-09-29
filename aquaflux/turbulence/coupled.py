@@ -65,6 +65,7 @@ from aquaflux.initialization import hybrid_initialize
 from aquaflux.schemes import narrow_gradient_sweeps
 from aquaflux.solve import (
     DEFAULT_GLOBALIZATION,
+    DEFAULT_SHIFT_BASIS,
     NO_REFRESH,
     NO_RETRIES,
     BlockScaledNorm,
@@ -79,7 +80,6 @@ from aquaflux.solve import (
     JacobianProbe,
     LinearSolveRegime,
     LinearSolveSettings,
-    LocalCourantBasis,
     MaterializedJacobian,
     MaterializedProblem,
     MaterializedSession,
@@ -129,9 +129,6 @@ from .preconditioner import (
 )
 from .preconditioner_spec import BlockDiagonal
 from .sources import production_and_limit
-
-# The default pseudo-time shift basis (full operator diagonal = uniform under-relaxation), a singleton.
-_DEFAULT_SHIFT_BASIS = LocalCourantBasis()
 
 if TYPE_CHECKING:
     from aquaflux.flow import MomentumContinuity
@@ -909,7 +906,7 @@ class CoupledShiftPolicy(eqx.Module):
     flow_preconditioner: BlockPreconditioner | None = None
     k_preconditioner: ScalarTransportPreconditioner | None = None
     omega_preconditioner: ScalarTransportPreconditioner | None = None
-    shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS
+    shift_basis: ShiftBasis = DEFAULT_SHIFT_BASIS
     velocity_shift_parts: VelocityShiftParts | None = None
     turbulence_damping: TurbulenceDamping = ConstantDamping(1.0)
 
@@ -1545,7 +1542,7 @@ def _coupled_shift_policy(
     reference_state: jnp.ndarray,
     scalar: ScalarBlock,
     reuse: CoupledShiftPolicy | None = None,
-    shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
+    shift_basis: ShiftBasis = DEFAULT_SHIFT_BASIS,
     velocity_shift_parts: VelocityShiftParts | None = None,
     turbulence_damping: TurbulenceDamping | float = 1.0,
     build_flow_block: bool = True,
@@ -2149,7 +2146,7 @@ def _resolved_shift(
     """
     shift = CoupledShiftSettings() if shift is None else shift
     return (
-        _DEFAULT_SHIFT_BASIS if shift.basis is None else shift.basis,
+        DEFAULT_SHIFT_BASIS if shift.basis is None else shift.basis,
         shift.velocity_parts,
         1.0 if shift.turbulence_damping is None else shift.turbulence_damping,
     )

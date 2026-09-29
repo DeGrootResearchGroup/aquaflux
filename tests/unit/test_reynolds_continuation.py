@@ -822,9 +822,10 @@ def _shift(coupled, state, damping, beta=0.5):
     The production quantity: damping multiplies the shift STRENGTH, not the base diagonal, so a test
     that read ``.diagonal`` would see no damping at all and pass for the wrong reason.
     """
-    from aquaflux.turbulence.coupled import _DEFAULT_SHIFT_BASIS, _monolithic_shift_source
+    from aquaflux.solve import DEFAULT_SHIFT_BASIS
+    from aquaflux.turbulence.coupled import _monolithic_shift_source
 
-    source = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS, None, damping)
+    source = _monolithic_shift_source(coupled, state, DEFAULT_SHIFT_BASIS, None, damping)
     return source.shift_term(state).shift(jnp.asarray(beta))
 
 
@@ -864,13 +865,14 @@ def test_swapping_the_damping_RATIO_is_a_compilation_cache_hit_not_a_recompile()
     The check is the one ``filter_jit`` itself makes: the two policies' static halves must be equal,
     and the ratio must land in the dynamic half.
     """
+    from aquaflux.solve import DEFAULT_SHIFT_BASIS
     from aquaflux.turbulence import ConstantDamping
-    from aquaflux.turbulence.coupled import _DEFAULT_SHIFT_BASIS, _monolithic_shift_source
+    from aquaflux.turbulence.coupled import _monolithic_shift_source
 
     coupled = _tiny_coupled()
     state = _seeded_state(coupled)
     five, two = (
-        _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS, None, gamma)
+        _monolithic_shift_source(coupled, state, DEFAULT_SHIFT_BASIS, None, gamma)
         for gamma in (5.0, 2.0)
     )
 
@@ -894,8 +896,8 @@ def test_damping_leaves_the_BASE_DIAGONAL_alone_so_the_marchs_measure_cannot_mov
     on two different measures and could not be compared at all. It would also multiply the shift's
     FLOOR, since ``beta`` arrives already clamped at ``beta_min``.
     """
+    from aquaflux.solve import DEFAULT_SHIFT_BASIS
     from aquaflux.turbulence.coupled import (
-        _DEFAULT_SHIFT_BASIS,
         _monolithic_shift_source,
         coupled_scaled_norm,
     )
@@ -903,7 +905,7 @@ def test_damping_leaves_the_BASE_DIAGONAL_alone_so_the_marchs_measure_cannot_mov
     coupled = _tiny_coupled()
     state = _seeded_state(coupled)
     plain, damped = (
-        _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS, None, gamma)
+        _monolithic_shift_source(coupled, state, DEFAULT_SHIFT_BASIS, None, gamma)
         for gamma in (1.0, 10.0)
     )
     assert jnp.array_equal(plain.shift_term(state).diagonal, damped.shift_term(state).diagonal)
@@ -918,9 +920,10 @@ def test_a_damping_of_one_is_bit_identical_to_no_damping_at_all() -> None:
     """The default must not move any incumbent march by a rounding."""
     coupled = _tiny_coupled()
     state = _seeded_state(coupled)
-    from aquaflux.turbulence.coupled import _DEFAULT_SHIFT_BASIS, _monolithic_shift_source
+    from aquaflux.solve import DEFAULT_SHIFT_BASIS
+    from aquaflux.turbulence.coupled import _monolithic_shift_source
 
-    default = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS)
+    default = _monolithic_shift_source(coupled, state, DEFAULT_SHIFT_BASIS)
     assert default.turbulence_damping.factor(jnp.asarray(0.5), None) == 1.0
 
     # The multiplier rides through as an array of ones, and `beta * 1.0 == beta` exactly in IEEE
@@ -956,15 +959,15 @@ def test_a_refresh_CARRIES_the_damping_rather_than_dropping_it_to_one() -> None:
     and a damping silently reset to ``1.0`` mid-march would be invisible -- the march would simply get
     harder at the step the preconditioner was refreshed.
     """
+    from aquaflux.solve import DEFAULT_SHIFT_BASIS
     from aquaflux.turbulence.coupled import (
-        _DEFAULT_SHIFT_BASIS,
         _coupled_shift_policy,
         _monolithic_shift_source,
     )
 
     coupled = _tiny_coupled()
     state = _seeded_state(coupled)
-    built = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS, None, 7.0)
+    built = _monolithic_shift_source(coupled, state, DEFAULT_SHIFT_BASIS, None, 7.0)
     assert built.turbulence_damping.factor(jnp.asarray(0.5), None) == 7.0
 
     refreshed = _coupled_shift_policy(
@@ -1093,9 +1096,9 @@ def test_the_residual_taper_survives_the_MONOLITHIC_WRAPPER_the_cases_actually_r
     per-row multiplier on the way out -- in silence, so the march ran and the taper simply never
     happened. Asserting on the base policy alone cannot see that; this drives the wrapper.
     """
-    from aquaflux.solve import MonolithicFactorShiftPolicy
+    from aquaflux.solve import DEFAULT_SHIFT_BASIS, MonolithicFactorShiftPolicy
     from aquaflux.turbulence import ResidualTaperedDamping, turbulence_residual_norm
-    from aquaflux.turbulence.coupled import _DEFAULT_SHIFT_BASIS, _monolithic_shift_source
+    from aquaflux.turbulence.coupled import _monolithic_shift_source
 
     coupled = _tiny_coupled()
     state = _seeded_state(coupled)
@@ -1108,7 +1111,7 @@ def test_the_residual_taper_survives_the_MONOLITHIC_WRAPPER_the_cases_actually_r
         reference=turbulence_residual_norm(coupled.layout, residual),
         layout=coupled.layout,
     )
-    base = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS, None, taper)
+    base = _monolithic_shift_source(coupled, state, DEFAULT_SHIFT_BASIS, None, taper)
     wrapped = MonolithicFactorShiftPolicy(base, _StubHostPreconditioner())
 
     beta = jnp.asarray(0.5)
@@ -1207,9 +1210,9 @@ def test_a_refresh_REBUILDS_the_tapers_reference_rather_than_carrying_it() -> No
     carried. Carried instead, a continuation march measures the taper against the anchor's problem,
     which is the easiest it ever sees, and the factor never leaves ``initial``.
     """
+    from aquaflux.solve import DEFAULT_SHIFT_BASIS
     from aquaflux.turbulence import ResidualTaperedDamping, turbulence_residual_norm
     from aquaflux.turbulence.coupled import (
-        _DEFAULT_SHIFT_BASIS,
         _coupled_shift_policy,
         _monolithic_shift_source,
     )
@@ -1217,7 +1220,7 @@ def test_a_refresh_REBUILDS_the_tapers_reference_rather_than_carrying_it() -> No
     coupled = _tiny_coupled()
     state = _seeded_state(coupled)
     stale = ResidualTaperedDamping(initial=9.0, reference=jnp.asarray(1e9), layout=coupled.layout)
-    built = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS, None, stale)
+    built = _monolithic_shift_source(coupled, state, DEFAULT_SHIFT_BASIS, None, stale)
     assert float(built.turbulence_damping.reference) == pytest.approx(1e9)
 
     refreshed = _coupled_shift_policy(
