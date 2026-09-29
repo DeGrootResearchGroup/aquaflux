@@ -92,6 +92,10 @@ class BlockScaledNorm(eqx.Module):
     pseudo-transient / line-search decisions); the implicit-function-theorem adjoint never forms a
     residual norm, so the choice of norm does not touch the gradient.
 
+    Only :attr:`sizes` is static. The scales are an ordinary leaf, as :class:`RowScaledNorm`'s are and
+    for the same reason: the measure is rebuilt at a new state, and a rebuild that changes only the
+    numbers over an unchanged block structure is then a compilation cache hit rather than a recompile.
+
     Attributes
     ----------
     sizes : tuple of int
@@ -100,10 +104,6 @@ class BlockScaledNorm(eqx.Module):
         The positive per-block reference magnitude each block's norm is divided by, shape
         ``(len(sizes),)``; typically the block's initial residual norm ``||R0_block||``. Any sequence
         of floats is accepted and stored as an array.
-
-    Only :attr:`sizes` is static. The scales are an ordinary leaf, as :class:`RowScaledNorm`'s are and
-    for the same reason: the measure is rebuilt at a new state, and a rebuild that changes only the
-    numbers over an unchanged block structure is then a compilation cache hit rather than a recompile.
     """
 
     sizes: tuple[int, ...] = eqx.field(static=True)
