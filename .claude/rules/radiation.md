@@ -543,33 +543,65 @@ receiver**, which writes the same row twice. Inputs are `stop_gradient`ed at the
 the outputs at the end, so a build under a trace (the frozen-geometry test builds under `jax.grad`)
 still works and still differentiates to zero.
 
-**THE BUILD SKIPS SENDING FACETS WHOLLY BEHIND A BLOCK'S RECEIVERS (2026-09-27).** The kernel clips
-a sending triangle to the receiver's front half-space (`_clip_to_front`), so a triangle whose
-vertices all lie behind the plane through a receiver's quadrature point contributes **exactly zero**
-there. `_columns_in_front` (host numpy, per block) keeps every areal facet NOT behind the plane
-through **every** quadrature point of **every** areal receiver in the block, by a margin
-`_BEHIND_MARGIN = 1e-9` of `|v|.|n| + |p|.|n|` — seven orders outside the kernel's own snapping band
-(`clipping._SLACK`, 16 eps), so a vertex in the plane (every edge neighbour has two) is left to the
-kernel. ⚠️ **It must be every quadrature point, NOT the centroid**: the first version tested the
-plane through the centroid and dropped 7 pairs of a 2,176-facet lamp worth up to **1.2e-5** — the
-lamp holds triangles collinear to rounding whose stored normal is rounding noise tilted off their
-line, so their quadrature points lie up to ~2 mm off that plane (facets 2157, 2165, 2173 of
-`lamp_resolution.lamp(16, 64)`). **Blocks are cut along the Morton curve** (`aquaflux.morton.morton_order`)
-so a block's receivers share their fronts; column lists are padded on `lit_blocks.rounded_width`'s
-capped ladder (a power-of-two pad first reached **8192 columns on a 4,160-facet scene**, doubling the
-work). Share of `n^2` kernel evaluations still made, 6-point rule: analytic 32 x 128 lamp (8,704
-facets) **26.9% at 256 rows, 15.5% at 64** (vs 92.3 / 90.1% in storage order); that lamp plus a
-64 x 60 generated chamber (16,512) **81.8 / 69.4%**. Measured builds (`_row_blocks` alone, fastest of
-two warm, one process per arm; jax 0.10.2, Linux x86_64, 4 cores; all three arrays bit-identical to
-`main` at `2810eea`): 16 x 64 lamp (2,176 facets) **17.26 s → 8.2 s at 256 rows, 4.48 s at 64**; that
-lamp plus a 32 x 30 chamber (4,160) **66.15 → 60.7 s at 256, 40.1 s at 64**. The default `chunk_size`
-is still 256 — **not measured on the Sozzi mesh** (its 7,516-facet `lampWall.stl`, #579's 56.8 s).
-Tests: `test_a_facet_is_dropped_only_where_the_kernel_returns_nothing_at_every_point` (per receiver,
-random triangles + tilted slivers, kernel at every point; red for the centroid plane, the margin's
-sign, and any-vertex-behind) and `test_pairs_wholly_behind_the_receiver_are_skipped_and_nothing_changes`
-(whole build vs every column, to the 1e-15 dust tolerance below, and < 40% of `n^2` evaluated on an
-open tube). The first of the two costs 5 s only because every receiver's kernel is one call — asked
-per receiver, each list a new eager shape, it cost 84 s.
+**THE BUILD SKIPS EVERY SENDING FACET THAT CANNOT REACH A BLOCK'S RECEIVERS: behind, IN the plane,
+or provably negligible (2026-09-27; sharpened 2026-09-28).** `_columns_in_front` (a Numba loop,
+`_any_in_front` → `_can_receive`, per block) keeps an areal facet only if, for some quadrature point
+of some areal receiver in the block, the kernel could return more than a rounding of zero. It mirrors
+the kernel's own clip: heights are snapped with `clipping._SLACK` exactly as `decidable_heights`
+does, so the two agree on which vertices lie in the plane.
+- **No vertex strictly in front** → what survives the clip lies in the receiver's plane, where every
+  direction has zero obliquity: dropped. That covers "wholly behind" (the 2026-09-27 rule) and the
+  far larger set **in** the plane — every triangle of a faceted cylinder's flat strip is coplanar
+  with the rest of it, and the old strictly-behind test (`_BEHIND_MARGIN`, deleted — there is no such
+  constant any more) kept and evaluated them all to produce zeros.
+- ⚠️ **Unless the point lies on that in-plane part** (`_on_triangle` / `_on_segment` / `_near`): a
+  point inside a coplanar triangle sees a hemisphere (the self-facet convention), one on an edge is
+  on the contour. A valid mesh has neither; a degenerate facet's points need not, so kept.
+- **A vertex in front** → kept unless `_projected_bound` (area × max height / d³, with `d` the
+  centroid distance LESS the vertex-sphere radius; infinite when `d <= 0`) is below `_NEGLIGIBLE =
+  2**-52` sr. ⚠️ **This is what the in-plane rule alone missed**: a strip's normals come from 2 mm
+  edges at coordinates near 1, so they are good only to ~1e-13, and the strip's far members come out
+  up to **5.9e-14 × distance** in front — beyond the snap — and the kernel returns ~1e-17 slivers
+  for 500-770 of them per row. With the bound they drop; immediate neighbours (too near for it) stay.
+- **Contract changed**: a skipped pair's value is zero **or under 2^-52**, not bit for bit the
+  kernel's (which returns such pairs as dust). `test_a_facet_is_dropped_only_where...` now asserts
+  `<= _NEGLIGIBLE`; its slivers (areas ~1e-18) send up to 9.0e-17 and are dropped by the bound.
+- ⚠️ **Every quadrature point, NOT the centroid** (still binding): a centroid plane dropped 7 pairs of
+  a 2,176-facet lamp worth up to **1.2e-5** — collinear-to-rounding triangles whose stored normal is
+  noise (facets 2157, 2165, 2173 of `lamp_resolution.lamp(16, 64)`).
+- **Blocks are cut along the Morton curve** (`aquaflux.morton.morton_order`, per-axis cells — cubic
+  cells widened the lists, #574); lists padded on `lit_blocks.rounded_width`'s capped ladder (a
+  power-of-two pad first reached 8192 columns on a 4,160-facet scene).
+
+**MEASURED** (`validation/sozzi_radiation/transfer_build_split.py`: the lamp alone as in the Sozzi
+model, default 6 points and 256 rows, a warm-up build then one timed build with each step waited on,
+then a build evaluating every column as the reference; analytic 32 x 128 lamp, 8,704 facets; jax
+0.10.2, Linux x86_64, 4 cores; one run per arm, 2026-09-28):
+
+| | `main` `aae00b4` (strictly behind) | in-plane dropped | + negligible bound (shipped) |
+|---|---|---|---|
+| build | 87.1 s | 69.2 s | **46.6 s** |
+| row blocks (kernel) | 74.2 s | 60.2 s | 36.7 s |
+| host front test | 11.6 s | 7.8 s | 8.8 s |
+| columns kept, share of every block's width | 26.9% | 21.8% | **12.8%** (median 391 of 8,704) |
+| largest difference from every column | 0 | 1.1e-16 | 1.1e-16 |
+
+**This lamp's transfer is zero except 32 rows**: the zero-area tip triangles at x = 0.810 (stored
+normal = noise), whose points "see" neighbours at up to **|F| = 0.556**. The block holding them keeps
+nearly every column (max 8,703) and must. Everything else is each row's immediate neighbours. ⚠️
+**Not yet measured on the case's `lampWall.stl`** (7,516 facets, a different triangulation) or at
+mesh scale; the 2026-09-27 shares below were taken under the strictly-behind rule and are history.
+Earlier (strictly-behind) measurements: storage order 92.3 / 90.1% of `n^2`; 16 x 64 lamp (2,176)
+17.26 s → 8.2 s at 256 rows, 4.48 s at 64; with a 32 x 30 chamber (4,160) 66.15 → 60.7 s at 256.
+Tests: `test_a_facet_is_dropped_only_where_the_kernel_returns_nothing_at_every_point`,
+`test_pairs_wholly_behind_the_receiver_are_skipped_and_nothing_changes` (whole build vs every column,
+1e-15), `test_facets_in_the_receiver_s_own_plane_are_skipped_and_the_matrix_is_unchanged` (a plate
+under a roof), `test_a_long_strip_off_the_origin_is_skipped_despite_its_normals_rounding`,
+`test_the_bound_on_what_a_triangle_can_send_is_never_exceeded` (4,000 random triangles; the bound
+without the radius term is exceeded by 214), and the case table
+`test_an_in_plane_facet_is_kept_where_the_receiving_point_lies_on_it`. **Mutation pass (9, all red)**:
+coplanar always kept, the edge / vertex / inside guards off, in-front vertices ignored, the snap far
+too wide, no bound, the threshold at 1e-3, the radius term dropped.
 
 **Remaining 4.07 GB** = 0.15 base + 1.36 kept + ~1 GB of one block's quadrature working set (2.49 GB
 after the blocks) + ~1.5 GB for the facet shadow pass with the three-cylinder `Outside` at the 4M
