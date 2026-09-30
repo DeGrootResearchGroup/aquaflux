@@ -75,11 +75,14 @@ def _aquaflux_imports(tree: ast.AST) -> dict[str, tuple[str, str]]:
     """Map each locally-bound name to the ``(module, attribute)`` it was imported from.
 
     Only ``from aquaflux... import name`` forms: a bare ``import aquaflux`` gives attribute access
-    this does not try to resolve, and a name bound some other way is not an API call site.
+    this does not try to resolve, and a name bound some other way is not an API call site. The
+    package or one of its submodules, not every module whose name merely begins with the word: a
+    case's own sibling module called ``aquaflux_floor`` is the case's, not the package's.
     """
     bound: dict[str, tuple[str, str]] = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("aquaflux"):
+        module = (node.module or "") if isinstance(node, ast.ImportFrom) else ""
+        if module == "aquaflux" or module.startswith("aquaflux."):
             for alias in node.names:
                 bound[alias.asname or alias.name] = (node.module or "", alias.name)
     return bound
@@ -443,6 +446,19 @@ def test_the_checker_actually_catches_a_break() -> None:
     accepted = _accepted_keywords(_resolve(*bound["RetryPolicy"]))
     assert accepted is not None and "no_such_parameter" not in accepted
     assert "abort_above_cycles" in accepted  # and it reads the real signature, not an empty set
+
+
+def test_a_sibling_module_whose_name_begins_with_aquaflux_is_not_the_package() -> None:
+    """``from aquaflux_floor import x`` is a case importing its own neighbour, and is left alone.
+
+    A prefix match on the word read it as the package and reported every such name missing.
+    """
+    tree = ast.parse(
+        "from aquaflux_floor import lamp_surfaces\n"
+        "from aquaflux.radiation import read_ies\n"
+        "from aquaflux import mesh\n"
+    )
+    assert set(_aquaflux_imports(tree)) == {"read_ies", "mesh"}
 
 
 def test_the_checker_reaches_a_call_on_an_imported_CLASS_not_only_a_bare_name() -> None:

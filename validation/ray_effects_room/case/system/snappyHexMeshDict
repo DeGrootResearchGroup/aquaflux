@@ -1,0 +1,142 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      snappyHexMeshDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Refinement, with the 5 cm background at level 0:
+//   bunny surface          level 4 (3.1 mm; the struts are 8 mm)
+//   lamp, on the ceiling   level 4, so the lamp patch is cut from 3.1 mm faces
+//   shadow volume          level 2 (1.25 cm) from the floor to the bunny's base
+//   floor band             level 2 (1.25 cm) for z < 3 cm over |x|, |y| < 1.2 m
+// The bunny entry is removed for the empty room (see generate_dom.py), which
+// keeps every other refinement, so the two meshes differ only near the bunny.
+
+castellatedMesh true;
+snap            true;
+addLayers       false;
+
+geometry
+{
+    bunny
+    {
+        type triSurfaceMesh;
+        file "bunny.stl";
+    }
+    lampBox
+    {
+        type searchableBox;
+        min  (-0.06 -0.05 2.97);
+        max  ( 0.06  0.05 3.10);
+    }
+    shadowVolume
+    {
+        type searchableBox;
+        min  (-0.85 -0.70 -0.10);
+        max  ( 0.85  0.70  1.20);
+    }
+    floorBand
+    {
+        type searchableBox;
+        min  (-1.20 -1.20 -0.10);
+        max  ( 1.20  1.20  0.03);
+    }
+};
+
+castellatedMeshControls
+{
+    maxLocalCells       8000000;
+    maxGlobalCells      12000000;
+    minRefinementCells  10;
+    maxLoadUnbalance    0.1;
+    nCellsBetweenLevels 3;
+
+    features ();
+
+    refinementSurfaces
+    {
+        bunny
+        {
+            level (4 4);
+            patchInfo { type wall; }
+        }
+    }
+
+    resolveFeatureAngle 30;
+
+    refinementRegions
+    {
+        lampBox      { mode inside; levels ((1e15 4)); }
+        shadowVolume { mode inside; levels ((1e15 2)); }
+        floorBand    { mode inside; levels ((1e15 2)); }
+    }
+
+    // In the air, clear of every refinement box and off every cell face.
+    locationInMesh (1.513 1.527 1.571);
+
+    allowFreeStandingZoneFaces true;
+}
+
+snapControls
+{
+    nSmoothPatch        3;
+    tolerance           2.0;
+    nSolveIter          30;
+    nRelaxIter          5;
+    nFeatureSnapIter    10;
+    implicitFeatureSnap true;
+    explicitFeatureSnap false;
+    multiRegionFeatureSnap false;
+}
+
+addLayersControls
+{
+    relativeSizes true;
+    layers {}
+    expansionRatio 1.0;
+    finalLayerThickness 0.5;
+    minThickness 0.1;
+    nGrow 0;
+    featureAngle 60;
+    nRelaxIter 5;
+    nSmoothSurfaceNormals 1;
+    nSmoothNormals 3;
+    nSmoothThickness 10;
+    maxFaceThicknessRatio 0.5;
+    maxThicknessToMedialRatio 0.3;
+    minMedianAxisAngle 90;
+    nBufferCellsNoExtrude 0;
+    nLayerIter 50;
+}
+
+meshQualityControls
+{
+    maxNonOrtho 65;
+    maxBoundarySkewness 20;
+    maxInternalSkewness 4;
+    maxConcave 80;
+    minVol 1e-13;
+    minTetQuality 1e-15;
+    minArea -1;
+    minTwist 0.02;
+    minDeterminant 0.001;
+    minFaceWeight 0.02;
+    minVolRatio 0.01;
+    minTriangleTwist -1;
+    nSmoothScale 4;
+    errorReduction 0.75;
+}
+
+writeFlags ();
+mergeTolerance 1e-6;
+
+// ************************************************************************* //

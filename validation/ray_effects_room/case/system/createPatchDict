@@ -1,0 +1,38 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      createPatchDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// The lamp: the ceiling faces whose centres lie in a 6 x 4.5 cm rectangle
+// about (0, 0, 3), 6 cm along x. The ceiling there is cut at 3.125 mm, so the
+// patch is 20 x 14 faces: 6.25 x 4.375 cm. Both solvers emit from exactly
+// these faces. The box is 1 mm thick about the ceiling, so it holds no internal face
+// (the nearest lie 1.6 mm below it).
+
+pointSync false;
+
+patches
+{
+    lamp
+    {
+        patchInfo { type wall; }
+        constructFrom zone;
+        zone
+        {
+            type box;
+            box  (-0.030 -0.0225 2.9995) (0.030 0.0225 3.0005);
+        }
+    }
+}
+
+// ************************************************************************* //

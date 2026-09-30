@@ -1,0 +1,42 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// The room: x, y in [-2, 2] m, z in [0, 3] m, at 5 cm (80 x 80 x 60).
+
+convertToMeters 1;
+
+vertices
+(
+    (-2 -2 0) (2 -2 0) (2 2 0) (-2 2 0)
+    (-2 -2 3) (2 -2 3) (2 2 3) (-2 2 3)
+);
+
+blocks
+(
+    hex (0 1 2 3 4 5 6 7) (80 80 60) simpleGrading (1 1 1)
+);
+
+boundary
+(
+    floor   { type wall; faces ((0 3 2 1)); }
+    ceiling { type wall; faces ((4 5 6 7)); }
+    walls
+    {
+        type wall;
+        faces ((0 1 5 4) (1 2 6 5) (2 3 7 6) (3 0 4 7));
+    }
+);
+
+// ************************************************************************* //
