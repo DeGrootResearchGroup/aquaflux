@@ -86,10 +86,10 @@ def _pair_by_pair(surfaces: Surfaces, points: np.ndarray, surviving=None) -> np.
         for f in range(surfaces.n_facets):
             profile = surfaces.profiles[int(index[f])]
             if point[f]:
-                fraction = float(profile.intensity_fraction(jnp.asarray(cosine[f])))
+                fraction = float(profile.intensity_fraction_at(jnp.asarray(cosine[f])))
                 field[r] += power[f] * fraction * through[f] / distance[f] ** 2
             else:
-                radiance = float(profile.radiance_per_exitance(jnp.asarray(cosine[f])))
+                radiance = float(profile.radiance_per_exitance_at(jnp.asarray(cosine[f])))
                 field[r] += emission[f] * radiance * omega[f] * through[f]
     return field
 

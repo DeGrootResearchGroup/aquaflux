@@ -1,0 +1,45 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      opticalRadiationProperties;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Air at 222 nm is effectively non-participating: transparent, no scattering.
+// nPhi and nTheta are set per run by generate_dom.py.
+
+opticalRadiation        on;
+radiationModel          DOM;
+
+DOMCoeffs
+{
+    nPhi          8;
+    nTheta        4;
+    // The bounded linearUpwind correction converges over the outer sweeps,
+    // slowly in clear air (a contraction of ~0.7 per sweep).
+    convergence   1e-5;
+    maxIter       80;
+    nBand         1;
+    nPixelPhi     1;
+    nPixelTheta   1;
+
+    // Incident flux on every patch: the floor map, and an energy balance
+    // (its area integral over all patches must equal the lamp's power).
+    incidentFluxPatches (".*");
+}
+
+extinctionModel transparent;
+transparentCoeffs
+{
+    nBands          1;
+}
+
+// ************************************************************************* //

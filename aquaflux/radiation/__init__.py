@@ -118,7 +118,14 @@ from aquaflux.radiation.model import (
     radiosity,
     surface_irradiance,
 )
-from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian, Profile
+from aquaflux.radiation.photometry import PhotometricProfile, Photometry, read_ies
+from aquaflux.radiation.profiles import (
+    AxisymmetricProfile,
+    CosinePower,
+    Isotropic,
+    Lambertian,
+    Profile,
+)
 from aquaflux.radiation.self_occlusion import (
     NoOcclusion,
     OcclusionField,
@@ -150,6 +157,7 @@ from aquaflux.radiation.visibility import Visibility, build_visibility
 
 __all__ = [
     "Absorption",
+    "AxisymmetricProfile",
     "BackFaces",
     "BodyCulling",
     "Coarsening",
@@ -160,6 +168,8 @@ __all__ = [
     "Lambertian",
     "NoOcclusion",
     "OcclusionField",
+    "PhotometricProfile",
+    "Photometry",
     "Profile",
     "RadiationModel",
     "RadiationSettings",
@@ -196,6 +206,7 @@ __all__ = [
     "open_facets",
     "projected_solid_angle",
     "radiosity",
+    "read_ies",
     "read_stl",
     "reciprocity_residual",
     "refine_for_receivers",

@@ -562,8 +562,8 @@ def profile_bias(source, receiver_point, exponent: float, subdivisions=DENSE_SUB
     to_receiver = np.asarray(receiver_point, dtype=float) - centroid
     at_centroid = float(np.dot(to_receiver, normal) / np.linalg.norm(to_receiver))
 
-    exact = float(np.sum(np.asarray(profile.radiance_per_exitance(cosine)) * omega))
-    return exact / (float(profile.radiance_per_exitance(at_centroid)) * float(np.sum(omega)))
+    exact = float(np.sum(np.asarray(profile.radiance_per_exitance_at(cosine)) * omega))
+    return exact / (float(profile.radiance_per_exitance_at(at_centroid)) * float(np.sum(omega)))
 
 
 def profile_cumulant_bias(source, receiver_point, exponent: float, subdivisions=DENSE_SUBDIVISIONS):

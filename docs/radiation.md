@@ -197,6 +197,20 @@ from a mesh's boundary patch ({func}`~aquaflux.mesh.patch_triangles`), or from a
   parameter and which reduces exactly to Lambertian at an exponent of one;
   {class}`~aquaflux.radiation.Isotropic` is for point sources only. A set may mix them — pass the
   distinct profiles and a per-facet index.
+- **A measured luminaire is read from its IES file.** {func}`~aquaflux.radiation.read_ies` parses an
+  LM-63 photometric file (Type C, no tilt) into a {class}`~aquaflux.radiation.Photometry`, whose
+  {attr}`~aquaflux.radiation.Photometry.flux` is the table's exact integrated flux and whose
+  {meth}`~aquaflux.radiation.Photometry.profile` gives a
+  {class}`~aquaflux.radiation.PhotometricProfile` for the lamp window's facets. The vertical angle is
+  measured from each facet's normal and the horizontal angle round it from a direction `up` you
+  choose, so the window's facets must face along the fixture's beam; the table is bilinear between
+  its tabulated directions and completed round the circle by its declared symmetry. The profile
+  varies around its axis as well as away from it, which is why a profile is asked about a direction
+  and a facet normal rather than a single angle ({class}`~aquaflux.radiation.AxisymmetricProfile`
+  is the family that depends on the angle alone). The direct gathers take it; the surface transfer,
+  which freezes one cosine per pair of facets, refuses it. ⚠️ The file's units are its own — candela
+  by default, sometimes milliwatts per steradian stated in a keyword — so convert the flux to watts
+  yourself before giving it as the lamp's power.
 
 **Receivers must be far enough from a facet for that facet to be resolved.** Each facet's
 contribution is exact, but the facet's radiance and its attenuation are evaluated once per facet,
@@ -474,10 +488,11 @@ calculation with a different medium and different geometry. What changes in prac
 - **Fixtures.** There is no fixture model. A louvred upper-room fixture can be represented by its
   geometry — the lamp as an emitting surface and the louvres as non-emitting, non-reflecting facets
   in the same surface set, which then shadow the lamp through the surface set's own shadowing — or
-  by its opening, as a set of facets emitting with a {class}`~aquaflux.radiation.CosinePower`
-  profile whose exponent is chosen to match the fixture's measured angular distribution. The first
-  follows the geometry; the second needs the distribution, and is only as good as a single-exponent
-  fit to it.
+  by its opening, as a set of facets emitting with the fixture's measured distribution — read from
+  its IES file into a {class}`~aquaflux.radiation.PhotometricProfile` — or, lacking one, with a
+  {class}`~aquaflux.radiation.CosinePower` profile whose exponent is fitted to it. The first follows
+  the geometry; the second needs the distribution, and a single-exponent fit is only as good as the
+  fixture's symmetry about its axis.
 - **Occupied-zone limits** are irradiances on a plane of a given orientation, at points that are
   not on any facet: see *Irradiance at any oriented point* under
   [Reflection and the surface solve](#reflection-and-the-surface-solve).
@@ -554,11 +569,14 @@ every direction, so $G = 4\pi L$ while $E = \pi L$ on its walls.
 
 ### How a source emits
 
-An angular **profile** $f(\cos\theta)$ is a distribution of radiant intensity normalized to one
-over the sphere, with $\theta$ measured from the source's own normal. A source of power $P$ has
-intensity $P f(\cos\theta)$ in W/sr. A point source has no normal to measure $\theta$ from, so it
+An angular **profile** $f(\hat{\mathbf{d}}, \mathbf{n})$ is a distribution of radiant intensity in
+direction $\hat{\mathbf{d}}$, normalized to one over the sphere, for a source whose own normal is
+$\mathbf{n}$. A source of power $P$ has intensity $P f$ in W/sr. Most profiles depend on the
+emission angle alone, $f(\cos\theta)$ with $\cos\theta = \hat{\mathbf{d}}\cdot\mathbf{n}$
+({class}`~aquaflux.radiation.AxisymmetricProfile`); a measured luminaire varies around its axis as
+well, and its horizontal angle is measured from a direction fixed to the fixture. A point source has no normal to measure $\theta$ from, so it
 is isotropic, with intensity $P/4\pi$. A facet of exitance $M$ radiates $MA$ in total, so its
-radiance in direction $\theta$ is $M\,g(\cos\theta)$, where $g(c) = f(c)/c$ is the **radiance per
+radiance in direction $\hat{\mathbf{d}}$ is $M\,g$, where $g = f/\cos\theta$ is the **radiance per
 unit exitance**:
 
 | profile | $f(c)$ | $g(c) = f(c)/c$ | for |
@@ -566,6 +584,11 @@ unit exitance**:
 | {class}`~aquaflux.radiation.Lambertian` | $\max(c, 0)/\pi$ | $1/\pi$ for $c > 0$, else $0$ | facets (and every reflection) |
 | {class}`~aquaflux.radiation.CosinePower` | $(n+1)\max(c,0)^n / 2\pi$ | $(n+1)\,c^{\,n-1}/2\pi$ for $c > 0$, else $0$ | facets, with exponent $n \ge 1$ |
 | {class}`~aquaflux.radiation.Isotropic` | $1/4\pi$ | not defined | point sources only |
+| {class}`~aquaflux.radiation.PhotometricProfile` | $I(\gamma, h)/\Phi$ from the table | $f/\cos\gamma$ in front, else $0$ | facets, with a measured Type C table |
+
+For the measured profile $\gamma$ is the angle from the facet's normal, $h$ the angle round it from
+the fixture's chosen `up` direction, $I$ the table interpolated bilinearly in both, and $\Phi$ the
+table's exact integral over the front hemisphere, so $f$ integrates to one.
 
 $g$ is supplied by each profile already reduced, so the Lambertian constant $1/\pi$ involves no
 $0/0$ at grazing incidence. A facet sends nothing behind itself: $g$ is zero there.
@@ -576,7 +599,7 @@ The field from the sources is a sum over every facet and every point source:
 
 $$
 G_\text{direct}(\mathbf{x}) =
-\sum_{j\ \text{areal}} M_j\, g_j(\cos\theta_j)\; \Omega_j(\mathbf{x})\; T_j(\mathbf{x})\; V_j(\mathbf{x})
+\sum_{j\ \text{areal}} M_j\, g_j(\hat{\mathbf{d}}_j)\; \Omega_j(\mathbf{x})\; T_j(\mathbf{x})\; V_j(\mathbf{x})
 \;+\;
 \sum_{k\ \text{point}} \frac{P_k}{4\pi r_k^2}\; T_k(\mathbf{x})\; V_k(\mathbf{x})
 $$
@@ -584,8 +607,9 @@ $$
 where
 
 - $\Omega_j(\mathbf{x})$ is the **exact solid angle** the triangle subtends at $\mathbf{x}$ (below);
-- $\cos\theta_j = \mathbf{n}_j \cdot (\mathbf{x} - \mathbf{c}_j) / |\mathbf{x} - \mathbf{c}_j|$
-  is the emission angle, and $r_k = |\mathbf{x} - \mathbf{c}_k|$ the distance to a point source;
+- $\hat{\mathbf{d}}_j = (\mathbf{x} - \mathbf{c}_j) / |\mathbf{x} - \mathbf{c}_j|$ is the emission
+  direction from the facet's centroid, and $\cos\theta_j = \mathbf{n}_j \cdot \hat{\mathbf{d}}_j$ the
+  emission angle, and $r_k = |\mathbf{x} - \mathbf{c}_k|$ the distance to a point source;
 - $T_j(\mathbf{x}) = \exp\!\left(-\int a\, ds\right)$ is the **transmittance of the medium** along the
   straight segment from $\mathbf{c}_j$ to $\mathbf{x}$;
 - $V_j(\mathbf{x}) \in [0, 1]$ is the fraction of the source's view that **gets past the geometry**
@@ -704,7 +728,10 @@ $$
 
 where $F$ carries **reflected** light, which leaves Lambertian, and $F^M$ carries each facet's own
 **emission** with its own profile ($\cos\theta_{ji}$ is the emission angle at facet $j$ towards
-facet $i$). For a Lambertian source $\pi g_j = 1$, and the two are the same matrix.
+facet $i$). For a Lambertian source $\pi g_j = 1$, and the two are the same matrix. The transfer
+evaluates one emission angle per pair, so it takes only profiles of that angle alone
+({class}`~aquaflux.radiation.AxisymmetricProfile`); a measured luminaire enters through the
+`external_irradiance` its direct gather gives each facet.
 
 ### The interreflection system
 

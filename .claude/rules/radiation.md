@@ -22,7 +22,8 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `checks.py` — build-time geometry checks, including the cell-in-the-metal test | **BUILT** |
 | `subdivide.py` — the width-over-distance refinement | **BUILT** |
 | `coarsen.py` — coarsening a dense surface (a mesh patch) by edge collapse, under longest-edge, chord and angle bounds | **BUILT** |
-| `profiles.py` — `Isotropic`, `Lambertian`, `CosinePower` | **BUILT** |
+| `profiles.py` — `Profile` (asked about a direction and a facet normal), `AxisymmetricProfile` (the angle alone: `Isotropic`, `Lambertian`, `CosinePower`) | **BUILT** |
+| `photometry.py` — `read_ies`, `Photometry`, `PhotometricProfile`: a measured luminaire's IES LM-63 table over both angles (2026-09-28) | **BUILT** (direct gathers only; the transfer refuses it) |
 | `gather.py` — `direct_fluence_rate` and `direct_irradiance` | **BUILT** |
 | `absorption.py` — `UniformAbsorption`, `VoxelAbsorption` | **BUILT** |
 | the solid bodies (`Body`, primitives, CSG, `Outside`) — **moved to `aquaflux/solids/`**, see `.claude/rules/solids.md` | **BUILT** |
@@ -218,8 +219,11 @@ repeated bisection of one edge would not, and conserves area exactly.
 carried separately, which is the illumination-design convention and is what lets one object
 describe both a point source (`G = P f / r^2`) and a surface.
 
-**Each profile supplies `intensity_fraction` and `radiance_per_exitance`, and the pair must
-satisfy `radiance_per_exitance(c) * c == intensity_fraction(c)`.** The second is not derived
+**Each profile supplies `intensity_fraction(direction, normal)` and
+`radiance_per_exitance(direction, normal)`, and the pair must satisfy
+`radiance_per_exitance * dot(d, n) == intensity_fraction`.** The axisymmetric ones implement them
+from `intensity_fraction_at(c)` / `radiance_per_exitance_at(c)`, the forms the transfer calls on its
+frozen `source_cosine`. The second is not derived
 from the first at run time because the derivation divides by `c`, and Lambertian — the default,
 and the distribution every reflected ray leaves by — is `0/0` at grazing. Written out, it is the
 constant `1/pi` with nothing to cancel.
@@ -232,6 +236,54 @@ constant `1/pi` with nothing to cancel.
   facet has no normal, so no directional distribution has anything to measure against.
   `check_profiles` refuses isotropic-on-areal and directional-on-point; the latter is silent
   otherwise, since a zero normal reads as a right angle and the source contributes nothing.
+
+## A measured luminaire is a table over TWO angles, so a profile is asked about a DIRECTION (2026-09-28)
+
+`photometry.py` reads an IES LM-63 file (Type C, `TILT=NONE`) — the photometry of the Ushio Care222 B1
+module (`validation/ray_effects_room/ushio_b1.ies`, OSLUV-measured) is the first consumer. Its
+intensity varies by up to **8 % of the peak** round the axis, so no function of `cos gamma` describes
+it, and the `Profile` methods changed from `(cos_theta)` to `(direction, normal)`. What is load-bearing:
+
+- **The frame is the facet's, and it must match of-optical-radiation's `iesEmitter`.** `gamma` is from
+  the facet's outward normal; `h` from `up` towards `normal x up`. That is OOR's `e2 = fixtureAxis x
+  fixtureUp`, with the normal playing `fixtureAxis` — so a ceiling window facing down with `up = +x`
+  reads the same table direction as OOR's BC with `fixtureAxis (0 0 -1)`, `fixtureUp (1 0 0)`.
+  `test_the_horizontal_angle_runs_towards_normal_cross_up` is the port of OOR's `iesHframeOrientation`
+  test. `up`'s own component along the normal drops out exactly (the in-plane part is normal to the
+  facet and `atan2` is scale-free), so it is neither projected nor normalized; a mutation removing a
+  projection there is **equivalent**, not a gap. An `up` parallel to a facet's normal leaves `h`
+  undefined: `Profile.refuse_normals`, asked by `check_profiles`.
+- **Interpolation and symmetry are OOR's**: bilinear in degrees, `gamma` clamped (not extrapolated),
+  quadrant / bilateral / full tables folded by LM-63's rules. The table is expanded round the circle
+  once, at `Photometry.profile`, so the traced code has no symmetry branch. Pinned against an
+  independent numpy reading, and cross-checked against the ray-effects reference's own parser to
+  **1.4e-15 of the peak** over 20,000 random directions.
+- **Normalization is closed form and over the FRONT HEMISPHERE** — `front_hemisphere_flux`, the exact
+  integral of the bilinear table times `sin gamma` over `[0, 90]` degrees, clamped. That is what a flat
+  emitter can radiate, and what OOR's BC normalizes over (its outgoing rays), so both emit exactly `P`.
+  `Photometry.flux` is the table's own range and is the lamp power when the file is absolute: the B1
+  file integrates to **118.826 mW** (a trapezoid estimate gave 118.6 and was quadrature error).
+- **The radiance is floored at `MIN_COSINE = 1e-3`** (OOR's `IES_MIN_COS`), since a table with light
+  at `gamma = 90` would otherwise need unbounded radiance along the facet's plane.
+- ⚠️ **The measured table disagrees with itself at the pole**: `I(0, h)` is 121.38 to 121.77 mW/sr
+  across `h`. A point on the axis reads `h = 0` (as OOR's `hDegFromDir_` does), and within a fraction of
+  a degree of the axis two neighbouring facets read different rows — a 0.18 % effect that a test at
+  `gamma = 0.1 deg` once read as a code error. It is the data.
+- **The transfer refuses it** (`NotImplementedError`): it freezes one `source_cosine` per pair, and an
+  azimuthal table needs the direction. Only the *emitted* transfer is affected — reflected light leaves
+  Lambertian — so this matters only for a reflecting room lit by an IES lamp. **And even there it
+  need not matter: keep the lamp out of the surface set.** Gather its direct irradiance on the
+  reflecting facets with `direct_irradiance` (which takes any profile), pass that as
+  `external_irradiance` to `radiosity` / `fluence_rate`, and the transfer only ever carries
+  Lambertian reflected light. `validation/ray_effects_room/aquaflux_reflecting.py` does exactly this
+  for a Care222-lit room (2,000 squares of 20 cm; the two routes to its slice field -- the library's
+  `fluence_rate` and a direct gather of the facets' radiosity -- agree to 0.0). Average the lamp's
+  irradiance over sub-points of each facet, not its centroid, or a shadow on a coarse facet is
+  point-sampled. Freezing the unit direction instead (3x the frozen array) is the route if the lamp
+  itself must reflect.
+- **The gather passes the unit direction, not the cosine, at no measured cost**: 2,000 Lambertian facets
+  x 40,000 receivers, fluence 0.549-0.557 s and irradiance 11.77-11.82 s against `main`'s 0.557 /
+  11.82 s, checksums equal to 13 figures (CPU, x64, jax 0.10.2, macOS arm64, separate processes).
 
 ## The clamp is a GATE, not a factor — and the difference is a factor of two or a zero
 
@@ -1192,7 +1244,7 @@ and all four were mutation-checked (seven one-line mutations, each red on its ow
   identical at n = 1 and 50**. ⚠️ The reference must be per pair: under a `CosinePower(50)` beam
   the two receiving triangles of one square differ by 12% at width 1e-2, which a reference at the
   square's middle reads as a first-order error in the code. ⚠️ A profile carries its constant in
-  **two** methods — the gather reads `intensity_fraction`, the transfer `radiance_per_exitance` — so a
+  **two** methods — the gather reads both, the transfer `radiance_per_exitance_at` — so a
   mutation of one is invisible to a test of the other path. The contract between them is pinned in
   `test_radiation_profiles.py`.
 - **Conservation of light through the adjoint** (`test_the_adjoint_conserves_light_through_every_facet`):
@@ -1938,9 +1990,9 @@ Three changes to `RayCastOcclusion` for receivers in the volume. The field is un
 checksum below is identical to 13 figures before and after.
 
 **A pair whose source faces away from its receiver is not cast.** The gather weights a pair by
-`radiance_per_exitance(cos)`, which for `Lambertian` and `CosinePower` is exactly zero for `cos <= 0`,
-so a ray there could only be multiplied by nothing. Now `Profile.dark_behind` (a `ClassVar`, `False`
-on the base, `True` on those two) declares it, and `Surfaces.dark_behind` asks it of every areal facet's
+`radiance_per_exitance`, which for `Lambertian`, `CosinePower` and `PhotometricProfile` is exactly zero
+for `cos <= 0`, so a ray there could only be multiplied by nothing. Now `Profile.dark_behind` (a
+`ClassVar`, `False` on the base, `True` on those three) declares it, and `Surfaces.dark_behind` asks it of every areal facet's
 profile. When that holds and `receiver_facet is None`, `field` drops the pairs whose receiver is
 **certainly** behind the facet's plane — `BackFaces.behind` (`back_faces.py`, since 2026-09-27; it was
 `self_occlusion._facing_away`, and there is no such function now), `clipping.decidable_heights` of the receiver above the plane
@@ -2523,7 +2575,8 @@ model's reflected set is Lambertian); a group is laid out by its planes only whe
 profile there is `dark_behind`, so there is no refusal path — a glowing group is simply listed in
 full. `areal_layout(points, geometry, groups, *, segments=None)` builds it; mask layers are read by
 `(row, facet)` gathers, and `surviving_fraction` now broadcasts over any gathering of pairs.
-`_emitter_cosine(centroid, normal, receivers)` and `_transmittance(absorption, source, receivers)`
+`_emitter_direction(centroid, receivers)` (it was `_emitter_cosine` until the profiles took a direction,
+2026-09-28; there is no such function now) and `_transmittance(absorption, source, receivers)`
 now take broadcast-ready arrays (the irradiance gather passes `[None]` / `[:, None]`); ⚠️ there is no
 `_compiled_gather` any more.
 
