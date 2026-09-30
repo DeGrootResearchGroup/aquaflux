@@ -19,8 +19,6 @@ from aquaflux.radiation import (
 )
 from aquaflux.radiation.photometry import MIN_COSINE, Photometry
 
-B1 = Path(__file__).resolve().parents[2] / "validation" / "ray_effects_room" / "ushio_b1.ies"
-
 
 def _ies(vertical, horizontal, rows, *, multiplier=1.0, ballast=1.0, kind=1, tilt="NONE"):
     """The text of an LM-63 file holding ``rows[h][gamma]``."""
@@ -43,6 +41,29 @@ def _write(tmp_path, text, name="lamp.ies") -> Path:
     path = tmp_path / name
     path.write_text(text)
     return path
+
+
+@pytest.fixture(scope="module")
+def b1(tmp_path_factory) -> Path:
+    """A synthetic full-table luminaire shaped like the measured Ushio B1 module.
+
+    Same layout as the file the ray-effects case reads (37 gamma columns over 0 to 90 degrees,
+    17 horizontal rows over 0 to 360, no assumed symmetry, mW/sr, a 45 x 60 mm opening), so these
+    tests do not depend on ``validation/``. The intensity is a smooth cosine lobe with an azimuthal
+    modulation that vanishes on the axis, so no two rows disagree at ``gamma = 0``.
+    """
+    vertical = np.arange(37) * 2.5
+    horizontal = np.arange(17) * 22.5
+    g, h = np.radians(vertical)[None, :], np.radians(horizontal)[:, None]
+    rows = (
+        120.0 * np.cos(g) ** 6 * (1 + 0.2 * np.sin(g) * np.sin(h) + 0.1 * np.sin(g) * np.cos(2 * h))
+    )
+    text = (
+        _ies(vertical.tolist(), horizontal.tolist(), rows)
+        .replace("1 -1 1.0 37 17 1 2 0.1 0.2 0.0", "1 -1 1.0 37 17 1 2 0.045 0.06 0.0")
+        .replace("[_INTENSITYUNITS] W/sr", "[_INTENSITYUNITS] mW/sr")
+    )
+    return _write(tmp_path_factory.mktemp("ies"), text, name="b1_like.ies")
 
 
 def _bilinear_reference(photometry: Photometry, gamma_deg, h_deg):
@@ -93,9 +114,9 @@ def _hemisphere(normal, up, n=1200):
 # -- reading ------------------------------------------------------------------------------------
 
 
-def test_the_measured_b1_module_reads_as_a_full_table_in_milliwatts_per_steradian():
-    """The file the ray-effects case uses: every header field the case relies on, read back."""
-    photometry = read_ies(B1)
+def test_a_b1_shaped_file_reads_as_a_full_table_in_milliwatts_per_steradian(b1):
+    """A file laid out like the ray-effects case's: every header field the case relies on, read back."""
+    photometry = read_ies(b1)
     assert photometry.symmetry == "full"
     assert photometry.intensity.shape == (17, 37)
     assert photometry.vertical[[0, -1]].tolist() == [0.0, 90.0]
@@ -103,7 +124,7 @@ def test_the_measured_b1_module_reads_as_a_full_table_in_milliwatts_per_steradia
     assert photometry.opening == (0.045, 0.06, 0.0)
     assert photometry.opening_unit == "metres"
     assert photometry.keywords["_INTENSITYUNITS"] == "mW/sr"
-    assert photometry.intensity[0, 0] == pytest.approx(121.37919924985037, rel=1e-15)
+    assert photometry.intensity[0, 0] == pytest.approx(120.0, rel=1e-12)
 
 
 def test_the_multiplier_and_ballast_factor_scale_the_table(tmp_path):
@@ -170,9 +191,9 @@ def test_a_quadrant_table_mirrors_into_the_second_quadrant(tmp_path):
 # -- flux and normalization ---------------------------------------------------------------------
 
 
-def test_the_flux_is_the_exact_integral_of_the_bilinear_table():
+def test_the_flux_is_the_exact_integral_of_the_bilinear_table(b1):
     """Against a dense midpoint integral of an independent bilinear reading of the file."""
-    photometry = read_ies(B1)
+    photometry = read_ies(b1)
     n = 1500
     gamma = (np.arange(n) + 0.5) / n * 90.0
     h = (np.arange(2 * n) + 0.5) / (2 * n) * 360.0
@@ -182,7 +203,6 @@ def test_the_flux_is_the_exact_integral_of_the_bilinear_table():
         np.sum(values * np.sin(np.radians(g))) * np.radians(90.0 / n) * np.radians(360 / (2 * n))
     )
     assert photometry.flux == pytest.approx(dense, rel=2e-6)
-    assert photometry.flux == pytest.approx(118.826316, rel=1e-6)
 
 
 def test_a_table_stored_short_of_ninety_degrees_is_continued_at_its_last_value(tmp_path):
@@ -215,14 +235,14 @@ def test_a_table_stored_short_of_ninety_degrees_is_continued_at_its_last_value(t
     [((0.0, 0.0, -1.0), (1.0, 0.0, 0.0)), ((0.3, -0.5, 0.81), (0.0, 1.0, 0.2))],
     ids=["downward", "oblique"],
 )
-def test_the_profile_integrates_to_one_over_the_facets_front_hemisphere(normal, up):
+def test_the_profile_integrates_to_one_over_the_facets_front_hemisphere(b1, normal, up):
     """Normalized in the facet's own frame, whichever way the facet faces.
 
     The oblique case puts the normal and ``up`` off every axis, so a frame built from the world
     axes rather than from the normal would integrate to something else.
     """
     normal = np.asarray(normal) / np.linalg.norm(normal)
-    profile = read_ies(B1).profile(up=up)
+    profile = read_ies(b1).profile(up=up)
     directions, weight = _hemisphere(normal, up)
     total = np.sum(np.asarray(profile.intensity_fraction(jnp.asarray(directions), normal)))
     assert total * weight == pytest.approx(1.0, rel=2e-6)
@@ -275,14 +295,14 @@ def test_the_horizontal_angle_runs_towards_normal_cross_up(tmp_path):
     assert minus_y > plus_z > plus_y
 
 
-def test_only_the_part_of_up_in_the_facets_plane_matters():
+def test_only_the_part_of_up_in_the_facets_plane_matters(b1):
     """An ``up`` tilted towards the normal measures ``h`` from its projection, not from itself.
 
     The two profiles differ only in ``up``'s component along the normal (+x), so they must agree
     to rounding at every direction; one that used ``up`` unprojected would measure every angle from
     a reference that is neither unit length nor in the plane.
     """
-    photometry = read_ies(B1)
+    photometry = read_ies(b1)
     tilted, flat = photometry.profile(up=(0.7, 0.0, 1.0)), photometry.profile(up=(0.0, 0.0, 1.0))
     normal = jnp.array([1.0, 0.0, 0.0])
     directions, _ = _hemisphere(np.asarray(normal), None, n=40)
@@ -342,17 +362,17 @@ def _window(width, normal_down=True):
     return triangles
 
 
-def test_a_small_window_delivers_power_times_intensity_over_distance_squared():
+def test_a_small_window_delivers_power_times_intensity_over_distance_squared(b1):
     """Far from a small window the fluence rate is ``P f(d) / r^2`` along every direction.
 
     The receivers sit 2 m below a 1 cm window at a spread of angles and azimuths, so the table's
     variation in both angles is exercised; the finite window's own correction is of order
-    ``(w / r)^2``, about 1e-5. They stay 3 degrees or more off the axis: the measured table
-    disagrees with itself at ``gamma = 0`` by 0.3% across ``h`` (121.38 against 121.77 mW/sr), so
-    within a fraction of a degree of the pole the window's two triangles read different rows of it
-    and the point-source limit is not the right reference there.
+    ``(w / r)^2``, about 1e-5. They stay 3 degrees or more off the axis: a measured table can disagree
+    with itself at ``gamma = 0`` across ``h``, so within a fraction of a degree of the pole the
+    window's two triangles could read different rows of it and the point-source limit would not be
+    the right reference there.
     """
-    photometry = read_ies(B1)
+    photometry = read_ies(b1)
     profile = photometry.profile(up=(1.0, 0.0, 0.0))
     power = 0.1188
     triangles = _window(0.01)
@@ -376,23 +396,23 @@ def test_a_small_window_delivers_power_times_intensity_over_distance_squared():
     np.testing.assert_allclose(irradiance, expected * np.cos(gamma), rtol=1e-4)
 
 
-def test_check_profiles_refuses_an_up_direction_along_the_window_normal():
-    profile = read_ies(B1).profile(up=(0.0, 0.0, 1.0))
+def test_check_profiles_refuses_an_up_direction_along_the_window_normal(b1):
+    profile = read_ies(b1).profile(up=(0.0, 0.0, 1.0))
     surfaces = Surfaces.from_triangles(_window(0.01), emission=1.0, profiles=(profile,))
     with pytest.raises(ValueError, match="parallel to the profile's up"):
         check_profiles(surfaces)
     check_profiles(
         Surfaces.from_triangles(
-            _window(0.01), emission=1.0, profiles=(read_ies(B1).profile(up=(1.0, 0, 0)),)
+            _window(0.01), emission=1.0, profiles=(read_ies(b1).profile(up=(1.0, 0, 0)),)
         )
     )
 
 
-def test_the_surface_transfer_refuses_a_profile_it_cannot_freeze():
+def test_the_surface_transfer_refuses_a_profile_it_cannot_freeze(b1):
     """The transfer freezes one source cosine per pair; an azimuthal table needs more."""
     lamp = _window(0.1)
     floor = _window(1.0, normal_down=False) + np.array([0.0, 0.0, -1.0])
-    profile = read_ies(B1).profile(up=(1.0, 0.0, 0.0))
+    profile = read_ies(b1).profile(up=(1.0, 0.0, 0.0))
     surfaces = Surfaces.from_triangles(
         np.concatenate([lamp, floor]),
         emission=np.array([1.0, 1.0, 0.0, 0.0]),
@@ -405,9 +425,9 @@ def test_the_surface_transfer_refuses_a_profile_it_cannot_freeze():
         transfer.assemble(surfaces)
 
 
-def test_the_fluence_rate_is_differentiable_in_the_table():
+def test_the_fluence_rate_is_differentiable_in_the_table(b1):
     """The table is a live leaf: its derivative matches a finite difference and is not zero."""
-    profile = read_ies(B1).profile(up=(1.0, 0.0, 0.0))
+    profile = read_ies(b1).profile(up=(1.0, 0.0, 0.0))
     triangles = _window(0.01)
     point = jnp.array([[0.3, -0.2, -1.5]])
 
