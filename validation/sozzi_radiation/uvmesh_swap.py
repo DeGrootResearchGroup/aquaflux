@@ -85,6 +85,11 @@ LAMP_EDGE, LAMP_CHORD = 4e-3, 1e-4
 #: Inactivation rate constants (cm^2/mJ) for the log reduction ``-log10 mean(exp(-k D))``.
 K_INACT = (0.01, 0.02, 0.05, 0.1, 0.2, 0.5)
 SOURCES = ("aquaflux", "dom64", "dom256", "dom256_native")
+#: Volumetric flow rate through the reactor, m^3/s: 25 US gallons a minute, the flow the case's
+#: inlet velocity was set from.
+FLOW_RATE = 25 * 3.785411784e-3 / 60
+#: J/m^2 to mJ/cm^2.
+TO_MJ_PER_CM2 = 0.1
 #: Cells per gather chunk. compare_fluence's 20,000 holds a chunk x facets array per step; this
 #: lamp has ~2.5x its facets, so the chunk is cut to keep the peak memory alike.
 GATHER_CHUNK = 4_000
@@ -263,11 +268,15 @@ def log_reduction(dose: np.ndarray, k: float) -> float:
 
 
 def field_statistics() -> dict:
-    """Each field's volume-weighted mean by region, and each DO field over aquaflux's on lit cells.
+    """Each field's volume-weighted mean by region, its mean dose, and each DO field over aquaflux's.
 
     The same two measures as ``compare_fluence``'s summary: the mean over all cells, the chamber,
     the inlet pipe and the riser; and percentiles of the cell-by-cell ratio over the cells where
-    aquaflux's G exceeds 1e-3 of its peak.
+    aquaflux's G exceeds 1e-3 of its peak. And the mean dose the field gives fluid that passes through
+    the reactor, ``integral(G dV) / Q`` with G below zero counted as zero, as the tracker counts it: in
+    a steady flow the dose averaged over the outflow is the volume integral of G over the flow rate,
+    whatever the flow's pattern, so a tracker whose particles sample the fluid correctly must return
+    this mean.
     """
     _say("reading the mesh for the field statistics")
     geometry = read_openfoam(MESH).geometry()
@@ -291,8 +300,12 @@ def field_statistics() -> dict:
         ratio[name] = {f"p{q}": float(np.percentile(values, q)) for q in (1, 10, 50, 90, 99)}
         _say(f"{name} / aquaflux over {int(lit.sum())} lit cells: {ratio[name]}")
     negative = {name: float(np.mean(fields[name] < 0)) for name in DOM}
+    mean_dose = {name: float(np.sum(np.maximum(f, 0.0) * volume)) / FLOW_RATE * TO_MJ_PER_CM2
+                 for name, f in fields.items()}  # fmt: skip
+    _say(f"integral(G dV) / Q [mJ/cm^2], volume {volume.sum():.6g} m^3: {mean_dose}")
     return {"volume_mean": means, "ratio_over_lit_cells": ratio, "lit_cells": int(lit.sum()),
-            "negative_cell_fraction": negative}  # fmt: skip
+            "negative_cell_fraction": negative, "volume_m3": float(volume.sum()),
+            "flow_rate_m3_per_s": FLOW_RATE, "mean_dose_from_integral": mean_dose}  # fmt: skip
 
 
 def stage_compare() -> None:
