@@ -46,7 +46,8 @@ steady flow the dose averaged over the outflow is `integral(G dV) / Q` whatever 
 dispersion model that keeps particles distributed as the fluid is must reproduce it. `compare` writes
 it (`fields_compared.mean_dose_from_integral`; reactor volume 5.759 L, Q = 25 US gal/min): aquaflux
 48.84, DOM 64 48.27, DOM 256 48.91 mJ/cm2, against tracked means of 48.98, 48.38 and 49.03 (0.2-0.3 %
-above, the particles being seeded uniformly over the inlet's area rather than its flux). A tracker
+above; the 9,986 escaped particles are a sample, and they are seeded uniformly over the inlet's area
+rather than its flux, so exact agreement is not expected). A tracker
 whose mean dose exceeds this integral is over-sampling the bright fluid next to the lamp. On this mesh DOM 256 agrees with aquaflux
 within 0.6 % at every k, against 1.1 % on the snapped mesh of the next section; DOM 64 falls 12 %
 short at k = 0.5, against 23 %. Those differ in mesh, flow, dispersion model and G's patch values at
