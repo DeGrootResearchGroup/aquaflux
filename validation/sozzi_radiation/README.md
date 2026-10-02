@@ -23,31 +23,39 @@ tracker's dictionaries; none of it is in the repository. Three stages, chosen by
 - `compare`: after the tracker has run in each case, refuses runs whose particles did not follow the
   same paths, then writes `swap/summary.json`.
 
-Tracker: of-optical-radiation's `radiationDose` with the `langevin` dispersion model (its PR #90, at its
-defaults), seed 42, one OpenMP thread (on three it aborts building the couplings' point normals).
-DOM: 64 (8 x 4) and 256 (16 x 8) directions, 1 x 1 pixels, bounded Gauss linearUpwind rays,
-convergence 1e-5, of-optical-radiation `659ec4a`. 9,986 of 9,987 particles escaped in every run, with
-identical ends.
+Tracker: of-optical-radiation's `radiationDose` with the `langevin` dispersion model (its PR #90 at
+`b23582b`, defaults: maxStepFraction 0.02, minLagrangianTime 10 ms), seed 42, one OpenMP thread (on
+three it aborts building the couplings' point normals). DOM: 64 (8 x 4) and 256 (16 x 8) directions,
+1 x 1 pixels, bounded Gauss linearUpwind rays, convergence 1e-5, of-optical-radiation `659ec4a`. All
+9,987 particles escaped in every run, with identical ends.
 
 | G | mean dose [mJ/cm2] | LR k = 0.01 | 0.1 | 0.5 | LR / aquaflux at k = 0.1 / 0.5 |
 |---|---|---|---|---|---|
-| aquaflux | 48.98 | 0.198 | 1.488 | 5.406 | 1 / 1 |
-| DOM 64 | 48.38 | 0.195 | 1.443 | 4.755 | 0.970 / 0.880 |
-| DOM 256 | 49.03 | 0.198 | 1.485 | 5.377 | 0.998 / 0.995 |
-| DOM 256, its own patch values | 49.02 | 0.198 | 1.485 | 5.377 | 0.998 / 0.995 |
+| aquaflux | 49.33 | 0.198 | 1.490 | 5.366 | 1 / 1 |
+| DOM 64 | 48.78 | 0.196 | 1.447 | 4.702 | 0.971 / 0.876 |
+| DOM 256 | 49.41 | 0.198 | 1.487 | 5.336 | 0.998 / 0.994 |
+| DOM 256, its own patch values | 49.40 | 0.198 | 1.487 | 5.336 | 0.998 / 0.994 |
+
+The same set traced with PR #90's first version (`ebadf6e`, whose Langevin model switched to a
+diffusion step near the walls) gave 48.98 / 48.38 / 49.03 mean dose and the same ratios to within
+0.004 (DOM 64 0.970 / 0.880, DOM 256 0.998 / 0.995).
 
 Fields: volume-weighted mean G over the reactor 133.78 (aquaflux), 132.19 (DOM 64), 133.96 (DOM 256)
 W/m2; DOM over aquaflux cell by cell where aquaflux's G exceeds 1e-3 of its peak, percentiles 10 to
 90: 0.586 to 1.233 at 64 directions, 0.935 to 1.055 at 256. linearUpwind G is below zero in 6.3 % of
-cells at both resolutions (the tracker counts it as zero).
+cells at both resolutions (the tracker counts it as zero). On this mesh DOM 256 agrees with aquaflux
+within 0.6 % at every k, against 1.1 % on the snapped mesh of the next section; DOM 64 falls 12 %
+short at k = 0.5, against 23 %. Those differ in mesh, flow, dispersion model and G's patch values at
+once, so the change is not attributable to any one of them.
 
 **The mean dose is the volume integral of G over the flow rate, and the tracker returns it.** In a
 steady flow the dose averaged over the outflow is `integral(G dV) / Q` whatever the flow's pattern, so a
 dispersion model that keeps particles distributed as the fluid is must reproduce it. `compare` writes
 it (`fields_compared.mean_dose_from_integral`; reactor volume 5.759 L, Q = 25 US gal/min): aquaflux
-48.84, DOM 64 48.27, DOM 256 48.91 mJ/cm2, against tracked means of 48.98, 48.38 and 49.03 (0.2-0.3 %
-above; the 9,986 escaped particles are a sample, and they are seeded uniformly over the inlet's area
-rather than its flux, so exact agreement is not expected). A tracker
+48.84, DOM 64 48.27, DOM 256 48.91 mJ/cm2, against tracked means of 49.33, 48.78 and 49.41 (1.0-1.1 %
+above). The particles are a sample seeded uniformly over the inlet's area rather than its flux, and
+the Langevin model's long steps next to the walls over-sample the bright water slightly (its first
+version, `ebadf6e`, was 0.2-0.3 % above), so exact agreement is not expected. A tracker
 whose mean dose exceeds this integral is over-sampling the bright fluid next to the lamp. On this mesh DOM 256 agrees with aquaflux
 within 0.6 % at every k, against 1.1 % on the snapped mesh of the next section; DOM 64 falls 12 %
 short at k = 0.5, against 23 %. Those differ in mesh, flow, dispersion model and G's patch values at
