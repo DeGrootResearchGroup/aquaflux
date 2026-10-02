@@ -260,12 +260,10 @@ cannot be written. The guard is what catches the next module that does branch.
   entirely the change of measure. Gate against the case's **own self-start** in whichever single norm
   the harness uses — both ends then move together, and a genuine configuration mismatch (which moves the
   residual by orders) still trips it.
-- **A saved `.npz` is not necessarily a checkpoint.** `pitzdaily_openfoam/ilu0_remedy_state.npz` is the
-  case's *self-start*, cached only so repeated runs skip rebuilding it. Measuring "at the converged root"
-  against it silently answers a different question — and the two differ enormously: at the self-start the
-  zero-shift coupled Jacobian is nearly singular (smallest pivot `1.3e-12` against a matrix 1-norm of
-  `278`), so even a complete LU is not an accurate inverse of it, while at a converged root the shipped
-  field split solves the same zero-shift operator to `6e-09`. Read what wrote a state before trusting it.
+- **A saved `.npz` is not necessarily a checkpoint.** A self-start cached only so repeated runs skip
+  rebuilding it is not a converged root, and measuring "at the converged root" against it silently answers
+  a different question: the zero-shift coupled Jacobian is nearly singular at a self-start and is not at a
+  root. Read what wrote a state before trusting it.
 - **`bfs3d`'s shipped `COLUMN_REACH = (3,3,3,3,2,2)` is licensed for the FIELD SPLIT ONLY.** A flow-first
   split never applies `dR_flow/dturb`, so it never touches the shortened k/ω columns. A **monolithic**
   factorization (the complete LU) does apply them, and a short colouring does not truncate a column —
