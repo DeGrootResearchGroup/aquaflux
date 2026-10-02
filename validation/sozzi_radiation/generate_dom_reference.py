@@ -34,8 +34,11 @@ Environment:
     The Docker image to run in; default ``oor:local``, built from that checkout's ``Dockerfile``
     (``docker build -t oor:local <checkout>``). The published image is amd64 only.
 
-Arguments: resolutions as ``nPhi x nTheta`` pairs, default ``8x4 16x8`` (64 and 256 directions;
-the tutorial runs 8x4).
+Arguments: resolutions as ``nPhi x nTheta`` pairs, default ``8x4 16x8`` (64 and 256 directions),
+the grids ``compare_fluence.py`` and ``dose_comparison.py`` read. DOM's ``nTheta`` bins span the
+polar angle over the whole sphere, so these grids' polar bins are twice as wide as their azimuthal
+ones; ``nPhi == nTheta`` gives square bins (``6x6`` and ``12x12``: 72 and 288 directions, the
+tutorial's grid and its refinement).
 
 Run with ``SOZZI_OOR_SOURCE=<checkout> validation/run_case.sh validation/sozzi_radiation/generate_dom_reference.py``.
 """

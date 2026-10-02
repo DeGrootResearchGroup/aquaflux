@@ -20,10 +20,10 @@ Stages, run as ``python uvmesh_swap.py <stage>`` or
     mesh is inside one of the three, which the stage checks.
 ``write``
     One tracking case per fluence rate under ``swap/<name>``: the flow's time directory (linked)
-    with ``G`` written in it. ``aquaflux``, ``dom64`` and ``dom256`` share the same patch treatment:
+    with ``G`` written in it. ``aquaflux``, ``dom72`` and ``dom288`` share the same patch treatment:
     the interior values, ``zeroGradient`` on every ordinary patch and the constraint type on the
     non-conformal coupling patches (the tracker interpolates ``G`` from cell and boundary values,
-    and aquaflux computes cells only). ``dom256_native`` keeps the DOM file as the solver wrote it.
+    and aquaflux computes cells only). ``dom288_native`` keeps the DOM file as the solver wrote it.
 ``compare``
     After the tracker has run in each case: refuses to compare runs whose particles did not follow
     the same paths (end reasons, times and points must agree), then writes the dose statistics and
@@ -32,8 +32,11 @@ Stages, run as ``python uvmesh_swap.py <stage>`` or
 
 Paths: ``SOZZI_UVMESH_RUN`` (default ``~/aquaflux-runs/sozzi_sst_dose_2026-10-01``) holds
 ``mesh_uvmesh/polyMesh``, the flow at ``case/uv_arc/<FLOW_TIME>``, and the DOM fields
-``case/uv_dom_lu/<t>/G`` (64 directions) and ``case/uv_dom256_lu/<t>/G`` (256), both linearUpwind
-rays and 1 x 1 pixels.
+``case/uv_dom6_lu/<t>/G`` and ``case/uv_dom12_lu/<t>/G``, both linearUpwind rays and 1 x 1 pixels.
+Their angular grids are uniform: of-optical-radiation's DOM divides the polar angle over the whole
+sphere into ``nTheta`` bins of pi/nTheta and the azimuth into ``2 nPhi`` bins of pi/nPhi, so the bins
+are square only when ``nPhi == nTheta``; n = 6 gives 72 directions and n = 12 gives 288 (Fluent's
+3 x 3 and 6 x 6 theta x phi divisions per octant).
 """
 
 from __future__ import annotations
@@ -72,7 +75,7 @@ RUN = Path(
 MESH = RUN / "mesh_uvmesh" / "polyMesh"
 FLOW_CASE = RUN / "case" / "uv_arc"
 FLOW_TIME = "2059"
-DOM = {"dom64": RUN / "case" / "uv_dom_lu", "dom256": RUN / "case" / "uv_dom256_lu"}
+DOM = {"dom72": RUN / "case" / "uv_dom6_lu", "dom288": RUN / "case" / "uv_dom12_lu"}
 #: The tracker's dictionaries for every run: the tutorial's, with the Langevin dispersion model.
 TRACKER_SYSTEM = RUN / "case" / "uv_dom_lu_lgv89" / "system"
 OUT = RUN / "swap"
@@ -84,7 +87,7 @@ LAMP_PATCHES = ("lamp0_wall", "lamp0_tip_B")
 LAMP_EDGE, LAMP_CHORD = 4e-3, 1e-4
 #: Inactivation rate constants (cm^2/mJ) for the log reduction ``-log10 mean(exp(-k D))``.
 K_INACT = (0.01, 0.02, 0.05, 0.1, 0.2, 0.5)
-SOURCES = ("aquaflux", "dom64", "dom256", "dom256_native")
+SOURCES = ("aquaflux", "dom72", "dom288", "dom288_native")
 #: Volumetric flow rate through the reactor, m^3/s: 25 US gallons a minute, the flow the case's
 #: inlet velocity was set from.
 FLOW_RATE = 25 * 3.785411784e-3 / 60
@@ -230,8 +233,8 @@ def stage_write() -> None:
             if item.name != "G":
                 (case / FLOW_TIME / item.name).symlink_to(os.path.relpath(item, case / FLOW_TIME))
         (case / "out.foam").touch()
-        if name == "dom256_native":
-            source = _latest_time(DOM["dom256"]) / "G"
+        if name == "dom288_native":
+            source = _latest_time(DOM["dom288"]) / "G"
             shutil.copy(source, case / FLOW_TIME / "G")
             record[name] = {"G": str(source), "patch_values": "the solver's own"}
         else:
