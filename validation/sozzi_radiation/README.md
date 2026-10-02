@@ -4,6 +4,55 @@
 runs its discrete-ordinates (DOM) solver at several angular resolutions. See its docstring for the
 case and the environment it needs.
 
+## Dose on the wall-resolved uvmesh mesh, with only G swapped (2026-10-01, `uvmesh_swap.py`)
+
+The same question as the next section, asked on the wall-resolved mesh that of-optical-radiation's
+`tools/uvMesh` builds for this reactor (1,232,629 cells; 20 um first cell at the sleeve, 100 um at the
+chamber wall; its pieces joined by non-conformal couplings), with a k-omega SST flow converged by its
+residual controls in 2059 iterations. The run directory (`SOZZI_UVMESH_RUN`, default
+`~/aquaflux-runs/sozzi_sst_dose_2026-10-01`) holds the mesh, the flow, the two DOM fields and the
+tracker's dictionaries; none of it is in the repository. Three stages, chosen by argument or by
+`SOZZI_SWAP_STAGE` (what `validation/run_case.sh` passes):
+
+- `gather`: aquaflux's G at every cell centre, from the mesh's own lamp patches (`lamp0_wall`,
+  `lamp0_tip_B`: 87,040 triangles, coarsened to 16,878 facets at a 4 mm edge and 0.1 mm chord, 35.429
+  W), black walls, absorption 35.67 /m, the pipe openings as in `compare_fluence.py`. 816 s, jax 0.10.2.
+- `write`: one tracking case per G. `aquaflux`, `dom64` and `dom256` get the interior values and
+  `zeroGradient` on every ordinary patch (the couplings keep their constraint types), so the patch
+  treatment is the same for all three; `dom256_native` keeps the DOM file as written.
+- `compare`: after the tracker has run in each case, refuses runs whose particles did not follow the
+  same paths, then writes `swap/summary.json`.
+
+Tracker: of-optical-radiation's `radiationDose` with the `langevin` dispersion model (its PR #90, at its
+defaults), seed 42, one OpenMP thread (on three it aborts building the couplings' point normals).
+DOM: 64 (8 x 4) and 256 (16 x 8) directions, 1 x 1 pixels, bounded Gauss linearUpwind rays,
+convergence 1e-5, of-optical-radiation `659ec4a`. 9,986 of 9,987 particles escaped in every run, with
+identical ends.
+
+| G | mean dose [mJ/cm2] | LR k = 0.01 | 0.1 | 0.5 | LR / aquaflux at k = 0.1 / 0.5 |
+|---|---|---|---|---|---|
+| aquaflux | 48.98 | 0.198 | 1.488 | 5.406 | 1 / 1 |
+| DOM 64 | 48.38 | 0.195 | 1.443 | 4.755 | 0.970 / 0.880 |
+| DOM 256 | 49.03 | 0.198 | 1.485 | 5.377 | 0.998 / 0.995 |
+| DOM 256, its own patch values | 49.02 | 0.198 | 1.485 | 5.377 | 0.998 / 0.995 |
+
+Fields: volume-weighted mean G over the reactor 133.78 (aquaflux), 132.19 (DOM 64), 133.96 (DOM 256)
+W/m2; DOM over aquaflux cell by cell where aquaflux's G exceeds 1e-3 of its peak, percentiles 10 to
+90: 0.586 to 1.233 at 64 directions, 0.935 to 1.055 at 256. linearUpwind G is below zero in 6.3 % of
+cells at both resolutions (the tracker counts it as zero).
+
+**The mean dose is the volume integral of G over the flow rate, and the tracker returns it.** In a
+steady flow the dose averaged over the outflow is `integral(G dV) / Q` whatever the flow's pattern, so a
+dispersion model that keeps particles distributed as the fluid is must reproduce it. `compare` writes
+it (`fields_compared.mean_dose_from_integral`; reactor volume 5.759 L, Q = 25 US gal/min): aquaflux
+48.84, DOM 64 48.27, DOM 256 48.91 mJ/cm2, against tracked means of 48.98, 48.38 and 49.03 (0.2-0.3 %
+above; the 9,986 escaped particles are a sample, and they are seeded uniformly over the inlet's area
+rather than its flux, so exact agreement is not expected). A tracker
+whose mean dose exceeds this integral is over-sampling the bright fluid next to the lamp. On this mesh DOM 256 agrees with aquaflux
+within 0.6 % at every k, against 1.1 % on the snapped mesh of the next section; DOM 64 falls 12 %
+short at k = 0.5, against 23 %. Those differ in mesh, flow, dispersion model and G's patch values at
+once, so the change is not attributable to any one of them.
+
 ## Dose: what the fluence-rate differences are worth to a particle (2026-09-25, `dose_comparison.py`)
 
 The reactor is designed against dose, not `G`. `dose_comparison.py` solves the tutorial's own flow
