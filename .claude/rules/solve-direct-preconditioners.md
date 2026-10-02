@@ -477,8 +477,13 @@ complete LU and the AMG's coloured probe both still depend on it.
         4.72M nonzeros against 13.32M, and a preconditioner indifferent to the pattern.
       - **🛑🛑 SCOPE BANNER — READ BEFORE CITING ANY ZERO-FILL RESULT BELOW. THE 2026-08-16 SWEEPS ARE
         MONOLITHIC AND THE CASE IS FIELD-SPLIT, SO THEY DO NOT DESCRIBE THE SHIPPED PRECONDITIONER.**
-        `validation/pitzdaily_openfoam/ilu0_remedy_sweep.py` and its siblings build **one `AmgVCycle`
-        over all five fields interleaved cell-major**. The pitzDaily case runs `field_split=True`, and
+        The sweep harnesses built **one `AmgVCycle` over all five fields interleaved cell-major**.
+        ⚠️ **They are deleted (2026-10-02)** — the whole PETSc-ILU probe cluster of
+        `pitzdaily_openfoam/`: `ilu0_remedy_sweep.py`, `ilu_fill_probe.py`, `order_ar_probe.py`,
+        `mc64_precheck.py`, `block_probe.py`, `size_probe.py`, `localize.py` and `state_probe.py` —
+        because incomplete-LU preconditioning is no longer a direction this project takes (2026-08-22,
+        project owner). **Every result below that names one of them is history that cannot be re-asked,
+        and is not meant to be; there is no such file to run.** The pitzDaily case runs `field_split=True`, and
         with `FLOW_INVERSE = "petsc"` (its default **until 2026-08-22**, when the case moved to
         `simplesmooth` — see `.claude/rules/validation.md`; under the current default no incomplete
         factorization runs on this case at all, which makes everything below doubly inapplicable to it)
@@ -673,8 +678,8 @@ complete LU and the AMG's coloured probe both still depend on it.
         them, and do not cite either without its reach and its state.**
       - **✅ THE SWEEP HAS NOW BEEN RUN, AND NOTHING IS A FIX (2026-08-16). Every candidate that rescues
         one shift breaks another, and the shipped cell-major order is the best single choice.** Harness:
-        `validation/pitzdaily_openfoam/ilu0_remedy_sweep.py` (kept in the repository so this can be
-        re-asked). Configuration, stated in full because two of these have moved before: the case's own
+        `ilu0_remedy_sweep.py` (deleted 2026-10-02, see the scope banner above; not re-askable).
+        Configuration, stated in full because two of these have moved before: the case's own
         **self-start** seed (potential-flow + Laplace-smoothed turbulence, `‖R‖` 2.8629e+02), real
         right-hand side `−R(state)`, reach **5** unless stated, `smoother_sweeps=4`,
         `coarse_eq_limit=2000`, plain aggregation, **operator and V-cycle at the SAME β — no PC-only
@@ -781,9 +786,9 @@ complete LU and the AMG's coloured probe both still depend on it.
           `argmin condest` pick the arm that converges, at each β? **It does not**, and neither does any
           threshold or window on it.
         - **❌❌ MEASURED, AND `condest` CARRIES NO USABLE SIGNAL ON THIS PROBLEM (2026-08-16). Do not
-          build a selector on it, and do not re-run this.** Every arm above was rebuilt with
-          `ILU0_SWEEP_CONDEST_ONLY=1` and its `condest` joined against the cycle counts already in the
-          table — same harness, same self-start state (`‖R‖` 2.8629e+02), same reach 5, same
+          build a selector on it, and do not re-run this.** Every arm above was rebuilt in the
+          sweep harness's `condest`-only mode and its `condest` joined against the cycle counts already in
+          the table — same harness, same self-start state (`‖R‖` 2.8629e+02), same reach 5, same
           `smoother_sweeps=4`, `coarse_eq_limit=2000`, plain aggregation, operator and V-cycle at the same
           β. The factorizations reproduce **bit-for-bit** (every pivot census identical to the earlier
           run), so the join is legitimate.
@@ -894,7 +899,7 @@ complete LU and the AMG's coloured probe both still depend on it.
         AND `u`, NOT `p` (2026-08-16).** This entry previously said *"if the pressure rows already carry
         their maximum on the diagonal after equilibration, MC64 has nothing to fix"*. The pressure rows
         **do** carry it — and the gate passes anyway, on the transport rows. Harness:
-        `validation/pitzdaily_openfoam/mc64_precheck.py`, no solve. Configuration: pitzDaily, 12225 cells,
+        `mc64_precheck.py` (deleted 2026-10-02, see the scope banner above), no solve. Configuration: pitzDaily, 12225 cells,
         5 fields, the case's own self-start seed (`‖R‖` 2.8629e+02), reach 5, the matrix **as the smoother
         factorizes it** (shift, symmetric square-root-diagonal equilibration, cell-major reorder). The
         ratio is (largest off-diagonal magnitude)/|diagonal| per row; equilibration puts every diagonal at

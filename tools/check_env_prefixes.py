@@ -16,11 +16,11 @@ the capture line's own pattern -- read out of ``run_case.sh`` itself, never dupl
 the check and the thing it checks cannot drift apart the way the original gap did.
 
 A "prefix", for the report below, is the leading run of ``[A-Z0-9]`` characters up to and
-including the first underscore (``BFS3D_MESH`` -> ``BFS3D_``, ``ILU0_SWEEP_ARMS`` -> ``ILU0_``).
+including the first underscore (``BFS3D_MESH`` -> ``BFS3D_``, ``TWO_WORD_ARMS`` -> ``TWO_``).
 That is only how an uncovered name is *grouped and displayed*; whether a name counts as covered is
 decided by matching it against the actual capture pattern, not by comparing single-word prefixes --
-one existing prefix (``ILU0_SWEEP``) is itself two words, and a name is covered whenever the real
-pattern matches it, however many words that alternative spells out.
+a capture alternative may itself be two words (``TWO_WORD``), and a name is covered whenever the
+real pattern matches it, however many words that alternative spells out.
 
 Usage
 -----
