@@ -583,6 +583,13 @@ snapped mesh. Its README carries every number with its configuration. What to kn
   `startswith("aquaflux.")`), pinned by `test_a_sibling_module_whose_name_begins_with_aquaflux_is_not_the_package`.
 - **`run_case.sh` records `RAY_` settings** (added to its capture prefixes; `test_check_env_prefixes.py`
   fails a case whose prefix is missing, which is how this was caught).
+- ⚠️ **of-optical-radiation's DOM grid is uniform only when `nPhi == nTheta`.** It divides the polar angle over
+  the WHOLE sphere into `nTheta` bins of `pi/nTheta` and the azimuth into `2 nPhi` bins of `pi/nPhi` (its tutorial's
+  "polar bins per hemisphere" comment was wrong). `8 x 4` / `16 x 8`, used for every 64- and 256-direction figure
+  below and in `sozzi_radiation/` before 2026-10-02, have polar bins twice the azimuthal; `n x n` gives `2 n^2`
+  directions and matches Fluent's `n/2 x n/2` per octant (6 x 6 = 72 = Fluent 3 x 3). On the Sozzi uvmesh swap the
+  8 x 4 grid's dose shortfall at k = 0.5 was 12.4 %, the uniform 6 x 6's 2.2 %: most of it was the grid's shape.
+  Every figure below quoted "at 64 / 256 directions" is on the non-uniform grids.
 - **A diffusely reflecting DOM sweep costs 3.3-3.8x a black one** (209 against 63 s at 64 directions,
   984 against 257 s at 256, 8 ranks) and needs ~60 % more sweeps (57 against 36 at 64), so the
   reflecting 256 run was stopped. ⚠️ Not quadratic in the directions, as was first said here: 64 -> 256

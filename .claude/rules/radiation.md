@@ -1286,6 +1286,12 @@ DOM on its `uvReactorSozzi2006-DOM` tutorial in Docker; `compare_fluence.py` com
 on the same 1,635,909-cell mesh and writes a VTU + plots). Full numbers and configuration in its
 `README.md`; the headline, so it is findable from here:
 
+⚠️ **These DOM figures are on `8 x 4` (64) and `16 x 8` (256) grids, which are not uniform**: of-optical-radiation's
+`nTheta` spans the whole sphere, so those polar bins are twice the azimuthal ones. The uvmesh swap set was rerun on
+`6 x 6` / `12 x 12` (2026-10-02) and the 64-direction dose shortfall at k = 0.5 fell from 12.4 % to 2.2 % at 72; the
+snapped-mesh figures below were not rerun.
+
+
 - **Whole-reactor volume-mean G agrees to 0.09%** (133.28 aquaflux, 133.16 DOM-256, 131.67 DOM-64).
 - **DOM converges on aquaflux**: DOM/aquaflux p10-p90 over lit cells 0.36-1.65 at 64 directions,
   0.886-1.076 at 256. The spread is DOM's ray effect — at mid-lamp the true field is axisymmetric
@@ -1430,7 +1436,7 @@ these makes it false and must update it in the same change: the six-point `recei
 `refine_for_receivers`' `max_ratio=0.25`, the GMRES global relative `1e-10`, `RayCastOcclusion` as
 the self-occlusion default and `ShaftCulling` as the culling default, opaque as the transmittance
 default, GMRES restart 120, point sources Isotropic-only (`check_profiles`), the 2.6%-at-eight-sectors inscribed-area undershoot, 95% UVT = 5.129 /m, and the Sozzi
-figures (0.09% volume mean; 0.36-1.65 / 0.886-1.076 at 64 / 256 directions; 0.44% median lamp
+figures (0.09% volume mean; 0.36-1.65 / 0.886-1.076 at 64 / 256 directions, non-uniform 8 x 4 / 16 x 8 grids; 0.44% median lamp
 discretization; dose mean 0.3%, log reduction within 1.1%, DOM-64 short by 23% at k = 0.5). Its
 quick start — `G = 80` in a 6x6x6 box mesh's own patches at `M = 10, rho = 0.5` — was run
 (2026-09-28, and again 2026-09-29 after it became the quick start) and holds to rounding.
