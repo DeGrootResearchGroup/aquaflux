@@ -46,7 +46,7 @@ Environment:
 ``RAY_STAGES``
     What to do, space-separated: ``mesh`` builds both meshes; a run is
     ``<mesh>:<nPhi>x<nTheta>[/<nPixelPhi>x<nPixelTheta>]`` with ``<mesh>`` one of ``bunny`` and
-    ``empty`` (e.g. ``bunny:8x4 empty:8x4/3x3``), and builds its mesh first if needed;
+    ``empty`` (e.g. ``bunny:6x6 empty:6x6/3x3``; ``nPhi == nTheta`` gives square bins), and builds its mesh first if needed;
     ``<mesh>+reflecting:<P>x<T>`` runs the room with its floor, ceiling and walls diffusely
     reflecting (``room.WALL_REFLECTANCE``) and the bunny black, into
     ``runs/<mesh>_reflecting_nphi<P>_ntheta<T>/``. Default ``mesh``.
