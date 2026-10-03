@@ -118,36 +118,26 @@ def _latest_time(case: Path) -> Path:
 # -- gather ---------------------------------------------------------------------------------------
 
 
-def stage_gather() -> None:
-    OUT.mkdir(parents=True, exist_ok=True)
-    _say("reading the mesh")
-    mesh = read_openfoam(MESH)
-    geometry = mesh.geometry()
-    points = np.asarray(geometry.cell.centroid)
-    region = np.where(_in_chamber(points), 0, np.where(points[:, 0] > X_BODY_END, 1, 2))
-    inside = np.asarray(_in_chamber(jnp.asarray(points)) | _in_inlet(jnp.asarray(points))
-                        | _in_riser(jnp.asarray(points)))  # fmt: skip
-    if not inside.all():
-        raise RuntimeError(f"{int((~inside).sum())} cells lie outside the three cylinders")
-    _say(f"{len(points)} cells: chamber {int((region == 0).sum())}, inlet "
-         f"{int((region == 1).sum())}, riser {int((region == 2).sum())}")  # fmt: skip
+def fluid_region(points: np.ndarray) -> np.ndarray:
+    """0 in the chamber, 1 in the inlet pipe, 2 in the riser, for points known to be in the fluid."""
+    return np.where(_in_chamber(points), 0, np.where(points[:, 0] > X_BODY_END, 1, 2))
 
+
+def mesh_lamp(mesh, geometry) -> tuple[Surfaces, dict]:
+    """The mesh's own lamp patches as aquaflux facets, coarsened with the emitted power held.
+
+    Returns the facets and a record of how they were made (the lamp half of ``gather.json``).
+    """
     triangles = patch_triangles(mesh, geometry, list(LAMP_PATCHES)).vertices
     exact = Surfaces.from_triangles(np.asarray(triangles), emission=EXITANCE)
     started = time.perf_counter()
-    lamp, record = coarsen_surfaces(exact, max_edge=LAMP_EDGE, chord=LAMP_CHORD)
+    lamp, coarsening = coarsen_surfaces(exact, max_edge=LAMP_EDGE, chord=LAMP_CHORD)
     exact_power = float(np.sum(np.asarray(exact.area))) * EXITANCE
     power = float(np.sum(np.asarray(lamp.area) * np.asarray(lamp.emission)))
-    _say(f"lamp: {len(triangles)} patch triangles ({exact_power:.4f} W) coarsened to "
-         f"{lamp.n_facets} facets ({power:.4f} W) in {time.perf_counter() - started:.0f} s")  # fmt: skip
-
-    started = time.perf_counter()
-    compare_fluence.CHUNK = GATHER_CHUNK
-    field = gather(lamp, points, region, "aquaflux")
     seconds = time.perf_counter() - started
-    np.save(OUT / "G_aquaflux.npy", field)
-    (OUT / "gather.json").write_text(json.dumps({
-        "cells": len(points),
+    _say(f"lamp: {len(triangles)} patch triangles ({exact_power:.4f} W) coarsened to "
+         f"{lamp.n_facets} facets ({power:.4f} W) in {seconds:.0f} s")  # fmt: skip
+    record = {
         "lamp_patches": list(LAMP_PATCHES),
         "patch_triangles": len(triangles),
         "lamp_facets": int(lamp.n_facets),
@@ -155,11 +145,39 @@ def stage_gather() -> None:
         "lamp_chord_m": LAMP_CHORD,
         "exact_patch_power_W": exact_power,
         "coarsened_power_W": power,
-        "longest_edge_max_m": float(record.longest_edge.max()),
+        "longest_edge_max_m": float(coarsening.longest_edge.max()),
+        "coarsening_seconds": round(seconds, 1),
         "exitance_W_per_m2": EXITANCE,
         "absorption_per_m": 35.67,
         "walls": "black",
         "visibility": "compare_fluence.BranchOpenings in the pipes, none needed in the chamber",
+    }
+    return lamp, record
+
+
+def stage_gather() -> None:
+    OUT.mkdir(parents=True, exist_ok=True)
+    _say("reading the mesh")
+    mesh = read_openfoam(MESH)
+    geometry = mesh.geometry()
+    points = np.asarray(geometry.cell.centroid)
+    region = fluid_region(points)
+    inside = np.asarray(_in_chamber(jnp.asarray(points)) | _in_inlet(jnp.asarray(points))
+                        | _in_riser(jnp.asarray(points)))  # fmt: skip
+    if not inside.all():
+        raise RuntimeError(f"{int((~inside).sum())} cells lie outside the three cylinders")
+    _say(f"{len(points)} cells: chamber {int((region == 0).sum())}, inlet "
+         f"{int((region == 1).sum())}, riser {int((region == 2).sum())}")  # fmt: skip
+
+    lamp, lamp_record = mesh_lamp(mesh, geometry)
+    started = time.perf_counter()
+    compare_fluence.CHUNK = GATHER_CHUNK
+    field = gather(lamp, points, region, "aquaflux")
+    seconds = time.perf_counter() - started
+    np.save(OUT / "G_aquaflux.npy", field)
+    (OUT / "gather.json").write_text(json.dumps({
+        "cells": len(points),
+        **lamp_record,
         "gather_chunk_cells": GATHER_CHUNK,
         "gather_seconds": round(seconds, 1),
         "jax": __import__("jax").__version__,
@@ -211,34 +229,50 @@ def write_field(path: Path, values: np.ndarray) -> None:
     path.write_text("".join(lines))
 
 
+def tracking_case(
+    case: Path, values: np.ndarray | None = None, copy_from: Path | None = None
+) -> None:
+    """A case the tracker can run in: the flow's time directory (linked) with ``G`` in it.
+
+    ``G`` is either ``values`` at the cells, written by :func:`write_field`, or a copy of
+    ``copy_from`` as it stands. The tracker's dictionaries are ``TRACKER_SYSTEM``'s.
+    """
+    if (values is None) == (copy_from is None):
+        raise ValueError("give exactly one of values and copy_from")
+    if case.exists():
+        shutil.rmtree(case)
+    flow = FLOW_CASE / FLOW_TIME
+    (case / FLOW_TIME).mkdir(parents=True)
+    shutil.copytree(TRACKER_SYSTEM, case / "system")
+    # Relative links, so the case also resolves inside a container that mounts RUN elsewhere.
+    (case / "constant").symlink_to(os.path.relpath(FLOW_CASE / "constant", case))
+    for item in flow.iterdir():
+        if item.name != "G":
+            (case / FLOW_TIME / item.name).symlink_to(os.path.relpath(item, case / FLOW_TIME))
+    (case / "out.foam").touch()
+    if values is None:
+        shutil.copy(copy_from, case / FLOW_TIME / "G")
+    else:
+        write_field(case / FLOW_TIME / "G", values)
+
+
 def stage_write() -> None:
     dictionary = (TRACKER_SYSTEM / "postProcess.dict").read_text()
     if not re.search(r"type\s+langevin;", dictionary):
         raise RuntimeError(f"{TRACKER_SYSTEM} does not select the langevin dispersion model")
     n = len(np.load(OUT / "G_aquaflux.npy"))
-    flow = FLOW_CASE / FLOW_TIME
     fields = {"aquaflux": np.load(OUT / "G_aquaflux.npy")}
     for name, case in DOM.items():
         fields[name] = _binary_or_ascii_internal(_latest_time(case) / "G", n)
     record = {}
     for name in SOURCES:
         case = OUT / name
-        if case.exists():
-            shutil.rmtree(case)
-        (case / FLOW_TIME).mkdir(parents=True)
-        shutil.copytree(TRACKER_SYSTEM, case / "system")
-        # Relative links, so the case also resolves inside a container that mounts RUN elsewhere.
-        (case / "constant").symlink_to(os.path.relpath(FLOW_CASE / "constant", case))
-        for item in flow.iterdir():
-            if item.name != "G":
-                (case / FLOW_TIME / item.name).symlink_to(os.path.relpath(item, case / FLOW_TIME))
-        (case / "out.foam").touch()
         if name == "dom288_native":
             source = _latest_time(DOM["dom288"]) / "G"
-            shutil.copy(source, case / FLOW_TIME / "G")
+            tracking_case(case, copy_from=source)
             record[name] = {"G": str(source), "patch_values": "the solver's own"}
         else:
-            write_field(case / FLOW_TIME / "G", fields[name])
+            tracking_case(case, values=fields[name])
             source = OUT / "G_aquaflux.npy" if name == "aquaflux" else _latest_time(DOM[name]) / "G"
             record[name] = {
                 "G": str(source),
@@ -251,19 +285,20 @@ def stage_write() -> None:
 # -- compare --------------------------------------------------------------------------------------
 
 
-def _tracks(name: str) -> dict[str, np.ndarray]:
-    path = next((OUT / name / "postProcessing" / "radiationDose").glob("*/doseDistribution.csv"))
+def tracks(case: Path) -> dict[str, np.ndarray]:
+    """The tracker's particles in ``case``, sorted by id: end reason, time, dose and end point."""
+    path = next((case / "postProcessing" / "radiationDose").glob("*/doseDistribution.csv"))
     rows = [line.split(",") for line in path.read_text().splitlines() if not line.startswith("#")]
     columns = list(zip(*rows, strict=True))
-    tracks = {
+    run = {
         "id": np.array(columns[0], dtype=int),
         "reason": np.array(columns[1]),
         "time": np.array(columns[2], dtype=float),
         "dose": np.array(columns[3], dtype=float),
         "end": np.array(columns[4:7], dtype=float).T,
     }
-    order = np.argsort(tracks["id"])
-    return {key: value[order] for key, value in tracks.items()}
+    order = np.argsort(run["id"])
+    return {key: value[order] for key, value in run.items()}
 
 
 def log_reduction(dose: np.ndarray, k: float) -> float:
@@ -312,11 +347,11 @@ def field_statistics() -> dict:
 
 
 def stage_compare() -> None:
-    tracks = {name: _tracks(name) for name in SOURCES}
-    first = tracks[SOURCES[0]]
+    by_source = {name: tracks(OUT / name) for name in SOURCES}
+    first = by_source[SOURCES[0]]
     for name in SOURCES[1:]:
         for key in ("id", "reason", "time", "end"):
-            if not np.array_equal(first[key], tracks[name][key]):
+            if not np.array_equal(first[key], by_source[name][key]):
                 raise RuntimeError(f"{name} and {SOURCES[0]} disagree on '{key}': not paired")
     escaped = first["reason"] == "escaped"
     _say(
@@ -324,7 +359,7 @@ def stage_compare() -> None:
     )
     runs = {}
     for name in SOURCES:
-        dose = tracks[name]["dose"][escaped]
+        dose = by_source[name]["dose"][escaped]
         runs[name] = {
             "n": int(dose.size),
             "mean": float(dose.mean()),
@@ -335,8 +370,8 @@ def stage_compare() -> None:
         }
         _say(f"{name:>14}: mean {runs[name]['mean']:.2f}, LR " + ", ".join(
             f"k={k}: {v:.3f}" for k, v in runs[name]["log_reduction"].items()))  # fmt: skip
-    ours = tracks["aquaflux"]["dose"][escaped]
-    paired = {name: {f"p{q}": float(np.percentile(tracks[name]["dose"][escaped] / ours, q))
+    ours = by_source["aquaflux"]["dose"][escaped]
+    paired = {name: {f"p{q}": float(np.percentile(by_source[name]["dose"][escaped] / ours, q))
                      for q in (1, 10, 50, 90, 99)} for name in SOURCES if name != "aquaflux"}  # fmt: skip
     summary = {
         "particles": int(escaped.size),

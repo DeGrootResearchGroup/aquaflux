@@ -588,6 +588,14 @@ snapped mesh. Its README carries every number with its configuration. What to kn
   directions and matches Fluent's `n/2 x n/2` per octant (6 x 6 = 72 = Fluent 3 x 3). On the Sozzi uvmesh swap the
   8 x 4 grid's dose shortfall at k = 0.5 was 12.4 %, the uniform 6 x 6's 2.2 %: most of it was the grid's shape.
   Every figure below quoted "at 64 / 256 directions" is on the non-uniform grids.
+- **`sozzi_radiation/background_grid.py`: aquaflux on a Cartesian grid, interpolated to the mesh (2026-10-02).**
+  Gathering only at 4 mm grid nodes (90,788, 43 s against 714 s at every cell) gives the dose within 0.65 % in
+  LR at every k, **but only with the sleeve's own value as data**: G = 2M at a diffuse emitter's surface
+  (outgoing hemisphere at zero path; the sleeve is convex and the walls black). Without it every variant
+  under-predicts the cells beside the sleeve (median 0.57-0.81 within 1 mm, 8-3 mm), because each wet corner
+  is farther from the lamp than the cell. ⚠️ `G_average`'s LR looking right at 3-4 mm is a cancellation (low
+  near the sleeve, high in the bulk), not accuracy: its mean dose is 2 % low and its p1 per-particle ratio 0.83.
+  ⚠️ Twelve tracker runs at once in Docker's VM killed three (memory); run five at a time. Numbers in its README.
 - **A diffusely reflecting DOM sweep costs 3.3-3.8x a black one** (209 against 63 s at 64 directions,
   984 against 257 s at 256, 8 ranks) and needs ~60 % more sweeps (57 against 36 at 64), so the
   reflecting 256 run was stopped. ⚠️ Not quadratic in the directions, as was first said here: 64 -> 256

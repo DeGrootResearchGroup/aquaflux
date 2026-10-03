@@ -69,6 +69,65 @@ The first swap (2026-10-01, the same mesh, flow, tracker and particles) ran DOM 
 (2.2 % against 12.4 %). The snapped-mesh results in the sections below were also computed on
 `8 x 4` and `16 x 8` grids and have not been rerun.
 
+## aquaflux on a Cartesian background grid, interpolated to the mesh (2026-10-02, `background_grid.py`)
+
+The direct gather costs the same at every receiver, and most of the uvmesh mesh's 1,232,629 cells are
+there for the flow's wall layers. `background_grid.py` gathers G only at the nodes of a uniform
+Cartesian grid (spacing `h`, the nodes that are corners of grid cells holding a cell centre and lie in
+the water: in the three cylinders and outside the 10 mm sleeve) and interpolates it to the cell
+centres, then traces dose with the same tracker and particles as the swap set above. Four variants take
+the same node values to the cells; corners outside the water are never used as data:
+
+- `G_average`: trilinear in G, dry corners dropped and the rest reweighted to sum to one;
+- `logG_average`: the same in log G;
+- `logG_extrapolated`: log G, with a least-squares linear fit to the wet corners wherever a cell has
+  dry ones;
+- `logG_surface`: as `logG_extrapolated`, with the sleeve's own value as data too: every corner inside
+  the sleeve adds its nearest surface point with `G = 2M`, the outgoing hemisphere of a diffuse emitter
+  at zero path length (the sleeve is convex and the walls black, so nothing arrives from elsewhere).
+  A cell beside the sleeve is then fitted between known values on both sides.
+
+The interpolate stage refuses to run unless the interpolator reproduces a linear field exactly at
+cells with all eight corners wet and at every fitted cell, and projects every inside corner onto the
+sleeve; each check was confirmed to fail on a deliberately broken version (a reused slot, a projection
+pulled 10 % inward).
+
+Reference: aquaflux at every cell centre, mean dose 49.33 mJ/cm2, LR 1.490 at k = 0.1 (the swap
+set). All 9,987 particles escaped in every run with identical ends. `logG_surface`:
+
+| h | wet nodes | time (s) | mean dose | max LR error, k = 0.01-0.5 | LR at k = 0.1 | dose / reference per particle, p1 / p50 / p99 |
+|---|---|---|---|---|---|---|
+| 8 mm | 10,860 | 9 + 4 | -0.7 % | 1.8 % | +1.0 % | 0.923 / 0.999 / 1.128 |
+| 6 mm | 26,121 | 13 + 4 | +1.7 % | 1.4 % | +1.0 % | 0.995 / 1.009 / 1.073 |
+| 4 mm | 90,788 | 43 + 4 | +0.9 % | 0.65 % | +0.38 % | 0.998 / 1.003 / 1.045 |
+| 3 mm | 212,523 | 92 + 4 | +0.9 % | 0.60 % | +0.33 % | 0.999 / 1.003 / 1.044 |
+| 2 mm | 691,728 | 259 + 4 | +0.5 % | 0.32 % | +0.17 % | 0.999 / 1.001 / 1.029 |
+
+Times are the gather plus the interpolation; the gather at every cell centre took 714 s. Reading the
+mesh (24-26 s) and coarsening the lamp (19-20 s) come on top of both and are left out of both columns.
+
+- **Without the surface value the near-sleeve field is wrong.** Median ratio to the reference within 1
+  mm of the sleeve: 0.57 (`G_average`), 0.56 (`logG_average`) and 0.63 (`logG_extrapolated`) at 8 mm,
+  and still 0.74-0.81 at 3 mm; with it, 0.83 at 8 mm and 1.00-1.05 from 6 mm down. Every wet corner of a
+  cell beside the sleeve is farther from the lamp than the cell, so averaging them under-predicts it,
+  and an 8 mm extrapolation in log G cannot follow the profile's bend near the surface.
+- **The other variants' dose errors are larger and less consistent.** `G_average`'s mean dose is 2-3 %
+  low at 4-6 mm while its LR is within 0.1 % at 4 and 3 mm, a cancellation between low G near the
+  sleeve and high G (linear interpolation of a convex profile) in the bulk; its p1 per-particle ratio
+  is 0.74-0.88. `logG_average` and `logG_extrapolated` put the mean dose 2-6 % low (averaging the
+  logarithm is a geometric mean, below the arithmetic one).
+- **`logG_surface` slightly over-predicts within 2 mm of the sleeve** (median 1.04-1.08 at 3-6 mm): log G
+  is not quite linear between the surface and the first wet node. That is the source of its +0.3-0.4 %
+  LR at 3-4 mm and +0.9 % mean dose.
+- **The gain levels off at 4 mm**: 3 mm is no better, and the remaining error is the over-prediction
+  above, not resolution. 4 mm gathers 15x faster than every cell.
+
+Configuration: aquaflux at this commit, jax 0.10.2, CPU, x64, macOS arm64, 11 cores; the swap set's lamp
+(16,878 facets), black walls, absorption 35.67 /m; tracker OOR `b23582b` `langevin`, seed 42, one thread,
+five traces at a time (twelve at once ran Docker's VM out of memory and killed three). The 6 and 4 mm
+gathers ran past `run_case.sh`'s free-memory check, which Docker's VM was failing, with nothing else
+running.
+
 ## Dose: what the fluence-rate differences are worth to a particle (2026-09-25, `dose_comparison.py`)
 
 **Angular grids not uniform.** The DOM fields in this section are on `8 x 4` (64 directions) and `16 x 8`
