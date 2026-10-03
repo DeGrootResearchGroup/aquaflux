@@ -54,7 +54,7 @@ export RAY_OOR_SOURCE=<of-optical-radiation checkout>
 export RAY_BUNNY_STL=<path to voronoi_bunny_open.stl>
 RAY_STAGES=mesh validation/run_case.sh validation/ray_effects_room/generate_dom.py --wait
 python3 validation/ray_effects_room/patches.py bunny empty
-RAY_STAGES="bunny:8x4 empty:8x4 bunny:16x8 empty:16x8 bunny+reflecting:8x4" \
+RAY_STAGES="bunny:6x6 empty:6x6 bunny:12x12 empty:12x12 bunny+reflecting:6x6 bunny:6x6/3x3" \
     validation/run_case.sh validation/ray_effects_room/generate_dom.py --wait
 validation/run_case.sh validation/ray_effects_room/aquaflux_floor.py --wait
 validation/run_case.sh validation/ray_effects_room/aquaflux_volume.py --wait
@@ -86,64 +86,72 @@ recording their counts; any other stops the run. The snapped bunny is one connec
 survived), 0.5459 m² against the STL's 0.5524 m². The bunny STL was placed by recentring its bounding
 box on x = y = 0 and translating its base to 1.2 m: `translate=(0.000236 0.009318 1.202035)`.
 
-## Results (2026-09-28/29)
+## Results (DOM 2026-10-02/03; aquaflux and the reference 2026-09-28/29)
 
-Configuration for every run below: of-optical-radiation `4f95835` (branch `add-incident-flux-output`:
+Configuration for every DOM run below: of-optical-radiation `4f95835` (branch `add-incident-flux-output`:
 the `qin` output, the `iesEmitter` exact-power normalization, and no per-ray snapshot without
 scattering), OpenFOAM 13 in Docker (`oor:local`, arm64, 11 CPUs, 17.5 GB), 8 MPI ranks (scotch),
-`bounded Gauss linearUpwind` ray transport, converged to `convergence 1e-5` (every run ended below
-it, between 7.3e-6 and 9.3e-6); aquaflux and the reference on the host, CPU only, x64, jax 0.10.2,
-macOS arm64, 11 cores. Lamp 118.826 mW. Errors are on the floor faces within 1 m of the centre,
+`bounded Gauss linearUpwind` ray transport, converged to `convergence 1e-5`, one run at a time;
+aquaflux and the reference on the host, CPU only, x64, jax 0.10.2, macOS arm64, 11 cores. Lamp
+118.826 mW. **The angular grids are uniform**: `nPhi = nTheta = 6` (72 directions, every bin 30 degrees
+square) and `12` (288, 15 degrees). of-optical-radiation's DOM divides the polar angle over the whole
+sphere into `nTheta` bins of `pi/nTheta` and the azimuth into `2 nPhi` bins of `pi/nPhi`, so the
+bins are square only when `nPhi == nTheta` (`6 x 6` and `12 x 12` match Fluent's `3 x 3` and `6 x 6`
+theta x phi divisions per octant). Errors are on the floor faces within 1 m of the centre,
 area-weighted, as shares of the reference's peak.
 
 **Black room, floor irradiance:**
 
 | room | solver | directions | wall time | L2 / peak | worst face / peak |
 |---|---|---|---|---|---|
-| bunny | reference | 17,920 window samples | 86 s | -- | -- |
-| bunny | aquaflux | exact, 17,920 lamp facets | 275 s | 3e-6 | 6e-5 |
-| bunny | DOM | 64 (36 sweeps) | 2,251 s | 0.77 | 1.0 |
-| bunny | DOM | 256 (38 sweeps) | 9,785 s | 1.76 | 6.0 |
-| bunny | DOM, 3x3 pixels | 64 (36 sweeps) | 2,767 s | 0.77 | 1.0 |
-| bunny | DOM, 3x3 pixels | 256 (38 sweeps) | void (swapping) | 1.76 | 6.0 |
-| empty | aquaflux | exact | 352 s | 5e-9 | 8e-9 |
-| empty | DOM | 64 (36 sweeps) | 1,285 s | 0.84 | 1.0 |
-| empty | DOM | 256 (38 sweeps) | 5,443 s | 1.77 | 5.6 |
+| bunny | reference | 17,920 window samples | 88 s | -- | -- |
+| bunny | aquaflux | exact, 17,920 lamp facets | 264 s | 3e-6 | 6e-5 |
+| bunny | DOM | 72 (37 sweeps) | 2,654 s | 3.53 | 21.0 |
+| bunny | DOM, 3x3 pixels | 72 (37 sweeps) | 2,804 s | 3.53 | 21.0 |
+| bunny | DOM | 288 (38 sweeps) | 10,853 s | 1.21 | 4.7 |
+| empty | aquaflux | exact | 129 s | 5e-9 | 8e-9 |
+| empty | DOM | 72 (37 sweeps) | 1,507 s | 3.52 | 20.9 |
+| empty | DOM | 288 (38 sweeps) | 5,867 s | 1.28 | 4.6 |
 
-- **Every DOM run conserves the lamp's power exactly** (its `qin` over all patches sums to
-  118.8263 mW), so its error is entirely in where the light goes. At 64 directions the downward
-  beams leave the lamp ~30 degrees from vertical: the floor's centre is dark and the bunny, within
-  ~10 degrees of it, is missed (it absorbs -0.004 mW). At 256 the nearest beams are ~11-15 degrees
-  out and land as a ring at ~0.8 m up to 6x the true peak, still skirting the bunny (0.64 mW).
-  Within 1 m of the centre, quadrupling the directions raised the error; **over the whole floor it
-  halved it but left it above the peak**: L2 / peak 2.03 at 64 directions and 1.07 at 256 (worst
-  face 13.5 and 6.8 times the peak). At 64 every beam lands in 16 spots ~1.7 m out, 106 % of the
-  lamp's power in the 1.5-2 m band beside -19 % as negative irradiance: the bounded linearUpwind
-  scheme undershoots on either side of each beam (-9 % at 256).
-- **Murthy-Mathur pixelation does not change this.** Every run above except the two marked uses
-  1 x 1 pixels (the template's ``nPixelPhi 1; nPixelTheta 1``). With 3 x 3 the floor error is the
-  same to four figures at both resolutions; the fields differ only at the bunny's snapped cells,
-  by at most 1.7e-4 of the floor's peak and 4.4e-5 of G's maximum, because elsewhere the mesh's
-  faces are axis-aligned and so are the bins' edges, so no bin overhangs a face. At 64 directions
-  3 x 3 pixels cost 23 % more wall time; the 256-direction run's time is void, the host having
-  swapped throughout (8.9 min a sweep against 4.3).
+- **Every DOM run conserves the lamp's power** (its `qin` over all patches sums to 118.8263 mW; the
+  3 x 3 run to 118.8256), so its error is entirely in where the light goes. At 72 directions the most
+  nearly vertical beams leave the lamp 15 degrees from vertical in 12 azimuths and land as 12 spots
+  ~0.8 m from the centre, up to 23 times the true peak over the whole floor; the floor's centre is
+  dark and the bunny absorbs -0.20 mW (the scheme's undershoot), against 4.96 mW direct. At 288 the
+  beams 7.5 and 22.5 degrees off vertical land as a ring at ~0.4 m and 24 spots at ~1.2 m, up to 6.4
+  times the peak, and the bunny absorbs 3.96 mW. **Over the whole floor the error is above the peak at
+  both**: L2 / peak 2.58 at 72 and 1.08 at 288; the central 2 x 2 m holds 48 % and 24 % of the
+  lamp's power against the true 34 %, and the bounded linearUpwind scheme's undershoots beside each
+  beam total -19 % (72) and -12 % (288) of it as negative irradiance.
+- **Murthy-Mathur pixelation does not change this.** At 72 directions 3 x 3 pixels give the same
+  floor error as 1 x 1 to seven figures and cost 6 % more wall time; the fields differ only at the
+  bunny's snapped cells, because elsewhere the mesh's faces are axis-aligned and so are the bins'
+  edges, so no bin overhangs a face. The 288-direction run is 1 x 1 only: 3 x 3 at 256 directions
+  swapped this machine throughout.
 - **The fluence rate agrees the same way.** On the vertical slice aquaflux is 1.3e-4 of the
-  reference's 99th percentile (L2) and on the horizontal 1.2e-6; DOM is 0.012 / 0.004 (64 / 256)
-  vertically and 1.65 / 0.89 on the horizontal slice below the bunny. aquaflux at all 2,461,089
+  reference's 99th percentile (L2) and on the horizontal 1.2e-6; DOM is 0.0051 / 0.0017 (72 / 288)
+  vertically and 1.83 / 0.80 on the horizontal slice below the bunny. aquaflux at all 2,461,089
   cells took 849 s (584 s of it the ray tests against the bunny's 258,008 triangles), with the
   1,120-facet lamp; on the slices, which use the refined lamp, the two lamps differ by under 2.4e-5
   past 1 m in the empty room and by 2.9 % (99th percentile) in the bunny's penumbrae.
 - **The reference is converged**: four times the window samples moves the floor by 3e-8 of the
   peak (empty) and 7e-4 (bunny); against the STL the mesh was snapped to instead of the snapped
   surface, the floor power moves by 0.025 %.
+- **The grid's shape matters as much as its count.** The first runs of this case used `nPhi 8,
+  nTheta 4` (64 directions; polar bins 45 degrees, azimuthal 22.5) and `16 x 8` (256), believed
+  uniform because the tutorial's comment called `nTheta` the bins per hemisphere. At 64 the nearest
+  beams were 22.5 degrees off vertical and landed as 16 spots ~1.7 m out, mostly outside the 1 m
+  window, so the window error (0.77) was lower than the uniform 72's while the whole-floor error was
+  2.03. Those runs are kept in `work/runs_nonuniform/`; nothing reads them.
 
 **Reflecting room** (floor, ceiling and walls diffuse at 0.5, bunny black): aquaflux 4,115 s for
 the floor, both slices and every cell (39 min of it the surface solve at 20 cm squares, with the
 lamp's light on 64,000 points of the room); the room absorbs 113.13 mW and the bunny 5.70 mW (4.96
 direct, 0.73 bounced); the two routes to the slices agree exactly; halving the squares moves the
-reflected floor by at most 5 % of its own peak, under 1 % of the total. DOM at 64 directions took
-11,910 s (57 sweeps), conserves the power exactly, has the bunny absorb 0.35 mW, and is 0.73 of
-aquaflux's floor peak away in L2. **DOM at 256 directions was stopped after 15 sweeps (4 h)**: a
-reflecting sweep cost 16.4 min against 4.3 min in the black room (3.3x at 64 directions, 3.8x at
-256), with ~60 % more sweeps to converge, so it needed an estimated 11-15 more hours. **The 576-direction runs were not made**, by decision: 64 and 256 already show the ray
-effect, at a cost far above aquaflux's.
+reflected floor by at most 5 % of its own peak, under 1 % of the total. DOM at 72 directions took
+14,597 s (65 sweeps; the machine was shared with other work for its first few minutes), conserves the
+power (what the patches absorb sums to the lamp's output), has the bunny absorb 0.85 mW, and is 3.34
+of aquaflux's floor peak away in L2. A reflecting sweep cost 3.7 min against 1.2 min in the black
+room (3.1x), with 76 % more sweeps. **The 288-direction reflecting run was not made**: scaled from
+these it would take about 16 hours, and 72 already shows the ray effect, at a cost far above
+aquaflux's.
