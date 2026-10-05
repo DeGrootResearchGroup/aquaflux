@@ -69,7 +69,7 @@ box = Surfaces.from_triangles(
 )
 model = build_radiation_model(cells, box)
 
-G, cycles = fluence_rate(model, box.with_optics(emission=10.0, reflectance=0.5))
+G, cycles = fluence_rate(model, box.with_optics(emission=10.0, diffuse_reflectance=0.5))
 print(G.min(), G.max(), cycles)    # 80 and 80 to rounding, 3 cycles: G = 4 * 10 / (1 - 0.5)
 ```
 
@@ -101,7 +101,7 @@ geometry = Surfaces.from_triangles(
 )
 surfaces = geometry.with_optics(
     emission=lamp_exitance(geometry, {"lamp": 35.0}),              # a 35 W lamp
-    reflectance=geometry.per_facet({"wall": 0.3}, default=0.0),
+    diffuse_reflectance=geometry.per_facet({"wall": 0.3}, default=0.0),
 )
 cell_centres = mesh.geometry().cell.centroid                       # or any (n, 3) array of points
 model = build_radiation_model(cell_centres, surfaces)
@@ -174,7 +174,7 @@ from a mesh's boundary patch ({func}`~aquaflux.mesh.patch_triangles`), or from a
 - **Optics are set per named body.** {meth}`~aquaflux.radiation.Surfaces.per_facet` expands a
   `{body: value}` mapping into a per-facet array and raises on a body name it does not know, so a
   misspelled `"lmap"` fails rather than emitting nothing.
-  {meth}`~aquaflux.radiation.Surfaces.with_optics` returns a copy with new emission, reflectance,
+  {meth}`~aquaflux.radiation.Surfaces.with_optics` returns a copy with new emission, reflectances,
   power or angular profiles and the same geometry, which is how a study varies them.
 - **A zero-area facet is a point source.** It carries a radiant `power` in watts rather than an
   exitance, emits isotropically — give it the {class}`~aquaflux.radiation.Isotropic` profile, since
@@ -351,7 +351,11 @@ orientation, as it should.
 ⚠️ **Reflection is diffuse.** A reflectance of 0.95 does not say whether a wall scatters in every
 direction or reflects like a mirror, and the two are not close: Hassanpour et al. (2023) measure a
 10–47% spread in log reduction between fully specular and fully diffuse walls at the same
-reflectivity. Supply a reflectance with that assumption in mind.
+reflectivity. That is why a surface set carries the two separately, as `diffuse_reflectance` and
+`specular_reflectance` (which must sum to at most one on each facet). The model carries only the
+diffuse part so far, and **refuses** a surface set with any specular reflectance rather than
+dropping the light it would reflect; until it carries both, give a wall's reflectance as diffuse,
+with that assumption in mind.
 
 ## Build once, solve many
 
@@ -362,7 +366,7 @@ study sweeps is supplied per call:
 
 | frozen at the build | supplied per call |
 |---|---|
-| surface geometry, receiver positions | emission, point-source power, reflectance, profile parameters |
+| surface geometry, receiver positions | emission, point-source power, diffuse reflectance, profile parameters |
 | body shapes (which pairs they block) | body transmittance |
 | the self-shadowing strategy | the medium (`absorption`) |
 
@@ -395,7 +399,8 @@ reverse-mode pass:
 import jax
 
 def mean_fluence_rate(reflectance, coefficient):
-    optics = surfaces.with_optics(reflectance=surfaces.per_facet({"wall": 1.0}, default=0.0) * reflectance)
+    walls = surfaces.per_facet({"wall": 1.0}, default=0.0)
+    optics = surfaces.with_optics(diffuse_reflectance=walls * reflectance)
     G, _ = fluence_rate(model, optics, absorption=UniformAbsorption(coefficient))
     return G.mean()
 

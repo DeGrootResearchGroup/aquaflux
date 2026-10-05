@@ -52,8 +52,10 @@ def test_emission_and_power_are_separate_quantities():
 
 
 def test_a_scalar_property_is_broadcast_to_every_facet():
-    surfaces = Surfaces.from_triangles(np.repeat(RIGHT_TRIANGLE, 4, axis=0), reflectance=0.5)
-    np.testing.assert_allclose(surfaces.reflectance, np.full(4, 0.5))
+    surfaces = Surfaces.from_triangles(
+        np.repeat(RIGHT_TRIANGLE, 4, axis=0), diffuse_reflectance=0.5
+    )
+    np.testing.assert_allclose(surfaces.diffuse_reflectance, np.full(4, 0.5))
 
 
 def test_per_body_properties_expand_to_per_facet_values():
@@ -84,9 +86,9 @@ def test_omitting_a_body_is_refused_unless_a_default_is_given():
 
 
 def test_replacing_the_optics_leaves_the_geometry_identical():
-    surfaces = Surfaces.from_triangles(RIGHT_TRIANGLE, emission=1.0, reflectance=0.2)
-    updated = surfaces.with_optics(reflectance=0.9)
-    np.testing.assert_allclose(updated.reflectance, [0.9])
+    surfaces = Surfaces.from_triangles(RIGHT_TRIANGLE, emission=1.0, diffuse_reflectance=0.2)
+    updated = surfaces.with_optics(diffuse_reflectance=0.9)
+    np.testing.assert_allclose(updated.diffuse_reflectance, [0.9])
     np.testing.assert_allclose(updated.emission, surfaces.emission)
     np.testing.assert_array_equal(np.asarray(updated.vertices), np.asarray(surfaces.vertices))
     np.testing.assert_array_equal(np.asarray(updated.normal), np.asarray(surfaces.normal))
@@ -156,7 +158,7 @@ def test_an_inconsistent_construction_is_refused(kwargs, message):
 
 def test_the_surface_set_is_a_pytree_whose_optics_are_differentiable_leaves():
     """The whole point of the module: a study varies these and differentiates through them."""
-    surfaces = Surfaces.from_triangles(RIGHT_TRIANGLE, emission=1.0, reflectance=0.2)
+    surfaces = Surfaces.from_triangles(RIGHT_TRIANGLE, emission=1.0, diffuse_reflectance=0.2)
 
     def total(emission):
         return jnp.sum(surfaces.with_optics(emission=emission).emission * surfaces.area)
@@ -200,7 +202,7 @@ def test_a_label_outside_the_set_is_refused():
 def test_moving_the_vertices_recomputes_everything_derived_from_them():
     """Substituting the vertices alone would leave centroid, normal and area describing the old
     shape, silently -- nothing downstream can tell a stale normal from a fresh one."""
-    surfaces = Surfaces.from_triangles(RIGHT_TRIANGLE, emission=4.0, reflectance=0.3)
+    surfaces = Surfaces.from_triangles(RIGHT_TRIANGLE, emission=4.0, diffuse_reflectance=0.3)
     doubled = surfaces.with_geometry(np.asarray(RIGHT_TRIANGLE) * 2.0)
     assert float(doubled.area[0]) == pytest.approx(4.0 * float(surfaces.area[0]))
     np.testing.assert_allclose(doubled.centroid[0], np.asarray(surfaces.centroid[0]) * 2.0)
@@ -215,7 +217,7 @@ def test_moving_the_vertices_keeps_the_optics_and_the_labels():
         solid_names=("wall", "lamp"),
         emission=[7.0, 0.0],
         power=[0.0, 35.0],
-        reflectance=0.4,
+        diffuse_reflectance=0.4,
     )
     moved = surfaces.with_geometry(np.asarray(vertices) + np.array([0.0, 0.0, 1.0]))
     np.testing.assert_allclose(moved.emission, surfaces.emission)
@@ -245,3 +247,56 @@ def test_the_vertices_may_be_traced_so_a_source_can_move_under_a_gradient():
 
     assert float(jax.jit(area_of)(jnp.asarray(2.0))) == pytest.approx(12.0)
     assert float(jax.grad(area_of)(jnp.asarray(1.0))) == pytest.approx(6.0)
+
+
+def test_a_facet_reflects_diffusely_and_specularly_in_separate_amounts():
+    """The two are different physics -- one leaves Lambertian, one leaves as a mirror sends it --
+    so a single reflectance cannot carry both, and specular defaults to none."""
+    surfaces = Surfaces.from_triangles(
+        np.repeat(RIGHT_TRIANGLE, 2, axis=0), diffuse_reflectance=0.3
+    )
+    np.testing.assert_array_equal(np.asarray(surfaces.specular_reflectance), [0.0, 0.0])
+    mixed = surfaces.with_optics(specular_reflectance=[0.6, 0.0])
+    np.testing.assert_allclose(mixed.specular_reflectance, [0.6, 0.0])
+    np.testing.assert_allclose(mixed.diffuse_reflectance, [0.3, 0.3])
+
+
+@pytest.mark.parametrize(
+    ("optics", "message"),
+    [
+        ({"diffuse_reflectance": 1.2}, "diffuse_reflectance must lie in"),
+        ({"specular_reflectance": -0.1}, "specular_reflectance must lie in"),
+        ({"diffuse_reflectance": 0.6, "specular_reflectance": 0.5}, "reflects more than arrives"),
+    ],
+)
+def test_a_reflectance_outside_what_a_surface_can_send_back_is_refused(optics, message):
+    """A facet reflecting more than arrives creates light, and the interreflection solve then has
+    no bounded answer. Each case trips only its own branch: every value is in range in the last."""
+    with pytest.raises(ValueError, match=message):
+        Surfaces.from_triangles(RIGHT_TRIANGLE, **optics)
+
+
+def test_replacing_one_reflectance_is_checked_against_the_other_as_it_stands():
+    surfaces = Surfaces.from_triangles(RIGHT_TRIANGLE, diffuse_reflectance=0.7)
+    surfaces.with_optics(specular_reflectance=0.3)
+    with pytest.raises(ValueError, match="reflects more than arrives"):
+        surfaces.with_optics(specular_reflectance=0.4)
+
+
+def test_the_reflectance_check_does_not_block_a_trace():
+    """Inside a trace the values cannot be read, and a check that tried would make every
+    reflectance-dependent result undifferentiable."""
+    surfaces = Surfaces.from_triangles(RIGHT_TRIANGLE)
+
+    def summed(rho_d, rho_s):
+        updated = surfaces.with_optics(diffuse_reflectance=rho_d, specular_reflectance=rho_s)
+        return jnp.sum(updated.diffuse_reflectance + 2.0 * updated.specular_reflectance)
+
+    gradient = jax.grad(summed, argnums=(0, 1))(0.4, 0.2)
+    np.testing.assert_allclose(gradient, (1.0, 2.0))
+
+
+def test_moving_the_vertices_keeps_the_specular_reflectance():
+    surfaces = Surfaces.from_triangles(RIGHT_TRIANGLE, specular_reflectance=0.8)
+    moved = surfaces.with_geometry(np.asarray(RIGHT_TRIANGLE) + 1.0)
+    np.testing.assert_allclose(moved.specular_reflectance, [0.8])

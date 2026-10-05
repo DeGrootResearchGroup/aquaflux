@@ -41,6 +41,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `transfer.py` — the frozen facet-to-facet geometry | **BUILT** |
 | `quadrature.py` — symmetric triangle rules for the receiving facet | **BUILT** |
 | `model.py` — the assembled model and the three public entry points | **BUILT** |
+| `mirrors.py` — `Mirror` (a plane, its aperture facets, reflection and the image of a surface set) and `planar_mirrors` (a body's facets grouped by plane); the reflectance split on `Surfaces` (#537 PR 1, 2026-10-05) | **BUILT** (geometry only; the model refuses specular reflectance until #537 PRs 2-3) |
 | `units.py` — lamp watts to exitance, ultraviolet transmittance to absorbance | **BUILT** |
 
 There is no separate optical-depth piece to build: the voxel-grid traversal is `VoxelAbsorption` in
@@ -284,6 +285,72 @@ it, and the `Profile` methods changed from `(cos_theta)` to `(direction, normal)
 - **The gather passes the unit direction, not the cosine, at no measured cost**: 2,000 Lambertian facets
   x 40,000 receivers, fluence 0.549-0.557 s and irradiance 11.77-11.82 s against `main`'s 0.557 /
   11.82 s, checksums equal to 13 figures (CPU, x64, jax 0.10.2, macOS arm64, separate processes).
+
+## SPECULAR REFLECTION: THE REFLECTANCE SPLIT AND THE MIRRORS (#537 PR 1, 2026-10-05)
+
+The plan, agreed with the user and posted on #537 (comment of 2026-10-05): image sources seen through
+**planar** mirror apertures, one bounce, in four PRs — (1) the optical split and the mirror geometry,
+no result changes; (2) images in the volume gather, unshadowed; (3) the transfer's specular exchange
+terms, the third gathered set and two-leg shadows, which is where specular becomes reachable; (4)
+validation, cost and docs. **Decided with the user**: a mirror is **one plane, not one body**; curved
+specular bodies (a lamp sleeve's exterior, a round vessel) are **out of #537 and moved to #604** — an
+exact path solve on the analytic `solids` body, shared with refraction, because a faceted sleeve is
+~100 planar strips (the Sozzi lamp's OpenCASCADE tessellation: 100 full-length strips, kept coplanar
+by the CAD reader's cutting planes) and at one dense `n x n` transfer term per mirror that is ~45 GB,
+and because a sleeve reflects mostly at its *inner* quartz-air face, with total internal reflection
+above ~47 deg incidence in water, which no outer-surface `rho_s` represents (those two figures are
+estimates from recorded numbers, not measurements). Store the incidence cosine per image pair in PR 3,
+so an angle-dependent (Fresnel) `rho_s` is a later strategy. **Still open, to decide before PR 3**:
+the transfer's storage — `rho_s` live per declared solid (planes summed into one array) or live per
+facet with a sparse store.
+
+**What PR 1 built.**
+- `Surfaces.reflectance` is **gone**: it is `diffuse_reflectance`, beside a new `specular_reflectance`
+  (default 0), both live leaves, on `from_triangles`, `with_optics`, `with_geometry`, `coarsen_surfaces`
+  and `refine_for_receivers`. ⚠️ **There is no `reflectance=` keyword any more**; an old call fails with
+  a `TypeError`. `_check_reflectances` refuses each outside `[0, 1]` and a facet whose two sum past one
+  (concrete values only, numpy, skipped for tracers — the same rule as `in_range`), from both
+  `from_triangles` and `with_optics` (which checks the pair as it stands after the replacement).
+- **The model refuses specular reflectance** (`model._without_specular`, called by `_solve`, so all
+  three entry points): `NotImplementedError` for a non-zero concrete value, and **`TypeError` for a
+  traced one whatever its value**. ⚠️ **The traced refusal is load-bearing, and the first version did
+  not have it**: it checked a traced value with `eqx.error_if`, which passed a zero and so let
+  `jax.grad` with respect to `rho_s` return **0.0** — finite, plausible, and wrong, since a mirror sends
+  light on. A traced `rho_s` arises only from differentiating with respect to it (the model already
+  refuses traced vertices, so a whole traced set never reaches here), so refusing it costs nothing
+  legitimate. The direct gathers ignore both reflectances, as they always did the diffuse one.
+- `vectors.reflect(vectors, normal)` is the one reflection formula (in the plane through the origin).
+- `Profile.mirrored(normal)` is **abstract** on `Profile`: an `AxisymmetricProfile` returns itself; a
+  `PhotometricProfile` reflects `up` **and flips `handedness`** (a new static field, default 1, read in
+  `angles`). ⚠️ **Reflecting `up` alone is wrong**: a reflection reverses handedness, so the image's own
+  `normal x up` is the *negated* reflection of the source's, and every table asymmetric in `h` reads
+  turned the wrong way. Pinned on the `b1` fixture (`sin h` term) against an oblique plane.
+- `Mirror(point, normal, facets)`: `reflect_points`, `reflect_directions`, and `image(surfaces)` —
+  vertices reflected **and two corners swapped**, which together give the reflected outward normal
+  (either alone points the image away from its viewer, and a dark-behind profile then sends nothing);
+  profiles replaced by their `mirrored`; every optical value and label carried. `facets` is a numpy
+  label array, like `profile_index`. `image` decides no visibility: which sources get an image (none
+  in or behind the plane) is PR 2's.
+- `planar_mirrors(surfaces, solids, *, tolerance=None)`: per named body, areal facets only, **largest
+  facet first** seeds a plane; a facet joins when all three corners lie within `tolerance` of the seed's
+  plane **and** it faces the same side (two faces of a thin sheet are two mirrors); the plane is then
+  the area-weighted mean normal and centroid of its members. Default tolerance `1e-6` of the set's
+  extent (`_RELATIVE_TOLERANCE`), above single-precision STL rounding (~6e-8) and below any real step.
+  ⚠️ **Seeding by area is load-bearing**: a sliver in a wall can compute a normal ~89 deg off the wall;
+  seeding from it splits the wall. ⚠️ **Not yet decided**: the plane-count threshold above which a
+  declared specular body is refused (pointing at #604) — set in PR 4 from measured cost, enforced in PR 3.
+
+**Tests**: `tests/unit/test_radiation_mirrors.py` (box = 6 mirrors of 8; a 12- and a 180-sector prism
+is exactly one mirror per strip; float32 rounding keeps a plane and a 1e-3 step splits one; sheet
+sides; per-body grouping and a misspelt name; point sources; the sliver seed; the image's direct field
+at reflected points equals the source's at the points, 1e-12, over Lambertian, `CosinePower`, an
+asymmetric `PhotometricProfile` and a point source; the image's carried properties and its involution),
+plus the reflectance split, its validation and the model's refusals in the surface and model test files.
+**Mutation pass (22, all red)**: winding not reversed, profiles not mirrored, handedness not flipped,
+handedness ignored in `angles`, seeding by index, no orientation test, tolerance 1e-9 and 1e-2, bodies
+grouped together, point sources grouped, an off-plane point, no sum check, no range check,
+`with_optics` unchecked, `with_geometry` dropping `rho_s`, the concrete and the traced refusals each
+removed, `reflect` with factor one, coarsening reading `rho_s` from `rho_d`, subdivision dropping it.
 
 ## The clamp is a GATE, not a factor — and the difference is a factor of two or a zero
 

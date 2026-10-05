@@ -64,7 +64,9 @@ def media():
 def main():
     radius, half_length, sectors, slices = LAMP
     lamp = Surfaces.from_triangles(
-        cylinder_triangles(radius, half_length, sectors, slices), emission=696.42, reflectance=0.3
+        cylinder_triangles(radius, half_length, sectors, slices),
+        emission=696.42,
+        diffuse_reflectance=0.3,
     )
     rng = np.random.default_rng(0)
     points = receivers(rng, N_RECEIVERS)

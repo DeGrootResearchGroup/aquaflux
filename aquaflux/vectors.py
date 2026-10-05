@@ -1,13 +1,14 @@
-"""Vector algebra on fields of vectors: per-element dot products, magnitudes, and scaling.
+"""Vector algebra on fields of vectors: dot products, magnitudes, scaling and reflection.
 
 Finite-volume kernels work with *fields* of small spatial vectors — one ``(dim,)`` vector per
 face or per cell, stored as a ``(..., dim)`` array whose leading axes index the faces/cells and
 whose last axis holds the spatial components. The elementary operations on such a field — the
-per-element dot product ``a·b``, the squared magnitude ``|a|²``, and scaling each vector by a
-per-element scalar — recur throughout the geometry, the reconstruction schemes, and the flux
-operators. Spelled out each time as ``jnp.sum(a * b, axis=-1)`` or ``s[..., None] * v`` they bury
-the intent under axis and broadcasting bookkeeping, so they are defined once here and imported
-wherever a vector field is contracted or scaled. Because they are written here and nowhere else,
+per-element dot product ``a·b``, the squared magnitude ``|a|²``, scaling each vector by a
+per-element scalar, and reflecting each vector in a plane — recur throughout the geometry, the
+reconstruction schemes, the flux operators and the radiation model's mirror images. Spelled out
+each time as ``jnp.sum(a * b, axis=-1)`` or ``s[..., None] * v`` they bury the intent under axis
+and broadcasting bookkeeping, so they are defined once here and imported wherever a vector field
+is contracted or scaled. Because they are written here and nowhere else,
 *how* each is spelled is decided once rather than at every call site — :func:`dot` in particular is
 deliberately not the reduction a reader would reach for first, for the reason its own docstring
 gives.
@@ -105,3 +106,30 @@ def scale(vectors: jnp.ndarray, scalars: jnp.ndarray) -> jnp.ndarray:
         The scaled vector field, shape ``(..., dim)``.
     """
     return scalars[..., None] * vectors
+
+
+def reflect(vectors: jnp.ndarray, normal: jnp.ndarray) -> jnp.ndarray:
+    """Reflect each vector in the plane through the origin with unit normal ``normal``.
+
+    ``v - 2 (v·n) n``: the component along the normal is reversed and the rest is kept. Applied
+    to a direction it gives the mirror image of that direction; applied to a position it reflects
+    in a plane **through the origin**, so a plane elsewhere is reflected in by offsetting the
+    position to a point on the plane first and back afterwards. Applying it twice returns the
+    input, and it preserves dot products between the vectors it reflects -- but it reverses
+    handedness, so the cross product of two reflected vectors is the *negated* reflection of
+    their cross product.
+
+    Parameters
+    ----------
+    vectors : jnp.ndarray
+        Vector field, shape ``(..., dim)``.
+    normal : jnp.ndarray
+        Unit normal of the plane, shape ``(dim,)`` or broadcasting against ``vectors``. Not
+        normalized here: a normal of any other length reflects nothing correctly.
+
+    Returns
+    -------
+    jnp.ndarray
+        The reflected field, shape ``(..., dim)``.
+    """
+    return vectors - scale(jnp.broadcast_to(normal, jnp.shape(vectors)), 2.0 * dot(vectors, normal))

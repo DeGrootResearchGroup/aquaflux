@@ -21,7 +21,7 @@ ROD = Cylinder(centre=[0, 0, 0], axis=[0, 1, 0], radius=0.3, half_length=4.0)
 
 def _effective(n: int, occluders) -> tuple[np.ndarray, np.ndarray]:
     """The transfer a solve uses: frozen geometry times the live mask, bodies fully opaque."""
-    surfaces = Surfaces.from_triangles(facing_plates(n), emission=1.0, reflectance=0.0)
+    surfaces = Surfaces.from_triangles(facing_plates(n), emission=1.0, diffuse_reflectance=0.0)
     transfer = build_transfer(surfaces, occluders=occluders, self_occlusion=NoOcclusion())
     reflected, _ = transfer.assemble(
         surfaces, transmittance=np.zeros(len(occluders)) if occluders else None

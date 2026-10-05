@@ -133,3 +133,9 @@ def test_the_exponent_is_a_differentiable_leaf():
     assert jnp.isfinite(gradient)
     assert float(gradient) != 0.0
     assert jax.tree_util.tree_leaves(CosinePower(3.0))
+
+
+@pytest.mark.parametrize("profile", [Lambertian(), CosinePower(5.0), Isotropic()])
+def test_a_distribution_of_the_angle_from_the_normal_alone_is_its_own_mirror_image(profile):
+    """A reflection keeps the angle between a direction and the normal, so nothing changes."""
+    assert profile.mirrored(jnp.asarray([0.0, 0.6, 0.8])) is profile

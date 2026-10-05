@@ -1,4 +1,4 @@
-"""Unit tests for the vector-field algebra helpers (dot / norm_squared / scale)."""
+"""Unit tests for the vector-field algebra helpers (dot / norm_squared / scale / reflect)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.vectors import dot, norm_squared, scale
+from aquaflux.vectors import dot, norm_squared, reflect, scale
 
 
 def test_dot_matches_reference_per_face():
@@ -130,3 +130,40 @@ def test_dot_of_numpy_operands_still_returns_a_jax_array():
     assert isinstance(got, jax.Array), type(got)
     assert hasattr(got, "at")
     np.testing.assert_allclose(got, np.sum(a * b, axis=-1))
+
+
+def test_reflect_reverses_the_normal_component_and_keeps_the_rest():
+    normal = jnp.asarray([0.0, 0.6, 0.8])
+    vectors = jnp.asarray([[1.0, 2.0, 3.0], [0.0, 0.6, 0.8], [5.0, 0.8, -0.6]])
+    expected = np.asarray(vectors) - 2.0 * (np.asarray(vectors) @ np.asarray(normal))[:, None] * (
+        np.asarray(normal)
+    )
+    got = reflect(vectors, normal)
+    assert got.shape == (3, 3)
+    np.testing.assert_allclose(got, expected, atol=1e-15)
+    # The normal itself is reversed and a vector in the plane is left exactly where it was.
+    np.testing.assert_allclose(got[1], -np.asarray(normal), atol=1e-15)
+    np.testing.assert_allclose(got[2], vectors[2], atol=1e-15)
+
+
+def test_reflect_is_its_own_inverse_keeps_dot_products_and_reverses_handedness():
+    rng = np.random.default_rng(3)
+    normal = rng.normal(size=3)
+    normal /= np.linalg.norm(normal)
+    a, b = jnp.asarray(rng.normal(size=(2, 7, 3)))
+    np.testing.assert_allclose(reflect(reflect(a, normal), normal), a, atol=1e-14)
+    np.testing.assert_allclose(dot(reflect(a, normal), reflect(b, normal)), dot(a, b), atol=1e-13)
+    np.testing.assert_allclose(
+        jnp.cross(reflect(a, normal), reflect(b, normal)),
+        -reflect(jnp.cross(a, b), normal),
+        atol=1e-13,
+    )
+
+
+def test_reflect_broadcasts_a_batch_against_one_normal():
+    normal = jnp.asarray([1.0, 0.0, 0.0])
+    field = jnp.arange(2 * 4 * 3, dtype=float).reshape(2, 4, 3)
+    got = reflect(field, normal)
+    assert got.shape == (2, 4, 3)
+    np.testing.assert_allclose(got[..., 0], -field[..., 0])
+    np.testing.assert_allclose(got[..., 1:], field[..., 1:])

@@ -60,7 +60,7 @@ def test_a_uniform_closed_box_reaches_its_closed_form(reflectance, divisions):
     is only because the row sums are.
     """
     exitance = 3.0
-    surfaces = box(divisions, emission=exitance, reflectance=reflectance)
+    surfaces = box(divisions, emission=exitance, diffuse_reflectance=reflectance)
     outgoing, _ = radiosity(surface_model(surfaces), surfaces)
     np.testing.assert_allclose(np.asarray(outgoing), exitance / (1.0 - reflectance), rtol=1e-12)
 
@@ -82,7 +82,7 @@ def test_a_closed_box_reaches_its_closed_form_AT_THE_DEFAULT_SETTINGS():
     So this test is deliberately the one that takes :class:`RadiationSettings` as it comes.
     """
     exitance, reflectance = 3.0, 0.9
-    surfaces = box(2, emission=exitance, reflectance=reflectance)
+    surfaces = box(2, emission=exitance, diffuse_reflectance=reflectance)
     model = build_radiation_model(np.zeros((0, 3)), surfaces)
     assert model.settings.self_occlusion is None, "the point of this test is the default"
     outgoing, _ = radiosity(model, surfaces)
@@ -92,7 +92,7 @@ def test_a_closed_box_reaches_its_closed_form_AT_THE_DEFAULT_SETTINGS():
 def test_the_radiosity_of_a_convex_enclosure_ignores_the_shadow_mask():
     """The other side of the same fact, one layer up: a box shadows nothing, so switching the
     mask on must move the solved radiosity by exactly zero rather than merely by a little."""
-    surfaces = box(2, emission=3.0, reflectance=0.9)
+    surfaces = box(2, emission=3.0, diffuse_reflectance=0.9)
     shadowed, _ = radiosity(surface_model(surfaces, self_occlusion=RayCastOcclusion()), surfaces)
     clear, _ = radiosity(surface_model(surfaces), surfaces)
     np.testing.assert_array_equal(np.asarray(shadowed), np.asarray(clear))
@@ -101,7 +101,7 @@ def test_the_radiosity_of_a_convex_enclosure_ignores_the_shadow_mask():
 def test_the_irradiance_matches_what_the_radiosity_implies():
     """``B = M + rho H`` must hold facet by facet, or the two are computing different systems."""
     exitance, reflectance = 3.0, 0.7
-    surfaces = box(2, emission=exitance, reflectance=reflectance)
+    surfaces = box(2, emission=exitance, diffuse_reflectance=reflectance)
     model = surface_model(surfaces)
     outgoing, _ = radiosity(model, surfaces)
     landing, _ = surface_irradiance(model, surfaces)
@@ -114,7 +114,7 @@ def test_the_bounce_count_is_not_a_parameter():
     """The inverse *is* the infinite bounce sum, so the solve must match a long Neumann series
     and must not match a short one."""
     reflectance = 0.8
-    surfaces = box(2, emission=1.0, reflectance=reflectance)
+    surfaces = box(2, emission=1.0, diffuse_reflectance=reflectance)
     model = surface_model(surfaces)
     exact, _ = radiosity(model, surfaces)
 
@@ -133,7 +133,7 @@ def test_the_bounce_count_is_not_a_parameter():
 
 
 def test_an_external_irradiance_is_reflected_like_any_other_arrival():
-    surfaces = box(1, emission=0.0, reflectance=0.5)
+    surfaces = box(1, emission=0.0, diffuse_reflectance=0.5)
     model = surface_model(surfaces)
     lit = np.full(surfaces.n_facets, 2.0)
     outgoing, _ = radiosity(model, surfaces, external_irradiance=lit)
@@ -165,7 +165,7 @@ def test_a_body_in_the_way_removes_the_transfer_across_it():
             rectangle_triangles([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
         ]
     )
-    surfaces = Surfaces.from_triangles(facing, emission=1.0, reflectance=0.5)
+    surfaces = Surfaces.from_triangles(facing, emission=1.0, diffuse_reflectance=0.5)
     clear = surface_model(surfaces)
     blocked = surface_model(
         surfaces,
@@ -185,7 +185,7 @@ def test_a_body_in_the_way_removes_the_transfer_across_it():
 def test_a_lambertian_source_transfers_its_emission_exactly_as_it_transfers_a_reflection():
     """The reduction that pins the profile constants: for a Lambertian emitter the emitted and
     reflected model matrices are the same matrix, so the whole default path collapses to one."""
-    surfaces = box(2, emission=1.0, reflectance=0.6)
+    surfaces = box(2, emission=1.0, diffuse_reflectance=0.6)
     model = surface_model(surfaces)
     reflected, emitted = model.transfer.assemble(surfaces)
     assert reflected is emitted
@@ -224,7 +224,7 @@ def test_a_narrow_source_sends_its_emission_where_its_profile_says(exponent):
     surfaces = Surfaces.from_triangles(
         np.concatenate([emitter, receiver]),
         emission=[exitance, exitance, 0.0, 0.0],
-        reflectance=0.0,
+        diffuse_reflectance=0.0,
         profiles=(CosinePower(exponent),),
     )
     np.testing.assert_allclose(np.asarray(surfaces.normal)[[0, 2]], [facing, sideways], atol=1e-12)
@@ -262,8 +262,8 @@ def test_only_a_lambertian_source_balances_its_energy_exactly(exponent):
     refinement and every rule. What does shrink this error is refining the mesh, which samples
     more directions.
     """
-    surfaces = box(1, emission=1.0, reflectance=0.0, profiles=(CosinePower(exponent),))
-    fine = box(4, emission=1.0, reflectance=0.0, profiles=(CosinePower(exponent),))
+    surfaces = box(1, emission=1.0, diffuse_reflectance=0.0, profiles=(CosinePower(exponent),))
+    fine = box(4, emission=1.0, diffuse_reflectance=0.0, profiles=(CosinePower(exponent),))
 
     def balance(facets):
         landing, _ = surface_irradiance(surface_model(facets), facets)
@@ -319,7 +319,7 @@ def test_a_second_solve_of_the_same_size_reuses_the_compiled_program(monkeypatch
 
     jax.clear_caches()
     monkeypatch.setattr(model_module, "solve_linear", watched)
-    surfaces = _lit_box(reflectance=0.6)
+    surfaces = _lit_box(diffuse_reflectance=0.6)
     model = surface_model(surfaces)
     first, _ = radiosity(model, surfaces)
     second, _ = radiosity(
@@ -330,11 +330,11 @@ def test_a_second_solve_of_the_same_size_reuses_the_compiled_program(monkeypatch
 
 
 def test_the_gradient_in_reflectance_is_exact():
-    surfaces = _lit_box(reflectance=0.6)
+    surfaces = _lit_box(diffuse_reflectance=0.6)
     model = surface_model(surfaces)
 
     def total(reflectance):
-        outgoing, _ = radiosity(model, surfaces.with_optics(reflectance=reflectance))
+        outgoing, _ = radiosity(model, surfaces.with_optics(diffuse_reflectance=reflectance))
         return jnp.sum(outgoing)
 
     gradient = float(jax.grad(total)(jnp.asarray(0.6)))
@@ -343,7 +343,7 @@ def test_the_gradient_in_reflectance_is_exact():
 
 
 def test_the_gradient_in_emission_is_exact():
-    surfaces = _lit_box(reflectance=0.6)
+    surfaces = _lit_box(diffuse_reflectance=0.6)
     model = surface_model(surfaces)
     base = jnp.asarray(surfaces.emission)
 
@@ -379,7 +379,7 @@ def test_the_adjoint_conserves_light_through_every_facet(field):
     """
     reflectance = 0.9
     emission = np.random.default_rng(1).uniform(0.0, 2.0, 48)
-    surfaces = stretched_box(2, emission=emission, reflectance=reflectance)
+    surfaces = stretched_box(2, emission=emission, diffuse_reflectance=reflectance)
     interior = np.array([[0.3, 0.4, 0.5], [0.7, 0.2, 1.7], [0.5, 0.5, 2.8]])  # box is 1 x 1 x 3
     model = build_radiation_model(
         interior, surfaces, settings=RadiationSettings(self_occlusion=NoOcclusion())
@@ -401,7 +401,7 @@ def test_the_adjoint_conserves_light_through_every_facet(field):
 def test_the_gradient_reaches_an_occluder_s_transmittance_through_the_solve():
     """One of the two ways this split has been got wrong. Freezing the visibility inside the
     geometry term leaves a finite, plausible number here that is short by about two thirds."""
-    surfaces = _lit_box(reflectance=0.6)
+    surfaces = _lit_box(diffuse_reflectance=0.6)
     model = surface_model(
         surfaces,
         occluders=[Cylinder(centre=[0.5, 0.5, 0.5], axis=[0, 0, 1], radius=0.2, half_length=0.3)],
@@ -420,7 +420,7 @@ def test_the_gradient_reaches_an_occluder_s_transmittance_through_the_solve():
 def test_the_gradient_reaches_the_absorption_coefficient_through_the_solve():
     """The other one. Freezing the whole model matrix costs a few percent of this and leaves
     the rest looking healthy."""
-    surfaces = _lit_box(reflectance=0.6)
+    surfaces = _lit_box(diffuse_reflectance=0.6)
     model = surface_model(surfaces)
 
     def total(coefficient):
@@ -433,7 +433,7 @@ def test_the_gradient_reaches_the_absorption_coefficient_through_the_solve():
 
 
 def test_the_gradient_reaches_a_source_s_profile_parameter():
-    surfaces = _lit_box(reflectance=0.6, profiles=(CosinePower(3.0),))
+    surfaces = _lit_box(diffuse_reflectance=0.6, profiles=(CosinePower(3.0),))
     model = surface_model(surfaces)
 
     def total(exponent):
@@ -454,14 +454,14 @@ def test_the_gradient_does_not_depend_on_how_hard_the_solve_worked():
     counts are asserted to differ, because a test whose two arms take the same path compares a
     configuration against itself.
     """
-    surfaces = _lit_box(reflectance=0.9)
+    surfaces = _lit_box(diffuse_reflectance=0.9)
     model = surface_model(surfaces)
 
     def make(restart):
         def total(reflectance):
             outgoing, _ = radiosity(
                 model,
-                surfaces.with_optics(reflectance=reflectance),
+                surfaces.with_optics(diffuse_reflectance=reflectance),
                 solver=relative_residual_gmres(1e-12, restart=restart),
             )
             return jnp.sum(outgoing)
@@ -483,7 +483,7 @@ def test_the_gradient_does_not_depend_on_how_hard_the_solve_worked():
 def test_the_expensive_geometry_is_frozen():
     """The solid angles are the ``n^2`` build, and nothing that varies per evaluation may force
     it again — so they carry no derivative with respect to where the facets are."""
-    surfaces = _lit_box(reflectance=0.6)
+    surfaces = _lit_box(diffuse_reflectance=0.6)
     model = surface_model(surfaces)
     gradient = jax.grad(lambda matrix: jnp.sum(matrix))(model.transfer.geometric)
     assert gradient.shape == model.transfer.geometric.shape
@@ -513,7 +513,7 @@ def _lamp_in_a_dark_box():
     vertices = inward_box(2)
     emission = np.zeros(len(vertices))
     emission[:4] = 100.0
-    return Surfaces.from_triangles(vertices, emission=emission, reflectance=0.9)
+    return Surfaces.from_triangles(vertices, emission=emission, diffuse_reflectance=0.9)
 
 
 def test_a_lamp_among_dark_walls_lights_all_of_them():
@@ -558,12 +558,14 @@ def test_integrating_the_receiver_is_what_keeps_a_fine_mesh_conservative():
     vertices = inward_box(4)
     emission = np.zeros(len(vertices))
     emission[:4] = 100.0
-    surfaces = Surfaces.from_triangles(vertices, emission=emission, reflectance=0.9)
+    surfaces = Surfaces.from_triangles(vertices, emission=emission, diffuse_reflectance=0.9)
 
     assert _absorbed_over_emitted(surfaces, 6) == pytest.approx(1.0, rel=1e-3)
     assert abs(_absorbed_over_emitted(surfaces, 1) - 1.0) > 1e-2, "the one-point rule was fine?"
 
-    everywhere = Surfaces.from_triangles(vertices, emission=np.ones(len(vertices)), reflectance=0.9)
+    everywhere = Surfaces.from_triangles(
+        vertices, emission=np.ones(len(vertices)), diffuse_reflectance=0.9
+    )
     assert _absorbed_over_emitted(everywhere, 1) == pytest.approx(1.0, rel=1e-9)
 
 
@@ -662,7 +664,7 @@ def test_a_model_can_be_built_with_the_silhouette_strategy():
     """
     sleeve = closed_drum(8, radius=0.15, half_height=0.3) + np.array([0.5, 0.5, 0.5])
     surfaces = Surfaces.from_triangles(
-        np.concatenate([inward_box(2), sleeve]), emission=1.0, reflectance=0.5
+        np.concatenate([inward_box(2), sleeve]), emission=1.0, diffuse_reflectance=0.5
     )
     receivers = np.array([[0.2, 0.5, 0.5], [0.8, 0.5, 0.5], [0.5, 0.2, 0.3], [0.5, 0.8, 0.7]])
     model = build_radiation_model(
@@ -691,7 +693,7 @@ def test_the_gather_pair_limit_reaches_the_gather():
     a delivered setting from a discarded one — every value passes. The second half asks the
     gather for a chunk it refuses, which only raises if the number got there.
     """
-    surfaces = box(2, emission=3.0, reflectance=0.5)
+    surfaces = box(2, emission=3.0, diffuse_reflectance=0.5)
     points = np.array([[0.5, 0.5, 0.5], [0.2, 0.3, 0.7], [0.9, 0.1, 0.5], [0.4, 0.8, 0.2]])
     whole, _ = fluence_rate(_volume_model(surfaces, points), surfaces)
     in_threes = _volume_model(surfaces, points, gather_pair_limit=3 * surfaces.n_facets)
@@ -711,7 +713,7 @@ def test_the_two_masks_are_built_against_the_same_bodies():
     none — the field comes out lit through a lamp sleeve the surface solve correctly treated as
     opaque, and nothing in either half looks wrong on its own.
     """
-    surfaces = box(2, emission=1.0, reflectance=0.5)
+    surfaces = box(2, emission=1.0, diffuse_reflectance=0.5)
     sleeve = Cylinder(centre=[0.5, 0.5, 0.5], axis=[0, 0, 1], radius=0.2, half_length=0.4)
     behind = np.array([[0.9, 0.5, 0.5]])
     model = _volume_model(surfaces, behind, occluders=[sleeve])
@@ -755,7 +757,7 @@ def test_the_field_inside_a_uniform_closed_box_is_four_times_its_radiosity(refle
     field rather than an error. The direct gather is evaluated here to show exactly that.
     """
     exitance = 3.0
-    surfaces = box(2, emission=exitance, reflectance=reflectance)
+    surfaces = box(2, emission=exitance, diffuse_reflectance=reflectance)
     model = _volume_model(surfaces, INSIDE_THE_BOX)
     field, _ = fluence_rate(model, surfaces)
     np.testing.assert_allclose(np.asarray(field), 4.0 * exitance / (1.0 - reflectance), rtol=1e-12)
@@ -779,7 +781,7 @@ def test_what_a_facet_reflects_leaves_lambertian_whatever_it_emitted_like():
     factor of two, and no longer even uniform across the enclosure.
     """
     reflectance, arriving = 0.9, 2.0
-    surfaces = box(2, emission=0.0, reflectance=reflectance, profiles=(CosinePower(8.0),))
+    surfaces = box(2, emission=0.0, diffuse_reflectance=reflectance, profiles=(CosinePower(8.0),))
     model = _volume_model(surfaces, INSIDE_THE_BOX)
     lit = np.full(surfaces.n_facets, arriving)
 
@@ -803,7 +805,7 @@ def _lamp_in_a_box(reflectance, divisions=2):
     return Surfaces.from_triangles(
         vertices,
         power=[0.0] * (n_facets - 1) + [10.0],
-        reflectance=[reflectance] * (n_facets - 1) + [0.0],
+        diffuse_reflectance=[reflectance] * (n_facets - 1) + [0.0],
         profiles=(Lambertian(), Isotropic()),
         profile_index=[0] * (n_facets - 1) + [1],
     )
@@ -881,7 +883,7 @@ def test_the_field_comes_back_in_the_receivers_own_order():
 def test_a_body_in_the_way_darkens_the_cells_behind_it():
     """The receiver mask is live in the transmittance, so a sleeve can be opened and closed
     without rebuilding the ``n^2`` geometry — and closing it must actually remove light."""
-    surfaces = box(2, emission=3.0, reflectance=0.0)
+    surfaces = box(2, emission=3.0, diffuse_reflectance=0.0)
     sleeve = Cylinder(centre=[0.5, 0.5, 0.5], axis=[0, 0, 1], radius=0.2, half_length=0.4)
     model = _volume_model(surfaces, np.array([[0.9, 0.5, 0.5]]), occluders=[sleeve])
     opaque, _ = fluence_rate(model, surfaces, transmittance=[0.0])
@@ -903,10 +905,10 @@ def test_the_field_compiles_with_the_model_closed_over():
     model = _volume_model(surfaces, AROUND_THE_LAMP, occluders=[sleeve])
 
     def field(reflectance, transmittance):
-        lit = surfaces.with_optics(reflectance=reflectance)
+        lit = surfaces.with_optics(diffuse_reflectance=reflectance)
         return fluence_rate(model, lit, transmittance=transmittance)[0]
 
-    values = (jnp.asarray(surfaces.reflectance), jnp.asarray([0.3]))
+    values = (jnp.asarray(surfaces.diffuse_reflectance), jnp.asarray([0.3]))
     np.testing.assert_allclose(
         np.asarray(jax.jit(field)(*values)), np.asarray(field(*values)), rtol=1e-12
     )
@@ -915,11 +917,11 @@ def test_the_field_compiles_with_the_model_closed_over():
 def test_the_gradient_of_the_field_in_reflectance_is_exact():
     """The whole point of the package: a derivative that reaches through the interreflection
     solve *and* the volume gather, not merely through one of them."""
-    surfaces = _lit_box(reflectance=0.6)
+    surfaces = _lit_box(diffuse_reflectance=0.6)
     model = _volume_model(surfaces, INSIDE_THE_BOX)
 
     def total(reflectance):
-        field, _ = fluence_rate(model, surfaces.with_optics(reflectance=reflectance))
+        field, _ = fluence_rate(model, surfaces.with_optics(diffuse_reflectance=reflectance))
         return jnp.sum(field)
 
     gradient = float(jax.grad(total)(jnp.asarray(0.6)))
@@ -943,7 +945,7 @@ def test_a_surface_set_moved_after_the_build_is_refused(call):
     refused as surely as a large one: the comparison is exact, because a legitimate call carries
     the build's own vertex array.
     """
-    surfaces = box(2, emission=1.0, reflectance=0.5)
+    surfaces = box(2, emission=1.0, diffuse_reflectance=0.5)
     model = build_radiation_model(
         np.array([[0.4, 0.5, 0.6]]),
         surfaces,
@@ -958,14 +960,14 @@ def test_a_surface_set_moved_after_the_build_is_refused(call):
 def test_a_surface_set_of_another_size_is_refused_with_the_same_explanation(call):
     """A different facet count is reported as the wrong geometry, by every entry point, rather
     than surfacing as a shape error from somewhere inside the solve."""
-    model = surface_model(box(2, emission=1.0, reflectance=0.5))
+    model = surface_model(box(2, emission=1.0, diffuse_reflectance=0.5))
     with pytest.raises(ValueError, match=r"\(108 facets given, 48 built\)"):
-        call(model, box(3, emission=1.0, reflectance=0.5))
+        call(model, box(3, emission=1.0, diffuse_reflectance=0.5))
 
 
 def test_new_optics_on_the_build_geometry_are_accepted():
     """The cheap path the refusal points at: same vertex array, different emission."""
-    surfaces = box(2, emission=1.0, reflectance=0.5)
+    surfaces = box(2, emission=1.0, diffuse_reflectance=0.5)
     model = surface_model(surfaces)
     brighter, _ = radiosity(
         model, surfaces.with_optics(emission=2.0 * jnp.asarray(surfaces.emission))
@@ -996,7 +998,7 @@ def test_traced_vertices_are_refused_because_the_transfer_would_not_follow_them(
     over rebuilt models. Traced vertices also cannot be fingerprinted, so every entry point refuses
     them and names the function that does take a position derivative.
     """
-    surfaces = box(2, emission=1.0, reflectance=0.5)
+    surfaces = box(2, emission=1.0, diffuse_reflectance=0.5)
     model = build_radiation_model(
         np.array([[0.4, 0.5, 0.6]]),
         surfaces,
@@ -1015,13 +1017,52 @@ def test_traced_vertices_are_refused_because_the_transfer_would_not_follow_them(
 def test_a_traced_optic_on_the_build_geometry_is_still_differentiated():
     """The refusal is of traced vertices only: optics substituted inside the trace, on the
     build's own vertex array, are what every sensitivity through the model is taken on."""
-    surfaces = box(2, emission=1.0, reflectance=0.5)
+    surfaces = box(2, emission=1.0, diffuse_reflectance=0.5)
     model = surface_model(surfaces)
 
     def total(rho):
-        field, _ = radiosity(model, surfaces.with_optics(reflectance=rho))
+        field, _ = radiosity(model, surfaces.with_optics(diffuse_reflectance=rho))
         return jnp.sum(field)
 
     # B = M / (1 - rho) on a uniform closed box, so dB/drho = M / (1 - rho)^2 on every facet.
     expected = surfaces.n_facets * 1.0 / (1.0 - 0.5) ** 2
     assert float(jax.grad(total)(jnp.asarray(0.5))) == pytest.approx(expected, rel=1e-8)
+
+
+# ---------------------------------------------------------------------------------------
+# Specular reflectance, which the model does not carry yet
+# ---------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("call", [radiosity, surface_irradiance, fluence_rate])
+def test_a_specular_reflectance_is_refused_rather_than_dropped(call):
+    """A mirror the model does not carry would send nowhere the light it reflects, leaving a
+    field darker than the walls make it -- and a darker field looks like a result. One facet is
+    enough to be refused, and a set without any is answered as before."""
+    surfaces = box(2, emission=1.0, diffuse_reflectance=0.5)
+    model = build_radiation_model(
+        np.full((1, 3), 0.5), surfaces, settings=RadiationSettings(self_occlusion=NoOcclusion())
+    )
+    call(model, surfaces)
+    mirrored = np.zeros(surfaces.n_facets)
+    mirrored[5] = 0.2
+    with pytest.raises(NotImplementedError, match="does not yet carry specular reflection"):
+        call(model, surfaces.with_optics(specular_reflectance=mirrored))
+
+
+def test_a_traced_specular_reflectance_is_refused_even_at_zero():
+    """It is traced only when something differentiates with respect to it, and this model's
+    derivative there would be zero -- finite, plausible, and wrong, since a mirror sends light
+    on. So the trace is refused before any value is read, while the diffuse reflectance beside it
+    stays differentiable."""
+    surfaces = box(2, emission=1.0, diffuse_reflectance=0.5)
+    model = surface_model(surfaces)
+
+    def total(diffuse, specular):
+        optics = surfaces.with_optics(diffuse_reflectance=diffuse, specular_reflectance=specular)
+        outgoing, _ = radiosity(model, optics)
+        return jnp.sum(outgoing)
+
+    assert float(jax.grad(total)(0.5, 0.0)) > 0.0
+    with pytest.raises(TypeError, match="specular_reflectance is traced"):
+        jax.grad(total, argnums=1)(0.5, 0.0)
