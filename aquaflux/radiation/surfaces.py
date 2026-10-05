@@ -73,9 +73,8 @@ class Surfaces(eqx.Module):
     specular_reflectance : jnp.ndarray, shape ``(n_facets,)``
         The share it sends back out as a mirror does, along the reflection of the direction it
         arrived from: ``rho_s`` in ``[0, 1]``, with ``rho_d + rho_s <= 1``. Differentiable.
-        **Not yet carried by the radiation model**, which refuses a non-zero or traced value
-        rather than dropping the light it would reflect; a mirror's geometry is
-        :class:`~aquaflux.radiation.mirrors.Mirror`.
+        Carried by the radiation model only on bodies named as specular when it is built, one
+        value per body; a mirror's geometry is :class:`~aquaflux.radiation.mirrors.Mirror`.
     solid_names : tuple of str
         Body names in :attr:`solid_id` order (static metadata, not a leaf).
     profiles : tuple of Profile

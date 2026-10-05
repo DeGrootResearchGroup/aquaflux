@@ -35,16 +35,20 @@ reciprocity. Eliminating ``H`` gives
 ``(I - diag(rho) F) B = M + rho * ((F^M - F) M + H_point + H_external)``, which is what is
 actually solved.
 
-⚠️ **Reflection here is purely DIFFUSE.** A wall described only by the number 0.95 could scatter
-that light in every direction or send it off like a mirror, and the two are not close:
+⚠️ **Reflection is DIFFUSE unless a body is named as specular.** A wall described only by the
+number 0.95 could scatter that light in every direction or send it off like a mirror, and the two
+are not close:
 Hassanpour et al. (2023) measure a **10-47% spread in log reduction between fully specular and
 fully diffuse walls at the same reflectivity of 0.95**. Diffuse is the right default rather than
 merely the convenient one — Li et al. (2017) find that diffuse reflection raises the
 reduction-equivalent fluence above specular, and the measurement literature emphasizes it — but
 the assumption belongs beside the number, which is why a surface set carries
-``diffuse_reflectance`` and ``specular_reflectance`` separately. This module carries only the
-first, and **refuses** a surface set with any of the second rather than dropping the light a
-mirror would send on, which would leave a field darker than its walls make it.
+``diffuse_reflectance`` and ``specular_reflectance`` separately. The second is carried only for
+bodies named in ``specular`` when the model is built: each is split into its flat planes, and one
+bounce in them reaches the other facets through the transfer and the volume through mirror
+images (:mod:`~aquaflux.radiation.images`). A specular reflectance on any other body is
+**refused** rather than dropped, which would leave a field darker than its walls make it, and so
+is a specular body in a scene where anything could shadow a reflected path.
 
 **Occluder geometry is a build argument; occluder transmittance is a call argument.** The split
 is by when the value is needed rather than by what it describes: the shadow mask is frozen

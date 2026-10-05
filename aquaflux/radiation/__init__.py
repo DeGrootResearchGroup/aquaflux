@@ -70,11 +70,12 @@ respect to mesh-node positions gets no contribution from the fluence rate.
   to 25% above it. So for water this is a model for lower transmittances — wastewater, or the
   70% water of the Sozzi & Taghipour (2006) reactor benchmark — and carries a systematic error of
   that size at drinking-water transmittances.
-- **Specular reflection.** Walls reflect diffusely. At the same reflectivity, fully specular and
-  fully diffuse walls have been measured 10–47% apart in log reduction (Hassanpour et al., 2023),
-  so a reflectance is only half a description of a wall. A surface set already carries the two
-  halves separately; the model refuses a non-zero ``specular_reflectance`` rather than drop the
-  light it would reflect, and :class:`Mirror` holds the planes a specular wall reflects in.
+- **Specular reflection beyond one flat bounce in an unshadowed scene.** At the same
+  reflectivity, fully specular and fully diffuse walls have been measured 10–47% apart in log
+  reduction (Hassanpour et al., 2023), so a surface set carries ``diffuse_reflectance`` and
+  ``specular_reflectance`` separately. Bodies named as specular when the model is built reflect
+  one bounce as flat mirrors (:class:`Mirror`); a model with specular bodies is refused if
+  anything could shadow a reflected path, if a body is curved, or under a graded medium.
 - **Scattering by the medium** (particles in water, aerosols or droplets in air), and **more
   than one waveband**: one absorbing, non-scattering medium at one wavelength.
 - **A source that is not diffuse** has its distribution evaluated along one direction per pair of
@@ -119,6 +120,12 @@ from aquaflux.radiation.model import (
     fluence_rate,
     radiosity,
     surface_irradiance,
+)
+from aquaflux.radiation.images import (
+    PlaneExchange,
+    mirrored_fluence_rate,
+    mirrored_irradiance,
+    plane_exchange,
 )
 from aquaflux.radiation.mirrors import Mirror, planar_mirrors
 from aquaflux.radiation.photometry import PhotometricProfile, Photometry, read_ies
@@ -174,6 +181,7 @@ __all__ = [
     "OcclusionField",
     "PhotometricProfile",
     "Photometry",
+    "PlaneExchange",
     "Profile",
     "RadiationModel",
     "RadiationSettings",
@@ -207,8 +215,11 @@ __all__ = [
     "enclosure_winding",
     "fluence_rate",
     "lamp_exitance",
+    "mirrored_fluence_rate",
+    "mirrored_irradiance",
     "open_facets",
     "planar_mirrors",
+    "plane_exchange",
     "projected_solid_angle",
     "radiosity",
     "read_ies",

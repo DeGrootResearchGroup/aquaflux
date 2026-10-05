@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.radiation.absorption import UniformAbsorption, VoxelAbsorption
+from aquaflux.radiation.images import plane_exchange
 from aquaflux.radiation.model import (
     RadiationSettings,
     build_radiation_model,
@@ -15,6 +16,7 @@ from aquaflux.radiation.model import (
     surface_irradiance,
 )
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian
+from aquaflux.radiation.quadrature import triangle_quadrature
 from aquaflux.radiation.self_occlusion import NoOcclusion, RayCastOcclusion
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.transfer import build_transfer, reciprocity_residual
@@ -296,3 +298,35 @@ def test_a_curved_specular_body_is_refused_past_the_plane_limit():
         build_transfer(
             surfaces, self_occlusion=NoOcclusion(), specular=["sleeve"], max_mirror_planes=8
         )
+
+
+def test_a_body_s_planes_share_their_path_lengths_weighted_by_what_each_carries():
+    """A body of several planes keeps one path length per pair of facets: the mean over its planes,
+    weighted by each plane's share of the exchange. That is what makes the attenuation exact to
+    first order in the absorption coefficient -- its derivative at zero is minus the sum over the
+    planes of each one's exchange times its own path length, which an unweighted mean, or any
+    one plane's length, does not give."""
+    surfaces = Surfaces.from_triangles(
+        inward_box(1) * np.array([1.0, 2.0, 3.0]), solid_names=("box",), specular_reflectance=1.0
+    )
+    transfer = build_transfer(
+        surfaces, receiver_quadrature=1, self_occlusion=NoOcclusion(), specular=["box"]
+    )
+    assert len(transfer.mirrors) == 6
+    rule = triangle_quadrature(1)
+    # The direct transfer is attenuated over its own centroid separations, alongside.
+    expected = -transfer.geometric * transfer.separation - sum(
+        exchange.geometric * exchange.separation
+        for exchange in (
+            plane_exchange(mirror, surfaces, rule.points(surfaces.vertices), rule.weight)
+            for mirror in transfer.mirrors
+        )
+    )
+
+    def reflected(coefficient):
+        matrix, _ = transfer.assemble(surfaces, UniformAbsorption(coefficient))
+        return matrix
+
+    slope = jax.jacfwd(reflected)(0.0)
+    np.testing.assert_allclose(slope, expected, atol=1e-14)
+    assert float(jnp.max(jnp.abs(slope))) > 0.0
