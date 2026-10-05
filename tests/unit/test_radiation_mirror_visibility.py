@@ -134,7 +134,10 @@ def test_only_paths_that_meet_the_mirror_are_tested():
     stands across the segment to it; a source behind the mirror has no column at all."""
     surfaces, mirror = _scene(rectangle_triangles([0.0, 0.0, -1.0], [0.1, 0, 0], [0, 0.1, 0]))
     slab = Box((0.0, 0.0, -0.5), (5.0, 5.0, 0.1))
-    mask = build_mirror_visibility(mirror, [slab], surfaces, np.array([RECEIVER, [1.0, 0.0, -1.0]]))
+    # Not at the lamp's mirrored height, where the path's meeting point would divide by zero and
+    # come out clear by accident; from here a path folded at the plane would cross the slab.
+    behind = [1.0, 0.0, -0.75]
+    mask = build_mirror_visibility(mirror, [slab], surfaces, np.array([RECEIVER, behind]))
     assert list(mask.sources) == [2]
     np.testing.assert_array_equal(mask.crossings[0, 1], [0])
     assert not bool(mask.hidden[1, 0])

@@ -481,6 +481,18 @@ keep the exact fraction): a two-leg path has no single source view to clip.
   hidden equal on all 26 x 26 cross pairs). Also: tau^2 through the transfer (pattern `(2, 1)`, two
   bodies with different tau), the transmittance derivative against central differences held and
   streamed, rays under `SilhouetteOcclusion` equal to `RayCastOcclusion`'s, and 16 mask unit tests.
+- **Mutation pass, 22 breaks, 21 red.** Red: one factor instead of `tau ** legs`; either leg's body
+  test or self test dropped; no lift; no receiver-facet exclusion; straddling sources tested; hidden
+  pairs kept in the transfer; pattern digits reversed (caught only once the tau^2 test carried a second
+  body of different transmittance); `assemble` ignoring the pattern; point arrivals, streamed or held
+  mirrors unshadowed; either gather dropping the surviving fraction; transparent by default;
+  `SilhouetteOcclusion` hiding nothing on legs; held transmittance dropped; the transfer's mask without
+  `receiver_facet`. **Dismissed, equivalent**: no source-facet exclusion on leg 1 -- a segment meets its
+  source's plane only at its origin, which the margin already discards (kept for the direct rays'
+  convention). ⚠️ **Receivers behind the mirror being tested first passed**, because the fixture's
+  receiver sat at the lamp's mirrored height, where the meeting point divides by zero and its NaN reads
+  clear; moved to `z = -0.75`, it goes red. The gather never reads those rows, so the field is unchanged
+  either way -- the test pins the documented "recorded clear".
 
 ## The clamp is a GATE, not a factor — and the difference is a factor of two or a zero
 
