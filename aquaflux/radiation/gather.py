@@ -204,6 +204,7 @@ def streamed_fluence_rate(
     absorption: Absorption | None = None,
     transmittance=None,
     pair_limit: int = DEFAULT_PAIR_LIMIT,
+    extra=None,
 ):
     """The summed fluence rate of several surface sets, each chunk's shadow mask built and dropped.
 
@@ -252,6 +253,13 @@ def streamed_fluence_rate(
     absorption, transmittance, pair_limit
         As for :func:`direct_fluence_rate`. ``pair_limit`` bounds each streamed chunk and each
         traced chunk inside it.
+    extra : object, optional
+        Further light each chunk receives, built and dropped with the chunk and recomputed with
+        it on the way back: anything with a ``field(live, points)`` method returning the chunk's
+        share, ``(n_chunk,)``, from ``live = (sets, absorption, transmittance)``. Its own shadows
+        must be built inside ``field`` from concrete geometry, as the chunk's mask is, since the
+        live values are traced on the way back. What reaches the receivers by a mirror is
+        gathered this way.
 
     Returns
     -------
@@ -288,6 +296,7 @@ def streamed_fluence_rate(
         occluders=tuple(occluders),
         options=options,
         gather=_compiled_parts(live, pair_limit),
+        extra=extra,
     )
     # The chunks are cut from the points in space-filling-curve order, so each is a compact
     # region: its blocks' boxes are small, its tiles' shafts narrow, and both decide more.
@@ -406,6 +415,7 @@ class _Shadows(eqx.Module):
     occluders: tuple
     options: dict
     gather: _CompiledParts = eqx.field(static=True)
+    extra: object = eqx.field(static=True, default=None)
 
     def mask(self, points) -> Visibility:
         """The mask for these receivers."""
@@ -426,6 +436,8 @@ def _chunk_total(live, points, shadows: _Shadows):
     for index, segments in enumerate(layout):
         for segment in segments:
             total = total + shadows.gather.segment(values, points, mask, index, segment)
+    if shadows.extra is not None:
+        total = total + shadows.extra.field(live, points)
     return total
 
 

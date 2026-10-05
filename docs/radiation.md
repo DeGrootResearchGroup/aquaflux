@@ -364,13 +364,13 @@ model = build_radiation_model(
     cell_centres,
     surfaces,
     specular=["end plate"],
-    settings=RadiationSettings(self_occlusion=NoOcclusion()),
+    occluders=[sleeve],
 )
 optics = surfaces.with_optics(
     diffuse_reflectance=surfaces.per_facet({"end plate": 0.1, "wall": 0.3}, default=0.0),
     specular_reflectance=surfaces.per_facet({"end plate": 0.6}, default=0.0),
 )
-G, cycles = fluence_rate(model, optics)
+G, cycles = fluence_rate(model, optics, transmittance=[0.9])
 ```
 
 Each specular body is split into the flat planes its facets lie in, and each plane is a mirror: what a
@@ -379,6 +379,14 @@ reflects reaches the volume and the other walls, and through them the diffuse in
 solve and every field include it. Its specular reflectance is one value per body, supplied at each
 call and differentiable like the diffuse one.
 
+A reflected path is shadowed like a direct one, on both of its legs: from the source to the mirror,
+and from the mirror on. The same occluders and the same self-occlusion setting apply, so a baffle or
+a lamp sleeve stands in the way of reflected light exactly as it does of direct light. Each leg is
+tested with one ray, through the source's centroid, whichever self-occlusion strategy is chosen: a
+reflected path has no single view of its source to clip, so `SilhouetteOcclusion` refines only the
+direct paths. A body crossed on both legs filters the light twice, by its transmittance squared, and
+the transmittance stays live and differentiable on the reflected paths as on the direct ones.
+
 What a specular body is limited to, and what the model refuses rather than answers wrongly:
 
 - **One bounce.** Light reflecting off two mirrors in turn is not carried. For a single flat mirror,
@@ -386,9 +394,9 @@ What a specular body is limited to, and what the model refuses rather than answe
 - **Flat bodies.** A body lying in more than 64 planes is refused (`max_mirror_planes` raises the
   limit): a curved one, such as a lamp sleeve, is one mirror per flat strip of facets, which is slow
   and describes a curved mirror poorly.
-- **Nothing in the way yet.** A model with specular bodies is refused unless it has no occluders and
-  `self_occlusion=NoOcclusion()`, since nothing yet shadows a reflected path. A convex enclosure,
-  where nothing stands in the way, is modelled fully.
+- **One ray per reflected path.** A source partly hidden on a reflected path counts as wholly hidden
+  or wholly clear, as under the ray test, whichever strategy shadows the direct paths. A source
+  that straddles a mirror's plane is not shadowed on its reflected paths at all.
 - **A uniform medium.** A graded one (`VoxelAbsorption`) is refused with specular bodies.
 - **One value per body.** A specular body whose facets carry different specular reflectances is
   refused, and so is a specular reflectance on a body not named as specular.
@@ -568,7 +576,7 @@ attaches to a scalar carried by the converged flow.
   drinking-water transmittances. A sleeved lamp in air is subject to the same neglect, though its
   size there is not quantified here; a bare lamp has no sleeve to refract through.
 - **Specular reflection beyond one flat bounce.** Mirror-like walls are carried for one bounce off
-  flat bodies, in scenes with nothing in the way (see [Mirror-like walls](#mirror-like-walls)).
+  flat bodies (see [Mirror-like walls](#mirror-like-walls)).
 - **Scattering by the medium, and more than one waveband.** The medium absorbs but does not
   scatter — neither particles in water nor aerosols or droplets in air — at one wavelength (see
   [Air disinfection](#air-disinfection) for lamps with more than one).

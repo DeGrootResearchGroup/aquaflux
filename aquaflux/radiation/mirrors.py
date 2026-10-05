@@ -89,6 +89,57 @@ class Mirror(eqx.Module):
         """
         return reflect(jnp.asarray(directions, dtype=float), self.normal)
 
+    def heights(self, points) -> np.ndarray:
+        """Signed distance of each point from the plane, positive on the side the mirror faces.
+
+        Host work, for deciding which points and facets a path through the mirror can involve:
+        the points must be concrete.
+
+        Parameters
+        ----------
+        points : array_like, shape ``(..., 3)``
+
+        Returns
+        -------
+        numpy.ndarray, shape ``(...)``
+        """
+        return (np.asarray(points, dtype=float) - np.asarray(self.point)) @ np.asarray(self.normal)
+
+    def in_front(self, points) -> np.ndarray:
+        """Indices of the points strictly in front of the mirror.
+
+        Only those see anything in it: the mirror reflects on the side it faces, and a point on
+        the plane sees the mirror edge on.
+
+        Parameters
+        ----------
+        points : array_like, shape ``(n_points, 3)``
+            Concrete.
+
+        Returns
+        -------
+        numpy.ndarray of int
+        """
+        return np.flatnonzero(self.heights(points) > 0.0)
+
+    def sources_in_front(self, surfaces: Surfaces) -> np.ndarray:
+        """Indices of the facets with any part strictly in front of the mirror.
+
+        Only those have an image a point in front can see. A facet wholly on or behind the plane
+        has none -- the mirror's own facets and every facet coplanar with them among them -- and
+        a facet straddling the plane is kept, since its part in front has an image.
+
+        Parameters
+        ----------
+        surfaces : Surfaces
+            Concrete.
+
+        Returns
+        -------
+        numpy.ndarray of int
+        """
+        return np.flatnonzero(self.heights(surfaces.vertices).max(axis=1) > 0.0)
+
     def image(self, surfaces: Surfaces) -> Surfaces:
         """The mirror image of a surface set in this plane: what a viewer sees in the mirror.
 

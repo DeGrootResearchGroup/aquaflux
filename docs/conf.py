@@ -130,7 +130,7 @@ SUBPACKAGE_GROUPS = {
         ),
         ("Direct gathers and the medium between", ["gather", "absorption"]),
         ("Surface-to-surface transfer", ["transfer", "quadrature"]),
-        ("Specular reflection", ["mirrors", "images"]),
+        ("Specular reflection", ["mirrors", "images", "mirror_visibility"]),
         (
             "What stands in the way",
             [

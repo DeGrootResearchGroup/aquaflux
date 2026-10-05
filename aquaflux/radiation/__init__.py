@@ -70,12 +70,12 @@ respect to mesh-node positions gets no contribution from the fluence rate.
   to 25% above it. So for water this is a model for lower transmittances — wastewater, or the
   70% water of the Sozzi & Taghipour (2006) reactor benchmark — and carries a systematic error of
   that size at drinking-water transmittances.
-- **Specular reflection beyond one flat bounce in an unshadowed scene.** At the same
-  reflectivity, fully specular and fully diffuse walls have been measured 10–47% apart in log
-  reduction (Hassanpour et al., 2023), so a surface set carries ``diffuse_reflectance`` and
-  ``specular_reflectance`` separately. Bodies named as specular when the model is built reflect
-  one bounce as flat mirrors (:class:`Mirror`); a model with specular bodies is refused if
-  anything could shadow a reflected path, if a body is curved, or under a graded medium.
+- **Specular reflection beyond one flat bounce.** At the same reflectivity, fully specular and
+  fully diffuse walls have been measured 10–47% apart in log reduction (Hassanpour et al., 2023),
+  so a surface set carries ``diffuse_reflectance`` and ``specular_reflectance`` separately. Bodies
+  named as specular when the model is built reflect one bounce as flat mirrors (:class:`Mirror`),
+  shadowed on both legs of each path (:class:`MirrorVisibility`); a model with specular bodies is
+  refused if a body is curved, or under a graded medium.
 - **Scattering by the medium** (particles in water, aerosols or droplets in air), and **more
   than one waveband**: one absorbing, non-scattering medium at one wavelength.
 - **A source that is not diffuse** has its distribution evaluated along one direction per pair of
@@ -127,6 +127,7 @@ from aquaflux.radiation.images import (
     mirrored_irradiance,
     plane_exchange,
 )
+from aquaflux.radiation.mirror_visibility import MirrorVisibility, build_mirror_visibility
 from aquaflux.radiation.mirrors import Mirror, planar_mirrors
 from aquaflux.radiation.photometry import PhotometricProfile, Photometry, read_ies
 from aquaflux.radiation.profiles import (
@@ -177,6 +178,7 @@ __all__ = [
     "Isotropic",
     "Lambertian",
     "Mirror",
+    "MirrorVisibility",
     "NoOcclusion",
     "OcclusionField",
     "PhotometricProfile",
@@ -202,6 +204,7 @@ __all__ = [
     "VoxelAbsorption",
     "WindingReport",
     "absorption_from_uvt",
+    "build_mirror_visibility",
     "build_radiation_model",
     "build_transfer",
     "build_visibility",
