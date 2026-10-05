@@ -41,6 +41,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `transfer.py` — the frozen facet-to-facet geometry | **BUILT** |
 | `quadrature.py` — symmetric triangle rules for the receiving facet | **BUILT** |
 | `model.py` — the assembled model and the three public entry points | **BUILT** |
+| `images.py` — `mirrored_fluence_rate` / `summed_mirrored_fluence_rate`: one specular bounce into the volume, each source's image seen through each mirror's aperture (#537 PR 2, 2026-10-05) | **BUILT** (unshadowed; not exported from the package or wired into the model until PR 3) |
 | `mirrors.py` — `Mirror` (a plane, its aperture facets, reflection and the image of a surface set) and `planar_mirrors` (a body's facets grouped by plane); the reflectance split on `Surfaces` (#537 PR 1, 2026-10-05) | **BUILT** (geometry only; the model refuses specular reflectance until #537 PRs 2-3) |
 | `units.py` — lamp watts to exitance, ultraviolet transmittance to absorbance | **BUILT** |
 
@@ -351,6 +352,35 @@ handedness ignored in `angles`, seeding by index, no orientation test, tolerance
 grouped together, point sources grouped, an off-plane point, no sum check, no range check,
 `with_optics` unchecked, `with_geometry` dropping `rho_s`, the concrete and the traced refusals each
 removed, `reflect` with factor one, coarsening reading `rho_s` from `rho_d`, subdivision dropping it.
+
+### PR 2: images in the volume gather (2026-10-05)
+
+`images.py`, unshadowed, one bounce, not yet exported or reachable from the model. Per mirror, per
+(receiver, source facet, aperture facet): `rho_s[aperture facet] x radiance (mirrored profile,
+direction from the image centroid) x solid angle of the image inside the aperture facet's cone`, the
+last being `silhouette.covered_by(view of the image, None, aperture facet) x |view.whole|` -- the aperture
+is the blocker, and **its depth cut is what discards an image's part in front of the mirror**, so a
+source straddling the mirror's plane needs no clipping of its own (pinned: a wall across the plane
+equals its upper half alone). Point sources: the image point is credited to the **first** aperture
+facet whose closed cone (filtered heights `>= 0`) holds the direction, so a line through a shared edge
+counts once -- a symmetric lamp over a square mirror puts the reflection point exactly on its diagonal
+(pinned). The medium is crossed on the **two real legs** (receiver -> crossing -> real source
+centroid), which equals `exp(-a |x - c'|)` for a uniform medium and is the correct path for a graded
+one (pinned against a closed-form leg integral of a linear field). Receivers and sources wholly on or
+behind the plane are culled on the host when positions are concrete -- **cost only**: traced positions
+skip the cull and give the same field (pinned), and the two cull mutations are dismissed as equivalent.
+It reuses `gather`'s private `_areal_groups`, `_groups`, `_one_geometry`, `_emitter_direction` and
+`silhouette._orientation`. ⚠️ **The clip stacks its candidates, so every operand must be broadcast to one
+batch shape first** (`(receiver, image, aperture facet)`); left to broadcast it fails in `jnp.stack`.
+Cost is dense in (receivers in front) x (sources in front) x (aperture facets) per mirror -- no cone
+cull or `covers_nothing` yet; PR 4 measures it. Tests `tests/unit/test_radiation_images.py` (18):
+point image closed form with and without a medium; aperture edge and outside; shared-edge diagonal;
+per-facet reflectance; nothing behind; image wider than the mirror = the mirror's own solid angle
+(`axial_rectangle_solid_angle`), image narrower = the whole image; an unbounded `rho_s = 1` mirror equals
+the direct gather of `Mirror.image` over Lambertian, `CosinePower` and an asymmetric photometric table;
+the straddling wall; linearity in the two facets' reflectances; the graded medium; summed sets; exact
+derivatives in `rho_s` and emission; pass-size invariance; a foreign mirror refused; two mirrors add;
+traced receivers. **Mutation pass (16, 14 red; the 2 green are the cost-only culls)**.
 
 ## The clamp is a GATE, not a factor — and the difference is a factor of two or a zero
 
