@@ -348,14 +348,53 @@ E = direct_irradiance(surfaces, points, normals, absorption=medium, visibility=s
 height facing the fixture, say. In a uniformly glowing box this gives `E = B` at any point and any
 orientation, as it should.
 
-⚠️ **Reflection is diffuse.** A reflectance of 0.95 does not say whether a wall scatters in every
-direction or reflects like a mirror, and the two are not close: Hassanpour et al. (2023) measure a
-10–47% spread in log reduction between fully specular and fully diffuse walls at the same
-reflectivity. That is why a surface set carries the two separately, as `diffuse_reflectance` and
-`specular_reflectance` (which must sum to at most one on each facet). The model carries only the
-diffuse part so far, and **refuses** a surface set with any specular reflectance rather than
-dropping the light it would reflect; until it carries both, give a wall's reflectance as diffuse,
-with that assumption in mind.
+### Mirror-like walls
+
+A reflectance of 0.95 does not say whether a wall scatters in every direction or reflects like a
+mirror, and the two are not close: Hassanpour et al. (2023) measure a 10–47% spread in log
+reduction between fully specular and fully diffuse walls at the same reflectivity. So a surface set
+carries the two separately, as `diffuse_reflectance` and `specular_reflectance`, which must each lie
+in `[0, 1]` and sum to at most one on each facet.
+
+A body reflects specularly only if it is named as specular when the model is built, because which
+walls are mirrors is geometry and is frozen with the rest:
+
+```python
+model = build_radiation_model(
+    cell_centres,
+    surfaces,
+    specular=["end plate"],
+    settings=RadiationSettings(self_occlusion=NoOcclusion()),
+)
+optics = surfaces.with_optics(
+    diffuse_reflectance=surfaces.per_facet({"end plate": 0.1, "wall": 0.3}, default=0.0),
+    specular_reflectance=surfaces.per_facet({"end plate": 0.6}, default=0.0),
+)
+G, cycles = fluence_rate(model, optics)
+```
+
+Each specular body is split into the flat planes its facets lie in, and each plane is a mirror: what a
+point sees in it is the mirror image of every source, through the mirror's own outline. The light it
+reflects reaches the volume and the other walls, and through them the diffuse interreflection, so the
+solve and every field include it. Its specular reflectance is one value per body, supplied at each
+call and differentiable like the diffuse one.
+
+What a specular body is limited to, and what the model refuses rather than answers wrongly:
+
+- **One bounce.** Light reflecting off two mirrors in turn is not carried. For a single flat mirror,
+  or a plane of symmetry, one bounce is all there is.
+- **Flat bodies.** A body lying in more than 64 planes is refused (`max_mirror_planes` raises the
+  limit): a curved one, such as a lamp sleeve, is one mirror per flat strip of facets, which is slow
+  and describes a curved mirror poorly.
+- **Nothing in the way yet.** A model with specular bodies is refused unless it has no occluders and
+  `self_occlusion=NoOcclusion()`, since nothing yet shadows a reflected path. A convex enclosure,
+  where nothing stands in the way, is modelled fully.
+- **A uniform medium.** A graded one (`VoxelAbsorption`) is refused with specular bodies.
+- **One value per body.** A specular body whose facets carry different specular reflectances is
+  refused, and so is a specular reflectance on a body not named as specular.
+- **Several planes in one body** share the body's path lengths between each pair of facets as an
+  average, weighted by how much each plane carries. That is exact for a body with one plane, so name
+  each reflective wall as its own body where the medium absorbs strongly.
 
 ## Build once, solve many
 
@@ -366,7 +405,7 @@ study sweeps is supplied per call:
 
 | frozen at the build | supplied per call |
 |---|---|
-| surface geometry, receiver positions | emission, point-source power, diffuse reflectance, profile parameters |
+| surface geometry, receiver positions, which bodies are mirrors | emission, point-source power, diffuse and specular reflectance, profile parameters |
 | body shapes (which pairs they block) | body transmittance |
 | the self-shadowing strategy | the medium (`absorption`) |
 
@@ -391,7 +430,7 @@ field is unset by default, which means the function it reaches uses its own defa
 ## Derivatives
 
 Every optical input is differentiable, through the interreflection solve by its adjoint rather
-than by replaying the iterations: emission, point-source power, reflectance, profile parameters,
+than by replaying the iterations: emission, point-source power, both reflectances, profile parameters,
 body transmittance, and the absorption coefficient or voxel field. So a sensitivity is one
 reverse-mode pass:
 
@@ -528,7 +567,8 @@ attaches to a scalar carried by the converged flow.
   Sozzi & Taghipour (2006) benchmark — and carries a systematic error of that size at
   drinking-water transmittances. A sleeved lamp in air is subject to the same neglect, though its
   size there is not quantified here; a bare lamp has no sleeve to refract through.
-- **Specular reflection.** Walls reflect diffusely (see above).
+- **Specular reflection beyond one flat bounce.** Mirror-like walls are carried for one bounce off
+  flat bodies, in scenes with nothing in the way (see [Mirror-like walls](#mirror-like-walls)).
 - **Scattering by the medium, and more than one waveband.** The medium absorbs but does not
   scatter — neither particles in water nor aerosols or droplets in air — at one wavelength (see
   [Air disinfection](#air-disinfection) for lamps with more than one).

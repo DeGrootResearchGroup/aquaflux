@@ -41,8 +41,8 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `transfer.py` — the frozen facet-to-facet geometry | **BUILT** |
 | `quadrature.py` — symmetric triangle rules for the receiving facet | **BUILT** |
 | `model.py` — the assembled model and the three public entry points | **BUILT** |
-| `images.py` — `mirrored_fluence_rate` / `summed_mirrored_fluence_rate`: one specular bounce into the volume, each source's image seen through each mirror's aperture (#537 PR 2, 2026-10-05) | **BUILT** (unshadowed; not exported from the package or wired into the model until PR 3) |
-| `mirrors.py` — `Mirror` (a plane, its aperture facets, reflection and the image of a surface set) and `planar_mirrors` (a body's facets grouped by plane); the reflectance split on `Surfaces` (#537 PR 1, 2026-10-05) | **BUILT** (geometry only; the model refuses specular reflectance until #537 PRs 2-3) |
+| `images.py` — `mirrored_fluence_rate` / `summed_mirrored_fluence_rate`: one specular bounce into the volume, each source's image seen through each mirror's aperture (#537 PR 2, 2026-10-05) | **BUILT** (unshadowed; exported and wired into the model by PR 3a, which adds `mirrored_irradiance` and `plane_exchange`) |
+| `mirrors.py` — `Mirror` (a plane, its aperture facets, reflection and the image of a surface set) and `planar_mirrors` (a body's facets grouped by plane); the reflectance split on `Surfaces` (#537 PR 1, 2026-10-05) | **BUILT** (the model carries specular bodies since PR 3a, unshadowed scenes only) |
 | `units.py` — lamp watts to exitance, ultraviolet transmittance to absorbance | **BUILT** |
 
 There is no separate optical-depth piece to build: the voxel-grid traversal is `VoxelAbsorption` in
@@ -312,14 +312,14 @@ facet with a sparse store.
   a `TypeError`. `_check_reflectances` refuses each outside `[0, 1]` and a facet whose two sum past one
   (concrete values only, numpy, skipped for tracers — the same rule as `in_range`), from both
   `from_triangles` and `with_optics` (which checks the pair as it stands after the replacement).
-- **The model refuses specular reflectance** (`model._without_specular`, called by `_solve`, so all
-  three entry points): `NotImplementedError` for a non-zero concrete value, and **`TypeError` for a
-  traced one whatever its value**. ⚠️ **The traced refusal is load-bearing, and the first version did
-  not have it**: it checked a traced value with `eqx.error_if`, which passed a zero and so let
-  `jax.grad` with respect to `rho_s` return **0.0** — finite, plausible, and wrong, since a mirror sends
-  light on. A traced `rho_s` arises only from differentiating with respect to it (the model already
-  refuses traced vertices, so a whole traced set never reaches here), so refusing it costs nothing
-  legitimate. The direct gathers ignore both reflectances, as they always did the diffuse one.
+- **PR 1's model refused all specular reflectance; since PR 3a it is `transfer._specular_by_solid`
+  (there is no `model._without_specular` any more)**, which keeps the two refusals that still apply:
+  a non-zero value on a body not built as specular (`ValueError` now), and a **traced** `rho_s` on a
+  model with no specular body (`TypeError`, whatever its value). ⚠️ **The traced refusal is
+  load-bearing, and PR 1's first version did not have it**: it checked a traced value with
+  `eqx.error_if`, which passed a zero and so let `jax.grad` with respect to `rho_s` return **0.0** —
+  finite, plausible, and wrong, since a mirror sends light on. The direct gathers ignore both
+  reflectances, as they always did the diffuse one.
 - `vectors.reflect(vectors, normal)` is the one reflection formula (in the plane through the origin).
 - `Profile.mirrored(normal)` is **abstract** on `Profile`: an `AxisymmetricProfile` returns itself; a
   `PhotometricProfile` reflects `up` **and flips `handedness`** (a new static field, default 1, read in
@@ -381,6 +381,47 @@ the direct gather of `Mirror.image` over Lambertian, `CosinePower` and an asymme
 the straddling wall; linearity in the two facets' reflectances; the graded medium; summed sets; exact
 derivatives in `rho_s` and emission; pass-size invariance; a foreign mirror refused; two mirrors add;
 traced receivers. **Mutation pass (16, 14 red; the 2 green are the cost-only culls)**.
+
+### PR 3a: the specular transfer and the model (2026-10-05)
+
+**Decided with the user**: PR 3 split into **3a** (this: transfer + model, unshadowed scenes only) and
+**3b** (two-leg shadows); `rho_s` **live per declared solid**; per-solid storage makes a multi-plane
+solid's path length and source cosine **G-weighted means** per pair (exact for one plane); the
+incidence cosine for a later Fresnel `rho_s` is **not stored yet** (one more weighted-mean array when
+built -- this reverses PR 1's decision 3); a **graded medium is refused** with specular bodies.
+
+- `build_radiation_model(..., specular=(names,))` and `build_transfer(..., specular=, max_mirror_planes=
+  MAX_MIRROR_PLANES)`. `TransferMatrix` gains `specular_solids` (static), `mirrors` (every plane of
+  every specular solid), `specular_geometric` / `specular_separation` / `specular_source_cosine`, each
+  `(n_specular, n, n)`: per solid, `images.plane_exchange` summed over its planes, and the two
+  G-weighted means. `assemble` adds `rho_s[k] * G_k * exp(-a d_k)` to **both** `F` and `F^M` (the
+  latter times the relative radiance at the mean cosine, through `_relative_radiance`, which the
+  direct emitted term now shares).
+- `transfer._specular_by_solid` reads one `rho_s` per solid from its first facet, refusing on concrete
+  values a solid whose facets differ and a non-zero value on an undeclared solid; traced, it takes the
+  first facet's (and refuses a traced value when no solid is specular).
+- **Refused, not approximated** (`NotImplementedError`): specular with occluders or with
+  self-occlusion on, for the facets (`build_transfer`) **and** the receivers (`build_radiation_model`
+  checks `receiver_visibility_options()`); a graded medium at `assemble`. `ValueError` past
+  `MAX_MIRROR_PLANES = 64` planes per solid -- **provisional**, to be set in PR 4 from measured cost.
+- The model's point-source arrivals add `images.mirrored_irradiance(..., point_sources_only=True)` at
+  the facet centroids; `fluence_rate` adds `summed_mirrored_fluence_rate((surfaces, bounced), ...)`.
+- **Compile cost was the build's whole cost**: a fresh closure per plane (and per call in the gather)
+  retraced everything, so a 12-facet box took 15-25 s to build and 2.9 s per repeated `fluence_rate`.
+  `images._exchange_rows` (jitted, scanned over the quadrature points), `_areal_through` and
+  `_points_through` (`eqx.filter_jit`, `_Path` now a pytree) are module level, so planes and calls
+  sharing shapes share programs: rebuild 0.1 s, repeated `fluence_rate` 0.4 s (first build still
+  ~10-13 s of compilation). Measured on a 4-core Linux container, jax 0.10.2, one run each.
+- **Gates** (`tests/unit/test_radiation_specular_model.py`): the **symmetry plane** -- half a box closed
+  by a `rho_s = 1` mirror against the whole box made by reflecting that half triangle for triangle --
+  equal radiosity, facet irradiance and volume field to 1e-9 for Lambertian walls, under uniform
+  absorption, with `CosinePower` emitters and with a point lamp; at the transfer level
+  (`test_radiation_images.py`) the exchange equals the whole box's transfer to the other half to 5e-17.
+  ⚠️ **`inward_box`'s right half is a TRANSLATE of its left, not a mirror image** (every quad cut on the
+  same diagonal), so a symmetry check against it fails at ~3% and looks like a bug in the code; build
+  the whole from the half by reflection. The **one-bounce enclosure** `B = M/(1 - rho_d(1 + rho_s))`,
+  `G = 4B(1 + rho_s)` to 1e-12; reciprocity falling with the receiver rule; `rho_s` and the absorption
+  coefficient against central differences; every refusal.
 
 ## The clamp is a GATE, not a factor — and the difference is a factor of two or a zero
 

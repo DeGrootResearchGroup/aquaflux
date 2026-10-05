@@ -83,6 +83,7 @@ nothing about cells, fluxes or residuals. Keeping that fence one-way is why
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 
 import equinox as eqx
 import jax
@@ -92,10 +93,11 @@ import numpy as np
 from aquaflux.radiation.absorption import Absorption
 from aquaflux.radiation.culling import BodyCulling
 from aquaflux.radiation.gather import direct_irradiance
+from aquaflux.radiation.images import mirrored_irradiance, summed_mirrored_fluence_rate
 from aquaflux.radiation.profiles import Lambertian
 from aquaflux.radiation.quadrature import TriangleQuadrature
 from aquaflux.radiation.receiver_shadows import FrozenShadows, ReceiverShadows, StreamedShadows
-from aquaflux.radiation.self_occlusion import SelfOcclusion
+from aquaflux.radiation.self_occlusion import NoOcclusion, SelfOcclusion
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.transfer import TransferMatrix, build_transfer
 from aquaflux.solve import relative_residual_gmres, solve_linear
@@ -271,6 +273,7 @@ def build_radiation_model(
     surfaces: Surfaces,
     *,
     occluders=(),
+    specular: Sequence[str] = (),
     settings: RadiationSettings | None = None,
     **visibility_options,
 ) -> RadiationModel:
@@ -286,6 +289,14 @@ def build_radiation_model(
     occluders : sequence of aquaflux.solids.Body, optional
         Analytic bodies standing between things. Their *geometry* is frozen here; what each
         lets through is a call argument.
+    specular : sequence of str, optional
+        Bodies, by name, that reflect specularly as well as diffusely: flat walls, each split into
+        the planes its facets lie in. Which bodies are mirrors is geometry and is frozen here;
+        how much each reflects is its ``specular_reflectance`` at each call, one value per body.
+        Every other body must have a specular reflectance of zero. Nothing yet stands in the way
+        of a reflected path, so a model with specular bodies is refused unless it has no
+        occluders and its settings switch self-occlusion off (``NoOcclusion()``), for the facets
+        and the receivers alike.
     settings : RadiationSettings, optional
         Build-time choices. Unset fields take each function's own default.
     **visibility_options
@@ -299,7 +310,10 @@ def build_radiation_model(
     ------
     ValueError
         If a facet centroid or a receiver lies inside one of the bodies, which is a geometry
-        error rather than a shadow — the raise comes from the visibility build.
+        error rather than a shadow — the raise comes from the visibility build; or if a specular
+        body is curved, lying in more planes than the transfer build allows.
+    NotImplementedError
+        If a specular body is named in a scene with occluders or with self-occlusion on.
 
     Notes
     -----
@@ -320,8 +334,21 @@ def build_radiation_model(
         msg = f"receivers must be (n_receivers, 3); got {receivers.shape}"
         raise ValueError(msg)
 
+    if specular and not isinstance(
+        settings.receiver_visibility_options().get("self_occlusion"), NoOcclusion
+    ):
+        msg = (
+            "specular bodies are carried with nothing yet standing in the way of a reflected "
+            "path, so the receivers' self-occlusion must be off too: set "
+            "RadiationSettings(self_occlusion=NoOcclusion()) and leave receiver_occlusion unset."
+        )
+        raise NotImplementedError(msg)
     transfer = build_transfer(
-        surfaces, occluders=occluders, **settings.transfer_options(), **visibility_options
+        surfaces,
+        occluders=occluders,
+        specular=specular,
+        **settings.transfer_options(),
+        **visibility_options,
     )
     shadows = StreamedShadows if settings.stream_receiver_mask else FrozenShadows
     receiver_shadows = shadows.build(
@@ -468,9 +495,7 @@ def _solve(model, surfaces, absorption, transmittance, external_irradiance, solv
     """Assemble and solve ``(I - diag(rho) F) B = M + rho ((F^M - F) M + H_point + H_external)``."""
     _check_geometry(model, surfaces)
     emission = jnp.asarray(surfaces.emission, dtype=float)
-    reflectance = _without_specular(
-        jnp.asarray(surfaces.diffuse_reflectance, dtype=float), surfaces.specular_reflectance
-    )
+    reflectance = jnp.asarray(surfaces.diffuse_reflectance, dtype=float)
     reflected, emitted = model.transfer.assemble(
         surfaces, absorption, transmittance, **model.settings.gather_options()
     )
@@ -496,52 +521,6 @@ def _solve(model, surfaces, absorption, transmittance, external_irradiance, solv
         reflected, reflectance, source, solver or relative_residual_gmres(_DEFAULT_RTOL)
     )
     return _Solved(outgoing, cycles, reflected, emitted, arriving)
-
-
-_SPECULAR_NOT_MODELLED = (
-    "a surface set with a non-zero specular_reflectance reached the radiation model, which does "
-    "not yet carry specular reflection: the light those facets send off as mirrors would be "
-    "dropped, leaving a field darker than the walls make it. Give the reflectance as "
-    "diffuse_reflectance to model those walls as diffuse, or keep specular_reflectance at zero."
-)
-
-
-def _without_specular(diffuse, specular):
-    """The diffuse reflectance, refused if any facet reflects specularly.
-
-    The refusal is a check rather than a silent zero because a dropped mirror loses light with
-    no error, which is the failure a model must not have. A **traced** specular reflectance is
-    refused whatever its value: it is traced only when something differentiates with respect to
-    it, and the derivative this model would give is zero -- finite, plausible, and wrong, since
-    a mirror sends light on.
-
-    Parameters
-    ----------
-    diffuse : jnp.ndarray, shape ``(n_facets,)``
-    specular : jnp.ndarray, shape ``(n_facets,)``
-
-    Returns
-    -------
-    jnp.ndarray, shape ``(n_facets,)``
-        ``diffuse``, unchanged.
-
-    Raises
-    ------
-    NotImplementedError
-        If the specular reflectance is non-zero on any facet.
-    TypeError
-        If it is traced.
-    """
-    if isinstance(specular, jax.core.Tracer):
-        msg = (
-            "specular_reflectance is traced, but the radiation model does not yet carry specular "
-            "reflection, so its derivative with respect to that reflectance would read zero. Keep "
-            "it out of the traced values."
-        )
-        raise TypeError(msg)
-    if np.any(np.asarray(specular) != 0.0):
-        raise NotImplementedError(_SPECULAR_NOT_MODELLED)
-    return diffuse
 
 
 @eqx.filter_jit
@@ -639,6 +618,17 @@ def _point_source_irradiance(model, surfaces, absorption, transmittance):
         transmittance=transmittance,
         point_sources_only=True,
     )
+    if model.transfer.mirrors:
+        # And by one bounce off a mirror, which the transfer cannot carry for them either.
+        landing = landing + mirrored_irradiance(
+            surfaces,
+            model.transfer.mirrors,
+            surfaces.centroid,
+            surfaces.normal,
+            absorption=absorption,
+            point_sources_only=True,
+            **model.settings.gather_options(),
+        )
     # A point source has no surface for an arrival to land on, and a zero-length normal, so its
     # own entry is meaningless rather than small.
     return jnp.where(jnp.asarray(surfaces.is_point_source), 0.0, landing)
@@ -750,4 +740,14 @@ def fluence_rate(
         transmittance=transmittance,
         **model.settings.gather_options(),
     )
+    if model.transfer.mirrors:
+        # The same two sets seen once more, in the mirrors: the emitted light with each source's
+        # own distribution and the reflected light Lambertian, each through the mirror's facets.
+        field = field + summed_mirrored_fluence_rate(
+            (surfaces, bounced),
+            model.transfer.mirrors,
+            model.receivers,
+            absorption=absorption,
+            **model.settings.gather_options(),
+        )
     return field, cycles
