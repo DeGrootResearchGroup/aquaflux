@@ -7,14 +7,26 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.radiation.absorption import UniformAbsorption, VoxelAbsorption
-from aquaflux.radiation.gather import direct_fluence_rate
-from aquaflux.radiation.images import mirrored_fluence_rate, summed_mirrored_fluence_rate
+from aquaflux.radiation.gather import direct_fluence_rate, direct_irradiance
+from aquaflux.radiation.images import (
+    mirrored_fluence_rate,
+    mirrored_irradiance,
+    plane_exchange,
+    summed_mirrored_fluence_rate,
+)
 from aquaflux.radiation.mirrors import planar_mirrors
 from aquaflux.radiation.photometry import PhotometricProfile
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian
+from aquaflux.radiation.quadrature import triangle_quadrature
+from aquaflux.radiation.self_occlusion import NoOcclusion
 from aquaflux.radiation.surfaces import Surfaces
+from aquaflux.radiation.transfer import build_transfer
 
-from tests.unit.radiation_references import axial_rectangle_solid_angle, rectangle_triangles
+from tests.unit.radiation_references import (
+    axial_rectangle_solid_angle,
+    inward_box,
+    rectangle_triangles,
+)
 
 #: The mirror of most fixtures: the plane z = 0, facing +z, as two triangles of a square.
 FLOOR_HALF = 10.0
@@ -372,3 +384,128 @@ def test_traced_receivers_get_what_concrete_ones_do_including_behind_the_mirror(
     assert float(concrete[2]) == 0.0
     assert float(jnp.min(concrete[:2])) > 0.0
     np.testing.assert_allclose(traced, concrete, rtol=1e-12, atol=0.0)
+
+
+# ---------------------------------------------------------------------------------------
+# Irradiance on oriented receivers
+# ---------------------------------------------------------------------------------------
+
+
+def _oriented(count, seed):
+    """Points above the floor with unit normals in every direction, some facing away."""
+    rng = np.random.default_rng(seed)
+    points = rng.uniform(-1.0, 1.0, size=(count, 3)) + np.array([0.0, 0.0, 1.5])
+    normals = rng.normal(size=(count, 3))
+    return points, normals / np.linalg.norm(normals, axis=1, keepdims=True)
+
+
+def test_a_point_lamp_s_image_lands_by_the_cosine_at_the_receiver():
+    """``rho_s P cos / (4 pi r'^2)``, with the cosine between the receiver's normal and the
+    direction back to the image; a receiver facing away gets nothing."""
+    lamp = np.array([0.3, 0.2, 1.0])
+    surfaces, mirrors = _point_lamp(lamp, 10.0)
+    points = np.array([[0.5, -0.4, 0.6], [1.0, 1.7, 2.0], [-2.0, 0.5, 4.5]])
+    image = lamp * np.array([1.0, 1.0, -1.0])
+    towards = (image - points) / np.linalg.norm(image - points, axis=1, keepdims=True)
+    tilted = towards + np.array([[0.3, 0.0, 0.0], [0.0, -0.4, 0.1], [0.2, 0.2, 0.0]])
+    normals = np.concatenate([tilted / np.linalg.norm(tilted, axis=1, keepdims=True), -towards])
+    at = np.concatenate([points, points])
+    field = np.asarray(mirrored_irradiance(surfaces, mirrors, at, normals))
+    unfolded = np.linalg.norm(points - image, axis=1)
+    cosine = np.sum(normals[:3] * towards, axis=1)
+    expected = 0.8 * 10.0 * cosine / (4.0 * np.pi * unfolded**2)
+    np.testing.assert_allclose(field[:3], expected, rtol=1e-13)
+    np.testing.assert_array_equal(field[3:], 0.0)
+
+
+def test_through_an_unbounded_mirror_the_irradiance_is_the_image_s_direct_irradiance():
+    """The irradiance counterpart of the unbounded-mirror test: through a mirror covering every
+    direction, of reflectance one, the image is seen whole, so the irradiance it gives is the
+    direct irradiance of the reflected set -- areal facets and a point source together, on
+    receivers facing every way."""
+    rng = np.random.default_rng(6)
+    triangles = rng.uniform(-0.4, 0.4, size=(4, 3, 3)) + np.array([0.0, 0.0, 1.2])
+    sources = np.concatenate([triangles, np.full((1, 3, 3), [0.2, -0.1, 0.9])])
+    profiles = (Lambertian(), CosinePower(4.0), Isotropic())
+    index = [0, 1, 0, 1, 2]
+    emission, power = [1.0, 2.0, 0.5, 1.5, 0.0], [0.0] * 4 + [6.0]
+    surfaces, mirrors = _scene(
+        sources,
+        mirror_half=1e3,
+        specular=(1.0, 1.0),
+        emission=emission,
+        power=power,
+        profiles=profiles,
+        profile_index=index,
+    )
+    lamp_only = Surfaces.from_triangles(
+        sources, emission=emission, power=power, profiles=profiles, profile_index=index
+    )
+    points, normals = _oriented(25, seed=7)
+    (mirror,) = mirrors
+    expected = direct_irradiance(mirror.image(lamp_only), points, normals)
+    field = mirrored_irradiance(surfaces, mirrors, points, normals)
+    assert float(jnp.max(expected)) > 0.0 and float(jnp.min(expected)) == 0.0
+    np.testing.assert_allclose(field, expected, rtol=1e-11, atol=1e-14)
+
+    only_points = mirrored_irradiance(surfaces, mirrors, points, normals, point_sources_only=True)
+    lamp_point = lamp_only.with_optics(emission=np.zeros(5))
+    expected_points = direct_irradiance(mirror.image(lamp_point), points, normals)
+    assert float(jnp.max(expected_points)) > 0.0
+    np.testing.assert_allclose(only_points, expected_points, rtol=1e-11, atol=1e-14)
+
+
+# ---------------------------------------------------------------------------------------
+# Facet-to-facet exchange through one mirror
+# ---------------------------------------------------------------------------------------
+
+
+def _half_box_and_its_reflection():
+    """The half ``x <= 0.5`` of a closed unit box with a mirror across ``x = 0.5``, and the whole box
+    made by reflecting that half -- triangle for triangle, so the two halves are mirror images and
+    not merely translates."""
+    walls = inward_box(2)
+    left = walls[np.all(walls[:, :, 0] <= 0.5, axis=1)]
+    right = (left * np.array([-1.0, 1.0, 1.0]) + np.array([1.0, 0.0, 0.0]))[:, ::-1]
+    mirror = rectangle_triangles([0.5, 0.5, 0.5], [0.0, 0.0, 0.5], [0.0, 0.5, 0.0])
+    half = Surfaces.from_triangles(
+        np.concatenate([left, mirror]),
+        solid_id=[0] * len(left) + [1, 1],
+        solid_names=("walls", "mirror"),
+    )
+    whole = Surfaces.from_triangles(np.concatenate([left, right]))
+    return half, whole, len(left)
+
+
+def test_a_mirror_across_a_symmetric_box_exchanges_exactly_what_the_other_half_would():
+    """From a facet in the half box, a facet's image through the mirror is the corresponding facet
+    of the other half, seen whole: the exchange equals the whole box's transfer to that facet, to
+    rounding, at every pair -- and with it every row of the half box sums to one, as the whole
+    box's do."""
+    half, whole, n = _half_box_and_its_reflection()
+    (mirror,) = planar_mirrors(half, ["mirror"])
+    np.testing.assert_allclose(np.asarray(mirror.normal), [-1.0, 0.0, 0.0], atol=1e-15)
+    rule = triangle_quadrature(6)
+    exchange = plane_exchange(mirror, half, rule.points(half.vertices), rule.weight)
+    direct = build_transfer(whole, self_occlusion=NoOcclusion()).geometric
+    np.testing.assert_allclose(exchange.geometric[:n, :n], direct[:n, n:], atol=1e-15)
+    within = build_transfer(half, self_occlusion=NoOcclusion()).geometric[:n, :n]
+    np.testing.assert_allclose(
+        jnp.sum(within + exchange.geometric[:n, :n], axis=1), 1.0, rtol=1e-13
+    )
+    # Nothing is exchanged with or through the mirror's own facets, which lie in its plane.
+    np.testing.assert_array_equal(exchange.geometric[n:], 0.0)
+    np.testing.assert_array_equal(exchange.geometric[:, n:], 0.0)
+
+
+def test_the_exchange_s_path_lengths_and_cosines_are_the_unfolded_ones():
+    """Distance and source cosine are measured to the image, as the light's unfolded path runs."""
+    half, whole, n = _half_box_and_its_reflection()
+    (mirror,) = planar_mirrors(half, ["mirror"])
+    rule = triangle_quadrature(1)
+    exchange = plane_exchange(mirror, half, rule.points(half.vertices), rule.weight)
+    direct = build_transfer(whole, receiver_quadrature=1, self_occlusion=NoOcclusion())
+    np.testing.assert_allclose(exchange.separation[:n, :n], direct.separation[:n, n:], atol=1e-15)
+    np.testing.assert_allclose(
+        exchange.source_cosine[:n, :n], direct.source_cosine[:n, n:], atol=1e-15
+    )

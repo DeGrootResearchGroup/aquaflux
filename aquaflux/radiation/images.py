@@ -33,8 +33,10 @@ and the aperture are the only things between them.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Sequence
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -53,7 +55,13 @@ from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, in_passes
 from aquaflux.vectors import dot
 
-__all__ = ["mirrored_fluence_rate", "summed_mirrored_fluence_rate"]
+__all__ = [
+    "PlaneExchange",
+    "mirrored_fluence_rate",
+    "mirrored_irradiance",
+    "plane_exchange",
+    "summed_mirrored_fluence_rate",
+]
 
 
 def mirrored_fluence_rate(
@@ -133,6 +141,55 @@ def summed_mirrored_fluence_rate(
         If no set is given, the sets do not share their geometry, or a mirror names a facet the
         set does not have.
     """
+    return _mirrored(sets, mirrors, points, None, absorption, pair_limit, point_sources_only=False)
+
+
+def mirrored_irradiance(
+    surfaces: Surfaces,
+    mirrors: Sequence[Mirror],
+    points,
+    normals,
+    *,
+    absorption: Absorption | None = None,
+    pair_limit: int = DEFAULT_PAIR_LIMIT,
+    point_sources_only: bool = False,
+):
+    """Irradiance on oriented points from one specular bounce of every source off every mirror.
+
+    The specular counterpart of :func:`~aquaflux.radiation.gather.direct_irradiance`, as
+    :func:`mirrored_fluence_rate` is of the direct fluence rate: the same images through the same
+    apertures, each weighted by the cosine of its direction from the receiver's normal rather than
+    counted from every direction alike, and nothing arriving from behind the receiver.
+
+    Parameters
+    ----------
+    surfaces, mirrors, absorption, pair_limit
+        As for :func:`mirrored_fluence_rate`.
+    points : array_like, shape ``(n_points, 3)``
+    normals : array_like, shape ``(n_points, 3)``
+        Unit normal at each point, on the side it receives light from.
+    point_sources_only : bool, optional
+        Gather only the point sources' images -- what the facet-to-facet transfer cannot carry,
+        since a point source has no area in it.
+
+    Returns
+    -------
+    jnp.ndarray, shape ``(n_points,)``
+        Irradiance in W/m².
+    """
+    return _mirrored(
+        (surfaces,),
+        mirrors,
+        points,
+        jnp.asarray(normals, dtype=float),
+        absorption,
+        pair_limit,
+        point_sources_only=point_sources_only,
+    )
+
+
+def _mirrored(sets, mirrors, points, normals, absorption, pair_limit, *, point_sources_only):
+    """The mirrored field of several sets on one geometry: fluence rate, or irradiance given normals."""
     sets = tuple(sets)
     geometry = _one_geometry(sets)
     # Read before conversion: inside a trace a concrete array becomes a tracer once it passes
@@ -150,32 +207,42 @@ def summed_mirrored_fluence_rate(
                 f"set's {geometry.n_facets}; it was found in a different set"
             )
             raise ValueError(msg)
-        path = _Path(mirror, geometry, absorption)
+        path = _Path.through(mirror, geometry, absorption)
         receivers = _in_front(mirror, host_points, points.shape[0], readable)
         if not receivers.size:
             continue
-        at = points[receivers]
+        at = (points[receivers], None if normals is None else normals[receivers])
         sources = _sources_in_front(mirror, geometry, readable)
         images = tuple(mirror.image(surfaces) for surfaces in sets)
-        received = _areal_images(sets, images, sources, path, at, pair_limit)
-        received = received + _point_images(sets, images, sources, path, at, pair_limit)
+        received = _point_images(sets, images, sources, path, at, pair_limit)
+        if not point_sources_only:
+            received = received + _areal_images(sets, images, sources, path, at, pair_limit)
         total = total.at[receivers].add(received)
     return total
 
 
-class _Path:
+class _Path(eqx.Module):
     """What every path through one mirror shares: its plane, its aperture and the medium.
 
-    Host-side bookkeeping for one mirror's gather, never traced as a whole, so a plain object.
+    A pytree, so a compiled gather takes it as an argument and the reflectances and the medium
+    stay live in it.
     """
 
-    def __init__(self, mirror: Mirror, geometry: Surfaces, absorption):
-        self.mirror = mirror
-        self.aperture = jnp.take(geometry.vertices, jnp.asarray(mirror.facets), axis=0)
-        self.reflectance = jnp.take(
-            jnp.asarray(geometry.specular_reflectance, dtype=float), jnp.asarray(mirror.facets)
+    mirror: Mirror
+    aperture: jnp.ndarray
+    reflectance: jnp.ndarray
+    absorption: Absorption | None
+
+    @classmethod
+    def through(cls, mirror: Mirror, geometry: Surfaces, absorption) -> _Path:
+        """The path through ``mirror``, whose facets index ``geometry``."""
+        facets = jnp.asarray(mirror.facets)
+        return cls(
+            mirror=mirror,
+            aperture=jnp.take(geometry.vertices, facets, axis=0),
+            reflectance=jnp.take(jnp.asarray(geometry.specular_reflectance, dtype=float), facets),
+            absorption=absorption,
         )
-        self.absorption = absorption
 
     def transmittance(self, image_centroid, receivers):
         """Surviving fraction along each receiver-to-mirror-to-source path, or one in vacuum.
@@ -234,11 +301,22 @@ def _sources_in_front(mirror: Mirror, geometry: Surfaces, readable: bool) -> np.
     return np.flatnonzero(height.max(axis=1) > 0.0)
 
 
+def _passes(receivers, pair_limit, per_receiver, body):
+    """:func:`~aquaflux.radiation.work.in_passes` over receivers, with their normals if any.
+
+    ``receivers`` is a ``(points, normals)`` pair, ``normals`` ``None`` for points in the volume;
+    ``body`` takes a chunk of each.
+    """
+    points, normals = receivers
+    if normals is None:
+        return in_passes(((points, 0),), pair_limit, per_receiver, lambda p: body(p, None))
+    return in_passes(((points, 0), (normals, 0)), pair_limit, per_receiver, body)
+
+
 def _areal_images(sets, images, sources, path: _Path, receivers, pair_limit):
     """What the areal facets' images send each receiver through the aperture, ``(n,)``."""
-    total = jnp.zeros(receivers.shape[0])
+    total = jnp.zeros(receivers[0].shape[0])
     image_geometry = images[0]
-    n_aperture = path.aperture.shape[0]
     for group in _areal_groups(images):
         facets = np.intersect1d(group.facets, sources)
         if not facets.size:
@@ -249,46 +327,75 @@ def _areal_images(sets, images, sources, path: _Path, receivers, pair_limit):
         normal = jnp.take(image_geometry.normal, index, axis=0)
         emission = [jnp.take(surfaces.emission, index) for surfaces in sets]
 
-        def at(
-            chunk,
-            vertices=vertices,
-            centroid=centroid,
-            normal=normal,
-            emission=emission,
-            profiles=group.profiles,
-        ):
-            seen = _seen_through(path, chunk, vertices)
-            direction, _ = _emitter_direction(centroid[None], chunk[:, None])
-            weight = seen * path.transmittance(centroid[None], chunk[:, None])
-            received = jnp.zeros(chunk.shape[0])
-            for flux, profile in zip(emission, profiles, strict=True):
-                radiance = profile.radiance_per_exitance(direction, normal[None])
-                received = received + jnp.sum(flux * radiance * weight, axis=1)
-            return received
-
-        total = total + in_passes(((receivers, 0),), pair_limit, len(facets) * n_aperture, at)
+        total = total + _areal_through(
+            path,
+            vertices,
+            centroid,
+            normal,
+            tuple(emission),
+            group.profiles,
+            *receivers,
+            pair_limit=pair_limit,
+        )
     return total
 
 
-def _seen_through(path: _Path, receivers, vertices):
+@eqx.filter_jit
+def _areal_through(
+    path, vertices, centroid, normal, emission, profiles, points, normals, *, pair_limit
+):
+    """What one group of areal images sends each receiver, compiled once per shape and profiles.
+
+    Module level, taking everything that varies as an argument, so a second call -- the next step
+    of a sweep, the same model asked again -- reuses the program instead of tracing it afresh.
+    """
+
+    def at(chunk, chunk_normals):
+        seen = _seen_through(path, chunk, chunk_normals, vertices)
+        direction, _ = _emitter_direction(centroid[None], chunk[:, None])
+        weight = seen * path.transmittance(centroid[None], chunk[:, None])
+        received = jnp.zeros(chunk.shape[0])
+        for flux, profile in zip(emission, profiles, strict=True):
+            radiance = profile.radiance_per_exitance(direction, normal[None])
+            received = received + jnp.sum(flux * radiance * weight, axis=1)
+        return received
+
+    per_receiver = vertices.shape[0] * path.aperture.shape[0]
+    return _passes((points, normals), pair_limit, per_receiver, at)
+
+
+def _seen_through(path: _Path, receivers, normals, vertices):
+    """:func:`_seen_through_aperture` through ``path``'s aperture, weighted by its reflectances."""
+    return _seen_through_aperture(path.aperture, path.reflectance, receivers, normals, vertices)
+
+
+def _seen_through_aperture(aperture, weights, receivers, normals, vertices):
     """Solid angle of each image seen through the aperture, weighted by each facet's reflectance.
+
+    The plain solid angle for a point in the volume, the projected one for a point with a normal.
 
     Parameters
     ----------
+    aperture : jnp.ndarray, shape ``(a, 3, 3)``
+        The mirror's facets.
+    weights : jnp.ndarray, shape ``(a,)``
+        What each aperture facet's share is weighted by: its specular reflectance, or one.
     receivers : jnp.ndarray, shape ``(r, 3)``
+    normals : jnp.ndarray, shape ``(r, 3)``, or None
     vertices : jnp.ndarray, shape ``(s, 3, 3)``
         The images' corners.
 
     Returns
     -------
     jnp.ndarray, shape ``(r, s)``
-        ``sum over aperture facets a of rho_a * (solid angle of the image within a's cone)``.
+        ``sum over aperture facets a of weights_a * (solid angle of the image within a's cone)``.
     """
-    view = source_view(receivers[:, None, :], None, vertices[None])
+    pair_normals = None if normals is None else normals[:, None, :]
+    view = source_view(receivers[:, None, :], pair_normals, vertices[None])
     # One view per (receiver, image), shared by every aperture facet it is clipped against. The
     # clip stacks its candidates, so everything is spread to one batch shape rather than left to
     # broadcast.
-    batch = (receivers.shape[0], vertices.shape[0], path.aperture.shape[0])
+    batch = (receivers.shape[0], vertices.shape[0], aperture.shape[0])
 
     def spread(array, trailing):
         return jnp.broadcast_to(array[:, :, None], (*batch, *trailing))
@@ -300,10 +407,11 @@ def _seen_through(path: _Path, receivers, vertices):
         through=spread(view.through, (3,)),
     )
     to_aperture = jnp.broadcast_to(
-        path.aperture[None, None] - receivers[:, None, None, None, :], (*batch, 3, 3)
+        aperture[None, None] - receivers[:, None, None, None, :], (*batch, 3, 3)
     )
-    fraction, _ = covered_by(spread_view, None, to_aperture)
-    return jnp.abs(view.whole) * (fraction @ path.reflectance)
+    triple_normals = None if normals is None else spread(pair_normals, (3,))
+    fraction, _ = covered_by(spread_view, triple_normals, to_aperture)
+    return jnp.abs(view.whole) * (fraction @ weights)
 
 
 def _point_images(sets, images, sources, path: _Path, receivers, pair_limit):
@@ -311,27 +419,45 @@ def _point_images(sets, images, sources, path: _Path, receivers, pair_limit):
     image_geometry = images[0]
     point_all = np.intersect1d(np.flatnonzero(image_geometry.is_point_source), sources)
     if not point_all.size:
-        return jnp.zeros(receivers.shape[0])
+        return jnp.zeros(receivers[0].shape[0])
     index = jnp.asarray(point_all)
     position = jnp.take(image_geometry.centroid, index, axis=0)
-    plans = [
-        [
-            (profile, np.searchsorted(point_all, np.intersect1d(point, point_all)))
+    plans = tuple(
+        tuple(
+            (
+                profile,
+                tuple(int(c) for c in np.searchsorted(point_all, np.intersect1d(point, point_all))),
+            )
             for profile, _, point in _groups(surfaces)
-        ]
+        )
         for surfaces in images
-    ]
+    )
     power = [jnp.take(surfaces.power, index) for surfaces in sets]
 
-    def at(chunk):
+    return _points_through(path, position, tuple(power), plans, *receivers, pair_limit=pair_limit)
+
+
+@eqx.filter_jit
+def _points_through(path, position, power, plans, points, normals, *, pair_limit):
+    """What the point sources' images send each receiver, compiled once per shape and plan.
+
+    ``plans`` holds, per set, each point-source profile with the columns it applies to as a tuple
+    of ints, which is static: it decides which columns the program reads.
+    """
+
+    def at(chunk, chunk_normals):
         reflectance = _crossed_reflectance(path, chunk, position)
         direction, distance_squared = _emitter_direction(position[None], chunk[:, None])
         weight = reflectance * path.transmittance(position[None], chunk[:, None])
         weight = weight / jnp.where(distance_squared == 0.0, 1.0, distance_squared)
+        if chunk_normals is not None:
+            # The light arrives travelling along `direction`, so it strikes a surface facing back
+            # along it; nothing is received from behind.
+            weight = weight * jnp.maximum(-dot(direction, chunk_normals[:, None, :]), 0.0)
         received = jnp.zeros(chunk.shape[0])
         for flux, plan in zip(power, plans, strict=True):
             for profile, columns in plan:
-                if not columns.size:
+                if not columns:
                     continue
                 pick = jnp.asarray(columns)
                 intensity = profile.intensity_fraction(
@@ -342,7 +468,8 @@ def _point_images(sets, images, sources, path: _Path, receivers, pair_limit):
                 )
         return received
 
-    return in_passes(((receivers, 0),), pair_limit, len(point_all) * path.aperture.shape[0], at)
+    per_receiver = position.shape[0] * path.aperture.shape[0]
+    return _passes((points, normals), pair_limit, per_receiver, at)
 
 
 def _crossed_reflectance(path: _Path, receivers, images):
@@ -379,3 +506,143 @@ def _crossed_reflectance(path: _Path, receivers, images):
     first = jnp.argmax(inside, axis=-1)
     reflectance = jnp.take(path.reflectance, first)
     return jnp.where(crosses & jnp.any(inside, axis=-1), reflectance, 0.0)
+
+
+class PlaneExchange(eqx.Module):
+    """Facet-to-facet transfer by one specular bounce in one mirror, and what it is attenuated by.
+
+    The specular counterpart of the direct transfer's frozen arrays, for one plane: the fraction
+    of what leaves facet ``j`` Lambertian that lands on facet ``i`` after reflecting in the mirror
+    (with unit reflectance), and the two one-point quantities the live optics multiply it by.
+
+    Attributes
+    ----------
+    geometric : jnp.ndarray, shape ``(n_facets, n_facets)``
+        Row ``i``, column ``j``: the projected solid angle of ``j``'s image seen through the
+        mirror from ``i``, over ``pi``, averaged over ``i``'s quadrature points. Zero where either
+        facet is a point source or wholly on or behind the plane.
+    separation : jnp.ndarray, shape ``(n_facets, n_facets)``
+        Distance from ``i``'s centroid to ``j``'s image's centroid: the length of the unfolded
+        path, which a uniform medium attenuates over.
+    source_cosine : jnp.ndarray, shape ``(n_facets, n_facets)``
+        Cosine, at ``j``'s image, between its normal and the direction to ``i``'s centroid -- what
+        a non-Lambertian source's distribution is asked about.
+    """
+
+    geometric: jnp.ndarray
+    separation: jnp.ndarray
+    source_cosine: jnp.ndarray
+
+
+def plane_exchange(
+    mirror: Mirror,
+    geometry: Surfaces,
+    sample,
+    weight,
+    *,
+    pair_limit: int = DEFAULT_PAIR_LIMIT,
+) -> PlaneExchange:
+    """Build one mirror's facet-to-facet exchange, integrating over each receiving facet.
+
+    The receiving half is quadrature, as for the direct transfer; the sending half -- the image
+    clipped to the aperture -- is closed form. Only facets with some part in front of the plane
+    can receive or send through it, so only those rows and columns are computed.
+
+    Parameters
+    ----------
+    mirror : Mirror
+    geometry : Surfaces
+        The facets, which the mirror's facets index.
+    sample : jnp.ndarray, shape ``(n_facets, n_points, 3)``
+        Quadrature points on each facet.
+    weight : jnp.ndarray, shape ``(n_points,)``
+        Their weights, summing to one.
+    pair_limit : int, optional
+        Receiving-facet-by-source-by-aperture-facet triples one pass may form, per quadrature
+        point.
+
+    Returns
+    -------
+    PlaneExchange
+    """
+    n = geometry.n_facets
+    areal = ~geometry.is_point_source
+    in_front = np.zeros(n, dtype=bool)
+    in_front[_sources_in_front(mirror, geometry, readable=True)] = True
+    rows = np.flatnonzero(in_front & areal)
+    columns = rows
+    aperture = jnp.take(geometry.vertices, jnp.asarray(mirror.facets), axis=0)
+    image = mirror.image(geometry)
+    index = jnp.asarray(columns)
+    image_vertices = jnp.take(image.vertices, index, axis=0)
+    image_centroid = jnp.take(image.centroid, index, axis=0)
+    image_normal = jnp.take(image.normal, index, axis=0)
+    weight = jnp.asarray(weight, dtype=float)
+
+    geometric = jnp.zeros((n, n))
+    separation = jnp.zeros((n, n))
+    source_cosine = jnp.zeros((n, n))
+    if rows.size:
+        row_index = jnp.asarray(rows)
+        block = _exchange_rows(
+            aperture,
+            image_vertices,
+            jnp.take(jnp.asarray(sample), row_index, axis=0),
+            jnp.take(geometry.normal, row_index, axis=0),
+            weight,
+            pair_limit=pair_limit,
+        )
+        offset = jnp.take(geometry.centroid, row_index, axis=0)[:, None] - image_centroid[None]
+        distance_squared = dot(offset, offset)
+        distance = jnp.sqrt(jnp.where(distance_squared == 0.0, 1.0, distance_squared))
+        cosine = dot(offset, image_normal[None]) / distance
+        grid = np.ix_(rows, columns)
+        geometric = geometric.at[grid].set(block)
+        separation = separation.at[grid].set(jnp.where(distance_squared == 0.0, 0.0, distance))
+        source_cosine = source_cosine.at[grid].set(cosine)
+    return PlaneExchange(geometric=geometric, separation=separation, source_cosine=source_cosine)
+
+
+@functools.partial(jax.jit, static_argnames="pair_limit")
+def _exchange_rows(aperture, image_vertices, sample, normals, weight, *, pair_limit):
+    """The projected solid angle of each image through the aperture, over ``pi``, per row.
+
+    Module level and compiled, so the planes of one build -- and of the next -- that share their
+    shapes share one program rather than each being traced afresh.
+
+    Parameters
+    ----------
+    aperture : jnp.ndarray, shape ``(a, 3, 3)``
+    image_vertices : jnp.ndarray, shape ``(s, 3, 3)``
+    sample : jnp.ndarray, shape ``(r, q, 3)``
+        Quadrature points on the receiving facets.
+    normals : jnp.ndarray, shape ``(r, 3)``
+    weight : jnp.ndarray, shape ``(q,)``
+
+    Returns
+    -------
+    jnp.ndarray, shape ``(r, s)``
+    """
+    ones = jnp.ones(aperture.shape[0])
+
+    def at(points, chunk_normals):
+        # Scanned over the quadrature points rather than unrolled, so the clip is compiled once
+        # however many points the rule has.
+        def accumulate(total, sampled):
+            weight_k, points_k = sampled
+            seen = _seen_through_aperture(aperture, ones, points_k, chunk_normals, image_vertices)
+            return total + weight_k * seen, None
+
+        total, _ = jax.lax.scan(
+            accumulate,
+            jnp.zeros((points.shape[0], image_vertices.shape[0])),
+            (weight, jnp.swapaxes(points, 0, 1)),
+        )
+        return total / jnp.pi
+
+    return in_passes(
+        ((sample, 0), (normals, 0)),
+        pair_limit,
+        image_vertices.shape[0] * aperture.shape[0],
+        at,
+    )

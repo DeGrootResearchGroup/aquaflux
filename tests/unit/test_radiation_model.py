@@ -1030,14 +1030,14 @@ def test_a_traced_optic_on_the_build_geometry_is_still_differentiated():
 
 
 # ---------------------------------------------------------------------------------------
-# Specular reflectance, which the model does not carry yet
+# Specular reflectance on a model built without specular bodies
 # ---------------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("call", [radiosity, surface_irradiance, fluence_rate])
-def test_a_specular_reflectance_is_refused_rather_than_dropped(call):
-    """A mirror the model does not carry would send nowhere the light it reflects, leaving a
-    field darker than the walls make it -- and a darker field looks like a result. One facet is
+def test_a_specular_reflectance_on_a_body_not_built_as_specular_is_refused(call):
+    """A mirror the model was not built to carry would send nowhere the light it reflects, leaving
+    a field darker than the walls make it -- and a darker field looks like a result. One facet is
     enough to be refused, and a set without any is answered as before."""
     surfaces = box(2, emission=1.0, diffuse_reflectance=0.5)
     model = build_radiation_model(
@@ -1046,13 +1046,13 @@ def test_a_specular_reflectance_is_refused_rather_than_dropped(call):
     call(model, surfaces)
     mirrored = np.zeros(surfaces.n_facets)
     mirrored[5] = 0.2
-    with pytest.raises(NotImplementedError, match="does not yet carry specular reflection"):
+    with pytest.raises(ValueError, match="have a specular reflectance but were not built as"):
         call(model, surfaces.with_optics(specular_reflectance=mirrored))
 
 
-def test_a_traced_specular_reflectance_is_refused_even_at_zero():
-    """It is traced only when something differentiates with respect to it, and this model's
-    derivative there would be zero -- finite, plausible, and wrong, since a mirror sends light
+def test_a_traced_specular_reflectance_is_refused_even_at_zero_without_specular_bodies():
+    """It is traced only when something differentiates with respect to it, and a model with no
+    specular body would give a derivative there of zero -- finite, plausible, and wrong, since a mirror sends light
     on. So the trace is refused before any value is read, while the diffuse reflectance beside it
     stays differentiable."""
     surfaces = box(2, emission=1.0, diffuse_reflectance=0.5)
