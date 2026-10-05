@@ -31,7 +31,7 @@ lamp rating and a water quality, the numbers a reactor engineer has::
     )
     surfaces = geometry.with_optics(
         emission=lamp_exitance(geometry, {"lamp": 35.0}),          # a 35 W lamp
-        reflectance=geometry.per_facet({"wall": 0.3}, default=0.0),
+        diffuse_reflectance=geometry.per_facet({"wall": 0.3}, default=0.0),
     )
     model = build_radiation_model(cell_centres, surfaces)
 
@@ -55,7 +55,7 @@ right. An angular profile is a distribution normalized to one over the sphere; t
 separately, and :func:`lamp_exitance` spreads a rating over the triangulated area so the model
 radiates exactly the rated power at any refinement.
 
-**What is differentiable.** Emission, point-source power, reflectance, profile parameters, the
+**What is differentiable.** Emission, point-source power, diffuse reflectance, profile parameters, the
 transmittance of analytic bodies, and the absorption coefficient or graded absorption field —
 through the interreflection solve by its adjoint, not by replaying it. **Exactly zero, by
 construction:** the derivative with respect to where anything stands in the way. Shadows are
@@ -72,7 +72,9 @@ respect to mesh-node positions gets no contribution from the fluence rate.
   that size at drinking-water transmittances.
 - **Specular reflection.** Walls reflect diffusely. At the same reflectivity, fully specular and
   fully diffuse walls have been measured 10–47% apart in log reduction (Hassanpour et al., 2023),
-  so a reflectance is only half a description of a wall.
+  so a reflectance is only half a description of a wall. A surface set already carries the two
+  halves separately; the model refuses a non-zero ``specular_reflectance`` rather than drop the
+  light it would reflect, and :class:`Mirror` holds the planes a specular wall reflects in.
 - **Scattering by the medium** (particles in water, aerosols or droplets in air), and **more
   than one waveband**: one absorbing, non-scattering medium at one wavelength.
 - **A source that is not diffuse** has its distribution evaluated along one direction per pair of
@@ -118,6 +120,7 @@ from aquaflux.radiation.model import (
     radiosity,
     surface_irradiance,
 )
+from aquaflux.radiation.mirrors import Mirror, planar_mirrors
 from aquaflux.radiation.photometry import PhotometricProfile, Photometry, read_ies
 from aquaflux.radiation.profiles import (
     AxisymmetricProfile,
@@ -166,6 +169,7 @@ __all__ = [
     "FrozenShadows",
     "Isotropic",
     "Lambertian",
+    "Mirror",
     "NoOcclusion",
     "OcclusionField",
     "PhotometricProfile",
@@ -204,6 +208,7 @@ __all__ = [
     "fluence_rate",
     "lamp_exitance",
     "open_facets",
+    "planar_mirrors",
     "projected_solid_angle",
     "radiosity",
     "read_ies",

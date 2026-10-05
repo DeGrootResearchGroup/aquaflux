@@ -66,7 +66,7 @@ REFERENCE = 36
 def plates(n: int) -> Surfaces:
     """The two facing plates as one emitting set, both fully emitting and non-reflecting."""
     return Surfaces.from_triangles(
-        facing_plates(n, half=HALF, gap=GAP), emission=1.0, reflectance=0.0
+        facing_plates(n, half=HALF, gap=GAP), emission=1.0, diffuse_reflectance=0.0
     )
 
 

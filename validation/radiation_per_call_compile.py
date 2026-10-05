@@ -103,7 +103,7 @@ def solve() -> None:
         f"{'facets':>7} {'call 1 s':>9} {'call 2 s':>9} {'call 3 s':>9} {'call 4 s':>9} {'cycles':>7}"
     )
     for divisions in (8, 16):
-        surfaces = box(divisions, emission=1.0, reflectance=0.5)
+        surfaces = box(divisions, emission=1.0, diffuse_reflectance=0.5)
         model = build_radiation_model(
             np.array([[0.5, 0.5, 0.5]]),
             surfaces,

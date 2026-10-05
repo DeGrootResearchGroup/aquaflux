@@ -109,7 +109,7 @@ def reflecting_room(side: float, lamp: Surfaces, body, slice_points, floor) -> d
     """Solve the room's interreflection at one facet size; the reflected floor and slice fields."""
     started = time.perf_counter()
     walls = Surfaces.from_triangles(
-        room.room_facets(side), emission=0.0, reflectance=room.WALL_REFLECTANCE
+        room.room_facets(side), emission=0.0, diffuse_reflectance=room.WALL_REFLECTANCE
     )
     samples = subpoints(np.asarray(walls.vertices), SUBPOINTS)
     normals = np.repeat(np.asarray(walls.normal)[:, None, :], samples.shape[1], axis=1)

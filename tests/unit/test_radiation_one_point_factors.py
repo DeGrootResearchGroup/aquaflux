@@ -175,7 +175,7 @@ def test_the_shipped_transfer_applies_absorption_at_the_centroid_separation():
     recorded bound would need re-measuring.
     """
     vertices = np.stack([SOURCE, _receiver(1.5)])
-    surfaces = Surfaces.from_triangles(vertices, emission=1.0, reflectance=0.0)
+    surfaces = Surfaces.from_triangles(vertices, emission=1.0, diffuse_reflectance=0.0)
     transfer = build_transfer(surfaces, self_occlusion=NoOcclusion())
 
     coefficient = 0.37

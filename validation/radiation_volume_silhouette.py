@@ -69,7 +69,7 @@ def water_points(per_side: int) -> np.ndarray:
 
 def lit_by_sleeves(surfaces):
     """The reactor with its walls black, so the only light is the sleeves' direct emission."""
-    return surfaces.with_optics(reflectance=jnp.zeros(surfaces.n_facets))
+    return surfaces.with_optics(diffuse_reflectance=jnp.zeros(surfaces.n_facets))
 
 
 def field_of(surfaces, points, strategy):

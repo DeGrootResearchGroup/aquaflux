@@ -35,14 +35,16 @@ reciprocity. Eliminating ``H`` gives
 ``(I - diag(rho) F) B = M + rho * ((F^M - F) M + H_point + H_external)``, which is what is
 actually solved.
 
-⚠️ **Reflection here is purely DIFFUSE, and a scalar reflectance does not say that.** A wall
-described only by the number 0.95 could scatter that light in every direction or send it off
-like a mirror, and the two are not close: Hassanpour et al. (2023) measure a **10-47% spread in
-log reduction between fully specular and fully diffuse walls at the same reflectivity of 0.95**.
-Diffuse is the right default rather than merely the convenient one — Li et al. (2017) find that
-diffuse reflection raises the reduction-equivalent fluence above specular, and the measurement
-literature emphasizes it — but the assumption belongs beside the number, because a reflectance
-supplied without it is an under-specified input.
+⚠️ **Reflection here is purely DIFFUSE.** A wall described only by the number 0.95 could scatter
+that light in every direction or send it off like a mirror, and the two are not close:
+Hassanpour et al. (2023) measure a **10-47% spread in log reduction between fully specular and
+fully diffuse walls at the same reflectivity of 0.95**. Diffuse is the right default rather than
+merely the convenient one — Li et al. (2017) find that diffuse reflection raises the
+reduction-equivalent fluence above specular, and the measurement literature emphasizes it — but
+the assumption belongs beside the number, which is why a surface set carries
+``diffuse_reflectance`` and ``specular_reflectance`` separately. This module carries only the
+first, and **refuses** a surface set with any of the second rather than dropping the light a
+mirror would send on, which would leave a field darker than its walls make it.
 
 **Occluder geometry is a build argument; occluder transmittance is a call argument.** The split
 is by when the value is needed rather than by what it describes: the shadow mask is frozen
@@ -466,7 +468,9 @@ def _solve(model, surfaces, absorption, transmittance, external_irradiance, solv
     """Assemble and solve ``(I - diag(rho) F) B = M + rho ((F^M - F) M + H_point + H_external)``."""
     _check_geometry(model, surfaces)
     emission = jnp.asarray(surfaces.emission, dtype=float)
-    reflectance = jnp.asarray(surfaces.reflectance, dtype=float)
+    reflectance = _without_specular(
+        jnp.asarray(surfaces.diffuse_reflectance, dtype=float), surfaces.specular_reflectance
+    )
     reflected, emitted = model.transfer.assemble(
         surfaces, absorption, transmittance, **model.settings.gather_options()
     )
@@ -492,6 +496,52 @@ def _solve(model, surfaces, absorption, transmittance, external_irradiance, solv
         reflected, reflectance, source, solver or relative_residual_gmres(_DEFAULT_RTOL)
     )
     return _Solved(outgoing, cycles, reflected, emitted, arriving)
+
+
+_SPECULAR_NOT_MODELLED = (
+    "a surface set with a non-zero specular_reflectance reached the radiation model, which does "
+    "not yet carry specular reflection: the light those facets send off as mirrors would be "
+    "dropped, leaving a field darker than the walls make it. Give the reflectance as "
+    "diffuse_reflectance to model those walls as diffuse, or keep specular_reflectance at zero."
+)
+
+
+def _without_specular(diffuse, specular):
+    """The diffuse reflectance, refused if any facet reflects specularly.
+
+    The refusal is a check rather than a silent zero because a dropped mirror loses light with
+    no error, which is the failure a model must not have. A **traced** specular reflectance is
+    refused whatever its value: it is traced only when something differentiates with respect to
+    it, and the derivative this model would give is zero -- finite, plausible, and wrong, since
+    a mirror sends light on.
+
+    Parameters
+    ----------
+    diffuse : jnp.ndarray, shape ``(n_facets,)``
+    specular : jnp.ndarray, shape ``(n_facets,)``
+
+    Returns
+    -------
+    jnp.ndarray, shape ``(n_facets,)``
+        ``diffuse``, unchanged.
+
+    Raises
+    ------
+    NotImplementedError
+        If the specular reflectance is non-zero on any facet.
+    TypeError
+        If it is traced.
+    """
+    if isinstance(specular, jax.core.Tracer):
+        msg = (
+            "specular_reflectance is traced, but the radiation model does not yet carry specular "
+            "reflection, so its derivative with respect to that reflectance would read zero. Keep "
+            "it out of the traced values."
+        )
+        raise TypeError(msg)
+    if np.any(np.asarray(specular) != 0.0):
+        raise NotImplementedError(_SPECULAR_NOT_MODELLED)
+    return diffuse
 
 
 @eqx.filter_jit

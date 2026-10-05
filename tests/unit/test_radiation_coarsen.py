@@ -188,13 +188,14 @@ def test_a_crease_sharper_than_the_angle_is_kept():
     assert coarse.n_facets < len(folded) / 4
 
 
-def test_the_surface_set_keeps_each_bodys_power_and_carries_reflectance():
+def test_the_surface_set_keeps_each_bodys_power_and_carries_both_reflectances():
     tube = open_cylinder(sectors=40, slices=8, length=0.01)
     half = (tube.mean(axis=1)[:, 2] > 0.005).astype(int)
     fine = Surfaces.from_triangles(tube, solid_id=half, solid_names=("lamp", "sleeve"))
     fine = fine.with_optics(
         emission=fine.per_facet({"lamp": 700.0}, default=0.0),
-        reflectance=fine.per_facet({"sleeve": 0.3}, default=0.0),
+        diffuse_reflectance=fine.per_facet({"sleeve": 0.3}, default=0.0),
+        specular_reflectance=fine.per_facet({"lamp": 0.25}, default=0.0),
     )
     coarse, record = coarsen_surfaces(fine, max_edge=4e-3, chord=5e-5)
 
@@ -210,7 +211,10 @@ def test_the_surface_set_keeps_each_bodys_power_and_carries_reflectance():
     assert record.area_after[0] < record.area_before[0]
     assert float(np.asarray(coarse.emission)[np.asarray(coarse.solid_id) == 0].max()) > 700.0
     sleeve = np.asarray(coarse.solid_id) == 1
-    np.testing.assert_array_equal(np.asarray(coarse.reflectance)[sleeve], 0.3)
+    np.testing.assert_array_equal(np.asarray(coarse.diffuse_reflectance)[sleeve], 0.3)
+    np.testing.assert_array_equal(np.asarray(coarse.diffuse_reflectance)[~sleeve], 0.0)
+    np.testing.assert_array_equal(np.asarray(coarse.specular_reflectance)[~sleeve], 0.25)
+    np.testing.assert_array_equal(np.asarray(coarse.specular_reflectance)[sleeve], 0.0)
     assert coarse.solid_names == ("lamp", "sleeve")
 
 

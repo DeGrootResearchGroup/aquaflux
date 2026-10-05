@@ -910,7 +910,7 @@ def coarsen_surfaces(
 ) -> tuple[Surfaces, Coarsening]:
     """Coarsen a surface set, carrying its optics and keeping each body's emitted power.
 
-    Reflectance and angular profile are carried unchanged, being intensive. Exitance is scaled,
+    Both reflectances and the angular profile are carried unchanged, being intensive. Exitance is scaled,
     per body, by the ratio of the body's area before to after, so each body emits the same power
     over its coarse area as over its original one.
 
@@ -938,7 +938,12 @@ def coarsen_surfaces(
     solid_id = np.asarray(surfaces.solid_id)
     n_bodies = len(surfaces.solid_names)
     emission = _per_body(np.asarray(surfaces.emission), solid_id, n_bodies, "emission")
-    reflectance = _per_body(np.asarray(surfaces.reflectance), solid_id, n_bodies, "reflectance")
+    diffuse = _per_body(
+        np.asarray(surfaces.diffuse_reflectance), solid_id, n_bodies, "diffuse_reflectance"
+    )
+    specular = _per_body(
+        np.asarray(surfaces.specular_reflectance), solid_id, n_bodies, "specular_reflectance"
+    )
     profile = _per_body(np.asarray(surfaces.profile_index), solid_id, n_bodies, "profile")
 
     coarsening = coarsen_to_size(
@@ -960,7 +965,8 @@ def coarsen_surfaces(
         solid_id=body,
         solid_names=surfaces.solid_names,
         emission=exitance[body],
-        reflectance=reflectance[body],
+        diffuse_reflectance=diffuse[body],
+        specular_reflectance=specular[body],
         profiles=surfaces.profiles,
         profile_index=profile[body],
     )

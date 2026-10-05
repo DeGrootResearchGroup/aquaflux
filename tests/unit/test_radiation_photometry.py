@@ -416,7 +416,7 @@ def test_the_surface_transfer_refuses_a_profile_it_cannot_freeze(b1):
     surfaces = Surfaces.from_triangles(
         np.concatenate([lamp, floor]),
         emission=np.array([1.0, 1.0, 0.0, 0.0]),
-        reflectance=np.array([0.0, 0.0, 0.5, 0.5]),
+        diffuse_reflectance=np.array([0.0, 0.0, 0.5, 0.5]),
         profiles=(profile, Lambertian()),
         profile_index=np.array([0, 0, 1, 1]),
     )
@@ -445,3 +445,29 @@ def test_the_fluence_rate_is_differentiable_in_the_table(b1):
     assert derivative == pytest.approx(
         (float(fluence(1.0 + step)) - float(fluence(1.0 - step))) / (2 * step), rel=1e-8
     )
+
+
+def test_a_mirror_image_sends_along_each_reflected_direction_what_the_source_sends_along_it(b1):
+    """What an image source must do for a specular bounce to be gathered as a direct one.
+
+    The table here varies as ``sin h``, which a reflection turns the other way round the normal,
+    so an image that only reflected ``up`` would read every asymmetric row mirrored. The plane is
+    oblique to the facet, to ``up`` and to the axes, so no symmetry of the setup hides that."""
+    profile = read_ies(b1).profile(up=(0.0, 1.0, 0.0))
+    plane = np.array([0.3, -0.5, 0.8])
+    plane /= np.linalg.norm(plane)
+    reflection = np.eye(3) - 2.0 * np.outer(plane, plane)
+    normal = np.array([0.2, 0.1, -1.0])
+    normal /= np.linalg.norm(normal)
+    directions, _ = _hemisphere(normal, np.array([0.0, 1.0, 0.0]), n=60)
+    image = profile.mirrored(jnp.asarray(plane))
+    for method in ("intensity_fraction", "radiance_per_exitance"):
+        source = getattr(profile, method)(jnp.asarray(directions), jnp.asarray(normal))
+        seen = getattr(image, method)(
+            jnp.asarray(directions @ reflection.T), jnp.asarray(reflection @ normal)
+        )
+        np.testing.assert_allclose(seen, source, rtol=1e-12, atol=1e-15)
+        assert float(np.ptp(np.asarray(source))) > 0.0
+    twice = image.mirrored(jnp.asarray(plane))
+    assert twice.handedness == profile.handedness
+    np.testing.assert_allclose(twice.up, profile.up, atol=1e-15)
