@@ -23,6 +23,7 @@ steady_state_solving
 preconditioning
 case_files
 radiation
+radiation_case
 cad_geometry
 ```
 

@@ -575,6 +575,29 @@ snapped mesh. Its README carries every number with its configuration. What to kn
   patch is cut, so each meshing step leaves its own completion marker.
 - **The cell count is not `owner.max() + 1`**: the highest cells may appear only as a neighbour
   (2-3 cells short on both meshes); `cells.npz`, written by OpenFOAM itself, is the authority.
+- **aquaflux's side is CASE FILES since 2026-10-05**: `cases/{bunny,empty}_{floor,volume}.yaml`,
+  `bunny_reflecting.yaml` and `bunny_reflecting_coarse.yaml` (0.4 m reflecting triangles), run by
+  `run_cases.py` (`RAY_CASES`, `RAY_OVERWRITE=1`) through `run_case.sh` into `work/cases/<name>/`
+  (`fields.vtu`, `patches.vtm` + `patches/*.vtp`, `run.yaml` with `results`). `aquaflux_floor.py`,
+  `aquaflux_volume.py` and `aquaflux_reflecting.py` are **deleted**; `figures.py` reads the run
+  directories through `outputs.py` (a numpy decoder of the VTK files, independent of the writer);
+  `slices_refined.py` is the one harness left, re-gathering the slice cells of `<mesh>_volume.yaml`'s
+  built scene with the floor case's refined lamp. `work` may be a symlink to the worktree that meshed
+  the rooms (the `.gitignore` entry is `/work`, which matches a link; `work/` did not).
+- **The port reproduces the scripts (2026-10-05/06; `943389aa` + the uncommitted port, jax 0.10.2,
+  CPU, macOS arm64, 11 cores; the deleted scripts' outputs at `8dd4caae` as the comparison).** Floor `E`
+  (bunny, 17,920-facet lamp) to 9.1e-12 of its peak, floor power 0.0994887477227159 W both; empty floor
+  9.1e-12. `bunny_volume` `G` p99 6.8e-10 of max, `volume_integral_G` to 3e-10 relative, but **26 cells
+  move by about one lamp facet's share** (shadow-edge ray decisions: the bunny's fan triangulation
+  differs from the old script's), one near-bunny cell 3.36e-4 -> 0. `bunny_reflecting` is NOT the same
+  configuration and is not a bit-for-bit check: 9,762 coarsened mesh-patch triangles (<= 0.2 m) against
+  2,000 squares, the lamp's own 1,120 facets (the script refined it for the floor and the walls' light),
+  a black lamp window. Under that: room absorbs 113.133 vs 113.129 mW, bunny 5.693 vs 5.697 mW,
+  reflected share of floor power 0.13443 vs 0.13442; reflected `G` p99 2.6 % of its peak, worst 40 %
+  in a cell 6 mm from the floor (0.7 % p99 past 10 cm from the walls). 0.2 -> 0.4 m moves the reflected
+  floor <= 4.5 % of its own peak (the script's squares: 5.1 %). Wall times (`run.yaml` `seconds`, mesh
+  read included): bunny floor 306 s, empty floor 148, bunny volume 805, empty volume 99 and bunny
+  reflecting 5,277 (both shared with unit tests: upper bounds), coarse 2,009 (its tail beside a test tier).
 - **`test_validation_api.py` matched `from aquaflux...` by string prefix**, so a case's sibling
   module named `aquaflux_floor` was taken for the package and every name imported from it reported
   missing. It now matches the package or its submodules (`module == "aquaflux"` or

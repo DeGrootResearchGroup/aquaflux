@@ -32,6 +32,7 @@ import yaml
 
 from aquaflux.mesh import Mesh
 
+from .paths import named_paths
 from .solver import solver_for
 from .spec import CaseSpec, case_spec_from_mapping, case_spec_to_mapping
 
@@ -90,10 +91,13 @@ class CheckedCase:
         The case.
     mesh : Mesh
         Its mesh, validated -- topology only; no geometry has been computed.
+    directory : pathlib.Path
+        The directory the case file sits in, which the files it names are relative to.
     """
 
     spec: CaseSpec
     mesh: Mesh
+    directory: Path
 
     def build(self) -> object:
         """The case's problem: its mesh's geometry, then its equations.
@@ -104,11 +108,12 @@ class CheckedCase:
 
         Returns
         -------
-        MomentumContinuity or CoupledRANS
+        MomentumContinuity, CoupledRANS or Scene
             The flow assembler for a laminar case; the coupled flow and closure for a
-            Reynolds-averaged one.
+            Reynolds-averaged one; the lamps, the surfaces they light and where the light is wanted for
+            a radiation one.
         """
-        return self.spec.physics.build(self.spec, self.mesh, self.mesh.geometry())
+        return self.spec.physics.build(self.spec, self.mesh, self.mesh.geometry(), self.directory)
 
     def solve(self, problem: object, **observers: object) -> object:
         """Solve ``problem`` with the case's solver (see :meth:`~aquaflux.case.SolverSpec.solve`).
@@ -125,7 +130,7 @@ class CheckedCase:
         -------
         object
             The converged fields: ``(flow, k, omega)`` for a Reynolds-averaged case, the flow state for
-            a laminar one.
+            a laminar one, a :class:`~aquaflux.radiation.SceneSolution` for a radiation one.
 
         Raises
         ------
@@ -155,6 +160,10 @@ class CaseFile:
     def check(self) -> CheckedCase:
         """Read the case's mesh, validate it, and check the case against it.
 
+        Every file the physics or a boundary patch names -- a lamp's photometry, a surface or a body
+        read from a drawing -- must exist, so a misspelt one is reported here rather than once the
+        geometry has been computed.
+
         Returns
         -------
         CheckedCase
@@ -166,11 +175,22 @@ class CaseFile:
             If the mesh is not topologically valid, or the case's patches do not fit it
             (:meth:`CaseSpec.check_against`).
         FileNotFoundError
-            If the mesh cannot be found.
+            If the mesh, or a file the case names, cannot be found.
         """
+        missing = [
+            f"{where}: {path}"
+            for section in ("physics", "boundaries")
+            for where, path in named_paths(getattr(self.spec, section), section)
+            if not (self.directory / path).exists()
+        ]
+        if missing:
+            raise FileNotFoundError(
+                f"the case names files that do not exist (relative to {self.directory}): "
+                + "; ".join(missing)
+            )
         mesh = self.spec.mesh.read(self.directory).validate()
         self.spec.check_against(mesh)
-        return CheckedCase(spec=self.spec, mesh=mesh)
+        return CheckedCase(spec=self.spec, mesh=mesh, directory=self.directory)
 
 
 def read_case(path: str | Path) -> CaseFile:

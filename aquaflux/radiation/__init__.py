@@ -146,6 +146,15 @@ from aquaflux.radiation.self_occlusion import (
 from aquaflux.radiation.coarsen import Coarsening, coarsen_surfaces, coarsen_to_size
 from aquaflux.radiation.quadrature import TriangleQuadrature, triangle_quadrature
 from aquaflux.radiation.receiver_shadows import FrozenShadows, ReceiverShadows, StreamedShadows
+from aquaflux.radiation.scene import (
+    DEFAULT_LAMP_SAMPLES,
+    Scene,
+    SceneSolution,
+    SurfaceReceivers,
+    VolumeReceivers,
+    solve_scene,
+    subtriangle_centroids,
+)
 from aquaflux.radiation.solid_angle import (
     projected_solid_angle,
     signed_solid_angle,
@@ -166,6 +175,7 @@ from aquaflux.radiation.units import absorption_from_uvt, lamp_exitance
 from aquaflux.radiation.visibility import Visibility, build_visibility
 
 __all__ = [
+    "DEFAULT_LAMP_SAMPLES",
     "Absorption",
     "AxisymmetricProfile",
     "BackFaces",
@@ -187,11 +197,14 @@ __all__ = [
     "RadiationSettings",
     "RayCastOcclusion",
     "ReceiverShadows",
+    "Scene",
+    "SceneSolution",
     "SelfOcclusion",
     "ShaftCulling",
     "SilhouetteOcclusion",
     "StreamedShadows",
     "Subdivision",
+    "SurfaceReceivers",
     "Surfaces",
     "TransferMatrix",
     "TriangleBody",
@@ -199,6 +212,7 @@ __all__ = [
     "TriangleSoup",
     "UniformAbsorption",
     "Visibility",
+    "VolumeReceivers",
     "VoxelAbsorption",
     "WindingReport",
     "absorption_from_uvt",
@@ -230,8 +244,10 @@ __all__ = [
     "segment_is_cut",
     "signed_solid_angle",
     "solid_angle",
+    "solve_scene",
     "stored_normal_disagreement",
     "subdivide_to_width",
+    "subtriangle_centroids",
     "surface_irradiance",
     "triangle_quadrature",
     "winding_report",

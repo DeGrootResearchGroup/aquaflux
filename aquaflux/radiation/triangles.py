@@ -284,9 +284,10 @@ def pairs_are_cut(
         The blocking triangles.
     receiver, source : array_like of int, shape ``(n_pairs,)``
         Each pair's receiver and source.
-    target : array_like of int, shape ``(n_receivers,)``, optional
-        The triangle each receiver sits on, excluded from its rays as the source is; omitted, only
-        the source is excluded.
+    target : array_like of int, shape ``(n_receivers,)`` or ``(n_receivers, k)``, optional
+        The triangle each receiver sits on -- or, where it sits on several (a shared edge or vertex),
+        those triangles, ``-1`` filling a row that names fewer -- excluded from its rays as the source
+        is; omitted, only the source is excluded.
     work_limit : int, optional
         As for :func:`segment_is_cut`.
 
@@ -298,7 +299,7 @@ def pairs_are_cut(
     sources = jnp.asarray(sources, dtype=float)
     min_distance = jnp.asarray(min_distance, dtype=float)
     receiver, source = np.asarray(receiver), np.asarray(source)
-    on = None if target is None else np.asarray(target)
+    on = None if target is None else np.asarray(target).reshape(len(receivers), -1)
 
     def chunk(pairs: slice, pad: int):
         by_receiver = _repeat_last(jnp.asarray(receiver[pairs]), pad)
@@ -309,7 +310,9 @@ def pairs_are_cut(
         excluded = (
             by_source[:, None]
             if on is None
-            else jnp.stack([by_source, _repeat_last(jnp.asarray(on[receiver[pairs]]), pad)], 1)
+            else jnp.concatenate(
+                [by_source[:, None], _repeat_last(jnp.asarray(on[receiver[pairs]]), pad)], axis=1
+            )
         )
         return origin, direction, near, excluded
 

@@ -125,9 +125,12 @@ class SelfOcclusion(eqx.Module):
         near : jnp.ndarray, shape ``(n_facets,)``
             How far along each segment to start looking, in length units -- the margin that
             stops a facet from shadowing itself.
-        receiver_facet : jnp.ndarray of int, shape ``(n_receivers,)`` or None
+        receiver_facet : jnp.ndarray of int, shape ``(n_receivers,)`` or ``(n_receivers, k)``, or None
             Which facet each receiver sits on, or ``-1`` where none, or ``None`` when the
-            receivers are volume points lying on no facet at all.
+            receivers are volume points lying on no facet at all. A receiver on a shared edge or
+            vertex lies on several, which the ray test takes as ``(n_receivers, k)`` rows, ``-1``
+            filling a row that names fewer; a strategy measuring about one facet's normal refuses
+            that form.
 
         Returns
         -------
@@ -235,7 +238,11 @@ class RayCastOcclusion(SelfOcclusion):
         facing = BackFaces.of(surfaces) if clear_behind else None
         centroid = np.asarray(surfaces.centroid)
         near = np.asarray(near, dtype=float)
-        on_facet = None if receiver_facet is None else np.asarray(receiver_facet, dtype=int)
+        on_facet = (
+            None
+            if receiver_facet is None
+            else np.asarray(receiver_facet, dtype=int).reshape(n_receivers, -1)
+        )
         blocked = np.zeros((n_receivers, n_facets), dtype=bool)
         per_pass = receivers_per_pass(self.pair_limit, n_facets)
         for start in range(0, n_receivers, per_pass):
@@ -302,12 +309,17 @@ class RayCastOcclusion(SelfOcclusion):
 
 
 def _exclusions(source: np.ndarray, row: np.ndarray, on_facet) -> np.ndarray:
-    """What each ray ignores: the facet it leaves and, when its receiver sits on one, that facet.
+    """What each ray ignores: the facet it leaves and, when its receiver sits on facets, those.
 
     Leaving out the second blocks every ray aimed at a facet centroid on its own destination.
     Formed for one pass's rays, from their indices, rather than for the whole problem.
+    ``on_facet`` is ``(n_receivers, k)``, ``-1`` naming no facet.
     """
-    return source[:, None] if on_facet is None else np.stack([source, on_facet[row]], axis=1)
+    return (
+        source[:, None]
+        if on_facet is None
+        else np.concatenate([source[:, None], on_facet[row]], axis=1)
+    )
 
 
 class SilhouetteOcclusion(SelfOcclusion):
@@ -402,6 +414,11 @@ class SilhouetteOcclusion(SelfOcclusion):
             if receiver_facet is None
             else np.asarray(receiver_facet, dtype=int)
         )
+        if facet_of.ndim != 1:
+            raise ValueError(
+                "SilhouetteOcclusion takes one facet per receiver -- the facet whose normal its share "
+                f"is projected about -- but receiver_facet has shape {facet_of.shape}."
+            )
         n_facets = int(surfaces.n_facets)
         either_side = self._either_side(surfaces)
         vertices = jnp.asarray(surfaces.vertices, dtype=float)

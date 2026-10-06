@@ -1,4 +1,4 @@
-"""A whole case -- mesh, fluid, physics, boundaries, numerics -- described in one file.
+"""A whole case -- mesh, physics, boundaries, and for a flow its fluid and numerics -- described in one file.
 
 A case file is a YAML document naming each part of a case as plain settings::
 
@@ -29,9 +29,29 @@ The file's ``solver`` section says how the case is solved and its ``outputs`` se
 writes; :func:`prepare_run` reads and checks a file for a run, and :meth:`PreparedRun.run` builds,
 solves and writes it -- what ``aquaflux run case.yaml`` does.
 
-Each boundary patch is described once for every field: an :class:`Inlet`, an :class:`Outlet` or a
-:class:`Wall`. The closures each equation needs, and the set of walls a turbulence closure measures its
-wall distance from, all follow from that one statement.
+Each boundary patch is described once for every field: an :class:`Inlet`, an :class:`Outlet`, a
+:class:`Wall` or a :class:`Lamp`. The closures each equation needs, and the set of walls a turbulence
+closure measures its wall distance from, all follow from that one statement.
+
+A :class:`Radiation` case is the light of its lamps rather than a flow: its patches are lamps and walls
+(black, or reflecting by a ``reflectance``), its physics holds the medium, what stands in the way and
+where the light is gathered, and it has no fluid and no numerics section::
+
+    mesh: {kind: OpenFOAMMesh, path: constant/polyMesh}
+    physics:
+      kind: Radiation
+      medium: {kind: UniformMedium, transmittance: 70.0}
+    boundaries:
+      lamp:
+        kind: Lamp
+        power: 35.0
+        profile: {kind: LambertianProfile}
+      walls: {kind: Wall, reflectance: 0.3, geometry: {kind: StlSurface, file: walls.stl}}
+    outputs:
+      fields: [{kind: Vtk}, {kind: PatchVtk}]
+
+It writes the fluence rate ``G`` at the cell centres, the irradiance ``E`` on the walls' faces, and in
+``run.yaml`` where the lamps' power goes.
 """
 
 from __future__ import annotations
@@ -41,6 +61,7 @@ from .boundaries import (
     Inlet,
     InletTurbulence,
     IntensityLength,
+    Lamp,
     Outlet,
     PatchCondition,
     Wall,
@@ -49,13 +70,33 @@ from .case_file import CaseFile, CheckedCase, read_case, write_case
 from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
 from .mesh_source import AxisGrading, GeometricGrading, MeshSource, OpenFOAMMesh, StructuredGrid
-from .outputs import Checkpoints, FieldWriter, OpenFOAMTime, Outputs, Vtk
-from .physics import RANS, Laminar, Physics
+from .outputs import Checkpoints, FieldWriter, OpenFOAMTime, Outputs, PatchVtk, RunFields, Vtk
+from .physics import RANS, Laminar, Physics, Radiation
+from .radiation import (
+    CadFluid,
+    CadPlacement,
+    CadSolid,
+    CadSurface,
+    Coarsen,
+    CosinePowerProfile,
+    IesProfile,
+    LambertianProfile,
+    LampProfile,
+    MeshPatch,
+    OccluderSpec,
+    PatchBody,
+    Receivers,
+    StlBody,
+    StlSurface,
+    SurfaceSource,
+    UniformMedium,
+)
 from .run import PreparedRun, RunRecord, prepare_run
 from .solver import (
     CoupledMarch,
     FlowMarch,
     NotConverged,
+    RadiationSolve,
     RootSolve,
     Segregated,
     SolverSpec,
@@ -69,10 +110,16 @@ __all__ = [
     "AxisGrading",
     "BodyForce",
     "BulkVelocity",
+    "CadFluid",
+    "CadPlacement",
+    "CadSolid",
+    "CadSurface",
     "CaseFile",
     "CaseSpec",
     "CheckedCase",
     "Checkpoints",
+    "Coarsen",
+    "CosinePowerProfile",
     "CoupledMarch",
     "DriveSpec",
     "FieldWriter",
@@ -80,26 +127,42 @@ __all__ = [
     "FlowMarch",
     "Fluid",
     "GeometricGrading",
+    "IesProfile",
     "Inlet",
     "InletTurbulence",
     "IntensityLength",
+    "LambertianProfile",
     "Laminar",
+    "Lamp",
+    "LampProfile",
+    "MeshPatch",
     "MeshSource",
     "NotConverged",
     "Numerics",
+    "OccluderSpec",
     "OpenFOAMMesh",
     "OpenFOAMTime",
     "Outlet",
     "Outputs",
+    "PatchBody",
     "PatchCondition",
+    "PatchVtk",
     "Physics",
     "PreparedRun",
+    "Radiation",
+    "RadiationSolve",
+    "Receivers",
     "RootSolve",
+    "RunFields",
     "RunRecord",
     "Segregated",
     "SolverSpec",
     "SourceSpec",
+    "StlBody",
+    "StlSurface",
     "StructuredGrid",
+    "SurfaceSource",
+    "UniformMedium",
     "ViscosityRamp",
     "Vtk",
     "Wall",

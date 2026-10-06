@@ -77,7 +77,12 @@ applies anywhere you want gradients through a flow solve.
   patch is stated once for every field, every setting is checked where it appears,
   a case can be checked against its mesh without building anything, and
   `aquaflux run case.yaml` solves it and writes its fields (VTK or an OpenFOAM
-  time directory), its log and a record of the run.
+  time directory), its log and a record of the run. A case may also be the light
+  of ultraviolet lamps instead of a flow: lamps and reflecting walls on the mesh's
+  patches (their surfaces read from the STEP or STL drawing, or the mesh itself),
+  bodies in the way and an absorbing medium; the run writes the fluence rate in the
+  cells, the irradiance on every wall as one VTK file per patch, and where the
+  lamps' power went.
 
 ## Installation
 

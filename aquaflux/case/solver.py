@@ -1,6 +1,6 @@
 """How a case is solved: the march, its preconditioner, its stopping test and its continuation.
 
-A case file's ``solver`` section names one of three solves, each the library solve of the same shape:
+A case file's ``solver`` section names one of four solves, each the library solve of the same shape:
 
 * :class:`CoupledMarch` -- a Reynolds-averaged case marched as one coupled system of the flow and the
   closure (:func:`~aquaflux.turbulence.solve_coupled`), optionally along a viscosity ramp
@@ -8,7 +8,9 @@ A case file's ``solver`` section names one of three solves, each the library sol
 * :class:`FlowMarch` -- a laminar case marched as the flow system (:func:`~aquaflux.flow.solve_flow_march`);
 * :class:`Segregated` -- a Reynolds-averaged case solved by alternating the flow and the closure
   (:func:`~aquaflux.turbulence.solve_segregated`), which is also the solve that holds a
-  :class:`~aquaflux.case.BulkVelocity` drive.
+  :class:`~aquaflux.case.BulkVelocity` drive;
+* :class:`RadiationSolve` -- a radiation case's lamps and reflecting walls, the reflections closed by
+  one linear solve (:func:`~aquaflux.radiation.solve_scene`).
 
 Every setting is optional unless its solve cannot run without it, and an unset one leaves the library
 solve's own default in force. What a solver section holds is settings, never a built solve: a march
@@ -30,6 +32,7 @@ from collections.abc import Callable, Mapping
 from typing import Literal
 
 from aquaflux.flow import MassFlow, bulk_velocity_flow_solve, reused_flow_solve, solve_flow_march
+from aquaflux.radiation import solve_scene
 from aquaflux.solve import (
     Convergence,
     DualTimeLoop,
@@ -42,6 +45,7 @@ from aquaflux.solve import (
     ShiftStrengthControl,
     StateCheckpointer,
     combine_observers,
+    relative_residual_gmres,
 )
 from aquaflux.turbulence import (
     BlockDiagonal,
@@ -58,12 +62,13 @@ from aquaflux.turbulence import (
 )
 
 from .forcing import DriveSpec
-from .physics import RANS, Laminar, Physics, _set
+from .physics import RANS, Laminar, Physics, Radiation, _set
 
 __all__ = [
     "CoupledMarch",
     "FlowMarch",
     "NotConverged",
+    "RadiationSolve",
     "RootSolve",
     "Segregated",
     "SolverSpec",
@@ -77,7 +82,8 @@ class NotConverged(RuntimeError):
 
 @dataclasses.dataclass(frozen=True)
 class SolverSpec(abc.ABC):
-    """How a case is solved: :class:`CoupledMarch`, :class:`FlowMarch` or :class:`Segregated`."""
+    """How a case is solved: :class:`CoupledMarch`, :class:`FlowMarch`, :class:`Segregated` or
+    :class:`RadiationSolve`."""
 
     @abc.abstractmethod
     def observers_for(
@@ -155,6 +161,8 @@ def _refuse_settings_as_observers(owner: str, owned: frozenset[str], observers) 
 
 
 def _refuse_physics(owner: str, physics: Physics, wanted: type, other: str) -> None:
+    if isinstance(physics, Radiation) and wanted is not Radiation:
+        other = "RadiationSolve"
     if not isinstance(physics, wanted):
         raise ValueError(
             f"solver: {owner} solves a {wanted.__name__} case, but the physics is "
@@ -714,6 +722,63 @@ class Segregated(SolverSpec):
                 raise NotConverged(str(warning)) from None
 
 
+@dataclasses.dataclass(frozen=True)
+class RadiationSolve(SolverSpec):
+    """A radiation case: the lamps' direct light, then the reflecting walls' (:func:`~aquaflux.radiation.solve_scene`).
+
+    Nothing is marched. The only iteration is the linear solve that closes the reflections over every
+    bounce, and its stopping test is the one setting here.
+
+    Attributes
+    ----------
+    rtol : float or None
+        The global relative residual the reflection solve stops at; unset,
+        :func:`~aquaflux.radiation.radiosity`'s own.
+
+    Raises
+    ------
+    ValueError
+        If ``rtol`` is not a positive number below one.
+    """
+
+    rtol: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.rtol is not None and not 0.0 < self.rtol < 1.0:
+            raise ValueError(f"RadiationSolve.rtol must lie in (0, 1), got {self.rtol!r}.")
+
+    def observers_for(
+        self, logger: MarchLogger, checkpointer: StateCheckpointer | None
+    ) -> dict[str, object]:
+        """The log's notes, one line as each stage starts; there are no steps to checkpoint."""
+        del checkpointer
+        return {"report": logger.note}
+
+    def refuse_for(self, physics: Physics, drive: DriveSpec | None) -> None:
+        """Refuse any physics but :class:`~aquaflux.case.Radiation`."""
+        del drive
+        _refuse_physics(
+            "RadiationSolve", physics, Radiation, "FlowMarch, CoupledMarch or Segregated"
+        )
+
+    def solve(self, problem: object, **observers: object) -> object:
+        """Light the scene the case built; ``report`` is the one observer.
+
+        Returns
+        -------
+        SceneSolution
+        """
+        _refuse_settings_as_observers("RadiationSolve", frozenset({"solver"}), observers)
+        unknown = sorted(set(observers) - {"report"})
+        if unknown:
+            raise TypeError(f"RadiationSolve takes the observer report alone, got {unknown}.")
+        return solve_scene(
+            problem,
+            solver=None if self.rtol is None else relative_residual_gmres(self.rtol),
+            report=observers.get("report"),
+        )
+
+
 def solver_for(spec: object) -> SolverSpec:
     """The solver a case runs: the one it states, or its physics' march with every setting unset.
 
@@ -726,7 +791,8 @@ def solver_for(spec: object) -> SolverSpec:
     -------
     SolverSpec
         :attr:`~aquaflux.case.CaseSpec.solver`, or unset, :class:`CoupledMarch` for a
-        Reynolds-averaged case and :class:`FlowMarch` for a laminar one.
+        Reynolds-averaged case, :class:`FlowMarch` for a laminar one and :class:`RadiationSolve` for a
+        radiation one.
 
     Raises
     ------
@@ -736,6 +802,8 @@ def solver_for(spec: object) -> SolverSpec:
     """
     if spec.solver is not None:
         return spec.solver
+    if isinstance(spec.physics, Radiation):
+        return RadiationSolve()
     solver = CoupledMarch() if isinstance(spec.physics, RANS) else FlowMarch()
     try:
         solver.refuse_for(spec.physics, spec.drive)

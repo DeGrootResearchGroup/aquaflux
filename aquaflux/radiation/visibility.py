@@ -244,9 +244,10 @@ def build_visibility(
         The emitting set; segments start at facet centroids.
     points : array_like, shape ``(n_receivers, 3)``
         Receiver positions.
-    receiver_facet : array_like of int, shape ``(n_receivers,)``, optional
+    receiver_facet : array_like of int, shape ``(n_receivers,)`` or ``(n_receivers, k)``, optional
         When each receiver point is itself the centroid of one of ``surfaces``' facets, that
-        facet's index. ⚠️ **Omitting it where it applies blocks every pair of facets that can
+        facet's index; when it lies on several (on a shared edge or vertex), the ray test takes
+        each, ``-1`` filling a row that names fewer. ⚠️ **Omitting it where it applies blocks every pair of facets that can
         see each other**, because the segment then ends exactly in the target facet's plane and
         the self-occlusion test reads that as a hit. There is no distance margin at the far end
         of a segment to absorb it, the way ``offset_scale`` absorbs the same thing at the near

@@ -70,49 +70,10 @@ def slice_cells(centre: np.ndarray, volume: np.ndarray, name: str) -> np.ndarray
 
 
 # The reflecting variant: the room's own surfaces reflect diffusely; the bunny and the lamp's window
-# stay black. Idealized for 222 nm (ordinary paints are 5-10 %), chosen so the bounce light is a
+# stay black. aquaflux reads it from cases/bunny_reflecting.yaml; the DOM run from here. Idealized for 222 nm (ordinary paints are 5-10 %), chosen so the bounce light is a
 # large part of the field.
 REFLECTING_PATCHES = ("floor", "ceiling", "walls")
 WALL_REFLECTANCE = 0.5
-# aquaflux's reflecting surfaces: each face of the room cut into squares of this side (and a check
-# at half of it). Reflected light is smooth, so these are far coarser than the mesh's faces.
-REFLECTING_FACET = 0.2  # m
-
-
-def room_facets(side: float) -> np.ndarray:
-    """The room's six faces as squares of ``side``, two triangles each, wound to face the room.
-
-    Returns
-    -------
-    np.ndarray, shape ``(n_triangles, 3, 3)``
-        Triangles whose normals point into the room: up from the floor, down from the ceiling,
-        inwards from each wall.
-    """
-    triangles = []
-    for axis in range(3):
-        u, v = [a for a in range(3) if a != axis]
-        nu = round((ROOM_HIGH[u] - ROOM_LOW[u]) / side)
-        nv = round((ROOM_HIGH[v] - ROOM_LOW[v]) / side)
-        gu = np.linspace(ROOM_LOW[u], ROOM_HIGH[u], nu + 1)
-        gv = np.linspace(ROOM_LOW[v], ROOM_HIGH[v], nv + 1)
-        for level, inward in ((ROOM_LOW[axis], 1.0), (ROOM_HIGH[axis], -1.0)):
-            for i in range(nu):
-                for j in range(nv):
-                    corners = np.zeros((4, 3))
-                    corners[:, axis] = level
-                    corners[:, u] = [gu[i], gu[i + 1], gu[i + 1], gu[i]]
-                    corners[:, v] = [gv[j], gv[j], gv[j + 1], gv[j + 1]]
-                    pair = [corners[[0, 1, 2]], corners[[0, 2, 3]]]
-                    normal = np.cross(pair[0][1] - pair[0][0], pair[0][2] - pair[0][0])
-                    if normal[axis] * inward < 0:
-                        pair = [t[::-1] for t in pair]
-                    triangles.extend(pair)
-    return np.array(triangles)
-
-
-# The fixture's h = 0 direction (IES "fixtureUp"), and its axis: the lamp faces straight down.
-LAMP_UP = (1.0, 0.0, 0.0)
-LAMP_AXIS = (0.0, 0.0, -1.0)
 
 
 def lamp_photometry():

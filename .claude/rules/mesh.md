@@ -237,7 +237,12 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
   not a gap to fill silently: on the Sozzi snapped mesh (`lampWall` 48,550 faces, `bodyWall`
   329,028; quads with a few 5-/6-gons and 218 triangles) **no** face folds — the worst fan triangle
   carries 12% of its face's mean share — so ear clipping was not built; build it the day a real mesh
-  trips the check. It lives here and not in `radiation/` because nothing in it is radiation: it is
+  trips the check. ⚠️ **A real mesh has now tripped it**: the snapped Voronoi bunny of
+  `validation/ray_effects_room` has **291** such faces (2026-10-05). For a surface that only BLOCKS, the
+  fold is harmless — the fan still covers the face (signed-area winding argument), some of it twice — so
+  `patch_triangles(..., allow_folded=True)` keeps them, each triangle still wound into the domain;
+  `case.PatchBody` uses it. Emitters and reflectors keep the refusal (an overlap double-counts area).
+  Pinned on the C-shaped face fixture (coverage of every point of the face, every triangle facing in). It lives here and not in `radiation/` because nothing in it is radiation: it is
   "the mesh's boundary as triangles", and `radiation/` imports no mesh. Supporting it,
   `FaceNodeConnectivity.select(faces)` returns the connectivity of a face subset in the order given
   (node indices unchanged), so a few patches of a large mesh are traversed without touching every

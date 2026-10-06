@@ -11,7 +11,8 @@ reflectance, the absorbance of the fluid and the other optical inputs.
 This page covers what the model computes and how, how to set up a scene, what is and is not
 differentiable, how to run it at the size of a real reactor mesh, and what it has been checked
 against. Reading the reactor geometry from a CAD drawing is covered separately, in
-[Reactor geometry from CAD](cad_geometry.md).
+[Reactor geometry from CAD](cad_geometry.md). To describe a lamp-lit room or reactor in a case file
+and run it with `aquaflux run`, with no script, see [Radiation case files](radiation_case.md).
 
 ## What the model computes
 

@@ -76,7 +76,8 @@ one form each, so they need no `kind`, and the top level is the case itself.
   case one cell thick between `empty` patches reads as a two-dimensional mesh, and those patches
   are not named in the file.
 - {class}`~aquaflux.case.StructuredGrid` generates a two-dimensional structured grid on the box
-  `[0, lx] x [0, ly]`, with patches named by side — `left`, `right`, `bottom`, `top`. An axis
+  `[0, lx] x [0, ly]`, with patches named by side — `left`, `right`, `bottom`, `top` — or, given
+  three counts and three lengths, a uniform three-dimensional box with `back` and `front` as well. An axis
   listed as `periodic` wraps around, and its two sides are not patches at all; an axis given a
   `grading` has its cells sized by it
   ({class}`~aquaflux.case.GeometricGrading`: finest at the walls, growing by `growth`):
@@ -98,6 +99,8 @@ the density, so a file cannot state two viscosities that disagree.
 **`physics`** — which equations are solved:
 
 - {class}`~aquaflux.case.Laminar` — laminar incompressible flow.
+- {class}`~aquaflux.case.Radiation` — the light of ultraviolet lamps rather than a flow; it has no
+  `fluid` or `numerics` section, and its patches are lamps and walls. See {doc}`radiation_case`.
 - {class}`~aquaflux.case.RANS` — Reynolds-averaged flow closed by k–ω SST, the flow and the
   closure solved together. It requires `advection` (how `k` and `omega` are advected) and
   optionally takes the model constants (`model: {kind: SSTModel, ...}`), the variable each
@@ -188,16 +191,17 @@ is changes the pressure only by a constant, and a point names the same place how
 is numbered. A datum is **required** when no patch is an `Outlet` and **refused** when one is:
 without one the system is singular, and beside an outlet it would fix the level twice.
 
-**`solver`** — how the case is solved. It names one of three solves, and every setting in it
+**`solver`** — how the case is solved. It names one of four solves, and every setting in it
 is optional unless noted: an unset one leaves that solve's own default in force. Unset
-altogether, a `RANS` case is marched by `CoupledMarch` and a `Laminar` one by `FlowMarch`, each
-with every setting at its default.
+altogether, a `RANS` case is marched by `CoupledMarch`, a `Laminar` one by `FlowMarch` and a
+`Radiation` one solved by `RadiationSolve`, each with every setting at its default.
 
 | kind | physics | solves by |
 |---|---|---|
 | {class}`~aquaflux.case.CoupledMarch` | `RANS` | one coupled march of the flow and the closure ({func}`~aquaflux.turbulence.solve_coupled`) |
 | {class}`~aquaflux.case.FlowMarch` | `Laminar` | one coupled march of the flow ({func}`~aquaflux.flow.solve_flow_march`) |
 | {class}`~aquaflux.case.Segregated` | `RANS` | alternating the flow and the closure ({func}`~aquaflux.turbulence.solve_segregated`) |
+| {class}`~aquaflux.case.RadiationSolve` | `Radiation` | the lamps' light and the walls' reflections ({func}`~aquaflux.radiation.solve_scene`); see {doc}`radiation_case` |
 
 The two marches share their settings, each a value of the solver library written in the file:
 
@@ -264,6 +268,10 @@ outputs:
   (`0` unless given), so the result restarts in the solver the case is set up for. It needs an
   OpenFOAM mesh, and a template for every field it writes. Quote `time`: a bare number reads as
   a number.
+- {class}`~aquaflux.case.PatchVtk` writes the boundary patches, and the fields on their faces, as
+  one VTK polygonal-data file per patch (`patches/<patch>.vtp`) indexed by a multiblock file
+  (`patches.vtm`), one block per patch named by it. A radiation case's irradiance is written this
+  way; a flow case has no patch fields, and writes the patches alone.
 - Each writer's `fields` names what it writes — `U` and `p`, and under `RANS` also `k`, `omega`
   and `nut`; left out, all of them. The pressure is the solved one.
 - {class}`~aquaflux.case.Checkpoints` writes the march's state every `every` steps into
@@ -371,7 +379,8 @@ aquaflux run case.yaml --overwrite  # replace an earlier run's results
   default, and its relative paths re-based so the copy reads where it lies;
 - `run.yaml`, a record of the run: the aquaflux version and the commit it ran from, when it
   started and how long it took, the solver, how many steps it took, where its residual ended,
-  whether it converged, and what it wrote.
+  whether it converged, and what it wrote; and, under `results`, the scalar results the physics
+  reports (a radiation case's lamp power and where it goes).
 
 `run` exits with status 0 when the solve converges. A solve that stops short of its stopping
 test writes no fields — what it holds is not a solution — but still writes its log, its

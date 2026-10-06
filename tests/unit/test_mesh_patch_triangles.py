@@ -115,6 +115,25 @@ def test_a_face_whose_fan_folds_over_itself_is_refused():
     # The triangular sides are convex, so the same mesh is otherwise fine.
     assert patch_triangles(mesh, mesh.geometry(), ["sides"]).n_triangles == 3 * len(sides)
 
+    # Kept on request, the fan still covers every point of the face, and each triangle faces into the
+    # domain (the cell is below the face, so down; seen from above, each is wound clockwise).
+    kept = patch_triangles(mesh, mesh.geometry(), ["base"], allow_folded=True).vertices
+    assert len(kept) == len(ring)
+    x, y = np.meshgrid(np.linspace(0.05, 2.95, 30), np.linspace(0.05, 2.95, 30))
+    inside_c = (x < 0.5) | (y < 0.5) | (y > 2.5)
+    points = np.stack([x[inside_c], y[inside_c]], axis=1)
+    a, b, c = kept[:, 0, :2], kept[:, 1, :2], kept[:, 2, :2]
+
+    def side(p, q, r):
+        return (q[None, :, 0] - p[None, :, 0]) * (r[:, None, 1] - p[None, :, 1]) - (
+            q[None, :, 1] - p[None, :, 1]
+        ) * (r[:, None, 0] - p[None, :, 0])
+
+    covered = (side(a, b, points) <= 0) & (side(b, c, points) <= 0) & (side(c, a, points) <= 0)
+    assert np.all(covered.any(axis=1))
+    normals = np.cross(kept[:, 1] - kept[:, 0], kept[:, 2] - kept[:, 0])
+    assert np.all(normals[:, 2] < 0)
+
 
 def test_a_patch_of_interior_faces_is_refused():
     mesh = box(nx=2, ny=1, nz=1)

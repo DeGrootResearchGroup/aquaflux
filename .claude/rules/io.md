@@ -375,6 +375,36 @@ not the same contract dressed differently — see the `FieldWriter` entry under 
 also records the one thing they *do* share (`io/cell_fields.as_cell_values`) and why the two
 questions have different answers.
 
+## Structure — BUILT (boundary patches as VTK `.vtp` + `.vtm`) — 2026-10-05
+
+`io/vtk/patches.py`: `write_patches(mesh, fields_by_patch, path, *, patches=None, binary=True)` writes
+**one VTK XML `PolyData` file per boundary patch** (`<stem>/<patch>.vtp`: the patch's own nodes,
+compacted; its faces as `Polys` — or `Lines` on a 2D mesh, points at `z = 0`; face fields as `CellData`
+under their own names) and **a `vtkMultiBlockDataSet` index** (`<stem>.vtm`, one `DataSet` per patch,
+`name` = patch, `file` = `<stem>/<patch>.vtp`, relative). Every boundary patch holding faces is written by
+default (`boundary_patches(mesh)`), with or without fields — the layout was **agreed with the project owner
+because the `aquaflux_viz` viewer reads it** (`fields.vtu` + `patches.vtm` in a run directory); a change to
+it is a change to that contract. Serialization reuses `xml.py`'s `_Arrays` (appended raw, `UInt64`
+headers), `_narrowed` and `cell_data_arrays` (2-component vectors padded on the trailing axis, as the
+`.vtu`). **Faces are wound OUT of the domain** whatever their stored ring: `topology.stored_ring_is_outward`
+decides per face, reversed rings read back to front (the `.vtu` writer's lesson — a `Mesh` does not promise
+the stored winding). A field of the wrong length is refused naming the patch. It is a `case.PatchVtk`
+field writer (`case.md`). This module does not touch `topology.py` beyond importing
+`stored_ring_is_outward` (another session was changing hex output there).
+
+Tests `tests/unit/test_vtk_patches.py`, decoded by `test_vtk_xml._decode` (independent of the writer):
+blocks and files; every face its own ring, Newell normal along the owner-outward normal, with HALF the
+rings stored reversed, binary and ASCII; a field encoding its face's centroid lands on that face; a 2D
+mesh as lines; the `patches=` filter; refusals.
+
+**Opened by ParaView's own reader** (`pvpython`, `/Applications/ParaView-5.12.0.app`, 2026-10-05), on the
+bunny room's floor run (`validation/ray_effects_room/work/cases/bunny_floor/`): `XMLMultiBlockDataReader`
+lists the five blocks by patch name with the face counts of the mesh's `boundary` file (floor 41,548,
+ceiling 7,788, walls 19,200, bunny 58,022, lamp 280), `E`/`E_absorbed` on the floor only;
+`IntegrateVariables` on `floor.vtp` gives area **15.999999999999279** and `∫E dA` **0.09948874772271568 W**
+against `run.yaml`'s `incident_power` 0.09948874772271586; every floor cell normal (`GenerateSurfaceNormals`,
+consistency off) is **(0, 0, −1)** — out of the room.
+
 ## Binding decisions
 - **A polyMesh is always 3D; a 2D case is one cell thick between two `empty` patches.** The reader
   builds the faithful 3D mesh, then `collapse_extruded_direction` reduces it to `dim == 2` (drop the
