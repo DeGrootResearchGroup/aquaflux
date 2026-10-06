@@ -25,10 +25,12 @@ A point source's image is a point: it is seen through the one aperture facet the
 receiver to it crosses, and a line through an edge shared by two facets is credited to one of
 them, so a symmetric layout is not counted twice.
 
-What is **not** here: anything standing in the way of either leg. The image is gathered as though
-the receiver saw the mirror and the mirror the source unobstructed -- as
-:func:`~aquaflux.radiation.gather.direct_fluence_rate` gathers without a mask -- and the medium
-and the aperture are the only things between them.
+**What stands in the way of either leg** is a frozen mask per mirror
+(:class:`~aquaflux.radiation.mirror_visibility.MirrorVisibility`), passed with each body's live
+transmittance as the direct gather takes its mask. Without one the image is gathered as though the
+receiver saw the mirror and the mirror the source unobstructed -- as
+:func:`~aquaflux.radiation.gather.direct_fluence_rate` gathers without a mask -- and the medium and
+the aperture are the only things between them.
 """
 
 from __future__ import annotations
@@ -49,6 +51,7 @@ from aquaflux.radiation.gather import (
     _groups,
     _one_geometry,
 )
+from aquaflux.radiation.mirror_visibility import MirrorVisibility, reflected_surviving
 from aquaflux.radiation.mirrors import Mirror
 from aquaflux.radiation.silhouette import SourceView, _orientation, covered_by, source_view
 from aquaflux.radiation.surfaces import Surfaces
@@ -70,6 +73,8 @@ def mirrored_fluence_rate(
     points,
     *,
     absorption: Absorption | None = None,
+    shadows=None,
+    transmittance=None,
     pair_limit: int = DEFAULT_PAIR_LIMIT,
 ):
     """Fluence rate at each point from one specular bounce of every source off every mirror.
@@ -77,7 +82,7 @@ def mirrored_fluence_rate(
     The specular counterpart of :func:`~aquaflux.radiation.gather.direct_fluence_rate`: each
     source's mirror image in each mirror, seen through that mirror's facets and weighted by each
     facet's ``specular_reflectance``. One bounce only -- light reflecting off two mirrors in turn
-    is not included -- and nothing occludes either leg of the path.
+    is not included -- and either leg of a path is occluded only through ``shadows``.
 
     Parameters
     ----------
@@ -90,6 +95,13 @@ def mirrored_fluence_rate(
         Where the fluence rate is wanted.
     absorption : Absorption, optional
         The medium, crossed along both legs of each path. Vacuum if omitted.
+    shadows : sequence of MirrorVisibility, optional
+        What stands across each reflected path: one mask per mirror, in the order of
+        ``mirrors``, each built for ``points`` (:func:`~aquaflux.radiation.mirror_visibility.build_mirror_visibility`).
+        Without them nothing does.
+    transmittance : array_like, shape ``(n_occluders,)``, optional
+        What each body in the masks lets through, per leg it crosses. Defaults to opaque; given
+        without ``shadows``, refused.
     pair_limit : int, optional
         Receiver-by-source-by-aperture-facet triples one pass may form.
 
@@ -101,10 +113,17 @@ def mirrored_fluence_rate(
     Raises
     ------
     ValueError
-        If a mirror names a facet the surface set does not have.
+        If a mirror names a facet the surface set does not have, or a mask is for other
+        receivers, other sources or another number of mirrors.
     """
     return summed_mirrored_fluence_rate(
-        (surfaces,), mirrors, points, absorption=absorption, pair_limit=pair_limit
+        (surfaces,),
+        mirrors,
+        points,
+        absorption=absorption,
+        shadows=shadows,
+        transmittance=transmittance,
+        pair_limit=pair_limit,
     )
 
 
@@ -114,6 +133,8 @@ def summed_mirrored_fluence_rate(
     points,
     *,
     absorption: Absorption | None = None,
+    shadows=None,
+    transmittance=None,
     pair_limit: int = DEFAULT_PAIR_LIMIT,
 ):
     """The mirrored fluence rate of several surface sets **on one geometry**, summed.
@@ -128,7 +149,7 @@ def summed_mirrored_fluence_rate(
     sets : sequence of Surfaces
         Sets sharing one geometry -- ``with_optics(...)`` of one set -- whose emission, power and
         profiles are each gathered.
-    mirrors, points, absorption, pair_limit
+    mirrors, points, absorption, shadows, transmittance, pair_limit
         As for :func:`mirrored_fluence_rate`.
 
     Returns
@@ -138,10 +159,20 @@ def summed_mirrored_fluence_rate(
     Raises
     ------
     ValueError
-        If no set is given, the sets do not share their geometry, or a mirror names a facet the
-        set does not have.
+        If no set is given, the sets do not share their geometry, a mirror names a facet the
+        set does not have, or a mask does not fit.
     """
-    return _mirrored(sets, mirrors, points, None, absorption, pair_limit, point_sources_only=False)
+    return _mirrored(
+        sets,
+        mirrors,
+        points,
+        None,
+        absorption,
+        pair_limit,
+        point_sources_only=False,
+        shadows=shadows,
+        transmittance=transmittance,
+    )
 
 
 def mirrored_irradiance(
@@ -151,6 +182,8 @@ def mirrored_irradiance(
     normals,
     *,
     absorption: Absorption | None = None,
+    shadows=None,
+    transmittance=None,
     pair_limit: int = DEFAULT_PAIR_LIMIT,
     point_sources_only: bool = False,
 ):
@@ -163,7 +196,7 @@ def mirrored_irradiance(
 
     Parameters
     ----------
-    surfaces, mirrors, absorption, pair_limit
+    surfaces, mirrors, absorption, shadows, transmittance, pair_limit
         As for :func:`mirrored_fluence_rate`.
     points : array_like, shape ``(n_points, 3)``
     normals : array_like, shape ``(n_points, 3)``
@@ -185,13 +218,32 @@ def mirrored_irradiance(
         absorption,
         pair_limit,
         point_sources_only=point_sources_only,
+        shadows=shadows,
+        transmittance=transmittance,
     )
 
 
-def _mirrored(sets, mirrors, points, normals, absorption, pair_limit, *, point_sources_only):
-    """The mirrored field of several sets on one geometry: fluence rate, or irradiance given normals."""
+def _mirrored(
+    sets,
+    mirrors,
+    points,
+    normals,
+    absorption,
+    pair_limit,
+    *,
+    point_sources_only,
+    shadows=None,
+    transmittance=None,
+):
+    """The mirrored field of several sets on one geometry: fluence rate, or irradiance given normals.
+
+    With ``shadows``, one :class:`~aquaflux.radiation.mirror_visibility.MirrorVisibility` per
+    mirror, which receivers and sources each mirror involves is read off its mask, which was built
+    from concrete geometry -- so it is known even where the sets' vertices are traced.
+    """
     sets = tuple(sets)
     geometry = _one_geometry(sets)
+    masks = _shadow_masks(shadows, mirrors, points, transmittance)
     # Read before conversion: inside a trace a concrete array becomes a tracer once it passes
     # through jnp, and which receivers lie in front of a mirror is only worth knowing when it can
     # be read.
@@ -199,7 +251,7 @@ def _mirrored(sets, mirrors, points, normals, absorption, pair_limit, *, point_s
     host_points = np.asarray(points, dtype=float) if readable else None
     points = jnp.asarray(points, dtype=float)
     total = jnp.zeros(points.shape[0])
-    for mirror in mirrors:
+    for mirror, mask in zip(mirrors, masks, strict=True):
         facets = np.asarray(mirror.facets)
         if facets.size and (facets.min() < 0 or facets.max() >= geometry.n_facets):
             msg = (
@@ -208,17 +260,80 @@ def _mirrored(sets, mirrors, points, normals, absorption, pair_limit, *, point_s
             )
             raise ValueError(msg)
         path = _Path.through(mirror, geometry, absorption)
-        receivers = _in_front(mirror, host_points, points.shape[0], readable)
+        if mask is None:
+            receivers = _in_front(mirror, host_points, points.shape[0], readable)
+            sources = _sources_in_front(mirror, geometry, readable)
+        else:
+            receivers = mirror.in_front(mask.receivers)
+            sources = mask.sources
         if not receivers.size:
             continue
         at = (points[receivers], None if normals is None else normals[receivers])
-        sources = _sources_in_front(mirror, geometry, readable)
+        shadow = _MaskRows.of(mask, receivers, transmittance)
         images = tuple(mirror.image(surfaces) for surfaces in sets)
-        received = _point_images(sets, images, sources, path, at, pair_limit)
+        received = _point_images(sets, images, sources, path, at, shadow, pair_limit)
         if not point_sources_only:
-            received = received + _areal_images(sets, images, sources, path, at, pair_limit)
+            received = received + _areal_images(sets, images, sources, path, at, shadow, pair_limit)
         total = total.at[receivers].add(received)
     return total
+
+
+def _shadow_masks(shadows, mirrors, points, transmittance) -> tuple:
+    """One mask per mirror, checked against the receivers, or ``None`` for each if unshadowed."""
+    if shadows is None:
+        if transmittance is not None:
+            msg = "transmittance was given without mirror visibility masks to apply it to"
+            raise ValueError(msg)
+        return (None,) * len(mirrors)
+    shadows = tuple(shadows)
+    if len(shadows) != len(mirrors):
+        msg = f"{len(shadows)} mirror visibility masks for {len(mirrors)} mirrors; give one each"
+        raise ValueError(msg)
+    return tuple(mask.for_receivers(points) for mask in shadows)
+
+
+class _Shadow(eqx.Module):
+    """A mirror's mask for one group of receivers and sources, and the bodies' transmittance.
+
+    A pytree, so a compiled gather takes it as an argument and the transmittance stays live.
+    """
+
+    crossings: jnp.ndarray
+    hidden: jnp.ndarray | None
+    transmittance: jnp.ndarray
+
+    def surviving(self, crossings, hidden) -> jnp.ndarray:
+        """The surviving fraction from one chunk's rows of :attr:`crossings` and :attr:`hidden`."""
+        return reflected_surviving(crossings, hidden, self.transmittance)
+
+
+class _MaskRows:
+    """One mirror's mask, cut down to the receivers in front of it; columns are cut per group."""
+
+    def __init__(self, mask: MirrorVisibility, receivers, transmittance):
+        rows = jnp.asarray(receivers)
+        self.mask = mask
+        self.crossings = jnp.take(mask.crossings, rows, axis=1)
+        self.hidden = None if mask.hidden is None else jnp.take(mask.hidden, rows, axis=0)
+        self.transmittance = (
+            jnp.zeros(mask.n_occluders)
+            if transmittance is None
+            else jnp.broadcast_to(jnp.asarray(transmittance, dtype=float), (mask.n_occluders,))
+        )
+
+    @classmethod
+    def of(cls, mask: MirrorVisibility | None, receivers, transmittance) -> _MaskRows | None:
+        """``mask``'s rows for ``receivers``, or ``None`` where nothing is masked."""
+        return None if mask is None else cls(mask, receivers, transmittance)
+
+    def for_sources(self, facets) -> _Shadow:
+        """The shadow of the paths from ``facets``, columns in their order."""
+        position = jnp.asarray(self.mask.columns(facets))
+        return _Shadow(
+            crossings=jnp.take(self.crossings, position, axis=2),
+            hidden=None if self.hidden is None else jnp.take(self.hidden, position, axis=1),
+            transmittance=self.transmittance,
+        )
 
 
 class _Path(eqx.Module):
@@ -277,43 +392,48 @@ class _Path(eqx.Module):
 def _in_front(mirror: Mirror, host_points, n_points: int, readable: bool) -> np.ndarray:
     """Indices of the points strictly in front of the mirror, or all of them if unreadable.
 
-    A point on or behind the plane sees no image through it: the mirror reflects on the side it
-    faces. Leaving such a point in would cost work and change nothing, since the clip keeps none
-    of an image seen from there.
+    Leaving a point on or behind the plane in would cost work and change nothing, since the clip
+    keeps none of an image seen from there.
     """
-    if not readable:
-        return np.arange(n_points)
-    height = (host_points - np.asarray(mirror.point)) @ np.asarray(mirror.normal)
-    return np.flatnonzero(height > 0.0)
+    return mirror.in_front(host_points) if readable else np.arange(n_points)
 
 
 def _sources_in_front(mirror: Mirror, geometry: Surfaces, readable: bool) -> np.ndarray:
-    """Facets with any part strictly in front of the mirror, or every facet if unreadable.
-
-    A facet wholly on or behind the plane has no image a receiver in front could see -- its own
-    aperture facets and every facet coplanar with them among them -- and the clip would give it
-    zero. A facet straddling the plane is kept: its part in front has an image.
-    """
-    if not readable:
-        return np.arange(geometry.n_facets)
-    corners = np.asarray(geometry.vertices) - np.asarray(mirror.point)
-    height = corners @ np.asarray(mirror.normal)
-    return np.flatnonzero(height.max(axis=1) > 0.0)
+    """Facets with any part strictly in front of the mirror, or every facet if unreadable."""
+    return mirror.sources_in_front(geometry) if readable else np.arange(geometry.n_facets)
 
 
-def _passes(receivers, pair_limit, per_receiver, body):
-    """:func:`~aquaflux.radiation.work.in_passes` over receivers, with their normals if any.
+def _passes(receivers, pair_limit, per_receiver, body, shadow: _Shadow | None = None):
+    """:func:`~aquaflux.radiation.work.in_passes` over receivers, with their normals and shadow.
 
-    ``receivers`` is a ``(points, normals)`` pair, ``normals`` ``None`` for points in the volume;
-    ``body`` takes a chunk of each.
+    ``receivers`` is a ``(points, normals)`` pair, ``normals`` ``None`` for points in the volume.
+    ``body`` takes a chunk of the points, of the normals, and the chunk's surviving fraction --
+    one where nothing is masked -- cut from ``shadow`` alongside them.
     """
     points, normals = receivers
-    if normals is None:
-        return in_passes(((points, 0),), pair_limit, per_receiver, lambda p: body(p, None))
-    return in_passes(((points, 0), (normals, 0)), pair_limit, per_receiver, body)
+    arrays = [(points, 0)]
+    if normals is not None:
+        arrays.append((normals, 0))
+    if shadow is not None:
+        arrays.append((shadow.crossings, 1))
+        if shadow.hidden is not None:
+            arrays.append((shadow.hidden, 0))
+
+    def run(*chunks):
+        chunks = list(chunks)
+        chunk = chunks.pop(0)
+        chunk_normals = chunks.pop(0) if normals is not None else None
+        surviving = 1.0
+        if shadow is not None:
+            crossings = chunks.pop(0)
+            hidden = chunks.pop(0) if shadow.hidden is not None else None
+            surviving = shadow.surviving(crossings, hidden)
+        return body(chunk, chunk_normals, surviving)
+
+    return in_passes(arrays, pair_limit, per_receiver, run)
 
 
-def _areal_images(sets, images, sources, path: _Path, receivers, pair_limit):
+def _areal_images(sets, images, sources, path: _Path, receivers, shadow, pair_limit):
     """What the areal facets' images send each receiver through the aperture, ``(n,)``."""
     total = jnp.zeros(receivers[0].shape[0])
     image_geometry = images[0]
@@ -335,6 +455,7 @@ def _areal_images(sets, images, sources, path: _Path, receivers, pair_limit):
             tuple(emission),
             group.profiles,
             *receivers,
+            None if shadow is None else shadow.for_sources(facets),
             pair_limit=pair_limit,
         )
     return total
@@ -342,7 +463,7 @@ def _areal_images(sets, images, sources, path: _Path, receivers, pair_limit):
 
 @eqx.filter_jit
 def _areal_through(
-    path, vertices, centroid, normal, emission, profiles, points, normals, *, pair_limit
+    path, vertices, centroid, normal, emission, profiles, points, normals, shadow, *, pair_limit
 ):
     """What one group of areal images sends each receiver, compiled once per shape and profiles.
 
@@ -350,10 +471,10 @@ def _areal_through(
     of a sweep, the same model asked again -- reuses the program instead of tracing it afresh.
     """
 
-    def at(chunk, chunk_normals):
+    def at(chunk, chunk_normals, surviving):
         seen = _seen_through(path, chunk, chunk_normals, vertices)
         direction, _ = _emitter_direction(centroid[None], chunk[:, None])
-        weight = seen * path.transmittance(centroid[None], chunk[:, None])
+        weight = seen * path.transmittance(centroid[None], chunk[:, None]) * surviving
         received = jnp.zeros(chunk.shape[0])
         for flux, profile in zip(emission, profiles, strict=True):
             radiance = profile.radiance_per_exitance(direction, normal[None])
@@ -361,7 +482,7 @@ def _areal_through(
         return received
 
     per_receiver = vertices.shape[0] * path.aperture.shape[0]
-    return _passes((points, normals), pair_limit, per_receiver, at)
+    return _passes((points, normals), pair_limit, per_receiver, at, shadow)
 
 
 def _seen_through(path: _Path, receivers, normals, vertices):
@@ -414,7 +535,7 @@ def _seen_through_aperture(aperture, weights, receivers, normals, vertices):
     return jnp.abs(view.whole) * (fraction @ weights)
 
 
-def _point_images(sets, images, sources, path: _Path, receivers, pair_limit):
+def _point_images(sets, images, sources, path: _Path, receivers, shadow, pair_limit):
     """What the point sources' images send each receiver through the aperture, ``(n,)``."""
     image_geometry = images[0]
     point_all = np.intersect1d(np.flatnonzero(image_geometry.is_point_source), sources)
@@ -434,21 +555,29 @@ def _point_images(sets, images, sources, path: _Path, receivers, pair_limit):
     )
     power = [jnp.take(surfaces.power, index) for surfaces in sets]
 
-    return _points_through(path, position, tuple(power), plans, *receivers, pair_limit=pair_limit)
+    return _points_through(
+        path,
+        position,
+        tuple(power),
+        plans,
+        *receivers,
+        None if shadow is None else shadow.for_sources(point_all),
+        pair_limit=pair_limit,
+    )
 
 
 @eqx.filter_jit
-def _points_through(path, position, power, plans, points, normals, *, pair_limit):
+def _points_through(path, position, power, plans, points, normals, shadow, *, pair_limit):
     """What the point sources' images send each receiver, compiled once per shape and plan.
 
     ``plans`` holds, per set, each point-source profile with the columns it applies to as a tuple
     of ints, which is static: it decides which columns the program reads.
     """
 
-    def at(chunk, chunk_normals):
+    def at(chunk, chunk_normals, surviving):
         reflectance = _crossed_reflectance(path, chunk, position)
         direction, distance_squared = _emitter_direction(position[None], chunk[:, None])
-        weight = reflectance * path.transmittance(position[None], chunk[:, None])
+        weight = reflectance * path.transmittance(position[None], chunk[:, None]) * surviving
         weight = weight / jnp.where(distance_squared == 0.0, 1.0, distance_squared)
         if chunk_normals is not None:
             # The light arrives travelling along `direction`, so it strikes a surface facing back
@@ -469,7 +598,7 @@ def _points_through(path, position, power, plans, points, normals, *, pair_limit
         return received
 
     per_receiver = position.shape[0] * path.aperture.shape[0]
-    return _passes((points, normals), pair_limit, per_receiver, at)
+    return _passes((points, normals), pair_limit, per_receiver, at, shadow)
 
 
 def _crossed_reflectance(path: _Path, receivers, images):

@@ -17,43 +17,65 @@ from aquaflux.radiation.model import (
 )
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian
 from aquaflux.radiation.quadrature import triangle_quadrature
-from aquaflux.radiation.self_occlusion import NoOcclusion, RayCastOcclusion
+from aquaflux.radiation.self_occlusion import (
+    NoOcclusion,
+    RayCastOcclusion,
+    SilhouetteOcclusion,
+)
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.transfer import build_transfer, reciprocity_residual
-from aquaflux.solids import Sphere
+from aquaflux.solids import Box, Sphere
 
 from tests.unit.radiation_references import cylinder_triangles, inward_box, rectangle_triangles
 
 UNSHADOWED = RadiationSettings(self_occlusion=NoOcclusion())
 
 
-def _halves():
+#: A plate standing in the left half of the box, facing up: the surface's own triangles across
+#: some of the paths, direct and reflected. Its edges sit off the box's thirds and sixths on
+#: purpose: at x = 0.35 a reflected path between two wall centroids grazed the edge exactly, and
+#: an edge hit is decided by rounding, differently along the half's leg and the whole's segment.
+BAFFLE = rectangle_triangles([0.24, 0.43, 0.47], [0.093, 0.0, 0.0], [0.0, 0.137, 0.0])
+
+#: A partly transmitting ball in the left half, away from the baffle.
+BALL = Sphere([0.3, 0.75, 0.3], 0.08)
+
+
+def _reflected(points):
+    """``points`` reflected in the plane of symmetry ``x = 0.5``."""
+    return np.asarray(points) * np.array([-1.0, 1.0, 1.0]) + np.array([1.0, 0.0, 0.0])
+
+
+def _halves(baffle=False):
     """The half ``x <= 0.5`` of a closed unit box, and its mirror image across ``x = 0.5``.
 
     Triangle for triangle, so the whole box made of the two is mirror-symmetric and not merely
-    two translates.
+    two translates. With ``baffle``, :data:`BAFFLE` stands in the left half and its image in the
+    right.
     """
     walls = inward_box(2)
     left = walls[np.all(walls[:, :, 0] <= 0.5, axis=1)]
-    right = (left * np.array([-1.0, 1.0, 1.0]) + np.array([1.0, 0.0, 0.0]))[:, ::-1]
+    if baffle:
+        left = np.concatenate([left, BAFFLE])
+    right = _reflected(left)[:, ::-1]
     return left, right
 
 
-def _symmetric_scene(emission, diffuse, *, profiles=None, profile_index=0, lamp=None):
+def _symmetric_scene(emission, diffuse, *, profiles=None, profile_index=0, lamp=None, baffle=False):
     """A whole box, and its left half closed by a perfect mirror across the plane of symmetry.
 
     The whole box carries the left half's optics on both halves; the half box carries them on
     its walls and a mirror of specular reflectance one, which emits and diffuses nothing. With
     ``lamp``, a point source sits at that position in the half box and at it and its reflection
-    in the whole.
+    in the whole; with ``baffle``, :data:`BAFFLE` is one more part of the walls.
     """
-    left, right = _halves()
+    left, right = _halves(baffle)
     n = len(left)
     mirror = rectangle_triangles([0.5, 0.5, 0.5], [0.0, 0.0, 0.5], [0.0, 0.5, 0.0])
     profiles = (Lambertian(),) if profiles is None else profiles
     index = np.broadcast_to(profile_index, (n,))
     lamps = [] if lamp is None else [np.asarray(lamp, dtype=float)]
-    reflected = [] if lamp is None else [lamps[0] * np.array([-1.0, 1.0, 1.0]) + [1.0, 0.0, 0.0]]
+    reflected = [] if lamp is None else [_reflected(lamps[0])]
     point = [np.full((1, 3, 3), position) for position in lamps]
     point_whole = [np.full((1, 3, 3), position) for position in lamps + reflected]
     catalogue = (*profiles, Isotropic())
@@ -82,8 +104,10 @@ def _symmetric_scene(emission, diffuse, *, profiles=None, profile_index=0, lamp=
 
 
 def _receivers(count=12, seed=0):
+    """Points in the left half, none inside :data:`BALL`."""
     rng = np.random.default_rng(seed)
-    return rng.uniform([0.05, 0.05, 0.05], [0.45, 0.95, 0.95], size=(count, 3))
+    points = rng.uniform([0.05, 0.05, 0.05], [0.45, 0.95, 0.95], size=(3 * count, 3))
+    return points[~np.asarray(BALL.contains(points))][:count]
 
 
 # ---------------------------------------------------------------------------------------
@@ -133,6 +157,50 @@ def test_a_perfect_mirror_on_a_plane_of_symmetry_reproduces_the_whole_scene(case
     whole_field, _ = fluence_rate(whole_model, whole, **calls)
     assert float(jnp.min(whole_field)) > 0.0
     np.testing.assert_allclose(half_field, whole_field, rtol=1e-9)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("case", ["lambertian", "point lamp"])
+def test_a_mirror_on_a_plane_of_symmetry_reproduces_the_whole_scene_s_shadows(case, stream):
+    """The symmetry plane again, with a baffle of the walls' own triangles and a partly
+    transmitting ball in the half, and both again in the whole. A path reflected in the mirror
+    is the whole scene's straight path folded at the plane, so the half's two legs cross the
+    ball and the baffle exactly where the whole's one segment crosses them and their images --
+    and the half's crossings of its one ball, filtered by its transmittance once per leg, must be
+    the whole's crossings of two balls of that transmittance. Held to the same 1e-9, which only a
+    mask that tests both legs, counts a body per leg and drops a path its own triangles hide can
+    reach; streaming the receivers' masks must not change it."""
+    rng = np.random.default_rng(2)
+    n_left = len(_halves(baffle=True)[0])
+    emission = rng.uniform(0.0, 3.0, n_left)
+    diffuse = rng.uniform(0.2, 0.8, n_left)
+    options = {}
+    if case == "point lamp":
+        emission = np.zeros(n_left)
+        options = {"lamp": [0.3, 0.3, 0.75]}
+    half, whole, n = _symmetric_scene(emission, diffuse, baffle=True, **options)
+    points = _receivers()
+    image_of_ball = Sphere(_reflected(BALL.centre), BALL.radius)
+
+    settings = RadiationSettings(stream_receiver_mask=stream)
+    half_model = build_radiation_model(
+        points, half, specular=["mirror"], occluders=[BALL], settings=settings
+    )
+    whole_model = build_radiation_model(points, whole, occluders=[BALL, image_of_ball])
+    absorption = UniformAbsorption(0.7)
+    half_calls = {"absorption": absorption, "transmittance": [0.4]}
+    whole_calls = {"absorption": absorption, "transmittance": [0.4, 0.4]}
+    half_out, _ = radiosity(half_model, half, **half_calls)
+    whole_out, _ = radiosity(whole_model, whole, **whole_calls)
+    np.testing.assert_allclose(half_out[:n], whole_out[:n], rtol=1e-9)
+    half_field, _ = fluence_rate(half_model, half, **half_calls)
+    whole_field, _ = fluence_rate(whole_model, whole, **whole_calls)
+    np.testing.assert_allclose(half_field, whole_field, rtol=1e-9)
+
+    # The shadows matter here: without them the half scene is brighter.
+    bare = build_radiation_model(points, half, specular=["mirror"], settings=UNSHADOWED)
+    bare_field, _ = fluence_rate(bare, half, absorption=absorption)
+    assert float(jnp.max(bare_field / whole_field)) > 1.01
 
 
 # ---------------------------------------------------------------------------------------
@@ -247,28 +315,116 @@ def test_the_specular_reflectance_and_the_medium_are_differentiable_through_the_
 # ---------------------------------------------------------------------------------------
 
 
-def test_a_specular_body_is_refused_where_something_could_shadow_a_reflected_path():
-    surfaces, _ = _mirrored_room()
-    points = np.array([[0.3, 0.4, 0.5]])
-    with pytest.raises(NotImplementedError, match="nothing yet standing in the way"):
-        build_radiation_model(points, surfaces, specular=["floor"])
-    with pytest.raises(NotImplementedError, match="nothing yet standing in the way"):
+def _plates_over_a_mirror():
+    """Two lamp patches facing down at height one over a floor mirror, and a slab between.
+
+    The patches face the same way, so neither sees the other straight; every path between them
+    is reflected in the floor, and crosses the slab once going down and once coming up.
+    """
+    floor = rectangle_triangles([0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [0.0, 3.0, 0.0])
+    left = rectangle_triangles([-0.6, 0.0, 1.0], [0.0, 0.2, 0.0], [0.2, 0.0, 0.0])
+    right = rectangle_triangles([0.6, 0.0, 1.0], [0.0, 0.2, 0.0], [0.2, 0.0, 0.0])
+    surfaces = Surfaces.from_triangles(
+        np.concatenate([floor, left, right]),
+        solid_id=[0, 0, 1, 1, 1, 1],
+        solid_names=("floor", "lamps"),
+        emission=[0.0, 0.0, 2.0, 2.0, 0.0, 0.0],
+        diffuse_reflectance=[0.0, 0.0, 0.0, 0.0, 0.5, 0.5],
+        specular_reflectance=[0.8, 0.8, 0.0, 0.0, 0.0, 0.0],
+    )
+    assert np.all(np.asarray(surfaces.normal)[2:, 2] < 0.0)
+    slab = Box([0.0, 0.0, 0.5], [5.0, 5.0, 0.05])
+    return surfaces, slab
+
+
+def test_a_body_crossed_on_both_legs_of_a_reflected_path_filters_it_twice():
+    """Every path between the patches crosses the slab twice and a ball beside the left patch
+    once, so the transfer between them is the unshadowed one times the slab's transmittance
+    squared times the ball's -- one term, of pattern (2, 1) -- and its derivative with respect to
+    the slab's transmittance is twice that transmittance times the rest."""
+    surfaces, slab = _plates_over_a_mirror()
+    ball = Sphere([-0.3, 0.0, 0.5], 0.15)
+    shadowed = build_transfer(surfaces, specular=["floor"], occluders=[slab, ball])
+    bare = build_transfer(surfaces, specular=["floor"], self_occlusion=NoOcclusion())
+    patches = np.ix_([4, 5], [2, 3])
+    assert (0, (2, 1)) in shadowed.specular_terms
+
+    def between(slab_transmittance):
+        reflected, _ = shadowed.assemble(
+            surfaces, transmittance=jnp.asarray([slab_transmittance, 0.6])
+        )
+        return reflected[patches]
+
+    clear, _ = bare.assemble(surfaces)
+    assert float(jnp.min(clear[patches])) > 0.0
+    np.testing.assert_allclose(between(0.3), 0.3**2 * 0.6 * clear[patches], rtol=1e-12)
+    slope = jax.jacfwd(between)(0.3)
+    np.testing.assert_allclose(slope, 2 * 0.3 * 0.6 * clear[patches], rtol=1e-12)
+
+
+def test_reflected_shadows_follow_the_transmittance_to_a_finite_difference():
+    """The field's derivative with respect to a body's transmittance, through the transfer's
+    pattern terms, the solve and the mirrored gather -- held and streamed alike."""
+    rng = np.random.default_rng(3)
+    n_left = len(_halves(baffle=True)[0])
+    half, _, _ = _symmetric_scene(
+        rng.uniform(0.0, 3.0, n_left), rng.uniform(0.2, 0.8, n_left), baffle=True
+    )
+    points = _receivers(6)
+    slopes = []
+    for stream in (False, True):
+        model = build_radiation_model(
+            points,
+            half,
+            specular=["mirror"],
+            occluders=[BALL],
+            settings=RadiationSettings(stream_receiver_mask=stream),
+        )
+
+        def total(transmittance, model=model):
+            field, _ = fluence_rate(model, half, transmittance=jnp.asarray([transmittance]))
+            return jnp.sum(field)
+
+        slope = jax.grad(total)(0.4)
+        step = 1e-6
+        difference = (total(0.4 + step) - total(0.4 - step)) / (2.0 * step)
+        assert abs(float(slope)) > 0.0
+        np.testing.assert_allclose(slope, difference, rtol=1e-6)
+        slopes.append(slope)
+    np.testing.assert_allclose(slopes[0], slopes[1], rtol=1e-12)
+
+
+# The half box is open where the mirror closes it, which the silhouette clip warns about.
+@pytest.mark.filterwarnings("ignore:SilhouetteOcclusion")
+def test_reflected_paths_are_rays_whichever_self_occlusion_strategy_is_chosen():
+    """The silhouette clip gives the direct pairs an exact fraction, but a reflected path has no
+    single source view to clip, so its legs are one ray each, as under the ray test."""
+    rng = np.random.default_rng(4)
+    n_left = len(_halves(baffle=True)[0])
+    half, _, _ = _symmetric_scene(
+        rng.uniform(0.0, 3.0, n_left), rng.uniform(0.2, 0.8, n_left), baffle=True
+    )
+    points = _receivers(6)
+    by_ray, by_clip = (
         build_radiation_model(
             points,
-            surfaces,
-            specular=["floor"],
-            occluders=[Sphere([0.5, 0.5, 0.5], 0.05)],
-            settings=UNSHADOWED,
+            half,
+            specular=["mirror"],
+            settings=RadiationSettings(self_occlusion=strategy),
         )
-    with pytest.raises(NotImplementedError, match="receivers' self-occlusion must be off"):
-        build_radiation_model(
-            points,
-            surfaces,
-            specular=["floor"],
-            settings=RadiationSettings(
-                self_occlusion=NoOcclusion(), receiver_occlusion=RayCastOcclusion()
-            ),
-        )
+        for strategy in (RayCastOcclusion(), SilhouetteOcclusion())
+    )
+    assert by_ray.transfer.specular_terms == by_clip.transfer.specular_terms
+    np.testing.assert_array_equal(
+        by_ray.transfer.specular_geometric, by_clip.transfer.specular_geometric
+    )
+    for ray, clip in zip(
+        by_ray.receiver_shadows.mirror_visibility,
+        by_clip.receiver_shadows.mirror_visibility,
+        strict=True,
+    ):
+        assert bool(jnp.any(ray.hidden))
+        np.testing.assert_array_equal(ray.hidden, clip.hidden)
 
 
 def test_a_specular_reflectance_must_be_one_value_on_a_declared_body_and_none_elsewhere():

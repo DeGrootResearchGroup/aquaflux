@@ -46,9 +46,10 @@ the assumption belongs beside the number, which is why a surface set carries
 ``diffuse_reflectance`` and ``specular_reflectance`` separately. The second is carried only for
 bodies named in ``specular`` when the model is built: each is split into its flat planes, and one
 bounce in them reaches the other facets through the transfer and the volume through mirror
-images (:mod:`~aquaflux.radiation.images`). A specular reflectance on any other body is
-**refused** rather than dropped, which would leave a field darker than its walls make it, and so
-is a specular body in a scene where anything could shadow a reflected path.
+images (:mod:`~aquaflux.radiation.images`), shadowed on both legs of each path by the same bodies
+and the same self-occlusion as direct light (:mod:`~aquaflux.radiation.mirror_visibility`). A
+specular reflectance on any other body is **refused** rather than dropped, which would leave a
+field darker than its walls make it.
 
 **Occluder geometry is a build argument; occluder transmittance is a call argument.** The split
 is by when the value is needed rather than by what it describes: the shadow mask is frozen
@@ -97,11 +98,11 @@ import numpy as np
 from aquaflux.radiation.absorption import Absorption
 from aquaflux.radiation.culling import BodyCulling
 from aquaflux.radiation.gather import direct_irradiance
-from aquaflux.radiation.images import mirrored_irradiance, summed_mirrored_fluence_rate
+from aquaflux.radiation.images import mirrored_irradiance
 from aquaflux.radiation.profiles import Lambertian
 from aquaflux.radiation.quadrature import TriangleQuadrature
 from aquaflux.radiation.receiver_shadows import FrozenShadows, ReceiverShadows, StreamedShadows
-from aquaflux.radiation.self_occlusion import NoOcclusion, SelfOcclusion
+from aquaflux.radiation.self_occlusion import SelfOcclusion
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.transfer import TransferMatrix, build_transfer
 from aquaflux.solve import relative_residual_gmres, solve_linear
@@ -297,10 +298,10 @@ def build_radiation_model(
         Bodies, by name, that reflect specularly as well as diffusely: flat walls, each split into
         the planes its facets lie in. Which bodies are mirrors is geometry and is frozen here;
         how much each reflects is its ``specular_reflectance`` at each call, one value per body.
-        Every other body must have a specular reflectance of zero. Nothing yet stands in the way
-        of a reflected path, so a model with specular bodies is refused unless it has no
-        occluders and its settings switch self-occlusion off (``NoOcclusion()``), for the facets
-        and the receivers alike.
+        Every other body must have a specular reflectance of zero. Both legs of a reflected path
+        are tested against the occluders and the surface's own triangles, one ray per path,
+        whichever self-occlusion strategy the settings choose; a body crossed on both legs
+        filters the light twice.
     settings : RadiationSettings, optional
         Build-time choices. Unset fields take each function's own default.
     **visibility_options
@@ -316,8 +317,6 @@ def build_radiation_model(
         If a facet centroid or a receiver lies inside one of the bodies, which is a geometry
         error rather than a shadow — the raise comes from the visibility build; or if a specular
         body is curved, lying in more planes than the transfer build allows.
-    NotImplementedError
-        If a specular body is named in a scene with occluders or with self-occlusion on.
 
     Notes
     -----
@@ -338,15 +337,6 @@ def build_radiation_model(
         msg = f"receivers must be (n_receivers, 3); got {receivers.shape}"
         raise ValueError(msg)
 
-    if specular and not isinstance(
-        settings.receiver_visibility_options().get("self_occlusion"), NoOcclusion
-    ):
-        msg = (
-            "specular bodies are carried with nothing yet standing in the way of a reflected "
-            "path, so the receivers' self-occlusion must be off too: set "
-            "RadiationSettings(self_occlusion=NoOcclusion()) and leave receiver_occlusion unset."
-        )
-        raise NotImplementedError(msg)
     transfer = build_transfer(
         surfaces,
         occluders=occluders,
@@ -359,6 +349,7 @@ def build_radiation_model(
         occluders,
         surfaces,
         receivers,
+        mirrors=transfer.mirrors,
         **settings.receiver_visibility_options(),
         **visibility_options,
     )
@@ -630,6 +621,8 @@ def _point_source_irradiance(model, surfaces, absorption, transmittance):
             surfaces.centroid,
             surfaces.normal,
             absorption=absorption,
+            shadows=model.transfer.point_shadows,
+            transmittance=None if model.transfer.point_shadows is None else transmittance,
             point_sources_only=True,
             **model.settings.gather_options(),
         )
@@ -736,7 +729,9 @@ def fluence_rate(
     )
     # Both sets are gathered in one pass through one set of shadows -- they share the geometry --
     # so the solid angles, attenuation and shadows are formed once for the two, and a streamed
-    # mask is built once per chunk rather than once per set.
+    # mask is built once per chunk rather than once per set. The shadows also gather the two sets
+    # once more in each mirror, through masks of their own: the emitted light with each source's
+    # own distribution and the reflected light Lambertian.
     field = model.receiver_shadows.fluence_rate(
         (surfaces, bounced),
         model.receivers,
@@ -744,14 +739,4 @@ def fluence_rate(
         transmittance=transmittance,
         **model.settings.gather_options(),
     )
-    if model.transfer.mirrors:
-        # The same two sets seen once more, in the mirrors: the emitted light with each source's
-        # own distribution and the reflected light Lambertian, each through the mirror's facets.
-        field = field + summed_mirrored_fluence_rate(
-            (surfaces, bounced),
-            model.transfer.mirrors,
-            model.receivers,
-            absorption=absorption,
-            **model.settings.gather_options(),
-        )
     return field, cycles
