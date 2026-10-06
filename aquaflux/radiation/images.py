@@ -36,7 +36,6 @@ the aperture are the only things between them.
 from __future__ import annotations
 
 import dataclasses
-import functools
 from collections.abc import Sequence
 
 import equinox as eqx
@@ -54,7 +53,7 @@ from aquaflux.radiation.gather import (
     areal_layout,
 )
 from aquaflux.radiation.mirror_visibility import MirrorVisibility, reflected_surviving
-from aquaflux.radiation.mirrors import Mirror
+from aquaflux.radiation.mirrors import Mirror, outline
 from aquaflux.radiation.silhouette import (
     SourceView,
     _orientation,
@@ -382,16 +381,44 @@ class _Path(eqx.Module):
     aperture: jnp.ndarray
     reflectance: jnp.ndarray
     absorption: Absorption | None
+    outline: jnp.ndarray | None = None
 
     @classmethod
     def through(cls, mirror: Mirror, geometry: Surfaces, absorption) -> _Path:
         """The path through ``mirror``, whose facets index ``geometry``."""
         facets = jnp.asarray(mirror.facets)
+        return cls.of(
+            mirror,
+            jnp.take(geometry.vertices, facets, axis=0),
+            jnp.take(jnp.asarray(geometry.specular_reflectance, dtype=float), facets),
+            absorption,
+        )
+
+    @classmethod
+    def of(cls, mirror: Mirror, aperture, reflectance, absorption=None) -> _Path:
+        """The path through ``mirror`` with this aperture, and its outline where it can be read.
+
+        The outline -- the aperture's edges that belong to one facet only, as degenerate
+        triangles -- is what lets an image seen wholly inside the mirror skip its clip, taking the
+        one weight every facet carries. So it is kept only where that weight can be read: aperture
+        and reflectances concrete, and the reflectances all equal. A traced reflectance is one a
+        derivative is wanted for, and a skipped image would credit all of it to the facet its
+        centroid's line crosses rather than sharing it among the facets the image is seen through;
+        there, and wherever the weights differ, every image is clipped.
+        """
+        rim = None
+        readable = not any(isinstance(a, jax.core.Tracer) for a in (aperture, reflectance))
+        weights = np.asarray(reflectance, dtype=float).ravel() if readable else None
+        if readable and weights.size and np.all(weights == weights[0]):
+            edges = outline(np.asarray(aperture))
+            if len(edges):
+                rim = jnp.asarray(edges[:, [0, 1, 1]])
         return cls(
             mirror=mirror,
-            aperture=jnp.take(geometry.vertices, facets, axis=0),
-            reflectance=jnp.take(jnp.asarray(geometry.specular_reflectance, dtype=float), facets),
+            aperture=jnp.asarray(aperture),
+            reflectance=jnp.asarray(reflectance, dtype=float),
             absorption=absorption,
+            outline=rim,
         )
 
     def transmittance(self, image_centroid, receivers):
@@ -548,8 +575,7 @@ def _segment_through(
         image_centroid = jnp.take(centroid, block_facets, axis=0, mode="clip")[:, None]
         image_normal = jnp.take(normal, block_facets, axis=0, mode="clip")[:, None]
         seen = _seen_pairs(
-            path.aperture,
-            path.reflectance,
+            path,
             jnp.broadcast_to(receivers, (*grid, 3)).reshape(-1, 3),
             None
             if normals is None
@@ -558,11 +584,7 @@ def _segment_through(
             ).reshape(-1, 3),
             jnp.broadcast_to(image, (*grid, 3, 3)).reshape(-1, 3, 3),
             cull=cull,
-            kept=_may_show(path.aperture, receivers[:, :, 0], image[:, 0]).reshape(
-                -1, path.aperture.shape[0]
-            )
-            if cull
-            else None,
+            screen=_flat(_screen(path, receivers[:, :, 0], image[:, 0])) if cull else None,
         ).reshape(grid)
         direction, _ = _emitter_direction(image_centroid, receivers)
         weight = seen * path.transmittance(image_centroid, receivers)
@@ -587,13 +609,13 @@ def _segment_through(
 _CLIP_BATCH = 4096
 
 
-def _seen_through_aperture(aperture, weights, receivers, normals, vertices, *, cull: bool = False):
+def _seen_through_aperture(path: _Path, receivers, normals, vertices, *, cull: bool = False):
     """:func:`_seen_pairs` for every receiver against every image.
 
     Parameters
     ----------
-    aperture : jnp.ndarray, shape ``(a, 3, 3)``
-    weights : jnp.ndarray, shape ``(a,)``
+    path : _Path
+        The mirror, its aperture and the weights its facets' shares are taken with.
     receivers : jnp.ndarray, shape ``(r, 3)``
     normals : jnp.ndarray, shape ``(r, 3)``, or None
     vertices : jnp.ndarray, shape ``(s, 3, 3)``
@@ -605,33 +627,30 @@ def _seen_through_aperture(aperture, weights, receivers, normals, vertices, *, c
     """
     grid = (receivers.shape[0], vertices.shape[0])
     seen = _seen_pairs(
-        aperture,
-        weights,
+        path,
         jnp.broadcast_to(receivers[:, None, :], (*grid, 3)).reshape(-1, 3),
         None
         if normals is None
         else jnp.broadcast_to(normals[:, None, :], (*grid, 3)).reshape(-1, 3),
         jnp.broadcast_to(vertices[None], (*grid, 3, 3)).reshape(-1, 3, 3),
         cull=cull,
-        kept=_may_show(aperture, receivers, vertices).reshape(-1, aperture.shape[0])
-        if cull
-        else None,
+        screen=_flat(_screen(path, receivers, vertices)) if cull else None,
     )
     return seen.reshape(grid)
 
 
-def _seen_pairs(aperture, weights, receivers, normals, vertices, *, cull: bool, kept):
+def _seen_pairs(path: _Path, receivers, normals, vertices, *, cull: bool, screen):
     """Solid angle of each pair's image seen through the aperture, weighted per aperture facet.
 
     The plain solid angle for a point in the volume, the projected one for a point with a normal.
 
-    **With ``cull``, an image is clipped only against the aperture facets it can be seen
-    through.** Seen from a receiver, an aperture facet whose cone of directions cannot overlap
-    the image's shows none of it, so its clip would return zero; the cone test is the one the
-    silhouette clip uses to drop blockers, conservative in the same direction, so the answer is
-    the same. Without it every image is clipped against every aperture facet, and the cost is the
-    aperture's facet count times a direct gather; with it, the facets an image actually overlaps
-    -- a handful, measured on a reactor's end plates, however finely they are meshed.
+    **With ``cull``, an image is clipped only where it has to be.** :func:`_screen` says which
+    aperture facets each image can be seen through -- a facet whose cone of directions cannot
+    overlap the image's shows none of it -- and which images lie wholly inside or wholly outside
+    the mirror's outline, which need no clip at all: inside, the mirror shows the whole image, so
+    its share is its whole solid angle; outside, none of it. Both tests are conservative in the
+    same direction, so the answer is the clip's. Without ``cull`` every image is clipped against
+    every aperture facet.
 
     The survivors are found and clipped inside a compiled loop whose length follows their count,
     which reverse mode cannot differentiate through. So the culled clip is taken of geometry held
@@ -641,27 +660,25 @@ def _seen_pairs(aperture, weights, receivers, normals, vertices, *, cull: bool, 
 
     Parameters
     ----------
-    aperture : jnp.ndarray, shape ``(a, 3, 3)``
-        The mirror's facets.
-    weights : jnp.ndarray, shape ``(a,)``
-        What each aperture facet's share is weighted by: its specular reflectance, or one.
+    path : _Path
+        The aperture, and the weights -- specular reflectances, or ones -- of its facets' shares.
     receivers : jnp.ndarray, shape ``(p, 3)``
         Each pair's receiver.
     normals : jnp.ndarray, shape ``(p, 3)``, or None
     vertices : jnp.ndarray, shape ``(p, 3, 3)``
         Each pair's image.
     cull : bool
-        Clip each image only against the aperture facets whose cones overlap it.
-    kept : jnp.ndarray of bool, shape ``(p, a)``, or None
-        With ``cull``, which aperture facets each pair keeps: :func:`_may_show`, formed by the
-        caller in the grid it has, where a facet's cone is taken once per receiver rather than
-        once per pair.
+    screen : tuple, or None
+        With ``cull``, :func:`_screen` for these pairs, flattened to them: which facets each keeps,
+        ``(p, a)``, and -- where the mirror has an outline -- which pairs skip the clip and the
+        weight each then takes, ``(p,)`` each.
 
     Returns
     -------
     jnp.ndarray, shape ``(p,)``
         ``sum over aperture facets a of weights_a * (solid angle of the image within a's cone)``.
     """
+    aperture, weights = path.aperture, path.reflectance
     if cull:
         aperture, receivers, vertices = (
             jax.lax.stop_gradient(array) for array in (aperture, receivers, vertices)
@@ -669,10 +686,18 @@ def _seen_pairs(aperture, weights, receivers, normals, vertices, *, cull: bool, 
         normals = None if normals is None else jax.lax.stop_gradient(normals)
     view = source_view(receivers, normals, vertices)
     if cull:
+        kept, shortcut = screen
+        if shortcut is not None:
+            skip, _ = shortcut
+            kept = kept & ~skip[:, None]
         fraction = _culled_fractions(
             view, aperture, receivers, normals, jax.lax.stop_gradient(kept)
         )
-        return jnp.abs(view.whole) * (fraction @ weights)
+        seen = jnp.abs(view.whole) * (fraction @ weights)
+        if shortcut is None:
+            return seen
+        skip, whole_weight = shortcut
+        return jnp.where(skip, jnp.abs(view.whole) * whole_weight, seen)
     # One view per pair, shared by every aperture facet it is clipped against. The clip stacks
     # its candidates, so everything is spread to one batch shape rather than left to broadcast.
     batch = (receivers.shape[0], aperture.shape[0])
@@ -693,18 +718,44 @@ def _seen_pairs(aperture, weights, receivers, normals, vertices, *, cull: bool, 
     return jnp.abs(view.whole) * (fraction @ weights)
 
 
-def _may_show(aperture, receivers, vertices):
-    """Which aperture facets may show part of each image, seen from each receiver.
+def _cones(relative):
+    """Each triangle's angular cone, as an axis and three per-cone values: :func:`angular_cone`."""
+    axis, *rest = angular_cone(relative)
+    return axis, rest
 
-    Conservatively: ``False`` only where the facet's cone of directions and the image's cannot
-    overlap, so the facet shows none of the image; ``True`` may still clip to nothing. A cone too
-    wide to bound anything -- a receiver near the facet's or the image's own plane -- overlaps
-    everything. Each facet's cone is taken once per receiver and each image's once per pair; the
-    overlap test, a few products, is what is formed per triple.
+
+def _overlap(images, others):
+    """Whether each image's cone may overlap each of ``others``': images ``(..., s)``, others
+    ``(..., a)``, giving ``(..., s, a)``. The axes carry their vector on a trailing axis of
+    their own, so it is spread before that axis rather than after."""
+    (image_axis, image_rest), (other_axis, other_rest) = images, others
+    return cones_may_overlap(
+        (image_axis[..., None, :], *(part[..., None] for part in image_rest)),
+        (other_axis[..., None, :, :], *(part[..., None, :] for part in other_rest)),
+    )
+
+
+def _screen(path: _Path, receivers, vertices):
+    """What each image needs from the clip, seen from each receiver: which facets, or none.
+
+    - **Which aperture facets may show part of it**: ``False`` only where the facet's cone of
+      directions and the image's cannot overlap, so the facet shows none of the image. A cone too
+      wide to bound anything -- a receiver near the facet's or the image's own plane -- overlaps
+      everything.
+    - **Whether it can skip the clip.** If no edge of the mirror's outline can lie in the image's
+      cone, no point of the outline lies within the image as seen through the plane, so the image
+      is wholly inside the mirror or wholly outside it; the line to its centroid says which, and the
+      weight it takes is that of the facet the line crosses -- zero outside. This is offered only
+      where it is exact: every corner of the image behind the plane, and an outline to test
+      against -- which the path carries only when every facet has the one concrete weight, so an
+      image spanning several facets takes the same weight from each.
+
+    Each facet's and each outline edge's cone is taken once per receiver, each image's once per
+    pair; the overlap tests, a few products each, are what is formed per triple.
 
     Parameters
     ----------
-    aperture : jnp.ndarray, shape ``(a, 3, 3)``
+    path : _Path
     receivers : jnp.ndarray, shape ``(..., r, 3)``
     vertices : jnp.ndarray, shape ``(..., s, 3, 3)``
         The images, with the same leading shape as ``receivers`` -- the blocks of a layout, each
@@ -712,18 +763,30 @@ def _may_show(aperture, receivers, vertices):
 
     Returns
     -------
-    jnp.ndarray of bool, shape ``(..., r, s, a)``
+    tuple
+        Which facets each pair keeps, ``(..., r, s, a)``; and either ``None`` or which pairs skip
+        the clip and the weight each takes, ``(..., r, s)`` each.
     """
-    image_axis, *image_rest = angular_cone(
-        vertices[..., None, :, :, :] - receivers[..., :, None, None, :]
-    )
-    facet_axis, *facet_rest = angular_cone(aperture - receivers[..., :, None, None, :])
-    # Each cone is an axis -- a vector, its own trailing axis -- and three per-cone values; the
-    # images are spread across the facets and the facets across the images.
-    return cones_may_overlap(
-        (image_axis[..., None, :], *(part[..., None] for part in image_rest)),
-        (facet_axis[..., None, :, :], *(part[..., None, :] for part in facet_rest)),
-    )
+    images = _cones(vertices[..., None, :, :, :] - receivers[..., :, None, None, :])
+    kept = _overlap(images, _cones(path.aperture - receivers[..., :, None, None, :]))
+    if path.outline is None:
+        return kept, None
+    rim = _cones(path.outline - receivers[..., :, None, None, :])
+    straddles = jnp.any(_overlap(images, rim), axis=-1)
+    height = dot(vertices - path.mirror.point, path.mirror.normal)
+    behind = jnp.all(height < 0.0, axis=-1)[..., None, :]
+    skip = ~straddles & behind
+    whole_weight = _crossed_reflectance(path, receivers, jnp.mean(vertices, axis=-2))
+    return kept, (jax.lax.stop_gradient(skip), whole_weight)
+
+
+def _flat(screen):
+    """:func:`_screen`'s output flattened to pairs: ``(p, a)``, and ``(p,)`` each."""
+    kept, shortcut = screen
+    flat = kept.reshape(-1, kept.shape[-1])
+    if shortcut is None:
+        return flat, None
+    return flat, tuple(part.reshape(-1) for part in shortcut)
 
 
 def _culled_fractions(view: SourceView, aperture, receivers, normals, kept):
@@ -732,7 +795,7 @@ def _culled_fractions(view: SourceView, aperture, receivers, normals, kept):
     Returns
     -------
     jnp.ndarray, shape ``(p, a)``
-        Zero for every triple the cone test rules out.
+        Zero for every triple not kept.
     """
     n_pairs, n_facets = receivers.shape[0], aperture.shape[0]
     kept = kept.reshape(-1)
@@ -841,27 +904,27 @@ def _crossed_reflectance(path: _Path, receivers, images):
 
     Parameters
     ----------
-    receivers : jnp.ndarray, shape ``(r, 3)``
-    images : jnp.ndarray, shape ``(p, 3)``
-        Image points, behind the mirror.
+    receivers : jnp.ndarray, shape ``(..., r, 3)``
+    images : jnp.ndarray, shape ``(..., p, 3)``
+        Image points, behind the mirror; the same leading shape as ``receivers``.
 
     Returns
     -------
-    jnp.ndarray, shape ``(r, p)``
+    jnp.ndarray, shape ``(..., r, p)``
     """
-    to_aperture = path.aperture[None] - receivers[:, None, None, :]
+    to_aperture = path.aperture - receivers[..., :, None, None, :]
     volume, edge_on = _orientation(to_aperture)
     facing = jnp.sign(volume)[..., None]
-    direction = (images[None] - receivers[:, None])[:, :, None, None, :]
-    inside = ~edge_on[:, None]
+    direction = (images[..., None, :, :] - receivers[..., :, None, :])[..., None, None, :]
+    inside = ~edge_on[..., :, None, :]
     for k in range(3):
         plane = spanning_plane(to_aperture[..., k, :], to_aperture[..., (k + 1) % 3, :]) * facing
-        height = decidable_heights(direction, plane[:, None])[..., 0]
+        height = decidable_heights(direction, plane[..., :, None, :, :])[..., 0]
         inside = inside & (height >= 0.0)
     # The line must also cross the plane between its ends, which a receiver behind the mirror or
     # an image in front of it does not.
-    near = dot(receivers - path.mirror.point, path.mirror.normal)[:, None]
-    far = dot(images - path.mirror.point, path.mirror.normal)[None]
+    near = dot(receivers - path.mirror.point, path.mirror.normal)[..., :, None]
+    far = dot(images - path.mirror.point, path.mirror.normal)[..., None, :]
     crosses = (near > 0.0) & (far < 0.0)
     first = jnp.argmax(inside, axis=-1)
     reflectance = jnp.take(path.reflectance, first)
@@ -932,6 +995,7 @@ def plane_exchange(
     rows = np.flatnonzero(in_front & areal)
     columns = rows
     aperture = jnp.take(geometry.vertices, jnp.asarray(mirror.facets), axis=0)
+    path = _Path.of(mirror, aperture, jnp.ones(aperture.shape[0]))
     image = mirror.image(geometry)
     index = jnp.asarray(columns)
     image_vertices = jnp.take(image.vertices, index, axis=0)
@@ -945,7 +1009,7 @@ def plane_exchange(
     if rows.size:
         row_index = jnp.asarray(rows)
         block = _exchange_rows(
-            aperture,
+            path,
             image_vertices,
             jnp.take(jnp.asarray(sample), row_index, axis=0),
             jnp.take(geometry.normal, row_index, axis=0),
@@ -963,8 +1027,8 @@ def plane_exchange(
     return PlaneExchange(geometric=geometric, separation=separation, source_cosine=source_cosine)
 
 
-@functools.partial(jax.jit, static_argnames="pair_limit")
-def _exchange_rows(aperture, image_vertices, sample, normals, weight, *, pair_limit):
+@eqx.filter_jit
+def _exchange_rows(path, image_vertices, sample, normals, weight, *, pair_limit):
     """The projected solid angle of each image through the aperture, over ``pi``, per row.
 
     Module level and compiled, so the planes of one build -- and of the next -- that share their
@@ -972,7 +1036,8 @@ def _exchange_rows(aperture, image_vertices, sample, normals, weight, *, pair_li
 
     Parameters
     ----------
-    aperture : jnp.ndarray, shape ``(a, 3, 3)``
+    path : _Path
+        The mirror and its aperture, with every facet weighted one.
     image_vertices : jnp.ndarray, shape ``(s, 3, 3)``
     sample : jnp.ndarray, shape ``(r, q, 3)``
         Quadrature points on the receiving facets.
@@ -983,16 +1048,13 @@ def _exchange_rows(aperture, image_vertices, sample, normals, weight, *, pair_li
     -------
     jnp.ndarray, shape ``(r, s)``
     """
-    ones = jnp.ones(aperture.shape[0])
 
     def at(points, chunk_normals):
         # Scanned over the quadrature points rather than unrolled, so the clip is compiled once
         # however many points the rule has.
         def accumulate(total, sampled):
             weight_k, points_k = sampled
-            seen = _seen_through_aperture(
-                aperture, ones, points_k, chunk_normals, image_vertices, cull=True
-            )
+            seen = _seen_through_aperture(path, points_k, chunk_normals, image_vertices, cull=True)
             return total + weight_k * seen, None
 
         total, _ = jax.lax.scan(
@@ -1005,6 +1067,6 @@ def _exchange_rows(aperture, image_vertices, sample, normals, weight, *, pair_li
     return in_passes(
         ((sample, 0), (normals, 0)),
         pair_limit,
-        image_vertices.shape[0] * aperture.shape[0],
+        image_vertices.shape[0] * path.aperture.shape[0],
         at,
     )

@@ -10,7 +10,6 @@ from aquaflux.radiation import images as images_module
 from aquaflux.radiation.absorption import UniformAbsorption, VoxelAbsorption
 from aquaflux.radiation.gather import direct_fluence_rate, direct_irradiance
 from aquaflux.radiation.images import (
-    _may_show,
     _seen_through_aperture,
     mirrored_fluence_rate,
     mirrored_irradiance,
@@ -18,11 +17,12 @@ from aquaflux.radiation.images import (
     summed_mirrored_fluence_rate,
 )
 from aquaflux.radiation.mirror_visibility import build_mirror_visibility
-from aquaflux.radiation.mirrors import planar_mirrors
+from aquaflux.radiation.mirrors import Mirror, planar_mirrors
 from aquaflux.radiation.photometry import PhotometricProfile
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian
 from aquaflux.radiation.quadrature import triangle_quadrature
 from aquaflux.radiation.self_occlusion import NoOcclusion
+from aquaflux.radiation.silhouette import source_view
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.transfer import build_transfer
 from aquaflux.solids import Box, Sphere
@@ -580,23 +580,37 @@ def test_shadows_must_be_one_mask_per_mirror_and_come_with_them_the_transmittanc
 # ---------------------------------------------------------------------------------------
 
 
-def _fine_aperture(cells: int = 10) -> np.ndarray:
-    """The square [-1, 1]^2 at z = 0, facing up, as ``2 * cells**2`` triangles."""
+def _fine_aperture(cells: int = 10, *, hole: bool = False) -> np.ndarray:
+    """The square [-1, 1]^2 at z = 0, facing up, as ``2 * cells**2`` triangles -- less the
+    middle cell's two with ``hole``, so the outline has an inner edge as well as a rim."""
     edges = np.linspace(-1.0, 1.0, cells + 1)
     step = edges[1] - edges[0]
+    middle = cells // 2
     return np.concatenate(
         [
             rectangle_triangles(
                 [x + step / 2, y + step / 2, 0.0], [step / 2, 0, 0], [0, step / 2, 0]
             )
-            for x in edges[:-1]
-            for y in edges[:-1]
+            for i, x in enumerate(edges[:-1])
+            for j, y in enumerate(edges[:-1])
+            if not (hole and i == middle and j == middle)
         ]
     )
 
 
+def _floor_path(aperture, weights):
+    """The gather's view of a mirror in the plane z = 0 whose facets are ``aperture``."""
+    mirror = Mirror(
+        point=jnp.zeros(3), normal=jnp.asarray([0.0, 0.0, 1.0]), facets=np.arange(len(aperture))
+    )
+    return images_module._Path.of(mirror, jnp.asarray(aperture), jnp.asarray(weights))
+
+
 def _images_and_receivers(seed: int, n_images: int = 7, n_receivers: int = 9):
-    """Small image triangles behind the plane z = 0, receivers in front, some with normals."""
+    """Small image triangles behind the plane z = 0, receivers in front, some with normals.
+
+    Some images lie well inside the mirror, some across its rim or the hole, some outside it.
+    """
     rng = np.random.default_rng(seed)
     centres = rng.uniform([-1.2, -1.2, -1.0], [1.2, 1.2, -0.2], (n_images, 1, 3))
     images = centres + rng.normal(scale=0.08, size=(n_images, 3, 3))
@@ -605,41 +619,98 @@ def _images_and_receivers(seed: int, n_images: int = 7, n_receivers: int = 9):
     # batch slot points at carries light, so padding counted as a survivor would show.
     images[0] = images[0] - centres[0] + np.array([-0.9, -0.9, -0.5])
     receivers[0] = [-0.9, -0.9, 0.5]
+    # The second image sits under the hole's middle, seen through it by the second receiver.
+    images[1] = images[1] - centres[1] + np.array([0.1, 0.1, -0.5])
+    receivers[1] = [0.1, 0.1, 0.4]
     normals = rng.normal(size=(n_receivers, 3))
     normals[:, 2] = -np.abs(normals[:, 2])
     normals /= np.linalg.norm(normals, axis=1, keepdims=True)
     return jnp.asarray(images), jnp.asarray(receivers), jnp.asarray(normals)
 
 
+@pytest.mark.parametrize("hole", [False, True], ids=["whole", "holed"])
+@pytest.mark.parametrize("weighting", ["one weight", "per facet"])
 @pytest.mark.parametrize("oriented", [False, True], ids=["volume", "on a surface"])
-def test_culling_the_mirror_facets_changes_no_answer(oriented, monkeypatch):
+def test_culling_and_skipping_the_clip_change_no_answer(oriented, weighting, hole, monkeypatch):
     """The culled clip against the clip of every facet, with a batch small enough that the
-    survivors take several passes, and per-facet weights that a facet swapped for another
-    would change."""
+    survivors take several passes. With one weight on every facet, images wholly inside the
+    outline skip the clip; with a weight per facet -- which a facet swapped for another would
+    change -- none may, and every image is clipped."""
     monkeypatch.setattr(images_module, "_CLIP_BATCH", 7)
-    aperture = jnp.asarray(_fine_aperture())
-    weights = jnp.asarray(np.random.default_rng(1).uniform(0.2, 1.0, len(aperture)))
+    aperture = _fine_aperture(hole=hole)
+    rng = np.random.default_rng(1)
+    weights = (
+        np.full(len(aperture), 0.6)
+        if weighting == "one weight"
+        else rng.uniform(0.2, 1.0, len(aperture))
+    )
+    path = _floor_path(aperture, weights)
     images, receivers, normals = _images_and_receivers(0)
     normals = normals if oriented else None
-    every = _seen_through_aperture(aperture, weights, receivers, normals, images, cull=False)
-    culled = _seen_through_aperture(aperture, weights, receivers, normals, images, cull=True)
+    every = _seen_through_aperture(path, receivers, normals, images, cull=False)
+    culled = _seen_through_aperture(path, receivers, normals, images, cull=True)
     assert float(jnp.min(every)) >= 0.0 and float(jnp.max(every)) > 0.0
     # The every-facet clip leaves last-bit noise on facets that show nothing, so the two agree
     # to a rounding of the largest value rather than bit for bit.
     np.testing.assert_allclose(culled, every, rtol=1e-12, atol=1e-13 * float(jnp.max(every)))
 
 
-def test_the_cone_test_keeps_every_facet_that_shows_part_of_an_image_and_few_others():
+def test_an_image_wholly_inside_the_mirror_needs_no_clip(monkeypatch):
+    """With the clip itself stubbed out to clip nothing, the pairs the screen lets skip it still
+    get the exact answer -- and they are most of them -- while an image under the hole does not
+    skip, and gets nothing."""
+    aperture = _fine_aperture(hole=True)
+    path = _floor_path(aperture, np.full(len(aperture), 0.6))
+    images, receivers, _ = _images_and_receivers(0)
+    every = np.asarray(_seen_through_aperture(path, receivers, None, images, cull=False))
+    _, (skip, _) = images_module._screen(path, receivers, images)
+    skip = np.asarray(skip)
+    monkeypatch.setattr(
+        images_module,
+        "_culled_fractions",
+        lambda view, aperture, receivers, normals, kept: jnp.zeros(kept.shape),
+    )
+    stubbed = np.asarray(_seen_through_aperture(path, receivers, None, images, cull=True))
+    assert skip.mean() > 0.4
+    assert not skip[1, 1]
+    np.testing.assert_allclose(stubbed[skip], every[skip], rtol=1e-12, atol=1e-15)
+    np.testing.assert_array_equal(stubbed[~skip], 0.0)
+
+
+def test_an_image_crossing_the_mirror_s_plane_is_clipped_however_far_inside_it_lies():
+    """The part of an image in front of the plane is not seen through the mirror, so an image that
+    crosses the plane is clipped even where no edge of the outline comes near it."""
+    aperture = _fine_aperture()
+    path = _floor_path(aperture, np.full(len(aperture), 0.6))
+    images = jnp.asarray([[[-0.1, -0.1, -0.1], [0.1, -0.1, 0.1], [0.0, 0.1, -0.1]]])
+    receivers = jnp.asarray([[0.0, 0.0, 0.8], [0.05, -0.02, 0.5]])
+    _, (skip, _) = images_module._screen(path, receivers, images)
+    every = np.asarray(_seen_through_aperture(path, receivers, None, images, cull=False))
+    culled = _seen_through_aperture(path, receivers, None, images, cull=True)
+    whole = np.abs(np.asarray(source_view(receivers[:, None], None, images[None]).whole))
+    assert not np.any(np.asarray(skip))
+    assert np.all(every > 0.0) and np.all(every < 0.9 * 0.6 * whole)
+    np.testing.assert_allclose(culled, every, rtol=1e-12, atol=1e-15)
+
+
+def test_the_screen_keeps_every_facet_that_shows_part_of_an_image_and_few_others():
     """Conservative -- each facet with a non-zero share is kept -- and worth having: on a mirror
     of 200 triangles a small image needs a small share of them."""
-    aperture = jnp.asarray(_fine_aperture())
+    aperture = _fine_aperture()
     images, receivers, _ = _images_and_receivers(2, n_images=5, n_receivers=6)
-    kept = np.asarray(_may_show(aperture, receivers, images))
+    kept, _ = images_module._screen(
+        _floor_path(aperture, np.ones(len(aperture))), receivers, images
+    )
+    kept = np.asarray(kept)
     shows = np.stack(
         [
             np.asarray(
                 _seen_through_aperture(
-                    aperture, jnp.eye(len(aperture))[k], receivers, None, images, cull=False
+                    _floor_path(aperture, np.eye(len(aperture))[k]),
+                    receivers,
+                    None,
+                    images,
+                    cull=False,
                 )
             )
             for k in range(len(aperture))
@@ -651,35 +722,55 @@ def test_the_cone_test_keeps_every_facet_that_shows_part_of_an_image_and_few_oth
     assert kept.mean() < 0.25
 
 
-def test_the_culled_clip_clips_only_what_the_cone_test_keeps(monkeypatch):
-    """With a cone test that keeps nothing, nothing is seen: the culled clip reads its
-    survivors from the test rather than clipping every facet anyway."""
+def test_the_culled_clip_clips_only_what_the_screen_keeps(monkeypatch):
+    """With a screen that keeps nothing and lets nothing skip, nothing is seen: the culled clip
+    reads its survivors from the screen rather than clipping every facet anyway."""
     monkeypatch.setattr(
         images_module,
-        "_may_show",
-        lambda aperture, receivers, vertices: jnp.zeros(
-            (*receivers.shape[:-1], vertices.shape[-3], aperture.shape[0]), dtype=bool
+        "_screen",
+        lambda path, receivers, vertices: (
+            jnp.zeros(
+                (*receivers.shape[:-1], vertices.shape[-3], path.aperture.shape[0]), dtype=bool
+            ),
+            None,
         ),
     )
-    aperture = jnp.asarray(_fine_aperture(4))
+    aperture = _fine_aperture(4)
+    path = _floor_path(aperture, np.ones(len(aperture)))
     images, receivers, _ = _images_and_receivers(4)
-    weights = jnp.ones(len(aperture))
-    every = _seen_through_aperture(aperture, weights, receivers, None, images, cull=False)
-    culled = _seen_through_aperture(aperture, weights, receivers, None, images, cull=True)
+    every = _seen_through_aperture(path, receivers, None, images, cull=False)
+    culled = _seen_through_aperture(path, receivers, None, images, cull=True)
     assert float(jnp.max(every)) > 0.0
     np.testing.assert_array_equal(culled, 0.0)
 
 
 def test_the_reflectances_stay_differentiable_through_the_culled_clip():
-    aperture = jnp.asarray(_fine_aperture(4))
+    """Each facet's derivative is the share of the images seen through it -- with one weight on
+    every facet as well, where a skipped image would credit its whole share to the one facet the
+    line to its centroid crosses. A traced reflectance therefore keeps no outline."""
+    aperture = _fine_aperture(4)
     images, receivers, _ = _images_and_receivers(3)
+    mirror = _floor_path(aperture, np.ones(len(aperture))).mirror
 
     def total(weights, cull):
-        return jnp.sum(
-            _seen_through_aperture(aperture, weights, receivers, None, images, cull=cull)
-        )
+        path = images_module._Path.of(mirror, jnp.asarray(aperture), weights)
+        return jnp.sum(_seen_through_aperture(path, receivers, None, images, cull=cull))
 
     weights = jnp.full(len(aperture), 0.7)
     culled = jax.grad(total)(weights, True)
     assert float(jnp.max(jnp.abs(culled))) > 0.0
     np.testing.assert_allclose(culled, jax.grad(total)(weights, False), rtol=1e-12, atol=1e-15)
+
+
+def test_only_one_concrete_weight_on_every_facet_lets_an_image_skip_its_clip():
+    """The outline the skip tests against is kept for one concrete weight, and for nothing else."""
+    aperture = _fine_aperture(2)
+    mirror = _floor_path(aperture, np.ones(len(aperture))).mirror
+    of = images_module._Path.of
+    assert of(mirror, aperture, np.full(len(aperture), 0.4)).outline is not None
+    assert of(mirror, aperture, np.linspace(0.2, 0.4, len(aperture))).outline is None
+    held = []
+    jax.grad(lambda w: held.append(of(mirror, aperture, w).outline) or jnp.sum(w))(
+        jnp.ones(len(aperture))
+    )
+    assert held == [None]
