@@ -2970,7 +2970,7 @@ lower limit still winning); reverting the `min(pair_limit, PASS_PAIRS)` turns it
 
 `RayCastOcclusion` tests every ray against every triangle, which a reactor puts out of reach:
 1.6M cells, 7,516 lamp facets and 53,500 wall triangles is **6.6e14** intersections, weeks at
-the measured 120-150 Mtest/s. `grid.py` registers each triangle in the voxels its bounding box
+the measured 120-150 Mtest/s. `grid.py` registers each triangle in the voxels its bounding box (a rounding wider)
 spans and walks each segment through them (Amanatides & Woo's 3D-DDA), testing only what those
 voxels hold and stopping at the first blocker. Selected with `RayCastOcclusion(grid=True)`, an
 integer, or a per-axis triple; **`False` is the default** — it changes cost, not answers, and
@@ -3341,6 +3341,50 @@ surface), `test_the_grid_a_body_vouches_from_is_near_cubic_whatever_the_walk_gri
 occupancy grid from the walk grid, and dropping the flat-axis refit — ⚠️ **that last one first SURVIVED**:
 the flat test checked only the per-axis counts, and without the refit the flat axis's near-zero extent
 blew the other two counts up to the voxel cap. It now also bounds the total against the budget.
+
+### A FLAT SURFACE AND A SHEET ON A VOXEL PLANE: three misses fixed (2026-10-05)
+
+Found from a `RuntimeWarning: invalid value encountered in cast` in `_walk_state` on a
+`TriangleBody` of one planar patch (`patch_triangles(..., ["front"])` of a box mesh, `sheet=True`).
+Asked: does `blocks` still answer what `segment_is_cut` answers on a flat triangle set? **At the
+default resolution, yes — at an explicit one, no; and one miss was not about flatness at all.**
+
+- **The flat axis was `np.finfo(float).tiny` thick**, so its voxels were ~2e-308. A crossing point
+  a rounding off the plane is then a voxel index past the range of an integer (the warning; the
+  cast's garbage was clipped into range). With **one** voxel through the thickness the clip always
+  lands in the right one, so the default grid's answers were right. With **two or more** (an
+  explicit `resolution`), the point lands in a voxel holding nothing: **110 of 48,000** seam-aimed
+  segments read clear. Fixed in `_box_and_area`: a flat axis is `_FLAT_THICKNESS = 1e-6` of the
+  widest extent thick (non-flat axes unchanged).
+- **A triangle on an interior voxel plane, any box, any resolution.** Registration truncated each
+  triangle's box with no margin, so a face lying on a voxel plane, or an edge along one, landed on
+  one side only — and **the box padding pushes every boundary past the grid's middle to round
+  DOWN**, so the triangle ending there is missed from the voxel above. Where the segment crosses that
+  plane and an in-plane boundary at one point, the DDA's tie-break can step around the voxel holding
+  the triangle the exact test credits. **23 of 36,000** segments through the middle of three
+  stacked sheets (an even voxel count through their height). Fixed: registration widens each
+  triangle's box by `_rounding_margin` (a billionth of the extent), the margin `holds_any` already
+  used, now one helper for the padding, the registration and the box test. ⚠️ Both sides are
+  load-bearing: widening only the low side passes every fixture except a placement far from the
+  origin, which is why `SHEET_PLACEMENTS` has one.
+- **`_enters_grid` admitted a segment with a zero direction component lying OUTSIDE the box's slab
+  on that axis** (it read zero motion as "never leaves", not "never in"). Answers were right — the
+  exact test found nothing — but those segments were walked for nothing, and on a flat box they were
+  the warning's main source. Fixed; pinned by counting walked rays.
+- **Not a grid defect, and the trap that hid all three**: a segment that **ends exactly in** the
+  sheet, or crosses its **open rim**, is a knife edge where the compiled `segment_is_cut` and the
+  Numba `_cuts` round differently — 8,525 such disagreements in the first probe, every one of them
+  knife-edge, at a one-voxel grid too. Compare the grid against a one-voxel grid (same kernel) to
+  separate voxel selection from kernel rounding, and keep segments off the rim and past the plane.
+- ⚠️ **A plane at a large coordinate hides the flat defect**: with origins within ±1 of a sheet at
+  `|z| >= 2`, the crossing point rounds exactly onto the plane (its error is under half an ulp of
+  `z`), and aiming at `origin + 2(seam - origin)` crosses at exactly `t = 0.5`. The first fixtures
+  did both and found nothing. Tests: `test_a_flat_sheet_answers_exactly_what_testing_every_triangle_answers`,
+  `test_a_sheet_lying_on_a_voxel_plane_inside_a_thick_box_is_found_from_either_side`,
+  `test_a_segment_parallel_to_an_axis_beside_the_grid_is_not_walked`. **Mutation pass (6, 5 red)**:
+  no thickness, no registration margin, either side of it alone, the slab test reverted; the
+  original file fails 19. **Dismissed and deleted**: centring the plane in its slab changed no answer.
+  Configuration: jax 0.10.2, numba 0.67.0, CPU, x64, macOS arm64, `main` at `943389a`.
 
 ## HOW MANY FACETS AN EMITTER NEEDS — measured, because it sets the price of everything
 

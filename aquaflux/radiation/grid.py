@@ -70,6 +70,11 @@ _MAX_ASPECT = 32.0
 #: memory is one index per voxel plus one entry per (triangle, voxel it spans).
 _MAX_VOXELS = 8_000_000
 
+#: The thickness a flat axis of the grid's box is given, as a share of the box's widest extent
+#: (``_box_and_area``). Thin enough that a segment crossing the plane steps through few extra
+#: voxels, and far wider than the rounding of a crossing point, which must land inside it.
+_FLAT_THICKNESS = 1e-6
+
 
 @dataclasses.dataclass(frozen=True)
 class TriangleGrid:
@@ -113,7 +118,7 @@ class TriangleGrid:
 
     @classmethod
     def build(cls, vertices, *, resolution: int | tuple[int, int, int] | None = None):
-        """Register every triangle in the voxels its bounding box spans.
+        """Register every triangle in the voxels its bounding box, a rounding wider, spans.
 
         Parameters
         ----------
@@ -147,8 +152,19 @@ class TriangleGrid:
         counts = _resolution(extent, area, len(vertices), resolution)
         spacing = extent / counts
 
-        span_low = np.clip(((vertices.min(axis=1) - low) / spacing).astype(int), 0, counts - 1)
-        span_high = np.clip(((vertices.max(axis=1) - low) / spacing).astype(int), 0, counts - 1)
+        # Each triangle's box is widened by the margin the box test widens by. A triangle lying on
+        # a voxel boundary -- an axis-aligned face on a voxel plane, an edge along one -- then sits
+        # in the voxels on both sides of it, so whichever of them the rounding of a walk visits as
+        # it passes through that boundary holds it. Unwidened, a segment through such an edge
+        # where the walk's tie-break steps around the one voxel holding the triangle the exact
+        # test credits the hit to reads clear.
+        margin = _rounding_margin(extent)
+        span_low = np.clip(
+            ((vertices.min(axis=1) - margin - low) / spacing).astype(int), 0, counts - 1
+        )
+        span_high = np.clip(
+            ((vertices.max(axis=1) + margin - low) / spacing).astype(int), 0, counts - 1
+        )
         voxel_of, triangle_of = _spans(span_low, span_high, counts)
         order = np.argsort(voxel_of, kind="stable")
         per_voxel = np.bincount(voxel_of, minlength=int(np.prod(counts)))
@@ -169,13 +185,14 @@ class TriangleGrid:
     def holds_any(self, low, high) -> np.ndarray:
         """Whether any triangle could meet each axis-aligned box: False only where none can.
 
-        A triangle is registered in every voxel its bounding box spans, so a triangle that
-        meets a box does so at a point lying in some voxel it is registered in -- one the box
-        overlaps. So a box overlapping no occupied voxel meets no triangle, exactly, and saying
-        so costs eight lookups in :attr:`occupied_below` however large the box. The voxel range
-        is found by the same truncation the registration uses, and the box is first widened by
-        a margin a billionth of the grid's extent, so a triangle a rounding outside a box does
-        not read as clear of a segment the exact test would call cut.
+        A triangle is registered in every voxel its bounding box, widened by a margin a
+        billionth of the grid's extent, spans, so a triangle that meets a box does so at a point
+        lying in some voxel it is registered in -- one the box overlaps. So a box overlapping no
+        occupied voxel meets no triangle, exactly, and saying so costs eight lookups in
+        :attr:`occupied_below` however large the box. The voxel range is found by the same
+        truncation the registration uses, and the box is first widened by the same margin, so
+        a triangle a rounding outside a box does not read as clear of a segment the exact test
+        would call cut.
 
         Parameters
         ----------
@@ -234,7 +251,7 @@ class TriangleGrid:
     @property
     def _lookup(self):
         """What the compiled box test reads of the grid: corner, voxel size, margin, top, table."""
-        margin = 1e-9 * self.spacing * self.resolution
+        margin = _rounding_margin(self.spacing * self.resolution)
         top = (self.resolution - 1).astype(np.int64)
         return self.low, self.spacing, margin, top, self.occupied_below
 
@@ -343,14 +360,29 @@ def _unions_held(
     return held
 
 
+def _rounding_margin(extent) -> np.ndarray:
+    """A billionth of ``extent``: how far past a box a rounding may put what belongs in it.
+
+    The grid's box is padded by it, and the registration and the box test widen by it, so the
+    three agree on how far a rounding reaches.
+    """
+    return 1e-9 * np.asarray(extent, dtype=float)
+
+
 def _box_and_area(vertices):
     """The grid's corner and extent -- the triangles' bounding box, a hair wider -- and their area."""
     corner = vertices.reshape(-1, 3)
     low, high = corner.min(axis=0), corner.max(axis=0)
-    extent = np.maximum(high - low, np.finfo(float).tiny)
+    span = high - low
+    # A flat axis -- every triangle in one axis-aligned plane, as a planar patch is -- is given a
+    # thickness. With none its voxels are a few times 1e-308 thick, so a segment's crossing point
+    # a rounding off the plane is a voxel index past the range of an integer, and with more than
+    # one voxel through the thickness it lands in a voxel holding nothing and reads clear.
+    extent = np.maximum(span, max(_FLAT_THICKNESS * float(span.max()), np.finfo(float).tiny))
     # A margin, so a triangle exactly on the far face still lands inside the grid.
-    low = low - 1e-9 * extent
-    extent = extent * (1.0 + 2e-9)
+    margin = _rounding_margin(extent)
+    low = low - margin
+    extent = extent + 2.0 * margin
     # Twice the area, since the cross product of two edges spans the parallelogram.
     edges = np.cross(vertices[:, 1] - vertices[:, 0], vertices[:, 2] - vertices[:, 0])
     return low, extent, 0.5 * float(np.sqrt(np.sum(edges * edges, axis=-1)).sum())
@@ -480,15 +512,18 @@ def _enters_grid(origin, direction, low, spacing, resolution):
     A receiver outside the surface's own bounding box is ordinary -- a probe beyond the vessel,
     a cell beside a lamp whose box does not reach it -- so the walk starts at the segment's
     entry into the box rather than at its origin, and a segment that misses the box entirely is
-    answered without walking.
+    answered without walking. Along an axis it does not move on, a segment is within the box's
+    slab for its whole length or for none of it, as its origin is.
     """
     high = low + spacing * resolution
     with np.errstate(divide="ignore", invalid="ignore"):
         to_low = (low - origin) / direction
         to_high = (high - origin) / direction
-    near = np.where(direction == 0.0, -np.inf, np.minimum(to_low, to_high))
-    far = np.where(direction == 0.0, np.inf, np.maximum(to_low, to_high))
-    inside = np.all((origin >= low) & (origin <= high), axis=1)
+    within = (origin >= low) & (origin <= high)
+    unmoving = direction == 0.0
+    near = np.where(unmoving, np.where(within, -np.inf, np.inf), np.minimum(to_low, to_high))
+    far = np.where(unmoving, np.inf, np.maximum(to_low, to_high))
+    inside = np.all(within, axis=1)
     entry = np.maximum(near.max(axis=1), 0.0)
     exit_at = np.minimum(far.min(axis=1), 1.0)
     return inside | (entry <= exit_at), np.where(inside, 0.0, entry)
