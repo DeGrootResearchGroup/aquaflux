@@ -35,6 +35,7 @@ the aperture are the only things between them.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 from collections.abc import Sequence
 
@@ -50,6 +51,7 @@ from aquaflux.radiation.gather import (
     _emitter_direction,
     _groups,
     _one_geometry,
+    areal_layout,
 )
 from aquaflux.radiation.mirror_visibility import MirrorVisibility, reflected_surviving
 from aquaflux.radiation.mirrors import Mirror
@@ -305,15 +307,28 @@ class _Shadow(eqx.Module):
     """A mirror's mask for one group of receivers and sources, and the bodies' transmittance.
 
     A pytree, so a compiled gather takes it as an argument and the transmittance stays live.
+    ``column`` maps a facet to its column of the mask where pairs are read by index; it is
+    ``None`` where the columns are already the sources gathered, in their order.
     """
 
     crossings: jnp.ndarray
     hidden: jnp.ndarray | None
     transmittance: jnp.ndarray
+    column: jnp.ndarray | None = None
 
     def surviving(self, crossings, hidden) -> jnp.ndarray:
         """The surviving fraction from one chunk's rows of :attr:`crossings` and :attr:`hidden`."""
         return reflected_surviving(crossings, hidden, self.transmittance)
+
+    def at(self, rows, facets) -> jnp.ndarray:
+        """The surviving fraction of the paths from ``facets`` to the receivers ``rows``.
+
+        ``rows`` index the receivers the mask's rows were cut to; ``facets`` index the surface
+        set, read through :attr:`column`. The two broadcast against each other.
+        """
+        column = jnp.take(self.column, facets, mode="clip")
+        hidden = None if self.hidden is None else self.hidden[rows, column]
+        return reflected_surviving(self.crossings[:, rows, column], hidden, self.transmittance)
 
 
 class _MaskRows:
@@ -334,6 +349,17 @@ class _MaskRows:
     def of(cls, mask: MirrorVisibility | None, receivers, transmittance) -> _MaskRows | None:
         """``mask``'s rows for ``receivers``, or ``None`` where nothing is masked."""
         return None if mask is None else cls(mask, receivers, transmittance)
+
+    def with_lookup(self, n_facets: int) -> _Shadow:
+        """Every column, read by facet index through a lookup of ``n_facets`` entries."""
+        column = np.zeros(n_facets, dtype=int)
+        column[self.mask.sources] = np.arange(len(self.mask.sources))
+        return _Shadow(
+            crossings=self.crossings,
+            hidden=self.hidden,
+            transmittance=self.transmittance,
+            column=jnp.asarray(column),
+        )
 
     def for_sources(self, facets) -> _Shadow:
         """The shadow of the paths from ``facets``, columns in their order."""
@@ -445,38 +471,48 @@ def _passes(receivers, pair_limit, per_receiver, body, shadow: _Shadow | None = 
 def _areal_images(sets, images, sources, path: _Path, receivers, shadow, pair_limit, *, cull):
     """What the areal facets' images send each receiver through the aperture, ``(n,)``.
 
+    Laid out as the direct gather lays out its facets (:func:`~aquaflux.radiation.gather.areal_layout`):
+    receivers in small blocks, each against the images that can light it. An image is an ordinary
+    surface set, so a block lying wholly behind an image's plane, where a profile dark behind
+    itself sends nothing, leaves the image off its list exactly as it would the facet.
+
     ``cull`` clips each image only against the aperture facets it overlaps; it is on wherever the
     geometry can be read, which is where no derivative with respect to it is being taken.
     """
-    total = jnp.zeros(receivers[0].shape[0])
+    points, normals = receivers
     image_geometry = images[0]
-    for group in _areal_groups(images):
-        facets = np.intersect1d(group.facets, sources)
-        if not facets.size:
-            continue
-        index = jnp.asarray(facets)
-        vertices = jnp.take(image_geometry.vertices, index, axis=0)
-        centroid = jnp.take(image_geometry.centroid, index, axis=0)
-        normal = jnp.take(image_geometry.normal, index, axis=0)
-        emission = [jnp.take(surfaces.emission, index) for surfaces in sets]
-
-        total = total + _areal_through(
-            path,
-            vertices,
-            centroid,
-            normal,
-            tuple(emission),
-            group.profiles,
-            *receivers,
-            None if shadow is None else shadow.for_sources(facets),
-            pair_limit=pair_limit,
-            cull=cull,
-        )
+    groups = [
+        dataclasses.replace(group, facets=np.intersect1d(group.facets, sources))
+        for group in _areal_groups(images)
+    ]
+    groups = [group for group in groups if group.facets.size]
+    total = jnp.zeros(points.shape[0])
+    if not groups:
+        return total
+    layout = areal_layout(points, image_geometry, groups)
+    emission = tuple(surfaces.emission for surfaces in sets)
+    lookup = None if shadow is None else shadow.with_lookup(image_geometry.n_facets)
+    for group, segments in zip(groups, layout, strict=True):
+        for segment in segments:
+            total = total + _segment_through(
+                path,
+                image_geometry.vertices,
+                image_geometry.centroid,
+                image_geometry.normal,
+                emission,
+                group.profiles,
+                points,
+                normals,
+                lookup,
+                segment,
+                pair_limit=pair_limit,
+                cull=cull,
+            )
     return total
 
 
 @eqx.filter_jit
-def _areal_through(
+def _segment_through(
     path,
     vertices,
     centroid,
@@ -486,37 +522,59 @@ def _areal_through(
     points,
     normals,
     shadow,
+    segment,
     *,
     pair_limit,
     cull,
 ):
-    """What one group of areal images sends each receiver, compiled once per shape and profiles.
+    """What one segment's blocks receive from their listed images, ``(n_points,)``.
 
-    Module level, taking everything that varies as an argument, so a second call -- the next step
-    of a sweep, the same model asked again -- reuses the program instead of tracing it afresh.
-    ``cull`` is :func:`_seen_through_aperture`'s, and must be off where the geometry is
-    differentiated.
+    As :func:`~aquaflux.radiation.gather._segment_fluence` gathers a segment of facets: each block
+    against its own list, so nothing is formed for a pair off the list; entries past a list and
+    padding receivers contribute exactly zero. Module level and compiled, taking everything that
+    varies as an argument, so the next call of a sweep reuses the program. ``cull`` is
+    :func:`_seen_pairs`'s, and must be off where the geometry is differentiated.
     """
+    n_points = points.shape[0]
+    rows = jnp.asarray(segment.rows)
+    lists = (jnp.asarray(segment.facets), jnp.asarray(segment.valid))
 
-    def at(chunk, chunk_normals, surviving):
-        seen = _seen_through(path, chunk, chunk_normals, vertices, cull=cull)
-        direction, _ = _emitter_direction(centroid[None], chunk[:, None])
-        weight = seen * path.transmittance(centroid[None], chunk[:, None]) * surviving
-        received = jnp.zeros(chunk.shape[0])
+    def at(block_rows, *block_lists):
+        block_facets, block_valid = lists if segment.shared else block_lists
+        row = jnp.minimum(block_rows, n_points - 1)
+        grid = (*row.shape, block_facets.shape[-1])
+        receivers = jnp.take(points, row, axis=0)[:, :, None, :]
+        image = jnp.take(vertices, block_facets, axis=0, mode="clip")[:, None]
+        image_centroid = jnp.take(centroid, block_facets, axis=0, mode="clip")[:, None]
+        image_normal = jnp.take(normal, block_facets, axis=0, mode="clip")[:, None]
+        seen = _seen_pairs(
+            path.aperture,
+            path.reflectance,
+            jnp.broadcast_to(receivers, (*grid, 3)).reshape(-1, 3),
+            None
+            if normals is None
+            else jnp.broadcast_to(
+                jnp.take(normals, row, axis=0)[:, :, None, :], (*grid, 3)
+            ).reshape(-1, 3),
+            jnp.broadcast_to(image, (*grid, 3, 3)).reshape(-1, 3, 3),
+            cull=cull,
+        ).reshape(grid)
+        direction, _ = _emitter_direction(image_centroid, receivers)
+        weight = seen * path.transmittance(image_centroid, receivers)
+        if shadow is not None:
+            weight = weight * shadow.at(row[:, :, None], block_facets[:, None, :])
+        weight = jnp.where(block_valid[:, None, :], weight, 0.0)
+        total = jnp.zeros(row.shape)
         for flux, profile in zip(emission, profiles, strict=True):
-            radiance = profile.radiance_per_exitance(direction, normal[None])
-            received = received + jnp.sum(flux * radiance * weight, axis=1)
-        return received
+            exitance = jnp.take(flux, block_facets, axis=0, mode="clip")[:, None, :]
+            radiance = profile.radiance_per_exitance(direction, image_normal)
+            total = total + jnp.sum(exitance * radiance * weight, axis=2)
+        return total
 
-    per_receiver = vertices.shape[0] * path.aperture.shape[0]
-    return _passes((points, normals), pair_limit, per_receiver, at, shadow)
-
-
-def _seen_through(path: _Path, receivers, normals, vertices, *, cull: bool):
-    """:func:`_seen_through_aperture` through ``path``'s aperture, weighted by its reflectances."""
-    return _seen_through_aperture(
-        path.aperture, path.reflectance, receivers, normals, vertices, cull=cull
-    )
+    per_block = segment.block * segment.width * path.aperture.shape[0]
+    arrays = ((rows, 0),) if segment.shared else ((rows, 0), (lists[0], 0), (lists[1], 0))
+    received = in_passes(arrays, pair_limit, per_block, at)
+    return jnp.zeros(n_points).at[rows.ravel()].add(received.ravel(), mode="drop")
 
 
 #: Triples one step of the culled clip forms -- a receiving point, an image and an aperture facet
@@ -525,7 +583,37 @@ _CLIP_BATCH = 4096
 
 
 def _seen_through_aperture(aperture, weights, receivers, normals, vertices, *, cull: bool = False):
-    """Solid angle of each image seen through the aperture, weighted by each facet's reflectance.
+    """:func:`_seen_pairs` for every receiver against every image.
+
+    Parameters
+    ----------
+    aperture : jnp.ndarray, shape ``(a, 3, 3)``
+    weights : jnp.ndarray, shape ``(a,)``
+    receivers : jnp.ndarray, shape ``(r, 3)``
+    normals : jnp.ndarray, shape ``(r, 3)``, or None
+    vertices : jnp.ndarray, shape ``(s, 3, 3)``
+    cull : bool, optional
+
+    Returns
+    -------
+    jnp.ndarray, shape ``(r, s)``
+    """
+    grid = (receivers.shape[0], vertices.shape[0])
+    seen = _seen_pairs(
+        aperture,
+        weights,
+        jnp.broadcast_to(receivers[:, None, :], (*grid, 3)).reshape(-1, 3),
+        None
+        if normals is None
+        else jnp.broadcast_to(normals[:, None, :], (*grid, 3)).reshape(-1, 3),
+        jnp.broadcast_to(vertices[None], (*grid, 3, 3)).reshape(-1, 3, 3),
+        cull=cull,
+    )
+    return seen.reshape(grid)
+
+
+def _seen_pairs(aperture, weights, receivers, normals, vertices, *, cull: bool):
+    """Solid angle of each pair's image seen through the aperture, weighted per aperture facet.
 
     The plain solid angle for a point in the volume, the projected one for a point with a normal.
 
@@ -549,16 +637,17 @@ def _seen_through_aperture(aperture, weights, receivers, normals, vertices, *, c
         The mirror's facets.
     weights : jnp.ndarray, shape ``(a,)``
         What each aperture facet's share is weighted by: its specular reflectance, or one.
-    receivers : jnp.ndarray, shape ``(r, 3)``
-    normals : jnp.ndarray, shape ``(r, 3)``, or None
-    vertices : jnp.ndarray, shape ``(s, 3, 3)``
-        The images' corners.
-    cull : bool, optional
+    receivers : jnp.ndarray, shape ``(p, 3)``
+        Each pair's receiver.
+    normals : jnp.ndarray, shape ``(p, 3)``, or None
+    vertices : jnp.ndarray, shape ``(p, 3, 3)``
+        Each pair's image.
+    cull : bool
         Clip each image only against the aperture facets whose cones overlap it.
 
     Returns
     -------
-    jnp.ndarray, shape ``(r, s)``
+    jnp.ndarray, shape ``(p,)``
         ``sum over aperture facets a of weights_a * (solid angle of the image within a's cone)``.
     """
     if cull:
@@ -566,35 +655,32 @@ def _seen_through_aperture(aperture, weights, receivers, normals, vertices, *, c
             jax.lax.stop_gradient(array) for array in (aperture, receivers, vertices)
         )
         normals = None if normals is None else jax.lax.stop_gradient(normals)
-    pair_normals = None if normals is None else normals[:, None, :]
-    view = source_view(receivers[:, None, :], pair_normals, vertices[None])
+    view = source_view(receivers, normals, vertices)
     if cull:
         fraction = _culled_fractions(view, aperture, receivers, normals, vertices)
         return jnp.abs(view.whole) * (fraction @ weights)
-    # One view per (receiver, image), shared by every aperture facet it is clipped against. The
-    # clip stacks its candidates, so everything is spread to one batch shape rather than left to
-    # broadcast.
-    batch = (receivers.shape[0], vertices.shape[0], aperture.shape[0])
+    # One view per pair, shared by every aperture facet it is clipped against. The clip stacks
+    # its candidates, so everything is spread to one batch shape rather than left to broadcast.
+    batch = (receivers.shape[0], aperture.shape[0])
 
     def spread(array, trailing):
-        return jnp.broadcast_to(array[:, :, None], (*batch, *trailing))
+        return jnp.broadcast_to(array[:, None], (*batch, *trailing))
 
     spread_view = SourceView(
-        loop=spread(view.loop, view.loop.shape[2:]),
+        loop=spread(view.loop, view.loop.shape[1:]),
         whole=spread(view.whole, ()),
         support=spread(view.support, (3,)),
         through=spread(view.through, (3,)),
     )
-    to_aperture = jnp.broadcast_to(
-        aperture[None, None] - receivers[:, None, None, None, :], (*batch, 3, 3)
+    to_aperture = jnp.broadcast_to(aperture[None] - receivers[:, None, None, :], (*batch, 3, 3))
+    fraction, _ = covered_by(
+        spread_view, None if normals is None else spread(normals, (3,)), to_aperture
     )
-    triple_normals = None if normals is None else spread(pair_normals, (3,))
-    fraction, _ = covered_by(spread_view, triple_normals, to_aperture)
     return jnp.abs(view.whole) * (fraction @ weights)
 
 
 def _may_show(aperture, receivers, vertices):
-    """Which aperture facets may show part of each image, seen from each receiver.
+    """Which aperture facets may show part of each pair's image, seen from its receiver.
 
     Conservatively: ``False`` only where the facet's cone of directions and the image's cannot
     overlap, so the facet shows none of the image; ``True`` may still clip to nothing. A cone too
@@ -604,40 +690,33 @@ def _may_show(aperture, receivers, vertices):
     Parameters
     ----------
     aperture : jnp.ndarray, shape ``(a, 3, 3)``
-    receivers : jnp.ndarray, shape ``(r, 3)``
-    vertices : jnp.ndarray, shape ``(s, 3, 3)``
+    receivers : jnp.ndarray, shape ``(p, 3)``
+    vertices : jnp.ndarray, shape ``(p, 3, 3)``
 
     Returns
     -------
-    jnp.ndarray of bool, shape ``(r, s, a)``
+    jnp.ndarray of bool, shape ``(p, a)``
     """
-    image_cone = angular_cone(vertices[None] - receivers[:, None, None, :])
+    image_cone = angular_cone(vertices - receivers[:, None, :])
     facet_cone = angular_cone(aperture[None] - receivers[:, None, None, :])
-    return cones_may_overlap(
-        tuple(part[:, :, None] for part in image_cone),
-        tuple(part[:, None, :] for part in facet_cone),
-    )
+    return cones_may_overlap(tuple(part[:, None] for part in image_cone), facet_cone)
 
 
 def _culled_fractions(view: SourceView, aperture, receivers, normals, vertices):
-    """Each image's share within each aperture facet's cone, clipping only where cones overlap.
+    """Each pair's image share within each aperture facet's cone, clipping only where cones overlap.
 
     Returns
     -------
-    jnp.ndarray, shape ``(r, s, a)``
+    jnp.ndarray, shape ``(p, a)``
         Zero for every triple the cone test rules out.
     """
-    n_receivers, n_images, n_facets = receivers.shape[0], vertices.shape[0], aperture.shape[0]
+    n_pairs, n_facets = receivers.shape[0], aperture.shape[0]
     kept = _may_show(aperture, receivers, vertices).reshape(-1)
     n_triples = kept.shape[0]
     width = min(_CLIP_BATCH, n_triples)
     survivors = jnp.sum(kept)
     # The survivors' flat indices first, padded to a whole number of batches.
     (order,) = jnp.nonzero(kept, size=-(-n_triples // width) * width, fill_value=0)
-    pair_loop = view.loop.reshape(-1, *view.loop.shape[2:])
-    pair_whole = view.whole.reshape(-1)
-    pair_support = view.support.reshape(-1, 3)
-    pair_through = view.through.reshape(-1, 3)
 
     def clip(state):
         step, fraction = state
@@ -645,23 +724,22 @@ def _culled_fractions(view: SourceView, aperture, receivers, normals, vertices):
         triple = jax.lax.dynamic_slice(order, (start,), (width,))
         valid = start + jnp.arange(width) < survivors
         pair, facet = jnp.divmod(triple, n_facets)
-        row = pair // n_images
         share, _ = covered_by(
             SourceView(
-                loop=pair_loop[pair],
-                whole=pair_whole[pair],
-                support=pair_support[pair],
-                through=pair_through[pair],
+                loop=view.loop[pair],
+                whole=view.whole[pair],
+                support=view.support[pair],
+                through=view.through[pair],
             ),
-            None if normals is None else normals[row],
-            aperture[facet] - receivers[row][:, None, :],
+            None if normals is None else normals[pair],
+            aperture[facet] - receivers[pair][:, None, :],
         )
         return step + 1, fraction.at[triple].add(jnp.where(valid, share, 0.0))
 
     _, fraction = jax.lax.while_loop(
         lambda state: state[0] * width < survivors, clip, (0, jnp.zeros(n_triples))
     )
-    return fraction.reshape(n_receivers, n_images, n_facets)
+    return fraction.reshape(n_pairs, n_facets)
 
 
 def _point_images(sets, images, sources, path: _Path, receivers, shadow, pair_limit):

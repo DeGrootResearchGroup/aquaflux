@@ -634,7 +634,14 @@ def test_the_cone_test_keeps_every_facet_that_shows_part_of_an_image_and_few_oth
     of 200 triangles a small image needs a small share of them."""
     aperture = jnp.asarray(_fine_aperture())
     images, receivers, _ = _images_and_receivers(2, n_images=5, n_receivers=6)
-    kept = np.asarray(_may_show(aperture, receivers, images))
+    grid = (receivers.shape[0], images.shape[0])
+    kept = np.asarray(
+        _may_show(
+            aperture,
+            jnp.broadcast_to(receivers[:, None], (*grid, 3)).reshape(-1, 3),
+            jnp.broadcast_to(images[None], (*grid, 3, 3)).reshape(-1, 3, 3),
+        )
+    ).reshape(*grid, -1)
     shows = np.stack(
         [
             np.asarray(
@@ -658,7 +665,7 @@ def test_the_culled_clip_clips_only_what_the_cone_test_keeps(monkeypatch):
         images_module,
         "_may_show",
         lambda aperture, receivers, vertices: jnp.zeros(
-            (receivers.shape[0], vertices.shape[0], aperture.shape[0]), dtype=bool
+            (receivers.shape[0], aperture.shape[0]), dtype=bool
         ),
     )
     aperture = jnp.asarray(_fine_aperture(4))
