@@ -351,8 +351,9 @@ orientation, as it should.
 ### Mirror-like walls
 
 A reflectance of 0.95 does not say whether a wall scatters in every direction or reflects like a
-mirror, and the two are not close: Hassanpour et al. (2023) measure a 10–47% spread in log
-reduction between fully specular and fully diffuse walls at the same reflectivity. So a surface set
+mirror, and the two are not close: simulating a reactor with a cylindrical reflector, Hassanpour et
+al. (2023) find a 10–47% spread in log reduction between fully specular and fully diffuse walls at
+the same reflectivity. So a surface set
 carries the two separately, as `diffuse_reflectance` and `specular_reflectance`, which must each lie
 in `[0, 1]` and sum to at most one on each facet.
 
