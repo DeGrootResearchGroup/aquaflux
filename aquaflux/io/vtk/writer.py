@@ -31,7 +31,9 @@ def write_vtu(
 
     The mesh's cells are written as arbitrary polygons in two dimensions and arbitrary polyhedra in
     three, which is what its face-based storage already describes; no reconstruction into standard
-    element types is attempted, and none is needed.
+    element types is attempted, and none is needed. On a periodic mesh, the cell that sees a
+    periodic seam face through its periodic image is written with that face's nodes on its own side
+    of the domain, so every cell is drawn where it is.
 
     Parameters
     ----------
@@ -61,8 +63,8 @@ def write_vtu(
     Raises
     ------
     ValueError
-        If the mesh is neither two- nor three-dimensional, or a field's shape or length does not
-        match it.
+        If the mesh is neither two- nor three-dimensional, a field's shape or length does not match
+        it, or the mesh is periodic and the two sides of a periodic seam do not match node for node.
     """
     cells = build_vtk_cells(mesh)
     arrays = cell_data_arrays(fields or {}, mesh.n_cells, mesh.dim)

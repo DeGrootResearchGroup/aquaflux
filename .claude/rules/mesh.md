@@ -301,11 +301,17 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
     `pad_partition` (real rows then zeros), and `collapse_extruded_direction` (a kept-face subset,
     then projected onto the surviving axes — `gather_neighbour_offset(kept_faces)[:, kept_axes]`; the
     dropped component is necessarily zero, since a periodic extruded axis would have no boundary faces
-    to be the caps the collapse removes). The collapse one is still *unreachable in production* — no
-    periodic mesh is 3D (only `structured_grid_2d(periodic=…)` builds one and the polyMesh reader
-    emits none) — so its test hand-builds a periodic extruded slab
-    (`tests/unit/test_collapse.py::_periodic_extruded_slab`); that helper is the thing to reuse if a
-    3D periodic generator is ever added.
+    to be the caps the collapse removes). That path **is** reachable in production: the polyMesh
+    reader fuses `cyclic` pairs into seam faces *before* it collapses (`io/openfoam/cyclic.py`), so a
+    periodic 2D OpenFOAM case is a periodic 3D mesh first — and a 3D case with a `cyclic` pair stays
+    one. Its test hand-builds a periodic extruded slab
+    (`tests/unit/test_collapse.py::_periodic_extruded_slab`); `tests/support/polymesh.py`'s
+    `cyclic_slab_polymesh_data` / `cyclic_two_cube_polymesh_data` give a real 3D periodic mesh.
+    ⚠️ **A seam face's node ring belongs to the OWNER's side only.** Positions take the offset, and
+    nodes are positions: anything that lists a seam face's nodes for the *neighbour* cell must
+    translate them by `−neighbour_offset` onto that cell's own nodes. The VTK writer did not, raised
+    on every periodic 2D mesh and silently wrote 3D seam cells spanning the period (fixed 2026-10-06,
+    `io/vtk/topology._onto_own_side`; see `io.md`).
   - `FaceNodeConnectivity` (obtained as **`mesh.face_nodes`**) — the ragged face→node relation:
     `gather_node_coords`, `perimeter_next`, `reduce_to_faces`, `vertex_mean`, and `select(faces)`
     for a subset's connectivity; the face-geometry
