@@ -13,7 +13,8 @@ Per plate facet size, it reports:
 - the receivers' mirror masks against their direct mask, and the mirrored volume gather against the
   direct gather (first call, which compiles, and a second);
 - the throughput of each as work items per second -- receiving point x source x aperture facet for
-  the clipped exchanges, receiver x source for the masks -- which is what a plane limit is read from;
+  the clipped exchanges, counted over every aperture facet whether or not the cone cull lets it
+  through (so it is an unculled-equivalent rate), receiver x source for the masks;
 - the share of (receiver, source) pairs through each mirror whose source image faces away from the
   receiver, which a back-face cull of images could skip.
 
@@ -203,8 +204,9 @@ def run() -> dict:
             front = mirror.sources_in_front(surfaces)
             areal_front = int(np.sum(~surfaces.is_point_source[front]))
             exchange_items = areal_front * areal_front * aperture * len(rule.weight)
+            # Timed once: at minutes per plane its compilation is noise, and a second call would
+            # double the run.
             _, exchange = _timed(plane_exchange, mirror, surfaces, sample, weight)
-            _, exchange_again = _timed(plane_exchange, mirror, surfaces, sample, weight)
             _, facet_mask = _timed(
                 build_mirror_visibility,
                 mirror,
@@ -223,9 +225,8 @@ def run() -> dict:
                     "aperture_facets": aperture,
                     "sources_in_front": len(front),
                     "receivers_in_front": len(in_front),
-                    "exchange_seconds_first": round(exchange, 2),
-                    "exchange_seconds_second": round(exchange_again, 2),
-                    "exchange_items_per_second": exchange_items / exchange_again,
+                    "exchange_seconds": round(exchange, 2),
+                    "exchange_triples_per_second_unculled_equivalent": exchange_items / exchange,
                     "facet_mask_seconds": round(facet_mask, 2),
                     "facet_mask_paths_per_second": n * len(front) / facet_mask,
                     "receiver_mask_seconds": round(receiver_mask, 2),
@@ -265,7 +266,8 @@ def run() -> dict:
             "direct_receiver_mask_seconds": round(direct_mask, 2),
             "direct_gather_seconds": [round(direct_first, 2), round(direct_second, 2)],
             "mirrored_gather_seconds": [round(mirrored_first, 2), round(mirrored_second, 2)],
-            "mirrored_gather_items_per_second": gather_items / mirrored_second,
+            "mirrored_gather_triples_per_second_unculled_equivalent": gather_items
+            / mirrored_second,
         }
         _say(
             f"  gathers: direct {row['direct_gather_seconds']} s, mirrored "
