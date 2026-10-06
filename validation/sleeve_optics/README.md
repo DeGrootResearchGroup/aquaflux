@@ -39,13 +39,22 @@ Each array is traced five ways:
 | full | every interface, own sleeve and neighbours' |
 | full, another seed | **the control**: its ratio to full is the sampling noise |
 | own sleeve only | neighbours' sleeves absent, their arcs still absorbing |
-| straight, from the arc | no interfaces: aquaflux today with the arc as emitter, other arcs as occluders |
-| straight, from the sleeve | the sleeve's outer surface emits, every sleeve opaque: aquaflux today with the meshed sleeve as the lamp |
+| straight, from the arc | no interfaces, no absorption inside the sleeves |
+| straight, from the sleeve | the sleeve's outer surface emits 1 W/m into the water, every sleeve opaque: aquaflux today with the meshed sleeve as the lamp |
+
+⚠️ **"Straight, from the arc" is not what aquaflux computes with the arc as emitter.** aquaflux's
+`UniformAbsorption` absorbs along the whole straight segment, the 4 mm of air and quartz inside the
+sleeve included; this trace absorbs only in water. ⚠️ **"Straight, from the sleeve" emits the arc's full
+watt from the sleeve**, where a real sleeve passes about 0.94 of it (the rest returns to the arc), so
+about six points of its gap is power a user would calibrate away; the rest is angular and is not.
 
 ## Results
 
 Ratios are the full trace over the other, per pixel, p5 / p50 / p95; "between" is the water inside the
-square of lamp axes, "band" the water within 5 mm of any sleeve.
+square of lamp axes, "band" the pixels whose centres lie 13.5 to 16.5 mm from a lamp axis. ⚠️ **The band
+does not reach the first 2 mm of water** (11.5 to 13.5 mm), where the gaps are largest. **Read the
+medians**: the control shows the p5/p95 columns are mostly sampling noise. A model reads high by
+`1/ratio - 1`: 0.890 is 12.4 % high, 0.795 is 25.8 %.
 
 | spacing, UVT | control (noise), between | full / own sleeve only, between | full / straight from arc, between · band | full / straight from sleeve, between · band |
 |---|---|---|---|---|
@@ -70,19 +79,23 @@ through its own sleeve's reflections.
 
 ## What it says
 
-1. **Reflection off a neighbour's sleeve exterior is negligible**: at most 0.25 % of the water's power.
-   A convex-mirror model of the sleeve's outside alone buys nothing measurable.
-2. **Light passing through a neighbour's sleeve matters at close spacing and clear water**: +7.8 %
-   median between lamps at 50 mm and 95 %, +3 % at 80 mm, nothing at 80 mm and 65 %. The full trace's
-   arcs absorb less (0.129 against 0.159 at 50 mm, 95 %): a neighbour's sleeve bends light around its
-   arc.
-3. **A lamp's own sleeve is the largest effect**: a straight model from the arc reads 12-13 % high
-   between lamps in clear water and 13-17 % high in the band beside the sleeves at both transmittances;
-   the meshed-sleeve model reads 13 % high between lamps in clear water and **15-26 % high beside the
-   sleeves**, at both transmittances. Fresnel losses at three interfaces, light returned to the arc,
-   and refraction's change to the angular distribution entering the water, together.
+1. **Reflection off a neighbour's sleeve exterior is negligible**: at most 0.25 % of the water's power,
+   as the 0.2 % water-quartz reflectance at normal incidence predicts. A convex-mirror model of the
+   sleeve's outside alone buys nothing measurable.
+2. **Light passing through a neighbour's sleeve adds up to 8 % between lamps (median, 50 mm, 95 %)
+   against neighbours' sleeves that are not there**; 3 % at 80 mm; nothing at 80 mm and 65 %. The full
+   trace's arcs absorb less (0.129 against 0.159 at 50 mm, 95 %): a neighbour's sleeve bends light around
+   its arc. Two qualifications: a model that meshes the sleeves treats them as **opaque**, not absent,
+   which this table does not measure; and the whole effect rests on the arcs absorbing what reaches them.
+3. **A lamp's own sleeve is the largest effect.** The meshed-sleeve model reads 14.4-14.8 % high between
+   lamps in clear water and 17-26 % high in the band, at both transmittances, and more in the first 2 mm
+   of water the band misses. Only about 6 % of the arc's emission is a power loss (light returned to the
+   arc, almost all of it reflected at the inner air-quartz surface); the rest is **refraction changing
+   the directions light leaves the sleeve in**, which moves fluence from beside the sleeve outwards and
+   which no scalar transmittance corrects.
 
 **Bound on what this does not settle**: every figure assumes the arcs absorb all that reaches them, no
 absorption in the quartz, infinitely long lamps and a black wall. The arc assumption moves items 2 and 3
 directly (light returned to an arc, light a neighbour's sleeve bends around its arc) and is not
-bracketed here.
+bracketed here. A low-pressure mercury plasma traps its own 254 nm line (optically thick, re-emitting),
+so a fully absorbing arc is the pessimistic end, not the physical one.
