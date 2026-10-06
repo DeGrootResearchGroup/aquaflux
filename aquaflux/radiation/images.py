@@ -558,6 +558,11 @@ def _segment_through(
             ).reshape(-1, 3),
             jnp.broadcast_to(image, (*grid, 3, 3)).reshape(-1, 3, 3),
             cull=cull,
+            kept=_may_show(path.aperture, receivers[:, :, 0], image[:, 0]).reshape(
+                -1, path.aperture.shape[0]
+            )
+            if cull
+            else None,
         ).reshape(grid)
         direction, _ = _emitter_direction(image_centroid, receivers)
         weight = seen * path.transmittance(image_centroid, receivers)
@@ -608,11 +613,14 @@ def _seen_through_aperture(aperture, weights, receivers, normals, vertices, *, c
         else jnp.broadcast_to(normals[:, None, :], (*grid, 3)).reshape(-1, 3),
         jnp.broadcast_to(vertices[None], (*grid, 3, 3)).reshape(-1, 3, 3),
         cull=cull,
+        kept=_may_show(aperture, receivers, vertices).reshape(-1, aperture.shape[0])
+        if cull
+        else None,
     )
     return seen.reshape(grid)
 
 
-def _seen_pairs(aperture, weights, receivers, normals, vertices, *, cull: bool):
+def _seen_pairs(aperture, weights, receivers, normals, vertices, *, cull: bool, kept):
     """Solid angle of each pair's image seen through the aperture, weighted per aperture facet.
 
     The plain solid angle for a point in the volume, the projected one for a point with a normal.
@@ -644,6 +652,10 @@ def _seen_pairs(aperture, weights, receivers, normals, vertices, *, cull: bool):
         Each pair's image.
     cull : bool
         Clip each image only against the aperture facets whose cones overlap it.
+    kept : jnp.ndarray of bool, shape ``(p, a)``, or None
+        With ``cull``, which aperture facets each pair keeps: :func:`_may_show`, formed by the
+        caller in the grid it has, where a facet's cone is taken once per receiver rather than
+        once per pair.
 
     Returns
     -------
@@ -657,7 +669,9 @@ def _seen_pairs(aperture, weights, receivers, normals, vertices, *, cull: bool):
         normals = None if normals is None else jax.lax.stop_gradient(normals)
     view = source_view(receivers, normals, vertices)
     if cull:
-        fraction = _culled_fractions(view, aperture, receivers, normals, vertices)
+        fraction = _culled_fractions(
+            view, aperture, receivers, normals, jax.lax.stop_gradient(kept)
+        )
         return jnp.abs(view.whole) * (fraction @ weights)
     # One view per pair, shared by every aperture facet it is clipped against. The clip stacks
     # its candidates, so everything is spread to one batch shape rather than left to broadcast.
@@ -680,30 +694,40 @@ def _seen_pairs(aperture, weights, receivers, normals, vertices, *, cull: bool):
 
 
 def _may_show(aperture, receivers, vertices):
-    """Which aperture facets may show part of each pair's image, seen from its receiver.
+    """Which aperture facets may show part of each image, seen from each receiver.
 
     Conservatively: ``False`` only where the facet's cone of directions and the image's cannot
     overlap, so the facet shows none of the image; ``True`` may still clip to nothing. A cone too
     wide to bound anything -- a receiver near the facet's or the image's own plane -- overlaps
-    everything.
+    everything. Each facet's cone is taken once per receiver and each image's once per pair; the
+    overlap test, a few products, is what is formed per triple.
 
     Parameters
     ----------
     aperture : jnp.ndarray, shape ``(a, 3, 3)``
-    receivers : jnp.ndarray, shape ``(p, 3)``
-    vertices : jnp.ndarray, shape ``(p, 3, 3)``
+    receivers : jnp.ndarray, shape ``(..., r, 3)``
+    vertices : jnp.ndarray, shape ``(..., s, 3, 3)``
+        The images, with the same leading shape as ``receivers`` -- the blocks of a layout, each
+        with its own receivers and its own images.
 
     Returns
     -------
-    jnp.ndarray of bool, shape ``(p, a)``
+    jnp.ndarray of bool, shape ``(..., r, s, a)``
     """
-    image_cone = angular_cone(vertices - receivers[:, None, :])
-    facet_cone = angular_cone(aperture[None] - receivers[:, None, None, :])
-    return cones_may_overlap(tuple(part[:, None] for part in image_cone), facet_cone)
+    image_axis, *image_rest = angular_cone(
+        vertices[..., None, :, :, :] - receivers[..., :, None, None, :]
+    )
+    facet_axis, *facet_rest = angular_cone(aperture - receivers[..., :, None, None, :])
+    # Each cone is an axis -- a vector, its own trailing axis -- and three per-cone values; the
+    # images are spread across the facets and the facets across the images.
+    return cones_may_overlap(
+        (image_axis[..., None, :], *(part[..., None] for part in image_rest)),
+        (facet_axis[..., None, :, :], *(part[..., None, :] for part in facet_rest)),
+    )
 
 
-def _culled_fractions(view: SourceView, aperture, receivers, normals, vertices):
-    """Each pair's image share within each aperture facet's cone, clipping only where cones overlap.
+def _culled_fractions(view: SourceView, aperture, receivers, normals, kept):
+    """Each pair's image share within each aperture facet's cone, clipping only what ``kept`` keeps.
 
     Returns
     -------
@@ -711,7 +735,7 @@ def _culled_fractions(view: SourceView, aperture, receivers, normals, vertices):
         Zero for every triple the cone test rules out.
     """
     n_pairs, n_facets = receivers.shape[0], aperture.shape[0]
-    kept = _may_show(aperture, receivers, vertices).reshape(-1)
+    kept = kept.reshape(-1)
     n_triples = kept.shape[0]
     width = min(_CLIP_BATCH, n_triples)
     survivors = jnp.sum(kept)
