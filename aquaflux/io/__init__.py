@@ -33,7 +33,7 @@ from .openfoam import (
     write_openfoam_time,
 )
 from .reader import MeshReader
-from .vtk import write_pvd, write_vtu
+from .vtk import write_patches, write_pvd, write_vtu
 
 __all__ = [
     "FieldTemplate",
@@ -46,6 +46,7 @@ __all__ = [
     "read_volume_scalar_field",
     "write_openfoam_field",
     "write_openfoam_time",
+    "write_patches",
     "write_pvd",
     "write_vtu",
 ]

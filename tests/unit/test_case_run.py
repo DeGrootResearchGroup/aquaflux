@@ -197,7 +197,7 @@ def test_a_rans_case_writes_k_omega_and_the_eddy_viscosity_they_give() -> None:
 
 def _mesh_and_geometry(spec):
     mesh = spec.mesh.read(REPO)
-    return mesh, mesh.geometry()
+    return mesh, mesh.geometry(), REPO
 
 
 # --- how each solve is observed ------------------------------------------------------------------

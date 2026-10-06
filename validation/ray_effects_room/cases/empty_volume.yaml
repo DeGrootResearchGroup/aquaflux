@@ -1,0 +1,18 @@
+# The empty black room's fluence rate at every cell centre, and the irradiance on its walls:
+# bunny_volume.yaml without the bunny, on the room meshed without it.
+mesh: {kind: OpenFOAMMesh, path: ../work/empty/case/constant/polyMesh}
+physics:
+  kind: Radiation
+  settings:
+    kind: RadiationSettings
+    self_occlusion: {kind: NoOcclusion}
+boundaries:
+  lamp:
+    kind: Lamp
+    profile: {kind: IesProfile, file: ../ushio_b1.ies, up: [1.0, 0.0, 0.0]}
+  floor: {kind: Wall}
+  ceiling: {kind: Wall}
+  walls: {kind: Wall}
+outputs:
+  directory: ../work/cases/empty_volume
+  fields: [{kind: Vtk}, {kind: PatchVtk}]

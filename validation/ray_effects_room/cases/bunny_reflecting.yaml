@@ -1,0 +1,39 @@
+# The reflecting room: floor, ceiling and walls reflect diffusely at 0.5, the bunny stays black.
+#
+# 0.5 is idealized for 222 nm (ordinary paints reflect 5-10 %), chosen so the bounced light is a large
+# part of the field. Interreflection is closed to convergence: the number of bounces is not a setting.
+#
+# The reflecting surfaces are the room's own patches, coarsened to triangles of at most 0.2 m -- reflected
+# light is smooth, so they are far coarser than the faces -- and the lamp's light on each is averaged
+# over 4 x 4 points of it, so the bunny's shadow on a coarse triangle is not decided at one point. The
+# lamp is its patch's 1,120 triangles, as in bunny_volume.yaml, and it is black to light arriving on it.
+# bunny_reflecting_coarse.yaml repeats this at 0.4 m, to show what the triangle size moves.
+mesh: {kind: OpenFOAMMesh, path: ../work/bunny/case/constant/polyMesh}
+physics:
+  kind: Radiation
+  occluders:
+    - {kind: PatchBody, patches: [bunny], sheet: true}
+  lamp_samples: 4
+  settings:
+    kind: RadiationSettings
+    self_occlusion: {kind: NoOcclusion}
+boundaries:
+  lamp:
+    kind: Lamp
+    profile: {kind: IesProfile, file: ../ushio_b1.ies, up: [1.0, 0.0, 0.0]}
+  floor:
+    kind: Wall
+    reflectance: 0.5
+    geometry: {kind: MeshPatch, coarsen: {kind: Coarsen, max_edge: 0.2, chord: 1.0e-3}}
+  ceiling:
+    kind: Wall
+    reflectance: 0.5
+    geometry: {kind: MeshPatch, coarsen: {kind: Coarsen, max_edge: 0.2, chord: 1.0e-3}}
+  walls:
+    kind: Wall
+    reflectance: 0.5
+    geometry: {kind: MeshPatch, coarsen: {kind: Coarsen, max_edge: 0.2, chord: 1.0e-3}}
+  bunny: {kind: Wall}
+outputs:
+  directory: ../work/cases/bunny_reflecting
+  fields: [{kind: Vtk}, {kind: PatchVtk}]

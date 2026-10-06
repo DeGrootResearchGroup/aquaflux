@@ -45,6 +45,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `mirrors.py` — `Mirror` (a plane, its aperture facets, reflection and the image of a surface set) and `planar_mirrors` (a body's facets grouped by plane); the reflectance split on `Surfaces` (#537 PR 1, 2026-10-05) | **BUILT** (the model carries specular bodies since PR 3a, shadowed since PR 3b) |
 | `mirror_visibility.py` — `MirrorVisibility` / `build_mirror_visibility` / `build_mirror_masks`: what stands across each path reflected in one mirror, both legs, per body counted 0/1/2 (#537 PR 3b) | **BUILT** |
 | `units.py` — lamp watts to exitance, ultraviolet transmittance to absorbance | **BUILT** |
+| `scene.py` — `Scene` / `solve_scene` / `SceneSolution`: lamps KEPT OUT of the transfer (any profile, incl. IES), reflecting surfaces, bodies, medium, `VolumeReceivers` and named `SurfaceReceivers`; what a radiation case file builds (2026-10-05) | **BUILT** |
 
 There is no separate optical-depth piece to build: the voxel-grid traversal is `VoxelAbsorption` in
 `absorption.py`, exact along each segment (trilinear field, Simpson per cell).
@@ -278,9 +279,11 @@ it, and the `Profile` methods changed from `(cos_theta)` to `(direction, normal)
   need not matter: keep the lamp out of the surface set.** Gather its direct irradiance on the
   reflecting facets with `direct_irradiance` (which takes any profile), pass that as
   `external_irradiance` to `radiosity` / `fluence_rate`, and the transfer only ever carries
-  Lambertian reflected light. `validation/ray_effects_room/aquaflux_reflecting.py` does exactly this
-  for a Care222-lit room (2,000 squares of 20 cm; the two routes to its slice field -- the library's
-  `fluence_rate` and a direct gather of the facets' radiosity -- agree to 0.0). Average the lamp's
+  Lambertian reflected light. **This is now the library's `solve_scene` (`scene.py`, section at the end
+  of this file)**, which a radiation case file builds; the script that first did it for a Care222-lit
+  room (`aquaflux_reflecting.py`, deleted 2026-10-05; 2,000 squares of 20 cm) found the two routes to
+  its slice field -- the library's `fluence_rate` and a direct gather of the facets' radiosity -- agree
+  to 0.0, which is why the scene takes the second route alone. Average the lamp's
   irradiance over sub-points of each facet, not its centroid, or a shadow on a coarse facet is
   point-sampled. Freezing the unit direction instead (3x the frozen array) is the route if the lamp
   itself must reflect.
@@ -4243,3 +4246,46 @@ stages); losing the Morton order fails `test_clusters_are_compact_rather_than_ar
 **Dismissed**: not propagating a member's unusable flag to its cluster changes nothing observable —
 every unusable member also has a cone cosine at or below the floor, so its own half-angle already pushes
 the enclosing cap to a right angle and flags the cluster — and the guard stays as the explicit rule.
+
+
+## THE SCENE: LAMPS KEPT OUT OF THE TRANSFER, AS A LIBRARY FUNCTION (2026-10-05)
+
+`scene.py` makes the recipe `aquaflux_reflecting.py` hand-assembled (and this file documented under
+"the transfer refuses it ... keep the lamp out of the surface set") the library's: `solve_scene(Scene(
+lamps, reflectors, occluders, absorption, volume, surfaces, lamp_samples, settings))`. It is what a
+radiation **case file** builds (`.claude/rules/case.md` → Radiation cases); the old scripts are deleted.
+
+- **Steps**: `check_profiles(lamps)`; with reflectors, the lamps' `direct_irradiance` at
+  `subtriangle_centroids(reflector vertices, lamp_samples)` (the `k^2` equal-area sub-triangle centroids,
+  default `DEFAULT_LAMP_SAMPLES = 4`), averaged per facet, is the `external_irradiance` of ONE
+  `surface_irradiance` solve on a model built with **zero receivers** (`np.zeros((0, 3))` works); the
+  radiosity is then `emission + rho H` (reflectors must not emit — refused — so `rho H`), re-gathered as a
+  Lambertian set. Volume: `G_direct` and `G_reflected` by `streamed_fluence_rate` when anything can shadow
+  (a body, or self-occlusion not `NoOcclusion`), else `summed_fluence_rate`. Surfaces: `direct_irradiance`
+  through a mask built per pass of `receivers_per_pass(pair_limit, n_facets x n_bodies)` points.
+  `medium_absorbed_power = sum(a(x) G V)` via the new **`Absorption.sample(position)`** (abstract;
+  `UniformAbsorption` broadcasts, `VoxelAbsorption` already had it).
+- **Gate**: `test_a_lamp_kept_out_of_the_transfer_lights_the_box_as_the_model_does_with_it_inside` — a
+  Lambertian lamp kept out equals the model with it inside to 1e-11 (fluence and radiosity) at ONE
+  receiver point per facet and ONE lamp sample, where both evaluate the same projected solid angles; the
+  reflected share is > 30 %, so the agreement is not the direct light's. Plus: `lamp_samples` 8 is within
+  5 % of `lamp_samples` 1's error against the 12-point transfer (lamp light averaged, not sampled once),
+  wall irradiance = a direct gather of the solved radiosity, pass size changes nothing (1e-13) with a
+  sphere shadowing, medium power, sub-triangle centroids.
+- ⚠️ **A point on a reflecting surface is NOT lit by its own facet, and no exclusion is needed for that**
+  — the first version masked it out and its test showed the mask did nothing: a point a rounding in front
+  of its facet is behind the receiver half-space, a point a rounding behind is behind the (dark-behind)
+  emitter, and exactly in-plane the emitter cosine is 0. What DOES need the facet is the **ray test**:
+  a ray from any other facet ends in the facet under the point and `RayCastOcclusion` counts that (far end
+  inclusive) — the "two exclusions" defect below. So `SurfaceReceivers.reflector` names the body, and
+  `_own_facets` passes **every** facet of it the point lies on (ties within 1e-12 of the body's extent)
+  as `receiver_facet`. ⚠️ **Several, not one**: a mesh face centre is the shared apex of all its fan
+  triangles, and a point on a shared edge lies on two; with only the nearest excluded, 4 of 16 floor
+  points of a regular box (on quad diagonals) came back shadowed. **`receiver_facet` now takes
+  `(n_receivers, k)` rows (`-1` padding)** in `build_visibility`, `RayCastOcclusion` (`_exclusions`, both
+  walks) and `pairs_are_cut(target=)`; `SilhouetteOcclusion` measures about one facet's normal and refuses
+  the 2-D form, so the scene hands it the nearest. Pinned by
+  `test_a_point_on_a_reflecting_wall_is_not_shadowed_by_the_facet_it_lies_on` (ray test with the
+  exclusion = no occlusion to 1e-12 on a convex box; without it, < half).
+- **Measured at mesh scale** — see `validation/ray_effects_room/README.md` (the case files and their
+  agreement with the scripts they replaced).

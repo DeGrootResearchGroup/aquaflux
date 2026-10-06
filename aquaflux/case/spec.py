@@ -5,16 +5,19 @@
 parses to. It holds no mesh and builds no equation -- that is what makes checking a case cheap, and
 what leaves the solver free to be rebuilt from whatever state a march has reached.
 
-It is not a flat record of every setting any case might need. A small core -- mesh, fluid, boundaries,
-numerics -- is common to every case; what differs between cases is decided by two discriminators, the
-**physics** (:class:`~aquaflux.case.Laminar` or :class:`~aquaflux.case.RANS`) and the **drive** (what
-sets the flow in motion). A setting that belongs to one physics lives inside it, so a case cannot carry
-one its physics would ignore.
+It is not a flat record of every setting any case might need. A small core -- mesh, boundaries,
+outputs -- is common to every case; what differs between cases is decided by two discriminators, the
+**physics** (:class:`~aquaflux.case.Laminar`, :class:`~aquaflux.case.RANS` or
+:class:`~aquaflux.case.Radiation`) and the **drive** (what sets the flow in motion). A setting that
+belongs to one physics lives inside it, so a case cannot carry one its physics would ignore, and the
+physics decides which of the other sections there are: a flow states its fluid and its numerics, a
+radiation case neither.
 
 A spec that is constructed is already consistent on its own terms: its physics has accepted its
-boundaries, and its pressure level is fixed exactly once -- by an outlet, or, in a closed domain, by
-its ``pressure_datum``. What it cannot know until its mesh is read -- that every boundary face has a
-patch, and that each patch and the datum fit the mesh -- is checked by :meth:`CaseSpec.check_against`.
+boundaries and its sections, and a flow's pressure level is fixed exactly once -- by an outlet, or, in
+a closed domain, by its ``pressure_datum``. What it cannot know until its mesh is read -- that every
+boundary face has a patch, and that each patch, the datum and the physics' own settings fit the mesh
+-- is checked by :meth:`CaseSpec.check_against`.
 """
 
 from __future__ import annotations
@@ -26,14 +29,17 @@ from collections.abc import Mapping
 
 import numpy as np
 
-from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import AdvectionScheme, FirstOrderUpwind, LimitedUpwind
-from aquaflux.flow import (
-    PinnedPoint,
-    PressureDatum,
-    refuse_an_unsuitable_pressure_datum,
-)
+from aquaflux.flow import PinnedPoint, PressureDatum
 from aquaflux.mesh import Mesh
+from aquaflux.radiation import (
+    EveryPair,
+    NoOcclusion,
+    RadiationSettings,
+    RayCastOcclusion,
+    ShaftCulling,
+    SilhouetteOcclusion,
+)
 from aquaflux.schemes import (
     CompactGreenGauss,
     CorrectedGreenGauss,
@@ -62,13 +68,45 @@ from aquaflux.solve import (
 )
 from aquaflux.turbulence import PRECONDITIONER_SPEC_MAPPING, DirectScalars, LogScalars, SSTModel
 
-from .boundaries import FixedTurbulence, Inlet, IntensityLength, Outlet, PatchCondition, Wall
+from .boundaries import (
+    FixedTurbulence,
+    Inlet,
+    IntensityLength,
+    Lamp,
+    Outlet,
+    PatchCondition,
+    Wall,
+)
 from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
 from .mesh_source import GeometricGrading, MeshSource, OpenFOAMMesh, StructuredGrid
-from .outputs import Checkpoints, OpenFOAMTime, Outputs, Vtk
-from .physics import RANS, Laminar, Physics
-from .solver import CoupledMarch, FlowMarch, RootSolve, Segregated, SolverSpec, ViscosityRamp
+from .outputs import Checkpoints, OpenFOAMTime, Outputs, PatchVtk, Vtk
+from .physics import RANS, Laminar, Physics, Radiation
+from .radiation import (
+    CadFluid,
+    CadPlacement,
+    CadSolid,
+    CadSurface,
+    Coarsen,
+    CosinePowerProfile,
+    IesProfile,
+    LambertianProfile,
+    MeshPatch,
+    PatchBody,
+    Receivers,
+    StlBody,
+    StlSurface,
+    UniformMedium,
+)
+from .solver import (
+    CoupledMarch,
+    FlowMarch,
+    RadiationSolve,
+    RootSolve,
+    Segregated,
+    SolverSpec,
+    ViscosityRamp,
+)
 
 __all__ = ["CaseSpec", "Numerics", "case_spec_from_mapping", "case_spec_to_mapping"]
 
@@ -104,24 +142,26 @@ class Numerics:
             raise TypeError(f"Numerics.gradient must be a GradientScheme, got {self.gradient!r}.")
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class CaseSpec:
-    """One case: its mesh, fluid, physics, boundary patches, numerics and drive.
+    """One case: its mesh, physics, boundary patches, and -- for a flow -- its fluid, numerics and drive.
 
     Attributes
     ----------
     mesh : MeshSource
         Where the mesh is read from.
-    fluid : Fluid
-        The fluid, stated once for every equation.
     physics : Physics
-        :class:`~aquaflux.case.Laminar` or :class:`~aquaflux.case.RANS`.
+        :class:`~aquaflux.case.Laminar`, :class:`~aquaflux.case.RANS` or
+        :class:`~aquaflux.case.Radiation`.
     boundaries : mapping of {str: PatchCondition}
         What each boundary patch is, by the patch's name in the mesh or by the name of a patch group
         (every wall at once, say), whose condition then applies to each patch in it. Stored read-only,
         in the order given; :meth:`patch_conditions` gives the per-patch form.
-    numerics : Numerics
-        The discretization choices common to every physics.
+    fluid : Fluid or None
+        The fluid, stated once for every equation of a flow; a radiation case has none.
+    numerics : Numerics or None
+        The discretization choices common to every flow physics; a radiation case keeps its own inside
+        its physics.
     drive : DriveSpec or None
         What drives the flow when its boundary conditions do not -- :class:`~aquaflux.case.BulkVelocity`,
         a bulk velocity held by a solved force. Unset, the boundary conditions and the sources do.
@@ -133,9 +173,9 @@ class CaseSpec:
         a lid-driven cavity: a :class:`~aquaflux.flow.PinnedPoint`. Required exactly when no patch is
         an :class:`~aquaflux.case.Outlet`, and refused otherwise.
     solver : SolverSpec or None
-        How the case is solved -- :class:`~aquaflux.case.CoupledMarch`, :class:`~aquaflux.case.FlowMarch`
-        or :class:`~aquaflux.case.Segregated`. Unset, its physics' march with the library's own
-        settings (see :meth:`~aquaflux.case.CheckedCase.solve`).
+        How the case is solved -- :class:`~aquaflux.case.CoupledMarch`, :class:`~aquaflux.case.FlowMarch`,
+        :class:`~aquaflux.case.Segregated` or :class:`~aquaflux.case.RadiationSolve`. Unset, its
+        physics' own with the library's settings (see :meth:`~aquaflux.case.CheckedCase.solve`).
     outputs : Outputs
         What a run writes and where (see :func:`~aquaflux.case.run_case`); unset, the fields as VTK and
         the log, in ``results/`` beside the case file.
@@ -146,17 +186,18 @@ class CaseSpec:
         If a section is not a value of its family.
     ValueError
         If there are no boundary patches, if the physics refuses one (a turbulence setting in a laminar
-        case, an inlet with no inflow turbulence in a Reynolds-averaged one), or if the pressure level
-        is not fixed exactly once: a closed domain with no ``pressure_datum``, or a datum beside an
-        outlet; if the solver cannot solve this physics or hold this drive; or if an output writes an
+        case, an inlet with no inflow turbulence in a Reynolds-averaged one, a reflectance in either)
+        or refuses a section (a flow with no fluid, a radiation case with one), or if a flow's pressure
+        level is not fixed exactly once: a closed domain with no ``pressure_datum``, or a datum beside
+        an outlet; if the solver cannot solve this physics or hold this drive; or if an output writes an
         OpenFOAM time directory for a mesh that is not an OpenFOAM one.
     """
 
     mesh: MeshSource
-    fluid: Fluid
     physics: Physics
     boundaries: Mapping[str, PatchCondition]
-    numerics: Numerics
+    fluid: Fluid | None = None
+    numerics: Numerics | None = None
     drive: DriveSpec | None = None
     pressure_datum: PressureDatum | None = None
     sources: tuple[SourceSpec, ...] = ()
@@ -166,15 +207,17 @@ class CaseSpec:
     def __post_init__(self) -> None:
         for name, family in (
             ("mesh", MeshSource),
-            ("fluid", Fluid),
             ("physics", Physics),
-            ("numerics", Numerics),
             ("outputs", Outputs),
         ):
             if not isinstance(getattr(self, name), family):
                 raise TypeError(
                     f"CaseSpec.{name} must be a {family.__name__}, got {getattr(self, name)!r}."
                 )
+        for name, family in (("fluid", Fluid), ("numerics", Numerics)):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, family):
+                raise TypeError(f"CaseSpec.{name} must be a {family.__name__}, got {value!r}.")
         if self.drive is not None and not isinstance(self.drive, DriveSpec):
             raise TypeError(
                 f"CaseSpec.drive must be a drive such as BulkVelocity(target), got {self.drive!r}."
@@ -197,22 +240,14 @@ class CaseSpec:
         for patch, condition in self.boundaries.items():
             if not isinstance(patch, str) or not isinstance(condition, PatchCondition):
                 raise TypeError(
-                    "CaseSpec.boundaries maps each patch name to an Inlet, Outlet or Wall, got "
+                    "CaseSpec.boundaries maps each patch name to an Inlet, Outlet, Wall or Lamp, got "
                     f"{patch!r}: {condition!r}."
                 )
         # A copy, read-only: the spec is frozen, and a dict handed in would otherwise stay mutable
         # through the caller's reference.
         object.__setattr__(self, "boundaries", types.MappingProxyType(dict(self.boundaries)))
         self.physics.refuse_boundaries(self.boundaries)
-        # The flow's own rule, asked of the closures the patches will build: which of them fixes the
-        # pressure level is the flow's knowledge, so it is not restated for the case.
-        refuse_an_unsuitable_pressure_datum(
-            BoundaryConditions(
-                {name: condition.flow_closure() for name, condition in self.boundaries.items()}
-            ),
-            self.pressure_datum,
-            "the case",
-        )
+        self.physics.refuse_sections(self)
         if self.solver is not None:
             self.solver.refuse_for(self.physics, self.drive)
         if not isinstance(self.mesh, OpenFOAMMesh) and any(
@@ -227,11 +262,12 @@ class CaseSpec:
         """Refuse this case on ``mesh`` unless its patches fit it exactly.
 
         Every key must name a boundary patch of the mesh, or a patch group of them, and no patch may be
-        reached by two keys; every boundary face must lie in a patch given a condition (a face nobody gave
-        a condition would keep a zero face value, which is a boundary condition nobody chose); each patch's, the drive's and each source's settings must fit the mesh's
-        dimension; and a pressure datum's point must have one coordinate per dimension and lie within the
-        mesh's bounding box. Needs the mesh's
-        topology and node coordinates only, not its geometry.
+        reached by two keys; every boundary face must lie in a patch given a condition (a face nobody
+        gave a condition would keep a zero face value, which is a boundary condition nobody chose); each
+        patch's, the drive's and each source's settings must fit the mesh's dimension; a pressure
+        datum's point must have one coordinate per dimension and lie within the mesh's bounding box; and
+        the physics' own settings must fit the mesh (a radiation case's occluders and receivers name
+        its walls). Needs the mesh's topology and node coordinates only, not its geometry.
 
         Parameters
         ----------
@@ -276,6 +312,7 @@ class CaseSpec:
                 problems.append(str(error))
         if isinstance(self.pressure_datum, PinnedPoint):
             problems.extend(_datum_misfits(self.pressure_datum, mesh))
+        problems.extend(self.physics.mesh_misfits(self, mesh))
         if problems:
             raise ValueError("the case does not fit its mesh: " + "; ".join(problems) + ".")
 
@@ -399,12 +436,14 @@ _CASE_MAPPING = SettingsMapping(
         Fluid,
         Laminar,
         RANS,
+        Radiation,
         SSTModel,
         DirectScalars,
         LogScalars,
         Inlet,
         Outlet,
         Wall,
+        Lamp,
         FixedTurbulence,
         IntensityLength,
         Numerics,
@@ -439,8 +478,30 @@ _CASE_MAPPING = SettingsMapping(
         GmresSolve,
         DirectSolve,
         *PRECONDITIONER_SPEC_MAPPING.kinds,
+        RadiationSolve,
+        LambertianProfile,
+        CosinePowerProfile,
+        IesProfile,
+        UniformMedium,
+        Coarsen,
+        CadPlacement,
+        MeshPatch,
+        StlSurface,
+        CadSurface,
+        PatchBody,
+        StlBody,
+        CadSolid,
+        CadFluid,
+        Receivers,
+        RadiationSettings,
+        NoOcclusion,
+        RayCastOcclusion,
+        SilhouetteOcclusion,
+        ShaftCulling,
+        EveryPair,
         Outputs,
         Vtk,
+        PatchVtk,
         OpenFOAMTime,
         Checkpoints,
     ]
@@ -456,8 +517,9 @@ _CASE_KIND = CaseSpec.__name__
 def case_spec_from_mapping(mapping: Mapping[str, object]) -> CaseSpec:
     """Read a case from the nested mapping a case file parses to.
 
-    The top level holds the sections -- ``mesh``, ``fluid``, ``physics``, ``boundaries``, ``numerics``
-    and optionally ``drive``, ``sources``, ``pressure_datum`` and ``solver`` -- and names no ``kind``, since the whole document is the case. Below it,
+    The top level holds the sections -- ``mesh``, ``physics``, ``boundaries``, for a flow ``fluid`` and
+    ``numerics``, and optionally ``drive``, ``sources``, ``pressure_datum``, ``solver`` and ``outputs``
+    -- and names no ``kind``, since the whole document is the case. Below it,
     each value is a mapping whose ``kind`` names its class, except ``boundaries``, which maps each patch
     name to that patch's condition::
 

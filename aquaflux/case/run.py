@@ -10,7 +10,8 @@ of the march as it goes, and writes:
 * the checkpoints, when asked for;
 * ``case.yaml``, the case as it ran -- the solver written out even when the file left it to the
   default -- and ``run.yaml``, a record of the run: the aquaflux version and commit, when it ran,
-  how many steps it took, where its residual ended and whether it converged.
+  how many steps it took, where its residual ended and whether it converged, and the physics' scalar
+  results (a radiation case's lamp power and where it goes).
 
 A solve that stops short of its stopping test writes no fields, since what it holds is not a solution,
 but it still writes its log, its checkpoints and ``run.yaml``.
@@ -36,8 +37,8 @@ import aquaflux
 from aquaflux.solve import MarchLogger, StateCheckpointer, StepReport
 
 from .case_file import CaseFile, CheckedCase, read_case, write_case
-from .mesh_source import OpenFOAMMesh
-from .outputs import OpenFOAMTime
+from .outputs import RunFields
+from .paths import with_paths
 from .solver import NotConverged, SolverSpec, solver_for
 from .spec import CaseSpec
 
@@ -66,6 +67,9 @@ class RunRecord:
         Every file or directory written, fields first.
     message : str or None
         Why the solve stopped short, when it did.
+    results : dict
+        The physics' scalar results, as recorded in ``run.yaml``; empty when it has none or the solve
+        stopped short.
     """
 
     directory: Path
@@ -74,6 +78,7 @@ class RunRecord:
     residual: float | None
     written: tuple[Path, ...]
     message: str | None = None
+    results: dict = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -134,14 +139,18 @@ class PreparedRun:
                 )
             )
             observers = self.solver.observers_for(logger, steps)
-            converged, message, written = True, None, []
+            converged, message, written, results = True, None, [], {}
             try:
                 solution = self.solver.solve(problem, **observers)
             except (NotConverged, eqx.EquinoxRuntimeError) as error:
                 converged, message = False, str(error).strip().splitlines()[0]
                 logger.note(f"did not converge: {message}")
             if converged:
-                fields = spec.physics.output_fields(problem, solution)
+                fields = RunFields(
+                    cells=spec.physics.output_fields(problem, solution),
+                    patches=spec.physics.output_patch_fields(problem, solution),
+                )
+                results = spec.physics.results(problem, solution)
                 for writer in outputs.fields:
                     written.append(
                         writer.write(
@@ -160,6 +169,7 @@ class PreparedRun:
                 residual=steps.residual,
                 written=tuple(written),
                 message=message,
+                results=results,
             )
             written_record = self._write_run_record(record, started, time.perf_counter() - clock)
             record = dataclasses.replace(record, written=(*record.written, written_record))
@@ -178,31 +188,21 @@ class PreparedRun:
         return self.source.parent
 
     def _write_case_record(self) -> Path:
-        """``case.yaml``: the case as it ran, its relative paths re-based on the output directory.
+        """``case.yaml``: the case as it ran, every file it names re-based on the output directory.
 
         The solver is written out whether the file stated it or left it to the default, so the record
         says what ran rather than what was omitted.
         """
-        spec = self.checked.spec
         base, here = self.checked_directory, self.directory
 
         def rebased(path: str) -> str:
             return path if os.path.isabs(path) else os.path.relpath(base / path, here)
 
-        mesh = spec.mesh
-        if isinstance(mesh, OpenFOAMMesh):
-            mesh = dataclasses.replace(mesh, path=rebased(mesh.path))
-        writers = tuple(
-            dataclasses.replace(writer, case=rebased(writer.case))
-            if isinstance(writer, OpenFOAMTime)
-            else writer
-            for writer in spec.outputs.fields
-        )
+        spec = with_paths(self.checked.spec, rebased)
         recorded = dataclasses.replace(
             spec,
-            mesh=mesh,
             solver=self.solver,
-            outputs=dataclasses.replace(spec.outputs, directory=".", fields=writers),
+            outputs=dataclasses.replace(spec.outputs, directory="."),
         )
         path = here / _CASE_RECORD
         write_case(recorded, path)
@@ -225,6 +225,8 @@ class PreparedRun:
             "message": record.message,
             "written": [os.path.relpath(path, self.directory) for path in record.written],
         }
+        if record.results:
+            document["results"] = record.results
         path = self.directory / _RUN_RECORD
         with path.open("w", encoding="utf-8") as stream:
             yaml.safe_dump(document, stream, sort_keys=False, default_flow_style=False)

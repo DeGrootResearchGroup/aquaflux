@@ -60,7 +60,7 @@ class PatchTriangles:
 
 
 def patch_triangles(
-    mesh: Mesh, geometry: MeshGeometry, patch_names: Sequence[str]
+    mesh: Mesh, geometry: MeshGeometry, patch_names: Sequence[str], *, allow_folded: bool = False
 ) -> PatchTriangles:
     """Cut the faces of named boundary patches into triangles facing into the domain.
 
@@ -72,6 +72,12 @@ def patch_triangles(
         The mesh's geometry; only the owner-outward face normals are read, to orient each face.
     patch_names : sequence of str
         The boundary patches to triangulate, each at most once.
+    allow_folded : bool, optional
+        Keep a face that is not star-shaped from its vertex mean rather than refuse it. Its fan still
+        covers the whole face, but covers part of it twice and reaches a little outside it, so the
+        triangles are right for a surface that only has to stand in the way of something -- a
+        snapped surface hit by a ray -- and wrong for one whose area counts, such as an emitter.
+        Each of its triangles is still wound to face into the domain.
 
     Returns
     -------
@@ -82,8 +88,8 @@ def patch_triangles(
     ValueError
         If the mesh is not 3D, no patch or a repeated patch is named, a patch is empty or holds
         interior faces (a baffle has two sides, and which one faces the domain is not a property of
-        the face), or a face is not star-shaped from its vertex mean, so that its fan would overlap
-        itself.
+        the face), or, unless ``allow_folded``, a face is not star-shaped from its vertex mean, so
+        that its fan would overlap itself.
     """
     if mesh.dim != 3:
         raise ValueError(f"patch_triangles needs a 3D mesh; this one is {mesh.dim}D")
@@ -125,7 +131,7 @@ def patch_triangles(
     # of it twice.
     face_sign = np.sign(np.bincount(owner, weights=projection, minlength=len(face_index)))
     folded = projection * face_sign[owner] <= 0.0
-    if np.any(folded):
+    if np.any(folded) and not allow_folded:
         bad = int(face_index[owner[np.argmax(folded)]])
         count = len(np.unique(owner[folded]))
         raise ValueError(

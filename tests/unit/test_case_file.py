@@ -47,7 +47,7 @@ from aquaflux.flow import (
 )
 from aquaflux.io import read_openfoam
 from aquaflux.io.openfoam.cyclic import DEFAULT_MATCH_TOLERANCE
-from aquaflux.mesh import Mesh, MeshGeometry, graded_nodes, structured_grid_2d
+from aquaflux.mesh import Mesh, MeshGeometry, graded_nodes, structured_grid_2d, structured_grid_3d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import (
     CorrectedGreenGauss,
@@ -218,7 +218,7 @@ def test_a_boundaries_table_given_in_code_is_frozen_and_copied() -> None:
             ),
             ValueError,
             r"at 'boundaries.top' is not accepted there; each entry of CaseSpec.boundaries takes one of "
-            r"'Inlet', 'Outlet', 'Wall'",
+            r"'Inlet', 'Lamp', 'Outlet', 'Wall'",
         ),
         (
             _sections(numerics={"gradient": {"kind": "CompactGreenGauss"}}),
@@ -235,7 +235,11 @@ def test_a_boundaries_table_given_in_code_is_frozen_and_copied() -> None:
             ValueError,
             r"CaseSpec has no field 'solvers'",
         ),
-        ({k: v for k, v in _sections().items() if k != "fluid"}, ValueError, r"needs 'fluid'"),
+        (
+            {k: v for k, v in _sections().items() if k != "fluid"},
+            ValueError,
+            r"^fluid: a Laminar case states its fluid and its numerics",
+        ),
     ],
     ids=[
         "no-viscosity",
@@ -594,7 +598,7 @@ def test_the_mesh_tolerance_reaches_the_reader_and_is_left_to_it_when_unset() ->
         (
             lambda: dataclasses.replace(_rans_case(), boundaries={"inlet": Outlet(0.0), "w": 3}),
             TypeError,
-            r"maps each patch name to an Inlet, Outlet or Wall",
+            r"maps each patch name to an Inlet, Outlet, Wall or Lamp",
         ),
         (lambda: dataclasses.replace(_rans_case(), physics="RANS"), TypeError, r"CaseSpec.physics"),
     ],
@@ -874,6 +878,13 @@ def test_a_structured_grid_generates_the_mesh_its_settings_describe() -> None:
     assert not {"left", "right"} & set(mesh.face_patches.names)
 
 
+def test_a_three_dimensional_structured_grid_is_the_uniform_box_its_settings_describe() -> None:
+    mesh = StructuredGrid(cells=(2, 3, 4), lengths=(1.0, 2.0, 3.0)).read(REPO)
+    # Unequal counts and lengths on every axis, so a transposed pair would change the mesh.
+    _same_problem(mesh, structured_grid_3d(2, 3, 4, 1.0, 2.0, 3.0, named_boundaries=True))
+    assert {"left", "right", "bottom", "top", "back", "front"} <= set(mesh.face_patches.names)
+
+
 def test_a_grading_toward_one_wall_reaches_the_generator() -> None:
     grid = StructuredGrid(
         cells=(2, 5), lengths=(1.0, 1.0), grading={"y": GeometricGrading(1.5, both_sides=False)}
@@ -889,7 +900,18 @@ def test_a_whole_number_cell_count_written_as_a_float_is_a_count() -> None:
 @pytest.mark.parametrize(
     ("build", "match"),
     [
-        (lambda: StructuredGrid(cells=(2, 2, 2), lengths=(1.0, 1.0, 1.0)), "two-dimensional"),
+        (
+            lambda: StructuredGrid(cells=(2, 2, 2, 2), lengths=(1.0, 1.0, 1.0, 1.0)),
+            "two cell counts and two lengths, or three of each",
+        ),
+        (
+            lambda: StructuredGrid(cells=(2, 2, 2), lengths=(1.0, 1.0)),
+            "two cell counts and two lengths, or three of each",
+        ),
+        (
+            lambda: StructuredGrid(cells=(2, 2, 2), lengths=(1.0, 1.0, 1.0), periodic=("x",)),
+            "three-dimensional structured grid is uniform",
+        ),
         (lambda: StructuredGrid(cells=(0, 2), lengths=(1.0, 1.0)), "cell counts must be >= 1"),
         (lambda: StructuredGrid(cells=(2, 2), lengths=(1.0, -1.0)), "lengths must be positive"),
         (
@@ -911,7 +933,9 @@ def test_a_whole_number_cell_count_written_as_a_float_is_a_count() -> None:
         (lambda: BodyForce(force=(1.0,)), "two or three components, got 1"),
     ],
     ids=[
-        "three-dimensional",
+        "four-dimensional",
+        "lengths-of-another-dimension",
+        "three-dimensional-and-periodic",
         "no-cells",
         "negative-length",
         "one-periodic-cell",

@@ -439,8 +439,8 @@ class ShaftCulling(BodyCulling):
     stopping at eight (``receiver_blocks=(32, 8)``, ``source_clusters=(32, 8)``).
     """
 
-    receiver_blocks: tuple = eqx.field(static=True, default=(32, 8, 2))
-    source_clusters: tuple = eqx.field(static=True, default=(32, 8, 2))
+    receiver_blocks: tuple[int, ...] = eqx.field(static=True, default=(32, 8, 2))
+    source_clusters: tuple[int, ...] = eqx.field(static=True, default=(32, 8, 2))
     sources: _Groups | None = None
 
     def __check_init__(self):
