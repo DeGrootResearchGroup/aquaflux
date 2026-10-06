@@ -500,8 +500,9 @@ keep the exact fraction): a two-leg path has no single source view to clip.
 **Hassanpour et al. (2023) is NOT a flat-mirror benchmark**: their reflector is **cylindrical** (lamps
 outside the water channel) and their 10-47% specular/diffuse spread is a **discrete-ordinates
 simulation**, not a measurement (the docstrings said "measure"; fixed). It moves to #604 as the curved
-reflector case, if the full text gives its geometry (nature.com and PMC are blocked from the cloud
-container; the 0.95 reflectivity quoted in the docs is unverified from there). The cost case is the
+reflector case (full text read 2026-10-06, geometry and figures posted on #604: DO 6x6 only, no Monte
+Carlo; R = 0.95 is the paper's own assumption, citing a vendor note; the 10-47% is diffuse-over-specular
+LRV at 10 GPM as the lamps move 7.5 -> 15 cm from the channel). The cost case is the
 Sozzi reactor from its drawing with the chamber's flat end plates specular, **without meshing**
 (receivers uniform in the drawing's fluid -- per-item throughput does not depend on where they are).
 
