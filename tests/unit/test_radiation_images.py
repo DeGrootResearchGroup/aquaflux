@@ -657,8 +657,8 @@ def test_culling_and_skipping_the_clip_change_no_answer(oriented, weighting, hol
 
 def test_an_image_wholly_inside_the_mirror_needs_no_clip(monkeypatch):
     """With the clip itself stubbed out to clip nothing, the pairs the screen lets skip it still
-    get the exact answer -- and they are most of them -- while an image under the hole does not
-    skip, and gets nothing."""
+    get the exact answer -- and they are most of them. That includes an image seen wholly within
+    the hole, which skips and gets nothing: the line to its centroid crosses no facet."""
     aperture = _fine_aperture(hole=True)
     path = _floor_path(aperture, np.full(len(aperture), 0.6))
     images, receivers, _ = _images_and_receivers(0)
@@ -672,7 +672,7 @@ def test_an_image_wholly_inside_the_mirror_needs_no_clip(monkeypatch):
     )
     stubbed = np.asarray(_seen_through_aperture(path, receivers, None, images, cull=True))
     assert skip.mean() > 0.4
-    assert not skip[1, 1]
+    assert skip[1, 1] and every[1, 1] == 0.0
     np.testing.assert_allclose(stubbed[skip], every[skip], rtol=1e-12, atol=1e-15)
     np.testing.assert_array_equal(stubbed[~skip], 0.0)
 
@@ -691,6 +691,68 @@ def test_an_image_crossing_the_mirror_s_plane_is_clipped_however_far_inside_it_l
     assert not np.any(np.asarray(skip))
     assert np.all(every > 0.0) and np.all(every < 0.9 * 0.6 * whole)
     np.testing.assert_allclose(culled, every, rtol=1e-12, atol=1e-15)
+
+
+def test_an_image_in_the_mirror_s_own_plane_is_not_skipped_on_a_rounding_of_its_height():
+    """A source in the mirror's plane has no part behind it, so the mirror shows nothing of its
+    image. The plane is a mean over its facets, good to a rounding of its coordinates, so the
+    image's heights can read a rounding below it: that must not count as behind."""
+    aperture = _fine_aperture()
+    mirror = Mirror(
+        point=jnp.asarray([0.0, 0.0, 2e-16]),
+        normal=jnp.asarray([0.0, 0.0, 1.0]),
+        facets=np.arange(len(aperture)),
+    )
+    path = images_module._Path.of(mirror, jnp.asarray(aperture), jnp.full(len(aperture), 0.6))
+    images = jnp.asarray([[[-0.3, -0.3, 0.0], [0.2, -0.25, 0.0], [0.0, 0.3, 0.0]]])
+    receivers = jnp.asarray([[0.0, 0.0, 0.8], [0.4, -0.1, 0.5]])
+    _, (skip, _) = images_module._screen(path, receivers, images)
+    every = _seen_through_aperture(path, receivers, None, images, cull=False)
+    culled = _seen_through_aperture(path, receivers, None, images, cull=True)
+    assert not np.any(np.asarray(skip))
+    np.testing.assert_array_equal(every, 0.0)
+    np.testing.assert_allclose(culled, 0.0, atol=1e-15)
+
+
+@pytest.mark.parametrize("hole", [False, True], ids=["whole", "holed"])
+def test_the_outline_test_flags_every_image_that_crosses_the_outline(hole):
+    """Against an independent classification of the image seen through the plane: a pair whose
+    triangle has a corner on each side of the outline, or holds an outline vertex, is flagged; and
+    the test is worth having -- it lets most images wholly inside through."""
+    aperture = _fine_aperture(hole=hole)
+    path = _floor_path(aperture, np.ones(len(aperture)))
+    images, receivers, _ = _images_and_receivers(5, n_images=60, n_receivers=12)
+    touches = np.asarray(images_module._touches_outline(path, receivers, images))
+    # Each image's corners carried into the plane z = 0 along the lines from the receiver.
+    r, v = np.asarray(receivers)[:, None, None, :], np.asarray(images)[None]
+    seen = r[..., :2] + (r[..., 2:] / (r[..., 2:] - v[..., 2:])) * (v[..., :2] - r[..., :2])
+    inside = np.all(np.abs(seen) <= 1.0, axis=-1)
+    vertices = [[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]]
+    if hole:
+        # The hole is the middle cell of the 10 x 10 grid, [0, 0.2] on each axis.
+        inside &= ~np.all(np.abs(seen - 0.1) <= 0.1, axis=-1)
+        vertices += [[0.0, 0.0], [0.0, 0.2], [0.2, 0.0], [0.2, 0.2]]
+    holds = np.zeros(touches.shape, dtype=bool)
+    for vertex in np.asarray(vertices):
+        holds |= _in_triangle(seen, vertex)
+    mixed = inside.any(axis=-1) & ~inside.all(axis=-1)
+    assert np.any(mixed) and np.all(touches[mixed])
+    assert np.all(touches[holds])
+    wholly = inside.all(axis=-1) & ~holds
+    assert np.any(wholly) and np.mean(~touches[wholly]) > 0.5
+
+
+def _in_triangle(triangle, point):
+    """Whether ``point`` (2,) lies in each closed triangle ``(..., 3, 2)``."""
+    a, b, c = (triangle[..., k, :] for k in range(3))
+
+    def side(u, v):
+        return (v[..., 0] - u[..., 0]) * (point[1] - u[..., 1]) - (v[..., 1] - u[..., 1]) * (
+            point[0] - u[..., 0]
+        )
+
+    d = np.stack([side(a, b), side(b, c), side(c, a)], axis=-1)
+    return np.all(d >= 0, axis=-1) | np.all(d <= 0, axis=-1)
 
 
 def test_the_screen_keeps_every_facet_that_shows_part_of_an_image_and_few_others():

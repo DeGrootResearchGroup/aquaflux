@@ -398,8 +398,8 @@ class _Path(eqx.Module):
     def of(cls, mirror: Mirror, aperture, reflectance, absorption=None) -> _Path:
         """The path through ``mirror`` with this aperture, and its outline where it can be read.
 
-        The outline -- the aperture's edges that belong to one facet only, as degenerate
-        triangles -- is what lets an image seen wholly inside the mirror skip its clip, taking the
+        The outline -- the aperture's edges that belong to one facet only, ``(e, 2, 3)`` -- is
+        what lets an image seen wholly inside the mirror skip its clip, taking the
         one weight every facet carries. So it is kept only where that weight can be read: aperture
         and reflectances concrete, and the reflectances all equal. A traced reflectance is one a
         derivative is wanted for, and a skipped image would credit all of it to the facet its
@@ -412,7 +412,7 @@ class _Path(eqx.Module):
         if readable and weights.size and np.all(weights == weights[0]):
             edges = outline(np.asarray(aperture))
             if len(edges):
-                rim = jnp.asarray(edges[:, [0, 1, 1]])
+                rim = jnp.asarray(edges)
         return cls(
             mirror=mirror,
             aperture=jnp.asarray(aperture),
@@ -742,16 +742,17 @@ def _screen(path: _Path, receivers, vertices):
       directions and the image's cannot overlap, so the facet shows none of the image. A cone too
       wide to bound anything -- a receiver near the facet's or the image's own plane -- overlaps
       everything.
-    - **Whether it can skip the clip.** If no edge of the mirror's outline can lie in the image's
-      cone, no point of the outline lies within the image as seen through the plane, so the image
-      is wholly inside the mirror or wholly outside it; the line to its centroid says which, and the
-      weight it takes is that of the facet the line crosses -- zero outside. This is offered only
-      where it is exact: every corner of the image behind the plane, and an outline to test
-      against -- which the path carries only when every facet has the one concrete weight, so an
-      image spanning several facets takes the same weight from each.
+    - **Whether it can skip the clip.** If the image as seen through the plane -- its corners
+      carried along the lines from the receiver into the plane -- keeps clear of every edge of the
+      mirror's outline (:func:`_touches_outline`), it is wholly inside the mirror or wholly outside
+      it; the line to its centroid says which, and the weight it takes is that of the facet the
+      line crosses -- zero outside. This is offered only where it is exact: every corner of the
+      image behind the plane, and an outline to test against -- which the path carries only when
+      every facet has the one concrete weight, so an image spanning several facets takes the same
+      weight from each.
 
-    Each facet's and each outline edge's cone is taken once per receiver, each image's once per
-    pair; the overlap tests, a few products each, are what is formed per triple.
+    Each facet's cone is taken once per receiver, each image's once per pair; the overlap tests,
+    a few products each, are what is formed per triple, and the outline test per pair and edge.
 
     Parameters
     ----------
@@ -771,13 +772,113 @@ def _screen(path: _Path, receivers, vertices):
     kept = _overlap(images, _cones(path.aperture - receivers[..., :, None, None, :]))
     if path.outline is None:
         return kept, None
-    rim = _cones(path.outline - receivers[..., :, None, None, :])
-    straddles = jnp.any(_overlap(images, rim), axis=-1)
-    height = dot(vertices - path.mirror.point, path.mirror.normal)
-    behind = jnp.all(height < 0.0, axis=-1)[..., None, :]
-    skip = ~straddles & behind
+    skip = _behind(path, vertices)[..., None, :] & ~_touches_outline(path, receivers, vertices)
     whole_weight = _crossed_reflectance(path, receivers, jnp.mean(vertices, axis=-2))
     return kept, (jax.lax.stop_gradient(skip), whole_weight)
+
+
+#: How far, as a share of the coordinates involved, an image must keep behind the mirror's plane
+#: and -- seen through the plane -- from every edge of the mirror's outline to skip its clip. Far
+#: above the rounding of the plane itself (an area-weighted mean over its facets), of the
+#: projection and of the products that test it, and far below any gap a skip could be wrong across.
+_SKIP_MARGIN = 1e-9
+
+
+def _behind(path: _Path, vertices):
+    """Whether every corner of each image lies behind the mirror's plane by :data:`_SKIP_MARGIN`.
+
+    The margin is taken of the coordinates themselves, not of the corners' offsets from the plane:
+    the plane is a mean over its facets, so an image of a facet in the plane -- which the mirror
+    shows nothing of -- has heights of the coordinates' rounding, of either sign.
+
+    Parameters
+    ----------
+    path : _Path
+    vertices : jnp.ndarray, shape ``(..., s, 3, 3)``
+
+    Returns
+    -------
+    jnp.ndarray of bool, shape ``(..., s)``
+    """
+    point, normal = path.mirror.point, path.mirror.normal
+    height = dot(vertices - point, normal)
+    scale = jnp.max(jnp.abs(vertices), axis=-1) + jnp.max(jnp.abs(point))
+    return jnp.all(height < -_SKIP_MARGIN * scale, axis=-1)
+
+
+def _plane_frame(normal):
+    """Two unit vectors spanning the plane with this unit normal, ``(3,)`` each."""
+    helper = jnp.where(
+        jnp.abs(normal[0]) < 0.9, jnp.array([1.0, 0.0, 0.0]), jnp.array([0.0, 1.0, 0.0])
+    )
+    first = jnp.cross(normal, helper)
+    first = first / jnp.sqrt(dot(first, first))
+    return first, jnp.cross(normal, first)
+
+
+def _touches_outline(path: _Path, receivers, vertices):
+    """Whether each image, seen through the mirror's plane, comes near an edge of its outline.
+
+    Each image's corners are carried along the lines from the receiver to where they cross the
+    plane, and the triangle they make is tested against each outline edge by separating axes: the
+    two are apart if, along the in-plane normal of one of the triangle's three edges or of the
+    outline edge, their extents are separated by more than :data:`_SKIP_MARGIN` of the extent
+    around them. An edge apart from the triangle by that test is apart from it exactly, so a pair
+    that touches no edge has its whole image on one side of the outline -- in the mirror, or out
+    of it, where a hole is out of it. Only meaningful where every corner lies behind the plane.
+
+    Parameters
+    ----------
+    path : _Path
+        With an outline.
+    receivers : jnp.ndarray, shape ``(..., r, 3)``
+    vertices : jnp.ndarray, shape ``(..., s, 3, 3)``
+
+    Returns
+    -------
+    jnp.ndarray of bool, shape ``(..., r, s)``
+    """
+    point, normal = path.mirror.point, path.mirror.normal
+    near = dot(receivers - point, normal)[..., :, None, None]
+    far = dot(vertices - point, normal)[..., None, :, :]
+    span = near - far
+    share = near / jnp.where(span == 0.0, 1.0, span)
+    seen = receivers[..., :, None, None, :] + share[..., None] * (
+        vertices[..., None, :, :, :] - receivers[..., :, None, None, :]
+    )
+    # In the plane's own frame: two in-plane axes, so every test below is in two coordinates.
+    first, second = _plane_frame(normal)
+    corner = jnp.stack([dot(seen - point, first), dot(seen - point, second)], axis=-1)
+    ends = path.outline - point
+    ends = jnp.stack([dot(ends, first), dot(ends, second)], axis=-1)
+    extent = jnp.maximum(jnp.max(jnp.abs(corner), axis=(-2, -1)), jnp.max(jnp.abs(ends)))
+    margin = (_SKIP_MARGIN * extent)[..., None]
+
+    # Written out corner by corner, so the outline's edges are the one axis every array carries
+    # last: reductions over three corners or two ends, as a trailing axis, are what is slow.
+    x = [corner[..., k, 0][..., None] for k in range(3)]
+    y = [corner[..., k, 1][..., None] for k in range(3)]
+    px, py, qx, qy = ends[:, 0, 0], ends[:, 0, 1], ends[:, 1, 0], ends[:, 1, 1]
+    separate = jnp.zeros((), dtype=bool)
+    for k in range(3):
+        ax, ay = y[k] - y[(k + 1) % 3], x[(k + 1) % 3] - x[k]
+        reach = margin * jnp.sqrt(ax * ax + ay * ay)
+        own = [ax * x[i] + ay * y[i] for i in range(3)]
+        low, high = (
+            jnp.minimum(jnp.minimum(*own[:2]), own[2]),
+            jnp.maximum(jnp.maximum(*own[:2]), own[2]),
+        )
+        at_p, at_q = ax * px + ay * py, ax * qx + ay * qy
+        below = jnp.maximum(at_p, at_q) < low - reach
+        above = jnp.minimum(at_p, at_q) > high + reach
+        separate = separate | below | above
+    bx, by = py - qy, qx - px
+    level = bx * px + by * py
+    reach = margin * jnp.sqrt(bx * bx + by * by)
+    on = [bx * x[i] + by * y[i] for i in range(3)]
+    low, high = jnp.minimum(jnp.minimum(*on[:2]), on[2]), jnp.maximum(jnp.maximum(*on[:2]), on[2])
+    separate = separate | (high < level - reach) | (low > level + reach)
+    return ~jnp.all(separate, axis=-1)
 
 
 def _flat(screen):
@@ -798,19 +899,26 @@ def _culled_fractions(view: SourceView, aperture, receivers, normals, kept):
         Zero for every triple not kept.
     """
     n_pairs, n_facets = receivers.shape[0], aperture.shape[0]
-    kept = kept.reshape(-1)
-    n_triples = kept.shape[0]
+    n_triples = n_pairs * n_facets
+    if not n_triples:
+        return jnp.zeros((n_pairs, n_facets))
     width = min(_CLIP_BATCH, n_triples)
-    survivors = jnp.sum(kept)
-    # The survivors' flat indices first, padded to a whole number of batches.
-    (order,) = jnp.nonzero(kept, size=-(-n_triples // width) * width, fill_value=0)
+    # The survivors are numbered pair by pair, each pair's in facet order: a pair's run ends at
+    # the running count of what it and the pairs before it keep. Finding a survivor's pair by
+    # bisecting those counts, and its facet by its rank in its pair's row, never forms anything
+    # the size of every triple -- an index of every triple cost more than clipping the survivors.
+    count = jnp.sum(kept, axis=-1)
+    end = jnp.cumsum(count)
+    survivors = end[-1]
 
     def clip(state):
         step, fraction = state
-        start = step * width
-        triple = jax.lax.dynamic_slice(order, (start,), (width,))
-        valid = start + jnp.arange(width) < survivors
-        pair, facet = jnp.divmod(triple, n_facets)
+        number = step * width + jnp.arange(width)
+        valid = number < survivors
+        pair = jnp.minimum(jnp.searchsorted(end, number, side="right"), n_pairs - 1)
+        rank = number - (end[pair] - count[pair])
+        facet = jnp.argmax(jnp.cumsum(kept[pair], axis=-1) > rank[:, None], axis=-1)
+        triple = pair * n_facets + facet
         share, _ = covered_by(
             SourceView(
                 loop=view.loop[pair],
