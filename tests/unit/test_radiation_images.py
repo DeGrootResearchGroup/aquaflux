@@ -6,9 +6,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from aquaflux.radiation import images as images_module
 from aquaflux.radiation.absorption import UniformAbsorption, VoxelAbsorption
 from aquaflux.radiation.gather import direct_fluence_rate, direct_irradiance
 from aquaflux.radiation.images import (
+    _may_show,
+    _seen_through_aperture,
     mirrored_fluence_rate,
     mirrored_irradiance,
     plane_exchange,
@@ -570,3 +573,113 @@ def test_shadows_must_be_one_mask_per_mirror_and_come_with_them_the_transmittanc
         mirrored_fluence_rate(surfaces, mirrors, points, shadows=[mask, mask])
     with pytest.raises(ValueError, match="without mirror visibility masks"):
         mirrored_fluence_rate(surfaces, mirrors, points, transmittance=[0.5])
+
+
+# ---------------------------------------------------------------------------------------
+# The cone cull: each image clipped only against the mirror facets it overlaps
+# ---------------------------------------------------------------------------------------
+
+
+def _fine_aperture(cells: int = 10) -> np.ndarray:
+    """The square [-1, 1]^2 at z = 0, facing up, as ``2 * cells**2`` triangles."""
+    edges = np.linspace(-1.0, 1.0, cells + 1)
+    step = edges[1] - edges[0]
+    return np.concatenate(
+        [
+            rectangle_triangles(
+                [x + step / 2, y + step / 2, 0.0], [step / 2, 0, 0], [0, step / 2, 0]
+            )
+            for x in edges[:-1]
+            for y in edges[:-1]
+        ]
+    )
+
+
+def _images_and_receivers(seed: int, n_images: int = 7, n_receivers: int = 9):
+    """Small image triangles behind the plane z = 0, receivers in front, some with normals."""
+    rng = np.random.default_rng(seed)
+    centres = rng.uniform([-1.2, -1.2, -1.0], [1.2, 1.2, -0.2], (n_images, 1, 3))
+    images = centres + rng.normal(scale=0.08, size=(n_images, 3, 3))
+    receivers = rng.uniform([-1.2, -1.2, 0.05], [1.2, 1.2, 1.0], (n_receivers, 3))
+    # The first receiver sees the first image through the first facet: the triple a padded
+    # batch slot points at carries light, so padding counted as a survivor would show.
+    images[0] = images[0] - centres[0] + np.array([-0.9, -0.9, -0.5])
+    receivers[0] = [-0.9, -0.9, 0.5]
+    normals = rng.normal(size=(n_receivers, 3))
+    normals[:, 2] = -np.abs(normals[:, 2])
+    normals /= np.linalg.norm(normals, axis=1, keepdims=True)
+    return jnp.asarray(images), jnp.asarray(receivers), jnp.asarray(normals)
+
+
+@pytest.mark.parametrize("oriented", [False, True], ids=["volume", "on a surface"])
+def test_culling_the_mirror_facets_changes_no_answer(oriented, monkeypatch):
+    """The culled clip against the clip of every facet, with a batch small enough that the
+    survivors take several passes, and per-facet weights that a facet swapped for another
+    would change."""
+    monkeypatch.setattr(images_module, "_CLIP_BATCH", 7)
+    aperture = jnp.asarray(_fine_aperture())
+    weights = jnp.asarray(np.random.default_rng(1).uniform(0.2, 1.0, len(aperture)))
+    images, receivers, normals = _images_and_receivers(0)
+    normals = normals if oriented else None
+    every = _seen_through_aperture(aperture, weights, receivers, normals, images, cull=False)
+    culled = _seen_through_aperture(aperture, weights, receivers, normals, images, cull=True)
+    assert float(jnp.min(every)) >= 0.0 and float(jnp.max(every)) > 0.0
+    # The every-facet clip leaves last-bit noise on facets that show nothing, so the two agree
+    # to a rounding of the largest value rather than bit for bit.
+    np.testing.assert_allclose(culled, every, rtol=1e-12, atol=1e-13 * float(jnp.max(every)))
+
+
+def test_the_cone_test_keeps_every_facet_that_shows_part_of_an_image_and_few_others():
+    """Conservative -- each facet with a non-zero share is kept -- and worth having: on a mirror
+    of 200 triangles a small image needs a small share of them."""
+    aperture = jnp.asarray(_fine_aperture())
+    images, receivers, _ = _images_and_receivers(2, n_images=5, n_receivers=6)
+    kept = np.asarray(_may_show(aperture, receivers, images))
+    shows = np.stack(
+        [
+            np.asarray(
+                _seen_through_aperture(
+                    aperture, jnp.eye(len(aperture))[k], receivers, None, images, cull=False
+                )
+            )
+            for k in range(len(aperture))
+        ],
+        axis=-1,
+    )
+    assert np.any(shows > 0.0)
+    assert np.all(kept[shows > 0.0])
+    assert kept.mean() < 0.25
+
+
+def test_the_culled_clip_clips_only_what_the_cone_test_keeps(monkeypatch):
+    """With a cone test that keeps nothing, nothing is seen: the culled clip reads its
+    survivors from the test rather than clipping every facet anyway."""
+    monkeypatch.setattr(
+        images_module,
+        "_may_show",
+        lambda aperture, receivers, vertices: jnp.zeros(
+            (receivers.shape[0], vertices.shape[0], aperture.shape[0]), dtype=bool
+        ),
+    )
+    aperture = jnp.asarray(_fine_aperture(4))
+    images, receivers, _ = _images_and_receivers(4)
+    weights = jnp.ones(len(aperture))
+    every = _seen_through_aperture(aperture, weights, receivers, None, images, cull=False)
+    culled = _seen_through_aperture(aperture, weights, receivers, None, images, cull=True)
+    assert float(jnp.max(every)) > 0.0
+    np.testing.assert_array_equal(culled, 0.0)
+
+
+def test_the_reflectances_stay_differentiable_through_the_culled_clip():
+    aperture = jnp.asarray(_fine_aperture(4))
+    images, receivers, _ = _images_and_receivers(3)
+
+    def total(weights, cull):
+        return jnp.sum(
+            _seen_through_aperture(aperture, weights, receivers, None, images, cull=cull)
+        )
+
+    weights = jnp.full(len(aperture), 0.7)
+    culled = jax.grad(total)(weights, True)
+    assert float(jnp.max(jnp.abs(culled))) > 0.0
+    np.testing.assert_allclose(culled, jax.grad(total)(weights, False), rtol=1e-12, atol=1e-15)

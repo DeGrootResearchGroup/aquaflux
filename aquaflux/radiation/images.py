@@ -53,7 +53,14 @@ from aquaflux.radiation.gather import (
 )
 from aquaflux.radiation.mirror_visibility import MirrorVisibility, reflected_surviving
 from aquaflux.radiation.mirrors import Mirror
-from aquaflux.radiation.silhouette import SourceView, _orientation, covered_by, source_view
+from aquaflux.radiation.silhouette import (
+    SourceView,
+    _orientation,
+    angular_cone,
+    cones_may_overlap,
+    covered_by,
+    source_view,
+)
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, in_passes
 from aquaflux.vectors import dot
@@ -273,7 +280,9 @@ def _mirrored(
         images = tuple(mirror.image(surfaces) for surfaces in sets)
         received = _point_images(sets, images, sources, path, at, shadow, pair_limit)
         if not point_sources_only:
-            received = received + _areal_images(sets, images, sources, path, at, shadow, pair_limit)
+            received = received + _areal_images(
+                sets, images, sources, path, at, shadow, pair_limit, cull=readable
+            )
         total = total.at[receivers].add(received)
     return total
 
@@ -433,8 +442,12 @@ def _passes(receivers, pair_limit, per_receiver, body, shadow: _Shadow | None = 
     return in_passes(arrays, pair_limit, per_receiver, run)
 
 
-def _areal_images(sets, images, sources, path: _Path, receivers, shadow, pair_limit):
-    """What the areal facets' images send each receiver through the aperture, ``(n,)``."""
+def _areal_images(sets, images, sources, path: _Path, receivers, shadow, pair_limit, *, cull):
+    """What the areal facets' images send each receiver through the aperture, ``(n,)``.
+
+    ``cull`` clips each image only against the aperture facets it overlaps; it is on wherever the
+    geometry can be read, which is where no derivative with respect to it is being taken.
+    """
     total = jnp.zeros(receivers[0].shape[0])
     image_geometry = images[0]
     for group in _areal_groups(images):
@@ -457,22 +470,36 @@ def _areal_images(sets, images, sources, path: _Path, receivers, shadow, pair_li
             *receivers,
             None if shadow is None else shadow.for_sources(facets),
             pair_limit=pair_limit,
+            cull=cull,
         )
     return total
 
 
 @eqx.filter_jit
 def _areal_through(
-    path, vertices, centroid, normal, emission, profiles, points, normals, shadow, *, pair_limit
+    path,
+    vertices,
+    centroid,
+    normal,
+    emission,
+    profiles,
+    points,
+    normals,
+    shadow,
+    *,
+    pair_limit,
+    cull,
 ):
     """What one group of areal images sends each receiver, compiled once per shape and profiles.
 
     Module level, taking everything that varies as an argument, so a second call -- the next step
     of a sweep, the same model asked again -- reuses the program instead of tracing it afresh.
+    ``cull`` is :func:`_seen_through_aperture`'s, and must be off where the geometry is
+    differentiated.
     """
 
     def at(chunk, chunk_normals, surviving):
-        seen = _seen_through(path, chunk, chunk_normals, vertices)
+        seen = _seen_through(path, chunk, chunk_normals, vertices, cull=cull)
         direction, _ = _emitter_direction(centroid[None], chunk[:, None])
         weight = seen * path.transmittance(centroid[None], chunk[:, None]) * surviving
         received = jnp.zeros(chunk.shape[0])
@@ -485,15 +512,36 @@ def _areal_through(
     return _passes((points, normals), pair_limit, per_receiver, at, shadow)
 
 
-def _seen_through(path: _Path, receivers, normals, vertices):
+def _seen_through(path: _Path, receivers, normals, vertices, *, cull: bool):
     """:func:`_seen_through_aperture` through ``path``'s aperture, weighted by its reflectances."""
-    return _seen_through_aperture(path.aperture, path.reflectance, receivers, normals, vertices)
+    return _seen_through_aperture(
+        path.aperture, path.reflectance, receivers, normals, vertices, cull=cull
+    )
 
 
-def _seen_through_aperture(aperture, weights, receivers, normals, vertices):
+#: Triples one step of the culled clip forms -- a receiving point, an image and an aperture facet
+#: whose cones can overlap. The survivors of a pass are clipped this many at a time.
+_CLIP_BATCH = 4096
+
+
+def _seen_through_aperture(aperture, weights, receivers, normals, vertices, *, cull: bool = False):
     """Solid angle of each image seen through the aperture, weighted by each facet's reflectance.
 
     The plain solid angle for a point in the volume, the projected one for a point with a normal.
+
+    **With ``cull``, an image is clipped only against the aperture facets it can be seen
+    through.** Seen from a receiver, an aperture facet whose cone of directions cannot overlap
+    the image's shows none of it, so its clip would return zero; the cone test is the one the
+    silhouette clip uses to drop blockers, conservative in the same direction, so the answer is
+    the same. Without it every image is clipped against every aperture facet, and the cost is the
+    aperture's facet count times a direct gather; with it, the facets an image actually overlaps
+    -- a handful, measured on a reactor's end plates, however finely they are meshed.
+
+    The survivors are found and clipped inside a compiled loop whose length follows their count,
+    which reverse mode cannot differentiate through. So the culled clip is taken of geometry held
+    constant: the aperture, the receivers and the images are cut from any derivative, while the
+    weights -- the live reflectances -- multiply its result outside the loop and keep theirs.
+    Where a derivative with respect to the geometry is wanted, ``cull`` must be off.
 
     Parameters
     ----------
@@ -505,14 +553,24 @@ def _seen_through_aperture(aperture, weights, receivers, normals, vertices):
     normals : jnp.ndarray, shape ``(r, 3)``, or None
     vertices : jnp.ndarray, shape ``(s, 3, 3)``
         The images' corners.
+    cull : bool, optional
+        Clip each image only against the aperture facets whose cones overlap it.
 
     Returns
     -------
     jnp.ndarray, shape ``(r, s)``
         ``sum over aperture facets a of weights_a * (solid angle of the image within a's cone)``.
     """
+    if cull:
+        aperture, receivers, vertices = (
+            jax.lax.stop_gradient(array) for array in (aperture, receivers, vertices)
+        )
+        normals = None if normals is None else jax.lax.stop_gradient(normals)
     pair_normals = None if normals is None else normals[:, None, :]
     view = source_view(receivers[:, None, :], pair_normals, vertices[None])
+    if cull:
+        fraction = _culled_fractions(view, aperture, receivers, normals, vertices)
+        return jnp.abs(view.whole) * (fraction @ weights)
     # One view per (receiver, image), shared by every aperture facet it is clipped against. The
     # clip stacks its candidates, so everything is spread to one batch shape rather than left to
     # broadcast.
@@ -533,6 +591,77 @@ def _seen_through_aperture(aperture, weights, receivers, normals, vertices):
     triple_normals = None if normals is None else spread(pair_normals, (3,))
     fraction, _ = covered_by(spread_view, triple_normals, to_aperture)
     return jnp.abs(view.whole) * (fraction @ weights)
+
+
+def _may_show(aperture, receivers, vertices):
+    """Which aperture facets may show part of each image, seen from each receiver.
+
+    Conservatively: ``False`` only where the facet's cone of directions and the image's cannot
+    overlap, so the facet shows none of the image; ``True`` may still clip to nothing. A cone too
+    wide to bound anything -- a receiver near the facet's or the image's own plane -- overlaps
+    everything.
+
+    Parameters
+    ----------
+    aperture : jnp.ndarray, shape ``(a, 3, 3)``
+    receivers : jnp.ndarray, shape ``(r, 3)``
+    vertices : jnp.ndarray, shape ``(s, 3, 3)``
+
+    Returns
+    -------
+    jnp.ndarray of bool, shape ``(r, s, a)``
+    """
+    image_cone = angular_cone(vertices[None] - receivers[:, None, None, :])
+    facet_cone = angular_cone(aperture[None] - receivers[:, None, None, :])
+    return cones_may_overlap(
+        tuple(part[:, :, None] for part in image_cone),
+        tuple(part[:, None, :] for part in facet_cone),
+    )
+
+
+def _culled_fractions(view: SourceView, aperture, receivers, normals, vertices):
+    """Each image's share within each aperture facet's cone, clipping only where cones overlap.
+
+    Returns
+    -------
+    jnp.ndarray, shape ``(r, s, a)``
+        Zero for every triple the cone test rules out.
+    """
+    n_receivers, n_images, n_facets = receivers.shape[0], vertices.shape[0], aperture.shape[0]
+    kept = _may_show(aperture, receivers, vertices).reshape(-1)
+    n_triples = kept.shape[0]
+    width = min(_CLIP_BATCH, n_triples)
+    survivors = jnp.sum(kept)
+    # The survivors' flat indices first, padded to a whole number of batches.
+    (order,) = jnp.nonzero(kept, size=-(-n_triples // width) * width, fill_value=0)
+    pair_loop = view.loop.reshape(-1, *view.loop.shape[2:])
+    pair_whole = view.whole.reshape(-1)
+    pair_support = view.support.reshape(-1, 3)
+    pair_through = view.through.reshape(-1, 3)
+
+    def clip(state):
+        step, fraction = state
+        start = step * width
+        triple = jax.lax.dynamic_slice(order, (start,), (width,))
+        valid = start + jnp.arange(width) < survivors
+        pair, facet = jnp.divmod(triple, n_facets)
+        row = pair // n_images
+        share, _ = covered_by(
+            SourceView(
+                loop=pair_loop[pair],
+                whole=pair_whole[pair],
+                support=pair_support[pair],
+                through=pair_through[pair],
+            ),
+            None if normals is None else normals[row],
+            aperture[facet] - receivers[row][:, None, :],
+        )
+        return step + 1, fraction.at[triple].add(jnp.where(valid, share, 0.0))
+
+    _, fraction = jax.lax.while_loop(
+        lambda state: state[0] * width < survivors, clip, (0, jnp.zeros(n_triples))
+    )
+    return fraction.reshape(n_receivers, n_images, n_facets)
 
 
 def _point_images(sets, images, sources, path: _Path, receivers, shadow, pair_limit):
@@ -759,7 +888,9 @@ def _exchange_rows(aperture, image_vertices, sample, normals, weight, *, pair_li
         # however many points the rule has.
         def accumulate(total, sampled):
             weight_k, points_k = sampled
-            seen = _seen_through_aperture(aperture, ones, points_k, chunk_normals, image_vertices)
+            seen = _seen_through_aperture(
+                aperture, ones, points_k, chunk_normals, image_vertices, cull=True
+            )
             return total + weight_k * seen, None
 
         total, _ = jax.lax.scan(

@@ -229,6 +229,11 @@ class _ChunkMirrors:
     def field(self, live, points):
         """The chunk's share, ``(n_chunk,)``, from ``live = (sets, absorption, transmittance)``."""
         sets, absorption, transmittance = live
+        # On the way back every live leaf is traced, the vertices among them, and a traced
+        # geometry would send the mirrored gather to its unculled clip. The vertices are the
+        # stream's geometry -- a model refuses any other -- and nothing differentiates them here,
+        # so the concrete ones are put back.
+        sets = tuple(surfaces.with_geometry(self.geometry.vertices) for surfaces in sets)
         masks = build_mirror_masks(
             self.mirrors, self.occluders, self.geometry, points, **self.options
         )
