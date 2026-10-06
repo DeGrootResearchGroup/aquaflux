@@ -30,7 +30,7 @@ import numpy as np
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.vectors import reflect
 
-__all__ = ["Mirror", "planar_mirrors"]
+__all__ = ["Mirror", "outline", "planar_mirrors"]
 
 #: Default coplanarity tolerance, as a fraction of the surface set's extent. Far above the rounding
 #: of a single-precision STL (about 6e-8 of a coordinate) and the error of a computed normal, so a
@@ -278,3 +278,37 @@ def _planes(facets, vertices, centroid, normal, area, tolerance) -> list[Mirror]
         )
         unplaced = unplaced[~member]
     return planes
+
+
+def outline(triangles, *, decimals: int = 9) -> np.ndarray:
+    """The edges of a set of triangles that belong to one triangle only: its rim and its holes.
+
+    Two triangles share an edge when they share both its corners. Corners are matched after
+    rounding to ``decimals`` places of the set's own extent, so a mesh whose shared corners differ
+    by a rounding still matches; an edge that does not match -- a T-junction, or corners further
+    apart than that -- is returned as outline, which is the safe direction for a caller asking
+    whether something stays clear of the rim.
+
+    Parameters
+    ----------
+    triangles : array_like, shape ``(n, 3, 3)``
+        Concrete.
+    decimals : int, optional
+
+    Returns
+    -------
+    numpy.ndarray, shape ``(e, 2, 3)``
+    """
+    triangles = np.asarray(triangles, dtype=float)
+    if not len(triangles):
+        return np.zeros((0, 2, 3))
+    edges = np.concatenate([triangles[:, [k, (k + 1) % 3]] for k in range(3)])
+    low = triangles.reshape(-1, 3).min(axis=0)
+    scale = max(float(np.ptp(triangles.reshape(-1, 3), axis=0).max()), np.finfo(float).tiny)
+    key = np.ascontiguousarray(np.round((edges - low) / scale, decimals))
+    # Each edge's two corners in a fixed order, compared as whole points, so an edge and its
+    # reverse are the same key.
+    ends = np.sort(key.view([("x", float), ("y", float), ("z", float)]).reshape(-1, 2), axis=1)
+    canonical = ends.view(float).reshape(len(edges), 6)
+    _, inverse, counts = np.unique(canonical, axis=0, return_inverse=True, return_counts=True)
+    return edges[counts[np.asarray(inverse).ravel()] == 1]

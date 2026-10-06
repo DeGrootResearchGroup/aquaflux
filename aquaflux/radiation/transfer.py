@@ -97,10 +97,13 @@ from aquaflux.radiation.visibility import Visibility, build_visibility
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, in_passes
 from aquaflux.vectors import dot
 
-#: The most planes one specular body may split into before it is refused as curved. Provisional: a
-#: bound on cost and on how poorly flat pieces describe a curved mirror, to be set from measured
-#: build and gather times.
-MAX_MIRROR_PLANES = 64
+#: The most planes one specular body may split into before it is refused as curved. Each plane is a
+#: mirror whose images cost a gather of their own -- several times a direct one even with each image
+#: clipped only against the aperture facets it overlaps, as measured on a reactor's flat end plates by
+#: ``validation/sozzi_radiation/specular_cost.py`` -- so the bound keeps a model's cost within some
+#: tens of direct gathers per body. Twelve admits any box and a body with several bends; a curved
+#: body, tessellated into many strips, exceeds it and belongs to an exact curved-mirror method.
+MAX_MIRROR_PLANES = 12
 
 #: Points per receiving facet in the default transfer build. Six is where the measured
 #: cost/accuracy frontier turns over -- see :func:`build_transfer`.
