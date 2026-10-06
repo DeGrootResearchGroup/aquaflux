@@ -456,6 +456,19 @@ def test_a_curved_specular_body_is_refused_past_the_plane_limit():
         )
 
 
+def test_by_default_a_box_is_flat_enough_and_a_tessellated_tube_is_not():
+    """The default limit admits the six planes of a box and refuses a tube cut into sixteen
+    strips."""
+    box = Surfaces.from_triangles(inward_box(1), solid_names=("box",))
+    built = build_transfer(box, self_occlusion=NoOcclusion(), specular=["box"])
+    assert len(built.mirrors) == 6
+    tube = Surfaces.from_triangles(
+        cylinder_triangles(0.1, 0.5, sectors=16, slices=2), solid_names=("sleeve",)
+    )
+    with pytest.raises(ValueError, match="lies in 16 planes, past the limit of 12"):
+        build_transfer(tube, self_occlusion=NoOcclusion(), specular=["sleeve"])
+
+
 def test_a_body_s_planes_share_their_path_lengths_weighted_by_what_each_carries():
     """A body of several planes keeps one path length per pair of facets: the mean over its planes,
     weighted by each plane's share of the exchange. That is what makes the attenuation exact to
