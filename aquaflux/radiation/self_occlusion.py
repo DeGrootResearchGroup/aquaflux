@@ -56,7 +56,7 @@ from aquaflux.radiation.silhouette import (
     enclosing_cone,
     source_view,
 )
-from aquaflux.radiation.triangles import padded_length, pairs_are_cut
+from aquaflux.radiation.triangles import padded_length, pairs_are_cut, segment_is_cut
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, receivers_per_pass
 from aquaflux.vectors import dot
 
@@ -153,6 +153,34 @@ class SelfOcclusion(eqx.Module):
         del surfaces
         return self
 
+    def segments_hidden(self, surfaces, origin, target, near, exclude) -> np.ndarray | None:
+        """Whether the surface's own triangles lie across each of a list of segments.
+
+        For segments that are not one source's view from one receiver -- the two legs of a path
+        broken at a mirror, which run between points no source-receiver product names. **Every
+        strategy answers this with one ray per segment**, since such a leg has no single source
+        whose angular extent could be clipped; :class:`NoOcclusion` answers that nothing is hidden.
+
+        Parameters
+        ----------
+        surfaces : Surfaces
+            Whose triangles are the blockers.
+        origin, target : numpy.ndarray, shape ``(n_segments, 3)``
+            Segment endpoints.
+        near : numpy.ndarray, shape ``(n_segments,)``
+            How far from ``origin`` a hit must be before it counts, in length units.
+        exclude : numpy.ndarray of int, shape ``(n_segments, k)``
+            Triangles each segment ignores; ``-1`` excludes nothing.
+
+        Returns
+        -------
+        numpy.ndarray of bool, shape ``(n_segments,)``, or None
+            ``None`` when the surface hides nothing at all.
+        """
+        return np.asarray(
+            segment_is_cut(origin, target, surfaces.vertices, near, exclude=exclude), dtype=bool
+        )
+
 
 class NoOcclusion(SelfOcclusion):
     """The surface does not shadow itself at all.
@@ -171,6 +199,10 @@ class NoOcclusion(SelfOcclusion):
     def field(self, surfaces, points, near, receiver_facet) -> OcclusionField:
         """Nothing hides anything. See :meth:`SelfOcclusion.field`."""
         return OcclusionField(fraction=None, overlapping=None)
+
+    def segments_hidden(self, surfaces, origin, target, near, exclude) -> None:
+        """Nothing hides anything. See :meth:`SelfOcclusion.segments_hidden`."""
+        return None
 
 
 class RayCastOcclusion(SelfOcclusion):
@@ -274,6 +306,19 @@ class RayCastOcclusion(SelfOcclusion):
         return OcclusionField(
             fraction=jnp.asarray(blocked), overlapping=None, clear_behind=clear_behind
         )
+
+    def segments_hidden(self, surfaces, origin, target, near, exclude) -> np.ndarray:
+        """One ray per segment, walked through the grid when there is one.
+
+        See :meth:`SelfOcclusion.segments_hidden`.
+        """
+        grid = self._triangle_grid(surfaces)
+        if grid is not None:
+            return np.asarray(grid.blocks(origin, target, near, exclude=exclude), dtype=bool)
+        hit = segment_is_cut(
+            origin, target, surfaces.vertices, near, exclude=exclude, work_limit=self.work_limit
+        )
+        return np.asarray(hit, dtype=bool)
 
     def prepared(self, surfaces) -> RayCastOcclusion:
         """With its grid built, so a stream of masks builds it once. See :meth:`SelfOcclusion.prepared`."""

@@ -41,8 +41,9 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `transfer.py` — the frozen facet-to-facet geometry | **BUILT** |
 | `quadrature.py` — symmetric triangle rules for the receiving facet | **BUILT** |
 | `model.py` — the assembled model and the three public entry points | **BUILT** |
-| `images.py` — `mirrored_fluence_rate` / `summed_mirrored_fluence_rate`: one specular bounce into the volume, each source's image seen through each mirror's aperture (#537 PR 2, 2026-10-05) | **BUILT** (unshadowed; exported and wired into the model by PR 3a, which adds `mirrored_irradiance` and `plane_exchange`) |
-| `mirrors.py` — `Mirror` (a plane, its aperture facets, reflection and the image of a surface set) and `planar_mirrors` (a body's facets grouped by plane); the reflectance split on `Surfaces` (#537 PR 1, 2026-10-05) | **BUILT** (the model carries specular bodies since PR 3a, unshadowed scenes only) |
+| `images.py` — `mirrored_fluence_rate` / `summed_mirrored_fluence_rate`: one specular bounce into the volume, each source's image seen through each mirror's aperture (#537 PR 2, 2026-10-05) | **BUILT** (exported and wired into the model by PR 3a, which adds `mirrored_irradiance` and `plane_exchange`; shadowed through `shadows=` since PR 3b) |
+| `mirrors.py` — `Mirror` (a plane, its aperture facets, reflection and the image of a surface set) and `planar_mirrors` (a body's facets grouped by plane); the reflectance split on `Surfaces` (#537 PR 1, 2026-10-05) | **BUILT** (the model carries specular bodies since PR 3a, shadowed since PR 3b) |
+| `mirror_visibility.py` — `MirrorVisibility` / `build_mirror_visibility` / `build_mirror_masks`: what stands across each path reflected in one mirror, both legs, per body counted 0/1/2 (#537 PR 3b) | **BUILT** |
 | `units.py` — lamp watts to exitance, ultraviolet transmittance to absorbance | **BUILT** |
 
 There is no separate optical-depth piece to build: the voxel-grid traversal is `VoxelAbsorption` in
@@ -393,19 +394,24 @@ built -- this reverses PR 1's decision 3); a **graded medium is refused** with s
 - `build_radiation_model(..., specular=(names,))` and `build_transfer(..., specular=, max_mirror_planes=
   MAX_MIRROR_PLANES)`. `TransferMatrix` gains `specular_solids` (static), `mirrors` (every plane of
   every specular solid), `specular_geometric` / `specular_separation` / `specular_source_cosine`, each
-  `(n_specular, n, n)`: per solid, `images.plane_exchange` summed over its planes, and the two
-  G-weighted means. `assemble` adds `rho_s[k] * G_k * exp(-a d_k)` to **both** `F` and `F^M` (the
+  `(n_terms, n, n)` (per solid in 3a; per `(solid, crossing pattern)` since 3b -- see below):
+  `images.plane_exchange` summed over the planes, and the two G-weighted means. `assemble` adds
+  `rho_s[k] * G_k * exp(-a d_k)` (times the pattern's transmittance since 3b) to **both** `F` and `F^M` (the
   latter times the relative radiance at the mean cosine, through `_relative_radiance`, which the
   direct emitted term now shares).
 - `transfer._specular_by_solid` reads one `rho_s` per solid from its first facet, refusing on concrete
   values a solid whose facets differ and a non-zero value on an undeclared solid; traced, it takes the
   first facet's (and refuses a traced value when no solid is specular).
-- **Refused, not approximated** (`NotImplementedError`): specular with occluders or with
-  self-occlusion on, for the facets (`build_transfer`) **and** the receivers (`build_radiation_model`
-  checks `receiver_visibility_options()`); a graded medium at `assemble`. `ValueError` past
-  `MAX_MIRROR_PLANES = 64` planes per solid -- **provisional**, to be set in PR 4 from measured cost.
+- **Refused, not approximated** (`NotImplementedError`): a graded medium at `assemble`. `ValueError`
+  past `MAX_MIRROR_PLANES = 64` planes per solid -- **provisional**, to be set in PR 4 from measured
+  cost. (3a also refused occluders and self-occlusion with specular bodies; PR 3b lifted that.)
 - The model's point-source arrivals add `images.mirrored_irradiance(..., point_sources_only=True)` at
-  the facet centroids; `fluence_rate` adds `summed_mirrored_fluence_rate((surfaces, bounced), ...)`.
+  the facet centroids; the volume's mirrored field is gathered by the `ReceiverShadows` strategy since
+  3b (it was a separate `summed_mirrored_fluence_rate` call in `fluence_rate` in 3a).
+- ⚠️ The specular arrays' first axis was **per solid** in 3a; since 3b it is **per term** --
+  `(solid, crossing pattern)`, listed in `specular_terms`. With nothing in the way there is still one
+  term per solid, with an empty pattern, so `specular_geometric[0]` on an unshadowed one-solid transfer
+  is unchanged.
 - **Compile cost was the build's whole cost**: a fresh closure per plane (and per call in the gather)
   retraced everything, so a 12-facet box took 15-25 s to build and 2.9 s per repeated `fluence_rate`.
   `images._exchange_rows` (jitted, scanned over the quadrature points), `_areal_through` and
@@ -422,6 +428,71 @@ built -- this reverses PR 1's decision 3); a **graded medium is refused** with s
   the whole from the half by reflection. The **one-bounce enclosure** `B = M/(1 - rho_d(1 + rho_s))`,
   `G = 4B(1 + rho_s)` to 1e-12; reciprocity falling with the receiver rule; `rho_s` and the absorption
   coefficient against central differences; every refusal.
+
+### PR 3b: shadows on both legs of a reflected path (2026-10-05)
+
+**Decided with the user**: the transfer keeps the bodies' transmittance **live** by grouping each
+specular solid's planes **by crossing pattern** (how many legs each body crosses, 0/1/2) -- one
+`(n, n)` term per `(solid, pattern)` present, `prod tau_b ** legs_b` applied at `assemble` -- rather
+than one array per plane (storage by plane count, what 3a avoided) or freezing `tau` on reflected paths
+(severs the gradient). Under `SilhouetteOcclusion` the **reflected paths are rays** (direct pairs
+keep the exact fraction): a two-leg path has no single source view to clip.
+
+- `mirror_visibility.py`: `build_mirror_visibility(mirror, occluders, surfaces, points, *,
+  receiver_facet, sources, self_occlusion, offset_scale, pair_limit)` -> `MirrorVisibility`
+  (`crossings` uint8 `(n_occ, n_r, n_s)`, `hidden` bool or `None`, `receivers`, `sources` -- numpy
+  facet labels, default `Mirror.sources_in_front`). One path per pair through the source **centroid**:
+  meeting point where receiver -> centroid's image crosses the plane. `build_mirror_masks(mirrors, ...)`
+  returns `None` when `shadows_reflected_paths` says nothing can shadow (no bodies **and**
+  `NoOcclusion`; `None` strategy means the default, which shadows). `reflected_surviving` is
+  `surviving_fraction(c >= 1) * surviving_fraction(c >= 2)`: the direct expression twice, and **finite
+  derivative at tau = 0** where `tau ** 0` would give `0 * inf`.
+- ⚠️ **The meeting point is LIFTED off the mirror** by `offset_scale * mean sqrt(aperture area)`
+  along the normal, and **both legs end there**. A leg ending exactly in the plane reads as cut by the
+  mirror triangle it lands on (a hit at distance 1 counts), so without the lift the mirror shadows every
+  path reflected in it; lifting clears every coplanar triangle without listing the aperture as
+  exclusions (which would be as wide as the aperture). Leg 1 runs source centroid -> lifted point with
+  the source's own margin and excluding the source facet (the direct ray's convention); leg 2 lifted
+  point -> receiver, excluding the receiver facet when there is one.
+- `SelfOcclusion.segments_hidden(surfaces, origin, target, near, exclude)`: per-segment rays for legs
+  that are no source-receiver product. Base = `segment_is_cut` (so `SilhouetteOcclusion` uses rays),
+  `NoOcclusion` -> `None`, `RayCastOcclusion` -> its grid when set. **Body culling does not apply** to
+  reflected paths -- every candidate path is tested (cost to measure in PR 4).
+- Candidate paths: receivers strictly in front, sources with a part in front; a source whose
+  **centroid** is not strictly in front (straddling the plane) is **recorded clear**, untested.
+- Gathers: `mirrored_fluence_rate` / `summed_...` / `mirrored_irradiance` take `shadows=` (one mask
+  per mirror, checked against the receivers) and `transmittance=` (refused without masks; default
+  opaque). With masks, which receivers and sources a mirror involves is **read off the mask** (built
+  from concrete geometry), so it is known when the sets' vertices are traced -- the streamed backward pass.
+- Transfer: `_specular_exchange` builds the facet-receiver mask per plane (`receiver_facet=arange`),
+  drops hidden pairs, and accumulates by pattern (`_by_pattern`: digits base 3, body 0 least
+  significant). New fields `specular_terms` (static) and `point_shadows` (per-mirror masks restricted to
+  point-source columns, for `model._point_source_irradiance`; `None` when unshadowed or no point source).
+- Receivers: `FrozenShadows` holds `mirrors` and `mirror_visibility`; `StreamedShadows` builds each
+  chunk's mirror masks inside the chunk's custom VJP through `streamed_fluence_rate(extra=...)` -- an
+  object with `field(live, points)` -- so a gradient's memory stays one chunk. `fluence_rate` no longer
+  gathers the mirrored field itself.
+- **Gate**: the symmetry plane with a baffle of the walls' own triangles and a partly transmitting ball
+  in the half, and both again (reflected) in the whole: radiosity and field to **1e-9**, Lambertian and
+  point lamp, held and streamed. ⚠️ **The first baffle sat on the box's sixths and a reflected path
+  between two wall centroids grazed its edge at exactly x = 0.35**: the half's leg and the whole's
+  segment round that edge hit differently, a 0.8% mismatch that looked like a defect. Moved off the
+  rational grid; the comparison is pair for pair identical (masks compared directly: crossings and
+  hidden equal on all 26 x 26 cross pairs). Also: tau^2 through the transfer (pattern `(2, 1)`, two
+  bodies with different tau), the transmittance derivative against central differences held and
+  streamed, rays under `SilhouetteOcclusion` equal to `RayCastOcclusion`'s, and 16 mask unit tests.
+- **Mutation pass, 22 breaks, 21 red.** Red: one factor instead of `tau ** legs`; either leg's body
+  test or self test dropped; no lift; no receiver-facet exclusion; straddling sources tested; hidden
+  pairs kept in the transfer; pattern digits reversed (caught only once the tau^2 test carried a second
+  body of different transmittance); `assemble` ignoring the pattern; point arrivals, streamed or held
+  mirrors unshadowed; either gather dropping the surviving fraction; transparent by default;
+  `SilhouetteOcclusion` hiding nothing on legs; held transmittance dropped; the transfer's mask without
+  `receiver_facet`. **Dismissed, equivalent**: no source-facet exclusion on leg 1 -- a segment meets its
+  source's plane only at its origin, which the margin already discards (kept for the direct rays'
+  convention). ⚠️ **Receivers behind the mirror being tested first passed**, because the fixture's
+  receiver sat at the lamp's mirrored height, where the meeting point divides by zero and its NaN reads
+  clear; moved to `z = -0.75`, it goes red. The gather never reads those rows, so the field is unchanged
+  either way -- the test pins the documented "recorded clear".
 
 ## The clamp is a GATE, not a factor — and the difference is a factor of two or a zero
 

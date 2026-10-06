@@ -14,6 +14,7 @@ from aquaflux.radiation.images import (
     plane_exchange,
     summed_mirrored_fluence_rate,
 )
+from aquaflux.radiation.mirror_visibility import build_mirror_visibility
 from aquaflux.radiation.mirrors import planar_mirrors
 from aquaflux.radiation.photometry import PhotometricProfile
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian
@@ -21,6 +22,7 @@ from aquaflux.radiation.quadrature import triangle_quadrature
 from aquaflux.radiation.self_occlusion import NoOcclusion
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.transfer import build_transfer
+from aquaflux.solids import Box, Sphere
 
 from tests.unit.radiation_references import (
     axial_rectangle_solid_angle,
@@ -509,3 +511,62 @@ def test_the_exchange_s_path_lengths_and_cosines_are_the_unfolded_ones():
     np.testing.assert_allclose(
         exchange.source_cosine[:n, :n], direct.source_cosine[:n, n:], atol=1e-15
     )
+
+
+# ---------------------------------------------------------------------------------------
+# Shadows on the reflected paths
+# ---------------------------------------------------------------------------------------
+
+
+def test_a_shadowed_image_is_filtered_once_per_leg_a_body_crosses():
+    """A slab both legs pass through, and a ball on the first leg of one receiver's path only: the
+    image reaches that receiver times the slab's transmittance squared times the ball's, the
+    other times the slab's squared -- for the fluence rate and the irradiance alike."""
+    surfaces, mirrors = _point_lamp([0.0, 0.0, 1.0], 4.0)
+    points = np.array([[1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]])
+    normals = np.array([[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]])
+    bodies = [Box((0.0, 0.0, 0.5), (5.0, 5.0, 0.1)), Sphere((0.25, 0.0, 0.5), 0.1)]
+    masks = [
+        build_mirror_visibility(mirror, bodies, surfaces, points, self_occlusion=NoOcclusion())
+        for mirror in mirrors
+    ]
+    expected = np.array([0.5**2 * 0.25, 0.5**2])
+    shadows = {"shadows": masks, "transmittance": [0.5, 0.25]}
+    np.testing.assert_allclose(
+        mirrored_fluence_rate(surfaces, mirrors, points, **shadows),
+        expected * mirrored_fluence_rate(surfaces, mirrors, points),
+        rtol=1e-14,
+    )
+    np.testing.assert_allclose(
+        mirrored_irradiance(surfaces, mirrors, points, normals, **shadows),
+        expected * mirrored_irradiance(surfaces, mirrors, points, normals),
+        rtol=1e-14,
+    )
+    # Given no transmittance, every body is opaque, as for the direct gather.
+    np.testing.assert_array_equal(
+        mirrored_fluence_rate(surfaces, mirrors, points, shadows=masks), [0.0, 0.0]
+    )
+
+
+def test_an_areal_image_is_hidden_by_the_surface_s_own_triangles():
+    """A plate across the second leg of one receiver's path hides the lamp patch's image from it
+    and from no other receiver."""
+    lamp = rectangle_triangles([0.0, 0.0, 1.0], [0.05, 0.0, 0.0], [0.0, 0.05, 0.0])[:, ::-1]
+    plate = rectangle_triangles([0.75, 0.0, 0.5], [0.05, 0.0, 0.0], [0.0, 0.05, 0.0])
+    surfaces, mirrors = _scene(np.concatenate([lamp, plate]), emission=[1.0, 1.0, 0.0, 0.0])
+    points = np.array([[1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]])
+    masks = [build_mirror_visibility(mirror, [], surfaces, points) for mirror in mirrors]
+    shadowed = mirrored_fluence_rate(surfaces, mirrors, points, shadows=masks)
+    clear = mirrored_fluence_rate(surfaces, mirrors, points)
+    assert float(clear[0]) > 0.0
+    np.testing.assert_allclose(shadowed, [0.0, clear[1]], rtol=1e-14, atol=0.0)
+
+
+def test_shadows_must_be_one_mask_per_mirror_and_come_with_them_the_transmittance():
+    surfaces, mirrors = _point_lamp([0.0, 0.0, 1.0], 4.0)
+    points = np.array([[1.0, 0.0, 1.0]])
+    mask = build_mirror_visibility(mirrors[0], [], surfaces, points)
+    with pytest.raises(ValueError, match="give one each"):
+        mirrored_fluence_rate(surfaces, mirrors, points, shadows=[mask, mask])
+    with pytest.raises(ValueError, match="without mirror visibility masks"):
+        mirrored_fluence_rate(surfaces, mirrors, points, transmittance=[0.5])
