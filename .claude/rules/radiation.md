@@ -514,20 +514,43 @@ Sozzi reactor from its drawing with the chamber's flat end plates specular, **wi
   centroids): the silhouette clip's cone test keeps **11-12 / 28** (sliver triangles of a coarse disc
   fan, wide cones), **4 / 35**, **5-6 / 211** aperture triangles per image -- p99 23 at 211; 4-6% of
   images keep none; unusable cones under 0.13%. Survivors stay ~a handful however fine the plate.
-- **The cull** (`images._may_show` + `_culled_fractions`): the cone test per (receiver, image, facet),
-  survivors' flat indices by `jnp.nonzero(size=padded)`, clipped `_CLIP_BATCH = 4096` at a time in a
-  `lax.while_loop` whose trip count follows the survivor count; padded slots point at triple 0 and are
-  masked (`valid`). ⚠️ **A while_loop is not reverse-differentiable**, so the culled clip takes its
-  geometry under `stop_gradient` and the live weights (reflectances) multiply `fraction @ weights`
-  **outside** the loop. `cull` is on where the geometry is readable (`_mirrored`'s `readable`; always in
-  `_exchange_rows`); the dense clip remains for a gather differentiated in position. The streamed
-  model's chunk puts the build's concrete vertices back on its sets (`with_geometry`) so its backward
-  pass, where every live leaf is traced, still culls.
-- **Measured with the cull** (same machine, scene): 28-triangle plate exchange 7.7e5 items/s (2.5x,
-  as the 41% survival predicts), gather 27.9 s (from 72); **211-triangle plate: gather 23 s against
-  1.4 s direct (17x per plane, from an estimated ~300x), exchange ~13 min per plane against ~1 min
-  direct (from an estimated 8.5 h)**. The floor is ~survivors x (clip / direct pair ~2.3) plus the
-  cone tests. Reflected-path masks cost ~3.6x a direct pair (two legs, no culling) -- not the problem.
+- **The cull** (`images._screen` + `_culled_fractions`): the cone test per (receiver, image, facet);
+  survivors clipped `_CLIP_BATCH = 4096` at a time in a `lax.while_loop` whose trip count follows the
+  survivor count. A survivor's pair is found by **bisecting the running count of what each pair keeps**
+  and its facet by its rank in the pair's row -- ⚠️ the first version took `jnp.nonzero` over every
+  triple, which on 16 receivers x 2,700 images x 211 facets cost **0.25 s of a 0.45 s** culled clip:
+  more than clipping the survivors. ⚠️ **A while_loop is not reverse-differentiable**, so the culled
+  clip takes its geometry under `stop_gradient` and the live weights (reflectances) multiply
+  `fraction @ weights` **outside** the loop. `cull` is on where the geometry is readable (`_mirrored`'s
+  `readable`; always in `_exchange_rows`); the dense clip remains for a gather differentiated in
+  position. The streamed model's chunk puts the build's concrete vertices back on its sets
+  (`with_geometry`) so its backward pass, where every live leaf is traced, still culls.
+- **The lit-block layout** (decided with the user: "port the direct culls"): the mirrored gather uses
+  `lit_blocks.areal_layout` with a `BackFaces` of the *image* set, so receivers behind an image's plane
+  are left out as in the direct gather, and the clip works on (receiver, image) pairs. ⚠️ Facet cones
+  must be taken **once per receiver** in the block grid, not per pair: per pair made the 4,000-receiver
+  gather slower (581 s against 450 s), per receiver 330 s.
+- **THE INSIDE SKIP** (decided with the user: "build it in PR 4"). An image seen wholly inside the
+  mirror needs no clip -- the mirror shows all of it, weighted by the facet the line to its centroid
+  crosses (zero outside, or in a hole). Measured first (`aperture_inside_share.py`, 300 receivers,
+  exact 2D classification): **98-99.5%** of seen images are inside at the 0.05 m plate, **90%** at
+  0.01 m (211 triangles, 107 outline edges). `mirrors.outline` gives the edges of one facet only
+  (rounded relative to the extent); `_Path.of` keeps them **only for one concrete reflectance on every
+  facet** -- ⚠️ a traced one would credit an image's whole derivative to the facet its centroid line
+  crosses (caught by the reflectance-gradient test: 12 of 32 facets wrong, sum right). `_screen` skips
+  a pair when every corner is behind the plane **by 1e-9 of the coordinates** (`_behind`) and
+  `_touches_outline` finds the image, projected into the plane along the lines from the receiver, apart
+  from every outline edge by separating axes with the same margin.
+  - ⚠️ **The outline CONE test came first and was too loose**: an image's circular cone overlaps edges
+    the image never reaches -- it flagged 50.5% of pairs against an exact 8% partial (64 receivers,
+    0.01 plate), so the gather went only 330 -> 246 s.
+  - ⚠️ **The behind test needs the margin** because the plane is an area-weighted mean over its
+    facets: the image of a facet IN the plane read heights of -3.3e-16, was skipped, and got 60% of its
+    solid angle where the dense clip (correctly) gives 0. Found by comparing every probe pair with the
+    dense clip -- 2 of 172,800.
+  - ⚠️ **Write the separating-axis test corner by corner, the outline's edges the innermost axis**: the
+    same arithmetic as reductions over trailing axes of 3 corners and 2 ends ran **16x slower** (0.29
+    against 0.018 s on 16 receivers), the CPU-vectorization lesson of `silhouette`'s 2x2 tiles again.
 - **`MAX_MIRROR_PLANES = 12`** (user's choice from 6 / 12 / 24 / 64): at ~12-17x direct per plane,
   twelve keeps a body within ~200x; any box (6) passes; a 16-strip tube is refused. Pinned by
   `test_by_default_a_box_is_flat_enough_and_a_tessellated_tube_is_not` (limit 16 and 5 each red).
