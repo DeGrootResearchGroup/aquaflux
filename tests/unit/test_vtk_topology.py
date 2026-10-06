@@ -11,8 +11,10 @@ from __future__ import annotations
 
 from itertools import pairwise
 
+import equinox as eqx
 import numpy as np
 import pytest
+from aquaflux.io.openfoam.assembler import assemble
 from aquaflux.io.vtk.topology import (
     VTK_POLYGON,
     VTK_POLYHEDRON,
@@ -20,6 +22,8 @@ from aquaflux.io.vtk.topology import (
     stored_ring_is_outward,
 )
 from aquaflux.mesh import Mesh, structured_grid_2d, structured_grid_3d
+
+from tests.support.polymesh import cyclic_slab_polymesh_data, cyclic_two_cube_polymesh_data
 
 
 def _cell_slices(offsets):
@@ -192,3 +196,72 @@ def test_a_2d_cell_whose_edges_form_two_rings_is_refused():
     mesh = Mesh.from_faces(outer + inner, edges, [0] * 8, [-1] * 8, 1)
     with pytest.raises(ValueError, match="more than one closed ring"):
         build_vtk_cells(mesh)
+
+
+# --- periodic seams ---------------------------------------------------------------------------------
+#
+# A periodic seam face is stored once, with its nodes on the owner's side of the domain. Each check
+# below recomputes a cell's size *from the emitted connectivity alone* and compares it with the
+# mesh's own cell volume: a seam ring handed to the neighbour untranslated reaches across the whole
+# period, which in two dimensions breaks the edge chain and in three silently inflates the cell.
+
+
+def _periodic_grid_2d():
+    # Unequal rows, so a ring taken from the wrong row would carry the wrong area.
+    return structured_grid_2d(4, 3, periodic=("x",), y_nodes=[0.0, 0.2, 0.7, 1.5])
+
+
+def _polyhedron_volume(points, rings):
+    """Divergence-theorem volume of a closed polyhedron from its outward-wound planar face rings."""
+    return (
+        sum(
+            float(np.dot(points[ring].mean(axis=0), _newell_normal(points[ring]))) for ring in rings
+        )
+        / 3.0
+    )
+
+
+def test_a_periodic_2d_cell_is_a_ring_of_its_own_nodes_with_its_own_area():
+    mesh = _periodic_grid_2d()
+    cells = build_vtk_cells(mesh)
+    volume = np.asarray(mesh.geometry().cell.volume)
+
+    for index, (start, end) in enumerate(_cell_slices(cells.offsets)):
+        ring = cells.connectivity[start:end]
+        assert len(set(ring.tolist())) == 4
+        np.testing.assert_allclose(_signed_area(cells.points[ring]), volume[index], rtol=1e-12)
+
+
+@pytest.mark.parametrize(
+    "mesh",
+    [assemble(cyclic_slab_polymesh_data(4, 3)), assemble(cyclic_two_cube_polymesh_data())],
+    ids=["cyclic-slab", "cyclic-two-cube"],
+)
+def test_a_periodic_3d_cell_is_a_closed_polyhedron_of_its_own_nodes_with_its_own_volume(mesh):
+    assert mesh.face_cells.neighbour_offset is not None  # the fixture really is periodic
+    cells = build_vtk_cells(mesh)
+    volume = np.asarray(mesh.geometry().cell.volume)
+    centroid = np.asarray(mesh.geometry().cell.centroid)
+
+    for index, ((start, end), rings) in enumerate(
+        zip(_cell_slices(cells.offsets), _cell_faces(cells), strict=True)
+    ):
+        assert end - start == 8  # a hexahedron's own eight points, none from across the period
+        np.testing.assert_allclose(
+            _polyhedron_volume(cells.points, rings), volume[index], rtol=1e-12
+        )
+        for ring in rings:
+            outward = cells.points[ring].mean(axis=0) - centroid[index]
+            assert np.dot(_newell_normal(cells.points[ring]), outward) > 0
+
+
+def test_a_periodic_seam_node_with_no_counterpart_is_refused():
+    # Move one node of the x = 0 column (the seam's image side) off the translated position of its
+    # x = lx partner by a third of the row height: the two sides no longer match.
+    mesh = _periodic_grid_2d()
+    coords = np.asarray(mesh.node_coords).copy()
+    moved = int(np.flatnonzero((coords[:, 0] == 0.0) & (coords[:, 1] == 0.7))[0])
+    coords[moved, 1] += 0.25
+    mismatched = eqx.tree_at(lambda m: m.node_coords, mesh, coords)
+    with pytest.raises(ValueError, match="no counterpart on the other side"):
+        build_vtk_cells(mismatched)

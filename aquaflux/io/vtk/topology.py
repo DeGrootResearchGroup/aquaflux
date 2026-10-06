@@ -33,6 +33,19 @@ and conflating them writes a mesh whose faces point inward on roughly half the c
 The ring is therefore reversed exactly when those two disagree: an owner-outward ring listed under
 the neighbour, or an owner-inward ring listed under the owner. A boundary face is listed by its
 owner only.
+
+Periodic seams
+--------------
+A periodic mesh joins its last cell to its first through one interior **seam** face, stored once,
+with its nodes on the owner's side of the domain; the neighbour cell lies a whole period away and
+sees the face only through its periodic-image translation (the face's ``neighbour_offset``, the
+displacement from the neighbour's own position to its image beside the owner). Listing the stored
+ring under the neighbour as well would hand that cell nodes from the far side of the domain: a
+polygon whose edges do not chain, or a polyhedron stretched across the whole period. So under the
+neighbour each seam node is replaced by the node at its position *minus* the offset -- the same
+face, seen from the neighbour's side. Both copies exist in the mesh, because the neighbour's other
+faces are built from them; the counterpart is found by position, and a node with none is refused
+rather than written as a stretched cell.
 """
 
 from __future__ import annotations
@@ -40,6 +53,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 from aquaflux.mesh.cell import CellGeometry
 from aquaflux.mesh.connectivity import index_dtype
@@ -53,6 +67,13 @@ if TYPE_CHECKING:  # pragma: no cover
 #: arbitrary polyhedron -- the two types that are defined by exactly what the mesh stores.
 VTK_POLYGON = 7
 VTK_POLYHEDRON = 42
+
+#: How far a periodic seam node's translated position may lie from the node it is matched to, as a
+#: fraction of the mean edge length of the seam face it belongs to. A genuine counterpart differs
+#: from the translated position only by rounding in the coordinates and the offset, while any other
+#: node is roughly an edge length away, so the match is decided by a margin of orders of magnitude
+#: either way; the fraction only has to sit between the two.
+PERIODIC_NODE_MATCH_TOLERANCE = 1e-2
 
 
 class VtkCells(NamedTuple):
@@ -147,6 +168,8 @@ class _CellFaceEntries(NamedTuple):
         The cell of each entry, non-decreasing.
     face : np.ndarray of int, shape ``(n_entries,)``
         The face of each entry.
+    by_owner : np.ndarray of bool, shape ``(n_entries,)``
+        Whether this entry lists the face under its owner (``False``: under its neighbour).
     reversed_ring : np.ndarray of bool, shape ``(n_entries,)``
         Whether this entry must list the face's stored node ring backwards to wind outward from
         *its* cell.
@@ -156,6 +179,7 @@ class _CellFaceEntries(NamedTuple):
 
     cell: np.ndarray
     face: np.ndarray
+    by_owner: np.ndarray
     reversed_ring: np.ndarray
     counts: np.ndarray
 
@@ -184,7 +208,7 @@ def _cell_face_entries(mesh: Mesh) -> _CellFaceEntries:
     # owner-outward ring under the owner, or an owner-inward ring under the neighbour.
     outward = stored_ring_is_outward(mesh)[face] == by_owner
     counts = np.bincount(cell, minlength=mesh.n_cells)
-    return _CellFaceEntries(cell, face, ~outward, counts)
+    return _CellFaceEntries(cell, face, by_owner, ~outward, counts)
 
 
 class _EntryRings(NamedTuple):
@@ -213,6 +237,9 @@ def _entry_rings(
 ) -> _EntryRings:
     """Read each entry's face ring out of the CSR store, reversing it where the entry says to.
 
+    A periodic seam face listed under its neighbour is then carried onto that cell's own side of the
+    domain (see *Periodic seams* in the module docstring).
+
     ``index`` is the integer width every array built here is formed at -- see
     :func:`build_vtk_cells`, which chooses it once for the whole reconstruction.
     """
@@ -227,7 +254,63 @@ def _entry_rings(
     )
     # A reversed ring reads its own slots back to front; the CSR slice it reads from is the same.
     source = np.where(entries.reversed_ring[entry], counts[entry] - 1 - position, position)
-    return _EntryRings(indices[ring_start[entries.face][entry] + source], entry, position, counts)
+    rings = _EntryRings(indices[ring_start[entries.face][entry] + source], entry, position, counts)
+    return _onto_own_side(mesh, entries, rings)
+
+
+def _image_shift(mesh: Mesh, entries: _CellFaceEntries) -> np.ndarray | None:
+    """The translation carrying each entry's stored ring onto its own cell's side of the domain.
+
+    Nonzero only for a periodic seam face listed under its neighbour, where it is minus the face's
+    ``neighbour_offset``. Returns ``None`` when no entry needs one, which is every non-periodic mesh.
+    """
+    offset = mesh.face_cells.neighbour_offset
+    if offset is None:
+        return None
+    shift = -np.asarray(offset, dtype=float)[entries.face]
+    shift[entries.by_owner] = 0.0
+    return shift if np.any(shift) else None
+
+
+def _onto_own_side(mesh: Mesh, entries: _CellFaceEntries, rings: _EntryRings) -> _EntryRings:
+    """Replace each periodic seam node listed under the neighbour by its translated counterpart.
+
+    See *Periodic seams* in the module docstring. The ring's order is kept: a translation changes
+    no winding, so the direction already chosen for the entry stands.
+
+    Raises
+    ------
+    ValueError
+        If a translated seam node has no node at its position, which is a periodic mesh whose two
+        sides do not match.
+    """
+    shift = _image_shift(mesh, entries)
+    if shift is None:
+        return rings
+    slots = np.flatnonzero(np.any(shift[rings.entry] != 0.0, axis=1))
+    coords = np.asarray(mesh.node_coords, dtype=float)
+    entry = rings.entry[slots]
+    target = coords[rings.node[slots]] + shift[entry]
+
+    # Each slot's edge runs to the next slot of its ring, wrapping at the end.
+    following = slots - rings.position[slots] + (rings.position[slots] + 1) % rings.counts[entry]
+    edge = np.linalg.norm(coords[rings.node[following]] - coords[rings.node[slots]], axis=1)
+    _, local = np.unique(entry, return_inverse=True)
+    mean_edge = np.bincount(local, weights=edge) / np.bincount(local)
+
+    distance, nearest = cKDTree(coords).query(target)
+    tolerance = PERIODIC_NODE_MATCH_TOLERANCE * mean_edge[local]
+    if np.any(distance > tolerance):
+        worst = int(np.argmax(distance / np.maximum(tolerance, np.finfo(float).tiny)))
+        raise ValueError(
+            "a periodic seam node has no counterpart on the other side of the domain: face "
+            f"{int(entries.face[entry[worst]])}'s node {int(rings.node[slots[worst]])}, translated "
+            f"by its periodic offset to {target[worst].tolist()}, is {float(distance[worst]):.3g} "
+            f"from the nearest node, so the two sides of the periodic mesh do not match"
+        )
+    node = rings.node.copy()
+    node[slots] = nearest.astype(node.dtype)
+    return rings._replace(node=node)
 
 
 def _polyhedron_faces(
@@ -337,7 +420,8 @@ def build_vtk_cells(mesh: Mesh) -> VtkCells:
     Raises
     ------
     ValueError
-        If a two-dimensional cell's edges do not form exactly one closed ring.
+        If a two-dimensional cell's edges do not form exactly one closed ring, or a periodic seam
+        node has no counterpart at its translated position on the other side of the domain.
 
     Notes
     -----

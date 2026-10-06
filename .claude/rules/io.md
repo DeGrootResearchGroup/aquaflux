@@ -315,6 +315,33 @@ ring traversed twice, at exactly the right length. The check is that the *first*
 cell's own edge count. This was a live bug, found by the test written for it
 (`test_a_2d_cell_whose_edges_form_two_rings_is_refused`, concentric squares as one cell).
 
+### ⚠️ A periodic seam face is listed under its neighbour with the NEIGHBOUR'S nodes, found by position (2026-10-06)
+A fused periodic seam (`structured_grid_2d(periodic=…)`, or an OpenFOAM `cyclic` pair through
+`cyclic.py`) is one interior face whose ring sits on the **owner's** side; the neighbour cell is a
+whole period away and sees it through `neighbour_offset`. Before this fix the writer listed the stored
+ring under both cells. **In 2D that raised** (the neighbour's edges do not chain: `write_vtu` and so
+`aquaflux run` with the default `Vtk` output failed on every periodic 2D case, e.g.
+`validation/turbulent_channel`). **In 3D it did not raise — it was silently wrong, which is worse**: the
+neighbour's polyhedron took 12 points (its own 8 plus the far side's 4) and spanned the period —
+ParaView 5.12.0 `CellSize` on the old output gave the seam cells **4×** their volume on
+`cyclic_slab_polymesh_data(4, 3)` (total 1.4 vs 0.8) and **2×** on the cyclic two-cube (3.0 vs 2.0).
+Nothing caught it because no test wrote a periodic 3D mesh.
+
+The fix (`topology._onto_own_side`) maps each seam node of a **neighbour-side** entry to the node at
+`position − neighbour_offset`, via one `cKDTree` query over all nodes, **after** the winding reversal
+(a translation changes no winding). Both copies of a seam node always exist — the neighbour's other
+faces are built from them — so a missing counterpart is a mismatched periodic mesh and is **refused**
+(`PERIODIC_NODE_MATCH_TOLERANCE` = 1e-2 of the seam face's mean edge length: a true counterpart is off
+only by rounding, any other node by ~an edge, so the fraction only has to sit between the two). The
+sign convention is the mesh's (`neighbour_centroid = cc[neighbour] + offset`), so it holds for the
+generator and the cyclic fusion alike. Pinned by `test_a_periodic_2d_cell_is_a_ring_of_its_own_nodes_*`
+and `test_a_periodic_3d_cell_is_a_closed_polyhedron_*` (each recomputes the cell size from the emitted
+connectivity alone and compares it with `mesh.geometry().cell.volume`) and
+`test_a_periodic_seam_node_with_no_counterpart_is_refused`; mutation-checked 2026-10-06 — removing the
+translation, flipping its sign, translating the owner side as well, and disabling the refusal each turn
+at least one red (the sign flip and the owner-side mutation leave the refusal test green, correctly:
+it pins the refusal, the other three pin the geometry).
+
 ### Binary is the default, and that was decided before shipping rather than after
 `<AppendedData encoding="raw">` with `header_type="UInt64"`; `binary=False` gives the same values to
 the last bit as decimal text, for reading a small mesh by eye. **Measured 2026-09-12** — macOS arm64,
@@ -358,6 +385,7 @@ makes it wrong or negative — the topology cannot be confirmed by counting cell
 | pitzDaily (2D, 12 225 cells) | integrated area **0.01451603999974618** vs aquaflux's own cell-volume sum **0.014516039999746174** — 15 significant figures |
 | bfs3d (3D OpenFOAM hex, 23 040 cells) | counts and points identical to **ParaView's own OpenFOAM reader**; per-cell volume vs aquaflux max rel dev **1.9e-15**; **zero** negative volumes; cell centres agree with aquaflux to **5.6e-17** |
 | `polyDualMesh` of bfs3d (25 891 genuinely polyhedral cells: 6/8/10 faces per cell, 4/5/6 nodes per face) | counts identical to ParaView's OpenFOAM reader; **zero** negative volumes; per-cell volume **ours vs ParaView's own OpenFOAM reader 1.08e-6** |
+| periodic: `structured_grid_2d(4,4,periodic=("x",))`, the `turbulent_channel` re20000 mesh (4×96, graded, periodic x), `cyclic_slab_polymesh_data(4,3)` and the cyclic two-cube (3D, `assemble`d) — 2026-10-06 | every cell type 7 / 42 with 4 / 8 points; per-cell `CellSize` vs aquaflux's volume max rel dev **0.0** (both 2D) and **2.1e-16 / 1.1e-16** (3D); totals 1.0, 2.0, 0.8, 2.0 exactly |
 | `.pvd` of three frames | opens as one dataset, three timesteps, per-step field ranges correct |
 
 ⚠️ **On the dual mesh aquaflux's own cell volumes differ from VTK's by up to 4.6 %, and that is NOT a
