@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import warnings
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from aquaflux.mesh import structured_grid_3d
+from aquaflux.mesh.surface import patch_triangles
 from aquaflux.radiation import grid as grid_module
 from aquaflux.radiation.grid import TriangleGrid, _near_cubic_resolution
 from aquaflux.radiation.triangles import segment_is_cut
@@ -268,3 +272,135 @@ def test_a_hit_exactly_at_the_near_margin_does_not_count():
     found = TriangleGrid.build(vertices).blocks(origin, target, near)
     assert found.tolist() == [False, True]
     np.testing.assert_array_equal(found, brute(origin, target, vertices, near))
+
+
+def flat_sheet() -> np.ndarray:
+    """A box mesh's ``front`` patch: 24 triangles exactly in the plane ``z = 2``, 3 x 4 faces."""
+    mesh = structured_grid_3d(3, 4, 5, 1.0, 1.5, 2.0, named_boundaries=True)
+    return np.asarray(patch_triangles(mesh, mesh.geometry(), ["front"]).vertices)
+
+
+def through_the_sheet_s_seams(sheet, count: int, rng):
+    """Segments crossing a sheet through its interior nodes and edge midpoints, plus a few
+    random crossings and segments parallel to it, on its plane and off it.
+
+    Aimed at the seams because that is where a walk that visits the wrong voxel misses: a ray
+    through an edge two triangles share is claimed by one of them, and a voxel boundary along
+    that edge decides which voxel the walk is in when it gets there. Each segment is carried on
+    past the sheet and none touches its rim, so the two intersection kernels -- which may round
+    differently where a segment ends exactly on a triangle or grazes the sheet's outline -- have
+    no knife edge to disagree on, and every disagreement is the grid's.
+    """
+    low = sheet.reshape(-1, 3).min(axis=0)
+    high = sheet.reshape(-1, 3).max(axis=0)
+    flat = int(np.argmin(high - low))
+    seams = np.concatenate(
+        [sheet.reshape(-1, 3), 0.5 * (sheet + np.roll(sheet, -1, axis=1)).reshape(-1, 3)]
+    )
+    in_plane = [axis for axis in range(3) if axis != flat]
+    interior = np.all(
+        (seams[:, in_plane] > low[in_plane]) & (seams[:, in_plane] < high[in_plane]), axis=1
+    )
+    seams = np.unique(seams[interior], axis=0)
+    origin = rng.uniform(low - 1.0, high + 1.0, (count, 3))
+    # Carried on past the seam by a random factor: aimed at twice the distance, every segment
+    # would cross at exactly half its length, where the crossing point never rounds.
+    reach = rng.uniform(1.5, 3.0, (count, 1))
+    target = origin + reach * (seams[rng.integers(0, len(seams), count)] - origin)
+    random = slice(0, count // 8)
+    target[random] = rng.uniform(low - 1.0, high + 1.0, (count // 8, 3))
+    parallel = slice(count // 8, count // 4)
+    target[parallel] = rng.uniform(low - 1.0, high + 1.0, (count // 8, 3))
+    target[parallel, flat] = origin[parallel, flat]
+    on_plane = slice(count // 4, count // 4 + count // 16)
+    origin[on_plane, flat] = target[on_plane, flat] = low[flat]
+    return origin, target
+
+
+#: Where the sheet is put, as an offset applied before its axes are permuted. A sheet whose
+#: plane coordinate is large next to the segments' travel across it is crossed at a point that
+#: rounds exactly onto the plane, which hides the flat box's defect; near ``0.1`` and ``0.03`` it
+#: does not. The second turns the flat axis onto x, so it is not always the last one. The third,
+#: far from the origin, is where the stacked sheets' seams round below a voxel boundary often
+#: enough to see a triangle registered short of its last voxel.
+SHEET_PLACEMENTS = [
+    ((0.1, 0.1, -1.9), (0, 1, 2)),
+    ((-7.3, 0.37, -1.97), (2, 0, 1)),
+    ((1e3, -3.1, 1e3), (0, 1, 2)),
+]
+
+
+def placed(sheet, offset, axes) -> np.ndarray:
+    return (sheet + np.asarray(offset))[..., list(axes)]
+
+
+@pytest.mark.parametrize("resolution", [None, (3, 4, 1), (6, 8, 1), (6, 8, 2)])
+@pytest.mark.parametrize(("offset", "axes"), SHEET_PLACEMENTS)
+def test_a_flat_sheet_answers_exactly_what_testing_every_triangle_answers(resolution, offset, axes):
+    """Triangles all in one axis-aligned plane -- a planar mesh patch -- give a box with no
+    extent along that axis. With none, the grid's voxels there were ``2.2e-308`` thick: a
+    crossing point a rounding off the plane was a voxel index past the range of an integer -- an
+    overflow cast numpy warns about, and warnings are errors here -- and, with more than one
+    voxel through the thickness, landed in a voxel holding nothing, so the segment read clear
+    (110 of 48,000 such segments, measured). Voxel boundaries on the sheet's own face edges
+    (3 x 4, 6 x 8) put seams on boundaries, and two voxels through the thickness put a voxel
+    plane in the sheet.
+    """
+    sheet = placed(flat_sheet(), offset, axes)
+    resolution = None if resolution is None else tuple(np.asarray(resolution)[list(axes)])
+    origin, target = through_the_sheet_s_seams(sheet, 6000, np.random.default_rng(13))
+    near = np.zeros(len(origin))
+    grid = TriangleGrid.build(sheet, resolution=resolution)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        found = grid.blocks(origin, target, near)
+    expected = brute(origin, target, sheet, near)
+    assert 0.3 < expected.mean() < 0.9, f"fixture is one-sided: {expected.mean()}"
+    np.testing.assert_array_equal(found, expected)
+
+
+@pytest.mark.parametrize("resolution", [(3, 4, 2), (6, 8, 2), (6, 8, 4)])
+@pytest.mark.parametrize(("offset", "axes"), SHEET_PLACEMENTS)
+def test_a_sheet_lying_on_a_voxel_plane_inside_a_thick_box_is_found_from_either_side(
+    resolution, offset, axes
+):
+    """The same kind of miss without a flat box: three parallel sheets a unit apart, and an even
+    voxel count through the box's height, so the middle sheet lies exactly on a voxel plane. A
+    segment through one of its seams crosses that plane and an in-plane voxel boundary at the
+    same point, the walk's tie-break steps around one of the voxels meeting there, and a
+    triangle registered only on the side its rounding put it is missed. Registering each
+    triangle in the voxels its box spans widened by a rounding margin puts it on both sides.
+    """
+    sheet = flat_sheet()
+    stack = placed(
+        np.concatenate([sheet, sheet - [0.0, 0.0, 1.0], sheet - [0.0, 0.0, 2.0]]), offset, axes
+    )
+    middle = placed(sheet - [0.0, 0.0, 1.0], offset, axes)
+    origin, target = through_the_sheet_s_seams(middle, 6000, np.random.default_rng(17))
+    near = np.zeros(len(origin))
+    resolution = tuple(np.asarray(resolution)[list(axes)])
+    found = TriangleGrid.build(stack, resolution=resolution).blocks(origin, target, near)
+    np.testing.assert_array_equal(found, brute(origin, target, stack, near))
+
+
+def test_a_segment_parallel_to_an_axis_beside_the_grid_is_not_walked(monkeypatch):
+    """Along an axis it does not move on, a segment lies in the grid's slab for its whole length
+    or none of it. One running beside the grid's box was walked anyway -- across the voxels its
+    shadow on the box falls on, testing triangles it cannot reach -- because a zero direction
+    component was read as never leaving the slab rather than as never being in it.
+    """
+    walked = []
+    real_walk = grid_module.walk_to_first_hit
+
+    def recording_walk(ray, *args):
+        walked.append(np.asarray(ray))
+        return real_walk(ray, *args)
+
+    monkeypatch.setattr(grid_module, "walk_to_first_hit", recording_walk)
+    sheet = flat_sheet()
+    origin = np.array([[-0.5, 0.7, 2.5], [-0.5, 0.7, 1.5], [-0.5, 0.7, 2.0], [-0.5, 0.7, 2.5]])
+    target = np.array([[1.5, 0.8, 2.5], [1.5, 0.8, 1.5], [1.5, 0.8, 2.0], [0.5, 0.7, 1.5]])
+    found = TriangleGrid.build(sheet).blocks(origin, target, np.zeros(4))
+    assert found.tolist() == [False, False, False, True]
+    # Above, below and in the sheet's plane; the last crosses it. Only the last two are in the slab.
+    assert np.concatenate(walked).tolist() == [2, 3]
