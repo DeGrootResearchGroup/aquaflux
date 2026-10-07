@@ -47,7 +47,13 @@ from aquaflux.radiation.self_occlusion import (
 )
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT
 
-__all__ = ["Visibility", "build_visibility", "refuse_points_inside", "surviving_fraction"]
+__all__ = [
+    "Visibility",
+    "build_visibility",
+    "refuse_points_inside",
+    "same_receivers",
+    "surviving_fraction",
+]
 
 
 def surviving_fraction(blocked, hidden_by_geometry, transmittance) -> jnp.ndarray:
@@ -155,35 +161,53 @@ class Visibility(eqx.Module):
     def for_receivers(self, points) -> jnp.ndarray:
         """Check that ``points`` are the receivers this mask was built for, and return it.
 
+        The check is :func:`same_receivers`.
+
         Raises
         ------
         ValueError
             If the points differ, in count or in position. A mask used with the wrong receivers
             puts every shadow in the wrong place and raises no error of its own.
-
-        Notes
-        -----
-        The positions are compared in numpy, and only when both sets are concrete. Inside a
-        trace a ``jnp`` comparison is staged even on concrete inputs, and reading a staged
-        result on the host is an error — so a check written with ``jnp`` would make every
-        caller untraceable. A mask and receivers closed over by a traced function are still
-        concrete and are still checked; only a traced set of points, which cannot be read,
-        goes by its shape alone.
         """
-        given = points if isinstance(points, jax.core.Tracer) else np.asarray(points, dtype=float)
-        mismatched = given.shape != self.receivers.shape
-        if not mismatched and not any(
-            isinstance(side, jax.core.Tracer) for side in (given, self.receivers)
-        ):
-            mismatched = not np.array_equal(given, np.asarray(self.receivers))
-        if mismatched:
-            msg = (
-                "this visibility mask was built for different receivers "
-                f"(mask {tuple(self.receivers.shape)}, given {tuple(given.shape)}). The mask is "
-                "indexed by receiver, so using it with another set silently moves every shadow."
-            )
-            raise ValueError(msg)
+        same_receivers(self.receivers, points, "visibility mask")
         return self.blocked
+
+
+def same_receivers(built_for, points, what: str) -> None:
+    """Refuse ``points`` unless they are the receivers a mask was built for.
+
+    The positions are compared in numpy, and only when both sets are concrete. Inside a trace a
+    ``jnp`` comparison is staged even on concrete inputs, and reading a staged result on the host
+    is an error -- so a check written with ``jnp`` would make every caller untraceable. A mask and
+    receivers closed over by a traced function are still concrete and are still checked; only a
+    traced set of points, which cannot be read, goes by its shape alone.
+
+    Parameters
+    ----------
+    built_for : array_like, shape ``(n_receivers, 3)``
+        The receivers the mask was built for.
+    points : array_like, shape ``(n_points, 3)``
+        The receivers it is about to be used with.
+    what : str
+        What the mask is, for the message.
+
+    Raises
+    ------
+    ValueError
+        If the points differ, in count or in position. A mask used with the wrong receivers puts
+        every shadow in the wrong place and raises no error of its own.
+    """
+    given = points if isinstance(points, jax.core.Tracer) else np.asarray(points, dtype=float)
+    mismatched = given.shape != built_for.shape
+    if not mismatched and not any(isinstance(side, jax.core.Tracer) for side in (given, built_for)):
+        mismatched = not np.array_equal(given, np.asarray(built_for))
+    if mismatched:
+        msg = (
+            f"this {what} was built for different receivers "
+            f"(mask {tuple(built_for.shape)}, given {tuple(given.shape)}). The mask is "
+            "indexed by receiver, so using it with another set silently moves every shadow."
+        )
+        raise ValueError(msg)
 
 
 def refuse_points_inside(occluders, surfaces, points) -> None:
@@ -244,9 +268,10 @@ def build_visibility(
         The emitting set; segments start at facet centroids.
     points : array_like, shape ``(n_receivers, 3)``
         Receiver positions.
-    receiver_facet : array_like of int, shape ``(n_receivers,)``, optional
+    receiver_facet : array_like of int, shape ``(n_receivers,)`` or ``(n_receivers, k)``, optional
         When each receiver point is itself the centroid of one of ``surfaces``' facets, that
-        facet's index. ⚠️ **Omitting it where it applies blocks every pair of facets that can
+        facet's index; when it lies on several (on a shared edge or vertex), the ray test takes
+        each, ``-1`` filling a row that names fewer. ⚠️ **Omitting it where it applies blocks every pair of facets that can
         see each other**, because the segment then ends exactly in the target facet's plane and
         the self-occlusion test reads that as a hit. There is no distance margin at the far end
         of a segment to absorb it, the way ``offset_scale`` absorbs the same thing at the near

@@ -260,12 +260,10 @@ cannot be written. The guard is what catches the next module that does branch.
   entirely the change of measure. Gate against the case's **own self-start** in whichever single norm
   the harness uses — both ends then move together, and a genuine configuration mismatch (which moves the
   residual by orders) still trips it.
-- **A saved `.npz` is not necessarily a checkpoint.** `pitzdaily_openfoam/ilu0_remedy_state.npz` is the
-  case's *self-start*, cached only so repeated runs skip rebuilding it. Measuring "at the converged root"
-  against it silently answers a different question — and the two differ enormously: at the self-start the
-  zero-shift coupled Jacobian is nearly singular (smallest pivot `1.3e-12` against a matrix 1-norm of
-  `278`), so even a complete LU is not an accurate inverse of it, while at a converged root the shipped
-  field split solves the same zero-shift operator to `6e-09`. Read what wrote a state before trusting it.
+- **A saved `.npz` is not necessarily a checkpoint.** A self-start cached only so repeated runs skip
+  rebuilding it is not a converged root, and measuring "at the converged root" against it silently answers
+  a different question: the zero-shift coupled Jacobian is nearly singular at a self-start and is not at a
+  root. Read what wrote a state before trusting it.
 - **`bfs3d`'s shipped `COLUMN_REACH = (3,3,3,3,2,2)` is licensed for the FIELD SPLIT ONLY.** A flow-first
   split never applies `dR_flow/dturb`, so it never touches the shortened k/ω columns. A **monolithic**
   factorization (the complete LU) does apply them, and a short colouring does not truncate a column —
@@ -577,12 +575,50 @@ snapped mesh. Its README carries every number with its configuration. What to kn
   patch is cut, so each meshing step leaves its own completion marker.
 - **The cell count is not `owner.max() + 1`**: the highest cells may appear only as a neighbour
   (2-3 cells short on both meshes); `cells.npz`, written by OpenFOAM itself, is the authority.
+- **aquaflux's side is CASE FILES since 2026-10-05**: `cases/{bunny,empty}_{floor,volume}.yaml`,
+  `bunny_reflecting.yaml` and `bunny_reflecting_coarse.yaml` (0.4 m reflecting triangles), run by
+  `run_cases.py` (`RAY_CASES`, `RAY_OVERWRITE=1`) through `run_case.sh` into `work/cases/<name>/`
+  (`fields.vtu`, `patches.vtm` + `patches/*.vtp`, `run.yaml` with `results`). `aquaflux_floor.py`,
+  `aquaflux_volume.py` and `aquaflux_reflecting.py` are **deleted**; `figures.py` reads the run
+  directories through `outputs.py` (a numpy decoder of the VTK files, independent of the writer);
+  `slices_refined.py` is the one harness left, re-gathering the slice cells of `<mesh>_volume.yaml`'s
+  built scene with the floor case's refined lamp. `work` may be a symlink to the worktree that meshed
+  the rooms (the `.gitignore` entry is `/work`, which matches a link; `work/` did not).
+- **The port reproduces the scripts (2026-10-05/06; `943389aa` + the uncommitted port, jax 0.10.2,
+  CPU, macOS arm64, 11 cores; the deleted scripts' outputs at `8dd4caae` as the comparison).** Floor `E`
+  (bunny, 17,920-facet lamp) to 9.1e-12 of its peak, floor power 0.0994887477227159 W both; empty floor
+  9.1e-12. `bunny_volume` `G` p99 6.8e-10 of max, `volume_integral_G` to 3e-10 relative, but **26 cells
+  move by about one lamp facet's share** (shadow-edge ray decisions: the bunny's fan triangulation
+  differs from the old script's), one near-bunny cell 3.36e-4 -> 0. `bunny_reflecting` is NOT the same
+  configuration and is not a bit-for-bit check: 9,762 coarsened mesh-patch triangles (<= 0.2 m) against
+  2,000 squares, the lamp's own 1,120 facets (the script refined it for the floor and the walls' light),
+  a black lamp window. Under that: room absorbs 113.133 vs 113.129 mW, bunny 5.693 vs 5.697 mW,
+  reflected share of floor power 0.13443 vs 0.13442; reflected `G` p99 2.6 % of its peak, worst 40 %
+  in a cell 6 mm from the floor (0.7 % p99 past 10 cm from the walls). 0.2 -> 0.4 m moves the reflected
+  floor <= 4.5 % of its own peak (the script's squares: 5.1 %). Wall times (`run.yaml` `seconds`, mesh
+  read included): bunny floor 306 s, empty floor 148, bunny volume 805, empty volume 99 and bunny
+  reflecting 5,277 (both shared with unit tests: upper bounds), coarse 2,009 (its tail beside a test tier).
 - **`test_validation_api.py` matched `from aquaflux...` by string prefix**, so a case's sibling
   module named `aquaflux_floor` was taken for the package and every name imported from it reported
   missing. It now matches the package or its submodules (`module == "aquaflux"` or
   `startswith("aquaflux.")`), pinned by `test_a_sibling_module_whose_name_begins_with_aquaflux_is_not_the_package`.
 - **`run_case.sh` records `RAY_` settings** (added to its capture prefixes; `test_check_env_prefixes.py`
   fails a case whose prefix is missing, which is how this was caught).
+- ⚠️ **of-optical-radiation's DOM grid is uniform only when `nPhi == nTheta`.** It divides the polar angle over
+  the WHOLE sphere into `nTheta` bins of `pi/nTheta` and the azimuth into `2 nPhi` bins of `pi/nPhi` (its tutorial's
+  "polar bins per hemisphere" comment was wrong). `8 x 4` / `16 x 8`, used for every 64- and 256-direction figure
+  below and in `sozzi_radiation/` before 2026-10-02, have polar bins twice the azimuthal; `n x n` gives `2 n^2`
+  directions and matches Fluent's `n/2 x n/2` per octant (6 x 6 = 72 = Fluent 3 x 3). On the Sozzi uvmesh swap the
+  8 x 4 grid's dose shortfall at k = 0.5 was 12.4 %, the uniform 6 x 6's 2.2 %: most of it was the grid's shape.
+  Every figure below quoted "at 64 / 256 directions" is on the non-uniform grids.
+- **`sozzi_radiation/background_grid.py`: aquaflux on a Cartesian grid, interpolated to the mesh (2026-10-02).**
+  Gathering only at 4 mm grid nodes (90,788, 43 s against 714 s at every cell) gives the dose within 0.65 % in
+  LR at every k, **but only with the sleeve's own value as data**: G = 2M at a diffuse emitter's surface
+  (outgoing hemisphere at zero path; the sleeve is convex and the walls black). Without it every variant
+  under-predicts the cells beside the sleeve (median 0.57-0.81 within 1 mm, 8-3 mm), because each wet corner
+  is farther from the lamp than the cell. ⚠️ `G_average`'s LR looking right at 3-4 mm is a cancellation (low
+  near the sleeve, high in the bulk), not accuracy: its mean dose is 2 % low and its p1 per-particle ratio 0.83.
+  ⚠️ Twelve tracker runs at once in Docker's VM killed three (memory); run five at a time. Numbers in its README.
 - **A diffusely reflecting DOM sweep costs 3.3-3.8x a black one** (209 against 63 s at 64 directions,
   984 against 257 s at 256, 8 ranks) and needs ~60 % more sweeps (57 against 36 at 64), so the
   reflecting 256 run was stopped. ⚠️ Not quadratic in the directions, as was first said here: 64 -> 256

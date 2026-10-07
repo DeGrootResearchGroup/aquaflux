@@ -11,7 +11,8 @@ reflectance, the absorbance of the fluid and the other optical inputs.
 This page covers what the model computes and how, how to set up a scene, what is and is not
 differentiable, how to run it at the size of a real reactor mesh, and what it has been checked
 against. Reading the reactor geometry from a CAD drawing is covered separately, in
-[Reactor geometry from CAD](cad_geometry.md).
+[Reactor geometry from CAD](cad_geometry.md). To describe a lamp-lit room or reactor in a case file
+and run it with `aquaflux run`, with no script, see [Radiation case files](radiation_case.md).
 
 ## What the model computes
 
@@ -69,7 +70,7 @@ box = Surfaces.from_triangles(
 )
 model = build_radiation_model(cells, box)
 
-G, cycles = fluence_rate(model, box.with_optics(emission=10.0, reflectance=0.5))
+G, cycles = fluence_rate(model, box.with_optics(emission=10.0, diffuse_reflectance=0.5))
 print(G.min(), G.max(), cycles)    # 80 and 80 to rounding, 3 cycles: G = 4 * 10 / (1 - 0.5)
 ```
 
@@ -101,7 +102,7 @@ geometry = Surfaces.from_triangles(
 )
 surfaces = geometry.with_optics(
     emission=lamp_exitance(geometry, {"lamp": 35.0}),              # a 35 W lamp
-    reflectance=geometry.per_facet({"wall": 0.3}, default=0.0),
+    diffuse_reflectance=geometry.per_facet({"wall": 0.3}, default=0.0),
 )
 cell_centres = mesh.geometry().cell.centroid                       # or any (n, 3) array of points
 model = build_radiation_model(cell_centres, surfaces)
@@ -174,7 +175,7 @@ from a mesh's boundary patch ({func}`~aquaflux.mesh.patch_triangles`), or from a
 - **Optics are set per named body.** {meth}`~aquaflux.radiation.Surfaces.per_facet` expands a
   `{body: value}` mapping into a per-facet array and raises on a body name it does not know, so a
   misspelled `"lmap"` fails rather than emitting nothing.
-  {meth}`~aquaflux.radiation.Surfaces.with_optics` returns a copy with new emission, reflectance,
+  {meth}`~aquaflux.radiation.Surfaces.with_optics` returns a copy with new emission, reflectances,
   power or angular profiles and the same geometry, which is how a study varies them.
 - **A zero-area facet is a point source.** It carries a radiant `power` in watts rather than an
   exitance, emits isotropically — give it the {class}`~aquaflux.radiation.Isotropic` profile, since
@@ -348,10 +349,65 @@ E = direct_irradiance(surfaces, points, normals, absorption=medium, visibility=s
 height facing the fixture, say. In a uniformly glowing box this gives `E = B` at any point and any
 orientation, as it should.
 
-⚠️ **Reflection is diffuse.** A reflectance of 0.95 does not say whether a wall scatters in every
-direction or reflects like a mirror, and the two are not close: Hassanpour et al. (2023) measure a
-10–47% spread in log reduction between fully specular and fully diffuse walls at the same
-reflectivity. Supply a reflectance with that assumption in mind.
+### Mirror-like walls
+
+A reflectance of 0.95 does not say whether a wall scatters in every direction or reflects like a
+mirror, and the two are not close: simulating a reactor with a cylindrical reflector, Hassanpour et
+al. (2023) find a 10–47% spread in log reduction between fully specular and fully diffuse walls at
+the same reflectivity, growing as the lamps are moved further from the water. So a surface set
+carries the two separately, as `diffuse_reflectance` and `specular_reflectance`, which must each lie
+in `[0, 1]` and sum to at most one on each facet.
+
+A body reflects specularly only if it is named as specular when the model is built, because which
+walls are mirrors is geometry and is frozen with the rest:
+
+```python
+model = build_radiation_model(
+    cell_centres,
+    surfaces,
+    specular=["end plate"],
+    occluders=[sleeve],
+)
+optics = surfaces.with_optics(
+    diffuse_reflectance=surfaces.per_facet({"end plate": 0.1, "wall": 0.3}, default=0.0),
+    specular_reflectance=surfaces.per_facet({"end plate": 0.6}, default=0.0),
+)
+G, cycles = fluence_rate(model, optics, transmittance=[0.9])
+```
+
+Each specular body is split into the flat planes its facets lie in, and each plane is a mirror: what a
+point sees in it is the mirror image of every source, through the mirror's own outline. The light it
+reflects reaches the volume and the other walls, and through them the diffuse interreflection, so the
+solve and every field include it. Its specular reflectance is one value per body, supplied at each
+call and differentiable like the diffuse one.
+
+A reflected path is shadowed like a direct one, on both of its legs: from the source to the mirror,
+and from the mirror on. The same occluders and the same self-occlusion setting apply, so a baffle or
+a lamp sleeve stands in the way of reflected light exactly as it does of direct light. Each leg is
+tested with one ray, through the source's centroid, whichever self-occlusion strategy is chosen: a
+reflected path has no single view of its source to clip, so `SilhouetteOcclusion` refines only the
+direct paths. A body crossed on both legs filters the light twice, by its transmittance squared, and
+the transmittance stays live and differentiable on the reflected paths as on the direct ones.
+
+What a specular body is limited to, and what the model refuses rather than answers wrongly:
+
+- **One bounce.** Light reflecting off two mirrors in turn is not carried. For a single flat mirror,
+  or a plane of symmetry, one bounce is all there is.
+- **Flat bodies.** A body lying in more than 12 planes is refused (`max_mirror_planes` raises the
+  limit): a curved one, such as a lamp sleeve, is one mirror per flat strip of facets, which is slow
+  and describes a curved mirror poorly. Each plane costs many times the direct gather it mirrors:
+  an image seen wholly inside or wholly outside the mirror's outline is cheap, but one that crosses
+  the outline is clipped against each of the mirror's triangles it may overlap. So a body's planes
+  are the cost to watch: twelve covers a box, or a wall with a few bends.
+- **One ray per reflected path.** A source partly hidden on a reflected path counts as wholly hidden
+  or wholly clear, as under the ray test, whichever strategy shadows the direct paths. A source
+  that straddles a mirror's plane is not shadowed on its reflected paths at all.
+- **A uniform medium.** A graded one (`VoxelAbsorption`) is refused with specular bodies.
+- **One value per body.** A specular body whose facets carry different specular reflectances is
+  refused, and so is a specular reflectance on a body not named as specular.
+- **Several planes in one body** share the body's path lengths between each pair of facets as an
+  average, weighted by how much each plane carries. That is exact for a body with one plane, so name
+  each reflective wall as its own body where the medium absorbs strongly.
 
 ## Build once, solve many
 
@@ -362,7 +418,7 @@ study sweeps is supplied per call:
 
 | frozen at the build | supplied per call |
 |---|---|
-| surface geometry, receiver positions | emission, point-source power, reflectance, profile parameters |
+| surface geometry, receiver positions, which bodies are mirrors | emission, point-source power, diffuse and specular reflectance, profile parameters |
 | body shapes (which pairs they block) | body transmittance |
 | the self-shadowing strategy | the medium (`absorption`) |
 
@@ -387,7 +443,7 @@ field is unset by default, which means the function it reaches uses its own defa
 ## Derivatives
 
 Every optical input is differentiable, through the interreflection solve by its adjoint rather
-than by replaying the iterations: emission, point-source power, reflectance, profile parameters,
+than by replaying the iterations: emission, point-source power, both reflectances, profile parameters,
 body transmittance, and the absorption coefficient or voxel field. So a sensitivity is one
 reverse-mode pass:
 
@@ -395,7 +451,8 @@ reverse-mode pass:
 import jax
 
 def mean_fluence_rate(reflectance, coefficient):
-    optics = surfaces.with_optics(reflectance=surfaces.per_facet({"wall": 1.0}, default=0.0) * reflectance)
+    walls = surfaces.per_facet({"wall": 1.0}, default=0.0)
+    optics = surfaces.with_optics(diffuse_reflectance=walls * reflectance)
     G, _ = fluence_rate(model, optics, absorption=UniformAbsorption(coefficient))
     return G.mean()
 
@@ -523,7 +580,8 @@ attaches to a scalar carried by the converged flow.
   Sozzi & Taghipour (2006) benchmark — and carries a systematic error of that size at
   drinking-water transmittances. A sleeved lamp in air is subject to the same neglect, though its
   size there is not quantified here; a bare lamp has no sleeve to refract through.
-- **Specular reflection.** Walls reflect diffusely (see above).
+- **Specular reflection beyond one flat bounce.** Mirror-like walls are carried for one bounce off
+  flat bodies (see [Mirror-like walls](#mirror-like-walls)).
 - **Scattering by the medium, and more than one waveband.** The medium absorbs but does not
   scatter — neither particles in water nor aerosols or droplets in air — at one wavelength (see
   [Air disinfection](#air-disinfection) for lamps with more than one).

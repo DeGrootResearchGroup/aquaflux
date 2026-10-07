@@ -1,0 +1,28 @@
+# The black room's fluence rate at every cell centre, and the irradiance on its floor, ceiling and walls.
+#
+# bunny_floor.yaml's room, lamp and bunny, gathered everywhere: G at all 2,461,089 cell centres (the
+# points the discrete-ordinates G belongs to), and E at the face centres of every patch but the lamp
+# and the bunny -- whose faces lie on the emitting surface and on the body. The lamp is its patch's
+# 1,120 fan triangles as they are: split against every cell, the near-field cells would ask for
+# ~0.4 mm facets, and a field of 2.5M cells against them is not affordable. On the cells of the two
+# slices, 1,120 facets leave banding in the bunny's penumbrae (2.9 % at the 99th percentile against
+# the lamp split as on the floor), which slices_refined.py measures.
+mesh: {kind: OpenFOAMMesh, path: ../work/bunny/case/constant/polyMesh}
+physics:
+  kind: Radiation
+  occluders:
+    - {kind: PatchBody, patches: [bunny], sheet: true}
+  settings:
+    kind: RadiationSettings
+    self_occlusion: {kind: NoOcclusion}
+boundaries:
+  lamp:
+    kind: Lamp
+    profile: {kind: IesProfile, file: ../ushio_b1.ies, up: [1.0, 0.0, 0.0]}
+  floor: {kind: Wall}
+  ceiling: {kind: Wall}
+  walls: {kind: Wall}
+  bunny: {kind: Wall}
+outputs:
+  directory: ../work/cases/bunny_volume
+  fields: [{kind: Vtk}, {kind: PatchVtk}]

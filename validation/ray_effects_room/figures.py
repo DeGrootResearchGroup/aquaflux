@@ -28,6 +28,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1]))
 sys.path.insert(0, str(HERE))
 
+import outputs  # noqa: E402
 import patches  # noqa: E402
 import room  # noqa: E402
 
@@ -46,14 +47,13 @@ def load(mesh: str) -> dict:
     if reference.exists():
         record = json.loads(reference.with_suffix(".json").read_text())
         fields["reference"] = {"E": np.load(reference)["E"], "label": "Reference", "record": record}
-    ours = WORK / "aquaflux" / f"{mesh}.npz"
-    if ours.exists():
-        record = json.loads(ours.with_suffix(".json").read_text())
-        # The refined lamp's field: the one whose lamp discretization has been shown not to matter.
+    if outputs.exists(f"{mesh}_floor"):
+        # cases/<mesh>_floor.yaml: the lamp split fine against the floor, the field whose lamp
+        # discretization has been shown not to matter.
         fields["aquaflux"] = {
-            "E": np.load(ours)["E_refined"],
+            "E": outputs.patch_field(f"{mesh}_floor", "floor", "E"),
             "label": "aquaflux",
-            "record": record,
+            "record": outputs.record(f"{mesh}_floor"),
         }
     runs = sorted(
         (WORK / "runs").glob(f"{mesh}_nphi*"),
@@ -232,14 +232,17 @@ def summary_table(results: dict) -> str:
             if "_nphi" in name:
                 directions, seconds = record["directions"], record["wall_seconds"]
                 hardware = f"CPU, {record['mpi_ranks']} MPI ranks"
-            elif name == "aquaflux" and "timing_s" in record:  # the reflecting room
-                directions = f"exact ({record['room_triangles']} room triangles, reflectance {record['wall_reflectance']})"
-                seconds = record["timing_s"]["total"]
-                hardware = f"CPU ({record['backend']}), {record['cpu_count']} cores"
+            elif name == "aquaflux" and "reflector_facets" in record["results"]:  # reflecting room
+                directions = (
+                    f"exact ({record['results']['reflector_facets']} room triangles, "
+                    f"reflectance {room.WALL_REFLECTANCE})"
+                )
+                seconds = record["seconds"]
+                hardware = "CPU"
             elif name == "aquaflux":
-                directions = f"exact ({record['refined_lamp_facets']} lamp facets)"
-                seconds = round(sum(record["timing"]["refined"].values()), 1)
-                hardware = f"CPU ({record['backend']}), {record['cpu_count']} cores"
+                directions = f"exact ({record['results']['lamp_facets']} lamp facets)"
+                seconds = record["seconds"]
+                hardware = "CPU"
             else:
                 directions = f"{record['window_samples']} window samples"
                 seconds = record["seconds"]
@@ -255,14 +258,14 @@ def load_volume(mesh: str) -> dict | None:
     """``G`` on each slice from every source, and over the whole volume from aquaflux and DOM."""
     cells = np.load(WORK / mesh / "cells.npz")
     reference = WORK / "reference" / f"{mesh}.npz"
-    ours = WORK / "aquaflux" / f"{mesh}_volume.npz"
-    if not reference.exists() or not ours.exists():
+    refined = outputs.run_directory(f"{mesh}_volume") / "slices_refined.npz"
+    if not reference.exists() or not outputs.exists(f"{mesh}_volume") or not refined.exists():
         return None
-    stored_reference, stored_ours = np.load(reference), np.load(ours)
+    stored_reference, stored_ours = np.load(reference), np.load(refined)
     from aquaflux.io.openfoam.fields import parse_scalar_field
     from aquaflux.io.openfoam.foamfile import read_foam_body
 
-    volume = {"aquaflux": {"G": stored_ours["G"], "label": "aquaflux"}}
+    volume = {"aquaflux": {"G": outputs.cell_field(f"{mesh}_volume", "G"), "label": "aquaflux"}}
     for run in sorted(
         (WORK / "runs").glob(f"{mesh}_nphi*"),
         key=_dom_order,
@@ -301,11 +304,10 @@ def load_reflecting(mesh: str) -> tuple[dict, dict] | None:
     DOM runs are compared with aquaflux, whose own checks (energy, facet size, two routes to the
     slices) are in its record.
     """
-    ours = WORK / "aquaflux" / f"{mesh}_reflecting.npz"
-    if not ours.exists():
+    case = f"{mesh}_reflecting"
+    if not outputs.exists(case):
         return None
-    stored = np.load(ours)
-    record = json.loads(ours.with_suffix(".json").read_text())
+    record = outputs.record(case)
     geometry = patches.load(mesh)
     floor = geometry["floor"]
     cells = np.load(WORK / mesh / "cells.npz")
@@ -314,8 +316,10 @@ def load_reflecting(mesh: str) -> tuple[dict, dict] | None:
     from aquaflux.io.openfoam.foamfile import read_foam_body
 
     label = "aquaflux"
-    floor_fields = {"aquaflux": {"E": stored["E"], "label": label, "record": record}}
-    volume_fields = {"aquaflux": {"G": stored["G"], "label": label}}
+    floor_fields = {
+        "aquaflux": {"E": outputs.patch_field(case, "floor", "E"), "label": label, "record": record}
+    }
+    volume_fields = {"aquaflux": {"G": outputs.cell_field(case, "G"), "label": label}}
     for run in sorted(
         (WORK / "runs").glob(f"{mesh}_reflecting_nphi*"),
         key=_dom_order,
@@ -334,9 +338,7 @@ def load_reflecting(mesh: str) -> tuple[dict, dict] | None:
     slices = {}
     for name in room.SLICES:
         chosen = room.slice_cells(cells["centre"], cells["volume"], name)
-        where = np.searchsorted(stored["slice_cells"], chosen)
         fields = {k: {"G": f["G"][chosen], "label": f["label"]} for k, f in volume_fields.items()}
-        fields["aquaflux"]["G"] = stored["G_slices"][where]  # the refined lamp's, as elsewhere
         slices[name] = {"cells": chosen, "fields": fields}
     floor_case = {
         "floor": floor,
@@ -465,12 +467,19 @@ def black_versus_reflecting(mesh: str) -> None:
     from matplotlib.collections import PolyCollection
     from matplotlib.colors import LogNorm, Normalize
 
-    reflecting = WORK / "aquaflux" / f"{mesh}_reflecting.npz"
-    if not reflecting.exists():
+    reflecting, black = f"{mesh}_reflecting", f"{mesh}_volume"
+    if not (outputs.exists(reflecting) and outputs.exists(black)):
         return
-    lit = np.load(reflecting)
-    black_floor = np.load(WORK / "aquaflux" / f"{mesh}.npz")["E_refined"]
-    black_volume = np.load(WORK / "aquaflux" / f"{mesh}_volume.npz")
+    # Both runs light the room with the lamp patch's own 1,120 triangles, so the panels differ by the
+    # walls' reflectance alone.
+    lit = {
+        "E": outputs.patch_field(reflecting, "floor", "E"),
+        "E_reflected": outputs.patch_field(reflecting, "floor", "E_reflected"),
+        "G": outputs.cell_field(reflecting, "G"),
+        "G_reflected": outputs.cell_field(reflecting, "G_reflected"),
+    }
+    black_floor = outputs.patch_field(black, "floor", "E")
+    black_volume = outputs.cell_field(black, "G")
     floor = patches.load(mesh)["floor"]
     cells = np.load(WORK / mesh / "cells.npz")
     scale = 1e6 / 1e4  # W/m^2 to uW/cm^2
@@ -502,9 +511,8 @@ def black_versus_reflecting(mesh: str) -> None:
 
     for name in room.SLICES:
         chosen = room.slice_cells(cells["centre"], cells["volume"], name)
-        black = black_volume["G_refined"][np.searchsorted(black_volume["slice_cells"], chosen)]
-        where = np.searchsorted(lit["slice_cells"], chosen)
-        total, bounced = lit["G_slices"][where], lit["G_slices_reflected"][where]
+        black = black_volume[chosen]
+        total, bounced = lit["G"][chosen], lit["G_reflected"][chosen]
         axis, value = room.SLICES[name]
         across = [i for i in range(3) if i != axis]
         centre = cells["centre"][chosen][:, across]

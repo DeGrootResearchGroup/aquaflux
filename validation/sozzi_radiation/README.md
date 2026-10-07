@@ -4,7 +4,7 @@
 runs its discrete-ordinates (DOM) solver at several angular resolutions. See its docstring for the
 case and the environment it needs.
 
-## Dose on the wall-resolved uvmesh mesh, with only G swapped (2026-10-01, `uvmesh_swap.py`)
+## Dose on the wall-resolved uvmesh mesh, with only G swapped (2026-10-02, `uvmesh_swap.py`)
 
 The same question as the next section, asked on the wall-resolved mesh that of-optical-radiation's
 `tools/uvMesh` builds for this reactor (1,232,629 cells; 20 um first cell at the sleeve, 100 um at the
@@ -16,44 +16,123 @@ tracker's dictionaries; none of it is in the repository. Three stages, chosen by
 
 - `gather`: aquaflux's G at every cell centre, from the mesh's own lamp patches (`lamp0_wall`,
   `lamp0_tip_B`: 87,040 triangles, coarsened to 16,878 facets at a 4 mm edge and 0.1 mm chord, 35.429
-  W), black walls, absorption 35.67 /m, the pipe openings as in `compare_fluence.py`. 816 s, jax 0.10.2.
-- `write`: one tracking case per G. `aquaflux`, `dom64` and `dom256` get the interior values and
+  W), black walls, absorption 35.67 /m, the pipe openings as in `compare_fluence.py`. 714 s alone on
+  the machine (816 s in the first run, which shared it), plus 24 s reading the mesh and 18 s
+  coarsening; jax 0.10.2, 11 cores.
+- `write`: one tracking case per G. `aquaflux`, `dom72` and `dom288` get the interior values and
   `zeroGradient` on every ordinary patch (the couplings keep their constraint types), so the patch
-  treatment is the same for all three; `dom256_native` keeps the DOM file as written.
+  treatment is the same for all three; `dom288_native` keeps the DOM file as written.
 - `compare`: after the tracker has run in each case, refuses runs whose particles did not follow the
   same paths, then writes `swap/summary.json`.
 
-Tracker: of-optical-radiation's `radiationDose` with the `langevin` dispersion model (its PR #90, at its
-defaults), seed 42, one OpenMP thread (on three it aborts building the couplings' point normals).
-DOM: 64 (8 x 4) and 256 (16 x 8) directions, 1 x 1 pixels, bounded Gauss linearUpwind rays,
-convergence 1e-5, of-optical-radiation `659ec4a`. 9,986 of 9,987 particles escaped in every run, with
-identical ends.
+Tracker: of-optical-radiation's `radiationDose` with the `langevin` dispersion model of its PR #90 at
+`b23582b` (one integrator, continuous step, defaults), seed 42, one OpenMP thread (on three it aborts
+building the couplings' point normals). DOM: of-optical-radiation `659ec4a`, 1 x 1 pixels, bounded Gauss
+linearUpwind rays, convergence 1e-5 (15 sweeps), 8 MPI ranks, on **uniform angular grids**:
+`nPhi = nTheta = 6` (72 directions, every bin 30 degrees square) and `12` (288, 15 degrees). DOM divides
+the polar angle over the whole sphere into `nTheta` bins of `pi/nTheta` and the azimuth into `2 nPhi`
+bins of `pi/nPhi`, so its bins are square only when `nPhi == nTheta`; these match Fluent's 3 x 3 and
+6 x 6 theta x phi divisions per octant. Solves alone on the machine: 258 s and 1055 s. All 9,987
+particles escaped in every run, with identical ends.
 
 | G | mean dose [mJ/cm2] | LR k = 0.01 | 0.1 | 0.5 | LR / aquaflux at k = 0.1 / 0.5 |
 |---|---|---|---|---|---|
-| aquaflux | 48.98 | 0.198 | 1.488 | 5.406 | 1 / 1 |
-| DOM 64 | 48.38 | 0.195 | 1.443 | 4.755 | 0.970 / 0.880 |
-| DOM 256 | 49.03 | 0.198 | 1.485 | 5.377 | 0.998 / 0.995 |
-| DOM 256, its own patch values | 49.02 | 0.198 | 1.485 | 5.377 | 0.998 / 0.995 |
+| aquaflux | 49.33 | 0.198 | 1.490 | 5.366 | 1 / 1 |
+| DOM 72 | 49.16 | 0.197 | 1.475 | 5.249 | 0.990 / 0.978 |
+| DOM 288 | 49.50 | 0.199 | 1.491 | 5.358 | 1.000 / 0.999 |
+| DOM 288, its own patch values | 49.49 | 0.199 | 1.491 | 5.358 | 1.000 / 0.999 |
 
-Fields: volume-weighted mean G over the reactor 133.78 (aquaflux), 132.19 (DOM 64), 133.96 (DOM 256)
+DOM 288's log reduction is within 0.23 % of aquaflux's at every k (largest at k = 0.01); DOM 72's
+falls short by 0.5 % at k = 0.01 growing to 2.2 % at k = 0.5. Per particle, DOM / aquaflux at
+percentiles 1 / 10 / 50 / 90 / 99: DOM 72 0.922 / 0.959 / 0.995 / 1.025 / 1.055; DOM 288 0.990 /
+0.997 / 1.002 / 1.007 / 1.011.
+
+Fields: volume-weighted mean G over the reactor 133.78 (aquaflux), 133.29 (DOM 72), 134.22 (DOM 288)
 W/m2; DOM over aquaflux cell by cell where aquaflux's G exceeds 1e-3 of its peak, percentiles 10 to
-90: 0.586 to 1.233 at 64 directions, 0.935 to 1.055 at 256. linearUpwind G is below zero in 6.3 % of
-cells at both resolutions (the tracker counts it as zero).
+90: 0.858 to 1.111 at 72 directions, 0.979 to 1.028 at 288. linearUpwind G is below zero in 5.8 %
+(72) and 6.5 % (288) of cells (the tracker counts it as zero).
 
 **The mean dose is the volume integral of G over the flow rate, and the tracker returns it.** In a
 steady flow the dose averaged over the outflow is `integral(G dV) / Q` whatever the flow's pattern, so a
 dispersion model that keeps particles distributed as the fluid is must reproduce it. `compare` writes
 it (`fields_compared.mean_dose_from_integral`; reactor volume 5.759 L, Q = 25 US gal/min): aquaflux
-48.84, DOM 64 48.27, DOM 256 48.91 mJ/cm2, against tracked means of 48.98, 48.38 and 49.03 (0.2-0.3 %
-above; the 9,986 escaped particles are a sample, and they are seeded uniformly over the inlet's area
-rather than its flux, so exact agreement is not expected). A tracker
-whose mean dose exceeds this integral is over-sampling the bright fluid next to the lamp. On this mesh DOM 256 agrees with aquaflux
-within 0.6 % at every k, against 1.1 % on the snapped mesh of the next section; DOM 64 falls 12 %
-short at k = 0.5, against 23 %. Those differ in mesh, flow, dispersion model and G's patch values at
-once, so the change is not attributable to any one of them.
+48.84, DOM 72 48.66, DOM 288 49.00 mJ/cm2, against tracked means of 49.33, 49.16 and 49.50 (1.0 %
+above; the 9,987 particles are a sample, and they are seeded uniformly over the inlet's area rather
+than its flux, so exact agreement is not expected). A tracker whose mean dose exceeds this integral
+by much more is over-sampling the bright fluid next to the lamp.
+
+**An earlier set used non-uniform grids, and most of its 64-direction error was the grid's shape.**
+The first swap (2026-10-01, the same mesh, flow, tracker and particles) ran DOM at `nPhi 8, nTheta 4`
+(64 directions; polar bins 45 degrees, azimuthal 22.5) and `16 x 8` (256): with the tracker at
+`b23582b`, LR / aquaflux 0.971 / 0.876 at k = 0.1 / 0.5 for 64 and 0.998 / 0.994 for 256. The uniform
+72-direction grid, with only 12 % more directions, closes most of the 64's shortfall at k = 0.5
+(2.2 % against 12.4 %). The snapped-mesh results in the sections below were also computed on
+`8 x 4` and `16 x 8` grids and have not been rerun.
+
+## aquaflux on a Cartesian background grid, interpolated to the mesh (2026-10-02, `background_grid.py`)
+
+The direct gather costs the same at every receiver, and most of the uvmesh mesh's 1,232,629 cells are
+there for the flow's wall layers. `background_grid.py` gathers G only at the nodes of a uniform
+Cartesian grid (spacing `h`, the nodes that are corners of grid cells holding a cell centre and lie in
+the water: in the three cylinders and outside the 10 mm sleeve) and interpolates it to the cell
+centres, then traces dose with the same tracker and particles as the swap set above. Four variants take
+the same node values to the cells; corners outside the water are never used as data:
+
+- `G_average`: trilinear in G, dry corners dropped and the rest reweighted to sum to one;
+- `logG_average`: the same in log G;
+- `logG_extrapolated`: log G, with a least-squares linear fit to the wet corners wherever a cell has
+  dry ones;
+- `logG_surface`: as `logG_extrapolated`, with the sleeve's own value as data too: every corner inside
+  the sleeve adds its nearest surface point with `G = 2M`, the outgoing hemisphere of a diffuse emitter
+  at zero path length (the sleeve is convex and the walls black, so nothing arrives from elsewhere).
+  A cell beside the sleeve is then fitted between known values on both sides.
+
+The interpolate stage refuses to run unless the interpolator reproduces a linear field exactly at
+cells with all eight corners wet and at every fitted cell, and projects every inside corner onto the
+sleeve; each check was confirmed to fail on a deliberately broken version (a reused slot, a projection
+pulled 10 % inward).
+
+Reference: aquaflux at every cell centre, mean dose 49.33 mJ/cm2, LR 1.490 at k = 0.1 (the swap
+set). All 9,987 particles escaped in every run with identical ends. `logG_surface`:
+
+| h | wet nodes | time (s) | mean dose | max LR error, k = 0.01-0.5 | LR at k = 0.1 | dose / reference per particle, p1 / p50 / p99 |
+|---|---|---|---|---|---|---|
+| 8 mm | 10,860 | 9 + 4 | -0.7 % | 1.8 % | +1.0 % | 0.923 / 0.999 / 1.128 |
+| 6 mm | 26,121 | 13 + 4 | +1.7 % | 1.4 % | +1.0 % | 0.995 / 1.009 / 1.073 |
+| 4 mm | 90,788 | 43 + 4 | +0.9 % | 0.65 % | +0.38 % | 0.998 / 1.003 / 1.045 |
+| 3 mm | 212,523 | 92 + 4 | +0.9 % | 0.60 % | +0.33 % | 0.999 / 1.003 / 1.044 |
+| 2 mm | 691,728 | 259 + 4 | +0.5 % | 0.32 % | +0.17 % | 0.999 / 1.001 / 1.029 |
+
+Times are the gather plus the interpolation; the gather at every cell centre took 714 s. Reading the
+mesh (24-26 s) and coarsening the lamp (19-20 s) come on top of both and are left out of both columns.
+
+- **Without the surface value the near-sleeve field is wrong.** Median ratio to the reference within 1
+  mm of the sleeve: 0.57 (`G_average`), 0.56 (`logG_average`) and 0.63 (`logG_extrapolated`) at 8 mm,
+  and still 0.74-0.81 at 3 mm; with it, 0.83 at 8 mm and 1.00-1.05 from 6 mm down. Every wet corner of a
+  cell beside the sleeve is farther from the lamp than the cell, so averaging them under-predicts it,
+  and an 8 mm extrapolation in log G cannot follow the profile's bend near the surface.
+- **The other variants' dose errors are larger and less consistent.** `G_average`'s mean dose is 2-3 %
+  low at 4-6 mm while its LR is within 0.1 % at 4 and 3 mm, a cancellation between low G near the
+  sleeve and high G (linear interpolation of a convex profile) in the bulk; its p1 per-particle ratio
+  is 0.74-0.88. `logG_average` and `logG_extrapolated` put the mean dose 2-6 % low (averaging the
+  logarithm is a geometric mean, below the arithmetic one).
+- **`logG_surface` slightly over-predicts within 2 mm of the sleeve** (median 1.04-1.08 at 3-6 mm): log G
+  is not quite linear between the surface and the first wet node. That is the source of its +0.3-0.4 %
+  LR at 3-4 mm and +0.9 % mean dose.
+- **The gain levels off at 4 mm**: 3 mm is no better, and the remaining error is the over-prediction
+  above, not resolution. 4 mm gathers 15x faster than every cell.
+
+Configuration: aquaflux at this commit, jax 0.10.2, CPU, x64, macOS arm64, 11 cores; the swap set's lamp
+(16,878 facets), black walls, absorption 35.67 /m; tracker OOR `b23582b` `langevin`, seed 42, one thread,
+five traces at a time (twelve at once ran Docker's VM out of memory and killed three). The 6 and 4 mm
+gathers ran past `run_case.sh`'s free-memory check, which Docker's VM was failing, with nothing else
+running.
 
 ## Dose: what the fluence-rate differences are worth to a particle (2026-09-25, `dose_comparison.py`)
+
+**Angular grids not uniform.** The DOM fields in this section are on `8 x 4` (64 directions) and `16 x 8`
+(256) grids, whose polar bins are twice as wide as their azimuthal ones (DOM's `nTheta` spans the
+whole sphere); see the first section for the uniform `6 x 6` and `12 x 12` set.
 
 The reactor is designed against dose, not `G`. `dose_comparison.py` solves the tutorial's own flow
 and runs of-optical-radiation's Lagrangian tracker (`radiationDose`) once per fluence rate, so the
@@ -523,6 +602,10 @@ the host path), so the 62 minutes is not expected to move; the analytic row may 
 
 ## Measured (2026-09-22)
 
+**Angular grids not uniform.** The DOM fields in this section are on `8 x 4` (64 directions) and `16 x 8`
+(256) grids, whose polar bins are twice as wide as their azimuthal ones (DOM's `nTheta` spans the
+whole sphere); see the first section for the uniform `6 x 6` and `12 x 12` set.
+
 Configuration: of-optical-radiation `726714d`, image built locally from its `Dockerfile`
 (OpenFOAM 13, arm64), Apple Silicon 11 cores / 19 GB, Docker's full allocation. Mesh from the
 tutorial's own `snappyHexMesh` settings: **1,635,909 cells**, `checkMesh` OK (not the ~365k an
@@ -545,6 +628,10 @@ this machine has. So a pointwise gate against DOM is not defensible at any resol
 here; a volume-integrated comparison is.
 
 ## aquaflux against DOM (2026-09-22, `compare_fluence.py`)
+
+**Angular grids not uniform.** The DOM fields in this section are on `8 x 4` (64 directions) and `16 x 8`
+(256) grids, whose polar bins are twice as wide as their azimuthal ones (DOM's `nTheta` spans the
+whole sphere); see the first section for the uniform `6 x 6` and `12 x 12` set.
 
 aquaflux: the lamp patch's own STL (7516 facets, 35.26 W at 696.42 W/m²), direct gather at every
 cell centre, exact visibility through the pipe openings (checked against brute-force segment

@@ -69,6 +69,7 @@ multiply against them.
 from __future__ import annotations
 
 import functools
+from collections.abc import Sequence
 
 import equinox as eqx
 import jax
@@ -79,7 +80,14 @@ import numpy as np
 from aquaflux.morton import morton_order
 from aquaflux.radiation.absorption import UniformAbsorption
 from aquaflux.radiation.clipping import _SLACK
+from aquaflux.radiation.images import plane_exchange
 from aquaflux.radiation.lit_blocks import rounded_width
+from aquaflux.radiation.mirror_visibility import (
+    MirrorVisibility,
+    build_mirror_masks,
+    reflected_surviving,
+)
+from aquaflux.radiation.mirrors import Mirror, planar_mirrors
 from aquaflux.radiation.profiles import AxisymmetricProfile, Lambertian
 from aquaflux.radiation.quadrature import TriangleQuadrature, triangle_quadrature
 from aquaflux.radiation.self_occlusion import SelfOcclusion
@@ -88,6 +96,14 @@ from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.visibility import Visibility, build_visibility
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, in_passes
 from aquaflux.vectors import dot
+
+#: The most planes one specular body may split into before it is refused as curved. Each plane is a
+#: mirror whose images cost a gather of their own -- several times a direct one even with each image
+#: clipped only against the aperture facets it overlaps, as measured on a reactor's flat end plates by
+#: ``validation/sozzi_radiation/specular_cost.py`` -- so the bound keeps a model's cost within some
+#: tens of direct gathers per body. Twelve admits any box and a body with several bends; a curved
+#: body, tessellated into many strips, exceeds it and belongs to an exact curved-mirror method.
+MAX_MIRROR_PLANES = 12
 
 #: Points per receiving facet in the default transfer build. Six is where the measured
 #: cost/accuracy frontier turns over -- see :func:`build_transfer`.
@@ -128,12 +144,48 @@ class TransferMatrix(eqx.Module):
         a transmittance without re-walking any geometry.
     visibility : Visibility
         The frozen blocking mask, built for the facet centroids as receivers.
+    specular_solids : tuple of str
+        The bodies that reflect specularly, in the order of the specular arrays' first axis.
+        Empty for a transfer with no specular reflection, which is then exactly the diffuse one.
+    mirrors : tuple of Mirror
+        Every plane those bodies reflect in, across all of them.
+    specular_terms : tuple of (int, tuple of int)
+        What each entry of the specular arrays' first axis stands for: the specular body, by its
+        index in :attr:`specular_solids`, and the pattern of what its paths cross -- how many of
+        the two legs each analytic body lies across, in the order of the bodies the visibility was
+        built with. Paths are grouped by pattern so that the bodies' transmittance stays live:
+        every path of one term is filtered by the same powers of the same transmittances. With
+        nothing in the way there is one term per body, with an empty pattern.
+    specular_geometric : jnp.ndarray, shape ``(n_terms, n_facets, n_facets)``
+        Per term, the transfer from facet ``j`` to facet ``i`` by one bounce in any of its body's
+        planes, at unit reflectance and before any transmittance:
+        :attr:`~aquaflux.radiation.images.PlaneExchange.geometric` summed over the planes, over
+        the pairs whose path has the term's pattern. A path the surface's own triangles stand
+        across carries nothing and is in no term. The body's specular reflectance and the
+        pattern's transmittance multiply it live.
+    specular_separation, specular_source_cosine : jnp.ndarray, shape ``(n_terms, n_facets, n_facets)``
+        The unfolded path length and the source cosine of each pair, averaged over the planes in
+        proportion to what each carries. Exact where one plane carries the pair; where several
+        reach it along different paths, a one-point value in the same sense the centroid
+        separation is for the direct transfer.
+    point_shadows : tuple of MirrorVisibility, or None
+        What stands across the paths from each point source to each facet, one mask per mirror
+        in the order of :attr:`mirrors` -- the reflected counterpart of :attr:`visibility` for the
+        light the transfer cannot carry, since a point source has no area in it. ``None`` where
+        nothing can stand in the way, or no source is a point.
     """
 
     geometric: jnp.ndarray
     source_cosine: jnp.ndarray
     separation: jnp.ndarray
     visibility: Visibility
+    specular_geometric: jnp.ndarray | None = None
+    specular_separation: jnp.ndarray | None = None
+    specular_source_cosine: jnp.ndarray | None = None
+    mirrors: tuple[Mirror, ...] = ()
+    point_shadows: tuple[MirrorVisibility, ...] | None = None
+    specular_solids: tuple[str, ...] = eqx.field(static=True, default=())
+    specular_terms: tuple[tuple[int, tuple[int, ...]], ...] = eqx.field(static=True, default=())
 
     @property
     def n_facets(self) -> int:
@@ -171,11 +223,24 @@ class TransferMatrix(eqx.Module):
         tuple of (jnp.ndarray, jnp.ndarray)
             ``F`` and ``F^M``, each ``(n_facets, n_facets)``: the weight carrying a facet's
             *reflected* output, which leaves Lambertian, and the weight carrying its own
-            *emission*, which leaves with its own distribution.
+            *emission*, which leaves with its own distribution. Each includes what reaches a facet
+            by one specular bounce, weighted by the bouncing body's specular reflectance.
+
+        Raises
+        ------
+        ValueError
+            If a body not built as specular has a specular reflectance, or one built as specular
+            has different specular reflectances on different facets.
+        TypeError
+            If the specular reflectance is traced and no body was built as specular.
+        NotImplementedError
+            If there are specular bodies and the medium is graded, which their frozen path
+            lengths cannot carry.
         """
-        surviving = self.visibility.surviving(
+        transmittance = (
             jnp.zeros(self.visibility.n_occluders) if transmittance is None else transmittance
         )
+        surviving = self.visibility.surviving(transmittance)
         if absorption is None:
             through = 1.0
         elif isinstance(absorption, UniformAbsorption):
@@ -193,6 +258,7 @@ class TransferMatrix(eqx.Module):
                 ),
             )
         common = self.geometric * surviving * through
+        mirrored = self._mirrored(surfaces, absorption, transmittance)
 
         # The emitted component leaves with each source's own distribution; the reflected component
         # leaves Lambertian by assumption. For a Lambertian source the two coincide exactly, which
@@ -202,14 +268,62 @@ class TransferMatrix(eqx.Module):
             for kind, profile in enumerate(surfaces.profiles)
             if np.any((np.asarray(surfaces.profile_index) == kind) & ~surfaces.is_point_source)
         )
+        reflected = common + sum(term for term, _ in mirrored)
         if lambertian:
-            return common, common
+            return reflected, reflected
+        emitted = common * self._relative_radiance(surfaces, self.source_cosine)
+        for term, cosine in mirrored:
+            emitted = emitted + term * self._relative_radiance(surfaces, cosine)
+        return reflected, emitted
+
+    def _mirrored(self, surfaces, absorption, transmittance) -> list:
+        """Each specular term's live transfer, with the source cosine its emission is read at.
+
+        Returns
+        -------
+        list of (jnp.ndarray, jnp.ndarray)
+            Per term, ``rho_s * surviving * G * attenuation`` and the mean source cosine, each
+            ``(n_facets, n_facets)``: the body's reflectance, its pattern's transmittance, and the
+            medium along the unfolded path.
+        """
+        reflectance = _specular_by_solid(surfaces, self.specular_solids)
+        if not self.specular_solids:
+            return []
+        if absorption is not None and not isinstance(absorption, UniformAbsorption):
+            msg = (
+                "specular reflection between facets is carried along frozen unfolded path "
+                "lengths, which a uniform medium attenuates in closed form but a graded one "
+                "cannot: its paths have to be walked through the fluid, and which mirror plane "
+                "each one breaks at is not kept. Use a UniformAbsorption, or build the model "
+                "without specular bodies."
+            )
+            raise NotImplementedError(msg)
+        terms = []
+        for index, (solid, crossings) in enumerate(self.specular_terms):
+            surviving = reflected_surviving(
+                jnp.asarray(crossings, dtype=jnp.uint8).reshape(-1), None, transmittance
+            )
+            term = reflectance[solid] * surviving * self.specular_geometric[index]
+            if absorption is not None:
+                term = term * jnp.exp(-absorption.coefficient * self.specular_separation[index])
+            terms.append((term, self.specular_source_cosine[index]))
+        return terms
+
+    def _relative_radiance(self, surfaces, cosine):
+        """Each areal source's radiance at ``cosine``, relative to a Lambertian one: ``pi L / M``.
+
+        Point sources are left at zero: they are absent from the transfer, and asking one for a
+        radiance is a category error it refuses rather than answers.
+
+        Parameters
+        ----------
+        surfaces : Surfaces
+        cosine : jnp.ndarray, shape ``(n_facets, n_facets)``
+            The source cosine of each pair, column ``j`` at source ``j``.
+        """
         index = np.asarray(surfaces.profile_index)
-        # Point sources are already absent from the transfer, and asking one for a radiance is a
-        # category error it refuses rather than answers — so they are skipped here too, or a scene
-        # with a point lamp in it could not assemble at all.
         areal = ~surfaces.is_point_source
-        relative = jnp.zeros_like(common)
+        relative = jnp.zeros_like(cosine)
         for kind, profile in enumerate(surfaces.profiles):
             sources = np.flatnonzero((index == kind) & areal)
             if not len(sources):
@@ -223,11 +337,9 @@ class TransferMatrix(eqx.Module):
                     "facets an AxisymmetricProfile."
                 )
                 raise NotImplementedError(msg)
-            weight = jnp.pi * profile.radiance_per_exitance_at(
-                jnp.take(self.source_cosine, sources, axis=1)
-            )
+            weight = jnp.pi * profile.radiance_per_exitance_at(jnp.take(cosine, sources, axis=1))
             relative = relative.at[:, sources].set(weight)
-        return common, common * relative
+        return relative
 
 
 class _Geometry(eqx.Module):
@@ -546,6 +658,62 @@ def _row_blocks(geometry: _Geometry, sample, weight, rows: int):
     return buffers
 
 
+def _specular_by_solid(surfaces, solids) -> jnp.ndarray:
+    """Each specular body's specular reflectance, checked against the per-facet values.
+
+    The transfer carries one live reflectance per specular body, so a value that varies over a
+    body's facets, or one on a body not built as specular, would be silently replaced or dropped.
+    Both are refused where the values can be read. A traced reflectance cannot be read: it is
+    taken from each body's first facet, and refused outright when no body was built as specular,
+    since a derivative with respect to it would then read zero while a mirror sends light on.
+
+    Parameters
+    ----------
+    surfaces : Surfaces
+    solids : tuple of str
+        The specular bodies, in the transfer's order.
+
+    Returns
+    -------
+    jnp.ndarray, shape ``(len(solids),)``
+    """
+    specular = surfaces.specular_reflectance
+    solid_id = np.asarray(surfaces.solid_id)
+    members = [np.flatnonzero(solid_id == surfaces.solid_names.index(name)) for name in solids]
+    if isinstance(specular, jax.core.Tracer):
+        if not solids:
+            msg = (
+                "specular_reflectance is traced, but no body was built as specular, so the model "
+                "carries no specular reflection and its derivative with respect to that "
+                "reflectance would read zero. Build the model with the reflecting bodies named "
+                "as specular, or keep the reflectance out of the traced values."
+            )
+            raise TypeError(msg)
+        return jnp.take(specular, jnp.asarray([facets[0] for facets in members]))
+    values = np.asarray(specular, dtype=float)
+    declared = np.zeros(values.shape, dtype=bool)
+    for name, facets in zip(solids, members, strict=True):
+        declared[facets] = True
+        if np.any(values[facets] != values[facets[0]]):
+            msg = (
+                f"body {name!r} has specular reflectances from {values[facets].min()} to "
+                f"{values[facets].max()}, but a specular body reflects with one value: give its "
+                "facets the same specular_reflectance"
+            )
+            raise ValueError(msg)
+    stray = np.flatnonzero(~declared & (values != 0.0))
+    if stray.size:
+        bodies = sorted({surfaces.solid_names[int(solid_id[f])] for f in stray})
+        msg = (
+            f"bodies {bodies} have a specular reflectance but were not built as specular, so the "
+            "light they would reflect as mirrors would be dropped, leaving the field darker than "
+            "the walls make it. Name them as specular when building, or give their reflectance "
+            "as diffuse_reflectance."
+        )
+        raise ValueError(msg)
+    return jnp.asarray([values[facets[0]] for facets in members])
+
+
 def build_transfer(
     surfaces: Surfaces,
     *,
@@ -553,6 +721,8 @@ def build_transfer(
     self_occlusion: SelfOcclusion | None = None,
     receiver_quadrature: TriangleQuadrature | int | None = None,
     chunk_size: int = 256,
+    specular: Sequence[str] = (),
+    max_mirror_planes: int = MAX_MIRROR_PLANES,
     **visibility_options,
 ) -> TransferMatrix:
     """Compute, once, the geometry of transfer between every pair of facets.
@@ -578,12 +748,29 @@ def build_transfer(
         Receiving facets per block of the build, bounding the working set beside the arrays kept.
         Its meaning is unchanged by the quadrature: the points are accumulated one at a time
         within a block, so a finer rule costs time and not memory.
+    specular : sequence of str, optional
+        Bodies, by name, that reflect specularly. Each is split into the planes its facets lie in
+        (:func:`~aquaflux.radiation.mirrors.planar_mirrors`), and one bounce in any of them is
+        carried between facets. Their specular reflectance is supplied per call, one value per
+        body. Both legs of each reflected path are tested against the occluders and the surface's
+        own triangles, one ray per pair as the direct mask's are
+        (:func:`~aquaflux.radiation.mirror_visibility.build_mirror_visibility`), whichever
+        ``self_occlusion`` strategy is in force.
+    max_mirror_planes : int, optional
+        The most planes one specular body may split into. A curved body is one plane per facet
+        strip, each a mirror whose images cost a gather of their own and which together describe
+        a curved mirror poorly; a body past this is refused rather than built slowly and wrongly.
     **visibility_options
         Passed through to the visibility build.
 
     Returns
     -------
     TransferMatrix
+
+    Raises
+    ------
+    ValueError
+        If a specular body splits into more than ``max_mirror_planes`` planes.
 
     Notes
     -----
@@ -690,6 +877,31 @@ def build_transfer(
     sample = receiver_quadrature.points(geometry.vertices)
     weight = jnp.asarray(receiver_quadrature.weight)
     geometric, source_cosine, separation = _row_blocks(geometry, sample, weight, chunk_size)
+    specular = tuple(dict.fromkeys(specular))
+    mirrored = _specular_exchange(
+        surfaces,
+        specular,
+        sample,
+        weight,
+        functools.partial(
+            build_mirror_masks,
+            occluders=occluders,
+            surfaces=surfaces,
+            points=surfaces.centroid,
+            # The receivers ARE the facets, so each path's second leg ends on the one it is
+            # aimed at and must ignore it, as the direct mask's rays do.
+            receiver_facet=np.arange(surfaces.n_facets),
+            # Prepared once here, not once per plane: a grid over the triangles is the same for
+            # every mirror. Not at all without a mirror, when no reflected path is masked.
+            self_occlusion=(
+                self_occlusion.prepared(surfaces)
+                if self_occlusion is not None and specular
+                else self_occlusion
+            ),
+            **visibility_options,
+        ),
+        max_mirror_planes,
+    )
 
     return TransferMatrix(
         geometric=geometric,
@@ -706,7 +918,114 @@ def build_transfer(
             self_occlusion=self_occlusion,
             **visibility_options,
         ),
+        **mirrored,
     )
+
+
+def _specular_exchange(surfaces, specular, sample, weight, masks, limit):
+    """The specular fields of a :class:`TransferMatrix`: per body and crossing pattern, summed.
+
+    Each plane's exchange is split by what stands across each pair's reflected path. A pair the
+    surface's own triangles hide carries nothing; the rest are grouped by how many legs each
+    analytic body crosses, so the bodies' transmittance can stay live: within a group every path
+    is filtered by the same powers of the same transmittances, so the group's planes sum into one
+    array that the live factor multiplies as a whole. ``masks`` builds the masks of a sequence of
+    mirrors between the facets, or returns ``None`` when nothing can shadow a path.
+
+    Returns
+    -------
+    dict
+        Keyword arguments for :class:`TransferMatrix`, empty when nothing is specular.
+    """
+    if not specular:
+        return {}
+    n = surfaces.n_facets
+    point_sources = np.flatnonzero(surfaces.is_point_source)
+    shadowed = False
+    terms: dict[tuple[int, tuple[int, ...]], list] = {}
+    mirrors, point_masks = [], []
+    for solid, name in enumerate(specular):
+        planes = planar_mirrors(surfaces, [name])
+        if len(planes) > limit:
+            msg = (
+                f"specular body {name!r} lies in {len(planes)} planes, past the limit of {limit}: "
+                "a curved body is one mirror per flat strip of its facets, which costs a gather "
+                "per strip and describes a curved mirror poorly. Name only flat bodies as "
+                "specular, or raise max_mirror_planes."
+            )
+            raise ValueError(msg)
+        for mirror in planes:
+            exchange = plane_exchange(mirror, surfaces, sample, weight)
+            built = masks(mirrors=(mirror,))
+            mask = None if built is None else built[0]
+            shadowed = built is not None
+            for crossings, carried in _by_pattern(exchange.geometric, mask, n):
+                total, length, angle = terms.setdefault(
+                    (solid, crossings), [jnp.zeros((n, n)), jnp.zeros((n, n)), jnp.zeros((n, n))]
+                )
+                terms[(solid, crossings)] = [
+                    total + carried,
+                    length + carried * exchange.separation,
+                    angle + carried * exchange.source_cosine,
+                ]
+            if mask is not None and point_sources.size:
+                point_masks.append(mask.for_sources(np.intersect1d(point_sources, mask.sources)))
+        mirrors.extend(planes)
+
+    keys = sorted(terms)
+    geometric, separation, cosine = [], [], []
+    for key in keys:
+        total, length, angle = terms[key]
+        carried = total > 0.0
+        safe = jnp.where(carried, total, 1.0)
+        geometric.append(total)
+        separation.append(jnp.where(carried, length / safe, 0.0))
+        cosine.append(jnp.where(carried, angle / safe, 0.0))
+    return {
+        "specular_geometric": jnp.stack(geometric),
+        "specular_separation": jnp.stack(separation),
+        "specular_source_cosine": jnp.stack(cosine),
+        "mirrors": tuple(mirrors),
+        "specular_solids": specular,
+        "specular_terms": tuple(keys),
+        "point_shadows": tuple(point_masks) if shadowed and point_sources.size else None,
+    }
+
+
+def _by_pattern(geometric, mask, n: int):
+    """One plane's exchange split by the legs each body crosses, with hidden pairs dropped.
+
+    Yields
+    ------
+    tuple of (tuple of int, jnp.ndarray)
+        Each pattern -- legs crossed, per body -- and the exchange of the pairs that have it,
+        ``(n, n)``, zero elsewhere. A pattern no carried pair has is not yielded.
+    """
+    if mask is None:
+        yield (), geometric
+        return
+    crossings = np.zeros((mask.n_occluders, n, n), dtype=np.uint8)
+    crossings[:, :, mask.sources] = np.asarray(mask.crossings)
+    visible = np.ones((n, n), dtype=bool)
+    if mask.hidden is not None:
+        visible[:, mask.sources] = ~np.asarray(mask.hidden)
+    # One integer per pair naming its pattern: the legs crossed, as digits base three.
+    code = np.zeros((n, n), dtype=np.int64)
+    for body in range(mask.n_occluders - 1, -1, -1):
+        code = 3 * code + crossings[body]
+    carried = visible & (np.asarray(geometric) > 0.0)
+    for value in np.unique(code[carried]):
+        pattern = tuple(int(digit) for digit in _digits(int(value), mask.n_occluders))
+        yield pattern, jnp.where(jnp.asarray(carried & (code == value)), geometric, 0.0)
+
+
+def _digits(value: int, count: int) -> list[int]:
+    """``value``'s ``count`` least significant digits in base three, least significant first."""
+    digits = []
+    for _ in range(count):
+        value, digit = divmod(value, 3)
+        digits.append(digit)
+    return digits
 
 
 def row_sum_error(transfer: TransferMatrix) -> float:

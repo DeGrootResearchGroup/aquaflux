@@ -82,14 +82,14 @@ def test_all_three_read_forms_are_recognized(tmp_path: Path, read: str) -> None:
 def test_a_multiword_covered_alternative_covers_names_with_that_whole_prefix(
     tmp_path: Path,
 ) -> None:
-    """``ILU0_SWEEP`` is a real prefix in run_case.sh's own list, and it is two words.
+    """A capture alternative may be two words (``TWO_WORD``); the name it covers must pass.
 
     Coverage has to be decided by matching the *whole* name against the capture pattern, not by
     comparing single-word prefixes -- a checker that only ever compared the leading word would
-    wrongly flag every ``ILU0_SWEEP_*`` name, because "ILU0" alone is not one of the alternatives.
+    wrongly flag every ``TWO_WORD_*`` name, because "TWO" alone is not one of the alternatives.
     """
-    (tmp_path / "sweep.py").write_text('import os\nos.environ.get("ILU0_SWEEP_ARMS", "")\n')
-    run_case = _make_run_case(tmp_path, "env | grep -E '^(BFS3D|ILU0_SWEEP)_' | sort || true\n")
+    (tmp_path / "sweep.py").write_text('import os\nos.environ.get("TWO_WORD_ARMS", "")\n')
+    run_case = _make_run_case(tmp_path, "env | grep -E '^(BFS3D|TWO_WORD)_' | sort || true\n")
     result = _run(tmp_path, run_case)
     assert result.returncode == 0, result.stderr
 

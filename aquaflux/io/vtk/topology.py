@@ -11,6 +11,14 @@ types that take exactly that shape:
 - **``VTK_POLYGON`` (type 7)**, in two dimensions, is the cell's ordered vertex ring -- a short walk
   around the cell's two-node edge faces.
 
+One standard type is recognized as well, because it is most of the cells of most meshes: a
+three-dimensional cell bounded by six quadrilaterals with eight distinct vertices is combinatorially
+a cube (Euler's formula leaves it no other shape), so it is written as a **``VTK_HEXAHEDRON``
+(type 12)** -- eight vertices in VTK's order, and no face stream. That matters to whatever reads the
+file rather than to the file's meaning: a viewer's cutting, thresholding and surface filters take a
+general path for a polyhedron, triangulating it face by face, and a direct one for a hexahedron, and
+the face stream of a hexahedral cell costs 31 integers against 8. Every other cell stays a polyhedron.
+
 This module turns a :class:`~aquaflux.mesh.Mesh` into the arrays those cell types are written from.
 It is eager NumPy throughout: writing a file never happens inside a compiled solve, and the per-cell
 face counts are ragged, so the index arithmetic is build-time work like the mesh assembly itself.
@@ -33,6 +41,19 @@ and conflating them writes a mesh whose faces point inward on roughly half the c
 The ring is therefore reversed exactly when those two disagree: an owner-outward ring listed under
 the neighbour, or an owner-inward ring listed under the owner. A boundary face is listed by its
 owner only.
+
+Periodic seams
+--------------
+A periodic mesh joins its last cell to its first through one interior **seam** face, stored once,
+with its nodes on the owner's side of the domain; the neighbour cell lies a whole period away and
+sees the face only through its periodic-image translation (the face's ``neighbour_offset``, the
+displacement from the neighbour's own position to its image beside the owner). Listing the stored
+ring under the neighbour as well would hand that cell nodes from the far side of the domain: a
+polygon whose edges do not chain, or a polyhedron stretched across the whole period. So under the
+neighbour each seam node is replaced by the node at its position *minus* the offset -- the same
+face, seen from the neighbour's side. Both copies exist in the mesh, because the neighbour's other
+faces are built from them; the counterpart is found by position, and a node with none is refused
+rather than written as a stretched cell.
 """
 
 from __future__ import annotations
@@ -40,6 +61,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 from aquaflux.mesh.cell import CellGeometry
 from aquaflux.mesh.connectivity import index_dtype
@@ -50,9 +72,18 @@ if TYPE_CHECKING:  # pragma: no cover
     from aquaflux.mesh import Mesh
 
 #: VTK cell type ids. A two-dimensional cell is an arbitrary polygon, a three-dimensional one an
-#: arbitrary polyhedron -- the two types that are defined by exactly what the mesh stores.
+#: arbitrary polyhedron -- the two types that are defined by exactly what the mesh stores -- unless it
+#: is a hexahedron, the one standard type recognized.
 VTK_POLYGON = 7
+VTK_HEXAHEDRON = 12
 VTK_POLYHEDRON = 42
+
+#: How far a periodic seam node's translated position may lie from the node it is matched to, as a
+#: fraction of the mean edge length of the seam face it belongs to. A genuine counterpart differs
+#: from the translated position only by rounding in the coordinates and the offset, while any other
+#: node is roughly an edge length away, so the match is decided by a margin of orders of magnitude
+#: either way; the fraction only has to sit between the two.
+PERIODIC_NODE_MATCH_TOLERANCE = 1e-2
 
 
 class VtkCells(NamedTuple):
@@ -68,21 +99,25 @@ class VtkCells(NamedTuple):
     connectivity : np.ndarray of int
         Each cell's point ids, concatenated. For a polygon these are the ordered vertex ring; for a
         polyhedron they are the cell's point *set* (ascending), since its topology is carried by
-        :attr:`faces` instead.
+        :attr:`faces` instead; for a hexahedron, its eight vertices in VTK's order -- a ring whose
+        right-hand normal points into the cell, then the vertex joined by an edge to each of them.
     offsets : np.ndarray of int, shape ``(n_cells,)``
         The **end** index of each cell's slice of :attr:`connectivity` -- the convention the VTK XML
         format uses, which is a cumulative count rather than the ``n + 1`` row pointer a CSR array
         would carry.
     types : np.ndarray of uint8, shape ``(n_cells,)``
-        The VTK cell type per cell: :data:`VTK_POLYGON` or :data:`VTK_POLYHEDRON`.
+        The VTK cell type per cell: :data:`VTK_POLYGON`, :data:`VTK_HEXAHEDRON` or
+        :data:`VTK_POLYHEDRON`.
     faces : np.ndarray of int or None
-        The polyhedron face stream, three dimensions only (``None`` in two). Per cell: the number of
+        The polyhedron face stream, present only when some cell is a polyhedron (``None`` in two
+        dimensions, and in three when every cell is a hexahedron). Per polyhedron: the number of
         faces, then for each face its node count followed by that face's point ids, wound outward
         from this cell. The ids are **global point ids**, not positions within
-        :attr:`connectivity`.
+        :attr:`connectivity`. Cells of other types contribute nothing to it.
     face_offsets : np.ndarray of int or None
-        The end index of each cell's slice of :attr:`faces`, same convention as :attr:`offsets`
-        (``None`` in two dimensions). Written under the name ``faceoffsets``.
+        The end index of each polyhedron's slice of :attr:`faces`, same convention as
+        :attr:`offsets`, and ``-1`` for a cell of any other type; ``None`` exactly when
+        :attr:`faces` is. Written under the name ``faceoffsets``.
     """
 
     points: np.ndarray
@@ -147,6 +182,8 @@ class _CellFaceEntries(NamedTuple):
         The cell of each entry, non-decreasing.
     face : np.ndarray of int, shape ``(n_entries,)``
         The face of each entry.
+    by_owner : np.ndarray of bool, shape ``(n_entries,)``
+        Whether this entry lists the face under its owner (``False``: under its neighbour).
     reversed_ring : np.ndarray of bool, shape ``(n_entries,)``
         Whether this entry must list the face's stored node ring backwards to wind outward from
         *its* cell.
@@ -156,6 +193,7 @@ class _CellFaceEntries(NamedTuple):
 
     cell: np.ndarray
     face: np.ndarray
+    by_owner: np.ndarray
     reversed_ring: np.ndarray
     counts: np.ndarray
 
@@ -184,7 +222,7 @@ def _cell_face_entries(mesh: Mesh) -> _CellFaceEntries:
     # owner-outward ring under the owner, or an owner-inward ring under the neighbour.
     outward = stored_ring_is_outward(mesh)[face] == by_owner
     counts = np.bincount(cell, minlength=mesh.n_cells)
-    return _CellFaceEntries(cell, face, ~outward, counts)
+    return _CellFaceEntries(cell, face, by_owner, ~outward, counts)
 
 
 class _EntryRings(NamedTuple):
@@ -213,6 +251,9 @@ def _entry_rings(
 ) -> _EntryRings:
     """Read each entry's face ring out of the CSR store, reversing it where the entry says to.
 
+    A periodic seam face listed under its neighbour is then carried onto that cell's own side of the
+    domain (see *Periodic seams* in the module docstring).
+
     ``index`` is the integer width every array built here is formed at -- see
     :func:`build_vtk_cells`, which chooses it once for the whole reconstruction.
     """
@@ -227,7 +268,63 @@ def _entry_rings(
     )
     # A reversed ring reads its own slots back to front; the CSR slice it reads from is the same.
     source = np.where(entries.reversed_ring[entry], counts[entry] - 1 - position, position)
-    return _EntryRings(indices[ring_start[entries.face][entry] + source], entry, position, counts)
+    rings = _EntryRings(indices[ring_start[entries.face][entry] + source], entry, position, counts)
+    return _onto_own_side(mesh, entries, rings)
+
+
+def _image_shift(mesh: Mesh, entries: _CellFaceEntries) -> np.ndarray | None:
+    """The translation carrying each entry's stored ring onto its own cell's side of the domain.
+
+    Nonzero only for a periodic seam face listed under its neighbour, where it is minus the face's
+    ``neighbour_offset``. Returns ``None`` when no entry needs one, which is every non-periodic mesh.
+    """
+    offset = mesh.face_cells.neighbour_offset
+    if offset is None:
+        return None
+    shift = -np.asarray(offset, dtype=float)[entries.face]
+    shift[entries.by_owner] = 0.0
+    return shift if np.any(shift) else None
+
+
+def _onto_own_side(mesh: Mesh, entries: _CellFaceEntries, rings: _EntryRings) -> _EntryRings:
+    """Replace each periodic seam node listed under the neighbour by its translated counterpart.
+
+    See *Periodic seams* in the module docstring. The ring's order is kept: a translation changes
+    no winding, so the direction already chosen for the entry stands.
+
+    Raises
+    ------
+    ValueError
+        If a translated seam node has no node at its position, which is a periodic mesh whose two
+        sides do not match.
+    """
+    shift = _image_shift(mesh, entries)
+    if shift is None:
+        return rings
+    slots = np.flatnonzero(np.any(shift[rings.entry] != 0.0, axis=1))
+    coords = np.asarray(mesh.node_coords, dtype=float)
+    entry = rings.entry[slots]
+    target = coords[rings.node[slots]] + shift[entry]
+
+    # Each slot's edge runs to the next slot of its ring, wrapping at the end.
+    following = slots - rings.position[slots] + (rings.position[slots] + 1) % rings.counts[entry]
+    edge = np.linalg.norm(coords[rings.node[following]] - coords[rings.node[slots]], axis=1)
+    _, local = np.unique(entry, return_inverse=True)
+    mean_edge = np.bincount(local, weights=edge) / np.bincount(local)
+
+    distance, nearest = cKDTree(coords).query(target)
+    tolerance = PERIODIC_NODE_MATCH_TOLERANCE * mean_edge[local]
+    if np.any(distance > tolerance):
+        worst = int(np.argmax(distance / np.maximum(tolerance, np.finfo(float).tiny)))
+        raise ValueError(
+            "a periodic seam node has no counterpart on the other side of the domain: face "
+            f"{int(entries.face[entry[worst]])}'s node {int(rings.node[slots[worst]])}, translated "
+            f"by its periodic offset to {target[worst].tolist()}, is {float(distance[worst]):.3g} "
+            f"from the nearest node, so the two sides of the periodic mesh do not match"
+        )
+    node = rings.node.copy()
+    node[slots] = nearest.astype(node.dtype)
+    return rings._replace(node=node)
 
 
 def _polyhedron_faces(
@@ -337,7 +434,8 @@ def build_vtk_cells(mesh: Mesh) -> VtkCells:
     Raises
     ------
     ValueError
-        If a two-dimensional cell's edges do not form exactly one closed ring.
+        If a two-dimensional cell's edges do not form exactly one closed ring, or a periodic seam
+        node has no counterpart at its translated position on the other side of the domain.
 
     Notes
     -----
@@ -360,14 +458,84 @@ def build_vtk_cells(mesh: Mesh) -> VtkCells:
     index = index_dtype(max(n_cells + entries.cell.shape[0] + ring_slots, n_nodes, 1))
 
     rings = _entry_rings(mesh, entries, index)
-    if mesh.dim == 3:
-        connectivity, offsets = _polyhedron_connectivity(entries, rings, n_cells, n_nodes)
-        faces, face_offsets = _polyhedron_faces(entries, rings, n_cells, index)
-        cell_type = VTK_POLYHEDRON
-    else:
+    if mesh.dim != 3:
         connectivity, offsets = _polygon_connectivity(entries, rings, n_cells, n_nodes)
-        faces, face_offsets = None, None
-        cell_type = VTK_POLYGON
+        types = np.full(n_cells, VTK_POLYGON, dtype=np.uint8)
+        return VtkCells(points, connectivity, offsets, types, None, None)
 
-    types = np.full(n_cells, cell_type, dtype=np.uint8)
+    connectivity, offsets = _polyhedron_connectivity(entries, rings, n_cells, n_nodes)
+    hexahedra, vertices = _hexahedron_vertices(entries, rings, offsets)
+    # A hexahedron has exactly eight points either way, so its slice of the connectivity is already
+    # the right length; only the order within it changes.
+    starts = offsets[hexahedra] - 8
+    connectivity[starts[:, None] + np.arange(8)] = vertices
+    types = np.where(hexahedra, VTK_HEXAHEDRON, VTK_POLYHEDRON).astype(np.uint8)
+    faces, face_offsets = _polyhedron_faces(entries, rings, n_cells, index)
+    faces, face_offsets = _drop_faces_of(hexahedra, faces, face_offsets)
     return VtkCells(points, connectivity, offsets, types, faces, face_offsets)
+
+
+def _hexahedron_vertices(
+    entries: _CellFaceEntries, rings: _EntryRings, point_offsets: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Which cells are hexahedra, and each one's eight vertices in VTK's order.
+
+    A cell qualifies when it has six faces, every one a quadrilateral, and eight distinct points: a
+    closed surface of six quadrilaterals has twelve edges, so eight vertices is exactly Euler's count
+    for a cube, and each vertex then lies on three faces and three edges. The ordering follows from
+    the outward winding every entry's ring already has. The first face, read backwards, is a ring
+    whose right-hand normal points into the cell -- VTK's vertices 0-3. Each of those vertices
+    starts one directed edge in each of its three faces' outward rings, two of which run along the
+    first face; the third leaves it, and its far end is the vertex opposite (VTK's 4-7).
+
+    Returns
+    -------
+    hexahedra : np.ndarray of bool, shape ``(n_cells,)``
+        Whether each cell is written as a hexahedron.
+    vertices : np.ndarray of int, shape ``(n_hexahedra, 8)``
+        Their vertices, in cell order.
+    """
+    n_cells = entries.counts.shape[0]
+    point_counts = np.diff(point_offsets, prepend=0)
+    quads = np.bincount(entries.cell, weights=rings.counts == 4, minlength=n_cells)
+    candidate = np.flatnonzero((entries.counts == 6) & (quads == 6) & (point_counts == 8))
+
+    slot_start = np.cumsum(rings.counts) - rings.counts
+    entry = entries.first[candidate][:, None] + np.arange(6)
+    ring = rings.node[slot_start[entry][..., None] + np.arange(4)]  # (n, 6 faces, 4 nodes)
+    tail = ring.reshape(-1, 24)
+    head = np.roll(ring, -1, axis=2).reshape(-1, 24)
+
+    base = ring[:, 0, ::-1]
+    off_base = ~np.any(head[:, :, None] == base[:, None, :], axis=2)
+    # For each base vertex, the outward edges that start at it and leave the base face.
+    leaving = (tail[:, None, :] == base[:, :, None]) & off_base[:, None, :]
+    opposite = np.take_along_axis(head, np.argmax(leaving, axis=2), axis=1)
+
+    vertices = np.concatenate([base, opposite], axis=1)
+    ordered = np.sort(vertices, axis=1)
+    # Anything short of a cube's incidence -- a vertex with no edge leaving the base, or two base
+    # vertices sharing an opposite one -- stays a polyhedron rather than being guessed at.
+    sound = np.all(leaving.sum(axis=2) == 1, axis=1) & np.all(
+        ordered[:, 1:] != ordered[:, :-1], axis=1
+    )
+
+    hexahedra = np.zeros(n_cells, dtype=bool)
+    hexahedra[candidate[sound]] = True
+    return hexahedra, vertices[sound]
+
+
+def _drop_faces_of(
+    excluded: np.ndarray, faces: np.ndarray, face_offsets: np.ndarray
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """The face stream with the excluded cells' blocks removed, and ``-1`` as their offset.
+
+    Returns ``(None, None)`` when every cell is excluded: a file with no polyhedron carries no face
+    stream at all.
+    """
+    if np.all(excluded):
+        return None, None
+    blocks = np.diff(face_offsets, prepend=0)
+    kept = np.where(excluded, 0, blocks)
+    offsets = np.where(excluded, -1, np.cumsum(kept, dtype=face_offsets.dtype))
+    return faces[np.repeat(~excluded, blocks)], offsets.astype(face_offsets.dtype)

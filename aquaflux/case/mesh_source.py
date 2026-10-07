@@ -11,14 +11,14 @@ import abc
 import dataclasses
 import math
 import types
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
 
 import numpy as np
 
 from aquaflux.io import OpenFOAMReader
-from aquaflux.mesh import Mesh, graded_nodes, structured_grid_2d
+from aquaflux.mesh import Mesh, graded_nodes, structured_grid_2d, structured_grid_3d
 
 __all__ = ["AxisGrading", "GeometricGrading", "MeshSource", "OpenFOAMMesh", "StructuredGrid"]
 
@@ -67,6 +67,8 @@ class OpenFOAMMesh(MeshSource):
     ValueError
         If ``path`` is empty, or the tolerance is not a positive, finite number.
     """
+
+    path_fields: ClassVar[tuple[str, ...]] = ("path",)
 
     path: str
     cyclic_match_tolerance: float | None = None
@@ -151,6 +153,9 @@ class GeometricGrading(AxisGrading):
     growth: float
     both_sides: bool | None = None
 
+    #: Where an unset setting takes its default from (read by the case-file schema).
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (graded_nodes,)
+
     def __post_init__(self) -> None:
         if not (math.isfinite(self.growth) and self.growth > 0):
             raise ValueError(
@@ -165,32 +170,35 @@ class GeometricGrading(AxisGrading):
 
 @dataclasses.dataclass(frozen=True)
 class StructuredGrid(MeshSource):
-    """A structured quadrilateral grid, generated rather than read: the box ``[0, lx] x [0, ly]``.
+    """A structured grid, generated rather than read: the box ``[0, lx] x [0, ly]``, or in three
+    dimensions ``[0, lx] x [0, ly] x [0, lz]``.
 
     Its boundary patches are named by side -- ``left`` (x = 0), ``right`` (x = lx), ``bottom``
-    (y = 0) and ``top`` (y = ly) -- except on a periodic axis, whose two sides are fused into an
-    interior seam and so are not patches at all: a grid periodic in ``x`` has only ``bottom`` and
-    ``top``.
+    (y = 0) and ``top`` (y = ly), and in three dimensions ``back`` (z = 0) and ``front`` (z = lz) --
+    except on a periodic axis, whose two sides are fused into an interior seam and so are not patches
+    at all: a grid periodic in ``x`` has only ``bottom`` and ``top``.
+
+    A three-dimensional grid is uniform: it takes neither a periodic axis nor a grading.
 
     Attributes
     ----------
     cells : tuple of int
-        The number of cells along x and y.
+        The number of cells along each axis: two counts, or three.
     lengths : tuple of float
-        The box's extent along x and y.
+        The box's extent along each axis, one per count.
     periodic : tuple of {"x"}
         The axes that wrap around; a streamwise-periodic channel is periodic in ``x``. A periodic axis
-        needs at least two cells.
+        needs at least two cells. Two dimensions only.
     grading : mapping of {str: AxisGrading}
         How the cells are sized along each named axis (``"x"`` or ``"y"``); an axis left out is
-        uniform.
+        uniform. Two dimensions only.
 
     Raises
     ------
     ValueError
-        If the grid is not two-dimensional, a count or length is not positive, an axis is named twice
-        as periodic, a periodic axis has fewer than two cells, or a grading names an axis the grid
-        does not have.
+        If the grid is not two- or three-dimensional, a count or length is not positive, an axis is
+        named twice as periodic, a periodic axis has fewer than two cells, a grading names an axis the
+        grid does not have, or a three-dimensional grid is given a periodic axis or a grading.
     """
 
     cells: tuple[int, ...]
@@ -199,10 +207,15 @@ class StructuredGrid(MeshSource):
     grading: Mapping[str, AxisGrading] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if len(self.cells) != 2 or len(self.lengths) != 2:
+        if len(self.cells) not in (2, 3) or len(self.lengths) != len(self.cells):
             raise ValueError(
-                "a structured grid is two-dimensional, so it takes two cell counts and two lengths, "
-                f"got {self.cells!r} and {self.lengths!r}."
+                "a structured grid takes two cell counts and two lengths, or three of each, got "
+                f"{self.cells!r} and {self.lengths!r}."
+            )
+        if len(self.cells) == 3 and (self.periodic or self.grading):
+            raise ValueError(
+                "a three-dimensional structured grid is uniform, so it takes neither a periodic axis "
+                "nor a grading."
             )
         # A reader may hand back a whole number as a float; the count is still a count.
         object.__setattr__(
@@ -238,6 +251,8 @@ class StructuredGrid(MeshSource):
     def read(self, directory: Path) -> Mesh:
         """The generated grid -- see :meth:`MeshSource.read`. ``directory`` is unused: nothing is read."""
         del directory
+        if len(self.cells) == 3:
+            return structured_grid_3d(*self.cells, *self.lengths, named_boundaries=True)
         (nx, ny), (lx, ly) = self.cells, self.lengths
         nodes = {
             f"{axis}_nodes": grading.nodes(n, length)

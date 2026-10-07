@@ -192,8 +192,8 @@ def refine_for_receivers(
 ) -> tuple[Surfaces, Subdivision]:
     """Refine a surface set for a set of receiver positions, carrying its properties along.
 
-    Every per-facet property is inherited unchanged by a facet's children: emission and
-    reflectance are intensive, so splitting a facet does not divide them. Radiant power is the
+    Every per-facet property is inherited unchanged by a facet's children: emission and both
+    reflectances are intensive, so splitting a facet does not divide them. Radiant power is the
     exception and is **not** carried, because it is extensive -- a point source has no area to
     split and never meets the criterion anyway, so a surface set carrying point sources should
     be refined before they are added rather than after.
@@ -231,7 +231,8 @@ def refine_for_receivers(
         solid_id=np.asarray(surfaces.solid_id)[inherited],
         solid_names=surfaces.solid_names,
         emission=np.asarray(surfaces.emission)[inherited],
-        reflectance=np.asarray(surfaces.reflectance)[inherited],
+        diffuse_reflectance=np.asarray(surfaces.diffuse_reflectance)[inherited],
+        specular_reflectance=np.asarray(surfaces.specular_reflectance)[inherited],
         profiles=surfaces.profiles,
         profile_index=np.asarray(surfaces.profile_index)[inherited],
     )

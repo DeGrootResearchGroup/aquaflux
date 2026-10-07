@@ -41,7 +41,11 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `transfer.py` — the frozen facet-to-facet geometry | **BUILT** |
 | `quadrature.py` — symmetric triangle rules for the receiving facet | **BUILT** |
 | `model.py` — the assembled model and the three public entry points | **BUILT** |
+| `images.py` — `mirrored_fluence_rate` / `summed_mirrored_fluence_rate`: one specular bounce into the volume, each source's image seen through each mirror's aperture (#537 PR 2, 2026-10-05) | **BUILT** (exported and wired into the model by PR 3a, which adds `mirrored_irradiance` and `plane_exchange`; shadowed through `shadows=` since PR 3b) |
+| `mirrors.py` — `Mirror` (a plane, its aperture facets, reflection and the image of a surface set) and `planar_mirrors` (a body's facets grouped by plane); the reflectance split on `Surfaces` (#537 PR 1, 2026-10-05) | **BUILT** (the model carries specular bodies since PR 3a, shadowed since PR 3b) |
+| `mirror_visibility.py` — `MirrorVisibility` / `build_mirror_visibility` / `build_mirror_masks`: what stands across each path reflected in one mirror, both legs, per body counted 0/1/2 (#537 PR 3b) | **BUILT** |
 | `units.py` — lamp watts to exitance, ultraviolet transmittance to absorbance | **BUILT** |
+| `scene.py` — `Scene` / `solve_scene` / `SceneSolution`: lamps' EMISSION kept out of the transfer (any profile, incl. IES) while their areal facets EXCHANGE reflected light (reflect by `diffuse_reflectance`, shadow, absorb; #604 step 1, 2026-10-07), reflecting surfaces, bodies, medium, `VolumeReceivers` and named `SurfaceReceivers`; what a radiation case file builds (2026-10-05) | **BUILT** |
 
 There is no separate optical-depth piece to build: the voxel-grid traversal is `VoxelAbsorption` in
 `absorption.py`, exact along each segment (trilinear field, Simpson per cell).
@@ -275,15 +279,317 @@ it, and the `Profile` methods changed from `(cos_theta)` to `(direction, normal)
   need not matter: keep the lamp out of the surface set.** Gather its direct irradiance on the
   reflecting facets with `direct_irradiance` (which takes any profile), pass that as
   `external_irradiance` to `radiosity` / `fluence_rate`, and the transfer only ever carries
-  Lambertian reflected light. `validation/ray_effects_room/aquaflux_reflecting.py` does exactly this
-  for a Care222-lit room (2,000 squares of 20 cm; the two routes to its slice field -- the library's
-  `fluence_rate` and a direct gather of the facets' radiosity -- agree to 0.0). Average the lamp's
+  Lambertian reflected light. **This is now the library's `solve_scene` (`scene.py`, section at the end
+  of this file)**, which a radiation case file builds; the script that first did it for a Care222-lit
+  room (`aquaflux_reflecting.py`, deleted 2026-10-05; 2,000 squares of 20 cm) found the two routes to
+  its slice field -- the library's `fluence_rate` and a direct gather of the facets' radiosity -- agree
+  to 0.0, which is why the scene takes the second route alone. Average the lamp's
   irradiance over sub-points of each facet, not its centroid, or a shadow on a coarse facet is
-  point-sampled. Freezing the unit direction instead (3x the frozen array) is the route if the lamp
-  itself must reflect.
+  point-sampled. ⚠️ **A lamp that must reflect does NOT need the direction frozen**: since #604 step 1
+  the scene keeps the lamp's EMISSION out of the transfer and puts its FACETS in, as reflectors with no
+  emission (THE SCENE section, end of this file). Freezing the unit direction (3x the frozen array)
+  would only be needed to carry a measured profile's *emitted* light through the transfer itself.
 - **The gather passes the unit direction, not the cosine, at no measured cost**: 2,000 Lambertian facets
   x 40,000 receivers, fluence 0.549-0.557 s and irradiance 11.77-11.82 s against `main`'s 0.557 /
   11.82 s, checksums equal to 13 figures (CPU, x64, jax 0.10.2, macOS arm64, separate processes).
+
+## SPECULAR REFLECTION: THE REFLECTANCE SPLIT AND THE MIRRORS (#537 PR 1, 2026-10-05)
+
+The plan, agreed with the user and posted on #537 (comment of 2026-10-05): image sources seen through
+**planar** mirror apertures, one bounce, in four PRs — (1) the optical split and the mirror geometry,
+no result changes; (2) images in the volume gather, unshadowed; (3) the transfer's specular exchange
+terms, the third gathered set and two-leg shadows, which is where specular becomes reachable; (4)
+validation, cost and docs. **Decided with the user**: a mirror is **one plane, not one body**; curved
+specular bodies (a lamp sleeve's exterior, a round vessel) are **out of #537 and moved to #604** — an
+exact path solve on the analytic `solids` body, shared with refraction, because a faceted sleeve is
+~100 planar strips (the Sozzi lamp's OpenCASCADE tessellation: 100 full-length strips, kept coplanar
+by the CAD reader's cutting planes) and at one dense `n x n` transfer term per mirror that is ~45 GB,
+and because a sleeve reflects mostly at its *inner* quartz-air face, with total internal reflection
+above ~47 deg incidence in water, which no outer-surface `rho_s` represents (those two figures are
+estimates from recorded numbers, not measurements). Store the incidence cosine per image pair in PR 3,
+so an angle-dependent (Fresnel) `rho_s` is a later strategy. **Still open, to decide before PR 3**:
+the transfer's storage — `rho_s` live per declared solid (planes summed into one array) or live per
+facet with a sparse store.
+
+**What PR 1 built.**
+- `Surfaces.reflectance` is **gone**: it is `diffuse_reflectance`, beside a new `specular_reflectance`
+  (default 0), both live leaves, on `from_triangles`, `with_optics`, `with_geometry`, `coarsen_surfaces`
+  and `refine_for_receivers`. ⚠️ **There is no `reflectance=` keyword any more**; an old call fails with
+  a `TypeError`. `_check_reflectances` refuses each outside `[0, 1]` and a facet whose two sum past one
+  (concrete values only, numpy, skipped for tracers — the same rule as `in_range`), from both
+  `from_triangles` and `with_optics` (which checks the pair as it stands after the replacement).
+- **PR 1's model refused all specular reflectance; since PR 3a it is `transfer._specular_by_solid`
+  (there is no `model._without_specular` any more)**, which keeps the two refusals that still apply:
+  a non-zero value on a body not built as specular (`ValueError` now), and a **traced** `rho_s` on a
+  model with no specular body (`TypeError`, whatever its value). ⚠️ **The traced refusal is
+  load-bearing, and PR 1's first version did not have it**: it checked a traced value with
+  `eqx.error_if`, which passed a zero and so let `jax.grad` with respect to `rho_s` return **0.0** —
+  finite, plausible, and wrong, since a mirror sends light on. The direct gathers ignore both
+  reflectances, as they always did the diffuse one.
+- `vectors.reflect(vectors, normal)` is the one reflection formula (in the plane through the origin).
+- `Profile.mirrored(normal)` is **abstract** on `Profile`: an `AxisymmetricProfile` returns itself; a
+  `PhotometricProfile` reflects `up` **and flips `handedness`** (a new static field, default 1, read in
+  `angles`). ⚠️ **Reflecting `up` alone is wrong**: a reflection reverses handedness, so the image's own
+  `normal x up` is the *negated* reflection of the source's, and every table asymmetric in `h` reads
+  turned the wrong way. Pinned on the `b1` fixture (`sin h` term) against an oblique plane.
+- `Mirror(point, normal, facets)`: `reflect_points`, `reflect_directions`, and `image(surfaces)` —
+  vertices reflected **and two corners swapped**, which together give the reflected outward normal
+  (either alone points the image away from its viewer, and a dark-behind profile then sends nothing);
+  profiles replaced by their `mirrored`; every optical value and label carried. `facets` is a numpy
+  label array, like `profile_index`. `image` decides no visibility: which sources get an image (none
+  in or behind the plane) is PR 2's.
+- `planar_mirrors(surfaces, solids, *, tolerance=None)`: per named body, areal facets only, **largest
+  facet first** seeds a plane; a facet joins when all three corners lie within `tolerance` of the seed's
+  plane **and** it faces the same side (two faces of a thin sheet are two mirrors); the plane is then
+  the area-weighted mean normal and centroid of its members. Default tolerance `1e-6` of the set's
+  extent (`_RELATIVE_TOLERANCE`), above single-precision STL rounding (~6e-8) and below any real step.
+  ⚠️ **Seeding by area is load-bearing**: a sliver in a wall can compute a normal ~89 deg off the wall;
+  seeding from it splits the wall. ⚠️ **Not yet decided**: the plane-count threshold above which a
+  declared specular body is refused (pointing at #604) — set in PR 4 from measured cost, enforced in PR 3.
+
+**Tests**: `tests/unit/test_radiation_mirrors.py` (box = 6 mirrors of 8; a 12- and a 180-sector prism
+is exactly one mirror per strip; float32 rounding keeps a plane and a 1e-3 step splits one; sheet
+sides; per-body grouping and a misspelt name; point sources; the sliver seed; the image's direct field
+at reflected points equals the source's at the points, 1e-12, over Lambertian, `CosinePower`, an
+asymmetric `PhotometricProfile` and a point source; the image's carried properties and its involution),
+plus the reflectance split, its validation and the model's refusals in the surface and model test files.
+**Mutation pass (22, all red)**: winding not reversed, profiles not mirrored, handedness not flipped,
+handedness ignored in `angles`, seeding by index, no orientation test, tolerance 1e-9 and 1e-2, bodies
+grouped together, point sources grouped, an off-plane point, no sum check, no range check,
+`with_optics` unchecked, `with_geometry` dropping `rho_s`, the concrete and the traced refusals each
+removed, `reflect` with factor one, coarsening reading `rho_s` from `rho_d`, subdivision dropping it.
+
+### PR 2: images in the volume gather (2026-10-05)
+
+`images.py`, unshadowed, one bounce, not yet exported or reachable from the model. Per mirror, per
+(receiver, source facet, aperture facet): `rho_s[aperture facet] x radiance (mirrored profile,
+direction from the image centroid) x solid angle of the image inside the aperture facet's cone`, the
+last being `silhouette.covered_by(view of the image, None, aperture facet) x |view.whole|` -- the aperture
+is the blocker, and **its depth cut is what discards an image's part in front of the mirror**, so a
+source straddling the mirror's plane needs no clipping of its own (pinned: a wall across the plane
+equals its upper half alone). Point sources: the image point is credited to the **first** aperture
+facet whose closed cone (filtered heights `>= 0`) holds the direction, so a line through a shared edge
+counts once -- a symmetric lamp over a square mirror puts the reflection point exactly on its diagonal
+(pinned). The medium is crossed on the **two real legs** (receiver -> crossing -> real source
+centroid), which equals `exp(-a |x - c'|)` for a uniform medium and is the correct path for a graded
+one (pinned against a closed-form leg integral of a linear field). Receivers and sources wholly on or
+behind the plane are culled on the host when positions are concrete -- **cost only**: traced positions
+skip the cull and give the same field (pinned), and the two cull mutations are dismissed as equivalent.
+It reuses `gather`'s private `_areal_groups`, `_groups`, `_one_geometry`, `_emitter_direction` and
+`silhouette._orientation`. ⚠️ **The clip stacks its candidates, so every operand must be broadcast to one
+batch shape first** (`(receiver, image, aperture facet)`); left to broadcast it fails in `jnp.stack`.
+Cost is dense in (receivers in front) x (sources in front) x (aperture facets) per mirror -- no cone
+cull or `covers_nothing` yet; PR 4 measures it. Tests `tests/unit/test_radiation_images.py` (18):
+point image closed form with and without a medium; aperture edge and outside; shared-edge diagonal;
+per-facet reflectance; nothing behind; image wider than the mirror = the mirror's own solid angle
+(`axial_rectangle_solid_angle`), image narrower = the whole image; an unbounded `rho_s = 1` mirror equals
+the direct gather of `Mirror.image` over Lambertian, `CosinePower` and an asymmetric photometric table;
+the straddling wall; linearity in the two facets' reflectances; the graded medium; summed sets; exact
+derivatives in `rho_s` and emission; pass-size invariance; a foreign mirror refused; two mirrors add;
+traced receivers. **Mutation pass (16, 14 red; the 2 green are the cost-only culls)**.
+
+### PR 3a: the specular transfer and the model (2026-10-05)
+
+**Decided with the user**: PR 3 split into **3a** (this: transfer + model, unshadowed scenes only) and
+**3b** (two-leg shadows); `rho_s` **live per declared solid**; per-solid storage makes a multi-plane
+solid's path length and source cosine **G-weighted means** per pair (exact for one plane); the
+incidence cosine for a later Fresnel `rho_s` is **not stored yet** (one more weighted-mean array when
+built -- this reverses PR 1's decision 3); a **graded medium is refused** with specular bodies.
+
+- `build_radiation_model(..., specular=(names,))` and `build_transfer(..., specular=, max_mirror_planes=
+  MAX_MIRROR_PLANES)`. `TransferMatrix` gains `specular_solids` (static), `mirrors` (every plane of
+  every specular solid), `specular_geometric` / `specular_separation` / `specular_source_cosine`, each
+  `(n_terms, n, n)` (per solid in 3a; per `(solid, crossing pattern)` since 3b -- see below):
+  `images.plane_exchange` summed over the planes, and the two G-weighted means. `assemble` adds
+  `rho_s[k] * G_k * exp(-a d_k)` (times the pattern's transmittance since 3b) to **both** `F` and `F^M` (the
+  latter times the relative radiance at the mean cosine, through `_relative_radiance`, which the
+  direct emitted term now shares).
+- `transfer._specular_by_solid` reads one `rho_s` per solid from its first facet, refusing on concrete
+  values a solid whose facets differ and a non-zero value on an undeclared solid; traced, it takes the
+  first facet's (and refuses a traced value when no solid is specular).
+- **Refused, not approximated** (`NotImplementedError`): a graded medium at `assemble`. `ValueError`
+  past `MAX_MIRROR_PLANES` planes per solid -- 64 in 3a, provisional; **12 since PR 4**, from measured
+  cost. (3a also refused occluders and self-occlusion with specular bodies; PR 3b lifted that.)
+- The model's point-source arrivals add `images.mirrored_irradiance(..., point_sources_only=True)` at
+  the facet centroids; the volume's mirrored field is gathered by the `ReceiverShadows` strategy since
+  3b (it was a separate `summed_mirrored_fluence_rate` call in `fluence_rate` in 3a).
+- ⚠️ The specular arrays' first axis was **per solid** in 3a; since 3b it is **per term** --
+  `(solid, crossing pattern)`, listed in `specular_terms`. With nothing in the way there is still one
+  term per solid, with an empty pattern, so `specular_geometric[0]` on an unshadowed one-solid transfer
+  is unchanged.
+- **Compile cost was the build's whole cost**: a fresh closure per plane (and per call in the gather)
+  retraced everything, so a 12-facet box took 15-25 s to build and 2.9 s per repeated `fluence_rate`.
+  `images._exchange_rows` (jitted, scanned over the quadrature points), `_areal_through` and
+  `_points_through` (`eqx.filter_jit`, `_Path` now a pytree) are module level, so planes and calls
+  sharing shapes share programs: rebuild 0.1 s, repeated `fluence_rate` 0.4 s (first build still
+  ~10-13 s of compilation). Measured on a 4-core Linux container, jax 0.10.2, one run each.
+- **Gates** (`tests/unit/test_radiation_specular_model.py`): the **symmetry plane** -- half a box closed
+  by a `rho_s = 1` mirror against the whole box made by reflecting that half triangle for triangle --
+  equal radiosity, facet irradiance and volume field to 1e-9 for Lambertian walls, under uniform
+  absorption, with `CosinePower` emitters and with a point lamp; at the transfer level
+  (`test_radiation_images.py`) the exchange equals the whole box's transfer to the other half to 5e-17.
+  ⚠️ **`inward_box`'s right half is a TRANSLATE of its left, not a mirror image** (every quad cut on the
+  same diagonal), so a symmetry check against it fails at ~3% and looks like a bug in the code; build
+  the whole from the half by reflection. The **one-bounce enclosure** `B = M/(1 - rho_d(1 + rho_s))`,
+  `G = 4B(1 + rho_s)` to 1e-12; reciprocity falling with the receiver rule; `rho_s` and the absorption
+  coefficient against central differences; every refusal.
+
+### PR 3b: shadows on both legs of a reflected path (2026-10-05)
+
+**Decided with the user**: the transfer keeps the bodies' transmittance **live** by grouping each
+specular solid's planes **by crossing pattern** (how many legs each body crosses, 0/1/2) -- one
+`(n, n)` term per `(solid, pattern)` present, `prod tau_b ** legs_b` applied at `assemble` -- rather
+than one array per plane (storage by plane count, what 3a avoided) or freezing `tau` on reflected paths
+(severs the gradient). Under `SilhouetteOcclusion` the **reflected paths are rays** (direct pairs
+keep the exact fraction): a two-leg path has no single source view to clip.
+
+- `mirror_visibility.py`: `build_mirror_visibility(mirror, occluders, surfaces, points, *,
+  receiver_facet, sources, self_occlusion, offset_scale, pair_limit)` -> `MirrorVisibility`
+  (`crossings` uint8 `(n_occ, n_r, n_s)`, `hidden` bool or `None`, `receivers`, `sources` -- numpy
+  facet labels, default `Mirror.sources_in_front`). One path per pair through the source **centroid**:
+  meeting point where receiver -> centroid's image crosses the plane. `build_mirror_masks(mirrors, ...)`
+  returns `None` when `shadows_reflected_paths` says nothing can shadow (no bodies **and**
+  `NoOcclusion`; `None` strategy means the default, which shadows). `reflected_surviving` is
+  `surviving_fraction(c >= 1) * surviving_fraction(c >= 2)`: the direct expression twice, and **finite
+  derivative at tau = 0** where `tau ** 0` would give `0 * inf`.
+- ⚠️ **The meeting point is LIFTED off the mirror** by `offset_scale * mean sqrt(aperture area)`
+  along the normal, and **both legs end there**. A leg ending exactly in the plane reads as cut by the
+  mirror triangle it lands on (a hit at distance 1 counts), so without the lift the mirror shadows every
+  path reflected in it; lifting clears every coplanar triangle without listing the aperture as
+  exclusions (which would be as wide as the aperture). Leg 1 runs source centroid -> lifted point with
+  the source's own margin and excluding the source facet (the direct ray's convention); leg 2 lifted
+  point -> receiver, excluding the receiver facet when there is one.
+- `SelfOcclusion.segments_hidden(surfaces, origin, target, near, exclude)`: per-segment rays for legs
+  that are no source-receiver product. Base = `segment_is_cut` (so `SilhouetteOcclusion` uses rays),
+  `NoOcclusion` -> `None`, `RayCastOcclusion` -> its grid when set. **Body culling does not apply** to
+  reflected paths -- every candidate path is tested (cost to measure in PR 4).
+- Candidate paths: receivers strictly in front, sources with a part in front; a source whose
+  **centroid** is not strictly in front (straddling the plane) is **recorded clear**, untested.
+- Gathers: `mirrored_fluence_rate` / `summed_...` / `mirrored_irradiance` take `shadows=` (one mask
+  per mirror, checked against the receivers) and `transmittance=` (refused without masks; default
+  opaque). With masks, which receivers and sources a mirror involves is **read off the mask** (built
+  from concrete geometry), so it is known when the sets' vertices are traced -- the streamed backward pass.
+- Transfer: `_specular_exchange` builds the facet-receiver mask per plane (`receiver_facet=arange`),
+  drops hidden pairs, and accumulates by pattern (`_by_pattern`: digits base 3, body 0 least
+  significant). New fields `specular_terms` (static) and `point_shadows` (per-mirror masks restricted to
+  point-source columns, for `model._point_source_irradiance`; `None` when unshadowed or no point source).
+- Receivers: `FrozenShadows` holds `mirrors` and `mirror_visibility`; `StreamedShadows` builds each
+  chunk's mirror masks inside the chunk's custom VJP through `streamed_fluence_rate(extra=...)` -- an
+  object with `field(live, points)` -- so a gradient's memory stays one chunk. `fluence_rate` no longer
+  gathers the mirrored field itself.
+- **Gate**: the symmetry plane with a baffle of the walls' own triangles and a partly transmitting ball
+  in the half, and both again (reflected) in the whole: radiosity and field to **1e-9**, Lambertian and
+  point lamp, held and streamed. ⚠️ **The first baffle sat on the box's sixths and a reflected path
+  between two wall centroids grazed its edge at exactly x = 0.35**: the half's leg and the whole's
+  segment round that edge hit differently, a 0.8% mismatch that looked like a defect. Moved off the
+  rational grid; the comparison is pair for pair identical (masks compared directly: crossings and
+  hidden equal on all 26 x 26 cross pairs). Also: tau^2 through the transfer (pattern `(2, 1)`, two
+  bodies with different tau), the transmittance derivative against central differences held and
+  streamed, rays under `SilhouetteOcclusion` equal to `RayCastOcclusion`'s, and 16 mask unit tests.
+- **Mutation pass, 22 breaks, 21 red.** Red: one factor instead of `tau ** legs`; either leg's body
+  test or self test dropped; no lift; no receiver-facet exclusion; straddling sources tested; hidden
+  pairs kept in the transfer; pattern digits reversed (caught only once the tau^2 test carried a second
+  body of different transmittance); `assemble` ignoring the pattern; point arrivals, streamed or held
+  mirrors unshadowed; either gather dropping the surviving fraction; transparent by default;
+  `SilhouetteOcclusion` hiding nothing on legs; held transmittance dropped; the transfer's mask without
+  `receiver_facet`. **Dismissed, equivalent**: no source-facet exclusion on leg 1 -- a segment meets its
+  source's plane only at its origin, which the margin already discards (kept for the direct rays'
+  convention). ⚠️ **Receivers behind the mirror being tested first passed**, because the fixture's
+  receiver sat at the lamp's mirrored height, where the meeting point divides by zero and its NaN reads
+  clear; moved to `z = -0.75`, it goes red. The gather never reads those rows, so the field is unchanged
+  either way -- the test pins the documented "recorded clear".
+
+### PR 4: what a mirror costs, the cone cull, and the plane limit (2026-10-06)
+
+**Decided with the user**: the validation case is the analytic gates already in place --
+**Hassanpour et al. (2023) is NOT a flat-mirror benchmark**: their reflector is **cylindrical** (lamps
+outside the water channel) and their 10-47% specular/diffuse spread is a **discrete-ordinates
+simulation**, not a measurement (the docstrings said "measure"; fixed). It moves to #604 as the curved
+reflector case (full text read 2026-10-06, geometry and figures posted on #604: DO 6x6 only, no Monte
+Carlo; R = 0.95 is the paper's own assumption, citing a vendor note; the 10-47% is diffuse-over-specular
+LRV at 10 GPM as the lamps move 7.5 -> 15 cm from the channel). The cost case is the
+Sozzi reactor from its drawing with the chamber's flat end plates specular, **without meshing**
+(receivers uniform in the drawing's fluid -- per-item throughput does not depend on where they are).
+
+- ⚠️ **COST IS SET BY THE APERTURE'S TRIANGLE COUNT, NOT THE PLANE COUNT.** Every image was clipped
+  against every aperture facet: on the coarse scene (`specular_cost.py` defaults: chord 1e-3, lamp
+  1,270 + wall 1,008 facets, 4 cores, jax 0.10.2, Linux) one plane of 28 triangles took ~50 min for the
+  exchange (3e5 clip items/s) against 47 s for the whole direct transfer, and 72 s against 1.9 s for a
+  400-receiver gather (39x). Two planes were already unusable; a plane limit could not fix it.
+- **Survival share** (`aperture_cull_share.py`, same scene, 2,000 uniform volume points and the facet
+  centroids): the silhouette clip's cone test keeps **11-12 / 28** (sliver triangles of a coarse disc
+  fan, wide cones), **4 / 35**, **5-6 / 211** aperture triangles per image -- p99 23 at 211; 4-6% of
+  images keep none; unusable cones under 0.13%. Survivors stay ~a handful however fine the plate.
+- **The cull** (`images._screen` + `_culled_fractions`): the cone test per (receiver, image, facet);
+  survivors clipped `_CLIP_BATCH = 4096` at a time in a `lax.while_loop` whose trip count follows the
+  survivor count. A survivor's pair is found by **bisecting the running count of what each pair keeps**
+  and its facet by its rank in the pair's row -- ⚠️ the first version took `jnp.nonzero` over every
+  triple, which on 16 receivers x 2,700 images x 211 facets cost **0.25 s of a 0.45 s** culled clip:
+  more than clipping the survivors. ⚠️ **A while_loop is not reverse-differentiable**, so the culled
+  clip takes its geometry under `stop_gradient` and the live weights (reflectances) multiply
+  `fraction @ weights` **outside** the loop. `cull` is on where the geometry is readable (`_mirrored`'s
+  `readable`; always in `_exchange_rows`); the dense clip remains for a gather differentiated in
+  position. The streamed model's chunk puts the build's concrete vertices back on its sets
+  (`with_geometry`) so its backward pass, where every live leaf is traced, still culls.
+- **The lit-block layout** (decided with the user: "port the direct culls"): the mirrored gather uses
+  `lit_blocks.areal_layout` with a `BackFaces` of the *image* set, so receivers behind an image's plane
+  are left out as in the direct gather, and the clip works on (receiver, image) pairs. ⚠️ Facet cones
+  must be taken **once per receiver** in the block grid, not per pair: per pair made the 4,000-receiver
+  gather slower (581 s against 450 s), per receiver 330 s.
+- **THE INSIDE SKIP** (decided with the user: "build it in PR 4"). An image seen wholly inside the
+  mirror needs no clip -- the mirror shows all of it, weighted by the facet the line to its centroid
+  crosses (zero outside, or in a hole). Measured first (`aperture_inside_share.py`, 300 receivers,
+  exact 2D classification): **98-99.5%** of seen images are inside at the 0.05 m plate, **90%** at
+  0.01 m (211 triangles, 107 outline edges). `mirrors.outline` gives the edges of one facet only
+  (rounded relative to the extent); `_Path.of` keeps them **only for one concrete reflectance on every
+  facet** -- ⚠️ a traced one would credit an image's whole derivative to the facet its centroid line
+  crosses (caught by the reflectance-gradient test: 12 of 32 facets wrong, sum right). `_screen` skips
+  a pair when every corner is behind the plane **by 1e-9 of the coordinates** (`_behind`) and
+  `_touches_outline` finds the image, projected into the plane along the lines from the receiver, apart
+  from every outline edge by separating axes with the same margin.
+  - ⚠️ **The outline CONE test came first and was too loose**: an image's circular cone overlaps edges
+    the image never reaches -- it flagged 50.5% of pairs against an exact 8% partial (64 receivers,
+    0.01 plate), so the gather went only 330 -> 246 s.
+  - ⚠️ **The behind test needs the margin** because the plane is an area-weighted mean over its
+    facets: the image of a facet IN the plane read heights of -3.3e-16, was skipped, and got 60% of its
+    solid angle where the dense clip (correctly) gives 0. Found by comparing every probe pair with the
+    dense clip -- 2 of 172,800.
+  - ⚠️ **Write the separating-axis test corner by corner, the outline's edges the innermost axis**: the
+    same arithmetic as reductions over trailing axes of 3 corners and 2 ends ran **16x slower** (0.29
+    against 0.018 s on 16 receivers), the CPU-vectorization lesson of `silhouette`'s 2x2 tiles again.
+- **MEASURED with all of the above** (`specular_cost.py`, `SOZZI_SPECULAR_PLATES=0.01`: chord 1e-3,
+  lamp 1,270 + wall 1,008 + plates 422 facets, two planes of 211 aperture triangles, 4,000 receivers
+  uniform in the drawing's fluid; jax 0.10.2, CPU, x64, Linux x86_64, 4 cores, nothing else running,
+  one run, 2026-10-06): **exchange 333 s per plane** warm (601 s for the first, which pays the
+  compilation) against **51.6 s for the whole direct transfer** -- ~6.5x per plane, from ~13 min;
+  **mirrored gather 93.5 s for both planes** warm against **2.47 s direct** -- ~19x per plane, from
+  ~90x (450 s) with the cull alone, 330 s with the lit-block layout, 246 s with the outline cone skip.
+  A separate probe of the same gather read 86.0 s, and its field matched the pre-skip field to 1.1e-16
+  of the peak. What is left is the clip of the survivors, ~4 us each; the reflected-path masks cost
+  28-39 s per plane (two legs, no culling). ⚠️ The earlier "17x per plane" gather figure was from 400
+  receivers and was deleted: at 4,000 the same code read ~90x.
+- **`MAX_MIRROR_PLANES = 12`** (user's choice from 6 / 12 / 24 / 64): at ~19x the direct gather and
+  ~6.5x the direct transfer per plane (above), twelve keeps a body's mirrored gather within ~230x the
+  direct one; any box (6) passes; a 16-strip tube is refused. Pinned by
+  `test_by_default_a_box_is_flat_enough_and_a_tessellated_tube_is_not` (limit 16 and 5 each red).
+- Tests: culled == unculled (volume and oriented, `_CLIP_BATCH` monkeypatched to 7 so survivors take
+  several passes, per-facet weights), to one rounding of the largest value (the unculled clip leaves
+  last-bit noise on facets that show nothing); the cone test keeps every facet with a non-zero share and
+  under 25% of a 200-triangle mirror; a test that keeps nothing gives nothing; reflectance gradients
+  equal. The skip: an image crossing the plane is clipped however far inside it lies; one in the
+  mirror's own plane is not skipped on a rounding of its height; the outline test flags every pair an
+  independent classification calls crossing (whole and holed mirrors) and lets most wholly-inside ones
+  through; only one concrete weight keeps an outline; the skip's answers stand with the clip stubbed
+  to clip nothing. **Skip mutations, 13 of 15 red** (straddle, behind and its margin, skip-nothing,
+  weight one, any weights, traced weights, all edges, the edge axis, the side test inverted, all for
+  any, the rank off by one, bisect left). **Dismissed**: dropping the triangle-side axes (more pairs
+  clipped, never a wrong skip), a non-orthogonal plane frame (touching is invariant under any linear
+  map of the plane; only the 1e-9 margin's size moves); and, not run, clipping the skipped pairs anyway
+  (their answer is overwritten, so only time could tell). **Cull mutations, 6/6 red** after two fixes: "clip everything" passed until the keep-nothing test,
+  "padding unmasked" passed until the fixture put light through triple (0, 0, 0). **Not run, and
+  cost-only by construction**: `cull=False` in `_mirrored` or `_exchange_rows`, and dropping the
+  streamed chunk's geometry swap -- each only selects the unculled clip, which the equivalence test pins
+  to the culled one, so the answers cannot differ; a test of them would have to time something.
 
 ## The clamp is a GATE, not a factor — and the difference is a factor of two or a zero
 
@@ -1286,6 +1592,12 @@ DOM on its `uvReactorSozzi2006-DOM` tutorial in Docker; `compare_fluence.py` com
 on the same 1,635,909-cell mesh and writes a VTU + plots). Full numbers and configuration in its
 `README.md`; the headline, so it is findable from here:
 
+⚠️ **These DOM figures are on `8 x 4` (64) and `16 x 8` (256) grids, which are not uniform**: of-optical-radiation's
+`nTheta` spans the whole sphere, so those polar bins are twice the azimuthal ones. The uvmesh swap set was rerun on
+`6 x 6` / `12 x 12` (2026-10-02) and the 64-direction dose shortfall at k = 0.5 fell from 12.4 % to 2.2 % at 72; the
+snapped-mesh figures below were not rerun.
+
+
 - **Whole-reactor volume-mean G agrees to 0.09%** (133.28 aquaflux, 133.16 DOM-256, 131.67 DOM-64).
 - **DOM converges on aquaflux**: DOM/aquaflux p10-p90 over lit cells 0.36-1.65 at 64 directions,
   0.886-1.076 at 256. The spread is DOM's ray effect — at mid-lamp the true field is axisymmetric
@@ -1430,7 +1742,7 @@ these makes it false and must update it in the same change: the six-point `recei
 `refine_for_receivers`' `max_ratio=0.25`, the GMRES global relative `1e-10`, `RayCastOcclusion` as
 the self-occlusion default and `ShaftCulling` as the culling default, opaque as the transmittance
 default, GMRES restart 120, point sources Isotropic-only (`check_profiles`), the 2.6%-at-eight-sectors inscribed-area undershoot, 95% UVT = 5.129 /m, and the Sozzi
-figures (0.09% volume mean; 0.36-1.65 / 0.886-1.076 at 64 / 256 directions; 0.44% median lamp
+figures (0.09% volume mean; 0.36-1.65 / 0.886-1.076 at 64 / 256 directions, non-uniform 8 x 4 / 16 x 8 grids; 0.44% median lamp
 discretization; dose mean 0.3%, log reduction within 1.1%, DOM-64 short by 23% at k = 0.5). Its
 quick start — `G = 80` in a 6x6x6 box mesh's own patches at `M = 10, rho = 0.5` — was run
 (2026-09-28, and again 2026-09-29 after it became the quick start) and holds to rounding.
@@ -2755,7 +3067,7 @@ lower limit still winning); reverting the `min(pair_limit, PASS_PAIRS)` turns it
 
 `RayCastOcclusion` tests every ray against every triangle, which a reactor puts out of reach:
 1.6M cells, 7,516 lamp facets and 53,500 wall triangles is **6.6e14** intersections, weeks at
-the measured 120-150 Mtest/s. `grid.py` registers each triangle in the voxels its bounding box
+the measured 120-150 Mtest/s. `grid.py` registers each triangle in the voxels its bounding box (a rounding wider)
 spans and walks each segment through them (Amanatides & Woo's 3D-DDA), testing only what those
 voxels hold and stopping at the first blocker. Selected with `RayCastOcclusion(grid=True)`, an
 integer, or a per-axis triple; **`False` is the default** — it changes cost, not answers, and
@@ -3126,6 +3438,50 @@ surface), `test_the_grid_a_body_vouches_from_is_near_cubic_whatever_the_walk_gri
 occupancy grid from the walk grid, and dropping the flat-axis refit — ⚠️ **that last one first SURVIVED**:
 the flat test checked only the per-axis counts, and without the refit the flat axis's near-zero extent
 blew the other two counts up to the voxel cap. It now also bounds the total against the budget.
+
+### A FLAT SURFACE AND A SHEET ON A VOXEL PLANE: three misses fixed (2026-10-05)
+
+Found from a `RuntimeWarning: invalid value encountered in cast` in `_walk_state` on a
+`TriangleBody` of one planar patch (`patch_triangles(..., ["front"])` of a box mesh, `sheet=True`).
+Asked: does `blocks` still answer what `segment_is_cut` answers on a flat triangle set? **At the
+default resolution, yes — at an explicit one, no; and one miss was not about flatness at all.**
+
+- **The flat axis was `np.finfo(float).tiny` thick**, so its voxels were ~2e-308. A crossing point
+  a rounding off the plane is then a voxel index past the range of an integer (the warning; the
+  cast's garbage was clipped into range). With **one** voxel through the thickness the clip always
+  lands in the right one, so the default grid's answers were right. With **two or more** (an
+  explicit `resolution`), the point lands in a voxel holding nothing: **110 of 48,000** seam-aimed
+  segments read clear. Fixed in `_box_and_area`: a flat axis is `_FLAT_THICKNESS = 1e-6` of the
+  widest extent thick (non-flat axes unchanged).
+- **A triangle on an interior voxel plane, any box, any resolution.** Registration truncated each
+  triangle's box with no margin, so a face lying on a voxel plane, or an edge along one, landed on
+  one side only — and **the box padding pushes every boundary past the grid's middle to round
+  DOWN**, so the triangle ending there is missed from the voxel above. Where the segment crosses that
+  plane and an in-plane boundary at one point, the DDA's tie-break can step around the voxel holding
+  the triangle the exact test credits. **23 of 36,000** segments through the middle of three
+  stacked sheets (an even voxel count through their height). Fixed: registration widens each
+  triangle's box by `_rounding_margin` (a billionth of the extent), the margin `holds_any` already
+  used, now one helper for the padding, the registration and the box test. ⚠️ Both sides are
+  load-bearing: widening only the low side passes every fixture except a placement far from the
+  origin, which is why `SHEET_PLACEMENTS` has one.
+- **`_enters_grid` admitted a segment with a zero direction component lying OUTSIDE the box's slab
+  on that axis** (it read zero motion as "never leaves", not "never in"). Answers were right — the
+  exact test found nothing — but those segments were walked for nothing, and on a flat box they were
+  the warning's main source. Fixed; pinned by counting walked rays.
+- **Not a grid defect, and the trap that hid all three**: a segment that **ends exactly in** the
+  sheet, or crosses its **open rim**, is a knife edge where the compiled `segment_is_cut` and the
+  Numba `_cuts` round differently — 8,525 such disagreements in the first probe, every one of them
+  knife-edge, at a one-voxel grid too. Compare the grid against a one-voxel grid (same kernel) to
+  separate voxel selection from kernel rounding, and keep segments off the rim and past the plane.
+- ⚠️ **A plane at a large coordinate hides the flat defect**: with origins within ±1 of a sheet at
+  `|z| >= 2`, the crossing point rounds exactly onto the plane (its error is under half an ulp of
+  `z`), and aiming at `origin + 2(seam - origin)` crosses at exactly `t = 0.5`. The first fixtures
+  did both and found nothing. Tests: `test_a_flat_sheet_answers_exactly_what_testing_every_triangle_answers`,
+  `test_a_sheet_lying_on_a_voxel_plane_inside_a_thick_box_is_found_from_either_side`,
+  `test_a_segment_parallel_to_an_axis_beside_the_grid_is_not_walked`. **Mutation pass (6, 5 red)**:
+  no thickness, no registration margin, either side of it alone, the slab test reverted; the
+  original file fails 19. **Dismissed and deleted**: centring the plane in its slab changed no answer.
+  Configuration: jax 0.10.2, numba 0.67.0, CPU, x64, macOS arm64, `main` at `943389a`.
 
 ## HOW MANY FACETS AN EMITTER NEEDS — measured, because it sets the price of everything
 
@@ -3984,3 +4340,112 @@ stages); losing the Morton order fails `test_clusters_are_compact_rather_than_ar
 **Dismissed**: not propagating a member's unusable flag to its cluster changes nothing observable —
 every unusable member also has a cone cosine at or below the floor, so its own half-angle already pushes
 the enclosing cap to a right angle and flags the cluster — and the guard stays as the explicit rule.
+
+
+## THE SCENE: LAMPS KEPT OUT OF THE TRANSFER, AS A LIBRARY FUNCTION (2026-10-05)
+
+`scene.py` makes the recipe `aquaflux_reflecting.py` hand-assembled (and this file documented under
+"the transfer refuses it ... keep the lamp out of the surface set") the library's: `solve_scene(Scene(
+lamps, reflectors, occluders, absorption, volume, surfaces, lamp_samples, settings))`. It is what a
+radiation **case file** builds (`.claude/rules/case.md` → Radiation cases); the old scripts are deleted.
+
+- **Steps**: `check_profiles(lamps)`; with reflectors, the lamps' `direct_irradiance` at
+  `subtriangle_centroids(reflector vertices, lamp_samples)` (the `k^2` equal-area sub-triangle centroids,
+  default `DEFAULT_LAMP_SAMPLES = 4`), averaged per facet, is the `external_irradiance` of ONE
+  `surface_irradiance` solve on a model built with **zero receivers** (`np.zeros((0, 3))` works); the
+  radiosity is then `emission + rho H` (reflectors must not emit — refused — so `rho H`), re-gathered as a
+  Lambertian set. Volume: `G_direct` and `G_reflected` by `streamed_fluence_rate` when anything can shadow
+  (a body, or self-occlusion not `NoOcclusion`), else `summed_fluence_rate`. Surfaces: `direct_irradiance`
+  through a mask built per pass of `receivers_per_pass(pair_limit, n_facets x n_bodies)` points.
+  `medium_absorbed_power = sum(a(x) G V)` via the new **`Absorption.sample(position)`** (abstract;
+  `UniformAbsorption` broadcasts, `VoxelAbsorption` already had it).
+- **Gate**: `test_a_lamp_kept_out_of_the_transfer_lights_the_box_as_the_model_does_with_it_inside` — a
+  Lambertian lamp kept out equals the model with it inside to 1e-11 (fluence and radiosity) at ONE
+  receiver point per facet and ONE lamp sample, where both evaluate the same projected solid angles; the
+  reflected share is > 30 %, so the agreement is not the direct light's. Plus: `lamp_samples` 8 is within
+  5 % of `lamp_samples` 1's error against the 12-point transfer (lamp light averaged, not sampled once),
+  wall irradiance = a direct gather of the solved radiosity, pass size changes nothing (1e-13) with a
+  sphere shadowing, medium power, sub-triangle centroids.
+- ⚠️ **A point on a reflecting surface is NOT lit by its own facet, and no exclusion is needed for that**
+  — the first version masked it out and its test showed the mask did nothing: a point a rounding in front
+  of its facet is behind the receiver half-space, a point a rounding behind is behind the (dark-behind)
+  emitter, and exactly in-plane the emitter cosine is 0. What DOES need the facet is the **ray test**:
+  a ray from any other facet ends in the facet under the point and `RayCastOcclusion` counts that (far end
+  inclusive) — the "two exclusions" defect below. So `SurfaceReceivers.reflector` names the body, and
+  `_own_facets` passes **every** facet of it the point lies on (ties within 1e-12 of the body's extent)
+  as `receiver_facet`. ⚠️ **Several, not one**: a mesh face centre is the shared apex of all its fan
+  triangles, and a point on a shared edge lies on two; with only the nearest excluded, 4 of 16 floor
+  points of a regular box (on quad diagonals) came back shadowed. **`receiver_facet` now takes
+  `(n_receivers, k)` rows (`-1` padding)** in `build_visibility`, `RayCastOcclusion` (`_exclusions`, both
+  walks) and `pairs_are_cut(target=)`; `SilhouetteOcclusion` measures about one facet's normal and refuses
+  the 2-D form, so the scene hands it the nearest. Pinned by
+  `test_a_point_on_a_reflecting_wall_is_not_shadowed_by_the_facet_it_lies_on` (ray test with the
+  exclusion = no occlusion to 1e-12 on a convex box; without it, < half).
+- **Measured at mesh scale** — see `validation/ray_effects_room/README.md` (the case files and their
+  agreement with the scripts they replaced).
+
+### #604 STEP 1: LAMPS REFLECT AND SHADOW IN THE EXCHANGE (2026-10-07)
+
+**Agreed with the user** (2026-10-07; full plan on #604): #604 is sequenced by GENERAL capability, not by
+lamp physics -- (1) emitters that also reflect, here; (2) transparent solids (index + absorption, exact
+paths through analytic bodies); (3) the equivalent surface as a general baking step; (4) curved specular
+reflectors; (5) path cuts. Two decisions for this step: **straight-through transmittance is deferred to
+(2)** (a surface's own triangles stay one opaque layer -- `visibility.py`); and **lamp facets are ALWAYS
+in the exchange** (default reflectance 0), which fixes the pass-through and costs transfer size.
+
+- **What changed.** `_Exchange.of(scene)` is the reflectors' facets then every AREAL lamp facet, built by
+  `from_triangles` with the lamp bodies' names after the reflectors', `point_sources=()`, no emission;
+  `None` when there are no reflectors and no lamp reflects (nothing is ever sent back). `_solve_exchange`
+  gathers the lamps' light on all of them (sub-triangle centroids, as before), solves once, and splits
+  back. `SceneSolution` gains `lamp_irradiance` (`(n_lamp_facets,)`, zero on point sources) and
+  `lamp_absorbed_power` (`sum (1 - rho) E A`); `radiosity` / `reflector_irradiance` stay the reflectors'
+  (and are `None` without them). The reflected gather is from the whole exchange, so **a lamp's triangles
+  now shadow light the walls reflect past it** -- before, a "black" lamp let it through (the scene's own
+  docstring said black; nothing tested shadowing). `Scene` now refuses lamps and reflectors sharing a body
+  name, and specular reflectance on either (the scene carries none). `SurfaceReceivers.reflector` may name
+  a lamp body; `_own_facets` returns `None` for a body not in the set asked about, and the DIRECT gather
+  now also leaves out the lamp facet a point lies on.
+- ⚠️ **A POINT INSIDE ITS OWN FACET CAN READ THE FACET AS A WHOLE HEMISPHERE.** The first version
+  sampled the lamps' light on lamp facets exactly in their planes, and on a 12-sector drum a lamp lit
+  itself: absorbed over emitted **1.22** with black walls. Off an axis-aligned plane the corners' heights
+  round to ~1e-17 either way; where they stay undecidable the kernel keeps the in-plane triangle and
+  returns the hemisphere (the self-facet convention). Measured on one tilted 9-facet plane: **51%** of
+  sub-triangle centroids read `E = M` from their own facet (centroids read 0 -- the zero-direction guard);
+  axis-aligned, none. Fixed by moving those points `_IN_FRONT_OF_OWN_FACET = 1e-12` of the scene's size
+  (extent + largest coordinate) **in front**, where the facet is decidably behind the receiving plane and
+  clipped away whatever the profile. ⚠️ **Behind would ALSO zero it (the emitter gate) and was the first
+  fix -- and is wrong**: behind a lamp is outside the fluid, so a body holding the fluid (a `CadFluid`,
+  `Outside(Difference(box, lamp))`) refuses the points (pinned by
+  `test_the_lamps_light_on_a_lamp_is_taken_on_the_fluid_s_side_of_it`). 1e-9 moved the model
+  equivalence to 2.4e-10; 1e-12 keeps it under 1e-11.
+- ⚠️ **The same hemisphere is latent in the scene's SurfaceReceivers on a TILTED reflecting facet**:
+  `direct_irradiance` of a set at points inside one of its facets (not its centroid, not a vertex) reads
+  that facet's radiosity as `E = B`. A case file's receivers are mesh face centres, which are the fan
+  triangles' shared vertex (the degenerate guard gives 0), so case files are not hit; a library caller's
+  arbitrary points can be. Not fixed here; raised with the user as a follow-up.
+- **Energy, measured** (12-sector drum, r 0.12, 0.5 high, in `inward_box(3)`, walls rho 0.8, lamp rho
+  0.4, default 6-point rule; jax 0.10.2, CPU, x64, Linux, 2026-10-07): walls + lamp absorb **1.014** of the
+  emitted power under `RayCastOcclusion` (the one-ray-per-pair mask of the drum's shadow on a coarse mesh);
+  **1.59 under `NoOcclusion`**, which is not a defect of the scene -- with nothing shadowing, wall light
+  passes through the lamp AND is absorbed by it. A drum in a box is not convex; do not run it unshadowed.
+- **Gates**: a lamp that emits and reflects, kept out, equals the model with it inside (fluence, lamp
+  landing, wall landing, 1e-11, one point per facet); a black drum shadows reflected light exactly as the
+  model with the drum inside it does (`RayCastOcclusion`, 1e-11; gathered from the walls alone, >5%
+  brighter somewhere); lamps alone (two reflecting plates) equal the model; a point-source lamp lands
+  zero; points on a lamp named by its body equal the same points 1e-6 off it (1e-4); the energy test
+  above (2.5%). **Mutation pass, 13 breaks, 12 red**: lamps left out of the exchange, lamps reflect
+  nothing, absorbed by rho not 1 - rho, no offset, offset behind, no exchange without reflectors, lamp
+  receivers not excluded, landing from the wrong rows, shared names allowed, the case ignoring
+  `Lamp.reflectance`, `unaccounted_power` keeping the lamps' share, the reflectance unchecked; the
+  shadow test alone goes red under "lamps left out". **Dismissed**: not leaving a lamp sample's own facet
+  out of its shadow test -- after the offset the point is in front of its facet, so no ray from it ends in
+  it; it stays because `SilhouetteOcclusion` reads `receiver_facet` to measure a receiver by the
+  projected rather than the plain solid angle. ⚠️ **The reflector samples pass no `receiver_facet`
+  (they lie on no LAMP facet), so under `SilhouetteOcclusion` their shares of the lamps are taken by the
+  plain solid angle** -- pre-existing, and the API cannot express "a surface receiver on no source
+  facet"; raised with the user as a follow-up.
+- **Cost**: the transfer is `n^2` in reflector + lamp facets now. Not measured at mesh scale. The
+  `ray_effects_room` cases' field cannot move (black flat window flush in the ceiling, `NoOcclusion`:
+  a black facet sends nothing and shadows nothing); not re-run.
+- **Case**: `Lamp.reflectance` (see `case.md`), results `lamp_absorbed_power`, subtracted from
+  `unaccounted_power`.

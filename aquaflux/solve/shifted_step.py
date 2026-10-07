@@ -74,7 +74,8 @@ class LinearSolveSettings(SettingsValue):
     restart : int or None
         The Arnoldi restart length.
     max_restarts : int or None
-        The restart-cycle cap, in raw ``lineax`` restarts -- the only bound on a single running solve.
+        The cap on a shifted solve's restart cycles, counted in raw ``lineax`` restarts. It is the
+        only bound on a single running solve.
     """
 
     rtol: float | None = None

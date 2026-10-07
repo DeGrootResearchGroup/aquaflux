@@ -590,7 +590,7 @@ def _obstructed_squares(n: int, strategy) -> tuple[float, float]:
     blocker = rectangle_triangles([0.0, 0.0, 0.25], [0.25, 0.0, 0.0], [0.0, 0.25, 0.0])
     surfaces = Surfaces.from_triangles(
         np.concatenate([facing_plates(n, half=0.5, gap=0.5), blocker]),
-        reflectance=0.0,
+        diffuse_reflectance=0.0,
         solid_id=[0] * (4 * n * n) + [1] * len(blocker),
         solid_names=SHEETS,
     )

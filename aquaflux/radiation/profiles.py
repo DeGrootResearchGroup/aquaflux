@@ -100,6 +100,28 @@ class Profile(eqx.Module):
             ``L / M`` in inverse steradians, zero where the direction is behind the facet.
         """
 
+    @abc.abstractmethod
+    def mirrored(self, normal) -> Profile:
+        """This distribution as its mirror image in a plane with unit normal ``normal`` emits it.
+
+        The mirror image of a source sends along the reflection of each direction what the source
+        sends along that direction, about the reflection of its own normal. So the profile
+        returned, ``q``, satisfies ``q.intensity_fraction(R d, R n) == intensity_fraction(d, n)``
+        for the reflection ``R`` in the plane, and the same for the radiance. A distribution of
+        the angle from the normal alone is its own mirror image; one that also varies round the
+        normal is not, because a reflection reverses the sense in which that angle increases.
+
+        Parameters
+        ----------
+        normal : array_like, shape ``(3,)``
+            Unit normal of the mirror's plane. Only its direction matters, and either sign of it
+            gives the same image.
+
+        Returns
+        -------
+        Profile
+        """
+
     def refuse_normals(self, normals) -> str | None:
         """Why facets with these normals cannot carry this profile, or ``None`` if they can.
 
@@ -158,6 +180,11 @@ class AxisymmetricProfile(Profile):
     def radiance_per_exitance(self, direction: jnp.ndarray, normal: jnp.ndarray) -> jnp.ndarray:
         """:meth:`radiance_per_exitance_at` the cosine of ``direction`` from ``normal``."""
         return self.radiance_per_exitance_at(dot(direction, normal))
+
+    def mirrored(self, normal) -> AxisymmetricProfile:
+        """Itself: a reflection keeps the angle between a direction and the normal."""
+        del normal
+        return self
 
 
 class Isotropic(AxisymmetricProfile):

@@ -44,14 +44,7 @@ def _sections(physics: str = "Laminar", cells=(4, 4), **overrides: object) -> di
         "fluid": {"density": 1.0, "kinematic_viscosity": 1.0e-2},
         "physics": {
             "kind": physics,
-            **(
-                {
-                    "advection": {"kind": "FirstOrderUpwind"},
-                    "omega_variable": {"kind": "LogScalars"},
-                }
-                if rans
-                else {}
-            ),
+            **({"omega_variable": {"kind": "LogScalars"}} if rans else {}),
         },
         "boundaries": {
             "left": inlet,
@@ -59,7 +52,10 @@ def _sections(physics: str = "Laminar", cells=(4, 4), **overrides: object) -> di
             "bottom": {"kind": "Wall"},
             "top": {"kind": "Wall"},
         },
-        "numerics": {"momentum_advection": {"kind": "FirstOrderUpwind"}},
+        "numerics": {
+            "momentum_advection": {"kind": "FirstOrderUpwind"},
+            **({"turbulence_advection": {"kind": "FirstOrderUpwind"}} if rans else {}),
+        },
     }
     return {**sections, **overrides}
 
@@ -424,3 +420,36 @@ def test_a_prepared_restart_carries_the_state_it_was_read_from(tmp_path) -> None
 
 def test_a_case_with_no_initial_section_prepares_with_no_starting_state(tmp_path) -> None:
     assert prepare_run(_file(tmp_path)).starting is None
+
+
+# --- a physics with nothing marched has no state to start from ------------------------------------
+
+
+def test_a_radiation_case_refuses_a_starting_state_when_the_file_is_read() -> None:
+    """Nothing is marched in a radiation case, so a state to start from would be read by nothing."""
+    from aquaflux.case import case_spec_from_mapping as read
+
+    radiation = {
+        "mesh": {"kind": "StructuredGrid", "cells": [2, 2, 2], "lengths": [1.0, 1.0, 1.0]},
+        "physics": {"kind": "Radiation"},
+        "boundaries": {
+            "left": {"kind": "Lamp", "profile": {"kind": "LambertianProfile"}, "power": 1.0},
+            "right": {"kind": "Wall"},
+            "bottom": {"kind": "Wall"},
+            "top": {"kind": "Wall"},
+            "back": {"kind": "Wall"},
+            "front": {"kind": "Wall"},
+        },
+    }
+    assert read(radiation).initial is None
+    with pytest.raises(ValueError, match=r"initial: a radiation case has no flow"):
+        read({**radiation, "initial": {"kind": "Checkpoint", "path": "ck"}})
+
+
+def test_a_physics_that_marches_nothing_has_no_fields_to_save_or_start_from(tmp_path) -> None:
+    from aquaflux.case import Radiation
+
+    with pytest.raises(ValueError, match=r"a Radiation case has no march state to save"):
+        Radiation().restart_fields(None, None)
+    with pytest.raises(ValueError, match=r"a Radiation case has no state to start from"):
+        Radiation().initial_fields(None, {})

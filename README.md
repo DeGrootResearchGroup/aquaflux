@@ -77,7 +77,18 @@ applies anywhere you want gradients through a flow solve.
   patch is stated once for every field, every setting is checked where it appears,
   a case can be checked against its mesh without building anything, and
   `aquaflux run case.yaml` solves it and writes its fields (VTK or an OpenFOAM
-  time directory), its log and a record of the run.
+  time directory), its log, its convergence history and a record of the run. A
+  case may also be the light of ultraviolet lamps instead of a flow: lamps and
+  reflecting walls on the mesh's
+  patches (their surfaces read from the STEP or STL drawing, or the mesh itself),
+  bodies in the way and an absorbing medium; the run writes the fluence rate in the
+  cells, the irradiance on every wall as one VTK file per patch, and where the
+  lamps' power went.
+- **A browser interface** — `aquaflux-ui` opens a case file to edit, with every
+  choice taken from the solver's own case-file definitions, or a run's results in a
+  browser page served on your own machine: colour by any field, slice, threshold,
+  step through snapshots, and plot the convergence history. See
+  [The browser interface](#the-browser-interface).
 
 ## Installation
 
@@ -174,6 +185,37 @@ gradient = jax.grad(mean_speed)(1e-2)
 The same works for gradients with respect to boundary values, source terms, or
 the mesh node coordinates.
 
+## The browser interface
+
+`aquaflux-ui` shows a run's results in your browser — the Setup and Run sections
+beside them hold the places of case setup and running. It is an optional extra —
+VTK (through PyVista) renders, trame serves the page, plotly draws the plot — with
+wheels for Linux, macOS and Windows, so it needs no compiler and no JavaScript
+toolchain:
+
+```bash
+pip install -e ".[ui]"
+aquaflux-ui path/to/results            # the directory `aquaflux run` wrote
+aquaflux-ui fields.vtu                 # or a .vtu, .pvd, .vtp or .vtm file
+```
+
+It serves the page on `127.0.0.1` only and opens it in the default browser
+(`--no-browser` prints the address instead, `--port` picks the port). The side
+panel shows the run's record and chooses what is drawn: the dataset, the field it
+is coloured by (a vector's magnitude or one component), the colormap, a linear or
+logarithmic scale with an automatic or fixed range, the outer surface and its
+opacity, any number of slice planes normal to x, y or z and any number of
+threshold regions (each with a slider and a box to type its coordinate or limits
+exactly), and the snapshot of a time series. Below the view, the convergence
+history plots the residual against the step; **Reload** re-reads it, so a run still
+in progress can be followed.
+
+The scene is rendered on your machine and the browser receives images, so a mesh of
+millions of cells is never sent to it, and what is drawn of a volume is its outer
+surface, the slices and the threshold regions rather than every cell. The viewer
+reads files only: it imports neither aquaflux nor JAX, and aquaflux never imports
+it, so results copied to another machine open there with only the extra installed.
+
 ## Documentation
 
 Full documentation — the mesh model, zones and patches, steady-state solving, and
@@ -189,8 +231,8 @@ pip install -e ".[lint,test]"
 # follows each checkout (and each worktree) to its own .githooks/.
 git config core.hooksPath .githooks
 
-ruff check aquaflux tests
-ruff format --check aquaflux tests
+ruff check aquaflux aquaflux_ui tests docs
+ruff format --check aquaflux aquaflux_ui tests docs
 pytest -m "not validation and not slow"    # fast gate
 ```
 

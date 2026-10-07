@@ -49,6 +49,7 @@ from __future__ import annotations
 import abc
 import dataclasses
 import itertools
+from typing import ClassVar
 
 import equinox as eqx
 import jax
@@ -419,9 +420,11 @@ class ShaftCulling(BodyCulling):
     Attributes
     ----------
     receiver_blocks : tuple of int
-        Receivers per block, coarsest first; each divides the one before. Smaller blocks make
-        narrower shafts, which more bodies can vouch for, and more tiles to compare -- which is
-        why refinement only ever splits the tiles the coarser size could not decide.
+        Receivers per block at each refinement level, coarsest first, each dividing the one before.
+        Smaller blocks make narrower shafts, which more bodies can vouch for, but more tiles to
+        compare.
+
+        That trade is why refinement only ever splits the tiles the coarser size could not decide.
     source_clusters : tuple of int
         Sources per cluster at the same levels, with the same trade. As many sizes as
         ``receiver_blocks``.
@@ -439,9 +442,12 @@ class ShaftCulling(BodyCulling):
     stopping at eight (``receiver_blocks=(32, 8)``, ``source_clusters=(32, 8)``).
     """
 
-    receiver_blocks: tuple = eqx.field(static=True, default=(32, 8, 2))
-    source_clusters: tuple = eqx.field(static=True, default=(32, 8, 2))
+    receiver_blocks: tuple[int, ...] = eqx.field(static=True, default=(32, 8, 2))
+    source_clusters: tuple[int, ...] = eqx.field(static=True, default=(32, 8, 2))
     sources: _Groups | None = None
+
+    #: Fields that are the value's own cache, not settings a case file may state.
+    not_settings: ClassVar[tuple[str, ...]] = ("sources",)
 
     def __check_init__(self):
         _check_sizes("receiver_blocks", self.receiver_blocks)

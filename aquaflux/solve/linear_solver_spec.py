@@ -11,6 +11,8 @@ from __future__ import annotations
 import abc
 import dataclasses
 import math
+from collections.abc import Callable
+from typing import ClassVar
 
 import lineax as lx
 
@@ -60,6 +62,9 @@ class GmresSolve(LinearSolverSpec):
     restart: int | None = None
     stagnation_iters: int | None = None
     max_restarts: int | None = None
+
+    #: Where an unset setting takes its default from (read by the case-file schema).
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (relative_residual_gmres,)
 
     def __post_init__(self) -> None:
         if not (math.isfinite(self.rtol) and self.rtol > 0):

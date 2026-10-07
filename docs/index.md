@@ -22,7 +22,9 @@ gradient_reconstruction
 steady_state_solving
 preconditioning
 case_files
+user_interface
 radiation
+radiation_case
 cad_geometry
 ```
 

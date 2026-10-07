@@ -47,7 +47,7 @@ from aquaflux.flow import (
 )
 from aquaflux.io import read_openfoam
 from aquaflux.io.openfoam.cyclic import DEFAULT_MATCH_TOLERANCE
-from aquaflux.mesh import Mesh, MeshGeometry, graded_nodes, structured_grid_2d
+from aquaflux.mesh import Mesh, MeshGeometry, graded_nodes, structured_grid_2d, structured_grid_3d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import (
     CorrectedGreenGauss,
@@ -83,7 +83,14 @@ def _sections(**overrides: object) -> dict[str, object]:
         },
         "numerics": {"momentum_advection": {"kind": "FirstOrderUpwind"}},
     }
-    return {**sections, **overrides}
+    sections = {**sections, **overrides}
+    if sections["physics"].get("kind") == "RANS" and "numerics" not in overrides:
+        # A RANS case's k and omega are advected too; a test leaving numerics alone gets a scheme.
+        sections["numerics"] = {
+            **sections["numerics"],
+            "turbulence_advection": {"kind": "FirstOrderUpwind"},
+        }
+    return sections
 
 
 def _boundaries(**overrides: object) -> dict[str, object]:
@@ -94,11 +101,7 @@ def _rans_case() -> CaseSpec:
     return CaseSpec(
         mesh=OpenFOAMMesh("runs/kwsst/polyMesh"),
         fluid=Fluid(density=1.0, kinematic_viscosity=1.0e-5),
-        physics=RANS(
-            advection=FirstOrderUpwind(),
-            omega_variable=LogScalars(),
-            explicit_production_limiter=True,
-        ),
+        physics=RANS(omega_variable=LogScalars(), explicit_production_limiter=True),
         boundaries={
             "inlet": Inlet((10.0, 0.0), turbulence=FixedTurbulence(k=0.375, omega=440.15)),
             "outlet": Outlet(pressure=0.0),
@@ -107,6 +110,7 @@ def _rans_case() -> CaseSpec:
         },
         numerics=Numerics(
             momentum_advection=LimitedUpwind(limiter=VenkatakrishnanLimiter()),
+            turbulence_advection=FirstOrderUpwind(),
             gradient=MultipleCorrectionGradient(),
         ),
     )
@@ -218,7 +222,7 @@ def test_a_boundaries_table_given_in_code_is_frozen_and_copied() -> None:
             ),
             ValueError,
             r"at 'boundaries.top' is not accepted there; each entry of CaseSpec.boundaries takes one of "
-            r"'Inlet', 'Outlet', 'Wall'",
+            r"'Inlet', 'Lamp', 'Outlet', 'Wall'",
         ),
         (
             _sections(numerics={"gradient": {"kind": "CompactGreenGauss"}}),
@@ -226,16 +230,30 @@ def test_a_boundaries_table_given_in_code_is_frozen_and_copied() -> None:
             r"Numerics at 'numerics' needs 'momentum_advection'",
         ),
         (
-            _sections(physics={"kind": "RANS"}),
+            _sections(
+                physics={"kind": "RANS"},
+                boundaries=_boundaries(
+                    left={
+                        "kind": "Inlet",
+                        "velocity": [1.0, 0.0],
+                        "turbulence": {"kind": "FixedTurbulence", "k": 0.1, "omega": 10.0},
+                    }
+                ),
+                numerics={"momentum_advection": {"kind": "FirstOrderUpwind"}},
+            ),
             ValueError,
-            r"RANS at 'physics' needs 'advection'",
+            r"numerics.turbulence_advection: a RANS case needs this setting",
         ),
         (
             _sections(solvers={"kind": "CoupledMarch"}),
             ValueError,
             r"CaseSpec has no field 'solvers'",
         ),
-        ({k: v for k, v in _sections().items() if k != "fluid"}, ValueError, r"needs 'fluid'"),
+        (
+            {k: v for k, v in _sections().items() if k != "fluid"},
+            ValueError,
+            r"^fluid: a Laminar case states its fluid and its numerics",
+        ),
     ],
     ids=[
         "no-viscosity",
@@ -287,14 +305,14 @@ def test_a_laminar_case_refuses_every_turbulence_setting_at_once() -> None:
 
 
 def test_a_rans_case_refuses_an_inlet_with_no_inflow_turbulence() -> None:
-    sections = _sections(physics={"kind": "RANS", "advection": {"kind": "FirstOrderUpwind"}})
+    sections = _sections(physics={"kind": "RANS"})
     with pytest.raises(ValueError, match=r"boundaries.left.turbulence: a RANS case needs"):
         case_spec_from_mapping(sections)
 
 
 def test_a_rans_case_with_inflow_turbulence_and_no_wall_setting_loads() -> None:
     sections = _sections(
-        physics={"kind": "RANS", "advection": {"kind": "FirstOrderUpwind"}},
+        physics={"kind": "RANS"},
         boundaries=_boundaries(
             left={
                 "kind": "Inlet",
@@ -418,7 +436,12 @@ def test_a_document_that_is_not_a_case_is_refused(document, match) -> None:
 
 def test_a_value_no_case_file_can_name_is_refused_on_writing() -> None:
     spec = dataclasses.replace(
-        _rans_case(), numerics=Numerics(FirstOrderUpwind(), gradient=HessianCorrectedGradient())
+        _rans_case(),
+        numerics=Numerics(
+            FirstOrderUpwind(),
+            turbulence_advection=FirstOrderUpwind(),
+            gradient=HessianCorrectedGradient(),
+        ),
     )
     with pytest.raises(
         TypeError, match=r"HessianCorrectedGradient at 'numerics.gradient' is not a kind"
@@ -473,7 +496,10 @@ def test_a_yaml_1_1_boolean_word_is_a_string_and_is_refused_where_a_boolean_belo
     text = _SLAB_CASE.replace("VISCOSITY", "1.0e-3").replace("PRESSURE", "0")
     text = text.replace(
         "physics: {kind: Laminar}",
-        f"physics: {{kind: RANS, advection: {{kind: FirstOrderUpwind}}, explicit_production_limiter: {written}}}",
+        f"physics: {{kind: RANS, explicit_production_limiter: {written}}}",
+    ).replace(
+        "  momentum_advection: {kind: FirstOrderUpwind}\n",
+        "  momentum_advection: {kind: FirstOrderUpwind}\n  turbulence_advection: {kind: FirstOrderUpwind}\n",
     )
     with pytest.raises(ValueError, match=rf"'{written}' at 'physics.explicit_production_limiter'"):
         read_case(_write(tmp_path / "case.yaml", text))
@@ -574,9 +600,13 @@ def test_the_mesh_tolerance_reaches_the_reader_and_is_left_to_it_when_unset() ->
         (lambda: Wall(velocity=(1.0, float("nan"))), ValueError, r"Wall.velocity must be finite"),
         (lambda: OpenFOAMMesh(""), ValueError, r"needs the path"),
         (lambda: OpenFOAMMesh("m", cyclic_match_tolerance=0.0), ValueError, r"positive, finite"),
-        (lambda: RANS(advection=None), TypeError, r"RANS.advection must be an AdvectionScheme"),
         (
-            lambda: RANS(advection=FirstOrderUpwind(), omega_variable=FirstOrderUpwind()),
+            lambda: Numerics(momentum_advection=FirstOrderUpwind(), turbulence_advection="upwind"),
+            TypeError,
+            r"Numerics.turbulence_advection must be an AdvectionScheme",
+        ),
+        (
+            lambda: RANS(omega_variable=FirstOrderUpwind()),
             TypeError,
             r"RANS.omega_variable must be a ScalarVariableTransform",
         ),
@@ -594,7 +624,7 @@ def test_the_mesh_tolerance_reaches_the_reader_and_is_left_to_it_when_unset() ->
         (
             lambda: dataclasses.replace(_rans_case(), boundaries={"inlet": Outlet(0.0), "w": 3}),
             TypeError,
-            r"maps each patch name to an Inlet, Outlet or Wall",
+            r"maps each patch name to an Inlet, Outlet, Wall or Lamp",
         ),
         (lambda: dataclasses.replace(_rans_case(), physics="RANS"), TypeError, r"CaseSpec.physics"),
     ],
@@ -752,7 +782,6 @@ def test_a_rans_case_builds_the_coupled_system_written_by_hand() -> None:
         fluid=_SLAB_FLUID,
         physics={
             "kind": "RANS",
-            "advection": {"kind": "FirstOrderUpwind"},
             "model": {"kind": "SSTModel", "wall_omega_exponent": 3.0},
             "omega_variable": {"kind": "LogScalars"},
             "explicit_production_limiter": True,
@@ -771,6 +800,7 @@ def test_a_rans_case_builds_the_coupled_system_written_by_hand() -> None:
                 "kind": "LimitedUpwind",
                 "limiter": {"kind": "VenkatakrishnanLimiter"},
             },
+            "turbulence_advection": {"kind": "FirstOrderUpwind"},
             "gradient": {"kind": "CorrectedGreenGauss"},
         },
     )
@@ -787,7 +817,7 @@ def test_an_unset_setting_leaves_the_builders_default_in_force() -> None:
     mesh, geometry = _slab()
     sections = _sections(
         fluid=_SLAB_FLUID,
-        physics={"kind": "RANS", "advection": {"kind": "FirstOrderUpwind"}},
+        physics={"kind": "RANS"},
         boundaries={
             **_SLAB_PATCHES,
             "left": {
@@ -874,6 +904,13 @@ def test_a_structured_grid_generates_the_mesh_its_settings_describe() -> None:
     assert not {"left", "right"} & set(mesh.face_patches.names)
 
 
+def test_a_three_dimensional_structured_grid_is_the_uniform_box_its_settings_describe() -> None:
+    mesh = StructuredGrid(cells=(2, 3, 4), lengths=(1.0, 2.0, 3.0)).read(REPO)
+    # Unequal counts and lengths on every axis, so a transposed pair would change the mesh.
+    _same_problem(mesh, structured_grid_3d(2, 3, 4, 1.0, 2.0, 3.0, named_boundaries=True))
+    assert {"left", "right", "bottom", "top", "back", "front"} <= set(mesh.face_patches.names)
+
+
 def test_a_grading_toward_one_wall_reaches_the_generator() -> None:
     grid = StructuredGrid(
         cells=(2, 5), lengths=(1.0, 1.0), grading={"y": GeometricGrading(1.5, both_sides=False)}
@@ -889,7 +926,18 @@ def test_a_whole_number_cell_count_written_as_a_float_is_a_count() -> None:
 @pytest.mark.parametrize(
     ("build", "match"),
     [
-        (lambda: StructuredGrid(cells=(2, 2, 2), lengths=(1.0, 1.0, 1.0)), "two-dimensional"),
+        (
+            lambda: StructuredGrid(cells=(2, 2, 2, 2), lengths=(1.0, 1.0, 1.0, 1.0)),
+            "two cell counts and two lengths, or three of each",
+        ),
+        (
+            lambda: StructuredGrid(cells=(2, 2, 2), lengths=(1.0, 1.0)),
+            "two cell counts and two lengths, or three of each",
+        ),
+        (
+            lambda: StructuredGrid(cells=(2, 2, 2), lengths=(1.0, 1.0, 1.0), periodic=("x",)),
+            "three-dimensional structured grid is uniform",
+        ),
         (lambda: StructuredGrid(cells=(0, 2), lengths=(1.0, 1.0)), "cell counts must be >= 1"),
         (lambda: StructuredGrid(cells=(2, 2), lengths=(1.0, -1.0)), "lengths must be positive"),
         (
@@ -911,7 +959,9 @@ def test_a_whole_number_cell_count_written_as_a_float_is_a_count() -> None:
         (lambda: BodyForce(force=(1.0,)), "two or three components, got 1"),
     ],
     ids=[
-        "three-dimensional",
+        "four-dimensional",
+        "lengths-of-another-dimension",
+        "three-dimensional-and-periodic",
         "no-cells",
         "negative-length",
         "one-periodic-cell",
@@ -1042,7 +1092,7 @@ def test_an_intensity_or_length_that_gives_no_turbulence_is_refused(turbulence, 
     if turbulence.get("length") == ".inf":
         turbulence = {**turbulence, "length": float("inf")}
     inlet = {"kind": "Inlet", "velocity": [1.0, 0.0], "turbulence": turbulence}
-    rans = {"kind": "RANS", "advection": {"kind": "FirstOrderUpwind"}}
+    rans = {"kind": "RANS"}
     with pytest.raises(ValueError, match=match):
         case_spec_from_mapping(_sections(physics=rans, boundaries=_boundaries(left=inlet)))
 
@@ -1059,7 +1109,7 @@ def test_an_intensity_length_inlet_builds_the_problem_its_k_and_omega_would() ->
     or that fixed the constant at 0.09 -- builds a different omega and fails the comparison.
     """
     model = {"kind": "SSTModel", "beta_star": 0.1}
-    rans = {"kind": "RANS", "advection": {"kind": "FirstOrderUpwind"}, "model": model}
+    rans = {"kind": "RANS", "model": model}
     speed, intensity, length = 1.0, 0.04, 0.02
     k = 1.5 * (intensity * speed) ** 2
     omega = k**0.5 / (0.1**0.25 * length)
@@ -1109,7 +1159,7 @@ _GROUPED_PATCHES = {
     "physics",
     [
         {"kind": "Laminar"},
-        {"kind": "RANS", "advection": {"kind": "FirstOrderUpwind"}},
+        {"kind": "RANS"},
     ],
     ids=["laminar", "rans"],
 )
@@ -1196,3 +1246,33 @@ def test_the_per_patch_conditions_are_refused_for_a_mesh_the_keys_do_not_fit(
     mesh = read_openfoam(directory)
     with pytest.raises(ValueError, match=r"'bottom' \(by 'walls' and 'bottom'\)"):
         spec.patch_conditions(mesh)
+
+
+def test_a_case_file_can_name_the_projected_stencil_gradient_and_not_its_cache():
+    from aquaflux.case import case_spec_from_mapping, case_spec_to_mapping
+    from aquaflux.schemes import ProjectedStencilGradient
+
+    numerics = {
+        "momentum_advection": {"kind": "FirstOrderUpwind"},
+        "gradient": {"kind": "ProjectedStencilGradient", "blend": 0.5},
+    }
+    spec = case_spec_from_mapping(_sections(numerics=numerics))
+    assert spec.numerics.gradient == ProjectedStencilGradient(blend=0.5)
+    assert case_spec_to_mapping(spec)["numerics"]["gradient"] == numerics["gradient"]
+    # Its weights are built from the mesh by the solve; a file cannot hand it some.
+    with pytest.raises(ValueError, match="has no field 'prepared'"):
+        case_spec_from_mapping(
+            _sections(numerics={**numerics, "gradient": {**numerics["gradient"], "prepared": 1}})
+        )
+
+
+def test_a_laminar_case_refuses_a_turbulence_advection_scheme_it_would_not_read() -> None:
+    numerics = {
+        "momentum_advection": {"kind": "FirstOrderUpwind"},
+        "turbulence_advection": {"kind": "FirstOrderUpwind"},
+    }
+    with pytest.raises(
+        ValueError,
+        match=r"numerics.turbulence_advection: a Laminar case does not read this setting",
+    ):
+        case_spec_from_mapping(_sections(numerics=numerics))

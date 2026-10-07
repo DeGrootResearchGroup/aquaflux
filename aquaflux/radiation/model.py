@@ -35,14 +35,22 @@ reciprocity. Eliminating ``H`` gives
 ``(I - diag(rho) F) B = M + rho * ((F^M - F) M + H_point + H_external)``, which is what is
 actually solved.
 
-⚠️ **Reflection here is purely DIFFUSE, and a scalar reflectance does not say that.** A wall
-described only by the number 0.95 could scatter that light in every direction or send it off
-like a mirror, and the two are not close: Hassanpour et al. (2023) measure a **10-47% spread in
-log reduction between fully specular and fully diffuse walls at the same reflectivity of 0.95**.
-Diffuse is the right default rather than merely the convenient one — Li et al. (2017) find that
-diffuse reflection raises the reduction-equivalent fluence above specular, and the measurement
-literature emphasizes it — but the assumption belongs beside the number, because a reflectance
-supplied without it is an under-specified input.
+⚠️ **Reflection is DIFFUSE unless a body is named as specular.** A wall described only by the
+number 0.95 could scatter that light in every direction or send it off like a mirror, and the two
+are not close:
+Hassanpour et al. (2023) find, simulating a reactor whose lamps are reflected into the water by a
+cylindrical reflector, a **10-47% spread in log reduction between fully specular and fully diffuse
+walls at the same reflectivity of 0.95**. Diffuse is the right default rather than
+merely the convenient one — Li et al. (2017) find that diffuse reflection raises the
+reduction-equivalent fluence above specular, and the measurement literature emphasizes it — but
+the assumption belongs beside the number, which is why a surface set carries
+``diffuse_reflectance`` and ``specular_reflectance`` separately. The second is carried only for
+bodies named in ``specular`` when the model is built: each is split into its flat planes, and one
+bounce in them reaches the other facets through the transfer and the volume through mirror
+images (:mod:`~aquaflux.radiation.images`), shadowed on both legs of each path by the same bodies
+and the same self-occlusion as direct light (:mod:`~aquaflux.radiation.mirror_visibility`). A
+specular reflectance on any other body is **refused** rather than dropped, which would leave a
+field darker than its walls make it.
 
 **Occluder geometry is a build argument; occluder transmittance is a call argument.** The split
 is by when the value is needed rather than by what it describes: the shadow mask is frozen
@@ -81,6 +89,7 @@ nothing about cells, fluxes or residuals. Keeping that fence one-way is why
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 
 import equinox as eqx
 import jax
@@ -90,6 +99,7 @@ import numpy as np
 from aquaflux.radiation.absorption import Absorption
 from aquaflux.radiation.culling import BodyCulling
 from aquaflux.radiation.gather import direct_irradiance
+from aquaflux.radiation.images import mirrored_irradiance
 from aquaflux.radiation.profiles import Lambertian
 from aquaflux.radiation.quadrature import TriangleQuadrature
 from aquaflux.radiation.receiver_shadows import FrozenShadows, ReceiverShadows, StreamedShadows
@@ -134,41 +144,49 @@ class RadiationSettings(eqx.Module):
     transfer_chunk_size : int or None
         Receiving facets per pass of the ``n^2`` transfer build, bounding its peak memory.
     gather_pair_limit : int or None
-        Receiver-by-facet pairs per pass of the volume gather, bounding its peak memory whatever
-        the facet count. It bounds the other per-call pass over pairs too: under a non-uniform
-        medium, the walk between every pair of facets, whose receivers are the facets. Counted in pairs rather than receivers because a pass's size is their
-        product, and a receiver count would leave it to how finely the emitter is divided. A
-        separate setting from the one above because the two loops are over different things —
-        facets against facets, and receivers against facets.
+        Receiver-by-facet pairs per pass of the volume gather, which bounds its peak memory
+        whatever the facet count. Unset, the gather's own limit.
+
+        It bounds the other per-call pass over pairs too: under a non-uniform medium, the walk
+        between every pair of facets, whose receivers are the facets. It is counted in pairs rather
+        than receivers because a pass's size is their product, and a receiver count would leave it
+        to how finely the emitter is divided. It is a separate setting from ``transfer_chunk_size``
+        because the two loops are over different things, facets against facets and receivers against
+        facets.
     self_occlusion : SelfOcclusion or None
-        How the emitting facets are tested for shadowing one another, which for any non-convex
-        body they do. Unset, one ray is cast per pair. Pass
-        :class:`~aquaflux.radiation.self_occlusion.SilhouetteOcclusion` to clip exact fractions
-        instead, which resolves a partly shadowed pair rather than rounding it to the nearer
-        answer, at a cost that rises steeply with facet count. It also governs the volume
-        receivers unless ``receiver_occlusion`` says otherwise, where the clip's fraction is of
-        each source's plain solid angle rather than its projected one.
+        How the emitting facets are tested for shadowing one another, which they do on any
+        non-convex body. Unset, one ray is cast per pair. It also governs the volume receivers
+        unless ``receiver_occlusion`` says otherwise.
+
+        Pass :class:`~aquaflux.radiation.self_occlusion.SilhouetteOcclusion` to clip exact fractions
+        instead, which resolves a partly shadowed pair rather than rounding it to the nearer answer,
+        at a cost that rises steeply with facet count. For the volume receivers the clip's fraction
+        is of each source's plain solid angle rather than its projected one.
     stream_receiver_mask : bool or None
-        Whether the receivers' shadow mask is built chunk by chunk at every call rather than
-        held whole. Unset, it is held: built once, and read by every call. The whole mask is one
-        entry per receiver, facet and body — 12 GB per body at a reactor mesh's 1.6 million cells
-        against a 7,516-facet lamp — so a mesh-scale model must stream it. Streaming keeps memory
-        to one chunk in a gradient as well as in the forward pass, and costs a mask build per
-        call (two per call under a gradient). Both give the same field and the same gradients;
-        the choice is between memory and repeated work. See
+        Build the receivers' shadow mask chunk by chunk at every call, rather than holding it whole.
+        Unset, it is held, built once and read by every call. Both give the same field and
+        gradients, so the choice is between memory and repeated work.
+
+        The whole mask is one entry per receiver, facet and body. That is 12 GB per body at a
+        reactor mesh's 1.6 million cells against a 7,516-facet lamp, so a mesh-scale model must
+        stream it. Streaming keeps memory to one chunk in a gradient as well as in the forward pass,
+        and costs a mask build per call (two per call under a gradient). See
         :mod:`~aquaflux.radiation.receiver_shadows`.
     receiver_occlusion : SelfOcclusion or None
-        How the facets are tested for shadowing the volume receivers. Unset, the receivers
-        follow ``self_occlusion``, so switching self-occlusion off, or choosing the ray test or
-        the silhouette clip, applies to both masks alike. Set this to choose differently -- the
-        ray test for the volume beside the clip between facets, say, where a mesh's cells are
-        too many to clip one by one.
+        How the facets are tested for shadowing the volume receivers. Unset, the receivers follow
+        ``self_occlusion``. Set it to choose differently, for example the ray test for the volume
+        beside the silhouette clip between facets.
+
+        Following ``self_occlusion`` means switching self-occlusion off, or choosing the ray test or
+        the silhouette clip, applies to both masks alike. The ray test for the volume suits a mesh
+        whose cells are too many to clip one by one.
     body_culling : BodyCulling or None
-        How the bodies' layer of both masks is worked out. Unset, whole tiles of pairs a body can
-        prove it misses are decided without a test
-        (:class:`~aquaflux.radiation.culling.ShaftCulling` at its default group sizes). Pass
-        :class:`~aquaflux.radiation.culling.EveryPair` to test every body against every pair --
-        the same masks, for more tests -- or a ``ShaftCulling`` with other group sizes.
+        How the bodies' part of both shadow masks is worked out. Unset,
+        :class:`~aquaflux.radiation.culling.ShaftCulling` at its default group sizes, which decides
+        whole tiles of pairs a body can prove it misses without testing them.
+
+        Pass :class:`~aquaflux.radiation.culling.EveryPair` to test every body against every pair,
+        which gives the same masks for more tests, or a ``ShaftCulling`` with other group sizes.
     """
 
     receiver_quadrature: int | TriangleQuadrature | None = eqx.field(static=True, default=None)
@@ -269,6 +287,7 @@ def build_radiation_model(
     surfaces: Surfaces,
     *,
     occluders=(),
+    specular: Sequence[str] = (),
     settings: RadiationSettings | None = None,
     **visibility_options,
 ) -> RadiationModel:
@@ -284,6 +303,14 @@ def build_radiation_model(
     occluders : sequence of aquaflux.solids.Body, optional
         Analytic bodies standing between things. Their *geometry* is frozen here; what each
         lets through is a call argument.
+    specular : sequence of str, optional
+        Bodies, by name, that reflect specularly as well as diffusely: flat walls, each split into
+        the planes its facets lie in. Which bodies are mirrors is geometry and is frozen here;
+        how much each reflects is its ``specular_reflectance`` at each call, one value per body.
+        Every other body must have a specular reflectance of zero. Both legs of a reflected path
+        are tested against the occluders and the surface's own triangles, one ray per path,
+        whichever self-occlusion strategy the settings choose; a body crossed on both legs
+        filters the light twice.
     settings : RadiationSettings, optional
         Build-time choices. Unset fields take each function's own default.
     **visibility_options
@@ -297,7 +324,8 @@ def build_radiation_model(
     ------
     ValueError
         If a facet centroid or a receiver lies inside one of the bodies, which is a geometry
-        error rather than a shadow — the raise comes from the visibility build.
+        error rather than a shadow — the raise comes from the visibility build; or if a specular
+        body is curved, lying in more planes than the transfer build allows.
 
     Notes
     -----
@@ -319,13 +347,18 @@ def build_radiation_model(
         raise ValueError(msg)
 
     transfer = build_transfer(
-        surfaces, occluders=occluders, **settings.transfer_options(), **visibility_options
+        surfaces,
+        occluders=occluders,
+        specular=specular,
+        **settings.transfer_options(),
+        **visibility_options,
     )
     shadows = StreamedShadows if settings.stream_receiver_mask else FrozenShadows
     receiver_shadows = shadows.build(
         occluders,
         surfaces,
         receivers,
+        mirrors=transfer.mirrors,
         **settings.receiver_visibility_options(),
         **visibility_options,
     )
@@ -466,7 +499,7 @@ def _solve(model, surfaces, absorption, transmittance, external_irradiance, solv
     """Assemble and solve ``(I - diag(rho) F) B = M + rho ((F^M - F) M + H_point + H_external)``."""
     _check_geometry(model, surfaces)
     emission = jnp.asarray(surfaces.emission, dtype=float)
-    reflectance = jnp.asarray(surfaces.reflectance, dtype=float)
+    reflectance = jnp.asarray(surfaces.diffuse_reflectance, dtype=float)
     reflected, emitted = model.transfer.assemble(
         surfaces, absorption, transmittance, **model.settings.gather_options()
     )
@@ -589,6 +622,19 @@ def _point_source_irradiance(model, surfaces, absorption, transmittance):
         transmittance=transmittance,
         point_sources_only=True,
     )
+    if model.transfer.mirrors:
+        # And by one bounce off a mirror, which the transfer cannot carry for them either.
+        landing = landing + mirrored_irradiance(
+            surfaces,
+            model.transfer.mirrors,
+            surfaces.centroid,
+            surfaces.normal,
+            absorption=absorption,
+            shadows=model.transfer.point_shadows,
+            transmittance=None if model.transfer.point_shadows is None else transmittance,
+            point_sources_only=True,
+            **model.settings.gather_options(),
+        )
     # A point source has no surface for an arrival to land on, and a zero-length normal, so its
     # own entry is meaningless rather than small.
     return jnp.where(jnp.asarray(surfaces.is_point_source), 0.0, landing)
@@ -692,7 +738,9 @@ def fluence_rate(
     )
     # Both sets are gathered in one pass through one set of shadows -- they share the geometry --
     # so the solid angles, attenuation and shadows are formed once for the two, and a streamed
-    # mask is built once per chunk rather than once per set.
+    # mask is built once per chunk rather than once per set. The shadows also gather the two sets
+    # once more in each mirror, through masks of their own: the emitted light with each source's
+    # own distribution and the reflected light Lambertian.
     field = model.receiver_shadows.fluence_rate(
         (surfaces, bounced),
         model.receivers,

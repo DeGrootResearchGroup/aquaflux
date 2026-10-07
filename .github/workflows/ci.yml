@@ -84,18 +84,18 @@ jobs:
       # it. Naming the directory rather than the file covers a second docs script
       # automatically; it is the only Python under `docs/`.
       - name: ruff check
-        run: ruff check aquaflux tests docs
+        run: ruff check aquaflux aquaflux_ui tests docs
 
       # Report later failures even when an earlier step already failed -- one red
       # run should show every problem to fix, not just the first.
       - name: ruff format --check
         if: ${{ !cancelled() }}
-        run: ruff format --check aquaflux tests docs
+        run: ruff format --check aquaflux aquaflux_ui tests docs
 
       # Canadian spelling gate (custom dictionary; config in pyproject.toml).
       - name: codespell
         if: ${{ !cancelled() }}
-        run: codespell aquaflux tests
+        run: codespell aquaflux aquaflux_ui tests
 
   # ---- Docs build (always-on) -------------------------------------------------
   # Read the Docs builds the site with `fail_on_warning`, and only AFTER a merge --
@@ -132,7 +132,7 @@ jobs:
 
   # ---- Fast unit tests (always-on) --------------------------------------------
   # Most unit tests are cheap and homogeneous (peak ~5 GB in one process), so they
-  # run unsharded across xdist workers (`-n auto`). The `distributed` tests are excluded
+  # run unsharded across three xdist workers (`-n 3`, see the step). The `distributed` tests are excluded
   # and run in their own job below -- they each fork a child that wants the whole machine,
   # so mixed in here they oversubscribe the runner and set this job's whole wall clock.
   # Two interpreters, since a unit-level regression can be version-specific.
@@ -158,7 +158,10 @@ jobs:
     #
     # This is a HANG BACKSTOP, not a cost budget: `--timeout=900` below names a hung test long
     # before this fires, so the cost of setting it generously is only paid by a genuinely stuck job.
-    timeout-minutes: 45
+    # 60 rather than 45 since the job runs three workers instead of four (see the step): a
+    # quarter fewer workers is about a third more wall clock, and the py3.12 job alone already
+    # took 32-35 min on 2026-10-07.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -174,6 +177,17 @@ jobs:
 
       - name: Install package and test dependencies
         run: pip install -e ".[test]"
+
+      - name: Record the runner's memory while the tests run
+        # One line every 30 s -- free memory, swap in use, and pages swapped in and out -- to a
+        # file the last step prints whatever the tests did. A worker killed by the per-test timeout
+        # and one killed for memory read the same in pytest's output (see the next step), and a
+        # runner that has started swapping slows EVERY worker at once by an order of magnitude, so
+        # this is what tells a slow runner from a swapping one. The process outlives this step and
+        # is stopped with the job.
+        run: |
+          swapon --show || true
+          nohup vmstat -t -S M 30 > "$RUNNER_TEMP/vmstat.log" 2>&1 &
 
       - name: Run unit tests
         # `not slow and not validation`: a few unit tests carry those markers and
@@ -210,13 +224,31 @@ jobs:
         # (Measured 2026-09-09 on macOS arm64, jax 0.10.2, x64 on, one thread per process,
         # `test_distributed_gradient.py` `_MATCHES` child at 4 simulated devices.)
         #
+        # THREE WORKERS, NOT `-n auto` (= 4 on this 4-core, 16 GB runner), FOR MEMORY. On
+        # 2026-10-07 the py3.11 job failed on four PRs in a row with no assertion failing anywhere:
+        # tests that take 26-64 s alone (`test_reynolds_continuation.py`, measured on py3.11 with
+        # these thread settings) ran 875-887 s, hit the per-test timeout and took their workers
+        # down, while radiation tests that take under 50 s ran 330-630 s beside them and one
+        # teardown took 717 s. Everything slowing at once by 14-35x is the runner, and at several
+        # GB per fast-tier worker four of them can outgrow 16 GB; the same commit passed in 23 min
+        # an hour earlier, so it is a margin, not a regression. The memory step above is there to
+        # confirm or refute that the next time a run slows down.
+        #
         # `-rs` lists every skipped test WITH ITS REASON. A skip and a pass are the same exit
         # status, so without it a module that never ran here is indistinguishable from one that
         # passed -- which is how two modules gated on an optional solver library went four days
         # without running while every required check stayed green.
         run: >-
-          pytest tests/unit -m "not slow and not validation and not distributed" -q -rs -n auto
+          pytest tests/unit -m "not slow and not validation and not distributed" -q -rs -n 3
           --durations=15 --timeout=900 --timeout-method=thread --max-worker-restart=0
+
+      - name: Show the runner's memory during the tests
+        if: always()
+        # `free`, `swpd` and `si`/`so` are MiB; a growing `swpd` with non-zero `si`/`so` while
+        # the tests slow down is the runner swapping.
+        run: |
+          free -m
+          cat "$RUNNER_TEMP/vmstat.log" || true
 
   # ---- Distributed (shard_map) tests (always-on) ------------------------------
   # These have their own job because of how they run, not because of what they cover: each

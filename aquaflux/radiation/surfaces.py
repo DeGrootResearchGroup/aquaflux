@@ -7,11 +7,11 @@ the triangle rather than approximating it by a point — the near-field error of
 approximation runs to hundreds of percent at the distances a reactor annulus puts its
 receivers at.
 
-Three of its fields are the quantities a design study varies — emission, radiant power and
-reflectance — and they are ordinary array leaves so that a derivative with respect to any of
-them flows straight through. The geometry is a leaf too: marking it static would put whole
-arrays in the compilation cache key, which equinox warns about and which fails outright on
-the second call with a different array.
+Four of its fields are the quantities a design study varies — emission, radiant power, and the
+diffuse and specular reflectances — and they are ordinary array leaves so that a derivative with
+respect to any of them flows straight through. The geometry is a leaf too: marking it static
+would put whole arrays in the compilation cache key, which equinox warns about and which fails
+outright on the second call with a different array.
 
 **Emission and power are separate fields, and zero area is legal.** A point source is
 represented as a zero-area facet carrying radiant power in watts; an areal facet carries
@@ -67,8 +67,14 @@ class Surfaces(eqx.Module):
         Prescribed emission ``M`` in W/m², zero on a point source. Differentiable.
     power : jnp.ndarray, shape ``(n_facets,)``
         Radiant power ``P`` in W, zero on an areal facet. Differentiable.
-    reflectance : jnp.ndarray, shape ``(n_facets,)``
-        Diffuse reflectance ``rho`` in ``[0, 1]``. Differentiable.
+    diffuse_reflectance : jnp.ndarray, shape ``(n_facets,)``
+        The share of arriving light a facet sends back out Lambertian, whatever direction it
+        arrived from: ``rho_d`` in ``[0, 1]``. Differentiable.
+    specular_reflectance : jnp.ndarray, shape ``(n_facets,)``
+        The share it sends back out as a mirror does, along the reflection of the direction it
+        arrived from: ``rho_s`` in ``[0, 1]``, with ``rho_d + rho_s <= 1``. Differentiable.
+        Carried by the radiation model only on bodies named as specular when it is built, one
+        value per body; a mirror's geometry is :class:`~aquaflux.radiation.mirrors.Mirror`.
     solid_names : tuple of str
         Body names in :attr:`solid_id` order (static metadata, not a leaf).
     profiles : tuple of Profile
@@ -97,7 +103,8 @@ class Surfaces(eqx.Module):
     solid_id: jnp.ndarray
     emission: jnp.ndarray
     power: jnp.ndarray
-    reflectance: jnp.ndarray
+    diffuse_reflectance: jnp.ndarray
+    specular_reflectance: jnp.ndarray
     profile_index: np.ndarray
     solid_names: tuple[str, ...] = eqx.field(static=True)
     profiles: tuple[Profile, ...] = ()
@@ -112,7 +119,8 @@ class Surfaces(eqx.Module):
         solid_names=("surface",),
         emission=0.0,
         power=0.0,
-        reflectance=0.0,
+        diffuse_reflectance=0.0,
+        specular_reflectance=0.0,
         profiles=None,
         profile_index=None,
         point_sources=None,
@@ -127,8 +135,9 @@ class Surfaces(eqx.Module):
             Body index per facet. Defaults to all zeros — one unnamed body.
         solid_names : tuple of str, optional
             Body names in ``solid_id`` order.
-        emission, power, reflectance : float or array_like, shape ``(n_facets,)``, optional
-            Per-facet optical properties; a scalar is broadcast to every facet.
+        emission, power, diffuse_reflectance, specular_reflectance : float or array_like, optional
+            Per-facet optical properties, each of shape ``(n_facets,)``; a scalar is broadcast to
+            every facet. The two reflectances must each lie in ``[0, 1]`` and sum to at most one.
         profiles : tuple of Profile, optional
             The distinct angular distributions present. Defaults to a single
             :class:`~aquaflux.radiation.profiles.Lambertian`, which is what a diffuse surface
@@ -143,6 +152,11 @@ class Surfaces(eqx.Module):
         Returns
         -------
         Surfaces
+
+        Raises
+        ------
+        ValueError
+            If a reflectance lies outside ``[0, 1]``, or the two sum past one on a facet.
         """
         vertices = jnp.asarray(vertices, dtype=float)
         if vertices.ndim != 3 or vertices.shape[1:] != (3, 3):
@@ -229,6 +243,10 @@ class Surfaces(eqx.Module):
             msg = f"point_sources indexes facets outside the set: {out_of_range[:8]}"
             raise ValueError(msg)
 
+        diffuse_reflectance = spread(diffuse_reflectance, "diffuse_reflectance")
+        specular_reflectance = spread(specular_reflectance, "specular_reflectance")
+        _check_reflectances(diffuse_reflectance, specular_reflectance)
+
         return cls(
             vertices=vertices,
             centroid=jnp.mean(vertices, axis=1),
@@ -237,7 +255,8 @@ class Surfaces(eqx.Module):
             solid_id=solid_id,
             emission=spread(emission, "emission"),
             power=spread(power, "power"),
-            reflectance=spread(reflectance, "reflectance"),
+            diffuse_reflectance=diffuse_reflectance,
+            specular_reflectance=specular_reflectance,
             profile_index=profile_index,
             solid_names=tuple(solid_names),
             profiles=profiles,
@@ -302,7 +321,8 @@ class Surfaces(eqx.Module):
             solid_names=self.solid_names,
             emission=self.emission,
             power=self.power,
-            reflectance=self.reflectance,
+            diffuse_reflectance=self.diffuse_reflectance,
+            specular_reflectance=self.specular_reflectance,
             profiles=self.profiles,
             profile_index=self.profile_index,
             point_sources=self.point_source_index,
@@ -370,7 +390,14 @@ class Surfaces(eqx.Module):
         return {name: float(total) for name, total in zip(self.solid_names, totals, strict=True)}
 
     def with_optics(
-        self, *, emission=None, power=None, reflectance=None, profiles=None, profile_index=None
+        self,
+        *,
+        emission=None,
+        power=None,
+        diffuse_reflectance=None,
+        specular_reflectance=None,
+        profiles=None,
+        profile_index=None,
     ) -> Surfaces:
         """A copy carrying different optical properties and the same geometry.
 
@@ -380,8 +407,9 @@ class Surfaces(eqx.Module):
 
         Parameters
         ----------
-        emission, power, reflectance : array_like, optional
-            Per-facet values, broadcast to ``(n_facets,)``.
+        emission, power, diffuse_reflectance, specular_reflectance : array_like, optional
+            Per-facet values, broadcast to ``(n_facets,)``. The reflectances are checked as a
+            pair, so replacing one is checked against the other as it stands.
         profiles : tuple of Profile, optional
             A new catalogue of angular distributions. Supplying one without ``profile_index``
             is only meaningful when it holds a single profile, which is then given to every
@@ -395,12 +423,14 @@ class Surfaces(eqx.Module):
         ------
         ValueError
             If ``profiles`` is given without ``profile_index`` and holds more than one entry,
-            leaving the existing indices pointing into a catalogue that has changed under them.
+            leaving the existing indices pointing into a catalogue that has changed under them; or
+            if the reflectances that result leave ``[0, 1]`` or sum past one on a facet.
         """
         replacements = {
             "emission": emission,
             "power": power,
-            "reflectance": reflectance,
+            "diffuse_reflectance": diffuse_reflectance,
+            "specular_reflectance": specular_reflectance,
         }
         updated = self
         for name, value in replacements.items():
@@ -408,6 +438,8 @@ class Surfaces(eqx.Module):
                 continue
             spread = jnp.broadcast_to(jnp.asarray(value, dtype=float), (self.n_facets,))
             updated = eqx.tree_at(lambda s, n=name: getattr(s, n), updated, spread)
+        if diffuse_reflectance is not None or specular_reflectance is not None:
+            _check_reflectances(updated.diffuse_reflectance, updated.specular_reflectance)
         if profiles is None and profile_index is None:
             return updated
         if profiles is not None and profile_index is None:
@@ -435,3 +467,41 @@ class Surfaces(eqx.Module):
         return dataclasses.replace(
             updated, profiles=catalogue, profile_index=index.astype(np.int32, copy=False)
         )
+
+
+def _check_reflectances(diffuse, specular) -> None:
+    """Refuse reflectances outside ``[0, 1]``, or a facet that reflects more than arrives.
+
+    A facet reflecting more than one in total creates light, and the interreflection solve then
+    has no bounded solution: its operator's spectral radius is bounded by the largest total
+    reflectance. Checked only on concrete values, in numpy, for the reason ``in_range`` in
+    :meth:`Surfaces.from_triangles` gives; a traced value has already been checked on its way in
+    or is a derivative's perturbation of one that was.
+
+    Parameters
+    ----------
+    diffuse, specular : array_like, shape ``(n_facets,)``
+        The two reflectances.
+
+    Raises
+    ------
+    ValueError
+        Naming the first offending facet and its values.
+    """
+    if isinstance(diffuse, jax.core.Tracer) or isinstance(specular, jax.core.Tracer):
+        return
+    diffuse = np.asarray(diffuse, dtype=float)
+    specular = np.asarray(specular, dtype=float)
+    for name, values in (("diffuse_reflectance", diffuse), ("specular_reflectance", specular)):
+        outside = np.flatnonzero((values < 0.0) | (values > 1.0))
+        if outside.size:
+            msg = f"{name} must lie in [0, 1]; facet {outside[0]} has {values[outside[0]]}"
+            raise ValueError(msg)
+    excess = np.flatnonzero(diffuse + specular > 1.0)
+    if excess.size:
+        facet = excess[0]
+        msg = (
+            f"facet {facet} reflects more than arrives: diffuse_reflectance "
+            f"{diffuse[facet]} plus specular_reflectance {specular[facet]} exceeds one"
+        )
+        raise ValueError(msg)

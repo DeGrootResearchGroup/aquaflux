@@ -17,7 +17,7 @@ import abc
 import dataclasses
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 import numpy as np
 
@@ -63,6 +63,9 @@ class InitialState(abc.ABC):
     """
 
     path: str
+
+    #: Which fields name a file or directory, relative to the case file (read by the case's path rules).
+    path_fields: ClassVar[tuple[str, ...]] = ("path",)
 
     def __post_init__(self) -> None:
         if not self.path:

@@ -41,11 +41,12 @@ import re
 from pathlib import Path
 from typing import ClassVar
 
+import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 
 from aquaflux.radiation.profiles import Profile
-from aquaflux.vectors import dot, norm_squared
+from aquaflux.vectors import dot, norm_squared, reflect
 
 __all__ = ["MIN_COSINE", "PhotometricProfile", "Photometry", "read_ies"]
 
@@ -205,9 +206,10 @@ class PhotometricProfile(Profile):
     """A luminaire's measured intensity, tabulated over both angles about the facet normal.
 
     ``gamma`` is the angle from the facet's outward normal, and ``h`` the angle round it from
-    ``up`` projected onto the facet's plane, positive towards ``normal x up``. Bilinear in the two
-    angles between tabulated directions, clamped beyond the tabulated vertical range; built by
-    :meth:`Photometry.profile`, which completes the table round the circle and normalizes it.
+    ``up`` projected onto the facet's plane, positive towards ``normal x up`` -- or, in a mirror
+    image (:meth:`mirrored`), towards its opposite. Bilinear in the two angles between tabulated
+    directions, clamped beyond the tabulated vertical range; built by :meth:`Photometry.profile`,
+    which completes the table round the circle and normalizes it.
 
     Emits nothing behind the facet. Where ``cos gamma`` is below :data:`MIN_COSINE` the radiance
     is the intensity over :data:`MIN_COSINE`, so the contract
@@ -225,6 +227,10 @@ class PhotometricProfile(Profile):
         leaf.
     up : jnp.ndarray, shape ``(3,)``
         The direction of ``h = 0``.
+    handedness : int
+        ``1`` when ``h`` increases towards ``normal x up``, as the table was measured; ``-1`` in
+        a mirror image, which turns the other way. A label rather than a leaf: it is a sign,
+        and nothing is differentiated with respect to it.
     """
 
     dark_behind: ClassVar[bool] = True
@@ -233,6 +239,7 @@ class PhotometricProfile(Profile):
     horizontal: jnp.ndarray
     table: jnp.ndarray
     up: jnp.ndarray
+    handedness: int = eqx.field(static=True, default=1)
 
     def angles(self, direction, normal) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """``cos gamma``, and ``gamma`` and ``h`` in radians, of each direction.
@@ -262,8 +269,10 @@ class PhotometricProfile(Profile):
         gamma = jnp.arctan2(sine, cosine)
         # h from up and normal x up. Both are dotted with the in-plane part only, which is normal
         # to the facet, so up's own component along the normal drops out; and atan2 needs no unit
-        # vectors, so neither is normalized.
-        h = jnp.arctan2(dot(in_plane, jnp.cross(normal, self.up)), dot(in_plane, self.up))
+        # vectors, so neither is normalized. The handedness turns it the other way in a mirror
+        # image, where the cross product of two reflected vectors is the reflection negated.
+        across = self.handedness * dot(in_plane, jnp.cross(normal, self.up))
+        h = jnp.arctan2(across, dot(in_plane, self.up))
         start = self.horizontal[0]
         return cosine, gamma, start + jnp.mod(h - start, 2.0 * jnp.pi)
 
@@ -289,6 +298,20 @@ class PhotometricProfile(Profile):
         cosine, gamma, h = self.angles(direction, normal)
         value = self._interpolate(gamma, h) / jnp.maximum(cosine, MIN_COSINE)
         return jnp.where(cosine > 0.0, value, 0.0)
+
+    def mirrored(self, normal) -> PhotometricProfile:
+        """The table seen in a plane mirror: ``up`` reflected, and ``h`` turning the other way.
+
+        Reflecting ``up`` alone is not enough. A reflection reverses handedness, so a direction
+        that sat at ``h`` towards ``normal x up`` from the source sits, in the image, at ``h``
+        towards the *opposite* of the image's own ``normal x up`` -- read with the same sense of
+        rotation, every asymmetric table would come back turned the wrong way round its axis.
+        """
+        return dataclasses.replace(
+            self,
+            up=reflect(self.up, jnp.asarray(normal, dtype=float)),
+            handedness=-self.handedness,
+        )
 
     def refuse_normals(self, normals) -> str | None:
         """Why facets with these normals cannot carry this profile, or ``None`` if they can.

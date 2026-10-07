@@ -1,0 +1,37 @@
+# The black room's floor irradiance, with the lamp split fine against the floor.
+#
+# The 4 x 4 x 3 m room of air (transparent at 222 nm), the Ushio Care222 B1 module on the ceiling, the
+# perforated Voronoi bunny hanging at 1.2 m, every surface black. The geometry is the MESH's, not the
+# STL the bunny was snapped from: the discrete-ordinates run solves on this mesh, and the comparison is
+# of angular treatment alone, so both must see one geometry.
+#
+# Light is gathered at the floor's face centres only. The lamp patch's 280 faces (1,120 fan
+# triangles) are split until each is under 2.7e-4 of the 3 m to the nearest floor point -- about
+# 0.8 mm, two splits, 17,920 facets: each facet casts its own hard shadow of a strut, and a soft
+# shadow is the sum of as many as there are facets.
+mesh: {kind: OpenFOAMMesh, path: ../work/bunny/case/constant/polyMesh}
+physics:
+  kind: Radiation
+  # The snapped bunny is a sheet: the room's air lies on both sides of its perforated shell.
+  occluders:
+    - {kind: PatchBody, patches: [bunny], sheet: true}
+  receivers: {kind: Receivers, cells: false, patches: [floor]}
+  lamp_refinement: 2.7e-4
+  # The lamp is a flat window and the room a convex box: nothing shadows itself, so the ray test
+  # among the sources' own triangles would cost a great deal to find nothing.
+  settings:
+    kind: RadiationSettings
+    self_occlusion: {kind: NoOcclusion}
+boundaries:
+  lamp:
+    kind: Lamp
+    # Unset power: the file states mW/sr, so its own flux, 118.826 mW, is the lamp's power.
+    # up: the fixture's h = 0 direction (IES "fixtureUp"), the window's long side.
+    profile: {kind: IesProfile, file: ../ushio_b1.ies, up: [1.0, 0.0, 0.0]}
+  floor: {kind: Wall}
+  ceiling: {kind: Wall}
+  walls: {kind: Wall}
+  bunny: {kind: Wall}
+outputs:
+  directory: ../work/cases/bunny_floor
+  fields: [{kind: PatchVtk}]

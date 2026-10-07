@@ -56,7 +56,7 @@ from aquaflux.radiation.silhouette import (
     enclosing_cone,
     source_view,
 )
-from aquaflux.radiation.triangles import padded_length, pairs_are_cut
+from aquaflux.radiation.triangles import padded_length, pairs_are_cut, segment_is_cut
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, receivers_per_pass
 from aquaflux.vectors import dot
 
@@ -125,9 +125,12 @@ class SelfOcclusion(eqx.Module):
         near : jnp.ndarray, shape ``(n_facets,)``
             How far along each segment to start looking, in length units -- the margin that
             stops a facet from shadowing itself.
-        receiver_facet : jnp.ndarray of int, shape ``(n_receivers,)`` or None
+        receiver_facet : jnp.ndarray of int, shape ``(n_receivers,)`` or ``(n_receivers, k)``, or None
             Which facet each receiver sits on, or ``-1`` where none, or ``None`` when the
-            receivers are volume points lying on no facet at all.
+            receivers are volume points lying on no facet at all. A receiver on a shared edge or
+            vertex lies on several, which the ray test takes as ``(n_receivers, k)`` rows, ``-1``
+            filling a row that names fewer; a strategy measuring about one facet's normal refuses
+            that form.
 
         Returns
         -------
@@ -153,6 +156,34 @@ class SelfOcclusion(eqx.Module):
         del surfaces
         return self
 
+    def segments_hidden(self, surfaces, origin, target, near, exclude) -> np.ndarray | None:
+        """Whether the surface's own triangles lie across each of a list of segments.
+
+        For segments that are not one source's view from one receiver -- the two legs of a path
+        broken at a mirror, which run between points no source-receiver product names. **Every
+        strategy answers this with one ray per segment**, since such a leg has no single source
+        whose angular extent could be clipped; :class:`NoOcclusion` answers that nothing is hidden.
+
+        Parameters
+        ----------
+        surfaces : Surfaces
+            Whose triangles are the blockers.
+        origin, target : numpy.ndarray, shape ``(n_segments, 3)``
+            Segment endpoints.
+        near : numpy.ndarray, shape ``(n_segments,)``
+            How far from ``origin`` a hit must be before it counts, in length units.
+        exclude : numpy.ndarray of int, shape ``(n_segments, k)``
+            Triangles each segment ignores; ``-1`` excludes nothing.
+
+        Returns
+        -------
+        numpy.ndarray of bool, shape ``(n_segments,)``, or None
+            ``None`` when the surface hides nothing at all.
+        """
+        return np.asarray(
+            segment_is_cut(origin, target, surfaces.vertices, near, exclude=exclude), dtype=bool
+        )
+
 
 class NoOcclusion(SelfOcclusion):
     """The surface does not shadow itself at all.
@@ -171,6 +202,10 @@ class NoOcclusion(SelfOcclusion):
     def field(self, surfaces, points, near, receiver_facet) -> OcclusionField:
         """Nothing hides anything. See :meth:`SelfOcclusion.field`."""
         return OcclusionField(fraction=None, overlapping=None)
+
+    def segments_hidden(self, surfaces, origin, target, near, exclude) -> None:
+        """Nothing hides anything. See :meth:`SelfOcclusion.segments_hidden`."""
+        return None
 
 
 class RayCastOcclusion(SelfOcclusion):
@@ -196,18 +231,20 @@ class RayCastOcclusion(SelfOcclusion):
         of the intersection test at a time; with one, the walk needs every ray's endpoints and
         exclusions for the whole pass.
     work_limit : int
-        Ray-by-triangle entries per compiled call of the every-triangle test, which is what
-        bounds that test's memory and, through that, its speed. The grid walk forms no such
-        entries -- it walks each ray to its first hit in a compiled loop -- so it does not read
-        this.
+        Ray-by-triangle entries per compiled call of the every-triangle test, which bounds that
+        test's memory and, through that, its speed. The grid walk does not read it.
+
+        The grid walk forms no such entries, since it walks each ray to its first hit in a compiled
+        loop.
     grid : bool or int or tuple of int or TriangleGrid
-        Cull each ray's candidates with a uniform grid over the triangles. ``False`` (the
-        default) tests everything; ``True`` sizes the grid from the triangle count; an integer
-        or a triple sets its resolution per axis; a built
-        :class:`~aquaflux.radiation.grid.TriangleGrid` is used as it is, and must be of the
-        surface's own triangles. **Off by default** because it is a change of cost, not of
-        answers, and the answers are what the shipped path is trusted for -- but a real reactor
-        is unusable without it.
+        Cull each ray's candidates with a uniform grid over the triangles. ``False`` (default) tests
+        every triangle, ``True`` sizes the grid from the triangle count, and an integer or a triple
+        sets its resolution per axis. It changes the cost, never the answer.
+
+        A built :class:`~aquaflux.radiation.grid.TriangleGrid` is used as it is, and must be of the
+        surface's own triangles. The grid is **off by default** because it is a change of cost, not
+        of answers, and the answers are what the shipped path is trusted for. A real reactor is
+        nonetheless unusable without it.
 
     Notes
     -----
@@ -235,7 +272,11 @@ class RayCastOcclusion(SelfOcclusion):
         facing = BackFaces.of(surfaces) if clear_behind else None
         centroid = np.asarray(surfaces.centroid)
         near = np.asarray(near, dtype=float)
-        on_facet = None if receiver_facet is None else np.asarray(receiver_facet, dtype=int)
+        on_facet = (
+            None
+            if receiver_facet is None
+            else np.asarray(receiver_facet, dtype=int).reshape(n_receivers, -1)
+        )
         blocked = np.zeros((n_receivers, n_facets), dtype=bool)
         per_pass = receivers_per_pass(self.pair_limit, n_facets)
         for start in range(0, n_receivers, per_pass):
@@ -275,6 +316,19 @@ class RayCastOcclusion(SelfOcclusion):
             fraction=jnp.asarray(blocked), overlapping=None, clear_behind=clear_behind
         )
 
+    def segments_hidden(self, surfaces, origin, target, near, exclude) -> np.ndarray:
+        """One ray per segment, walked through the grid when there is one.
+
+        See :meth:`SelfOcclusion.segments_hidden`.
+        """
+        grid = self._triangle_grid(surfaces)
+        if grid is not None:
+            return np.asarray(grid.blocks(origin, target, near, exclude=exclude), dtype=bool)
+        hit = segment_is_cut(
+            origin, target, surfaces.vertices, near, exclude=exclude, work_limit=self.work_limit
+        )
+        return np.asarray(hit, dtype=bool)
+
     def prepared(self, surfaces) -> RayCastOcclusion:
         """With its grid built, so a stream of masks builds it once. See :meth:`SelfOcclusion.prepared`."""
         grid = self._triangle_grid(surfaces)
@@ -302,12 +356,17 @@ class RayCastOcclusion(SelfOcclusion):
 
 
 def _exclusions(source: np.ndarray, row: np.ndarray, on_facet) -> np.ndarray:
-    """What each ray ignores: the facet it leaves and, when its receiver sits on one, that facet.
+    """What each ray ignores: the facet it leaves and, when its receiver sits on facets, those.
 
     Leaving out the second blocks every ray aimed at a facet centroid on its own destination.
     Formed for one pass's rays, from their indices, rather than for the whole problem.
+    ``on_facet`` is ``(n_receivers, k)``, ``-1`` naming no facet.
     """
-    return source[:, None] if on_facet is None else np.stack([source, on_facet[row]], axis=1)
+    return (
+        source[:, None]
+        if on_facet is None
+        else np.concatenate([source[:, None], on_facet[row]], axis=1)
+    )
 
 
 class SilhouetteOcclusion(SelfOcclusion):
@@ -370,9 +429,10 @@ class SilhouetteOcclusion(SelfOcclusion):
         (Source, blocker) pairs rejected or clipped per compiled call, which bounds those passes'
         memory: each of :attr:`threads` calls in flight holds one chunk's working set.
     pair_limit : int
-        Entries one compiled call of the cull may form for a receiver -- cluster pairs times the
-        cluster size, or member pairs -- which bounds the cull's memory the same way
-        ``pair_limit`` bounds every receiver-by-facet pass in this package.
+        Entries one compiled call of the cull may form for a receiver, counted as cluster pairs
+        times the cluster size, or as member pairs. It bounds the cull's memory.
+
+        It does so the same way ``pair_limit`` bounds every receiver-by-facet pass in this package.
     cluster_size : int
         Facets per cluster in the cull (:class:`~aquaflux.radiation.clusters.FacetClusters`).
         Smaller clusters bound their members more tightly but make more cluster pairs to test;
@@ -402,6 +462,11 @@ class SilhouetteOcclusion(SelfOcclusion):
             if receiver_facet is None
             else np.asarray(receiver_facet, dtype=int)
         )
+        if facet_of.ndim != 1:
+            raise ValueError(
+                "SilhouetteOcclusion takes one facet per receiver -- the facet whose normal its share "
+                f"is projected about -- but receiver_facet has shape {facet_of.shape}."
+            )
         n_facets = int(surfaces.n_facets)
         either_side = self._either_side(surfaces)
         vertices = jnp.asarray(surfaces.vertices, dtype=float)

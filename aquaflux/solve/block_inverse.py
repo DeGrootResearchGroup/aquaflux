@@ -21,11 +21,13 @@ from __future__ import annotations
 import abc
 import dataclasses
 from collections.abc import Callable
-from typing import Literal
+from typing import ClassVar, Literal
 
 import scipy.sparse as sp
 
 from .field_split import AirBlockInverse, JacobiSmoothedInverse
+from .hierarchy_inverse import HierarchyBlockInverse
+from .multigrid import build_air_hierarchy
 from .saddle_multigrid import SimpleSmoothedInverse
 from .settings_value import SettingsValue
 
@@ -45,9 +47,18 @@ class BlockInverse(SettingsValue, abc.ABC):
     #: Whether the inverse class accepts a ``report`` sink for its build record.
     _reports = True
 
+    @property
     @abc.abstractmethod
+    def unset_resolves_to(self) -> tuple[Callable, ...]:
+        """The inverse class this value builds, then what that class forwards its other settings to.
+
+        A setting left unset takes its default from the first of these that has a parameter of its
+        name, which is what lets the case-file schema report each default without restating it.
+        """
+
     def _inverse_class(self) -> type:
         """The inverse class this value builds."""
+        return self.unset_resolves_to[0]
 
     def _build(
         self, block: sp.spmatrix, n_fields: int, report: Callable[[str], None] | None
@@ -135,8 +146,13 @@ class SimpleSmoothed(BlockInverse):
     frozen_coarsening: bool | None = None
     shape_headroom: float | None = None
 
-    def _inverse_class(self) -> type:
-        return SimpleSmoothedInverse
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (
+        SimpleSmoothedInverse,
+        HierarchyBlockInverse,
+    )
+
+    #: The settings for which unset means the feature is off (read by the case-file schema).
+    unset_means_off: ClassVar[tuple[str, ...]] = ("shape_headroom",)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -160,8 +176,13 @@ class JacobiSmoothed(BlockInverse):
     frozen_coarsening: bool | None = None
     shape_headroom: float | None = None
 
-    def _inverse_class(self) -> type:
-        return JacobiSmoothedInverse
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (
+        JacobiSmoothedInverse,
+        HierarchyBlockInverse,
+    )
+
+    #: The settings for which unset means the feature is off (read by the case-file schema).
+    unset_means_off: ClassVar[tuple[str, ...]] = ("shape_headroom",)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -186,5 +207,4 @@ class AirReduction(BlockInverse):
     max_coarse: int | None = None
     max_levels: int | None = None
 
-    def _inverse_class(self) -> type:
-        return AirBlockInverse
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (AirBlockInverse, build_air_hierarchy)

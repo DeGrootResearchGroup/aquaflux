@@ -1,0 +1,31 @@
+# bunny_reflecting.yaml with the reflecting triangles twice as large (at most 0.4 m): what the
+# size of the reflecting triangles moves.
+mesh: {kind: OpenFOAMMesh, path: ../work/bunny/case/constant/polyMesh}
+physics:
+  kind: Radiation
+  occluders:
+    - {kind: PatchBody, patches: [bunny], sheet: true}
+  lamp_samples: 4
+  settings:
+    kind: RadiationSettings
+    self_occlusion: {kind: NoOcclusion}
+boundaries:
+  lamp:
+    kind: Lamp
+    profile: {kind: IesProfile, file: ../ushio_b1.ies, up: [1.0, 0.0, 0.0]}
+  floor:
+    kind: Wall
+    reflectance: 0.5
+    geometry: {kind: MeshPatch, coarsen: {kind: Coarsen, max_edge: 0.4, chord: 1.0e-3}}
+  ceiling:
+    kind: Wall
+    reflectance: 0.5
+    geometry: {kind: MeshPatch, coarsen: {kind: Coarsen, max_edge: 0.4, chord: 1.0e-3}}
+  walls:
+    kind: Wall
+    reflectance: 0.5
+    geometry: {kind: MeshPatch, coarsen: {kind: Coarsen, max_edge: 0.4, chord: 1.0e-3}}
+  bunny: {kind: Wall}
+outputs:
+  directory: ../work/cases/bunny_reflecting_coarse
+  fields: [{kind: Vtk}, {kind: PatchVtk}]

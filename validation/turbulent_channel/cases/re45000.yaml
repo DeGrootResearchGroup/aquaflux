@@ -19,7 +19,6 @@ fluid:
 
 physics:
   kind: RANS
-  advection: {kind: FirstOrderUpwind}
 
 boundaries:
   bottom: {kind: Wall, k: zero}
@@ -27,6 +26,7 @@ boundaries:
 
 numerics:
   momentum_advection: {kind: FirstOrderUpwind}
+  turbulence_advection: {kind: FirstOrderUpwind}
   gradient: {kind: CompactGreenGauss}
 
 # The body force is solved for so that <U_x> = 1 holds exactly at every step; initial_force is where

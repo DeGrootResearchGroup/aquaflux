@@ -82,14 +82,23 @@ def test_the_level_cap_is_respected_and_the_shortfall_is_reported():
 
 def test_properties_are_carried_onto_every_child():
     surfaces = Surfaces.from_triangles(
-        SQUARE, solid_id=[0, 1], solid_names=("wall", "lamp"), emission=[1.0, 7.0], reflectance=0.4
+        SQUARE,
+        solid_id=[0, 1],
+        solid_names=("wall", "lamp"),
+        emission=[1.0, 7.0],
+        diffuse_reflectance=0.4,
+        specular_reflectance=[0.5, 0.2],
     )
     refined, division = refine_for_receivers(surfaces, NEAR_RECEIVER, max_ratio=0.25)
     assert refined.n_facets == division.n_facets
     np.testing.assert_allclose(
         np.asarray(refined.emission), np.asarray(surfaces.emission)[division.origin]
     )
-    np.testing.assert_allclose(np.asarray(refined.reflectance), 0.4)
+    np.testing.assert_allclose(np.asarray(refined.diffuse_reflectance), 0.4)
+    np.testing.assert_allclose(
+        np.asarray(refined.specular_reflectance),
+        np.asarray(surfaces.specular_reflectance)[division.origin],
+    )
     np.testing.assert_array_equal(
         np.asarray(refined.solid_id), np.asarray(surfaces.solid_id)[division.origin]
     )

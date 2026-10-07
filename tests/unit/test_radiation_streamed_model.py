@@ -33,7 +33,7 @@ def _receivers(count=11):
 
 
 def _scene():
-    return box(2, emission=1.0, reflectance=0.5)
+    return box(2, emission=1.0, diffuse_reflectance=0.5)
 
 
 def _model(stream, **settings):
@@ -85,7 +85,7 @@ def test_every_gradient_a_held_mask_gives_a_streamed_one_gives_too():
     streamed, _ = _model(stream=True, gather_pair_limit=3 * surfaces.n_facets)
 
     def total(model, emission, reflectance, coefficient, transmittance):
-        lit = surfaces.with_optics(emission=emission, reflectance=reflectance)
+        lit = surfaces.with_optics(emission=emission, diffuse_reflectance=reflectance)
         field, _ = fluence_rate(
             model, lit, absorption=UniformAbsorption(coefficient), transmittance=transmittance
         )
@@ -93,7 +93,7 @@ def test_every_gradient_a_held_mask_gives_a_streamed_one_gives_too():
 
     arguments = (
         jnp.asarray(surfaces.emission),
-        jnp.asarray(surfaces.reflectance),
+        jnp.asarray(surfaces.diffuse_reflectance),
         jnp.asarray(0.8),
         jnp.array([0.2]),
     )

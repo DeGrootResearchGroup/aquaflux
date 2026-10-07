@@ -274,15 +274,41 @@ unstructured grid a viewer opens directly. `io/vtk/{topology,xml,writer}.py`, ex
 `topology` reconstructs the connectivity (pure numpy, file-free), `xml` serializes it (pure), and
 `writer` is the only part that opens a file.
 
-**Why hand-rolled, and why VTK's polyhedron in particular.** The mesh is face-based — nodes,
+**Why hand-rolled, and why VTK's polyhedron in particular** (hexahedra excepted — next section). The mesh is face-based — nodes,
 owner/neighbour, ragged CSR face rings — and cells are *implicit*: there is no cell→vertex list.
 `VTK_POLYHEDRON` (type 42) is defined *by its face-node lists*, and `VTK_POLYGON` (type 7) by a
 vertex ring that is one edge-walk away, so the connectivity is a reconstruction rather than a
 translation. Alternatives were measured out before this was built: **VTKHDF**'s polyhedron support is
 unreleased and the installed ParaView (5.10.1 / 5.12.0) could not read it anyway; **meshio** cannot
 mix polyhedra with other cell types and would still need the topology hand-built; the **`vtk` /
-`pyvista`** wheels are a ~100 MB C++ dependency for a lean JAX package; **XDMF**'s polyhedral support
+`pyvista`** wheels are a ~100 MB C++ dependency for a lean JAX package (still true of the solver: the
+browser viewer that does use them is a separate package behind the `ui` extra, `ui.md`); **XDMF**'s polyhedral support
 is poor. Nothing but the standard library is imported.
+
+### Hexahedra are written as `VTK_HEXAHEDRON` (type 12), everything else stays a polyhedron (2026-10-05)
+`topology._hexahedron_vertices` recognizes a 3D cell with **six faces, all quadrilaterals, and eight
+distinct points** — Euler's count leaves such a closed cell no shape but a cube — and orders its
+vertices from the outward rings already built: the first entry's ring **reversed** (right-hand
+normal into the cell) is VTK's 0–3, and for each of those the one outward directed edge leaving that
+face ends at its opposite vertex (4–7). The face stream then carries **only the polyhedra**, with
+`faceoffsets = -1` for every hexahedron, and is omitted entirely when no polyhedron remains (the
+legacy `faces`/`faceoffsets` convention VTK 9.7.1 reads; verified by opening hexahedral, perturbed,
+tetrahedral and mixed hexahedron+prism files in VTK and matching `compute_cell_sizes` to aquaflux's
+volumes to ≤1.2e-15 relative). Only the hexahedron is recognized: tetrahedra, prisms and pyramids
+stay polyhedra (widening this was not agreed).
+- **Why:** it is the *viewer's* cost. Measured 2026-10-05 on `structured_grid_3d(100,100,100)`
+  (1 000 000 cells, one scalar), VTK 9.7.1 / PyVista 0.49.0, macOS arm64: file **70 MB vs 198 MB**,
+  peak RSS after read + slice + threshold + surface **393 MB vs 1074 MB**, `extract_surface`
+  **0.06 s vs 1.13 s**; slice and threshold were ~0.03 s either way, and read 0.05 vs 0.17 s.
+- **Pinned by** `test_hexahedron_vertices_are_in_vtk_order` (base face's normal inward, top in the
+  same sense, each `i, i+4` side a mesh face — geometric, not a pinned array),
+  `test_a_hexahedral_cells_volume_is_the_meshs_own`, and
+  `test_a_mixed_mesh_carries_a_face_stream_for_its_polyhedra_only`; every one of seven targeted
+  mutations of the new code turns them red. **Two guards are deliberately unpinned:** the `sound`
+  incidence check and the 8-point count cannot be reached by a valid closed six-quadrilateral cell,
+  so no fixture distinguishes them; they stay as a refusal to guess on a malformed cell.
+- `tests/support/meshes.py::hexahedron_beside_a_prism` is the mixed fixture; the polyhedron-winding
+  tests run on it and on `tetrahedral_grid_3d`, since a structured grid no longer emits polyhedra.
 
 ### ⚠️ THE WINDING RULE IS NOT "KEEP THE RING AS STORED" — THE PREMISE THAT SAYS SO IS FALSE
 VTK needs each polyhedron face listed outward from the cell listing it, and the obvious rule — keep a
@@ -315,6 +341,39 @@ ring traversed twice, at exactly the right length. The check is that the *first*
 cell's own edge count. This was a live bug, found by the test written for it
 (`test_a_2d_cell_whose_edges_form_two_rings_is_refused`, concentric squares as one cell).
 
+### ⚠️ A periodic seam face is listed under its neighbour with the NEIGHBOUR'S nodes, found by position (2026-10-06)
+A fused periodic seam (`structured_grid_2d(periodic=…)`, or an OpenFOAM `cyclic` pair through
+`cyclic.py`) is one interior face whose ring sits on the **owner's** side; the neighbour cell is a
+whole period away and sees it through `neighbour_offset`. Before this fix the writer listed the stored
+ring under both cells. **In 2D that raised** (the neighbour's edges do not chain: `write_vtu` and so
+`aquaflux run` with the default `Vtk` output failed on every periodic 2D case, e.g.
+`validation/turbulent_channel`). **In 3D it did not raise — it was silently wrong, which is worse**: the
+neighbour's polyhedron took 12 points (its own 8 plus the far side's 4) and spanned the period —
+ParaView 5.12.0 `CellSize` on the old output gave the seam cells **4×** their volume on
+`cyclic_slab_polymesh_data(4, 3)` (total 1.4 vs 0.8) and **2×** on the cyclic two-cube (3.0 vs 2.0).
+Nothing caught it because no test wrote a periodic 3D mesh.
+
+The fix (`topology._onto_own_side`) maps each seam node of a **neighbour-side** entry to the node at
+`position − neighbour_offset`, via one `cKDTree` query over all nodes, **after** the winding reversal
+(a translation changes no winding). Both copies of a seam node always exist — the neighbour's other
+faces are built from them — so a missing counterpart is a mismatched periodic mesh and is **refused**
+(`PERIODIC_NODE_MATCH_TOLERANCE` = 1e-2 of the seam face's mean edge length: a true counterpart is off
+only by rounding, any other node by ~an edge, so the fraction only has to sit between the two). The
+sign convention is the mesh's (`neighbour_centroid = cc[neighbour] + offset`), so it holds for the
+generator and the cyclic fusion alike. Pinned by `test_a_periodic_2d_cell_is_a_ring_of_its_own_nodes_*`
+and `test_a_periodic_3d_cell_is_closed_by_its_own_nodes_*` (each recomputes the cell size from the emitted
+connectivity alone and compares it with `mesh.geometry().cell.volume`) and
+`test_a_periodic_seam_node_with_no_counterpart_is_refused`; mutation-checked 2026-10-06 — removing the
+translation, flipping its sign, translating the owner side as well, and disabling the refusal each turn
+at least one red (the sign flip and the owner-side mutation leave the refusal test green, correctly:
+it pins the refusal, the other three pin the geometry).
+- **With the hexahedron writer, both periodic 3D fixtures are written as `VTK_HEXAHEDRON`, not
+  polyhedra** — the seam shift happens on the entry rings *before* `_hexahedron_vertices` orders them,
+  so a seam cell is still a hexahedron of its own 8 nodes. The 3D test (renamed from `…_closed_polyhedron_…`
+  at the merge, 2026-10-06) reads a hexahedron's outward faces from VTK's vertex order
+  (`_HEXAHEDRON_FACES`) and a polyhedron's from the face stream (`_outward_rings`); removing the seam
+  shift still turns both fixtures red.
+
 ### Binary is the default, and that was decided before shipping rather than after
 `<AppendedData encoding="raw">` with `header_type="UInt64"`; `binary=False` gives the same values to
 the last bit as decimal text, for reading a small mesh by eye. **Measured 2026-09-12** — macOS arm64,
@@ -326,7 +385,9 @@ raw file is *larger* (15 125 B vs 10 419 B), because a toy mesh's indices are on
 against a fixed four bytes. A test asserting "binary is smaller" was written, failed, and was
 deleted rather than re-scaled — the property is load time, not bytes.
 
-**Scale it was built for** (same configuration, `structured_grid_3d(118,118,118)` = 1 643 032 cells /
+**Scale it was built for** (same configuration, **measured with every cell written as a polyhedron —
+before hexahedra became type 12 (2026-10-05), so the face-stream size, peak and file size below no
+longer describe a hexahedral mesh**; `structured_grid_3d(118,118,118)` = 1 643 032 cells /
 4 970 868 faces, i.e. uvreactor scale): the face stream alone is **50.9 M integers**; reconstruction
 15.5 s + write 15.2 s at **3.37 GiB peak RSS** (1.83 GiB of which is the mesh), giving a 347 MiB file
 ParaView opens in **0.7 s**. The index arrays are formed at a width chosen once per build by
@@ -347,7 +408,10 @@ things it is for; a viewer draws those cells as blanks.
 
 ### Verified by opening the files, not by asserting on the XML produced
 Every number below is from `pvpython` inside `/Applications/ParaView-5.12.0.app` (5.12.0),
-2026-09-12. **The load-bearing check is `IntegrateVariables` and `CellSize`**: VTK computes a
+2026-09-12, **when every 3D cell was written as type 42** — the `structured_grid_3d` and bfs3d hex rows
+are now written as type 12 and were re-checked only in VTK 9.7.1 (volumes to ≤1.2e-15, see the
+hexahedron section above), not in ParaView; the `polyDualMesh` row is unaffected (its cells are not
+six-quadrilateral). **The load-bearing check is `IntegrateVariables` and `CellSize`**: VTK computes a
 polyhedron's volume from the face stream by the divergence theorem, so a single inward-wound face
 makes it wrong or negative — the topology cannot be confirmed by counting cells.
 
@@ -358,6 +422,7 @@ makes it wrong or negative — the topology cannot be confirmed by counting cell
 | pitzDaily (2D, 12 225 cells) | integrated area **0.01451603999974618** vs aquaflux's own cell-volume sum **0.014516039999746174** — 15 significant figures |
 | bfs3d (3D OpenFOAM hex, 23 040 cells) | counts and points identical to **ParaView's own OpenFOAM reader**; per-cell volume vs aquaflux max rel dev **1.9e-15**; **zero** negative volumes; cell centres agree with aquaflux to **5.6e-17** |
 | `polyDualMesh` of bfs3d (25 891 genuinely polyhedral cells: 6/8/10 faces per cell, 4/5/6 nodes per face) | counts identical to ParaView's OpenFOAM reader; **zero** negative volumes; per-cell volume **ours vs ParaView's own OpenFOAM reader 1.08e-6** |
+| periodic: `structured_grid_2d(4,4,periodic=("x",))`, the `turbulent_channel` re20000 mesh (4×96, graded, periodic x), `cyclic_slab_polymesh_data(4,3)` and the cyclic two-cube (3D, `assemble`d) — 2026-10-06 | every cell type 7 / 42 with 4 / 8 points; per-cell `CellSize` vs aquaflux's volume max rel dev **0.0** (both 2D) and **2.1e-16 / 1.1e-16** (3D); totals 1.0, 2.0, 0.8, 2.0 exactly |
 | `.pvd` of three frames | opens as one dataset, three timesteps, per-step field ranges correct |
 
 ⚠️ **On the dual mesh aquaflux's own cell volumes differ from VTK's by up to 4.6 %, and that is NOT a
@@ -374,6 +439,36 @@ is the mean of a cell's points, not its volume centroid, and the two coincide on
 not the same contract dressed differently — see the `FieldWriter` entry under **Deferred**, which
 also records the one thing they *do* share (`io/cell_fields.as_cell_values`) and why the two
 questions have different answers.
+
+## Structure — BUILT (boundary patches as VTK `.vtp` + `.vtm`) — 2026-10-05
+
+`io/vtk/patches.py`: `write_patches(mesh, fields_by_patch, path, *, patches=None, binary=True)` writes
+**one VTK XML `PolyData` file per boundary patch** (`<stem>/<patch>.vtp`: the patch's own nodes,
+compacted; its faces as `Polys` — or `Lines` on a 2D mesh, points at `z = 0`; face fields as `CellData`
+under their own names) and **a `vtkMultiBlockDataSet` index** (`<stem>.vtm`, one `DataSet` per patch,
+`name` = patch, `file` = `<stem>/<patch>.vtp`, relative). Every boundary patch holding faces is written by
+default (`boundary_patches(mesh)`), with or without fields — the layout was **agreed with the project owner
+because the `aquaflux_viz` viewer reads it** (`fields.vtu` + `patches.vtm` in a run directory); a change to
+it is a change to that contract. Serialization reuses `xml.py`'s `_Arrays` (appended raw, `UInt64`
+headers), `_narrowed` and `cell_data_arrays` (2-component vectors padded on the trailing axis, as the
+`.vtu`). **Faces are wound OUT of the domain** whatever their stored ring: `topology.stored_ring_is_outward`
+decides per face, reversed rings read back to front (the `.vtu` writer's lesson — a `Mesh` does not promise
+the stored winding). A field of the wrong length is refused naming the patch. It is a `case.PatchVtk`
+field writer (`case.md`). This module does not touch `topology.py` beyond importing
+`stored_ring_is_outward` (another session was changing hex output there).
+
+Tests `tests/unit/test_vtk_patches.py`, decoded by `test_vtk_xml._decode` (independent of the writer):
+blocks and files; every face its own ring, Newell normal along the owner-outward normal, with HALF the
+rings stored reversed, binary and ASCII; a field encoding its face's centroid lands on that face; a 2D
+mesh as lines; the `patches=` filter; refusals.
+
+**Opened by ParaView's own reader** (`pvpython`, `/Applications/ParaView-5.12.0.app`, 2026-10-05), on the
+bunny room's floor run (`validation/ray_effects_room/work/cases/bunny_floor/`): `XMLMultiBlockDataReader`
+lists the five blocks by patch name with the face counts of the mesh's `boundary` file (floor 41,548,
+ceiling 7,788, walls 19,200, bunny 58,022, lamp 280), `E`/`E_absorbed` on the floor only;
+`IntegrateVariables` on `floor.vtp` gives area **15.999999999999279** and `∫E dA` **0.09948874772271568 W**
+against `run.yaml`'s `incident_power` 0.09948874772271586; every floor cell normal (`GenerateSurfaceNormals`,
+consistency off) is **(0, 0, −1)** — out of the room.
 
 ## Binding decisions
 - **A polyMesh is always 3D; a 2D case is one cell thick between two `empty` patches.** The reader

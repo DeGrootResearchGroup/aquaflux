@@ -68,6 +68,23 @@ class Absorption(eqx.Module):
             fraction is its negative exponential.
         """
 
+    @abc.abstractmethod
+    def sample(self, position: jnp.ndarray) -> jnp.ndarray:
+        """The absorption coefficient at each position.
+
+        What the medium absorbs per unit volume where the fluence rate is ``G`` is this times
+        ``G``, so integrated against a volume field this is the power the medium takes.
+
+        Parameters
+        ----------
+        position : jnp.ndarray, shape ``(..., 3)``
+
+        Returns
+        -------
+        jnp.ndarray, shape ``(...)``
+            Absorption coefficient in inverse metres.
+        """
+
 
 class UniformAbsorption(Absorption):
     """A single absorption coefficient everywhere: ``tau = a r``.
@@ -89,6 +106,10 @@ class UniformAbsorption(Absorption):
         """``a`` times the straight-line distance."""
         offset = jnp.asarray(target, dtype=float) - jnp.asarray(origin, dtype=float)
         return self.coefficient * jnp.sqrt(dot(offset, offset))
+
+    def sample(self, position: jnp.ndarray) -> jnp.ndarray:
+        """``a``, at every position."""
+        return jnp.broadcast_to(self.coefficient, jnp.shape(position)[:-1])
 
 
 class VoxelAbsorption(Absorption):

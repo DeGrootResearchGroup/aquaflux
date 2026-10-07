@@ -635,16 +635,16 @@ class JacobiSmoothedInverse(HierarchyBlockInverse):
         See :class:`~aquaflux.solve.hierarchy_inverse.HierarchyBlockInverse`, which owns the hierarchy,
         the in-place refresh and the host boundary. Only the smoother below belongs to this class.
     cycles : int
-        V-cycles per application. Fixed, so ``b -> x`` stays a linear map — required by the
-        non-flexible outer Krylov and by the transposed adjoint solve.
+        V-cycles per application. The count is fixed, so ``b -> x`` stays a linear map, as the
+        non-flexible outer Krylov solve and the transposed adjoint solve both require.
     sweeps : int
         Smoother sweeps per level.
     aggressive_levels : int
         Levels coarsened on the **squared** graph, starting from the finest. ``1`` (default) is the
         aggressive first level the defaults note below describes.
     prolongation_smoothing : str
-        Which prolongator the hierarchy builds — ``"none"`` (default, the unsmoothed tentative
-        prolongation), ``"symmetric-part"`` or ``"standard"``.
+        Which prolongator the hierarchy builds: ``"none"`` (default) for the unsmoothed tentative
+        prolongation, ``"symmetric-part"`` or ``"standard"``.
     spectral_damping : bool
         Scale the smoother's relaxation by the level's largest eigenvalue estimate. ``False``
         (default) is the undamped sweep the note below explains; it also selects ``omega``'s meaning,
@@ -652,10 +652,12 @@ class JacobiSmoothedInverse(HierarchyBlockInverse):
     equilibrate : bool
         Coarsen the operator rescaled to a unit-magnitude diagonal; see the note below.
     avoid_singletons : bool
-        Attach a maximal-independent-set aggregate with no free neighbour to an adjacent one instead of
-        leaving it standing alone. ``False`` (default, byte-identical off) matches the class's original
-        behaviour. A nonzero ``strength_threshold`` prunes edges before aggregation and so is more prone
-        to stranding vertices this way; see :func:`~aquaflux.solve.multigrid.build_convection_hierarchy`.
+        Attach a maximal-independent-set aggregate with no free neighbour to an adjacent one,
+        instead of leaving it standing alone. Default ``False``.
+
+        ``False`` is byte-identical to the class's original behaviour. A nonzero
+        ``strength_threshold`` prunes edges before aggregation and so is more prone to stranding
+        vertices this way; see :func:`~aquaflux.solve.multigrid.build_convection_hierarchy`.
 
     Notes
     -----
@@ -756,8 +758,8 @@ class AirBlockInverse:
     n_group_fields : int
         Fields per cell in this group.
     cycles : int
-        V-cycles per application. Fixed, so ``b -> x`` stays a linear map — required by the non-flexible
-        outer Krylov and by the transposed adjoint solve.
+        V-cycles per application. The count is fixed, so ``b -> x`` stays a linear map, as the
+        non-flexible outer Krylov solve and the transposed adjoint solve both require.
     f_iters, c_iters : int
         Fine- and coarse-point sweeps in the FC-Jacobi smoother.
     omega : float

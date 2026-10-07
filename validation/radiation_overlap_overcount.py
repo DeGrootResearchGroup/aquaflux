@@ -86,7 +86,7 @@ def two_sleeve_reactor(divisions: int, sectors: int) -> Surfaces:
     return Surfaces.from_triangles(
         triangles,
         emission=np.where(is_sleeve, 1.0, 0.0),
-        reflectance=np.where(is_sleeve, 0.0, 0.5),
+        diffuse_reflectance=np.where(is_sleeve, 0.0, 0.5),
     )
 
 

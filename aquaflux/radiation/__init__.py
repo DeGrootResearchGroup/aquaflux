@@ -31,7 +31,7 @@ lamp rating and a water quality, the numbers a reactor engineer has::
     )
     surfaces = geometry.with_optics(
         emission=lamp_exitance(geometry, {"lamp": 35.0}),          # a 35 W lamp
-        reflectance=geometry.per_facet({"wall": 0.3}, default=0.0),
+        diffuse_reflectance=geometry.per_facet({"wall": 0.3}, default=0.0),
     )
     model = build_radiation_model(cell_centres, surfaces)
 
@@ -55,7 +55,7 @@ right. An angular profile is a distribution normalized to one over the sphere; t
 separately, and :func:`lamp_exitance` spreads a rating over the triangulated area so the model
 radiates exactly the rated power at any refinement.
 
-**What is differentiable.** Emission, point-source power, reflectance, profile parameters, the
+**What is differentiable.** Emission, point-source power, diffuse reflectance, profile parameters, the
 transmittance of analytic bodies, and the absorption coefficient or graded absorption field —
 through the interreflection solve by its adjoint, not by replaying it. **Exactly zero, by
 construction:** the derivative with respect to where anything stands in the way. Shadows are
@@ -70,9 +70,12 @@ respect to mesh-node positions gets no contribution from the fluence rate.
   to 25% above it. So for water this is a model for lower transmittances — wastewater, or the
   70% water of the Sozzi & Taghipour (2006) reactor benchmark — and carries a systematic error of
   that size at drinking-water transmittances.
-- **Specular reflection.** Walls reflect diffusely. At the same reflectivity, fully specular and
-  fully diffuse walls have been measured 10–47% apart in log reduction (Hassanpour et al., 2023),
-  so a reflectance is only half a description of a wall.
+- **Specular reflection beyond one flat bounce.** At the same reflectivity, fully specular and
+  fully diffuse walls have been simulated 10–47% apart in log reduction (Hassanpour et al., 2023),
+  so a surface set carries ``diffuse_reflectance`` and ``specular_reflectance`` separately. Bodies
+  named as specular when the model is built reflect one bounce as flat mirrors (:class:`Mirror`),
+  shadowed on both legs of each path (:class:`MirrorVisibility`); a model with specular bodies is
+  refused if a body is curved, or under a graded medium.
 - **Scattering by the medium** (particles in water, aerosols or droplets in air), and **more
   than one waveband**: one absorbing, non-scattering medium at one wavelength.
 - **A source that is not diffuse** has its distribution evaluated along one direction per pair of
@@ -118,6 +121,14 @@ from aquaflux.radiation.model import (
     radiosity,
     surface_irradiance,
 )
+from aquaflux.radiation.images import (
+    PlaneExchange,
+    mirrored_fluence_rate,
+    mirrored_irradiance,
+    plane_exchange,
+)
+from aquaflux.radiation.mirror_visibility import MirrorVisibility, build_mirror_visibility
+from aquaflux.radiation.mirrors import Mirror, planar_mirrors
 from aquaflux.radiation.photometry import PhotometricProfile, Photometry, read_ies
 from aquaflux.radiation.profiles import (
     AxisymmetricProfile,
@@ -136,6 +147,15 @@ from aquaflux.radiation.self_occlusion import (
 from aquaflux.radiation.coarsen import Coarsening, coarsen_surfaces, coarsen_to_size
 from aquaflux.radiation.quadrature import TriangleQuadrature, triangle_quadrature
 from aquaflux.radiation.receiver_shadows import FrozenShadows, ReceiverShadows, StreamedShadows
+from aquaflux.radiation.scene import (
+    DEFAULT_LAMP_SAMPLES,
+    Scene,
+    SceneSolution,
+    SurfaceReceivers,
+    VolumeReceivers,
+    solve_scene,
+    subtriangle_centroids,
+)
 from aquaflux.radiation.solid_angle import (
     projected_solid_angle,
     signed_solid_angle,
@@ -156,6 +176,7 @@ from aquaflux.radiation.units import absorption_from_uvt, lamp_exitance
 from aquaflux.radiation.visibility import Visibility, build_visibility
 
 __all__ = [
+    "DEFAULT_LAMP_SAMPLES",
     "Absorption",
     "AxisymmetricProfile",
     "BackFaces",
@@ -166,20 +187,26 @@ __all__ = [
     "FrozenShadows",
     "Isotropic",
     "Lambertian",
+    "Mirror",
+    "MirrorVisibility",
     "NoOcclusion",
     "OcclusionField",
     "PhotometricProfile",
     "Photometry",
+    "PlaneExchange",
     "Profile",
     "RadiationModel",
     "RadiationSettings",
     "RayCastOcclusion",
     "ReceiverShadows",
+    "Scene",
+    "SceneSolution",
     "SelfOcclusion",
     "ShaftCulling",
     "SilhouetteOcclusion",
     "StreamedShadows",
     "Subdivision",
+    "SurfaceReceivers",
     "Surfaces",
     "TransferMatrix",
     "TriangleBody",
@@ -187,9 +214,11 @@ __all__ = [
     "TriangleSoup",
     "UniformAbsorption",
     "Visibility",
+    "VolumeReceivers",
     "VoxelAbsorption",
     "WindingReport",
     "absorption_from_uvt",
+    "build_mirror_visibility",
     "build_radiation_model",
     "build_transfer",
     "build_visibility",
@@ -203,7 +232,11 @@ __all__ = [
     "enclosure_winding",
     "fluence_rate",
     "lamp_exitance",
+    "mirrored_fluence_rate",
+    "mirrored_irradiance",
     "open_facets",
+    "planar_mirrors",
+    "plane_exchange",
     "projected_solid_angle",
     "radiosity",
     "read_ies",
@@ -214,8 +247,10 @@ __all__ = [
     "segment_is_cut",
     "signed_solid_angle",
     "solid_angle",
+    "solve_scene",
     "stored_normal_disagreement",
     "subdivide_to_width",
+    "subtriangle_centroids",
     "surface_irradiance",
     "triangle_quadrature",
     "winding_report",

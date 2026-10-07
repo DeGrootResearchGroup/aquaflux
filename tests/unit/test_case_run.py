@@ -54,17 +54,17 @@ def _sections(physics: str = "Laminar", mesh=None, **overrides: object) -> dict[
     sections = {
         "mesh": mesh or {"kind": "OpenFOAMMesh", "path": str(SLAB)},
         "fluid": {"density": 1.0, "kinematic_viscosity": 1.0e-2},
-        "physics": {
-            "kind": physics,
-            **({"advection": {"kind": "FirstOrderUpwind"}} if rans else {}),
-        },
+        "physics": {"kind": physics},
         "boundaries": {
             "left": inlet,
             "right": {"kind": "Outlet", "pressure": 0.0},
             "bottom": {"kind": "Wall"},
             "top": {"kind": "Wall"},
         },
-        "numerics": {"momentum_advection": {"kind": "FirstOrderUpwind"}},
+        "numerics": {
+            "momentum_advection": {"kind": "FirstOrderUpwind"},
+            **({"turbulence_advection": {"kind": "FirstOrderUpwind"}} if rans else {}),
+        },
     }
     return {**sections, **overrides}
 
@@ -72,9 +72,11 @@ def _sections(physics: str = "Laminar", mesh=None, **overrides: object) -> dict[
 # --- the section ---------------------------------------------------------------------------------
 
 
-def test_a_file_with_no_outputs_section_writes_vtk_and_the_log_into_results() -> None:
+def test_a_file_with_no_outputs_section_writes_vtk_the_log_and_the_history_into_results() -> None:
     spec = case_spec_from_mapping(_sections())
-    assert spec.outputs == Outputs(directory="results", fields=(Vtk(),), log="march.log")
+    assert spec.outputs == Outputs(
+        directory="results", fields=(Vtk(),), log="march.log", history="history.csv"
+    )
     assert "outputs" not in case_spec_to_mapping(spec)
 
 
@@ -82,6 +84,7 @@ def test_an_outputs_section_reads_without_its_kind_and_writes_back_equal() -> No
     section = {
         "directory": "out",
         "log": None,
+        "history": "steps.csv",
         "checkpoints": {"kind": "Checkpoints", "every": 5, "keep": 2},
         "fields": [
             {"kind": "Vtk", "file": "flow.vtu", "fields": ["U"]},
@@ -96,6 +99,7 @@ def test_an_outputs_section_reads_without_its_kind_and_writes_back_equal() -> No
             OpenFOAMTime(case="of", time="10", template_time="0"),
         ),
         log=None,
+        history="steps.csv",
         checkpoints=Checkpoints(every=5, keep=2),
     )
     assert case_spec_to_mapping(spec)["outputs"] == section
@@ -121,6 +125,8 @@ def test_an_outputs_section_reads_without_its_kind_and_writes_back_equal() -> No
         ({"checkpoints": {"kind": "Checkpoints", "every": 0}}, r"Checkpoints.every must be >= 1"),
         ({"checkpoints": {"kind": "Checkpoints", "keep": 0}}, r"Checkpoints.keep must be >= 1"),
         ({"log": "logs/march.log"}, r"Outputs.log is a file name"),
+        ({"history": "logs/history.csv"}, r"Outputs.history is a file name"),
+        ({"log": "steps.txt", "history": "steps.txt"}, r"log and Outputs.history both name"),
         ({"directory": ""}, r"Outputs.directory names the directory"),
     ],
     ids=[
@@ -131,6 +137,8 @@ def test_an_outputs_section_reads_without_its_kind_and_writes_back_equal() -> No
         "checkpoints-never",
         "checkpoints-keep-none",
         "log-in-a-subdirectory",
+        "history-in-a-subdirectory",
+        "log-and-history-one-file",
         "no-directory",
     ],
 )
@@ -197,7 +205,7 @@ def test_a_rans_case_writes_k_omega_and_the_eddy_viscosity_they_give() -> None:
 
 def _mesh_and_geometry(spec):
     mesh = spec.mesh.read(REPO)
-    return mesh, mesh.geometry()
+    return mesh, mesh.geometry(), REPO
 
 
 # --- how each solve is observed ------------------------------------------------------------------
