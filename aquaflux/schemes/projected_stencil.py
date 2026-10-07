@@ -35,6 +35,7 @@ already couples, so a residual's Jacobian gains no reach.
 from __future__ import annotations
 
 import warnings
+from typing import ClassVar
 
 import equinox as eqx
 import jax
@@ -333,6 +334,9 @@ class ProjectedStencilGradient(GradientScheme):
     blend: float = eqx.field(static=True, default=0.75)
     reach: int = eqx.field(static=True, default=2)
     prepared: tuple | None = None
+
+    #: Fields that are the value's own cache, not settings a case file may state.
+    not_settings: ClassVar[tuple[str, ...]] = ("prepared",)
 
     def bind(
         self,

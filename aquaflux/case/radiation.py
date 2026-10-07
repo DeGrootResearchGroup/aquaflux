@@ -30,12 +30,14 @@ from __future__ import annotations
 import abc
 import dataclasses
 import math
+from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar
 
 import numpy as np
 from scipy.spatial import cKDTree
 
+from aquaflux.io.cad.model import CadModel
 from aquaflux.radiation import (
     Absorption,
     CosinePower,
@@ -270,6 +272,9 @@ class Coarsen:
     chord: float
     angle: float | None = None
 
+    #: Where an unset setting takes its default from (read by the case-file schema).
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (coarsen_to_size,)
+
     def __post_init__(self) -> None:
         for name in ("max_edge", "chord", "angle"):
             _refuse_non_positive("Coarsen", name, getattr(self, name))
@@ -398,6 +403,9 @@ class MeshPatch(SurfaceSource):
 
     coarsen: Coarsen | None = None
 
+    #: The settings for which unset means the feature is off (read by the case-file schema).
+    unset_means_off: ClassVar[tuple[str, ...]] = ("coarsen",)
+
     def triangles(self, patch: PatchSurface, directory: Path, drawings: _Drawings) -> np.ndarray:
         """The patch's triangles, already facing into the domain, coarsened if asked."""
         del directory, drawings
@@ -426,6 +434,9 @@ class StlSurface(SurfaceSource):
     file: str
     solids: tuple[str, ...] = ()
     coarsen: Coarsen | None = None
+
+    #: The settings for which unset means the feature is off (read by the case-file schema).
+    unset_means_off: ClassVar[tuple[str, ...]] = ("coarsen",)
 
     def _read(self, patch: PatchSurface, directory: Path, drawings: _Drawings) -> np.ndarray:
         del patch, drawings
@@ -465,6 +476,11 @@ class CadSurface(SurfaceSource):
     facet_size: float | None = None
     angle: float | None = None
     placement: CadPlacement | None = None
+
+    #: Where an unset setting takes its default from (read by the case-file schema).
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (CadModel.triangles,)
+    #: The settings for which unset means the feature is off (read by the case-file schema).
+    unset_means_off: ClassVar[tuple[str, ...]] = ("facet_size",)
 
     def __post_init__(self) -> None:
         for name in ("chord", "facet_size", "angle"):
@@ -566,8 +582,9 @@ class PatchBody(OccluderSpec):
     patches : tuple of str
         The patches.
     sheet : bool or None
-        ``True`` treats them as a sheet with no inside, which a surface the domain lies on both sides
-        of -- a perforated object hung in a room -- is; ``None`` reads each connected piece's topology.
+        ``True`` treats the patches as a sheet with no inside, as suits a surface with the domain on
+        both sides of it, such as a perforated object hung in a room. ``None`` decides from each
+        connected piece's topology.
     """
 
     patches: tuple[str, ...]
@@ -670,6 +687,9 @@ class CadFluid(OccluderSpec):
     solids: tuple[str, ...]
     placement: CadPlacement | None = None
     tolerance: float | None = None
+
+    #: Where an unset setting takes its default from (read by the case-file schema).
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (CadModel.fluid,)
 
     def __post_init__(self) -> None:
         if not self.solids:

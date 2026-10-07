@@ -72,10 +72,7 @@ def _sections(physics: str = "RANS", **overrides: object) -> dict[str, object]:
     sections = {
         "mesh": {"kind": "StructuredGrid", "cells": [4, 4], "lengths": [1.0, 1.0]},
         "fluid": {"density": 1.0, "kinematic_viscosity": 1.0e-3},
-        "physics": {
-            "kind": physics,
-            **({"advection": {"kind": "FirstOrderUpwind"}} if physics == "RANS" else {}),
-        },
+        "physics": {"kind": physics},
         "boundaries": {
             "left": {"kind": "Inlet", "velocity": [1.0, 0.0]}
             | (
@@ -87,7 +84,10 @@ def _sections(physics: str = "RANS", **overrides: object) -> dict[str, object]:
             "bottom": {"kind": "Wall"},
             "top": {"kind": "Wall"},
         },
-        "numerics": {"momentum_advection": {"kind": "FirstOrderUpwind"}},
+        "numerics": {
+            "momentum_advection": {"kind": "FirstOrderUpwind"},
+            **({"turbulence_advection": {"kind": "FirstOrderUpwind"}} if physics == "RANS" else {}),
+        },
     }
     return {**sections, **overrides}
 
@@ -97,9 +97,11 @@ def _periodic_rans(**overrides: object) -> CaseSpec:
     return CaseSpec(
         mesh=StructuredGrid(cells=(4, 8), lengths=(1.0, 2.0), periodic=("x",)),
         fluid=Fluid(density=1.0, kinematic_viscosity=1e-4),
-        physics=RANS(advection=FirstOrderUpwind()),
+        physics=RANS(),
         boundaries={"bottom": Wall(k="zero"), "top": Wall(k="zero")},
-        numerics=Numerics(momentum_advection=FirstOrderUpwind()),
+        numerics=Numerics(
+            momentum_advection=FirstOrderUpwind(), turbulence_advection=FirstOrderUpwind()
+        ),
         drive=BulkVelocity(target=1.0, direction="x"),
         pressure_datum=PinnedPoint((0.0, 0.0)),
         **overrides,
@@ -358,7 +360,7 @@ def test_a_solver_that_cannot_solve_the_case_is_refused_when_the_file_is_read(
 
 @pytest.mark.parametrize(
     ("physics", "march"),
-    [(RANS(advection=FirstOrderUpwind()), CoupledMarch()), (Laminar(), FlowMarch())],
+    [(RANS(), CoupledMarch()), (Laminar(), FlowMarch())],
     ids=["coupled", "flow"],
 )
 def test_a_march_is_refused_a_bulk_velocity_it_would_leave_at_its_starting_force(
@@ -371,6 +373,11 @@ def test_a_march_is_refused_a_bulk_velocity_it_would_leave_at_its_starting_force
             _periodic_rans(),
             physics=physics,
             boundaries={"bottom": Wall(), "top": Wall()},
+            # The numerics this physics reads: no turbulence scheme for a laminar case.
+            numerics=Numerics(
+                momentum_advection=FirstOrderUpwind(),
+                turbulence_advection=FirstOrderUpwind() if isinstance(physics, RANS) else None,
+            ),
             solver=march,
         )
 

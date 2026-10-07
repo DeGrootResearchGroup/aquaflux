@@ -16,6 +16,7 @@ a step still diverged after escalation, because the tight solve is far more expe
 from __future__ import annotations
 
 import dataclasses
+from typing import ClassVar
 
 import jax.numpy as jnp
 
@@ -63,24 +64,29 @@ class RetryPolicy:
     Attributes
     ----------
     solver : LinearSolverSpec or None
-        A **tighter** linear solver, by its settings (a :class:`~aquaflux.solve.GmresSolve`), for
-        redoing a step that is still diverged after any shift escalation. With an *inexact* preconditioner the loose default Krylov tolerance can leave the
-        correction non-finite on the stiff operator an aggressive step produces, where the same solve
-        taken tightly is finite. The step is redone from the same pre-step state, so only the Krylov
-        tolerance changes -- the preconditioner is already matched to this state and shift. ``None``
-        (default) never retries this way; an exact factorization never needs it.
+        A **tighter** linear solver (a :class:`~aquaflux.solve.GmresSolve`) for redoing a step that
+        is still diverged after any shift escalation. ``None`` (default) never retries this way, and
+        an exact factorization never needs it.
+
+        With an *inexact* preconditioner the loose default Krylov tolerance can leave the correction
+        non-finite on the stiff operator an aggressive step produces, where the same solve taken
+        tightly is finite. The step is redone from the same pre-step state, so only the Krylov
+        tolerance changes. The preconditioner is already matched to this state and shift.
     divergence_cap : float
         A step counts as diverged when its residual norm is non-finite **or**, if this cap is finite,
-        exceeds ``divergence_cap * reference``. Defaults to ``inf``, so only non-finiteness counts. A
-        tight cap is the wrong default because the residual legitimately *rises* while a flow develops
-        under a pseudo-time march, so a finite cap false-fires on exactly the progress it should leave
-        alone.
+        exceeds ``divergence_cap * reference``. Defaults to ``inf``, so only non-finiteness counts.
+
+        A tight cap is the wrong default because the residual legitimately *rises* while a flow
+        develops under a pseudo-time march, so a finite cap false-fires on exactly the progress it
+        should leave alone.
     abort_above_cycles : int or None
-        Per-solve restart-cycle budget. Once a solve exceeds it the step stops taking further inner
-        iterations and is judged on what it has: a **cost guard**, not a diagnosis. It does **not**
-        escalate the shift and does not by itself discard the step — an aborted step that is finite and
-        whose line search held is accepted, and the step control adapts to the rate it achieved.
-        ``None`` (default) leaves the inner loop bounded only by its own iteration count.
+        A per-solve budget of restart cycles. Once a solve exceeds it, the step stops taking further
+        inner iterations and is judged on what it has. ``None`` (default) leaves the inner loop
+        bounded only by its own iteration count.
+
+        This is a **cost guard**, not a diagnosis. It does **not** escalate the shift and does not
+        by itself discard the step. An aborted step that is finite and whose line search held is
+        accepted, and the step control adapts to the rate it achieved.
 
         The abort is what stops a hopeless step spending its whole inner budget before ``on_alpha``
         catches it. ⚠️ But set it **above** what the installed preconditioner costs when it is
@@ -124,6 +130,9 @@ class RetryPolicy:
     on_alpha: float | None = None
     beta_factor: float = 2.0
     cycles_limit: int = 2
+
+    #: The settings for which unset means the feature is off (read by the case-file schema).
+    unset_means_off: ClassVar[tuple[str, ...]] = ("solver", "abort_above_cycles", "on_alpha")
 
     @property
     def escalates(self) -> bool:

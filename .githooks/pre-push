@@ -3,9 +3,9 @@
 # Pre-push hook: run the same gate CI will enforce, so a formatting, lint, or
 # spelling slip is caught locally instead of turning a required check red on the
 # PR:
-#     ruff check aquaflux tests docs
-#     ruff format --check aquaflux tests docs
-#     codespell aquaflux tests
+#     ruff check aquaflux aquaflux_ui tests docs
+#     ruff format --check aquaflux aquaflux_ui tests docs
+#     codespell aquaflux aquaflux_ui tests
 #
 # Enable it once per clone (git does not install repo hooks automatically):
 #     git config core.hooksPath .githooks
@@ -25,15 +25,15 @@ fi
 
 fail=0
 
-echo "pre-push: ruff check aquaflux tests docs" >&2
-if ! ruff check aquaflux tests docs; then
+echo "pre-push: ruff check aquaflux aquaflux_ui tests docs" >&2
+if ! ruff check aquaflux aquaflux_ui tests docs; then
   echo "pre-push: 'ruff check' reported errors (see above)." >&2
   fail=1
 fi
 
-echo "pre-push: ruff format --check aquaflux tests docs" >&2
-if ! ruff format --check aquaflux tests docs; then
-  echo "pre-push: files are not formatted -- run 'ruff format aquaflux tests docs', commit, and re-push." >&2
+echo "pre-push: ruff format --check aquaflux aquaflux_ui tests docs" >&2
+if ! ruff format --check aquaflux aquaflux_ui tests docs; then
+  echo "pre-push: files are not formatted -- run 'ruff format aquaflux aquaflux_ui tests docs', commit, and re-push." >&2
   fail=1
 fi
 
@@ -44,9 +44,9 @@ if ! command -v codespell >/dev/null 2>&1; then
   echo "pre-push: codespell not found on PATH -- skipping the spelling check." >&2
   echo "          install it with:  pip install -e \".[lint]\"" >&2
 else
-  echo "pre-push: codespell aquaflux tests" >&2
-  if ! codespell aquaflux tests; then
-    echo "pre-push: spelling issues (see above) -- fix them (or run 'codespell -w aquaflux tests'), commit, and re-push." >&2
+  echo "pre-push: codespell aquaflux aquaflux_ui tests" >&2
+  if ! codespell aquaflux aquaflux_ui tests; then
+    echo "pre-push: spelling issues (see above) -- fix them (or run 'codespell -w aquaflux aquaflux_ui tests'), commit, and re-push." >&2
     fail=1
   fi
 fi

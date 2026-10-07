@@ -70,7 +70,7 @@ cfd/                                  # repo root
 │   │   ├── reader.py                 #   MeshReader(eqx.Module) strategy: read() → Mesh (format-agnostic seam)
 │   │   ├── cell_fields.py            #   as_cell_values(): the conversion + per-cell length check every field writer makes
 │   │   ├── vtk/                      #   VTK XML output: write_vtu() (one frame) / write_pvd() (transient collection)
-│   │   │   ├── topology.py           #     Mesh → VtkCells: face-based storage → arbitrary polygon/polyhedron connectivity, each face wound outward from the cell listing it (pure numpy)
+│   │   │   ├── topology.py           #     Mesh → VtkCells: face-based storage → arbitrary polygon/polyhedron connectivity (hexahedra as VTK hexahedra), each face wound outward from the cell listing it (pure numpy)
 │   │   │   ├── xml.py                #     VtkCells + cell fields → .vtu / .pvd document parts; raw appended binary by default, ASCII on request (pure)
 │   │   │   └── writer.py             #     write_vtu / write_pvd: the only file I/O
 │   │   └── openfoam/                 #   OpenFOAM polyMesh reader (ASCII): read_openfoam() / OpenFOAMReader
@@ -145,6 +145,7 @@ cfd/                                  # repo root
 │   │   ├── march.py                  #   newton_march: the observed forward-only Newton march every solve runs on + the staleness trigger watching it
 │   │   ├── strategy.py               #   NewtonStrategy / ShiftedNewtonStrategy + StepOutcome / StepReport / StepControl: the contracts the march is written against
 │   │   ├── march_log.py              #   MarchLogger: the streaming per-step log (the reporting half of the on_step seam)
+│   │   ├── march_history.py          #   StepHistory: the same steps as CSV rows, for a program (a convergence plot) to read
 │   │   ├── checkpoint.py             #   StateCheckpointer: periodic state persistence (the on_checkpoint seam)
 │   │   ├── step_control.py           #   feedback step controls for the eager march (DualTimeControl and friends)
 │   │   ├── continuation.py           #   PseudoTransientStep / NewtonStrategy: continuation as a residual-agnostic Newton step

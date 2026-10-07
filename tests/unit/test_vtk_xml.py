@@ -18,6 +18,8 @@ from aquaflux.io.vtk.topology import build_vtk_cells
 from aquaflux.io.vtk.xml import cell_data_arrays, pvd_document, vtu_parts
 from aquaflux.mesh import structured_grid_2d, structured_grid_3d
 
+from tests.support.meshes import hexahedron_beside_a_prism
+
 _NUMPY_OF_VTK = {
     "Float64": np.float64,
     "Int32": np.int32,
@@ -64,7 +66,7 @@ def _document(mesh, fields=(), *, binary=True) -> bytes:
 
 @pytest.mark.parametrize("binary", [True, False])
 def test_a_3d_document_declares_its_piece_and_carries_every_cell_array(binary):
-    mesh = structured_grid_3d(2, 2, 1)
+    mesh = hexahedron_beside_a_prism()
     fields = {
         "p": np.arange(mesh.n_cells, dtype=float),
         "U": np.asarray(mesh.geometry().cell.centroid),
@@ -96,6 +98,12 @@ def test_a_3d_document_declares_its_piece_and_carries_every_cell_array(binary):
     np.testing.assert_allclose(values["U"], fields["U"])
 
 
+def test_an_all_hexahedral_document_carries_no_face_stream():
+    _, values = _decode(_document(structured_grid_3d(2, 2, 1)))
+    assert "faces" not in values and "faceoffsets" not in values
+    np.testing.assert_array_equal(values["types"], 12)
+
+
 def test_a_2d_document_carries_no_face_stream():
     root, values = _decode(_document(structured_grid_2d(2, 2)))
     assert "faces" not in values and "faceoffsets" not in values
@@ -108,7 +116,7 @@ def test_a_2d_document_carries_no_face_stream():
 
 
 def test_the_ascii_and_binary_forms_carry_the_same_values():
-    mesh = structured_grid_3d(2, 1, 2)
+    mesh = hexahedron_beside_a_prism()
     fields = {
         "p": np.linspace(-1.0, 1.0, mesh.n_cells),
         "U": np.asarray(mesh.geometry().cell.centroid),
@@ -157,10 +165,11 @@ def test_a_field_of_an_unusable_rank_is_refused():
 
 
 def test_an_array_narrows_to_32_bit_indices_when_they_fit():
-    root, _ = _decode(_document(structured_grid_3d(2, 2, 2)))
+    root, _ = _decode(_document(hexahedron_beside_a_prism()))
     types = {a.attrib["Name"]: a.attrib["type"] for a in root.iter("DataArray")}
     assert types["connectivity"] == "Int32"
     assert types["faces"] == "Int32"
+    assert types["faceoffsets"] == "Int32"  # signed: a hexahedron's entry is -1
     assert types["Points"] == "Float64"
     assert types["types"] == "UInt8"
 
