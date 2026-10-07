@@ -709,10 +709,11 @@ JACOBI_TRAILING = SOLVER.preconditioner.inverse.trailing.settings() if FIELD_SPL
 #: gets 3 for free and that is luck, not physics.
 #:
 #: ⚠️ **EVERYTHING ABOVE IS ABOUT THE SWEPT RECONSTRUCTION, AND THE DEFAULT NO LONGER USES ONE.** The
-#: shipped `GRADIENT` is the two-face-pass `MultipleCorrectionGradient`, whose residual carries
-#: **exactly zero** Jacobian mass beyond distance 3 at every skewness measured -- so a probe at reach 3
-#: recovers it exactly, and 3 is the default. Reach is a property of that scheme rather than of this
-#: mesh; `validation/gradient_stencil_reach.py` re-measures it in about a minute.
+#: shipped `GRADIENT` is the two-face-pass `MultipleCorrectionGradient`, whose SCALAR residual carries
+#: **exactly zero** Jacobian mass beyond distance 3 at every skewness measured
+#: (`validation/gradient_stencil_reach.py`). ⚠️ The COUPLED residual does not: the velocity gradient feeds
+#: the eddy viscosity, which spends one more ring, so the u and v columns reach 4 and a probe at the
+#: default reach 3 folds ~1e-6 relative onto near entries (`probe_reach_check.py`; reach 4 is exact).
 #:
 #: ⚠️⚠️ **SET IT BACK TO 5 IF YOU SET `PITZ_GRADIENT=swept`, AND READ THIS BEFORE VARYING EITHER.** The
 #: swept scheme's residual reaches `sweeps + 1`, and reach 5 is then NECESSARY AND NOT SUFFICIENT --
@@ -764,10 +765,10 @@ GRADIENT_SWEEPS = int(os.environ.get("PITZ_GRADIENT_SWEEPS", "4"))
 #: ⚠️ **The choice is coupled to `PITZ_STENCIL_REACH`, and that is the point of having it.** Each
 #: Richardson sweep couples a cell one further ring, so the swept residual reaches `sweeps + 1` -- on
 #: a randomly perturbed grid, measured reach 5 at the shipped four sweeps, against **3 with exactly
-#: zero mass beyond distance 3** for `multcorr`, at every skewness tested. A probe at reach 3
-#: therefore recovers the two-pass Jacobian exactly, where against the swept one it would fold far
-#: couplings onto near entries. Vary the two together; `validation/gradient_stencil_reach.py`
-#: re-measures both halves in about a minute.
+#: zero mass beyond distance 3** for `multcorr`, at every skewness tested -- on a SCALAR residual. The
+#: coupled residual adds a ring through the eddy viscosity (reach 4 for `multcorr` on this mesh,
+#: `probe_reach_check.py`), so add it to either scheme's figure. Vary the two together;
+#: `validation/gradient_stencil_reach.py` re-measures the scalar halves in about a minute.
 GRADIENT = os.environ.get("PITZ_GRADIENT")
 GRADIENT_BLEND = float(os.environ.get("PITZ_GRADIENT_BLEND", "0.75"))
 _GRADIENTS = {
@@ -967,9 +968,10 @@ def case_spec(model=None, gradient_scheme=None):
         exact case rather than on a second copy of it. ⚠️ A scheme whose residual reaches further
         across the cell graph than ``stencil_reach`` needs that raised to match: the coloured probe
         folds coupling beyond its reach onto near entries instead of dropping it, so an under-reaching
-        probe corrupts the preconditioner rather than approximating it. The default reconstruction
-        carries *exactly zero* mass beyond reach 3 and ``CorrectedGreenGauss`` beyond ``sweeps + 1``,
-        which is what makes each of those pairings exact;
+        probe corrupts the preconditioner rather than approximating it. On a scalar residual the
+        default reconstruction carries *exactly zero* mass beyond reach 3 and ``CorrectedGreenGauss``
+        beyond ``sweeps + 1``; the coupled residual here adds one ring through the eddy viscosity, so
+        the shipped reach 3 is one short (``probe_reach_check.py``);
         :class:`~aquaflux.schemes.HessianCorrectedGradient` does not have that cut-off at any sweep
         setting, so a study that swaps it in needs a preconditioner that is not built by probing --
         which is why that comparison lives in the sibling ``pitzdaily_gradient_ab`` case rather than

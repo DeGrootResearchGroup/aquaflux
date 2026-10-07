@@ -1976,9 +1976,10 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   | exact Krylov solve of the same system | 7–11 | same | 1.07e-2 / 1.91e-2 / 3.02e-2 |
   | **`MultipleCorrectionGradient`** | **3** | **exactly 0.000e+00** | **7.11e-3 / 7.39e-3 / 7.77e-3** |
 
-  Two findings, and the second was not expected. A probe at reach 3 recovers the two-pass Jacobian
-  **exactly** — nothing to fold, so the "vary reach and fill together or not at all" pairing rule has
-  nothing to bite on. And the corrected-Green–Gauss system's *own exact solution* is ~4x less accurate
+  Two findings, and the second was not expected. A probe at reach 3 recovers the two-pass **scalar**
+  Jacobian **exactly** — nothing to fold, so the "vary reach and fill together or not at all" pairing rule
+  has nothing to bite on. ⚠️ **Not the coupled RANS Jacobian** — see the reach-4 entry below the march
+  table. And the corrected-Green–Gauss system's *own exact solution* is ~4x less accurate
   than the two-pass answer at high skew: **the sweeps converge faithfully to a worse answer**, and every
   sweep past ~2 buys no accuracy while pushing the stencil one more ring out. The two-pass error is also
   near skew-independent (7.11e-3 → 7.77e-3 over an 8x skew range) where corrected Green–Gauss degrades 3x.
@@ -2005,10 +2006,26 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   blockMesh, skew-free to round-off, so its sweeps are inert and it already floors at reach 3 — it sets
   no `stencil_reach` at all. What this changes is the standing warning that "`stencil_reach = 3` IS A
   PROPERTY OF SKEW-FREE MESHES, NOT OF THE DISCRETIZATION … the sibling gets 3 for free and that is luck,
-  not physics": with a two-pass reconstruction, reach 3 becomes a property of the **scheme**, so a case on
-  a genuinely skewed mesh gets it too. pitzDaily has since adopted it (its `case.yaml` states
+  not physics": with a two-pass reconstruction, the **gradient's** reach becomes a property of the scheme
+  on a genuinely skewed mesh too. pitzDaily has since adopted it (its `case.yaml` states
   `MultipleCorrectionGradient`, which `PITZ_GRADIENT` overrides only when set; `STENCIL_REACH` defaults to 3); `bfs3d` still builds `CorrectedGreenGauss` in its own
   `build_case`, where the choice is inert — see the library-default entry below.
+
+  **⚠️ THE COUPLED pitzDaily RESIDUAL REACHES 4, NOT 3, UNDER THIS SCHEME — so the shipped probe at reach 3
+  folds (measured 2026-10-07, `validation/pitzdaily_openfoam/probe_reach_check.py`).** The scalar figure
+  above is the gradient's own; the coupled residual feeds the reconstructed **velocity** gradient into the
+  eddy viscosity and the face viscosity, which spend one more ring. Per (row, column) block, relative error
+  of the materialized matrix against the exact jvp on a random vector supported on that column, at the
+  time-accurate OpenFOAM field mapped onto the mesh (jax 0.11.2, CPU):
+  at **reach 3 (165 probes)** the `u` and `v` columns are inexact in every row (2.2e-08 to **5.5e-06**),
+  `k` → `omega` is 5.9e-09, and the `p`, `k`-row and `omega` columns are at round-off; at **reach 4
+  (265 probes)** every block is at round-off (worst 3.7e-16). An independent reach ladder on the same
+  state agrees (165 probes 1.5e-7 global, 265 probes 3.9e-16). So "reach 3 becomes a property of the
+  scheme" holds for a scalar and **not** for coupled RANS on a skewed mesh. Orthogonal `bfs3d` is
+  unaffected (its second gradient pass vanishes). The case still ships reach 3 — whether the ~1e-6 fold
+  costs Krylov cycles has not been marched; a per-column plan `(4,4,3,4,3)` would be exact at ~225 probes
+  (`k` → `omega` makes `k` need 4; not measured as a plan). The 506 s / 417-cycle row above ran on the
+  folded matrix.
 
   **✅✅ AND IT IS NOW THE LIBRARY DEFAULT — `schemes.DEFAULT_GRADIENT_SCHEME`, 2026-09-16 (#361).**
   `MultipleCorrectionGradient()` with its own defaults (`OwnerGradient`, no fallback), as a

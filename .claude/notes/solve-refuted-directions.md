@@ -416,6 +416,52 @@ reproducible on the current tree.** Full detail, including what was ruled out fi
 merges are inert — `|R|` identical to twelve digits at a fixed state), in `.claude/rules/validation.md`
 § "pitzDaily's SHIPPED PRECONDITIONER STOPPED MARCHING IT".
 
+## Local (staged) AD assembly of the coupled Jacobian, and the materialized-`J` matvec it was to enable — REFUTED / CLOSED (2026-10-07)
+
+**What was proposed** (`solve-open-directions.md` items 1–2, both removed from there): build the coupled
+Jacobian from local derivatives instead of the coloured probe, "15–30× cheaper on bfs3d", and once that
+made assembly cheap enough to rebuild every Newton iterate, run the Krylov matvec on the sparse `J`
+instead of `jax.jvp`.
+
+**Measured** (`validation/pitzdaily_openfoam/local_jacobian_probe.py`; pitzDaily 12,225 cells, shipped
+`case.yaml` with `MultipleCorrectionGradient`, one state: the time-accurate OpenFOAM field mapped cell for
+cell; jax 0.11.2, CPU, 4-core Linux container, probe batch 8, min of 3 warm runs — absolute seconds ~5×
+the recorded macOS figures, read the ratios). Split `R(x) = F(x, g(x))`, `g = G x` mesh-linear, so
+`J = F_x + F_g G` with `G` built once. `F_x` measured exactly by `stop_gradient` on every reconstructed
+gradient (residual unchanged, difference 0.0): exact at reach 2, 100 probes, 1.01 s. `F_g` estimated from
+colour counts at reach 1 (90 probes, ~0.91 s). Product `F_x + F_g G` in SciPy on random values with the
+real patterns (7,445,375 nnz, the shipped `J`'s exact count): 0.30 s. **Total 2.22 s against 2.21 s for
+the shipped probe (165 probes, reach 3) — 0.99×.**
+
+**Independent review corrected it, and every correction weakens the idea further:** the four
+velocity-gradient reconstructions reach 2, not 1, in `F_g` (≈210 probes, not 90); the 9 reconstructions
+are 5–6 unique fields (u, v, k, ω each twice), so deduped `F_g` is ~10–12 columns per cell, not 18; and the
+shipped pitzDaily residual is exact at **reach 4**, not 3 (`schemes.md`, the reach-4 entry). Corrected
+staged estimate ≈ 210–220 probes, ~1.3× against the exact reach-4 baseline (265 probes, 3.78 s) — against
+a pre-registered pass of < 1/5 of the probe's wall time.
+
+**Why it cannot reach 15–30×, and why it does not generalize:**
+- **The colouring is already near the forward-mode floor.** pitzDaily reach 1/2/3: 5/20/33 colours against
+  widest rows of 5/13/25 cells; a synthetic 23,040-cell hex mesh (bfs3d's size) 12/39/98 against 7/25/63.
+  The note's 15–30× set ~stencil-width local evaluations against 564 full JVPs, ignoring that each JVP
+  covers every face at once and is batched.
+- **Gradient work is a small share of a tangent:** freezing every gradient cuts one JVP 44 → 34 ms; inside
+  the batched probe the per-probe cost barely moves (10–14 ms against 13.4).
+- **The unbounded variant — per-face `vmap(jacfwd)`, no colouring — moves the cost into sparse products.**
+  Reviewer's SciPy timing on the synthetic bfs3d-size mesh, 6 fields: `F_x + F_g G` 1.99 s (47.7M nnz,
+  `F_g` reach 1) / 7.26 s (94.8M nnz, reach 2), against ~6 s for the whole shipped bfs3d materialize.
+  Estimated ceiling ~2–3× (SciPy) or ~5–10× (parallel SpGEMM) — and materialize is ~6 s of an 11.5 s
+  refresh beside a ~34 s mean outer step (recorded), so even infinite speed saves ≤ ~18 % per refresh.
+- **At 1.6M cells (reactor mesh) the exact Jacobian does not fit, however it is assembled**: bfs3d's ~2,050
+  nnz/cell gives ~3.3G nnz ≈ 26 GB of values (more on polyhedra); the compressed probe responses alone
+  ~43 GB. On GPU, batched probing gets relatively cheaper and JAX has no efficient GPU SpGEMM.
+
+**Item 2 closed with it.** Its per-matvec gain is real — a SciPy CSR matvec of the 7.4M-nnz `J` is 6.5 ms
+against a 44 ms residual JVP (same configuration) — but its premise was that item 1 makes a per-iterate
+build cheap, and a build is ~2.2 s ≈ 60 matvecs to break even. It also miscounted bfs3d's `J` at ~5M nnz;
+the recorded figure is 47.2M structural (~380 MB). Reopen only with a build that is genuinely cheap per
+iterate, e.g. on hardware where the probe itself changes cost class.
+
 ## `jax.linearize` in place of the per-matvec `jax.jvp` — REFUTED, and it looks obviously right
 
 `solve/continuation.py`'s `shifted_jacobian` builds the Krylov matvec as

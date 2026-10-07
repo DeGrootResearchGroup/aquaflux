@@ -21,77 +21,27 @@ The recorded numbers (`solve-march.md`, `solve-refuted-directions.md`):
 | pitzDaily coupled RANS | 12 225 | ~73k | 363 s (ramp arm) | 396 s | 3.2–9.1 ms |
 | bfs3d coupled RANS | 23 040 | ~138k | ~50 min | — | 16.6–33.2 ms |
 
-A sparse matvec on a 138k-row, ~38-nnz/row matrix is a few million flops — well under a millisecond on
-one CPU core. The matvec actually run is `jax.jvp` through the full residual (five gradient
-reconstructions per evaluation, `schemes.md`), so the Krylov operator costs roughly **10× the operator
-it represents**. The matrix is not used for the matvec because *materializing* it costs ~560 global JVPs
-(`sparse_jacobian.py`, colored probing at reach 3), which is why the preconditioner is refreshed only
-every few steps — and the ledger already found that **staleness, not hard operators, is the dominant
-linear-solve cost at low β** (the `InnerIterateCheckpointer` result: 15 cycles stale vs 1 cycle matched
-at the march's hardest solve).
+The matvec actually run is `jax.jvp` through the full residual, which reconstructs nine gradients per
+evaluation on pitzDaily. Measured 2026-10-07 on pitzDaily (4-core Linux, jax 0.11.2): the jvp is 44 ms,
+while a SciPy matvec on the materialized `J` (7.4M nnz, ~120 per row) is 6.5 ms, about 7× cheaper. bfs3d's
+`J` is 47.2M structural nnz (~340 per row). The matrix is not used for the matvec because *materializing*
+it costs 165–564 batched JVPs (`sparse_jacobian.py`, coloured probing), which is why the preconditioner is
+refreshed only every few steps — and the ledger already found that **staleness, not hard operators, is the
+dominant linear-solve cost at low β** (the `InnerIterateCheckpointer` result: 15 cycles stale vs 1 cycle
+matched at the march's hardest solve).
 
 So the two costs are coupled: the matvec is expensive because the matrix is expensive to build, and the
-preconditioner is stale because the matrix is expensive to build. Entries 1–2 break that coupling; 3–6
-attack the *number* of linear solves rather than their cost; 7–9 are platform and sweep-level levers.
+preconditioner is stale because the matrix is expensive to build. Entries 1–2 tried to break that
+coupling and are closed (below): the coloured probe is already near the forward-mode floor. 3–6 attack the
+*number* of linear solves rather than their cost; 7–9 are platform and sweep-level levers.
 
 ---
 
-## 1. Local AD assembly of the exact Jacobian (replace coloured probing)
+## 1–2. CLOSED — local Jacobian assembly and the materialized-`J` matvec
 
-**What.** The residual is gather → compute → scatter (`discretization.md`). Differentiate the
-*per-face / per-cell contribution* with respect to its own fixed-size, padded stencil using
-`jax.vmap(jax.jacfwd(local_contribution))` over faces, and scatter the resulting small dense blocks
-straight into a COO/BCOO Jacobian. The gradient-reconstruction stage (least-squares + `sweeps` of the
-skewness correction) composes the same way: its per-cell linear map over the reach-1 ring is itself a
-small dense block, and the chain rule over two stencil rings is a sparse product of two sparse operators
-that can be formed once per materialization.
-
-**Why it should win.** Cost is ~(stencil width) × one fused *local* evaluation, with no colouring and
-no de-compression, against 564 full residual JVPs. On bfs3d that is a 15–30× cheaper materialization
-in flop terms, and the work is embarrassingly parallel (ideal on GPU, where probing is a sequence of
-full-mesh passes).
-
-**What it does not change.** The result is the same AD Jacobian to rounding — the exactness the
-project's Principle on hand-linearization protects is preserved, because nothing is derived by hand;
-only the *order* of differentiation and summation changes.
-
-**Pre-registered measurement.** At `bfs3d` `state-00049`: assemble by both routes, report
-`‖J_local − J_probe‖_max / ‖J_probe‖_max` (expect ≤ 1e-13) and wall time for each, CPU, warm compile.
-Then the same on pitzDaily. A pass is agreement to rounding at < 1/5 of the probe's wall time.
-
-**Risks.** Padding ragged stencils to a fixed width wastes work on meshes with high-valence polyhedra;
-measure the padding ratio. Boundary-patch closures (`boundary.md`'s per-patch fold) need their own local
-blocks. The reach-3 pattern is required (ledger) — the local route reproduces it exactly, so this is a
-non-issue, but assert it in the test.
-
-## 2. Run the Krylov matvec on the materialized `J`, not the JVP
-
-**What.** Once (1) makes assembly cheap enough to run **every Newton iterate**, hand GMRES
-`lambda v: J @ v` (sparse) and the adjoint `Jᵀ @ v`, with the preconditioner built from the same `J` at
-the same iterate.
-
-**Why it should win.** ~10× cheaper per matvec (see table), and it deletes the staleness mechanism the
-ledger identifies as the low-β wall: the preconditioner is matched to the operator at every inner
-iterate by construction, with no refresh policy, no cost trigger and no `beta_rel_change` heuristics.
-The adjoint's single tight transpose solve gets the same speed-up.
-
-**Distinguish from the refuted entries.** The `jax.linearize` refutation concerned hoisting primal work
-*inside the JVP path*; this removes the JVP path from the linear solve. The block-CSR refutation
-concerned a BCOO-vs-block-CSR *implementation* of a sparse matvec, not whether the sparse matvec should
-replace the JVP. Neither bears on this.
-
-**What it does not change.** `J` is exact at the iterate, so the Newton direction and the IFT adjoint
-are identical to the JVP path to rounding; `custom_vjp` / `linear_transpose` plumbing in `implicit.py`
-is unaffected in principle, but the preconditioner's `stop_gradient` discipline must extend to `J`
-*as used in the PC* while `J` *as used in the matvec* stays on the differentiable path.
-
-**Pre-registered measurement.** `pitzDaily` ramp arm (the shipped 40-step configuration): identical
-step count and `x_r/h` 8.0686; report Krylov cycles, matvec wall, materialization wall, total wall.
-Then bfs3d. The comparison that matters is total wall at identical trajectory.
-
-**Risks.** Memory: `J` on bfs3d is ~5M nonzeros × 8 B = 40 MB — trivial. The failure mode is (1) being
-less cheap than hoped on a real polyhedral mesh; then materialize every *k* iterates and keep the JVP
-matvec for the in-between iterates — still a win on staleness.
+Both were measured on 2026-10-07 and moved to `solve-refuted-directions.md` ("Local (staged) AD assembly
+of the coupled Jacobian…"). Local assembly gains ~1× to ~1.3× at best, not 15–30×, so the per-iterate
+build item 2 relied on is not cheap. The numbering below is kept so cross-references stay valid.
 
 ## 3. Tangent-predictor continuation along the Reynolds ladder / homotopy
 
@@ -194,7 +144,7 @@ others. bfs3d at 138k dofs should be of order one second per Newton step on a si
 would make the whole march minutes rather than fifty. Every host-callback inverse (PETSc GAMG via
 `pure_callback`, scipy LU) is serialized through the host on that path, which is why the traced
 hierarchies (`SimpleSmoothed`, `MaterializedBlockPreconditioner`) exist. Consequences for this file:
-entries 1, 2 and 7 compound on GPU and are worth more there than their CPU measurements will show;
+entry 7 compounds on GPU and is worth more there than its CPU measurement will show;
 entry 6 is a JAX solver by necessity; a GPU-friendly smoother (coloured Gauss–Seidel, Chebyshev where
 the operator allows, or more ILU-free sweeps) replaces ILU(0), whose quality the ledger credits to a
 sequential global sweep that does not parallelize.
@@ -250,7 +200,7 @@ operator (the warm-start refutation is the cautionary tale).
   recorded as tried; cheap to measure on pitzDaily's opening residual.
 - **Gradient reconstruction `sweeps`.** `schemes.md` is explicit that `sweeps=4` must not be lowered
   globally; the open question is whether the *tangent* reconstruction inside the JVP needs the same
-  count as the primal — irrelevant once entry 2 removes the JVP from the Krylov loop.
+  count as the primal (still open: entry 2, which would have made this moot, is closed).
 
 ## Where this file does not go
 

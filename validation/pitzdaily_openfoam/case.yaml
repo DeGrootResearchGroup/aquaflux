@@ -48,8 +48,8 @@ numerics:
   # limiter does not prevent it; first-order upwind keeps the omega transport operator diagonally
   # dominant (an M-matrix), which is what keeps the shifted Newton step positive.
   turbulence_advection: {kind: FirstOrderUpwind}
-  # The two-face-pass reconstruction: quadratic-exact with no solve, and its residual reaches exactly
-  # distance 3 across the cell graph, which is what makes the driver's probe at reach 3 exact.
+  # The two-face-pass reconstruction: quadratic-exact with no solve. On a scalar residual it reaches
+  # exactly distance 3; the coupled residual here reaches 4 (see the probe below).
   gradient: {kind: MultipleCorrectionGradient}
 
 solver:
@@ -70,8 +70,11 @@ solver:
       leading: {kind: SimpleSmoothed, sweeps: 2, pressure_sweeps: 2, omega: 1.0, aggressive_levels: 0,
         avoid_singletons: true, block_splitting: true, strength_threshold: 0.25, max_levels: 5, max_coarse: 500}
       trailing: {kind: JacobiSmoothed, max_coarse: 2000, equilibrate: false}
-    # The multiple-correction gradient's residual reaches exactly distance 3, so a probe at reach 3 is
-    # exact.
+    # Reach 3 is NOT exact for this coupled residual: the velocity gradient feeds the eddy viscosity,
+    # which spends one more ring, so the u and v columns (and, weakly, k into omega) reach 4. At reach 3
+    # the far coupling is folded onto near entries, relative error up to ~5e-6 per block at the
+    # OpenFOAM state; reach 4 is exact to round-off but costs 265 probes against 165
+    # (validation/pitzdaily_openfoam/probe_reach_check.py). Kept at 3 pending a march comparison.
     probe: {kind: JacobianProbeSpec, stencil_reach: 3}
     refit_beta_floor: 0.05
   # Each outer step a dual-time inner loop of up to five Newton iterations, stopping at a hundredth of
