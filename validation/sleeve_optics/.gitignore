@@ -1,0 +1,3 @@
+# Regenerable: every trace and check writes here.
+/work
+__pycache__/
