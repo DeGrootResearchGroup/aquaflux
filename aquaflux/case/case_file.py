@@ -32,6 +32,7 @@ import yaml
 
 from aquaflux.mesh import Mesh
 
+from .initial import StartingFields, starting_seed
 from .solver import solver_for
 from .spec import CaseSpec, case_spec_from_mapping, case_spec_to_mapping
 
@@ -90,10 +91,37 @@ class CheckedCase:
         The case.
     mesh : Mesh
         Its mesh, validated -- topology only; no geometry has been computed.
+    directory : pathlib.Path
+        The directory the case file sits in, which a relative path in the case is taken from.
     """
 
     spec: CaseSpec
     mesh: Mesh
+    directory: Path
+
+    def starting_fields(self) -> StartingFields | None:
+        """What the case's ``initial`` section starts it from, read and checked against its mesh.
+
+        Needs no geometry and no equations, so a state that does not fit is refused as cheaply as a
+        patch that does not.
+
+        Returns
+        -------
+        StartingFields or None
+            ``None`` when the case has no ``initial`` section and builds its own starting state.
+
+        Raises
+        ------
+        FileNotFoundError
+            If the section names a state that is not there.
+        ValueError
+            If the state cannot start this case: the wrong physics, cell count or mesh, or not a case
+            checkpoint at all.
+        """
+        initial = self.spec.initial
+        if initial is None:
+            return None
+        return initial.read(self.directory, self.spec.physics, self.mesh)
 
     def build(self) -> object:
         """The case's problem: its mesh's geometry, then its equations.
@@ -113,6 +141,9 @@ class CheckedCase:
     def solve(self, problem: object, **observers: object) -> object:
         """Solve ``problem`` with the case's solver (see :meth:`~aquaflux.case.SolverSpec.solve`).
 
+        A case with an ``initial`` section starts from the state it names, read by
+        :meth:`starting_fields`; one without starts from the solve's own.
+
         Parameters
         ----------
         problem : object
@@ -130,11 +161,15 @@ class CheckedCase:
         Raises
         ------
         ValueError
-            If the case states no solver and its physics' default cannot solve it.
+            If the case states no solver and its physics' default cannot solve it, or its starting
+            state cannot start it (see :meth:`starting_fields`).
         TypeError
             If an observer keyword is one of the solve's settings.
+        FileNotFoundError
+            If the starting state is not there.
         """
-        return solver_for(self.spec).solve(problem, **observers)
+        seed = starting_seed(self.starting_fields(), self.spec.physics, problem)
+        return solver_for(self.spec).solve(problem, initial=seed, **observers)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -170,7 +205,7 @@ class CaseFile:
         """
         mesh = self.spec.mesh.read(self.directory).validate()
         self.spec.check_against(mesh)
-        return CheckedCase(spec=self.spec, mesh=mesh)
+        return CheckedCase(spec=self.spec, mesh=mesh, directory=self.directory)
 
 
 def read_case(path: str | Path) -> CaseFile:

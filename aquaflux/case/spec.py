@@ -65,6 +65,7 @@ from aquaflux.turbulence import PRECONDITIONER_SPEC_MAPPING, DirectScalars, LogS
 from .boundaries import FixedTurbulence, Inlet, IntensityLength, Outlet, PatchCondition, Wall
 from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
+from .initial import Checkpoint, InitialState
 from .mesh_source import GeometricGrading, MeshSource, OpenFOAMMesh, StructuredGrid
 from .outputs import Checkpoints, OpenFOAMTime, Outputs, Vtk
 from .physics import RANS, Laminar, Physics
@@ -136,6 +137,9 @@ class CaseSpec:
         How the case is solved -- :class:`~aquaflux.case.CoupledMarch`, :class:`~aquaflux.case.FlowMarch`
         or :class:`~aquaflux.case.Segregated`. Unset, its physics' march with the library's own
         settings (see :meth:`~aquaflux.case.CheckedCase.solve`).
+    initial : InitialState or None
+        What the case starts from when it is not from scratch -- :class:`~aquaflux.case.Checkpoint`, an
+        earlier run's checkpoints. Unset, the solve builds its own starting state.
     outputs : Outputs
         What a run writes and where (see :func:`~aquaflux.case.run_case`); unset, the fields as VTK and
         the log, in ``results/`` beside the case file.
@@ -148,8 +152,9 @@ class CaseSpec:
         If there are no boundary patches, if the physics refuses one (a turbulence setting in a laminar
         case, an inlet with no inflow turbulence in a Reynolds-averaged one), or if the pressure level
         is not fixed exactly once: a closed domain with no ``pressure_datum``, or a datum beside an
-        outlet; if the solver cannot solve this physics or hold this drive; or if an output writes an
-        OpenFOAM time directory for a mesh that is not an OpenFOAM one.
+        outlet; if the solver cannot solve this physics or hold this drive, or cannot start from the
+        ``initial`` state given; or if an output writes an OpenFOAM time directory for a mesh that is
+        not an OpenFOAM one.
     """
 
     mesh: MeshSource
@@ -161,6 +166,7 @@ class CaseSpec:
     pressure_datum: PressureDatum | None = None
     sources: tuple[SourceSpec, ...] = ()
     solver: SolverSpec | None = None
+    initial: InitialState | None = None
     outputs: Outputs = dataclasses.field(default_factory=Outputs)
 
     def __post_init__(self) -> None:
@@ -192,6 +198,11 @@ class CaseSpec:
             raise TypeError(
                 f"CaseSpec.solver must be a solver such as CoupledMarch(), got {self.solver!r}."
             )
+        if self.initial is not None and not isinstance(self.initial, InitialState):
+            raise TypeError(
+                "CaseSpec.initial must be a starting state such as "
+                f"Checkpoint(path), got {self.initial!r}."
+            )
         if not self.boundaries:
             raise ValueError("a case names at least one boundary patch.")
         for patch, condition in self.boundaries.items():
@@ -215,6 +226,8 @@ class CaseSpec:
         )
         if self.solver is not None:
             self.solver.refuse_for(self.physics, self.drive)
+            if self.initial is not None:
+                self.solver.refuse_initial(self.initial)
         if not isinstance(self.mesh, OpenFOAMMesh) and any(
             isinstance(writer, OpenFOAMTime) for writer in self.outputs.fields
         ):
@@ -443,6 +456,7 @@ _CASE_MAPPING = SettingsMapping(
         Vtk,
         OpenFOAMTime,
         Checkpoints,
+        Checkpoint,
     ]
 )
 
@@ -457,7 +471,7 @@ def case_spec_from_mapping(mapping: Mapping[str, object]) -> CaseSpec:
     """Read a case from the nested mapping a case file parses to.
 
     The top level holds the sections -- ``mesh``, ``fluid``, ``physics``, ``boundaries``, ``numerics``
-    and optionally ``drive``, ``sources``, ``pressure_datum`` and ``solver`` -- and names no ``kind``, since the whole document is the case. Below it,
+    and optionally ``drive``, ``sources``, ``pressure_datum``, ``solver``, ``initial`` and ``outputs`` -- and names no ``kind``, since the whole document is the case. Below it,
     each value is a mapping whose ``kind`` names its class, except ``boundaries``, which maps each patch
     name to that patch's condition::
 

@@ -866,3 +866,48 @@ def test_each_step_case_script_runs_its_files_solver_when_no_override_is_set(cas
         timeout=300,
     )
     assert result.returncode == 0, result.stderr[-2000:]
+
+
+# --- a starting state ------------------------------------------------------------------------------
+
+
+_SEED = ("flow", "k", "omega")
+
+
+def test_a_coupled_march_starts_solve_coupled_from_the_state_it_is_given(recorded) -> None:
+    CoupledMarch(max_steps=7).solve("problem", initial=_SEED)
+    ((args, kwargs),) = recorded.solve_coupled.calls
+    assert args == ("problem", "flow", "k", "omega")
+    assert kwargs == {"max_steps": 7}
+
+
+def test_a_coupled_march_given_no_state_leaves_solve_coupled_to_start_itself(recorded) -> None:
+    CoupledMarch().solve("problem")
+    ((args, _),) = recorded.solve_coupled.calls
+    assert args == ("problem",)
+
+
+def test_a_flow_march_starts_from_the_state_it_is_given_and_otherwise_passes_none(recorded) -> None:
+    FlowMarch().solve("problem")
+    FlowMarch(max_steps=4).solve("problem", initial="state")
+    (_, unset), (_, given) = recorded.solve_flow_march.calls
+    assert unset == {}
+    assert given == {"max_steps": 4, "state": "state"}
+
+
+def test_a_segregated_solve_starts_from_the_state_it_is_given_not_its_own_initializer(
+    recorded,
+) -> None:
+    momentum = types.SimpleNamespace(drive=None)
+    problem = types.SimpleNamespace(momentum=momentum, turbulence="t")
+    Segregated(sweeps=5).solve(problem, initial=("flow1", "k1", "omega1"))
+    assert recorded.sst_initial_fields.calls == []
+    ((args, _),) = recorded.solve_segregated.calls
+    assert args[-3:] == ("flow1", "k1", "omega1")
+
+
+def test_a_ramp_cannot_be_handed_a_starting_state_by_a_script_either(recorded) -> None:
+    ramp = ViscosityRamp(anchor=50.0, stations=6, steps_per_station=2)
+    with pytest.raises(ValueError, match=r"a viscosity ramp opens on a seed fitted to its anchor"):
+        CoupledMarch(continuation=ramp).solve("problem", initial=_SEED)
+    assert recorded.solve_reynolds_ramp.calls == []

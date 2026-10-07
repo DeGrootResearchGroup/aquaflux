@@ -142,7 +142,13 @@ from .linear import (
     restart_cycles,
     solve_linear,
 )
-from .checkpoint import InnerIterateCheckpointer, StateCheckpointer
+from .checkpoint import (
+    InnerIterateCheckpointer,
+    StateCheckpointer,
+    checkpoint_name,
+    find_checkpoint,
+    report_record,
+)
 from .march import (
     CoefficientDriftTrigger,
     combine_observers,
@@ -382,6 +388,7 @@ __all__ = [
     "build_convection_hierarchy",
     "build_smoothed_hierarchy",
     "cell_major_permutation",
+    "checkpoint_name",
     "column_probe_plan",
     "combine_metrics",
     "combine_observers",
@@ -394,6 +401,7 @@ __all__ = [
     "explicit_source",
     "field_change_metrics",
     "filled_from",
+    "find_checkpoint",
     "frozen_shift_diagonal",
     "in_progress_measure",
     "jacobian_matvec",
@@ -410,6 +418,7 @@ __all__ = [
     "refuse_a_transform_the_march_cannot_run_in",
     "refuse_unforwardable_settings",
     "relative_residual_gmres",
+    "report_record",
     "resolve_linear_solve",
     "restart_cycles",
     "root_adjoint",

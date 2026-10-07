@@ -58,6 +58,7 @@ from aquaflux.turbulence import (
 )
 
 from .forcing import DriveSpec
+from .initial import InitialState
 from .physics import RANS, Laminar, Physics, _set
 
 __all__ = [
@@ -116,14 +117,37 @@ class SolverSpec(abc.ABC):
             If the solve is not one for this physics, or cannot hold this drive.
         """
 
+    def refuse_initial(self, initial: InitialState) -> None:
+        """Refuse a starting state this solve cannot start from.
+
+        Every solve can by default; one that opens on a seed of its own says so here.
+
+        Parameters
+        ----------
+        initial : InitialState
+            The case's ``initial`` section.
+
+        Raises
+        ------
+        ValueError
+            If this solve cannot start from a given state.
+        """
+        del initial
+
     @abc.abstractmethod
-    def solve(self, problem: object, **observers: object) -> object:
+    def solve(
+        self, problem: object, *, initial: object | None = None, **observers: object
+    ) -> object:
         """Solve ``problem``, the problem the case built.
 
         Parameters
         ----------
         problem : object
             What :meth:`~aquaflux.case.CheckedCase.build` returned.
+        initial : object, optional
+            The state to start from, in the form the physics' :meth:`~aquaflux.case.Physics.initial_fields`
+            gives: the flow state for a laminar case, ``(flow, k, omega)`` for a Reynolds-averaged one.
+            Unset, the solve builds its own starting state.
         **observers
             Keywords of the library solve that observe it without changing it -- ``on_checkpoint``,
             ``on_retry``, ``inner_observer`` and the like. See each solve for which it accepts.
@@ -330,6 +354,14 @@ class ViscosityRamp:
         )
 
 
+#: Why a ramp refuses a starting state, said both when a file is read and when a script passes one.
+_RAMP_TAKES_NO_STARTING_STATE = (
+    "solver: a viscosity ramp opens on a seed fitted to its anchor station's viscosity, so it cannot "
+    "start from a given state. Remove the initial section to run the ramp, or remove the continuation "
+    "to start from the state at the case's own viscosity."
+)
+
+
 def _no_point_setup(companion: object, seed_state: object, point: object) -> dict[str, object]:
     """A ramp's per-station configuration: none, since every setting is the case's."""
     del companion, seed_state, point
@@ -399,6 +431,17 @@ class CoupledMarch(_March):
             "CoupledMarch", drive, "Solve it with a Segregated solver, which holds it."
         )
 
+    def refuse_initial(self, initial: InitialState) -> None:
+        """Refuse a starting state when the march is a ramp -- see :meth:`SolverSpec.refuse_initial`.
+
+        A ramp opens on a seed it builds from its anchor station, because the seed must match the
+        anchor's viscosity: a state fitted to the case's own viscosity would sit off the anchor's own
+        wall condition by the viscosity ratio. So a ramp has no starting state to take.
+        """
+        del initial
+        if self.continuation is not None:
+            raise ValueError(_RAMP_TAKES_NO_STARTING_STATE)
+
     def observers_for(
         self, logger: MarchLogger, checkpointer: StateCheckpointer | None
     ) -> dict[str, object]:
@@ -432,6 +475,7 @@ class CoupledMarch(_March):
         self,
         problem: object,
         *,
+        initial: tuple[object, object, object] | None = None,
         session_options: Mapping[str, object] | None = None,
         point_setup: Callable | None = None,
         **observers: object,
@@ -445,6 +489,8 @@ class CoupledMarch(_March):
         ----------
         problem : CoupledRANS
             The case's coupled problem.
+        initial : tuple of jnp.ndarray, optional
+            The ``(flow, k, omega)`` to start from, physical fields. Refused with a continuation.
         session_options : mapping, optional
             Observers for that session -- ``observer``, ``reports``, ``on_build`` and the other
             keywords of :func:`~aquaflux.turbulence.open_session` beyond the spec. Refused for a
@@ -479,7 +525,9 @@ class CoupledMarch(_March):
             )
         options = settings | observers
         if self.continuation is None:
-            return solve_coupled(problem, **options)
+            return solve_coupled(problem, *(() if initial is None else initial), **options)
+        if initial is not None:
+            raise ValueError(_RAMP_TAKES_NO_STARTING_STATE)
         return self.continuation.solve(
             problem,
             options,
@@ -528,13 +576,17 @@ class FlowMarch(_March):
         """
         return self._march_settings()
 
-    def solve(self, problem: object, **observers: object) -> object:
+    def solve(
+        self, problem: object, *, initial: object | None = None, **observers: object
+    ) -> object:
         """March ``problem`` -- see :meth:`SolverSpec.solve`.
 
         Parameters
         ----------
         problem : MomentumContinuity
             The case's flow problem.
+        initial : jnp.ndarray, optional
+            The flow state to start from, shape ``((dim + 1) n_cells,)``; unset, a potential flow.
         **observers
             Observer keywords of :func:`~aquaflux.flow.solve_flow_march` (``on_step``,
             ``on_checkpoint``, ``on_retry``, ...).
@@ -546,7 +598,7 @@ class FlowMarch(_March):
         """
         settings = self.settings()
         _refuse_settings_as_observers("FlowMarch", self._owned(), observers)
-        return solve_flow_march(problem, **settings, **observers)
+        return solve_flow_march(problem, **settings, **_set(state=initial), **observers)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -657,13 +709,22 @@ class Segregated(SolverSpec):
         del drive
         _refuse_physics("Segregated", physics, RANS, "FlowMarch")
 
-    def solve(self, problem: object, **observers: object) -> object:
+    def solve(
+        self,
+        problem: object,
+        *,
+        initial: tuple[object, object, object] | None = None,
+        **observers: object,
+    ) -> object:
         """Solve ``problem`` -- see :meth:`SolverSpec.solve`. It takes no observers.
 
         Parameters
         ----------
         problem : CoupledRANS
             The case's coupled problem, whose flow and closure are solved in turn.
+        initial : tuple of jnp.ndarray, optional
+            The ``(flow, k, omega)`` to start from, physical fields; unset,
+            :func:`~aquaflux.turbulence.sst_initial_fields`.
 
         Returns
         -------
@@ -701,7 +762,7 @@ class Segregated(SolverSpec):
                     turbulence,
                     build_flow_solve(momentum, **flow_root),
                     scalar_pseudo_transient_solve(**scalar_root),
-                    *sst_initial_fields(momentum, turbulence),
+                    *(sst_initial_fields(momentum, turbulence) if initial is None else initial),
                     max_sweeps=self.sweeps,
                     **_set(
                         relaxation=self.relaxation,

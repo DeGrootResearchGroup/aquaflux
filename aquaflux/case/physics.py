@@ -19,6 +19,7 @@ import dataclasses
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
+import jax.numpy as jnp
 import numpy as np
 
 from aquaflux.boundary import BoundaryConditions
@@ -99,6 +100,50 @@ class Physics(abc.ABC):
         """
 
     @abc.abstractmethod
+    def restart_fields(self, problem: object, state: object) -> dict[str, np.ndarray]:
+        """The physical fields of a march state, by name: what a checkpoint holds.
+
+        Parameters
+        ----------
+        problem : object
+            What :meth:`build` returned.
+        state : object
+            A state of the march, as its ``on_checkpoint`` observer is handed it -- the march's
+            solved variables, which need not be the physical ones.
+
+        Returns
+        -------
+        dict of {str: np.ndarray}
+            The fields a solve of this physics can start from -- ``U`` and ``p``, and under RANS ``k``
+            and ``omega`` -- in the form :meth:`initial_fields` takes back. The pressure is the solved
+            one.
+        """
+
+    @abc.abstractmethod
+    def initial_fields(self, problem: object, fields: Mapping[str, np.ndarray]) -> object:
+        """The starting state a solve takes, from physical fields: the inverse of :meth:`restart_fields`.
+
+        Parameters
+        ----------
+        problem : object
+            What :meth:`build` returned.
+        fields : mapping of {str: np.ndarray}
+            Physical fields by name -- ``U`` ``(n_cells, dim)``, ``p`` ``(n_cells,)``, and under RANS
+            ``k`` and ``omega`` ``(n_cells,)`` -- on the problem's mesh.
+
+        Returns
+        -------
+        object
+            What the case's solve takes as its starting state: the flow state for a laminar case, the
+            tuple ``(flow, k, omega)`` for a Reynolds-averaged one.
+
+        Raises
+        ------
+        ValueError
+            If a field this physics needs is missing, naming it and the fields given.
+        """
+
+    @abc.abstractmethod
     def progress_fields(self, problem: object) -> Callable[[object], Mapping[str, object]] | None:
         """What a march's log reports the change of at each step, or ``None`` for nothing.
 
@@ -140,6 +185,17 @@ class Laminar(Physics):
         """``U`` and ``p`` -- see :meth:`Physics.output_fields`."""
         velocity, pressure = problem.unpack(solution)
         return {"U": np.asarray(velocity), "p": np.asarray(pressure)}
+
+    def restart_fields(self, problem: MomentumContinuity, state: object) -> dict[str, np.ndarray]:
+        """``U`` and ``p`` -- see :meth:`Physics.restart_fields`. A laminar march's state is the flow's own."""
+        return self.output_fields(problem, state)
+
+    def initial_fields(
+        self, problem: MomentumContinuity, fields: Mapping[str, np.ndarray]
+    ) -> jnp.ndarray:
+        """The flow state of ``U`` and ``p`` -- see :meth:`Physics.initial_fields`."""
+        velocity, pressure = _required(fields, ("U", "p"))
+        return problem.pack(jnp.asarray(velocity), jnp.asarray(pressure))
 
     def progress_fields(self, problem: MomentumContinuity) -> None:
         """None: the log reports the residual alone -- see :meth:`Physics.progress_fields`."""
@@ -244,19 +300,51 @@ class RANS(Physics):
         """``U``, ``p``, ``k``, ``omega`` and the eddy viscosity ``nut`` -- see :meth:`Physics.output_fields`."""
         flow, k, omega = solution
         momentum = problem.momentum
-        velocity, pressure = momentum.unpack(flow)
         nut = problem.turbulence.closure_fields(momentum.velocity_fields(flow), k, omega).nu_t
+        return {**self._solved_fields(problem, solution), "nut": np.asarray(nut)}
+
+    def restart_fields(self, problem: CoupledRANS, state: object) -> dict[str, np.ndarray]:
+        """``U``, ``p``, ``k`` and ``omega`` -- see :meth:`Physics.restart_fields`.
+
+        The march's state holds the solved variables, so ``omega`` is mapped back out of its logarithm
+        when the case solves for that.
+        """
+        return self._solved_fields(problem, problem.physical_fields(state))
+
+    def initial_fields(
+        self, problem: CoupledRANS, fields: Mapping[str, np.ndarray]
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """``(flow, k, omega)`` from the physical fields -- see :meth:`Physics.initial_fields`."""
+        velocity, pressure, k, omega = _required(fields, ("U", "p", "k", "omega"))
+        flow = problem.momentum.pack(jnp.asarray(velocity), jnp.asarray(pressure))
+        return flow, jnp.asarray(k), jnp.asarray(omega)
+
+    @staticmethod
+    def _solved_fields(problem: CoupledRANS, solution: object) -> dict[str, np.ndarray]:
+        """The fields the closure is solved for, from ``(flow, k, omega)``: everything but ``nut``."""
+        flow, k, omega = solution
+        velocity, pressure = problem.momentum.unpack(flow)
         return {
             "U": np.asarray(velocity),
             "p": np.asarray(pressure),
             "k": np.asarray(k),
             "omega": np.asarray(omega),
-            "nut": np.asarray(nut),
         }
 
     def progress_fields(self, problem: CoupledRANS) -> Callable[[object], Mapping[str, object]]:
         """The physical velocity components, pressure, ``k``, ``omega`` and ``nu_t`` -- see :meth:`Physics.progress_fields`."""
         return coupled_fields(problem)
+
+
+def _required(fields: Mapping[str, np.ndarray], names: tuple[str, ...]) -> list[np.ndarray]:
+    """The named fields, in order, refusing a mapping that lacks one."""
+    missing = [name for name in names if name not in fields]
+    if missing:
+        raise ValueError(
+            f"a starting state needs the fields {list(names)}, but {missing} "
+            f"{'is' if len(missing) == 1 else 'are'} missing from {sorted(fields)}."
+        )
+    return [fields[name] for name in names]
 
 
 def _set(**settings: object) -> dict[str, object]:

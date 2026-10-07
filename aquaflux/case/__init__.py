@@ -25,8 +25,9 @@ of the wrong form or inconsistent with the rest of the case, with the path to it
 patch, and every patch fits the mesh -- without computing any geometry, so a case can be checked
 cheaply before anything expensive is built.
 
-The file's ``solver`` section says how the case is solved and its ``outputs`` section what a run
-writes; :func:`prepare_run` reads and checks a file for a run, and :meth:`PreparedRun.run` builds,
+The file's ``solver`` section says how the case is solved, its optional ``initial`` section what it
+starts from (a :class:`Checkpoint` of an earlier run, to resume one that stopped short) and its
+``outputs`` section what a run writes; :func:`prepare_run` reads and checks a file for a run, and :meth:`PreparedRun.run` builds,
 solves and writes it -- what ``aquaflux run case.yaml`` does.
 
 Each boundary patch is described once for every field: an :class:`Inlet`, an :class:`Outlet` or a
@@ -48,6 +49,7 @@ from .boundaries import (
 from .case_file import CaseFile, CheckedCase, read_case, write_case
 from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
+from .initial import Checkpoint, InitialState, StartingFields
 from .mesh_source import AxisGrading, GeometricGrading, MeshSource, OpenFOAMMesh, StructuredGrid
 from .outputs import Checkpoints, FieldWriter, OpenFOAMTime, Outputs, Vtk
 from .physics import RANS, Laminar, Physics
@@ -72,6 +74,7 @@ __all__ = [
     "CaseFile",
     "CaseSpec",
     "CheckedCase",
+    "Checkpoint",
     "Checkpoints",
     "CoupledMarch",
     "DriveSpec",
@@ -80,6 +83,7 @@ __all__ = [
     "FlowMarch",
     "Fluid",
     "GeometricGrading",
+    "InitialState",
     "Inlet",
     "InletTurbulence",
     "IntensityLength",
@@ -99,6 +103,7 @@ __all__ = [
     "Segregated",
     "SolverSpec",
     "SourceSpec",
+    "StartingFields",
     "StructuredGrid",
     "ViscosityRamp",
     "Vtk",

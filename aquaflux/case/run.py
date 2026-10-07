@@ -7,10 +7,12 @@ of the march as it goes, and writes:
 
 * the converged fields, by each of the section's field writers;
 * the log, one row per outer step, also echoed to the terminal;
-* the checkpoints, when asked for;
+* the checkpoints, when asked for -- the physical fields with what they belong to, so a later run
+  can start from one;
 * ``case.yaml``, the case as it ran -- the solver written out even when the file left it to the
   default -- and ``run.yaml``, a record of the run: the aquaflux version and commit, when it ran,
-  how many steps it took, where its residual ended and whether it converged.
+  how many steps it took, where its residual ended and whether it converged, and, for a run that
+  started from an earlier state, which state.
 
 A solve that stops short of its stopping test writes no fields, since what it holds is not a solution,
 but it still writes its log, its checkpoints and ``run.yaml``.
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import hashlib
 import os
 import shutil
 import subprocess
@@ -36,10 +39,12 @@ import aquaflux
 from aquaflux.solve import MarchLogger, StateCheckpointer, StepReport
 
 from .case_file import CaseFile, CheckedCase, read_case, write_case
+from .initial import StartingFields, starting_seed
 from .mesh_source import OpenFOAMMesh
 from .outputs import OpenFOAMTime
+from .restart_file import RestartHeader, checkpoint_writer
 from .solver import NotConverged, SolverSpec, solver_for
-from .spec import CaseSpec
+from .spec import CaseSpec, case_spec_to_mapping
 
 __all__ = ["PreparedRun", "RunRecord", "prepare_run"]
 
@@ -90,12 +95,16 @@ class PreparedRun:
         The solver it runs -- the file's, or its physics' default.
     directory : pathlib.Path
         The output directory.
+    starting : StartingFields or None
+        The state the case's ``initial`` section starts it from, already read and checked against the
+        mesh; ``None`` when it starts from its solve's own.
     """
 
     source: Path
     checked: CheckedCase
     solver: SolverSpec
     directory: Path
+    starting: StartingFields | None = None
 
     def run(self, terminal: IO[str] | None = None) -> RunRecord:
         """Build and solve the case, and write its outputs.
@@ -131,12 +140,18 @@ class PreparedRun:
                     self.directory / _CHECKPOINTS,
                     every=outputs.checkpoints.every,
                     keep=outputs.checkpoints.keep,
+                    save=checkpoint_writer(
+                        spec.physics,
+                        problem,
+                        RestartHeader.of(spec.physics, self.checked.mesh, _case_digest(spec)),
+                    ),
                 )
             )
             observers = self.solver.observers_for(logger, steps)
             converged, message, written = True, None, []
             try:
-                solution = self.solver.solve(problem, **observers)
+                seed = starting_seed(self.starting, spec.physics, problem)
+                solution = self.solver.solve(problem, initial=seed, **observers)
             except (NotConverged, eqx.EquinoxRuntimeError) as error:
                 converged, message = False, str(error).strip().splitlines()[0]
                 logger.note(f"did not converge: {message}")
@@ -198,10 +213,14 @@ class PreparedRun:
             else writer
             for writer in spec.outputs.fields
         )
+        initial = spec.initial
+        if initial is not None:
+            initial = dataclasses.replace(initial, path=rebased(initial.path))
         recorded = dataclasses.replace(
             spec,
             mesh=mesh,
             solver=self.solver,
+            initial=initial,
             outputs=dataclasses.replace(spec.outputs, directory=".", fields=writers),
         )
         path = here / _CASE_RECORD
@@ -219,6 +238,7 @@ class PreparedRun:
             "started": started.isoformat(timespec="seconds"),
             "seconds": round(seconds, 1),
             "solver": type(self.solver).__name__,
+            "initial": None if self.starting is None else dict(self.starting.source),
             "converged": record.converged,
             "steps": record.steps,
             "residual": record.residual,
@@ -254,21 +274,51 @@ def prepare_run(path: str | Path, *, overwrite: bool = False) -> PreparedRun:
         is false.
     ValueError, TypeError
         If the file is refused (see :func:`~aquaflux.case.read_case`), its case states no solver and
-        its physics' default cannot solve it, or the case does not fit its mesh.
+        its physics' default cannot solve it, the case does not fit its mesh, its starting state is
+        inside the output directory or cannot start it (see
+        :meth:`~aquaflux.case.CheckedCase.starting_fields`).
     FileNotFoundError
-        If the file or its mesh cannot be found.
+        If the file, its mesh or its starting state cannot be found.
     """
     source = Path(path).resolve()
     case_file = read_case(source)
     spec = case_file.spec
     directory = spec.outputs.output_directory(case_file.directory).resolve()
-    _refuse_or_clear(spec, case_file, directory, overwrite)
+    _refuse_a_start_from_the_output(spec, case_file, directory)
+    _refuse_an_occupied_directory(spec, case_file, directory, overwrite)
     solver = solver_for(spec)
-    return PreparedRun(source=source, checked=case_file.check(), solver=solver, directory=directory)
+    checked = case_file.check()
+    # Read, and checked against the mesh, before anything is cleared: a state that does not fit
+    # must not have cost an earlier run its checkpoints.
+    starting = checked.starting_fields()
+    if overwrite and (directory / _CHECKPOINTS).is_dir():
+        shutil.rmtree(directory / _CHECKPOINTS)
+    return PreparedRun(
+        source=source, checked=checked, solver=solver, directory=directory, starting=starting
+    )
 
 
-def _refuse_or_clear(spec: CaseSpec, case_file: CaseFile, directory: Path, overwrite: bool) -> None:
-    """Refuse a directory holding an earlier run's results, or, told to overwrite, clear its checkpoints."""
+def _refuse_a_start_from_the_output(spec: CaseSpec, case_file: CaseFile, directory: Path) -> None:
+    """Refuse a starting state read from the directory the run writes into.
+
+    A run replaces what it finds in its output directory, so a state read from there is either
+    refused as results to move or, told to overwrite, cleared before it is used.
+    """
+    if spec.initial is None:
+        return
+    location = spec.initial.location(case_file.directory)
+    if location.is_relative_to(directory):
+        raise ValueError(
+            f"initial: {location} lies inside the output directory {directory}, which this run "
+            "writes into and replaces. Write the restart elsewhere (outputs.directory), so the "
+            "state it starts from is kept."
+        )
+
+
+def _refuse_an_occupied_directory(
+    spec: CaseSpec, case_file: CaseFile, directory: Path, overwrite: bool
+) -> None:
+    """Refuse a directory holding an earlier run's results, unless told to overwrite them."""
     occupied = [directory] if directory.is_dir() and any(directory.iterdir()) else []
     occupied += [
         target
@@ -281,8 +331,12 @@ def _refuse_or_clear(spec: CaseSpec, case_file: CaseFile, directory: Path, overw
             f"{', '.join(map(str, occupied))} already {'holds' if len(occupied) == 1 else 'hold'} "
             "results; move them, or replace them with --overwrite (overwrite=True)."
         )
-    if overwrite and (directory / _CHECKPOINTS).is_dir():
-        shutil.rmtree(directory / _CHECKPOINTS)
+
+
+def _case_digest(spec: CaseSpec) -> str:
+    """A digest of the case as a file states it, recorded in each checkpoint as where it came from."""
+    document = yaml.safe_dump(case_spec_to_mapping(spec), sort_keys=True)
+    return hashlib.sha256(document.encode()).hexdigest()
 
 
 class _Tee:

@@ -145,7 +145,7 @@ cfd/                                  # repo root
 │   │   ├── march.py                  #   newton_march: the observed forward-only Newton march every solve runs on + the staleness trigger watching it
 │   │   ├── strategy.py               #   NewtonStrategy / ShiftedNewtonStrategy + StepOutcome / StepReport / StepControl: the contracts the march is written against
 │   │   ├── march_log.py              #   MarchLogger: the streaming per-step log (the reporting half of the on_step seam)
-│   │   ├── checkpoint.py             #   StateCheckpointer: periodic state persistence (the on_checkpoint seam)
+│   │   ├── checkpoint.py             #   StateCheckpointer: periodic state persistence (the on_checkpoint seam), find_checkpoint to look one up again
 │   │   ├── step_control.py           #   feedback step controls for the eager march (DualTimeControl and friends)
 │   │   ├── continuation.py           #   PseudoTransientStep / NewtonStrategy: continuation as a residual-agnostic Newton step
 │   │   ├── relaxation.py             #   RelaxationSchedule → SwitchedEvolutionRelaxation, ConstantRelaxation: how the shift strength beta is set each step
@@ -168,6 +168,8 @@ cfd/                                  # repo root
 │   │   ├── fluid.py                  #   Fluid: density and exactly one of the kinematic / dynamic viscosity
 │   │   ├── forcing.py                #   DriveSpec -> BulkVelocity (builds MassFlow); SourceSpec -> BodyForce (builds UniformBodyForce)
 │   │   ├── physics.py                #   Physics -> Laminar / RANS (k-omega SST settings live inside RANS)
+│   │   ├── initial.py                #   InitialState -> Checkpoint: what a case starts from instead of its own initial condition
+│   │   ├── restart_file.py           #   the checkpoint file a case writes (physical fields + a header: physics, cells, mesh digest) and reads back
 │   │   └── boundaries.py             #   PatchCondition -> Inlet / Outlet / Wall, one per patch for every field; FixedTurbulence
 │   └── parallel/                     # distributed memory: decomposition and halo exchange (the concern kept out of Mesh)
 │       ├── partitioner.py            #   Partitioner → BlockPartitioner (RCM-block, dependency-free default) / ScotchCLIPartitioner / ScotchPartitioner; consumes cell_adjacency_csr

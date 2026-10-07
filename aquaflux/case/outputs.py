@@ -7,7 +7,7 @@ A case file's ``outputs`` section names a directory, relative to the case file, 
   directory of an OpenFOAM case, which restarts in the solver that case is set up for);
 * ``log`` -- the per-step table of the march, written as the run goes;
 * ``checkpoints`` -- the march state every few steps (:class:`Checkpoints`), so a run that stops
-  has not lost its work.
+  has not lost its work and a later run can start from it.
 
 Every part is optional. A file with no ``outputs`` section writes the fields as VTK and the log into
 ``results/`` beside the case file.
@@ -200,9 +200,10 @@ class OpenFOAMTime(FieldWriter):
 class Checkpoints:
     """Write the march state every few steps, keeping the most recent, in ``checkpoints/``.
 
-    Each file holds the solved-variable state (``omega`` in log form when it is solved so), which is
-    what a march resumes from. They are written only by a march; the segregated solve has no steps to
-    checkpoint.
+    Each file holds the physical fields (``U``, ``p`` and, under RANS, ``k`` and ``omega``) and what
+    they belong to -- the physics, the number of cells and a digest of the mesh -- so a later case can
+    start from one with an ``initial`` section (:class:`~aquaflux.case.Checkpoint`). They are written
+    only by a march; the segregated solve has no steps to checkpoint.
 
     Attributes
     ----------

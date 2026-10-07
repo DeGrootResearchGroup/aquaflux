@@ -808,7 +808,16 @@ paths:
     checkpointer so a driver does not hand-roll a lambda one of them can be dropped from.
     **Known defect, not yet fixed:** the checkpointer writes whatever the march reports *including the
     failed step*, so the newest file can be the poisoned state — and a driver calling it "last good
-    state" is then lying. Skip a non-finite report, or do not claim "good".
+    state" is then lying. Skip a non-finite report, or do not claim "good". (A case's `initial:
+    Checkpoint` refuses non-finite fields when it reads one, so a restart does not start from poison;
+    the writer itself is unchanged.)
+    **Finding one again (2026-10-02):** a new process has no `StateCheckpointer.latest`, so
+    `find_checkpoint(directory, step="latest", prefix=...)` looks files up by name — the highest observed
+    step (not the newest by mtime), ignoring the `.partial` staging name, matching the prefix exactly.
+    `checkpoint_name` is the one place the `<prefix>-<step:05d>.npz` pattern lives, shared by writer and
+    finder, and `report_record(report)` the one place a step's numbers are listed, shared by the default
+    serializer and the case layer's. The default serializer still writes a bare `state` array; a case's run
+    injects its own `save=` (physical fields + header, `aquaflux/case/restart_file.py`).
   - **`on_retry(reason, attempt, beta)` — say WHY a step is being redone (BUILT).** `newton_march`
   calls it immediately before a redo with `"diverged"`, `"cycles"` or `"alpha"` — the three
   `RetryPolicy.retry_reason` returns (⚠️ only `"diverged"`/`"alpha"` escalate β since 2026-08-17;
