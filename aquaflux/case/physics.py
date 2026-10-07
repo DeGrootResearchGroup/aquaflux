@@ -713,13 +713,13 @@ class Radiation(Physics):
         """Where the lamps' power goes.
 
         ``lamp_power`` and ``lamp_facets``; ``reflector_facets`` and ``radiosity_cycles`` (when something
-        reflects); per receiving patch its
-        ``area``, the power arriving on it, ``incident_power``, and the part it keeps,
+        reflects), and the power the lamps take back, ``lamp_absorbed_power`` (likewise); per receiving
+        patch its ``area``, the power arriving on it, ``incident_power``, and the part it keeps,
         ``absorbed_power``; and, when the cells were gathered at, ``volume_integral_G``. The medium's
         share, ``medium_absorbed_power``, is zero when it absorbs nothing and otherwise needs the cells.
-        ``unaccounted_power`` is the lamps' power less the medium's and every receiving patch's share:
-        what the lamps, the occluders and any patch not gathered on absorb -- or, where it is small and
-        nothing else can absorb, the error of the gathers.
+        ``unaccounted_power`` is the lamps' power less the medium's, the lamps' own and every receiving
+        patch's share: what the occluders and any patch not gathered on absorb, and the lamps too when
+        nothing reflects -- or, where it is small and nothing else can absorb, the error of the gathers.
         """
         patches = {}
         for name, receivers in problem.surfaces.items():
@@ -740,6 +740,8 @@ class Radiation(Physics):
             out["reflector_facets"] = problem.reflectors.n_facets
         if solution.cycles is not None:
             out["radiosity_cycles"] = solution.cycles
+        if solution.lamp_absorbed_power is not None:
+            out["lamp_absorbed_power"] = solution.lamp_absorbed_power
         if problem.volume is not None:
             out["volume_integral_G"] = float(np.sum(solution.fluence_rate * problem.volume.volumes))
         out["medium_absorbed_power"] = medium
@@ -748,6 +750,7 @@ class Radiation(Physics):
             out["unaccounted_power"] = (
                 solution.lamp_power
                 - medium
+                - (solution.lamp_absorbed_power or 0.0)
                 - sum(entry["absorbed_power"] for entry in patches.values())
             )
         return out
@@ -758,7 +761,8 @@ class Radiation(Physics):
 
 
 def _lamps(lamps: Mapping[str, Lamp], triangles_of, directory: Path) -> Surfaces:
-    """Every lamp as one body of a surface set, emitting its power over its own area with its profile."""
+    """Every lamp as one body of a surface set, emitting its power over its own area with its profile,
+    and reflecting its reflectance of the light arriving on it."""
     pieces, powers, profiles = [], {}, []
     for name, lamp in lamps.items():
         pieces.append(triangles_of(name, lamp.geometry))
@@ -776,6 +780,9 @@ def _lamps(lamps: Mapping[str, Lamp], triangles_of, directory: Path) -> Surfaces
         np.concatenate(pieces),
         solid_id=solid_id,
         solid_names=tuple(lamps),
+        diffuse_reflectance=np.asarray([lamp.reflectance or 0.0 for lamp in lamps.values()])[
+            solid_id
+        ],
         profiles=tuple(profiles),
         profile_index=solid_id,
     )

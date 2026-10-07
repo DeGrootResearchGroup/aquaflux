@@ -70,11 +70,14 @@ the angular distribution its `profile` gives:
 The lamp's `power` may be left out only for a photometry file that states its intensities in a
 radiant unit, through an `[_INTENSITYUNITS]` keyword of `W/sr`, `mW/sr` or `uW/sr`; its own
 integrated flux is then the power. A file in candela carries no radiant power and the lamp must
-state one. A lamp is black to the light that arrives on it.
+state one.
 
 **A wall** is black unless it has a `reflectance`, in which case it reflects that fraction of the
-light arriving on it, diffusely. Interreflection is closed to convergence: the number of bounces is
-not a setting.
+light arriving on it, diffusely. **A lamp** is the same to the light arriving on it: black unless it
+has a `reflectance`, and then reflecting diffusely what lands on it from the other lamps and the
+walls. Either way its triangles stand in the way of light the walls reflect past it, so a wall's
+light does not reach the water behind a lamp. Interreflection is closed to convergence: the number of
+bounces is not a setting.
 
 A lamp is a stationary wall to a flow, but a flow case refuses one, and refuses a reflectance: nothing
 in it would read them. A radiation case refuses an `Inlet` or an `Outlet`, and a wall's `velocity` or
@@ -123,6 +126,12 @@ a domain with a wall that can stand between a lamp and a point — an L-shaped r
 part of the boundary — must name it as an occluder.
 ```
 
+The lamps need not be listed: their own triangles shadow the light of the other lamps and the light the
+walls reflect, whenever the surfaces shadow themselves (that is, unless `self_occlusion` is
+`NoOcclusion`). Do not list a solid drawn round a lamp as well: the lamp's triangles lie on its
+surface, which a solid can count as inside it, and a surface inside a body is refused as a geometry
+error.
+
 ## The medium, and where the light is gathered
 
 `medium` is a {class}`~aquaflux.case.UniformMedium`: its napierian `absorption` coefficient per
@@ -166,6 +175,7 @@ Into the output directory, beside `case.yaml` and `run.yaml`:
 
 `run.yaml` records, under `results`, where the lamps' power goes: `lamp_power`, the reflection
 solve's `radiosity_cycles`, `volume_integral_G`, the power the medium absorbs
-(`medium_absorbed_power`), each gathered patch's `area`, `incident_power` and `absorbed_power`, and
-`unaccounted_power` — the lamps' power less all of those, which is what the lamps, the occluders and
-any patch not gathered on absorb.
+(`medium_absorbed_power`), the power the lamps take back when anything reflects
+(`lamp_absorbed_power`), each gathered patch's `area`, `incident_power` and `absorbed_power`, and
+`unaccounted_power` — the lamps' power less all of those, which is what the occluders and any patch
+not gathered on absorb, and the lamps too when nothing reflects.

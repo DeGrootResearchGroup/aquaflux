@@ -50,6 +50,12 @@ def _refuse_non_finite(owner: str, name: str, values: tuple[float, ...]) -> None
         raise ValueError(f"{owner}.{name} must be finite, got {values!r}.")
 
 
+def _refuse_a_bad_reflectance(owner: str, reflectance: float | None) -> None:
+    """Refuse a diffuse reflectance that is not a finite fraction in ``[0, 1]``; unset is fine."""
+    if reflectance is not None and not (math.isfinite(reflectance) and 0.0 <= reflectance <= 1.0):
+        raise ValueError(f"{owner}.reflectance must lie in [0, 1], got {reflectance!r}.")
+
+
 def _refuse_a_bad_velocity(owner: str, label: str, velocity: tuple[float, ...]) -> None:
     """Refuse a patch velocity that is not two or three finite components.
 
@@ -394,10 +400,7 @@ class Wall(PatchCondition):
     def __post_init__(self) -> None:
         if self.velocity is not None:
             _refuse_a_bad_velocity("Wall", "a wall", self.velocity)
-        if self.reflectance is not None and not (
-            math.isfinite(self.reflectance) and 0.0 <= self.reflectance <= 1.0
-        ):
-            raise ValueError(f"Wall.reflectance must lie in [0, 1], got {self.reflectance!r}.")
+        _refuse_a_bad_reflectance("Wall", self.reflectance)
         if self.geometry is not None:
             if not isinstance(self.geometry, SurfaceSource):
                 raise TypeError(
@@ -453,9 +456,10 @@ class Lamp(PatchCondition):
     """A wall that emits light: an ultraviolet lamp's window, or the quartz sleeve around one.
 
     A lamp emits its power from the patch's surface, spread evenly over its area, and distributed over
-    direction by its profile. It is black to the light that arrives on it. To a flow it is a stationary
-    wall, so a lamp patch is stated once for both; a flow case still refuses one, since nothing in it
-    would read the photometry.
+    direction by its profile. To the light that arrives on it, it is a surface like a wall: black unless
+    it is given a reflectance, and then reflecting diffusely; either way it stands in the way of light
+    reflected past it. To a flow it is a stationary wall, so a lamp patch is stated once for both; a
+    flow case still refuses one, since nothing in it would read the photometry.
 
     Attributes
     ----------
@@ -469,11 +473,15 @@ class Lamp(PatchCondition):
     geometry : SurfaceSource or None
         Where the lamp's triangles come from -- the drawing (:class:`~aquaflux.case.CadSurface`,
         :class:`~aquaflux.case.StlSurface`) or, unset, the mesh's own patch.
+    reflectance : float or None
+        The fraction of the light arriving on the lamp that it sends back, diffusely, in ``[0, 1]``;
+        unset, it reflects none.
 
     Raises
     ------
     ValueError
-        If the power is not positive, or is unset for a profile that cannot state one.
+        If the power is not positive, or is unset for a profile that cannot state one, or if the
+        reflectance is outside ``[0, 1]``.
     TypeError
         If the profile or the geometry is not a value of its family.
     """
@@ -481,6 +489,7 @@ class Lamp(PatchCondition):
     profile: LampProfile
     power: float | None = None
     geometry: SurfaceSource | None = None
+    reflectance: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.profile, LampProfile):
@@ -498,6 +507,7 @@ class Lamp(PatchCondition):
                 f"Lamp.power is unset, and a {type(self.profile).__name__} states no power of its own; "
                 "give the lamp's radiant power in W."
             )
+        _refuse_a_bad_reflectance("Lamp", self.reflectance)
 
     def flow_closure(self) -> NoSlipWall:
         """A :class:`~aquaflux.flow.NoSlipWall`: to the flow a lamp is a stationary wall."""
@@ -508,10 +518,15 @@ class Lamp(PatchCondition):
         return Wall().turbulence_closures(model)
 
     def radiation_settings(self) -> tuple[str, ...]:
-        """The profile, and the power and geometry where given: everything a lamp states is light."""
+        """The profile, and the power, geometry and reflectance where given: everything a lamp states is
+        light."""
         return (
             "profile",
-            *(name for name in ("power", "geometry") if getattr(self, name) is not None),
+            *(
+                name
+                for name in ("power", "geometry", "reflectance")
+                if getattr(self, name) is not None
+            ),
         )
 
     def refuse_for_dimension(self, dim: int, patch: str) -> None:

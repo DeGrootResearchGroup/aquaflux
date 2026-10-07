@@ -451,9 +451,11 @@ whose runs write what every run writes. Decisions taken with the owner before bu
   states `[_INTENSITYUNITS]` `W/sr` / `mW/sr` / `uW/sr`: then `photometry.flux * scale`. **The unit
   reading is the case layer's, deliberately** — `photometry.py`'s docstring says converting units is the
   caller's decision. A candela file with no power is refused at build. Exitance by `lamp_exitance`
-  (each lamp one body named by its patch, its own profile).
+  (each lamp one body named by its patch, its own profile). **`Lamp.reflectance`** (unset = 0, the same
+  `[0, 1]` check as `Wall.reflectance` through `boundaries._refuse_a_bad_reflectance`) becomes the lamp
+  facets' `diffuse_reflectance`; a lamp now reflects and shadows in the scene's exchange (#604 step 1).
 - **What is built is the library's `radiation.Scene`** (`radiation/scene.py`, see `radiation.md`): lamps
-  kept out of the transfer, reflectors, bodies, medium, `VolumeReceivers` (cell centroids + volumes),
+  whose emission is kept out of the transfer but whose facets exchange reflected light, reflectors, bodies, medium, `VolumeReceivers` (cell centroids + volumes),
   `SurfaceReceivers` per patch (face centroids, `-normal`, areas, reflectance, `reflector` = the patch's
   name when it reflects). Solved by `RadiationSolve(rtol)` → `solve_scene`, observer `report` = the log's
   `note`. **`Physics.build` now takes `directory`** (files are relative to the case file);
@@ -464,7 +466,8 @@ whose runs write what every run writes. Decisions taken with the owner before bu
   fields `E`, `E_absorbed` = (1−ρ)E, plus `E_direct`/`E_reflected`. Writers now take `RunFields(cells,
   patches)`; `Physics.output_patch_fields` and `Physics.results` default to empty for flow. `run.yaml`
   gains `results:` (lamp power and facets, reflector facets, radiosity cycles, `volume_integral_G`,
-  `medium_absorbed_power`, per patch `area`/`incident_power`/`absorbed_power`, `unaccounted_power`).
+  `medium_absorbed_power`, `lamp_absorbed_power` when anything reflects, per patch
+  `area`/`incident_power`/`absorbed_power`, `unaccounted_power` -- which subtracts the lamps' share).
 - **Files**: `CaseFile.check` refuses a missing file named under `physics` or `boundaries` (inputs; the
   mesh is checked by reading it, an `OpenFOAMTime` target is an output) before reading the mesh;
   `_write_case_record` re-bases every `path_fields` entry through `with_paths` — this replaced its two
