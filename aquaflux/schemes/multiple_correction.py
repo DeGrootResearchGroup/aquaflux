@@ -89,7 +89,7 @@ from __future__ import annotations
 
 import abc
 import warnings
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import equinox as eqx
 import jax
@@ -444,23 +444,27 @@ class MultipleCorrectionGradient(GradientScheme):
     ----------
     boundary_closure : GradientBoundaryClosure
         How the gradient is closed on boundary faces, where a boundary condition gives the field but
-        not its derivative. Defaults to :class:`OwnerGradient`, which never reads a boundary value
-        and is the one that marches a coupled RANS case (measured; see :class:`SkewCorrectedGradient`
-        for what happens otherwise, and for the caveat that it is the closure to reach for on a mesh
-        with boundary **tetrahedra**, where the owner closure leaves the Hessian underdetermined).
+        not its derivative. Defaults to :class:`OwnerGradient`, which never reads a boundary value.
+
+        The owner closure is the one measured to march a coupled RANS case; see
+        :class:`SkewCorrectedGradient` for what happens otherwise. That docstring also gives the
+        caveat: the skew-corrected closure is the one to reach for on a mesh with boundary
+        **tetrahedra**, where the owner closure leaves the Hessian underdetermined.
     fallback : GradientBoundaryClosure or None
-        Used on the boundary faces of any cell :attr:`boundary_closure` cannot determine, leaving
-        every other cell alone (:class:`CellwiseFallback`). Defaults to ``None``, which leaves such
-        cells amplifying and warns rather than repairing them. :class:`SkewCorrectedGradient`
-        supplies the direction a corner tetrahedron is short of and repairs them, but it also reads
-        a boundary value on every boundary face it is installed on — including every one of the
-        undetermined cells' own — and that closure is measured to destabilize a coupled march badly
-        at an unconverged iterate on exactly those cells (see its own docstring). A repair chosen
-        without knowing the mesh needs it is therefore not a safe default: pass it explicitly once
-        you have looked at the mesh and decided the corner-tetrahedron accuracy is worth that risk.
-        On a mesh with no undetermined cells nothing is built either way and the reconstruction is
-        byte-identical regardless of this setting — measured on quadrilateral and hexahedral meshes,
-        and on a 1.6M-cell snappyHexMesh mesh.
+        A boundary closure used only on the boundary faces of cells that :attr:`boundary_closure`
+        cannot determine, such as corner tetrahedra. Defaults to ``None``, which leaves such cells
+        unrepaired and warns about them. It has no effect on a mesh with no such cells.
+
+        Every other cell is left alone (:class:`CellwiseFallback`); unrepaired cells amplify.
+        :class:`SkewCorrectedGradient` supplies the direction a corner tetrahedron is short of and
+        repairs them. It also reads a boundary value on every boundary face it is installed on,
+        including every one of the undetermined cells' own, and that closure is measured to
+        destabilize a coupled march badly at an unconverged iterate on exactly those cells (see its
+        own docstring). A repair chosen without knowing the mesh needs it is therefore not a safe
+        default. Pass it explicitly once you have looked at the mesh and decided the
+        corner-tetrahedron accuracy is worth that risk. On a mesh with no undetermined cells nothing
+        is built either way and the reconstruction is byte-identical regardless of this setting, as
+        measured on quadrilateral and hexahedral meshes and on a 1.6M-cell snappyHexMesh mesh.
     prepared : Corrections or None
         The geometry-only correction matrices, present once :meth:`bind` has been called. ``None``
         rebuilds them on every reconstruction, which is correct but wasteful — an assembler binds
@@ -472,6 +476,12 @@ class MultipleCorrectionGradient(GradientScheme):
     boundary_closure: GradientBoundaryClosure = eqx.field(default_factory=OwnerGradient)
     fallback: GradientBoundaryClosure | None = None
     prepared: Corrections | None = None
+
+    #: The settings for which unset means the feature is off (read by the case-file schema).
+    unset_means_off: ClassVar[tuple[str, ...]] = ("fallback",)
+
+    #: Fields that are the value's own cache, not settings a case file may state.
+    not_settings: ClassVar[tuple[str, ...]] = ("prepared",)
 
     def bind(
         self,

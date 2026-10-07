@@ -79,7 +79,10 @@ SUBPACKAGE_GROUPS = {
                 "line_search_growth",
             ],
         ),
-        ("Observing and checkpointing a march", ["march_log", "checkpoint", "refresh_timing"]),
+        (
+            "Observing and checkpointing a march",
+            ["march_log", "march_history", "checkpoint", "refresh_timing"],
+        ),
         (
             "Linear solves and residual measures",
             ["linear", "linear_solver_spec", "norm", "convergence", "shift_basis"],

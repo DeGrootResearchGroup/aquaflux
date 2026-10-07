@@ -54,6 +54,58 @@ GATED_MODULES: dict[str, tuple[str, str]] = {
         "STEP reading through the OpenCASCADE kernel; fast tier. CI installs it through the `test` "
         "extra, so this gate removes coverage only from a local environment without the `cad` extra",
     ),
+    "ui/test_history.py": (
+        "pyvista",
+        "the viewer reading and piping real VTK data; fast tier. CI installs it through the `test` extra, so this gate removes coverage only from a local environment without the `ui` extra",
+    ),
+    "ui/test_mesh_view.py": (
+        "pyvista",
+        "the viewer reading and piping real VTK data; fast tier. CI installs it through the `test` extra, so this gate removes coverage only from a local environment without the `ui` extra",
+    ),
+    "ui/test_case_form.py": (
+        "pyvista",
+        "the viewer reading and piping real VTK data; fast tier. CI installs it through the `test` extra, so this gate removes coverage only from a local environment without the `ui` extra",
+    ),
+    "ui/test_file_browser.py": (
+        "trame",
+        "the viewer's page and its independence from the solver; fast tier. CI installs it through the `test` extra, as for `pyvista`",
+    ),
+    "ui/test_solver_commands.py": (
+        "trame",
+        "the viewer's page and its independence from the solver; fast tier. CI installs it through the `test` extra, as for `pyvista`",
+    ),
+    "ui/test_solver_worker.py": (
+        "trame",
+        "the viewer's page and its independence from the solver; fast tier. CI installs it through the `test` extra, as for `pyvista`",
+    ),
+    "ui/test_theme.py": (
+        "pyvista",
+        "the viewer reading and piping real VTK data; fast tier. CI installs it through the `test` extra, so this gate removes coverage only from a local environment without the `ui` extra",
+    ),
+    "ui/test_controls.py": (
+        "pyvista",
+        "the viewer reading and piping real VTK data; fast tier. CI installs it through the `test` extra, so this gate removes coverage only from a local environment without the `ui` extra",
+    ),
+    "ui/test_scene.py": (
+        "pyvista",
+        "the viewer reading and piping real VTK data; fast tier. CI installs it through the `test` extra, so this gate removes coverage only from a local environment without the `ui` extra",
+    ),
+    "ui/test_sources.py": (
+        "pyvista",
+        "the viewer reading and piping real VTK data; fast tier. CI installs it through the `test` extra, so this gate removes coverage only from a local environment without the `ui` extra",
+    ),
+    "ui/test_app.py": (
+        "trame",
+        "the viewer's page and its independence from the solver; fast tier. CI installs it through the `test` extra, as for `pyvista`",
+    ),
+    "ui/test_workspace.py": (
+        "trame",
+        "the viewer's page and its independence from the solver; fast tier. CI installs it through the `test` extra, as for `pyvista`",
+    ),
+    "ui/test_independence.py": (
+        "trame",
+        "the viewer's page and its independence from the solver; fast tier. CI installs it through the `test` extra, as for `pyvista`",
+    ),
 }
 
 #: Distributions that CI does not install, so every gate above naming one is dead there.

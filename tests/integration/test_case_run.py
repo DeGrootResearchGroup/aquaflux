@@ -6,6 +6,7 @@ field written from anything but the converged root -- a stale state, the seed, t
 
 from __future__ import annotations
 
+import csv
 import shutil
 from pathlib import Path
 
@@ -70,6 +71,7 @@ def test_a_run_writes_the_converged_fields_its_log_its_checkpoints_and_its_recor
         "case.yaml",
         "checkpoints",
         "fields.vtu",
+        "history.csv",
         "march.log",
         "run.yaml",
     ]
@@ -86,12 +88,22 @@ def test_a_run_writes_the_converged_fields_its_log_its_checkpoints_and_its_recor
     assert record["solver"] == "FlowMarch"
     assert record["steps"] == int(checkpoint.stem.split("-")[1])
     assert record["residual"] < 1e-8
-    assert record["written"] == ["fields.vtu", "march.log", "checkpoints", "case.yaml"]
+    assert record["written"] == [
+        "fields.vtu",
+        "march.log",
+        "history.csv",
+        "checkpoints",
+        "case.yaml",
+    ]
 
     vtu = (results / "fields.vtu").read_text(errors="replace")
     assert 'Name="U"' in vtu and 'Name="p"' in vtu
     log = (results / "march.log").read_text()
     assert log.count("\n|") >= record["steps"]  # one table row per step, at least
+    # One history row per step, the last ending where the run record says the march did.
+    history = list(csv.DictReader((results / "history.csv").open()))
+    assert [int(row["step"]) for row in history] == list(range(1, record["steps"] + 1))
+    assert float(history[-1]["residual_norm"]) == record["residual"]
 
     # The case as it ran: the default solver written out, the outputs pointing at themselves.
     ran = read_case(results / "case.yaml").spec

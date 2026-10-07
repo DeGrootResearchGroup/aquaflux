@@ -42,13 +42,8 @@ def test_writing_a_3d_mesh_with_fields(tmp_path):
     data = {a.attrib["Name"]: a for a in piece.find("CellData")}
     assert data["p"].attrib.get("NumberOfComponents", "1") == "1"
     assert data["U"].attrib["NumberOfComponents"] == "3"
-    assert {a.attrib["Name"] for a in piece.find("Cells")} == {
-        "connectivity",
-        "offsets",
-        "types",
-        "faces",
-        "faceoffsets",
-    }
+    # Every cell of a structured grid is a hexahedron, which needs no face stream.
+    assert {a.attrib["Name"] for a in piece.find("Cells")} == {"connectivity", "offsets", "types"}
 
 
 def test_writing_a_mesh_alone(tmp_path):
@@ -75,7 +70,7 @@ def test_the_two_forms_differ_only_in_how_the_arrays_are_carried(tmp_path):
     # toy mesh's indices are one or two characters against a fixed four bytes, and the order
     # reverses as the indices grow. Size is not why the default is raw -- load time is.)
     assert ET.fromstring(text.read_text()).find("./UnstructuredGrid/Piece") is not None
-    for name in ("connectivity", "faces", "p"):
+    for name in ("connectivity", "types", "p"):
         assert f'Name="{name}"' in text.read_text()
 
 

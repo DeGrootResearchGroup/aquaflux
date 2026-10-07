@@ -30,10 +30,11 @@ def write_vtu(
     """Write a mesh and its cell-centred fields as a VTK unstructured-grid file.
 
     The mesh's cells are written as arbitrary polygons in two dimensions and arbitrary polyhedra in
-    three, which is what its face-based storage already describes; no reconstruction into standard
-    element types is attempted, and none is needed. On a periodic mesh, the cell that sees a
-    periodic seam face through its periodic image is written with that face's nodes on its own side
-    of the domain, so every cell is drawn where it is.
+    three, which is what its face-based storage already describes -- except that a cell bounded by
+    six quadrilaterals is written as a hexahedron, VTK's own type for it, which a viewer slices and
+    thresholds far more cheaply than the polyhedron it would otherwise be. On a periodic mesh, the
+    cell that sees a periodic seam face through its periodic image is written with that face's nodes
+    on its own side of the domain, so every cell is drawn where it is.
 
     Parameters
     ----------

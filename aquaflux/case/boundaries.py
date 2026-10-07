@@ -25,13 +25,14 @@ from __future__ import annotations
 import abc
 import dataclasses
 import math
-from typing import Literal
+from typing import ClassVar, Literal
 
 from aquaflux.boundary import BoundaryCondition, Dirichlet, ZeroGradient
 from aquaflux.flow import FlowBoundary, MovingWall, NoSlipWall, PressureOutlet, VelocityInlet
 from aquaflux.turbulence import SSTModel
 
 from .radiation import LampProfile, SurfaceSource
+from .scopes import FLOW, RADIATION, TURBULENCE, Scoped
 
 __all__ = [
     "FixedTurbulence",
@@ -146,7 +147,8 @@ class IntensityLength(InletTurbulence):
     Attributes
     ----------
     intensity : float
-        The r.m.s. velocity fluctuation as a fraction of the inflow speed, ``> 0`` -- ``0.05`` for 5%.
+        The root-mean-square (r.m.s.) velocity fluctuation as a fraction of the inflow speed,
+        ``> 0``. For example, ``0.05`` for 5%.
     length : float
         The turbulence length scale, ``> 0``, in the mesh's length units.
 
@@ -186,11 +188,12 @@ class IntensityLength(InletTurbulence):
 
 
 @dataclasses.dataclass(frozen=True)
-class PatchCondition(abc.ABC):
+class PatchCondition(Scoped, abc.ABC):
     """What one boundary patch is: an :class:`Inlet`, an :class:`Outlet`, a :class:`Wall` or a :class:`Lamp`.
 
     Each builds the closures it stands for, and answers the questions a case asks of its boundaries
     before anything is built, so that a case's physics and its mesh can refuse what does not fit them.
+    Which physics reads each of its settings is its ``setting_scopes`` (see :mod:`.scopes`).
     """
 
     @abc.abstractmethod
@@ -215,22 +218,6 @@ class PatchCondition(abc.ABC):
         tuple of BoundaryCondition
             The ``k`` closure and the ``omega`` closure.
         """
-
-    def turbulence_settings(self) -> tuple[str, ...]:
-        """The settings given here that only a turbulence closure reads; none by default."""
-        return ()
-
-    def missing_turbulence_settings(self) -> tuple[str, ...]:
-        """The settings a turbulence closure needs here that this patch does not give; none by default."""
-        return ()
-
-    def flow_settings(self) -> tuple[str, ...]:
-        """The settings given here that only the flow reads; none by default."""
-        return ()
-
-    def radiation_settings(self) -> tuple[str, ...]:
-        """The settings given here that only a radiation case reads; none by default."""
-        return ()
 
     def refuse_for_dimension(self, dim: int, patch: str) -> None:
         """Refuse this patch on a mesh of ``dim`` spatial dimensions if it cannot apply there.
@@ -259,7 +246,8 @@ class Inlet(PatchCondition):
     velocity : tuple of float
         The inflow velocity, one component per spatial dimension of the mesh.
     turbulence : InletTurbulence or None
-        The turbulence admitted -- required by a Reynolds-averaged case and refused by a laminar one.
+        The turbulence the inlet admits. Required by a Reynolds-averaged case and refused by a
+        laminar one.
 
     Raises
     ------
@@ -269,6 +257,10 @@ class Inlet(PatchCondition):
 
     velocity: tuple[float, ...]
     turbulence: InletTurbulence | None = None
+
+    #: Which physics reads each setting (see :mod:`.scopes`).
+    setting_scopes: ClassVar[dict[str, str]] = {"velocity": FLOW, "turbulence": TURBULENCE}
+    required_in_scope: ClassVar[tuple[str, ...]] = ("turbulence",)
 
     def __post_init__(self) -> None:
         _refuse_a_bad_velocity("Inlet", "an inlet", self.velocity)
@@ -298,18 +290,6 @@ class Inlet(PatchCondition):
         k, omega = self.turbulence.inflow(self.velocity, model)
         return Dirichlet(k), Dirichlet(omega)
 
-    def turbulence_settings(self) -> tuple[str, ...]:
-        """``("turbulence",)`` if the inflow turbulence is given."""
-        return () if self.turbulence is None else ("turbulence",)
-
-    def missing_turbulence_settings(self) -> tuple[str, ...]:
-        """``("turbulence",)`` if it is not -- every inflow carries turbulence into a closure."""
-        return ("turbulence",) if self.turbulence is None else ()
-
-    def flow_settings(self) -> tuple[str, ...]:
-        """``("velocity",)``: an inlet is a statement about the flow alone."""
-        return ("velocity",)
-
     def refuse_for_dimension(self, dim: int, patch: str) -> None:
         """Refuse a velocity whose component count is not the mesh's dimension."""
         _refuse_a_velocity_of_the_wrong_dimension(self.velocity, dim, patch, "inlet")
@@ -322,7 +302,8 @@ class Outlet(PatchCondition):
     Attributes
     ----------
     pressure : float
-        The pressure imposed on the patch -- the level every pressure in the solution is measured from.
+        The pressure imposed on the patch. Every pressure in the solution is measured from this
+        level.
 
     Raises
     ------
@@ -331,6 +312,9 @@ class Outlet(PatchCondition):
     """
 
     pressure: float
+
+    #: Which physics reads each setting (see :mod:`.scopes`).
+    setting_scopes: ClassVar[dict[str, str]] = {"pressure": FLOW}
 
     def __post_init__(self) -> None:
         _refuse_non_finite("Outlet", "pressure", (self.pressure,))
@@ -344,14 +328,10 @@ class Outlet(PatchCondition):
         del model
         return ZeroGradient(), ZeroGradient()
 
-    def flow_settings(self) -> tuple[str, ...]:
-        """``("pressure",)``: an outlet is a statement about the flow alone."""
-        return ("pressure",)
-
 
 @dataclasses.dataclass(frozen=True)
 class Wall(PatchCondition):
-    """A solid wall: no slip, no through-flow -- stationary, or moving in its own plane.
+    """A solid wall with no slip and no through-flow, either stationary or moving in its own plane.
 
     A moving wall (the driven lid of a cavity) holds the fluid at its own velocity instead of at rest,
     and is a wall in every other respect: it passes no fluid, and in a Reynolds-averaged case it is
@@ -368,16 +348,15 @@ class Wall(PatchCondition):
         the zero gradient.
     velocity : tuple of float or None
         The wall's velocity, one component per spatial dimension; unset, the wall is at rest. Any normal
-        component is ignored for continuity -- a wall, however it moves, passes no fluid. A flow
+        component is ignored for continuity, since a wall passes no fluid however it moves. A flow
         setting, so a radiation case refuses it.
     reflectance : float or None
         The fraction of the light arriving that the wall reflects, diffusely, in ``[0, 1]``; unset, it
         reflects none. A radiation setting, so a flow case refuses it.
     geometry : SurfaceSource or None
-        Where a reflecting wall's triangles come from -- the drawing
-        (:class:`~aquaflux.case.CadSurface`, :class:`~aquaflux.case.StlSurface`) or, unset, the mesh's
-        own patch. Only a reflecting wall has a surface for light to leave, so a black wall refuses
-        one.
+        Where a reflecting wall's triangles come from: a drawing (:class:`~aquaflux.case.CadSurface`
+        or :class:`~aquaflux.case.StlSurface`) or, unset, the mesh's own patch. Only a reflecting
+        wall has a surface for light to leave, so a black wall refuses one.
 
     Raises
     ------
@@ -390,6 +369,14 @@ class Wall(PatchCondition):
     velocity: tuple[float, ...] | None = None
     reflectance: float | None = None
     geometry: SurfaceSource | None = None
+
+    #: Which physics reads each setting (see :mod:`.scopes`).
+    setting_scopes: ClassVar[dict[str, str]] = {
+        "velocity": FLOW,
+        "k": TURBULENCE,
+        "reflectance": RADIATION,
+        "geometry": RADIATION,
+    }
 
     def __post_init__(self) -> None:
         if self.velocity is not None:
@@ -428,20 +415,6 @@ class Wall(PatchCondition):
         k = Dirichlet(0.0) if self.k == "zero" else ZeroGradient()
         return k, ZeroGradient()
 
-    def turbulence_settings(self) -> tuple[str, ...]:
-        """``("k",)`` if the wall's ``k`` condition is given."""
-        return () if self.k is None else ("k",)
-
-    def flow_settings(self) -> tuple[str, ...]:
-        """``("velocity",)`` if the wall moves."""
-        return () if self.velocity is None else ("velocity",)
-
-    def radiation_settings(self) -> tuple[str, ...]:
-        """The reflectance and the geometry, whichever is given."""
-        return tuple(
-            name for name in ("reflectance", "geometry") if getattr(self, name) is not None
-        )
-
     def refuse_for_dimension(self, dim: int, patch: str) -> None:
         """Refuse a wall velocity whose component count is not the mesh's dimension."""
         if self.velocity is not None:
@@ -464,10 +437,10 @@ class Lamp(PatchCondition):
         :class:`~aquaflux.case.CosinePowerProfile`, or a measured table,
         :class:`~aquaflux.case.IesProfile`.
     power : float or None
-        The radiant power emitted, in W. Unset, the profile's own -- which only a photometry file
-        stating its intensities in a radiant unit has.
+        The radiant power emitted, in W. Unset, the profile's own power is used, which only a
+        photometry file stating its intensities in a radiant unit has.
     geometry : SurfaceSource or None
-        Where the lamp's triangles come from -- the drawing (:class:`~aquaflux.case.CadSurface`,
+        Where the lamp's triangles come from: a drawing (:class:`~aquaflux.case.CadSurface` or
         :class:`~aquaflux.case.StlSurface`) or, unset, the mesh's own patch.
 
     Raises
@@ -481,6 +454,13 @@ class Lamp(PatchCondition):
     profile: LampProfile
     power: float | None = None
     geometry: SurfaceSource | None = None
+
+    #: Which physics reads each setting (see :mod:`.scopes`).
+    setting_scopes: ClassVar[dict[str, str]] = {
+        "profile": RADIATION,
+        "power": RADIATION,
+        "geometry": RADIATION,
+    }
 
     def __post_init__(self) -> None:
         if not isinstance(self.profile, LampProfile):
@@ -506,13 +486,6 @@ class Lamp(PatchCondition):
     def turbulence_closures(self, model: SSTModel) -> tuple[BoundaryCondition, ZeroGradient]:
         """A stationary wall's -- see :meth:`Wall.turbulence_closures`."""
         return Wall().turbulence_closures(model)
-
-    def radiation_settings(self) -> tuple[str, ...]:
-        """The profile, and the power and geometry where given: everything a lamp states is light."""
-        return (
-            "profile",
-            *(name for name in ("power", "geometry") if getattr(self, name) is not None),
-        )
 
     def refuse_for_dimension(self, dim: int, patch: str) -> None:
         """Refuse a lamp on a mesh that is not three-dimensional: light is gathered in three."""

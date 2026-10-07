@@ -29,7 +29,7 @@ import abc
 import dataclasses
 import warnings
 from collections.abc import Callable, Mapping
-from typing import Literal
+from typing import ClassVar, Literal
 
 from aquaflux.flow import MassFlow, bulk_velocity_flow_solve, reused_flow_solve, solve_flow_march
 from aquaflux.radiation import solve_scene
@@ -189,7 +189,8 @@ class _March(SolverSpec):
     max_steps : int or None
         The outer-step cap of each march segment; unset, the solve's own.
     convergence : Convergence or None
-        The stopping test -- a measure and its tolerances; an unset part takes the solve's own.
+        The stopping test, made of a measure and its tolerances. Any part left unset takes the
+        solve's own.
     preconditioner : BlockDiagonal, MaterializedJacobian or None
         What preconditions each step's linear solve; unset, the solve's own.
     dual_time : DualTimeLoop or None
@@ -391,6 +392,15 @@ class CoupledMarch(_March):
     positivity_projection: bool | None = None
     continuation: ViscosityRamp | None = None
 
+    #: Where an unset setting takes its default from (read by the case-file schema).
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (solve_coupled,)
+    #: The settings for which unset means the feature is off (read by the case-file schema).
+    unset_means_off: ClassVar[tuple[str, ...]] = (
+        "dual_time",
+        "retry",
+        "continuation",
+    )
+
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.continuation is not None and not isinstance(self.continuation, ViscosityRamp):
@@ -510,6 +520,14 @@ class FlowMarch(_March):
     TypeError
         If the preconditioner is block-diagonal.
     """
+
+    #: Where an unset setting takes its default from (read by the case-file schema).
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (solve_flow_march,)
+    #: The settings for which unset means the feature is off (read by the case-file schema).
+    unset_means_off: ClassVar[tuple[str, ...]] = (
+        "dual_time",
+        "retry",
+    )
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -640,6 +658,11 @@ class Segregated(SolverSpec):
     flow_solve: RootSolve | None = None
     scalar_solve: RootSolve | None = None
     scalar_preconditioner: ScalarBlock | None = None
+
+    #: Where an unset setting takes its default from (read by the case-file schema).
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (solve_segregated,)
+    #: The settings for which unset means the feature is off (read by the case-file schema).
+    unset_means_off: ClassVar[tuple[str, ...]] = ("relaxation_max",)
 
     def __post_init__(self) -> None:
         if self.sweeps < 1:

@@ -18,11 +18,6 @@ fluid:
 
 physics:
   kind: RANS
-  # First-order upwind on k and omega. The negative-omega failure of a second-order scheme on the stiff
-  # omega equation is a Newton-update overshoot at the cell centre, not a face-value one, so a slope
-  # limiter does not prevent it; first-order upwind keeps the omega transport operator diagonally
-  # dominant (an M-matrix), which is what keeps the shifted Newton step positive.
-  advection: {kind: FirstOrderUpwind}
   # omega = e^w stays positive under any Newton step. k stays direct: log(k) is ill-conditioned where
   # k -> 0 at the walls.
   omega_variable: {kind: LogScalars}
@@ -48,6 +43,11 @@ numerics:
   momentum_advection:
     kind: LimitedUpwind
     limiter: {kind: VenkatakrishnanLimiter}
+  # First-order upwind on k and omega. The negative-omega failure of a second-order scheme on the stiff
+  # omega equation is a Newton-update overshoot at the cell centre, not a face-value one, so a slope
+  # limiter does not prevent it; first-order upwind keeps the omega transport operator diagonally
+  # dominant (an M-matrix), which is what keeps the shifted Newton step positive.
+  turbulence_advection: {kind: FirstOrderUpwind}
   # The two-face-pass reconstruction: quadratic-exact with no solve, and its residual reaches exactly
   # distance 3 across the cell graph, which is what makes the driver's probe at reach 3 exact.
   gradient: {kind: MultipleCorrectionGradient}
