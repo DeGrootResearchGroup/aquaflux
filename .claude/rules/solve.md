@@ -244,8 +244,9 @@ testability seam. Everything subsystem-specific moved out:
 | `.claude/notes/solve-globalization-log.md` | *(never auto-loads)* | The dated investigation behind the globalization architecture |
 | `solve-march.md` | `march.py`, `march_log.py`, `checkpoint.py` | The observed march: `newton_march`, triggers, controls, logging |
 | `.claude/notes/solve-refuted-directions.md` | *(never auto-loads)* | A cross-cutting ledger of closed/refuted ideas — check here before proposing something that sounds already tried |
+| `.claude/notes/solve-open-directions.md` | *(never auto-loads)* | The backlog of unmeasured speed-up directions for the fluid solve, each with a pre-registered measurement — read before starting solver-performance work; an entry leaves it once measured (a win into the matching rule, a loss into `solve-refuted-directions.md`) |
 
-The two `-log.md` files and `solve-refuted-directions.md` live in **`.claude/notes/`, outside the
+The two `-log.md` files, `solve-refuted-directions.md` and `solve-open-directions.md` live in **`.claude/notes/`, outside the
 auto-loaded `.claude/rules/` tree, and never auto-load** — they are tracked (so a finding can be
 re-adjudicated later, per the root `CLAUDE.md` rule that findings belong in tracked files, not memory)
 but deliberately kept out of the auto-loaded path so routine solver work does not pay for the full
