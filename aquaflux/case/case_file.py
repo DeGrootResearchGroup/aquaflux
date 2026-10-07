@@ -36,7 +36,7 @@ from .paths import named_paths
 from .solver import solver_for
 from .spec import CaseSpec, case_spec_from_mapping, case_spec_to_mapping
 
-__all__ = ["CaseFile", "CheckedCase", "read_case", "write_case"]
+__all__ = ["CaseFile", "CheckedCase", "read_case", "read_case_document", "write_case"]
 
 _BOOL_TAG = "tag:yaml.org,2002:bool"
 _FLOAT_TAG = "tag:yaml.org,2002:float"
@@ -217,13 +217,38 @@ def read_case(path: str | Path) -> CaseFile:
         If the file is not valid YAML, or a mapping in it names one key twice.
     """
     path = Path(path)
-    with path.open(encoding="utf-8") as stream:
-        document = yaml.load(stream, Loader=_CaseLoader)
+    document = read_case_document(path)
     try:
         spec = case_spec_from_mapping(document)
     except (ValueError, TypeError) as error:
         raise type(error)(f"{path}: {error}") from error
     return CaseFile(spec=spec, directory=path.parent)
+
+
+def read_case_document(path: str | Path) -> object:
+    """A case file's parsed document, before anything in it is checked.
+
+    The parse :func:`read_case` makes -- YAML 1.2 plain scalars, a key named twice refused -- without
+    the reading into a case that follows it, so a file whose settings are refused can still be shown
+    and corrected.
+
+    Parameters
+    ----------
+    path : str or path-like
+        The case file.
+
+    Returns
+    -------
+    object
+        What the document holds: for a case file, a mapping of its sections.
+
+    Raises
+    ------
+    yaml.YAMLError
+        If the file is not valid YAML, or a mapping in it names one key twice.
+    """
+    with Path(path).open(encoding="utf-8") as stream:
+        return yaml.load(stream, Loader=_CaseLoader)
 
 
 def write_case(spec: CaseSpec, path: str | Path) -> None:

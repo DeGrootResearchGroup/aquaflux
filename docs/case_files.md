@@ -26,7 +26,6 @@ fluid:
 
 physics:
   kind: RANS
-  advection: {kind: FirstOrderUpwind}
   omega_variable: {kind: LogScalars}
   explicit_production_limiter: true
 
@@ -43,6 +42,7 @@ numerics:
   momentum_advection:
     kind: LimitedUpwind
     limiter: {kind: VenkatakrishnanLimiter}
+  turbulence_advection: {kind: FirstOrderUpwind}
   gradient: {kind: MultipleCorrectionGradient}
 
 solver:
@@ -102,13 +102,13 @@ the density, so a file cannot state two viscosities that disagree.
 - {class}`~aquaflux.case.Radiation` — the light of ultraviolet lamps rather than a flow; it has no
   `fluid` or `numerics` section, and its patches are lamps and walls. See {doc}`radiation_case`.
 - {class}`~aquaflux.case.RANS` — Reynolds-averaged flow closed by k–ω SST, the flow and the
-  closure solved together. It requires `advection` (how `k` and `omega` are advected) and
-  optionally takes the model constants (`model: {kind: SSTModel, ...}`), the variable each
+  closure solved together. It optionally takes the model constants (`model: {kind: SSTModel, ...}`), the variable each
   field is solved in (`k_variable`, `omega_variable`: `DirectScalars` or `LogScalars`), and
   `explicit_production_limiter`.
 
-Everything that belongs to the turbulence closure lives inside `RANS` or on a boundary patch,
-and a laminar case refuses any of it.
+A setting that only the turbulence closure reads, such as a wall's `k` condition or
+`numerics.turbulence_advection`, is refused by a laminar case; the browser interface does not
+show one for a laminar case at all.
 
 **`boundaries`** — one entry per boundary patch, by the patch's name in the mesh. Each patch
 is described once, for every field:
@@ -152,10 +152,16 @@ An inlet's `turbulence` is given either outright or the way it is usually known:
   turbulence: {kind: IntensityLength, intensity: 0.05, length: 2.54e-3}
   ```
 
-**`numerics`** — the discretization choices common to every case: `momentum_advection`
-(required, since a flow with no advection is Stokes flow rather than a default) and
+**`numerics`** — the discretization choices of a flow: `momentum_advection`
+(required, since a flow with no advection is Stokes flow rather than a default),
+`turbulence_advection` (how `k` and `omega` are advected; required by a RANS case, refused by a
+laminar one) and
 `gradient` (the cell-gradient reconstruction, for every field; unset,
-{data}`~aquaflux.schemes.DEFAULT_GRADIENT_SCHEME`).
+{data}`~aquaflux.schemes.DEFAULT_GRADIENT_SCHEME`). The choices are
+{class}`~aquaflux.schemes.CompactGreenGauss`, {class}`~aquaflux.schemes.CorrectedGreenGauss`,
+{class}`~aquaflux.schemes.MultipleCorrectionGradient`, which suits hexahedral and polyhedral
+meshes, and {class}`~aquaflux.schemes.ProjectedStencilGradient`, the one to use on a
+tetrahedral mesh. {doc}`gradient_reconstruction` compares them.
 
 **`drive`** — what sets the flow in motion when the boundary conditions do not. Unset, they
 do. A streamwise-periodic channel prescribes the velocity nowhere, and is held at a bulk
@@ -248,12 +254,13 @@ solver:
 ```
 
 **`outputs`** — what a run writes, and where. Every part is optional; with no section at all a
-run writes the fields as VTK and the log into `results/` beside the case file.
+run writes the fields as VTK, the log and the history into `results/` beside the case file.
 
 ```yaml
 outputs:
   directory: results                    # relative to the case file
   log: march.log                        # the march's per-step table; null for the terminal only
+  history: history.csv                  # the same steps as comma-separated values; null for none
   checkpoints: {kind: Checkpoints, every: 1, keep: 3}
   fields:
     - {kind: Vtk, file: fields.vtu}
@@ -274,9 +281,43 @@ outputs:
   way; a flow case has no patch fields, and writes the patches alone.
 - Each writer's `fields` names what it writes — `U` and `p`, and under `RANS` also `k`, `omega`
   and `nut`; left out, all of them. The pressure is the solved one.
+- The history ({class}`~aquaflux.solve.StepHistory`) has one row per step of the march — the
+  step, the seconds since the run started, the residual and its ratio to the starting one, the
+  line-search factor, the shift and the linear-solve cost — every number at full precision, each
+  row written as the step ends. It is what a convergence plot reads. The segregated solve takes no
+  steps, so its history holds only the header.
 - {class}`~aquaflux.case.Checkpoints` writes the march's state every `every` steps into
   `checkpoints/`, keeping the latest `keep`, so a run that stops has not lost its work. The
   segregated solve takes no steps a checkpoint could be written at.
+
+## Editing a case file from another program
+
+Four commands let a program read and write case files as aquaflux does — the
+browser interface's Setup section is built on them. Each prints JSON:
+
+```bash
+aquaflux schema                                   # every kind, field and choice a case file may hold
+aquaflux show case.yaml                           # the file as aquaflux reads it, and why it is refused
+aquaflux write copy.yaml --relative-to . < case.json  # check, then write; re-base relative paths
+aquaflux mesh out/ --relative-to . < mesh.json        # read or generate a mesh section, as VTK
+```
+
+`schema` is read off the same definitions a file is checked against, so a program
+that builds its choices from it offers exactly what aquaflux accepts. `write`
+writes nothing it would refuse, and prints the reason instead (exit status 2).
+
+Starting Python and importing aquaflux takes a few seconds, far longer than any of
+these commands takes itself, so a program asking many of them can keep one process
+instead:
+
+```bash
+aquaflux serve        # answers schema, show, write, mesh and check requests, one per line
+```
+
+Each request is one line of JSON, `{"arguments": ["show", "case.yaml"], "stdin": null}`,
+and each answer is one line, `{"status": 0, "output": "...", "errors": "..."}`: the
+exit status the command would have had and what it would have printed. It stops at
+the end of its input.
 
 ## What is checked, and when
 

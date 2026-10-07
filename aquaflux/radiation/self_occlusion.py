@@ -271,18 +271,20 @@ class RayCastOcclusion(SelfOcclusion):
         of the intersection test at a time; with one, the walk needs every ray's endpoints and
         exclusions for the whole pass.
     work_limit : int
-        Ray-by-triangle entries per compiled call of the every-triangle test, which is what
-        bounds that test's memory and, through that, its speed. The grid walk forms no such
-        entries -- it walks each ray to its first hit in a compiled loop -- so it does not read
-        this.
+        Ray-by-triangle entries per compiled call of the every-triangle test, which bounds that
+        test's memory and, through that, its speed. The grid walk does not read it.
+
+        The grid walk forms no such entries, since it walks each ray to its first hit in a compiled
+        loop.
     grid : bool or int or tuple of int or TriangleGrid
-        Cull each ray's candidates with a uniform grid over the triangles. ``False`` (the
-        default) tests everything; ``True`` sizes the grid from the triangle count; an integer
-        or a triple sets its resolution per axis; a built
-        :class:`~aquaflux.radiation.grid.TriangleGrid` is used as it is, and must be of the
-        surface's own triangles. **Off by default** because it is a change of cost, not of
-        answers, and the answers are what the shipped path is trusted for -- but a real reactor
-        is unusable without it.
+        Cull each ray's candidates with a uniform grid over the triangles. ``False`` (default) tests
+        every triangle, ``True`` sizes the grid from the triangle count, and an integer or a triple
+        sets its resolution per axis. It changes the cost, never the answer.
+
+        A built :class:`~aquaflux.radiation.grid.TriangleGrid` is used as it is, and must be of the
+        surface's own triangles. The grid is **off by default** because it is a change of cost, not
+        of answers, and the answers are what the shipped path is trusted for. A real reactor is
+        nonetheless unusable without it.
 
     Notes
     -----
@@ -467,9 +469,10 @@ class SilhouetteOcclusion(SelfOcclusion):
         (Source, blocker) pairs rejected or clipped per compiled call, which bounds those passes'
         memory: each of :attr:`threads` calls in flight holds one chunk's working set.
     pair_limit : int
-        Entries one compiled call of the cull may form for a receiver -- cluster pairs times the
-        cluster size, or member pairs -- which bounds the cull's memory the same way
-        ``pair_limit`` bounds every receiver-by-facet pass in this package.
+        Entries one compiled call of the cull may form for a receiver, counted as cluster pairs
+        times the cluster size, or as member pairs. It bounds the cull's memory.
+
+        It does so the same way ``pair_limit`` bounds every receiver-by-facet pass in this package.
     cluster_size : int
         Facets per cluster in the cull (:class:`~aquaflux.radiation.clusters.FacetClusters`).
         Smaller clusters bound their members more tightly but make more cluster pairs to test;

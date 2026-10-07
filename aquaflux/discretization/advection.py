@@ -24,7 +24,7 @@ conservatively couples both cells.
 from __future__ import annotations
 
 import abc
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -144,6 +144,9 @@ class LimitedUpwind(AdvectionScheme):
     """
 
     limiter: Limiter | None = None
+
+    #: The settings for which unset means the feature is off (read by the case-file schema).
+    unset_means_off: ClassVar[tuple[str, ...]] = ("limiter",)
 
     def uses_gradient(self) -> bool:
         """``True`` unconditionally -- the 2nd-order reconstruction reads the gradient whether or

@@ -145,41 +145,49 @@ class RadiationSettings(eqx.Module):
     transfer_chunk_size : int or None
         Receiving facets per pass of the ``n^2`` transfer build, bounding its peak memory.
     gather_pair_limit : int or None
-        Receiver-by-facet pairs per pass of the volume gather, bounding its peak memory whatever
-        the facet count. It bounds the other per-call pass over pairs too: under a non-uniform
-        medium, the walk between every pair of facets, whose receivers are the facets. Counted in pairs rather than receivers because a pass's size is their
-        product, and a receiver count would leave it to how finely the emitter is divided. A
-        separate setting from the one above because the two loops are over different things —
-        facets against facets, and receivers against facets.
+        Receiver-by-facet pairs per pass of the volume gather, which bounds its peak memory
+        whatever the facet count. Unset, the gather's own limit.
+
+        It bounds the other per-call pass over pairs too: under a non-uniform medium, the walk
+        between every pair of facets, whose receivers are the facets. It is counted in pairs rather
+        than receivers because a pass's size is their product, and a receiver count would leave it
+        to how finely the emitter is divided. It is a separate setting from ``transfer_chunk_size``
+        because the two loops are over different things, facets against facets and receivers against
+        facets.
     self_occlusion : SelfOcclusion or None
-        How the emitting facets are tested for shadowing one another, which for any non-convex
-        body they do. Unset, one ray is cast per pair. Pass
-        :class:`~aquaflux.radiation.self_occlusion.SilhouetteOcclusion` to clip exact fractions
-        instead, which resolves a partly shadowed pair rather than rounding it to the nearer
-        answer, at a cost that rises steeply with facet count. It also governs the volume
-        receivers unless ``receiver_occlusion`` says otherwise, where the clip's fraction is of
-        each source's plain solid angle rather than its projected one.
+        How the emitting facets are tested for shadowing one another, which they do on any
+        non-convex body. Unset, one ray is cast per pair. It also governs the volume receivers
+        unless ``receiver_occlusion`` says otherwise.
+
+        Pass :class:`~aquaflux.radiation.self_occlusion.SilhouetteOcclusion` to clip exact fractions
+        instead, which resolves a partly shadowed pair rather than rounding it to the nearer answer,
+        at a cost that rises steeply with facet count. For the volume receivers the clip's fraction
+        is of each source's plain solid angle rather than its projected one.
     stream_receiver_mask : bool or None
-        Whether the receivers' shadow mask is built chunk by chunk at every call rather than
-        held whole. Unset, it is held: built once, and read by every call. The whole mask is one
-        entry per receiver, facet and body — 12 GB per body at a reactor mesh's 1.6 million cells
-        against a 7,516-facet lamp — so a mesh-scale model must stream it. Streaming keeps memory
-        to one chunk in a gradient as well as in the forward pass, and costs a mask build per
-        call (two per call under a gradient). Both give the same field and the same gradients;
-        the choice is between memory and repeated work. See
+        Build the receivers' shadow mask chunk by chunk at every call, rather than holding it whole.
+        Unset, it is held, built once and read by every call. Both give the same field and
+        gradients, so the choice is between memory and repeated work.
+
+        The whole mask is one entry per receiver, facet and body. That is 12 GB per body at a
+        reactor mesh's 1.6 million cells against a 7,516-facet lamp, so a mesh-scale model must
+        stream it. Streaming keeps memory to one chunk in a gradient as well as in the forward pass,
+        and costs a mask build per call (two per call under a gradient). See
         :mod:`~aquaflux.radiation.receiver_shadows`.
     receiver_occlusion : SelfOcclusion or None
-        How the facets are tested for shadowing the volume receivers. Unset, the receivers
-        follow ``self_occlusion``, so switching self-occlusion off, or choosing the ray test or
-        the silhouette clip, applies to both masks alike. Set this to choose differently -- the
-        ray test for the volume beside the clip between facets, say, where a mesh's cells are
-        too many to clip one by one.
+        How the facets are tested for shadowing the volume receivers. Unset, the receivers follow
+        ``self_occlusion``. Set it to choose differently, for example the ray test for the volume
+        beside the silhouette clip between facets.
+
+        Following ``self_occlusion`` means switching self-occlusion off, or choosing the ray test or
+        the silhouette clip, applies to both masks alike. The ray test for the volume suits a mesh
+        whose cells are too many to clip one by one.
     body_culling : BodyCulling or None
-        How the bodies' layer of both masks is worked out. Unset, whole tiles of pairs a body can
-        prove it misses are decided without a test
-        (:class:`~aquaflux.radiation.culling.ShaftCulling` at its default group sizes). Pass
-        :class:`~aquaflux.radiation.culling.EveryPair` to test every body against every pair --
-        the same masks, for more tests -- or a ``ShaftCulling`` with other group sizes.
+        How the bodies' part of both shadow masks is worked out. Unset,
+        :class:`~aquaflux.radiation.culling.ShaftCulling` at its default group sizes, which decides
+        whole tiles of pairs a body can prove it misses without testing them.
+
+        Pass :class:`~aquaflux.radiation.culling.EveryPair` to test every body against every pair,
+        which gives the same masks for more tests, or a ``ShaftCulling`` with other group sizes.
     """
 
     receiver_quadrature: int | TriangleQuadrature | None = eqx.field(static=True, default=None)

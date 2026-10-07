@@ -16,7 +16,6 @@ fluid:
 
 physics:
   kind: RANS
-  advection: {kind: FirstOrderUpwind}
   omega_variable: {kind: LogScalars}
   explicit_production_limiter: true
 
@@ -34,6 +33,7 @@ numerics:
   momentum_advection:
     kind: LimitedUpwind
     limiter: {kind: VenkatakrishnanLimiter}
+  turbulence_advection: {kind: FirstOrderUpwind}
   gradient: {kind: CorrectedGreenGauss}
 
 solver:

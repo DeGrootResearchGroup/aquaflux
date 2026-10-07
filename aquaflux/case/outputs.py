@@ -8,18 +8,20 @@ A case file's ``outputs`` section names a directory, relative to the case file, 
   :class:`PatchVtk` (the boundary patches and the fields on their faces, one VTK polygonal-data file
   per patch bound by one multiblock index);
 * ``log`` -- the per-step table of the march, written as the run goes;
+* ``history`` -- the same steps as a comma-separated-values file, every number at full precision, for
+  a program to read (a convergence plot, a comparison of runs);
 * ``checkpoints`` -- the march state every few steps (:class:`Checkpoints`), so a run that stops
   has not lost its work.
 
-Every part is optional. A file with no ``outputs`` section writes the fields as VTK and the log into
-``results/`` beside the case file.
+Every part is optional. A file with no ``outputs`` section writes the fields as VTK, the log and the
+history into ``results/`` beside the case file.
 """
 
 from __future__ import annotations
 
 import abc
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import ClassVar
 
@@ -173,7 +175,7 @@ class OpenFOAMTime(FieldWriter):
         The OpenFOAM case directory the time directory is written into, relative to the case file
         unless absolute; it holds the template time.
     time : str
-        The time directory's name, used verbatim -- quote it in a file (``time: "1000"``), since a
+        The time directory's name, used verbatim. Quote it in a file (``time: "1000"``), since a
         bare number reads as a number.
     template_time : str or None
         The time directory whose fields are the templates; unset, ``0``.
@@ -189,6 +191,9 @@ class OpenFOAMTime(FieldWriter):
     case: str
     time: str
     template_time: str | None = None
+
+    #: Where an unset setting takes its default from (read by the case-file schema).
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (write_openfoam_time,)
 
     def __post_init__(self) -> None:
         if not self.case or not self.time:
@@ -311,13 +316,18 @@ class Outputs:
     log : str or None
         The per-step log's file name in the output directory; ``None`` writes the log to the terminal
         only.
+    history : str or None
+        The per-step history's file name in the output directory, a comma-separated-values file with
+        one row per step of the march (:class:`~aquaflux.solve.StepHistory`); ``None`` writes none.
+        The segregated solve takes no steps, so its history holds the header row only.
     checkpoints : Checkpoints or None
         The march state every few steps; unset, none.
 
     Raises
     ------
     ValueError
-        If ``directory`` is empty, or ``log`` is not a plain file name.
+        If ``directory`` is empty, or ``log`` or ``history`` is not a plain file name, or the two
+        name the same file.
     TypeError
         If a field writer or the checkpoints are not values of their family.
     """
@@ -325,13 +335,21 @@ class Outputs:
     directory: str = "results"
     fields: tuple[FieldWriter, ...] = (Vtk(),)
     log: str | None = "march.log"
+    history: str | None = "history.csv"
     checkpoints: Checkpoints | None = None
+
+    #: The settings for which unset means the feature is off (read by the case-file schema).
+    unset_means_off: ClassVar[tuple[str, ...]] = ("checkpoints",)
 
     def __post_init__(self) -> None:
         if not self.directory:
             raise ValueError("Outputs.directory names the directory a run writes into.")
-        if self.log is not None and (not self.log or Path(self.log).name != self.log):
-            raise ValueError(f"Outputs.log is a file name, got {self.log!r}.")
+        for name in ("log", "history"):
+            value = getattr(self, name)
+            if value is not None and (not value or Path(value).name != value):
+                raise ValueError(f"Outputs.{name} is a file name, got {value!r}.")
+        if self.log is not None and self.log == self.history:
+            raise ValueError(f"Outputs.log and Outputs.history both name {self.log!r}.")
         for writer in self.fields:
             if not isinstance(writer, FieldWriter):
                 raise TypeError(

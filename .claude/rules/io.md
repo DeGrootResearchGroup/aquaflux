@@ -274,15 +274,41 @@ unstructured grid a viewer opens directly. `io/vtk/{topology,xml,writer}.py`, ex
 `topology` reconstructs the connectivity (pure numpy, file-free), `xml` serializes it (pure), and
 `writer` is the only part that opens a file.
 
-**Why hand-rolled, and why VTK's polyhedron in particular.** The mesh is face-based — nodes,
+**Why hand-rolled, and why VTK's polyhedron in particular** (hexahedra excepted — next section). The mesh is face-based — nodes,
 owner/neighbour, ragged CSR face rings — and cells are *implicit*: there is no cell→vertex list.
 `VTK_POLYHEDRON` (type 42) is defined *by its face-node lists*, and `VTK_POLYGON` (type 7) by a
 vertex ring that is one edge-walk away, so the connectivity is a reconstruction rather than a
 translation. Alternatives were measured out before this was built: **VTKHDF**'s polyhedron support is
 unreleased and the installed ParaView (5.10.1 / 5.12.0) could not read it anyway; **meshio** cannot
 mix polyhedra with other cell types and would still need the topology hand-built; the **`vtk` /
-`pyvista`** wheels are a ~100 MB C++ dependency for a lean JAX package; **XDMF**'s polyhedral support
+`pyvista`** wheels are a ~100 MB C++ dependency for a lean JAX package (still true of the solver: the
+browser viewer that does use them is a separate package behind the `ui` extra, `ui.md`); **XDMF**'s polyhedral support
 is poor. Nothing but the standard library is imported.
+
+### Hexahedra are written as `VTK_HEXAHEDRON` (type 12), everything else stays a polyhedron (2026-10-05)
+`topology._hexahedron_vertices` recognizes a 3D cell with **six faces, all quadrilaterals, and eight
+distinct points** — Euler's count leaves such a closed cell no shape but a cube — and orders its
+vertices from the outward rings already built: the first entry's ring **reversed** (right-hand
+normal into the cell) is VTK's 0–3, and for each of those the one outward directed edge leaving that
+face ends at its opposite vertex (4–7). The face stream then carries **only the polyhedra**, with
+`faceoffsets = -1` for every hexahedron, and is omitted entirely when no polyhedron remains (the
+legacy `faces`/`faceoffsets` convention VTK 9.7.1 reads; verified by opening hexahedral, perturbed,
+tetrahedral and mixed hexahedron+prism files in VTK and matching `compute_cell_sizes` to aquaflux's
+volumes to ≤1.2e-15 relative). Only the hexahedron is recognized: tetrahedra, prisms and pyramids
+stay polyhedra (widening this was not agreed).
+- **Why:** it is the *viewer's* cost. Measured 2026-10-05 on `structured_grid_3d(100,100,100)`
+  (1 000 000 cells, one scalar), VTK 9.7.1 / PyVista 0.49.0, macOS arm64: file **70 MB vs 198 MB**,
+  peak RSS after read + slice + threshold + surface **393 MB vs 1074 MB**, `extract_surface`
+  **0.06 s vs 1.13 s**; slice and threshold were ~0.03 s either way, and read 0.05 vs 0.17 s.
+- **Pinned by** `test_hexahedron_vertices_are_in_vtk_order` (base face's normal inward, top in the
+  same sense, each `i, i+4` side a mesh face — geometric, not a pinned array),
+  `test_a_hexahedral_cells_volume_is_the_meshs_own`, and
+  `test_a_mixed_mesh_carries_a_face_stream_for_its_polyhedra_only`; every one of seven targeted
+  mutations of the new code turns them red. **Two guards are deliberately unpinned:** the `sound`
+  incidence check and the 8-point count cannot be reached by a valid closed six-quadrilateral cell,
+  so no fixture distinguishes them; they stay as a refusal to guess on a malformed cell.
+- `tests/support/meshes.py::hexahedron_beside_a_prism` is the mixed fixture; the polyhedron-winding
+  tests run on it and on `tetrahedral_grid_3d`, since a structured grid no longer emits polyhedra.
 
 ### ⚠️ THE WINDING RULE IS NOT "KEEP THE RING AS STORED" — THE PREMISE THAT SAYS SO IS FALSE
 VTK needs each polyhedron face listed outward from the cell listing it, and the obvious rule — keep a
@@ -335,12 +361,18 @@ faces are built from them — so a missing counterpart is a mismatched periodic 
 only by rounding, any other node by ~an edge, so the fraction only has to sit between the two). The
 sign convention is the mesh's (`neighbour_centroid = cc[neighbour] + offset`), so it holds for the
 generator and the cyclic fusion alike. Pinned by `test_a_periodic_2d_cell_is_a_ring_of_its_own_nodes_*`
-and `test_a_periodic_3d_cell_is_a_closed_polyhedron_*` (each recomputes the cell size from the emitted
+and `test_a_periodic_3d_cell_is_closed_by_its_own_nodes_*` (each recomputes the cell size from the emitted
 connectivity alone and compares it with `mesh.geometry().cell.volume`) and
 `test_a_periodic_seam_node_with_no_counterpart_is_refused`; mutation-checked 2026-10-06 — removing the
 translation, flipping its sign, translating the owner side as well, and disabling the refusal each turn
 at least one red (the sign flip and the owner-side mutation leave the refusal test green, correctly:
 it pins the refusal, the other three pin the geometry).
+- **With the hexahedron writer, both periodic 3D fixtures are written as `VTK_HEXAHEDRON`, not
+  polyhedra** — the seam shift happens on the entry rings *before* `_hexahedron_vertices` orders them,
+  so a seam cell is still a hexahedron of its own 8 nodes. The 3D test (renamed from `…_closed_polyhedron_…`
+  at the merge, 2026-10-06) reads a hexahedron's outward faces from VTK's vertex order
+  (`_HEXAHEDRON_FACES`) and a polyhedron's from the face stream (`_outward_rings`); removing the seam
+  shift still turns both fixtures red.
 
 ### Binary is the default, and that was decided before shipping rather than after
 `<AppendedData encoding="raw">` with `header_type="UInt64"`; `binary=False` gives the same values to
@@ -353,7 +385,9 @@ raw file is *larger* (15 125 B vs 10 419 B), because a toy mesh's indices are on
 against a fixed four bytes. A test asserting "binary is smaller" was written, failed, and was
 deleted rather than re-scaled — the property is load time, not bytes.
 
-**Scale it was built for** (same configuration, `structured_grid_3d(118,118,118)` = 1 643 032 cells /
+**Scale it was built for** (same configuration, **measured with every cell written as a polyhedron —
+before hexahedra became type 12 (2026-10-05), so the face-stream size, peak and file size below no
+longer describe a hexahedral mesh**; `structured_grid_3d(118,118,118)` = 1 643 032 cells /
 4 970 868 faces, i.e. uvreactor scale): the face stream alone is **50.9 M integers**; reconstruction
 15.5 s + write 15.2 s at **3.37 GiB peak RSS** (1.83 GiB of which is the mesh), giving a 347 MiB file
 ParaView opens in **0.7 s**. The index arrays are formed at a width chosen once per build by
@@ -374,7 +408,10 @@ things it is for; a viewer draws those cells as blanks.
 
 ### Verified by opening the files, not by asserting on the XML produced
 Every number below is from `pvpython` inside `/Applications/ParaView-5.12.0.app` (5.12.0),
-2026-09-12. **The load-bearing check is `IntegrateVariables` and `CellSize`**: VTK computes a
+2026-09-12, **when every 3D cell was written as type 42** — the `structured_grid_3d` and bfs3d hex rows
+are now written as type 12 and were re-checked only in VTK 9.7.1 (volumes to ≤1.2e-15, see the
+hexahedron section above), not in ParaView; the `polyDualMesh` row is unaffected (its cells are not
+six-quadrilateral). **The load-bearing check is `IntegrateVariables` and `CellSize`**: VTK computes a
 polyhedron's volume from the face stream by the divergence theorem, so a single inward-wound face
 makes it wrong or negative — the topology cannot be confirmed by counting cells.
 
