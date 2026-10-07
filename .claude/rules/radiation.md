@@ -101,6 +101,31 @@ refinement** — non-convergence, not size, is what identifies a wrong kernel.
    selection. Write `sqrt(where(zero, 1, sq))`. Zero-length edges are the *normal* case here,
    not a degenerate one — the clip manufactures three of them for every fully visible triangle
    — so this is on the main path, and the whole project is gradients.
+   ⚠️ **It recurred three more times (#620, 2026-10-07), each with a correct forward value and a
+   NaN gradient, and none was seen because no test differentiated in POSITION with any profile but
+   Lambertian.** (a) `CosinePower.radiance_per_exitance_at` raised `max(cos, 0)` to `n - 1`, whose
+   slope at a zero base is infinite for `n` in `[1, 2)` — every receiver behind a facet; now
+   `profiles._forward_power` substitutes the base (`where(cos > 0, cos, 1)`) inside the power, for
+   both views. (b) `UniformAbsorption` and `VoxelAbsorption` took `sqrt(dot(offset, offset))`
+   unguarded — a receiver at a facet's own centroid in a medium (vacuum was fine); both now use
+   `aquaflux.vectors.norm`, the zero-safe magnitude (moved there from `mesh/face.py`'s private
+   `_safe_magnitude`, so the guard has one home). (c) `PhotometricProfile.angles` took
+   `arctan2(0, 0)` on a facet's axis — every receiver straight below a ceiling lamp; the operands
+   are substituted with `(0, 1)` where the in-plane part is zero. **The generalization: the same
+   defect arrives through `**`, `arctan2`, `log` — any primitive with an infinite or `0/0` slope
+   where the selection discards its value.** ⚠️ **A Lambertian fixture cannot see a NaN direction**:
+   its radiance is a constant that never reads the direction, so `gather._emitter_direction`'s guard
+   (receiver at a centroid) survived a mutation until the centroid test ran a `CosinePower` too.
+   Pinned by `test_a_source_can_be_moved_under_a_gradient_whatever_it_emits_with` (every areal
+   profile, a receiver behind a facet and one on another's axis, against a finite difference),
+   `test_a_receiver_at_a_facet_s_own_centroid_takes_nothing_from_it_and_has_a_finite_gradient`
+   (vacuum / uniform / voxel x Lambertian / cosine: field and point gradient equal the other facet's
+   alone), `test_a_receiver_on_a_facet_s_axis_has_a_finite_position_gradient` (FD only ALONG the
+   axis — the bilinear table in polar angles is a cone at the pole, so no other derivative exists
+   there), `test_a_direction_behind_the_facet_has_a_zero_derivative_not_a_nan` and
+   `test_a_segment_of_zero_length_has_zero_depth_and_a_finite_gradient`. Mutation-checked: each of
+   the three fixes reverted, `norm` guarded after the root, only one `arctan2` operand substituted,
+   and `_emitter_direction` unguarded — all red.
 
 ## ⚠️ THE VERTEX-DEGENERACY GUARD IS FOR THE GRADIENT; THE VALUE NEEDS NO HELP
 

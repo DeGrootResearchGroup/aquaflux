@@ -3,7 +3,7 @@
 Finite-volume kernels work with *fields* of small spatial vectors — one ``(dim,)`` vector per
 face or per cell, stored as a ``(..., dim)`` array whose leading axes index the faces/cells and
 whose last axis holds the spatial components. The elementary operations on such a field — the
-per-element dot product ``a·b``, the squared magnitude ``|a|²``, scaling each vector by a
+per-element dot product ``a·b``, the magnitude ``|a|`` and its square, scaling each vector by a
 per-element scalar, and reflecting each vector in a plane — recur throughout the geometry, the
 reconstruction schemes, the flux operators and the radiation model's mirror images. Spelled out
 each time as ``jnp.sum(a * b, axis=-1)`` or ``s[..., None] * v`` they bury the intent under axis
@@ -84,6 +84,35 @@ def norm_squared(a: jnp.ndarray) -> jnp.ndarray:
         The squared magnitude, shape ``(...)``.
     """
     return dot(a, a)
+
+
+def norm(a: jnp.ndarray) -> jnp.ndarray:
+    """Euclidean magnitude ``|a|`` over the last (spatial) axis, with a finite gradient at zero.
+
+    ``jnp.linalg.norm`` — or ``sqrt(a·a)`` written out — returns a NaN *gradient* at exactly the
+    zero vector, because reverse mode evaluates ``d/dx √x`` at ``x = 0``. Guarding *after* the
+    root does not help: ``where(zero, 0, sqrt(sq))`` still differentiates the unselected
+    ``sqrt(0)``, and its infinite slope times the zero cotangent the selection sends back is NaN,
+    so the forward value is finite and the gradient is not. The guard is therefore applied to the
+    root's **argument**, so the branch that is differentiated never sees zero. The magnitude is
+    ``0`` at the zero vector, with a zero gradient there, and exact elsewhere.
+
+    A zero vector is an ordinary input, not a degenerate one, wherever two points may coincide: a
+    degenerate mesh face, or a receiver placed exactly at an emitting facet's centroid.
+
+    Parameters
+    ----------
+    a : jnp.ndarray
+        Vector field, shape ``(..., dim)``.
+
+    Returns
+    -------
+    jnp.ndarray
+        The magnitude, shape ``(...)``.
+    """
+    squared = norm_squared(a)
+    nonzero = squared > 0.0
+    return jnp.where(nonzero, jnp.sqrt(jnp.where(nonzero, squared, 1.0)), 0.0)
 
 
 def scale(vectors: jnp.ndarray, scalars: jnp.ndarray) -> jnp.ndarray:

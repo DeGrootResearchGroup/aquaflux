@@ -483,7 +483,9 @@ physical flux as one honest residual term; AD assembles the matrix.
 
 **Vector algebra lives in one leaf, `aquaflux/vectors.py`.** Per-element operations on fields
 of small spatial vectors — the per-face/per-cell dot product `dot(a, b)`, squared magnitude
-`norm_squared(a)`, scaling a vector field by a per-element scalar `scale(vectors, scalars)`, and
+`norm_squared(a)`, the magnitude `norm(a)` (zero-safe: `0` with a zero gradient at the zero vector,
+the root guarded inside its argument — reach for it wherever two points may coincide, never for
+`jnp.linalg.norm` or a `sqrt(dot(...))` guarded after the root), scaling a vector field by a per-element scalar `scale(vectors, scalars)`, and
 reflecting it in a plane through the origin `reflect(vectors, normal)` (the image-source method's
 one formula, shared by `radiation/mirrors.py` and the photometric profile's mirror image)
 — are defined once here and imported wherever the geometry, schemes, or flux operators contract
