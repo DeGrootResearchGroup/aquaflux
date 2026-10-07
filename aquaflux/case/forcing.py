@@ -65,8 +65,9 @@ class BulkVelocity(DriveSpec):
     direction : {"x", "y", "z"} or None
         The axis the bulk velocity is measured and the force applied along; unset, ``x``.
     initial_force : float or None
-        The force per unit volume the solve starts from -- a guess, not a setting of the problem: the
-        solved force does not depend on it, though how quickly the solve reaches it can. Unset, zero.
+        The force per unit volume the solve starts from. It is a guess rather than part of the
+        problem, so the solved force does not depend on it, though how quickly the solve reaches it
+        can. Unset, zero.
 
     Raises
     ------

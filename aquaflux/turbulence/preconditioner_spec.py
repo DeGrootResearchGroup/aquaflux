@@ -75,9 +75,67 @@ class BlockDiagonal(SettingsValue):
         How the ``k`` and ``omega`` blocks are preconditioned: :class:`~aquaflux.turbulence.ScalarTwoLevel`,
         :class:`~aquaflux.turbulence.ScalarAir`, or :class:`~aquaflux.turbulence.UnpreconditionedScalars`
         to leave them unpreconditioned. Unset, the two-level hierarchy.
-    velocity, schur_scaling, composition, mass_scale, v_cycles, strength_threshold
-        The flow block's settings -- see :meth:`~aquaflux.flow.BlockPreconditioner.build`.
-        ``v_cycles`` is the flow block's alone; the scalar blocks' is set on their own value.
+    velocity : VelocityBlock or None
+        Which velocity block is fitted, and how: :class:`~aquaflux.flow.ViscousMultilevel`,
+        :class:`~aquaflux.flow.ConvectionTwoLevel` or :class:`~aquaflux.flow.ConvectionAir`. Unset,
+        the coupled march takes :class:`~aquaflux.flow.ConvectionTwoLevel`.
+
+        :class:`~aquaflux.flow.ViscousMultilevel` is a multilevel algebraic multigrid (AMG) on the
+        viscous momentum operator, mesh-independent but blind to the Peclet number, so it bounds the
+        reachable Reynolds number. :class:`~aquaflux.flow.ConvectionTwoLevel` is a two-level
+        hierarchy on the frozen viscous plus first-order-upwind operator, which stays a good
+        momentum-block approximation as convection strengthens but whose direct coarse solve does
+        not scale to large meshes. :class:`~aquaflux.flow.ConvectionAir` puts the same operator
+        under a local approximate ideal restriction (lAIR) hierarchy that is robust in the Peclet
+        number *and* mesh-independent. See :meth:`~aquaflux.flow.BlockPreconditioner.build`.
+    schur_scaling : {"simple", "msimple"} or None
+        Which pressure-Schur approximation the flow block uses. ``"simple"`` scales by the momentum
+        diagonal ``a_P``; ``"msimple"`` by a frozen, velocity-independent mass diagonal. Unset,
+        ``"simple"``.
+
+        The classical SIMPLE Schur ``V / a_P`` degrades as convection strengthens. The mass-scaled
+        ``Q̂ = ρ V / k`` makes the Schur a constant-coefficient pressure Poisson that stays robust
+        in the Reynolds number, which carries a **flow-only** solve past the point where the ``a_P``
+        Schur's inner solve stalls. Both are scaled Laplacians, hence near-Stokes approximations.
+        Inside a coupled flow and turbulence solve the choice does not move the converged state. See
+        :meth:`~aquaflux.flow.BlockPreconditioner.build`.
+    composition : {"triangular", "simple", "simpler"} or None
+        How the flow block's velocity and Schur solves are combined. ``"triangular"`` is one of
+        each, ``"simple"`` adds a closing velocity update, and ``"simpler"`` also predicts the
+        pressure first, at the cost of a second Schur solve. Unset, ``"triangular"``.
+
+        ``"simple"`` makes the pass the full block ``LU``. This axis is independent of
+        ``schur_scaling``. The method Klaij & Vuik call **MSIMPLER** is
+        ``schur_scaling="msimple", composition="simpler"``, and their **SIMPLER** is
+        ``schur_scaling="simple", composition="simpler"``. See :meth:`~aquaflux.flow.BlockPreconditioner.build`.
+    mass_scale : float or None
+        The mass-scaled Schur's ``k``, used only with ``schur_scaling="msimple"``. Unset, it is
+        calibrated automatically at every iterate from the real momentum diagonal.
+
+        It sets the Schur magnitude to the operating convection, or the block preconditioner is
+        unbalanced and stalls. The automatic value is ``mean(rho V / a_P)``, which encodes the true
+        velocity, density and viscosity scale. Pass an explicit value only to pin ``k``, for a study
+        say. See :meth:`~aquaflux.flow.BlockPreconditioner.build`.
+    v_cycles : int or None
+        Multigrid V-cycles per application of the flow block. This count is the flow block's alone;
+        the scalar blocks' is set on their own value. Unset, one.
+
+        Raising it does **not** rescue the high-Reynolds coupled solve. At high cell Peclet number
+        the block's accuracy is limited by the Schur approximation, not by how well that
+        approximation is inverted, so extra velocity cycles leave the preconditioned error operator
+        ``I - A M`` unchanged and extra Schur cycles make it worse. See
+        :meth:`~aquaflux.flow.BlockPreconditioner.build`.
+    strength_threshold : float or None
+        Strength-of-connection threshold for the flow block's velocity and Schur multigrid
+        aggregation. ``0`` aggregates on the full graph, and a positive value (such as ``0.25``)
+        only along strong connections. Unset, the coupled march takes ``0.25``.
+
+        Aggregating along strong connections is what keeps those V-cycles contracting on a
+        high-aspect-ratio or skewed mesh, where isotropic aggregation coarsens across the stiff
+        wall-normal direction and the V-cycle stalls. It is a no-op on a low-aspect-ratio mesh and
+        does not apply to the :class:`~aquaflux.flow.ConvectionAir` block, whose coarsening is
+        already strength-based. It makes the coarsening value-dependent. See
+        :meth:`~aquaflux.flow.BlockPreconditioner.build`.
 
     Raises
     ------

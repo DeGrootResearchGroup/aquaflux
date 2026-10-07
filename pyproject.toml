@@ -82,6 +82,8 @@ test = [
     # carried here and those tests run there -- unlike `petsc`, whose absence from CI is a recorded
     # cost (tests/unit/test_optional_dependency_skips.py).
     "aquaflux[cad]",
+    # The browser interface's own tests (tests/ui/) read and pipe real VTK data, so they need it installed.
+    "aquaflux[ui]",
 ]
 # `docs` is the Sphinx toolchain for the site under `docs/` — MyST Markdown pages,
 # the pydata theme, and the copy-button extension; autodoc imports the package
@@ -117,10 +119,28 @@ cad = ["cadquery-ocp-novtk==8.0.1.0.0"]
 # preconditioners are unaffected. petsc4py builds PETSc from source; a SuiteSparse-enabled build needs
 # CMake (`PETSC_CONFIGURE_OPTIONS="--download-suitesparse"`).
 petsc = ["petsc4py>=3.20"]
+# `ui` is the browser interface, `aquaflux-ui` (the `aquaflux_ui` package): VTK through PyVista renders
+# here, trame serves the page and sends it images rather than meshes, plotly draws the convergence
+# history. All have wheels for Linux, macOS and Windows, so it needs no compiler and no JavaScript
+# toolchain. The solver never imports any of it. Floors only, like the core dependencies: an upper cap
+# here would propagate into whatever environment installs the interface.
+ui = [
+    "pyvista>=0.44",
+    "vtk>=9.3",
+    "trame>=3.6",
+    "trame-vtk>=2.8",
+    "trame-vuetify>=2.7",
+    "trame-plotly>=3.0",
+    "plotly>=5.18",
+    # The colormap previews read Matplotlib's colormaps; PyVista needs it too.
+    "matplotlib>=3.6",
+]
 
 [project.scripts]
 # `aquaflux check case.yaml` / `aquaflux run case.yaml`; `python -m aquaflux` is the same command.
 aquaflux = "aquaflux.__main__:main"
+# `aquaflux-ui results/`: the browser interface, from the `ui` extra.
+aquaflux-ui = "aquaflux_ui.__main__:main"
 
 [project.urls]
 Repository = "https://github.com/DeGrootResearchGroup/aquaflux"
@@ -129,8 +149,9 @@ Repository = "https://github.com/DeGrootResearchGroup/aquaflux"
 version = { attr = "aquaflux.__version__" }
 
 [tool.setuptools.packages.find]
-# Only package `aquaflux*`. The repo root also holds documentation, tests, and
-# runnable validation cases — none of which belong in the installed distribution.
+# Only package `aquaflux*` -- the solver, `aquaflux`, and the viewer, `aquaflux_ui`. The repo root
+# also holds documentation, tests, and runnable validation cases — none of which belong in the
+# installed distribution.
 include = ["aquaflux*"]
 
 [tool.ruff]
@@ -138,7 +159,7 @@ line-length = 100
 target-version = "py311"
 # Lint only the package and its tests; everything else in the repo is out of
 # scope for the style gate.
-src = ["aquaflux", "tests"]
+src = ["aquaflux", "aquaflux_ui", "tests"]
 
 [tool.ruff.lint]
 #   E,W  pycodestyle     F   pyflakes            I    isort

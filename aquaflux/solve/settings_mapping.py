@@ -22,14 +22,32 @@ it is eventually consumed -- or being ignored, which is indistinguishable from n
 
 Nothing here parses a file. It works on the mapping a parser produces, so it adds no parsing dependency
 and does not care which format the mapping came from.
+
+The same per-field rules are also published, as plain data, by :meth:`SettingsMapping.schema`: every
+kind, its fields, what each accepts and its default. A form that edits these mappings builds its
+choices from that description, so it offers exactly what reading will accept, because the two are read
+off one set of annotations and cannot disagree.
+
+Many of these values leave a setting ``None``, meaning "not set here", so that the class consuming the
+value applies its own default and that default is written in one place. Such a value can say where its
+unset settings go, in an ``unset_resolves_to`` class attribute: the classes or functions whose own
+keyword defaults apply, searched in order for a parameter of the same name. The schema then reports
+that default, and the parameter's description when the value has none of its own. A value can also name
+the settings for which "not set" means the feature is off, in ``unset_means_off``, and the fields that
+are its own internal state rather than settings, in ``not_settings``: those are neither written, read
+nor described. And a value can say which part of a whole description reads each of its settings, in
+``setting_scopes`` (with ``required_in_scope``), while a value that is that part names the scopes it
+reads in ``reads_scopes``: the schema publishes both, so a form can leave out what would be refused.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import inspect
+import re
 import types
 import typing
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 
 __all__ = ["SettingsMapping"]
 
@@ -85,9 +103,7 @@ class SettingsMapping:
         # built rather than loading unvalidated (see `_atoms`).
         self._accepts = {
             name: {
-                field.name: _atoms(hints[field.name], name, field.name)
-                for field in dataclasses.fields(kind)
-                if field.init
+                field.name: _atoms(hints[field.name], name, field.name) for field in _settings(kind)
             }
             for name, kind in by_name.items()
             for hints in (typing.get_type_hints(kind),)
@@ -97,6 +113,90 @@ class SettingsMapping:
     def kinds(self) -> tuple[type, ...]:
         """The accepted classes, in the order they were given."""
         return tuple(self._by_name.values())
+
+    def schema(self) -> dict[str, object]:
+        """Every accepted kind, its fields and what each accepts, as plain data.
+
+        This is the description a form needs to edit these mappings: the same per-field rules
+        :meth:`from_mapping` checks against, read off the same annotations, so a choice the form offers
+        is one reading accepts.
+
+        Returns
+        -------
+        dict
+            ``{"kinds": {<class name>: {"summary": str, "fields": [<field>, ...]}}}``, the kinds in the
+            order given. Each field is ``{"name", "accepts", "required", "doc"}`` and, when it has one
+            that is plain data, ``"default"`` -- written as :meth:`to_mapping` would write it. A field
+            whose default is ``None`` may also carry ``"resolved_default"``, the default its kind's
+            ``unset_resolves_to`` applies in its place, or ``"off": True`` when its kind lists it in
+            ``unset_means_off``. A field its kind lists in ``setting_scopes`` carries ``"scope"``, and
+            ``"required_in_scope": True`` when also in ``required_in_scope``; a kind with
+            ``reads_scopes`` carries them as ``"reads"``. Each entry
+            of ``accepts`` is one alternative: ``{"type": "null"}``, ``{"type": "boolean" | "integer"
+            | "number" | "string"}``, ``{"type": "choice", "values": [...]}``, ``{"type": "nested",
+            "kinds": [<usable kind names>]}``, ``{"type": "list", "of": [...]}`` or ``{"type": "table",
+            "of": [...]}``. ``summary`` is the first line of the class's docstring and ``doc`` the
+            field's entry in its ``Attributes`` section (empty when it has none).
+
+        Examples
+        --------
+        >>> import dataclasses
+        >>> from typing import Literal
+        >>> @dataclasses.dataclass(frozen=True)
+        ... class Smoother:
+        ...     \"\"\"A smoother.\"\"\"
+        ...     method: Literal["jacobi", "gauss-seidel"] = "jacobi"
+        >>> field, = SettingsMapping([Smoother]).schema()["kinds"]["Smoother"]["fields"]
+        >>> field["accepts"], field["default"]
+        ([{'type': 'choice', 'values': ['jacobi', 'gauss-seidel']}], 'jacobi')
+        """
+        kinds = {}
+        for name, kind in self._by_name.items():
+            docs = _attribute_docs(kind)
+            targets = getattr(kind, "unset_resolves_to", ())
+            targets = (
+                targets if isinstance(targets, tuple) else ()
+            )  # an abstract base declares none
+            off = frozenset(getattr(kind, "unset_means_off", ()))
+            scopes = dict(getattr(kind, "setting_scopes", {}))
+            required_in_scope = frozenset(getattr(kind, "required_in_scope", ()))
+            fields = []
+            for field in _settings(kind):
+                entry = {
+                    "name": field.name,
+                    "accepts": [
+                        atom.schema(self._by_name) for atom in self._accepts[name][field.name]
+                    ],
+                    "required": _default(field) is dataclasses.MISSING,
+                    "doc": docs.get(field.name, ""),
+                }
+                where = f"{name}.{field.name}"
+                if not entry["required"]:
+                    try:
+                        entry["default"] = self._encode(_default(field), where)
+                    except TypeError:
+                        pass  # a default that is not plain data (a function, say) is not shown
+                if field.name in scopes:
+                    entry["scope"] = scopes[field.name]
+                    if field.name in required_in_scope:
+                        entry["required_in_scope"] = True
+                if _default(field) is None and field.name in off:
+                    entry["off"] = True
+                elif _default(field) is None and targets:
+                    resolved = _resolved(targets, field.name)
+                    if resolved is not None:
+                        default, doc = resolved
+                        if default is not None:
+                            try:
+                                entry["resolved_default"] = self._encode(default, where)
+                            except TypeError:
+                                pass  # not something a case file can write
+                        entry["doc"] = entry["doc"] or doc
+                fields.append(entry)
+            kinds[name] = {"summary": _summary(kind), "fields": fields}
+            if getattr(kind, "reads_scopes", ()):
+                kinds[name]["reads"] = list(kind.reads_scopes)
+        return {"kinds": kinds}
 
     def to_mapping(self, value: object) -> dict[str, object]:
         """The mapping that describes ``value``, omitting every field left at its default.
@@ -167,9 +267,7 @@ class SettingsMapping:
                 f"kinds are {sorted(self._by_name)}."
             )
         mapping: dict[str, object] = {KIND: type(value).__name__}
-        for field in dataclasses.fields(value):
-            if not field.init:
-                continue
+        for field in _settings(type(value)):
             setting = getattr(value, field.name)
             if setting != _default(field):
                 mapping[field.name] = self._encode(setting, _join(path, field.name))
@@ -219,7 +317,7 @@ class SettingsMapping:
             raise ValueError(
                 f"unknown {KIND} {name!r}{where}; accepted kinds are {sorted(self._by_name)}."
             )
-        fields = {field.name for field in dataclasses.fields(kind) if field.init}
+        fields = {field.name for field in _settings(kind)}
         unknown = sorted(set(mapping) - fields - {KIND})
         if unknown:
             raise ValueError(
@@ -234,8 +332,8 @@ class SettingsMapping:
                 self._check(setting, accepts[key], _join(path, key), f"{name}.{key}")
         required = [
             field.name
-            for field in dataclasses.fields(kind)
-            if field.init and _default(field) is dataclasses.MISSING and field.name not in mapping
+            for field in _settings(kind)
+            if _default(field) is dataclasses.MISSING and field.name not in mapping
         ]
         if required:
             raise ValueError(
@@ -323,6 +421,10 @@ class _Null:
         del kinds
         return "null"
 
+    def schema(self, kinds: Mapping[str, type]) -> dict[str, object]:
+        del kinds
+        return {"type": "null"}
+
 
 @dataclasses.dataclass(frozen=True)
 class _Choice:
@@ -338,6 +440,10 @@ class _Choice:
     def describe(self, kinds: Mapping[str, type]) -> str:
         del kinds
         return "one of " + ", ".join(repr(value) for value in self.values)
+
+    def schema(self, kinds: Mapping[str, type]) -> dict[str, object]:
+        del kinds
+        return {"type": "choice", "values": list(self.values)}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -370,6 +476,12 @@ class _Scalar:
             self.type
         ]
 
+    def schema(self, kinds: Mapping[str, type]) -> dict[str, object]:
+        del kinds
+        return {
+            "type": {bool: "boolean", int: "integer", float: "number", str: "string"}[self.type]
+        }
+
 
 @dataclasses.dataclass(frozen=True)
 class _Nested:
@@ -396,6 +508,13 @@ class _Nested:
         usable = self.usable(kinds)
         return f"one of {', '.join(repr(name) for name in usable)}" if usable else "no known kind"
 
+    def schema(self, kinds: Mapping[str, type]) -> dict[str, object]:
+        # In registration order rather than sorted, so a form lists them as the registry does.
+        return {
+            "type": "nested",
+            "kinds": [name for name, kind in kinds.items() if issubclass(kind, self.base)],
+        }
+
 
 @dataclasses.dataclass(frozen=True)
 class _Table:
@@ -418,6 +537,9 @@ class _Table:
     def describe(self, kinds: Mapping[str, type]) -> str:
         return f"a table from names to ({_describe(self.atoms, kinds)})"
 
+    def schema(self, kinds: Mapping[str, type]) -> dict[str, object]:
+        return {"type": "table", "of": [atom.schema(kinds) for atom in self.atoms]}
+
 
 @dataclasses.dataclass(frozen=True)
 class _Sequence:
@@ -432,6 +554,9 @@ class _Sequence:
 
     def describe(self, kinds: Mapping[str, type]) -> str:
         return f"a list of ({_describe(self.atoms, kinds)})"
+
+    def schema(self, kinds: Mapping[str, type]) -> dict[str, object]:
+        return {"type": "list", "of": [atom.schema(kinds) for atom in self.atoms]}
 
 
 def _atoms(annotation: object, owner: str, field: str) -> tuple[object, ...]:
@@ -537,3 +662,127 @@ def _default(field: dataclasses.Field) -> object:
     if field.default_factory is not dataclasses.MISSING:
         return field.default_factory()
     return dataclasses.MISSING
+
+
+def _settings(kind: type) -> tuple[dataclasses.Field, ...]:
+    """A kind's settings: its constructor's fields, less any it lists in ``not_settings``.
+
+    A value may carry state that is not a choice -- a cache it fills for itself -- in a field the
+    constructor still takes; ``not_settings`` keeps such a field out of the mapping, the schema and a
+    file.
+    """
+    internal = frozenset(getattr(kind, "not_settings", ()))
+    return tuple(f for f in dataclasses.fields(kind) if f.init and f.name not in internal)
+
+
+def _resolved(targets: tuple[Callable, ...], name: str) -> tuple[object, str] | None:
+    """The keyword default and description of the first of ``targets`` taking a parameter ``name``.
+
+    A class is searched by its constructor's signature, a function by its own. A parameter with no
+    default resolves to ``None``; one gathered by ``**`` is searched for in the next target.
+    """
+    for target in targets:
+        try:
+            parameter = inspect.signature(target).parameters.get(name)
+        except (TypeError, ValueError):
+            continue  # a callable whose signature cannot be read describes nothing
+        if parameter is None or parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            continue
+        default = None if parameter.default is inspect.Parameter.empty else parameter.default
+        if isinstance(target, type) and dataclasses.is_dataclass(target):
+            # A dataclass field built by a factory shows only a placeholder in the signature.
+            (field,) = [f for f in dataclasses.fields(target) if f.name == name] or [None]
+            if field is not None:
+                built = _default(field)
+                default = None if built is dataclasses.MISSING else built
+        return default, _parameter_doc(target, name)
+    return None
+
+
+def _parameter_doc(target: Callable, name: str) -> str:
+    """A parameter's description in ``target``'s docstrings: a function's, or a class's and its bases'.
+
+    A class documents its constructor's parameters in its own docstring or its ``__init__``'s, under
+    ``Parameters`` or ``Attributes``.
+    """
+    if isinstance(target, type):
+        docs = [
+            doc
+            for base in target.__mro__
+            for doc in (
+                base.__dict__.get("__doc__"),
+                getattr(base.__dict__.get("__init__"), "__doc__", None),
+            )
+        ]
+    else:
+        docs = [inspect.getdoc(target)]
+    for doc in docs:
+        for section in ("Parameters", "Attributes"):
+            text = _section_docs(doc, section).get(name)
+            if text:
+                return text
+    return ""
+
+
+def _summary(kind: type) -> str:
+    """The first line of a class's own docstring, or empty."""
+    doc = inspect.cleandoc(kind.__dict__.get("__doc__") or "")
+    return doc.split("\n", 1)[0].strip()
+
+
+#: A NumPy-style section underline: the line of dashes beneath a section's heading.
+_UNDERLINE = re.compile(r"^-{3,}$")
+
+
+def _attribute_docs(kind: type) -> dict[str, str]:
+    """Each field's description from the ``Attributes`` sections of a class and the classes it derives from.
+
+    A field a base class declares is documented there, so every class in the method resolution order
+    is read, the class's own description of a field taking precedence over a base's.
+    """
+    docs: dict[str, str] = {}
+    for base in reversed(kind.__mro__):
+        docs.update(
+            (name, text)
+            for name, text in _section_docs(base.__dict__.get("__doc__"), "Attributes").items()
+            if text
+        )
+    return docs
+
+
+def _section_docs(doc: str | None, section: str) -> dict[str, str]:
+    """Each entry's description in one section (``Attributes``, ``Parameters``) of a docstring.
+
+    The section is the NumPy docstring form: an entry is a ``name : type`` line (``low, high : float``
+    names several fields at once) followed by its indented description. The description's first
+    paragraph is taken, joined into one line: that is the setting's help, and any later paragraph is
+    detail for the reference documentation alone. A docstring with no such section, or an entry it does
+    not describe, has no entry.
+    """
+    lines = inspect.cleandoc(doc or "").splitlines()
+    try:
+        start = next(
+            i + 2
+            for i, line in enumerate(lines[:-1])
+            if line.strip() == section and _UNDERLINE.match(lines[i + 1].strip())
+        )
+    except StopIteration:
+        return {}
+    docs: dict[str, str] = {}
+    names: list[str] = []
+    finished = False  # the current entry's first paragraph has ended
+    for i in range(start, len(lines)):
+        line = lines[i]
+        if i + 1 < len(lines) and line.strip() and _UNDERLINE.match(lines[i + 1].strip()):
+            break  # the next section's heading
+        if line and not line[0].isspace():
+            names = [name.strip() for name in line.split(" : ", 1)[0].split(",")]
+            finished = False
+            for name in names:
+                docs[name] = ""
+        elif not line.strip():
+            finished = finished or any(docs[name] for name in names)
+        elif not finished:
+            for name in names:
+                docs[name] = f"{docs[name]} {line.strip()}".strip()
+    return docs
