@@ -225,6 +225,11 @@ def _solver_with_overrides(solver):
     retry = _environment("RETRY_ON_CYCLES", int)
     if retry is not None:
         edits["retry"] = dataclasses.replace(solver.retry, abort_above_cycles=retry)
+    # The inexact-Newton forcing term of every inner linear solve, in the row-scaled measure. Swept to
+    # bound what an adaptive (Eisenstat--Walker) forcing term could buy over the file's fixed value.
+    forward_rtol = _environment("FORWARD_RTOL", float)
+    if forward_rtol is not None:
+        edits["linear_solve"] = dataclasses.replace(solver.linear_solve, rtol=forward_rtol)
     return dataclasses.replace(solver, **edits)
 
 
