@@ -462,6 +462,42 @@ build cheap, and a build is ~2.2 s ≈ 60 matvecs to break even. It also miscoun
 the recorded figure is 47.2M structural (~380 MB). Reopen only with a build that is genuinely cheap per
 iterate, e.g. on hardware where the probe itself changes cost class.
 
+## Tangent / secant predictor between continuation stations — CLOSED (2026-10-07)
+
+**What was proposed** (`solve-open-directions.md` item 3, removed from there): seed each Reynolds rung or
+`ResidualHomotopy` station at `x + dlam·dx/dlam`, `J dx/dlam = -dR/dlam`, rather than at the previous
+state, to cut the "opening residual" a station change creates.
+
+**Already measured once, on the configuration it was proposed for** (`turbulence.md`, 2026-09-08,
+`validation/continuation_seed_error.py`): on the decade **ladder** the predictor made the seed 23 % worse
+on bfs3d and helped only on a ladder too fine to afford while β restarted per rung. The item's own
+evidence ("rung 2 opened 6,000× worse") was the ladder's, and pitzDaily no longer runs a ladder.
+
+**Measured on the shipped march** (`validation/pitzdaily_openfoam/ramp_predictor_probe.py`): pitzDaily
+`case.yaml` as shipped — `ViscosityRamp` anchor 100, 16 stations × 1 step, momentum-only scaling — re-run
+2026-10-07 with every step checkpointed (31 steps, 203 restart cycles, `x_r/h` 8.0686; jax 0.11.2, CPU,
+4-core Linux). The first-order expansion `R(x + dlam v, lam + dlam) ≈ R(x, lam + dlam) − dlam dR/dlam`
+holds at any state, so an exactly solved predictor removes the station-jump term and nothing else;
+scored in the row-equilibrated measure the march stops on, rebuilt at the new station:
+
+| station changes | jump share of the residual the step faces | residual an exact predictor leaves / without it |
+|---|---|---|
+| 1–7 | 15 % → 6 % | **1.004–1.118 (worse)** |
+| 8–16 (16 = entry to the target) | 5 % → 9 % | 0.974–0.994 |
+
+**Why it cannot pay on the ramp:**
+- At `1.33×` viscosity per station the state never reaches a root, so the step faces mostly what the
+  previous step left unsolved (`left` ≈ `E0` throughout); early on the jump partly cancels it, so removing
+  the jump raises the starting residual.
+- Best case 2.6 % for one extra linear solve per station (≈ a Newton step's solve) — and that is an upper
+  bound, since a real predictor is solved loosely against a frozen preconditioner.
+- The 15 target-station steps cost 92 of the 203 cycles and see no station change at all.
+- The cost-free secant form, on a one-step-per-station ramp, extrapolates the iteration itself — that is
+  item 5 (Anderson / NGMRES), not a path predictor.
+
+Reopen only for a march that converges each station (a ladder, or `steps_per_station` ≫ 1) at a spacing
+fine enough that `continuation_seed_error.py`'s `E1/E0` falls well below one.
+
 ## `jax.linearize` in place of the per-matvec `jax.jvp` — REFUTED, and it looks obviously right
 
 `solve/continuation.py`'s `shifted_jacobian` builds the Krylov matvec as

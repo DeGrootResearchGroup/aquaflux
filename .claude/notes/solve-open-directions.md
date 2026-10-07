@@ -32,7 +32,7 @@ matched at the march's hardest solve).
 
 So the two costs are coupled: the matvec is expensive because the matrix is expensive to build, and the
 preconditioner is stale because the matrix is expensive to build. Entries 1–2 tried to break that
-coupling and are closed (below): the coloured probe is already near the forward-mode floor. 3–6 attack the
+coupling and are closed (below): the coloured probe is already near the forward-mode floor. 4–6 attack the
 *number* of linear solves rather than their cost; 7–9 are platform and sweep-level levers.
 
 ---
@@ -43,26 +43,12 @@ Both were measured on 2026-10-07 and moved to `solve-refuted-directions.md` ("Lo
 of the coupled Jacobian…"). Local assembly gains ~1× to ~1.3× at best, not 15–30×, so the per-iterate
 build item 2 relied on is not cheap. The numbering below is kept so cross-references stay valid.
 
-## 3. Tangent-predictor continuation along the Reynolds ladder / homotopy
+## 3. CLOSED — tangent / secant predictor between continuation stations
 
-**What.** Each rung (or `ResidualHomotopy` station) currently seeds the next from the previous *root*
-with zero slope. Compute `dx/dλ = −J⁻¹ ∂R/∂λ` at the converged root — one linear solve with the
-operator you already have factored/preconditioned — and seed the next station at
-`x₀ + Δλ · dx/dλ`. A secant predictor from the last two roots costs nothing at all.
-
-**Why it should win.** The ledger's own evidence: rung 1 closed at `|R|` 7.2e-6 and rung 2 opened at
-4.5e-2, *six thousand times worse*. A first-order predictor makes the opening residual `O(Δλ²)`; most
-of the 12–16 "comfortable" β-ladder steps per rung are spent recovering exactly that loss. This is the
-single most natural lever in a differentiable solver and is absent from the notes.
-
-**What it does not change.** A seed is a seed; the converged state and its adjoint are unaffected.
-
-**Pre-registered measurement.** pitzDaily shipped ladder: opening `|R|` per rung, outer steps and
-cycles per rung, total wall; arms: no predictor / secant / tangent. Expect the tangent arm to cut rung
-2 and 3 steps by roughly half.
-
-**Risks.** A predictor overshoots across a bifurcation or a turning point in the ladder; the SER control
-already re-damps a bad step, so the downside is one wasted step.
+Measured on 2026-10-07 and moved to `solve-refuted-directions.md` ("Tangent / secant predictor between
+continuation stations"). It was already measured on the old ladder (worse at a decade). On the shipped
+one-step-per-station ramp an exact predictor changes the starting residual by −2.6 % to +12 %, for one
+extra linear solve per station.
 
 ## 4. Eisenstat–Walker forcing terms
 
@@ -167,7 +153,7 @@ their compile.
 **Caveats.** `RootSolver` reads residual norms back as Python numbers and refuses to run under
 `vmap`/`jit` by design (`steady_state_solving.md`); this needs a batched march driver with traced
 convergence masks — a new driver, not a wrapper. Members converging at different step counts waste
-work on the finished ones; pair with entry 3 so members start closer together.
+work on the finished ones; members starting closer together would help (entry 3, a predictor, is closed).
 
 ## 10. Nonlinear elimination of the ω stiffness
 
