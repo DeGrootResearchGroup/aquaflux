@@ -33,7 +33,7 @@ from aquaflux.radiation import (
 )
 from aquaflux.solids import Sphere
 
-from tests.unit.radiation_references import inward_box
+from tests.unit.radiation_references import inward_box, tilted
 
 LAMP_EXITANCE = 7.0
 REFLECTANCE = 0.6
@@ -169,6 +169,37 @@ def test_a_point_on_a_reflecting_wall_is_not_shadowed_by_the_facet_it_lies_on() 
     unshadowed = reflected(NoOcclusion(), None)
     np.testing.assert_allclose(reflected(RayCastOcclusion(), "walls"), unshadowed, rtol=1e-12)
     assert np.all(reflected(RayCastOcclusion(), None) < 0.5 * unshadowed)
+
+
+def test_a_point_inside_a_tilted_reflecting_facet_is_not_lit_by_that_facet() -> None:
+    # Off an axis-aligned plane, a point inside a facet's triangle sees that facet's corners at
+    # heights of rounding noise, and the gather can read it the whole hemisphere: the facet's own
+    # radiosity, at full strength. The reference moves each point a hair in front of its wall,
+    # where nothing is undecidable and its own facet is behind it.
+    triangles, top = _box_split()
+    triangles = tilted(triangles)
+    lamps = Surfaces.from_triangles(triangles[top], emission=LAMP_EXITANCE)
+    reflectors = Surfaces.from_triangles(
+        triangles[~top], solid_names=("walls",), diffuse_reflectance=REFLECTANCE
+    )
+    floor = np.isclose(np.asarray(reflectors.normal) @ np.asarray(lamps.normal)[0], -1.0)
+    points = subtriangle_centroids(np.asarray(reflectors.vertices)[floor], 3).reshape(-1, 3)
+    normals = np.tile(np.asarray(reflectors.normal)[floor][0], (len(points), 1))
+
+    def reflected(occlusion, at, on):
+        settings = RadiationSettings(receiver_quadrature=1, self_occlusion=occlusion)
+        scene = Scene(
+            lamps=lamps,
+            reflectors=reflectors,
+            surfaces={"floor": SurfaceReceivers(at, normals, reflector=on)},
+            settings=settings,
+        )
+        return solve_scene(scene).irradiance_reflected["floor"]
+
+    reference = reflected(NoOcclusion(), points + 1e-9 * normals, None)
+    np.testing.assert_allclose(reflected(NoOcclusion(), points, "walls"), reference, rtol=1e-6)
+    # The ray test takes the other path through the scene, which must leave the facets out too.
+    np.testing.assert_allclose(reflected(RayCastOcclusion(), points, "walls"), reference, rtol=1e-6)
 
 
 def test_the_wall_irradiance_is_the_same_however_many_points_a_pass_holds() -> None:

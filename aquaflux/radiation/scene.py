@@ -128,9 +128,12 @@ class SurfaceReceivers:
         arrives. Read for that and nothing else: whether the surface sends light back out is decided
         by :attr:`Scene.reflectors`.
     reflector : str or None
-        The body of :attr:`Scene.reflectors` the points lie on, if they lie on one. The facet of that
-        body nearest each point is then left out of the test of what shadows it, in which a ray from
-        another facet would otherwise end in that facet and be read as blocked.
+        The body of :attr:`Scene.reflectors` the points lie on, if they lie on one. The facets of that
+        body each point lies on -- the nearest, and any as near -- are then left out of the test of
+        what shadows it, in which a ray from another facet would otherwise end in that facet and be
+        read as blocked, and out of the reflected light gathered there, since a facet sends nothing
+        into its own plane. Unset on points that do lie on a reflector, a point inside a tilted
+        facet can read that facet's whole radiosity.
 
     Raises
     ------
@@ -470,8 +473,9 @@ def _irradiance(
     """Irradiance from ``sources`` at oriented points, a pass of points at a time.
 
     Each pass builds the mask for its own points and drops it, so memory is a pass's whatever the
-    number of points. ``own`` gives, per point, the facet of ``sources`` it lies on, which the shadow
-    test leaves out at the point's end of every ray.
+    number of points. ``own`` gives, per point, the facets of ``sources`` it lies on, as
+    :func:`_own_facets` returns them: the shadow test leaves them out at the point's end of every ray,
+    and the gather leaves them out as sources, since a facet lights nothing in its own plane.
     """
     pair_limit = _pair_limit(scene.settings)
     if not _casts_shadows(scene):
@@ -482,6 +486,7 @@ def _irradiance(
                 jnp.asarray(normals),
                 absorption=scene.absorption,
                 pair_limit=pair_limit,
+                receiver_facet=own,
             )
         )
     per_pass = receivers_per_pass(pair_limit, sources.n_facets * max(1, len(scene.occluders)))
@@ -491,14 +496,15 @@ def _irradiance(
         stop = min(start + per_pass, len(points))
         chunk = points[start:stop]
         facet = None if own is None else own[start:stop]
+        shadow_facet = facet
         if facet is not None and isinstance(options.get("self_occlusion"), SilhouetteOcclusion):
             # The clip projects its shares about one facet's normal: the nearest.
-            facet = facet[:, 0]
+            shadow_facet = facet[:, 0]
         visibility = build_visibility(
             scene.occluders,
             sources,
             chunk,
-            receiver_facet=facet,
+            receiver_facet=shadow_facet,
             pair_limit=pair_limit,
             **options,
         )
@@ -510,6 +516,7 @@ def _irradiance(
                 absorption=scene.absorption,
                 visibility=visibility,
                 pair_limit=pair_limit,
+                receiver_facet=facet,
             )
         )
     return out

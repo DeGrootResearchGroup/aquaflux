@@ -19,6 +19,7 @@ from aquaflux.radiation.gather import (
     summed_fluence_rate,
 )
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian
+from aquaflux.radiation.scene import subtriangle_centroids
 from aquaflux.radiation.subdivide import refine_for_receivers
 from aquaflux.radiation.surfaces import Surfaces
 from scipy.integrate import quad
@@ -28,7 +29,9 @@ from tests.unit.radiation_references import (
     cylinder_triangles,
     disc_triangles,
     finite_line_fluence_rate,
+    inward_box,
     rectangle_triangles,
+    tilted,
 )
 
 POWER = 100.0
@@ -261,6 +264,86 @@ def test_a_facet_cannot_illuminate_what_is_behind_it():
     behind = float(direct_fluence_rate(surfaces, np.array([[0.0, 0.0, -1.0]]))[0])
     assert in_front > 0.0
     assert behind == 0.0
+
+
+def _points_on_own_facets(surfaces: Surfaces, per_side: int):
+    """Points spread over each facet, with that facet's normal and index, one row per point."""
+    points = subtriangle_centroids(np.asarray(surfaces.vertices), per_side)
+    per_facet = points.shape[1]
+    normals = np.repeat(np.asarray(surfaces.normal)[:, None, :], per_facet, axis=1)
+    own = np.repeat(np.arange(surfaces.n_facets), per_facet)
+    return points.reshape(-1, 3), normals.reshape(-1, 3), own
+
+
+def test_a_point_on_a_tilted_facet_is_lit_by_the_others_and_not_by_its_own_facet():
+    """A facet sends nothing into its own plane, so a point on it is lit by the rest alone.
+
+    The reference moves each point a hair in front of its facet, where every height the clip asks
+    about is decidable and the own facet lies behind the receiver. Left in the sum at the point
+    itself, the own facet's corners sit at heights of rounding noise off an axis-aligned plane, and
+    the projected solid angle can come back as the whole hemisphere: ``E`` gains the facet's own
+    exitance.
+    """
+    triangles = tilted(inward_box(3))
+    # Every facet emits, each at its own exitance, so a wrong facet left out or let in shows.
+    exitance = 1.0 + np.arange(len(triangles)) / len(triangles)
+    surfaces = Surfaces.from_triangles(triangles, emission=exitance)
+    points, normals, own = _points_on_own_facets(surfaces, 4)
+    hair = 1e-9
+    reference = direct_irradiance(surfaces, points + hair * normals, normals)
+    on_facet = direct_irradiance(surfaces, points, normals, receiver_facet=own)
+    np.testing.assert_allclose(np.asarray(on_facet), np.asarray(reference), rtol=1e-6)
+    # Without naming the facets, points do read their own facet's light: the case is reached.
+    unnamed = np.asarray(direct_irradiance(surfaces, points, normals)) - np.asarray(reference)
+    assert np.sum(np.isclose(unnamed, exitance[own], rtol=1e-6)) > len(points) // 4
+
+
+def test_every_facet_a_row_names_is_left_out_and_a_minus_one_names_none():
+    """A point on a shared edge lies on several facets, so a row may name several, padded by -1.
+
+    Naming a second facet that does light the point must remove exactly that facet's share, which
+    is checked against the gather of that facet alone; a ``-1`` must remove nothing.
+    """
+    triangles = tilted(inward_box(3))
+    exitance = 1.0 + np.arange(len(triangles)) / len(triangles)
+    surfaces = Surfaces.from_triangles(triangles, emission=exitance)
+    points, normals, own = _points_on_own_facets(surfaces, 2)
+    # The points on one face of the box, and a facet of the face opposite, which lights them all.
+    facing = np.asarray(surfaces.normal) @ np.asarray(surfaces.normal)[0]
+    on_face = np.isclose(facing[own], 1.0)
+    points, normals, own = points[on_face], normals[on_face], own[on_face]
+    second = int(np.argmin(facing))
+    hair = 1e-9
+    reference = np.asarray(direct_irradiance(surfaces, points + hair * normals, normals))
+    only = np.zeros(len(triangles))
+    only[second] = exitance[second]
+    share = np.asarray(
+        direct_irradiance(surfaces.with_optics(emission=jnp.asarray(only)), points, normals)
+    )
+    assert np.all(share > 1e-3 * reference)
+    rows = np.stack([own, np.full_like(own, second), np.full_like(own, -1)], axis=1)
+    both = direct_irradiance(surfaces, points, normals, receiver_facet=rows)
+    np.testing.assert_allclose(np.asarray(both), reference - share, rtol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "receiver_facet",
+    [
+        np.zeros(2, dtype=int),
+        np.zeros((2, 3), dtype=int),
+        np.array([5, 0, 0]),
+        np.array([0.0, 0.0, 0.0]),
+    ],
+)
+def test_naming_facets_that_are_not_one_row_per_point_or_not_facets_is_refused(receiver_facet):
+    surfaces = Surfaces.from_triangles(
+        rectangle_triangles([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), emission=1.0
+    )
+    points = np.tile([0.2, 0.2, 1.0], (3, 1))
+    with pytest.raises(ValueError, match="receiver_facet must"):
+        direct_irradiance(
+            surfaces, points, np.tile([0.0, 0.0, 1.0], (3, 1)), receiver_facet=receiver_facet
+        )
 
 
 @pytest.mark.parametrize(("radius", "height"), [(1.0, 1.0), (1.0, 0.25), (4.0, 0.5)])

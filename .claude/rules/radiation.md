@@ -129,6 +129,11 @@ deliberately **not** in the kernel, which knows nothing about matrices.
 A receiver coplanar with a facet but *outside* it correctly contributes nothing, so coplanar
 neighbours on the same wall need no special handling.
 
+⚠️ **The same convention binds the GATHER at a receiver lying ON an emitting facet**, and there it is
+honoured by `direct_irradiance(..., receiver_facet=)` leaving those facets out — not by the kernel and
+not by the emitter's cosine gate, both of which read rounding noise there off an axis-aligned plane
+(measured in "THE SCENE" below).
+
 ## Testing
 
 `tests/unit/test_solid_angle.py`, with references in `tests/unit/radiation_references.py`.
@@ -4364,10 +4369,34 @@ radiation **case file** builds (`.claude/rules/case.md` → Radiation cases); th
   5 % of `lamp_samples` 1's error against the 12-point transfer (lamp light averaged, not sampled once),
   wall irradiance = a direct gather of the solved radiosity, pass size changes nothing (1e-13) with a
   sphere shadowing, medium power, sub-triangle centroids.
-- ⚠️ **A point on a reflecting surface is NOT lit by its own facet, and no exclusion is needed for that**
-  — the first version masked it out and its test showed the mask did nothing: a point a rounding in front
-  of its facet is behind the receiver half-space, a point a rounding behind is behind the (dark-behind)
-  emitter, and exactly in-plane the emitter cosine is 0. What DOES need the facet is the **ray test**:
+- ⚠️ **A point on a reflecting surface IS lit by its own facet unless that facet is left out of the
+  gather, and the argument that it is not was measured only on axis-aligned walls (2026-10-07).** The
+  first version masked it out, its test (an axis-aligned box) showed the mask did nothing, and the mask
+  was dropped on the reasoning "in front -> behind the receiver half-space, behind -> behind the emitter,
+  exactly in-plane -> emitter cosine 0". On an axis-aligned plane the in-plane heights round to exact
+  zero and that holds. **Off one it does not**: the corners' heights round to ~1e-17 of either sign,
+  `clipping.decidable_heights` cannot always snap them, the clip keeps the in-plane triangle and the
+  contour integral returns the full hemisphere; and `Lambertian.radiance_per_exitance_at` gates on
+  `cos > 0`, which rounding noise passes about half the time. Measured: `inward_box(3)` floor, rotated
+  by Euler `(0.3, 0.7, 0.2)` and shifted, `emission=1`, `direct_irradiance` at
+  `subtriangle_centroids(vertices, 4)` with each facet's own normal: **51-67 % of the points read
+  `E = 1`** (the full exitance; which share depends on the exact rotation convention and shift); at the centroids 0 (the zero-direction
+  guard in `_emitter_direction`), axis-aligned 0. Face-centre receivers (every radiation case file) sit
+  on the shared apex of their centre-fan triangles and read 0 — by luck, not design.
+  **FIX (decided 2026-10-07): exclude the receiver's own facets as SOURCES in the gather**, by
+  `direct_irradiance(..., receiver_facet=)` — `(n_points,)` or `(n_points, k)` rows, `-1` padding, the
+  same form `build_visibility` takes — and `scene._irradiance` passes `_own_facets`' rows to it on BOTH
+  paths (unshadowed and per-pass masked). **Rejected: offsetting the points a hair in front of their
+  facet** (what the #604 step-1 work, not on main when this was decided, did for lamp light on lamp facets, `1e-12` of the scene's
+  size). It is correct only while the offset clears `clipping._SLACK`'s band at that facet's size, so it
+  silently couples a scene-scale constant to the clip's rounding tolerance; exclusion is exact (a flat
+  facet sends nothing into its own plane), needs no length scale, and is the transfer's `F_ii = 0`
+  convention applied in the gather. A #604 lamp-on-lamp case should pass `receiver_facet` too rather than
+  carry the offset. Pinned by `test_a_point_on_a_tilted_facet_is_lit_by_the_others_and_not_by_its_own_facet`
+  and `test_every_facet_a_row_names_is_left_out_and_a_minus_one_names_none` (gather; the reference is
+  the same points 1e-9 in front, unnamed) and `test_a_point_inside_a_tilted_reflecting_facet_is_not_lit_by_that_facet`
+  (scene, both paths); each mutation-checked, `tests/unit/radiation_references.tilted` is the fixture.
+  What ALSO needs the facet is the **ray test**:
   a ray from any other facet ends in the facet under the point and `RayCastOcclusion` counts that (far end
   inclusive) — the "two exclusions" defect below. So `SurfaceReceivers.reflector` names the body, and
   `_own_facets` passes **every** facet of it the point lies on (ties within 1e-12 of the body's extent)
