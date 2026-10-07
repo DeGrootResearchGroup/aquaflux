@@ -2,6 +2,7 @@
 paths:
   - "aquaflux/solve/march.py"
   - "aquaflux/solve/march_log.py"
+  - "aquaflux/solve/march_history.py"
   - "aquaflux/solve/checkpoint.py"
 ---
 
@@ -17,6 +18,21 @@ paths:
 > auto-loaded tree — never a `paths:`-less file in `.claude/rules/`, which loads always) and
 > leave a current-status summary here, following the pattern in `solve-flow-block.md` /
 > `solve-flow-block-log.md`. See `solve.md`'s "Where new content goes".
+
+## `StepHistory` — the per-step record for a program to read (BUILT 2026-10-05)
+
+`march_history.py::StepHistory(path, clock=)` is an `on_checkpoint(report, state)` observer writing one
+CSV row per observed step: `step` (1-based, counting on across continuation segments), `seconds`
+(since construction, injected clock), every `StepReport` field under its own name with the report's
+own `step` renamed `segment_step` (it restarts per segment), and `restart_cycles`. Floats are written
+by `repr` (exact round trip), booleans as 0/1, and NumPy/JAX scalars are unwrapped with `.item()`
+first — **a `np.float64` IS a `float` subclass and its repr in NumPy 2 is `np.float64(0.1)`**, which is
+what that unwrap prevents. Header and each row are flushed as written, so a viewer or monitor can read
+an unfinished run. It is the machine-readable sibling of `MarchLogger` (which formats for a person),
+not a replacement: the case runner writes both (`Outputs.log`, `Outputs.history`, default
+`history.csv`), and `aquaflux_ui` plots the history. `COLUMNS` is derived from
+`StepReport._fields`, so a field added to the report reaches the file without an edit here.
+Pinned by `tests/unit/test_march_history.py` (six targeted mutations each turn it red).
 
 ## The observed march — newton_march, triggers, controls, logging
 

@@ -295,3 +295,26 @@ def tetrahedral_grid_3d(n: int, *, perturb: float = 0.0, seed: int = 0) -> Mesh:
     return Mesh.from_faces(
         jnp.asarray(coords), faces, jnp.asarray(owner), jnp.asarray(neighbour), len(cells)
     )
+
+
+def hexahedron_beside_a_prism():
+    """Two cells of different kinds -- the fixture with a hexahedron AND a polyhedron.
+
+    A unit cube at ``x in [0, 1]`` sharing its ``x = 1`` face with a triangular prism beyond it.
+
+    The smallest mesh on which a writer must give one cell a standard type and the other its face
+    stream, so an index that confuses the two kinds of cell has somewhere to go wrong.
+    """
+    coords = [
+        [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+        [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1],
+        [2, 0, 0], [2, 0, 1],
+    ]  # fmt: skip
+    faces = [
+        [1, 2, 6, 5],  # shared, x = 1
+        [0, 3, 7, 4], [0, 1, 5, 4], [3, 2, 6, 7], [0, 1, 2, 3], [4, 5, 6, 7],  # the cube's others
+        [1, 8, 9, 5], [2, 8, 9, 6], [1, 2, 8], [5, 6, 9],  # the prism's others
+    ]  # fmt: skip
+    owner = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1]
+    neighbour = [1, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+    return Mesh.from_faces(np.asarray(coords, dtype=float), faces, owner, neighbour, 2)

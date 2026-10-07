@@ -446,8 +446,8 @@ def test_a_lamp_on_a_two_dimensional_mesh_is_refused(tmp_path) -> None:
 def test_a_lamp_is_a_wall_to_the_flow() -> None:
     lamp = Lamp(profile=LambertianProfile(), power=1.0)
     assert lamp.flow_closure() == Wall().flow_closure()
-    assert lamp.radiation_settings() == ("profile", "power")
-    assert Wall(reflectance=0.2).radiation_settings() == ("reflectance",)
+    assert lamp.settings_in("radiation") == ("profile", "power")
+    assert Wall(reflectance=0.2).settings_in("radiation") == ("reflectance",)
     assert IesProfile(file="x.ies", up=(0.0, 0.0, 1.0)).can_state_power
     assert isinstance(Radiation().receivers.cells, bool)
 

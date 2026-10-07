@@ -153,6 +153,7 @@ from .march import (
     newton_march,
     refuse_a_transform_the_march_cannot_run_in,
 )
+from .march_history import StepHistory
 from .march_log import MarchLogger, combine_metrics, field_change_metrics
 from .saddle_multigrid import (
     SimpleSmoothedInverse,
@@ -362,6 +363,7 @@ __all__ = [
     "StateCheckpointer",
     "StepAcceptance",
     "StepControl",
+    "StepHistory",
     "StepOutcome",
     "StepReport",
     "SubLayout",

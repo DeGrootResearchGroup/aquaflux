@@ -18,7 +18,6 @@ fluid:
 
 physics:
   kind: RANS
-  advection: {kind: FirstOrderUpwind}
 
 boundaries:
   bottom: {kind: Wall, k: zero}
@@ -26,6 +25,7 @@ boundaries:
 
 numerics:
   momentum_advection: {kind: LimitedUpwind}
+  turbulence_advection: {kind: FirstOrderUpwind}
   gradient: {kind: CompactGreenGauss}
 
 drive: {kind: BulkVelocity, target: 1.0, direction: x, initial_force: 0.004}

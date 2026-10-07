@@ -28,6 +28,7 @@ from __future__ import annotations
 import abc
 import dataclasses
 from collections.abc import Callable
+from typing import ClassVar
 
 import jax
 import jax.numpy as jnp
@@ -186,6 +187,9 @@ class ScalarTwoLevel(ScalarBlock):
 
     v_cycles: int | None = None
 
+    #: Where an unset setting takes its default from (read by the case-file schema).
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (ConvectionAmgPreconditioner,)
+
     def _build(
         self,
         operator: Callable[[], sp.csr_matrix],
@@ -213,6 +217,9 @@ class ScalarAir(ScalarBlock):
     """
 
     v_cycles: int | None = None
+
+    #: Where an unset setting takes its default from (read by the case-file schema).
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (AirAmgPreconditioner,)
 
     def _build(
         self,

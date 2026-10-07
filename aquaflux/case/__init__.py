@@ -6,7 +6,6 @@ A case file is a YAML document naming each part of a case as plain settings::
     fluid: {density: 1.0, kinematic_viscosity: 1.0e-5}
     physics:
       kind: RANS
-      advection: {kind: FirstOrderUpwind}
       omega_variable: {kind: LogScalars}
     boundaries:
       inlet:
@@ -18,6 +17,7 @@ A case file is a YAML document naming each part of a case as plain settings::
       lowerWall: {kind: Wall}
     numerics:
       momentum_advection: {kind: LimitedUpwind, limiter: {kind: VenkatakrishnanLimiter}}
+      turbulence_advection: {kind: FirstOrderUpwind}
 
 :func:`read_case` reads one into a :class:`CaseSpec`, refusing any setting that is unknown, misspelt,
 of the wrong form or inconsistent with the rest of the case, with the path to it.
@@ -66,7 +66,7 @@ from .boundaries import (
     PatchCondition,
     Wall,
 )
-from .case_file import CaseFile, CheckedCase, read_case, write_case
+from .case_file import CaseFile, CheckedCase, read_case, read_case_document, write_case
 from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
 from .mesh_source import AxisGrading, GeometricGrading, MeshSource, OpenFOAMMesh, StructuredGrid
@@ -103,7 +103,14 @@ from .solver import (
     ViscosityRamp,
     solver_for,
 )
-from .spec import CaseSpec, Numerics, case_spec_from_mapping, case_spec_to_mapping
+from .spec import (
+    CaseSpec,
+    Numerics,
+    case_schema,
+    case_spec_from_mapping,
+    case_spec_to_mapping,
+    mesh_source_from_mapping,
+)
 
 __all__ = [
     "RANS",
@@ -166,10 +173,13 @@ __all__ = [
     "ViscosityRamp",
     "Vtk",
     "Wall",
+    "case_schema",
     "case_spec_from_mapping",
     "case_spec_to_mapping",
+    "mesh_source_from_mapping",
     "prepare_run",
     "read_case",
+    "read_case_document",
     "solver_for",
     "write_case",
 ]

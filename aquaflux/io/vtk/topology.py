@@ -11,6 +11,14 @@ types that take exactly that shape:
 - **``VTK_POLYGON`` (type 7)**, in two dimensions, is the cell's ordered vertex ring -- a short walk
   around the cell's two-node edge faces.
 
+One standard type is recognized as well, because it is most of the cells of most meshes: a
+three-dimensional cell bounded by six quadrilaterals with eight distinct vertices is combinatorially
+a cube (Euler's formula leaves it no other shape), so it is written as a **``VTK_HEXAHEDRON``
+(type 12)** -- eight vertices in VTK's order, and no face stream. That matters to whatever reads the
+file rather than to the file's meaning: a viewer's cutting, thresholding and surface filters take a
+general path for a polyhedron, triangulating it face by face, and a direct one for a hexahedron, and
+the face stream of a hexahedral cell costs 31 integers against 8. Every other cell stays a polyhedron.
+
 This module turns a :class:`~aquaflux.mesh.Mesh` into the arrays those cell types are written from.
 It is eager NumPy throughout: writing a file never happens inside a compiled solve, and the per-cell
 face counts are ragged, so the index arithmetic is build-time work like the mesh assembly itself.
@@ -64,8 +72,10 @@ if TYPE_CHECKING:  # pragma: no cover
     from aquaflux.mesh import Mesh
 
 #: VTK cell type ids. A two-dimensional cell is an arbitrary polygon, a three-dimensional one an
-#: arbitrary polyhedron -- the two types that are defined by exactly what the mesh stores.
+#: arbitrary polyhedron -- the two types that are defined by exactly what the mesh stores -- unless it
+#: is a hexahedron, the one standard type recognized.
 VTK_POLYGON = 7
+VTK_HEXAHEDRON = 12
 VTK_POLYHEDRON = 42
 
 #: How far a periodic seam node's translated position may lie from the node it is matched to, as a
@@ -89,21 +99,25 @@ class VtkCells(NamedTuple):
     connectivity : np.ndarray of int
         Each cell's point ids, concatenated. For a polygon these are the ordered vertex ring; for a
         polyhedron they are the cell's point *set* (ascending), since its topology is carried by
-        :attr:`faces` instead.
+        :attr:`faces` instead; for a hexahedron, its eight vertices in VTK's order -- a ring whose
+        right-hand normal points into the cell, then the vertex joined by an edge to each of them.
     offsets : np.ndarray of int, shape ``(n_cells,)``
         The **end** index of each cell's slice of :attr:`connectivity` -- the convention the VTK XML
         format uses, which is a cumulative count rather than the ``n + 1`` row pointer a CSR array
         would carry.
     types : np.ndarray of uint8, shape ``(n_cells,)``
-        The VTK cell type per cell: :data:`VTK_POLYGON` or :data:`VTK_POLYHEDRON`.
+        The VTK cell type per cell: :data:`VTK_POLYGON`, :data:`VTK_HEXAHEDRON` or
+        :data:`VTK_POLYHEDRON`.
     faces : np.ndarray of int or None
-        The polyhedron face stream, three dimensions only (``None`` in two). Per cell: the number of
+        The polyhedron face stream, present only when some cell is a polyhedron (``None`` in two
+        dimensions, and in three when every cell is a hexahedron). Per polyhedron: the number of
         faces, then for each face its node count followed by that face's point ids, wound outward
         from this cell. The ids are **global point ids**, not positions within
-        :attr:`connectivity`.
+        :attr:`connectivity`. Cells of other types contribute nothing to it.
     face_offsets : np.ndarray of int or None
-        The end index of each cell's slice of :attr:`faces`, same convention as :attr:`offsets`
-        (``None`` in two dimensions). Written under the name ``faceoffsets``.
+        The end index of each polyhedron's slice of :attr:`faces`, same convention as
+        :attr:`offsets`, and ``-1`` for a cell of any other type; ``None`` exactly when
+        :attr:`faces` is. Written under the name ``faceoffsets``.
     """
 
     points: np.ndarray
@@ -444,14 +458,84 @@ def build_vtk_cells(mesh: Mesh) -> VtkCells:
     index = index_dtype(max(n_cells + entries.cell.shape[0] + ring_slots, n_nodes, 1))
 
     rings = _entry_rings(mesh, entries, index)
-    if mesh.dim == 3:
-        connectivity, offsets = _polyhedron_connectivity(entries, rings, n_cells, n_nodes)
-        faces, face_offsets = _polyhedron_faces(entries, rings, n_cells, index)
-        cell_type = VTK_POLYHEDRON
-    else:
+    if mesh.dim != 3:
         connectivity, offsets = _polygon_connectivity(entries, rings, n_cells, n_nodes)
-        faces, face_offsets = None, None
-        cell_type = VTK_POLYGON
+        types = np.full(n_cells, VTK_POLYGON, dtype=np.uint8)
+        return VtkCells(points, connectivity, offsets, types, None, None)
 
-    types = np.full(n_cells, cell_type, dtype=np.uint8)
+    connectivity, offsets = _polyhedron_connectivity(entries, rings, n_cells, n_nodes)
+    hexahedra, vertices = _hexahedron_vertices(entries, rings, offsets)
+    # A hexahedron has exactly eight points either way, so its slice of the connectivity is already
+    # the right length; only the order within it changes.
+    starts = offsets[hexahedra] - 8
+    connectivity[starts[:, None] + np.arange(8)] = vertices
+    types = np.where(hexahedra, VTK_HEXAHEDRON, VTK_POLYHEDRON).astype(np.uint8)
+    faces, face_offsets = _polyhedron_faces(entries, rings, n_cells, index)
+    faces, face_offsets = _drop_faces_of(hexahedra, faces, face_offsets)
     return VtkCells(points, connectivity, offsets, types, faces, face_offsets)
+
+
+def _hexahedron_vertices(
+    entries: _CellFaceEntries, rings: _EntryRings, point_offsets: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Which cells are hexahedra, and each one's eight vertices in VTK's order.
+
+    A cell qualifies when it has six faces, every one a quadrilateral, and eight distinct points: a
+    closed surface of six quadrilaterals has twelve edges, so eight vertices is exactly Euler's count
+    for a cube, and each vertex then lies on three faces and three edges. The ordering follows from
+    the outward winding every entry's ring already has. The first face, read backwards, is a ring
+    whose right-hand normal points into the cell -- VTK's vertices 0-3. Each of those vertices
+    starts one directed edge in each of its three faces' outward rings, two of which run along the
+    first face; the third leaves it, and its far end is the vertex opposite (VTK's 4-7).
+
+    Returns
+    -------
+    hexahedra : np.ndarray of bool, shape ``(n_cells,)``
+        Whether each cell is written as a hexahedron.
+    vertices : np.ndarray of int, shape ``(n_hexahedra, 8)``
+        Their vertices, in cell order.
+    """
+    n_cells = entries.counts.shape[0]
+    point_counts = np.diff(point_offsets, prepend=0)
+    quads = np.bincount(entries.cell, weights=rings.counts == 4, minlength=n_cells)
+    candidate = np.flatnonzero((entries.counts == 6) & (quads == 6) & (point_counts == 8))
+
+    slot_start = np.cumsum(rings.counts) - rings.counts
+    entry = entries.first[candidate][:, None] + np.arange(6)
+    ring = rings.node[slot_start[entry][..., None] + np.arange(4)]  # (n, 6 faces, 4 nodes)
+    tail = ring.reshape(-1, 24)
+    head = np.roll(ring, -1, axis=2).reshape(-1, 24)
+
+    base = ring[:, 0, ::-1]
+    off_base = ~np.any(head[:, :, None] == base[:, None, :], axis=2)
+    # For each base vertex, the outward edges that start at it and leave the base face.
+    leaving = (tail[:, None, :] == base[:, :, None]) & off_base[:, None, :]
+    opposite = np.take_along_axis(head, np.argmax(leaving, axis=2), axis=1)
+
+    vertices = np.concatenate([base, opposite], axis=1)
+    ordered = np.sort(vertices, axis=1)
+    # Anything short of a cube's incidence -- a vertex with no edge leaving the base, or two base
+    # vertices sharing an opposite one -- stays a polyhedron rather than being guessed at.
+    sound = np.all(leaving.sum(axis=2) == 1, axis=1) & np.all(
+        ordered[:, 1:] != ordered[:, :-1], axis=1
+    )
+
+    hexahedra = np.zeros(n_cells, dtype=bool)
+    hexahedra[candidate[sound]] = True
+    return hexahedra, vertices[sound]
+
+
+def _drop_faces_of(
+    excluded: np.ndarray, faces: np.ndarray, face_offsets: np.ndarray
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """The face stream with the excluded cells' blocks removed, and ``-1`` as their offset.
+
+    Returns ``(None, None)`` when every cell is excluded: a file with no polyhedron carries no face
+    stream at all.
+    """
+    if np.all(excluded):
+        return None, None
+    blocks = np.diff(face_offsets, prepend=0)
+    kept = np.where(excluded, 0, blocks)
+    offsets = np.where(excluded, -1, np.cumsum(kept, dtype=face_offsets.dtype))
+    return faces[np.repeat(~excluded, blocks)], offsets.astype(face_offsets.dtype)

@@ -82,6 +82,40 @@ whose default is compared by `!=` must compare by value — an array-valued fiel
 rule; none exists today. (There is no `BlockDiagonal.method`; an earlier version of this paragraph
 cited one as its example.)
 
+**`SettingsMapping.schema()` (2026-10-05) publishes the per-field rules as plain JSON-able data** — every
+kind, its fields, each field's `accepts` alternatives (`null` / `boolean` / `integer` / `number` / `string`
+/ `choice{values}` / `nested{kinds}` / `list{of}` / `table{of}`), `required`, `default` (encoded as
+`to_mapping` writes it; omitted when not plain data) and `doc` (the field's entry in its class's NumPy
+`Attributes` section, `_attribute_docs`). Each `_atoms` alternative has a `schema()` beside its `accepts`
+/ `describe`, so **the description a form edits by and the check a file is read by come from one parse of
+the annotations and cannot drift** — the browser interface's case editor builds every dropdown from it
+(`aquaflux schema`, `case.md`). `nested.kinds` is in REGISTRATION order (a form lists them as the registry
+does), unlike `describe`'s sorted list. Pinned by `tests/unit/test_settings_schema.py`.
+
+**Three class-level declarations a kind may make for the schema (2026-10-06, for the case editor's help
+and defaults), each a `ClassVar` read by `getattr` so a kind declaring none is unchanged:**
+- **`unset_resolves_to`** — the callables (classes or functions) a `None` setting falls through to,
+  searched IN ORDER for a parameter of the field's name (a `**` gatherer moves on to the next; a dataclass
+  factory default is built, since the signature shows only `<factory>`). The schema then reports
+  `resolved_default` (encoded; skipped when not plain data or `None`) and, when the field has no help of
+  its own, the parameter's `Parameters`/`Attributes` entry. This is what keeps the `SettingsValue`
+  convention — every default written once, on the CONSUMER — while a form can still state it. On the block
+  inverses it is also the build: `_inverse_class()` is `unset_resolves_to[0]`, so the declaration cannot
+  drift from what is built. Measured 2026-10-06: of 165 `None`-default case-file fields, 62 resolve this
+  way, 24 are off, 79 stay "not set" (path- or case-dependent, or a default only an inline literal holds).
+  ⚠️ **A target is only right if no call site overrides it**: `BlockDiagonal` is NOT linked to
+  `BlockPreconditioner.build`, because the coupled march overrides its `velocity` and
+  `strength_threshold` inline, so the build's defaults would be reported wrongly.
+- **`unset_means_off`** — field names whose `None` turns the feature off; reported as `"off": true`.
+- **`not_settings`** — fields that are the value's own cache (`MultipleCorrectionGradient.prepared`,
+  `ShaftCulling.sources`): left out of the schema, `to_mapping` and `from_mapping` (a file naming one is
+  refused), all through one `_settings(kind)` filter. `init=False` was tried first and is unusable: an
+  equinox field with `init=False` drops out of the pytree, so `eqx.tree_at` cannot fill it.
+- **Help is an entry's FIRST PARAGRAPH**, read through the whole MRO (`_attribute_docs`, so a base
+  class's `Attributes` documents the fields it declares); later paragraphs are reference-only detail.
+  Pinned, with every declaration checked against the real registry, by
+  `test_every_case_file_kinds_declarations_name_real_fields_and_readable_targets`.
+
 **Three additions for the case file (2026-09-24, #437), all generic:**
 - **A table** — a field annotated `Mapping[str, X]` holds entries named by the *file* (a boundary
   condition per patch), written as a mapping of those entries and read back as a read-only

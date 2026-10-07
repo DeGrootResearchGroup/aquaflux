@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable
-from typing import NamedTuple, Protocol
+from typing import ClassVar, NamedTuple, Protocol
 
 import equinox as eqx
 import jax
@@ -1395,6 +1395,10 @@ class DualTimeLoop(SettingsValue):
     inner_tol: float | None = None
     cycle_budget: int | None = None
     refresh_on_cycles: int | None = None
+
+    #: Where an unset setting takes its default from (read by the case-file schema).
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (DualTimeStep,)
+    unset_means_off: ClassVar[tuple[str, ...]] = ("cycle_budget", "refresh_on_cycles")
 
     def __post_init__(self) -> None:
         if self.inner_steps is not None and self.inner_steps < 2:

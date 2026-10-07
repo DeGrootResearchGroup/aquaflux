@@ -7,6 +7,7 @@ of the march as it goes, and writes:
 
 * the converged fields, by each of the section's field writers;
 * the log, one row per outer step, also echoed to the terminal;
+* the history, the same steps as a comma-separated-values file for a program to read;
 * the checkpoints, when asked for;
 * ``case.yaml``, the case as it ran -- the solver written out even when the file left it to the
   default -- and ``run.yaml``, a record of the run: the aquaflux version and commit, when it ran,
@@ -34,11 +35,11 @@ import equinox as eqx
 import yaml
 
 import aquaflux
-from aquaflux.solve import MarchLogger, StateCheckpointer, StepReport
+from aquaflux.solve import MarchLogger, StateCheckpointer, StepHistory, StepReport
 
 from .case_file import CaseFile, CheckedCase, read_case, write_case
 from .outputs import RunFields
-from .paths import with_paths
+from .paths import relocated
 from .solver import NotConverged, SolverSpec, solver_for
 from .spec import CaseSpec
 
@@ -123,13 +124,14 @@ class PreparedRun:
         started = datetime.datetime.now(datetime.UTC)
         clock = time.perf_counter()
         log = None if outputs.log is None else (self.directory / outputs.log).open("w")
+        history = None if outputs.history is None else StepHistory(self.directory / outputs.history)
         try:
             stream = _Tee([terminal, *([] if log is None else [log])])
             stream.write(f"aquaflux {aquaflux.__version__}: {self.source}\n")
             stream.write(f"  solver: {type(self.solver).__name__}; writing to {self.directory}\n")
             problem = self.checked.build()
             logger = MarchLogger(stream, fields=spec.physics.progress_fields(problem))
-            steps = _StepCount(
+            checkpointer = (
                 None
                 if outputs.checkpoints is None
                 else StateCheckpointer(
@@ -138,6 +140,7 @@ class PreparedRun:
                     keep=outputs.checkpoints.keep,
                 )
             )
+            steps = _StepCount([recorder for recorder in (history, checkpointer) if recorder])
             observers = self.solver.observers_for(logger, steps)
             converged, message, written, results = True, None, [], {}
             try:
@@ -159,6 +162,8 @@ class PreparedRun:
                     )
             if log is not None:
                 written.append(self.directory / outputs.log)
+            if history is not None:
+                written.append(history.path)
             if outputs.checkpoints is not None and steps.count:
                 written.append(self.directory / _CHECKPOINTS)
             written.append(self._write_case_record())
@@ -181,6 +186,8 @@ class PreparedRun:
         finally:
             if log is not None:
                 log.close()
+            if history is not None:
+                history.close()
 
     @property
     def checked_directory(self) -> Path:
@@ -193,12 +200,8 @@ class PreparedRun:
         The solver is written out whether the file stated it or left it to the default, so the record
         says what ran rather than what was omitted.
         """
-        base, here = self.checked_directory, self.directory
-
-        def rebased(path: str) -> str:
-            return path if os.path.isabs(path) else os.path.relpath(base / path, here)
-
-        spec = with_paths(self.checked.spec, rebased)
+        here = self.directory
+        spec = relocated(self.checked.spec, self.checked_directory, here)
         recorded = dataclasses.replace(
             spec,
             solver=self.solver,
@@ -305,18 +308,21 @@ class _Tee:
 
 
 class _StepCount:
-    """Counts the march's steps and keeps its last residual, forwarding each step to the checkpoints."""
+    """Counts the march's steps and keeps its last residual, forwarding each step to its recorders.
 
-    def __init__(self, checkpointer: StateCheckpointer | None) -> None:
-        self._checkpointer = checkpointer
+    A recorder is anything with ``on_checkpoint(report, state)`` -- the history, the checkpoints.
+    """
+
+    def __init__(self, recorders: Sequence[StepHistory | StateCheckpointer]) -> None:
+        self._recorders = tuple(recorders)
         self.count = 0
         self.residual: float | None = None
 
     def on_checkpoint(self, report: StepReport, state: object) -> None:
         self.count += 1
         self.residual = float(report.residual_norm)
-        if self._checkpointer is not None:
-            self._checkpointer.on_checkpoint(report, state)
+        for recorder in self._recorders:
+            recorder.on_checkpoint(report, state)
 
 
 def _checkout_state() -> tuple[str | None, bool | None]:
