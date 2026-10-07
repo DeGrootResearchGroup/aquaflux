@@ -45,7 +45,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `mirrors.py` — `Mirror` (a plane, its aperture facets, reflection and the image of a surface set) and `planar_mirrors` (a body's facets grouped by plane); the reflectance split on `Surfaces` (#537 PR 1, 2026-10-05) | **BUILT** (the model carries specular bodies since PR 3a, shadowed since PR 3b) |
 | `mirror_visibility.py` — `MirrorVisibility` / `build_mirror_visibility` / `build_mirror_masks`: what stands across each path reflected in one mirror, both legs, per body counted 0/1/2 (#537 PR 3b) | **BUILT** |
 | `units.py` — lamp watts to exitance, ultraviolet transmittance to absorbance | **BUILT** |
-| `scene.py` — `Scene` / `solve_scene` / `SceneSolution`: lamps KEPT OUT of the transfer (any profile, incl. IES), reflecting surfaces, bodies, medium, `VolumeReceivers` and named `SurfaceReceivers`; what a radiation case file builds (2026-10-05) | **BUILT** |
+| `scene.py` — `Scene` / `solve_scene` / `SceneSolution`: lamps' EMISSION kept out of the transfer (any profile, incl. IES) while their areal facets EXCHANGE reflected light (reflect by `diffuse_reflectance`, shadow, absorb; #604 step 1, 2026-10-07), reflecting surfaces, bodies, medium, `VolumeReceivers` and named `SurfaceReceivers`; what a radiation case file builds (2026-10-05) | **BUILT** |
 
 There is no separate optical-depth piece to build: the voxel-grid traversal is `VoxelAbsorption` in
 `absorption.py`, exact along each segment (trilinear field, Simpson per cell).
@@ -290,8 +290,10 @@ it, and the `Profile` methods changed from `(cos_theta)` to `(direction, normal)
   its slice field -- the library's `fluence_rate` and a direct gather of the facets' radiosity -- agree
   to 0.0, which is why the scene takes the second route alone. Average the lamp's
   irradiance over sub-points of each facet, not its centroid, or a shadow on a coarse facet is
-  point-sampled. Freezing the unit direction instead (3x the frozen array) is the route if the lamp
-  itself must reflect.
+  point-sampled. ⚠️ **A lamp that must reflect does NOT need the direction frozen**: since #604 step 1
+  the scene keeps the lamp's EMISSION out of the transfer and puts its FACETS in, as reflectors with no
+  emission (THE SCENE section, end of this file). Freezing the unit direction (3x the frozen array)
+  would only be needed to carry a measured profile's *emitted* light through the transfer itself.
 - **The gather passes the unit direction, not the cosine, at no measured cost**: 2,000 Lambertian facets
   x 40,000 receivers, fluence 0.549-0.557 s and irradiance 11.77-11.82 s against `main`'s 0.557 /
   11.82 s, checksums equal to 13 figures (CPU, x64, jax 0.10.2, macOS arm64, separate processes).
@@ -4387,12 +4389,12 @@ radiation **case file** builds (`.claude/rules/case.md` → Radiation cases); th
   `direct_irradiance(..., receiver_facet=)` — `(n_points,)` or `(n_points, k)` rows, `-1` padding, the
   same form `build_visibility` takes — and `scene._irradiance` passes `_own_facets`' rows to it on BOTH
   paths (unshadowed and per-pass masked). **Rejected: offsetting the points a hair in front of their
-  facet** (what the #604 step-1 work, not on main when this was decided, did for lamp light on lamp facets, `1e-12` of the scene's
+  facet** (what #604 step 1 did for lamp light on lamp facets, `_IN_FRONT_OF_OWN_FACET`, `1e-12` of the scene's
   size). It is correct only while the offset clears `clipping._SLACK`'s band at that facet's size, so it
   silently couples a scene-scale constant to the clip's rounding tolerance; exclusion is exact (a flat
   facet sends nothing into its own plane), needs no length scale, and is the transfer's `F_ii = 0`
-  convention applied in the gather. A #604 lamp-on-lamp case should pass `receiver_facet` too rather than
-  carry the offset. Pinned by `test_a_point_on_a_tilted_facet_is_lit_by_the_others_and_not_by_its_own_facet`
+  convention applied in the gather. The lamp samples do pass their facet now, so the offset there serves only
+  its other purpose (see #604 STEP 1 below). Pinned by `test_a_point_on_a_tilted_facet_is_lit_by_the_others_and_not_by_its_own_facet`
   and `test_every_facet_a_row_names_is_left_out_and_a_minus_one_names_none` (gather; the reference is
   the same points 1e-9 in front, unnamed) and `test_a_point_inside_a_tilted_reflecting_facet_is_not_lit_by_that_facet`
   (scene, both paths); each mutation-checked, `tests/unit/radiation_references.tilted` is the fixture.
@@ -4410,3 +4412,74 @@ radiation **case file** builds (`.claude/rules/case.md` → Radiation cases); th
   exclusion = no occlusion to 1e-12 on a convex box; without it, < half).
 - **Measured at mesh scale** — see `validation/ray_effects_room/README.md` (the case files and their
   agreement with the scripts they replaced).
+
+### #604 STEP 1: LAMPS REFLECT AND SHADOW IN THE EXCHANGE (2026-10-07)
+
+**Agreed with the user** (2026-10-07; full plan on #604): #604 is sequenced by GENERAL capability, not by
+lamp physics -- (1) emitters that also reflect, here; (2) transparent solids (index + absorption, exact
+paths through analytic bodies); (3) the equivalent surface as a general baking step; (4) curved specular
+reflectors; (5) path cuts. Two decisions for this step: **straight-through transmittance is deferred to
+(2)** (a surface's own triangles stay one opaque layer -- `visibility.py`); and **lamp facets are ALWAYS
+in the exchange** (default reflectance 0), which fixes the pass-through and costs transfer size.
+
+- **What changed.** `_Exchange.of(scene)` is the reflectors' facets then every AREAL lamp facet, built by
+  `from_triangles` with the lamp bodies' names after the reflectors', `point_sources=()`, no emission;
+  `None` when there are no reflectors and no lamp reflects (nothing is ever sent back). `_solve_exchange`
+  gathers the lamps' light on all of them (sub-triangle centroids, as before), solves once, and splits
+  back. `SceneSolution` gains `lamp_irradiance` (`(n_lamp_facets,)`, zero on point sources) and
+  `lamp_absorbed_power` (`sum (1 - rho) E A`); `radiosity` / `reflector_irradiance` stay the reflectors'
+  (and are `None` without them). The reflected gather is from the whole exchange, so **a lamp's triangles
+  now shadow light the walls reflect past it** -- before, a "black" lamp let it through (the scene's own
+  docstring said black; nothing tested shadowing). `Scene` now refuses lamps and reflectors sharing a body
+  name, and specular reflectance on either (the scene carries none). `SurfaceReceivers.reflector` may name
+  a lamp body; `_own_facets` returns `None` for a body not in the set asked about, and the DIRECT gather
+  now also leaves out the lamp facet a point lies on.
+- ⚠️ **A POINT INSIDE ITS OWN FACET CAN READ THE FACET AS A WHOLE HEMISPHERE.** The first version
+  sampled the lamps' light on lamp facets exactly in their planes, and on a 12-sector drum a lamp lit
+  itself: absorbed over emitted **1.22** with black walls. Off an axis-aligned plane the corners' heights
+  round to ~1e-17 either way; where they stay undecidable the kernel keeps the in-plane triangle and
+  returns the hemisphere (the self-facet convention). Measured on one tilted 9-facet plane: **51%** of
+  sub-triangle centroids read `E = M` from their own facet (centroids read 0 -- the zero-direction guard);
+  axis-aligned, none. Fixed by moving those points `_IN_FRONT_OF_OWN_FACET = 1e-12` of the scene's size
+  (extent + largest coordinate) **in front**, where the facet is decidably behind the receiving plane and
+  clipped away whatever the profile. ⚠️ **Behind would ALSO zero it (the emitter gate) and was the first
+  fix -- and is wrong**: behind a lamp is outside the fluid, so a body holding the fluid (a `CadFluid`,
+  `Outside(Difference(box, lamp))`) refuses the points (pinned by
+  `test_the_lamps_light_on_a_lamp_is_taken_on_the_fluid_s_side_of_it`). 1e-9 moved the model
+  equivalence to 2.4e-10; 1e-12 keeps it under 1e-11.
+- **The same hemisphere at the scene's SurfaceReceivers on a tilted reflecting facet is FIXED (#615,
+  2026-10-07) by exclusion, not by this offset** -- `direct_irradiance(..., receiver_facet=)` leaves a
+  point's own facets out as sources; see "THE SCENE" above for the measurement and why the offset was not
+  generalized. The lamp samples pass `own=` too, so they are excluded as well; **the offset stays for
+  its second reason only**, keeping them on the fluid's side where a body holding the fluid does not
+  refuse them. ⚠️ **That reason is now UNPINNED**: with the exclusion in, `_IN_FRONT_OF_OWN_FACET = 0`
+  leaves all 20 `test_radiation_scene.py` tests green (2026-10-07, merge of #614 into #615), because
+  `test_the_lamps_light_on_a_lamp_is_taken_on_the_fluid_s_side_of_it` samples axis-aligned caps,
+  where an in-plane point is not refused. Either pin it with a tilted lamp inside a fluid body, or
+  delete the offset as dominated -- the user's call, not taken in the merge.
+- **Energy, measured** (12-sector drum, r 0.12, 0.5 high, in `inward_box(3)`, walls rho 0.8, lamp rho
+  0.4, default 6-point rule; jax 0.10.2, CPU, x64, Linux, 2026-10-07): walls + lamp absorb **1.014** of the
+  emitted power under `RayCastOcclusion` (the one-ray-per-pair mask of the drum's shadow on a coarse mesh);
+  **1.59 under `NoOcclusion`**, which is not a defect of the scene -- with nothing shadowing, wall light
+  passes through the lamp AND is absorbed by it. A drum in a box is not convex; do not run it unshadowed.
+- **Gates**: a lamp that emits and reflects, kept out, equals the model with it inside (fluence, lamp
+  landing, wall landing, 1e-11, one point per facet); a black drum shadows reflected light exactly as the
+  model with the drum inside it does (`RayCastOcclusion`, 1e-11; gathered from the walls alone, >5%
+  brighter somewhere); lamps alone (two reflecting plates) equal the model; a point-source lamp lands
+  zero; points on a lamp named by its body equal the same points 1e-6 off it (1e-4); the energy test
+  above (2.5%). **Mutation pass, 13 breaks, 12 red**: lamps left out of the exchange, lamps reflect
+  nothing, absorbed by rho not 1 - rho, no offset, offset behind, no exchange without reflectors, lamp
+  receivers not excluded, landing from the wrong rows, shared names allowed, the case ignoring
+  `Lamp.reflectance`, `unaccounted_power` keeping the lamps' share, the reflectance unchecked; the
+  shadow test alone goes red under "lamps left out". **Dismissed**: not leaving a lamp sample's own facet
+  out of its shadow test -- after the offset the point is in front of its facet, so no ray from it ends in
+  it; it stays because `SilhouetteOcclusion` reads `receiver_facet` to measure a receiver by the
+  projected rather than the plain solid angle. ⚠️ **The reflector samples pass no `receiver_facet`
+  (they lie on no LAMP facet), so under `SilhouetteOcclusion` their shares of the lamps are taken by the
+  plain solid angle** -- pre-existing, and the API cannot express "a surface receiver on no source
+  facet"; raised with the user as a follow-up.
+- **Cost**: the transfer is `n^2` in reflector + lamp facets now. Not measured at mesh scale. The
+  `ray_effects_room` cases' field cannot move (black flat window flush in the ceiling, `NoOcclusion`:
+  a black facet sends nothing and shadows nothing); not re-run.
+- **Case**: `Lamp.reflectance` (see `case.md`), results `lamp_absorbed_power`, subtracted from
+  `unaccounted_power`.

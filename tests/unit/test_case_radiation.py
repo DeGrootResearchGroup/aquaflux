@@ -63,7 +63,12 @@ def _sections(**changes) -> dict:
             "settings": {"kind": "RadiationSettings", "self_occlusion": {"kind": "NoOcclusion"}},
         },
         "boundaries": {
-            "top": {"kind": "Lamp", "power": 2.0, "profile": {"kind": "LambertianProfile"}},
+            "top": {
+                "kind": "Lamp",
+                "power": 2.0,
+                "profile": {"kind": "LambertianProfile"},
+                "reflectance": 0.25,
+            },
             "bottom": {
                 "kind": "Wall",
                 "reflectance": 0.3,
@@ -110,6 +115,7 @@ def test_the_case_builds_the_scene_the_library_calls_build_by_hand(tmp_path) -> 
         triangles("top"),
         solid_id=np.zeros(len(triangles("top")), dtype=int),
         solid_names=("top",),
+        diffuse_reflectance=np.full(len(triangles("top")), 0.25),
         profiles=(Lambertian(),),
         profile_index=np.zeros(len(triangles("top")), dtype=int),
     )
@@ -448,6 +454,11 @@ def test_a_lamp_is_a_wall_to_the_flow() -> None:
     assert lamp.flow_closure() == Wall().flow_closure()
     assert lamp.settings_in("radiation") == ("profile", "power")
     assert Wall(reflectance=0.2).settings_in("radiation") == ("reflectance",)
+    assert Lamp(profile=LambertianProfile(), power=1.0, reflectance=0.1).settings_in(
+        "radiation"
+    ) == ("profile", "power", "reflectance")
+    with pytest.raises(ValueError, match=r"Lamp.reflectance must lie in \[0, 1\], got 1.5"):
+        Lamp(profile=LambertianProfile(), power=1.0, reflectance=1.5)
     assert IesProfile(file="x.ies", up=(0.0, 0.0, 1.0)).can_state_power
     assert isinstance(Radiation().receivers.cells, bool)
 
@@ -472,8 +483,11 @@ def test_a_run_writes_the_fields_the_patches_and_where_the_power_went(tmp_path) 
     assert out["lamp_power"] == pytest.approx(2.0, rel=1e-12)
     assert list(out["patches"]) == ["bottom", "left", "right", "back"]
     absorbed = sum(entry["absorbed_power"] for entry in out["patches"].values())
+    # The lamp reflects a quarter of what lands on it and keeps the rest, which is on the books too.
+    assert out["lamp_absorbed_power"] > 0.0
     assert out["unaccounted_power"] == pytest.approx(
-        out["lamp_power"] - out["medium_absorbed_power"] - absorbed, rel=1e-12
+        out["lamp_power"] - out["medium_absorbed_power"] - out["lamp_absorbed_power"] - absorbed,
+        rel=1e-12,
     )
     # Every wall absorbs what arrives on it, less what it reflects.
     assert out["patches"]["left"]["absorbed_power"] == pytest.approx(
