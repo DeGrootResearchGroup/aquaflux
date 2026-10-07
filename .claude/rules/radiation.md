@@ -45,7 +45,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `mirrors.py` — `Mirror` (a plane, its aperture facets, reflection and the image of a surface set) and `planar_mirrors` (a body's facets grouped by plane); the reflectance split on `Surfaces` (#537 PR 1, 2026-10-05) | **BUILT** (the model carries specular bodies since PR 3a, shadowed since PR 3b) |
 | `mirror_visibility.py` — `MirrorVisibility` / `build_mirror_visibility` / `build_mirror_masks`: what stands across each path reflected in one mirror, both legs, per body counted 0/1/2 (#537 PR 3b) | **BUILT** |
 | `units.py` — lamp watts to exitance, ultraviolet transmittance to absorbance | **BUILT** |
-| `scene.py` — `Scene` / `solve_scene` / `SceneSolution`: lamps KEPT OUT of the transfer (any profile, incl. IES), reflecting surfaces, bodies, medium, `VolumeReceivers` and named `SurfaceReceivers`; what a radiation case file builds (2026-10-05) | **BUILT** |
+| `scene.py` — `Scene` / `solve_scene` / `SceneSolution`: lamps KEPT OUT of the transfer (any profile, incl. IES), reflecting surfaces, bodies, medium, `VolumeReceivers` and named `SurfaceReceivers`; one `settings` whose `two_sided` may name a body of either set (checked once against the union, cut per set by `settings_for`, 2026-10-06); what a radiation case file builds (2026-10-05) | **BUILT** |
 
 There is no separate optical-depth piece to build: the voxel-grid traversal is `VoxelAbsorption` in
 `absorption.py`, exact along each segment (trilinear field, Simpson per cell).
@@ -1568,7 +1568,8 @@ zero-thickness sheet, though, has the medium on both sides: seen from behind it 
 Walton's pair with a one-sided blocker read the **unobstructed 0.1998** from one plate, silently.
 The ray test is two-sided and never had the problem. Now `SilhouetteOcclusion(two_sided=(names,))`
 counts the named bodies (by `Surfaces.solid_names`) from both sides; a misspelt name **raises**
-(it would otherwise leak light with no error); and any **open piece left undeclared is warned
+(it would otherwise leak light with no error) — against the one surface set, or in a `Scene` against the
+union of lamps and reflectors, each set then built with its own share (see THE SCENE); and any **open piece left undeclared is warned
 about** at build, naming its bodies. With the blocker declared, the one-sided Walton pair converges
 exactly as a two-sided copy did (−1.6e-4 / −4.0e-5 at 6 / 12 plates a side).
 
@@ -4381,3 +4382,35 @@ radiation **case file** builds (`.claude/rules/case.md` → Radiation cases); th
   exclusion = no occlusion to 1e-12 on a convex box; without it, < half).
 - **Measured at mesh scale** — see `validation/ray_effects_room/README.md` (the case files and their
   agreement with the scripts they replaced).
+- ⚠️ **ONE `Scene.settings` SERVES TWO SURFACE SETS, SO A BODY IT NAMES MAY BE IN EITHER (2026-10-06).**
+  Every mask the scene builds has the lamps or the reflectors as its sources: the lamps' light on the
+  reflector samples, on `SurfaceReceivers` and in the volume; the reflectors' transfer (`self_occlusion`)
+  **and its zero-receiver mask (`receiver_occlusion`)**; the reflected gathers. `SilhouetteOcclusion`
+  refuses a `two_sided` name its surface set lacks (the misspelling guard), so before this a sheet
+  declared on one set made **every** build on the other raise — a lamp-set baffle could not be declared
+  unless the reflectors happened to carry a body of the same name, and `receiver_occlusion=` alone
+  failed too, through the model's zero-receiver mask. **Decided with the project owner** over per-set
+  settings (two objects whose other fields could drift, against "the two cannot be built differently")
+  and over moving the refusal out of the strategy into every entry point (a new entry point forgetting it
+  loses it silently): `Scene.__post_init__` runs `settings.check_bodies(union of both sets' solid_names)`
+  once, and every build gets `scene.settings_for(sources)` = `settings.for_bodies(sources.solid_names)`,
+  a copy with each occlusion choice cut to that set's bodies (`SelfOcclusion.for_bodies`/`check_bodies`,
+  identity/no-op by default; `SilhouetteOcclusion` filters `two_sided`). The strategy keeps its strict
+  refusal (`_either_side` calls `check_bodies`), so standalone `build_radiation_model`/`build_visibility`
+  still catch a misspelling. A name present in **both** sets is two-sided in both (default
+  `solid_names` is `("surface",)` for each). Pinned by
+  `test_a_sheet_declared_two_sided_shades_from_behind_whichever_set_it_belongs_to` (a baffle among the
+  lamps and a shelf among the reflectors, each facing away from the point it shades: declared → that
+  point's part 0 to 1e-12, undeclared → equal to `NoOcclusion` to 1e-12, and the open-sheet warning names
+  exactly the undeclared ones), `test_a_scene_refuses_a_sheet_that_neither_set_has` (both fields) and
+  `test_settings_cut_down_to_a_set_keep_its_own_sheets_and_nothing_else_changes`. Mutation-checked, 11
+  of 11 red: no narrowing, narrowing to nothing, inverted or no-op filter, no union check, union of the
+  lamps only, `receiver_occlusion` left out of `_occlusions`, and each of the three build sites
+  (model, `_fluence`, `_irradiance`) left unnarrowed, plus dropping the standalone check (caught by
+  `test_a_misspelt_sheet_is_refused_rather_than_left_one_sided`).
+- ⚠️ **A set's triangles shade only that set's light.** Each mask's self-occlusion is over its own
+  sources: a reflecting body does **not** block the lamps' direct light, and a non-emitting body in the
+  lamp set does **not** block reflected light. Only `occluders` shade both. Harmless for an enclosure the
+  points sit inside; wrong for a reflecting baffle standing between a lamp and a point. The test above
+  depends on it (its shelf leaves the lamps' light alone) — not decided, recorded so it is not mistaken
+  for physics.
