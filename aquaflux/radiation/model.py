@@ -38,8 +38,9 @@ actually solved.
 ⚠️ **Reflection is DIFFUSE unless a body is named as specular.** A wall described only by the
 number 0.95 could scatter that light in every direction or send it off like a mirror, and the two
 are not close:
-Hassanpour et al. (2023) measure a **10-47% spread in log reduction between fully specular and
-fully diffuse walls at the same reflectivity of 0.95**. Diffuse is the right default rather than
+Hassanpour et al. (2023) find, simulating a reactor whose lamps are reflected into the water by a
+cylindrical reflector, a **10-47% spread in log reduction between fully specular and fully diffuse
+walls at the same reflectivity of 0.95**. Diffuse is the right default rather than
 merely the convenient one — Li et al. (2017) find that diffuse reflection raises the
 reduction-equivalent fluence above specular, and the measurement literature emphasizes it — but
 the assumption belongs beside the number, which is why a surface set carries

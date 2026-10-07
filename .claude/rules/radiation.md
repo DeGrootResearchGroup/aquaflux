@@ -406,7 +406,7 @@ built -- this reverses PR 1's decision 3); a **graded medium is refused** with s
   values a solid whose facets differ and a non-zero value on an undeclared solid; traced, it takes the
   first facet's (and refuses a traced value when no solid is specular).
 - **Refused, not approximated** (`NotImplementedError`): a graded medium at `assemble`. `ValueError`
-  past `MAX_MIRROR_PLANES = 64` planes per solid -- **provisional**, to be set in PR 4 from measured
+  past `MAX_MIRROR_PLANES` planes per solid -- 64 in 3a, provisional; **12 since PR 4**, from measured
   cost. (3a also refused occluders and self-occlusion with specular bodies; PR 3b lifted that.)
 - The model's point-source arrivals add `images.mirrored_irradiance(..., point_sources_only=True)` at
   the facet centroids; the volume's mirrored field is gathered by the `ReceiverShadows` strategy since
@@ -496,6 +496,98 @@ keep the exact fraction): a two-leg path has no single source view to clip.
   receiver sat at the lamp's mirrored height, where the meeting point divides by zero and its NaN reads
   clear; moved to `z = -0.75`, it goes red. The gather never reads those rows, so the field is unchanged
   either way -- the test pins the documented "recorded clear".
+
+### PR 4: what a mirror costs, the cone cull, and the plane limit (2026-10-06)
+
+**Decided with the user**: the validation case is the analytic gates already in place --
+**Hassanpour et al. (2023) is NOT a flat-mirror benchmark**: their reflector is **cylindrical** (lamps
+outside the water channel) and their 10-47% specular/diffuse spread is a **discrete-ordinates
+simulation**, not a measurement (the docstrings said "measure"; fixed). It moves to #604 as the curved
+reflector case (full text read 2026-10-06, geometry and figures posted on #604: DO 6x6 only, no Monte
+Carlo; R = 0.95 is the paper's own assumption, citing a vendor note; the 10-47% is diffuse-over-specular
+LRV at 10 GPM as the lamps move 7.5 -> 15 cm from the channel). The cost case is the
+Sozzi reactor from its drawing with the chamber's flat end plates specular, **without meshing**
+(receivers uniform in the drawing's fluid -- per-item throughput does not depend on where they are).
+
+- ⚠️ **COST IS SET BY THE APERTURE'S TRIANGLE COUNT, NOT THE PLANE COUNT.** Every image was clipped
+  against every aperture facet: on the coarse scene (`specular_cost.py` defaults: chord 1e-3, lamp
+  1,270 + wall 1,008 facets, 4 cores, jax 0.10.2, Linux) one plane of 28 triangles took ~50 min for the
+  exchange (3e5 clip items/s) against 47 s for the whole direct transfer, and 72 s against 1.9 s for a
+  400-receiver gather (39x). Two planes were already unusable; a plane limit could not fix it.
+- **Survival share** (`aperture_cull_share.py`, same scene, 2,000 uniform volume points and the facet
+  centroids): the silhouette clip's cone test keeps **11-12 / 28** (sliver triangles of a coarse disc
+  fan, wide cones), **4 / 35**, **5-6 / 211** aperture triangles per image -- p99 23 at 211; 4-6% of
+  images keep none; unusable cones under 0.13%. Survivors stay ~a handful however fine the plate.
+- **The cull** (`images._screen` + `_culled_fractions`): the cone test per (receiver, image, facet);
+  survivors clipped `_CLIP_BATCH = 4096` at a time in a `lax.while_loop` whose trip count follows the
+  survivor count. A survivor's pair is found by **bisecting the running count of what each pair keeps**
+  and its facet by its rank in the pair's row -- ⚠️ the first version took `jnp.nonzero` over every
+  triple, which on 16 receivers x 2,700 images x 211 facets cost **0.25 s of a 0.45 s** culled clip:
+  more than clipping the survivors. ⚠️ **A while_loop is not reverse-differentiable**, so the culled
+  clip takes its geometry under `stop_gradient` and the live weights (reflectances) multiply
+  `fraction @ weights` **outside** the loop. `cull` is on where the geometry is readable (`_mirrored`'s
+  `readable`; always in `_exchange_rows`); the dense clip remains for a gather differentiated in
+  position. The streamed model's chunk puts the build's concrete vertices back on its sets
+  (`with_geometry`) so its backward pass, where every live leaf is traced, still culls.
+- **The lit-block layout** (decided with the user: "port the direct culls"): the mirrored gather uses
+  `lit_blocks.areal_layout` with a `BackFaces` of the *image* set, so receivers behind an image's plane
+  are left out as in the direct gather, and the clip works on (receiver, image) pairs. ⚠️ Facet cones
+  must be taken **once per receiver** in the block grid, not per pair: per pair made the 4,000-receiver
+  gather slower (581 s against 450 s), per receiver 330 s.
+- **THE INSIDE SKIP** (decided with the user: "build it in PR 4"). An image seen wholly inside the
+  mirror needs no clip -- the mirror shows all of it, weighted by the facet the line to its centroid
+  crosses (zero outside, or in a hole). Measured first (`aperture_inside_share.py`, 300 receivers,
+  exact 2D classification): **98-99.5%** of seen images are inside at the 0.05 m plate, **90%** at
+  0.01 m (211 triangles, 107 outline edges). `mirrors.outline` gives the edges of one facet only
+  (rounded relative to the extent); `_Path.of` keeps them **only for one concrete reflectance on every
+  facet** -- ⚠️ a traced one would credit an image's whole derivative to the facet its centroid line
+  crosses (caught by the reflectance-gradient test: 12 of 32 facets wrong, sum right). `_screen` skips
+  a pair when every corner is behind the plane **by 1e-9 of the coordinates** (`_behind`) and
+  `_touches_outline` finds the image, projected into the plane along the lines from the receiver, apart
+  from every outline edge by separating axes with the same margin.
+  - ⚠️ **The outline CONE test came first and was too loose**: an image's circular cone overlaps edges
+    the image never reaches -- it flagged 50.5% of pairs against an exact 8% partial (64 receivers,
+    0.01 plate), so the gather went only 330 -> 246 s.
+  - ⚠️ **The behind test needs the margin** because the plane is an area-weighted mean over its
+    facets: the image of a facet IN the plane read heights of -3.3e-16, was skipped, and got 60% of its
+    solid angle where the dense clip (correctly) gives 0. Found by comparing every probe pair with the
+    dense clip -- 2 of 172,800.
+  - ⚠️ **Write the separating-axis test corner by corner, the outline's edges the innermost axis**: the
+    same arithmetic as reductions over trailing axes of 3 corners and 2 ends ran **16x slower** (0.29
+    against 0.018 s on 16 receivers), the CPU-vectorization lesson of `silhouette`'s 2x2 tiles again.
+- **MEASURED with all of the above** (`specular_cost.py`, `SOZZI_SPECULAR_PLATES=0.01`: chord 1e-3,
+  lamp 1,270 + wall 1,008 + plates 422 facets, two planes of 211 aperture triangles, 4,000 receivers
+  uniform in the drawing's fluid; jax 0.10.2, CPU, x64, Linux x86_64, 4 cores, nothing else running,
+  one run, 2026-10-06): **exchange 333 s per plane** warm (601 s for the first, which pays the
+  compilation) against **51.6 s for the whole direct transfer** -- ~6.5x per plane, from ~13 min;
+  **mirrored gather 93.5 s for both planes** warm against **2.47 s direct** -- ~19x per plane, from
+  ~90x (450 s) with the cull alone, 330 s with the lit-block layout, 246 s with the outline cone skip.
+  A separate probe of the same gather read 86.0 s, and its field matched the pre-skip field to 1.1e-16
+  of the peak. What is left is the clip of the survivors, ~4 us each; the reflected-path masks cost
+  28-39 s per plane (two legs, no culling). ⚠️ The earlier "17x per plane" gather figure was from 400
+  receivers and was deleted: at 4,000 the same code read ~90x.
+- **`MAX_MIRROR_PLANES = 12`** (user's choice from 6 / 12 / 24 / 64): at ~19x the direct gather and
+  ~6.5x the direct transfer per plane (above), twelve keeps a body's mirrored gather within ~230x the
+  direct one; any box (6) passes; a 16-strip tube is refused. Pinned by
+  `test_by_default_a_box_is_flat_enough_and_a_tessellated_tube_is_not` (limit 16 and 5 each red).
+- Tests: culled == unculled (volume and oriented, `_CLIP_BATCH` monkeypatched to 7 so survivors take
+  several passes, per-facet weights), to one rounding of the largest value (the unculled clip leaves
+  last-bit noise on facets that show nothing); the cone test keeps every facet with a non-zero share and
+  under 25% of a 200-triangle mirror; a test that keeps nothing gives nothing; reflectance gradients
+  equal. The skip: an image crossing the plane is clipped however far inside it lies; one in the
+  mirror's own plane is not skipped on a rounding of its height; the outline test flags every pair an
+  independent classification calls crossing (whole and holed mirrors) and lets most wholly-inside ones
+  through; only one concrete weight keeps an outline; the skip's answers stand with the clip stubbed
+  to clip nothing. **Skip mutations, 13 of 15 red** (straddle, behind and its margin, skip-nothing,
+  weight one, any weights, traced weights, all edges, the edge axis, the side test inverted, all for
+  any, the rank off by one, bisect left). **Dismissed**: dropping the triangle-side axes (more pairs
+  clipped, never a wrong skip), a non-orthogonal plane frame (touching is invariant under any linear
+  map of the plane; only the 1e-9 margin's size moves); and, not run, clipping the skipped pairs anyway
+  (their answer is overwritten, so only time could tell). **Cull mutations, 6/6 red** after two fixes: "clip everything" passed until the keep-nothing test,
+  "padding unmasked" passed until the fixture put light through triple (0, 0, 0). **Not run, and
+  cost-only by construction**: `cull=False` in `_mirrored` or `_exchange_rows`, and dropping the
+  streamed chunk's geometry swap -- each only selects the unculled clip, which the equivalence test pins
+  to the culled one, so the answers cannot differ; a test of them would have to time something.
 
 ## The clamp is a GATE, not a factor — and the difference is a factor of two or a zero
 

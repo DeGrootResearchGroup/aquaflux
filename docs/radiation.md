@@ -352,8 +352,9 @@ orientation, as it should.
 ### Mirror-like walls
 
 A reflectance of 0.95 does not say whether a wall scatters in every direction or reflects like a
-mirror, and the two are not close: Hassanpour et al. (2023) measure a 10–47% spread in log
-reduction between fully specular and fully diffuse walls at the same reflectivity. So a surface set
+mirror, and the two are not close: simulating a reactor with a cylindrical reflector, Hassanpour et
+al. (2023) find a 10–47% spread in log reduction between fully specular and fully diffuse walls at
+the same reflectivity, growing as the lamps are moved further from the water. So a surface set
 carries the two separately, as `diffuse_reflectance` and `specular_reflectance`, which must each lie
 in `[0, 1]` and sum to at most one on each facet.
 
@@ -392,9 +393,12 @@ What a specular body is limited to, and what the model refuses rather than answe
 
 - **One bounce.** Light reflecting off two mirrors in turn is not carried. For a single flat mirror,
   or a plane of symmetry, one bounce is all there is.
-- **Flat bodies.** A body lying in more than 64 planes is refused (`max_mirror_planes` raises the
+- **Flat bodies.** A body lying in more than 12 planes is refused (`max_mirror_planes` raises the
   limit): a curved one, such as a lamp sleeve, is one mirror per flat strip of facets, which is slow
-  and describes a curved mirror poorly.
+  and describes a curved mirror poorly. Each plane costs many times the direct gather it mirrors:
+  an image seen wholly inside or wholly outside the mirror's outline is cheap, but one that crosses
+  the outline is clipped against each of the mirror's triangles it may overlap. So a body's planes
+  are the cost to watch: twelve covers a box, or a wall with a few bends.
 - **One ray per reflected path.** A source partly hidden on a reflected path counts as wholly hidden
   or wholly clear, as under the ray test, whichever strategy shadows the direct paths. A source
   that straddles a mirror's plane is not shadowed on its reflected paths at all.

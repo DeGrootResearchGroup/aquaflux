@@ -71,7 +71,7 @@ respect to mesh-node positions gets no contribution from the fluence rate.
   70% water of the Sozzi & Taghipour (2006) reactor benchmark — and carries a systematic error of
   that size at drinking-water transmittances.
 - **Specular reflection beyond one flat bounce.** At the same reflectivity, fully specular and
-  fully diffuse walls have been measured 10–47% apart in log reduction (Hassanpour et al., 2023),
+  fully diffuse walls have been simulated 10–47% apart in log reduction (Hassanpour et al., 2023),
   so a surface set carries ``diffuse_reflectance`` and ``specular_reflectance`` separately. Bodies
   named as specular when the model is built reflect one bounce as flat mirrors (:class:`Mirror`),
   shadowed on both legs of each path (:class:`MirrorVisibility`); a model with specular bodies is
