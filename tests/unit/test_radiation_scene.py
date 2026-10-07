@@ -19,6 +19,7 @@ from aquaflux.radiation import (
     RadiationSettings,
     RayCastOcclusion,
     Scene,
+    SilhouetteOcclusion,
     SurfaceReceivers,
     Surfaces,
     UniformAbsorption,
@@ -33,7 +34,7 @@ from aquaflux.radiation import (
 )
 from aquaflux.solids import Sphere
 
-from tests.unit.radiation_references import inward_box
+from tests.unit.radiation_references import inward_box, sampled_fraction
 
 LAMP_EXITANCE = 7.0
 REFLECTANCE = 0.6
@@ -257,3 +258,51 @@ def test_a_scene_refuses_what_it_cannot_light_as_described() -> None:
         SurfaceReceivers(np.zeros((1, 3)), np.ones((1, 3)), reflectance=1.5)
     with pytest.raises(ValueError, match="normals must have shape"):
         SurfaceReceivers(np.zeros((2, 3)), np.ones((1, 3)))
+
+
+#: A lamp seen obliquely from the origin, behind a baffle that hides its overhead end. Wound to
+#: face the origin, so the lamp shines on it and the baffle stands in front of it.
+OBLIQUE_LAMP = np.array([[-0.5, -1.0, 1.0], [4.0, -1.0, 1.0], [4.0, 1.5, 1.0]])
+BAFFLE = np.array([[-9.0, -9.0, 0.5], [0.5, -9.0, 0.5], [0.5, 9.0, 0.5]])
+UP = np.array([0.0, 0.0, 1.0])
+
+
+# Both triangles face the points they light or shadow, so counting them from that side alone is
+# right; `two_sided` cannot say so, as the scene's one setting must name bodies of every set.
+@pytest.mark.filterwarnings("ignore:SilhouetteOcclusion. .* free edge")
+def test_a_partly_shadowed_lamp_lights_a_wall_by_the_share_of_its_projected_solid_angle() -> None:
+    """The lamps' light on a reflecting wall, and on a set of wall points, under the silhouette clip.
+
+    Neither kind of point lies on a lamp facet, and both face a way. The baffle is one of the lamp
+    set's own triangles, so the clip hides a share of the lamp, and the share an irradiance wants
+    is of the lamp's projected solid angle -- which on this oblique fixture differs from the share
+    of its plain solid angle by twenty times the sampler's noise. A point's irradiance is its
+    unshadowed irradiance less that share, Lambertian radiance being the same in every direction;
+    the share is checked against the brute-force sampler, which never reads a mask.
+    """
+    lamps = Surfaces.from_triangles(
+        np.stack([OBLIQUE_LAMP[::-1], BAFFLE[::-1]]),
+        emission=np.array([LAMP_EXITANCE, 0.0]),
+    )
+    # One small reflecting facet whose centroid is the origin, sampled once, at that centroid.
+    wall = np.array([[[-0.01, -0.01, 0.0], [0.02, -0.01, 0.0], [-0.01, 0.02, 0.0]]])
+    reflectors = Surfaces.from_triangles(wall, diffuse_reflectance=REFLECTANCE)
+    origin = np.zeros((1, 3))
+    solution = solve_scene(
+        Scene(
+            lamps=lamps,
+            reflectors=reflectors,
+            surfaces={"floor": SurfaceReceivers(origin, UP[None])},
+            lamp_samples=1,
+            settings=RadiationSettings(receiver_quadrature=1, self_occlusion=SilhouetteOcclusion()),
+        )
+    )
+    unshadowed = float(direct_irradiance(lamps, jnp.asarray(origin), jnp.asarray(UP[None]))[0])
+    projected = sampled_fraction(np.zeros(3), UP, OBLIQUE_LAMP, BAFFLE, samples=400_000)
+    plain = sampled_fraction(np.zeros(3), None, OBLIQUE_LAMP, BAFFLE, samples=400_000)
+    assert abs(projected - plain) > 0.08
+    for name, landed in (
+        ("on the reflecting facet", float(solution.reflector_irradiance[0])),
+        ("at the floor point", float(solution.irradiance_direct["floor"][0])),
+    ):
+        assert landed / unshadowed == pytest.approx(1.0 - projected, abs=4e-3), name

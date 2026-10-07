@@ -51,7 +51,7 @@ from aquaflux.radiation.coarsen import _point_triangle_distance
 from aquaflux.radiation.gather import direct_irradiance, streamed_fluence_rate, summed_fluence_rate
 from aquaflux.radiation.model import RadiationSettings, build_radiation_model, surface_irradiance
 from aquaflux.radiation.profiles import Lambertian
-from aquaflux.radiation.self_occlusion import NoOcclusion, SilhouetteOcclusion
+from aquaflux.radiation.self_occlusion import NoOcclusion
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.visibility import build_visibility
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, receivers_per_pass
@@ -470,8 +470,11 @@ def _irradiance(
     """Irradiance from ``sources`` at oriented points, a pass of points at a time.
 
     Each pass builds the mask for its own points and drops it, so memory is a pass's whatever the
-    number of points. ``own`` gives, per point, the facet of ``sources`` it lies on, which the shadow
-    test leaves out at the point's end of every ray.
+    number of points. ``own`` gives, per point, the facets of ``sources`` it lies on, which the
+    shadow test leaves out at the point's end of every ray. The mask is told which way every point
+    faces whether or not it lies on one of them -- the lamps' light on a reflecting wall lies on no
+    lamp facet -- so a share of a partly hidden source is a share of the measure an irradiance
+    weights by.
     """
     pair_limit = _pair_limit(scene.settings)
     if not _casts_shadows(scene):
@@ -490,15 +493,12 @@ def _irradiance(
     for start in range(0, len(points), per_pass):
         stop = min(start + per_pass, len(points))
         chunk = points[start:stop]
-        facet = None if own is None else own[start:stop]
-        if facet is not None and isinstance(options.get("self_occlusion"), SilhouetteOcclusion):
-            # The clip projects its shares about one facet's normal: the nearest.
-            facet = facet[:, 0]
         visibility = build_visibility(
             scene.occluders,
             sources,
             chunk,
-            receiver_facet=facet,
+            receiver_facet=None if own is None else own[start:stop],
+            receiver_normal=normals[start:stop],
             pair_limit=pair_limit,
             **options,
         )

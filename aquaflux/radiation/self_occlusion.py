@@ -75,8 +75,8 @@ class OcclusionField(eqx.Module):
     Attributes
     ----------
     fraction : jnp.ndarray, shape ``(n_receivers, n_facets)``, or None
-        Of each source's view -- its projected solid angle from a receiver on a facet, its plain
-        solid angle from one in the volume -- how much the surface's own triangles hide.
+        Of each source's view -- its projected solid angle from a receiver that faces a way, its
+        plain solid angle from a point in the volume -- how much the surface's own triangles hide.
         **Stored at the narrowest type that holds it**, because it is the size of the whole
         problem: floating point from the silhouette clip, which measures anything in between;
         boolean from a ray test, which can only say all or nothing, and whose eight bytes a pair
@@ -108,12 +108,13 @@ class OcclusionField(eqx.Module):
 class SelfOcclusion(eqx.Module):
     """How a surface's own triangles are tested for standing in the light.
 
-    Every strategy answers for both kinds of receiver: points on a facet, as the surface-to-surface
-    transfer uses, and points in the fluid, as the volume gather does.
+    Every strategy answers for every kind of receiver: points on a facet, as the surface-to-surface
+    transfer uses; other points that face a way, as an irradiance on a wall that is not part of the
+    emitting set gathers; and points in the fluid, as the volume gather does.
     """
 
     @abc.abstractmethod
-    def field(self, surfaces, points, near, receiver_facet) -> OcclusionField:
+    def field(self, surfaces, points, near, receiver_facet, receiver_normal) -> OcclusionField:
         """Work out, once, how much of each source each receiver cannot see.
 
         Parameters
@@ -129,8 +130,13 @@ class SelfOcclusion(eqx.Module):
             Which facet each receiver sits on, or ``-1`` where none, or ``None`` when the
             receivers are volume points lying on no facet at all. A receiver on a shared edge or
             vertex lies on several, which the ray test takes as ``(n_receivers, k)`` rows, ``-1``
-            filling a row that names fewer; a strategy measuring about one facet's normal refuses
-            that form.
+            filling a row that names fewer; a strategy measuring about a facet's normal refuses
+            that form unless ``receiver_normal`` says which way to measure.
+        receiver_normal : numpy.ndarray, shape ``(n_receivers, 3)``, or None
+            Which way each receiver faces, as unit normals, or ``None``. Independent of
+            ``receiver_facet``, which says where a receiver lies: a point on a wall outside the
+            emitting set lies on no facet of it and still faces a way. ``None`` leaves a receiver on
+            a facet facing the way that facet does, and every other receiver a point in the volume.
 
         Returns
         -------
@@ -199,7 +205,7 @@ class NoOcclusion(SelfOcclusion):
     baffle, a bend -- this silently deletes the shadows the package exists to compute.
     """
 
-    def field(self, surfaces, points, near, receiver_facet) -> OcclusionField:
+    def field(self, surfaces, points, near, receiver_facet, receiver_normal) -> OcclusionField:
         """Nothing hides anything. See :meth:`SelfOcclusion.field`."""
         return OcclusionField(fraction=None, overlapping=None)
 
@@ -262,8 +268,13 @@ class RayCastOcclusion(SelfOcclusion):
     work_limit: int = 4_000_000
     grid: bool | int | tuple[int, int, int] | TriangleGrid = False
 
-    def field(self, surfaces, points, near, receiver_facet) -> OcclusionField:
-        """Cast the rays. See :meth:`SelfOcclusion.field`."""
+    def field(self, surfaces, points, near, receiver_facet, receiver_normal) -> OcclusionField:
+        """Cast the rays. See :meth:`SelfOcclusion.field`.
+
+        ``receiver_normal`` is not read: a ray hides all of a source or none of it, and every
+        measure of a source agrees about all and none.
+        """
+        del receiver_normal
         n_receivers, n_facets = int(points.shape[0]), int(surfaces.n_facets)
         grid = self._triangle_grid(surfaces)
         clear_behind = receiver_facet is None and surfaces.dark_behind
@@ -379,10 +390,14 @@ class SilhouetteOcclusion(SelfOcclusion):
     contributed, which includes every tiling, so it proves pairs exact rather than finding the
     wrong ones.
 
-    **The fraction is of the measure the receiver gathers in.** A receiver on a facet takes its
-    share of the source's *projected* solid angle, about that facet's normal, because that is
-    what an irradiance weights by; a point in the fluid has no normal and takes its share of the
-    *plain* solid angle, which is what a fluence rate weights by. The clip is the same for both --
+    **The fraction is of the measure the receiver gathers in.** A receiver that faces a way takes
+    its share of the source's *projected* solid angle, about its normal, because that is what an
+    irradiance weights by; a point in the fluid has no normal and takes its share of the *plain*
+    solid angle, which is what a fluence rate weights by. Which way a receiver faces is
+    ``receiver_normal`` where given, and otherwise the normal of the facet it lies on. ⚠️ **Lying on
+    no facet of the set does not make a receiver a point in the volume**: a point on a reflecting
+    wall, lit by a separate set of lamps, faces a way all the same, and without its normal its share
+    of a partly hidden lamp is taken of the wrong measure. The clip is the same for both --
     it works in direction space -- and only the contour integral taken of the covered region
     differs. So a fluence rate in the fluid sees a sleeve's shadow edge as the fraction it is,
     rather than all or nothing per pair.
@@ -449,21 +464,13 @@ class SilhouetteOcclusion(SelfOcclusion):
     threads: int = 4
     two_sided: tuple[str, ...] = ()
 
-    def field(self, surfaces, points, near, receiver_facet) -> OcclusionField:
+    def field(self, surfaces, points, near, receiver_facet, receiver_normal) -> OcclusionField:
         """Clip the survivors. See :meth:`SelfOcclusion.field`."""
         n_receivers = int(points.shape[0])
-        # A receiver on no facet -- every one, when there are no facets to name -- is a point in
-        # the volume: it has no normal, and takes its share of the plain solid angle instead.
-        facet_of = (
-            np.full(n_receivers, -1)
-            if receiver_facet is None
-            else np.asarray(receiver_facet, dtype=int)
+        facet_normal = np.asarray(surfaces.normal, dtype=float)
+        own, oriented, facing = _receiver_frames(
+            n_receivers, facet_normal, receiver_facet, receiver_normal
         )
-        if facet_of.ndim != 1:
-            raise ValueError(
-                "SilhouetteOcclusion takes one facet per receiver -- the facet whose normal its share "
-                f"is projected about -- but receiver_facet has shape {facet_of.shape}."
-            )
         n_facets = int(surfaces.n_facets)
         either_side = self._either_side(surfaces)
         vertices = jnp.asarray(surfaces.vertices, dtype=float)
@@ -471,7 +478,6 @@ class SilhouetteOcclusion(SelfOcclusion):
         normal = jnp.asarray(surfaces.normal, dtype=float)
         near = jnp.asarray(near, dtype=float)
         receivers = np.asarray(points, dtype=float)
-        facet_normal = np.asarray(surfaces.normal, dtype=float)
 
         fraction = np.zeros((n_receivers, n_facets))
         blockers = np.zeros((n_receivers, n_facets), dtype=np.int32)
@@ -479,35 +485,41 @@ class SilhouetteOcclusion(SelfOcclusion):
         clusters = FacetClusters.build(np.asarray(surfaces.vertices), self.cluster_size)
 
         def candidates(row):
-            own = facet_of[row]
-            facing = None if own < 0 else facet_normal[own]
             return self._candidates(
-                receivers[row], facing, vertices, centroid, normal, near, either_side, clusters
+                receivers[row],
+                facing[row] if oriented[row] else None,
+                vertices,
+                centroid,
+                normal,
+                near,
+                either_side,
+                clusters,
             )
 
         with ThreadPoolExecutor(max_workers=max(1, self.threads)) as pool:
-            # Surface and volume receivers take different measures, so they are clipped by
+            # Oriented and volume receivers take different measures, so they are clipped by
             # different programs and packed into different chunks.
             pipelines = {
-                on_facet: _PairPipeline(
+                kind: _PairPipeline(
                     pool,
                     self.work_chunk,
                     max(1, self.threads),
                     vertices,
                     receivers,
-                    facet_normal[np.maximum(facet_of, 0)] if on_facet else None,
+                    facing if kind else None,
                     fraction,
                     blockers,
                 )
-                for on_facet in (True, False)
+                for kind in (True, False)
             }
             for row, (view, source, blocker) in _ahead(pool, candidates, n_receivers, self.threads):
-                own = facet_of[row]
-                # A facet never blocks itself, and never blocks the facet the receiver sits on --
-                # a test that is vacuous for a receiver on no facet, whose index is -1.
-                legal = (source != blocker) & (blocker != own) & (source != own)
+                # A facet never blocks itself, and never blocks or lights the facets the receiver
+                # lies on -- a test that is vacuous for a receiver on none, whose row is all -1.
+                legal = (
+                    (source != blocker) & ~np.isin(blocker, own[row]) & ~np.isin(source, own[row])
+                )
                 if np.any(legal):
-                    pipelines[own >= 0].add(row, view, source[legal], blocker[legal])
+                    pipelines[bool(oriented[row])].add(row, view, source[legal], blocker[legal])
             for pipeline in pipelines.values():
                 pipeline.finish()
 
@@ -744,6 +756,47 @@ class SilhouetteOcclusion(SelfOcclusion):
         # and their order only decides the order a source's shares are summed in, which moves the
         # answer by a rounding and not by a pair.
         return host_view, np.concatenate(found_source), np.concatenate(found_blocker)
+
+
+def _receiver_frames(n_receivers, facet_normal, receiver_facet, receiver_normal):
+    """Where each receiver lies, whether it faces a way, and which way.
+
+    Parameters
+    ----------
+    n_receivers : int
+    facet_normal : numpy.ndarray, shape ``(n_facets, 3)``
+    receiver_facet : array_like of int, shape ``(n_receivers,)`` or ``(n_receivers, k)``, or None
+    receiver_normal : numpy.ndarray, shape ``(n_receivers, 3)``, or None
+        Unit normals.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        The facets each receiver lies on, ``(n_receivers, k)`` with ``-1`` naming none; whether
+        each faces a way, ``(n_receivers,)``; and the unit normal it faces, ``(n_receivers, 3)``,
+        zero where it faces none.
+
+    Raises
+    ------
+    ValueError
+        If a receiver lies on several facets and no ``receiver_normal`` says which way it faces.
+    """
+    own = (
+        np.full((n_receivers, 1), -1)
+        if receiver_facet is None
+        else np.asarray(receiver_facet, dtype=int).reshape(n_receivers, -1)
+    )
+    if receiver_normal is not None:
+        return own, np.ones(n_receivers, dtype=bool), np.asarray(receiver_normal, dtype=float)
+    if own.shape[1] > 1:
+        raise ValueError(
+            "SilhouetteOcclusion projects each receiver's share about one normal, but "
+            f"receiver_facet names up to {own.shape[1]} facets per receiver and no "
+            "receiver_normal says which way the receivers face."
+        )
+    on_facet = own[:, 0] >= 0
+    facing = np.where(on_facet[:, None], facet_normal[np.maximum(own[:, 0], 0)], 0.0)
+    return own, on_facet, facing
 
 
 def _power_of_two_at_most(count: int) -> int:

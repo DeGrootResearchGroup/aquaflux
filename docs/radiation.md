@@ -732,7 +732,8 @@ $$
   and walls alike — which are opaque. {class}`~aquaflux.radiation.RayCastOcclusion` casts the one segment and records $0$ or
   $1$. {class}`~aquaflux.radiation.SilhouetteOcclusion` clips the source's image on the sphere
   against each blocking triangle's silhouette and records the covered fraction of $\Omega_j$ for a
-  point in the fluid, or of $\Omega^\perp_j$ for a receiver on a facet. The covered shares of
+  point in the fluid, or of $\Omega^\perp_j$ for a receiver that faces a way: one on a facet of the
+  set, or a point on another surface, such as a reflecting wall lit by a separate set of lamps. The covered shares of
   separate blockers are added and capped at one, so two blockers covering the same part of a
   source are counted twice. {class}`~aquaflux.radiation.NoOcclusion` sets $h_j = 0$.
 
