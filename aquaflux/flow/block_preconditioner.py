@@ -25,7 +25,7 @@ import abc
 import dataclasses
 import warnings
 from collections.abc import Callable
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
 import equinox as eqx
 import jax
@@ -625,6 +625,9 @@ class ConvectionTwoLevel(_ConvectionVelocityBlock):
 
     sweeps: int | None = None
     omega: float | None = None
+
+    #: Where an unset setting takes its default from (read by the case-file schema).
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (TwoLevelConvectionVelocity.build,)
 
     def _strategy_class(self) -> type:
         return TwoLevelConvectionVelocity

@@ -11,7 +11,7 @@ import abc
 import dataclasses
 import math
 import types
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import ClassVar, Literal
 
@@ -152,6 +152,9 @@ class GeometricGrading(AxisGrading):
 
     growth: float
     both_sides: bool | None = None
+
+    #: Where an unset setting takes its default from (read by the case-file schema).
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (graded_nodes,)
 
     def __post_init__(self) -> None:
         if not (math.isfinite(self.growth) and self.growth > 0):

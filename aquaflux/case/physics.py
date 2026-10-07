@@ -21,12 +21,11 @@ import abc
 import dataclasses
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 
 from aquaflux.boundary import BoundaryConditions
-from aquaflux.discretization import AdvectionScheme
 from aquaflux.flow import MomentumContinuity, refuse_an_unsuitable_pressure_datum, sheared_patches
 from aquaflux.mesh import patch_triangles
 from aquaflux.radiation import (
@@ -49,6 +48,7 @@ from aquaflux.turbulence import (
 
 from .boundaries import Lamp, PatchCondition, Wall
 from .radiation import MeshPatch, OccluderSpec, PatchSurface, Receivers, UniformMedium, _Drawings
+from .scopes import FLOW, RADIATION, SCOPES, TURBULENCE
 
 if TYPE_CHECKING:
     from aquaflux.mesh import Mesh, MeshGeometry
@@ -60,7 +60,16 @@ __all__ = ["RANS", "Laminar", "Physics", "Radiation"]
 
 @dataclasses.dataclass(frozen=True)
 class Physics(abc.ABC):
-    """The equations a case solves: :class:`Laminar`, :class:`RANS` or :class:`Radiation`."""
+    """The equations a case solves: :class:`Laminar`, :class:`RANS` or :class:`Radiation`.
+
+    Attributes
+    ----------
+    reads_scopes : tuple of str
+        A class attribute: the scopes of setting this physics reads (see :mod:`.scopes`). A setting
+        of any other scope is refused wherever a case states it.
+    """
+
+    reads_scopes: ClassVar[tuple[str, ...]] = ()
 
     @abc.abstractmethod
     def refuse_sections(self, spec: CaseSpec) -> None:
@@ -225,6 +234,28 @@ class _Flow(Physics):
                 "numerics; give "
                 f"{'it' if len(missing) == 1 else 'them'}."
             )
+        numerics = spec.numerics
+        stray = [
+            f"numerics.{name}"
+            for scope in SCOPES
+            if scope not in self.reads_scopes
+            for name in numerics.settings_in(scope)
+        ]
+        if stray:
+            raise ValueError(
+                f"{', '.join(stray)}: a {type(self).__name__} case does not read "
+                f"{'this setting' if len(stray) == 1 else 'these settings'}; remove "
+                f"{'it' if len(stray) == 1 else 'them'}."
+            )
+        needed = [
+            f"numerics.{name}" for scope in self.reads_scopes for name in numerics.missing_in(scope)
+        ]
+        if needed:
+            raise ValueError(
+                f"{', '.join(needed)}: a {type(self).__name__} case needs "
+                f"{'this setting' if len(needed) == 1 else 'these settings'}; give "
+                f"{'it' if len(needed) == 1 else 'them'}."
+            )
         refuse_an_unsuitable_pressure_datum(
             BoundaryConditions(
                 {name: condition.flow_closure() for name, condition in spec.boundaries.items()}
@@ -235,13 +266,13 @@ class _Flow(Physics):
 
 
 def _refuse_stray(
-    boundaries: Mapping[str, PatchCondition], settings: str, case: str, remedy: str
+    boundaries: Mapping[str, PatchCondition], scope: str, case: str, remedy: str
 ) -> None:
-    """Refuse every patch setting of one family -- ``settings`` names the patch's method -- at once."""
+    """Refuse every patch setting of one scope at once."""
     stray = [
         f"boundaries.{patch}.{setting}"
         for patch, condition in boundaries.items()
-        for setting in getattr(condition, settings)()
+        for setting in condition.settings_in(scope)
     ]
     if stray:
         one = len(stray) == 1
@@ -256,7 +287,7 @@ def _refuse_light(boundaries: Mapping[str, PatchCondition]) -> None:
     """Refuse a reflectance or a lamp in a flow case -- nothing in it would read either."""
     _refuse_stray(
         boundaries,
-        "radiation_settings",
+        RADIATION,
         "a flow case gathers no light",
         "Remove {it}, or make the physics Radiation.",
     )
@@ -266,13 +297,16 @@ def _refuse_light(boundaries: Mapping[str, PatchCondition]) -> None:
 class Laminar(_Flow):
     """Laminar incompressible flow: momentum and continuity, with no turbulence closure."""
 
+    #: The settings this physics reads, by scope (see :mod:`.scopes`).
+    reads_scopes: ClassVar[tuple[str, ...]] = (FLOW,)
+
     def refuse_boundaries(self, boundaries: Mapping[str, PatchCondition]) -> None:
         """Refuse any turbulence setting on a patch -- nothing in a laminar case would read it -- and any
         light."""
         _refuse_light(boundaries)
         _refuse_stray(
             boundaries,
-            "turbulence_settings",
+            TURBULENCE,
             "a laminar case has no turbulence closure",
             "Remove {it}, or make the physics RANS.",
         )
@@ -298,20 +332,18 @@ class Laminar(_Flow):
 class RANS(_Flow):
     """Reynolds-averaged (RANS) incompressible flow closed by the k-omega shear-stress transport (SST) model.
 
-    The flow and the closure's ``k`` and ``omega`` are solved together, as one coupled system.
+    The flow and the closure's ``k`` and ``omega`` are solved together, as one coupled system. How
+    ``k`` and ``omega`` are advected is the case's ``numerics.turbulence_advection``.
 
     Attributes
     ----------
-    advection : AdvectionScheme
-        How ``k`` and ``omega`` are advected -- :class:`~aquaflux.discretization.FirstOrderUpwind` or
-        :class:`~aquaflux.discretization.LimitedUpwind`. Required: the momentum advection is set
-        separately, under the case's numerics.
-    model : SSTModel or None
-        The model's constants; unset, :class:`~aquaflux.turbulence.SSTModel`'s own.
+    model : SSTModel
+        The model's constants. Unset, the standard ones (:class:`~aquaflux.turbulence.SSTModel` with
+        its own defaults).
     k_variable, omega_variable : ScalarVariableTransform or None
-        The variable each field is solved in -- itself (:class:`~aquaflux.turbulence.DirectScalars`) or
-        its logarithm (:class:`~aquaflux.turbulence.LogScalars`, which keeps it positive under any
-        Newton step). Unset, the coupled system's default.
+        The variable each field is solved in. :class:`~aquaflux.turbulence.DirectScalars` solves for
+        the field itself and :class:`~aquaflux.turbulence.LogScalars` for its logarithm, which keeps
+        it positive under any Newton step. Unset, the coupled system's default.
     explicit_production_limiter : bool or None
         Freeze the ``k``-production cap in the linearization; unset, the exact operator. See
         :class:`~aquaflux.turbulence.SSTTurbulence` for when this is safe.
@@ -322,15 +354,17 @@ class RANS(_Flow):
         If a setting is not a value of its family.
     """
 
-    advection: AdvectionScheme
-    model: SSTModel | None = None
+    model: SSTModel = dataclasses.field(default_factory=SSTModel)
     k_variable: ScalarVariableTransform | None = None
     omega_variable: ScalarVariableTransform | None = None
     explicit_production_limiter: bool | None = None
 
+    #: Where an unset setting takes its default from (read by the case-file schema).
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (SSTTurbulence.build,)
+    #: The settings this physics reads, by scope (see :mod:`.scopes`).
+    reads_scopes: ClassVar[tuple[str, ...]] = (FLOW, TURBULENCE)
+
     def __post_init__(self) -> None:
-        if not isinstance(self.advection, AdvectionScheme):
-            raise TypeError(f"RANS.advection must be an AdvectionScheme, got {self.advection!r}.")
         for name, family in (
             ("model", SSTModel),
             ("k_variable", ScalarVariableTransform),
@@ -347,7 +381,7 @@ class RANS(_Flow):
         missing = [
             f"boundaries.{patch}.{setting}"
             for patch, condition in boundaries.items()
-            for setting in condition.missing_turbulence_settings()
+            for setting in condition.missing_in(TURBULENCE)
         ]
         if missing:
             raise ValueError(
@@ -366,7 +400,7 @@ class RANS(_Flow):
         """
         del directory
         momentum = _momentum(spec, mesh, geometry)
-        model = SSTModel() if self.model is None else self.model
+        model = self.model
         # The model is the one the closure is built with, so an inlet's length scale reads its constants.
         closures = {
             name: condition.turbulence_closures(model)
@@ -380,7 +414,7 @@ class RANS(_Flow):
             model,
             mesh,
             geometry,
-            self.advection,
+            spec.numerics.turbulence_advection,
             momentum.properties,
             wall_patches=list(sheared_patches(momentum.boundary)),
             k_boundary=BoundaryConditions({name: k for name, (k, _) in closures.items()}),
@@ -462,6 +496,17 @@ class Radiation(Physics):
     lamp_samples: int | None = None
     settings: RadiationSettings | None = None
 
+    #: Where an unset setting takes its default from (read by the case-file schema).
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (Scene,)
+    #: The settings for which unset means the feature is off (read by the case-file schema).
+    unset_means_off: ClassVar[tuple[str, ...]] = (
+        "medium",
+        "lamp_refinement",
+    )
+
+    #: The settings this physics reads, by scope (see :mod:`.scopes`).
+    reads_scopes: ClassVar[tuple[str, ...]] = (RADIATION,)
+
     def __post_init__(self) -> None:
         for name, family in (("medium", UniformMedium), ("settings", RadiationSettings)):
             value = getattr(self, name)
@@ -485,8 +530,8 @@ class Radiation(Physics):
         """Refuse what only a flow reads -- an inlet, an outlet, a wall's velocity or ``k`` -- and a case
         with no lamp."""
         for settings, case in (
-            ("flow_settings", "a radiation case has no flow"),
-            ("turbulence_settings", "a radiation case has no turbulence closure"),
+            (FLOW, "a radiation case has no flow"),
+            (TURBULENCE, "a radiation case has no turbulence closure"),
         ):
             _refuse_stray(
                 boundaries,

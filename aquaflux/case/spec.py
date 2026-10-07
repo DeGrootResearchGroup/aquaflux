@@ -26,6 +26,7 @@ import dataclasses
 import functools
 import types
 from collections.abc import Mapping
+from typing import ClassVar
 
 import numpy as np
 
@@ -47,6 +48,7 @@ from aquaflux.schemes import (
     GradientScheme,
     MultipleCorrectionGradient,
     OwnerGradient,
+    ProjectedStencilGradient,
     SkewCorrectedGradient,
     SweptGradientSolve,
     VenkatakrishnanLimiter,
@@ -98,6 +100,7 @@ from .radiation import (
     StlSurface,
     UniformMedium,
 )
+from .scopes import TURBULENCE, Scoped
 from .solver import (
     CoupledMarch,
     FlowMarch,
@@ -112,14 +115,22 @@ __all__ = ["CaseSpec", "Numerics", "case_spec_from_mapping", "case_spec_to_mappi
 
 
 @dataclasses.dataclass(frozen=True)
-class Numerics:
-    """The discretization choices every case makes, whatever its physics.
+class Numerics(Scoped):
+    """The discretization choices of a flow: how each equation's advection is discretized, and gradients.
 
     Attributes
     ----------
     momentum_advection : AdvectionScheme
         How the momentum is advected. Required: a flow with no advection scheme is Stokes flow, which is
         a different problem rather than a default.
+    turbulence_advection : AdvectionScheme or None
+        How ``k`` and ``omega`` are advected, by :class:`~aquaflux.discretization.FirstOrderUpwind` or
+        :class:`~aquaflux.discretization.LimitedUpwind`. Required by a Reynolds-averaged case and
+        refused by a laminar one, which has no turbulence equations.
+
+        It is a separate choice from the momentum's because a turbulence closure is stiff and must stay
+        positive: a robust first-order scheme suits it where the momentum takes a limited second-order
+        one, as in the backward-facing step.
     gradient : GradientScheme or None
         How cell gradients are reconstructed, for every field of the case; unset,
         :data:`~aquaflux.schemes.DEFAULT_GRADIENT_SCHEME`.
@@ -131,20 +142,27 @@ class Numerics:
     """
 
     momentum_advection: AdvectionScheme
+    turbulence_advection: AdvectionScheme | None = None
     gradient: GradientScheme | None = None
 
+    #: Which physics reads each setting (see :mod:`.scopes`).
+    setting_scopes: ClassVar[dict[str, str]] = {"turbulence_advection": TURBULENCE}
+    required_in_scope: ClassVar[tuple[str, ...]] = ("turbulence_advection",)
+
     def __post_init__(self) -> None:
-        if not isinstance(self.momentum_advection, AdvectionScheme):
-            raise TypeError(
-                f"Numerics.momentum_advection must be an AdvectionScheme, got {self.momentum_advection!r}."
-            )
+        for name in ("momentum_advection", "turbulence_advection"):
+            value = getattr(self, name)
+            if (name == "momentum_advection" or value is not None) and not isinstance(
+                value, AdvectionScheme
+            ):
+                raise TypeError(f"Numerics.{name} must be an AdvectionScheme, got {value!r}.")
         if self.gradient is not None and not isinstance(self.gradient, GradientScheme):
             raise TypeError(f"Numerics.gradient must be a GradientScheme, got {self.gradient!r}.")
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class CaseSpec:
-    """One case: its mesh, physics, boundary patches, and -- for a flow -- its fluid, numerics and drive.
+    """One case: its mesh, physics and boundary patches, plus a flow's fluid, numerics and drive.
 
     Attributes
     ----------
@@ -163,19 +181,21 @@ class CaseSpec:
         The discretization choices common to every flow physics; a radiation case keeps its own inside
         its physics.
     drive : DriveSpec or None
-        What drives the flow when its boundary conditions do not -- :class:`~aquaflux.case.BulkVelocity`,
-        a bulk velocity held by a solved force. Unset, the boundary conditions and the sources do.
+        What drives the flow when its boundary conditions do not, such as
+        :class:`~aquaflux.case.BulkVelocity`, which holds a bulk velocity by a solved force. Unset,
+        the boundary conditions and the sources drive it.
     sources : tuple of SourceSpec
-        Terms added to the momentum balance -- :class:`~aquaflux.case.BodyForce`, a prescribed uniform
-        force. Empty by default.
+        Terms added to the momentum balance, such as :class:`~aquaflux.case.BodyForce`, a prescribed
+        uniform force. Empty by default.
     pressure_datum : PressureDatum or None
-        Where the pressure level is fixed in a domain no patch fixes it in -- a closed domain, such as
-        a lid-driven cavity: a :class:`~aquaflux.flow.PinnedPoint`. Required exactly when no patch is
-        an :class:`~aquaflux.case.Outlet`, and refused otherwise.
+        Where the pressure level is fixed when no patch fixes it, as in a closed domain such as a
+        lid-driven cavity. Given as a :class:`~aquaflux.flow.PinnedPoint`. Required exactly when no
+        patch is an :class:`~aquaflux.case.Outlet`, and refused otherwise.
     solver : SolverSpec or None
-        How the case is solved -- :class:`~aquaflux.case.CoupledMarch`, :class:`~aquaflux.case.FlowMarch`,
-        :class:`~aquaflux.case.Segregated` or :class:`~aquaflux.case.RadiationSolve`. Unset, its
-        physics' own with the library's settings (see :meth:`~aquaflux.case.CheckedCase.solve`).
+        How the case is solved: :class:`~aquaflux.case.CoupledMarch`,
+        :class:`~aquaflux.case.FlowMarch`, :class:`~aquaflux.case.Segregated` or
+        :class:`~aquaflux.case.RadiationSolve`. Unset, the physics' own solve runs with the
+        library's settings (see :meth:`~aquaflux.case.CheckedCase.solve`).
     outputs : Outputs
         What a run writes and where (see :func:`~aquaflux.case.run_case`); unset, the fields as VTK and
         the log, in ``results/`` beside the case file.
@@ -203,6 +223,9 @@ class CaseSpec:
     sources: tuple[SourceSpec, ...] = ()
     solver: SolverSpec | None = None
     outputs: Outputs = dataclasses.field(default_factory=Outputs)
+
+    #: The settings for which unset means the feature is off (read by the case-file schema).
+    unset_means_off: ClassVar[tuple[str, ...]] = ("drive",)
 
     def __post_init__(self) -> None:
         for name, family in (
@@ -455,6 +478,7 @@ _CASE_MAPPING = SettingsMapping(
         SweptGradientSolve,
         GmresGradientSolve,
         MultipleCorrectionGradient,
+        ProjectedStencilGradient,
         OwnerGradient,
         SkewCorrectedGradient,
         BulkVelocity,
@@ -527,7 +551,6 @@ def case_spec_from_mapping(mapping: Mapping[str, object]) -> CaseSpec:
         fluid: {density: 1.0, kinematic_viscosity: 1.0e-5}
         physics:
           kind: RANS
-          advection: {kind: FirstOrderUpwind}
           omega_variable: {kind: LogScalars}
         boundaries:
           inlet:
@@ -539,6 +562,7 @@ def case_spec_from_mapping(mapping: Mapping[str, object]) -> CaseSpec:
           lowerWall: {kind: Wall}
         numerics:
           momentum_advection: {kind: LimitedUpwind, limiter: {kind: VenkatakrishnanLimiter}}
+          turbulence_advection: {kind: FirstOrderUpwind}
 
     The ``fluid``, ``numerics`` and ``outputs`` sections have one form each, so their ``kind`` may be
     left out.
@@ -605,3 +629,55 @@ def case_spec_to_mapping(spec: CaseSpec) -> dict[str, object]:
         if section in mapping:
             del mapping[section]["kind"]
     return mapping
+
+
+def case_schema() -> dict[str, object]:
+    """What a case file may hold, as plain data, for a form that edits one.
+
+    Read off the same field annotations :func:`case_spec_from_mapping` checks a file against (see
+    :meth:`~aquaflux.solve.SettingsMapping.schema`), so every choice it offers is one a file may make,
+    and a kind or a choice added to the case file reaches it without a change here.
+
+    Returns
+    -------
+    dict
+        ``{"root": "CaseSpec", "one_form_sections": [...], "scopes_from": "physics", "kinds":
+        {...}}``. ``root`` is the kind whose fields are the file's top-level sections -- written
+        without a ``kind``, since the whole document is the case -- and ``one_form_sections`` the
+        sections whose ``kind`` a file may leave out. ``scopes_from`` is the section whose kind's
+        ``reads`` say which scoped settings the case reads: the physics.
+    """
+    return {
+        "root": _CASE_KIND,
+        "one_form_sections": [section for section, _ in _ONE_FORM_SECTIONS],
+        "scopes_from": "physics",
+        **_CASE_MAPPING.schema(),
+    }
+
+
+def mesh_source_from_mapping(mapping: Mapping[str, object]) -> MeshSource:
+    """Read a case file's ``mesh`` section on its own, without the rest of the case.
+
+    The section is read by the same rules as within a whole case (:func:`case_spec_from_mapping`), so
+    a mesh can be read or generated -- to be looked at, say -- while the rest of the case is unfinished.
+
+    Parameters
+    ----------
+    mapping : mapping
+        The ``mesh`` section: ``{kind: OpenFOAMMesh, path: ...}`` or ``{kind: StructuredGrid, ...}``.
+
+    Returns
+    -------
+    MeshSource
+
+    Raises
+    ------
+    ValueError
+        If the section is not a mesh source, or a setting in it is refused; the message says where.
+    """
+    source = _CASE_MAPPING.from_mapping(mapping)
+    if not isinstance(source, MeshSource):
+        raise ValueError(
+            f"a case's mesh section names a mesh source, got a {type(source).__name__}."
+        )
+    return source

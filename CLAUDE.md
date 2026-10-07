@@ -54,6 +54,7 @@ Checklist still governs).
 | `.claude/rules/parallel.md` | `aquaflux/parallel/**` | distributed memory: graph partitioners, the `PartitionedMesh` owned+halo decomposition, uniform-shape padding, and the `shard_map` residual that runs an *injected* assembler per device (never a re-implementation) |
 | `.claude/rules/radiation.md` | `aquaflux/radiation/**` | ultraviolet fluence rate `G` by a deterministic backward gather over surface facets: the two closed-form solid-angle kernels and why they are not interchangeable, the `arctan2`/clip/magnitude/safe-root details that are load-bearing, and the `F_ii = 0` convention callers must honour; the scene (`solve_scene`: lamps' emission kept out of the transfer, their facets reflecting and shadowing in it) a radiation case file builds |
 | `.claude/rules/solids.md` | `aquaflux/solids/**` | solid bodies answered by formula rather than search: the `Body` contract (`blocks`/`contains`/`traceable`), analytic primitives, constructive solid geometry over line intervals, `Outside` (a vessel as the fluid it holds), the grazing-robust cylinder discriminant; generic geometry, held to the same import-nothing rule as `solve/` — what a CAD model is read into and what radiation shadows with |
+| `.claude/rules/ui.md` | `aquaflux_ui/**`, `tests/ui/**` | the browser interface `aquaflux-ui` (top-level package, `ui` extra; Setup / Run / Results sections, Run a placeholder; Setup edits case files through one long-lived `aquaflux serve` process): the binding independence rule (imports neither `aquaflux` nor `jax`, and the solver never imports it — tested), the `ResultSource` seam (`RunDirectory` reads what `run.yaml` lists, `VtkFiles`), the render-free `Pipeline` and its large-mesh policy (surface/slice/threshold only, cached by dependency), and the trame page |
 | `.claude/rules/case.md` | `aquaflux/case/**`, `aquaflux/__main__.py`, `validation/*/case.yaml`, `validation/*/cases/*.yaml` | a whole case described in one YAML file: the `CaseSpec` core plus the physics (laminar, RANS, or radiation — lamps, reflecting walls, surfaces from CAD/STL/mesh) and drive discriminators, one physical kind per boundary patch or patch group (closures and wall set derived, never restated), the fluid stated once with exactly one viscosity, why the YAML parse is 1.2 and refuses duplicate keys, how the build derives each equation's closures, the wall set and one property model (bit-identical to the hand-built drivers, and the float-leaf trap that almost hid a recompile), the solver section (four solves, the library's own settings values read directly, a script may observe a solve but never configure it), `aquaflux run` with its outputs section and run records, and what is not built yet |
 
 ---
@@ -442,6 +443,7 @@ backward compatibility becomes a real constraint and the calculus reverses.
 | Transient integration | Diffrax | traced, shared with aquakin |
 | Mesh | static connectivity arrays + `segment_sum` scatter | XLA-friendly graph/message-passing layout |
 | Compiled host loops | **Numba** | a loop whose value is in the work it SKIPS (a ray walked to its first hit) cannot be traced — a traced loop pays its worst case on every item — and written as numpy passes it pays per step for every item still in flight. Its first consumer is the triangle grid's walk (`aquaflux/radiation/grid_walk.py`), 17-37x the numpy walk it replaced, with identical answers; the back-face tile tests (`back_faces.py`) and the transfer build's per-block front test (`transfer._any_in_front`, which exits at the first quadrature point that keeps a facet) are the same shape. The occupancy grid's box certificate (`grid._unions_held`) uses it for the other reason a host loop can win — fusing several whole-array passes into one threaded loop that forms no intermediate — and was ~15x faster in place, identical answers (`.claude/rules/radiation.md`). A core dependency since 2026-09-26, by the project owner's decision over keeping it optional. |
+| Browser interface (optional) | **PyVista/VTK + trame + plotly** (`aquaflux_ui`, `ui` extra) | a local browser interface (results viewer and case setup; running to come) that needs no JavaScript toolchain: VTK renders on this machine and trame streams images, so a large mesh never reaches the browser. A separate top-level package, because `import aquaflux` enables x64 and configures JAX — the interface imports neither aquaflux nor JAX, and asks the solver through a separate `aquaflux serve` process (`.claude/rules/ui.md`) |
 | Case file | **PyYAML** (`aquaflux/case/`) | a case's mesh, physics, boundaries, (for a flow) fluid and numerics, and solver in one YAML document, read by the YAML 1.2 rules for plain values (PyYAML's own 1.1 rules read `1e-5` as a string and `no` as a boolean) and validated per position by `solve.SettingsMapping` — so no pydantic. The equation DSL (YAML → AST emitting terms) is a different thing and is still the **last** layer, not built |
 | Bounded compilation cache | **filelock** (`aquaflux/__init__.py`) | `import aquaflux` points JAX's persistent on-disk compilation cache at `~/.cache/aquaflux/jax` and **bounds it**. JAX's default `jax_compilation_cache_max_size` is `-1`, which its LRU implementation reads as *no eviction* — an unbounded cache never prunes and only grows (one checkout reached 88 GiB across 2128 entries, 95% of it more than a week old, 42 of them ~1 GiB coupled-solve programs). Setting a byte bound turns real eviction on, and JAX takes an inter-process lock through `filelock` to do it. **⚠️ A BOUND WITHOUT `filelock` DISABLES THE CACHE ENTIRELY** — every read and write fails with a `UserWarning` and it stores nothing, which is worse than no bound, so the package checks and degrades to merely unbounded rather than silently dead. Override the size with `AQUAFLUX_COMPILATION_CACHE_MAX_GIB` (negative for no bound), the location with `AQUAFLUX_COMPILATION_CACHE_DIR`, or switch it off with `AQUAFLUX_DISABLE_COMPILATION_CACHE=1`. |
 
@@ -1153,10 +1155,10 @@ affect the task (a touched subsystem moved under you), surface that to the user 
 silently rebasing over it.
 
 CI runs a ruff gate on every pull request (and on pushes to `main`) via GitHub Actions
-(`.github/workflows/ci.yml`): `ruff check` + `ruff format --check` on `aquaflux`, `tests` and
-`docs` — the last because `docs/conf.py` generates the API reference and is real code that
+(`.github/workflows/ci.yml`): `ruff check` + `ruff format --check` on `aquaflux`, `aquaflux_ui`,
+`tests` and `docs` — the last because `docs/conf.py` generates the API reference and is real code that
 nothing else checks — with ruff pinned by the `lint` extra so the gate cannot move under a new
-release. (`codespell` stays on `aquaflux tests`; the docs prose is not yet spell-gated.) The same
+release. (`codespell` stays on `aquaflux aquaflux_ui tests`; the docs prose is not yet spell-gated.) The same
 gate is available locally through the committed pre-push hook (`.githooks/pre-push`) — enable
 it once per clone with `git config core.hooksPath .githooks`, and it runs the identical two
 commands before every push, so a slip is caught locally instead of as a red check on the PR.
@@ -1416,14 +1418,14 @@ After **every code change**, before considering the task complete, review and ac
      untracked prototype delivered as done is the exact Principle-0 failure this gate guards against.
 
 2. **Lint, format & comment hygiene** — from the repo root:
-   - `ruff check aquaflux tests docs` — must report no errors.
-   - `ruff format aquaflux tests docs` — auto-applies formatting (CI will run `--check`).
+   - `ruff check aquaflux aquaflux_ui tests docs` — must report no errors.
+   - `ruff format aquaflux aquaflux_ui tests docs` — auto-applies formatting (CI will run `--check`).
    - **Comment-hygiene guard (the Comment Convention + Claude-Facing-File Reference Ban):** the
      shipped surface must not point at the precursor codebases, the Claude-facing files
      (`CLAUDE.md` / `.claude/`), the internal design notes, or the author's own papers. This grep
      must come back **empty** for any `.py` you touched:
      ```
-     grep -rniE "c\+\+|fortran|\.claude|claude\.md|reference code|the reference|degroot|\.hpp|\.f90|design.note|briefing\.md|MeshObjectGroup" aquaflux tests --include="*.py"
+     grep -rniE "c\+\+|fortran|\.claude|claude\.md|reference code|the reference|degroot|\.hpp|\.f90|design.note|briefing\.md|MeshObjectGroup" aquaflux aquaflux_ui tests --include="*.py"
      ```
      (`design.note` rather than `-design-note`: the hyphenated form missed "the design note (S5)",
      which sat in two shipped docstrings for months. `the reference` is deliberately noisy — most hits

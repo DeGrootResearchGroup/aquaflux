@@ -203,6 +203,7 @@ def test_the_strategy_contract_module_stays_a_leaf() -> None:
         "retry",
         "step_control",
         "march_log",
+        "march_history",
         "checkpoint",
     }
     tree = ast.parse(contract.read_text())

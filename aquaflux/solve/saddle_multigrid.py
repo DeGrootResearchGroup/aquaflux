@@ -477,9 +477,86 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
         The damped-Jacobi sweeps used for the Schur solve inside one SIMPLE sweep, and their damping.
     omega : float
         Relaxation applied to the whole SIMPLE correction.
-    frobenius, schur_frobenius, aggressive_levels, orthonormal, avoid_singletons, block_splitting, simplec, mu, pre_smooth, prolongation_smoothing, equilibrate
-        The splitting and coarsening choices, each documented by the comment on its own line of the
-        signature below; ``prolongation_smoothing`` and ``equilibrate`` are passed through to
+    frobenius : bool
+        Approximate the velocity block's inverse by the Frobenius-optimal diagonal
+        ``F_ii / ||F_i||^2`` rather than the Jacobi diagonal ``1 / F_ii``. Default ``True``.
+
+        The Frobenius-optimal diagonal is Jacobi with a derived per-row under-relaxation, which is
+        what an amplifying sweep lacks. The change is qualitative rather than one of degree: under
+        Jacobi more sweeps make the residual worse, under this one they make it better.
+    schur_frobenius : bool
+        Use the Frobenius-optimal diagonal, rather than the Jacobi one, in the pressure-Schur
+        relaxation as well. Default ``True``.
+
+        It is why ``pressure_omega`` defaults to undamped. Measured as a 2x2 at four sweeps: with
+        the Jacobi diagonal an undamped pressure sweep blows up (3.4e-01 against 6.8e-05), while
+        with the Frobenius one removing the damping helps (6.8e-05 to 4.2e-05). The hand-set damping
+        and the derived per-row relaxation do the same job, so stacking them over-damps.
+    aggressive_levels : int
+        How many leading levels aggregate over the squared graph, which coarsens much faster than
+        ordinary aggregation. Default ``1``.
+
+        Depth and coarsening rate are two halves of one choice. One aggressive level gives a roughly
+        hundredfold jump in a single step, so one prolongation from a ~860-equation coarse space
+        carries the whole error; more levels at a gentler rate ask less of each interpolation.
+        Aggressive coarsening exists to bound the level count as the mesh grows, not to improve the
+        coarse space. See :func:`~aquaflux.solve.multigrid.build_convection_hierarchy`.
+    orthonormal : bool
+        Scale each aggregate's prolongation column to unit length, by ``1 / sqrt(|aggregate|)``.
+        Default ``False``.
+
+        This is inert on a two-level cycle with an exact coarse solve, but not deeper. With 0/1
+        columns the Galerkin coarse operator picks up a scaling of order ``|agg_i| * |agg_j|`` per
+        entry, which the next level's smoother and spectral estimate read, so the distortion
+        compounds once per level in proportion to how uneven the aggregate sizes are.
+    avoid_singletons : bool
+        Attach a vertex whose neighbours are all already claimed to one of their aggregates, instead
+        of letting it form an aggregate of its own. Default ``False``.
+
+        Such singletons are an artifact of arrival order in the random sweep, not of the graph, and
+        they interact badly with ``orthonormal``, which promotes a singleton several-fold against a
+        real aggregate. See :func:`~aquaflux.solve.multigrid.build_convection_hierarchy`.
+    block_splitting : bool
+        Replace the velocity predictor's scalar diagonal with a per-cell block inverse. Default
+        ``False``. It cannot be combined with ``simplec``.
+
+        The splitting error is the larger half of what governs this preconditioner's eigenvalue
+        clustering at the fine level, and a diagonal cannot represent a cell's own coupling between
+        velocity components at all.
+    simplec : bool
+        Use SIMPLEC's velocity coefficient, dividing by the row sum rather than the diagonal.
+        Default ``False``. It cannot be combined with ``block_splitting``.
+
+        The appeal as a smoother is that the splitting error then annihilates constants exactly, so
+        it does not fight the coarse grid over the smoothest mode.
+    mu : int
+        How many times each coarse level is visited per visit of its parent: ``1`` is a V-cycle,
+        ``2`` a W-cycle. Default ``1``.
+
+        A W-cycle buys convergence with coarse work, where every other setting here buys it with
+        fine-level relaxation, and the fine level is ~60% of the smoothing cost, so the two are
+        priced very differently.
+    pre_smooth : bool
+        Relax before the coarse-grid correction as well as after it. Default ``True``.
+
+        Dropping the pre-relaxation also drops the residual matrix-vector product that follows it,
+        which at two inner pressure sweeps is the single largest term in a sweep.
+    prolongation_smoothing : {"none", "symmetric-part", "standard"}
+        How the coarse correction is interpolated back. ``"none"`` (default) injects it
+        piecewise-constant over each aggregate; the other two smooth the prolongator once with the
+        operator.
+
+        Unsmoothed aggregation is the standard explanation for a hierarchy that works at two levels
+        and gains nothing deeper, since the interpolation error does not fall as the grids coarsen.
+        Smoothing the prolongator is what makes aggregation multigrid depth-independent.
+        ``"standard"`` presumes a unit-magnitude diagonal, so pair it with ``equilibrate``. Passed
+        to :func:`~aquaflux.solve.multigrid.build_convection_hierarchy`.
+    equilibrate : bool
+        Coarsen the operator rescaled to a unit-magnitude diagonal, rather than as given. The answer
+        is unchanged. Default ``False``.
+
+        Every step of the setup reads the diagonal, so on an operator whose diagonal spans orders of
+        magnitude it is otherwise calibrated against a scale with no meaning. Passed to
         :func:`~aquaflux.solve.multigrid.build_convection_hierarchy`.
     """
 

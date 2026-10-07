@@ -913,11 +913,13 @@ class SweptGradientSolve(GradientSolve):
         sufficiently skewed mesh. A differentiable leaf, not a static field, so it can be swept or
         fitted without retracing.
     warn_tol : float or None
-        Emit a one-time warning if the relative gradient residual after ``sweeps`` exceeds this
-        (default ``5e-2``, i.e. the sweep is clearly stalling — the converged field stays accurate
-        well below this, so it flags only a genuinely under-resolved mesh). ``None`` disables the
-        check entirely, and it is skipped at ``sweeps=1`` where the measured ratio is exactly 1 on
-        any mesh (see :meth:`solve`), so it would report nothing but its own construction.
+        Warn once if the relative gradient residual after ``sweeps`` exceeds this value, which means
+        the sweep is clearly stalling. Default ``5e-2``; ``None`` disables the check.
+
+        The converged field stays accurate well below the default, so it flags only a genuinely
+        under-resolved mesh. The check is skipped at ``sweeps=1``, where the measured ratio is
+        exactly 1 on any mesh (see :meth:`solve`), so it would report nothing but its own
+        construction.
     """
 
     sweeps: int = eqx.field(static=True, default=4)
@@ -1778,7 +1780,7 @@ class CoupledBlockSweep(HessianSolve):
 
 
 class CorrectedGreenGauss(GradientScheme):
-    """Green–Gauss with the non-orthogonal skewness correction — a coupled sparse system.
+    """Green–Gauss with the non-orthogonal skewness correction, solved as a coupled sparse system.
 
     The corrected face value adds a gradient-based extrapolation from the P–N line to the
     face centroid:
@@ -1809,6 +1811,10 @@ class CorrectedGreenGauss(GradientScheme):
         The strategy applying ``A_g⁻¹`` to solve ``A_g·G = B·φ`` (default
         :class:`SweptGradientSolve`, the scalable unrolled sweep; use :class:`GmresGradientSolve` for
         a mesh skewed enough to need an exact Krylov solve).
+    preconditioner : CellPreconditioner
+        How each cell's rows are scaled in the solve. :class:`InverseCellVolume` (the default) divides
+        them by the cell's volume, which suits a mesh of reasonable quality; :class:`ExactCellBlock`
+        inverts each cell's own block, for a mesh with badly flattened cells.
     """
 
     solver: GradientSolve = eqx.field(default_factory=SweptGradientSolve)

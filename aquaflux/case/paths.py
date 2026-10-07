@@ -3,17 +3,19 @@
 A value that names a file says which of its fields are paths, in a ``path_fields`` class attribute;
 every such path is relative to the case file unless absolute. :func:`named_paths` finds them all in a
 case, at any depth -- a mesh, a lamp's photometry, an STL surface on one wall -- and
-:func:`with_paths` rewrites them, which is how a copy of a case written elsewhere keeps pointing at
-the same files.
+:func:`with_paths` rewrites them; :func:`relocated` uses it to re-base them all, which is how a copy of
+a case written elsewhere keeps pointing at the same files.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import os
 import types
 from collections.abc import Callable, Iterator, Mapping
+from pathlib import Path
 
-__all__ = ["named_paths", "with_paths"]
+__all__ = ["named_paths", "relocated", "with_paths"]
 
 
 def named_paths(value: object, where: str = "") -> Iterator[tuple[str, str]]:
@@ -88,3 +90,28 @@ def with_paths(value: object, rewrite: Callable[[str], str]) -> object:
             return value
         return rewritten
     return value
+
+
+def relocated(value: object, source: Path, target: Path) -> object:
+    """``value`` for a case file moved from directory ``source`` to ``target``, so it means the same.
+
+    Every relative path it names is re-based onto ``target``; an absolute one is left as it is. The
+    output directory names no file and is not re-based: it is where *this* case file's runs write,
+    beside it.
+
+    Parameters
+    ----------
+    value : object
+        A case, or any part of one.
+    source, target : pathlib.Path
+        The directory the case file is in, and the one it is moving to.
+
+    Returns
+    -------
+    object
+    """
+
+    def rebased(path: str) -> str:
+        return path if os.path.isabs(path) else os.path.relpath(Path(source) / path, Path(target))
+
+    return with_paths(value, rebased)

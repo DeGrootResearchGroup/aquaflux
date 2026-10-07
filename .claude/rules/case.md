@@ -54,7 +54,8 @@ F frozen solver → G drive.
 
 | module | holds |
 |---|---|
-| `spec.py` | `CaseSpec` (mesh, physics, boundaries, optional fluid and numerics — the physics decides —, drive, pressure datum, sources, solver, outputs), `Numerics`, the one `SettingsMapping` registry `_CASE_MAPPING`, `case_spec_from_mapping` / `_to_mapping`, `CaseSpec.check_against(mesh)` |
+| `scopes.py` | `FLOW` / `TURBULENCE` / `RADIATION`, `SCOPES`, the `Scoped` mixin (`setting_scopes`, `required_in_scope`, `settings_in`, `missing_in`) |
+| `spec.py` | `CaseSpec` (mesh, physics, boundaries, optional fluid and numerics — the physics decides —, drive, pressure datum, sources, solver, outputs), `Numerics` (momentum and turbulence advection, gradient), the one `SettingsMapping` registry `_CASE_MAPPING`, `case_spec_from_mapping` / `_to_mapping`, `CaseSpec.check_against(mesh)` |
 | `case_file.py` | the YAML parse (`_CaseLoader`), `read_case` / `write_case`, `CaseFile`, `CheckedCase` |
 | `mesh_source.py` | `MeshSource.read(directory) -> Mesh` → `OpenFOAMMesh` (read) / `StructuredGrid` + `AxisGrading` → `GeometricGrading` (generated) |
 | `forcing.py` | `DriveSpec` → `BulkVelocity` (builds `flow.MassFlow`); `SourceSpec` → `BodyForce` (builds `flow.UniformBodyForce`) |
@@ -62,9 +63,9 @@ F frozen solver → G drive.
 | `physics.py` | `Physics` → `_Flow` → `Laminar` / `RANS`, and `Radiation` |
 | `boundaries.py` | `PatchCondition` → `Inlet` / `Outlet` / `Wall` / `Lamp`; `InletTurbulence` → `FixedTurbulence` |
 | `radiation.py` | the radiation vocabulary: `LampProfile` → `LambertianProfile` / `CosinePowerProfile` / `IesProfile`; `UniformMedium`; `SurfaceSource` → `MeshPatch` / `StlSurface` / `CadSurface` (+ `Coarsen`, `CadPlacement`); `OccluderSpec` → `PatchBody` / `StlBody` / `CadSolid` / `CadFluid`; `Receivers`; the internal `PatchSurface`, `_Drawings`, `_facing` |
-| `paths.py` | `named_paths` / `with_paths`: every value naming a file declares `path_fields` (a `ClassVar`), found at any depth for the existence check and the `case.yaml` re-basing |
+| `paths.py` | `named_paths` / `with_paths` / `relocated`: every value naming a file declares `path_fields` (a `ClassVar`), found at any depth for the existence check; `relocated(value, source, target)` is THE re-basing rule (relative → re-based, absolute kept, `outputs.directory` never — it names no file), used by the `case.yaml` run record and `aquaflux write --relative-to` |
 | `solver.py` | `SolverSpec` → `CoupledMarch` / `FlowMarch` (both on the private `_March`, their shared settings) / `Segregated` / `RadiationSolve`; `ViscosityRamp`; `RootSolve`; `solver_for(spec)`; `NotConverged`; each kind's `observers_for(logger, checkpointer)` |
-| `outputs.py` | `Outputs(directory, fields, log, checkpoints)`; `RunFields(cells, patches)`; `FieldWriter` → `Vtk` / `OpenFOAMTime` / `PatchVtk`; `Checkpoints` |
+| `outputs.py` | `Outputs(directory, fields, log, history, checkpoints)`; `RunFields(cells, patches)`; `FieldWriter` → `Vtk` / `OpenFOAMTime` / `PatchVtk`; `Checkpoints` |
 | `run.py` | `prepare_run(path, overwrite)` → `PreparedRun.run(terminal)` → `RunRecord` |
 | `aquaflux/__main__.py` | the `aquaflux check` / `aquaflux run` command (console script `aquaflux`) — the ONE module outside `case/` allowed to import it |
 
@@ -95,11 +96,19 @@ F frozen solver → G drive.
   the wall set are **derived** from one statement (see below), so they cannot disagree. The cost, accepted: a
   per-field choice becomes a field on the kind (`Wall.k: zero_gradient | zero` — the one that varies in
   the existing cases), and an unusual combination needs a new kind.
-- **Turbulence settings sit on the patch; the PHYSICS decides whether they may.** Each `PatchCondition`
-  reports `turbulence_settings()` (given here, read only by a closure) and `missing_turbulence_settings()`
-  (a closure needs it here and it is absent); `Laminar.refuse_boundaries` refuses the first,
-  `RANS.refuse_boundaries` the second, each listing **every** offending path at once. Polymorphic on
-  purpose — no `isinstance(physics, RANS)` in `CaseSpec`, so a third physics adds its own rule.
+- **Which physics reads a setting is DECLARED once, as a scope (`case/scopes.py`, 2026-10-06), and both
+  the refusals and the browser form read that declaration.** A value (each `PatchCondition`, `Numerics`)
+  lists `setting_scopes` (`{"k": TURBULENCE, "velocity": FLOW, "reflectance": RADIATION, ...}`) and
+  `required_in_scope`; each physics lists `reads_scopes` (Laminar `flow`; RANS `flow`+`turbulence`;
+  Radiation `radiation`). `Scoped.settings_in(scope)` / `missing_in(scope)` replaced the hand-written
+  `turbulence_settings()` / `missing_turbulence_settings()` / `flow_settings()` / `radiation_settings()`
+  (deleted; each was reproduced exactly by the derivation, including the lamp's `("profile", "power")`).
+  The physics refuses a stated setting of a scope it does not read and a missing required one, listing
+  **every** offending path at once (`_refuse_stray` per scope on the boundaries; `_Flow.refuse_sections`
+  generically over `numerics`). The schema publishes `scope` / `required_in_scope` per field and `reads`
+  per physics, with `scopes_from: "physics"`, so the form shows a laminar case no turbulence setting and
+  a flow case no light setting (`ui.md`). Polymorphic on purpose — no `isinstance(physics, RANS)` in
+  `CaseSpec`. Mutation-checked 9/9 (2026-10-06).
 - **The fluid is stated once, with exactly one viscosity (decided by the project owner, 2026-09-24).**
   Either `kinematic_viscosity` or `dynamic_viscosity`, never both, never neither — the other follows from
   `density`. This makes #367's momentum/SST viscosity mismatch unwritable in a file. ⚠️ `SSTTurbulence.build`
@@ -130,9 +139,20 @@ F frozen solver → G drive.
   its own kind.** A moving wall is a wall in every other respect — no through-flow, a wall to the closure,
   the same `k` option — so one kind keeps those shared by construction. `flow_closure()` is
   `NoSlipWall()` unset, `MovingWall(velocity)` set; `refuse_for_dimension` checks the velocity.
-- **`Numerics.momentum_advection` and `RANS.advection` are REQUIRED.** `MomentumContinuity.build`'s
-  `advection_scheme=None` means *Stokes flow* — a different problem, not a default — so a file cannot
-  reach it by omission. `RANS.advection` is required because `SSTTurbulence.build` takes it positionally.
+- **`Numerics.gradient` offers four schemes: `CompactGreenGauss`, `CorrectedGreenGauss`,
+  `MultipleCorrectionGradient`, `ProjectedStencilGradient`.** The last was BUILT 2026-09-22 (two days
+  before the case file existed) and left out of `_CASE_MAPPING` until 2026-10-06, though `schemes.md`
+  names it THE scheme for tetrahedral meshes; its `prepared` weight cache is `not_settings`. Checked
+  2026-10-06 by two coupled steps on pitzDaily through a case file naming it (finite residual, 3.4e-2).
+  `HessianCorrectedGradient` is still unregistered (dominated on cost per `schemes.md`; not asked for).
+- **Every advection scheme is in `numerics` (project owner, 2026-10-06): `momentum_advection` (REQUIRED)
+  and `turbulence_advection` (scope `turbulence`: required by RANS, refused by Laminar).**
+  `MomentumContinuity.build`'s `advection_scheme=None` means *Stokes flow* — a different problem, not a
+  default — so a file cannot reach it by omission; the turbulence one is required because
+  `SSTTurbulence.build` takes it positionally. ⚠️ There is no `RANS.advection` or
+  `RANS.turbulence_advection`: the key was `physics.advection`, renamed `turbulence_advection` and then
+  moved to `numerics` the same day (`numerics.gradient` is already every field's, so the advection schemes
+  sit beside it).
 - **A `boundaries` key names a patch OR a patch group (decided by the project owner, 2026-09-25, #364).**
   `CaseSpec.boundaries` keeps the file's keys as written (so a case round-trips unchanged);
   `CaseSpec.patch_conditions(mesh)` resolves them to `{patch: condition}` through
@@ -317,8 +337,46 @@ by construction), and not passing `drive` (the only nameable drive is the builde
   `OpenFOAMTime` target), resolve the solver (a bulk-velocity case with no solver is refused HERE), and
   check the mesh — all before any geometry. `--overwrite` replaces the files the run writes and clears
   `checkpoints/` (whose names collide across runs); anything else in the directory is left alone.
-- **`outputs` is optional; its default writes `results/fields.vtu` + `results/march.log`** (project owner,
-  2026-09-25). `Outputs` is a `default_factory` field, so a file stating none round-trips with no section.
+- **Editing commands for a program (2026-10-05, for the browser interface's Setup section)** — `aquaflux
+  schema` prints `case_schema()` (root `CaseSpec`, `one_form_sections`, and `_CASE_MAPPING.schema()`);
+  `aquaflux show case.yaml` prints `{"error", "case"}` — the document by `read_case_document` (the SAME
+  YAML 1.2 parse `read_case` uses, factored out so the two cannot differ) and the refusal of reading it
+  into a case, if any (a refused file is still shown so it can be corrected; unparseable YAML → exit 2);
+  `aquaflux write case.yaml [--relative-to DIR] < {"case": ...}` validates through
+  `case_spec_from_mapping` and writes with `write_case`, writing NOTHING when refused (exit 2, JSON
+  error). Saving rewrites the file: comments and hand formatting are not kept, settings at their default
+  are dropped — the UI warns before the first save over an opened file. The UI never imports the
+  solver: it asks these through ONE long-lived `aquaflux serve` process (below), not a process per command. Pinned by
+  `tests/unit/test_case_editing_commands.py`. Fourth command, `aquaflux mesh OUT [--relative-to DIR] <
+  {"mesh": ...}`: reads only the mesh section (`mesh_source_from_mapping`, the same rules as within a
+  case, so a mesh can be previewed while the rest is unfinished), reads or generates and validates it,
+  writes `OUT/mesh.vtu`, and prints `cells`, `dim`, boundary `patches` (name + face count, holding faces
+  only) and `groups`.
+- **`aquaflux serve` (2026-10-06, project owner: "build the persistent worker")** — answers `SERVED`
+  (`schema`/`show`/`write`/`mesh`/`check`, never `run`) one JSON line per request
+  (`{"arguments", "stdin"}` → `{"status", "output", "errors"}`) by calling `main(arguments)` in-process
+  with stdin/stdout/stderr swapped for strings; a `SystemExit` (argparse) or any exception becomes that
+  request's status, and the loop goes on; Ctrl-C (run by hand) or a closed reply pipe ends it quietly. **Replies go on a `dup` of fd 1, and fd 1 is then pointed at
+  stderr**, so a library or compiled code writing to stdout cannot corrupt the protocol
+  (`test_serve_replies_on_a_channel_nothing_else_writes_to`). Why it exists: each command's work is
+  0.01–0.4 s while a fresh process spends 2.5–5 s importing (JAX ~1.1–1.9 s, SciPy via `mesh.distance`,
+  the flow package via `case.boundaries`) — measured 2026-10-06 on pitzDaily, macOS arm64, under a load
+  average of 12–24 from a concurrent fast gate, so the absolute seconds are inflated; opening a case was
+  two such processes (schema, show) then a third (mesh). Through the worker: start + schema 1.5 s
+  (in the background at page load), show 0.02 s, first mesh 2.0 s, a repeat mesh 0.3 s.
+- **`paths.relocated(value, source, target)` — one home for "this case file moved directories"** (on
+  `with_paths`, so it reaches every `path_fields` path at any depth: mesh, OpenFOAM writer case, lamp
+  photometry, STL/STEP surfaces); absolute paths are unchanged and `outputs.directory` is NOT re-based (a
+  copy's runs write beside the copy). The run record's `case.yaml` and `aquaflux write --relative-to`
+  both use it. ⚠️ There is no `CaseSpec.relocated` / `MeshSource.relocated` / `rebased_path`: a
+  per-class version was built for the browser interface in parallel with `with_paths` (2026-10-06) and
+  deleted at the merge as dominated — it reached only the mesh and `OpenFOAMTime`.
+- **`outputs` is optional; its default writes `results/fields.vtu` + `results/march.log` +
+  `results/history.csv`** (project owner, 2026-09-25; `history` added 2026-10-05 for the browser viewer's
+  convergence plot). `history` is `solve.StepHistory` — one CSV row per step, every `StepReport` field
+  at full precision, flushed per row; the runner's `_StepCount` forwards each step to it and to the
+  checkpointer. Under `Segregated` (no steps) it holds the header only. `log` and `history` may not name
+  the same file. `Outputs` is a `default_factory` field, so a file stating none round-trips with no section.
   Like `fluid`/`numerics`, the section may omit its `kind`; nested values (`Checkpoints`, writers) may not.
 - **Three writers, all the library's** (`PatchVtk` → `write_patches` since 2026-10-05, see Radiation cases): `Vtk` → `write_vtu` (any mesh) and `OpenFOAMTime` →
   `write_openfoam_time` (writes into the named OpenFOAM case, not the output directory; refused at read
@@ -410,10 +468,10 @@ whose runs write what every run writes. Decisions taken with the owner before bu
 - **Patch kinds are `Wall` + a new `Lamp`, shared with flow** (not radiation-only kinds), so a coupled
   flow + UV case later states each patch once. `Wall` gained `reflectance` (black when unset) and
   `geometry`; `Lamp(profile, power, geometry)` is a stationary wall to a flow (`flow_closure()` is
-  `Wall()`'s). Each `PatchCondition` now reports `flow_settings()` and `radiation_settings()` beside
-  `turbulence_settings()`: a flow physics refuses the radiation ones (`_refuse_light`), `Radiation`
-  refuses the flow and turbulence ones and requires at least one `Lamp` — the same polymorphic rule as
-  Laminar/RANS, through one `_refuse_stray` helper. An `Inlet`/`Outlet` is refused in a radiation case
+  `Wall()`'s). Its settings carry `flow` / `radiation` scopes beside `turbulence` (see the scope bullet
+  above): a flow physics refuses the radiation ones (`_refuse_light`), `Radiation` refuses the flow and
+  turbulence ones and requires at least one `Lamp` — the same polymorphic rule as Laminar/RANS, through
+  one `_refuse_stray` helper. An `Inlet`/`Outlet` is refused in a radiation case
   (both carry required flow settings).
 - **The medium lives inside the physics** (`Radiation.medium: UniformMedium(absorption | transmittance)`),
   not on `fluid`: a radiation case has **no `fluid` and no `numerics` section**. So `CaseSpec.fluid` /

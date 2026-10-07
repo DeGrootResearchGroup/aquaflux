@@ -17,10 +17,12 @@ at the default of the class that consumes it.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
-from typing import Literal
+from collections.abc import Callable, Mapping
+from typing import ClassVar, Literal
 
+from .amg_preconditioner import MonolithicAmgPreconditioner
 from .block_inverse import AirReduction, BlockInverse, JacobiSmoothed, SimpleSmoothed
+from .lu_preconditioner import MonolithicLuPreconditioner
 from .settings_mapping import SettingsMapping
 from .settings_value import SettingsValue
 
@@ -62,6 +64,12 @@ class JacobianProbeSpec(SettingsValue):
     column_reach: tuple[int, ...] | None = None
     gradient_sweeps: int | None = None
 
+    #: The settings for which unset means the feature is off (read by the case-file schema).
+    unset_means_off: ClassVar[tuple[str, ...]] = (
+        "column_reach",
+        "gradient_sweeps",
+    )
+
     def __post_init__(self) -> None:
         if self.column_reach is not None:
             object.__setattr__(self, "column_reach", tuple(int(r) for r in self.column_reach))
@@ -77,10 +85,16 @@ class CompleteLu(SettingsValue):
     Attributes
     ----------
     backend : {"auto", "umfpack", "scipy"} or None
-        The factorization backend -- see :meth:`~aquaflux.solve.MonolithicLuPreconditioner.build`.
+        The factorization backend. ``"auto"`` uses UMFPACK (through ``petsc4py``) when it is
+        available and falls back to SciPy's SuperLU otherwise. Unset, ``"auto"``.
+
+        See :meth:`~aquaflux.solve.MonolithicLuPreconditioner.build`.
     """
 
     backend: Literal["auto", "umfpack", "scipy"] | None = None
+
+    #: Where an unset setting takes its default from (read by the case-file schema).
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (MonolithicLuPreconditioner.build,)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -100,6 +114,9 @@ class MonolithicVCycle(SettingsValue):
     smoother_sweeps: int | None = None
     coarse_eq_limit: int | None = None
 
+    #: Where an unset setting takes its default from (read by the case-file schema).
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (MonolithicAmgPreconditioner.build,)
+
 
 @dataclasses.dataclass(frozen=True)
 class FieldSplit:
@@ -114,11 +131,11 @@ class FieldSplit:
     Attributes
     ----------
     leading : BlockInverse
-        The inverse fitted to the leading fields (``[u, v, w, p]``) -- :class:`~aquaflux.solve.SimpleSmoothed`, for
-        example.
+        The inverse fitted to the leading fields (``[u, v, w, p]``), for example
+        :class:`~aquaflux.solve.SimpleSmoothed`.
     trailing : BlockInverse
-        The inverse fitted to the trailing fields (``[k, omega]``) -- :class:`~aquaflux.solve.JacobiSmoothed`, for
-        example.
+        The inverse fitted to the trailing fields (``[k, omega]``), for example
+        :class:`~aquaflux.solve.JacobiSmoothed`.
 
     Raises
     ------
@@ -148,11 +165,15 @@ class MaterializedJacobian:
     Attributes
     ----------
     inverse : CompleteLu, MonolithicVCycle, FieldSplit or BlockInverse
-        How the materialized, shifted Jacobian is inverted. Its type also decides how often the inverse
-        is refitted during a march and which Krylov restart regime the forward solve defaults to. A bare
-        :class:`~aquaflux.solve.BlockInverse` (a :class:`~aquaflux.solve.SimpleSmoothed`, say) inverts the
-        **whole** state, so it is for a problem whose fields form a single group -- a laminar flow -- and
-        needs no optional dependency; a problem with two groups takes a :class:`FieldSplit` instead.
+        How the materialized, shifted Jacobian is inverted. A bare block inverse such as
+        :class:`~aquaflux.solve.SimpleSmoothed` suits a laminar flow, and a turbulent flow takes a
+        :class:`FieldSplit`.
+
+        The inverse's type also decides how often it is refitted during a march and which Krylov
+        restart regime the forward solve defaults to. A bare :class:`~aquaflux.solve.BlockInverse`
+        inverts the **whole** state, so it is for a problem whose fields form a single group, such
+        as a laminar flow, and it needs no optional dependency. A problem with two groups takes a
+        :class:`FieldSplit` instead.
     probe : JacobianProbeSpec
         How the Jacobian is probed. The default probes every column at the builder's own reach.
     build_beta : float or None
@@ -160,10 +181,11 @@ class MaterializedJacobian:
         inverse freezes its coarse space at that build, since every later refit reuses it.
     refit_beta_floor : float or None
         A lower bound on the shift the inverse is refitted at, while the march keeps solving at its own
-        shift. Not the march's own ``beta_floor`` (a field of
-        :class:`~aquaflux.solve.Globalization`), which bounds the shift the *solve* runs at: this one
-        bounds only the shift the *inverse is fitted to*, so it changes how well the preconditioner
-        tracks the operator and never what is being solved.
+        shift. It changes how well the preconditioner tracks the operator, never what is solved.
+
+        This is not the march's own ``beta_floor`` (a field of
+        :class:`~aquaflux.solve.Globalization`), which bounds the shift the *solve* runs at. This
+        one bounds only the shift the *inverse is fitted to*.
 
     Raises
     ------
