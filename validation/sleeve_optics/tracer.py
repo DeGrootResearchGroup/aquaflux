@@ -61,6 +61,10 @@ class Scene:
         ``"arc"`` -- each lamp's arc emits into its air gap; or ``"sleeve"`` -- each lamp's outer sleeve
         surface emits into the water, the lamp's interior never entered, which is how a model that meshes
         the sleeve as the lamp sees it.
+    reflections : bool
+        ``False`` ends a ray at its first Fresnel reflection (its weight tallied as ``discarded``), so
+        only light that crossed every interface it met is counted: the transmitted paths alone, which
+        is what a model that follows no reflection computes.
     """
 
     centres: np.ndarray
@@ -74,6 +78,7 @@ class Scene:
     air: float = AIR
     neighbours: str = "optics"
     emit_from: str = "arc"
+    reflections: bool = True
 
 
 @dataclasses.dataclass
@@ -87,6 +92,7 @@ class Tally:
     sleeves: float = 0.0
     wall: float = 0.0
     lost: float = 0.0
+    discarded: float = 0.0
 
 
 def fresnel(cos_i, n1, n2):
@@ -265,6 +271,11 @@ def _trace_batch(scene, centres, lamp, n, weight_each, rng, tally, grid, max_eve
         cos_i = np.abs(cos_n)
         r, cos_t = fresnel(cos_i, n1, n2)
         reflect = rng.random(m) < r
+        if not scene.reflections:
+            dropped = go & reflect
+            tally.discarded += w[dropped].sum()
+            stop = stop | dropped
+            go = go & ~dropped
         reflected = d + 2.0 * cos_i[:, None] * facing
         ratio = (n1 / n2)[:, None]
         refracted = ratio * d + (ratio[:, 0] * cos_i - cos_t)[:, None] * facing
