@@ -84,16 +84,6 @@ _OWN_FACET_CANDIDATES = 32
 #: body's extent: a rounding of the point's coordinates.
 _TIE = 1e-12
 
-#: How far in front of its own facet a point the lamps' light is averaged over on a lamp facet is
-#: moved, as a share of the scene's size. In the facet's plane the point can see its own facet as a
-#: whole hemisphere, wherever a rounding leaves the facet's corners undecidably in the point's own
-#: plane -- the kernels' convention for a point inside a facet -- and read a lamp as lighting
-#: itself. A hair in front, the facet lies decidably behind the point's receiving plane and is
-#: clipped away whatever the lamp's profile, and the point stays on the fluid's side of the lamp,
-#: where a body holding the fluid does not refuse it. Far above a rounding of the coordinates, far
-#: below anything geometric.
-_IN_FRONT_OF_OWN_FACET = 1e-12
-
 
 @dataclasses.dataclass(frozen=True)
 class VolumeReceivers:
@@ -145,9 +135,12 @@ class SurfaceReceivers:
         by the facets' own ``diffuse_reflectance``.
     reflector : str or None
         The body the points lie on, if they lie on one that exchanges light: a body of
-        :attr:`Scene.reflectors` or of :attr:`Scene.lamps`. The facet of that body nearest each point
-        is then left out of the test of what shadows it, in which a ray from another facet would
-        otherwise end in that facet and be read as blocked.
+        :attr:`Scene.reflectors` or of :attr:`Scene.lamps`. The facets of that body each point lies
+        on -- the nearest, and any as near -- are then left out of the test of what shadows it, in
+        which a ray from another facet would otherwise end in that facet and be read as blocked, and
+        out of the light gathered from that body there, since a facet sends nothing into its own
+        plane. Unset on points that do lie on such a body, a point inside a tilted facet can read
+        that facet's whole exitance.
 
     Raises
     ------
@@ -524,9 +517,9 @@ class _Exchanged:
 def _solve_exchange(scene: Scene, exchange: _Exchange, solver, say) -> _Exchanged:
     """Solve the reflected light among the exchanging facets, lit from outside by the lamps.
 
-    The lamps' light on each facet is averaged over its sub-triangle centroids. On a lamp facet
-    those points are moved a hair in front of the facet, so that it lights none of them whatever a
-    rounding of their heights says, and its triangle is left out of their shadow test.
+    The lamps' light on each facet is averaged over its sub-triangle centroids, in the facet's own
+    plane. On a lamp facet the facet is named as those points' own: left out of their shadow test,
+    and of the light gathered at them, since a facet lights nothing in its own plane.
     """
     surfaces, lamps = exchange.surfaces, scene.lamps
     samples = subtriangle_centroids(surfaces.vertices, scene.lamp_samples)
@@ -544,13 +537,10 @@ def _solve_exchange(scene: Scene, exchange: _Exchange, solver, say) -> _Exchange
             scene, lamps, samples[:split].reshape(-1, 3), normals[:split].reshape(-1, 3)
         ).reshape(split, per_facet)
     if len(exchange.lamp_facets):
-        vertices = np.asarray(surfaces.vertices)
-        size = np.max(np.ptp(vertices.reshape(-1, 3), axis=0)) + np.max(np.abs(vertices))
-        in_front = samples[split:] + _IN_FRONT_OF_OWN_FACET * size * normals[split:]
         external[split:] = _irradiance(
             scene,
             lamps,
-            in_front.reshape(-1, 3),
+            samples[split:].reshape(-1, 3),
             normals[split:].reshape(-1, 3),
             own=np.repeat(exchange.lamp_facets, per_facet)[:, None],
         ).reshape(-1, per_facet)
@@ -629,8 +619,9 @@ def _irradiance(
     """Irradiance from ``sources`` at oriented points, a pass of points at a time.
 
     Each pass builds the mask for its own points and drops it, so memory is a pass's whatever the
-    number of points. ``own`` gives, per point, the facet of ``sources`` it lies on, which the shadow
-    test leaves out at the point's end of every ray.
+    number of points. ``own`` gives, per point, the facets of ``sources`` it lies on, as
+    :func:`_own_facets` returns them: the shadow test leaves them out at the point's end of every ray,
+    and the gather leaves them out as sources, since a facet lights nothing in its own plane.
     """
     pair_limit = _pair_limit(scene.settings)
     if not _casts_shadows(scene):
@@ -641,6 +632,7 @@ def _irradiance(
                 jnp.asarray(normals),
                 absorption=scene.absorption,
                 pair_limit=pair_limit,
+                receiver_facet=own,
             )
         )
     per_pass = receivers_per_pass(pair_limit, sources.n_facets * max(1, len(scene.occluders)))
@@ -650,14 +642,15 @@ def _irradiance(
         stop = min(start + per_pass, len(points))
         chunk = points[start:stop]
         facet = None if own is None else own[start:stop]
+        shadow_facet = facet
         if facet is not None and isinstance(options.get("self_occlusion"), SilhouetteOcclusion):
             # The clip projects its shares about one facet's normal: the nearest.
-            facet = facet[:, 0]
+            shadow_facet = facet[:, 0]
         visibility = build_visibility(
             scene.occluders,
             sources,
             chunk,
-            receiver_facet=facet,
+            receiver_facet=shadow_facet,
             pair_limit=pair_limit,
             **options,
         )
@@ -669,6 +662,7 @@ def _irradiance(
                 absorption=scene.absorption,
                 visibility=visibility,
                 pair_limit=pair_limit,
+                receiver_facet=facet,
             )
         )
     return out
