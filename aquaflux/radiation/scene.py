@@ -199,7 +199,10 @@ class Scene:
     settings : RadiationSettings
         Build-time choices: how the surfaces shadow themselves and the points they light, how the
         bodies' shadows are worked out, and how many pairs a pass may form. Read for every gather and
-        for the surface solve alike, so the two cannot be built differently.
+        for the surface solve alike, so the two cannot be built differently. A body its
+        self-occlusion names -- a zero-thickness sheet declared two-sided -- may be one of the lamps'
+        or one of the reflectors': each mask is built by :meth:`settings_for` its sources, which
+        keeps only the names of their own bodies.
 
     Raises
     ------
@@ -207,7 +210,7 @@ class Scene:
         If a reflector emits; if a lamp or a reflector reflects specularly, which the scene does not
         carry; if the lamps and the reflectors share a body name, which would leave a set of surface
         points unable to say which it lies on; if a set of surface points names a body neither has;
-        or if ``lamp_samples`` is less than one.
+        if the settings name a body neither has; or if ``lamp_samples`` is less than one.
     """
 
     lamps: Surfaces
@@ -248,6 +251,9 @@ class Scene:
                 "distinct solid_names, which is how a set of surface points says what it lies on."
             )
         names = (*reflecting, *self.lamps.solid_names)
+        # Once, against every body: each mask sees only its own sources' bodies, so a misspelt name
+        # would otherwise be dropped from every one of them without an error.
+        self.settings.check_bodies(names)
         unknown = sorted(
             f"{name!r} names {receivers.reflector!r}"
             for name, receivers in self.surfaces.items()
@@ -258,6 +264,24 @@ class Scene:
                 f"Scene.surfaces: {', '.join(unknown)}, which is not a body of the lamps or the "
                 f"reflectors; their bodies are {list(names)}."
             )
+
+    def settings_for(self, sources: Surfaces) -> RadiationSettings:
+        """:attr:`settings` as they apply to a mask whose sources are ``sources``.
+
+        Cut down by :meth:`~aquaflux.radiation.model.RadiationSettings.for_bodies` to the bodies of
+        ``sources``: the lamps alone hold only the lamps' bodies, so a body of the reflectors that the
+        settings name is a stranger to them.
+
+        Parameters
+        ----------
+        sources : Surfaces
+            The lamps, or the exchanging facets in any of their optical states.
+
+        Returns
+        -------
+        RadiationSettings
+        """
+        return self.settings.for_bodies(sources.solid_names)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -546,7 +570,7 @@ def _solve_exchange(scene: Scene, exchange: _Exchange, solver, say) -> _Exchange
         ).reshape(-1, per_facet)
     say("exchange: building the facet-to-facet transfer")
     model = build_radiation_model(
-        np.zeros((0, 3)), surfaces, occluders=scene.occluders, settings=scene.settings
+        np.zeros((0, 3)), surfaces, occluders=scene.occluders, settings=scene.settings_for(surfaces)
     )
     landing, solved_cycles = surface_irradiance(
         model,
@@ -597,7 +621,7 @@ def _fluence(scene: Scene, sources: Surfaces, points: np.ndarray) -> np.ndarray:
             (sources,), jnp.asarray(points), absorption=scene.absorption, pair_limit=pair_limit
         )
         return np.asarray(field)
-    options = dict(scene.settings.receiver_visibility_options())
+    options = dict(scene.settings_for(sources).receiver_visibility_options())
     self_occlusion = options.pop("self_occlusion", None)
     field = streamed_fluence_rate(
         (sources,),
@@ -636,7 +660,7 @@ def _irradiance(
             )
         )
     per_pass = receivers_per_pass(pair_limit, sources.n_facets * max(1, len(scene.occluders)))
-    options = scene.settings.receiver_visibility_options()
+    options = scene.settings_for(sources).receiver_visibility_options()
     out = np.empty(len(points))
     for start in range(0, len(points), per_pass):
         stop = min(start + per_pass, len(points))

@@ -12,6 +12,10 @@ the same comparison holds for a lamp that reflects and for one that stands in th
 
 from __future__ import annotations
 
+import ast
+import re
+import warnings
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -23,6 +27,7 @@ from aquaflux.radiation import (
     RadiationSettings,
     RayCastOcclusion,
     Scene,
+    SilhouetteOcclusion,
     SurfaceReceivers,
     Surfaces,
     UniformAbsorption,
@@ -39,7 +44,13 @@ from aquaflux.radiation import (
 from aquaflux.radiation.gather import summed_fluence_rate
 from aquaflux.solids import Box, Cylinder, Difference, Outside, Sphere
 
-from tests.unit.radiation_references import closed_drum, inward_box, tilt_rotation, tilted
+from tests.unit.radiation_references import (
+    closed_drum,
+    inward_box,
+    rectangle_triangles,
+    tilt_rotation,
+    tilted,
+)
 
 LAMP_EXITANCE = 7.0
 REFLECTANCE = 0.6
@@ -632,3 +643,108 @@ def test_a_tilted_lamp_flush_with_the_water_s_wall_is_lit_as_without_the_water()
     unbounded = landing(())
     assert np.all(unbounded > 0.0)
     np.testing.assert_allclose(landing((water,)), unbounded, rtol=1e-12)
+
+
+def _scene_with_a_sheet_in_each_set(occlusion) -> Scene:
+    """A lamp with a baffle among the lamps, and a ceiling with a shelf among the reflectors.
+
+    Each sheet faces away from the point it is meant to shade, so counted from the side it faces it
+    hides nothing, and only its declaration as two-sided darkens that point. The first volume point
+    sits above the baffle, on the far side of it from the lamp, and away from the shelf; the second
+    sits under the shelf, which hides the whole ceiling from it, and away from the baffle. The baffle
+    is clear of every line from the lamp to the ceiling, so the ceiling is lit either way.
+    """
+    up, down = ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), ([0.0, 1.0, 0.0], [1.0, 0.0, 0.0])
+    lamp = rectangle_triangles([0.0, 0.0, 0.0], *[0.1 * np.asarray(e) for e in up])
+    baffle = rectangle_triangles([0.55, 0.0, 0.3], [0.0, 0.4, 0.0], [0.25, 0.0, 0.0])
+    ceiling = rectangle_triangles([0.0, 0.0, 2.0], *down)
+    shelf = rectangle_triangles([-3.0, 0.0, 1.5], [1.75, 0.0, 0.0], [0.0, 1.5, 0.0])
+    lamps = Surfaces.from_triangles(
+        np.concatenate([lamp, baffle]),
+        emission=[LAMP_EXITANCE] * 2 + [0.0] * 2,
+        solid_id=[0, 0, 1, 1],
+        solid_names=("lamp", "baffle"),
+    )
+    reflectors = Surfaces.from_triangles(
+        np.concatenate([ceiling, shelf]),
+        diffuse_reflectance=[REFLECTANCE] * 2 + [0.0] * 2,
+        solid_id=[0, 0, 1, 1],
+        solid_names=("ceiling", "shelf"),
+    )
+    return Scene(
+        lamps=lamps,
+        reflectors=reflectors,
+        volume=VolumeReceivers(np.array([[1.0, 0.0, 0.6], [-3.0, 0.0, 1.2]])),
+        settings=RadiationSettings(receiver_quadrature=1, self_occlusion=occlusion),
+    )
+
+
+@pytest.mark.parametrize(
+    ("two_sided", "dark"),
+    [((), ()), (("baffle",), (0,)), (("shelf",), (1,)), (("baffle", "shelf"), (0, 1))],
+    ids=["neither", "baffle", "shelf", "both"],
+)
+def test_a_sheet_declared_two_sided_shades_from_behind_whichever_set_it_belongs_to(
+    two_sided, dark
+) -> None:
+    # The lamp and the ceiling are sheets too, open at every edge; declaring them keeps the build
+    # from warning about them, and changes nothing, since nothing lies behind either.
+    sheets = ("lamp", "ceiling", *two_sided)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        solution = solve_scene(
+            _scene_with_a_sheet_in_each_set(SilhouetteOcclusion(two_sided=sheets))
+        )
+    # Every build warns about the open sheets of its own set that were left undeclared, and only
+    # about those.
+    warned = {
+        name
+        for w in caught
+        for match in re.findall(r"facet\(s\) of (\[[^\]]*\]) belong", str(w.message))
+        for name in ast.literal_eval(match)
+    }
+    assert warned == {"baffle", "shelf"} - set(two_sided)
+    clear = solve_scene(_scene_with_a_sheet_in_each_set(NoOcclusion()))
+    # The baffle is among the lamps, so it shades the lamps' light; the shelf is among the
+    # reflectors, so it shades theirs. Each point is shaded only by the part its sheet can hide.
+    shaded = (solution.fluence_rate_direct[0], solution.fluence_rate_reflected[1])
+    unshaded = (clear.fluence_rate_direct[0], clear.fluence_rate_reflected[1])
+    for point, (field, reference) in enumerate(zip(shaded, unshaded, strict=True)):
+        assert reference > 0.0
+        if point in dark:
+            assert field == pytest.approx(0.0, abs=1e-12 * reference)
+        else:
+            assert field == pytest.approx(reference, rel=1e-12)
+    # A sheet among the lamps blocks no lamp light from the ceiling, so the reflected light is the
+    # same whatever the lamps declare.
+    np.testing.assert_allclose(solution.radiosity, clear.radiosity, rtol=1e-12)
+
+
+@pytest.mark.parametrize("field", ["self_occlusion", "receiver_occlusion"])
+def test_a_scene_refuses_a_sheet_that_neither_set_has(field) -> None:
+    scene = _scene_with_a_sheet_in_each_set(NoOcclusion())
+    misspelt = RadiationSettings(**{field: SilhouetteOcclusion(two_sided=("baffle", "shelff"))})
+    with pytest.raises(
+        ValueError,
+        match=r"two_sided names no body of these surfaces: \['shelff'\]; "
+        r"have \['ceiling', 'shelf', 'lamp', 'baffle'\]",
+    ):
+        Scene(lamps=scene.lamps, reflectors=scene.reflectors, settings=misspelt)
+
+
+def test_settings_cut_down_to_a_set_keep_its_own_sheets_and_nothing_else_changes() -> None:
+    settings = RadiationSettings(
+        receiver_quadrature=3,
+        self_occlusion=SilhouetteOcclusion(two_sided=("baffle", "shelf"), cluster_size=8),
+        receiver_occlusion=SilhouetteOcclusion(two_sided=("shelf", "lamp")),
+        gather_pair_limit=1234,
+    )
+    lamps = settings.for_bodies(("lamp", "baffle"))
+    assert lamps.self_occlusion == SilhouetteOcclusion(two_sided=("baffle",), cluster_size=8)
+    assert lamps.receiver_occlusion == SilhouetteOcclusion(two_sided=("lamp",))
+    assert (lamps.receiver_quadrature, lamps.gather_pair_limit) == (3, 1234)
+    walls = settings.for_bodies(("shelf",))
+    assert walls.self_occlusion.two_sided == walls.receiver_occlusion.two_sided == ("shelf",)
+    # A choice that names no bodies is the same choice on every set, and an unset one stays unset.
+    plain = RadiationSettings(self_occlusion=RayCastOcclusion())
+    assert plain.for_bodies(("anything",)) == plain

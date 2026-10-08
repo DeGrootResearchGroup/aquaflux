@@ -33,6 +33,7 @@ every gradient.
 from __future__ import annotations
 
 import abc
+import dataclasses
 import warnings
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -155,6 +156,45 @@ class SelfOcclusion(eqx.Module):
         """
         del surfaces
         return self
+
+    def for_bodies(self, names) -> SelfOcclusion:
+        """This strategy as it applies to a surface set holding the bodies ``names``.
+
+        For a caller holding several surface sets under one choice -- a scene's lamps and its
+        reflecting walls -- whose declarations may name a body of any of them: each set's masks
+        are then built by the share that names its own bodies. Unless a strategy names bodies, it
+        is itself.
+
+        Parameters
+        ----------
+        names : sequence of str
+            The set's :attr:`~aquaflux.radiation.surfaces.Surfaces.solid_names`.
+
+        Returns
+        -------
+        SelfOcclusion
+        """
+        del names
+        return self
+
+    def check_bodies(self, names) -> None:
+        """Refuse a body this strategy names that is not among ``names``.
+
+        Called against every body a strategy could be applied to -- one surface set's, or the union
+        of several sets' -- so that a misspelt name is an error rather than a body silently left
+        out. Unless a strategy names bodies, there is nothing to refuse.
+
+        Parameters
+        ----------
+        names : sequence of str
+            Every body the strategy may name.
+
+        Raises
+        ------
+        ValueError
+            If the strategy names a body not in ``names``.
+        """
+        del names
 
     def segments_hidden(self, surfaces, origin, target, near, exclude) -> np.ndarray | None:
         """Whether the surface's own triangles lie across each of a list of segments.
@@ -443,7 +483,9 @@ class SilhouetteOcclusion(SelfOcclusion):
     two_sided : tuple of str
         Bodies, by their name in :attr:`~aquaflux.radiation.surfaces.Surfaces.solid_names`, that
         block from both sides: zero-thickness sheets. Empty by default. Naming a closed body here
-        makes it block twice, which errs dark.
+        makes it block twice, which errs dark. Every name must be a body of the surfaces the clip
+        is applied to; where one choice serves several surface sets, it may name a body of any of
+        them, and each set is clipped by :meth:`for_bodies` its own share.
     """
 
     work_chunk: int = 32_768
@@ -522,17 +564,35 @@ class SilhouetteOcclusion(SelfOcclusion):
             overlapping=jnp.asarray(blockers > 1),
         )
 
-    def _either_side(self, surfaces) -> np.ndarray:
-        """Which facets block from both sides, warning about open pieces nobody declared."""
-        names = tuple(surfaces.solid_names)
+    def for_bodies(self, names) -> SilhouetteOcclusion:
+        """This clip with :attr:`two_sided` cut down to the bodies in ``names``.
+
+        See :meth:`SelfOcclusion.for_bodies`. A body named in :attr:`two_sided` and present in
+        several sets is two-sided in each of them.
+        """
+        names = set(names)
+        return dataclasses.replace(
+            self, two_sided=tuple(name for name in self.two_sided if name in names)
+        )
+
+    def check_bodies(self, names) -> None:
+        """Refuse a name in :attr:`two_sided` that is not among ``names``.
+
+        See :meth:`SelfOcclusion.check_bodies`.
+        """
         unknown = sorted(set(self.two_sided) - set(names))
         if unknown:
             msg = (
-                f"two_sided names no body in this surface set: {unknown}; have {list(names)}. "
+                f"two_sided names no body of these surfaces: {unknown}; have {list(names)}. "
                 "A misspelt sheet would otherwise be counted from one side only, and let light "
                 "through from behind without any error."
             )
             raise ValueError(msg)
+
+    def _either_side(self, surfaces) -> np.ndarray:
+        """Which facets block from both sides, warning about open pieces nobody declared."""
+        names = tuple(surfaces.solid_names)
+        self.check_bodies(names)
         solid = np.asarray(surfaces.solid_id)
         declared = np.isin(solid, [names.index(name) for name in self.two_sided])
         undeclared = open_facets(np.asarray(surfaces.vertices)) & ~declared
