@@ -836,7 +836,11 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
      "1 cycle" ran TWO (`restart_cycles` subtracts the start-up pass and the cycle the solution-change
      test forces), `2 (restart + 1) + 1` applications of `A M`. On pitzDaily's 42 final-station solves the
      march's solver used 2186 applications where a residual-only stop checked every iteration needs 514.
-     Not changed (a march must show the looser corrections cost no inner iterations); open-directions 6b.
+     **`residual_stop_gmres` (BUILT, opt-in, 2026-10-08)** stops on the residual alone, tested every
+     iteration in the same measure (`norm=None` binds the step's, like `relative_residual_gmres`). On a
+     pitzDaily march it took 693 s against 1306 s to the same root (open-directions 6b). Not the default:
+     its reported count is cycles RUN, one more than `lineax`'s for the same work, so the cost triggers
+     need re-calibrating, and bfs3d is unmeasured.
   6. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
      Jacobian are **field-major**: DOF `(cell i, field f)` sits at `f·n_cells + i`, fields ordered
      `[u, v, w, p, k, ω]`. Slicing it cell-major silently yields a *different matrix* that still looks

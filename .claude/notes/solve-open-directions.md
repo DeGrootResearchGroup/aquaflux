@@ -139,6 +139,32 @@ is exactly what a single-system replay cannot see, so it needs a march.
 at 0.3 (and 0.6 on pitzDaily, to see whether 4b survives it): steps, inner solves, cycles AND operator
 applications (cycles are no longer comparable across stops), retries, refreshes, wall, `x_r/h`.
 
+**✅ Measured on pitzDaily 2026-10-08 — 1.88× faster wall, same root.** `residual_stop_gmres`
+(`solve/linear.py`, opt-in) against the shipped stop, both through the study path
+(`PITZ_KRYLOV_STOP=residual` / `shipped`), back to back, shipped `case.yaml`, jax 0.11.2, CPU, 4-core
+Linux, one run each (this case's march is deterministic in its counts):
+
+| | shipped stop | residual stop |
+|---|---|---|
+| outer steps | 31 | 31 |
+| inner solves | 99 | 137 (+38 %) |
+| applications of `A M` | 4931 | **2147 (−56 %)** |
+| mid-step preconditioner refreshes | 12 | 4 |
+| wall | 1306 s | **693 s** |
+| final `|R|` / `x_r/h` | 7.818e-06 / 8.0686 | 7.700e-06 / 8.0686 |
+
+The control reproduces the shipped march exactly (31 / 99 / 203). The looser corrections cost about one
+inner Newton iteration per step and the cheaper solves pay for it twice over. ⚠️ **Not a pure stop
+effect:** the residual stop reports cycles run where `lineax` reports cycles run minus one, so the
+`refresh_on_cycles = 3` trigger fired 4 times against 12; part of the wall gain is fewer rebuilds.
+**Still open before any default moves:** bfs3d (its mesh is not in this container), the slow and
+validation tiers, the cost thresholds' re-calibration, and the follow-ups below.
+
+**Follow-ups planned on the replay harness, then marches:** minimize the residual in the stop's own
+(row-scaled) measure rather than the 2-norm; sweep the restart length; re-measure 4b and the
+Eisenstat–Walker refutation under the new stop (both were measured under `lineax`'s, whose
+solution-change test is likely most of what loosening `rtol` relaxed).
+
 ## 7. Mixed precision: float64 outside, float32 inside the preconditioner
 
 **What.** Keep the residual, the Krylov true-residual recurrence, the outer stopping test and the
