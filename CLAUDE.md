@@ -775,15 +775,23 @@ to this tier:
   small multiple of what the succeeding arm needs — which is also the fairer test, since it stops the
   failing arm from being one that was simply given fewer steps.
 
-**⚠️ A UNIT JOB CANCELLED AT ITS CAP LOOKS EXACTLY LIKE YOUR REGRESSION AND USUALLY IS NOT** — the
-same trap the slow shards' duration balancing carries, one tier up. The unit job's wall clock is set
-by run-to-run runner variance, not by the change under test or the interpreter: one `main` commit ran
-py3.11 in 23:12 against py3.12's 21:55, and a later `main` commit ran py3.11 *faster* than py3.12
-(18.7 vs 20.7 min). Before attributing a cancellation to your branch, check whether unrelated branches
-are cancelling too, and compare the *other* interpreter on your own run — a branch whose py3.12 leg is
-faster than main's did not slow the suite down. Two measured facts to save the re-derivation: the tier
-costs 18.7-30 min end to end, and **preserving the JAX persistent compilation cache across CI runs
-buys nothing** — the distributed `shard_map` tests (see below) compile 7184 XLA programs
+**⚠️ A UNIT JOB THAT SLOWS DOWN OR TIMES OUT IS USUALLY THE RUNNER SWAPPING, NOT YOUR CHANGE — and
+the fix is a shard, not a worker.** A fast-tier worker is not cheap: one module alone
+(`test_radiation_images.py`) peaks at 4.9 GB, and a worker's footprint grows as it draws module after
+module. Run unsharded at `-n 3` on a 16 GB hosted runner, the tier overflowed RAM into swap, every test
+slowed 10–35x, and tests crossed the 900 s per-test timeout with no assertion failing anywhere — read
+for a week as "runner variance". The unit job's memory step (a `vmstat` line every 30 s, printed after
+the tests) is what told the two apart: free RAM at ~200 MB within ten minutes, swap climbing. So the
+tier now runs as **three shards of two workers** (`--splits 3 --group N -n 2`, balanced by the unit
+durations the weekly refresh records in `.test_durations` -- record them on CI, never locally: local
+durations mispredicted CI by up to 2x per test and balanced nothing), measured 2026-10-08 on
+a 4-core / 16 GB container without swap, jax 0.10.2: the unsharded `-n 3` run peaked 14.1 GB and was
+OOM-killed, `-n 3 --dist loadfile` 14.3 GB with all three workers killed (`loadfile` does not help
+here), and each shard 9.2–10.9 GB in 12–17 min with none killed. When it outgrows that, **add a shard;
+never add a worker.** Before blaming a slow unit job on your branch, read its memory step, check
+whether unrelated branches are slow too, and compare the other interpreter on your own run. One more
+measured fact to save the re-derivation: **preserving the JAX persistent compilation cache across CI
+runs buys nothing** — the distributed `shard_map` tests (see below) compile 7184 XLA programs
 whose largest takes 0.05s, so none clears the 2.0s persistence floor and the cache stays empty. Their
 cost is eager per-op tracing and dispatch in mesh/partition setup, which is where a real saving would
 have to come from. (`.github/workflows/ci.yml` carries both measurements with their configuration.)
@@ -1567,8 +1575,8 @@ After **every code change**, before considering the task complete, review and ac
    that call path, so grep for the changed symbol across `-m slow`/`-m validation` tests and run the
    ones that hit it. Don't assume "unit + fast integration green" means safe to merge.
 
-   **⚠️ The slow/validation shards are balanced by `.test_durations`, and a stale one silently
-   unbalances them.** Those tiers are heterogeneous (a 21 s scheme check beside a 242 s adjoint
+   **⚠️ The unit, slow and validation shards are balanced by `.test_durations`, and a stale one
+   silently unbalances them.** Those tiers are heterogeneous (a 21 s scheme check beside a 242 s adjoint
    continuation), so `pytest-split` partitions them by recorded duration. With **no** durations it
    splits evenly by **count**, and then adding a test *anywhere* shifts the boundaries and can
    migrate the expensive tests onto whichever shard is already heaviest — which is not hypothetical:
@@ -1578,7 +1586,11 @@ After **every code change**, before considering the task complete, review and ac
    and is not one. A weekly cron (plus `workflow_dispatch`) re-records the file and opens a
    metadata-only PR; label a PR **`refresh-durations`** to record it on that branch instead, which is
    the only way to populate it before the workflow has merged (`workflow_dispatch` is registered from
-   the default branch only). The fast integration tier is deliberately **not** duration-balanced —
+   the default branch only). **The weekly merge rewrites the whole file from what the refresh jobs
+   record, so a tier that splits by it must also be recorded by one** — which is why the unit tier
+   has its own `refresh-unit-durations` job; without it the first refresh would delete every unit
+   duration and drop the unit shards back to a count split (13.0 / 9.3 / 15.7 min on 2026-10-08,
+   py3.11, a mean of 12.7). The fast integration tier is deliberately **not** duration-balanced —
    those tests are homogeneous, and an even-by-count split balances their memory too.
 
 4. **Documentation sync (binding — this is how the docs stop drifting).** A code change is
