@@ -2012,10 +2012,17 @@ separating pitzDaily case (`validation/pitzdaily_openfoam`) drives the direct `�
 form is validated (channel + tests); efficient convergence on the *full* pitzDaily mesh is the open
 tuning follow-up noted above.
 
-- **`diagnostics.py` — the march log's per-equation view (BUILT).** Three exports over one set of
-  names, so the two grids under a step row join instead of drifting:
-  - `coupled_equation_names(dim)` → `(u, v, w, p, k, omega)` (`(u, v, p, k, omega)` in 2D) — the flat
-    layout's block order, and the **single home** for these names. Raises above `dim = 3`.
+- **`measures.py` — the coupled row-scaled measure and its equation names (moved out of `coupled.py`
+  2026-10-07, where the names had briefly gone and pushed it past its size budget).**
+  `coupled_scaled_norm(coupled, shift_policy, state)` and `coupled_equation_names(dim)` → `(u, v, w,
+  p, k, omega)` (`(u, v, p, k, omega)` in 2D) — the flat layout's block order, the **single home** for
+  these names, built on `flow.flow_equation_names` (the flow's `u, v[, w], p`) plus the closure's two.
+  The measure names its blocks by them, which is what lets the march report the residual per equation
+  (`newton_march(on_residuals=)`, see `solve-march.md`). `coupled.py` imports the measure for
+  `_CoupledMeasures`; `CoupledRANS`/`CoupledShiftPolicy` appear in `measures.py` only as annotations
+  (under `TYPE_CHECKING`), so there is no import cycle.
+- **`diagnostics.py` — the march log's per-equation view (BUILT).** Two exports over the names above,
+  so the two grids under a step row join instead of drifting:
   - `coupled_fields(coupled)` → named **physical** fields for `field_change_metrics` (each solved
     scalar mapped back through its variable transform, so the log reads the same whether ω is solved
     directly or in log form). Velocity is **split per component** so each lines up with its own

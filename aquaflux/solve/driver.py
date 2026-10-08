@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Protocol
 
 import equinox as eqx
@@ -249,6 +249,7 @@ def staged_march(
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
+    on_residuals: Callable[[Mapping[str, float]], None] | None = None,
     caller: str = "staged_march",
 ) -> StagedResult:
     """March ``residual_fn`` to convergence in refresh segments, and refuse a state that is not a root.
@@ -276,7 +277,7 @@ def staged_march(
         ``state -> drift(state)``, re-based at each segment's starting state, since a refresh re-freezes
         there and a measure carried across would keep reporting drift the refresh had absorbed. ``None``
         for a residual with no coefficient drift to watch (a refresh trigger then needs to read costs).
-    max_steps, step_control, on_step, on_checkpoint, retry, on_retry, homotopy, station_step
+    max_steps, step_control, on_step, on_checkpoint, retry, on_retry, homotopy, station_step, on_residuals
         Forwarded to :func:`~aquaflux.solve.newton_march` on every segment.
     caller : str
         The public entry point's name, for the error a non-converged march raises.
@@ -339,6 +340,7 @@ def staged_march(
             on_retry=on_retry,
             homotopy=homotopy,
             station_step=station_step,
+            on_residuals=on_residuals,
         )
         state = result.state
         control_state = result.control_state

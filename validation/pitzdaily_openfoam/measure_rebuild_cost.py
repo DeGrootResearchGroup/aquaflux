@@ -26,7 +26,8 @@ import equinox as eqx  # noqa: E402
 import jax  # noqa: E402
 import numpy as np  # noqa: E402
 from aquaflux.turbulence import UnpreconditionedScalars  # noqa: E402
-from aquaflux.turbulence.coupled import _coupled_shift_policy, coupled_scaled_norm  # noqa: E402
+from aquaflux.turbulence.coupled import _coupled_shift_policy  # noqa: E402
+from aquaflux.turbulence.measures import coupled_scaled_norm  # noqa: E402
 from compare import build_case  # noqa: E402
 
 REPEATS = 20

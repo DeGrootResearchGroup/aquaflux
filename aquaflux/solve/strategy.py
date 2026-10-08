@@ -285,6 +285,14 @@ class StepReport(NamedTuple):
         report would cost the replay property that makes trigger calibration cheap (see
         ``newton_march``'s ``checkpoint``). Reducing it to a number here keeps a trigger a pure
         function of numbers while still letting it see the physics.
+    station : int
+        Which station of the march's homotopy the step drove (:meth:`~aquaflux.solve.ResidualHomotopy.station`), ``0``
+        for a march without one. Only equality between adjacent steps means anything: a change marks the
+        step that entered a new station.
+    arrived : bool
+        Whether the step drove the **target** problem rather than a station on the way to it -- ``True``
+        throughout a march without a homotopy. A residual from a step before arrival is a path value,
+        not progress on the case, which is why a plot of a march marks where it arrived.
     """
 
     step: int
@@ -299,6 +307,8 @@ class StepReport(NamedTuple):
     shift: float = 0.0
     escalations: int = 0
     diverged_retry: bool = False
+    station: int = 0
+    arrived: bool = True
 
     @property
     def restart_cycles(self) -> int:
