@@ -349,6 +349,13 @@ E = direct_irradiance(surfaces, points, normals, absorption=medium, visibility=s
 height facing the fixture, say. In a uniformly glowing box this gives `E = B` at any point and any
 orientation, as it should.
 
+When the points lie **on** the walls themselves, name the facet each lies on — several, in rows
+padded with `-1`, for a point on a shared edge or vertex — as `receiver_facet`, to both
+`build_visibility` and both `direct_irradiance` calls. A flat facet sends nothing into its own
+plane, and that is what the gather then counts; left unnamed, a point inside a facet that is not
+aligned with a coordinate plane can read that facet's whole exitance, because its corners'
+heights above the receiver's plane are only rounding noise there.
+
 ### Mirror-like walls
 
 A reflectance of 0.95 does not say whether a wall scatters in every direction or reflects like a
