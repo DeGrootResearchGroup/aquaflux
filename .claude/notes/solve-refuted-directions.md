@@ -531,6 +531,40 @@ stop is not the pure relative-residual test its docstring claimed — lineax als
 change over the last cycle to be ≤ `rtol` and spends a counted start-up cycle (docstring corrected; see
 `solve.md`); (3) pitzDaily's `PITZ_*` march overrides had been inert since #437 (fixed; `validation.md`).
 
+## Krylov subspace recycling (GCRO-DR) across inner solves — REFUTED (2026-10-08)
+
+**What was proposed** (`solve-open-directions.md` item 6): carry a `k`-vector recycled space (harmonic
+Ritz vectors, Parks et al. 2006) from each inner GMRES solve to the next, since consecutive systems share
+their slow modes.
+
+**Probe, no implementation:** `validation/pitzdaily_openfoam/krylov_recycling_probe.py` rebuilds every
+linear system pitzDaily's final viscosity station solved (steps 17–31, 42 solves) from a march run with
+`PITZ_CHECKPOINT_KEEP=500 PITZ_INNER_DUMP_ABOVE=1`: the step's own shift policy (built at the anchor's
+hybrid start, as the ramp builds it), its recorded β, and the preconditioner refitted where the march
+refitted it. The march's own solver reproduces **all 42** recorded cycle counts exactly. Shipped
+`case.yaml` (field split `SimpleSmoothed` / `JacobiSmoothed`, restart 15, `rtol` 0.3 row-scaled), jax
+0.11.2, CPU, 4-core Linux. Counted in applications of the preconditioned operator `A M`:
+
+| arm (same 42 systems) | applications |
+|---|---|
+| the march's `lineax` GMRES | 2186 |
+| GMRES(15), residual-only stop at restart boundaries (derived from the next row) | 890 |
+| GMRES(15), residual-only stop checked every iteration | **514** |
+| GCRO-DR depth 5 / 10, same stop, recycled space carried | 825 / 1056 |
+| — the same without the `k` applications per system that re-derive `A M U` | 620 / 646 |
+
+**Why it loses:** at `rtol = 0.3` a solve is ~12 iterations, so there are no slow modes to deflate, and a
+space carried from the previous operator costs iterations to orthogonalize against while the operator
+moves under it. Better than plain GMRES on 6 (depth 5) and 2 (depth 10) of 42 solves. A tight solve is
+where recycling pays (a toy with six outlier eigenvalues at `rtol` 1e-3: 526 → 181), and the forward
+solve is not one. The adjoint is one solve, so it has nothing to recycle from.
+
+**What it found instead:** the first and third rows. `lineax` tests its stop only at a restart boundary
+and also requires the solution to have moved by less than the tolerance over the last cycle, so every
+solve runs at least two full cycles (33 applications) and the corrected count (`restart_cycles`) reads
+that as "1 cycle". Opened as `solve-open-directions.md` item 6b; the docstrings that called a reported
+"1 cycle" an ideal one-cycle solve were corrected.
+
 ## `jax.linearize` in place of the per-matvec `jax.jvp` — REFUTED, and it looks obviously right
 
 `solve/continuation.py`'s `shifted_jacobian` builds the Krylov matvec as

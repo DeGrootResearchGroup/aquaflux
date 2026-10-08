@@ -60,8 +60,10 @@ DEPTHS = tuple(int(d) for d in os.environ.get("PITZ_AA_DEPTHS", "1,2,3,5").split
 def load_states():
     states = {}
     for path in sorted(CHECKPOINTS.glob("state-*.npz")):
+        # Keyed by the FILE's index, the number of steps completed. The record's own `step` field counts
+        # from zero, and keying by it once put every state one step early in this table.
         with np.load(path) as data:
-            states[int(data["step"])] = np.asarray(data["state"])
+            states[int(path.stem.split("-")[1])] = np.asarray(data["state"])
     return states
 
 

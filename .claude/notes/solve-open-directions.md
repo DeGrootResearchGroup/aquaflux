@@ -94,9 +94,12 @@ search as the acceptance gate and reset the history on any rejected step.
 Replay on the shipped pitzDaily march (`case.yaml` as shipped, 31 steps / 203 cycles / `x_r/h` 8.0686,
 every step checkpointed; jax 0.11.2, CPU): at each target-station step the Anderson proposal of depth
 1/2/3/5, built from the unaccelerated iterates, scored in one row-scaled measure built at `x_{k+1}`.
-- **Steps 17–22** (early target station): proposal ≈ the march's own next iterate (ratio 0.80–1.25), never
+⚠️ The step labels below are corrected (2026-10-08): the harness keyed checkpoints by their `step`
+field, which counts from zero, so it printed every state one lower than its file index and skipped the
+station's first step. The numbers are the harness's; only the labels moved. The harness now keys by file.
+- **Steps 18–23** (early target station): proposal ≈ the march's own next iterate (ratio 0.80–1.25), never
   better than `x_{k+2}`; depth 5 sometimes worse. No saving.
-- **Steps 23–29** (the linear tail, β at its 0.005 floor, the march's own rate 0.64 → 0.82 per step and
+- **Steps 24–30** (the linear tail, β at its 0.005 floor, the march's own rate 0.64 → 0.82 per step and
   slowing): every depth beats `x_{k+2}` (ratio 0.55–0.77), i.e. about one saved step per step.
 - **Bound:** compounding that factor over the tail gives ~2.5 steps for the march's 6, i.e. ~3–4 outer
   steps and ~14 of 203 cycles (~7 %). Optimistic — a one-step replay on the unaccelerated sequence, not a
@@ -107,23 +110,34 @@ every step checkpointed; jax 0.11.2, CPU): at each target-station step the Ander
 
 **Deferred — tracked in #639** (needs the real march above, and bfs3d, before it is worth building).
 
-## 6. Krylov subspace recycling across Newton steps (GCRO-DR)
+## 6. CLOSED — Krylov subspace recycling (GCRO-DR); it found 6b instead
 
-**What.** Keep a ~10–20-vector approximate invariant subspace (harmonic Ritz vectors of the slowest
-modes) from each GMRES solve and deflate it from the next (Parks, de Sturler, Mackey, Johnson & Maiti
-2006). Consecutive Newton systems share their slow modes; at low β those few modes are what turn a
-1-cycle solve into 15.
+Measured 2026-10-08 and moved to `solve-refuted-directions.md` ("Krylov subspace recycling (GCRO-DR)").
+On the replayed sequence of pitzDaily's 42 final-station solves, recycling costs 60–105 % MORE operator
+applications than plain GMRES under the same stop, and still more with its recompute charge removed. At
+`rtol = 0.3` a solve is ~12 iterations; there are no slow modes worth carrying.
 
-**Why it should win.** The ledger's cell-block SVD puts the near-null directions in ω, coherently
-located in low-`k` regions — a *small* subspace, which is exactly what recycling captures and a V-cycle
-cannot. It is the standard remedy for sequences of related nonsymmetric systems in Newton–Krylov CFD.
+## 6b. The GMRES stopping rule over-solves about 4×
 
-**Cost.** Not in `lineax`; a `GCRO-DR` solver would be written in-house (the restart machinery and the
-`linear_transpose` requirement constrain the design — recycling the *transpose* for the adjoint is a
-separate question, and the adjoint is one solve, so leave it un-recycled).
+**What.** Stop the inner Krylov solve on its residual alone, tested every iteration, instead of
+`lineax`'s rule (tested only at a restart boundary, and only once the solution has also stopped moving
+over a whole cycle). In-house restarted GMRES, or a `lineax` subclass; the adjoint's transpose solve is
+untouched.
 
-**Pre-registered measurement.** Replay the seven ≥4-cycle solves `InnerIterateCheckpointer` captured on
-bfs3d, with and without a recycle space carried from the preceding solve; report cycles and true residual.
+**Why it should win.** On the same 42 replayed systems (`krylov_recycling_probe.py`, exact reproduction
+of every recorded cycle count) the march's solver used **2186** applications of `A M`; a residual-only
+test at restart boundaries needs **890**, and one checked every iteration **514**. Krylov work is ~half
+of pitzDaily's wall (fit over the baseline log: ~4.4 s per restart cycle against a ~2 s per-step
+constant, 4-core Linux). Every solve pays at least two full restart cycles today; the median one needs
+about one. This plausibly IS 4b's gain: loosening `rtol` mostly makes the solution-change test easier.
+
+**What it does change.** The inner corrections become less over-solved (the march's second cycle drives
+the residual far below 0.3), so the inner Newton loop may take more iterations or clip differently. That
+is exactly what a single-system replay cannot see, so it needs a march.
+
+**Pre-registered measurement.** pitzDaily and bfs3d marches, shipped stop vs per-iteration residual stop
+at 0.3 (and 0.6 on pitzDaily, to see whether 4b survives it): steps, inner solves, cycles AND operator
+applications (cycles are no longer comparable across stops), retries, refreshes, wall, `x_r/h`.
 
 ## 7. Mixed precision: float64 outside, float32 inside the preconditioner
 

@@ -43,10 +43,13 @@ def default_linear_solver() -> lx.AbstractLinearSolver:
     return lx.GMRES(rtol=1e-10, atol=1e-10)
 
 
-# A converged ``lineax`` GMRES reports two `num_steps` beyond the restart cycles it actually ran, so a
-# solve that converged inside a single cycle reads as 3. The offset is per *solve*, which is why a
-# multi-solve step must divide it out by its solve count rather than subtract a flat 2 (see
-# `restart_cycles`).
+# ``lineax``'s GMRES counts a start-up pass as a step (it forms the initial residual and runs no Arnoldi
+# cycle), and it stops only once the solution moved by less than the tolerance over a whole restart
+# cycle, so a solve whose residual met the tolerance inside its first cycle still runs a second and
+# reports 3. Subtracting 2 therefore leaves the Arnoldi cycles run MINUS ONE: a solve counted as "1
+# cycle" ran two, ``2 * (restart + 1) + 1`` operator applications. The convention is kept because every
+# recorded count is in it. The offset is per *solve*, which is why a multi-solve step must divide it out
+# by its solve count rather than subtract a flat 2 (see `restart_cycles`).
 _LINEAX_STEP_OFFSET = 2
 
 
@@ -62,10 +65,12 @@ def corrected_cycles(raw_count, solves=1):
 def restart_cycles(raw_count: int, solves: int = 1) -> int:
     """Strip the fixed per-solve offset from a raw ``lineax`` iteration count.
 
-    :func:`solve_linear` returns ``lineax``'s ``num_steps``, which carries a constant ``+2`` per solve,
-    so an ideal one-cycle solve reports ``3`` rather than ``1``. Correcting it matters most where the
-    count is smallest: at ``num_steps = 6`` over two solves, the raw number is *entirely* offset and the
-    real cost is two single-cycle solves -- reading it as "six cycles" overstates the work threefold.
+    :func:`solve_linear` returns ``lineax``'s ``num_steps``, which carries a constant ``+2`` per solve:
+    one for a start-up pass that runs no Arnoldi cycle, and one for the cycle its stopping test needs
+    after the residual has met the tolerance (it also demands that the solution stop moving). The
+    corrected count is therefore one less than the Arnoldi cycles run, and it is the convention every
+    count is reported in: a solve reported as one cycle ran two. Correcting it matters most where the
+    count is smallest: at ``num_steps = 6`` over two solves the corrected count is two, against six raw.
 
     Parameters
     ----------

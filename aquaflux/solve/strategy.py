@@ -304,9 +304,10 @@ class StepReport(NamedTuple):
     def restart_cycles(self) -> int:
         """The offset-corrected restart-cycle count.
 
-        ``cycles`` with lineax's +2-per-inner-solve offset removed, so an ideal one-cycle solve reads as
-        ``1`` and a dual-time step as its real total cycles over the inner loop. Clamped at ``0`` (a
-        no-measurement ``cycles = 0`` step stays ``0``).
+        ``cycles`` with lineax's +2-per-inner-solve offset removed, summed over the inner loop. Each
+        solve's corrected count is one less than the Arnoldi cycles it ran (see
+        :func:`~aquaflux.solve.restart_cycles`). Clamped at ``0`` (a no-measurement ``cycles = 0`` step
+        stays ``0``).
         """
         return _strip_step_offset(self.cycles, self.inner_iterations)
 

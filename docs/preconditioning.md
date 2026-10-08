@@ -581,8 +581,9 @@ nothing after it to correct anything.
 
 Read the **cycle count**, not the wall clock. {func}`~aquaflux.solve.restart_cycles` strips
 the fixed per-solve offset from a raw `lineax` iteration count, which is what makes small
-counts readable: an offset means a solve that converges within a single restart cycle does
-not report `1`.
+counts readable. The corrected count is one less than the restart cycles a solve actually
+ran: `lineax` stops only once the solution has stopped moving over a whole cycle, so a solve
+whose residual met its tolerance within the first cycle runs a second and is reported as `1`.
 
 From there:
 

@@ -832,6 +832,11 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
      166 / 161 restart cycles, all 31 steps, 98–103 inner solves, `x_r/h` 8.0686. The shipped 0.3 is not
      changed (bfs3d, where it was calibrated, is unmeasured); see `solve-refuted-directions.md`'s
      Eisenstat–Walker entry and the open-directions note.
+     ⚠️ **What the stop costs, replayed (2026-10-08, `krylov_recycling_probe.py`):** a solve reported as
+     "1 cycle" ran TWO (`restart_cycles` subtracts the start-up pass and the cycle the solution-change
+     test forces), `2 (restart + 1) + 1` applications of `A M`. On pitzDaily's 42 final-station solves the
+     march's solver used 2186 applications where a residual-only stop checked every iteration needs 514.
+     Not changed (a march must show the looser corrections cost no inner iterations); open-directions 6b.
   6. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
      Jacobian are **field-major**: DOF `(cell i, field f)` sits at `f·n_cells + i`, fields ordered
      `[u, v, w, p, k, ω]`. Slicing it cell-major silently yields a *different matrix* that still looks
