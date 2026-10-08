@@ -105,6 +105,8 @@ every step checkpointed; jax 0.11.2, CPU): at each target-station step the Ander
   needs `newton_march` to carry the history: an implementation, not a probe.
 - Depth 2–3 is as good as 5; the gain is confined to where the shifted step converges linearly.
 
+**Deferred — tracked in #639** (needs the real march above, and bfs3d, before it is worth building).
+
 ## 6. Krylov subspace recycling across Newton steps (GCRO-DR)
 
 **What.** Keep a ~10–20-vector approximate invariant subspace (harmonic Ritz vectors of the slowest
