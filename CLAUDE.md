@@ -773,15 +773,21 @@ to this tier:
   small multiple of what the succeeding arm needs — which is also the fairer test, since it stops the
   failing arm from being one that was simply given fewer steps.
 
-**⚠️ A UNIT JOB CANCELLED AT ITS CAP LOOKS EXACTLY LIKE YOUR REGRESSION AND USUALLY IS NOT** — the
-same trap the slow shards' duration balancing carries, one tier up. The unit job's wall clock is set
-by run-to-run runner variance, not by the change under test or the interpreter: one `main` commit ran
-py3.11 in 23:12 against py3.12's 21:55, and a later `main` commit ran py3.11 *faster* than py3.12
-(18.7 vs 20.7 min). Before attributing a cancellation to your branch, check whether unrelated branches
-are cancelling too, and compare the *other* interpreter on your own run — a branch whose py3.12 leg is
-faster than main's did not slow the suite down. Two measured facts to save the re-derivation: the tier
-costs 18.7-30 min end to end, and **preserving the JAX persistent compilation cache across CI runs
-buys nothing** — the distributed `shard_map` tests (see below) compile 7184 XLA programs
+**⚠️ A UNIT JOB THAT SLOWS DOWN OR TIMES OUT IS USUALLY THE RUNNER SWAPPING, NOT YOUR CHANGE — and
+the fix is a shard, not a worker.** A fast-tier worker is not cheap: one module alone
+(`test_radiation_images.py`) peaks at 4.9 GB, and a worker's footprint grows as it draws module after
+module. Run unsharded at `-n 3` on a 16 GB hosted runner, the tier overflowed RAM into swap, every test
+slowed 10–35x, and tests crossed the 900 s per-test timeout with no assertion failing anywhere — read
+for a week as "runner variance". The unit job's memory step (a `vmstat` line every 30 s, printed after
+the tests) is what told the two apart: free RAM at ~200 MB within ten minutes, swap climbing. So the
+tier now runs as **three shards of two workers** (`--splits 3 --group N -n 2`), measured 2026-10-08 on
+a 4-core / 16 GB container without swap, jax 0.10.2: the unsharded `-n 3` run peaked 14.1 GB and was
+OOM-killed, `-n 3 --dist loadfile` 14.3 GB with all three workers killed (`loadfile` does not help
+here), and each shard 9.2–10.9 GB in 12–17 min with none killed. When it outgrows that, **add a shard;
+never add a worker.** Before blaming a slow unit job on your branch, read its memory step, check
+whether unrelated branches are slow too, and compare the other interpreter on your own run. One more
+measured fact to save the re-derivation: **preserving the JAX persistent compilation cache across CI
+runs buys nothing** — the distributed `shard_map` tests (see below) compile 7184 XLA programs
 whose largest takes 0.05s, so none clears the 2.0s persistence floor and the cache stays empty. Their
 cost is eager per-op tracing and dispatch in mesh/partition setup, which is where a real saving would
 have to come from. (`.github/workflows/ci.yml` carries both measurements with their configuration.)

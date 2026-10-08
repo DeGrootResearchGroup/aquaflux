@@ -130,42 +130,48 @@ jobs:
         # them rather than stopping at the first.
         run: sphinx-build -T -W --keep-going -j auto -b html docs docs/_build/html
 
-  # ---- Fast unit tests (always-on) --------------------------------------------
-  # Most unit tests are cheap and homogeneous (peak ~5 GB in one process), so they
-  # run unsharded across three xdist workers (`-n 3`, see the step). The `distributed` tests are excluded
-  # and run in their own job below -- they each fork a child that wants the whole machine,
-  # so mixed in here they oversubscribe the runner and set this job's whole wall clock.
-  # Two interpreters, since a unit-level regression can be version-specific.
+  # ---- Fast unit tests (always-on, sharded) -----------------------------------
+  # Sharded across three jobs per interpreter, each a fresh process pool of two xdist workers
+  # (`--splits 3 --group N -n 2`, see the step). The `distributed` tests are excluded and run in
+  # their own job below -- they each fork a child that wants the whole machine, so mixed in here
+  # they oversubscribe the runner and set this job's whole wall clock. Two interpreters, since a
+  # unit-level regression can be version-specific.
+  #
+  # SHARDED FOR MEMORY, NOT FOR SPEED (the speed is a side effect). A fast-tier worker is not
+  # cheap: one module alone (`test_radiation_images.py`) peaks at 4.9 GB in a fresh process, and a
+  # worker's footprint also grows as it draws module after module (`test_preconditioner.py` peaks
+  # at 2.6 GB alone, yet the worker running it was OOM-killed at 5.5 GB). Three workers on one
+  # 16 GB runner therefore reach the ceiling; on a hosted runner, which has 3 GB of swap, that
+  # reads as every test slowing 10-35x until one crosses the per-test timeout, not as an OOM.
+  # Measured 2026-10-08 on a 4-core / 16 GB Linux container without swap (so overflow is an OOM
+  # kill rather than a slowdown), jax/jaxlib 0.10.2, Python 3.13, the thread pinning below:
+  #   -n 3, one job (the previous configuration):  peak 14.1 GB, a worker OOM-killed at 4.9 GB
+  #   -n 3 --dist loadfile, one job:                peak 14.3 GB, all three workers OOM-killed
+  #   -n 2, three shards, run one after another:    peaks 10.9 / 9.2 / 9.2 GB, no worker killed,
+  #                                                 11.8 / 16.8 / 16.3 min (~1100 tests each)
+  # (The container's memory cap is a cgroup limit, read from the kernel's OOM log; "peak" is
+  # `free`'s used figure sampled every 2-10 s, so a short spike above it can go unseen.)
+  # `--dist loadfile` (which the local gate uses) did not help here and is not used: it keeps a
+  # heavy module's tests on one worker, but the heavy modules are adjacent and all three workers
+  # held one at once. Splitting the tier bounds both what runs concurrently (two workers) and how
+  # much any one worker accumulates (a third of the tests). When this tier outgrows that margin,
+  # add a shard rather than a worker.
   unit:
-    name: unit tests (py${{ matrix.python-version }})
+    name: unit tests (py${{ matrix.python-version }} shard ${{ matrix.group }}/3)
     if: >-
       github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
       && github.event.action != 'labeled'
     runs-on: ubuntu-latest
-    # THE OBSERVED RANGE IS 18.7 TO 30+ MIN, AND RUN-TO-RUN RUNNER VARIANCE SETS IT.
-    # The "13-20 min" this cap used to be sized against was measured while the per-test
-    # `--timeout` was 300s, which was KILLING THE WORKER on a ~400s distributed test and ending
-    # the job early -- those runs never timed the suite, they died partway through it (one shows
-    # `worker 'gw2' crashed while running test_distributed_residual_matches_serial_on_skewed_mesh`
-    # with 980 of 1313 tests run, at 12:54). Raising that per-test timeout to 900s let the tier
-    # run to completion for the first time and revealed a true cost of 18.7-30 min -- against a
-    # 25-minute cap, which then cancelled intermittently on branches that had changed nothing
-    # related (issue-285 at 25.2, issue-314 at 25.3 and 30.0).
-    #
-    # The spread is the runner, not the interpreter: one main commit ran py3.11 in 23:12 against
-    # py3.12's 21:55 (5.9%), and a later main commit ran py3.11 FASTER than py3.12 (18.7 vs 20.7).
-    # A cap without roughly 2x headroom over the median is therefore a coin flip, not a signal.
-    #
-    # This is a HANG BACKSTOP, not a cost budget: `--timeout=900` below names a hung test long
-    # before this fires, so the cost of setting it generously is only paid by a genuinely stuck job.
-    # 60 rather than 45 since the job runs three workers instead of four (see the step): a
-    # quarter fewer workers is about a third more wall clock, and the py3.12 job alone already
-    # took 32-35 min on 2026-10-07.
-    timeout-minutes: 60
+    # A HANG BACKSTOP, NOT A COST BUDGET, sized at about 2x a shard's measured 12-17 min (see the
+    # header) because hosted-runner wall clock varies run to run by more than the change under test
+    # does -- a cap without that headroom cancels branches that changed nothing related. Keep it
+    # above the per-test `--timeout=900` below, which names a hung test before this fires.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
+        group: [1, 2, 3]
     steps:
       - uses: actions/checkout@v6
 
@@ -224,22 +230,26 @@ jobs:
         # (Measured 2026-09-09 on macOS arm64, jax 0.10.2, x64 on, one thread per process,
         # `test_distributed_gradient.py` `_MATCHES` child at 4 simulated devices.)
         #
-        # THREE WORKERS, NOT `-n auto` (= 4 on this 4-core, 16 GB runner), FOR MEMORY. On
-        # 2026-10-07 the py3.11 job failed on four PRs in a row with no assertion failing anywhere:
-        # tests that take 26-64 s alone (`test_reynolds_continuation.py`, measured on py3.11 with
-        # these thread settings) ran 875-887 s, hit the per-test timeout and took their workers
-        # down, while radiation tests that take under 50 s ran 330-630 s beside them and one
-        # teardown took 717 s. Everything slowing at once by 14-35x is the runner, and at several
-        # GB per fast-tier worker four of them can outgrow 16 GB; the same commit passed in 23 min
-        # an hour earlier, so it is a margin, not a regression. The memory step above is there to
-        # confirm or refute that the next time a run slows down.
+        # TWO WORKERS PER SHARD, FOR MEMORY -- see the job header for the measurement. On
+        # 2026-10-07 the unsharded job failed on four PRs in a row with no assertion failing
+        # anywhere: tests that take 26-64 s alone ran 875-887 s, hit the per-test timeout and took
+        # their workers down, and one module teardown took 717 s. Cutting four workers to three did
+        # not fix it: on main afterwards the py3.11 job's memory log showed free RAM at ~200 MB
+        # within ten minutes and 1.6 GB of swap in use, and it took 42.6 min against py3.12's 24.2.
+        # The memory step above is what showed that, and stays for the next time a shard slows.
+        #
+        # `--splits` partitions by `.test_durations`, which records only the slow/validation tiers,
+        # so every unit test gets the same fallback duration and the split is even by count. The
+        # default algorithm cuts the collected order into contiguous chunks, so a module stays on
+        # one shard except at a chunk boundary.
         #
         # `-rs` lists every skipped test WITH ITS REASON. A skip and a pass are the same exit
         # status, so without it a module that never ran here is indistinguishable from one that
         # passed -- which is how two modules gated on an optional solver library went four days
         # without running while every required check stayed green.
         run: >-
-          pytest tests/unit -m "not slow and not validation and not distributed" -q -rs -n 3
+          pytest tests/unit -m "not slow and not validation and not distributed" -q -rs -n 2
+          --splits 3 --group ${{ matrix.group }}
           --durations=15 --timeout=900 --timeout-method=thread --max-worker-restart=0
 
       - name: Show the runner's memory during the tests
