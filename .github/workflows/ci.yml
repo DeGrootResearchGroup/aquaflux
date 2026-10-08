@@ -14,10 +14,10 @@ on:
   push:
     branches: [main]
   schedule:
-    # Weekly (Mon 07:23 UTC): refresh `.test_durations` so the slow/validation
-    # pytest-split shards stay duration-balanced as tests are added. Only the
-    # refresh-durations / commit-durations jobs run on this event; every other job
-    # is gated off it.
+    # Weekly (Mon 07:23 UTC): refresh `.test_durations` so the unit, slow and
+    # validation pytest-split shards stay duration-balanced as tests are added. Only
+    # the refresh-durations / refresh-unit-durations / commit-durations jobs run on
+    # this event; every other job is gated off it.
     - cron: "23 7 * * 1"
   # Manual trigger for the same refresh (e.g. to populate the durations
   # immediately instead of waiting for the weekly cron). Note that GitHub only
@@ -50,6 +50,10 @@ env:
   OMP_NUM_THREADS: "1"
   NUMBA_NUM_THREADS: "1"
   XLA_FLAGS: "--xla_cpu_multi_thread_eigen=false"
+  # The unit tier's selection, shared by the job that runs it and the job that records its
+  # durations: the two must select the same tests, or the recorded file balances a set the
+  # unit shards never run.
+  UNIT_MARKERS: "not slow and not validation and not distributed"
 
 jobs:
   # ---- Lint gate: ruff + codespell (always-on) --------------------------------
@@ -238,17 +242,21 @@ jobs:
         # within ten minutes and 1.6 GB of swap in use, and it took 42.6 min against py3.12's 24.2.
         # The memory step above is what showed that, and stays for the next time a shard slows.
         #
-        # `--splits` partitions by `.test_durations`, which records only the slow/validation tiers,
-        # so every unit test gets the same fallback duration and the split is even by count. The
-        # default algorithm cuts the collected order into contiguous chunks, so a module stays on
-        # one shard except at a chunk boundary.
+        # `--splits` balances the shards by the unit durations recorded in `.test_durations` (kept
+        # current by `refresh-unit-durations` below). By count they were not balanced: on this
+        # PR's first CI run the three shards' test steps took 13.0 / 9.3 / 15.7 min (py3.11) and
+        # 12.2 / 9.6 / 14.3 min (py3.12), because the heavy modules are not spread evenly through
+        # the collected order. A test added since the last refresh gets the average of the
+        # recorded unit durations. The default algorithm cuts the collected order into contiguous
+        # chunks of equal recorded duration, so a module stays on one shard except at a chunk
+        # boundary and its module-scoped fixtures are not rebuilt on every shard.
         #
         # `-rs` lists every skipped test WITH ITS REASON. A skip and a pass are the same exit
         # status, so without it a module that never ran here is indistinguishable from one that
         # passed -- which is how two modules gated on an optional solver library went four days
         # without running while every required check stayed green.
         run: >-
-          pytest tests/unit -m "not slow and not validation and not distributed" -q -rs -n 2
+          pytest tests/unit -m "$UNIT_MARKERS" -q -rs -n 2
           --splits 3 --group ${{ matrix.group }}
           --durations=15 --timeout=900 --timeout-method=thread --max-worker-restart=0
 
@@ -564,6 +572,56 @@ jobs:
           path: durations-${{ matrix.group }}.json
           if-no-files-found: error
 
+  # ---- Refresh of the unit tier's durations (same triggers) -------------------
+  # The unit shards balance by `.test_durations` too, and the commit job below REWRITES that
+  # file from what the refresh jobs record -- so the unit tests must be recorded here, or the
+  # first weekly refresh would delete every unit duration and silently put the unit shards back
+  # on an even-by-count split.
+  #
+  # A separate job rather than more groups of the one above because the unit tier runs
+  # differently: `-n 2` per shard for memory (see the unit job), its own marker selection, and
+  # the unit job's per-test timeout. Recording under the same `-n 2` the shards run with means
+  # each duration is measured under the same contention it is used to predict. Like the job
+  # above, it records into a fresh path, so its own split is even by count: about 9-16 min a
+  # shard on 2026-10-08.
+  refresh-unit-durations:
+    name: refresh unit test-durations (shard ${{ matrix.group }}/3)
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request' && github.event.action == 'labeled'
+          && contains(github.event.pull_request.labels.*.name, 'refresh-durations'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package and test dependencies
+        run: pip install -e ".[test]"
+
+      - name: Record this shard's durations
+        run: >-
+          pytest tests/unit -m "$UNIT_MARKERS" -q -n 2
+          --splits 3 --group ${{ matrix.group }}
+          --store-durations --durations-path durations-unit-${{ matrix.group }}.json
+          --timeout=900 --timeout-method=thread --max-worker-restart=0
+
+      - name: Upload shard durations
+        uses: actions/upload-artifact@v4
+        with:
+          name: durations-unit-${{ matrix.group }}
+          path: durations-unit-${{ matrix.group }}.json
+          if-no-files-found: error
+
   # ---- Commit the refreshed durations (schedule / manual only) ----------------
   # Deliberately NOT run for the `refresh-durations` PR label: on a PR the point is
   # to land the file in that PR, so the artifacts are downloaded and committed by
@@ -573,7 +631,9 @@ jobs:
   commit-durations:
     name: open .test_durations refresh PR
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    needs: refresh-durations          # only proceed on a COMPLETE set (all shards ok)
+    # Only proceed on a COMPLETE set (every shard of both refresh jobs ok): the merge below
+    # replaces the whole file, so a missing shard would delete its tests' durations.
+    needs: [refresh-durations, refresh-unit-durations]
     runs-on: ubuntu-latest
     permissions:
       contents: write                 # write .test_durations via the Contents API

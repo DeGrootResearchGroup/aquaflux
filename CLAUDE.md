@@ -780,7 +780,8 @@ module. Run unsharded at `-n 3` on a 16 GB hosted runner, the tier overflowed RA
 slowed 10–35x, and tests crossed the 900 s per-test timeout with no assertion failing anywhere — read
 for a week as "runner variance". The unit job's memory step (a `vmstat` line every 30 s, printed after
 the tests) is what told the two apart: free RAM at ~200 MB within ten minutes, swap climbing. So the
-tier now runs as **three shards of two workers** (`--splits 3 --group N -n 2`), measured 2026-10-08 on
+tier now runs as **three shards of two workers** (`--splits 3 --group N -n 2`, balanced by the unit
+durations in `.test_durations`), measured 2026-10-08 on
 a 4-core / 16 GB container without swap, jax 0.10.2: the unsharded `-n 3` run peaked 14.1 GB and was
 OOM-killed, `-n 3 --dist loadfile` 14.3 GB with all three workers killed (`loadfile` does not help
 here), and each shard 9.2–10.9 GB in 12–17 min with none killed. When it outgrows that, **add a shard;
@@ -1571,8 +1572,8 @@ After **every code change**, before considering the task complete, review and ac
    that call path, so grep for the changed symbol across `-m slow`/`-m validation` tests and run the
    ones that hit it. Don't assume "unit + fast integration green" means safe to merge.
 
-   **⚠️ The slow/validation shards are balanced by `.test_durations`, and a stale one silently
-   unbalances them.** Those tiers are heterogeneous (a 21 s scheme check beside a 242 s adjoint
+   **⚠️ The unit, slow and validation shards are balanced by `.test_durations`, and a stale one
+   silently unbalances them.** Those tiers are heterogeneous (a 21 s scheme check beside a 242 s adjoint
    continuation), so `pytest-split` partitions them by recorded duration. With **no** durations it
    splits evenly by **count**, and then adding a test *anywhere* shifts the boundaries and can
    migrate the expensive tests onto whichever shard is already heaviest — which is not hypothetical:
@@ -1582,7 +1583,11 @@ After **every code change**, before considering the task complete, review and ac
    and is not one. A weekly cron (plus `workflow_dispatch`) re-records the file and opens a
    metadata-only PR; label a PR **`refresh-durations`** to record it on that branch instead, which is
    the only way to populate it before the workflow has merged (`workflow_dispatch` is registered from
-   the default branch only). The fast integration tier is deliberately **not** duration-balanced —
+   the default branch only). **The weekly merge rewrites the whole file from what the refresh jobs
+   record, so a tier that splits by it must also be recorded by one** — which is why the unit tier
+   has its own `refresh-unit-durations` job; without it the first refresh would delete every unit
+   duration and drop the unit shards back to a count split (13.0 / 9.3 / 15.7 min on 2026-10-08,
+   py3.11, a mean of 12.7). The fast integration tier is deliberately **not** duration-balanced —
    those tests are homogeneous, and an even-by-count split balances their memory too.
 
 4. **Documentation sync (binding — this is how the docs stop drifting).** A code change is
