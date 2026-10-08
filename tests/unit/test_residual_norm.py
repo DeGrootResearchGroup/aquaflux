@@ -14,7 +14,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.solve import BlockScaledNorm, RowScaledNorm
+from aquaflux.solve import BlockScaledNorm, RowScaledNorm, named_blocks
 from aquaflux.solve.implicit import backtracking_line_search
 
 
@@ -192,3 +192,31 @@ def test_the_row_scaled_measure_is_the_euclidean_combination_of_its_own_per_bloc
     residual = jnp.array([1.0, 3.0, 2.0, 6.0])
 
     assert float(norm(residual)) == pytest.approx(float(jnp.linalg.norm(norm.per_block(residual))))
+
+
+@pytest.mark.parametrize("names", [("u",), ("u", "u"), ("u", "v", "p")])
+def test_a_measures_names_must_name_each_block_once(names) -> None:
+    with pytest.raises(ValueError, match="name each of its 2 blocks once"):
+        RowScaledNorm(sizes=(2, 2), row_scale=jnp.ones(4), field_scale=jnp.ones(2), names=names)
+    with pytest.raises(ValueError, match="name each of its 2 blocks once"):
+        BlockScaledNorm((2, 2), (1.0, 1.0), names=names)
+
+
+def test_named_blocks_are_the_terms_the_measure_combines() -> None:
+    residual = jnp.array([1.0, 3.0, 2.0, 6.0])
+    for measure in (
+        RowScaledNorm(
+            sizes=(2, 2), row_scale=jnp.array([2.0, 2.0, 1.0, 1.0]),
+            field_scale=jnp.array([1.0, 4.0]), names=("u", "p"),
+        ),
+        BlockScaledNorm((2, 2), (2.0, 4.0), names=("u", "p")),
+    ):  # fmt: skip
+        terms = named_blocks(measure, lambda state: state, residual)
+        assert list(terms) == ["u", "p"]
+        np.testing.assert_allclose(list(terms.values()), measure.per_block(residual))
+        assert float(np.linalg.norm(list(terms.values()))) == pytest.approx(
+            float(measure(residual))
+        )
+    # A measure whose blocks are unnamed, or a plain norm, has none to report.
+    assert named_blocks(BlockScaledNorm((2, 2), (1.0, 1.0)), lambda s: s, residual) is None
+    assert named_blocks(jnp.linalg.norm, lambda s: s, residual) is None

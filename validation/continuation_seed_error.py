@@ -99,7 +99,8 @@ def judged_norm(coupled, state):
     Built as a shift source only, since scoring a residual needs the shift diagonal the scales come
     from and not the flow preconditioner a full policy would also construct.
     """
-    from aquaflux.turbulence.coupled import _coupled_shift_policy, coupled_scaled_norm
+    from aquaflux.turbulence.coupled import _coupled_shift_policy
+    from aquaflux.turbulence.measures import coupled_scaled_norm
 
     return coupled_scaled_norm(
         coupled,

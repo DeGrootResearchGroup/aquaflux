@@ -228,6 +228,28 @@ def test_the_optical_depth_is_differentiable_in_the_segment_endpoints():
     assert float(gradient) == pytest.approx(finite_difference, rel=1e-6)
 
 
+@pytest.mark.parametrize(
+    "medium", [UniformAbsorption(3.0), graded_field()], ids=["uniform", "voxel"]
+)
+def test_a_segment_of_zero_length_has_zero_depth_and_a_finite_gradient(medium):
+    """A receiver at an emitting facet's own centroid asks for the depth of a segment of no length.
+
+    Its length is a square root at zero, whose derivative is infinite; guarded only after the root,
+    the depth is right and its gradient NaN. The subgradient zero is what a guard inside the root
+    gives, and it is what is asserted -- in both endpoints, and in the coefficient, where the depth
+    of a segment of no length cannot depend on the medium at all.
+    """
+    point = jnp.asarray([0.3, 0.5, 0.6])
+    assert float(medium.optical_depth(point, point)) == 0.0
+    origin_gradient, target_gradient = jax.grad(medium.optical_depth, argnums=(0, 1))(point, point)
+    np.testing.assert_array_equal(origin_gradient, 0.0)
+    np.testing.assert_array_equal(target_gradient, 0.0)
+    coefficient_gradient = jax.grad(lambda m: m.optical_depth(point, point), allow_int=True)(
+        medium
+    ).coefficient
+    np.testing.assert_array_equal(coefficient_gradient, 0.0)
+
+
 def test_a_huge_optical_depth_gives_zero_transmittance_rather_than_a_nan():
     """No clamp: in double precision the exponential reaches zero where zero is correct, and a
     clamp would only flatten the sensitivity to absorbance across a whole region."""

@@ -15,12 +15,13 @@ Three more commands are for a program editing case files -- the browser interfac
 
     aquaflux schema                     # what a case file may hold: every kind, field and choice
     aquaflux show case.yaml             # the file as aquaflux reads it, and why it is refused if it is
+    aquaflux plan case.yaml             # where a run would write, and which earlier results it would replace
     aquaflux write case.yaml < case.json  # write the case given on standard input, checked first
     aquaflux write copy.yaml --relative-to original/ < case.json  # re-base its relative paths
     aquaflux mesh out/ --relative-to case_dir/ < mesh.json  # read or generate a case's mesh and its patches, as VTK
     aquaflux serve                      # answer any of these, one per line, without restarting
 
-``show``, ``write`` and ``mesh`` print ``{"error": null, ...}`` on success and ``{"error": "<reason>"}`` with exit
+``show``, ``plan``, ``write`` and ``mesh`` print ``{"error": null, ...}`` on success and ``{"error": "<reason>"}`` with exit
 status 2 when the file, or the case, is refused.
 
 ``serve`` is for a program that asks many of these in turn: starting Python and importing the solver
@@ -48,6 +49,7 @@ from aquaflux.case import (
     case_schema,
     case_spec_from_mapping,
     mesh_source_from_mapping,
+    plan_run,
     prepare_run,
     read_case,
     read_case_document,
@@ -63,7 +65,7 @@ __all__ = ["main"]
 _REFUSED = 2
 
 #: The commands ``serve`` answers: the ones that read and write case files, each finished in seconds.
-SERVED = ("schema", "show", "write", "mesh", "check")
+SERVED = ("schema", "show", "write", "mesh", "check", "plan")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -90,6 +92,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     run.add_argument(
         "--overwrite", action="store_true", help="replace the results of an earlier run"
     )
+    plan = commands.add_parser(
+        "plan",
+        help="print where a run of a case file would write, and what it would replace, as JSON",
+    )
+    plan.add_argument("case", help="the case file")
     commands.add_parser("schema", help="print what a case file may hold, as JSON")
     show = commands.add_parser("show", help="print a case file as aquaflux reads it, as JSON")
     show.add_argument("case", help="the case file")
@@ -126,6 +133,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if arguments.command == "show":
         return _show(arguments.case)
+    if arguments.command == "plan":
+        return _plan(arguments.case)
     if arguments.command == "write":
         return _write(arguments.case, sys.stdin.read(), arguments.relative_to)
     try:
@@ -155,6 +164,27 @@ def _show(path: str) -> int:
     except (ValueError, TypeError) as refusal:
         error = str(refusal)
     print(json.dumps({"error": error, "case": document}))
+    return 0
+
+
+def _plan(path: str) -> int:
+    """Print where a run of ``path`` would write, and what it would replace, as JSON."""
+    try:
+        plan = plan_run(path)
+    except (*_REFUSALS, OSError) as error:
+        print(json.dumps({"error": f"{path}: {error}"}))
+        return _REFUSED
+    print(
+        json.dumps(
+            {
+                "error": None,
+                "directory": str(plan.directory),
+                "log": None if plan.log is None else str(plan.log),
+                "history": None if plan.history is None else str(plan.history),
+                "occupied": [str(target) for target in plan.occupied],
+            }
+        )
+    )
     return 0
 
 

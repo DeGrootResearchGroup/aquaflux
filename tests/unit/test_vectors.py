@@ -1,4 +1,4 @@
-"""Unit tests for the vector-field algebra helpers (dot / norm_squared / scale / reflect)."""
+"""Unit tests for the vector-field algebra helpers (dot / norm_squared / norm / scale / reflect)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.vectors import dot, norm_squared, reflect, scale
+from aquaflux.vectors import dot, norm, norm_squared, reflect, scale
 
 
 def test_dot_matches_reference_per_face():
@@ -32,6 +32,25 @@ def test_norm_squared_is_dot_with_self():
     a = jnp.asarray([[3.0, 4.0], [5.0, 12.0]])
     np.testing.assert_allclose(norm_squared(a), [25.0, 169.0])
     np.testing.assert_allclose(norm_squared(a), dot(a, a))
+
+
+def test_norm_is_the_magnitude_and_its_gradient_is_the_unit_vector():
+    a = jnp.asarray([[3.0, 4.0, 0.0], [1.0, -2.0, 2.0]])
+    np.testing.assert_allclose(norm(a), [5.0, 3.0], rtol=1e-15)
+    np.testing.assert_allclose(jax.grad(lambda v: jnp.sum(norm(v)))(a), a / norm(a)[:, None])
+
+
+def test_norm_of_the_zero_vector_is_zero_with_a_finite_zero_gradient():
+    """The guard is inside the root, so reverse mode never differentiates ``sqrt(0)``.
+
+    Guarding after the root -- ``where(zero, 0, sqrt(sq))`` -- returns the same values and a NaN
+    gradient here, which is the defect this function exists to prevent.
+    """
+    field = jnp.asarray([[0.0, 0.0, 0.0], [0.0, 3.0, 4.0]])
+    assert float(norm(field)[0]) == 0.0
+    gradient = jax.grad(lambda v: jnp.sum(norm(v)))(field)
+    np.testing.assert_array_equal(gradient[0], 0.0)
+    np.testing.assert_allclose(gradient[1], [0.0, 0.6, 0.8])
 
 
 def test_scale_broadcasts_scalar_over_components():
