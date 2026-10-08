@@ -90,6 +90,21 @@ converged state and adjoint unchanged.
 Watch the retry region: Anderson on a stiff sequence can extrapolate into non-descent; keep the line
 search as the acceptance gate and reset the history on any rejected step.
 
+**Probed 2026-10-08 (`validation/pitzdaily_openfoam/anderson_replay_probe.py`) — modest, tail-only.**
+Replay on the shipped pitzDaily march (`case.yaml` as shipped, 31 steps / 203 cycles / `x_r/h` 8.0686,
+every step checkpointed; jax 0.11.2, CPU): at each target-station step the Anderson proposal of depth
+1/2/3/5, built from the unaccelerated iterates, scored in one row-scaled measure built at `x_{k+1}`.
+- **Steps 17–22** (early target station): proposal ≈ the march's own next iterate (ratio 0.80–1.25), never
+  better than `x_{k+2}`; depth 5 sometimes worse. No saving.
+- **Steps 23–29** (the linear tail, β at its 0.005 floor, the march's own rate 0.64 → 0.82 per step and
+  slowing): every depth beats `x_{k+2}` (ratio 0.55–0.77), i.e. about one saved step per step.
+- **Bound:** compounding that factor over the tail gives ~2.5 steps for the march's 6, i.e. ~3–4 outer
+  steps and ~14 of 203 cycles (~7 %). Optimistic — a one-step replay on the unaccelerated sequence, not a
+  march feeding its own proposals back. The pre-registered march (depth 0 / 3 / 5, history reset on a
+  station change or a rejected step, line search as the acceptance gate) is what would settle it, and it
+  needs `newton_march` to carry the history: an implementation, not a probe.
+- Depth 2–3 is as good as 5; the gain is confined to where the shifted step converges linearly.
+
 ## 6. Krylov subspace recycling across Newton steps (GCRO-DR)
 
 **What.** Keep a ~10–20-vector approximate invariant subspace (harmonic Ritz vectors of the slowest
