@@ -62,37 +62,16 @@ import abc
 import equinox as eqx
 import jax.numpy as jnp
 
-from aquaflux.vectors import dot, norm_squared, scale
+from aquaflux.vectors import dot, norm, scale
 
 from .connectivity import FaceNodeConnectivity
 
 
-def _safe_magnitude(vectors: jnp.ndarray) -> jnp.ndarray:
-    """Euclidean magnitude along the last axis, with a zero-safe gradient at the zero vector.
-
-    ``jnp.linalg.norm`` returns a NaN *gradient* at exactly the zero vector (``d/dx √(x·x)`` is
-    ``0/0`` there). Geometry is differentiable w.r.t. node coordinates, and a degenerate face —
-    or even a single collinear fan triangle on an otherwise valid face — can make an intermediate
-    vector exactly zero, so the plain norm would inject a NaN into ``grad`` with no NaN in the
-    forward value. This masks the square root's argument so the taken branch never differentiates
-    ``√0``: the magnitude is ``0`` at the zero vector and exact elsewhere.
-
-    Parameters
-    ----------
-    vectors : jnp.ndarray
-        Array of vectors, shape ``(..., dim)``.
-
-    Returns
-    -------
-    jnp.ndarray
-        Magnitudes, shape ``(...,)``.
-    """
-    sq = norm_squared(vectors)
-    return jnp.where(sq > 0.0, jnp.sqrt(jnp.where(sq > 0.0, sq, 1.0)), 0.0)
-
-
 def _safe_unit(vectors: jnp.ndarray) -> jnp.ndarray:
-    """Unit vectors along the last axis, zero-safe in value and gradient (see :func:`_safe_magnitude`).
+    """Unit vectors along the last axis, zero-safe in value and gradient.
+
+    The square root is guarded inside its argument, for the reason
+    :func:`~aquaflux.vectors.norm` gives.
 
     A zero input vector maps to a zero output vector (a degenerate face has no unit normal), with a
     finite gradient rather than a ``0/0`` NaN.
@@ -224,7 +203,7 @@ class EdgeFaceGeometry(FaceGeometryScheme):
         verts = face_nodes.gather_node_coords(node_coords).reshape(face_nodes.n_faces, 2, -1)
         p0, p1 = verts[:, 0], verts[:, 1]
         d = p1 - p0
-        area = _safe_magnitude(d)
+        area = norm(d)
         centroid = 0.5 * (p0 + p1)
         normal = _safe_unit(jnp.stack([d[:, 1], -d[:, 0]], axis=1))
         return area, centroid, normal
@@ -360,7 +339,7 @@ class PolygonFaceGeometry(FaceGeometryScheme):
         tri_centroid = (pa + pb + pc) / 3.0
 
         vector_area = face_nodes.reduce_to_faces(directed)  # S
-        area = _safe_magnitude(vector_area)  # |S|
+        area = norm(vector_area)  # |S|
         normal = _safe_unit(vector_area)
         # Signed projected area of each fan triangle onto the (unit) face normal. Summed per face
         # this is exactly |S|, so it is the correct area-weight — and it is negative for a
@@ -370,7 +349,7 @@ class PolygonFaceGeometry(FaceGeometryScheme):
             :, None
         ]  # degenerate face -> 0 centroid, no NaN
         centroid = face_nodes.reduce_to_faces(scale(tri_centroid, signed)) / safe_area
-        total_tri_area = face_nodes.reduce_to_faces(_safe_magnitude(directed))
+        total_tri_area = face_nodes.reduce_to_faces(norm(directed))
         return area, centroid, normal, total_tri_area
 
 

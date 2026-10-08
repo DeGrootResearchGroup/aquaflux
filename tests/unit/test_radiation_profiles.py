@@ -135,6 +135,29 @@ def test_the_exponent_is_a_differentiable_leaf():
     assert jax.tree_util.tree_leaves(CosinePower(3.0))
 
 
+@pytest.mark.parametrize("exponent", [1.0, 1.5, 2.0, 40.0])
+@pytest.mark.parametrize("method", ["intensity_fraction_at", "radiance_per_exitance_at"])
+def test_a_direction_behind_the_facet_has_a_zero_derivative_not_a_nan(exponent, method):
+    """Behind the facet both views are zero, and so are their derivatives -- in the cosine and in
+    the exponent alike.
+
+    The radiance raises the cosine to ``n - 1``, which lies in ``[0, 1)`` for ``n`` in ``[1, 2)``,
+    so with the zero base left inside the power its slope is infinite and the selection that
+    zeroes the value multiplies that infinity by zero. The value was right all along; only the
+    derivative read NaN. In front, the derivative in the cosine is checked against the closed form.
+    """
+    view = getattr(CosinePower(exponent), method)
+    for behind in (-0.4, 0.0):
+        assert float(view(jnp.asarray(behind))) == 0.0
+        assert float(jax.grad(view)(jnp.asarray(behind))) == 0.0
+        in_exponent = jax.grad(lambda n, c=behind: getattr(CosinePower(n), method)(jnp.asarray(c)))
+        assert float(in_exponent(jnp.asarray(exponent))) == 0.0
+    power = exponent if method == "intensity_fraction_at" else exponent - 1.0
+    cosine = 0.6
+    expected = (exponent + 1.0) * power * cosine ** (power - 1.0) / (2.0 * np.pi)
+    assert float(jax.grad(view)(jnp.asarray(cosine))) == pytest.approx(expected, rel=1e-14)
+
+
 @pytest.mark.parametrize("profile", [Lambertian(), CosinePower(5.0), Isotropic()])
 def test_a_distribution_of_the_angle_from_the_normal_alone_is_its_own_mirror_image(profile):
     """A reflection keeps the angle between a direction and the normal, so nothing changes."""
