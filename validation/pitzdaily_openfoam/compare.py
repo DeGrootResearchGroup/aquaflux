@@ -97,6 +97,7 @@ from aquaflux.solve import (
     MonolithicVCycle,
     StateCheckpointer,
     combine_observers,
+    residual_stop_gmres,
 )
 from aquaflux.turbulence import (
     BetaTaperedDamping,
@@ -487,6 +488,39 @@ _TURB_DAMPING_SHAPE = (
 )
 RAMP_SCALE = SOLVER.continuation.scale
 RAMP_COMPANION = _RAMP_SCALINGS[RAMP_SCALE]
+
+#: Which stop the inner Krylov solve uses. Unset: the case file's (``lineax``'s, which tests only at a
+#: restart boundary and also waits for the solution to stop moving). ``shipped``: the same solver, but
+#: run through the study path, so it is the control for the next. ``residual``: stop on the residual
+#: alone, tested every iteration (``residual_stop_gmres``), at the file's tolerance, restart and cap.
+#: Both arms count their operator applications, since a cycle no longer means the same work in both.
+KRYLOV_STOP = os.environ.get("PITZ_KRYLOV_STOP") or None
+if KRYLOV_STOP not in (None, "shipped", "residual"):
+    raise SystemExit(f"PITZ_KRYLOV_STOP is 'shipped' or 'residual', got {KRYLOV_STOP!r}")
+
+
+class _KrylovWork:
+    """Applications of the preconditioned operator over a march, counted per inner solve.
+
+    ``lineax``'s count follows from its cycles (one start-up application, then ``restart + 1`` per
+    cycle); the residual stop reports its own, since it may stop part way through a cycle.
+    """
+
+    def __init__(self):
+        self.applications = 0
+        self.solves = 0
+
+    def on_inner(self, index, g_before, g_after, cycles, alpha, iterate):
+        if KRYLOV_STOP != "residual":
+            self.applications += 1 + (FORWARD_RESTART + 1) * (int(cycles) - 1)
+            self.solves += 1
+
+    def on_solve(self, iterations, cycles):
+        self.applications += int(iterations)
+        self.solves += 1
+
+
+KRYLOV_WORK = _KrylovWork()
 #: How many geometric viscosity stations the ramp walks (`PITZ_RAMP_STATIONS`), one outer step each.
 #:
 #: ⚠️ 16, and it was swept JOINTLY with `TURB_DAMPING` because the two interact -- a coarser ramp is a
@@ -1071,6 +1105,7 @@ def _study_arms(jacobian_gradient_sweeps):
             ("a tapered closure damping (PITZ_TURB_TAPER)", bool(TURB_TAPER)),
             ("a target-station damping (PITZ_TURB_DAMPING_TARGET)", bool(TURB_DAMPING_TARGET)),
             ("capped Jacobian gradient sweeps", jacobian_gradient_sweeps is not None),
+            (f"the Krylov stop (PITZ_KRYLOV_STOP={KRYLOV_STOP})", KRYLOV_STOP is not None),
         )
         if active
     ]
@@ -1246,10 +1281,10 @@ def solve_aquaflux(
     )
     observers = (
         dict(
-            inner_observer=(
-                logger.on_inner
-                if inner_dump is None
-                else combine_observers(logger.on_inner, inner_dump.on_inner)
+            inner_observer=combine_observers(
+                logger.on_inner,
+                KRYLOV_WORK.on_inner,
+                *([] if inner_dump is None else [inner_dump.on_inner]),
             ),
             on_checkpoint=(
                 logger.on_checkpoint
@@ -1297,6 +1332,14 @@ def _solve_study_arm(coupled, solver, logger, jacobian_gradient_sweeps, observer
     per-rung closure damping, a per-station one, or a capped Jacobian.
     """
     settings = solver.settings()
+    if KRYLOV_STOP == "residual":
+        regime = solver.linear_solve
+        settings["linear_solve"] = residual_stop_gmres(
+            regime.rtol,
+            restart=regime.restart,
+            max_restarts=regime.max_restarts,
+            on_solve=KRYLOV_WORK.on_solve,
+        )
     # One session for the whole march: it builds the probe once, and every rung glues in the same
     # inverse and refresh hook, re-pointed at the rung's own companion -- FITTED per rung, not a fresh
     # object.
@@ -1426,6 +1469,11 @@ def main():
     print(
         f"aquaflux coupled solve: {time.time() - t0:.0f}s, "
         f"Ux in [{aq['U'][:, 0].min():.3f}, {aq['U'][:, 0].max():.3f}]",
+        flush=True,
+    )
+    print(
+        f"Krylov work: {KRYLOV_WORK.applications} applications of the preconditioned operator over "
+        f"{KRYLOV_WORK.solves} inner solves",
         flush=True,
     )
 

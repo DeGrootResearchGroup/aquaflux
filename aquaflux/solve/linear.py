@@ -104,6 +104,15 @@ def _global_two_norm(pytree: Any) -> jnp.ndarray:
     return jnp.sqrt(sum(jnp.sum(jnp.square(leaf)) for leaf in leaves))
 
 
+def _require_measure(solver: Any) -> None:
+    """Refuse a solver configured to follow a step's measure but run outside one."""
+    if solver.norm is None:
+        raise TypeError(
+            "this GMRES stops in the progress measure of the Newton step that runs it (norm=None), and "
+            "it was run outside one. Pass the measure as `norm`, or hand the solver to a step."
+        )
+
+
 class _RelativeResidualGMRES(lx.GMRES):
     """GMRES whose stopping test is a *global* relative residual in an injected norm, not componentwise.
 
@@ -135,12 +144,7 @@ class _RelativeResidualGMRES(lx.GMRES):
     def compute(
         self, state: Any, vector: Any, options: dict[str, Any]
     ) -> tuple[Any, Any, dict[str, Any]]:
-        if self.norm is None:
-            raise TypeError(
-                "this GMRES stops in the progress measure of the Newton step that runs it "
-                "(relative_residual_gmres(norm=None)), and it was run outside one. Pass the measure as "
-                "`norm`, or hand the solver to a step."
-            )
+        _require_measure(self)
         # Scale the right-hand side to unit ``self.norm`` so the (absolute) ``atol`` floor acts as a
         # relative tolerance; undo the scaling on the returned solution (the map ``b -> x`` is linear, so
         # a constant factor passes straight through). ``jnp.where`` guards a zero right-hand side.
@@ -214,6 +218,140 @@ def relative_residual_gmres(
         restart=restart,
         stagnation_iters=stagnation_iters,
         max_steps=max_restarts,
+    )
+
+
+class _ResidualStopGMRES(_RelativeResidualGMRES):
+    """Restarted GMRES that stops the moment its residual meets the tolerance, tested every iteration.
+
+    :class:`_RelativeResidualGMRES` inherits ``lineax``'s stopping rule, which is tested only at a
+    restart boundary and also demands that the solution has stopped moving over the last whole cycle:
+    every solve then runs at least two full cycles, ``2 (restart + 1) + 1`` operator applications, even
+    when one cycle's first few iterations already met the tolerance. An inexact-Newton forcing term is a
+    bound on the linear residual alone, so this solver tests that and nothing else, after every
+    iteration, in the same injected measure: ``norm(b - A x) <= rtol norm(b)``.
+
+    The residual is formed from the Arnoldi relation, ``r = V_{j+1} (beta e_1 - H_j y_j)``, so testing it
+    costs no operator application. The basis is orthogonalized by classical Gram--Schmidt applied twice,
+    and the small least-squares problem is re-solved at every iteration (its size is at most the restart
+    length, so this is negligible beside one application of the operator).
+
+    The reported count is the restart cycles RUN, a partial one included, plus ``lineax``'s fixed offset
+    of two, so :func:`restart_cycles` reads it as the number of cycles run. That is one MORE than the
+    same number means for :class:`_RelativeResidualGMRES`, whose corrected count is the cycles run minus
+    one; a cost trigger keyed on the count fires at a different difficulty under the two solvers.
+
+    The forward march is the only consumer, so only :meth:`compute` is replaced; transposition and the
+    rest are ``lineax``'s, and the adjoint's transpose solve is configured separately.
+
+    Attributes
+    ----------
+    on_solve : callable or None
+        ``(iterations, cycles) -> None``, called on the host after each solve with the operator
+        applications it made and the cycles it ran. ``None`` (default) elides it. An observer for
+        studies that count work: the cycle count alone cannot, since a cycle may stop part way.
+    """
+
+    on_solve: Callable[[Any, Any], None] | None = eqx.field(static=True, default=None)
+
+    def compute(
+        self, state: Any, vector: Any, options: dict[str, Any]
+    ) -> tuple[Any, Any, dict[str, Any]]:
+        _require_measure(self)
+        del options  # ``solve_linear`` folds any preconditioner into the operator
+        operator, norm, size = state, self.norm, self.restart
+        target = self.atol * norm(vector)
+        rows = jnp.arange(size + 1)
+
+        def iterate(inner):
+            j, basis, hessenberg, _, _, beta = inner
+            w = operator.mv(basis[j])
+            coefficients = jnp.zeros(size + 1, dtype=w.dtype)
+            for _ in range(
+                2
+            ):  # classical Gram--Schmidt, twice: once loses orthogonality in float64
+                projection = jnp.where(rows <= j, basis @ w, 0.0)
+                w = w - projection @ basis
+                coefficients = coefficients + projection
+            length = jnp.linalg.norm(w)
+            hessenberg = hessenberg.at[:, j].set(coefficients.at[j + 1].set(length))
+            basis = basis.at[j + 1].set(w / jnp.where(length > 0.0, length, 1.0))
+            # Least squares over the columns built so far: zero columns are left out of the
+            # minimum-norm solution, so the unbuilt ones contribute nothing.
+            built = jnp.where(jnp.arange(size) <= j, hessenberg, 0.0)
+            rhs = jnp.zeros(size + 1, dtype=w.dtype).at[0].set(beta)
+            y = jnp.linalg.lstsq(built, rhs)[0]
+            residual = (rhs - built @ y) @ basis
+            done = (norm(residual) <= target) | (length <= jnp.finfo(w.dtype).eps * beta)
+            return j + 1, basis, hessenberg, y, done, beta
+
+        def cycle(outer):
+            x, r, cycles, applications, _ = outer
+            beta = jnp.linalg.norm(r)
+            basis = jnp.zeros((size + 1, r.size), dtype=r.dtype).at[0].set(r / beta)
+            hessenberg = jnp.zeros((size + 1, size), dtype=r.dtype)
+            inner = (0, basis, hessenberg, jnp.zeros(size, dtype=r.dtype), jnp.asarray(False), beta)
+            j, basis, hessenberg, y, done, beta = jax.lax.while_loop(
+                lambda inner: (inner[0] < size) & jnp.logical_not(inner[4]), iterate, inner
+            )
+            x = x + y @ basis[:size]
+            rhs = jnp.zeros(size + 1, dtype=r.dtype).at[0].set(beta)
+            r = (rhs - hessenberg @ y) @ basis
+            return x, r, cycles + 1, applications + j, done
+
+        def keep_going(outer):
+            _, r, cycles, _, done = outer
+            return jnp.logical_not(done) & (cycles < self.max_steps) & (norm(r) > target)
+
+        start = (jnp.zeros_like(vector), vector, 0, 0, norm(vector) <= target)
+        x, r, cycles, applications, _ = jax.lax.while_loop(keep_going, cycle, start)
+        if self.on_solve is not None:
+            jax.debug.callback(self.on_solve, applications, cycles)
+        converged = norm(r) <= target
+        result = lx.RESULTS.where(converged, lx.RESULTS.successful, lx.RESULTS.max_steps_reached)
+        return x, result, {"num_steps": cycles + _LINEAX_STEP_OFFSET, "max_steps": self.max_steps}
+
+
+def residual_stop_gmres(
+    rtol: float,
+    *,
+    norm: Callable[[Any], jnp.ndarray] | None = None,
+    restart: int = 15,
+    max_restarts: int = 14,
+    on_solve: Callable[[Any, Any], None] | None = None,
+) -> lx.AbstractLinearSolver:
+    """A restarted GMRES that stops on ``norm(b - A x) <= rtol norm(b)`` alone, tested every iteration.
+
+    The stop an inexact-Newton forcing term asks for, without the restart-boundary granularity and the
+    solution-change test of :func:`relative_residual_gmres` (see :class:`_ResidualStopGMRES`).
+
+    Parameters
+    ----------
+    rtol : float
+        The relative-residual target.
+    norm : callable or None
+        The measure the stop is taken in, positively homogeneous of degree one. ``None`` (default) takes
+        it from the Newton step that runs the solver (:func:`in_progress_measure`).
+    restart : int
+        The Krylov subspace size before a restart (default ``15``).
+    max_restarts : int
+        The most restart cycles a solve may run (default ``14``).
+    on_solve : callable or None
+        ``(iterations, cycles) -> None``, told each solve's operator applications and cycles run.
+
+    Returns
+    -------
+    lineax.AbstractLinearSolver
+        The solver, for injection as a forward solver (``linear_solve=``).
+    """
+    return _ResidualStopGMRES(
+        rtol=0.0,
+        atol=rtol,
+        norm=norm,
+        restart=restart,
+        stagnation_iters=max_restarts,
+        max_steps=max_restarts,
+        on_solve=on_solve,
     )
 
 
