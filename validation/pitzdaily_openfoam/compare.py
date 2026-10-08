@@ -92,6 +92,7 @@ from aquaflux.solve import (
     CflResidualDualTimeControl,
     Convergence,
     FieldSplit,
+    InnerIterateCheckpointer,
     MarchLogger,
     MonolithicVCycle,
     StateCheckpointer,
@@ -891,6 +892,13 @@ REFRESH_ON_CYCLES = SOLVER.dual_time.refresh_on_cycles or 0
 #: study needs the march's own intermediate states rather than its endpoint.
 CHECKPOINT_KEEP = int(os.environ.get("PITZ_CHECKPOINT_KEEP", "3"))
 
+#: Save the INNER iterates whose linear solve reached this many restart cycles (beside the step
+#: checkpoints, so it needs a `checkpoint_dir`). Off by default (0), and the march is unchanged with it
+#: on: the hook only observes. A step checkpoint holds the state a step STARTS from, so only a step's
+#: first linear system can be rebuilt from it; `1` keeps every inner iterate, which is what a replay of
+#: the march's whole sequence of linear solves needs (`krylov_recycling_probe.py`).
+INNER_DUMP_ABOVE = int(os.environ.get("PITZ_INNER_DUMP_ABOVE", "0"))
+
 #: Redo a step whose solve was expensive, whose line search collapsed, or that diverged -- escalating
 #: the shift first, and falling back to a tighter Krylov solve only for a divergence damping cannot fix.
 #:
@@ -1222,6 +1230,7 @@ def solve_aquaflux(
         ("forward restart / max restarts", f"{FORWARD_RESTART} / {FORWARD_MAX_RESTARTS}"),
         ("k positivity projection", POSITIVITY_PROJECTION),
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
+        ("inner dump above", INNER_DUMP_ABOVE or "off"),
     ):
         logger.note(f"  {_name}: {_value}")
 
@@ -1230,9 +1239,18 @@ def solve_aquaflux(
         if checkpoint_dir is not None
         else None
     )
+    inner_dump = (
+        InnerIterateCheckpointer(checkpoint_dir, above=INNER_DUMP_ABOVE)
+        if INNER_DUMP_ABOVE and checkpoint_dir is not None
+        else None
+    )
     observers = (
         dict(
-            inner_observer=logger.on_inner,
+            inner_observer=(
+                logger.on_inner
+                if inner_dump is None
+                else combine_observers(logger.on_inner, inner_dump.on_inner)
+            ),
             on_checkpoint=(
                 logger.on_checkpoint
                 if checkpoints is None
