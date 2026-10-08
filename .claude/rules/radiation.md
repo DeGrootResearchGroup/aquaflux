@@ -4751,4 +4751,10 @@ light refracted and the walls' light not.
   or the held mask without media, one absorption for every medium, one coefficient for the medium's power,
   no last-leg exclusion, `through` ignored in `surviving_fraction` or in the segment gather, the beside
   regions not evaluated, cross-medium pairs ones, the pass misindexed, both refusals.
+- **Four-lamp tracer check** (`validation/sleeve_optics/check_array.py`, table in its README; 50 mm square,
+  95 % UVT, black wall, 212,992 facets, 20M rays a lamp, one run, Linux 4 cores, 2026-10-08): within the
+  tracer's error where no light passed another sleeve; **2.8-3.5 % low (2.3-3.3 standard errors) where it
+  did** — larger than the share that entered a sleeve (1.0-2.4 %), so not decomposed (straight lines
+  meeting a neighbour's arc where bent paths miss is a candidate, unmeasured). Reflections left out:
+  5.5-7.5 % with four lamps (under 0.5 % with one). aquaflux 977 s, compile included.
 

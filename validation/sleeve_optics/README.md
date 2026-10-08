@@ -137,3 +137,38 @@ slices 0.2 mm at the mid-plane growing by 6 % (106,496 facets); jax 0.10.2, CPU,
   as a descent on the optical length), not physics; the tracer's emitting-sleeve check at the same
   pixels and rays (aquaflux exact there) agreed with the tracer to 0.2 % at every ring, which is what
   ruled the tracer out.
+
+## Four lamps: the scene with transparent solids against the tracer (`check_array.py`)
+
+Four sleeved lamps on the corners of a 50 mm square (`SLEEVE_ARRAY_PITCH` 0.025), each 1 W/m from its
+arc, 95 % UVT water inside a black wall at 100 mm. aquaflux is `solve_scene` with the four sleeves as
+`Media` (128 sectors per arc on the graded tube, 212,992 facets, `RayCastOcclusion(grid=True)`); the
+tracer at 20,000,000 rays a lamp, 0.5 mm pixels, each point the mean over the water pixels within 1 mm.
+aquaflux follows no reflection, so it is compared with the trace that ends each ray at its first one.
+"Entered" is the tracer's share of the transmitted light at the point that passed through another
+lamp's sleeve, which aquaflux crosses straight. jax 0.10.2, CPU, x64, Linux x86_64, 4 cores, one run,
+2026-10-08; aquaflux 977 s, compile included; the traces 476 and 348 s.
+
+| point (mm) | aquaflux / transmitted | in standard errors | traced error | entered | transmitted / full | straight / full |
+|---|---|---|---|---|---|---|
+| (0, 0) | 1.0015 | +0.25 | 0.60 % | 0 | 0.945 | 1.097 |
+| (0, -25) | 0.9971 | -0.35 | 0.85 % | 0.8 % | 0.926 | 1.077 |
+| (45, 25) | 0.9875 | -1.44 | 0.87 % | 1.8 % | 0.925 | 1.124 |
+| (55, 25) | 0.9673 | -2.26 | 1.44 % | 2.4 % | 0.940 | 1.040 |
+| (37, 37) | 1.0244 | +1.30 | 1.87 % | 0 | 0.943 | 1.586 |
+| (50, 50) | 0.9647 | -3.31 | 1.06 % | 2.3 % | 0.940 | 1.025 |
+| (-25, 41) | 0.9871 | -1.33 | 0.97 % | 1.9 % | 0.930 | 1.202 |
+| (0, 75) | 0.9722 | -2.33 | 1.19 % | 1.0 % | 0.927 | 1.113 |
+| (-65, 0) | 0.9904 | -0.59 | 1.63 % | 0.7 % | 0.927 | 1.058 |
+
+- Where no light passed another sleeve, aquaflux agrees with the transmitted trace within its
+  statistical error.
+- **Where light passes a neighbouring sleeve, aquaflux reads 2.8-3.5 % low, at 2.3-3.3 standard
+  errors** (beyond a lamp along the edge and along the diagonal, and outside the array). The straight
+  crossing of the neighbour is the likely cause, but this is **not decomposed**: the deficit is larger
+  than the light the tracer says entered a sleeve (1.0-2.4 %), so it is not only the bending of that
+  light; a straight line meeting a neighbour's arc where the bent path misses it would also count, and
+  was not measured.
+- The reflections left out are worth 5.5-7.5 % here against under 0.5 % beside one lamp: with four
+  lamps, light reflected off the neighbours' sleeves reaches the water. That is step 4's.
+- The straight gather with the sleeves absent reads 2.5-59 % high.
