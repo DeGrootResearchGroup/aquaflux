@@ -8,6 +8,10 @@ parsed record so the assembler can be tested without any files or text parsing.
 
 from __future__ import annotations
 
+import re
+import shutil
+from pathlib import Path
+
 import numpy as np
 from aquaflux.io.openfoam.records import CellZone, FoamPatch, PolyMeshData
 
@@ -197,3 +201,31 @@ def cyclic_slab_polymesh_data(
         patches=(left, right, bottom, top, front_and_back),
         cell_zones=(),
     )
+
+
+SLAB_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "polymesh_2d_slab_frontandback"
+
+
+def copy_slab_polymesh(destination: Path, thickness: float = 0.5) -> Path:
+    """The committed two-cell slab polyMesh, copied with its extruded direction ``thickness`` thick.
+
+    The fixture is a 2 x 1 x 1 slab, so which of its two unit axes was extruded cannot be told from
+    its extents; a different thickness makes the axis (``z``) identifiable, as it is on any real
+    two-dimensional case.
+
+    Parameters
+    ----------
+    destination : pathlib.Path
+        The polyMesh directory to create.
+    thickness : float
+        The slab's extent along ``z``.
+
+    Returns
+    -------
+    pathlib.Path
+        ``destination``.
+    """
+    shutil.copytree(SLAB_FIXTURE, destination)
+    points = destination / "points"
+    points.write_text(re.sub(r"\((\S+) (\S+) 1\)", rf"(\1 \2 {thickness})", points.read_text()))
+    return destination

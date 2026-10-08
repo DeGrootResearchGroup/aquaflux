@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
-import hashlib
 import os
 import shutil
 import subprocess
@@ -41,12 +40,12 @@ import aquaflux
 from aquaflux.solve import MarchLogger, StateCheckpointer, StepHistory, StepReport
 
 from .case_file import CaseFile, CheckedCase, read_case, write_case
-from .initial import StartingFields, starting_seed
+from .initial import StartingFields, starting_arguments
 from .outputs import RunFields
 from .paths import relocated
 from .restart_file import RestartHeader, checkpoint_writer
 from .solver import NotConverged, SolverSpec, solver_for
-from .spec import CaseSpec, case_spec_to_mapping
+from .spec import CaseSpec
 
 __all__ = ["PreparedRun", "RunRecord", "prepare_run"]
 
@@ -150,7 +149,7 @@ class PreparedRun:
                     save=checkpoint_writer(
                         spec.physics,
                         problem,
-                        RestartHeader.of(spec.physics, self.checked.mesh, _case_digest(spec)),
+                        RestartHeader.of(spec, self.checked.mesh),
                     ),
                 )
             )
@@ -158,8 +157,8 @@ class PreparedRun:
             observers = self.solver.observers_for(logger, steps)
             converged, message, written, results = True, None, [], {}
             try:
-                seed = starting_seed(self.starting, spec.physics, problem)
-                solution = self.solver.solve(problem, initial=seed, **observers)
+                start = starting_arguments(self.starting, spec.physics, problem)
+                solution = self.solver.solve(problem, **start, **observers)
             except (NotConverged, eqx.EquinoxRuntimeError) as error:
                 converged, message = False, str(error).strip().splitlines()[0]
                 logger.note(f"did not converge: {message}")
@@ -167,6 +166,7 @@ class PreparedRun:
                 fields = RunFields(
                     cells=spec.physics.output_fields(problem, solution),
                     patches=spec.physics.output_patch_fields(problem, solution),
+                    density=None if spec.fluid is None else spec.fluid.density,
                 )
                 results = spec.physics.results(problem, solution)
                 for writer in outputs.fields:
@@ -332,12 +332,6 @@ def _refuse_an_occupied_directory(
             f"{', '.join(map(str, occupied))} already {'holds' if len(occupied) == 1 else 'hold'} "
             "results; move them, or replace them with --overwrite (overwrite=True)."
         )
-
-
-def _case_digest(spec: CaseSpec) -> str:
-    """A digest of the case as a file states it, recorded in each checkpoint as where it came from."""
-    document = yaml.safe_dump(case_spec_to_mapping(spec), sort_keys=True)
-    return hashlib.sha256(document.encode()).hexdigest()
 
 
 class _Tee:

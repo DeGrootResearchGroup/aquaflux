@@ -86,6 +86,19 @@ Three pure seams so ~80% of the logic tests with no filesystem (separate I/O fro
     also returns the internal block *only*: a `volScalarField`'s `boundaryField` holds **face**
     values, a different quantity on a different index space, so concatenating them as the surface
     reader does would produce something no consumer wants.
+    **`parse_vector_field` / `read_openfoam_time(case, time, names, mesh, *, extruded_axis=None)` (built
+    2026-10-07, for a case's `Fields` starting state)** are the reading counterpart of
+    `write_openfoam_time`: each named file of a time directory is read by its header `class`
+    (`volScalarField` → `(n,)`, `volVectorField` → `(n, 3)`, anything else refused), both `uniform` and
+    `nonuniform` internal entries. On a 2D (collapsed) mesh a vector's component along the extruded axis is
+    **dropped after checking it is zero** (`1e-8` of the largest kept component, floored at one) — the
+    inverse of the writer's padding, and a refusal rather than a silent discard when the axis is wrong or
+    the flow is not planar. The axis comes from the explicit argument or, only when a vector is read onto
+    a 2D mesh, `infer_extruded_axis(case, mesh)`; a case file passes the axis from its mesh path, since
+    the fields' case need not hold the polyMesh. ⚠️ As with the scalar reader only the cell COUNT is
+    checked against the mesh. A missing field is reported with what the directory does hold.
+    ⚠️ **`_values`' count refusal said "the patch has N faces" even for the internal field** (a cell
+    count); it now says "N are expected".
     **`read_surface_scalar_field` refuses a periodic mesh outright** (`face_cells.neighbour_offset
     is not None`) rather than relying only on the leading-interior-block check below: a fused
     `cyclic` seam face is interior but sat in whichever boundary patch declared it in the original

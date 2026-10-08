@@ -24,11 +24,13 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import hashlib
 import types
 from collections.abc import Mapping
 from typing import ClassVar
 
 import numpy as np
+import yaml
 
 from aquaflux.discretization import AdvectionScheme, FirstOrderUpwind, LimitedUpwind
 from aquaflux.flow import PinnedPoint, PressureDatum
@@ -81,7 +83,7 @@ from .boundaries import (
 )
 from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
-from .initial import Checkpoint, InitialState
+from .initial import Checkpoint, Fields, InitialState
 from .mesh_source import GeometricGrading, MeshSource, OpenFOAMMesh, StructuredGrid
 from .outputs import Checkpoints, OpenFOAMTime, Outputs, PatchVtk, Vtk
 from .physics import RANS, Laminar, Physics, Radiation
@@ -110,6 +112,7 @@ from .solver import (
     Segregated,
     SolverSpec,
     ViscosityRamp,
+    solver_for,
 )
 
 __all__ = ["CaseSpec", "Numerics", "case_spec_from_mapping", "case_spec_to_mapping"]
@@ -199,7 +202,8 @@ class CaseSpec:
         library's settings (see :meth:`~aquaflux.case.CheckedCase.solve`).
     initial : InitialState or None
         What the case starts from when it is not from scratch -- :class:`~aquaflux.case.Checkpoint`, an
-        earlier run's checkpoints. Unset, the solve builds its own starting state.
+        earlier run's checkpoints, or :class:`~aquaflux.case.Fields`, a time directory of an OpenFOAM
+        case. Unset, the solve builds its own starting state.
     outputs : Outputs
         What a run writes and where (see :func:`~aquaflux.case.run_case`); unset, the fields as VTK and
         the log, in ``results/`` beside the case file.
@@ -267,7 +271,7 @@ class CaseSpec:
         if self.initial is not None and not isinstance(self.initial, InitialState):
             raise TypeError(
                 "CaseSpec.initial must be a starting state such as "
-                f"Checkpoint(path), got {self.initial!r}."
+                f"Checkpoint(path) or Fields(path, time), got {self.initial!r}."
             )
         if not self.boundaries:
             raise ValueError("a case names at least one boundary patch.")
@@ -293,6 +297,48 @@ class CaseSpec:
                 "outputs.fields: an OpenFOAMTime writes into an OpenFOAM case, whose mesh must be the "
                 f"case's own, but the mesh is a {type(self.mesh).__name__}. Write the fields as Vtk."
             )
+
+    def digest(self) -> str:
+        """A digest of the case as a file states it, recorded in each checkpoint as where it came from.
+
+        Returns
+        -------
+        str
+            A hex digest, the same for two equal cases.
+        """
+        return _digest(case_spec_to_mapping(self))
+
+    def problem_digest(self) -> str:
+        """A digest of what this case solves and how it measures progress, not of where it writes or starts.
+
+        Two cases with the same problem digest state the same equations on the same mesh and judge a
+        residual in the same measure, so a residual norm one took is a scale for the other. That is what
+        a restart needs to know before it carries the stopped run's reference residual: the file may
+        differ in its ``outputs`` (a restart writes elsewhere), its ``initial`` section, and in every
+        solver setting that does not change the measure -- the step budget, the preconditioner, the
+        shift -- and still continue the same march.
+
+        Returns
+        -------
+        str
+            A hex digest.
+
+        Raises
+        ------
+        ValueError
+            If the case states no solver and its physics' default cannot solve it.
+        """
+        # The solver the case runs, so a file that states its default solver and one that leaves it
+        # unstated are the same problem.
+        mapping = case_spec_to_mapping(dataclasses.replace(self, solver=solver_for(self)))
+        for section in ("outputs", "initial"):
+            mapping.pop(section, None)
+        solver = mapping["solver"]
+        # The solver's kind and the measure it judges a residual in: the rest of it is how the march is
+        # steered, which a restart may change without changing what its residual means.
+        convergence = solver.get("convergence") or {}
+        mapping["solver"] = {"kind": solver["kind"], "measure": convergence.get("measure")}
+        return _digest(mapping)
 
     def check_against(self, mesh: Mesh) -> None:
         """Refuse this case on ``mesh`` unless its patches fit it exactly.
@@ -542,6 +588,7 @@ _CASE_MAPPING = SettingsMapping(
         OpenFOAMTime,
         Checkpoints,
         Checkpoint,
+        Fields,
     ]
 )
 
@@ -610,6 +657,11 @@ def case_spec_from_mapping(mapping: Mapping[str, object]) -> CaseSpec:
         if isinstance(sections.get(section), Mapping) and "kind" not in sections[section]:
             sections[section] = {"kind": kind.__name__, **sections[section]}
     return _CASE_MAPPING.from_mapping({**sections, "kind": _CASE_KIND})
+
+
+def _digest(mapping: Mapping[str, object]) -> str:
+    """A hex digest of a case mapping's content, independent of key order."""
+    return hashlib.sha256(yaml.safe_dump(dict(mapping), sort_keys=True).encode()).hexdigest()
 
 
 def case_spec_to_mapping(spec: CaseSpec) -> dict[str, object]:

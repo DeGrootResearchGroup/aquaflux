@@ -142,7 +142,12 @@ class SolverSpec(abc.ABC):
 
     @abc.abstractmethod
     def solve(
-        self, problem: object, *, initial: object | None = None, **observers: object
+        self,
+        problem: object,
+        *,
+        initial: object | None = None,
+        reference_residual: float | None = None,
+        **observers: object,
     ) -> object:
         """Solve ``problem``, the problem the case built.
 
@@ -154,6 +159,11 @@ class SolverSpec(abc.ABC):
             The state to start from, in the form the physics' :meth:`~aquaflux.case.Physics.initial_fields`
             gives: the flow state for a laminar case, ``(flow, k, omega)`` for a Reynolds-averaged one.
             Unset, the solve builds its own starting state.
+        reference_residual : float, optional
+            The residual norm a march that stopped short took at its own first state, for a solve
+            resuming it from ``initial``: it sets the scale the march's damping ramp and stopping bar
+            are measured against, so the resumed march continues the stopped one. Only a march has one;
+            a solve that does not march refuses it. Unset, the march measures at ``initial``.
         **observers
             Keywords of the library solve that observe it without changing it -- ``on_checkpoint``,
             ``on_retry``, ``inner_observer`` and the like. See each solve for which it accepts.
@@ -494,6 +504,7 @@ class CoupledMarch(_March):
         problem: object,
         *,
         initial: tuple[object, object, object] | None = None,
+        reference_residual: float | None = None,
         session_options: Mapping[str, object] | None = None,
         point_setup: Callable | None = None,
         **observers: object,
@@ -509,6 +520,9 @@ class CoupledMarch(_March):
             The case's coupled problem.
         initial : tuple of jnp.ndarray, optional
             The ``(flow, k, omega)`` to start from, physical fields. Refused with a continuation.
+        reference_residual : float, optional
+            The stopped march's reference residual -- see :meth:`SolverSpec.solve`. Refused with a
+            continuation, which has no state to resume.
         session_options : mapping, optional
             Observers for that session -- ``observer``, ``reports``, ``on_build`` and the other
             keywords of :func:`~aquaflux.turbulence.open_session` beyond the spec. Refused for a
@@ -543,8 +557,13 @@ class CoupledMarch(_March):
             )
         options = settings | observers
         if self.continuation is None:
-            return solve_coupled(problem, *(() if initial is None else initial), **options)
-        if initial is not None:
+            return solve_coupled(
+                problem,
+                *(() if initial is None else initial),
+                **_set(reference_residual=reference_residual),
+                **options,
+            )
+        if initial is not None or reference_residual is not None:
             raise ValueError(_RAMP_TAKES_NO_STARTING_STATE)
         return self.continuation.solve(
             problem,
@@ -603,7 +622,12 @@ class FlowMarch(_March):
         return self._march_settings()
 
     def solve(
-        self, problem: object, *, initial: object | None = None, **observers: object
+        self,
+        problem: object,
+        *,
+        initial: object | None = None,
+        reference_residual: float | None = None,
+        **observers: object,
     ) -> object:
         """March ``problem`` -- see :meth:`SolverSpec.solve`.
 
@@ -613,6 +637,8 @@ class FlowMarch(_March):
             The case's flow problem.
         initial : jnp.ndarray, optional
             The flow state to start from, shape ``((dim + 1) n_cells,)``; unset, a potential flow.
+        reference_residual : float, optional
+            The stopped march's reference residual -- see :meth:`SolverSpec.solve`.
         **observers
             Observer keywords of :func:`~aquaflux.flow.solve_flow_march` (``on_step``,
             ``on_checkpoint``, ``on_retry``, ...).
@@ -624,7 +650,12 @@ class FlowMarch(_March):
         """
         settings = self.settings()
         _refuse_settings_as_observers("FlowMarch", self._owned(), observers)
-        return solve_flow_march(problem, **settings, **_set(state=initial), **observers)
+        return solve_flow_march(
+            problem,
+            **settings,
+            **_set(state=initial, reference_residual=reference_residual),
+            **observers,
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -745,6 +776,7 @@ class Segregated(SolverSpec):
         problem: object,
         *,
         initial: tuple[object, object, object] | None = None,
+        reference_residual: float | None = None,
         **observers: object,
     ) -> object:
         """Solve ``problem`` -- see :meth:`SolverSpec.solve`. It takes no observers.
@@ -756,6 +788,9 @@ class Segregated(SolverSpec):
         initial : tuple of jnp.ndarray, optional
             The ``(flow, k, omega)`` to start from, physical fields; unset,
             :func:`~aquaflux.turbulence.sst_initial_fields`.
+        reference_residual : None
+            The loop stops on the change between sweeps and has no residual reference to resume;
+            anything else is refused.
 
         Returns
         -------
@@ -766,7 +801,14 @@ class Segregated(SolverSpec):
         ------
         NotConverged
             If the sweeps ran out before a sweep changed the fields by less than ``increment_tol``.
+        ValueError
+            If a reference residual is given.
         """
+        if reference_residual is not None:
+            raise ValueError(
+                "a segregated solve stops on the change between sweeps, so it has no reference "
+                "residual to resume."
+            )
         if observers:
             raise TypeError(f"Segregated takes no observers, got {sorted(observers)}.")
         momentum, turbulence = problem.momentum, problem.turbulence
@@ -846,7 +888,12 @@ class RadiationSolve(SolverSpec):
         )
 
     def solve(
-        self, problem: object, *, initial: object | None = None, **observers: object
+        self,
+        problem: object,
+        *,
+        initial: object | None = None,
+        reference_residual: float | None = None,
+        **observers: object,
     ) -> object:
         """Light the scene the case built; ``report`` is the one observer.
 
@@ -856,6 +903,8 @@ class RadiationSolve(SolverSpec):
             The scene the case built.
         initial : None
             Nothing is marched, so there is no state to start from; anything else is refused.
+        reference_residual : None
+            Nothing is marched, so there is no residual to resume; anything else is refused.
         **observers
             ``report`` alone.
 
@@ -868,7 +917,7 @@ class RadiationSolve(SolverSpec):
         ValueError
             If a starting state is given.
         """
-        if initial is not None:
+        if initial is not None or reference_residual is not None:
             raise ValueError("a radiation solve marches nothing, so it has no state to start from.")
         _refuse_settings_as_observers("RadiationSolve", frozenset({"solver"}), observers)
         unknown = sorted(set(observers) - {"report"})

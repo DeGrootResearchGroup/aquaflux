@@ -271,9 +271,32 @@ must have the same physics and the same mesh. The viscosity, the boundary values
 settings may differ. Write the new run to its own `outputs.directory`: a run replaces what it
 finds in its output directory, so one that reads from there is refused.
 
-A restart resumes the **state**, not the march's history. The pseudo-time shift opens at its
-starting value again, so a resumed march begins at the residual the stopped one ended on but
-need not take fewer steps than a fresh one to converge from there.
+A restart also resumes the march. The checkpoint records the residual the stopped march began
+at, and the new run measures its damping and its stopping bar against that one rather than against
+the residual at the state it was handed, so it takes the steps the stopped march had left. That
+holds when the new file states the same problem -- the same mesh, physics, fluid, boundaries and
+numerics -- and judges a residual in the same measure (`convergence.measure`); the step budget, the
+preconditioner, the outputs and the like may change. If the file differs in any of the first, the
+run starts from the checkpoint's fields as a new march, and its `run.yaml` records
+`reference_residual: null`. A march that had already refreshed its preconditioner before it
+stopped re-based its damping at the refresh, which a checkpoint does not record: its restart
+continues from the residual it began at, not from where the refresh re-based it.
+
+```yaml
+initial:
+  kind: Fields
+  path: of_case        # an OpenFOAM case directory, relative to the case file
+  time: "1000"         # the time directory to start from; quote it
+```
+
+{class}`~aquaflux.case.Fields` starts the case from one time directory of an OpenFOAM case: another
+program's converged solution, or the output of an earlier run's
+{class}`~aquaflux.case.OpenFOAMTime`. It reads the files `U` and `p` (and under `RANS` also `k` and
+`omega`). The case's mesh must be that OpenFOAM case's own, which is what numbers the cells; only
+the number of cells can be checked against it. The pressure is read as an incompressible OpenFOAM
+solver holds it, per unit density, and multiplied by the case's fluid density; `OpenFOAMTime`
+writes it the same way, so the two are inverses and a case of density one reads it unchanged. It
+carries no march to continue, so the run begins as a new march from the state.
 
 A {class}`~aquaflux.case.ViscosityRamp` opens on a seed fitted to its own anchor station, so a
 case with a `continuation` refuses an `initial` section: drop the `continuation` to resume at
@@ -300,7 +323,8 @@ outputs:
   and boundary conditions from the file of the same name in its `template_time` directory
   (`0` unless given), so the result restarts in the solver the case is set up for. It needs an
   OpenFOAM mesh, and a template for every field it writes. Quote `time`: a bare number reads as
-  a number.
+  a number. The pressure is written per unit density (`p / density`), as an incompressible
+  OpenFOAM solver holds it; the other writers write the pressure itself.
 - {class}`~aquaflux.case.PatchVtk` writes the boundary patches, and the fields on their faces, as
   one VTK polygonal-data file per patch (`patches/<patch>.vtp`) indexed by a multiblock file
   (`patches.vtm`), one block per patch named by it. A radiation case's irradiance is written this
@@ -375,10 +399,11 @@ When the case is **checked** against its mesh ({meth}`~aquaflux.case.CaseFile.ch
   bounding box.
 
 When a run is **prepared** ({func}`~aquaflux.case.prepare_run`), before anything is built, an
-`initial` state is read and checked against the case: it must be of the same physics and the
-same mesh (the same number of cells, and the same cell numbering and node positions), and it
-must lie outside the run's own output directory. A state that does not fit is refused before an
-earlier run's checkpoints are cleared.
+`initial` state is read and checked against the case. A checkpoint must be of the same physics and
+the same mesh (the same number of cells, and the same cell numbering and node positions); an
+OpenFOAM time directory must be on the case's own OpenFOAM mesh, with the right number of cells
+and finite values. Either must lie outside the run's own output directory. A state that does not
+fit is refused before an earlier run's checkpoints are cleared.
 
 Every problem found is reported at once.
 
@@ -478,9 +503,9 @@ In code, {func}`~aquaflux.case.prepare_run` reads and checks a file for a run an
 
 - **A boundary profile** — an inlet velocity or value varying across the patch. Those are
   functions of position, built in code.
-- **A starting state from another solver's fields** — a run can resume from its own
-  checkpoints, but cannot start from fields written by another program, such as an OpenFOAM
-  solution.
+- **A starting state on a mesh that is not an OpenFOAM one** — `Fields` reads an OpenFOAM time
+  directory onto that case's own mesh; there is no way yet to start from another program's fields on
+  a generated grid.
 - **A laminar case holding a bulk velocity** — the flow march solves with the force fixed, and
   no laminar solve holds the constraint from a file.
 

@@ -19,7 +19,13 @@ from .field_writer import (
     write_openfoam_field,
     write_openfoam_time,
 )
-from .fields import parse_scalar_field, read_surface_scalar_field, read_volume_scalar_field
+from .fields import (
+    parse_scalar_field,
+    parse_vector_field,
+    read_openfoam_time,
+    read_surface_scalar_field,
+    read_volume_scalar_field,
+)
 from .reader import OpenFOAMReader, read_openfoam
 
 __all__ = [
@@ -29,8 +35,10 @@ __all__ = [
     "infer_extruded_axis",
     "parse_field_template",
     "parse_scalar_field",
+    "parse_vector_field",
     "read_field_template",
     "read_openfoam",
+    "read_openfoam_time",
     "read_surface_scalar_field",
     "read_volume_scalar_field",
     "write_openfoam_field",

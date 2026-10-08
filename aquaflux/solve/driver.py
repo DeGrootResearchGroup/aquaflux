@@ -249,6 +249,7 @@ def staged_march(
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
+    reference_residual: float | None = None,
     caller: str = "staged_march",
 ) -> StagedResult:
     """March ``residual_fn`` to convergence in refresh segments, and refuse a state that is not a root.
@@ -278,6 +279,14 @@ def staged_march(
         for a residual with no coefficient drift to watch (a refresh trigger then needs to read costs).
     max_steps, step_control, on_step, on_checkpoint, retry, on_retry, homotopy, station_step
         Forwarded to :func:`~aquaflux.solve.newton_march` on every segment.
+    reference_residual : float or None
+        The residual norm an interrupted march measured at *its* first state, in the measure it was
+        steered by, for a march **resuming** it from the state it stopped at. It replaces the norm
+        measured at ``state`` as the stopping target's scale (``atol + rtol * reference``), so the
+        resumed march stops where the original would have, and it anchors the first segment's damping
+        schedule, which would otherwise be re-based at the resumed state and open at its starting
+        strength again. Later segments re-base as in any march. ``None`` measures at ``state``.
+        Refused beside a ``homotopy``, whose first station is the damping anchor's, not the target's.
     caller : str
         The public entry point's name, for the error a non-converged march raises.
 
@@ -291,7 +300,21 @@ def staged_march(
     equinox.EquinoxRuntimeError
         If the march ends short of its target: it exhausted ``max_steps`` in its last segment, stopped on
         a stalled positivity cap, went non-finite, or a homotopy never reached its target.
+    ValueError
+        If ``reference_residual`` is given beside a ``homotopy``, or is not a positive finite number.
     """
+    if reference_residual is not None:
+        if homotopy is not None:
+            raise ValueError(
+                f"{caller}: a reference_residual from an interrupted march cannot be combined with a "
+                "homotopy. The damping schedule is anchored at the homotopy's first station, which is "
+                "not the problem the reference was measured on."
+            )
+        if not (math.isfinite(reference_residual) and reference_residual > 0.0):
+            raise ValueError(
+                f"{caller}: reference_residual must be a positive finite residual norm, "
+                f"got {reference_residual!r}."
+            )
     # A refresh rebuilds the step; a caller-supplied step with no builder leaves it nothing to rebuild
     # WITH, so the refresh would silently never happen. The policy owns that check.
     refresh.require_rebuildable(strategy)
@@ -309,7 +332,11 @@ def staged_march(
     # initial state's scales for the whole solve, so a refresh cannot re-base it (which would put the
     # target, measured once here, out of reach); a `RowScaled` one re-reads the step it is handed.
     norm_builder = convergence.measure._builder(measures, state)
-    reference_norm = float(norm_builder(strategy, state)(residual_fn(state)))
+    reference_norm = (
+        float(norm_builder(strategy, state)(residual_fn(state)))
+        if reference_residual is None
+        else float(reference_residual)
+    )
     # `refresh.limit` refreshes means `refresh.segments` segments: the segment *after* the last refresh
     # must still be marched, or the newly-refreshed preconditioner would never be used.
     control_state: object = None
@@ -322,6 +349,9 @@ def staged_march(
             rtol=convergence.rtol,
             atol=convergence.atol,
             reference_norm=reference_norm,
+            # A resumed march continues the interrupted one's damping ramp on its first segment only: a
+            # later segment follows a refresh, which re-bases the ramp at its own starting state.
+            damping_reference=reference_residual if segment == 0 else None,
             # The last segment has no refresh left to spend, so it marches to convergence or to
             # `max_steps` rather than stopping where the trigger fires.
             trigger=None if refresh.is_last_segment(segment) else refresh.trigger,

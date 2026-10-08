@@ -23,6 +23,7 @@ from aquaflux.case import (
     case_spec_to_mapping,
     prepare_run,
 )
+from aquaflux.case.initial import starting_arguments
 from aquaflux.case.restart_file import (
     RestartHeader,
     checkpoint_writer,
@@ -68,20 +69,22 @@ def _checked(directory: Path, **kwargs: object) -> CheckedCase:
     return CheckedCase(spec=spec, mesh=mesh, directory=directory)
 
 
-def _report(step: int = 0, residual: float = 1.0e-3) -> StepReport:
-    return StepReport(step=step, cycles=3, residual_norm=residual, residual_ratio=0.5, alpha=1.0)
+def _report(step: int = 0, residual: float = 1.0e-3, ratio: float = 0.5) -> StepReport:
+    return StepReport(step=step, cycles=3, residual_norm=residual, residual_ratio=ratio, alpha=1.0)
 
 
-def _write_checkpoints(checked: CheckedCase, directory: Path, states) -> None:
+def _write_checkpoints(checked: CheckedCase, directory: Path, states, ratio: float = 0.5) -> None:
     """Checkpoint ``states`` in order into ``directory``, as a run of this case would."""
     problem = checked.build()
     physics = checked.spec.physics
-    header = RestartHeader.of(physics, checked.mesh, "digest-of-the-writer")
+    header = dataclasses.replace(
+        RestartHeader.of(checked.spec, checked.mesh), case_digest="digest-of-the-writer"
+    )
     checkpointer = StateCheckpointer(
         directory, keep=len(states), save=checkpoint_writer(physics, problem, header)
     )
     for step, state in enumerate(states):
-        checkpointer.on_checkpoint(_report(step, residual=10.0 ** -(step + 1)), state)
+        checkpointer.on_checkpoint(_report(step, residual=10.0 ** -(step + 1), ratio=ratio), state)
 
 
 # --- the mesh digest -------------------------------------------------------------------------------
@@ -118,7 +121,9 @@ def test_a_digest_tells_a_renumbered_mesh_from_the_original(tmp_path) -> None:
 
 # --- what a header refuses -------------------------------------------------------------------------
 
-_HEADER = RestartHeader(physics="Laminar", n_cells=16, dim=2, mesh_digest="a", case_digest="x")
+_HEADER = RestartHeader(
+    physics="Laminar", n_cells=16, dim=2, mesh_digest="a", case_digest="x", problem_digest="p"
+)
 
 
 def _refusal(found: RestartHeader, expected: RestartHeader = _HEADER) -> str:
@@ -185,8 +190,8 @@ def test_a_laminar_checkpoint_holds_the_physical_fields_and_the_headers_record(t
     np.testing.assert_array_equal(restart.fields["U"], velocity)
     np.testing.assert_array_equal(restart.fields["p"], pressure)
     assert set(restart.fields) == {"U", "p"}
-    assert restart.header == RestartHeader.of(
-        checked.spec.physics, checked.mesh, "digest-of-the-writer"
+    assert restart.header == dataclasses.replace(
+        RestartHeader.of(checked.spec, checked.mesh), case_digest="digest-of-the-writer"
     )
     assert restart.residual == 0.1
 
@@ -239,11 +244,10 @@ def test_a_checkpoint_reads_the_latest_step_or_the_one_named(tmp_path) -> None:
     problem = checked.build()
     states = [problem.pack(np.full((16, 2), float(i)), np.full(16, float(i))) for i in (1, 2, 3)]
     _write_checkpoints(checked, tmp_path / "ck", states)
-    physics = checked.spec.physics
 
-    latest = Checkpoint(path="ck").read(tmp_path, physics, checked.mesh)
+    latest = Checkpoint(path="ck").read(tmp_path, checked.spec, checked.mesh)
     assert float(latest.fields["p"][0]) == 3.0
-    named = Checkpoint(path="ck", step=2).read(tmp_path, physics, checked.mesh)
+    named = Checkpoint(path="ck", step=2).read(tmp_path, checked.spec, checked.mesh)
     assert float(named.fields["p"][0]) == 2.0
     assert Path(named.source["file"]).name == "state-00002.npz"
     assert named.source["kind"] == "Checkpoint"
@@ -256,7 +260,7 @@ def test_a_checkpoint_of_another_mesh_is_refused_before_anything_is_built(tmp_pa
     _write_checkpoints(checked, tmp_path / "ck", [checked.build().initial_state()])
     other = _checked(tmp_path, cells=(8, 4))
     with pytest.raises(ValueError, match=r"it holds 16 cells, but this case's mesh has 32"):
-        Checkpoint(path="ck").read(tmp_path, other.spec.physics, other.mesh)
+        Checkpoint(path="ck").read(tmp_path, other.spec, other.mesh)
 
 
 def test_a_checkpoint_of_a_diverged_state_is_refused_naming_the_field(tmp_path) -> None:
@@ -266,13 +270,13 @@ def test_a_checkpoint_of_a_diverged_state_is_refused_naming_the_field(tmp_path) 
     good = problem.pack(np.ones((16, 2)), np.ones(16))
     bad = problem.pack(np.ones((16, 2)), np.where(np.arange(16) == 5, np.nan, 1.0))
     _write_checkpoints(checked, tmp_path / "ck", [good, bad])
-    physics = checked.spec.physics
 
     with pytest.raises(ValueError, match=r"not finite in \['p'\]: the march had diverged"):
-        Checkpoint(path="ck").read(tmp_path, physics, checked.mesh)
+        Checkpoint(path="ck").read(tmp_path, checked.spec, checked.mesh)
     # An earlier step that was kept still starts the case.
     assert (
-        Checkpoint(path="ck", step=1).read(tmp_path, physics, checked.mesh).fields["p"].min() == 1.0
+        Checkpoint(path="ck", step=1).read(tmp_path, checked.spec, checked.mesh).fields["p"].min()
+        == 1.0
     )
 
 
@@ -282,7 +286,121 @@ def test_a_checkpoint_missing_the_step_asked_for_lists_those_it_has(tmp_path) ->
     with pytest.raises(
         FileNotFoundError, match=r"no checkpoint of step 9; it holds steps \[1, 2\]"
     ):
-        Checkpoint(path="ck", step=9).read(tmp_path, checked.spec.physics, checked.mesh)
+        Checkpoint(path="ck", step=9).read(tmp_path, checked.spec, checked.mesh)
+
+
+# --- carrying the stopped march's reference residual ---------------------------------------------
+
+
+def _checkpointed(tmp_path, ratio: float = 0.5, **overrides: object) -> CheckedCase:
+    """A case that has written two checkpoints (residuals 0.1 and 0.01) into ``tmp_path / "ck"``."""
+    checked = _checked(tmp_path, **overrides)
+    state = checked.build().initial_state()
+    _write_checkpoints(checked, tmp_path / "ck", [state, state], ratio=ratio)
+    return checked
+
+
+def test_a_checkpoint_hands_a_restart_the_residual_its_march_began_at(tmp_path) -> None:
+    """The record holds the step's residual and its ratio to ``|R0|``; their quotient is ``|R0|``.
+
+    Handing on the step's own residual instead (0.01) would anchor the resumed ramp a factor of
+    ``ratio`` too low, which is the wrong answer this pins against.
+    """
+    checked = _checkpointed(tmp_path)
+    start = Checkpoint(path="ck").read(tmp_path, checked.spec, checked.mesh)
+    assert start.reference_residual == pytest.approx(0.02, rel=1e-12)
+
+
+def test_a_record_with_no_usable_ratio_carries_no_reference(tmp_path) -> None:
+    """A march that began at an exact root reports a ratio of zero; there is nothing to divide by."""
+    checked = _checkpointed(tmp_path, ratio=0.0)
+    start = Checkpoint(path="ck").read(tmp_path, checked.spec, checked.mesh)
+    assert start.reference_residual is None
+    # The fields still start the case: only the history is missing.
+    assert set(start.fields) == {"U", "p"}
+
+
+_THE_SAME_PROBLEM = {
+    "a different output directory and a restart section": {
+        "outputs": {"directory": "elsewhere"},
+        "initial": {"kind": "Checkpoint", "path": "ck"},
+    },
+    "a larger step budget": {"solver": {"kind": "FlowMarch", "max_steps": 99}},
+    "a dual-time loop": {
+        "solver": {"kind": "FlowMarch", "dual_time": {"kind": "DualTimeLoop", "inner_steps": 3}}
+    },
+}
+
+
+@pytest.mark.parametrize("change", _THE_SAME_PROBLEM.values(), ids=list(_THE_SAME_PROBLEM))
+def test_a_restart_that_changes_only_how_the_march_is_run_carries_the_reference(
+    tmp_path, change
+) -> None:
+    writer = _checkpointed(tmp_path, solver={"kind": "FlowMarch", "max_steps": 10})
+    reader = _checked(tmp_path, **change)
+    start = Checkpoint(path="ck").read(tmp_path, reader.spec, reader.mesh)
+    assert start.reference_residual == pytest.approx(0.02)
+    assert writer.spec.problem_digest() == reader.spec.problem_digest()
+
+
+_ANOTHER_PROBLEM = {
+    "a different viscosity": {"fluid": {"density": 1.0, "kinematic_viscosity": 2.0e-2}},
+    "a different inlet": {
+        "boundaries": {
+            "left": {"kind": "Inlet", "velocity": [2.0, 0.0]},
+            "right": {"kind": "Outlet", "pressure": 0.0},
+            "bottom": {"kind": "Wall"},
+            "top": {"kind": "Wall"},
+        }
+    },
+    "a different residual measure": {
+        "solver": {
+            "kind": "FlowMarch",
+            "convergence": {"kind": "Convergence", "measure": {"kind": "Euclidean"}},
+        }
+    },
+}
+
+
+@pytest.mark.parametrize("change", _ANOTHER_PROBLEM.values(), ids=list(_ANOTHER_PROBLEM))
+def test_a_restart_of_another_problem_or_measure_carries_no_reference(tmp_path, change) -> None:
+    """The reference is a scale for the problem it was measured on and the measure it was judged in."""
+    _checkpointed(tmp_path)
+    reader = _checked(tmp_path, **change)
+    start = Checkpoint(path="ck").read(tmp_path, reader.spec, reader.mesh)
+    assert start.reference_residual is None
+    assert set(start.fields) == {"U", "p"}
+
+
+def test_a_file_that_states_its_default_solver_is_the_problem_of_one_that_leaves_it_out(
+    tmp_path,
+) -> None:
+    """The record of a run (``case.yaml``) states the solver the file left to its default."""
+    left_out = _checked(tmp_path).spec
+    stated = _checked(tmp_path, solver={"kind": "FlowMarch"}).spec
+    assert left_out.problem_digest() == stated.problem_digest()
+    assert left_out.digest() != stated.digest()
+
+
+def test_a_restart_that_changes_the_kind_of_solve_is_not_the_same_problem(tmp_path) -> None:
+    """A reference residual is the march's; a segregated loop has none to continue."""
+    marched = _checked(tmp_path, physics="RANS").spec
+    segregated = _checked(tmp_path, physics="RANS", solver={"kind": "Segregated", "sweeps": 5}).spec
+    assert marched.problem_digest() != segregated.problem_digest()
+
+
+def test_a_starting_state_hands_a_solve_its_seed_and_its_reference(tmp_path) -> None:
+    checked = _checkpointed(tmp_path)
+    problem = checked.build()
+    start = Checkpoint(path="ck").read(tmp_path, checked.spec, checked.mesh)
+    arguments = starting_arguments(start, checked.spec.physics, problem)
+    assert set(arguments) == {"initial", "reference_residual"}
+    assert arguments["reference_residual"] == pytest.approx(0.02)
+    assert arguments["initial"].shape == problem.initial_state().shape
+    assert starting_arguments(None, checked.spec.physics, problem) == {
+        "initial": None,
+        "reference_residual": None,
+    }
 
 
 # --- the section ---------------------------------------------------------------------------------

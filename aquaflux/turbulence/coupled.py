@@ -2707,6 +2707,7 @@ def solve_coupled(
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
+    reference_residual: float | None = None,
     **strategy_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system ``R(u, p, k, omega) = 0`` by one monolithic Newton march.
@@ -2872,9 +2873,8 @@ def solve_coupled(
         :func:`~aquaflux.solve.newton_march`: called before a step is redone, with why. A log without it
         shows a step's work twice and never says what triggered the redo.
     homotopy : ResidualHomotopy, optional
-        Walk a sequence of related problems within this one march, ending at the target (see
-        :func:`~aquaflux.solve.newton_march`). The solve converges only once the homotopy has arrived:
-        a converged intermediate station is not an answer.
+        Walk related problems within this one march, ending at the target (see
+        :func:`~aquaflux.solve.newton_march`); it converges only once the homotopy has arrived.
     station_step : callable, optional
         ``(step, station, arrived) -> step``, forwarded to
         :func:`~aquaflux.solve.newton_march`: reshape the Newton step for the continuation station it
@@ -2884,6 +2884,8 @@ def solve_coupled(
         reached, and no signal a shift policy can read for itself distinguishes those. It reshapes the
         path, not the root, and ``None`` (the default) is byte-identical.
         ⚠️ It must swap **array** leaves over a fixed structure or every station recompiles the solve.
+    reference_residual : float or None
+        A resumed march's first residual norm; see :func:`~aquaflux.solve.staged_march`.
     **strategy_kwargs
         The march settings of :func:`coupled_step` (``dual_time``, ``positivity_floor``, ``linear_solve``,
         ...), handed to every build and refresh of the internally-built continuation; an unknown
@@ -2967,6 +2969,7 @@ def solve_coupled(
         on_retry=on_retry,
         homotopy=homotopy,
         station_step=station_step,
+        reference_residual=reference_residual,
         caller="solve_coupled",
     )
     root = _reject_a_root_the_frozen_cap_invalidates(frozen, staged.state)

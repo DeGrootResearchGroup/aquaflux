@@ -32,7 +32,7 @@ import yaml
 
 from aquaflux.mesh import Mesh
 
-from .initial import StartingFields, starting_seed
+from .initial import StartingFields, starting_arguments
 from .paths import named_paths
 from .solver import solver_for
 from .spec import CaseSpec, case_spec_from_mapping, case_spec_to_mapping
@@ -122,7 +122,7 @@ class CheckedCase:
         initial = self.spec.initial
         if initial is None:
             return None
-        return initial.read(self.directory, self.spec.physics, self.mesh)
+        return initial.read(self.directory, self.spec, self.mesh)
 
     def build(self) -> object:
         """The case's problem: its mesh's geometry, then its equations.
@@ -170,8 +170,8 @@ class CheckedCase:
         FileNotFoundError
             If the starting state is not there.
         """
-        seed = starting_seed(self.starting_fields(), self.spec.physics, problem)
-        return solver_for(self.spec).solve(problem, initial=seed, **observers)
+        start = starting_arguments(self.starting_fields(), self.spec.physics, problem)
+        return solver_for(self.spec).solve(problem, **start, **observers)
 
 
 @dataclasses.dataclass(frozen=True)

@@ -68,9 +68,14 @@ class Physics(abc.ABC):
     reads_scopes : tuple of str
         A class attribute: the scopes of setting this physics reads (see :mod:`.scopes`). A setting
         of any other scope is refused wherever a case states it.
+    state_fields : tuple of str
+        A class attribute: the physical fields a solve of this physics starts from -- what
+        :meth:`initial_fields` needs and :meth:`restart_fields` gives. Empty for a physics that
+        marches nothing.
     """
 
     reads_scopes: ClassVar[tuple[str, ...]] = ()
+    state_fields: ClassVar[tuple[str, ...]] = ()
 
     @abc.abstractmethod
     def refuse_sections(self, spec: CaseSpec) -> None:
@@ -354,6 +359,7 @@ class Laminar(_Flow):
 
     #: The settings this physics reads, by scope (see :mod:`.scopes`).
     reads_scopes: ClassVar[tuple[str, ...]] = (FLOW,)
+    state_fields: ClassVar[tuple[str, ...]] = ("U", "p")
 
     def refuse_boundaries(self, boundaries: Mapping[str, PatchCondition]) -> None:
         """Refuse any turbulence setting on a patch -- nothing in a laminar case would read it -- and any
@@ -386,7 +392,7 @@ class Laminar(_Flow):
         self, problem: MomentumContinuity, fields: Mapping[str, np.ndarray]
     ) -> jnp.ndarray:
         """The flow state of ``U`` and ``p`` -- see :meth:`Physics.initial_fields`."""
-        velocity, pressure = _required(fields, ("U", "p"))
+        velocity, pressure = _required(fields, self.state_fields)
         return problem.pack(jnp.asarray(velocity), jnp.asarray(pressure))
 
     def progress_fields(self, problem: MomentumContinuity) -> None:
@@ -429,6 +435,7 @@ class RANS(_Flow):
     unset_resolves_to: ClassVar[tuple[Callable, ...]] = (SSTTurbulence.build,)
     #: The settings this physics reads, by scope (see :mod:`.scopes`).
     reads_scopes: ClassVar[tuple[str, ...]] = (FLOW, TURBULENCE)
+    state_fields: ClassVar[tuple[str, ...]] = ("U", "p", "k", "omega")
 
     def __post_init__(self) -> None:
         for name, family in (
@@ -512,7 +519,7 @@ class RANS(_Flow):
         self, problem: CoupledRANS, fields: Mapping[str, np.ndarray]
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """``(flow, k, omega)`` from the physical fields -- see :meth:`Physics.initial_fields`."""
-        velocity, pressure, k, omega = _required(fields, ("U", "p", "k", "omega"))
+        velocity, pressure, k, omega = _required(fields, self.state_fields)
         flow = problem.momentum.pack(jnp.asarray(velocity), jnp.asarray(pressure))
         return flow, jnp.asarray(k), jnp.asarray(omega)
 

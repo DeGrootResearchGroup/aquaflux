@@ -36,7 +36,7 @@ from aquaflux.case import (
     case_spec_to_mapping,
     read_case,
 )
-from aquaflux.case.solver import solver_for
+from aquaflux.case.solver import RadiationSolve, solver_for
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import MassFlow, PinnedPoint
 from aquaflux.solve import (
@@ -900,6 +900,37 @@ def test_a_flow_march_starts_from_the_state_it_is_given_and_otherwise_passes_non
     (_, unset), (_, given) = recorded.solve_flow_march.calls
     assert unset == {}
     assert given == {"max_steps": 4, "state": "state"}
+
+
+def test_a_coupled_march_resumes_with_the_reference_residual_it_is_given(recorded) -> None:
+    CoupledMarch(max_steps=7).solve("problem", initial=_SEED, reference_residual=0.25)
+    CoupledMarch().solve("problem", initial=_SEED)
+    (_, resumed), (_, plain) = recorded.solve_coupled.calls
+    assert resumed == {"max_steps": 7, "reference_residual": 0.25}
+    # Left unset it is not passed at all, so the library's own default measures at the initial state.
+    assert plain == {}
+
+
+def test_a_flow_march_resumes_with_the_reference_residual_it_is_given(recorded) -> None:
+    FlowMarch().solve("problem", initial="state", reference_residual=0.25)
+    ((_, kwargs),) = recorded.solve_flow_march.calls
+    assert kwargs == {"state": "state", "reference_residual": 0.25}
+
+
+def test_a_solve_with_no_march_to_resume_refuses_a_reference_residual(recorded) -> None:
+    problem = types.SimpleNamespace(momentum=types.SimpleNamespace(drive=None), turbulence="t")
+    with pytest.raises(ValueError, match="no reference residual to resume"):
+        Segregated(sweeps=5).solve(problem, reference_residual=0.25)
+    with pytest.raises(ValueError, match="marches nothing"):
+        RadiationSolve().solve("scene", reference_residual=0.25)
+    assert recorded.solve_segregated.calls == []
+
+
+def test_a_ramp_cannot_be_handed_a_reference_residual_either(recorded) -> None:
+    ramp = ViscosityRamp(anchor=50.0, stations=6, steps_per_station=2)
+    with pytest.raises(ValueError, match=r"a viscosity ramp opens on a seed fitted to its anchor"):
+        CoupledMarch(continuation=ramp).solve("problem", reference_residual=0.25)
+    assert recorded.solve_reynolds_ramp.calls == []
 
 
 def test_a_segregated_solve_starts_from_the_state_it_is_given_not_its_own_initializer(

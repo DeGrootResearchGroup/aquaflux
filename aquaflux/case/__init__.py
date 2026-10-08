@@ -26,7 +26,8 @@ patch, and every patch fits the mesh -- without computing any geometry, so a cas
 cheaply before anything expensive is built.
 
 The file's ``solver`` section says how the case is solved, its optional ``initial`` section what it
-starts from (a :class:`Checkpoint` of an earlier run, to resume one that stopped short) and its
+starts from (a :class:`Checkpoint` of an earlier run, to resume one that stopped short, or the
+:class:`Fields` of an OpenFOAM time directory) and its
 ``outputs`` section what a run writes; :func:`prepare_run` reads and checks a file for a run, and :meth:`PreparedRun.run` builds,
 solves and writes it -- what ``aquaflux run case.yaml`` does.
 
@@ -70,7 +71,7 @@ from .boundaries import (
 from .case_file import CaseFile, CheckedCase, read_case, read_case_document, write_case
 from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
-from .initial import Checkpoint, InitialState, StartingFields
+from .initial import Checkpoint, Fields, InitialState, StartingFields
 from .mesh_source import AxisGrading, GeometricGrading, MeshSource, OpenFOAMMesh, StructuredGrid
 from .outputs import Checkpoints, FieldWriter, OpenFOAMTime, Outputs, PatchVtk, RunFields, Vtk
 from .physics import RANS, Laminar, Physics, Radiation
@@ -133,6 +134,7 @@ __all__ = [
     "CoupledMarch",
     "DriveSpec",
     "FieldWriter",
+    "Fields",
     "FixedTurbulence",
     "FlowMarch",
     "Fluid",

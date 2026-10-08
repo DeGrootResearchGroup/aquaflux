@@ -269,6 +269,18 @@ Pinned by `tests/unit/test_march_history.py` (six targeted mutations each turn i
     `reference_norm` is **global** (fixed across segments, used for the convergence test and the reported
     ratio). Substituting the second for the first pairs a refreshed, larger shift diagonal with the small
     β belonging to the pre-refresh residual — the over-damping freeze documented in `turbulence.md`.
+    - **Resuming a march (2026-10-07): `newton_march(damping_reference=)` replaces the SER anchor only, and
+      `staged_march(reference_residual=)` replaces the stopping scale and anchors the FIRST segment.** A march
+      resumed at a state re-measures `residual_norm_0` there, so the ratio `‖R‖/‖R₀‖` is ~1 and beta
+      reopens at `beta0` — the reason a resumed default march did not continue the interrupted one (the
+      memoryless SER schedule holds no other history; a report's `shift` reads 0.0 for it, which looked
+      like a reset and was not). The march still STARTS from the residual it measures at `phi0`
+      (`current`, the loop's own test) — only the schedule's anchor and, via `reference_norm`, the stopping
+      bar change. ⚠️ **Not carried: a `StepControl`'s `control_state`** (the dual-time Courant ramp's
+      `(beta, memo)`), so a coupled default march's restart begins its ramp at `beta_start`; unmeasured.
+      Refused beside a `homotopy`. Carried by `Checkpoint` from a step record's `residual_norm /
+      residual_ratio` (`case.md`). Pinned in `tests/integration/test_flow_march.py` and
+      `tests/unit/test_coupled_rans.py`.
   - **Per-step jit cache hit is mandatory, not an optimization (top implementation risk).** The per-step
     call goes through the module-level `eqx.filter_jit`'d `_march_step`, taking the `NewtonStrategy` **and**
     the residual as *arguments*. Two caller obligations: pass the **same** `strategy` object across a

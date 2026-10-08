@@ -11,7 +11,10 @@ Beside the fields goes a header saying what they belong to: the physics, the cel
 dimension, and a digest of the mesh. The cell count alone would let a renumbered mesh, or one of the
 same size but different shape, load as an unrelated field of the right length; the digest is what
 catches that. The case the file came from is recorded too, as provenance for the run that starts from
-it -- it is not compared, since a restart is often a case with something changed.
+it -- it is not compared, since a restart is often a case with something changed. A second digest,
+of the problem the case solves and the measure it judged a residual in, is compared for one purpose:
+a restart of the same problem continues the stopped march's damping, which is measured against the
+residual the march began at, and one of a different problem does not.
 
 The header and the fields are written and read here and nowhere else, so the two cannot disagree.
 """
@@ -33,8 +36,16 @@ if TYPE_CHECKING:
     from aquaflux.solve import StepReport
 
     from .physics import Physics
+    from .spec import CaseSpec
 
-__all__ = ["RestartFile", "RestartHeader", "checkpoint_writer", "mesh_digest", "read_restart"]
+__all__ = [
+    "RestartFile",
+    "RestartHeader",
+    "checkpoint_writer",
+    "mesh_digest",
+    "read_restart",
+    "refuse_non_finite",
+]
 
 #: How finely a node's position is resolved when a mesh is digested, as a fraction of the mesh's
 #: largest extent. Coarse enough that rounding in the last bits of a coordinate -- the same mesh read
@@ -91,6 +102,10 @@ class RestartHeader:
         The mesh's :func:`mesh_digest`.
     case_digest : str
         A digest of the case that wrote the file. Recorded, never compared.
+    problem_digest : str
+        A digest of what that case solves and the measure it judged a residual in
+        (:meth:`~aquaflux.case.CaseSpec.problem_digest`). It is what decides whether a restart may
+        carry the stopped run's reference residual, which is a scale only for the same problem.
     """
 
     physics: str
@@ -98,30 +113,30 @@ class RestartHeader:
     dim: int
     mesh_digest: str
     case_digest: str
+    problem_digest: str
 
     @classmethod
-    def of(cls, physics: Physics, mesh: Mesh, case_digest: str) -> RestartHeader:
-        """The header of fields of ``physics`` on ``mesh``.
+    def of(cls, spec: CaseSpec, mesh: Mesh) -> RestartHeader:
+        """The header of fields of ``spec``'s physics on ``mesh``.
 
         Parameters
         ----------
-        physics : Physics
-            The case's physics.
+        spec : CaseSpec
+            The case. Its physics names the fields and its digests are recorded.
         mesh : Mesh
             The case's mesh.
-        case_digest : str
-            A digest of the case, for the record.
 
         Returns
         -------
         RestartHeader
         """
         return cls(
-            physics=type(physics).__name__,
+            physics=type(spec.physics).__name__,
             n_cells=int(mesh.n_cells),
             dim=int(mesh.dim),
             mesh_digest=mesh_digest(mesh),
-            case_digest=case_digest,
+            case_digest=spec.digest(),
+            problem_digest=spec.problem_digest(),
         )
 
     def refuse_unless_fits(self, expected: RestartHeader, path: Path) -> None:
@@ -130,7 +145,8 @@ class RestartHeader:
         Parameters
         ----------
         expected : RestartHeader
-            The header of the case about to start from the fields; its ``case_digest`` is not read.
+            The header of the case about to start from the fields; its digests of the case are not
+            read.
         path : pathlib.Path
             The file the fields were read from, for the message.
 
@@ -175,6 +191,11 @@ class RestartFile:
         The physical fields by name -- a vector ``(n_cells, dim)``, a scalar ``(n_cells,)``.
     residual : float
         The march's residual at the step that wrote the file, in the measure it was steered by.
+    reference_residual : float or None
+        The residual norm the march took at **its** first state, which the step's recorded residual
+        and residual ratio give back (their quotient): the scale the march's damping ramp and stopping
+        bar were measured against. ``None`` when the record has no usable ratio (a march that started
+        at an exact root).
     path : pathlib.Path
         The file it was read from.
     """
@@ -182,6 +203,7 @@ class RestartFile:
     header: RestartHeader
     fields: Mapping[str, np.ndarray]
     residual: float
+    reference_residual: float | None
     path: Path
 
     def refuse_if_not_finite(self) -> None:
@@ -196,14 +218,31 @@ class RestartFile:
         ValueError
             Naming the fields, and pointing at an earlier step.
         """
-        bad = sorted(
-            name for name, values in self.fields.items() if not np.all(np.isfinite(values))
+        refuse_non_finite(
+            self.fields,
+            f"{self.path} holds values that are not finite in {{bad}}: the march had diverged when "
+            "it wrote it. Start from an earlier checkpoint (set the step) if one was kept.",
         )
-        if bad:
-            raise ValueError(
-                f"{self.path} holds values that are not finite in {bad}: the march had diverged when "
-                "it wrote it. Start from an earlier checkpoint (set the step) if one was kept."
-            )
+
+
+def refuse_non_finite(fields: Mapping[str, np.ndarray], message: str) -> None:
+    """Refuse fields holding a value that is not a number, naming the fields that do.
+
+    Parameters
+    ----------
+    fields : mapping of {str: np.ndarray}
+        The fields by name.
+    message : str
+        What to raise, with ``{bad}`` standing for the sorted names of the offending fields.
+
+    Raises
+    ------
+    ValueError
+        With ``message``, if any field holds a value that is not finite.
+    """
+    bad = sorted(name for name, values in fields.items() if not np.all(np.isfinite(values)))
+    if bad:
+        raise ValueError(message.format(bad=bad))
 
 
 def checkpoint_writer(
@@ -278,12 +317,19 @@ def read_restart(path: str | Path) -> RestartFile:
             dim=int(data["dim"]),
             mesh_digest=str(data["mesh_digest"]),
             case_digest=str(data["case_digest"]),
+            problem_digest=str(data["problem_digest"]),
         )
+        residual, ratio = float(data["residual_norm"]), float(data["residual_ratio"])
         fields = {
             name[len(_FIELD_PREFIX) :]: np.asarray(data[name])
             for name in data.files
             if name.startswith(_FIELD_PREFIX)
         }
+        usable = np.isfinite(residual) and np.isfinite(ratio) and residual > 0.0 and ratio > 0.0
         return RestartFile(
-            header=header, fields=fields, residual=float(data["residual_norm"]), path=path
+            header=header,
+            fields=fields,
+            residual=residual,
+            reference_residual=residual / ratio if usable else None,
+            path=path,
         )

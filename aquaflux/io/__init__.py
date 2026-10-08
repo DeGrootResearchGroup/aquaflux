@@ -9,7 +9,8 @@ as :class:`OpenFOAMReader` and the :func:`read_openfoam` convenience.
 The export half has two destinations, for two different purposes. :func:`write_openfoam_time` writes
 cell fields back into the case they were read from, as an ordinary time directory -- so a solved
 state can be viewed beside the solution it is validated against, post-processed with the same tools,
-or used to restart a run. :func:`write_vtu` instead writes the mesh *and* its fields as one
+or used to restart a run, and :func:`read_openfoam_time` is its inverse, reading a time directory's
+fields back onto a mesh -- a run's starting state. :func:`write_vtu` instead writes the mesh *and* its fields as one
 self-contained VTK XML file, which needs no case to write into and so is the path for a mesh that
 came from anywhere; :func:`write_pvd` indexes a series of those as one transient dataset.
 
@@ -25,9 +26,10 @@ from .openfoam import (
     FieldTemplate,
     OpenFOAMReader,
     infer_extruded_axis,
-    read_openfoam,
-    read_surface_scalar_field,
     read_field_template,
+    read_openfoam,
+    read_openfoam_time,
+    read_surface_scalar_field,
     read_volume_scalar_field,
     write_openfoam_field,
     write_openfoam_time,
@@ -42,6 +44,7 @@ __all__ = [
     "infer_extruded_axis",
     "read_field_template",
     "read_openfoam",
+    "read_openfoam_time",
     "read_surface_scalar_field",
     "read_volume_scalar_field",
     "write_openfoam_field",

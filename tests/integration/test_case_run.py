@@ -19,7 +19,9 @@ from aquaflux.__main__ import main
 from aquaflux.case import FlowMarch, read_case
 from aquaflux.case.restart_file import read_restart
 from aquaflux.flow import solve_flow_march
-from aquaflux.io import read_volume_scalar_field
+from aquaflux.io import read_openfoam_time, read_volume_scalar_field
+
+from tests.support.polymesh import copy_slab_polymesh
 
 REPO = Path(__file__).resolve().parents[2]
 SLAB = REPO / "tests" / "fixtures" / "polymesh_2d_slab_frontandback"
@@ -53,6 +55,26 @@ boundaryField
     right { type fixedValue; value uniform 0; }
     bottom { type zeroGradient; }
     top { type zeroGradient; }
+    frontAndBack { type empty; }
+}
+"""
+
+
+#: A velocity template for the same patches, as an OpenFOAM case's ``0/U`` states it.
+_VELOCITY_TEMPLATE = """FoamFile
+{
+    format ascii;
+    class volVectorField;
+    object U;
+}
+dimensions      [0 1 -1 0 0 0 0];
+internalField   uniform (0 0 0);
+boundaryField
+{
+    left { type fixedValue; value uniform (1 0 0); }
+    right { type zeroGradient; }
+    bottom { type noSlip; }
+    top { type noSlip; }
     frontAndBack { type empty; }
 }
 """
@@ -177,20 +199,22 @@ def _reference_residual(directory: Path) -> float:
     return float(match.group(1))
 
 
-def test_a_run_that_stopped_short_is_resumed_from_its_checkpoint_to_the_same_root(tmp_path) -> None:
-    """The point of a restart: a stopped run's state is kept, and the answer is the same one.
+def test_a_run_that_stopped_short_is_resumed_from_its_checkpoint_as_the_same_march(
+    tmp_path,
+) -> None:
+    """The point of a restart: a stopped run's march goes on, step for step, to the same root.
 
     The stopped run is cut off at three steps, leaving its checkpoint. The resumed run must begin where
-    that run ended -- not from scratch, which a restart that ignored its seed would -- and reach the
-    root the library reaches by itself.
-
-    The resumed run is not asserted to take fewer steps than a fresh one: the march's pseudo-time shift
-    starts again from its opening value, so it re-takes the damped phase from the later state. A restart
-    resumes the state, not the step control's history.
+    that run ended -- not from scratch, which a restart that ignored its seed would -- and then take the
+    steps the uninterrupted run took after its third, because the checkpoint carries the one piece of
+    the march's history its damping ramp and stopping bar are measured against: the residual it began
+    at. A restart that re-measured at the resumed state would take a different path and stop against a
+    different bar.
     """
     checkpoints = {"checkpoints": {"kind": "Checkpoints", "keep": 1}}
     fresh = _restart_case(tmp_path, "fresh.yaml", checkpoints)
     assert main(["run", str(fresh)]) == 0
+    fresh_record = yaml.safe_load((tmp_path / "fresh" / "run.yaml").read_text())
 
     stopped = _restart_case(
         tmp_path, "stopped.yaml", checkpoints, solver={"kind": "FlowMarch", "max_steps": 3}
@@ -205,9 +229,18 @@ def test_a_run_that_stopped_short_is_resumed_from_its_checkpoint_to_the_same_roo
         initial={"kind": "Checkpoint", "path": "stopped/checkpoints"},
     )
     assert main(["run", str(resumed)]) == 0
-    began_at = _reference_residual(tmp_path / "resumed")
-    assert began_at == pytest.approx(left_at, rel=0.05)
-    assert began_at < 0.7 * _reference_residual(tmp_path / "fresh")
+    resumed_record = yaml.safe_load((tmp_path / "resumed" / "run.yaml").read_text())
+
+    # It picks the stopped march up where it left off ...
+    assert resumed_record["initial"]["residual"] == pytest.approx(left_at, rel=1e-12)
+    # ... against the reference the uninterrupted march judged itself by, so the step the log reports
+    # as its target is the same one ...
+    # (the log prints five significant figures)
+    began_at = _reference_residual(tmp_path / "fresh")
+    assert _reference_residual(tmp_path / "resumed") == pytest.approx(began_at, rel=1e-4)
+    assert resumed_record["initial"]["reference_residual"] == pytest.approx(began_at, rel=1e-4)
+    # ... and takes exactly the steps the uninterrupted run had left.
+    assert resumed_record["steps"] == fresh_record["steps"] - 3
 
     problem = read_case(fresh).check().build()
     velocity, pressure = problem.unpack(solve_flow_march(problem))
@@ -215,6 +248,26 @@ def test_a_run_that_stopped_short_is_resumed_from_its_checkpoint_to_the_same_roo
     reached = read_restart(final)
     np.testing.assert_allclose(reached.fields["U"], np.asarray(velocity), rtol=1e-6, atol=1e-9)
     np.testing.assert_allclose(reached.fields["p"], np.asarray(pressure), rtol=1e-6, atol=1e-9)
+
+
+def test_a_restart_of_a_changed_case_starts_its_march_afresh_from_the_checkpoint(tmp_path) -> None:
+    """A different fluid is a different problem, so the stopped run's reference residual is not carried."""
+    checkpoints = {"checkpoints": {"kind": "Checkpoints", "keep": 1}}
+    stopped = _restart_case(
+        tmp_path, "stopped.yaml", checkpoints, solver={"kind": "FlowMarch", "max_steps": 3}
+    )
+    assert main(["run", str(stopped)]) == 1
+
+    changed = _restart_case(
+        tmp_path,
+        "changed.yaml",
+        checkpoints,
+        fluid={"density": 1.0, "kinematic_viscosity": 4.0e-2},
+        initial={"kind": "Checkpoint", "path": "stopped/checkpoints"},
+    )
+    assert main(["run", str(changed)]) == 0
+    record = yaml.safe_load((tmp_path / "changed" / "run.yaml").read_text())
+    assert record["initial"]["reference_residual"] is None
 
 
 def test_a_run_started_from_a_converged_checkpoint_has_nothing_left_to_do(tmp_path) -> None:
@@ -239,3 +292,68 @@ def test_a_run_started_from_a_converged_checkpoint_has_nothing_left_to_do(tmp_pa
     assert (
         ran.initial.location(tmp_path / "again") == (tmp_path / "first" / "checkpoints").resolve()
     )
+
+
+def test_a_case_starts_from_the_openfoam_time_directory_another_run_wrote(tmp_path) -> None:
+    """Out through ``OpenFOAMTime`` and back in through ``Fields``: the pressure, at a density of two.
+
+    The file holds ``p / 2`` because that is what an OpenFOAM incompressible solver reads; the run that
+    starts from it multiplies by two again. A writer that stored the pressure itself, or a reader that
+    did not scale, would each leave the second run a factor of two off the first's pressure -- far
+    enough from a root that it could not stop at once.
+    """
+    of = tmp_path / "of"
+    copy_slab_polymesh(of / "constant" / "polyMesh")
+    (of / "0").mkdir()
+    (of / "0" / "p").write_text(_PRESSURE_TEMPLATE)
+    (of / "0" / "U").write_text(_VELOCITY_TEMPLATE)
+    common = _CHANNEL | {
+        "mesh": {"kind": "OpenFOAMMesh", "path": "of/constant/polyMesh"},
+        "fluid": {"density": 2.0, "kinematic_viscosity": 2.0e-2},
+        "numerics": {
+            "momentum_advection": {"kind": "FirstOrderUpwind"},
+            "gradient": {"kind": "CompactGreenGauss"},
+        },
+    }
+    first = _write(
+        tmp_path / "first.yaml",
+        common
+        | {
+            "outputs": {
+                "directory": "first",
+                "fields": [{"kind": "OpenFOAMTime", "case": "of", "time": "5"}],
+            }
+        },
+    )
+    assert main(["run", str(first)]) == 0
+
+    problem = read_case(first).check().build()
+    velocity, pressure = problem.unpack(solve_flow_march(problem))
+    mesh = read_case(first).check().mesh
+    written = read_volume_scalar_field(of / "5" / "p", mesh)
+    np.testing.assert_allclose(written, np.asarray(pressure) / 2.0, rtol=1e-6, atol=1e-9)
+    assert float(np.max(np.abs(pressure))) > 1e-3  # the comparison is not between zeros
+
+    second = _write(
+        tmp_path / "second.yaml",
+        common
+        | {
+            "outputs": {
+                "directory": "second",
+                "fields": [{"kind": "OpenFOAMTime", "case": "of", "time": "6"}],
+            },
+            "initial": {"kind": "Fields", "path": "of", "time": "5"},
+        },
+    )
+    assert main(["run", str(second)]) == 0
+    record = yaml.safe_load((tmp_path / "second" / "run.yaml").read_text())
+    # Already at the root, so the march takes no step; a pressure left unscaled by the density is off
+    # by a factor of two and would need some.
+    assert (record["steps"] or 0) == 0
+    assert record["initial"]["kind"] == "Fields" and record["initial"]["density"] == 2.0
+    # What the second run wrote is what the first did: the state went out and came back unchanged.
+    again = read_openfoam_time(of, "6", ["U", "p"], mesh)
+    first_written = read_openfoam_time(of, "5", ["U", "p"], mesh)
+    np.testing.assert_allclose(again["p"], first_written["p"], rtol=1e-6, atol=1e-9)
+    np.testing.assert_allclose(again["U"], first_written["U"], rtol=1e-6, atol=1e-9)
+    np.testing.assert_allclose(first_written["U"], np.asarray(velocity), rtol=1e-6, atol=1e-9)

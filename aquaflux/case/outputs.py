@@ -28,6 +28,8 @@ from typing import ClassVar
 from aquaflux.io import write_openfoam_time, write_patches, write_vtu
 from aquaflux.mesh import Mesh
 
+from .kinematic import kinematic_pressure
+
 __all__ = ["Checkpoints", "FieldWriter", "OpenFOAMTime", "Outputs", "PatchVtk", "RunFields", "Vtk"]
 
 
@@ -42,10 +44,14 @@ class RunFields:
     patches : mapping of {str: mapping of {str: array-like}}
         Per patch, its face fields by name, in the patch's own face order; empty for a physics with
         nothing to write on a boundary.
+    density : float or None
+        The fluid's density, for a writer whose format holds the pressure per unit density
+        (:class:`OpenFOAMTime`); ``None`` for a case with no fluid.
     """
 
     cells: Mapping[str, object]
     patches: Mapping[str, Mapping[str, object]] = dataclasses.field(default_factory=dict)
+    density: float | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -169,6 +175,10 @@ class OpenFOAMTime(FieldWriter):
     hold a template for every field written -- name the ones it has in ``fields``. It writes into
     ``case``, not into the run's output directory.
 
+    The pressure ``p`` is written per unit density, as an incompressible OpenFOAM solver holds it
+    (``p / density``; the file's own dimensions say so), whereas every other format of this package
+    writes the pressure itself. The two differ unless the density is one.
+
     Attributes
     ----------
     case : str
@@ -211,9 +221,10 @@ class OpenFOAMTime(FieldWriter):
         """Write the time directory -- see :meth:`FieldWriter.write`."""
         del directory
         options = {} if self.template_time is None else {"template_time": self.template_time}
-        return write_openfoam_time(
-            case_directory / self.case, self.time, self.chosen(fields.cells), mesh, **options
-        )
+        cells = self.chosen(fields.cells)
+        if "p" in cells and fields.density is not None:
+            cells["p"] = kinematic_pressure(cells["p"], fields.density)
+        return write_openfoam_time(case_directory / self.case, self.time, cells, mesh, **options)
 
 
 @dataclasses.dataclass(frozen=True)

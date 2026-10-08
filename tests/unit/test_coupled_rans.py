@@ -1073,6 +1073,44 @@ def _recorded_measure_builders(
     return builders
 
 
+def test_a_resumed_solve_anchors_its_first_segment_to_the_reference_and_every_segment_stops_by_it(
+    monkeypatch,
+) -> None:
+    """The reference residual of a march being resumed sets the stopping target throughout and the
+    damping anchor on the first segment only.
+
+    A later segment follows a refresh, which re-bases the damping at its own starting state, so
+    anchoring it to the interrupted march's residual would hand it a ramp measured against a different
+    state; and a stopping target taken from the reference in only some segments would put the bar in
+    different places across refreshes.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    calls: list[dict] = []
+
+    def recording_march(step, residual_fn, at, **kwargs):
+        from aquaflux.solve import MarchResult
+
+        calls.append(kwargs)
+        return MarchResult(at, (), True, kwargs["trigger"] is not None, None)
+
+    monkeypatch.setattr(driver_module, "newton_march", recording_march)
+    step = coupled_step(
+        coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+    )
+    solve_coupled(
+        coupled,
+        *coupled.physical_fields(state),
+        convergence=Convergence(rtol=1.0, atol=1e30),
+        strategy=step,
+        refresh=RefreshPolicy(trigger=object(), limit=1, builder=lambda s: step),
+        reference_residual=0.25,
+    )
+    first, second = calls
+    assert first["damping_reference"] == 0.25 and second["damping_reference"] is None
+    assert first["reference_norm"] == 0.25 and second["reference_norm"] == 0.25
+
+
 def test_a_coupled_solve_rebuilds_its_row_scaled_measure_at_the_state_each_iteration_starts(
     monkeypatch,
 ) -> None:

@@ -77,7 +77,7 @@ cfd/                                  # repo root
 │   │       ├── records.py            #     FoamPatch / CellZone / PolyMeshData value records
 │   │       ├── foamfile.py           #     FoamFile envelope: comment strip, header dict, ASCII/binary detection; read_foam_body() is the one file->body entry
 │   │       ├── grammar.py            #     body parsers (points/faces/labels/boundary/cellZones) sharing one list envelope
-│   │       ├── fields.py             #     read a scalar field written on an imported mesh (phi, nut): parse_scalar_field (pure) + read_surface_scalar_field (faces, placed by index, ordering checked) + read_volume_scalar_field (cells)
+│   │       ├── fields.py             #     read fields written on an imported mesh: parse_scalar_field / parse_vector_field (pure) + read_surface_scalar_field (faces, placed by index, ordering checked) + read_volume_scalar_field (cells) + read_openfoam_time (a time directory's scalars and vectors, a 2D vector's dropped axis checked zero)
 │   │       ├── assembler.py          #     assemble(PolyMeshData) → Mesh: neighbour pad, n_cells, patches/zones, from_csr
 │   │       └── reader.py             #     OpenFOAMReader: file I/O; parse → assemble → collapse (empty-patch 2D)
 │   │
@@ -169,8 +169,9 @@ cfd/                                  # repo root
 │   │   ├── fluid.py                  #   Fluid: density and exactly one of the kinematic / dynamic viscosity
 │   │   ├── forcing.py                #   DriveSpec -> BulkVelocity (builds MassFlow); SourceSpec -> BodyForce (builds UniformBodyForce)
 │   │   ├── physics.py                #   Physics -> Laminar / RANS (k-omega SST settings live inside RANS)
-│   │   ├── initial.py                #   InitialState -> Checkpoint: what a case starts from instead of its own initial condition
-│   │   ├── restart_file.py           #   the checkpoint file a case writes (physical fields + a header: physics, cells, mesh digest) and reads back
+│   │   ├── initial.py                #   InitialState -> Checkpoint / Fields: what a case starts from instead of its own initial condition
+│   │   ├── kinematic.py              #   pressure per unit density, the form OpenFOAM's incompressible solvers hold (both directions of the factor)
+│   │   ├── restart_file.py           #   the checkpoint file a case writes (physical fields + a header: physics, cells, mesh digest, case digests) and reads back
 │   │   └── boundaries.py             #   PatchCondition -> Inlet / Outlet / Wall, one per patch for every field; FixedTurbulence
 │   └── parallel/                     # distributed memory: decomposition and halo exchange (the concern kept out of Mesh)
 │       ├── partitioner.py            #   Partitioner → BlockPartitioner (RCM-block, dependency-free default) / ScotchCLIPartitioner / ScotchPartitioner; consumes cell_adjacency_csr
