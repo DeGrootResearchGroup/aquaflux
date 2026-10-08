@@ -1119,7 +1119,10 @@ def solve_aquaflux(
         case["turbulence"],
         case["geom"],
     )
-    solver = case["spec"].solver
+    # ⚠️ `SOLVER`, NOT `case["spec"].solver`: the spec is the file's, and every `PITZ_*` march override is
+    # an edit of `SOLVER` alone. Reading the spec's solver here silently dropped all of them on every
+    # path while the banner, which reads `SOLVER`, reported them as in force.
+    solver = SOLVER
     if stencil_reach is not None:
         preconditioner = solver.preconditioner
         solver = dataclasses.replace(

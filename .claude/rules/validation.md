@@ -522,6 +522,18 @@ writing a harness:
   edits the spec (`dataclasses.replace`), as the `PITZ_*` overrides do; one that varies something no file
   can state is a script-only study arm that calls the library itself (pitzDaily's `_solve_study_arm`).
 
+⚠️ **From that change (2026-09-24, #437) until 2026-10-08, pitzDaily's `PITZ_*` MARCH overrides were
+INERT.** `solve_aquaflux` solved `case["spec"].solver` (the file's) while the banner printed the edited
+`SOLVER`, so every override — `BETA_START`, `REFRESH_ON_CYCLES`, `RETRY_ON_CYCLES`, `TURB_DAMPING`,
+`K_POSITIVITY_PROJECTION`, `FLOW_SWEEPS`, `FIELD_SPLIT`, `PROBE_GRADIENT_SWEEPS`, `RAMP_*`, the new
+`FORWARD_RTOL` — was reported as in force and ran the file unchanged; the study arms received the same
+unedited solver. Found when three marches at `FORWARD_RTOL` 0.01 / 0.1 / 0.6 came back bit-identical to
+the 0.3 baseline. Fixed (`solver = SOLVER`) and pinned by
+`test_a_pitzdaily_march_override_reaches_the_solve_not_only_the_banner`, mutation-checked. The
+`stencil_reach` and `gradient_scheme` *arguments* were unaffected. **A pitzDaily arm in that window that
+set a `PITZ_*` march variable is a run of the file's solver**; none is recorded in these files. bfs3d
+reassembles its solver from its constants and was not affected.
+
 ## The channel studies read case files (2026-09-24) — and their tracked report was stale
 
 `turbulent_channel` and `turbulent_channel_openfoam` build each configuration from a file under `cases/`

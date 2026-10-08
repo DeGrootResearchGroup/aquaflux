@@ -873,3 +873,38 @@ def test_each_step_case_script_runs_its_files_solver_when_no_override_is_set(cas
         timeout=300,
     )
     assert result.returncode == 0, result.stderr[-2000:]
+
+
+def test_a_pitzdaily_march_override_reaches_the_solve_not_only_the_banner() -> None:
+    """A ``PITZ_*`` march variable must change the solver the default run hands the library.
+
+    The script edits its solver as ``SOLVER`` and prints its banner from that, so a solve that read the
+    case file's own solver instead would report every override as in force while running the file
+    unchanged. That happened: three marches at different linear tolerances came back bit-identical. The
+    solve is intercepted at the solver's ``solve``, after the case is built, so nothing is marched.
+    """
+    script = (
+        "import compare\n"
+        "seen = {}\n"
+        "def record(self, *args, **kwargs):\n"
+        "    seen['solver'] = self\n"
+        "    raise SystemExit(0)\n"
+        "type(compare.SOLVER).solve = record\n"
+        "try:\n"
+        "    compare.solve_aquaflux()\n"
+        "except SystemExit:\n"
+        "    pass\n"
+        "assert seen['solver'].linear_solve.rtol == 0.0123, seen['solver'].linear_solve\n"
+    )
+    environment = {
+        name: value for name, value in os.environ.items() if not name.startswith("PITZ_")
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=REPO / "validation" / "pitzdaily_openfoam",
+        env=environment | {"PYTHONPATH": str(REPO), "PITZ_FORWARD_RTOL": "0.0123"},
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
