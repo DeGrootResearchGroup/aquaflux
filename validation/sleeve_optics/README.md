@@ -112,7 +112,8 @@ gather's own error and the worth of the reflected paths it leaves out are measur
 
 Configuration: 40,000,000 rays per trace, 0.25 mm pixels (a 1 mm pixel's average reads above the
 value at its ring this close to the sleeve), rings 0.6 mm wide; the arc a 3 m tube of 256 sectors,
-slices 0.2 mm at the mid-plane growing by 6 % (106,496 facets); jax 0.10.2, CPU, Linux, 2026-10-08.
+slices 0.2 mm at the mid-plane growing by 6 % (106,496 facets); jax 0.10.2, CPU, Linux (4 cores),
+2026-10-08. The gather took 90 s for the 7 points, compile included (one run; the tracer 155 and 136 s).
 
 | radius, mm | aquaflux / transmitted trace | in standard errors | transmitted / full trace | straight gather / full trace |
 |---|---|---|---|---|

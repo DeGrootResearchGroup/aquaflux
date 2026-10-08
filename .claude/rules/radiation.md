@@ -4561,6 +4561,11 @@ split by me into 2a (this: regions, Fresnel, the path solve, the refracted gathe
   media absorbing; and the irradiance), 2.5e-3 at 32 cells a side, second order: air->water -0.60,
   -0.15, -0.04 % at 16/32/64; glass->air -0.52, -0.13, -0.03 %; receiver 0.2 mm off the plane -0.46,
   -0.11, -0.03 % at 32/64/128; the mask follows the refracted leg and not the straight line.
+- **Against the tracer** (`validation/sleeve_optics/check_refraction.py`, numbers in its README): one
+  sleeved lamp, 95 % UVT, 40M rays -- the transmitted paths agree within 1.5 standard errors at every
+  radius 12.5-60 mm; the reflected paths left out are worth < 0.5 %; the straight gather reads 12-25 %
+  high. Gather 90 s for 106,496 arc facets and 7 points, compile included (4-core Linux; 271 s before
+  the compile caching and the written-out derivatives).
 - **Mutation pass, 25 breaks, 25 red after two tests were added** (`PYTHONDONTWRITEBYTECODE=1`, the tests
   aimed at each): Fresnel's half, total reflection transmitting, the outermost region winning, each of
   the three refusals, crossed regions counted beside a leg, the leg after leaving taken as the region,
