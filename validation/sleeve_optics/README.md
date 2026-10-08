@@ -99,3 +99,40 @@ absorption in the quartz, infinitely long lamps and a black wall. The arc assump
 directly (light returned to an arc, light a neighbour's sleeve bends around its arc) and is not
 bracketed here. A low-pressure mercury plasma traps its own 254 nm line (optically thick, re-emitting),
 so a fully absorbing arc is the pessimistic end, not the physical one.
+
+## aquaflux's refracted gather against the tracer
+
+`check_refraction.py`: one lamp of the array above (arc, air gap, quartz sleeve, 1 W/m from the arc,
+Lambertian) in 95 % UVT water, no wall in reach. aquaflux gathers the arc's facets at points along a
+radius of the mid-plane along their refracted paths (`aquaflux.radiation.refracted.refracted_fluence_rate`:
+out through the air-quartz and quartz-water surfaces, Fresnel and Snell at each, every reflection
+counted as lost). The tracer runs twice -- in full, and with each ray ended at its first reflection
+(`Scene(reflections=False)`), which counts exactly the transmitted paths aquaflux follows -- so the
+gather's own error and the worth of the reflected paths it leaves out are measured apart.
+
+Configuration: 40,000,000 rays per trace, 0.25 mm pixels (a 1 mm pixel's average reads above the
+value at its ring this close to the sleeve), rings 0.6 mm wide; the arc a 3 m tube of 256 sectors,
+slices 0.2 mm at the mid-plane growing by 6 % (106,496 facets); jax 0.10.2, CPU, Linux, 2026-10-08.
+
+| radius, mm | aquaflux / transmitted trace | in standard errors | transmitted / full trace | straight gather / full trace |
+|---|---|---|---|---|
+| 12.5 | 0.9993 | -0.41 | 0.9997 | 1.255 |
+| 13.5 | 0.9996 | -0.24 | 1.0000 | 1.244 |
+| 16 | 0.9995 | -0.30 | 0.9990 | 1.221 |
+| 20 | 1.0025 | +1.52 | 0.9971 | 1.201 |
+| 30 | 0.9991 | -0.54 | 1.0012 | 1.171 |
+| 45 | 1.0008 | +0.47 | 0.9976 | 1.138 |
+| 60 | 0.9974 | -1.38 | 1.0024 | 1.116 |
+
+- **The refracted gather agrees with the transmitted paths to within the tracer's noise** at every
+  radius, the first millimetre of water beside the sleeve included.
+- **The reflected paths it leaves out are worth under half a percent** (transmitted over full, 0.997 to
+  1.006, itself within about two standard errors of one): almost all the light a sleeve reflects goes
+  back to the arc, which absorbs it.
+- **The straight-line gather from the same arc reads 12-25 % high** -- it absorbs along the air and
+  quartz too, which the tracer's straight variant above does not, so read it for scale only.
+- ⚠️ **The first version of the gather read 1.5-2 % low within 2 mm of the sleeve, converged under
+  refinement.** It was the path solve giving up on paths seen at grazing incidence (fixed by solving
+  as a descent on the optical length), not physics; the tracer's emitting-sleeve check at the same
+  pixels and rays (aquaflux exact there) agreed with the tracer to 0.2 % at every ring, which is what
+  ruled the tracer out.
