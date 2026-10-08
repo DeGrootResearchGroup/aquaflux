@@ -39,8 +39,16 @@ Usage
         validation/run_case.sh validation/pitzdaily_openfoam/compare.py
     validation/run_case.sh validation/pitzdaily_openfoam/krylov_recycling_probe.py
 
+⚠️ Any later run of ``compare.py`` writes its own rolling checkpoints into the same directory and evicts
+the capture's step states (the inner dumps survive, the states do not); re-run the capture first.
+
 ``PITZ_RECYCLE_FROM`` / ``PITZ_RECYCLE_TO`` bound the replayed steps (default: the target station to the
-end); ``PITZ_RECYCLE_DEPTHS`` the recycle depths (default ``5,10``).
+end); ``PITZ_REPLAY_ARMS`` the arms (default ``lineax,gmres-15,gcro-5,gcro-10``).
+
+``weighted-R`` asks whether GMRES should minimize what it is judged by. It cannot minimize the measure
+itself, an L1 mean per field block, since GMRES minimizes an inner-product norm; it minimizes the
+nearest one, ``||W r||`` with ``W`` the measure's own row and field scales and ``1/sqrt(block size)``,
+by running on ``W A M`` and ``W b``. The stop is still the measure, on the true residual.
 """
 
 from __future__ import annotations
@@ -80,7 +88,10 @@ from aquaflux.turbulence import (  # noqa: E402
 from aquaflux.turbulence.coupled import coupled_scaled_norm  # noqa: E402
 
 CHECKPOINTS = HERE / "checkpoints"
-DEPTHS = tuple(int(d) for d in os.environ.get("PITZ_RECYCLE_DEPTHS", "5,10").split(","))
+#: The arms to run, by name: ``lineax`` (the march's own solver, and the fidelity check), ``gmres-R``
+#: (GMRES(R), residual stop every iteration), ``weighted-R`` (the same, minimizing a weighted 2-norm
+#: matched to the measure's row and field scales) and ``gcro-D`` (GCRO-DR keeping D vectors).
+ARMS = tuple(os.environ.get("PITZ_REPLAY_ARMS", "lineax,gmres-15,gcro-5,gcro-10").split(","))
 RESTART = 15
 #: A solve that has not converged after this many applications is reported as such, not run on.
 MAX_APPLICATIONS = 400
@@ -218,7 +229,7 @@ def main():
     last_step = int(os.environ.get("PITZ_RECYCLE_TO", max(states)))
     print(
         f"[configuration] steps {first_step}..{last_step} of {max(states)}; restart {RESTART}; "
-        f"depths {DEPTHS}; refresh on {refresh_on} cycles; jax {jax.__version__}, "
+        f"arms {ARMS}; refresh on {refresh_on} cycles; jax {jax.__version__}, "
         f"{jax.default_backend()}",
         flush=True,
     )
@@ -271,14 +282,14 @@ def main():
             eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(beta)), state
         )
 
-    totals = {"lineax": 0, "gmres": 0, **{f"gcro-{d}": 0 for d in DEPTHS}}
-    recycled = {d: None for d in DEPTHS}
+    totals = dict.fromkeys(ARMS, 0)
+    recycled = {arm: None for arm in ARMS}
     mismatches = 0
     previous = None
-    header = f"{'step':>4} {'in':>2} {'cyc':>3} {'lx':>3} | {'lineax':>6} {'gmres':>6} " + " ".join(
-        f"{'gcro-' + str(d):>7}" for d in DEPTHS
+    print(
+        f"\n{'step':>4} {'in':>2} {'cyc':>3} {'lx':>3} | " + " ".join(f"{a:>11}" for a in ARMS),
+        flush=True,
     )
-    print("\n" + header, flush=True)
     for k in range(first_step, last_step + 1):
         phi_n = jnp.asarray(states[k - 1]["state"]) if k > 1 else seed
         beta = float(states[k]["shift"])
@@ -286,6 +297,11 @@ def main():
         r_n = assembler.residual(phi_n)
         shift = jax.lax.stop_gradient(policy.shift_term(phi_n, r_n).shift(beta))
         measure = coupled_scaled_norm(coupled, policy, phi_n)
+        sizes = np.asarray(measure.sizes)
+        weights = 1.0 / (
+            np.asarray(measure.row_scale)
+            * np.repeat(np.asarray(measure.field_scale) * np.sqrt(sizes), sizes)
+        )
         # A station change re-fits in full at the step's start. Starting the replay anywhere but at a
         # station change is NOT faithful: the march's inverse there dates from a mid-step refresh.
         if assembler is not previous:
@@ -295,13 +311,8 @@ def main():
         i, p = 0, phi_n
         while (k, i) in inner:
             record = inner[(k, i)]
-            b = -(assembler.residual(p) + shift * (p - phi_n))
-            raw = int(march_solve(assembler, p, shift, b, measure))
-            cycles = restart_cycles(raw)
             recorded = int(record["cycles"])
-            mismatches += cycles != recorded
-            # lineax spends one application on its start-up residual and RESTART + 1 per cycle after it.
-            counts = {"lineax": 1 + (RESTART + 1) * (raw - 1)}
+            b = -(assembler.residual(p) + shift * (p - phi_n))
 
             def apply(v, assembler=assembler, p=p, shift=shift):
                 # A copy: an array viewed from JAX is read-only, and the Arnoldi loop works in place.
@@ -311,18 +322,37 @@ def main():
                 return float(measured(measure, jnp.asarray(v)))
 
             bn = np.asarray(b)
-            counts["gmres"] = gcro_dr(apply, bn, norm, rtol, RESTART, 0, None)[1]
-            for d in DEPTHS:
-                _, used, recycled[d] = gcro_dr(apply, bn, norm, rtol, RESTART, d, recycled[d])
-                counts[f"gcro-{d}"] = used
-            for name, value in counts.items():
-                totals[name] += value
+            counts, cycles = {}, recorded
+            for arm in ARMS:
+                kind, _, number = arm.partition("-")
+                if kind == "lineax":
+                    raw = int(march_solve(assembler, p, shift, b, measure))
+                    cycles = restart_cycles(raw)
+                    mismatches += cycles != recorded
+                    # One application for the start-up residual, then RESTART + 1 per cycle.
+                    counts[arm] = 1 + (RESTART + 1) * (raw - 1)
+                elif kind == "gmres":
+                    counts[arm] = gcro_dr(apply, bn, norm, rtol, int(number), 0, None)[1]
+                elif kind == "weighted":
+                    counts[arm] = gcro_dr(
+                        lambda v, apply=apply, w=weights: w * apply(v),
+                        weights * bn,
+                        lambda v, norm=norm, w=weights: norm(v / w),
+                        rtol,
+                        int(number),
+                        0,
+                        None,
+                    )[1]
+                elif kind == "gcro":
+                    _, counts[arm], recycled[arm] = gcro_dr(
+                        apply, bn, norm, rtol, RESTART, int(number), recycled[arm]
+                    )
+                else:
+                    raise SystemExit(f"unknown arm {arm!r}")
+                totals[arm] += counts[arm]
             print(
                 f"{k:4d} {i:2d} {recorded:3d} {cycles:3d}{'!' if cycles != recorded else ' '}| "
-                + " ".join(
-                    f"{counts[n]:6d}" if n in ("lineax", "gmres") else f"{counts[n]:7d}"
-                    for n in counts
-                ),
+                + " ".join(f"{counts[a]:11d}" for a in ARMS),
                 flush=True,
             )
             # The march's mid-step refresh: once per step, at the iterate the expensive solve reached.
