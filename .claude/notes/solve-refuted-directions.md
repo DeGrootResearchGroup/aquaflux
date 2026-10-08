@@ -498,6 +498,39 @@ scored in the row-equilibrated measure the march stops on, rebuilt at the new st
 Reopen only for a march that converges each station (a ladder, or `steps_per_station` ≫ 1) at a spacing
 fine enough that `continuation_seed_error.py`'s `E1/E0` falls well below one.
 
+## Eisenstat–Walker adaptive forcing terms — NOT WORTH BUILDING (2026-10-08); a looser FIXED term is
+
+**What was proposed** (`solve-open-directions.md` item 4): replace the fixed inner `rtol = 0.3` with
+Eisenstat & Walker (1996) choice 2, `η_k = γ (‖R_k‖/‖R_{k−1}‖)^α`, γ = 0.9, α = 2, safeguarded — loose far
+from the root, tight near it.
+
+**Probe, no implementation:** fixed-`rtol` marches bracketing what the schedule would pick, via
+`PITZ_FORWARD_RTOL` (`validation/pitzdaily_openfoam/compare.py`). pitzDaily, shipped `case.yaml` (16 × 1
+viscosity ramp, dual time 5 / 0.01, field split `SimpleSmoothed` / `JacobiSmoothed`, restart 15,
+row-scaled stop), jax 0.11.2, CPU, 4-core Linux, one run per arm:
+
+| `rtol` | steps | restart cycles | inner solves | wall | `x_r/h` |
+|---|---|---|---|---|---|
+| 0.1 | 31 | 245 | 98 | 1810 s | 8.0686 |
+| **0.3 (shipped)** | 31 | **203** | 99 | 1547 s ⚠️ | 8.0686 |
+| 0.6 | 31 | **166 (−18 %)** | 100 | 1207 s | 8.0686 |
+| 0.9 | 31 | **161 (−21 %)** | 103 | 1453 s | 8.0686 |
+
+⚠️ The 0.3 wall ran beside another probe and the walls disagree with the cycles at 0.9; read the cycle
+column (same preconditioner in every arm, so cycles are a fair cost). No arm retried.
+
+**Why the adaptive schedule loses:** tightening buys no nonlinear iterations (98 → 103 inner solves across a
+9× range) and costs cycles. At this march's inner rates (`G out / G in` 0.02–0.6) choice 2 gives
+`η` ≈ 4e-4 … 0.3, i.e. it *tightens* below the shipped value on most inner iterations — exactly the
+direction that measured worse. The whole gain is the loose end, which a fixed value reaches without any
+schedule.
+
+**What it found instead:** (1) the shipped 0.3 is tighter than pitzDaily needs — moved to the open note as
+its own direction, to be measured on bfs3d (where 0.3 was calibrated) before any default changes; (2) the
+stop is not the pure relative-residual test its docstring claimed — lineax also requires the solution's
+change over the last cycle to be ≤ `rtol` and spends a counted start-up cycle (docstring corrected; see
+`solve.md`); (3) pitzDaily's `PITZ_*` march overrides had been inert since #437 (fixed; `validation.md`).
+
 ## `jax.linearize` in place of the per-matvec `jax.jvp` — REFUTED, and it looks obviously right
 
 `solve/continuation.py`'s `shifted_jacobian` builds the Krylov matvec as

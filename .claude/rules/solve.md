@@ -823,6 +823,15 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
      **achieved** reduction is routinely tighter than the requested one, because a restarted GMRES tests
      the stop only at restart boundaries, so a solve that would cross 30 % after three matrix-vector
      products still builds fifteen.
+     ⚠️ **And `rtol` is not only a residual tolerance (found 2026-10-08).** lineax's GMRES also stops only
+     once the solution's change over the last restart cycle is ≤ `rtol` (in the measure, `‖b‖` scaled to
+     one), and its first counted cycle is a start-up pass that reduces nothing. A toy solve whose residual
+     was 0.02 after one real cycle still ran another at `rtol = 0.1`, because the solution had moved 0.265.
+     **Measured on pitzDaily (shipped `case.yaml`, 2026-10-08, jax 0.11.2, CPU; `PITZ_FORWARD_RTOL`), the
+     march is not sensitive to tightening and IS to loosening:** `rtol` 0.1 / 0.3 / 0.6 / 0.9 → 245 / 203 /
+     166 / 161 restart cycles, all 31 steps, 98–103 inner solves, `x_r/h` 8.0686. The shipped 0.3 is not
+     changed (bfs3d, where it was calibrated, is unmeasured); see `solve-refuted-directions.md`'s
+     Eisenstat–Walker entry and the open-directions note.
   6. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
      Jacobian are **field-major**: DOF `(cell i, field f)` sits at `f·n_cells + i`, fields ordered
      `[u, v, w, p, k, ω]`. Slicing it cell-major silently yields a *different matrix* that still looks

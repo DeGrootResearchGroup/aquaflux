@@ -113,8 +113,12 @@ class _RelativeResidualGMRES(lx.GMRES):
     This subclass sidesteps that by scaling the right-hand side to unit ``self.norm`` inside
     :meth:`compute` and deferring to a stock GMRES configured with ``rtol = 0`` (so the componentwise
     ``rtol*|b_i|`` term vanishes and the scale is the uniform ``atol``), ``self.norm``, and ``atol`` set
-    to the desired relative tolerance. Termination is then exactly ``norm(r) <= atol * norm(b)`` -- one
-    global relative test in whatever measure ``self.norm`` is, immune to the near-zero entries. The
+    to the desired relative tolerance. The residual half of the stop is then ``norm(r) <= atol * norm(b)``
+    -- one global relative test in whatever measure ``self.norm`` is, immune to the near-zero entries.
+    It is not the whole stop: the stock GMRES also requires the change in the solution over the last
+    restart cycle to be at most ``atol`` in the same norm (with the right-hand side at unit norm), and
+    the first cycle it counts is a start-up pass that does not reduce the residual. So a solve whose
+    residual meets the tolerance can still run another cycle because its solution is still moving. The
     measure is injected (:func:`relative_residual_gmres`): the default ``_global_two_norm`` gives the
     plain 2-norm stop, and a **row-scaled** measure (:class:`~aquaflux.solve.RowScaledNorm`, the coupled
     march's own progress measure) gives a stop that weights every field block comparably rather than

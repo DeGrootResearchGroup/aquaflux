@@ -50,23 +50,25 @@ continuation stations"). It was already measured on the old ladder (worse at a d
 one-step-per-station ramp an exact predictor changes the starting residual by −2.6 % to +12 %, for one
 extra linear solve per station.
 
-## 4. Eisenstat–Walker forcing terms
+## 4. CLOSED — Eisenstat–Walker forcing terms; replaced by 4b
 
-**What.** Replace the fixed inner tolerances (`rtol=0.3` in `VCYCLE_LINEAR_SOLVE` /
-`FACTORIZATION_LINEAR_SOLVE`, `1e-3` in `_INEXACT_CONTINUATION_SOLVER`) with Eisenstat & Walker (1996)
-choice 2, safeguarded: `η_k = γ (‖R_k‖/‖R_{k−1}‖)^α`, `γ = 0.9, α = 2`, floors and the standard
-"do not let the tolerance drop below the previous step's achieved residual" guard.
+Measured 2026-10-08 and moved to `solve-refuted-directions.md` ("Eisenstat–Walker adaptive forcing
+terms"): tightening the inner tolerance buys no nonlinear iterations on pitzDaily, and the schedule would
+tighten most of the time. The gain is the loose end, which needs no schedule.
 
-**Why it should win.** Standard result for inexact Newton on pseudo-transient CFD: 20–40 % fewer
-Krylov iterations by over-solving less far from the root and solving tightly only where quadratic
-convergence can use it. It also aligns the inner tolerance with where staleness already makes the
-direction inexact.
+## 4b. Loosen the fixed inner forcing term from 0.3
 
-**What it does not change.** The stopping test on the outer residual and the adjoint's tight solve
-are untouched.
+**What.** Raise `LinearSolveSettings.rtol` (the `_VCYCLE_LINEAR_SOLVE` / `VCYCLE_LINEAR_SOLVE` family
+value, and the case files' `linear_solve.rtol`) from 0.3 to ~0.6.
 
-**Pre-registered measurement.** Both flagship cases, identical `x_r/h`; cycles and wall vs the fixed
-tolerance. ~20 lines; cheapest entry in this file.
+**Why.** On pitzDaily, 0.6 took 166 restart cycles against 203 (−18 %), 0.9 took 161, with identical steps,
+inner-solve counts and `x_r/h` (table in the ledger entry above). 0.3 was calibrated on bfs3d's
+multigrid family and carried to the others.
+
+**Pre-registered measurement.** bfs3d at `BFS3D_FORWARD_RTOL` 0.3 / 0.6 / 0.9 (one case at a time):
+steps, cycles, retries, refreshes, wall, mid-span `x_r/h`. A pass is ≥ 10 % fewer cycles with no extra
+steps or retries and the same `x_r/h`; then a library-default change needs the project owner. Watch the
+retry ladder: a looser direction near the low-β wall could trip `abort_above_cycles` or the line search.
 
 ## 5. Anderson acceleration / nonlinear GMRES around the outer step
 
