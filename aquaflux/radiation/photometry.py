@@ -271,8 +271,15 @@ class PhotometricProfile(Profile):
         # to the facet, so up's own component along the normal drops out; and atan2 needs no unit
         # vectors, so neither is normalized. The handedness turns it the other way in a mirror
         # image, where the cross product of two reflected vectors is the reflection negated.
-        across = self.handedness * dot(in_plane, jnp.cross(normal, self.up))
-        h = jnp.arctan2(across, dot(in_plane, self.up))
+        # On the axis the in-plane part is zero and h is arctan2(0, 0): zero in value, as the
+        # table's convention for the pole wants, but its derivative is 0/0. A where() after the
+        # arctan2 would still differentiate it, so the operands are substituted before it instead,
+        # with (0, 1), whose angle is the same zero and whose derivative is finite.
+        across = jnp.where(
+            positive, self.handedness * dot(in_plane, jnp.cross(normal, self.up)), 0.0
+        )
+        along = jnp.where(positive, dot(in_plane, self.up), 1.0)
+        h = jnp.arctan2(across, along)
         start = self.horizontal[0]
         return cosine, gamma, start + jnp.mod(h - start, 2.0 * jnp.pi)
 

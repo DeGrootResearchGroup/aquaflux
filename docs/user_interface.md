@@ -74,10 +74,44 @@ for a structured grid — with its boundary patches listed by name and face coun
 Changing the mesh settings marks the view out of date; **Reload** reads or generates
 the mesh again from the settings as they stand, saved or not. Choosing a patch, or a
 boundary entry named after a patch or a patch group, picks it out in the view once
-aquaflux writes the boundary patches with the mesh. **Run** holds the place of starting and following a run: run it with
-`aquaflux run case.yaml` in a terminal and open its output directory here; a run
-still in progress can be followed in Results, whose **Reload** reads its history as
-it grows.
+aquaflux writes the boundary patches with the mesh.
+
+## Running a case
+
+**Run** solves the case open in Setup. Everything about the run is set in the case
+file, so the section has no settings of its own: **Run case** starts the solve and
+**Stop** interrupts it. The side panel summarizes what the case file sets the run to
+do (the physics, the solver, any continuation, the inner loop, the step cap, the
+stopping test and where the results go), with a link back to Setup to change it.
+
+A run reads the saved file, so **Run case** waits while the case has unsaved
+changes. It does not replace an earlier run's results unless asked: when the output
+directory already holds results, the side panel says so and Run starts only once
+**Replace the earlier results** is switched on. Until then the earlier run's history
+is shown.
+
+While the case runs, the page re-reads its history every second and draws:
+
+- **Headline numbers**: the residual against the stopping target (with how many
+  decades remain), the step, the linear solve cost so far, how many steps were redone,
+  and how many times the preconditioner was refitted.
+- **The residual** against the step, with the stopping target dashed, redone steps
+  marked, refits ticked along the foot, and the steps a continuation spends before it
+  reaches the case's own problem shaded. **Per equation** draws each equation's part of
+  the residual instead (`u`, `v`, `p`, and `k` and `omega` for a Reynolds-averaged
+  case) — the parts the residual is made of, so the line nearest the total is the
+  equation holding the march up.
+- **Four smaller plots** on the same step axis: each step's linear solve cost, with its
+  hardest single solve against the cost above which the step is redone; the inner
+  Newton iterations against the inner loop's limit; the pseudo-time shift against its
+  smallest allowed value; and the line-search step against the value below which the
+  step is redone. Each limit is drawn where the case file sets one.
+- **What happened**: the steps redone and why, the preconditioner refits and what
+  they cost, and where a continuation ended — or, under **Log**, what the run printed.
+
+**Stop** interrupts the solve as Ctrl-C would. It ends after the step it is on, and
+records itself as a run that stopped short: its log, history and `run.yaml` are
+written, and no fields. Closing the page stops a run still in progress.
 
 ## What it reads from a run
 

@@ -104,15 +104,25 @@ class BlockScaledNorm(eqx.Module):
         The positive per-block reference magnitude each block's norm is divided by, shape
         ``(len(sizes),)``; typically the block's initial residual norm ``||R0_block||``. Any sequence
         of floats is accepted and stored as an array.
+    names : tuple of str
+        The equation each block holds, in order (static), or empty for blocks that are not one
+        equation each. Named blocks are what a march reports per equation (:meth:`per_block`).
     """
 
     sizes: tuple[int, ...] = eqx.field(static=True)
     scales: jnp.ndarray = eqx.field(converter=jnp.asarray)
+    names: tuple[str, ...] = eqx.field(static=True, default=())
+
+    def __check_init__(self) -> None:
+        _check_names(self.names, self.sizes)
 
     def __call__(self, residual: jnp.ndarray) -> jnp.ndarray:
         """The block-scaled Euclidean norm of ``residual`` (shape ``(sum(sizes),)``)."""
-        relative = block_two_norms(residual, self.sizes) / self.scales
-        return jnp.linalg.norm(relative)
+        return jnp.linalg.norm(self.per_block(residual))
+
+    def per_block(self, residual: jnp.ndarray) -> jnp.ndarray:
+        """Each block's norm over its scale, shape ``(len(sizes),)`` -- the terms the measure combines."""
+        return block_two_norms(residual, self.sizes) / self.scales
 
 
 class RowScaledNorm(eqx.Module):
@@ -164,6 +174,9 @@ class RowScaledNorm(eqx.Module):
     field_scale : jnp.ndarray
         The per-block divisor for stage 2, shape ``(len(sizes),)``, strictly positive; the field's mean
         absolute magnitude, or ``1`` for a block already dimensionless after stage 1.
+    names : tuple of str
+        The equation each block holds, in order (static), or empty for blocks that are not one
+        equation each. Named blocks are what a march reports per equation (:meth:`per_block`).
 
     Examples
     --------
@@ -178,6 +191,10 @@ class RowScaledNorm(eqx.Module):
     sizes: tuple[int, ...] = eqx.field(static=True)
     row_scale: jnp.ndarray
     field_scale: jnp.ndarray
+    names: tuple[str, ...] = eqx.field(static=True, default=())
+
+    def __check_init__(self) -> None:
+        _check_names(self.names, self.sizes)
 
     def __call__(self, residual: jnp.ndarray) -> jnp.ndarray:
         """The row-equilibrated, field-normalized measure of ``residual``.
@@ -216,4 +233,53 @@ class RowScaledNorm(eqx.Module):
         blocks = jnp.split(equilibrated, split_points)
         return jnp.stack(
             [jnp.mean(block) / scale for block, scale in zip(blocks, self.field_scale, strict=True)]
+        )
+
+
+def named_blocks(
+    measure: object, residual_fn: Callable[[jnp.ndarray], jnp.ndarray], state: jnp.ndarray
+) -> dict[str, float] | None:
+    """Each named equation's term of ``measure`` at ``state``, or ``None`` when its blocks are unnamed.
+
+    A block-structured measure combines one term per block into the scalar a march steers by; this
+    reads those terms under the names the measure gives its blocks, so a record of the march can say
+    which equation is holding the residual up. A measure with no named blocks -- a plain Euclidean
+    norm, or blocks that do not hold one equation each -- has nothing to report, and costs nothing.
+
+    The residual and its terms are evaluated in one compiled call, so a march that reports them pays
+    one residual evaluation per step rather than one dispatch per array operation.
+
+    Parameters
+    ----------
+    measure : ResidualNorm
+        The measure, as a march holds it.
+    residual_fn : callable
+        ``state -> R(state)``, shape ``(n,)``; a bound method of a module, so its arrays are traced
+        rather than compiled in.
+    state : jnp.ndarray
+        Where to evaluate it, shape ``(n,)``.
+
+    Returns
+    -------
+    dict of {str: float} or None
+        By equation name, in block order.
+    """
+    names = getattr(measure, "names", ())
+    if not names:
+        return None
+    terms = _block_terms(measure, residual_fn, state)
+    return dict(zip(names, (float(value) for value in terms), strict=True))
+
+
+@eqx.filter_jit
+def _block_terms(measure, residual_fn, state):
+    """The measure's per-block terms of ``residual_fn(state)``, compiled once per block structure."""
+    return measure.per_block(residual_fn(state))
+
+
+def _check_names(names: tuple[str, ...], sizes: tuple[int, ...]) -> None:
+    """Refuse block names that do not name every block once."""
+    if names and (len(names) != len(sizes) or len(set(names)) != len(names)):
+        raise ValueError(
+            f"a measure's names must name each of its {len(sizes)} blocks once, got {names!r}."
         )

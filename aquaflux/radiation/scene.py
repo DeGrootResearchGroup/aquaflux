@@ -1,37 +1,43 @@
 """Lamps lighting a scene of reflecting surfaces, with the light gathered where it is wanted.
 
-A lamp and a reflecting wall leave the facet-to-facet transfer in different ways, and the
-difference decides the assembly. Reflected light leaves every surface Lambertian, whatever lit it,
-so the reflecting surfaces are exactly what :func:`~aquaflux.radiation.model.build_radiation_model`
-is for. A lamp's light need not be: a measured luminaire is a table over two angles
+A lamp's *emitted* light and *reflected* light leave the facet-to-facet transfer in different ways,
+and the difference decides the assembly. Reflected light leaves every surface Lambertian, whatever
+lit it, so reflection is exactly what :func:`~aquaflux.radiation.model.build_radiation_model` is
+for. A lamp's own light need not be: a measured luminaire is a table over two angles
 (:class:`~aquaflux.radiation.photometry.PhotometricProfile`), which the transfer cannot carry,
-because it freezes one direction per pair of facets. So the lamps are **kept out of the
-transfer**:
+because it freezes one direction per pair of facets. So the lamps' **emission is kept out of the
+transfer, and their surfaces are kept in it**:
 
-- their direct light on each reflecting facet is gathered with their own profiles, averaged over
-  points spread evenly across the facet so a shadow falling partly across it is not decided at one
-  point, and handed to the surface solve as an irradiance arriving from outside it;
-- the solve then carries only reflected, Lambertian light, and gives each reflecting facet its
-  radiosity;
+- the lamps' direct light on every facet that exchanges light -- each reflecting facet and each
+  lamp facet -- is gathered with their own profiles, averaged over points spread evenly across the
+  facet so a shadow falling partly across it is not decided at one point, and handed to the surface
+  solve as an irradiance arriving from outside it;
+- the solve then carries only reflected, Lambertian light among the reflectors and the lamps
+  together, and gives each facet its radiosity: what it reflects, by its own
+  ``diffuse_reflectance``;
 - the light anywhere is the lamps' direct light, gathered with their profiles, plus the reflected
-  light, gathered from the facets as Lambertian sources of their radiosity.
+  light, gathered from every facet as a Lambertian source of its radiosity.
 
-A lamp keeps none of the light that lands on it: it is black to arriving light, as a lamp window
-modelled as an emitting boundary usually is.
+A lamp is therefore a surface like any other to the light arriving on it: it reflects its
+``diffuse_reflectance`` of it diffusely and absorbs the rest, and its triangles stand in the way of
+reflected light as a wall's do. With no reflectance it is black, and still casts its shadow. A point
+source has no surface, so it neither reflects nor shadows.
 
 :class:`Scene` holds the lamps, the reflecting surfaces, whatever stands in the way and the medium
 between them, and the points the light is wanted at -- a set of points in the medium
 (:class:`VolumeReceivers`), and any number of named sets of points on surfaces, each facing the way
 the surface does (:class:`SurfaceReceivers`). :func:`solve_scene` returns the fluence rate at the
 first and the irradiance at the others, split into the direct and the reflected parts
-(:class:`SceneSolution`), together with what each set of points absorbs.
+(:class:`SceneSolution`), together with what the medium and the lamps absorb.
 
-A point on a reflecting surface lies on one of that surface's facets. That facet's own light needs no
-exclusion -- a facet lights nothing in its own plane, a point a rounding in front of it is behind its
-receiving half-space and a point a rounding behind it is behind the facet -- but its triangle does,
-from any test of what shadows the point: a ray from another facet ends in it, and would read it as a
-blocker. Each set of points on a reflecting surface therefore names the surface's body, and the facet
-of that body nearest each point is left out of the shadow test at the point's end of every ray.
+A point on a surface that exchanges light lies on one of that surface's facets. That facet's own
+light needs no exclusion -- a facet lights nothing in its own plane, a point a rounding in front of
+it is behind its receiving half-space and a point a rounding behind it is behind the facet -- but its
+triangle does, from any test of what shadows the point: a ray from another facet ends in it, and
+would read it as a blocker. Each set of points on such a surface therefore names the surface's body,
+and the facet of that body nearest each point is left out of the shadow test at the point's end of
+every ray; the points the lamps' light is averaged over on a lamp facet leave that facet out the same
+way.
 """
 
 from __future__ import annotations
@@ -126,11 +132,15 @@ class SurfaceReceivers:
     reflectance : float
         The surface's diffuse reflectance, so that what it absorbs is ``1 - reflectance`` of what
         arrives. Read for that and nothing else: whether the surface sends light back out is decided
-        by :attr:`Scene.reflectors`.
+        by the facets' own ``diffuse_reflectance``.
     reflector : str or None
-        The body of :attr:`Scene.reflectors` the points lie on, if they lie on one. The facet of that
-        body nearest each point is then left out of the test of what shadows it, in which a ray from
-        another facet would otherwise end in that facet and be read as blocked.
+        The body the points lie on, if they lie on one that exchanges light: a body of
+        :attr:`Scene.reflectors` or of :attr:`Scene.lamps`. The facets of that body each point lies
+        on -- the nearest, and any as near -- are then left out of the test of what shadows it, in
+        which a ray from another facet would otherwise end in that facet and be read as blocked, and
+        out of the light gathered from that body there, since a facet sends nothing into its own
+        plane. Unset on points that do lie on such a body, a point inside a tilted facet can read
+        that facet's whole exitance.
 
     Raises
     ------
@@ -168,11 +178,13 @@ class Scene:
     Attributes
     ----------
     lamps : Surfaces
-        What emits. Any angular profile; gathered directly and never part of the transfer, so a lamp
-        is black to the light arriving on it.
+        What emits. Any angular profile; its emission is gathered directly and never carried by the
+        transfer. Its areal facets take part in the transfer as surfaces all the same: each reflects
+        its ``diffuse_reflectance`` of the light arriving on it, diffusely, and absorbs the rest, and
+        each stands in the way of reflected light. With no reflectance a lamp is black.
     reflectors : Surfaces or None
-        The surfaces that reflect, diffusely, by each facet's ``diffuse_reflectance``. They emit
-        nothing of their own: an emitting surface is a lamp. Unset, nothing reflects.
+        The surfaces that reflect, diffusely, by each facet's ``diffuse_reflectance``, and emit
+        nothing of their own: an emitting surface is a lamp. Unset, only the lamps can reflect.
     occluders : tuple of aquaflux.solids.Body
         Bodies that shadow the light from every source, lamps and reflectors alike.
     absorption : Absorption or None
@@ -195,9 +207,10 @@ class Scene:
     Raises
     ------
     ValueError
-        If a reflector emits, if a set of surface points names a body the reflectors do not have, if
-        the settings name a body that neither the lamps nor the reflectors have, or if
-        ``lamp_samples`` is less than one.
+        If a reflector emits; if a lamp or a reflector reflects specularly, which the scene does not
+        carry; if the lamps and the reflectors share a body name, which would leave a set of surface
+        points unable to say which it lies on; if a set of surface points names a body neither has;
+        if the settings name a body neither has; or if ``lamp_samples`` is less than one.
     """
 
     lamps: Surfaces
@@ -224,10 +237,23 @@ class Scene:
                     "Scene.reflectors emit light of their own; an emitting surface belongs in "
                     "Scene.lamps, which are gathered with their own profiles."
                 )
-        names = () if self.reflectors is None else self.reflectors.solid_names
+        for name, surfaces in (("lamps", self.lamps), ("reflectors", self.reflectors)):
+            if surfaces is not None and np.any(np.asarray(surfaces.specular_reflectance) != 0.0):
+                raise ValueError(
+                    f"Scene.{name} reflect specularly; a scene carries diffuse reflection only, so "
+                    "the light a mirror would send on would be lost without a word."
+                )
+        reflecting = () if self.reflectors is None else self.reflectors.solid_names
+        shared = sorted(set(reflecting) & set(self.lamps.solid_names))
+        if shared:
+            raise ValueError(
+                f"Scene: the lamps and the reflectors both have bodies named {shared}; give them "
+                "distinct solid_names, which is how a set of surface points says what it lies on."
+            )
+        names = (*reflecting, *self.lamps.solid_names)
         # Once, against every body: each mask sees only its own sources' bodies, so a misspelt name
         # would otherwise be dropped from every one of them without an error.
-        self.settings.check_bodies(tuple(dict.fromkeys(self.lamps.solid_names + names)))
+        self.settings.check_bodies(names)
         unknown = sorted(
             f"{name!r} names {receivers.reflector!r}"
             for name, receivers in self.surfaces.items()
@@ -235,21 +261,21 @@ class Scene:
         )
         if unknown:
             raise ValueError(
-                f"Scene.surfaces: {', '.join(unknown)}, which is not a reflecting body; the "
-                f"reflecting bodies are {list(names)}."
+                f"Scene.surfaces: {', '.join(unknown)}, which is not a body of the lamps or the "
+                f"reflectors; their bodies are {list(names)}."
             )
 
     def settings_for(self, sources: Surfaces) -> RadiationSettings:
         """:attr:`settings` as they apply to a mask whose sources are ``sources``.
 
         Cut down by :meth:`~aquaflux.radiation.model.RadiationSettings.for_bodies` to the bodies of
-        ``sources``, since the lamps and the reflectors are separate surface sets and a body either
-        one names is a stranger to the other.
+        ``sources``: the lamps alone hold only the lamps' bodies, so a body of the reflectors that the
+        settings name is a stranger to them.
 
         Parameters
         ----------
         sources : Surfaces
-            The lamps, or the reflectors in any of their optical states.
+            The lamps, or the exchanging facets in any of their optical states.
 
         Returns
         -------
@@ -275,11 +301,18 @@ class SceneSolution:
     irradiance_direct, irradiance_reflected : mapping of {str: np.ndarray}
         Irradiance at each named set of surface points, likewise.
     radiosity : np.ndarray or None, shape ``(n_reflector_facets,)``
-        What each reflecting facet sends out, in W/m².
+        What each reflecting facet sends out, in W/m²; ``None`` without reflectors.
     reflector_irradiance : np.ndarray or None, shape ``(n_reflector_facets,)``
-        What lands on each reflecting facet, in W/m².
+        What lands on each reflecting facet, in W/m²; ``None`` without reflectors.
+    lamp_irradiance : np.ndarray or None, shape ``(n_lamp_facets,)``
+        What lands on each lamp facet from the other lamps and from everything that reflects, in
+        W/m²; zero on a point source, which has no surface to land on. ``None`` when nothing
+        exchanges light: no reflectors, and no lamp that reflects.
+    lamp_absorbed_power : float or None
+        What the lamps absorb of :attr:`lamp_irradiance`, ``Σ (1 - ρ) E A`` over their facets, in W;
+        ``None`` with it.
     cycles : int or None
-        The surface solve's restart cycles.
+        The surface solve's restart cycles; ``None`` when nothing exchanges light.
     medium_absorbed_power : float or None
         What the medium absorbs, ``∫ a G dV``, in W; ``None`` without volume points or volumes.
     """
@@ -291,6 +324,8 @@ class SceneSolution:
     irradiance_reflected: Mapping[str, np.ndarray] | None
     radiosity: np.ndarray | None
     reflector_irradiance: np.ndarray | None
+    lamp_irradiance: np.ndarray | None
+    lamp_absorbed_power: float | None
     cycles: int | None
     medium_absorbed_power: float | None
 
@@ -349,7 +384,7 @@ def subtriangle_centroids(vertices, per_side: int) -> np.ndarray:
 def solve_scene(
     scene: Scene, *, solver=None, report: Callable[[str], None] | None = None
 ) -> SceneSolution:
-    """Light a scene: the lamps directly, then whatever the reflecting surfaces send back.
+    """Light a scene: the lamps directly, then whatever the reflectors and the lamps send back.
 
     Parameters
     ----------
@@ -378,37 +413,13 @@ def solve_scene(
     )
     say(f"lamps: {lamps.n_facets} facets, {lamp_power:.6g} W")
 
-    bounced, radiosity, arriving, cycles = None, None, None, None
-    reflectors = scene.reflectors
-    if reflectors is not None:
-        samples = subtriangle_centroids(reflectors.vertices, scene.lamp_samples)
-        normals = np.repeat(np.asarray(reflectors.normal)[:, None, :], samples.shape[1], axis=1)
-        say(
-            f"reflectors: {reflectors.n_facets} facets; the lamps' light on them at "
-            f"{samples.shape[0] * samples.shape[1]} points"
+    exchange = _Exchange.of(scene)
+    bounced, exchanged = None, None
+    if exchange is not None:
+        exchanged = _solve_exchange(scene, exchange, solver, say)
+        bounced = exchange.surfaces.with_optics(
+            emission=jnp.asarray(exchanged.radiosity), profiles=(Lambertian(),)
         )
-        external = _irradiance(scene, lamps, samples.reshape(-1, 3), normals.reshape(-1, 3))
-        external = external.reshape(samples.shape[:2]).mean(axis=1)
-        say("reflectors: building the facet-to-facet transfer")
-        model = build_radiation_model(
-            np.zeros((0, 3)),
-            reflectors,
-            occluders=scene.occluders,
-            settings=scene.settings_for(reflectors),
-        )
-        landing, solved_cycles = surface_irradiance(
-            model,
-            reflectors,
-            absorption=scene.absorption,
-            external_irradiance=jnp.asarray(external),
-            solver=solver,
-        )
-        arriving = np.asarray(landing)
-        cycles = int(solved_cycles)
-        # What each facet sends out is what it reflects, since a reflector emits nothing of its own.
-        radiosity = np.asarray(reflectors.diffuse_reflectance) * arriving
-        bounced = reflectors.with_optics(emission=jnp.asarray(radiosity), profiles=(Lambertian(),))
-        say(f"reflectors: radiosity solved in {cycles} restart cycle(s)")
 
     direct_g, reflected_g, medium = None, None, None
     if scene.volume is not None:
@@ -430,16 +441,21 @@ def solve_scene(
     direct_e, reflected_e = {}, None if bounced is None else {}
     for name, receivers in scene.surfaces.items():
         say(f"irradiance on {name!r}, {len(receivers.points)} points: direct")
-        direct_e[name] = _irradiance(scene, lamps, receivers.points, receivers.normals)
+        direct_e[name] = _irradiance(
+            scene,
+            lamps,
+            receivers.points,
+            receivers.normals,
+            own=_own_facets(lamps, receivers.reflector, receivers.points),
+        )
         if bounced is not None:
             say(f"irradiance on {name!r}: reflected")
-            own = (
-                None
-                if receivers.reflector is None
-                else _own_facets(bounced, receivers.reflector, receivers.points)
-            )
             reflected_e[name] = _irradiance(
-                scene, bounced, receivers.points, receivers.normals, own=own
+                scene,
+                bounced,
+                receivers.points,
+                receivers.normals,
+                own=_own_facets(bounced, receivers.reflector, receivers.points),
             )
     return SceneSolution(
         lamp_power=lamp_power,
@@ -447,10 +463,139 @@ def solve_scene(
         fluence_rate_reflected=reflected_g,
         irradiance_direct=types.MappingProxyType(direct_e),
         irradiance_reflected=None if reflected_e is None else types.MappingProxyType(reflected_e),
-        radiosity=radiosity,
-        reflector_irradiance=arriving,
-        cycles=cycles,
+        radiosity=None if exchanged is None else exchanged.reflector_radiosity,
+        reflector_irradiance=None if exchanged is None else exchanged.reflector_irradiance,
+        lamp_irradiance=None if exchanged is None else exchanged.lamp_irradiance,
+        lamp_absorbed_power=None if exchanged is None else exchanged.lamp_absorbed_power,
+        cycles=None if exchanged is None else exchanged.cycles,
         medium_absorbed_power=medium,
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class _Exchange:
+    """The facets that exchange reflected light: every reflector, then every areal lamp facet.
+
+    The lamps' facets carry no emission here -- the lamps' own light arrives from outside the solve,
+    gathered with their profiles -- only their geometry and their diffuse reflectance, so each lamp
+    reflects and shadows as a wall does. A point source has no surface and is left out.
+
+    Attributes
+    ----------
+    surfaces : Surfaces
+        The reflectors' facets followed by the lamps' areal facets, with their bodies' names.
+    n_reflector_facets : int
+        How many of the facets are the reflectors'; the rest are the lamps'.
+    lamp_facets : np.ndarray of int, shape ``(n_surfaces - n_reflector_facets,)``
+        Which facet of :attr:`Scene.lamps` each of the rest is.
+    """
+
+    surfaces: Surfaces
+    n_reflector_facets: int
+    lamp_facets: np.ndarray
+
+    @classmethod
+    def of(cls, scene: Scene) -> _Exchange | None:
+        """The exchanging facets of ``scene``; ``None`` when nothing can reflect.
+
+        Without reflectors and with no lamp that reflects, no light is ever sent back, so nothing
+        is exchanged and nothing is gathered as reflected -- the lamps' shadows on reflected light
+        then shadow nothing.
+        """
+        lamps, reflectors = scene.lamps, scene.reflectors
+        lamp_facets = np.flatnonzero(~lamps.is_point_source)
+        lamp_reflectance = np.asarray(lamps.diffuse_reflectance)[lamp_facets]
+        if reflectors is None and not np.any(lamp_reflectance > 0.0):
+            return None
+        pieces = [] if reflectors is None else [reflectors]
+        n_reflector_facets = 0 if reflectors is None else reflectors.n_facets
+        reflecting_names = () if reflectors is None else reflectors.solid_names
+        vertices = [np.asarray(piece.vertices) for piece in pieces]
+        solid_id = [np.asarray(piece.solid_id) for piece in pieces]
+        reflectance = [np.asarray(piece.diffuse_reflectance) for piece in pieces]
+        vertices.append(np.asarray(lamps.vertices)[lamp_facets])
+        solid_id.append(np.asarray(lamps.solid_id)[lamp_facets] + len(reflecting_names))
+        reflectance.append(lamp_reflectance)
+        surfaces = Surfaces.from_triangles(
+            np.concatenate(vertices),
+            solid_id=np.concatenate(solid_id),
+            solid_names=(*reflecting_names, *lamps.solid_names),
+            diffuse_reflectance=np.concatenate(reflectance),
+            point_sources=(),
+        )
+        return cls(surfaces, n_reflector_facets, lamp_facets)
+
+
+@dataclasses.dataclass(frozen=True)
+class _Exchanged:
+    """What the surface solve gives each exchanging facet, split back into reflectors and lamps."""
+
+    radiosity: np.ndarray
+    reflector_radiosity: np.ndarray | None
+    reflector_irradiance: np.ndarray | None
+    lamp_irradiance: np.ndarray
+    lamp_absorbed_power: float
+    cycles: int
+
+
+def _solve_exchange(scene: Scene, exchange: _Exchange, solver, say) -> _Exchanged:
+    """Solve the reflected light among the exchanging facets, lit from outside by the lamps.
+
+    The lamps' light on each facet is averaged over its sub-triangle centroids, in the facet's own
+    plane. On a lamp facet the facet is named as those points' own: left out of their shadow test,
+    and of the light gathered at them, since a facet lights nothing in its own plane.
+    """
+    surfaces, lamps = exchange.surfaces, scene.lamps
+    samples = subtriangle_centroids(surfaces.vertices, scene.lamp_samples)
+    per_facet = samples.shape[1]
+    normals = np.repeat(np.asarray(surfaces.normal)[:, None, :], per_facet, axis=1)
+    say(
+        f"exchange: {exchange.n_reflector_facets} reflector and "
+        f"{len(exchange.lamp_facets)} lamp facets; the lamps' light on them at "
+        f"{samples.shape[0] * per_facet} points"
+    )
+    split = exchange.n_reflector_facets
+    external = np.zeros(samples.shape[:2])
+    if split:
+        external[:split] = _irradiance(
+            scene, lamps, samples[:split].reshape(-1, 3), normals[:split].reshape(-1, 3)
+        ).reshape(split, per_facet)
+    if len(exchange.lamp_facets):
+        external[split:] = _irradiance(
+            scene,
+            lamps,
+            samples[split:].reshape(-1, 3),
+            normals[split:].reshape(-1, 3),
+            own=np.repeat(exchange.lamp_facets, per_facet)[:, None],
+        ).reshape(-1, per_facet)
+    say("exchange: building the facet-to-facet transfer")
+    model = build_radiation_model(
+        np.zeros((0, 3)), surfaces, occluders=scene.occluders, settings=scene.settings_for(surfaces)
+    )
+    landing, solved_cycles = surface_irradiance(
+        model,
+        surfaces,
+        absorption=scene.absorption,
+        external_irradiance=jnp.asarray(external.mean(axis=1)),
+        solver=solver,
+    )
+    arriving = np.asarray(landing)
+    cycles = int(solved_cycles)
+    say(f"exchange: radiosity solved in {cycles} restart cycle(s)")
+    # What each facet sends out is what it reflects: the lamps' own light is gathered apart.
+    reflectance = np.asarray(surfaces.diffuse_reflectance)
+    radiosity = reflectance * arriving
+    lamp_irradiance = np.zeros(lamps.n_facets)
+    lamp_irradiance[exchange.lamp_facets] = arriving[split:]
+    absorbed = (1.0 - reflectance[split:]) * arriving[split:] * np.asarray(surfaces.area)[split:]
+    has_reflectors = scene.reflectors is not None
+    return _Exchanged(
+        radiosity=radiosity,
+        reflector_radiosity=radiosity[:split] if has_reflectors else None,
+        reflector_irradiance=arriving[:split] if has_reflectors else None,
+        lamp_irradiance=lamp_irradiance,
+        lamp_absorbed_power=float(np.sum(absorbed)),
+        cycles=cycles,
     )
 
 
@@ -498,8 +643,9 @@ def _irradiance(
     """Irradiance from ``sources`` at oriented points, a pass of points at a time.
 
     Each pass builds the mask for its own points and drops it, so memory is a pass's whatever the
-    number of points. ``own`` gives, per point, the facet of ``sources`` it lies on, which the shadow
-    test leaves out at the point's end of every ray.
+    number of points. ``own`` gives, per point, the facets of ``sources`` it lies on, as
+    :func:`_own_facets` returns them: the shadow test leaves them out at the point's end of every ray,
+    and the gather leaves them out as sources, since a facet lights nothing in its own plane.
     """
     pair_limit = _pair_limit(scene.settings)
     if not _casts_shadows(scene):
@@ -510,6 +656,7 @@ def _irradiance(
                 jnp.asarray(normals),
                 absorption=scene.absorption,
                 pair_limit=pair_limit,
+                receiver_facet=own,
             )
         )
     per_pass = receivers_per_pass(pair_limit, sources.n_facets * max(1, len(scene.occluders)))
@@ -519,14 +666,15 @@ def _irradiance(
         stop = min(start + per_pass, len(points))
         chunk = points[start:stop]
         facet = None if own is None else own[start:stop]
+        shadow_facet = facet
         if facet is not None and isinstance(options.get("self_occlusion"), SilhouetteOcclusion):
             # The clip projects its shares about one facet's normal: the nearest.
-            facet = facet[:, 0]
+            shadow_facet = facet[:, 0]
         visibility = build_visibility(
             scene.occluders,
             sources,
             chunk,
-            receiver_facet=facet,
+            receiver_facet=shadow_facet,
             pair_limit=pair_limit,
             **options,
         )
@@ -538,18 +686,22 @@ def _irradiance(
                 absorption=scene.absorption,
                 visibility=visibility,
                 pair_limit=pair_limit,
+                receiver_facet=facet,
             )
         )
     return out
 
 
-def _own_facets(surfaces: Surfaces, body: str, points: np.ndarray) -> np.ndarray:
+def _own_facets(surfaces: Surfaces, body: str | None, points: np.ndarray) -> np.ndarray | None:
     """The facets of ``body`` each point lies on: the nearest, and any as near as it.
 
     A point on a shared edge or vertex lies on several -- a face centre is the vertex all the
     triangles of its own centre fan share -- and every one of them must be left out of the shadow
-    test. Returned as ``(n_points, k)`` rows, ``-1`` filling a row that names fewer.
+    test. Returned as ``(n_points, k)`` rows, ``-1`` filling a row that names fewer; ``None`` when
+    the points lie on no body of ``surfaces``, so nothing is left out.
     """
+    if body is None or body not in surfaces.solid_names:
+        return None
     candidates = np.flatnonzero(np.asarray(surfaces.solid_id) == surfaces.solid_names.index(body))
     corners = np.asarray(surfaces.vertices)[candidates]
     count = min(_OWN_FACET_CANDIDATES, len(candidates))

@@ -114,7 +114,8 @@ from aquaflux.turbulence import (
     solve_reynolds_continuation,
     strain_rate_magnitude,
 )
-from aquaflux.turbulence.coupled import coupled_scaled_norm, positive_k_limit  # noqa: E402
+from aquaflux.turbulence.coupled import positive_k_limit  # noqa: E402
+from aquaflux.turbulence.measures import coupled_scaled_norm  # noqa: E402
 from aquaflux.vectors import dot  # noqa: E402
 
 #: Every reconstruction this case can run, so the comparison is not confined to the two that differ

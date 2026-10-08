@@ -91,7 +91,7 @@ from .radiation import (
     SurfaceSource,
     UniformMedium,
 )
-from .run import PreparedRun, RunRecord, prepare_run
+from .run import PreparedRun, RunPlan, RunRecord, plan_run, prepare_run
 from .solver import (
     CoupledMarch,
     FlowMarch,
@@ -161,6 +161,7 @@ __all__ = [
     "Receivers",
     "RootSolve",
     "RunFields",
+    "RunPlan",
     "RunRecord",
     "Segregated",
     "SolverSpec",
@@ -177,6 +178,7 @@ __all__ = [
     "case_spec_from_mapping",
     "case_spec_to_mapping",
     "mesh_source_from_mapping",
+    "plan_run",
     "prepare_run",
     "read_case",
     "read_case_document",

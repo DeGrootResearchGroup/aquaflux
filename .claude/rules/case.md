@@ -64,7 +64,7 @@ F frozen solver → G drive.
 | `boundaries.py` | `PatchCondition` → `Inlet` / `Outlet` / `Wall` / `Lamp`; `InletTurbulence` → `FixedTurbulence` |
 | `radiation.py` | the radiation vocabulary: `LampProfile` → `LambertianProfile` / `CosinePowerProfile` / `IesProfile`; `UniformMedium`; `SurfaceSource` → `MeshPatch` / `StlSurface` / `CadSurface` (+ `Coarsen`, `CadPlacement`); `OccluderSpec` → `PatchBody` / `StlBody` / `CadSolid` / `CadFluid`; `Receivers`; the internal `PatchSurface`, `_Drawings`, `_facing` |
 | `paths.py` | `named_paths` / `with_paths` / `relocated`: every value naming a file declares `path_fields` (a `ClassVar`), found at any depth for the existence check; `relocated(value, source, target)` is THE re-basing rule (relative → re-based, absolute kept, `outputs.directory` never — it names no file), used by the `case.yaml` run record and `aquaflux write --relative-to` |
-| `solver.py` | `SolverSpec` → `CoupledMarch` / `FlowMarch` (both on the private `_March`, their shared settings) / `Segregated` / `RadiationSolve`; `ViscosityRamp`; `RootSolve`; `solver_for(spec)`; `NotConverged`; each kind's `observers_for(logger, checkpointer)` |
+| `solver.py` | `SolverSpec` → `CoupledMarch` / `FlowMarch` (both on the private `_March`, their shared settings) / `Segregated` / `RadiationSolve`; `ViscosityRamp`; `RootSolve`; `solver_for(spec)`; `NotConverged`; each kind's `observers_for(logger, recorder)` |
 | `outputs.py` | `Outputs(directory, fields, log, history, checkpoints)`; `RunFields(cells, patches)`; `FieldWriter` → `Vtk` / `OpenFOAMTime` / `PatchVtk`; `Checkpoints` |
 | `run.py` | `prepare_run(path, overwrite)` → `PreparedRun.run(terminal)` → `RunRecord` |
 | `aquaflux/__main__.py` | the `aquaflux check` / `aquaflux run` command (console script `aquaflux`) — the ONE module outside `case/` allowed to import it |
@@ -335,7 +335,12 @@ by construction), and not passing `drive` (the only nameable drive is the builde
   one-line "refused file".
 - **`prepare_run` is the cheap stop**: read, refuse an occupied output directory (or an existing
   `OpenFOAMTime` target), resolve the solver (a bulk-velocity case with no solver is refused HERE), and
-  check the mesh — all before any geometry. `--overwrite` replaces the files the run writes and clears
+  check the mesh — all before any geometry. **What counts as occupied has one home, `run._plan`**, shared
+  with **`plan_run(path) -> RunPlan(directory, log, history, occupied)`** (2026-10-07), which answers the
+  same question without checking the mesh; `aquaflux plan case.yaml` prints it as
+  `{"error", "directory", "log", "history", "occupied"}` and `serve` answers it. The browser interface's
+  Run section asks it before offering to replace results (project owner, 2026-10-07: "only overwrite
+  with permission"). `--overwrite` replaces the files the run writes and clears
   `checkpoints/` (whose names collide across runs); anything else in the directory is left alone.
 - **Editing commands for a program (2026-10-05, for the browser interface's Setup section)** — `aquaflux
   schema` prints `case_schema()` (root `CaseSpec`, `one_form_sections`, and `_CASE_MAPPING.schema()`);
@@ -353,7 +358,7 @@ by construction), and not passing `drive` (the only nameable drive is the builde
   writes `OUT/mesh.vtu`, and prints `cells`, `dim`, boundary `patches` (name + face count, holding faces
   only) and `groups`.
 - **`aquaflux serve` (2026-10-06, project owner: "build the persistent worker")** — answers `SERVED`
-  (`schema`/`show`/`write`/`mesh`/`check`, never `run`) one JSON line per request
+  (`schema`/`show`/`write`/`mesh`/`check`/`plan`, never `run`) one JSON line per request
   (`{"arguments", "stdin"}` → `{"status", "output", "errors"}`) by calling `main(arguments)` in-process
   with stdin/stdout/stderr swapped for strings; a `SystemExit` (argparse) or any exception becomes that
   request's status, and the loop goes on; Ctrl-C (run by hand) or a closed reply pipe ends it quietly. **Replies go on a `dup` of fd 1, and fd 1 is then pointed at
@@ -374,8 +379,11 @@ by construction), and not passing `drive` (the only nameable drive is the builde
 - **`outputs` is optional; its default writes `results/fields.vtu` + `results/march.log` +
   `results/history.csv`** (project owner, 2026-09-25; `history` added 2026-10-05 for the browser viewer's
   convergence plot). `history` is `solve.StepHistory` — one CSV row per step, every `StepReport` field
-  at full precision, flushed per row; the runner's `_StepCount` forwards each step to it and to the
-  checkpointer. Under `Segregated` (no steps) it holds the header only. `log` and `history` may not name
+  at full precision, flushed per row, plus refits, retry reasons and the per-equation residuals (see
+  `solve-march.md`); the runner's `_StepCount` forwards each march hook to every recorder that has it
+  (`on_checkpoint` to the history and the checkpointer; `on_retry`, `on_refresh` and `on_residuals` to
+  the history). Its header is written with the first row, so under `Segregated` (no steps) it stays
+  empty. `log` and `history` may not name
   the same file. `Outputs` is a `default_factory` field, so a file stating none round-trips with no section.
   Like `fluid`/`numerics`, the section may omit its `kind`; nested values (`Checkpoints`, writers) may not.
 - **Three writers, all the library's** (`PatchVtk` → `write_patches` since 2026-10-05, see Radiation cases): `Vtk` → `write_vtu` (any mesh) and `OpenFOAMTime` →
@@ -387,14 +395,19 @@ by construction), and not passing `drive` (the only nameable drive is the builde
 - **What is written is each physics' `output_fields(problem, solution)`** — `U`, `p` (the SOLVED pressure,
   not `coupled_fields`' gauge-free one), and under RANS `k`, `omega`, `nut`; the log's per-step field
   changes are `progress_fields(problem)` (`coupled_fields` for RANS, none for laminar).
-- **Each solver kind attaches the log and the checkpoints itself** (`observers_for`): a march wires
-  `on_checkpoint` (log + checkpointer, via `combine_observers`), `on_retry`, and `inner_observer` only
-  with a dual-time loop; `CoupledMarch` adds the session's refresh observer and the ramp's point label;
+- **Each solver kind attaches the log and the recorder itself** (`observers_for(logger, recorder)`): a
+  march wires `on_checkpoint` and `on_retry` to both (via `combine_observers`, in `solver._both`),
+  `on_residuals` to the recorder only when it has a taker (`_StepCount.on_residuals` is `None` without
+  one, since each costs a residual evaluation per step), and `inner_observer` only with a dual-time loop;
+  `CoupledMarch` adds the session's refresh observer (log and recorder) and the ramp's point label;
   `Segregated` gets nothing (#543). The runner never names a library keyword itself.
 - **A solve that stops short is a record, not an error**: `NotConverged` (the case layer's, raised by
   `Segregated` from the loop's own warning — a stopgap until #543) and `EquinoxRuntimeError` (the marches'
   non-root refusal) end the run with `converged: false`, no fields, but the log, checkpoints and records
-  written. Any other exception propagates. `_SEGREGATED_NOT_CONVERGED` is matched against the loop's
+  written. **An interrupt is one too (2026-10-07)**: `KeyboardInterrupt` during the solve — Ctrl-C, or
+  the browser interface's Stop, which sends SIGINT to the run's process group — records `message:
+  interrupted before it converged` and exits 1, so a stopped run leaves `run.yaml` rather than a
+  traceback and nothing. Any other exception propagates. `_SEGREGATED_NOT_CONVERGED` is matched against the loop's
   warning by its opening words, and a test asserts those words are in `solve_segregated`'s source.
 - **Provenance**: `case.yaml` is the spec as it ran — `solver_for(spec)` written out, relative mesh and
   `OpenFOAMTime.case` paths **re-based on the output directory** (`os.path.relpath`), `outputs.directory`
@@ -509,9 +522,11 @@ whose runs write what every run writes. Decisions taken with the owner before bu
   states `[_INTENSITYUNITS]` `W/sr` / `mW/sr` / `uW/sr`: then `photometry.flux * scale`. **The unit
   reading is the case layer's, deliberately** — `photometry.py`'s docstring says converting units is the
   caller's decision. A candela file with no power is refused at build. Exitance by `lamp_exitance`
-  (each lamp one body named by its patch, its own profile).
+  (each lamp one body named by its patch, its own profile). **`Lamp.reflectance`** (unset = 0, the same
+  `[0, 1]` check as `Wall.reflectance` through `boundaries._refuse_a_bad_reflectance`) becomes the lamp
+  facets' `diffuse_reflectance`; a lamp now reflects and shadows in the scene's exchange (#604 step 1).
 - **What is built is the library's `radiation.Scene`** (`radiation/scene.py`, see `radiation.md`): lamps
-  kept out of the transfer, reflectors, bodies, medium, `VolumeReceivers` (cell centroids + volumes),
+  whose emission is kept out of the transfer but whose facets exchange reflected light, reflectors, bodies, medium, `VolumeReceivers` (cell centroids + volumes),
   `SurfaceReceivers` per patch (face centroids, `-normal`, areas, reflectance, `reflector` = the patch's
   name when it reflects). Solved by `RadiationSolve(rtol)` → `solve_scene`, observer `report` = the log's
   `note`. **`Physics.build` now takes `directory`** (files are relative to the case file);
@@ -522,7 +537,8 @@ whose runs write what every run writes. Decisions taken with the owner before bu
   fields `E`, `E_absorbed` = (1−ρ)E, plus `E_direct`/`E_reflected`. Writers now take `RunFields(cells,
   patches)`; `Physics.output_patch_fields` and `Physics.results` default to empty for flow. `run.yaml`
   gains `results:` (lamp power and facets, reflector facets, radiosity cycles, `volume_integral_G`,
-  `medium_absorbed_power`, per patch `area`/`incident_power`/`absorbed_power`, `unaccounted_power`).
+  `medium_absorbed_power`, `lamp_absorbed_power` when anything reflects, per patch
+  `area`/`incident_power`/`absorbed_power`, `unaccounted_power` -- which subtracts the lamps' share).
 - **Files**: `CaseFile.check` refuses a missing file named under `physics` or `boundaries` (inputs; the
   mesh is checked by reading it, an `OpenFOAMTime` target is an output) before reading the mesh;
   `_write_case_record` re-bases every `path_fields` entry through `with_paths` — this replaced its two

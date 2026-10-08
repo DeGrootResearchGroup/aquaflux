@@ -22,10 +22,46 @@ from aquaflux.solve import BlockScaledNorm, NewtonStrategy, RowScaledNorm, block
 from .momentum import MomentumContinuity
 from .scales import characteristic_velocity
 
-__all__ = ["FlowMeasures", "flow_row_scales"]
+__all__ = ["FlowMeasures", "flow_equation_names", "flow_row_scales"]
 
 #: Keeps a row scale strictly positive so it can divide a residual row.
 _TINY = 1e-300
+
+#: The velocity components' names, in the order the flat state lays them out.
+_VELOCITY_NAMES = ("u", "v", "w")
+
+
+def flow_equation_names(dim: int) -> tuple[str, ...]:
+    """The flow state's solved equations, named, **in the order the flat state lays them out**.
+
+    ``(u, v, w, p)`` in three dimensions and ``(u, v, p)`` in two: one name per equal-sized block of
+    the flat layout ``[vel_0..vel_{dim-1}, pressure]``. A row-scaled flow measure names its blocks by
+    these, so a march's per-equation residuals arrive under them.
+
+    Parameters
+    ----------
+    dim : int
+        Number of velocity components (the spatial dimension), at most 3.
+
+    Returns
+    -------
+    tuple of str
+        The ``dim + 1`` block names, in block order.
+
+    Raises
+    ------
+    ValueError
+        If ``dim`` exceeds the three named velocity components.
+
+    Examples
+    --------
+    >>> flow_equation_names(2)
+    ('u', 'v', 'p')
+    """
+    if dim > len(_VELOCITY_NAMES):
+        raise ValueError(f"dim {dim} exceeds the named velocity components {_VELOCITY_NAMES}")
+    return (*_VELOCITY_NAMES[:dim], "p")
+
 
 #: The velocity field scale is never taken below this fraction of the characteristic speed. A state at
 #: rest has no speed of its own to scale by, and one just after it has so little that the rebuilt measure
@@ -136,6 +172,7 @@ class FlowMeasures(eqx.Module):
             sizes=(self.momentum.mesh.n_cells,) * self.momentum.layout.n_fields,
             row_scale=jax.lax.stop_gradient(row_scale),
             field_scale=jax.lax.stop_gradient(field_scale),
+            names=flow_equation_names(self.momentum.mesh.dim),
         )
 
     def block_scaled(self, state: jnp.ndarray) -> BlockScaledNorm:

@@ -371,7 +371,8 @@ mesh file). Use "face geometry" / "cell geometry".
     `centroid=Σ(d_i·n)c_i/|S|` (**signed** projected-area weights — the unsigned `Σ|d_i|c_i/Σ|d_i|`
     is wrong on a **non-convex** face, where a reflex vertex makes one fan triangle wind against
     `n`; `Σ|d_i|` is kept only for the planarity metric). Normalization is zero-safe (a degenerate
-    zero-area face yields a zero normal + finite gradient, never a NaN). **Deliberate deviation from the C++ node-0 fan (decided —
+    zero-area face yields a zero normal + finite gradient, never a NaN; the magnitudes are
+    `aquaflux.vectors.norm`, which was `face.py`'s private `_safe_magnitude` until #620 moved it there). **Deliberate deviation from the C++ node-0 fan (decided —
     do not revert):** the C++ used `area=Σ|d_i|` + a *sub-unit* normal that is
     vertex-order-dependent on **non-planar/warped faces** (common in real hex/polyhedral
     meshes). The centre fan gives `|S|` + unit normal for any polygon, vertex-order-

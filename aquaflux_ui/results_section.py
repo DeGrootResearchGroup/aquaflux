@@ -20,9 +20,10 @@ from trame.widgets import vuetify3 as v3
 from . import controls
 from .controls import COLORMAPS, MAGNITUDE
 from .history import ConvergenceHistory
+from .plots import base_figure
 from .scene import AXES, Scene, automatic_range, field_components, field_values
 from .sources import ResultSource
-from .theme import LIGHT, PLOT_STYLES, THEMES, colormap_gradient
+from .theme import LIGHT, THEMES, colormap_gradient
 from .widgets import icon_button, panel
 
 __all__ = ["ResultsSection", "convergence_figure"]
@@ -51,18 +52,7 @@ def convergence_figure(history: ConvergenceHistory | None, theme: str = LIGHT) -
     -------
     plotly.graph_objects.Figure
     """
-    style = PLOT_STYLES[theme if theme in PLOT_STYLES else LIGHT]
-    axis = {"gridcolor": style.grid, "zerolinecolor": style.grid, "linecolor": style.grid}
-    figure = go.Figure()
-    figure.update_layout(
-        margin={"l": 60, "r": 20, "t": 30, "b": 40},
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font={"family": "system-ui, sans-serif", "color": style.text, "size": 12},
-        xaxis={"title": "Step", **axis},
-        yaxis=axis,
-        legend={"orientation": "h", "y": 1.15, "x": 0},
-    )
+    figure, style = base_figure(theme)
     columns = {} if history is None else history.residual_columns()
     if not columns or history.n_steps == 0:
         figure.add_annotation(
