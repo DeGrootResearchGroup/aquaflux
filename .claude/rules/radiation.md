@@ -44,6 +44,8 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `images.py` — `mirrored_fluence_rate` / `summed_mirrored_fluence_rate`: one specular bounce into the volume, each source's image seen through each mirror's aperture (#537 PR 2, 2026-10-05) | **BUILT** (exported and wired into the model by PR 3a, which adds `mirrored_irradiance` and `plane_exchange`; shadowed through `shadows=` since PR 3b) |
 | `mirrors.py` — `Mirror` (a plane, its aperture facets, reflection and the image of a surface set) and `planar_mirrors` (a body's facets grouped by plane); the reflectance split on `Surfaces` (#537 PR 1, 2026-10-05) | **BUILT** (the model carries specular bodies since PR 3a, shadowed since PR 3b) |
 | `mirror_visibility.py` — `MirrorVisibility` / `build_mirror_visibility` / `build_mirror_masks`: what stands across each path reflected in one mirror, both legs, per body counted 0/1/2 (#537 PR 3b) | **BUILT** |
+| `refraction.py` — `Transparent` / `Media` (convex regions with an index and an absorption, nested), `fresnel_transmittance`, `Chain`, `solve_paths` -> `Paths`: the transmitted path between two points by a descent on the optical length (#604 step 2a, 2026-10-08) | **BUILT** |
+| `refracted.py` — `refracted_fluence_rate` / `refracted_irradiance` (each triangle's solid angle on its corners' arrival directions) and `build_refracted_visibility` -> `RefractedVisibility` (every leg of the centroid's path) (#604 step 2a) | **BUILT** (exported; not yet in the model, scene or transfer) |
 | `units.py` — lamp watts to exitance, ultraviolet transmittance to absorbance | **BUILT** |
 | `scene.py` — `Scene` / `solve_scene` / `SceneSolution`: lamps' EMISSION kept out of the transfer (any profile, incl. IES) while their areal facets EXCHANGE reflected light (reflect by `diffuse_reflectance`, shadow, absorb; #604 step 1, 2026-10-07), reflecting surfaces, bodies, medium, `VolumeReceivers` and named `SurfaceReceivers`; what a radiation case file builds (2026-10-05) | **BUILT** |
 
@@ -4505,8 +4507,18 @@ split by me into 2a (this: regions, Fresnel, the path solve, the refracted gathe
   source in another medium than a receiver is refused (no area to spread through a surface).
   `solids.ConvexSolid.face_distances` is the one solids addition: each face's own signed distance, so
   a crossing is held to ONE smooth face whose gradient is its normal.
-- **Not wired anywhere yet**: not exported from `aquaflux.radiation`, not in the model, the scene or
-  the transfer -- that is 2b.
+- **Exported from `aquaflux.radiation`** (`Media`, `Transparent`, `Chain`, `Paths`, `solve_paths`,
+  `fresnel_transmittance`, `refracted_fluence_rate`, `refracted_irradiance`,
+  `build_refracted_visibility`, `RefractedVisibility`; docs group "Transparent solids"), and **not in the
+  model, the scene or the transfer -- that is 2b**; the package docstring's refraction limitation says so.
+- **`tools/sibling_builders.py` pairs `build_refracted_visibility` with `build_visibility`** (both build a
+  `Visibility`, six shared parameters), reviewed and left: `media` is the refracted path's own;
+  `body_culling` certifies tiles of STRAIGHT segments, which a bent path is not; `receiver_facet` (receivers
+  sitting on facets) is not needed by volume receivers and arrives with the exchange in 2b.
+- **The corner mean is not the centroid**: at equal indices in a strongly absorbing medium (40 /m, the
+  test drum of 24 x 8 facets) the refracted gather differs from the direct one by 1-8 %, both being
+  second-order estimates of the absorption across a facet with different constants; at the far test
+  point 1.3 % -> 0.25 % from 24 x 8 to 48 x 16 facets. Equal to 1e-12 without absorption.
 - ⚠️ **NEWTON ON THE STATIONARITY CONDITIONS, STARTED FROM THE STRAIGHT LINE, RUNS AWAY NEAR AN
   INTERFACE -- the solve is a DESCENT ON THE OPTICAL LENGTH.** A source seen at grazing incidence
   through a surface close to the receiver has its true crossing far from where the straight line meets
@@ -4549,3 +4561,15 @@ split by me into 2a (this: regions, Fresnel, the path solve, the refracted gathe
   media absorbing; and the irradiance), 2.5e-3 at 32 cells a side, second order: air->water -0.60,
   -0.15, -0.04 % at 16/32/64; glass->air -0.52, -0.13, -0.03 %; receiver 0.2 mm off the plane -0.46,
   -0.11, -0.03 % at 32/64/128; the mask follows the refracted leg and not the straight line.
+- **Mutation pass, 25 breaks, 25 red after two tests were added** (`PYTHONDONTWRITEBYTECODE=1`, the tests
+  aimed at each): Fresnel's half, total reflection transmitting, the outermost region winning, each of
+  the three refusals, crossed regions counted beside a leg, the leg after leaving taken as the region,
+  the wrong face, no boundary check, Fresnel indices swapped, no leg absorption, the straight-through
+  exit Fresnel and excess absorption, no basin step, no line search, no implicit tangent, the index ratio
+  inverted and dropped, the plain kernel for irradiance, the mask's first leg only, corners mis-shared.
+  **First green, now red**: a single corner instead of the corner mean (symmetric fixtures cancelled it;
+  `test_with_every_index_equal_the_corners_absorption_converges_on_the_centroid_s`) and any corner seen
+  instead of all (`test_a_triangle_with_a_corner_that_has_no_path_carries_nothing`). **Dismissed**: the
+  crossing-direction check -- the descent finds the shortest path, which never turns back at a surface,
+  so no reachable input fails it; kept as a guard on what the solve returns.
+

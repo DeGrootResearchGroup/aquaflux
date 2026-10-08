@@ -147,7 +147,10 @@ def _optical_length_minimum(media, indices, surfaces, source, receiver, guess):
 
     def length(parameters):
         points = [np.asarray(source), *surfaces(parameters), np.asarray(receiver)]
-        return sum(n * np.linalg.norm(b - a) for n, a, b in zip(indices, points[:-1], points[1:]))
+        return sum(
+            n * np.linalg.norm(b - a)
+            for n, a, b in zip(indices, points[:-1], points[1:], strict=True)
+        )
 
     result = optimize.minimize(
         length,

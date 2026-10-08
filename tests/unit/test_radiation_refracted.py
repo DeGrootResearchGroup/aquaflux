@@ -177,6 +177,50 @@ def test_through_a_flat_interface_it_is_the_quadrature_over_the_receiver_s_direc
     assert got == pytest.approx(expected, rel=2.5e-3)
 
 
+def test_through_a_flat_interface_the_error_falls_at_second_order():
+    """Halving the cells quarters the error, which is what averaging over the corners buys.
+
+    The radiance, Fresnel share and absorption are taken as the mean over a triangle's three corners;
+    any one corner alone is right to first order only, and inside the tolerance above at 32 cells, so
+    the order is what tells them apart.
+    """
+    depth, height, half_width, exitance = 0.05, 0.05, 0.2, 10.0
+    expected = _through_a_plane(AIR, WATER, 3.0, 5.0, depth, height, half_width, exitance)
+    media = Media(
+        WATER,
+        (Transparent(HalfSpace([0, 0, 0], [0, 0, 1]), AIR, UniformAbsorption(3.0)),),
+        UniformAbsorption(5.0),
+    )
+    errors = []
+    for cells in (16, 32):
+        triangles = _square(half_width, cells, -depth)
+        surfaces = Surfaces.from_triangles(triangles).with_optics(
+            emission=jnp.full(len(triangles), exitance)
+        )
+        got = float(refracted_fluence_rate(surfaces, media, np.array([[0.0, 0.0, height]]))[0])
+        errors.append(abs(got / expected - 1.0))
+    assert errors[0] / errors[1] > 3.0
+
+
+def test_a_triangle_with_a_corner_that_has_no_path_carries_nothing():
+    """Under the end of a short air cylinder in glass, a corner high enough has no path out.
+
+    The path from it would leave by the side's extension beyond the flat end, so that corner is
+    absent; the triangle holding it is dropped whole rather than drawn from two real arrival
+    directions and the straight line the third started from. A triangle wholly below that height
+    is seen, so the zero is not a receiver that sees nothing at all.
+    """
+    media = Media(1.5, (Transparent(Cylinder([0, 0, 0], [0, 0, 1], 0.1, 0.1), 1.0),))
+    receiver = np.array([[0.3, 0.0, 0.115]])
+
+    def triangle(top):
+        corners = np.array([[[0.0, -0.005, 0.07], [0.0, 0.005, 0.07], [0.0, 0.0, top]]])
+        return Surfaces.from_triangles(corners).with_optics(emission=jnp.array([10.0]))
+
+    assert float(refracted_fluence_rate(triangle(0.085), media, receiver)[0]) > 0.0
+    assert float(refracted_fluence_rate(triangle(0.095), media, receiver)[0]) == 0.0
+
+
 def test_a_body_across_the_refracted_path_shadows_it_and_one_across_the_straight_line_does_not():
     """The mask follows the light, not the line from the receiver to the source.
 
@@ -262,3 +306,27 @@ def test_what_it_cannot_gather_is_refused():
         refracted_fluence_rate(surfaces, media, _POINTS, visibility=straight)
     with pytest.raises(ValueError, match="transmittance was given without a visibility mask"):
         refracted_fluence_rate(surfaces, media, _POINTS, transmittance=[0.5])
+
+
+def test_with_every_index_equal_the_corners_absorption_converges_on_the_centroid_s():
+    """In an absorbing medium the corner mean stands in for the direct gather's centroid.
+
+    Each is a second-order estimate of the absorption across a facet, with different constants, so
+    at a coarse arc they differ by a percent and the difference falls as the facets shrink; any one
+    corner alone is off by a quarter at the far receiver here. Taken at that receiver, the one whose
+    paths cross the most absorbing water.
+    """
+    absorbing = UniformAbsorption(40.0)
+    gap = Transparent(Cylinder([0, 0, 0], [0, 0, 1], 0.01025, 0.5), 1.3, absorbing)
+    media = Media(
+        1.3,
+        (Transparent(Cylinder([0, 0, 0], [0, 0, 1], 0.0115, 0.5), 1.3, absorbing, inside=(gap,)),),
+        absorbing,
+    )
+    point = _POINTS[2:3]
+    for (sectors, slices), tolerance in (((24, 8), 0.02), ((48, 16), 0.005)):
+        surfaces = Surfaces.from_triangles(_drum(0.0075, 0.2, sectors, slices))
+        surfaces = surfaces.with_optics(emission=jnp.full(surfaces.n_facets, 100.0))
+        got = float(refracted_fluence_rate(surfaces, media, point)[0])
+        direct = float(direct_fluence_rate(surfaces, point, absorption=absorbing)[0])
+        assert got == pytest.approx(direct, rel=tolerance)

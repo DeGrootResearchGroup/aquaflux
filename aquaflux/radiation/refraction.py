@@ -41,6 +41,7 @@ side, or back and forth inside the quartz -- is counted as lost at each reflecti
 from __future__ import annotations
 
 import dataclasses
+import itertools
 
 import equinox as eqx
 import jax
@@ -51,7 +52,7 @@ from aquaflux.radiation.absorption import Absorption
 from aquaflux.solids import ConvexSolid
 from aquaflux.vectors import dot, norm, norm_squared
 
-__all__ = ["Media", "Transparent", "fresnel_transmittance"]
+__all__ = ["Chain", "Media", "Paths", "Transparent", "fresnel_transmittance", "solve_paths"]
 
 #: Steps allowed per path. A path that exists converges quadratically once near it, in a handful;
 #: one that does not -- no transmitted path joins the two points, say beyond the critical angle --
@@ -518,7 +519,6 @@ def _one_path(media: Media, chain: Chain, source, receiver) -> Paths:
 
     start = jnp.stack(guess)
     z0 = with_multipliers(start)
-    largest_index = jnp.max(indices)
 
     def newton_step(crossing):
         """The step a Newton iteration on the stationarity conditions takes from ``crossing``.
@@ -616,9 +616,7 @@ def _one_path(media: Media, chain: Chain, source, receiver) -> Paths:
     found = jax.lax.stop_gradient(found) > 0.5
     crossing = z[: 3 * m].reshape(m, 3)
     full = jnp.concatenate([source[None], crossing, receiver[None]])
-    legs = full[1:] - full[:-1]
-    lengths = norm(legs)
-    directions = legs / jnp.where(lengths > 0.0, lengths, 1.0)[:, None]
+    _, directions = legs(crossing)
 
     valid = found
     transmittance = jnp.asarray(1.0)
@@ -627,13 +625,15 @@ def _one_path(media: Media, chain: Chain, source, receiver) -> Paths:
         normal = normal / norm(normal)
         before, after = dot(directions[k], normal), dot(directions[k + 1], normal)
         # Leaving, both legs head out through the outward normal; entering, both head in. A
-        # stationary path that turns back at the surface is a reflection, not this path.
+        # stationary path that turns back at the surface is a reflection, not this path. The
+        # descent finds the shortest path, which never turns back, so this is a guard on what the
+        # solve returns rather than a case it reaches.
         valid = valid & ((before > 0.0) & (after > 0.0) if out else (before < 0.0) & (after < 0.0))
         valid = valid & jnp.all(body.face_distances(crossing[k]) <= _ON_BOUNDARY * length_scale)
         transmittance = transmittance * fresnel_transmittance(before, indices[k], indices[k + 1])
 
     depth = jnp.asarray(0.0)
-    for leg, (start_point, end_point) in enumerate(zip(full[:-1], full[1:], strict=True)):
+    for leg, (start_point, end_point) in enumerate(itertools.pairwise(full)):
         medium = media.absorption_of(chain.legs[leg])
         if medium is not None:
             depth = depth + medium.optical_depth(start_point, end_point)

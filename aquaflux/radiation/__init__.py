@@ -65,11 +65,15 @@ respect to mesh-node positions gets no contribution from the fluence rate.
 
 **What it does not model, and what that costs.**
 
-- **Refraction and reflection at a quartz sleeve.** In water, Bolton (2000) puts the error of
-  neglecting them at a 6.5% reflection correction below 70% transmittance per centimetre, and up
-  to 25% above it. So for water this is a model for lower transmittances — wastewater, or the
-  70% water of the Sozzi & Taghipour (2006) reactor benchmark — and carries a systematic error of
-  that size at drinking-water transmittances.
+- **Refraction and reflection at a quartz sleeve, in the model.** In water, Bolton (2000) puts the
+  error of neglecting them at a 6.5% reflection correction below 70% transmittance per centimetre,
+  and up to 25% above it. So for water the model is one for lower transmittances — wastewater, or
+  the 70% water of the Sozzi & Taghipour (2006) reactor benchmark — and carries a systematic error
+  of that size at drinking-water transmittances. The direct gather through transparent solids is
+  available on its own (:func:`~aquaflux.radiation.refracted.refracted_fluence_rate`): each source
+  seen along its refracted path, with Fresnel losses at each surface and each medium's own
+  absorption, light reflected on the way counted as lost. It is not yet part of the model, the
+  scene or the surface transfer.
 - **Specular reflection beyond one flat bounce.** At the same reflectivity, fully specular and
   fully diffuse walls have been simulated 10–47% apart in log reduction (Hassanpour et al., 2023),
   so a surface set carries ``diffuse_reflectance`` and ``specular_reflectance`` separately. Bodies
@@ -146,6 +150,20 @@ from aquaflux.radiation.self_occlusion import (
 )
 from aquaflux.radiation.coarsen import Coarsening, coarsen_surfaces, coarsen_to_size
 from aquaflux.radiation.quadrature import TriangleQuadrature, triangle_quadrature
+from aquaflux.radiation.refracted import (
+    RefractedVisibility,
+    build_refracted_visibility,
+    refracted_fluence_rate,
+    refracted_irradiance,
+)
+from aquaflux.radiation.refraction import (
+    Chain,
+    Media,
+    Paths,
+    Transparent,
+    fresnel_transmittance,
+    solve_paths,
+)
 from aquaflux.radiation.receiver_shadows import FrozenShadows, ReceiverShadows, StreamedShadows
 from aquaflux.radiation.scene import (
     DEFAULT_LAMP_SAMPLES,
@@ -181,16 +199,19 @@ __all__ = [
     "AxisymmetricProfile",
     "BackFaces",
     "BodyCulling",
+    "Chain",
     "Coarsening",
     "CosinePower",
     "EveryPair",
     "FrozenShadows",
     "Isotropic",
     "Lambertian",
+    "Media",
     "Mirror",
     "MirrorVisibility",
     "NoOcclusion",
     "OcclusionField",
+    "Paths",
     "PhotometricProfile",
     "Photometry",
     "PlaneExchange",
@@ -199,6 +220,7 @@ __all__ = [
     "RadiationSettings",
     "RayCastOcclusion",
     "ReceiverShadows",
+    "RefractedVisibility",
     "Scene",
     "SceneSolution",
     "SelfOcclusion",
@@ -209,6 +231,7 @@ __all__ = [
     "SurfaceReceivers",
     "Surfaces",
     "TransferMatrix",
+    "Transparent",
     "TriangleBody",
     "TriangleQuadrature",
     "TriangleSoup",
@@ -220,6 +243,7 @@ __all__ = [
     "absorption_from_uvt",
     "build_mirror_visibility",
     "build_radiation_model",
+    "build_refracted_visibility",
     "build_transfer",
     "build_visibility",
     "check_points_outside",
@@ -231,6 +255,7 @@ __all__ = [
     "direct_irradiance",
     "enclosure_winding",
     "fluence_rate",
+    "fresnel_transmittance",
     "lamp_exitance",
     "mirrored_fluence_rate",
     "mirrored_irradiance",
@@ -243,10 +268,13 @@ __all__ = [
     "read_stl",
     "reciprocity_residual",
     "refine_for_receivers",
+    "refracted_fluence_rate",
+    "refracted_irradiance",
     "row_sum_error",
     "segment_is_cut",
     "signed_solid_angle",
     "solid_angle",
+    "solve_paths",
     "solve_scene",
     "stored_normal_disagreement",
     "subdivide_to_width",

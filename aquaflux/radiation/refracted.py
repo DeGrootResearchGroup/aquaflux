@@ -209,7 +209,7 @@ def build_refracted_visibility(
             target = corners[:, :, 1:].reshape(-1, 3)
             n_legs = corners.shape[2] - 1
             pair_near = np.broadcast_to(
-                near[group.facets][None, :, None], paths.shape[:2] + (n_legs,)
+                near[group.facets][None, :, None], (*paths.shape[:2], n_legs)
             )
             leg_near = pair_near.reshape(-1)
             cell = np.ix_(rows, group.facets)
@@ -220,7 +220,7 @@ def build_refracted_visibility(
                     )
                 ).reshape(len(rows), len(group.facets), n_legs)
                 blocked[index][cell] = np.any(crossed, axis=2)
-            source = np.broadcast_to(group.facets[None, :, None], paths.shape[:2] + (n_legs,))
+            source = np.broadcast_to(group.facets[None, :, None], (*paths.shape[:2], n_legs))
             first = np.zeros(n_legs, dtype=bool)
             first[0] = True
             exclude = np.where(first[None, None, :], source, -1).reshape(-1, 1)
@@ -370,7 +370,7 @@ def _group_field(surfaces, media, group: _Group, points, normals, layers, pair_l
     if normals is not None:
         arrays.append((jnp.take(normals, group.rows, axis=0), 0))
     if layers is not None:
-        blocked, hidden, transmittance = layers
+        blocked, hidden, _ = layers
         cell = np.ix_(group.rows, facets)
         arrays.append((blocked[:, cell[0], cell[1]], 1))
         if hidden is not None:
