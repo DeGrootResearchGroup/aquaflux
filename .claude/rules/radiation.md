@@ -44,6 +44,8 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `images.py` — `mirrored_fluence_rate` / `summed_mirrored_fluence_rate`: one specular bounce into the volume, each source's image seen through each mirror's aperture (#537 PR 2, 2026-10-05) | **BUILT** (exported and wired into the model by PR 3a, which adds `mirrored_irradiance` and `plane_exchange`; shadowed through `shadows=` since PR 3b) |
 | `mirrors.py` — `Mirror` (a plane, its aperture facets, reflection and the image of a surface set) and `planar_mirrors` (a body's facets grouped by plane); the reflectance split on `Surfaces` (#537 PR 1, 2026-10-05) | **BUILT** (the model carries specular bodies since PR 3a, shadowed since PR 3b) |
 | `mirror_visibility.py` — `MirrorVisibility` / `build_mirror_visibility` / `build_mirror_masks`: what stands across each path reflected in one mirror, both legs, per body counted 0/1/2 (#537 PR 3b) | **BUILT** |
+| `refraction.py` — `Transparent` / `Media` (convex regions with an index and an absorption, nested), `fresnel_transmittance`, `Chain`, `solve_paths` -> `Paths`: the transmitted path between two points by a descent on the optical length (#604 step 2a, 2026-10-08) | **BUILT** |
+| `refracted.py` — `refracted_fluence_rate` / `refracted_irradiance` (each triangle's solid angle on its corners' arrival directions) and `build_refracted_visibility` -> `RefractedVisibility` (every leg of the centroid's path) (#604 step 2a) | **BUILT** (exported; not yet in the model, scene or transfer) |
 | `units.py` — lamp watts to exitance, ultraviolet transmittance to absorbance | **BUILT** |
 | `scene.py` — `Scene` / `solve_scene` / `SceneSolution`: lamps' EMISSION kept out of the transfer (any profile, incl. IES) while their areal facets EXCHANGE reflected light (reflect by `diffuse_reflectance`, shadow, absorb; #604 step 1, 2026-10-07), reflecting surfaces, bodies, medium, `VolumeReceivers` and named `SurfaceReceivers`; one `settings` whose `two_sided` may name a body of the lamps or the reflectors (checked once against both, cut per build by `settings_for`, 2026-10-06); what a radiation case file builds (2026-10-05) | **BUILT** |
 
@@ -4593,3 +4595,105 @@ in the exchange** (default reflectance 0), which fixes the pass-through and cost
   a black facet sends nothing and shadows nothing); not re-run.
 - **Case**: `Lamp.reflectance` (see `case.md`), results `lamp_absorbed_power`, subtracted from
   `unaccounted_power`.
+
+### #604 STEP 2a: TRANSPARENT SOLIDS AND THE REFRACTED DIRECT GATHER (2026-10-08)
+
+**Agreed with the user** (2026-10-08): a transparent solid is a convex analytic body with an index and
+an absorption; the path between a source and a receiver crosses the surface of every region holding
+exactly one of them, once, in a fixed order; the crossings come from Fermat's principle, solved per
+path and differentiated by the implicit function theorem; the weight is the existing closed-form solid
+angle evaluated on the **arrival directions of the paths to a source triangle's three corners**, times
+the corners' mean of radiance x Fresnel x leg absorption, times `(n_receiver / n_source)^2`. Three
+choices put to the user: a region holding **neither** end (a neighbour's sleeve) is crossed **straight**
+(its absorption on the chord and the Fresnel loss at the straight chord's angles, no bending) with the
+error bounded by the tracer and exact handling a later step; **reflected branches are deferred to step
+4** (each Fresnel reflection is a loss); **library only**, case-file wiring a later small PR. Step 2 was
+split by me into 2a (this: regions, Fresnel, the path solve, the refracted gather and its leg masks) and
+2b (the model, the scene, the facet-to-facet exchange, the four-lamp tracer comparison, cost at scale)
+-- the same scope, two PRs, said to the user at the time.
+
+- **What is built.** `refraction.py`: `fresnel_transmittance` (unpolarized, zero past the critical
+  angle), `Transparent` (a `ConvexSolid`, an index, an `Absorption`, regions `inside` it), `Media` (the
+  surrounding index and absorption and the outermost regions; `nodes` depth first, `parents`,
+  `region_of` refusing a point within `1e-9` of the scene's size of a surface, in a region but not its
+  holder, or in two siblings), `Chain.between` (crossings out of every region round the source and into
+  every one round the receiver; the medium of each leg; the regions each leg passes straight through),
+  `solve_paths` -> `Paths` (departure, arrival, transmittance, valid, crossing points). `refracted.py`:
+  `refracted_fluence_rate`, `refracted_irradiance`, `build_refracted_visibility` ->
+  `RefractedVisibility` (wraps a `Visibility`: per body, receiver and facet, any leg of the path to the
+  facet's CENTROID blocked; the surface's own triangles one ray per leg, the source facet excluded on
+  the first leg). Pairs in one medium are the direct gather's and contribute nothing here. A point
+  source in another medium than a receiver is refused (no area to spread through a surface).
+  `solids.ConvexSolid.face_distances` is the one solids addition: each face's own signed distance, so
+  a crossing is held to ONE smooth face whose gradient is its normal.
+- **Exported from `aquaflux.radiation`** (`Media`, `Transparent`, `Chain`, `Paths`, `solve_paths`,
+  `fresnel_transmittance`, `refracted_fluence_rate`, `refracted_irradiance`,
+  `build_refracted_visibility`, `RefractedVisibility`; docs group "Transparent solids"), and **not in the
+  model, the scene or the transfer -- that is 2b**; the package docstring's refraction limitation says so.
+- **`tools/sibling_builders.py` pairs `build_refracted_visibility` with `build_visibility`** (both build a
+  `Visibility`, six shared parameters), reviewed and left: `media` is the refracted path's own;
+  `body_culling` certifies tiles of STRAIGHT segments, which a bent path is not; `receiver_facet` (receivers
+  sitting on facets) is not needed by volume receivers and arrives with the exchange in 2b.
+- **The corner mean is not the centroid**: at equal indices in a strongly absorbing medium (40 /m, the
+  test drum of 24 x 8 facets) the refracted gather differs from the direct one by 1-8 %, both being
+  second-order estimates of the absorption across a facet with different constants; at the far test
+  point 1.3 % -> 0.25 % from 24 x 8 to 48 x 16 facets. Equal to 1e-12 without absorption.
+- ⚠️ **NEWTON ON THE STATIONARITY CONDITIONS, STARTED FROM THE STRAIGHT LINE, RUNS AWAY NEAR AN
+  INTERFACE -- the solve is a DESCENT ON THE OPTICAL LENGTH.** A source seen at grazing incidence
+  through a surface close to the receiver has its true crossing far from where the straight line meets
+  the surface (0.2 mm against 0.6 mm at 3 mm separation), and plain Newton diverged there; the path
+  was reported absent and the facet dropped. On the sleeve this read as **-1.5 % to -2.1 % within
+  1-2 mm of the sleeve**, converged under refinement (so it looked like physics), and a flat-interface
+  quadrature with the receiver 0.2 mm off the plane read **-18 %**. A transmitted path minimizes the
+  optical length among paths crossing each surface once, so the length is a merit function: each step
+  is the Newton step on the Lagrangian (the optical length's curvature, written out, plus each face's
+  times its multiplier), else tangential steepest descent, moved back onto the faces (`onto`: exact
+  in one move for a plane, tube or ball) and taken at the longest of a ladder of halvings that
+  shortens the path. Inside `_BASIN = 1e-6` of the separation a Newton step is taken whole (the length
+  cannot resolve the fall), and convergence is the Newton step under `1e-10` of the separation --
+  a gradient tolerance was unreachable on short legs, where the curvature makes the gradient large.
+- ⚠️ **I ATTRIBUTED THAT -2 % TO PHYSICS FIRST, AND IT WAS NOT.** Paths to arc points far along the
+  axis came back absent and I explained it by the axial direction cosine Snell conserves -- wrong:
+  the air leg can run nearly axially, so those paths exist, and the globalized solve finds every one.
+  The check that found it was the closed form, not the reasoning: **a dropped path is the solver's
+  until a forward trace or a quadrature says otherwise.**
+- ⚠️ **A `while_loop` INSIDE A `while_loop` UNDER `vmap` NEVER ENDS.** The line search was a nested
+  loop; once one pair of a batch had finished its outer loop its inner loop stopped updating while
+  its own condition stayed true, and the batch hung (reproducible with two sources). The line search
+  is now a fixed ladder of 41 step sizes evaluated together.
+- ⚠️ **`Chain.beside` must leave out the crossed regions.** A leg leaving a region starts on its
+  surface; counted as passing straight through it, its chord came out a rounding long or zero and the
+  straight-through Fresnel factor at grazing zeroed paths at random (a flat-interface quadrature read
+  -13 to -16 %, not converging).
+- **Compiled once per chain and shape** (`_solve_paths`, `eqx.filter_jit`): eager calls cost 25 s
+  first and 4 s each after; compiled, 3.2 s to trace, 3.2 s to compile, ~1-2 ms a call. The optical
+  length's gradient and curvature are written out and each body's faces are built once per path,
+  which took tracing from 5.1 to 3.2 s (one sleeve chain, jax 0.10.2, CPU, Linux, 2026-10-08).
+- **Checks** (`tests/unit/test_radiation_refraction.py`, `test_radiation_refracted.py`): Fresnel
+  against the amplitude form at 60 angles, reciprocity and the critical angle; the innermost region
+  and every refusal; chains (out of a sleeve, into one, sibling to sibling); paths against a
+  general-purpose optimizer on the optical length (a flat interface incl. the grazing case; a skew path
+  out of a sleeve); a crossing off the end of its face is no path; the implicit derivative against a
+  finite difference (path and gather); a region beside the path at normal incidence = `(1 - R)^2`
+  times its excess absorption; equal indices = the direct gather to 1e-12 (fluence and irradiance);
+  **a flat interface against a quadrature over the receiver's directions** (both index orders, both
+  media absorbing; and the irradiance), 2.5e-3 at 32 cells a side, second order: air->water -0.60,
+  -0.15, -0.04 % at 16/32/64; glass->air -0.52, -0.13, -0.03 %; receiver 0.2 mm off the plane -0.46,
+  -0.11, -0.03 % at 32/64/128; the mask follows the refracted leg and not the straight line.
+- **Against the tracer** (`validation/sleeve_optics/check_refraction.py`, numbers in its README): one
+  sleeved lamp, 95 % UVT, 40M rays -- the transmitted paths agree within 1.5 standard errors at every
+  radius 12.5-60 mm; the reflected paths left out are worth < 0.5 %; the straight gather reads 12-25 %
+  high. Gather 90 s for 106,496 arc facets and 7 points, compile included (4-core Linux; 271 s before
+  the compile caching and the written-out derivatives).
+- **Mutation pass, 25 breaks, 25 red after two tests were added** (`PYTHONDONTWRITEBYTECODE=1`, the tests
+  aimed at each): Fresnel's half, total reflection transmitting, the outermost region winning, each of
+  the three refusals, crossed regions counted beside a leg, the leg after leaving taken as the region,
+  the wrong face, no boundary check, Fresnel indices swapped, no leg absorption, the straight-through
+  exit Fresnel and excess absorption, no basin step, no line search, no implicit tangent, the index ratio
+  inverted and dropped, the plain kernel for irradiance, the mask's first leg only, corners mis-shared.
+  **First green, now red**: a single corner instead of the corner mean (symmetric fixtures cancelled it;
+  `test_with_every_index_equal_the_corners_absorption_converges_on_the_centroid_s`) and any corner seen
+  instead of all (`test_a_triangle_with_a_corner_that_has_no_path_carries_nothing`). **Dismissed**: the
+  crossing-direction check -- the descent finds the shortest path, which never turns back at a surface,
+  so no reachable input fails it; kept as a guard on what the solve returns.
+
