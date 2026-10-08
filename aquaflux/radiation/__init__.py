@@ -72,8 +72,10 @@ respect to mesh-node positions gets no contribution from the fluence rate.
   of that size at drinking-water transmittances. The direct gather through transparent solids is
   available on its own (:func:`~aquaflux.radiation.refracted.refracted_fluence_rate`): each source
   seen along its refracted path, with Fresnel losses at each surface and each medium's own
-  absorption, light reflected on the way counted as lost. It is not yet part of the model, the
-  scene or the surface transfer.
+  absorption, light reflected on the way counted as lost. A :class:`Scene` takes the transparent
+  solids too (``media=``) and gathers the lamps' direct light through them, but only where nothing
+  exchanges light -- no reflecting surfaces, no lamp that reflects; the model and the surface
+  transfer do not yet carry light through them.
 - **Specular reflection beyond one flat bounce.** At the same reflectivity, fully specular and
   fully diffuse walls have been simulated 10–47% apart in log reduction (Hassanpour et al., 2023),
   so a surface set carries ``diffuse_reflectance`` and ``specular_reflectance`` separately. Bodies
@@ -163,6 +165,7 @@ from aquaflux.radiation.refraction import (
     Transparent,
     fresnel_transmittance,
     solve_paths,
+    straight_through,
 )
 from aquaflux.radiation.receiver_shadows import FrozenShadows, ReceiverShadows, StreamedShadows
 from aquaflux.radiation.scene import (
@@ -277,6 +280,7 @@ __all__ = [
     "solve_paths",
     "solve_scene",
     "stored_normal_disagreement",
+    "straight_through",
     "subdivide_to_width",
     "subtriangle_centroids",
     "surface_irradiance",

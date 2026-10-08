@@ -12,13 +12,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.radiation import UniformAbsorption
+from aquaflux.radiation import Surfaces, UniformAbsorption
 from aquaflux.radiation.refraction import (
     Chain,
     Media,
     Transparent,
     fresnel_transmittance,
     solve_paths,
+    straight_through,
 )
 from aquaflux.solids import Cylinder, HalfSpace, Sphere, Union
 from scipy import optimize
@@ -286,3 +287,46 @@ def test_a_region_beside_the_path_is_crossed_straight_with_its_fresnel_losses_an
     )
     normal = 1.0 - ((WATER - QUARTZ) / (WATER + QUARTZ)) ** 2
     assert ratio == pytest.approx(normal**2 * np.exp(-(absorbing - water) * 0.02), rel=1e-12)
+
+
+def _tiny_facets(centroids) -> Surfaces:
+    """One small triangle about each centroid, in the plane normal to x."""
+    corners = np.array([[0.0, -1.0, -1.0], [0.0, 2.0, -1.0], [0.0, -1.0, 2.0]]) * 1e-4 / 3
+    return Surfaces.from_triangles(np.asarray(centroids)[:, None, :] + corners[None])
+
+
+def test_a_straight_segment_through_a_sleeve_s_axis_loses_each_interface_and_each_excess_depth():
+    """Across a sleeve through its axis every crossing is at normal incidence.
+
+    So what gets past is ``(1 - R)^2`` at the water-quartz surfaces and at the quartz-air ones, and the
+    quartz and the air each absorb their excess over the water along their own chords -- the nesting
+    telescoped, the air's chord counted once in the air and not again in the quartz. A pair with its
+    two ends in different media gets nothing along the straight line, and one whose line misses the
+    sleeve gets it all.
+    """
+    water, quartz, air = 3.0, 11.0, 0.5
+    inner, outer = 0.01025, 0.0115
+    axis = [0.0, 0.0, 1.0]
+    gap = Transparent(Cylinder([0, 0, 0], axis, inner, 0.5), AIR, UniformAbsorption(air))
+    sleeve = Transparent(
+        Cylinder([0, 0, 0], axis, outer, 0.5), QUARTZ, UniformAbsorption(quartz), inside=(gap,)
+    )
+    media = Media(WATER, (sleeve,), UniformAbsorption(water))
+    facets = _tiny_facets([[-0.05, 0.0, 0.0], [0.0, 0.0, 0.002], [-0.05, 0.08, 0.0]])
+    points = np.array([[0.05, 0.0, 0.0], [0.05, 0.08, 0.0], [0.0, 0.005, 0.0]])
+    through = straight_through(media, facets, points)
+
+    def kept(n1, n2):
+        return 1.0 - ((n1 - n2) / (n1 + n2)) ** 2
+
+    expected = (
+        kept(WATER, QUARTZ) ** 2
+        * kept(QUARTZ, AIR) ** 2
+        * np.exp(-(quartz - water) * 2 * (outer - inner) - (air - water) * 2 * inner)
+    )
+    assert through[0, 0] == pytest.approx(expected, rel=1e-12)
+    assert through[1, 0] == through[0, 2] == through[1, 2] == 1.0  # These lines miss the sleeve.
+    assert through[0, 1] == 0.0 and through[2, 0] == 0.0  # Different media: refracted instead.
+    assert through[2, 1] == 1.0  # Both in the air gap, nothing inside it.
+    # However the pairs are cut into passes.
+    np.testing.assert_array_equal(straight_through(media, facets, points, pair_limit=2), through)

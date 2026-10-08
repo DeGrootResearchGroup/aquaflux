@@ -49,10 +49,20 @@ import jax.numpy as jnp
 import numpy as np
 
 from aquaflux.radiation.absorption import Absorption
+from aquaflux.radiation.triangles import padded_length
+from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, PASS_PAIRS
 from aquaflux.solids import ConvexSolid
 from aquaflux.vectors import dot, norm, norm_squared
 
-__all__ = ["Chain", "Media", "Paths", "Transparent", "fresnel_transmittance", "solve_paths"]
+__all__ = [
+    "Chain",
+    "Media",
+    "Paths",
+    "Transparent",
+    "fresnel_transmittance",
+    "solve_paths",
+    "straight_through",
+]
 
 #: Steps allowed per path. A path that exists converges quadratically once near it, in a handful;
 #: one that does not -- no transmitted path joins the two points, say beyond the critical angle --
@@ -276,6 +286,36 @@ class Media(eqx.Module):
             )
             raise ValueError(msg)
         return region
+
+    def region_of_facets(self, surfaces) -> np.ndarray:
+        """The medium each facet lies in, read at its centroid, refusing one that straddles a surface.
+
+        Parameters
+        ----------
+        surfaces : Surfaces
+            Read for its vertices and centroids, which must be concrete.
+
+        Returns
+        -------
+        numpy.ndarray of int, shape ``(n_facets,)``
+
+        Raises
+        ------
+        ValueError
+            If a facet's corners are not all in the medium its centroid is in: a facet must lie in
+            one medium. And as :meth:`region_of`, for a corner or centroid on a region's surface.
+        """
+        vertices = np.asarray(surfaces.vertices, dtype=float)
+        corners = self.region_of(vertices.reshape(-1, 3), "facet vertex").reshape(-1, 3)
+        centres = self.region_of(np.asarray(surfaces.centroid), "facet centroid")
+        split = np.flatnonzero(np.any(corners != centres[:, None], axis=1))
+        if len(split):
+            msg = (
+                f"{len(split)} facet(s) cross the surface of a transparent region (first few: "
+                f"{split[:8].tolist()}); a facet must lie in one medium."
+            )
+            raise ValueError(msg)
+        return centres
 
 
 def _walk(regions, parent):
@@ -649,6 +689,82 @@ def _one_path(media: Media, chain: Chain, source, receiver) -> Paths:
         valid=valid,
         points=crossing,
     )
+
+
+def straight_through(media: Media, surfaces, points, *, pair_limit: int = DEFAULT_PAIR_LIMIT):
+    """What the straight segment from each facet's centroid to each point gets past.
+
+    The factor a mask of straight segments carries for the transparent regions: where a facet and a
+    point lie in the same medium, the product over every region the segment passes through of the
+    Fresnel transmittances where the segment enters and leaves it, at the angles it meets the
+    region's surface there, and of the region's absorption along its chord in excess of the
+    medium's own -- which the gather already counts along the whole segment. Where the two lie in
+    different media it is **zero**: their light crosses a surface that bends it, and goes by a
+    refracted path (:mod:`~aquaflux.radiation.refracted`) instead.
+
+    Taken along the centroid's segment, as every shadow is, and frozen: worked out on the host from
+    the indices and absorptions given, with no derivative.
+
+    Parameters
+    ----------
+    media : Media
+    surfaces : Surfaces
+        The sources; read for their centroids, and their corners to place each facet in one medium.
+    points : array_like, shape ``(n_points, 3)``
+        The receivers, concrete.
+    pair_limit : int, optional
+        Pairs evaluated at once, at most; a pass is also held to
+        :data:`~aquaflux.radiation.work.PASS_PAIRS`.
+
+    Returns
+    -------
+    numpy.ndarray, shape ``(n_points, n_facets)``
+
+    Raises
+    ------
+    ValueError
+        If a point or a facet corner lies on a region's surface, or a facet straddles one.
+    """
+    points = np.asarray(points, dtype=float).reshape(-1, 3)
+    facet_region = media.region_of_facets(surfaces)
+    point_region = media.region_of(points, "receiver")
+    centroid = np.asarray(surfaces.centroid, dtype=float)
+    through = np.zeros((points.shape[0], surfaces.n_facets))
+    parents = media.parents
+    for medium in np.unique(point_region):
+        rows = np.flatnonzero(point_region == medium)
+        columns = np.flatnonzero(facet_region == medium)
+        if not len(columns):
+            continue
+        beside = Chain.between(parents, int(medium), int(medium)).beside[0]
+        if not beside:
+            through[np.ix_(rows, columns)] = 1.0
+            continue
+        count = len(rows) * len(columns)
+        chunk = padded_length(min(count, max(1, pair_limit), PASS_PAIRS))
+        for start in range(0, count, chunk):
+            # Padded to the chunk by repeating the last pair, so every pass shares one program.
+            flat = np.minimum(np.arange(start, start + chunk), count - 1)
+            row, column = rows[flat // len(columns)], columns[flat % len(columns)]
+            got = np.asarray(
+                _through_pairs(
+                    media, beside, jnp.asarray(centroid[column]), jnp.asarray(points[row])
+                )
+            )
+            kept = slice(0, min(chunk, count - start))
+            through[row[kept], column[kept]] = got[kept]
+    return through
+
+
+@eqx.filter_jit
+def _through_pairs(media: Media, beside: tuple, origin, target) -> jnp.ndarray:
+    """:func:`_straight_through` for many segments, as one factor each, compiled per shape."""
+
+    def one(start, end):
+        through, depth = _straight_through(media, beside, start, end)
+        return through * jnp.exp(-depth)
+
+    return jax.vmap(one)(origin, target)
 
 
 def _straight_through(media: Media, beside, origin, target):

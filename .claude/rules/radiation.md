@@ -44,8 +44,8 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `images.py` — `mirrored_fluence_rate` / `summed_mirrored_fluence_rate`: one specular bounce into the volume, each source's image seen through each mirror's aperture (#537 PR 2, 2026-10-05) | **BUILT** (exported and wired into the model by PR 3a, which adds `mirrored_irradiance` and `plane_exchange`; shadowed through `shadows=` since PR 3b) |
 | `mirrors.py` — `Mirror` (a plane, its aperture facets, reflection and the image of a surface set) and `planar_mirrors` (a body's facets grouped by plane); the reflectance split on `Surfaces` (#537 PR 1, 2026-10-05) | **BUILT** (the model carries specular bodies since PR 3a, shadowed since PR 3b) |
 | `mirror_visibility.py` — `MirrorVisibility` / `build_mirror_visibility` / `build_mirror_masks`: what stands across each path reflected in one mirror, both legs, per body counted 0/1/2 (#537 PR 3b) | **BUILT** |
-| `refraction.py` — `Transparent` / `Media` (convex regions with an index and an absorption, nested), `fresnel_transmittance`, `Chain`, `solve_paths` -> `Paths`: the transmitted path between two points by a descent on the optical length (#604 step 2a, 2026-10-08) | **BUILT** |
-| `refracted.py` — `refracted_fluence_rate` / `refracted_irradiance` (each triangle's solid angle on its corners' arrival directions) and `build_refracted_visibility` -> `RefractedVisibility` (every leg of the centroid's path) (#604 step 2a) | **BUILT** (exported; not yet in the model, scene or transfer) |
+| `refraction.py` — `Transparent` / `Media` (convex regions with an index and an absorption, nested; `Media.region_of_facets`), `fresnel_transmittance`, `Chain`, `solve_paths` -> `Paths`: the transmitted path between two points by a descent on the optical length (#604 step 2a, 2026-10-08); `straight_through`, the straight segment's factor for a mask (#604 step 2b-i) | **BUILT** |
+| `refracted.py` — `refracted_fluence_rate` / `refracted_irradiance` (each triangle's solid angle on its corners' arrival directions) and `build_refracted_visibility` -> `RefractedVisibility` (every leg of the centroid's path; `receiver_facet` excluded on the last leg since 2b-i) (#604 step 2a) | **BUILT** (in the scene's direct light since 2b-i; not yet in the model or the transfer — 2b-ii) |
 | `units.py` — lamp watts to exitance, ultraviolet transmittance to absorbance | **BUILT** |
 | `scene.py` — `Scene` / `solve_scene` / `SceneSolution`: lamps' EMISSION kept out of the transfer (any profile, incl. IES) while their areal facets EXCHANGE reflected light (reflect by `diffuse_reflectance`, shadow, absorb; #604 step 1, 2026-10-07), reflecting surfaces, bodies, medium, `VolumeReceivers` and named `SurfaceReceivers`; one `settings` whose `two_sided` may name a body of the lamps or the reflectors (checked once against both, cut per build by `settings_for`, 2026-10-06); what a radiation case file builds (2026-10-05) | **BUILT** |
 
@@ -4696,4 +4696,59 @@ split by me into 2a (this: regions, Fresnel, the path solve, the refracted gathe
   instead of all (`test_a_triangle_with_a_corner_that_has_no_path_carries_nothing`). **Dismissed**: the
   crossing-direction check -- the descent finds the shortest path, which never turns back at a surface,
   so no reachable input fails it; kept as a guard on what the solve returns.
+
+### #604 STEP 2b-i: TRANSPARENT SOLIDS IN THE SCENE'S DIRECT LIGHT (2026-10-08)
+
+**Agreed with the user** (2026-10-08, after 2a merged as #638): 2b in two PRs — **2b-i** (this: media in
+the `Scene`, the lamps' direct light routed by medium, the straight-through factor, the four-lamp
+black-wall tracer check) and **2b-ii** (the refracted facet-to-facet transfer, the model's `media=`, the
+reflecting-wall tracer check, cost at Sozzi scale). For 2b-ii, decided: refracted transfer pairs keep the
+**surrounding absorption live** (per corner, the water leg's length stored sparsely beside the frozen
+solid angle, Fresnel and in-region absorption; indices and region absorptions frozen, a traced `Media`
+refused by the model), and use the transfer's **own receiver quadrature** (six points), cost measured
+before anything coarser is considered. ⚠️ **Deviation, said here so it is not mistaken for scope**: the
+2b-i option text read "media in Scene and the model's direct and volume gathers"; the model's gathers
+went to 2b-ii with its transfer, because a model with media but a straight transfer would carry lamp
+light refracted and the walls' light not.
+
+- **`Scene.media`** (`Media | None`). With it, `Scene.absorption` must be unset (refused: the medium
+  would have two absorptions) and `Scene.medium` reads `media.absorption`. **Refused, `NotImplementedError`,
+  when anything exchanges** (`_Exchange.of(scene) is not None`: reflectors, or a lamp that reflects) —
+  the transfer has no refraction until 2b-ii.
+- **Routing** (`scene._by_medium`): each point is lit by the sources in **its own** medium along straight
+  lines, in `media.absorption_of(its medium)` (not the scene's — a point in a sleeve's air gap is lit
+  through air), and by the sources in **other** media along refracted paths (`scene._refracted`, a mask
+  per pass from `build_refracted_visibility`, then `refracted_fluence_rate` / `refracted_irradiance`).
+  With media, the straight half always builds masks (streamed for the volume, per pass for oriented
+  points), because the mask is what removes the cross-medium pairs.
+- **`Visibility.through`** (float `(n_receivers, n_facets)` or `None`), built by
+  `build_visibility(..., media=)` from `refraction.straight_through`: for a pair in one medium, the
+  Fresnel losses where the straight segment enters and leaves each region it passes and those regions'
+  absorption **in excess of the medium's own** (telescoped through nesting, as 2a's `_straight_through`);
+  **zero** for a pair in different media (its light is the refracted gather's). Frozen. `surviving_fraction`
+  multiplies it in; **the gathers now read a mask's layers by name** (`Visibility.layers()` ->
+  `(kinds, (array, axis) pairs)`, `surviving_from_layers`; `gather._Layers` carries the kinds), not by
+  position — the positional `blocked, *hidden` unpacking could not take a third layer. Built
+  `None` when the media have no regions, so a scene without regions costs nothing new.
+- `straight_through` evaluates pairs a pass at a time, `min(pair_limit, PASS_PAIRS)` padded to a power
+  of two (`_through_pairs`, `eqx.filter_jit` over the beside tuple, compiled per medium). A medium with
+  no region inside it is all ones without evaluating anything.
+- **`build_refracted_visibility(..., receiver_facet=)`**: the last leg of a refracted path ends in the facet
+  a point lies on, and the ray test read that facet as a blocker — so points on one lamp lit by another
+  were dark. Excluded on the last leg as `build_visibility` excludes it on the one leg.
+- `Media.region_of_facets(surfaces)` is the one home of "a facet lies in one medium" (moved from
+  `refracted._facet_regions`; there is no such function any more).
+- **Tests** (`test_radiation_scene_media.py`, and the straight-through test in
+  `test_radiation_refraction.py`): equal indices and no absorption = the scene with no media, to 1e-10,
+  fluence and irradiance, points in the water and in a gap, two lamps; a gap point takes its own lamp
+  through the air's absorption, and the medium's absorbed power uses each point's own coefficient; a quartz
+  ball centred on the line in water = the straight gather times `(1 - R)^2 exp(-Δμ 2a)` to 1e-12; points on
+  a lamp named by its body = points 1e-7 in front of it (RayCast); the refusals; `straight_through` across a
+  sleeve through its axis = the closed form (Fresnel at all four surfaces, the two excesses telescoped) to
+  1e-12, cross-medium zero, misses one, independent of the pass size. **Mutation pass, 14 breaks, 14 red**
+  (after adding a third facet so a pass-index slip is visible — with one column per medium
+  `flat // n_columns` and `flat % n_rows` coincide): refracted fluence or irradiance dropped, the streamed
+  or the held mask without media, one absorption for every medium, one coefficient for the medium's power,
+  no last-leg exclusion, `through` ignored in `surviving_fraction` or in the segment gather, the beside
+  regions not evaluated, cross-medium pairs ones, the pass misindexed, both refusals.
 

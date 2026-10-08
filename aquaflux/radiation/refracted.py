@@ -92,7 +92,7 @@ class _Group:
 
 def _plan(surfaces: Surfaces, media: Media, points: np.ndarray) -> tuple[_Group, ...]:
     """Every group of pairs with a crossing, worked out on the host from concrete positions."""
-    facet_region = _facet_regions(surfaces, media)
+    facet_region = media.region_of_facets(surfaces)
     receiver_region = media.region_of(points, "receiver")
     parents = media.parents
     groups = []
@@ -121,27 +121,13 @@ def _plan(surfaces: Surfaces, media: Media, points: np.ndarray) -> tuple[_Group,
     return tuple(groups)
 
 
-def _facet_regions(surfaces: Surfaces, media: Media) -> np.ndarray:
-    """The medium each facet emits into, refusing a facet whose corners are in different ones."""
-    vertices = np.asarray(surfaces.vertices, dtype=float)
-    corners = media.region_of(vertices.reshape(-1, 3), "facet vertex").reshape(-1, 3)
-    centres = media.region_of(np.asarray(surfaces.centroid), "facet centroid")
-    split = np.flatnonzero(np.any(corners != centres[:, None], axis=1))
-    if len(split):
-        msg = (
-            f"{len(split)} facet(s) cross the surface of a transparent region (first few: "
-            f"{split[:8].tolist()}); a facet must lie in one medium."
-        )
-        raise ValueError(msg)
-    return centres
-
-
 def build_refracted_visibility(
     occluders,
     surfaces: Surfaces,
     media: Media,
     points,
     *,
+    receiver_facet=None,
     self_occlusion: SelfOcclusion | None = None,
     offset_scale: float = 1e-6,
     pair_limit: int = DEFAULT_PAIR_LIMIT,
@@ -161,7 +147,12 @@ def build_refracted_visibility(
         The emitting set; paths start at facet centroids.
     media : Media
     points : array_like, shape ``(n_receivers, 3)``
-        Receiver positions, in the volume.
+        Receiver positions.
+    receiver_facet : array_like of int, shape ``(n_receivers,)`` or ``(n_receivers, k)``, optional
+        The facets of ``surfaces`` each receiver lies on, ``-1`` for none, left out of the test of
+        the last leg, which ends in them. As for
+        :func:`~aquaflux.radiation.visibility.build_visibility`: omitted where it applies, a
+        receiver on a facet reads that facet as blocking every path to it.
     self_occlusion : SelfOcclusion, optional
         How the surface's own triangles are tested; each leg is one ray whatever the strategy, as
         for a mirror's two legs. Defaults to
@@ -190,6 +181,11 @@ def build_refracted_visibility(
     hidden = None
     centroid = np.asarray(surfaces.centroid, dtype=float)
     near = offset_scale * np.sqrt(np.asarray(surfaces.area, dtype=float))
+    own = (
+        np.full((n_points, 1), -1, dtype=int)
+        if receiver_facet is None
+        else np.asarray(receiver_facet, dtype=int).reshape(n_points, -1)
+    )
     for group in _plan(surfaces, media, host_points):
         per_pass = receivers_per_pass(pair_limit, len(group.facets))
         for start in range(0, len(group.rows), per_pass):
@@ -220,10 +216,11 @@ def build_refracted_visibility(
                     )
                 ).reshape(len(rows), len(group.facets), n_legs)
                 blocked[index][cell] = np.any(crossed, axis=2)
-            source = np.broadcast_to(group.facets[None, :, None], (*paths.shape[:2], n_legs))
-            first = np.zeros(n_legs, dtype=bool)
-            first[0] = True
-            exclude = np.where(first[None, None, :], source, -1).reshape(-1, 1)
+            # The first leg leaves the source facet, and the last ends in the receiver's own.
+            exclude = np.full((*paths.shape[:2], n_legs, 1 + own.shape[1]), -1, dtype=int)
+            exclude[:, :, 0, 0] = group.facets[None, :]
+            exclude[:, :, -1, 1:] = own[rows][:, None, :]
+            exclude = exclude.reshape(-1, exclude.shape[-1])
             cut = strategy.segments_hidden(surfaces, origin, target, leg_near, exclude)
             if cut is not None:
                 if hidden is None:
