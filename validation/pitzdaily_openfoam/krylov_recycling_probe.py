@@ -195,8 +195,10 @@ def gcro_dr(apply, b, measure, rtol, restart, depth, recycled):
 def load(directory):
     states = {}
     for path in sorted(directory.glob("state-*.npz")):
+        # Keyed by the FILE's index, the number of steps completed: the record's own `step` field
+        # counts from zero, so `state-00017` holds step 16 -- the state step 18 (one-based) starts from.
         with np.load(path) as data:
-            states[int(data["step"])] = {k: np.asarray(data[k]) for k in data.files}
+            states[int(path.stem.split("-")[1])] = {k: np.asarray(data[k]) for k in data.files}
     inner = {}
     for path in sorted(directory.glob("inner-*.npz")):
         with np.load(path) as data:
@@ -302,7 +304,8 @@ def main():
             counts = {"lineax": 1 + (RESTART + 1) * (raw - 1)}
 
             def apply(v, assembler=assembler, p=p, shift=shift):
-                return np.asarray(preconditioned(assembler, p, shift, jnp.asarray(v)))
+                # A copy: an array viewed from JAX is read-only, and the Arnoldi loop works in place.
+                return np.array(preconditioned(assembler, p, shift, jnp.asarray(v)))
 
             def norm(v, measure=measure):
                 return float(measured(measure, jnp.asarray(v)))
