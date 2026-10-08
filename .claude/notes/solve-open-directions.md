@@ -58,6 +58,8 @@ tighten most of the time. The gain is the loose end, which needs no schedule.
 
 ## 4b. Loosen the fixed inner forcing term from 0.3
 
+**Deferred — tracked in #637** (needs bfs3d and a robustness check before any default moves).
+
 **What.** Raise `LinearSolveSettings.rtol` (the `_VCYCLE_LINEAR_SOLVE` / `VCYCLE_LINEAR_SOLVE` family
 value, and the case files' `linear_solve.rtol`) from 0.3 to ~0.6.
 
