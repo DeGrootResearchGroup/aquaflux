@@ -407,13 +407,14 @@ def test_the_surviving_fraction_lets_a_half_hidden_pair_through_by_half():
 VOLUME_POINTS = np.array([[0.2, 0.5, 0.5], [0.8, 0.45, 0.3], [0.5, 0.15, 0.7]])
 
 
-def _volume_mask(points, receiver_facet=None):
+def _volume_mask(points, receiver_facet=None, receiver_normal=None):
     surfaces = _reactor()
     mask = build_visibility(
         (),
         surfaces,
         jnp.asarray(points),
         receiver_facet=receiver_facet,
+        receiver_normal=receiver_normal,
         self_occlusion=SilhouetteOcclusion(),
     )
     return surfaces, np.asarray(mask.hidden_by_geometry)
@@ -468,6 +469,88 @@ def test_a_receiver_on_no_facet_is_answered_as_a_point_in_the_volume():
         samples=400_000,
     )
     assert mixed[0, source] == pytest.approx(sampled, abs=SAMPLER_FLOOR)
+
+
+def _oblique_set() -> Surfaces:
+    """:data:`OBLIQUE_SOURCE` behind :data:`OVERHEAD_BLOCKER`, as one set, both facing the receiver.
+
+    :data:`RECEIVER` lies on neither, as a point on a wall outside the emitting set does -- a
+    reflecting wall lit by a set of lamps.
+    """
+    return Surfaces.from_triangles(
+        np.stack([OBLIQUE_SOURCE[::-1], OVERHEAD_BLOCKER[::-1]]),
+        solid_id=np.array([0, 1]),
+        solid_names=("lamp", "baffle"),
+        emission=np.array([1.0, 0.0]),
+    )
+
+
+#: Two-sided only to say both open triangles are meant as sheets; each faces the receiver anyway.
+OBLIQUE_CLIP = SilhouetteOcclusion(two_sided=("lamp", "baffle"))
+
+
+def _oblique_share(**orientation) -> float:
+    """How much of the oblique source the baffle hides from :data:`RECEIVER`, through a mask."""
+    mask = build_visibility(
+        (), _oblique_set(), RECEIVER[None], self_occlusion=OBLIQUE_CLIP, **orientation
+    )
+    return float(np.asarray(mask.hidden_by_geometry)[0, 0])
+
+
+def test_a_receiver_on_no_facet_that_faces_a_way_takes_its_share_of_the_projected_solid_angle():
+    """Lying on no facet of the set is not the same as having no normal.
+
+    Before ``receiver_normal`` a mask could say a receiver faces a way only by naming the facet of
+    the set it lies on, so a point on a wall outside the set -- where the lamps' light on a
+    reflector is gathered -- was measured as a point in the volume, by the plain solid angle. The
+    fixture is oblique, because on axis the two measures barely differ: here they are 0.117 apart,
+    and each build must match the sampler of its own measure.
+    """
+    sampled = {
+        kind: sampled_fraction(RECEIVER, n, OBLIQUE_SOURCE, OVERHEAD_BLOCKER, samples=400_000)
+        for kind, n in (("plain", None), ("projected", NORMAL))
+    }
+    assert abs(sampled["plain"] - sampled["projected"]) > 20 * SAMPLER_FLOOR
+    oriented = _oblique_share(receiver_normal=NORMAL[None])
+    assert oriented == pytest.approx(sampled["projected"], abs=SAMPLER_FLOOR)
+    assert _oblique_share() == pytest.approx(sampled["plain"], abs=SAMPLER_FLOOR)
+    # Lying on no facet, said outright, changes nothing; nor does the normal's length.
+    assert _oblique_share(receiver_facet=np.array([-1]), receiver_normal=NORMAL[None]) == oriented
+    assert _oblique_share(receiver_normal=3.0 * NORMAL[None]) == oriented
+
+
+def test_a_receiver_on_several_facets_is_measured_about_the_normal_it_is_given():
+    """A point on a shared edge lies on two facets, and the clip needs one way to face.
+
+    Named on several facets with no normal it is refused, since nothing says which way it faces;
+    given the normal of the facet it lies on, it reads exactly as named on that facet alone.
+    """
+    surfaces = _reactor()
+    on_wall = 3
+    point = np.asarray(surfaces.centroid)[on_wall][None]
+    _, alone = _volume_mask(point, receiver_facet=np.array([on_wall]))
+    assert ((alone > 0.05) & (alone < 0.95)).any(), "the fixture has moved: nothing partly hidden"
+    rows = np.array([[on_wall, -1]])
+    with pytest.raises(ValueError, match="no receiver_normal says"):
+        _volume_mask(point, receiver_facet=rows)
+    _, given = _volume_mask(
+        point, receiver_facet=rows, receiver_normal=np.asarray(surfaces.normal)[on_wall][None]
+    )
+    assert np.array_equal(given, alone)
+
+
+@pytest.mark.parametrize(
+    "normals, message",
+    [
+        (np.array([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]]), "one normal per receiver"),
+        (np.array([[0.0, 0.0, 0.0]]), "of no length or not finite"),
+        (np.array([[0.0, np.nan, 1.0]]), "of no length or not finite"),
+    ],
+    ids=["one too many", "no length", "not finite"],
+)
+def test_a_normal_that_cannot_say_which_way_a_receiver_faces_is_refused(normals, message):
+    with pytest.raises(ValueError, match=message):
+        _oblique_share(receiver_normal=normals)
 
 
 def test_a_source_coplanar_with_the_receiver_hides_nothing():

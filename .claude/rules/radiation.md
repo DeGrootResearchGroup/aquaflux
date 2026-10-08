@@ -3917,11 +3917,44 @@ A receiver on a facet takes its share of the *projected* solid angle `∫ cos θ
 weights by); **a point in the fluid, which has no normal, takes its share of the plain solid angle
 `∫ dω`** (what the fluence-rate gather weights by, `radiance × solid_angle`). `receiver_normal=None` is
 how a volume receiver says so, all the way down: `source_view`, `covered_by`, `covered_fraction` and
-`may_occlude` accept it, and `SilhouetteOcclusion.field` treats `receiver_facet=None` — or `-1` in any
-row — as a volume point (it used to raise for both). One choice, `silhouette._measure`, picks the
-integral for the whole, the covered part and the blocker-extent clamp together, so a share cannot be
+`may_occlude` accept it, and `SilhouetteOcclusion.field` treats a receiver with **no
+`receiver_normal` and no facet** (`receiver_facet=None`, or `-1` in its row) as a volume point (it used to
+raise for both). ⚠️ **"On no facet" is NOT "no normal"** — see ORIENTED RECEIVERS ON NO FACET below.
+One choice, `silhouette._measure`, picks the integral for the whole, the covered part and the blocker-extent clamp together, so a share cannot be
 taken of one measure against another.
 
+- **ORIENTED RECEIVERS ON NO FACET (2026-10-06).** `receiver_facet` conflated two things: "this
+  receiver lies on facet k of the SOURCE set (leave it out of the shadow test)" and "this receiver has a
+  normal (measure by the projected solid angle)". A point on a reflecting wall gathering the lamps'
+  light has a normal and lies on no lamp facet, so `solve_scene`'s lamp-on-reflector gather (and every
+  `SurfaceReceivers` gather of a set it does not lie on) took its silhouette share by the **plain** solid
+  angle — wrong for an irradiance, and silently, since only a partly hidden pair on an oblique line can
+  tell. Now `build_visibility(..., receiver_normal=(n, 3))` says which way a receiver faces, independent
+  of where it lies; it reaches `SelfOcclusion.field(surfaces, points, near, receiver_facet,
+  receiver_normal)` (a **new positional parameter on every strategy**; only the silhouette reads it), is
+  normalized and refused on a wrong shape or a zero / non-finite length (`visibility._unit_normals`), and
+  **takes precedence** over the facet's normal (`self_occlusion._receiver_frames`). With a normal the
+  silhouette now also accepts `(n, k)` facet rows and excludes every facet named (`np.isin`), so the
+  scene no longer cuts rows to their nearest facet for it; without one, `k > 1` is still refused. The
+  scene's `_irradiance` passes the points' normals on every gather. ⚠️ **`clear_behind` / `BackFaces` still
+  key on `receiver_facet is None`, deliberately**: the cull is valid for any receiver gathered directly
+  (volume or oriented — `direct_irradiance` weights a pair by the source's radiance towards it, zero
+  behind a dark-behind source, and refuses a non-dark-behind set through such a mask); it is the
+  facet-to-facet transfer, whose receivers are named in `receiver_facet`, that must cast in full. So the
+  new argument does not touch the cull, and an oriented point on no facet keeps it. Under `RayCastOcclusion`
+  nothing changes (a share of 0 or 1 is the same in every measure). Tests:
+  `test_a_receiver_on_no_facet_that_faces_a_way_takes_its_share_of_the_projected_solid_angle` (the
+  oblique `OBLIQUE_SOURCE` / `OVERHEAD_BLOCKER` pair as one surface set, 0.117 between the measures, each
+  build against its own sampler), `test_a_receiver_on_several_facets_is_measured_about_the_normal_it_is_given`,
+  the refusals, and in `test_radiation_scene.py`
+  `test_a_partly_shadowed_lamp_lights_a_wall_by_the_share_of_its_projected_solid_angle` (reflector
+  irradiance and a floor point, `E / E_unshadowed = 1 - sampled projected share` to 4e-3). **Mutation pass
+  (9, 8 red)**: the scene dropping the normals, `_unchecked_visibility` passing `None`, `_receiver_frames`
+  ignoring the normal, no normalization (caught by exact equality at 3x length — a share is a ratio, so
+  that one moves only a rounding), no `k > 1` refusal, no shape check, no length check, volume rows sent
+  to the oriented pipeline. **Dismissed, equivalent**: excluding only a row's first facet — every facet a
+  receiver lies on passes through it, so as a source it is seen edge-on and as a blocker it is not front
+  facing (or, declared two-sided, edge-on); `np.isin` stays for the ray test's semantics.
 - **The clip is unchanged; only the integral differs.** A volume point has no front half-space, so
   `_in_view` pads the source (and the depth-cut blocker) with a repeated corner instead of clipping —
   the same widths `4 … 8`, so one clip serves both. The tangent-plane cull in `_per_triangle` is skipped;
@@ -4431,8 +4464,9 @@ radiation **case file** builds (`.claude/rules/case.md` → Radiation cases); th
   triangles, and a point on a shared edge lies on two; with only the nearest excluded, 4 of 16 floor
   points of a regular box (on quad diagonals) came back shadowed. **`receiver_facet` now takes
   `(n_receivers, k)` rows (`-1` padding)** in `build_visibility`, `RayCastOcclusion` (`_exclusions`, both
-  walks) and `pairs_are_cut(target=)`; `SilhouetteOcclusion` measures about one facet's normal and refuses
-  the 2-D form, so the scene hands it the nearest. Pinned by
+  walks) and `pairs_are_cut(target=)`; `SilhouetteOcclusion` takes them too since 2026-10-06, because the
+  scene now passes every gather its points' normals (ORIENTED RECEIVERS ON NO FACET, above) — without a
+  `receiver_normal` it still refuses rows naming more than one facet. Pinned by
   `test_a_point_on_a_reflecting_wall_is_not_shadowed_by_the_facet_it_lies_on` (ray test with the
   exclusion = no occlusion to 1e-12 on a convex box; without it, < half).
 - **Measured at mesh scale** — see `validation/ray_effects_room/README.md` (the case files and their

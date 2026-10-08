@@ -96,7 +96,7 @@ class PrecomputedOcclusion(SelfOcclusion):
     fraction: jnp.ndarray
     overlapping: jnp.ndarray = eqx.field(default=None)
 
-    def field(self, surfaces, points, near, receiver_facet) -> OcclusionField:
+    def field(self, surfaces, points, near, receiver_facet, receiver_normal) -> OcclusionField:
         overlapping = (
             jnp.zeros_like(self.fraction, dtype=bool)
             if self.overlapping is None
@@ -228,7 +228,7 @@ def study(divisions: int, sectors: int, max_pairs: int | None, seed: int = 0) ->
     )
 
     start = time.perf_counter()
-    clip = SilhouetteOcclusion().field(surfaces, surfaces.centroid, jnp.zeros(n), facets)
+    clip = SilhouetteOcclusion().field(surfaces, surfaces.centroid, jnp.zeros(n), facets, None)
     fraction, flagged = np.asarray(clip.fraction), np.asarray(clip.overlapping)
     print(f"silhouette field: {time.perf_counter() - start:.1f} s", flush=True)
 

@@ -48,6 +48,7 @@ from tests.unit.radiation_references import (
     closed_drum,
     inward_box,
     rectangle_triangles,
+    sampled_fraction,
     tilt_rotation,
     tilted,
 )
@@ -748,3 +749,56 @@ def test_settings_cut_down_to_a_set_keep_its_own_sheets_and_nothing_else_changes
     # A choice that names no bodies is the same choice on every set, and an unset one stays unset.
     plain = RadiationSettings(self_occlusion=RayCastOcclusion())
     assert plain.for_bodies(("anything",)) == plain
+
+
+#: A lamp seen obliquely from the origin, behind a baffle that hides its overhead end. Wound to
+#: face the origin, so the lamp shines on it and the baffle stands in front of it.
+OBLIQUE_LAMP = np.array([[-0.5, -1.0, 1.0], [4.0, -1.0, 1.0], [4.0, 1.5, 1.0]])
+BAFFLE = np.array([[-9.0, -9.0, 0.5], [0.5, -9.0, 0.5], [0.5, 9.0, 0.5]])
+UP = np.array([0.0, 0.0, 1.0])
+
+
+def test_a_partly_shadowed_lamp_lights_a_wall_by_the_share_of_its_projected_solid_angle() -> None:
+    """The lamps' light on a reflecting wall, and on a set of wall points, under the silhouette clip.
+
+    Neither kind of point lies on a lamp facet, and both face a way. The baffle is one of the lamp
+    set's own triangles, so the clip hides a share of the lamp, and the share an irradiance wants
+    is of the lamp's projected solid angle -- which on this oblique fixture differs from the share
+    of its plain solid angle by twenty times the sampler's noise. A point's irradiance is its
+    unshadowed irradiance less that share, Lambertian radiance being the same in every direction;
+    the share is checked against the brute-force sampler, which never reads a mask.
+    """
+    lamps = Surfaces.from_triangles(
+        np.stack([OBLIQUE_LAMP[::-1], BAFFLE[::-1]]),
+        solid_names=("lamp",),
+        emission=np.array([LAMP_EXITANCE, 0.0]),
+    )
+    # One small reflecting facet whose centroid is the origin, sampled once, at that centroid.
+    wall = np.array([[[-0.01, -0.01, 0.0], [0.02, -0.01, 0.0], [-0.01, 0.02, 0.0]]])
+    reflectors = Surfaces.from_triangles(
+        wall, solid_names=("wall",), diffuse_reflectance=REFLECTANCE
+    )
+    origin = np.zeros((1, 3))
+    solution = solve_scene(
+        Scene(
+            lamps=lamps,
+            reflectors=reflectors,
+            surfaces={"floor": SurfaceReceivers(origin, UP[None])},
+            lamp_samples=1,
+            # Every body is one open sheet; each faces the points it lights or shadows, so this only
+            # says they are meant as sheets.
+            settings=RadiationSettings(
+                receiver_quadrature=1,
+                self_occlusion=SilhouetteOcclusion(two_sided=("lamp", "wall")),
+            ),
+        )
+    )
+    unshadowed = float(direct_irradiance(lamps, jnp.asarray(origin), jnp.asarray(UP[None]))[0])
+    projected = sampled_fraction(np.zeros(3), UP, OBLIQUE_LAMP, BAFFLE, samples=400_000)
+    plain = sampled_fraction(np.zeros(3), None, OBLIQUE_LAMP, BAFFLE, samples=400_000)
+    assert abs(projected - plain) > 0.08
+    for name, landed in (
+        ("on the reflecting facet", float(solution.reflector_irradiance[0])),
+        ("at the floor point", float(solution.irradiance_direct["floor"][0])),
+    ):
+        assert landed / unshadowed == pytest.approx(1.0 - projected, abs=4e-3), name
