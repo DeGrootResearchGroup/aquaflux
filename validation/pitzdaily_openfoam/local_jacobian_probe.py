@@ -34,7 +34,7 @@ Usage
 -----
     validation/run_case.sh validation/pitzdaily_openfoam/local_jacobian_probe.py
 
-``LOCAL_JAC_REPEATS`` sets the timing repeats (default 3; the minimum is reported).
+``PITZ_LOCAL_JAC_REPEATS`` sets the timing repeats (default 3; the minimum is reported).
 """
 
 from __future__ import annotations
@@ -60,15 +60,13 @@ from aquaflux.solve import (  # noqa: E402
     PROBE_BATCH_SIZE,
     JacobianProbe,
     batched_jacobian_matvec,
-    jacobian_matvec,
-)
-from aquaflux.solve.sparse_jacobian import (  # noqa: E402
     block_stencil_colouring,
+    jacobian_matvec,
     jacobian_relative_error,
     materialize_block_jacobian,
 )
 
-REPEATS = int(os.environ.get("LOCAL_JAC_REPEATS", "3"))
+REPEATS = int(os.environ.get("PITZ_LOCAL_JAC_REPEATS", "3"))
 
 #: The reach the shipped case probes at (``case.yaml``: the multiple-correction residual reaches 3).
 SHIPPED_REACH = 3

@@ -37,8 +37,8 @@ from aquaflux.solve import (  # noqa: E402
     JacobianProbe,
     batched_jacobian_matvec,
     jacobian_matvec,
+    materialize_block_jacobian,
 )
-from aquaflux.solve.sparse_jacobian import materialize_block_jacobian  # noqa: E402
 from local_jacobian_probe import reference_state  # noqa: E402
 
 REACHES = tuple(int(r) for r in os.environ.get("PROBE_CHECK_REACHES", "3,4").split(","))

@@ -52,7 +52,7 @@ import numpy as np  # noqa: E402
 from aquaflux.turbulence import scale_both_blocks, scale_momentum_only  # noqa: E402
 from continuation_seed_error import judged_norm  # noqa: E402
 
-CHECKPOINTS = Path(os.environ.get("RAMP_PROBE_CHECKPOINTS", HERE / "checkpoints"))
+CHECKPOINTS = Path(os.environ.get("PITZ_RAMP_PROBE_CHECKPOINTS", HERE / "checkpoints"))
 _COMPANIONS = {"flow": scale_momentum_only, "both": scale_both_blocks, None: scale_both_blocks}
 
 
