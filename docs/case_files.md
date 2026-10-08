@@ -283,9 +283,13 @@ outputs:
   and `nut`; left out, all of them. The pressure is the solved one.
 - The history ({class}`~aquaflux.solve.StepHistory`) has one row per step of the march — the
   step, the seconds since the run started, the residual and its ratio to the starting one, the
-  line-search factor, the shift and the linear-solve cost — every number at full precision, each
-  row written as the step ends. It is what a convergence plot reads. The segregated solve takes no
-  steps, so its history holds only the header.
+  line-search factor, the shift, the linear-solve cost, the continuation station the step drove
+  and whether that was the case's own problem, how many times the preconditioner was refitted for
+  it and what that took, why the step was redone (if it was), and the residual split by equation
+  (`residual_of_u`, `residual_of_p`, …, under the default row-scaled measure) — every number at
+  full precision, each row written as the step ends. It is what a convergence plot reads. Its
+  header is written with the first row, so the file is empty until then; the segregated solve
+  takes no steps, so its history stays empty.
 - {class}`~aquaflux.case.Checkpoints` writes the march's state every `every` steps into
   `checkpoints/`, keeping the latest `keep`, so a run that stops has not lost its work. The
   segregated solve takes no steps a checkpoint could be written at.
@@ -407,6 +411,7 @@ The `aquaflux` command runs a file from start to finish:
 
 ```bash
 aquaflux check case.yaml            # read the file and check it against its mesh, in seconds
+aquaflux plan case.yaml             # where a run would write, and which earlier results it would replace
 aquaflux run case.yaml              # read, check, build, solve, and write the outputs
 aquaflux run case.yaml --overwrite  # replace an earlier run's results
 ```
@@ -424,13 +429,16 @@ aquaflux run case.yaml --overwrite  # replace an earlier run's results
   reports (a radiation case's lamp power and where it goes).
 
 `run` exits with status 0 when the solve converges. A solve that stops short of its stopping
-test writes no fields — what it holds is not a solution — but still writes its log, its
-checkpoints and `run.yaml`, and exits with status 1. A file that is refused exits with status
+test — or is interrupted, with Ctrl-C or the browser interface's Stop — writes no fields (what it
+holds is not a solution) but still writes its log, its checkpoints and `run.yaml`, and exits with
+status 1. A file that is refused exits with status
 2, with the reason. A run refuses an output directory that already holds results unless given
 `--overwrite`, which replaces the files the run writes and clears its old checkpoints.
 
 In code, {func}`~aquaflux.case.prepare_run` reads and checks a file for a run and
-{meth}`~aquaflux.case.PreparedRun.run` runs it, returning a {class}`~aquaflux.case.RunRecord`.
+{meth}`~aquaflux.case.PreparedRun.run` runs it, returning a {class}`~aquaflux.case.RunRecord`;
+{func}`~aquaflux.case.plan_run` says where a run would write and what it would replace, by the
+same rule a run refuses on, without checking the mesh.
 
 ## What a case file cannot describe yet
 

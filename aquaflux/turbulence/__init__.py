@@ -30,7 +30,8 @@ from .boundary import (
     wall_y_star,
 )
 from .continuation import ScalarShiftPolicy, scalar_pseudo_transient_solve
-from .diagnostics import coupled_equation_names, coupled_fields, coupled_residuals
+from .diagnostics import coupled_fields, coupled_residuals
+from .measures import coupled_equation_names
 from .coupled import (
     BetaTaperedDamping,
     ConstantDamping,

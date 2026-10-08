@@ -172,7 +172,13 @@ from .multigrid import (
     smoothed_multigrid_solve,
 )
 from .newton import newton_step
-from .norm import BlockScaledNorm, ResidualNorm, RowScaledNorm, block_reference_scales
+from .norm import (
+    BlockScaledNorm,
+    ResidualNorm,
+    RowScaledNorm,
+    block_reference_scales,
+    named_blocks,
+)
 from .convergence import (
     PLAIN_RESIDUAL,
     BlockScaled,
@@ -404,6 +410,7 @@ __all__ = [
     "materialize_block_jacobian",
     "materialized_spec_from_mapping",
     "materialized_spec_to_mapping",
+    "named_blocks",
     "newton_march",
     "newton_step",
     "positive_block_limit",

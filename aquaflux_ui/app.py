@@ -117,7 +117,8 @@ class Workspace:
         self.results = (
             ResultsSection(source, self.server) if source is not None else NoResultsSection()
         )
-        self.sections: tuple[Section, ...] = (self.setup, RunSection(self.server), self.results)
+        self.run = RunSection(self.server, self.setup)
+        self.sections: tuple[Section, ...] = (self.setup, self.run, self.results)
         if len({section.key for section in self.sections}) != len(self.sections):
             raise ValueError("every section of a workspace needs its own key.")
         self._build_page()

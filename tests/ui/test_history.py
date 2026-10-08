@@ -39,11 +39,16 @@ def test_the_residual_columns_are_offered_relative_first(tmp_path):
     assert list(history.residual_columns()) == ["residual_ratio", "residual_norm"]
 
 
-def test_a_history_with_only_its_header_has_no_steps(tmp_path):
-    # What the segregated solve writes: it takes no march steps.
+def test_a_history_with_no_steps_yet_has_none(tmp_path):
+    # What a run writes before its first step, and all a segregated solve, which takes none, writes.
     history = ConvergenceHistory.read(_write(tmp_path / "history.csv", []))
     assert history.n_steps == 0
     assert history.steps.shape == (0,)
+
+
+def test_a_history_with_only_its_header_has_no_steps(tmp_path):
+    (tmp_path / "history.csv").write_text(",".join(StepHistory.COLUMNS) + "\n")
+    assert ConvergenceHistory.read(tmp_path / "history.csv").n_steps == 0
 
 
 def test_a_partly_written_last_line_is_left_for_the_next_read(tmp_path):
@@ -65,12 +70,6 @@ def test_a_file_with_no_step_column_is_refused(tmp_path):
     path.write_text("iteration,residual\n1,0.5\n")
     with pytest.raises(ValueError, match="needs a 'step' column"):
         ConvergenceHistory.read(path)
-
-
-def test_an_empty_file_is_refused(tmp_path):
-    (tmp_path / "history.csv").write_text("")
-    with pytest.raises(ValueError, match="is empty"):
-        ConvergenceHistory.read(tmp_path / "history.csv")
 
 
 def test_a_column_that_is_not_numeric_is_kept_as_text(tmp_path):

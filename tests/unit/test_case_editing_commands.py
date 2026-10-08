@@ -1,4 +1,4 @@
-"""Tests for the ``aquaflux schema``, ``show``, ``write``, ``mesh`` and ``serve`` commands a case-file editor works through.
+"""Tests for the ``aquaflux schema``, ``show``, ``plan``, ``write``, ``mesh`` and ``serve`` commands a case-file editor works through.
 
 Run in this process through :func:`aquaflux.__main__.main`, reading what each prints, so what is
 pinned is the contract a program relies on: JSON on standard output, the refusal's reason in it, and
@@ -15,7 +15,13 @@ from pathlib import Path
 
 import pytest
 from aquaflux.__main__ import main, serve
-from aquaflux.case import OpenFOAMTime, StructuredGrid, read_case, read_case_document
+from aquaflux.case import (
+    OpenFOAMTime,
+    StructuredGrid,
+    prepare_run,
+    read_case,
+    read_case_document,
+)
 from aquaflux.case.paths import relocated
 
 REPO = Path(__file__).resolve().parents[2]
@@ -60,6 +66,38 @@ def test_show_refuses_a_file_that_is_not_yaml(capsys, tmp_path):
     case.write_text("mesh: [unclosed\n")
     status, shown = _run(capsys, ["show", str(case)])
     assert status == 2 and str(case) in shown["error"]
+
+
+def test_plan_says_where_a_run_writes_and_what_it_would_replace(capsys, tmp_path, monkeypatch):
+    case = tmp_path / "case.yaml"
+    status, reply = _run(capsys, ["show", str(PITZDAILY)])
+    _run(
+        capsys,
+        ["write", str(case), "--relative-to", str(PITZDAILY.parent)],
+        json.dumps(reply),
+        monkeypatch,
+    )
+    status, plan = _run(capsys, ["plan", str(case)])
+    results = (tmp_path / "results").resolve()
+    assert status == 0 and plan["error"] is None
+    assert plan["directory"] == str(results)
+    assert (plan["log"], plan["history"]) == (
+        str(results / "march.log"),
+        str(results / "history.csv"),
+    )
+    assert plan["occupied"] == []
+
+    # What `aquaflux run` would refuse to replace, by the same rule.
+    results.mkdir()
+    (results / "history.csv").write_text("")
+    assert _run(capsys, ["plan", str(case)])[1]["occupied"] == [str(results)]
+    with pytest.raises(FileExistsError, match="already holds results"):
+        prepare_run(case)
+
+
+def test_plan_refuses_a_file_it_cannot_read(capsys, tmp_path):
+    status, reply = _run(capsys, ["plan", str(tmp_path / "missing.yaml")])
+    assert status == 2 and "missing.yaml" in reply["error"]
 
 
 def test_write_writes_a_case_that_reads_back_equal(capsys, tmp_path, monkeypatch):

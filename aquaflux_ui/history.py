@@ -71,19 +71,21 @@ class ConvergenceHistory:
         Returns
         -------
         ConvergenceHistory
-            Its columns. A file holding only its header has zero steps.
+            Its columns. An empty file, or one holding only its header, has zero steps.
 
         Raises
         ------
         ValueError
-            If the file has no header, a row has a different number of cells from the header, or
-            there is no ``step`` column.
+            If a row has a different number of cells from the header, or there is no ``step``
+            column.
         """
         source = Path(path)
         with source.open(newline="", encoding="utf-8") as stream:
             rows = list(csv.reader(stream))
+        # The solver writes the header with the first step, so an empty file is a march that has not
+        # finished one yet -- or a solve that takes no march steps at all.
         if not rows:
-            raise ValueError(f"{source} is empty; a convergence history starts with a header row.")
+            return cls({STEP: np.zeros(0)}, source)
         header, body = rows[0], rows[1:]
         # A run still being written can end in a partly written line; anything shorter than the header
         # is that, and is left for the next read rather than refused.

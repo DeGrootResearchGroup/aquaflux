@@ -20,7 +20,7 @@ import sys
 import threading
 from collections.abc import Sequence
 
-__all__ = ["TIMEOUT", "CommandResult", "SolverWorker"]
+__all__ = ["OWN_PROCESS_GROUP", "TIMEOUT", "CommandResult", "SolverWorker"]
 
 #: Seconds a command may take before it is given up on: ``check`` and ``mesh`` read the case's mesh,
 #: and a large one takes a while.
@@ -48,7 +48,7 @@ class CommandResult:
 
 #: Starts the process in a process group of its own, so Ctrl-C in the terminal running the page reaches
 #: the page alone; the process stops when the page's end closes its input.
-_OWN_PROCESS_GROUP = (
+OWN_PROCESS_GROUP = (
     {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
     if sys.platform == "win32"
     else {"start_new_session": True}
@@ -148,7 +148,7 @@ class SolverWorker:
                 text=True,
                 encoding="utf-8",
                 bufsize=1,
-                **_OWN_PROCESS_GROUP,
+                **OWN_PROCESS_GROUP,
             )
             replies: queue.Queue = queue.Queue()
             # Read on a thread of its own, so a reply can be waited for with a time limit on every

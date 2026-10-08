@@ -44,10 +44,10 @@ LINE_LIMIT = 1500
 BUDGETS = {
     # Holds the k--omega residual and the coupled march's preconditioner sessions and probe. The
     # residual-agnostic driver and step tail have moved to ``solve/``, and the mass-flow border --
-    # layout, seed, constraint vectors and bulk-velocity average -- to ``flow/drive.py``; the sessions
-    # and the coloured probe are still to move (they take a ``CoupledRANS`` only for its residual and
-    # layout).
-    "turbulence/coupled.py": 3286,
+    # layout, seed, constraint vectors and bulk-velocity average -- to ``flow/drive.py``, and the
+    # row-scaled measure with its equation names to ``turbulence/measures.py``; the sessions and the
+    # coloured probe are still to move (they take a ``CoupledRANS`` only for its residual and layout).
+    "turbulence/coupled.py": 3196,
 }
 
 
