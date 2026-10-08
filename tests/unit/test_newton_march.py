@@ -1793,6 +1793,36 @@ def test_the_homotopy_is_entered_once_per_step_and_changes_once_per_station() ->
     assert len(homotopy.changes) == 3
 
 
+def test_each_report_says_which_station_its_step_drove_and_whether_that_was_the_target() -> None:
+    """A record of a march can mark where the path ended and the case began, from the reports alone."""
+    target = jnp.array([8.0, 27.0, 64.0])
+    homotopy = _CubicRamp(target, start=target * 100.0, stations=3, steps_per_station=2)
+    result = newton_march(
+        DampedNewtonStep(line_search=10),
+        _Cubic(target),
+        jnp.ones_like(target),
+        max_steps=10,
+        rtol=1e-10,
+        atol=1e-12,
+        homotopy=homotopy,
+    )
+    steps = range(len(result.reports))
+    assert len(result.reports) > 6
+    assert [report.station for report in result.reports] == [homotopy.station(i) for i in steps]
+    assert [report.arrived for report in result.reports] == [homotopy.arrived(i) for i in steps]
+    assert not result.reports[0].arrived and result.reports[-1].arrived
+
+    plain = newton_march(
+        DampedNewtonStep(line_search=10),
+        _Cubic(target),
+        jnp.ones_like(target),
+        max_steps=3,
+        rtol=1e-10,
+        atol=1e-12,
+    )
+    assert {(report.station, report.arrived) for report in plain.reports} == {(0, True)}
+
+
 # --- rebasing a residual-keyed control at a station boundary ------------------------------------
 
 

@@ -9,14 +9,13 @@ paths:
 > Comment Convention and Claude-Facing-File Reference Ban apply to `aquaflux_ui/*.py` exactly as to
 > `aquaflux/` — it is shipped surface. Spell out comma-separated values (CSV) at first use per file.
 
-A local browser interface (BUILT 2026-10-05, v1): its Results section is a read-only viewer for finished results, Setup opens / edits / saves / checks a case file, Run is a placeholder. Renamed from `aquaflux_viz` / `aquaflux-viz` / the `viz` extra the same day, before it was ever committed (the project owner's call, once it stopped being only a viewer). PyVista/VTK renders
+A local browser interface (BUILT 2026-10-05, v1): its Results section is a read-only viewer for finished results, Setup opens / edits / saves / checks a case file, Run solves the open case and follows its march live (BUILT 2026-10-07). Renamed from `aquaflux_viz` / `aquaflux-viz` / the `viz` extra the same day, before it was ever committed (the project owner's call, once it stopped being only a viewer). PyVista/VTK renders
 **server-side** (an off-screen `pv.Plotter`), trame serves the page and streams images through
 trame-vtk's `VtkRemoteView`, plotly draws the convergence history. Installed by the `ui` extra;
 entry point `aquaflux-ui` (`aquaflux_ui.__main__:main`). Agreed scope (project owner, 2026-10-05):
 top-level package, tests run in CI, residual history output added to the solver, hexahedra written as
 `VTK_HEXAHEDRON` (see `io.md`); then, the same day, a case-file editor in Setup (load, edit, save,
-check) with every option generated from the solver's schema. Out of scope so far: live solver
-monitoring/steering, remote/multi-user hosting, a PyWebView wrapper (the rendering code is meant to be
+check) with every option generated from the solver's schema; then (2026-10-07) a Run section that starts a run and follows it live. Out of scope so far: steering a run while it goes, remote/multi-user hosting, a PyWebView wrapper (the rendering code is meant to be
 reused unchanged by one).
 
 ## ⚠️ The independence rule (binding, mechanically checked)
@@ -42,12 +41,15 @@ packages.
 | `app.py` | `Workspace` (the page shell), `Section` protocol | app bar, the Setup/Run/Results rail, the theme toggle, which section shows. Owns NO section's controls |
 | `results_section.py` | `ResultsSection`, `convergence_figure` | the viewer proper: plotter, scene, its side panel and main area; routes control events to `controls` |
 | `setup_section.py` | `SetupSection`, `SECTION_ICONS` | the case editor: Open / Save / Save as / Check in the side panel ABOVE the form (the project owner had the form moved there so the main area is free for the mesh view) |
-| `case_form.py` | `CaseSchema`, `Row`, `form_sections`, `set_value`/`unset`/`remove_at`/`set_kind`/`add_item`/`add_entry`, `field_at`/`entry_kinds`, `parse_input`, `plain_doc` | pure: schema + document → rows; edits return NEW documents. Lists NO kind, field or choice of its own |
-| `solver_commands.py` | `SolverCommands` (`schema`/`show`/`write`/`mesh`/`check`), `CaseDocument`, `MeshExport`, `Runner` | parses the commands' JSON; the runner is injected (tests pass a stub) and defaults to a `SolverWorker` |
+| `case_form.py` | `CaseSchema`, `Row`, `form_sections`, `set_value`/`unset`/`remove_at`/`set_kind`/`add_item`/`add_entry`, `field_at`/`entry_kinds`, `setting`, `parse_input`, `plain_doc` | pure: schema + document → rows; edits return NEW documents. Lists NO kind, field or choice of its own |
+| `solver_commands.py` | `SolverCommands` (`schema`/`show`/`write`/`mesh`/`check`/`plan`), `CaseDocument`, `MeshExport`, `RunPlan`, `Runner` | parses the commands' JSON; the runner is injected (tests pass a stub) and defaults to a `SolverWorker` |
 | `solver_worker.py` | `SolverWorker`, `CommandResult`, `TIMEOUT` | ONE long-lived `sys.executable -m aquaflux serve` process (see `case.md`), started lazily — by the schema prefetch at page load. Requests serialized by a lock; replies read on a daemon thread into a per-process queue so the time limit works on every platform; a timeout or a death mid-request stops the process and the NEXT request starts a new one (`poll()` before writing plus a one-retry on `BrokenPipeError` — each covers the other, so a mutation of either alone passes; both together fail). Its stdin closing is how it stops, so nothing needs an exit hook. ⚠️ **Started in its own process group** (`start_new_session` / `CREATE_NEW_PROCESS_GROUP`): in the terminal's group it got Ctrl-C too and printed a `KeyboardInterrupt` traceback over the page's clean exit (project owner, 2026-10-06); pinned by `test_the_process_is_out_of_reach_of_the_terminals_ctrl_c` |
 | `mesh_view.py` | `MeshView`, `mesh_layers` (pure), `patches_addressed`, `read_patches` | draws what `aquaflux mesh` wrote; reads no mesh format and generates nothing itself |
 | `file_browser.py` | `list_directory` (pure), `FileBrowser` (dialog: open / save) | server-side, since a browser's picker hides the real path and a case's mesh path is relative to the case file |
-| `run_section.py` | `RunSection` | PLACEHOLDER: Start/Stop disabled, and an empty state giving today's command |
+| `run_section.py` | `RunSection`, `POLL_SECONDS` | the trame layout of Run and its wiring only: Run case / Stop, the status card, the case-file summary, the replace switch, the tiles, five plots, the events/log card; re-reads the history every `POLL_SECONDS` while a run goes |
+| `run_monitor.py` | `RunLimits`, `RunEvent`, `run_events`, `run_tiles`, `residual_figure`, `cost_figures`, `equation_columns`, `RETRY_REASONS`, `EQUATION_PREFIX` | PURE: history + limits → figures, tiles, events (no trame import, tested headless) |
+| `run_process.py` | `CaseRun`, `CONVERGED`/`NOT_CONVERGED`/`REFUSED`, `STOP_GRACE` | one `sys.executable -m aquaflux run case.yaml [--overwrite]` in its own process group, its stdout+stderr to a console file |
+| `plots.py` | `base_figure` | the one plotly base every plot builds on (Results' convergence plot and Run's five) |
 | `widgets.py` | `panel`, `icon_button`, `empty_state` | page pieces shared by sections |
 | `theme.py` | `vuetify_config`, `RenderStyle`/`THEMES`, `PlotStyle`/`PLOT_STYLES`, `colormap_gradient`, `PAGE_CSS` | EVERY colour lives here, per light/dark theme: page (Vuetify), 3D view (background gradient, colour-bar text, grey context surface), plot. `Scene(plotter, style)` takes its `RenderStyle` injected; the theme toggle swaps page, view and plot together |
 | `__main__.py` | CLI | imports `app` only after the source opened, so a bad path fails before trame loads |
@@ -104,11 +106,11 @@ packages.
 - **One interface for setup, running and results (project owner, 2026-10-05).** The page is a
   `Workspace` of three `Section`s switched from an icon rail; each section supplies `drawer()`,
   `main()`, `toolbar()` and `shown()` and is built ONCE, shown with `v_show`, so it keeps its state
-  (camera, open panels, slices) while another is in front. Setup is the case editor (below); Run is a placeholder.
+  (camera, open panels, slices) while another is in front. Setup is the case editor (below); Run solves the open case (below).
   **The independence rule shapes how they are built:** both need the solver, which this package
   does not import — Setup asks it through the `aquaflux schema` / `show` / `write` / `mesh` / `check`
-  commands, answered by one `aquaflux serve` process (below), and Run will start `aquaflux run` as a separate process and follow it through the files it
-  flushes per step (`march.log`, `history.csv`; `ConvergenceHistory.read` already tolerates a
+  commands, answered by one `aquaflux serve` process (below), and Run starts `aquaflux run` as a separate process and follows it through the files it
+  flushes per step (`history.csv`, and the console it prints to; `ConvergenceHistory.read` tolerates a
   half-written last row). ⚠️ **`v_show` cannot hide an element carrying Vuetify's `d-flex`**
   (it is `display: flex !important`, beating the inline `display: none`) — put the class on a child.
 - **The case editor's options come from the installed solver, never from this package (project owner,
@@ -196,6 +198,42 @@ packages.
   so the first open showed nothing); the mesh card says "Loading the mesh…". The schema is fetched in the
   background at server start (`_prefetch_schema`), and an open that lands while it is in flight awaits
   THAT request (`_schema_task`) rather than asking again; a failed prefetch is retried by the next open.
+- **The Run section (project owner, 2026-10-07: "a button to run the case… plot in the right panel the
+  residual plot in real time… the number of cycles and details of the inner and outer solves"; the
+  layout was mocked first and approved as drawn).** No settings of its own — everything is the case
+  file's. The side panel: Run case / Stop, a status chip and card (step, elapsed, last step, whether the
+  step was on the case's own problem, residual, stopping test), a summary of what the case file sets the
+  run to do (`case_form.setting` reads each value or its default, `None` inside an `off` section), and
+  the replace switch. The main area: five headline tiles, the residual (overall or per equation), four
+  small plots on the same step axis, and an events/log card. **Every piece of data comes from what the
+  solver records** — the history's columns (see `solve-march.md`, `StepHistory`) and the console; the
+  page derives nothing about the march it cannot read there.
+  - **A run reads the SAVED file**, so Run case is disabled while `case_modified`; and it replaces
+    results **only with permission** (project owner, 2026-10-07): `aquaflux plan` (see `case.md`)
+    reports `occupied` by the same rule `prepare_run` refuses on, and Run needs the switch on before it
+    passes `--overwrite`. Until a new run starts, the earlier run's history is drawn ("Showing the
+    earlier run"); a history file older than the run being followed is ignored, so an overwrite does
+    not flash the old plot.
+  - **The cost plot shows restart cycles (offset-corrected) and each step's hardest single solve
+    against `retry.abort_above_cycles`, NOT the dual-time `cycle_budget`** — a deviation from the
+    approved mockup, said in its summary: the budget is compared against the RAW summed count (lineax
+    `num_steps`, +2 per solve), so a line at it over corrected cycles would compare two units.
+  - **Per-equation lines use a validated palette** (`PlotStyle.equations`: six of the reference
+    categorical hues in order, leaving out the orange and violet the retry/refit marks use). On the
+    light surface the worst adjacent pair (green/red, CVD ΔE 7.2) is legal only with a second
+    encoding, so each line is also labelled at its end; dark passes outright (2026-10-07, the dataviz
+    validator). The legend and event marks take their colours from the same `PLOT_STYLES` through CSS
+    variables generated per theme in `theme.py`.
+  - **Stop sends SIGINT to the run's process group** (CTRL_BREAK on Windows) and kills only after
+    `STOP_GRACE` = 60 s: an interrupt lands only when the solve returns to Python between compiled
+    steps — on pitzDaily a 3 s wait was not enough. `aquaflux run` records an interrupted run as one
+    that stopped short (`run.yaml`, exit 1). Closing the page stops a run in progress (`atexit`).
+  - ⚠️ **Anything put in the page state must be plain Python** — a NumPy integer in the events list
+    made trame log "Skip state value … not serializable", the variable never reached the page, and the
+    template's `run_events.length` threw and took the page's connection down. `RunEvent.to_state`
+    converts, pinned by a JSON round trip in `test_events_are_newest_first_and_say_what_happened`.
+  - Checked by hand on a scratch copy of pitzDaily (2026-10-07): live residual, tiles, status, the
+    events as refits landed, the earlier-run view, the replace switch, Stop.
 - `aquaflux-ui [path]`: a results directory or VTK file opens on Results; a `.yaml` opens on Setup with
   the case loaded; no path opens on Setup (Results shows `NoResultsSection`).
 - **Placeholder wording**: they say a feature "is not available in this version" and give today's
@@ -225,8 +263,9 @@ Configuration: VTK 9.7.1, PyVista 0.49.0, trame 4.0.0, trame-vtk 2.11.17, macOS 
 
 ## Deferred (tracked in the PR description, not built)
 
-- A live source (`ResultSource` over a running march: `times()` growing, `history()` re-read — the
-  **reload** button already re-reads; an auto-poll is not built).
+- Results following a run live (`ResultSource` over a running march, `times()` growing): Run follows
+  the history, but Results still shows a run's fields only once it has written them, and is opened on a
+  directory at start-up rather than switched to a run's output when it finishes.
 - A radiation run's patch fields in Results: `PatchVtk` writes `patches.vtm` (merged 2026-10-06), which
   `RunDirectory` lists from `run.yaml` and `VtkFiles` reads as a multiblock by block name — not yet
   checked in a browser on a real radiation run.

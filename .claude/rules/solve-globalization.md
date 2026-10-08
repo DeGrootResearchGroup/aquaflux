@@ -22,6 +22,10 @@ paths:
 > not here.** Update this file's architecture/binding prose only when an investigation reaches a
 > durable verdict (see `solve.md`'s "Where new content goes").
 
+
+> `StepReport` gained `station` and `arrived` (2026-10-07), set by `newton_march` from its homotopy so a
+> record of a march can mark where a continuation ended — see `solve-march.md`.
+
 ## ⚠️ A DEFECT THAT FIRES FOR THE WRONG REASON CAN BE LOAD-BEARING (binding, measured 2026-09-09)
 
 **A globalization defect can be the only thing holding the march out of a bad regime, so fixing it

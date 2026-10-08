@@ -28,47 +28,11 @@ from collections.abc import Callable, Mapping
 
 import jax.numpy as jnp
 
-from .coupled import coupled_scaled_norm
+from .measures import coupled_equation_names, coupled_scaled_norm
 
-__all__ = ["coupled_equation_names", "coupled_fields", "coupled_residuals"]
+__all__ = ["coupled_fields", "coupled_residuals"]
 
 #: Velocity-component names in axis order, so a 2D case reads ``u, v`` and a 3D one ``u, v, w``.
-_VELOCITY_NAMES = ("u", "v", "w")
-
-
-def coupled_equation_names(dim: int) -> tuple[str, ...]:
-    """The coupled state's solved equations, named, **in the order the flat state lays them out**.
-
-    ``(u, v, w, p, k, omega)`` in three dimensions and ``(u, v, p, k, omega)`` in two: one name per
-    equal-sized block of the flat layout ``[vel_0..vel_{dim-1}, pressure, k, omega]``. The single home
-    for these names, so a per-block residual and a per-field change report the same equation under the
-    same label and cannot drift apart.
-
-    Parameters
-    ----------
-    dim : int
-        Number of velocity components (the spatial dimension), at most 3.
-
-    Returns
-    -------
-    tuple of str
-        The ``dim + 3`` block names, in block order.
-
-    Raises
-    ------
-    ValueError
-        If ``dim`` exceeds the three named velocity components.
-
-    Examples
-    --------
-    >>> coupled_equation_names(3)
-    ('u', 'v', 'w', 'p', 'k', 'omega')
-    >>> coupled_equation_names(2)
-    ('u', 'v', 'p', 'k', 'omega')
-    """
-    if dim > len(_VELOCITY_NAMES):
-        raise ValueError(f"dim {dim} exceeds the named velocity components {_VELOCITY_NAMES}")
-    return (*_VELOCITY_NAMES[:dim], "p", "k", "omega")
 
 
 def coupled_fields(coupled) -> Callable[[jnp.ndarray], Mapping[str, jnp.ndarray]]:

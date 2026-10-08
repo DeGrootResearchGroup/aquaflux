@@ -1,4 +1,4 @@
-"""The solver's case-file commands, asked of a separate process: schema, show, write, mesh and check.
+"""The solver's case-file commands, asked of a separate process: schema, show, write, mesh, check, plan.
 
 This package does not import the solver -- that would bring JAX into the page's process -- so
 everything it needs to know about a case file it asks the ``aquaflux`` command, which prints JSON
@@ -17,7 +17,7 @@ from pathlib import Path
 from .case_form import CaseSchema
 from .solver_worker import CommandResult, SolverWorker
 
-__all__ = ["CaseDocument", "MeshExport", "Runner", "SolverCommands"]
+__all__ = ["CaseDocument", "MeshExport", "RunPlan", "Runner", "SolverCommands"]
 
 #: Runs ``aquaflux <arguments>`` with the given standard input; the seam a test replaces.
 Runner = Callable[[Sequence[str], str | None], CommandResult]
@@ -66,6 +66,29 @@ class MeshExport:
     dim: int = 3
     patches: list = dataclasses.field(default_factory=list)
     groups: dict = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass(frozen=True)
+class RunPlan:
+    """Where a run of a case file would write, as the solver works it out.
+
+    Attributes
+    ----------
+    error : str or None
+        Why the file could not be read, if it could not; the other attributes are then unset.
+    directory : pathlib.Path or None
+        The output directory.
+    log, history : pathlib.Path or None
+        The log and the per-step history the run writes there; ``None`` for one the case turns off.
+    occupied : tuple of pathlib.Path
+        What already holds results, which the run replaces only when told to overwrite.
+    """
+
+    error: str | None
+    directory: Path | None = None
+    log: Path | None = None
+    history: Path | None = None
+    occupied: tuple[Path, ...] = ()
 
 
 class SolverCommands:
@@ -168,6 +191,23 @@ class SolverCommands:
         result = self._run(["check", str(path)], None)
         message = (result.output if result.status == 0 else result.errors or result.output).strip()
         return result.status == 0, message
+
+    def plan(self, path: str | Path) -> RunPlan:
+        """Where a run of the case file at ``path`` would write, and what it would replace."""
+        reply = _reply(self._run(["plan", str(path)], None))
+        if reply.get("error"):
+            return RunPlan(reply["error"])
+        return RunPlan(
+            None,
+            Path(reply["directory"]),
+            _path(reply.get("log")),
+            _path(reply.get("history")),
+            tuple(Path(target) for target in reply.get("occupied", [])),
+        )
+
+
+def _path(text: str | None) -> Path | None:
+    return None if text is None else Path(text)
 
 
 def _reply(result: CommandResult) -> dict:

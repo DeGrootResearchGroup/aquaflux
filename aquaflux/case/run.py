@@ -14,8 +14,8 @@ of the march as it goes, and writes:
   how many steps it took, where its residual ended and whether it converged, and the physics' scalar
   results (a radiation case's lamp power and where it goes).
 
-A solve that stops short of its stopping test writes no fields, since what it holds is not a solution,
-but it still writes its log, its checkpoints and ``run.yaml``.
+A solve that stops short of its stopping test -- or is interrupted -- writes no fields, since what it
+holds is not a solution, but it still writes its log, its checkpoints and ``run.yaml``.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import IO
 
@@ -35,15 +35,21 @@ import equinox as eqx
 import yaml
 
 import aquaflux
-from aquaflux.solve import MarchLogger, StateCheckpointer, StepHistory, StepReport
+from aquaflux.solve import (
+    MarchLogger,
+    RefreshTiming,
+    StateCheckpointer,
+    StepHistory,
+    StepReport,
+    combine_observers,
+)
 
 from .case_file import CaseFile, CheckedCase, read_case, write_case
 from .outputs import RunFields
 from .paths import relocated
 from .solver import NotConverged, SolverSpec, solver_for
-from .spec import CaseSpec
 
-__all__ = ["PreparedRun", "RunRecord", "prepare_run"]
+__all__ = ["PreparedRun", "RunPlan", "RunRecord", "plan_run", "prepare_run"]
 
 #: The files a run writes into its output directory besides its fields and its log.
 _CASE_RECORD, _RUN_RECORD, _CHECKPOINTS = "case.yaml", "run.yaml", "checkpoints"
@@ -148,6 +154,11 @@ class PreparedRun:
             except (NotConverged, eqx.EquinoxRuntimeError) as error:
                 converged, message = False, str(error).strip().splitlines()[0]
                 logger.note(f"did not converge: {message}")
+            except KeyboardInterrupt:
+                # Stopped by hand (Ctrl-C, or the browser interface's Stop): a run that stopped
+                # short, recorded as one, rather than one that leaves no record of how it ended.
+                converged, message = False, "interrupted before it converged"
+                logger.note(f"did not converge: {message}")
             if converged:
                 fields = RunFields(
                     cells=spec.physics.output_fields(problem, solution),
@@ -236,6 +247,50 @@ class PreparedRun:
         return path
 
 
+@dataclasses.dataclass(frozen=True)
+class RunPlan:
+    """Where a run of a case would write, and what earlier results that would replace.
+
+    Attributes
+    ----------
+    directory : pathlib.Path
+        The output directory.
+    log, history : pathlib.Path or None
+        The log and the per-step history the run would write there; ``None`` for one the outputs
+        section turns off.
+    occupied : tuple of pathlib.Path
+        What already holds results: the output directory, when it holds anything, and any field
+        writer's target outside it that exists. Empty when the run would replace nothing.
+    """
+
+    directory: Path
+    log: Path | None
+    history: Path | None
+    occupied: tuple[Path, ...]
+
+
+def plan_run(path: str | Path) -> RunPlan:
+    """Say where a run of the case file at ``path`` would write, without checking its mesh.
+
+    Parameters
+    ----------
+    path : str or path-like
+        The case file.
+
+    Returns
+    -------
+    RunPlan
+        What :func:`prepare_run` would refuse to replace unless told to overwrite.
+
+    Raises
+    ------
+    ValueError, TypeError, FileNotFoundError
+        If the file cannot be read or is refused (see :func:`~aquaflux.case.read_case`).
+    """
+    case_file = read_case(Path(path).resolve())
+    return _plan(case_file)
+
+
 def prepare_run(path: str | Path, *, overwrite: bool = False) -> PreparedRun:
     """Read a case file and check it, refusing to replace an earlier run's results.
 
@@ -265,29 +320,39 @@ def prepare_run(path: str | Path, *, overwrite: bool = False) -> PreparedRun:
     """
     source = Path(path).resolve()
     case_file = read_case(source)
+    plan = _plan(case_file)
+    if plan.occupied and not overwrite:
+        raise FileExistsError(
+            f"{', '.join(map(str, plan.occupied))} already "
+            f"{'holds' if len(plan.occupied) == 1 else 'hold'} results; move them, or replace them "
+            "with --overwrite (overwrite=True)."
+        )
+    if overwrite and (plan.directory / _CHECKPOINTS).is_dir():
+        shutil.rmtree(plan.directory / _CHECKPOINTS)
+    solver = solver_for(case_file.spec)
+    return PreparedRun(
+        source=source, checked=case_file.check(), solver=solver, directory=plan.directory
+    )
+
+
+def _plan(case_file: CaseFile) -> RunPlan:
+    """Where ``case_file``'s run writes, and which of its targets already hold results."""
     spec = case_file.spec
-    directory = spec.outputs.output_directory(case_file.directory).resolve()
-    _refuse_or_clear(spec, case_file, directory, overwrite)
-    solver = solver_for(spec)
-    return PreparedRun(source=source, checked=case_file.check(), solver=solver, directory=directory)
-
-
-def _refuse_or_clear(spec: CaseSpec, case_file: CaseFile, directory: Path, overwrite: bool) -> None:
-    """Refuse a directory holding an earlier run's results, or, told to overwrite, clear its checkpoints."""
+    outputs = spec.outputs
+    directory = outputs.output_directory(case_file.directory).resolve()
     occupied = [directory] if directory.is_dir() and any(directory.iterdir()) else []
     occupied += [
         target
-        for writer in spec.outputs.fields
+        for writer in outputs.fields
         for target in writer.targets(directory, case_file.directory)
         if target.exists() and not target.is_relative_to(directory)
     ]
-    if occupied and not overwrite:
-        raise FileExistsError(
-            f"{', '.join(map(str, occupied))} already {'holds' if len(occupied) == 1 else 'hold'} "
-            "results; move them, or replace them with --overwrite (overwrite=True)."
-        )
-    if overwrite and (directory / _CHECKPOINTS).is_dir():
-        shutil.rmtree(directory / _CHECKPOINTS)
+    return RunPlan(
+        directory=directory,
+        log=None if outputs.log is None else directory / outputs.log,
+        history=None if outputs.history is None else directory / outputs.history,
+        occupied=tuple(occupied),
+    )
 
 
 class _Tee:
@@ -308,9 +373,11 @@ class _Tee:
 
 
 class _StepCount:
-    """Counts the march's steps and keeps its last residual, forwarding each step to its recorders.
+    """Counts the march's steps and keeps its last residual, forwarding each march hook to its recorders.
 
-    A recorder is anything with ``on_checkpoint(report, state)`` -- the history, the checkpoints.
+    A recorder is anything with ``on_checkpoint(report, state)`` -- the history, the checkpoints -- and
+    optionally ``on_retry``, ``on_refresh`` and ``on_residuals``, which reach the recorders that have
+    them.
     """
 
     def __init__(self, recorders: Sequence[StepHistory | StateCheckpointer]) -> None:
@@ -323,6 +390,25 @@ class _StepCount:
         self.residual = float(report.residual_norm)
         for recorder in self._recorders:
             recorder.on_checkpoint(report, state)
+
+    def on_retry(self, reason: str, attempt: int, beta: float) -> None:
+        for hook in self._hooks("on_retry"):
+            hook(reason, attempt, beta)
+
+    def on_refresh(self, timing: RefreshTiming) -> None:
+        for hook in self._hooks("on_refresh"):
+            hook(timing)
+
+    @property
+    def on_residuals(self) -> Callable[[Mapping[str, float]], None] | None:
+        """The per-equation hook, or ``None`` when no recorder keeps them, so the march skips their cost."""
+        hooks = self._hooks("on_residuals")
+        if not hooks:
+            return None
+        return combine_observers(*hooks)
+
+    def _hooks(self, name: str) -> list[Callable]:
+        return [getattr(recorder, name) for recorder in self._recorders if hasattr(recorder, name)]
 
 
 def _checkout_state() -> tuple[str | None, bool | None]:
