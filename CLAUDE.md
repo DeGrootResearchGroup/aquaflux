@@ -781,7 +781,8 @@ slowed 10–35x, and tests crossed the 900 s per-test timeout with no assertion 
 for a week as "runner variance". The unit job's memory step (a `vmstat` line every 30 s, printed after
 the tests) is what told the two apart: free RAM at ~200 MB within ten minutes, swap climbing. So the
 tier now runs as **three shards of two workers** (`--splits 3 --group N -n 2`, balanced by the unit
-durations in `.test_durations`), measured 2026-10-08 on
+durations the weekly refresh records in `.test_durations` -- record them on CI, never locally: local
+durations mispredicted CI by up to 2x per test and balanced nothing), measured 2026-10-08 on
 a 4-core / 16 GB container without swap, jax 0.10.2: the unsharded `-n 3` run peaked 14.1 GB and was
 OOM-killed, `-n 3 --dist loadfile` 14.3 GB with all three workers killed (`loadfile` does not help
 here), and each shard 9.2–10.9 GB in 12–17 min with none killed. When it outgrows that, **add a shard;

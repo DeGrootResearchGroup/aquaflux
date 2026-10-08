@@ -242,12 +242,13 @@ jobs:
         # within ten minutes and 1.6 GB of swap in use, and it took 42.6 min against py3.12's 24.2.
         # The memory step above is what showed that, and stays for the next time a shard slows.
         #
-        # `--splits` balances the shards by the unit durations recorded in `.test_durations` (kept
-        # current by `refresh-unit-durations` below). By count they were not balanced: on this
-        # PR's first CI run the three shards' test steps took 13.0 / 9.3 / 15.7 min (py3.11) and
-        # 12.2 / 9.6 / 14.3 min (py3.12), because the heavy modules are not spread evenly through
-        # the collected order. A test added since the last refresh gets the average of the
-        # recorded unit durations. The default algorithm cuts the collected order into contiguous
+        # `--splits` balances the shards by the unit durations recorded in `.test_durations` by
+        # `refresh-unit-durations` below. Until that job's first run has been merged there are
+        # none, every unit test gets the same fallback and the split is even by count -- which is
+        # not balanced: on 2026-10-08 the three shards' test steps took 13.0 / 9.3 / 15.7 min
+        # (py3.11) and 12.2 / 9.6 / 14.3 min (py3.12), because the heavy modules are not spread
+        # evenly through the collected order. A test added since the last refresh gets the average
+        # of the recorded unit durations. The default algorithm cuts the collected order into contiguous
         # chunks of equal recorded duration, so a module stays on one shard except at a chunk
         # boundary and its module-scoped fixtures are not rebuilt on every shard.
         #
@@ -581,7 +582,15 @@ jobs:
   # A separate job rather than more groups of the one above because the unit tier runs
   # differently: `-n 2` per shard for memory (see the unit job), its own marker selection, and
   # the unit job's per-test timeout. Recording under the same `-n 2` the shards run with means
-  # each duration is measured under the same contention it is used to predict. Like the job
+  # each duration is measured under the same contention it is used to predict.
+  #
+  # RECORD THEM HERE, NOT ON A DEVELOPMENT MACHINE. Durations recorded locally (a 4-core / 16 GB
+  # Linux container, Python 3.13, the same command, 2026-10-08) mispredicted CI per test by up to
+  # 2x in both directions, clustered by module -- e.g. 37.6 s locally against 20.3 s here for one
+  # radiation test, 16.3 s against 23.7 s for another -- and a split built from them left the
+  # slowest shard exactly where the count split had it (15.9 against 15.7 min, py3.11). The same
+  # tests also ran 15.8 min on py3.11 and 9.6 min on py3.12, so even CI-recorded (py3.12)
+  # durations balance the py3.11 shards only approximately. Like the job
   # above, it records into a fresh path, so its own split is even by count: about 9-16 min a
   # shard on 2026-10-08.
   refresh-unit-durations:
