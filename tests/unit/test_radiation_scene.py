@@ -16,6 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.radiation import (
+    DEFAULT_LAMP_SAMPLES,
     Isotropic,
     Lambertian,
     NoOcclusion,
@@ -38,7 +39,7 @@ from aquaflux.radiation import (
 from aquaflux.radiation.gather import summed_fluence_rate
 from aquaflux.solids import Box, Cylinder, Difference, Outside, Sphere
 
-from tests.unit.radiation_references import closed_drum, inward_box, tilted
+from tests.unit.radiation_references import closed_drum, inward_box, tilt_rotation, tilted
 
 LAMP_EXITANCE = 7.0
 REFLECTANCE = 0.6
@@ -518,10 +519,55 @@ def test_points_on_a_lamp_are_not_shadowed_by_the_facet_they_lie_on() -> None:
     assert np.mean(irradiance(points, None) < 0.5 * off) > 0.5
 
 
+def test_one_lamp_s_light_on_another_lands_as_the_model_with_both_inside_says() -> None:
+    # Two drums under the ray test. The points one lamp's light is averaged over on the other lie in
+    # that lamp's facets, so a ray from the first ends in the facet under the point: left in the
+    # test, that facet cuts it, and the second lamp reads dark where the first lights it. The model
+    # carries both lamps in its surface set, where each facet is left out of its own rays, so it says
+    # what lands with that done. One sample and one quadrature point per facet: the same points.
+    walls = inward_box(3)
+    drums = np.concatenate(
+        [
+            closed_drum(8, radius=0.1, half_height=0.25) + np.array([0.3, 0.5, 0.5]),
+            closed_drum(8, radius=0.1, half_height=0.25) + np.array([0.7, 0.5, 0.5]),
+        ]
+    )
+    is_lamp = np.arange(len(walls) + len(drums)) >= len(walls)
+    settings = RadiationSettings(receiver_quadrature=1, self_occlusion=RayCastOcclusion())
+    whole = Surfaces.from_triangles(
+        np.concatenate([walls, drums]),
+        emission=np.where(is_lamp, LAMP_EXITANCE, 0.0),
+        diffuse_reflectance=np.where(is_lamp, LAMP_REFLECTANCE, REFLECTANCE),
+    )
+    landing, _ = surface_irradiance(
+        build_radiation_model(np.zeros((0, 3)), whole, settings=settings), whole
+    )
+    lamps = Surfaces.from_triangles(
+        drums, solid_names=("lamps",), emission=LAMP_EXITANCE, diffuse_reflectance=LAMP_REFLECTANCE
+    )
+    reflectors = Surfaces.from_triangles(
+        walls, solid_names=("walls",), diffuse_reflectance=REFLECTANCE
+    )
+    solution = solve_scene(
+        Scene(lamps=lamps, reflectors=reflectors, lamp_samples=1, settings=settings)
+    )
+    np.testing.assert_allclose(solution.lamp_irradiance, np.asarray(landing)[is_lamp], rtol=1e-11)
+    # Each lamp lights the other directly: the walls alone, black, leave the lamps far darker.
+    dark = solve_scene(
+        Scene(
+            lamps=lamps,
+            reflectors=reflectors.with_optics(diffuse_reflectance=0.0),
+            lamp_samples=1,
+            settings=settings,
+        )
+    )
+    assert np.max(dark.lamp_irradiance) > 0.1 * np.max(solution.lamp_irradiance)
+
+
 def test_the_lamps_light_on_a_lamp_is_taken_on_the_fluid_s_side_of_it() -> None:
     # The water as a body -- the box less a cylinder standing inside the drum, its caps on the
     # drum's caps, as a drawing's fluid leaves out its lamp. The points the lamps' light is averaged
-    # over on a lamp facet must lie in that water: a hair behind a cap they are inside the lamp,
+    # over on a lamp facet must not be moved off it into the lamp: a hair behind a cap they are
     # outside the water, and the scene refuses them. Standing wholly behind the lamp's facets, the
     # cylinder shadows nothing the lamp does not, so what lands on the lamp is what it was without
     # the water.
@@ -546,3 +592,43 @@ def test_the_lamps_light_on_a_lamp_is_taken_on_the_fluid_s_side_of_it() -> None:
         return solve_scene(scene).lamp_irradiance
 
     np.testing.assert_allclose(landing((water,)), landing(()), rtol=1e-12)
+
+
+def test_a_tilted_lamp_flush_with_the_water_s_wall_is_lit_as_without_the_water() -> None:
+    # A box lamp whose facets are the faces of the box the water leaves out, turned off every axis.
+    # The points the lamps' light is averaged over then lie in those faces, at heights above the
+    # water's wall that are rounding noise of either sign -- the same noise as the facet centroids,
+    # which the scene checks too. A water body with a tolerance above that rounding admits the
+    # facets, and so admits their sample points as they are: none needs moving off its facet. And
+    # its own facet, named and left out, does not light it, so what lands is what it was without
+    # the water.
+    half = np.array([0.08, 0.08, 0.2])
+    turn = tilt_rotation()
+    # The unit box's inward triangles, wound to face outward, sized to the lamp and turned.
+    lamp_triangles = ((inward_box(1)[:, ::-1, :] - 0.5) * 2.0 * half) @ turn.T + 0.5
+    lamps = Surfaces.from_triangles(
+        lamp_triangles,
+        solid_names=("lamp",),
+        emission=LAMP_EXITANCE,
+        diffuse_reflectance=LAMP_REFLECTANCE,
+    )
+    reflectors = Surfaces.from_triangles(
+        inward_box(3), solid_names=("walls",), diffuse_reflectance=REFLECTANCE
+    )
+    lamp = Box(centre=[0.5, 0.5, 0.5], half_sizes=half, axes=turn.T)
+    water = Outside(Difference(Box(centre=[0.5, 0.5, 0.5], half_sizes=0.5), lamp), tolerance=1e-12)
+    samples = subtriangle_centroids(np.asarray(lamps.vertices), DEFAULT_LAMP_SAMPLES)
+    off_by_rounding = np.abs(np.asarray(lamp.signed_distance(jnp.asarray(samples.reshape(-1, 3)))))
+    # The samples do lie in the lamp's faces, and some on the lamp's side of them by a rounding:
+    # without the tolerance those would be refused.
+    assert np.max(off_by_rounding) < 1e-14
+    assert np.any(np.asarray(Outside(water.fluid).contains(jnp.asarray(samples.reshape(-1, 3)))))
+    settings = RadiationSettings(self_occlusion=RayCastOcclusion())
+
+    def landing(occluders):
+        scene = Scene(lamps=lamps, reflectors=reflectors, occluders=occluders, settings=settings)
+        return solve_scene(scene).lamp_irradiance
+
+    unbounded = landing(())
+    assert np.all(unbounded > 0.0)
+    np.testing.assert_allclose(landing((water,)), unbounded, rtol=1e-12)

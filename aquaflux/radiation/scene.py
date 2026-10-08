@@ -84,14 +84,6 @@ _OWN_FACET_CANDIDATES = 32
 #: body's extent: a rounding of the point's coordinates.
 _TIE = 1e-12
 
-#: How far in front of its own facet a point the lamps' light is averaged over on a lamp facet is
-#: moved, as a share of the scene's size. In the facet's plane the point sits exactly on the lamp's
-#: boundary; a hair in front it is unambiguously on the fluid's side, where a body holding the fluid
-#: does not refuse it. (That its own facet does not light it is the gather's doing: the facet is
-#: named as the point's own and left out.) Far above a rounding of the coordinates, far below
-#: anything geometric.
-_IN_FRONT_OF_OWN_FACET = 1e-12
-
 
 @dataclasses.dataclass(frozen=True)
 class VolumeReceivers:
@@ -525,9 +517,9 @@ class _Exchanged:
 def _solve_exchange(scene: Scene, exchange: _Exchange, solver, say) -> _Exchanged:
     """Solve the reflected light among the exchanging facets, lit from outside by the lamps.
 
-    The lamps' light on each facet is averaged over its sub-triangle centroids. On a lamp facet
-    those points are moved a hair in front of the facet, on the fluid's side of it, and the facet is
-    named as their own: left out of their shadow test and of the light gathered at them.
+    The lamps' light on each facet is averaged over its sub-triangle centroids, in the facet's own
+    plane. On a lamp facet the facet is named as those points' own: left out of their shadow test,
+    and of the light gathered at them, since a facet lights nothing in its own plane.
     """
     surfaces, lamps = exchange.surfaces, scene.lamps
     samples = subtriangle_centroids(surfaces.vertices, scene.lamp_samples)
@@ -545,13 +537,10 @@ def _solve_exchange(scene: Scene, exchange: _Exchange, solver, say) -> _Exchange
             scene, lamps, samples[:split].reshape(-1, 3), normals[:split].reshape(-1, 3)
         ).reshape(split, per_facet)
     if len(exchange.lamp_facets):
-        vertices = np.asarray(surfaces.vertices)
-        size = np.max(np.ptp(vertices.reshape(-1, 3), axis=0)) + np.max(np.abs(vertices))
-        in_front = samples[split:] + _IN_FRONT_OF_OWN_FACET * size * normals[split:]
         external[split:] = _irradiance(
             scene,
             lamps,
-            in_front.reshape(-1, 3),
+            samples[split:].reshape(-1, 3),
             normals[split:].reshape(-1, 3),
             own=np.repeat(exchange.lamp_facets, per_facet)[:, None],
         ).reshape(-1, per_facet)

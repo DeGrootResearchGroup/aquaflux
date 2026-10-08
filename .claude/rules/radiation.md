@@ -4389,12 +4389,11 @@ radiation **case file** builds (`.claude/rules/case.md` → Radiation cases); th
   `direct_irradiance(..., receiver_facet=)` — `(n_points,)` or `(n_points, k)` rows, `-1` padding, the
   same form `build_visibility` takes — and `scene._irradiance` passes `_own_facets`' rows to it on BOTH
   paths (unshadowed and per-pass masked). **Rejected: offsetting the points a hair in front of their
-  facet** (what #604 step 1 did for lamp light on lamp facets, `_IN_FRONT_OF_OWN_FACET`, `1e-12` of the scene's
-  size). It is correct only while the offset clears `clipping._SLACK`'s band at that facet's size, so it
+  facet** (what #604 step 1 did for lamp light on lamp facets, `1e-12` of the scene's size -- since
+  DELETED, see #604 STEP 1 below). It is correct only while the offset clears `clipping._SLACK`'s band at that facet's size, so it
   silently couples a scene-scale constant to the clip's rounding tolerance; exclusion is exact (a flat
   facet sends nothing into its own plane), needs no length scale, and is the transfer's `F_ii = 0`
-  convention applied in the gather. The lamp samples do pass their facet now, so the offset there serves only
-  its other purpose (see #604 STEP 1 below). Pinned by `test_a_point_on_a_tilted_facet_is_lit_by_the_others_and_not_by_its_own_facet`
+  convention applied in the gather. Pinned by `test_a_point_on_a_tilted_facet_is_lit_by_the_others_and_not_by_its_own_facet`
   and `test_every_facet_a_row_names_is_left_out_and_a_minus_one_names_none` (gather; the reference is
   the same points 1e-9 in front, unnamed) and `test_a_point_inside_a_tilted_reflecting_facet_is_not_lit_by_that_facet`
   (scene, both paths); each mutation-checked, `tests/unit/radiation_references.tilted` is the fixture.
@@ -4440,23 +4439,31 @@ in the exchange** (default reflectance 0), which fixes the pass-through and cost
   round to ~1e-17 either way; where they stay undecidable the kernel keeps the in-plane triangle and
   returns the hemisphere (the self-facet convention). Measured on one tilted 9-facet plane: **51%** of
   sub-triangle centroids read `E = M` from their own facet (centroids read 0 -- the zero-direction guard);
-  axis-aligned, none. Fixed by moving those points `_IN_FRONT_OF_OWN_FACET = 1e-12` of the scene's size
-  (extent + largest coordinate) **in front**, where the facet is decidably behind the receiving plane and
-  clipped away whatever the profile. ⚠️ **Behind would ALSO zero it (the emitter gate) and was the first
-  fix -- and is wrong**: behind a lamp is outside the fluid, so a body holding the fluid (a `CadFluid`,
-  `Outside(Difference(box, lamp))`) refuses the points (pinned by
-  `test_the_lamps_light_on_a_lamp_is_taken_on_the_fluid_s_side_of_it`). 1e-9 moved the model
-  equivalence to 2.4e-10; 1e-12 keeps it under 1e-11.
+  axis-aligned, none. **Fixed (#615) by naming the facet as the points' own** (`own=` -> the gather's
+  `receiver_facet`), which leaves it out as a source exactly; the points stay IN the facet's plane.
+  ⚠️ **Never move them BEHIND the facet** (the emitter gate would also zero it, and that was the first
+  fix): behind a lamp is outside the fluid, so a body holding the fluid (a `CadFluid`,
+  `Outside(Difference(box, lamp))`) refuses them (pinned by
+  `test_the_lamps_light_on_a_lamp_is_taken_on_the_fluid_s_side_of_it`).
+- ⚠️ **There is no offset IN FRONT any more either -- `_IN_FRONT_OF_OWN_FACET` (1e-12 of the scene's
+  size) was DELETED as redundant (#615, 2026-10-07).** It had two jobs. *Self-lighting* is done exactly
+  by the exclusion above. *Keeping the samples where a fluid body admits them* never applied on its own:
+  the samples lie in their facet's plane with the same rounding as the facet's centroid, which
+  `refuse_points_inside` checks too, so a body that admits the facets admits their samples and one that
+  refuses them refuses the scene first. Measured (2026-10-07, jax 0.10.2, CPU, x64, macOS arm64): a box
+  lamp `half_sizes (0.08, 0.08, 0.2)` flush with `Outside(Difference(unit box, Box(..., axes=R.T)))` in
+  `inward_box(3)`, `RayCastOcclusion`, 4 orientations (axis-aligned and three Euler tilts): at
+  `tolerance=0` the scene is refused for 2-9 of its 12 facet centroids **with or without the offset**
+  (tilted, 38-134 of 192 in-plane samples also read inside; axis-aligned, `0.08` is inexact in binary
+  and 6 centroids sit at +1.1e-16); at `tolerance=1e-12` nothing is refused and offset 1e-12 vs 0 agree
+  to <=6.1e-16 in `lamp_irradiance`. A 12-sector drum with an inscribed `Cylinder` (half-length 0.25 or
+  0.24) gave the same verdict: refused by its cap centroids regardless, or no sample on the surface at
+  all. Pinned by `test_a_tilted_lamp_flush_with_the_water_s_wall_is_lit_as_without_the_water` (the
+  samples do round onto the lamp's side -- asserted -- and the water at 1e-12 changes nothing).
+  ⚠️ `Box(axes=)` takes the axes as ROWS: a rotation `R` applied as `x @ R.T` needs `axes=R.T`; with
+  `axes=R` the body is misplaced by ~0.1 and every refusal reads as a rounding problem.
 - **The same hemisphere at the scene's SurfaceReceivers on a tilted reflecting facet is FIXED (#615,
-  2026-10-07) by exclusion, not by this offset** -- `direct_irradiance(..., receiver_facet=)` leaves a
-  point's own facets out as sources; see "THE SCENE" above for the measurement and why the offset was not
-  generalized. The lamp samples pass `own=` too, so they are excluded as well; **the offset stays for
-  its second reason only**, keeping them on the fluid's side where a body holding the fluid does not
-  refuse them. ⚠️ **That reason is now UNPINNED**: with the exclusion in, `_IN_FRONT_OF_OWN_FACET = 0`
-  leaves all 20 `test_radiation_scene.py` tests green (2026-10-07, merge of #614 into #615), because
-  `test_the_lamps_light_on_a_lamp_is_taken_on_the_fluid_s_side_of_it` samples axis-aligned caps,
-  where an in-plane point is not refused. Either pin it with a tilted lamp inside a fluid body, or
-  delete the offset as dominated -- the user's call, not taken in the merge.
+  2026-10-07) by the same exclusion** -- see "THE SCENE" above for the measurement.
 - **Energy, measured** (12-sector drum, r 0.12, 0.5 high, in `inward_box(3)`, walls rho 0.8, lamp rho
   0.4, default 6-point rule; jax 0.10.2, CPU, x64, Linux, 2026-10-07): walls + lamp absorb **1.014** of the
   emitted power under `RayCastOcclusion` (the one-ray-per-pair mask of the drum's shadow on a coarse mesh);
@@ -4468,13 +4475,21 @@ in the exchange** (default reflectance 0), which fixes the pass-through and cost
   brighter somewhere); lamps alone (two reflecting plates) equal the model; a point-source lamp lands
   zero; points on a lamp named by its body equal the same points 1e-6 off it (1e-4); the energy test
   above (2.5%). **Mutation pass, 13 breaks, 12 red**: lamps left out of the exchange, lamps reflect
-  nothing, absorbed by rho not 1 - rho, no offset, offset behind, no exchange without reflectors, lamp
+  nothing, absorbed by rho not 1 - rho, no offset, offset behind (both measured under the since-deleted
+  offset; "behind" survives as the fluid-side test), no exchange without reflectors, lamp
   receivers not excluded, landing from the wrong rows, shared names allowed, the case ignoring
   `Lamp.reflectance`, `unaccounted_power` keeping the lamps' share, the reflectance unchecked; the
-  shadow test alone goes red under "lamps left out". **Dismissed**: not leaving a lamp sample's own facet
-  out of its shadow test -- after the offset the point is in front of its facet, so no ray from it ends in
-  it; it stays because `SilhouetteOcclusion` reads `receiver_facet` to measure a receiver by the
-  projected rather than the plain solid angle. ⚠️ **The reflector samples pass no `receiver_facet`
+  shadow test alone goes red under "lamps left out". A lamp sample's own facet in its shadow test was
+  dismissed as inert under the offset; **with the samples back in the facet's plane it is load-bearing
+  again** (a ray from another facet ends in it -- the "two exclusions" defect), and `own=` supplies it;
+  `SilhouetteOcclusion` also reads it to measure a receiver by the projected solid angle. ⚠️ **Only a
+  SECOND lamp exposes it**: a single convex drum cannot light itself, so every one-drum test stays green
+  with it removed (all 50 scene + case-radiation tests did). Measured (2026-10-08, jax 0.10.2, CPU, x64,
+  macOS arm64): two 12-sector drums (r 0.1, half-height 0.25, at x 0.3 and 0.7) in `inward_box(3)`,
+  walls rho 0.6, lamps rho 0.4, `RayCastOcclusion`, default 4x4 samples -- removing it changes **every**
+  lamp facet's `lamp_irradiance`, by up to **51%** (lamp absorbed 0.664 -> 0.550 W). Pinned by
+  `test_one_lamp_s_light_on_another_lands_as_the_model_with_both_inside_says` (two 8-sector drums, the
+  model with both inside as the reference, 1e-11; red with the exclusion removed for lamp samples only). ⚠️ **The reflector samples pass no `receiver_facet`
   (they lie on no LAMP facet), so under `SilhouetteOcclusion` their shares of the lamps are taken by the
   plain solid angle** -- pre-existing, and the API cannot express "a surface receiver on no source
   facet"; raised with the user as a follow-up.

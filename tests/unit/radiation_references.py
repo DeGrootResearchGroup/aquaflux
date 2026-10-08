@@ -216,20 +216,26 @@ def inward_box(divisions: int = 2) -> np.ndarray:
     return corrected
 
 
-def tilted(vertices: np.ndarray) -> np.ndarray:
-    """``vertices`` turned off every coordinate axis and moved off the origin.
+def tilt_rotation() -> np.ndarray:
+    """The rotation :func:`tilted` applies: Euler angles ``(0.3, 0.7, 0.2)`` about ``x``, ``y``, ``z``.
 
-    The rotation is by Euler angles ``(0.3, 0.7, 0.2)`` about ``x``, ``y``, ``z`` and the shift is
-    ``(0.4, -0.2, 1.3)``, so no face of a box stays in a plane where a coordinate is constant. A
-    point that lies in a facet's plane then has heights above it that round to noise of either sign
-    rather than to exact zeros, which is the case an axis-aligned fixture never reaches.
+    Shared with the analytic body a tilted test turns the same way, so the two cannot disagree.
     """
     a, b, c = 0.3, 0.7, 0.2
     about_x = np.array([[1, 0, 0], [0, np.cos(a), -np.sin(a)], [0, np.sin(a), np.cos(a)]])
     about_y = np.array([[np.cos(b), 0, np.sin(b)], [0, 1, 0], [-np.sin(b), 0, np.cos(b)]])
     about_z = np.array([[np.cos(c), -np.sin(c), 0], [np.sin(c), np.cos(c), 0], [0, 0, 1]])
-    rotation = about_z @ about_y @ about_x
-    return vertices @ rotation.T + np.array([0.4, -0.2, 1.3])
+    return about_z @ about_y @ about_x
+
+
+def tilted(vertices: np.ndarray) -> np.ndarray:
+    """``vertices`` turned by :func:`tilt_rotation` and moved off the origin by ``(0.4, -0.2, 1.3)``.
+
+    No face of a box then stays in a plane where a coordinate is constant. A point that lies in a
+    facet's plane has heights above it that round to noise of either sign rather than to exact
+    zeros, which is the case an axis-aligned fixture never reaches.
+    """
+    return vertices @ tilt_rotation().T + np.array([0.4, -0.2, 1.3])
 
 
 def mid_box_sheet(divisions: int, *, span: float) -> np.ndarray:
