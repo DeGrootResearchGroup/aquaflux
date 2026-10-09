@@ -270,6 +270,19 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   on the neighbour side) instead of deriving it from the cell index internally, so both spend the
   same displacement the reconstruction applies. Latent until now: no shipped case pairs a periodic
   mesh with a limiter (the periodic cases run unlimited or first-order advection).
+- **`boundary_closure.py` — BUILT (2026-10-09, #58). `BoundaryClosure(values)`: one scalar field's
+  boundary face values as a function `(field, gradient) -> (n_faces,)`, and the one home of
+  everything a reconstruction needs from them** — `reconstruct(scheme, field, mesh, geometry, *,
+  operator_hook, imposed)` (leading-order values at a zero gradient into the scheme, plus
+  `boundary_values_at` and `boundary_gradient_weight`; returns the gradient and the values
+  re-evaluated at it; `scheme=None` → a zero gradient), `value_weight` / `gradient_weight` (the `jvp`
+  probes), and `linearization(n_cells, dim)` (both at rest — the `BoundaryLinearization` `bind`
+  takes). `ResidualAssembler` wraps `boundary_values`; `MomentumContinuity` wraps the pressure and
+  a per-component view of each velocity component. Before it, those were written three times
+  (scalar, velocity, pressure) and the flow copies had drifted — no `operator_hook`, no `imposed`.
+  A frozen dataclass, not an `equinox.Module`: it holds a callable closing over its assembler and
+  lives for one method call, never on a pytree. **When a new caller reconstructs a gradient against
+  boundary closures, wrap them in this; do not write a fourth copy of the two passes.**
 - **`projected_stencil.py` — BUILT (2026-09-22). `ProjectedStencilGradient`: the weights are CHOSEN,
   and that is the whole point of it.** Every linear reconstruction is per-cell weights over a stencil;
   exactness for quadratics fixes only ten of the ~13 numbers per gradient component on a tetrahedron's

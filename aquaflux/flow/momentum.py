@@ -31,7 +31,6 @@ import dataclasses
 from typing import TYPE_CHECKING, NamedTuple
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
 
 from aquaflux.boundary import BoundaryConditions, refuse_a_closure_that_closes_other_fields
@@ -44,7 +43,7 @@ from aquaflux.discretization import (
     FixedValueCells,
 )
 from aquaflux.properties import PropertyModel
-from aquaflux.schemes import DEFAULT_GRADIENT_SCHEME, BoundaryLinearization
+from aquaflux.schemes import DEFAULT_GRADIENT_SCHEME, BoundaryClosure, BoundaryLinearization
 from aquaflux.schemes.interpolation import (
     interpolate_to_face,
     interpolation_factor,
@@ -266,7 +265,8 @@ class MomentumContinuity(eqx.Module):
 
         ``boundary`` is a :class:`~aquaflux.boundary.BoundaryConditions` collection of per-patch
         flow closures (``BoundaryConditions({name: FlowBoundary})``), bound to ``mesh.face_patches``
-        internally. ``properties`` must supply ``"viscosity"`` and ``"density"``.
+        internally. ``properties`` must supply ``"viscosity"`` and ``"density"``, and every property a
+        source names in its :meth:`~aquaflux.flow.MomentumSource.requires`.
         ``gradient_scheme`` reconstructs the velocity and pressure gradients this residual cannot do
         without; omitting it takes :data:`~aquaflux.schemes.DEFAULT_GRADIENT_SCHEME`, which is where
         that choice is written down. Whatever it ends up being is carried on the built assembler, so
@@ -290,7 +290,8 @@ class MomentumContinuity(eqx.Module):
         :class:`~aquaflux.flow.MassFlow` solve, which needs a leaf of its own to write each iterate
         into and a border column ``dR/dbeta = −V`` a source cannot supply.
         """
-        properties.require("viscosity", "density")
+        needed = {"viscosity", "density"} | {n for source in sources for n in source.requires()}
+        properties.require(*sorted(needed))
         refuse_a_closure_that_closes_other_fields(boundary, FLOW_FIELDS, "MomentumContinuity.build")
         refuse_an_unsuitable_pressure_datum(boundary, pressure_datum, "MomentumContinuity.build")
         reject_unsupported_face_force(sources, geometry, properties, mesh)
@@ -354,38 +355,26 @@ class MomentumContinuity(eqx.Module):
     def _build_time_velocity_linearizations(self) -> tuple[BoundaryLinearization, ...]:
         """Each velocity component's boundary linearization, evaluated without a state.
 
-        One per component, from :meth:`_velocity_boundary_value_weight` and
-        :meth:`_velocity_boundary_gradient_weight` at rest and at a zero gradient, because both are
-        properties of the closures and the geometry and not of the field. Every flow closure is
-        affine in the owner's value and gradient (a prescribed value ignores both; an extrapolating
-        one follows the value and adds the tangential offset ``grad . d_t``), so the derivatives at
-        rest are the derivatives everywhere -- pinned by
+        One per component, read off that component's :meth:`_velocity_closure` at rest, because both
+        derivatives are properties of the closures and the geometry and not of the field. Every flow
+        closure is affine in the owner's value and gradient (a prescribed value ignores both; an
+        extrapolating one follows the value and adds the tangential offset ``grad . d_t``), so the
+        derivatives at rest are the derivatives everywhere -- pinned by
         ``test_the_flow_boundary_linearizations_do_not_depend_on_the_state``.
 
         Unlike the scalar twin on a residual assembler, no property is evaluated on the way: the
         flow closures read the state and the face geometry only, so this cannot fail on a property
         that needs a field.
         """
-        velocity = jnp.zeros((self.mesh.n_cells, self.mesh.dim))
-        gradient = jnp.zeros((self.mesh.n_cells, self.mesh.dim, self.mesh.dim))
+        rest = jnp.zeros((self.mesh.n_cells, self.mesh.dim))
         return tuple(
-            BoundaryLinearization(
-                value_weight=self._velocity_boundary_value_weight(velocity, component, gradient),
-                gradient_weight=self._velocity_boundary_gradient_weight(
-                    velocity, component, gradient
-                ),
-            )
+            self._velocity_closure(rest, component).linearization(self.mesh.n_cells, self.mesh.dim)
             for component in range(self.mesh.dim)
         )
 
     def _build_time_pressure_linearization(self) -> BoundaryLinearization:
         """The pressure boundary linearization, evaluated without a state -- see the velocity twin."""
-        pressure = jnp.zeros(self.mesh.n_cells)
-        gradient = jnp.zeros((self.mesh.n_cells, self.mesh.dim))
-        return BoundaryLinearization(
-            value_weight=self._pressure_boundary_value_weight(pressure, gradient),
-            gradient_weight=self._pressure_boundary_gradient_weight(pressure, gradient),
-        )
+        return self._pressure_closure().linearization(self.mesh.n_cells, self.mesh.dim)
 
     # --- state layout ------------------------------------------------------------------
 
@@ -690,6 +679,37 @@ class MomentumContinuity(eqx.Module):
 
     # --- residual ----------------------------------------------------------------------
 
+    def _velocity_closure(self, velocity: jnp.ndarray, component: int) -> BoundaryClosure:
+        """One velocity component's boundary closure, as a function of that component and its gradient.
+
+        The per-component view of the vector flow closures: the component's cell values are written
+        into ``velocity`` and its ``(n_cells, dim)`` gradient into row ``component`` of an otherwise
+        zero gradient tensor, and column ``component`` of the boundary velocity is read back. The view
+        is exact because every flow closure closes each component on its own -- component ``i`` reads
+        its own value and its own row of the tensor -- so the zeroed rows never reach the returned
+        column. It is what each component's reconstruction is fed; the face values the fluxes read
+        are taken from the vector closures at the whole tensor (:meth:`_velocity_gradient`).
+
+        Parameters
+        ----------
+        velocity : jnp.ndarray
+            Cell velocity the other components are read from, shape ``(n_cells, dim)``.
+        component : int
+            The velocity component this closure describes.
+        """
+        tensor = jnp.zeros((self.mesh.n_cells, self.mesh.dim, self.mesh.dim))
+
+        def values(field: jnp.ndarray, gradient: jnp.ndarray) -> jnp.ndarray:
+            return self._boundary_velocity(
+                velocity.at[:, component].set(field), tensor.at[:, component, :].set(gradient)
+            )[:, component]
+
+        return BoundaryClosure(values)
+
+    def _pressure_closure(self) -> BoundaryClosure:
+        """The pressure's boundary closure, as a function of the pressure and its gradient."""
+        return BoundaryClosure(self._boundary_pressure)
+
     def _velocity_gradient(self, velocity: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
         """The cell velocity gradient and the boundary velocity consistent with it.
 
@@ -698,52 +718,28 @@ class MomentumContinuity(eqx.Module):
         reconstruction and the momentum viscous flux — together with the boundary face velocity,
         shape ``(n_faces, dim)``.
 
-        Two passes, the shape the scalar path uses. The reconstruction is fed a **leading-order**
-        boundary value (the closures at a zero gradient, so their tangential non-orthogonal
-        correction is dropped), which keeps the residual a single pass over the state; the returned
-        boundary velocity is the closures re-evaluated at the reconstructed gradient, and that is
-        what the viscous flux consumes. The two agree exactly on orthogonal grids, where the
-        correction vanishes.
-
-        ``boundary_values_at`` hands a scheme that **differentiates** a boundary value the corrected
-        one directly: a gradient-type closure's whole content is a correction, so differencing a
-        value evaluated at zero gradient reports a normal derivative the field does not have, and
-        the closure then divides that by the wall-normal distance.
+        Each component is the two-pass reconstruction a scalar equation uses
+        (:meth:`~aquaflux.schemes.BoundaryClosure.reconstruct`), through its own
+        :meth:`_velocity_closure` and with the scheme bound for that component's conditions: fed the
+        leading-order boundary value (the closures at a zero gradient, which keeps the residual a
+        single pass over the state), and returning the closures re-evaluated at the reconstructed
+        gradient, which is what the viscous flux consumes. The two agree exactly on orthogonal grids,
+        where the tangential non-orthogonal correction vanishes.
         """
-        zero_gradient = jnp.zeros((self.mesh.n_cells, self.mesh.dim, self.mesh.dim))
-        leading = self._boundary_velocity(velocity, zero_gradient)
-        columns = [
-            self.velocity_gradient_schemes[i].gradients(
-                velocity[:, i],
-                self.mesh,
-                self.geometry,
-                leading[:, i],
-                boundary_values_at=lambda g, i=i: self._boundary_velocity_component(velocity, i, g),
-                boundary_gradient_weight=self._velocity_boundary_gradient_weight(
-                    velocity, i, zero_gradient
-                ),
-            )
-            for i in range(self.mesh.dim)
-        ]
-        gradient = jnp.stack(columns, axis=1)
-        return gradient, self._boundary_velocity(velocity, gradient)
-
-    def _boundary_velocity_component(
-        self, velocity: jnp.ndarray, component: int, component_gradient: jnp.ndarray
-    ) -> jnp.ndarray:
-        """Boundary values of one velocity component at that component's own gradient, ``(n_faces,)``.
-
-        The per-component view a gradient scheme's ``boundary_values_at`` asks for: it reconstructs
-        one scalar and so hands back one ``(n_cells, dim)`` gradient. Each component's closure reads
-        only its own row of the velocity-gradient tensor, so the other rows never reach the returned
-        column and are filled with zeros rather than plumbed through.
-        """
-        gradient = (
-            jnp.zeros((self.mesh.n_cells, self.mesh.dim, self.mesh.dim))
-            .at[:, component, :]
-            .set(component_gradient)
+        gradient = jnp.stack(
+            [
+                self._velocity_closure(velocity, i).reconstruct(
+                    self.velocity_gradient_schemes[i], velocity[:, i], self.mesh, self.geometry
+                )[0]
+                for i in range(self.mesh.dim)
+            ],
+            axis=1,
         )
-        return self._boundary_velocity(velocity, gradient)[:, component]
+        # The face values the fluxes read come from the vector closures at the whole gradient tensor,
+        # not from the per-component views: only the reconstruction relies on a component's closure
+        # reading its own row alone, and a closure that couples the components must still be handed
+        # the tensor here.
+        return gradient, self._boundary_velocity(velocity, gradient)
 
     def _pressure_gradient(self, pressure: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
         """The cell pressure gradient ``(n_cells, dim)`` and the boundary pressure consistent with it.
@@ -752,85 +748,8 @@ class MomentumContinuity(eqx.Module):
         reason; the returned boundary pressure is what the momentum pressure force reads at a
         boundary face.
         """
-        zero_gradient = jnp.zeros((self.mesh.n_cells, self.mesh.dim))
-        leading = self._boundary_pressure(pressure, zero_gradient)
-        gradient = self.pressure_gradient_scheme.gradients(
-            pressure,
-            self.mesh,
-            self.geometry,
-            leading,
-            boundary_values_at=lambda g: self._boundary_pressure(pressure, g),
-            boundary_gradient_weight=self._pressure_boundary_gradient_weight(
-                pressure, zero_gradient
-            ),
-        )
-        return gradient, self._boundary_pressure(pressure, gradient)
-
-    def _velocity_boundary_value_weight(
-        self, velocity: jnp.ndarray, component: int, grad_velocity: jnp.ndarray
-    ) -> jnp.ndarray:
-        """``d(boundary velocity_i)/d(velocity_i owner)`` per face, shape ``(n_faces,)``.
-
-        Differentiated from the closures, as the gradient weight is: zero where the component is
-        prescribed, one where it extrapolates. A face value reads only its own owner, so one
-        directional derivative seeded in every cell resolves every face.
-        """
-        return jax.jvp(
-            lambda v: self._boundary_velocity(v, grad_velocity)[:, component],
-            (velocity,),
-            (jnp.zeros_like(velocity).at[:, component].set(1.0),),
-        )[1]
-
-    def _pressure_boundary_value_weight(
-        self, pressure: jnp.ndarray, grad_pressure: jnp.ndarray
-    ) -> jnp.ndarray:
-        """``d(boundary pressure)/d(pressure owner)`` per face, shape ``(n_faces,)`` -- see the velocity twin."""
-        return jax.jvp(
-            lambda p: self._boundary_pressure(p, grad_pressure),
-            (pressure,),
-            (jnp.ones_like(pressure),),
-        )[1]
-
-    def _velocity_boundary_gradient_weight(
-        self, velocity: jnp.ndarray, component: int, grad_velocity: jnp.ndarray
-    ) -> jnp.ndarray:
-        """``d(boundary velocity_i)/d(grad velocity_i)`` per face, shape ``(n_faces, dim)``.
-
-        Per **component**, since a patch may treat the components differently, and one directional
-        derivative per gradient direction: component ``i``'s closure reads only row ``i`` of the
-        gradient tensor, and a face value reads only its own owner's gradient, so a seed set in every
-        cell resolves every face.
-
-        Differentiated from the closures rather than declared, so it cannot disagree with them: a
-        prescribed velocity does not move with the gradient and gives zero, and a zero-gradient one
-        gives the tangential offset its face value carries.
-        """
-        return jnp.stack(
-            [
-                jax.jvp(
-                    lambda g: self._boundary_velocity(velocity, g)[:, component],
-                    (grad_velocity,),
-                    (jnp.zeros_like(grad_velocity).at[:, component, k].set(1.0),),
-                )[1]
-                for k in range(grad_velocity.shape[2])
-            ],
-            axis=-1,
-        )
-
-    def _pressure_boundary_gradient_weight(
-        self, pressure: jnp.ndarray, grad_pressure: jnp.ndarray
-    ) -> jnp.ndarray:
-        """``d(boundary pressure)/d(grad pressure)`` per face, shape ``(n_faces, dim)`` -- see the velocity twin."""
-        return jnp.stack(
-            [
-                jax.jvp(
-                    lambda g: self._boundary_pressure(pressure, g),
-                    (grad_pressure,),
-                    (jnp.zeros_like(grad_pressure).at[:, k].set(1.0),),
-                )[1]
-                for k in range(grad_pressure.shape[1])
-            ],
-            axis=-1,
+        return self._pressure_closure().reconstruct(
+            self.pressure_gradient_scheme, pressure, self.mesh, self.geometry
         )
 
     def _mass_flux(
