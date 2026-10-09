@@ -244,8 +244,9 @@ testability seam. Everything subsystem-specific moved out:
 | `.claude/notes/solve-globalization-log.md` | *(never auto-loads)* | The dated investigation behind the globalization architecture |
 | `solve-march.md` | `march.py`, `march_log.py`, `checkpoint.py` | The observed march: `newton_march`, triggers, controls, logging |
 | `.claude/notes/solve-refuted-directions.md` | *(never auto-loads)* | A cross-cutting ledger of closed/refuted ideas — check here before proposing something that sounds already tried |
+| `.claude/notes/solve-open-directions.md` | *(never auto-loads)* | The backlog of unmeasured speed-up directions for the fluid solve, each with a pre-registered measurement — read before starting solver-performance work; an entry leaves it once measured (a win into the matching rule, a loss into `solve-refuted-directions.md`) |
 
-The two `-log.md` files and `solve-refuted-directions.md` live in **`.claude/notes/`, outside the
+The two `-log.md` files, `solve-refuted-directions.md` and `solve-open-directions.md` live in **`.claude/notes/`, outside the
 auto-loaded `.claude/rules/` tree, and never auto-load** — they are tracked (so a finding can be
 re-adjudicated later, per the root `CLAUDE.md` rule that findings belong in tracked files, not memory)
 but deliberately kept out of the auto-loaded path so routine solver work does not pay for the full
@@ -356,6 +357,9 @@ halves of the decision are now separated:
 | `_FACTORIZATION_LINEAR_SOLVE` | `MaterializedJacobian(CompleteLu)` | 0.3 | 10 | 40 |
 | `_VCYCLE_LINEAR_SOLVE` | `MaterializedJacobian(MonolithicVCycle \| FieldSplit)` (3D `bfs3d`) | 0.3 | 15 | 60 |
 | `_CONSTRAINED_LINEAR_SOLVE` | `mass_flow_coupled_continuation` | **1e-2, Euclidean** | 120 | 15 |
+
+Every regime also carries `stop` (`"lineax"` unset), the rule a solve ends by — see measurement
+discipline item 5 for what `lineax`'s costs and `residual_stop_gmres` for the alternative.
 
 Both coupled builders take the regime as one value, `linear_solve=LinearSolveSettings(rtol=…, restart=…,
 max_restarts=…)` (#388 — there are no `forward_*` keywords any more). ⚠️ **Move the tolerance or the
@@ -860,6 +864,31 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
      **achieved** reduction is routinely tighter than the requested one, because a restarted GMRES tests
      the stop only at restart boundaries, so a solve that would cross 30 % after three matrix-vector
      products still builds fifteen.
+     ⚠️ **And `rtol` is not only a residual tolerance (found 2026-10-08).** lineax's GMRES also stops only
+     once the solution's change over the last restart cycle is ≤ `rtol` (in the measure, `‖b‖` scaled to
+     one), and its first counted cycle is a start-up pass that reduces nothing. A toy solve whose residual
+     was 0.02 after one real cycle still ran another at `rtol = 0.1`, because the solution had moved 0.265.
+     **Measured on pitzDaily (shipped `case.yaml`, 2026-10-08, jax 0.11.2, CPU; `PITZ_FORWARD_RTOL`), the
+     march is not sensitive to tightening and IS to loosening:** `rtol` 0.1 / 0.3 / 0.6 / 0.9 → 245 / 203 /
+     166 / 161 restart cycles, all 31 steps, 98–103 inner solves, `x_r/h` 8.0686. The shipped 0.3 is not
+     changed (bfs3d, where it was calibrated, is unmeasured); see `solve-refuted-directions.md`'s
+     Eisenstat–Walker entry and the open-directions note.
+     ⚠️ **What the stop costs, replayed (2026-10-08, `krylov_recycling_probe.py`):** a solve reported as
+     "1 cycle" ran TWO (`restart_cycles` subtracts the start-up pass and the cycle the solution-change
+     test forces), `2 (restart + 1) + 1` applications of `A M`. On pitzDaily's 42 final-station solves the
+     march's solver used 2186 applications where a residual-only stop checked every iteration needs 514.
+     **`residual_stop_gmres` (BUILT, opt-in, 2026-10-08)** stops on the residual alone, tested every
+     iteration in the same measure (`norm=None` binds the step's, like `relative_residual_gmres`). On a
+     pitzDaily march it took 693 s against 1306 s to the same root (open-directions 6b). **Selected by
+     `LinearSolveSettings.stop` / `LinearSolveRegime.stop` (`"lineax"` | `"residual"`, 2026-10-09)**, so a
+     case file writes `linear_solve: {stop: residual}`; `LinearSolveRegime.solver()` is the ONE place a
+     regime becomes a solver (`shifted_step` calls it), so every march family reaches it. **The default is
+     still `lineax`**: flipping it is a shipped-default change awaiting the project owner, its reported count
+     is cycles RUN (one more than `lineax`'s for the same work) so the cost triggers fire at a different
+     difficulty, `max_restarts` counts cycles under it rather than raw `lineax` steps, bfs3d is
+     unmeasured, and forced as the default it fails three slow tests (linear convergence at the end of
+     the march, and one Reynolds-continuation march that goes erratic; #645). **pitzDaily's `case.yaml`
+     opts in** (`stop: residual`, `refresh_on_cycles: 2`, 2026-10-09). Pinned by `test_the_stop_reaches_the_step_s_solver_with_the_regime_and_the_step_s_measure`.
   6. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
      Jacobian are **field-major**: DOF `(cell i, field f)` sits at `f·n_cells + i`, fields ordered
      `[u, v, w, p, k, ω]`. Slicing it cell-major silently yields a *different matrix* that still looks

@@ -140,6 +140,7 @@ from .linear import (
     default_linear_solver,
     in_progress_measure,
     relative_residual_gmres,
+    residual_stop_gmres,
     restart_cycles,
     solve_linear,
 )
@@ -431,6 +432,7 @@ __all__ = [
     "refuse_unforwardable_settings",
     "relative_residual_gmres",
     "report_record",
+    "residual_stop_gmres",
     "resolve_linear_solve",
     "restart_cycles",
     "root_adjoint",

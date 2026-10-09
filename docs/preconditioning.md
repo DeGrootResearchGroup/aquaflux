@@ -562,6 +562,13 @@ relative residual rather than `lineax`'s componentwise test. On a coupled system
 right-hand side has near-zero entries, the componentwise test quietly becomes an absolute
 demand and drives the solve orders of magnitude past the tolerance requested.
 
+It keeps the rest of `lineax`'s rule, though: the residual is tested only at the end of a
+restart cycle, and the solve also runs until its solution has stopped moving over a whole
+cycle, so every solve runs at least two cycles. For a loose forcing term that is most of the
+work. {func}`~aquaflux.solve.residual_stop_gmres` stops the moment the residual meets the
+tolerance, tested after every iteration; a march selects it with
+`linear_solve: {stop: residual}` ({class}`~aquaflux.solve.LinearSolveSettings`).
+
 ## Gradients
 
 The preconditioner is part of the forward solve, and the reverse-mode gradient is a single
@@ -583,8 +590,9 @@ nothing after it to correct anything.
 
 Read the **cycle count**, not the wall clock. {func}`~aquaflux.solve.restart_cycles` strips
 the fixed per-solve offset from a raw `lineax` iteration count, which is what makes small
-counts readable: an offset means a solve that converges within a single restart cycle does
-not report `1`.
+counts readable. The corrected count is one less than the restart cycles a solve actually
+ran: `lineax` stops only once the solution has stopped moving over a whole cycle, so a solve
+whose residual met its tolerance within the first cycle runs a second and is reported as `1`.
 
 From there:
 

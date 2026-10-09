@@ -683,10 +683,12 @@ def _pitzdaily_march_as_its_script_passed_it() -> tuple[dict, dict]:
             probe=JacobianProbeSpec(stencil_reach=3, column_reach=None, gradient_sweeps=None),
             refit_beta_floor=0.05,
         ),
+        # The residual-only Krylov stop and its re-tuned refresh threshold, the case's own since the
+        # script stopped building its march.
         "dual_time": DualTimeLoop(
-            inner_steps=5, inner_tol=1e-2, cycle_budget=42, refresh_on_cycles=3
+            inner_steps=5, inner_tol=1e-2, cycle_budget=42, refresh_on_cycles=2
         ),
-        "linear_solve": LinearSolveSettings(rtol=0.3, restart=15, max_restarts=14),
+        "linear_solve": LinearSolveSettings(rtol=0.3, restart=15, max_restarts=14, stop="residual"),
         "positivity_floor": 0.0,
         "positivity_projection": True,
         "step_control": CflResidualDualTimeControl(
@@ -869,6 +871,41 @@ def test_each_step_case_script_runs_its_files_solver_when_no_override_is_set(cas
         [sys.executable, "-c", f"import compare; assert {check}"],
         cwd=REPO / "validation" / case,
         env=environment | {"PYTHONPATH": str(REPO)},
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+
+
+def test_a_pitzdaily_march_override_reaches_the_solve_not_only_the_banner() -> None:
+    """A ``PITZ_*`` march variable must change the solver the default run hands the library.
+
+    The script edits its solver as ``SOLVER`` and prints its banner from that, so a solve that read the
+    case file's own solver instead would report every override as in force while running the file
+    unchanged. That happened: three marches at different linear tolerances came back bit-identical. The
+    solve is intercepted at the solver's ``solve``, after the case is built, so nothing is marched.
+    """
+    script = (
+        "import compare\n"
+        "seen = {}\n"
+        "def record(self, *args, **kwargs):\n"
+        "    seen['solver'] = self\n"
+        "    raise SystemExit(0)\n"
+        "type(compare.SOLVER).solve = record\n"
+        "try:\n"
+        "    compare.solve_aquaflux()\n"
+        "except SystemExit:\n"
+        "    pass\n"
+        "assert seen['solver'].linear_solve.rtol == 0.0123, seen['solver'].linear_solve\n"
+    )
+    environment = {
+        name: value for name, value in os.environ.items() if not name.startswith("PITZ_")
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=REPO / "validation" / "pitzdaily_openfoam",
+        env=environment | {"PYTHONPATH": str(REPO), "PITZ_FORWARD_RTOL": "0.0123"},
         capture_output=True,
         text=True,
         timeout=300,

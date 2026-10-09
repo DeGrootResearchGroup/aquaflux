@@ -416,6 +416,179 @@ reproducible on the current tree.** Full detail, including what was ruled out fi
 merges are inert — `|R|` identical to twelve digits at a fixed state), in `.claude/rules/validation.md`
 § "pitzDaily's SHIPPED PRECONDITIONER STOPPED MARCHING IT".
 
+## Local (staged) AD assembly of the coupled Jacobian, and the materialized-`J` matvec it was to enable — REFUTED / CLOSED (2026-10-07)
+
+**What was proposed** (`solve-open-directions.md` items 1–2, both removed from there): build the coupled
+Jacobian from local derivatives instead of the coloured probe, "15–30× cheaper on bfs3d", and once that
+made assembly cheap enough to rebuild every Newton iterate, run the Krylov matvec on the sparse `J`
+instead of `jax.jvp`.
+
+**Measured** (`validation/pitzdaily_openfoam/local_jacobian_probe.py`; pitzDaily 12,225 cells, shipped
+`case.yaml` with `MultipleCorrectionGradient`, one state: the time-accurate OpenFOAM field mapped cell for
+cell; jax 0.11.2, CPU, 4-core Linux container, probe batch 8, min of 3 warm runs — absolute seconds ~5×
+the recorded macOS figures, read the ratios). Split `R(x) = F(x, g(x))`, `g = G x` mesh-linear, so
+`J = F_x + F_g G` with `G` built once. `F_x` measured exactly by `stop_gradient` on every reconstructed
+gradient (residual unchanged, difference 0.0): exact at reach 2, 100 probes, 1.01 s. `F_g` estimated from
+colour counts at reach 1 (90 probes, ~0.91 s). Product `F_x + F_g G` in SciPy on random values with the
+real patterns (7,445,375 nnz, the shipped `J`'s exact count): 0.30 s. **Total 2.22 s against 2.21 s for
+the shipped probe (165 probes, reach 3) — 0.99×.**
+
+**Independent review corrected it, and every correction weakens the idea further:** the four
+velocity-gradient reconstructions reach 2, not 1, in `F_g` (≈210 probes, not 90); the 9 reconstructions
+are 5–6 unique fields (u, v, k, ω each twice), so deduped `F_g` is ~10–12 columns per cell, not 18; and the
+shipped pitzDaily residual is exact at **reach 4**, not 3 (`schemes.md`, the reach-4 entry). Corrected
+staged estimate ≈ 210–220 probes, ~1.3× against the exact reach-4 baseline (265 probes, 3.78 s) — against
+a pre-registered pass of < 1/5 of the probe's wall time.
+
+**Why it cannot reach 15–30×, and why it does not generalize:**
+- **The colouring is already near the forward-mode floor.** pitzDaily reach 1/2/3: 5/20/33 colours against
+  widest rows of 5/13/25 cells; a synthetic 23,040-cell hex mesh (bfs3d's size) 12/39/98 against 7/25/63.
+  The note's 15–30× set ~stencil-width local evaluations against 564 full JVPs, ignoring that each JVP
+  covers every face at once and is batched.
+- **Gradient work is a small share of a tangent:** freezing every gradient cuts one JVP 44 → 34 ms; inside
+  the batched probe the per-probe cost barely moves (10–14 ms against 13.4).
+- **The unbounded variant — per-face `vmap(jacfwd)`, no colouring — moves the cost into sparse products.**
+  Reviewer's SciPy timing on the synthetic bfs3d-size mesh, 6 fields: `F_x + F_g G` 1.99 s (47.7M nnz,
+  `F_g` reach 1) / 7.26 s (94.8M nnz, reach 2), against ~6 s for the whole shipped bfs3d materialize.
+  Estimated ceiling ~2–3× (SciPy) or ~5–10× (parallel SpGEMM) — and materialize is ~6 s of an 11.5 s
+  refresh beside a ~34 s mean outer step (recorded), so even infinite speed saves ≤ ~18 % per refresh.
+- **At 1.6M cells (reactor mesh) the exact Jacobian does not fit, however it is assembled**: bfs3d's ~2,050
+  nnz/cell gives ~3.3G nnz ≈ 26 GB of values (more on polyhedra); the compressed probe responses alone
+  ~43 GB. On GPU, batched probing gets relatively cheaper and JAX has no efficient GPU SpGEMM.
+
+**Item 2 closed with it.** Its per-matvec gain is real — a SciPy CSR matvec of the 7.4M-nnz `J` is 6.5 ms
+against a 44 ms residual JVP (same configuration) — but its premise was that item 1 makes a per-iterate
+build cheap, and a build is ~2.2 s ≈ 60 matvecs to break even. It also miscounted bfs3d's `J` at ~5M nnz;
+the recorded figure is 47.2M structural (~380 MB). Reopen only with a build that is genuinely cheap per
+iterate, e.g. on hardware where the probe itself changes cost class.
+
+## Tangent / secant predictor between continuation stations — CLOSED (2026-10-07)
+
+**What was proposed** (`solve-open-directions.md` item 3, removed from there): seed each Reynolds rung or
+`ResidualHomotopy` station at `x + dlam·dx/dlam`, `J dx/dlam = -dR/dlam`, rather than at the previous
+state, to cut the "opening residual" a station change creates.
+
+**Already measured once, on the configuration it was proposed for** (`turbulence.md`, 2026-09-08,
+`validation/continuation_seed_error.py`): on the decade **ladder** the predictor made the seed 23 % worse
+on bfs3d and helped only on a ladder too fine to afford while β restarted per rung. The item's own
+evidence ("rung 2 opened 6,000× worse") was the ladder's, and pitzDaily no longer runs a ladder.
+
+**Measured on the shipped march** (`validation/pitzdaily_openfoam/ramp_predictor_probe.py`): pitzDaily
+`case.yaml` as shipped — `ViscosityRamp` anchor 100, 16 stations × 1 step, momentum-only scaling — re-run
+2026-10-07 with every step checkpointed (31 steps, 203 restart cycles, `x_r/h` 8.0686; jax 0.11.2, CPU,
+4-core Linux). The first-order expansion `R(x + dlam v, lam + dlam) ≈ R(x, lam + dlam) − dlam dR/dlam`
+holds at any state, so an exactly solved predictor removes the station-jump term and nothing else;
+scored in the row-equilibrated measure the march stops on, rebuilt at the new station:
+
+| station changes | jump share of the residual the step faces | residual an exact predictor leaves / without it |
+|---|---|---|
+| 1–7 | 15 % → 6 % | **1.004–1.118 (worse)** |
+| 8–16 (16 = entry to the target) | 5 % → 9 % | 0.974–0.994 |
+
+**Why it cannot pay on the ramp:**
+- At `1.33×` viscosity per station the state never reaches a root, so the step faces mostly what the
+  previous step left unsolved (`left` ≈ `E0` throughout); early on the jump partly cancels it, so removing
+  the jump raises the starting residual.
+- Best case 2.6 % for one extra linear solve per station (≈ a Newton step's solve) — and that is an upper
+  bound, since a real predictor is solved loosely against a frozen preconditioner.
+- The 15 target-station steps cost 92 of the 203 cycles and see no station change at all.
+- The cost-free secant form, on a one-step-per-station ramp, extrapolates the iteration itself — that is
+  item 5 (Anderson / NGMRES), not a path predictor.
+
+Reopen only for a march that converges each station (a ladder, or `steps_per_station` ≫ 1) at a spacing
+fine enough that `continuation_seed_error.py`'s `E1/E0` falls well below one.
+
+## Eisenstat–Walker adaptive forcing terms — NOT WORTH BUILDING (2026-10-08); a looser FIXED term is
+
+**What was proposed** (`solve-open-directions.md` item 4): replace the fixed inner `rtol = 0.3` with
+Eisenstat & Walker (1996) choice 2, `η_k = γ (‖R_k‖/‖R_{k−1}‖)^α`, γ = 0.9, α = 2, safeguarded — loose far
+from the root, tight near it.
+
+**Probe, no implementation:** fixed-`rtol` marches bracketing what the schedule would pick, via
+`PITZ_FORWARD_RTOL` (`validation/pitzdaily_openfoam/compare.py`). pitzDaily, shipped `case.yaml` (16 × 1
+viscosity ramp, dual time 5 / 0.01, field split `SimpleSmoothed` / `JacobiSmoothed`, restart 15,
+row-scaled stop), jax 0.11.2, CPU, 4-core Linux, one run per arm:
+
+| `rtol` | steps | restart cycles | inner solves | wall | `x_r/h` |
+|---|---|---|---|---|---|
+| 0.1 | 31 | 245 | 98 | 1810 s | 8.0686 |
+| **0.3 (shipped)** | 31 | **203** | 99 | 1547 s ⚠️ | 8.0686 |
+| 0.6 | 31 | **166 (−18 %)** | 100 | 1207 s | 8.0686 |
+| 0.9 | 31 | **161 (−21 %)** | 103 | 1453 s | 8.0686 |
+
+⚠️ The 0.3 wall ran beside another probe and the walls disagree with the cycles at 0.9; read the cycle
+column (same preconditioner in every arm, so cycles are a fair cost). No arm retried.
+
+**Why the adaptive schedule loses:** tightening buys no nonlinear iterations (98 → 103 inner solves across a
+9× range) and costs cycles. At this march's inner rates (`G out / G in` 0.02–0.6) choice 2 gives
+`η` ≈ 4e-4 … 0.3, i.e. it *tightens* below the shipped value on most inner iterations — exactly the
+direction that measured worse. The whole gain is the loose end, which a fixed value reaches without any
+schedule.
+
+**What it found instead:** (1) the shipped 0.3 is tighter than pitzDaily needs — moved to the open note as
+its own direction, to be measured on bfs3d (where 0.3 was calibrated) before any default changes; (2) the
+stop is not the pure relative-residual test its docstring claimed — lineax also requires the solution's
+change over the last cycle to be ≤ `rtol` and spends a counted start-up cycle (docstring corrected; see
+`solve.md`); (3) pitzDaily's `PITZ_*` march overrides had been inert since #437 (fixed; `validation.md`).
+
+## Krylov subspace recycling (GCRO-DR) across inner solves — REFUTED (2026-10-08)
+
+**What was proposed** (`solve-open-directions.md` item 6): carry a `k`-vector recycled space (harmonic
+Ritz vectors, Parks et al. 2006) from each inner GMRES solve to the next, since consecutive systems share
+their slow modes.
+
+**Probe, no implementation:** `validation/pitzdaily_openfoam/krylov_recycling_probe.py` rebuilds every
+linear system pitzDaily's final viscosity station solved (steps 17–31, 42 solves) from a march run with
+`PITZ_CHECKPOINT_KEEP=500 PITZ_INNER_DUMP_ABOVE=1`: the step's own shift policy (built at the anchor's
+hybrid start, as the ramp builds it), its recorded β, and the preconditioner refitted where the march
+refitted it. The march's own solver reproduces **all 42** recorded cycle counts exactly. Shipped
+`case.yaml` (field split `SimpleSmoothed` / `JacobiSmoothed`, restart 15, `rtol` 0.3 row-scaled), jax
+0.11.2, CPU, 4-core Linux. Counted in applications of the preconditioned operator `A M`:
+
+| arm (same 42 systems) | applications |
+|---|---|
+| the march's `lineax` GMRES | 2186 |
+| GMRES(15), residual-only stop at restart boundaries (derived from the next row) | 890 |
+| GMRES(15), residual-only stop checked every iteration | **514** |
+| GCRO-DR depth 5 / 10, same stop, recycled space carried | 825 / 1056 |
+| — the same without the `k` applications per system that re-derive `A M U` | 620 / 646 |
+
+**Why it loses:** at `rtol = 0.3` a solve is ~12 iterations, so there are no slow modes to deflate, and a
+space carried from the previous operator costs iterations to orthogonalize against while the operator
+moves under it. Better than plain GMRES on 6 (depth 5) and 2 (depth 10) of 42 solves. A tight solve is
+where recycling pays (a toy with six outlier eigenvalues at `rtol` 1e-3: 526 → 181), and the forward
+solve is not one. The adjoint is one solve, so it has nothing to recycle from.
+
+**What it found instead:** the first and third rows. `lineax` tests its stop only at a restart boundary
+and also requires the solution to have moved by less than the tolerance over the last cycle, so every
+solve runs at least two full cycles (33 applications) and the corrected count (`restart_cycles`) reads
+that as "1 cycle". Opened as `solve-open-directions.md` item 6b; the docstrings that called a reported
+"1 cycle" an ideal one-cycle solve were corrected.
+
+## Weighted inner product and longer restarts for the residual-stop GMRES — NO GAIN (2026-10-09)
+
+**What was proposed** (follow-ups to `solve-open-directions.md` 6b): (a) have GMRES minimize the residual
+in the norm it is judged by rather than the 2-norm, whose coupled residual is ~100 % `omega`; (b) restart
+at 30 or 60 instead of 15, since with a per-iteration stop a longer restart costs only memory.
+
+**Probe:** the replay (`krylov_recycling_probe.py`, `PITZ_REPLAY_ARMS`) on pitzDaily's 42 final-station
+systems, same configuration as the recycling entry above, applications of `A M`:
+
+| arm | applications |
+|---|---|
+| GMRES(15), residual stop every iteration | 514 |
+| the same, weighted inner product, restart 15 / 30 | 529 / 496 |
+| GMRES(30) / GMRES(60) (first 23 systems; the run was killed there) | within a few applications of GMRES(15) on every system |
+
+**Why:** the march's measure is an L1 mean per field block, which no inner product reproduces; the
+nearest weighted 2-norm (the measure's own row and field scales, `1/sqrt(block size)`) wins 12 systems
+and loses 21. And a solve at `rtol = 0.3` rarely needs more than 15 iterations, so a longer restart
+rarely restarts anything.
+**⚠️ Trap that cost a run:** weighting by scaling the system on the LEFT (`W A M`, `W b`) builds a
+different Krylov space, and on this operator it did not converge on any system within 400 applications
+(60 unrestarted iterations: weighted residual 0.97). The weighted inner product over plain GMRES's space
+is the similar operator `W A M W^-1` from `W b`.
+
 ## `jax.linearize` in place of the per-matvec `jax.jvp` — REFUTED, and it looks obviously right
 
 `solve/continuation.py`'s `shifted_jacobian` builds the Krylov matvec as
