@@ -106,6 +106,85 @@ def test_an_outputs_section_reads_without_its_kind_and_writes_back_equal() -> No
     assert case_spec_from_mapping(case_spec_to_mapping(spec)) == spec
 
 
+def _slab_case_with_a_velocity_template(root: Path) -> Path:
+    """An OpenFOAM case on the slab -- whose extents leave its extruded axis ambiguous -- with a ``U`` template."""
+    shutil.copytree(SLAB, root / "of" / "constant" / "polyMesh")
+    (root / "of" / "0").mkdir()
+    (root / "of" / "0" / "U").write_text(
+        "FoamFile\n{\n    format ascii;\n    class volVectorField;\n    object U;\n}\n"
+        "dimensions [0 1 -1 0 0 0 0];\ninternalField uniform (0 0 0);\n"
+        "boundaryField\n{\n    left { type fixedValue; value uniform (1 0 0); }\n}\n"
+    )
+    return root
+
+
+def test_an_openfoam_time_writes_a_vector_with_its_zero_on_the_axis_the_file_states(
+    tmp_path,
+) -> None:
+    """A slab whose extents cannot say which axis was extruded is written where the file says.
+
+    Wrong answers this catches: a stated axis that is ignored (the ambiguous slab then raises), the
+    letters mapped to the wrong component (the zero lands one slot over, so reading the file back
+    along ``z`` refuses it), and the axis not reaching the writer at all.
+    """
+    from aquaflux.case import RunFields
+    from aquaflux.io import read_openfoam, read_openfoam_time
+
+    root = _slab_case_with_a_velocity_template(tmp_path)
+    mesh = read_openfoam(root / "of")
+    velocity = np.array([[1.0, 2.0], [3.0, 4.0]])
+    fields = RunFields(cells={"U": velocity})
+
+    with pytest.raises(ValueError, match="pass extruded_axis explicitly"):
+        OpenFOAMTime(case="of", time="1").write(tmp_path, root, mesh, fields)
+
+    OpenFOAMTime(case="of", time="2", extruded_axis="y").write(tmp_path, root, mesh, fields)
+    read_back = read_openfoam_time(root / "of", "2", ["U"], mesh, extruded_axis=1)
+    np.testing.assert_array_equal(read_back["U"], velocity)
+    with pytest.raises(ValueError, match="nonzero component along axis 2"):
+        read_openfoam_time(root / "of", "2", ["U"], mesh, extruded_axis=2)
+
+    OpenFOAMTime(case="of", time="3", extruded_axis="z").write(tmp_path, root, mesh, fields)
+    np.testing.assert_array_equal(
+        read_openfoam_time(root / "of", "3", ["U"], mesh, extruded_axis=2)["U"], velocity
+    )
+
+
+def test_an_extruded_axis_is_refused_for_a_three_dimensional_mesh_and_only_then() -> None:
+    writer = OpenFOAMTime(case="of", time="1", extruded_axis="z")
+    with pytest.raises(ValueError, match=r"outputs.fields: extruded_axis .* three-dimensional"):
+        writer.refuse_for_dimension(3)
+    writer.refuse_for_dimension(2)
+    OpenFOAMTime(case="of", time="1").refuse_for_dimension(3)
+
+
+def test_the_case_refuses_an_extruded_axis_its_mesh_has_no_use_for(tmp_path) -> None:
+    """The check against the mesh reports it with the rest, from the writers and the starting state."""
+    sections = _sections(
+        outputs={
+            "fields": [{"kind": "OpenFOAMTime", "case": "of", "time": "1", "extruded_axis": "z"}]
+        },
+        initial={"kind": "Fields", "path": "of", "time": "0", "extruded_axis": "z"},
+    )
+    spec = case_spec_from_mapping(sections)
+    mesh = spec.mesh.read(tmp_path)
+    spec.check_against(mesh)  # a two-dimensional mesh takes both
+    three = shutil.copytree(
+        REPO / "tests" / "fixtures" / "polymesh_3d_two_cubes", tmp_path / "three" / "polyMesh"
+    )
+    spec_3d = case_spec_from_mapping(
+        _sections(
+            mesh={"kind": "OpenFOAMMesh", "path": str(three)},
+            outputs=sections["outputs"],
+            initial=sections["initial"],
+        )
+    )
+    with pytest.raises(ValueError) as refused:
+        spec_3d.check_against(spec_3d.mesh.read(tmp_path))
+    assert "outputs.fields: extruded_axis" in str(refused.value)
+    assert "initial: extruded_axis" in str(refused.value)
+
+
 @pytest.mark.parametrize(
     ("outputs", "match"),
     [

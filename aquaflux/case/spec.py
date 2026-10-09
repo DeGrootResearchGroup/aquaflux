@@ -312,8 +312,8 @@ class CaseSpec:
         """A digest of what this case solves and how it measures progress, not of where it writes or starts.
 
         Two cases with the same problem digest state the same equations on the same mesh and judge a
-        residual in the same measure, so a residual norm one took is a scale for the other. That is what
-        a restart needs to know before it carries the stopped run's reference residual: the file may
+        residual in the same measure, so a residual norm or a shift one took is a scale for the other. That is what
+        a restart needs to know before it carries the stopped run's march history: the file may
         differ in its ``outputs`` (a restart writes elsewhere), its ``initial`` section, and in every
         solver setting that does not change the measure -- the step budget, the preconditioner, the
         shift -- and still continue the same march.
@@ -385,6 +385,15 @@ class CaseSpec:
             *(
                 functools.partial(source.refuse_for_dimension, mesh.dim, index)
                 for index, source in enumerate(self.sources)
+            ),
+            *(
+                functools.partial(writer.refuse_for_dimension, mesh.dim)
+                for writer in self.outputs.fields
+            ),
+            *(
+                []
+                if self.initial is None
+                else [functools.partial(self.initial.refuse_for_dimension, mesh.dim)]
             ),
         ]
         for refuse in refusals:

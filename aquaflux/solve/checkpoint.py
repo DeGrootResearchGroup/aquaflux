@@ -156,7 +156,8 @@ def report_record(report: StepReport) -> dict[str, Any]:
     -------
     dict
         ``step``, ``residual_norm``, ``residual_ratio``, ``shift``, ``alpha``, ``cycles``,
-        ``max_inner_cycles`` and ``inner_iterations``, ready to hand to ``numpy.savez``.
+        ``max_inner_cycles``, ``inner_iterations`` and ``damping_reference``, ready to hand to
+        ``numpy.savez``.
     """
     return {
         "step": report.step,
@@ -167,6 +168,7 @@ def report_record(report: StepReport) -> dict[str, Any]:
         "cycles": report.cycles,
         "max_inner_cycles": report.max_inner_cycles,
         "inner_iterations": report.inner_iterations,
+        "damping_reference": report.damping_reference,
     }
 
 

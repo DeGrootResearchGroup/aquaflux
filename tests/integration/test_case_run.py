@@ -238,7 +238,9 @@ def test_a_run_that_stopped_short_is_resumed_from_its_checkpoint_as_the_same_mar
     # (the log prints five significant figures)
     began_at = _reference_residual(tmp_path / "fresh")
     assert _reference_residual(tmp_path / "resumed") == pytest.approx(began_at, rel=1e-4)
-    assert resumed_record["initial"]["reference_residual"] == pytest.approx(began_at, rel=1e-4)
+    assert resumed_record["initial"]["resumption"]["reference_residual"] == pytest.approx(
+        began_at, rel=1e-4
+    )
     # ... and takes exactly the steps the uninterrupted run had left.
     assert resumed_record["steps"] == fresh_record["steps"] - 3
 
@@ -248,6 +250,39 @@ def test_a_run_that_stopped_short_is_resumed_from_its_checkpoint_as_the_same_mar
     reached = read_restart(final)
     np.testing.assert_allclose(reached.fields["U"], np.asarray(velocity), rtol=1e-6, atol=1e-9)
     np.testing.assert_allclose(reached.fields["p"], np.asarray(pressure), rtol=1e-6, atol=1e-9)
+
+
+def _shifts(directory: Path) -> list[float]:
+    """The shift each step of a run took, from its step history."""
+    with open(directory / "history.csv", newline="") as handle:
+        return [float(row["shift"]) for row in csv.DictReader(handle)]
+
+
+def test_a_dual_time_run_resumes_the_shift_its_stopped_run_had_walked_down_to(tmp_path) -> None:
+    """The Courant ramp's shift is march history a checkpoint carries, and a resume must not reset it.
+
+    The wrong answer this catches: the resumed run opening at the ramp's starting shift again, which
+    is what a restart that carried only the residual did, and then walking the whole ramp a second time.
+    """
+    march = {
+        "kind": "FlowMarch",
+        "dual_time": {"kind": "DualTimeLoop", "inner_steps": 3},
+    }
+    checkpoints = {"checkpoints": {"kind": "Checkpoints", "keep": 1}}
+    stopped = _restart_case(tmp_path, "stopped.yaml", checkpoints, solver=march | {"max_steps": 6})
+    assert main(["run", str(stopped)]) == 1
+    walked = _shifts(tmp_path / "stopped")
+    assert walked[-1] < 0.5 * walked[0]  # the ramp has come down by the time it is cut off
+
+    resumed = _restart_case(
+        tmp_path,
+        "resumed.yaml",
+        checkpoints,
+        solver=march,
+        initial={"kind": "Checkpoint", "path": "stopped/checkpoints"},
+    )
+    assert main(["run", str(resumed)]) == 0
+    assert _shifts(tmp_path / "resumed")[0] == pytest.approx(walked[-1])
 
 
 def test_a_restart_of_a_changed_case_starts_its_march_afresh_from_the_checkpoint(tmp_path) -> None:
@@ -267,7 +302,7 @@ def test_a_restart_of_a_changed_case_starts_its_march_afresh_from_the_checkpoint
     )
     assert main(["run", str(changed)]) == 0
     record = yaml.safe_load((tmp_path / "changed" / "run.yaml").read_text())
-    assert record["initial"]["reference_residual"] is None
+    assert record["initial"]["resumption"] is None
 
 
 def test_a_run_started_from_a_converged_checkpoint_has_nothing_left_to_do(tmp_path) -> None:

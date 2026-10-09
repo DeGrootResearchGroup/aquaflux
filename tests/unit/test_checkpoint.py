@@ -67,13 +67,17 @@ def test_a_checkpoint_carries_the_step_that_produced_it(tmp_path) -> None:
     Without the metadata a directory of checkpoints is unusable unless the log survived alongside it.
     """
     checkpoints = StateCheckpointer(tmp_path)
-    checkpoints.on_checkpoint(_report(step=42, residual_norm=3.5e-4, shift=0.078), np.arange(4.0))
+    checkpoints.on_checkpoint(
+        _report(step=42, residual_norm=3.5e-4, shift=0.078, damping_reference=0.125), np.arange(4.0)
+    )
 
     saved = np.load(checkpoints.latest)
     assert np.array_equal(saved["state"], np.arange(4.0))
     assert saved["step"] == 42
     assert saved["residual_norm"] == pytest.approx(3.5e-4)
     assert saved["shift"] == pytest.approx(0.078)
+    # What a march resumed from this file damps against: the step's own anchor, not its reference.
+    assert saved["damping_reference"] == pytest.approx(0.125)
 
 
 def test_no_partial_file_is_left_behind(tmp_path) -> None:

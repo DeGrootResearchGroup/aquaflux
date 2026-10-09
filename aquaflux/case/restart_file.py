@@ -13,8 +13,9 @@ same size but different shape, load as an unrelated field of the right length; t
 catches that. The case the file came from is recorded too, as provenance for the run that starts from
 it -- it is not compared, since a restart is often a case with something changed. A second digest,
 of the problem the case solves and the measure it judged a residual in, is compared for one purpose:
-a restart of the same problem continues the stopped march's damping, which is measured against the
-residual the march began at, and one of a different problem does not.
+a restart of the same problem continues the stopped march (its damping and stopping bar, which are
+measured against residuals the march took, and its step control's shift), and one of a different
+problem does not.
 
 The header and the fields are written and read here and nowhere else, so the two cannot disagree.
 """
@@ -29,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from aquaflux.solve import report_record
+from aquaflux.solve import Resumption, report_record
 
 if TYPE_CHECKING:
     from aquaflux.mesh import Mesh
@@ -105,7 +106,7 @@ class RestartHeader:
     problem_digest : str
         A digest of what that case solves and the measure it judged a residual in
         (:meth:`~aquaflux.case.CaseSpec.problem_digest`). It is what decides whether a restart may
-        carry the stopped run's reference residual, which is a scale only for the same problem.
+        carry the stopped run's march history, which holds only for the same problem.
     """
 
     physics: str
@@ -191,11 +192,12 @@ class RestartFile:
         The physical fields by name -- a vector ``(n_cells, dim)``, a scalar ``(n_cells,)``.
     residual : float
         The march's residual at the step that wrote the file, in the measure it was steered by.
-    reference_residual : float or None
-        The residual norm the march took at **its** first state, which the step's recorded residual
-        and residual ratio give back (their quotient): the scale the march's damping ramp and stopping
-        bar were measured against. ``None`` when the record has no usable ratio (a march that started
-        at an exact root).
+    resumption : Resumption or None
+        What the step's record says of the march that wrote the file, for a march resuming it: the
+        residual norm the march took at **its** first state (the recorded residual and residual ratio
+        give it back as their quotient), the one its last segment's damping was anchored at, and the
+        shift its last step ran at when a step control set one. ``None`` when the record has no usable
+        ratio (a march that started at an exact root).
     path : pathlib.Path
         The file it was read from.
     """
@@ -203,7 +205,7 @@ class RestartFile:
     header: RestartHeader
     fields: Mapping[str, np.ndarray]
     residual: float
-    reference_residual: float | None
+    resumption: Resumption | None
     path: Path
 
     def refuse_if_not_finite(self) -> None:
@@ -281,6 +283,17 @@ def checkpoint_writer(
     return save
 
 
+def _positive_or_none(value: np.ndarray) -> float | None:
+    """A recorded number as a float, or ``None`` when it is not a usable positive one.
+
+    A step record writes ``0.0`` for "not recorded" (a march with no step control has no shift, and a
+    report from before the damping anchor was kept has no anchor), and a diverged step may write a
+    non-finite one; neither says anything a march can resume from.
+    """
+    number = float(value)
+    return number if np.isfinite(number) and number > 0.0 else None
+
+
 def read_restart(path: str | Path) -> RestartFile:
     """Read a checkpoint written by :func:`checkpoint_writer`.
 
@@ -330,6 +343,14 @@ def read_restart(path: str | Path) -> RestartFile:
             header=header,
             fields=fields,
             residual=residual,
-            reference_residual=residual / ratio if usable else None,
+            resumption=(
+                Resumption(
+                    reference_residual=residual / ratio,
+                    damping_reference=_positive_or_none(data["damping_reference"]),
+                    shift=_positive_or_none(data["shift"]),
+                )
+                if usable
+                else None
+            ),
             path=path,
         )

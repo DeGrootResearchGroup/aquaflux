@@ -148,6 +148,7 @@ cfd/                                  # repo root
 │   │   ├── march_history.py          #   StepHistory: the same steps as CSV rows, for a program (a convergence plot) to read
 │   │   ├── checkpoint.py             #   StateCheckpointer: periodic state persistence (the on_checkpoint seam), find_checkpoint to look one up again
 │   │   ├── step_control.py           #   feedback step controls for the eager march (DualTimeControl and friends)
+│   │   ├── resumption.py             #   Resumption: an interrupted march's reference residual, damping anchor and shift, for the march resuming it
 │   │   ├── continuation.py           #   PseudoTransientStep / NewtonStrategy: continuation as a residual-agnostic Newton step
 │   │   ├── relaxation.py             #   RelaxationSchedule → SwitchedEvolutionRelaxation, ConstantRelaxation: how the shift strength beta is set each step
 │   │   ├── shift_basis.py            #   ShiftBasis: how the pseudo-transient shift's spatial distribution is built from a cell's operator parts
@@ -167,11 +168,12 @@ cfd/                                  # repo root
 │   │   ├── case_file.py              #   read_case / write_case (YAML 1.2 scalars, duplicate keys refused); CaseFile.check() -> CheckedCase
 │   │   ├── mesh_source.py            #   MeshSource.read(directory) -> Mesh: OpenFOAMMesh (read) / StructuredGrid + GeometricGrading (generated)
 │   │   ├── fluid.py                  #   Fluid: density and exactly one of the kinematic / dynamic viscosity
+│   │   ├── axes.py                   #   the axis letters a file names (x, y, z) and the extruded-axis refusal for a three-dimensional mesh
 │   │   ├── forcing.py                #   DriveSpec -> BulkVelocity (builds MassFlow); SourceSpec -> BodyForce (builds UniformBodyForce)
 │   │   ├── physics.py                #   Physics -> Laminar / RANS (k-omega SST settings live inside RANS)
 │   │   ├── initial.py                #   InitialState -> Checkpoint / Fields: what a case starts from instead of its own initial condition
 │   │   ├── kinematic.py              #   pressure per unit density, the form OpenFOAM's incompressible solvers hold (both directions of the factor)
-│   │   ├── restart_file.py           #   the checkpoint file a case writes (physical fields + a header: physics, cells, mesh digest, case digests) and reads back
+│   │   ├── restart_file.py           #   the checkpoint file a case writes (physical fields + a header: physics, cells, mesh digest, case digests) and reads back, with the march history its step record carries
 │   │   └── boundaries.py             #   PatchCondition -> Inlet / Outlet / Wall, one per patch for every field; FixedTurbulence
 │   └── parallel/                     # distributed memory: decomposition and halo exchange (the concern kept out of Mesh)
 │       ├── partitioner.py            #   Partitioner → BlockPartitioner (RCM-block, dependency-free default) / ScotchCLIPartitioner / ScotchPartitioner; consumes cell_adjacency_csr

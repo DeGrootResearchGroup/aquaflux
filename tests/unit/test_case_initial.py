@@ -31,7 +31,7 @@ from aquaflux.case.restart_file import (
     read_restart,
 )
 from aquaflux.mesh import permute_cells
-from aquaflux.solve import StateCheckpointer, StepReport
+from aquaflux.solve import Resumption, StateCheckpointer, StepReport
 
 
 def _sections(physics: str = "Laminar", cells=(4, 4), **overrides: object) -> dict[str, object]:
@@ -69,11 +69,42 @@ def _checked(directory: Path, **kwargs: object) -> CheckedCase:
     return CheckedCase(spec=spec, mesh=mesh, directory=directory)
 
 
-def _report(step: int = 0, residual: float = 1.0e-3, ratio: float = 0.5) -> StepReport:
-    return StepReport(step=step, cycles=3, residual_norm=residual, residual_ratio=ratio, alpha=1.0)
+def _report(
+    step: int = 0,
+    residual: float = 1.0e-3,
+    ratio: float = 0.5,
+    shift: float = 0.0,
+    damping_reference: float = 0.0,
+) -> StepReport:
+    return StepReport(
+        step=step,
+        cycles=3,
+        residual_norm=residual,
+        residual_ratio=ratio,
+        alpha=1.0,
+        shift=shift,
+        damping_reference=damping_reference,
+    )
 
 
-def _write_checkpoints(checked: CheckedCase, directory: Path, states, ratio: float = 0.5) -> None:
+def _is(resumption, reference, damping=None, shift=None) -> bool:
+    """Whether a resumption holds exactly these numbers (the reference to rounding)."""
+    return (
+        isinstance(resumption, Resumption)
+        and resumption.reference_residual == pytest.approx(reference, rel=1e-12)
+        and resumption.damping_reference == damping
+        and resumption.shift == shift
+    )
+
+
+def _write_checkpoints(
+    checked: CheckedCase,
+    directory: Path,
+    states,
+    ratio: float = 0.5,
+    shift: float = 0.0,
+    damping_reference: float = 0.0,
+) -> None:
     """Checkpoint ``states`` in order into ``directory``, as a run of this case would."""
     problem = checked.build()
     physics = checked.spec.physics
@@ -84,7 +115,14 @@ def _write_checkpoints(checked: CheckedCase, directory: Path, states, ratio: flo
         directory, keep=len(states), save=checkpoint_writer(physics, problem, header)
     )
     for step, state in enumerate(states):
-        checkpointer.on_checkpoint(_report(step, residual=10.0 ** -(step + 1), ratio=ratio), state)
+        report = _report(
+            step,
+            residual=10.0 ** -(step + 1),
+            ratio=ratio,
+            shift=shift,
+            damping_reference=damping_reference,
+        )
+        checkpointer.on_checkpoint(report, state)
 
 
 # --- the mesh digest -------------------------------------------------------------------------------
@@ -292,11 +330,14 @@ def test_a_checkpoint_missing_the_step_asked_for_lists_those_it_has(tmp_path) ->
 # --- carrying the stopped march's reference residual ---------------------------------------------
 
 
-def _checkpointed(tmp_path, ratio: float = 0.5, **overrides: object) -> CheckedCase:
-    """A case that has written two checkpoints (residuals 0.1 and 0.01) into ``tmp_path / "ck"``."""
+def _checkpointed(tmp_path, ratio: float = 0.5, history: dict | None = None, **overrides: object):
+    """A case that has written two checkpoints (residuals 0.1 and 0.01) into ``tmp_path / "ck"``.
+
+    ``history`` is the shift and damping anchor the writing march's steps recorded.
+    """
     checked = _checked(tmp_path, **overrides)
     state = checked.build().initial_state()
-    _write_checkpoints(checked, tmp_path / "ck", [state, state], ratio=ratio)
+    _write_checkpoints(checked, tmp_path / "ck", [state, state], ratio=ratio, **(history or {}))
     return checked
 
 
@@ -304,18 +345,32 @@ def test_a_checkpoint_hands_a_restart_the_residual_its_march_began_at(tmp_path) 
     """The record holds the step's residual and its ratio to ``|R0|``; their quotient is ``|R0|``.
 
     Handing on the step's own residual instead (0.01) would anchor the resumed ramp a factor of
-    ``ratio`` too low, which is the wrong answer this pins against.
+    ``ratio`` too low, which is the wrong answer this pins against. A record that holds no shift and
+    no damping anchor (a march with no step control, or one from before they were kept) hands on none.
     """
     checked = _checkpointed(tmp_path)
     start = Checkpoint(path="ck").read(tmp_path, checked.spec, checked.mesh)
-    assert start.reference_residual == pytest.approx(0.02, rel=1e-12)
+    assert _is(start.resumption, 0.02)
 
 
-def test_a_record_with_no_usable_ratio_carries_no_reference(tmp_path) -> None:
-    """A march that began at an exact root reports a ratio of zero; there is nothing to divide by."""
-    checked = _checkpointed(tmp_path, ratio=0.0)
+def test_a_checkpoint_hands_a_restart_the_damping_anchor_and_shift_its_last_step_ran_at(
+    tmp_path,
+) -> None:
+    """Each is the record's own number: neither is the reference, and neither is the other.
+
+    The anchor (0.05) differs from the reference (0.02) because a march that has refreshed its
+    preconditioner re-bases its damping at the refresh; the shift is what a Courant ramp had walked to.
+    """
+    checked = _checkpointed(tmp_path, history={"shift": 0.37, "damping_reference": 0.05})
     start = Checkpoint(path="ck").read(tmp_path, checked.spec, checked.mesh)
-    assert start.reference_residual is None
+    assert _is(start.resumption, 0.02, damping=0.05, shift=0.37)
+
+
+def test_a_record_with_no_usable_ratio_carries_no_history(tmp_path) -> None:
+    """A march that began at an exact root reports a ratio of zero; there is nothing to divide by."""
+    checked = _checkpointed(tmp_path, ratio=0.0, history={"shift": 0.37})
+    start = Checkpoint(path="ck").read(tmp_path, checked.spec, checked.mesh)
+    assert start.resumption is None
     # The fields still start the case: only the history is missing.
     assert set(start.fields) == {"U", "p"}
 
@@ -333,13 +388,15 @@ _THE_SAME_PROBLEM = {
 
 
 @pytest.mark.parametrize("change", _THE_SAME_PROBLEM.values(), ids=list(_THE_SAME_PROBLEM))
-def test_a_restart_that_changes_only_how_the_march_is_run_carries_the_reference(
+def test_a_restart_that_changes_only_how_the_march_is_run_carries_the_history(
     tmp_path, change
 ) -> None:
-    writer = _checkpointed(tmp_path, solver={"kind": "FlowMarch", "max_steps": 10})
+    writer = _checkpointed(
+        tmp_path, history={"shift": 0.37}, solver={"kind": "FlowMarch", "max_steps": 10}
+    )
     reader = _checked(tmp_path, **change)
     start = Checkpoint(path="ck").read(tmp_path, reader.spec, reader.mesh)
-    assert start.reference_residual == pytest.approx(0.02)
+    assert _is(start.resumption, 0.02, shift=0.37)
     assert writer.spec.problem_digest() == reader.spec.problem_digest()
 
 
@@ -363,12 +420,12 @@ _ANOTHER_PROBLEM = {
 
 
 @pytest.mark.parametrize("change", _ANOTHER_PROBLEM.values(), ids=list(_ANOTHER_PROBLEM))
-def test_a_restart_of_another_problem_or_measure_carries_no_reference(tmp_path, change) -> None:
-    """The reference is a scale for the problem it was measured on and the measure it was judged in."""
-    _checkpointed(tmp_path)
+def test_a_restart_of_another_problem_or_measure_carries_no_history(tmp_path, change) -> None:
+    """The history is a scale and a shift for the problem it was measured on and the measure it was judged in."""
+    _checkpointed(tmp_path, history={"shift": 0.37, "damping_reference": 0.05})
     reader = _checked(tmp_path, **change)
     start = Checkpoint(path="ck").read(tmp_path, reader.spec, reader.mesh)
-    assert start.reference_residual is None
+    assert start.resumption is None
     assert set(start.fields) == {"U", "p"}
 
 
@@ -389,17 +446,17 @@ def test_a_restart_that_changes_the_kind_of_solve_is_not_the_same_problem(tmp_pa
     assert marched.problem_digest() != segregated.problem_digest()
 
 
-def test_a_starting_state_hands_a_solve_its_seed_and_its_reference(tmp_path) -> None:
+def test_a_starting_state_hands_a_solve_its_seed_and_its_history(tmp_path) -> None:
     checked = _checkpointed(tmp_path)
     problem = checked.build()
     start = Checkpoint(path="ck").read(tmp_path, checked.spec, checked.mesh)
     arguments = starting_arguments(start, checked.spec.physics, problem)
-    assert set(arguments) == {"initial", "reference_residual"}
-    assert arguments["reference_residual"] == pytest.approx(0.02)
+    assert set(arguments) == {"initial", "resume"}
+    assert _is(arguments["resume"], 0.02)
     assert arguments["initial"].shape == problem.initial_state().shape
     assert starting_arguments(None, checked.spec.physics, problem) == {
         "initial": None,
-        "reference_residual": None,
+        "resume": None,
     }
 
 

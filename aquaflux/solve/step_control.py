@@ -142,6 +142,29 @@ class ShiftStrengthControl(eqx.Module):
         memo = state[1] if isinstance(state, tuple) else None
         return (float(beta), memo)
 
+    def resumed_at(self, shift: float) -> tuple[float, None]:
+        """The carried state of a march resumed from one whose last step ran at ``shift``.
+
+        The march starts from the shift the interrupted one had walked to rather than from
+        :attr:`beta_start`, so a ramp that took many steps to come down is not walked again. The state
+        has no memo, which is the path a residual-ratio rule already takes for a step with no reference
+        (alpha alone drives it), and the first step **holds** the shift as the first step after a
+        preconditioner refresh does, since there is no previous step to adapt it from.
+
+        Parameters
+        ----------
+        shift : float
+            The shift strength the interrupted march's last step ran at.
+
+        Returns
+        -------
+        tuple
+            The ``(beta, memo)`` state to hand :func:`~aquaflux.solve.newton_march` as ``control_state``,
+            with ``beta`` held inside ``[beta_min, beta_max]`` in case this control's bounds differ from
+            the interrupted march's.
+        """
+        return (self._clamp(shift), None)
+
     def redamp(self, state: object, factor: float) -> object:
         """The carried state with β multiplied by ``factor``, memo untouched.
 

@@ -35,6 +35,7 @@ from .convergence import Convergence, ResidualMeasures
 from .march import ResidualHomotopy, newton_march
 from .materialized_session import PreconditionerSession
 from .refresh import RefreshPolicy
+from .resumption import Resumption
 from .retry import NO_RETRIES, RetryPolicy
 from .step_control import default_dual_time_control
 from .strategy import NewtonStrategy, StepControl, StepReport
@@ -249,7 +250,7 @@ def staged_march(
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
-    reference_residual: float | None = None,
+    resume: Resumption | None = None,
     caller: str = "staged_march",
 ) -> StagedResult:
     """March ``residual_fn`` to convergence in refresh segments, and refuse a state that is not a root.
@@ -279,14 +280,16 @@ def staged_march(
         for a residual with no coefficient drift to watch (a refresh trigger then needs to read costs).
     max_steps, step_control, on_step, on_checkpoint, retry, on_retry, homotopy, station_step
         Forwarded to :func:`~aquaflux.solve.newton_march` on every segment.
-    reference_residual : float or None
-        The residual norm an interrupted march measured at *its* first state, in the measure it was
-        steered by, for a march **resuming** it from the state it stopped at. It replaces the norm
-        measured at ``state`` as the stopping target's scale (``atol + rtol * reference``), so the
-        resumed march stops where the original would have, and it anchors the first segment's damping
-        schedule, which would otherwise be re-based at the resumed state and open at its starting
-        strength again. Later segments re-base as in any march. ``None`` measures at ``state``.
-        Refused beside a ``homotopy``, whose first station is the damping anchor's, not the target's.
+    resume : Resumption or None
+        The history of an interrupted march, for a march **resuming** it from the state it stopped at;
+        ``None`` starts afresh. Its reference residual replaces the norm measured at ``state`` as the
+        stopping target's scale (``atol + rtol * reference``), so the resumed march stops where the
+        original would have; its damping anchor is the first segment's damping reference, which would
+        otherwise be re-based at the resumed state and open the ramp at its starting strength again
+        (later segments re-base as in any march); and its shift seeds the step control, which would
+        otherwise walk its ramp from the opening value again -- a control with no ``resumed_at``, and a
+        march with no control, have none to seed. Refused beside a ``homotopy``, whose first station is
+        the damping anchor's, not the target's.
     caller : str
         The public entry point's name, for the error a non-converged march raises.
 
@@ -301,20 +304,14 @@ def staged_march(
         If the march ends short of its target: it exhausted ``max_steps`` in its last segment, stopped on
         a stalled positivity cap, went non-finite, or a homotopy never reached its target.
     ValueError
-        If ``reference_residual`` is given beside a ``homotopy``, or is not a positive finite number.
+        If ``resume`` is given beside a ``homotopy``.
     """
-    if reference_residual is not None:
-        if homotopy is not None:
-            raise ValueError(
-                f"{caller}: a reference_residual from an interrupted march cannot be combined with a "
-                "homotopy. The damping schedule is anchored at the homotopy's first station, which is "
-                "not the problem the reference was measured on."
-            )
-        if not (math.isfinite(reference_residual) and reference_residual > 0.0):
-            raise ValueError(
-                f"{caller}: reference_residual must be a positive finite residual norm, "
-                f"got {reference_residual!r}."
-            )
+    if resume is not None and homotopy is not None:
+        raise ValueError(
+            f"{caller}: a march cannot resume an interrupted one beside a homotopy. The damping "
+            "schedule is anchored at the homotopy's first station, which is not the problem the "
+            "interrupted march's history was measured on."
+        )
     # A refresh rebuilds the step; a caller-supplied step with no builder leaves it nothing to rebuild
     # WITH, so the refresh would silently never happen. The policy owns that check.
     refresh.require_rebuildable(strategy)
@@ -334,12 +331,14 @@ def staged_march(
     norm_builder = convergence.measure._builder(measures, state)
     reference_norm = (
         float(norm_builder(strategy, state)(residual_fn(state)))
-        if reference_residual is None
-        else float(reference_residual)
+        if resume is None
+        else float(resume.reference_residual)
     )
     # `refresh.limit` refreshes means `refresh.segments` segments: the segment *after* the last refresh
     # must still be marched, or the newly-refreshed preconditioner would never be used.
     control_state: object = None
+    if resume is not None and resume.shift is not None and hasattr(step_control, "resumed_at"):
+        control_state = step_control.resumed_at(resume.shift)
     for segment in range(refresh.segments):
         result = newton_march(
             strategy,
@@ -351,7 +350,7 @@ def staged_march(
             reference_norm=reference_norm,
             # A resumed march continues the interrupted one's damping ramp on its first segment only: a
             # later segment follows a refresh, which re-bases the ramp at its own starting state.
-            damping_reference=reference_residual if segment == 0 else None,
+            damping_reference=resume.anchor if resume is not None and segment == 0 else None,
             # The last segment has no refresh left to spend, so it marches to convergence or to
             # `max_steps` rather than stopping where the trigger fires.
             trigger=None if refresh.is_last_segment(segment) else refresh.trigger,

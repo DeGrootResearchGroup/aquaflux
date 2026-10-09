@@ -94,8 +94,8 @@ Three pure seams so ~80% of the logic tests with no filesystem (separate I/O fro
     **dropped after checking it is zero** (`1e-8` of the largest kept component, floored at one) — the
     inverse of the writer's padding, and a refusal rather than a silent discard when the axis is wrong or
     the flow is not planar. The axis comes from the explicit argument or, only when a vector is read onto
-    a 2D mesh, `infer_extruded_axis(case, mesh)`; a case file passes the axis from its mesh path, since
-    the fields' case need not hold the polyMesh. ⚠️ As with the scalar reader only the cell COUNT is
+    a 2D mesh, `infer_extruded_axis(case, mesh)`; a case file passes the axis it states (`Fields.extruded_axis`) or, unset,
+    the one recovered from its mesh path, since the fields' case need not hold the polyMesh. ⚠️ As with the scalar reader only the cell COUNT is
     checked against the mesh. A missing field is reported with what the directory does hold.
     ⚠️ **`_values`' count refusal said "the patch has N faces" even for the internal field** (a cell
     count); it now says "N are expected".

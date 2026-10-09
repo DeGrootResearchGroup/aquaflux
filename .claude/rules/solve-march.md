@@ -269,18 +269,35 @@ Pinned by `tests/unit/test_march_history.py` (six targeted mutations each turn i
     `reference_norm` is **global** (fixed across segments, used for the convergence test and the reported
     ratio). Substituting the second for the first pairs a refreshed, larger shift diagonal with the small
     β belonging to the pre-refresh residual — the over-damping freeze documented in `turbulence.md`.
-    - **Resuming a march (2026-10-07): `newton_march(damping_reference=)` replaces the SER anchor only, and
-      `staged_march(reference_residual=)` replaces the stopping scale and anchors the FIRST segment.** A march
-      resumed at a state re-measures `residual_norm_0` there, so the ratio `‖R‖/‖R₀‖` is ~1 and beta
-      reopens at `beta0` — the reason a resumed default march did not continue the interrupted one (the
-      memoryless SER schedule holds no other history; a report's `shift` reads 0.0 for it, which looked
-      like a reset and was not). The march still STARTS from the residual it measures at `phi0`
-      (`current`, the loop's own test) — only the schedule's anchor and, via `reference_norm`, the stopping
-      bar change. ⚠️ **Not carried: a `StepControl`'s `control_state`** (the dual-time Courant ramp's
-      `(beta, memo)`), so a coupled default march's restart begins its ramp at `beta_start`; unmeasured.
-      Refused beside a `homotopy`. Carried by `Checkpoint` from a step record's `residual_norm /
-      residual_ratio` (`case.md`). Pinned in `tests/integration/test_flow_march.py` and
-      `tests/unit/test_coupled_rans.py`.
+    - **Resuming a march (2026-10-07; shift and anchor 2026-10-08): `resume=Resumption(...)` on `staged_march`,
+      `solve_flow_march`, `solve_coupled`, `RootSolver.solve` and `solve_coupled_mass_flow`, built on
+      `newton_march(reference_norm=, damping_reference=)`.** A march resumed at a state re-measures
+      `residual_norm_0` there, so the ratio `‖R‖/‖R₀‖` is ~1 and beta reopens at `beta0` — the reason a
+      resumed default march did not continue the interrupted one (the memoryless SER schedule holds no other
+      history; a report's `shift` reads 0.0 for it, which looked like a reset and was not). A `Resumption`
+      carries `reference_residual` (the stopping scale, `atol + rtol * reference`, and the first segment's
+      damping anchor unless `damping_reference` is given), `damping_reference` (the anchor of the segment the
+      march was in — differs from the reference once it has refreshed, since a later segment re-bases) and
+      `shift` (what a dual-time march's `ShiftStrengthControl` had walked to). The march still STARTS from
+      the residual it measures at `phi0` (`current`, the loop's own test) — only the schedule's anchor and,
+      via `reference_norm`, the stopping bar change. `StepReport.damping_reference` records the anchor each
+      step was damped against, and `report_record` writes it, so a checkpoint carries it.
+      - **The shift goes through `ShiftStrengthControl.resumed_at(shift)` → `(clamp(shift), None)`**, which
+        `staged_march` calls on the control it ends up with (the default Courant ramp for a dual-time march) when the
+        `Resumption` has a shift and the control has the hook. The first step then HOLDS the shift (there
+        is no previous report to adapt from — the refresh boundary's treatment) and the ramp continues from it;
+        the memo is dropped, so a ratio-keyed control forms its first ratio a step later. A march with no
+        control (the single-step SER march) has no shift to seed; a custom control without `resumed_at`
+        starts afresh. **Measured 2026-10-08** (24 x 16 laminar channel, `mu = 5e-3`, `DualTimeLoop(inner_steps=3)`,
+        default `DualTimeControl` — `beta_start` 2, `beta_min` 0.02, grow 1.5 —, row-scaled `atol = 1e-9`): fresh
+        17 steps, shift 2.0 → 0.02; resumed at step 3 / 6 / 10 with the reference only, 16 / 16 / 14 steps
+        (14 / 11 / 7 left), each opening at 2.0; with the shift, the first step runs at the shift the stopped
+        march's last step ran at and the next two follow its ramp.
+      - Refused beside a `homotopy` (its anchor is the first station's). Carried by `Checkpoint` from a step
+        record (`case.md`). ⚠️ **Not carried:** the refresh budget (`refresh.limit` restarts) and a retry's
+        escalation history beyond the shift the march ended on. Pinned in `tests/integration/test_flow_march.py`,
+        `test_flow_march_resume.py` (the dual-time shift),
+        `tests/unit/test_coupled_rans.py`, `test_root_solver.py` and `test_step_control.py`.
   - **Per-step jit cache hit is mandatory, not an optimization (top implementation risk).** The per-step
     call goes through the module-level `eqx.filter_jit`'d `_march_step`, taking the `NewtonStrategy` **and**
     the residual as *arguments*. Two caller obligations: pass the **same** `strategy` object across a

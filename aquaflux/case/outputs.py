@@ -28,6 +28,7 @@ from typing import ClassVar
 from aquaflux.io import write_openfoam_time, write_patches, write_vtu
 from aquaflux.mesh import Mesh
 
+from .axes import AXES, AxisName, refuse_an_extruded_axis_of_a_three_dimensional_mesh
 from .kinematic import kinematic_pressure
 
 __all__ = ["Checkpoints", "FieldWriter", "OpenFOAMTime", "Outputs", "PatchVtk", "RunFields", "Vtk"]
@@ -94,6 +95,21 @@ class FieldWriter(abc.ABC):
                 f"it produces {list(fields)}."
             )
         return {name: fields[name] for name in self.fields}
+
+    def refuse_for_dimension(self, dim: int) -> None:
+        """Refuse a setting the mesh's dimension cannot take; none by default.
+
+        Parameters
+        ----------
+        dim : int
+            The case mesh's dimension.
+
+        Raises
+        ------
+        ValueError
+            If the writer states something a mesh of this dimension has no meaning for.
+        """
+        del dim
 
     @abc.abstractmethod
     def targets(self, directory: Path, case_directory: Path) -> tuple[Path, ...]:
@@ -189,6 +205,11 @@ class OpenFOAMTime(FieldWriter):
         bare number reads as a number.
     template_time : str or None
         The time directory whose fields are the templates; unset, ``0``.
+    extruded_axis : {"x", "y", "z"} or None
+        For a two-dimensional mesh, the axis it was extruded along, where the zero component of each
+        vector field goes; unset, recovered from the case's mesh points, which decide it for any real
+        extrusion. A mesh whose extents leave it ambiguous needs it stated. Refused for a
+        three-dimensional mesh.
 
     Raises
     ------
@@ -201,6 +222,7 @@ class OpenFOAMTime(FieldWriter):
     case: str
     time: str
     template_time: str | None = None
+    extruded_axis: AxisName | None = None
 
     #: Where an unset setting takes its default from (read by the case-file schema).
     unset_resolves_to: ClassVar[tuple[Callable, ...]] = (write_openfoam_time,)
@@ -217,10 +239,18 @@ class OpenFOAMTime(FieldWriter):
         del directory
         return (case_directory / self.case / self.time,)
 
+    def refuse_for_dimension(self, dim: int) -> None:
+        """Refuse an extruded axis for a three-dimensional mesh -- see :meth:`FieldWriter.refuse_for_dimension`."""
+        refuse_an_extruded_axis_of_a_three_dimensional_mesh(
+            "outputs.fields", self.extruded_axis, dim
+        )
+
     def write(self, directory: Path, case_directory: Path, mesh: Mesh, fields: RunFields) -> Path:
         """Write the time directory -- see :meth:`FieldWriter.write`."""
         del directory
         options = {} if self.template_time is None else {"template_time": self.template_time}
+        if self.extruded_axis is not None:
+            options["extruded_axis"] = AXES.index(self.extruded_axis)
         cells = self.chosen(fields.cells)
         if "p" in cells and fields.density is not None:
             cells["p"] = kinematic_pressure(cells["p"], fields.density)

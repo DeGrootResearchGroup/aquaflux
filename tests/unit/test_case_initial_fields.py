@@ -52,9 +52,9 @@ def _field(directory: Path, name: str, kind: str, internal: str) -> None:
     )
 
 
-def _time_directory(root: Path, time: str = "5", fields=("U", "p")) -> Path:
+def _time_directory(root: Path, time: str = "5", fields=("U", "p"), thickness: float = 0.5) -> Path:
     """An OpenFOAM case with the slab's mesh and a time directory whose values name their cell."""
-    copy_slab_polymesh(root / "of" / "constant" / "polyMesh")
+    copy_slab_polymesh(root / "of" / "constant" / "polyMesh", thickness)
     directory = root / "of" / time
     values = {
         "U": ("volVectorField", "nonuniform List<vector> 2\n(\n(1.5 0.5 0)\n(2.5 -0.5 0)\n)"),
@@ -80,7 +80,7 @@ def test_each_field_lands_on_its_cell_with_the_dropped_component_taken_out(tmp_p
     np.testing.assert_array_equal(start.fields["U"], [[1.5, 0.5], [2.5, -0.5]])
     np.testing.assert_array_equal(start.fields["p"], [10.0, 30.0])
     assert set(start.fields) == {"U", "p"}
-    assert start.reference_residual is None
+    assert start.resumption is None
     assert start.source["kind"] == "Fields"
     assert start.source["file"] == str(root / "of" / "5")
 
@@ -105,6 +105,29 @@ def test_the_dropped_axis_comes_from_the_cases_mesh_not_from_the_fields_director
     }
     start = _read(root, sections, Fields(path="of", time="5"))
     np.testing.assert_array_equal(start.fields["U"], [[1.5, 0.5], [2.5, -0.5]])
+
+
+def test_a_mesh_whose_extruded_axis_is_ambiguous_reads_where_the_file_says(tmp_path) -> None:
+    """A slab as thick as it is tall cannot say which axis was extruded; the case file can.
+
+    Wrong answers this catches: a stated axis that is ignored (the ambiguity then raises), a letter
+    mapped to the wrong component (``y`` would drop the nonzero component and be refused), and an axis
+    that reaches the reader but not the dropped component.
+    """
+    root = _time_directory(tmp_path, thickness=1.0)
+    with pytest.raises(ValueError, match="pass extruded_axis explicitly"):
+        _read(root, _sections(), Fields(path="of", time="5"))
+    start = _read(root, _sections(), Fields(path="of", time="5", extruded_axis="z"))
+    np.testing.assert_array_equal(start.fields["U"], [[1.5, 0.5], [2.5, -0.5]])
+    with pytest.raises(ValueError, match="nonzero component along axis 1"):
+        _read(root, _sections(), Fields(path="of", time="5", extruded_axis="y"))
+
+
+def test_an_extruded_axis_on_a_starting_state_is_refused_for_a_three_dimensional_mesh() -> None:
+    with pytest.raises(ValueError, match=r"initial: extruded_axis .* three-dimensional"):
+        Fields(path="of", time="5", extruded_axis="z").refuse_for_dimension(3)
+    Fields(path="of", time="5", extruded_axis="z").refuse_for_dimension(2)
+    Fields(path="of", time="5").refuse_for_dimension(3)
 
 
 def test_a_rans_case_reads_the_closures_fields_too(tmp_path) -> None:
@@ -148,6 +171,15 @@ def test_the_section_reads_and_writes_as_a_file_states_it() -> None:
     spec = case_spec_from_mapping(sections)
     assert spec.initial == Fields(path="of", time="5")
     assert case_spec_to_mapping(spec)["initial"] == {"kind": "Fields", "path": "of", "time": "5"}
+
+
+def test_the_extruded_axis_reads_and_writes_as_a_file_states_it() -> None:
+    state = {"kind": "Fields", "path": "of", "time": "5", "extruded_axis": "z"}
+    spec = case_spec_from_mapping(_sections(initial=state))
+    assert spec.initial == Fields(path="of", time="5", extruded_axis="z")
+    assert case_spec_to_mapping(spec)["initial"] == state
+    with pytest.raises(ValueError, match=r"initial.*extruded_axis"):
+        case_spec_from_mapping(_sections(initial=state | {"extruded_axis": "w"}))
 
 
 def test_a_time_written_as_a_number_is_refused_and_says_to_quote_it() -> None:

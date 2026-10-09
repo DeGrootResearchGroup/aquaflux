@@ -271,16 +271,19 @@ must have the same physics and the same mesh. The viscosity, the boundary values
 settings may differ. Write the new run to its own `outputs.directory`: a run replaces what it
 finds in its output directory, so one that reads from there is refused.
 
-A restart also resumes the march. The checkpoint records the residual the stopped march began
-at, and the new run measures its damping and its stopping bar against that one rather than against
-the residual at the state it was handed, so it takes the steps the stopped march had left. That
-holds when the new file states the same problem -- the same mesh, physics, fluid, boundaries and
-numerics -- and judges a residual in the same measure (`convergence.measure`); the step budget, the
-preconditioner, the outputs and the like may change. If the file differs in any of the first, the
-run starts from the checkpoint's fields as a new march, and its `run.yaml` records
-`reference_residual: null`. A march that had already refreshed its preconditioner before it
-stopped re-based its damping at the refresh, which a checkpoint does not record: its restart
-continues from the residual it began at, not from where the refresh re-based it.
+A restart also resumes the march. The checkpoint records where the stopped march had got to: the
+residual it began at, the residual its damping was anchored at (which is a later one once it has
+refreshed its preconditioner), and the shift its step control had come down to. The new run
+measures its damping and its stopping bar against those residuals rather than against the
+residual at the state it was handed, and its step control opens at that shift rather than at the
+top of its ramp, so it takes the steps the stopped march had left. That holds when the new file
+states the same problem -- the same mesh, physics, fluid, boundaries and numerics -- and judges a
+residual in the same measure (`convergence.measure`); the step budget, the preconditioner, the
+outputs and the like may change. If the file differs in any of the first, the run starts from the
+checkpoint's fields as a new march, and its `run.yaml` records `resumption: null`. The first step
+of a resumed march with a step control holds the shift it resumes from, since there is no step
+before it to adapt from; a control that adapts by the ratio of successive residuals forms its
+first ratio one step later.
 
 ```yaml
 initial:
@@ -297,6 +300,11 @@ the number of cells can be checked against it. The pressure is read as an incomp
 solver holds it, per unit density, and multiplied by the case's fluid density; `OpenFOAMTime`
 writes it the same way, so the two are inverses and a case of density one reads it unchanged. It
 carries no march to continue, so the run begins as a new march from the state.
+
+A two-dimensional OpenFOAM mesh was extruded along one axis, and its vector fields carry a
+component along it, which must be zero. The axis is recovered from the mesh's points, which
+decide it for any real extrusion; a mesh whose extents leave it ambiguous (a slab as thick as it
+is tall) needs `extruded_axis: z` (or `x`, `y`) stated. It is refused for a three-dimensional mesh.
 
 A {class}`~aquaflux.case.ViscosityRamp` opens on a seed fitted to its own anchor station, so a
 case with a `continuation` refuses an `initial` section: drop the `continuation` to resume at
@@ -323,7 +331,9 @@ outputs:
   and boundary conditions from the file of the same name in its `template_time` directory
   (`0` unless given), so the result restarts in the solver the case is set up for. It needs an
   OpenFOAM mesh, and a template for every field it writes. Quote `time`: a bare number reads as
-  a number. The pressure is written per unit density (`p / density`), as an incompressible
+  a number. On a two-dimensional mesh the zero component of each vector goes on the axis the mesh
+  was extruded along, recovered from its points; state `extruded_axis` (`x`, `y` or `z`) when
+  they leave it ambiguous. The pressure is written per unit density (`p / density`), as an incompressible
   OpenFOAM solver holds it; the other writers write the pressure itself.
 - {class}`~aquaflux.case.PatchVtk` writes the boundary patches, and the fields on their faces, as
   one VTK polygonal-data file per patch (`patches/<patch>.vtp`) indexed by a multiblock file

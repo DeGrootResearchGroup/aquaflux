@@ -191,6 +191,7 @@ from .convergence import (
 )
 from .relaxation import ConstantRelaxation, RelaxationSchedule, SwitchedEvolutionRelaxation
 from .refresh import NO_REFRESH, RefreshPolicy
+from .resumption import Resumption
 from .driver import (
     CallerBuiltSource,
     ContinuationSource,
@@ -346,6 +347,7 @@ __all__ = [
     "ResidualMeasures",
     "ResidualNorm",
     "ResidualRatioDualTimeControl",
+    "Resumption",
     "RetryPolicy",
     "RootSolveSettings",
     "RootSolver",

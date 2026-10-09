@@ -592,7 +592,9 @@ def newton_march(
         segment per refresh passes the previous segment's :attr:`MarchResult.control_state` here, so a
         stateful control continues across the refresh instead of resetting — the same discipline the
         *global* ``reference_norm`` follows, and the opposite of the deliberately segment-local damping
-        reference and ``drift_measure``. Ignored when ``step_control is None``.
+        reference and ``drift_measure``. A march resuming an interrupted one passes the control's own
+        ``resumed_at(shift)`` here (see :class:`~aquaflux.solve.Resumption`). Ignored when
+        ``step_control is None``.
     observer : callable, optional
         Called with each :class:`StepReport` as it is produced, for streaming progress out of a long
         march. The full history is also returned, so an observer is only needed for live reporting.
@@ -996,6 +998,7 @@ def newton_march(
             shift=0.0 if step_shift is None else float(step_shift),
             escalations=int(retries),
             diverged_retry=bool(diverged_retry),
+            damping_reference=float(residual_norm_0),
         )
         stalled = stalled + 1 if _limit_collapsing(reports[-1] if reports else None, report) else 0
         reports.append(report)

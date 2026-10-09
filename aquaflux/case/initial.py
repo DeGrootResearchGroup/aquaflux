@@ -25,8 +25,9 @@ from typing import TYPE_CHECKING, ClassVar, Literal
 import numpy as np
 
 from aquaflux.io import infer_extruded_axis, read_openfoam_time
-from aquaflux.solve import find_checkpoint
+from aquaflux.solve import Resumption, find_checkpoint
 
+from .axes import AXES, AxisName, refuse_an_extruded_axis_of_a_three_dimensional_mesh
 from .kinematic import pressure_from_kinematic
 from .mesh_source import OpenFOAMMesh
 from .restart_file import RestartHeader, read_restart, refuse_non_finite
@@ -52,17 +53,18 @@ class StartingFields:
     source : mapping of {str: object}
         What they were read from, for a run's record: the kind of source and the file, and what that
         kind knows of it -- a checkpoint's residual, the digest of the case that wrote it and the
-        reference residual carried to the solve, an OpenFOAM time's density.
-    reference_residual : float or None
-        The residual norm the run that wrote the fields took at its own first state, when the case
-        starting from them states the same problem and judges a residual the same way, so that a march
-        resumed from them continues the stopped march's damping and stops against the same bar. ``None``
-        when the source has no such history, or the case differs from the one that wrote it.
+        history carried to the solve, an OpenFOAM time's density.
+    resumption : Resumption or None
+        The history of the march that wrote the fields -- its reference residual, its damping anchor and
+        its last shift -- when the case starting from them states the same problem and judges a residual
+        the same way, so that a march resumed from them continues the stopped march rather than starting
+        a new one. ``None`` when the source has no such history, or the case differs from the one that
+        wrote it.
     """
 
     fields: Mapping[str, np.ndarray]
     source: Mapping[str, object]
-    reference_residual: float | None = None
+    resumption: Resumption | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -100,6 +102,21 @@ class InitialState(abc.ABC):
         """
         return (Path(case_directory) / self.path).resolve()
 
+    def refuse_for_dimension(self, dim: int) -> None:
+        """Refuse a setting the mesh's dimension cannot take; none by default.
+
+        Parameters
+        ----------
+        dim : int
+            The case mesh's dimension.
+
+        Raises
+        ------
+        ValueError
+            If the state states something a mesh of this dimension has no meaning for.
+        """
+        del dim
+
     @abc.abstractmethod
     def read(self, case_directory: Path, spec: CaseSpec, mesh: Mesh) -> StartingFields:
         """Read the state and check that it belongs to this case.
@@ -136,12 +153,13 @@ class Checkpoint(InitialState):
     physics; the viscosity, the boundary values and the solver settings may all differ.
 
     A march that is resumed continues the stopped one when the case states the same problem and judges
-    a residual in the same measure: the file records the residual the stopped march began at, and the
-    resumed march measures its damping and its stopping bar against that one instead of against the
-    residual at the state it is handed (which would restart its damping at the opening strength). If
-    the problem or the measure differs, the fields still start the case but the march is a new one. A
-    march that had refreshed its preconditioner before it stopped re-based its damping at the refresh,
-    which the file does not record, so its resumed march continues from the residual it began at.
+    a residual in the same measure: the file records where the stopped march had got to -- the residual
+    it began at, the residual its damping was anchored at (a later one once it has refreshed its
+    preconditioner) and the shift its step control had come down to -- and the resumed march measures
+    its damping and its stopping bar against those instead of against the residual at the state it is
+    handed (which would restart its damping at the opening strength), and its step control opens at that
+    shift instead of at the top of its ramp. If the problem or the measure differs, the fields still start
+    the case but the march is a new one.
 
     A viscosity ramp cannot start from a state -- it opens on a seed fitted to its own anchor
     station -- so a case with one refuses this section. Drop the ramp to resume at the case's own
@@ -175,9 +193,9 @@ class Checkpoint(InitialState):
     def read(self, case_directory: Path, spec: CaseSpec, mesh: Mesh) -> StartingFields:
         """The checkpoint's fields, checked against the case -- see :meth:`InitialState.read`.
 
-        The stopped march's reference residual is carried only when the case states the same problem as
-        the one that wrote the file, and judges a residual in the same measure: it is a scale for that
-        problem and means nothing for another.
+        The stopped march's history is carried only when the case states the same problem as the one
+        that wrote the file, and judges a residual in the same measure: its residual scales and its
+        shift are for that problem and mean nothing for another.
         """
         file = find_checkpoint(self.location(case_directory), self.step)
         restart = read_restart(file)
@@ -185,7 +203,7 @@ class Checkpoint(InitialState):
         restart.header.refuse_unless_fits(expected, file)
         restart.refuse_if_not_finite()
         same_problem = restart.header.problem_digest == expected.problem_digest
-        carried = restart.reference_residual if same_problem else None
+        carried = restart.resumption if same_problem else None
         return StartingFields(
             fields=restart.fields,
             source={
@@ -193,9 +211,9 @@ class Checkpoint(InitialState):
                 "file": str(file),
                 "residual": restart.residual,
                 "case_digest": restart.header.case_digest,
-                "reference_residual": carried,
+                "resumption": None if carried is None else dataclasses.asdict(carried),
             },
-            reference_residual=carried,
+            resumption=carried,
         )
 
 
@@ -214,6 +232,10 @@ class Fields(InitialState):
     would be read without complaint. A march resumed from a time directory has no history to carry, so
     it begins as a new one from the state.
 
+    A two-dimensional mesh was extruded along one axis, and OpenFOAM's vector fields carry the component
+    along it, which must be zero. The axis is recovered from the case's mesh points, which decide it
+    for any real extrusion; a mesh whose extents leave it ambiguous needs it stated.
+
     Attributes
     ----------
     path : str
@@ -222,6 +244,10 @@ class Fields(InitialState):
     time : str
         The time directory's name, used verbatim. Quote it in a file (``time: "1000"``), since a bare
         number reads as a number.
+    extruded_axis : {"x", "y", "z"} or None
+        For a two-dimensional mesh, the axis it was extruded along, whose component of each vector
+        field is dropped after being checked to be zero; unset, recovered from the mesh points. Refused
+        for a three-dimensional mesh.
 
     Raises
     ------
@@ -230,11 +256,16 @@ class Fields(InitialState):
     """
 
     time: str
+    extruded_axis: AxisName | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if not self.time:
             raise ValueError("Fields.time names the time directory to start from.")
+
+    def refuse_for_dimension(self, dim: int) -> None:
+        """Refuse an extruded axis for a three-dimensional mesh -- see :meth:`InitialState.refuse_for_dimension`."""
+        refuse_an_extruded_axis_of_a_three_dimensional_mesh("initial", self.extruded_axis, dim)
 
     def read(self, case_directory: Path, spec: CaseSpec, mesh: Mesh) -> StartingFields:
         """The time directory's fields, in this case's units -- see :meth:`InitialState.read`.
@@ -253,11 +284,15 @@ class Fields(InitialState):
                 f"the case's mesh must be that case's OpenFOAMMesh, not a {type(spec.mesh).__name__}."
             )
         directory = self.location(case_directory)
-        axis = (
-            infer_extruded_axis(Path(case_directory) / spec.mesh.path, mesh)
-            if mesh.dim == 2
-            else None
-        )
+        if mesh.dim == 2:
+            axis = (
+                infer_extruded_axis(Path(case_directory) / spec.mesh.path, mesh)
+                if self.extruded_axis is None
+                else AXES.index(self.extruded_axis)
+            )
+        else:
+            self.refuse_for_dimension(mesh.dim)
+            axis = None
         read = read_openfoam_time(
             directory, self.time, spec.physics.state_fields, mesh, extruded_axis=axis
         )
@@ -289,7 +324,7 @@ def starting_arguments(
     -------
     dict
         ``{"initial": <the flow state, or (flow, k, omega) for a Reynolds-averaged case>,
-        "reference_residual": <float or None>}``; both ``None`` to start from scratch.
+        "resume": <a Resumption or None>}``; both ``None`` to start from scratch.
 
     Raises
     ------
@@ -297,8 +332,8 @@ def starting_arguments(
         If the fields lack one the physics needs.
     """
     if starting is None:
-        return {"initial": None, "reference_residual": None}
+        return {"initial": None, "resume": None}
     return {
         "initial": physics.initial_fields(problem, starting.fields),
-        "reference_residual": starting.reference_residual,
+        "resume": starting.resumption,
     }

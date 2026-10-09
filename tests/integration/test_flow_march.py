@@ -36,6 +36,7 @@ from aquaflux.solve import (
     MonolithicFactorShiftPolicy,
     PseudoTransientStep,
     RefreshPolicy,
+    Resumption,
     RetryPolicy,
     RootSolver,
     RowScaled,
@@ -475,7 +476,7 @@ def _march_with_states(assembler, step, state=None, **march):
     return reports, states
 
 
-def test_a_march_resumed_with_its_reference_residual_continues_the_one_it_resumes(
+def test_a_march_resumed_with_its_history_continues_the_one_it_resumes(
     channel, shared_step
 ) -> None:
     """Resuming at a step's state with the original ``|R0|`` reproduces the steps that followed it.
@@ -493,7 +494,10 @@ def test_a_march_resumed_with_its_reference_residual_continues_the_one_it_resume
 
     control_reports, _ = _march_with_states(assembler, shared_step, fresh_states[resumed_at - 1])
     reports, states = _march_with_states(
-        assembler, shared_step, fresh_states[resumed_at - 1], reference_residual=reference
+        assembler,
+        shared_step,
+        fresh_states[resumed_at - 1],
+        resume=Resumption(reference_residual=reference),
     )
 
     expected = fresh_reports[resumed_at:]
@@ -511,7 +515,7 @@ def test_a_march_resumed_with_its_reference_residual_continues_the_one_it_resume
     assert float(jnp.max(jnp.abs(states[-1] - fresh_states[-1]))) < 1e-9
 
 
-def test_a_reference_residual_is_the_stopping_targets_scale(channel, shared_step) -> None:
+def test_a_resumptions_reference_is_the_stopping_targets_scale(channel, shared_step) -> None:
     """A march stops against ``atol + rtol * reference``, so the reference moves where it stops."""
     assembler, _ = channel
     reports, states = _march_with_states(assembler, shared_step)
@@ -527,7 +531,7 @@ def test_a_reference_residual_is_the_stopping_targets_scale(channel, shared_step
             strategy=shared_step,
             convergence=convergence,
             max_steps=120,
-            reference_residual=reference,
+            resume=Resumption(reference_residual=reference),
             on_checkpoint=lambda report, _: taken.append(report),
         )
         return taken
@@ -541,7 +545,7 @@ def test_a_reference_residual_is_the_stopping_targets_scale(channel, shared_step
     assert len(steps(reference, tight)) > len(steps(reference, loose))
 
 
-def test_a_march_resumed_at_its_root_takes_no_step_whatever_reference_it_is_given(
+def test_a_march_resumed_at_its_root_takes_no_step_whatever_history_it_is_given(
     channel, shared_step
 ) -> None:
     """The march starts from the residual it measures at the state it is handed, not from the reference.
@@ -551,13 +555,64 @@ def test_a_march_resumed_at_its_root_takes_no_step_whatever_reference_it_is_give
     """
     assembler, _ = channel
     _, states = _march_with_states(assembler, shared_step)
-    reports, _ = _march_with_states(assembler, shared_step, states[-1], reference_residual=1.0e3)
+    reports, _ = _march_with_states(
+        assembler, shared_step, states[-1], resume=Resumption(reference_residual=1.0e3)
+    )
     assert reports == []
 
 
-def test_a_reference_residual_beside_a_homotopy_or_that_is_not_positive_is_refused(channel) -> None:
+def test_a_march_cannot_resume_beside_a_homotopy(channel) -> None:
     assembler, _ = channel
-    with pytest.raises(ValueError, match="positive finite"):
-        solve_flow_march(assembler, reference_residual=0.0, max_steps=1)
-    with pytest.raises(ValueError, match="cannot be combined with a homotopy"):
-        solve_flow_march(assembler, reference_residual=1.0, homotopy=object(), max_steps=1)
+    with pytest.raises(ValueError, match="cannot resume an interrupted one beside a homotopy"):
+        solve_flow_march(
+            assembler, resume=Resumption(reference_residual=1.0), homotopy=object(), max_steps=1
+        )
+
+
+def test_a_resumed_march_damps_against_the_anchor_it_is_given_and_reports_it(
+    channel, shared_step
+) -> None:
+    """The first segment's damping anchor is the resumption's, and each step's report says what it was.
+
+    Wrong answers this catches: an anchor taken at the resumed state whatever the resumption says (the
+    reports then read the residual measured there), one that uses the reference where a separate
+    anchor was given (a march that has refreshed its preconditioner has two), and a report that records
+    the stopping reference rather than the anchor the damping was judged against.
+    """
+    assembler, _ = channel
+    reports, states = _march_with_states(assembler, shared_step)
+    reference = float(reports[0].residual_norm) / float(reports[0].residual_ratio)
+    # A fresh march damps against the residual it measured at its first state: the reference itself.
+    assert {round(r.damping_reference, 9) for r in reports} == {round(reference, 9)}
+
+    def anchors(resume):
+        taken, _ = _march_with_states(assembler, shared_step, states[2], resume=resume)
+        return {round(r.damping_reference, 9) for r in taken}
+
+    # Control: with no history the march re-bases at the state it resumes, a different residual.
+    assert anchors(None) != {round(reference, 9)}
+    assert anchors(Resumption(reference)) == {round(reference, 9)}
+    assert anchors(Resumption(reference, damping_reference=2.0 * reference)) == {
+        round(2.0 * reference, 9)
+    }
+
+
+def test_a_resumed_shift_is_not_used_by_a_march_with_no_step_control(channel, shared_step) -> None:
+    """A single-step march damps by a memoryless schedule, so there is no shift to resume.
+
+    The wrong answer this catches: the shift reaching the march some other way and changing it. The
+    resumed march must be exactly the one resumed without a shift.
+    """
+    assembler, _ = channel
+    reports, states = _march_with_states(assembler, shared_step)
+    reference = float(reports[2].residual_norm) / float(reports[2].residual_ratio)
+    plain, _ = _march_with_states(
+        assembler, shared_step, states[2], resume=Resumption(reference_residual=reference)
+    )
+    shifted, _ = _march_with_states(
+        assembler,
+        shared_step,
+        states[2],
+        resume=Resumption(reference_residual=reference, shift=0.3),
+    )
+    assert [r.residual_norm for r in shifted] == [r.residual_norm for r in plain]
