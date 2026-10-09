@@ -178,8 +178,31 @@ re-measured there).
 
 **In the library (2026-10-09):** `LinearSolveSettings.stop: residual` selects it from a case file or a
 builder (`PITZ_FORWARD_STOP=residual` edits pitzDaily's file); the default is still `lineax`.
-**Still open before the default moves:** bfs3d (its mesh is not in this container), the slow and
-validation tiers, the cost thresholds' re-calibration, and the project owner's decision.
+**Still open before the default moves:** bfs3d (its mesh is not in this container), the cost
+thresholds' re-calibration, the end-of-march failures below, and the project owner's decision.
+
+**The tiers with `stop: residual` forced as the default (2026-10-09, `residual_stop_gmres` with the
+true residual recomputed at every cycle end, commit after `1619fd0`; jax 0.11.2, CPU, 4-core Linux).**
+Validation: 18 passed, 8 skipped (case data absent). Slow: everything passes alone except three, which
+pass under `lineax`:
+- `test_coupled_lu.py`'s two march tests, both failing in the shared **block-diagonal** march
+  (`max_steps=40`, ends at 2.807e-11 against 7.093e-12). **Cause: the end of the march converges
+  linearly.** A step solved to 0.3 removes about 0.3 of the residual once Newton is otherwise exact, where
+  lineax's stop over-solves and gives near-quadratic convergence. Traced (`on_step`, default
+  `Convergence`, `rtol` 0.3): block march 27 steps (lineax, `4.0e-06 → 1.1e-15` in two steps) against
+  42 (residual, ~0.3 per step from 1e-3 down); complete-LU march 28 against 35. Recomputing the true
+  residual changed nothing (bit-identical failure), so it was not Arnoldi drift.
+- `test_reynolds_continuation.py::test_adjoint_matches_a_direct_solve_and_is_point_count_independent`
+  (`n_points=1`, `max_steps=60`). **Not a budget shortfall: the target march goes erratic** — accepted
+  steps raising `|R|` 0.087 → 3.9, 0.030 → 2.7, 0.077 → 3.3, line-search `alpha` down to 1e-3, and 60
+  steps end at 4.9e-02 (lineax: 11 steps to 1.2e-13). With the residual stop on the TARGET step only
+  (ramp rung on lineax, a slightly different anchor) it converges in 24, linearly. So the inexact step is
+  fragile here near the anchor, not only slow at the end.
+- **Consequence:** flipping the default as built would trade pitzDaily's 1.88x for slower, linear endings
+  on tight-tolerance solves and a lost robustness margin on at least one continuation. Candidate remedies,
+  unbuilt and unmeasured: a terminal forcing safeguard (solve no looser than `½ target / |R_k|`, which
+  tightens only in the last few steps and so avoids what refuted Eisenstat–Walker), and re-solving tighter
+  after a line-search cut.
 
 **Follow-ups.** Two were measured on the replay and are closed (ledger: "Weighted inner product and
 longer restarts for the residual-stop GMRES"): neither a measure-weighted inner product nor a restart of
