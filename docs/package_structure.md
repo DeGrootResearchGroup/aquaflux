@@ -96,6 +96,7 @@ cfd/                                  # repo root
 │   │
 │   ├── schemes/                      # first-class swappable numerics (physics-free; one-way discretization → schemes)
 │   │   ├── gradient.py               #   GradientScheme → CompactGreenGauss, CorrectedGreenGauss (injected GradientSolve: GmresGradientSolve / SweptGradientSolve fixed-sweep; injected GradientPreconditioner: InverseVolume / CellBlockJacobi, extracted by cell_diagonal_block), HessianCorrectedGradient (separate outer + hessian_solver)
+│   │   ├── boundary_closure.py       #   BoundaryClosure: one field's boundary values as a function of (field, gradient) — the two-pass reconstruct + the jvp weight probes/linearization, shared by ResidualAssembler and MomentumContinuity
 │   │   ├── interpolation.py          #   face interpolation in one place: interpolation_factor(g), interpolate_owner_neighbour ((1-g)·a + g·b), blend_owner_neighbour (the two-field form, each side from its own field)
 │   │   └── limiter.py                #   Limiter → VenkatakrishnanLimiter (per-cell psi for bounded second-order reconstruction; held by LimitedUpwind)
 │   │
@@ -106,7 +107,7 @@ cfd/                                  # repo root
 │   ├── flow/                         # the coupled pressure–velocity (u, v[, w], p) block
 │   │   ├── state.py                  #   flow_state_layout: the flow system's named [velocity, pressure] blocks over solve/state.py's FieldLayout
 │   │   ├── momentum.py               #   MomentumContinuity: the coupled residual (each momentum component is a CellBalance over Diffusion/PressureForce/Advection; Rhie–Chow continuity; pressure pin; takes a PropertyModel → viscosity/density) + PressureForce
-│   │   ├── source.py                 #   MomentumSource (vector volume source: source/face_force/diagonal, the diagonal added to a_P) + UniformBodyForce; where buoyancy, porous drag, rotating-frame terms attach
+│   │   ├── source.py                 #   MomentumSource (vector volume source: source/face_force/diagonal, the diagonal added to a_P; requires() validated at build) + UniformBodyForce; where buoyancy, porous drag, rotating-frame terms attach
 │   │   ├── rhie_chow.py              #   interior_mass_flux + momentum_diagonal / frozen_momentum_diagonal_parts (viscous + convective)
 │   │   ├── boundary.py               #   FlowBoundary → NoSlipWall, MovingWall, VelocityInlet, PressureOutlet
 │   │   ├── preconditioner.py         #   SIMPLE Schur pieces: pressure_schur_laplacian (a_P-based), damped_jacobi_solve

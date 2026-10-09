@@ -119,6 +119,11 @@ Engineering Principles.
     level in `_momentum_residual`, after the per-component balances are stacked — a momentum source
     is coupled across components (a rotating-frame term is `−2ρΩ×u`), so it is not a per-component
     quantity and cannot ride in a `CellBalance`'s scalar `source_operators`.
+    - **`requires()` names the properties a source reads (default `()`)**, mirroring
+      `VolumeSource.requires`; `MomentumContinuity.build` unions them with `viscosity`/`density` into
+      one `properties.require(...)`, so a drag reading a mistyped `"permeability"` is a build-time
+      `ValueError` rather than a `KeyError` inside a traced residual. Not abstract, unlike the three
+      below: a missing declaration only moves where the error surfaces, never the answer.
     - **It does NOT take a `FieldContext` (binding).** That context carries *one* scalar component's
       boundary values and reconstructed gradient; a momentum source needs the whole kinematic state
       (the velocity, and the gradient **tensor** for anything stress-like), so handing it one
@@ -312,7 +317,7 @@ Engineering Principles.
   all-faces form (`boundary_corrected=False`): it is a forward-path *stabilization* scale, not the
   operator coefficient, and the extra boundary damping is what carries the high-Reynolds pseudo-transient
   march — correcting it there regressed `test_channel_high_reynolds` and never affects the converged
-  residual or its adjoint (the shift vanishes at the fixed point). The broader assembler unification is #58.
+  residual or its adjoint (the shift vanishes at the fixed point).
 - **`a_P`'s viscous term is the flux-continuous conductance, i.e. the diffusion operator's own diagonal
   (binding, #154).** `momentum_diagonal`/`momentum_diagonal_parts` build the viscous coupling from
   `discretization.flux_continuous_conductance(μ_eff, geometry, face_cells)` — `Γ_P A / denom`,
@@ -382,10 +387,26 @@ Engineering Principles.
     scheme that *differences* a boundary value gets the corrected one; the previously-noted
     impossibility ("its closures accept no gradient") is gone. On an orthogonal grid `d ∥ n`, the
     correction vanishes and the two passes agree exactly, so **nothing moves on an orthogonal mesh**.
-    - Velocity closes **per component**: component `i` reads row `i` of the `(n_cells, dim, dim)`
-      gradient tensor and nothing else of it, which is what lets `_boundary_velocity_component` hand a
-      scheme's per-scalar `boundary_values_at` one component's own `(n_cells, dim)` gradient with the
-      other rows zero-filled rather than plumbed through.
+    - **The two passes are not written here: they are `schemes.BoundaryClosure.reconstruct`, the same
+      object `ResidualAssembler._gradient` composes (#58, 2026-10-09).** `_pressure_closure()` wraps
+      `_boundary_pressure`; `_velocity_closure(velocity, i)` is the per-component view — component
+      `i`'s value written into `velocity`, its `(n_cells, dim)` gradient into row `i` of an otherwise
+      zero tensor, column `i` read back. That view is exact only because every flow closure closes
+      each component on its own (row `i` alone); **the face values the fluxes read are still taken
+      from the vector closures at the whole tensor** (`_boundary_velocity(velocity, gradient)` in
+      `_velocity_gradient`), so a future closure that couples components (a slip or symmetry wall)
+      gets correct face values and needs only its reconstruction hooks revisited. The build-time
+      linearizations are `closure.linearization(...)` too. Before this the flow carried its own copy
+      of the two passes and of both `jvp` weight probes, and it had already drifted: it passed neither
+      `operator_hook` nor `imposed` to the scheme — the scalar copy passes both, so both are now
+      reachable from the flow (`reconstruct(..., imposed=...)`) without a third copy.
+      **Gated on bit-identity, not on tests passing** (254 arrays: residual, every `flow_fields` entry,
+      `a_P`, `jvp`, jitted residual, scalar assembler, coupled RANS residual and `jvp`, over 2D/3D ×
+      compact/corrected/multiple-correction × Stokes/upwind/limited, perturbed meshes): all
+      bit-identical **except the flow residual's reverse-mode `vjp`, which moves 1–4 ulp** — the
+      per-component closures change the transpose's summation order. Forward values and the `jvp`
+      (what a march and its Krylov solves use) do not move, so archived trajectories hold; adjoint
+      gradients move at rounding level only.
     - **`mass_flux`'s through-flow term is the patch's own *boundary* velocity, for every patch
       (binding, #319 — corrected from an earlier design where it read the owner velocity).**
       `_boundary_mass_flux` passes each patch its own already-assembled `boundary_velocity` slice —

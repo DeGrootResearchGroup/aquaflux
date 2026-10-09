@@ -90,42 +90,26 @@ class WallModelVelocityMomentum(MomentumContinuity):
         return direction[:, :, None] * (shear[:, None] * self.wall_normal)[:, None, :]
 
     def _velocity_gradient(self, velocity: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
-        zero_gradient = jnp.zeros((self.mesh.n_cells, self.mesh.dim, self.mesh.dim))
-        leading = self._boundary_velocity(velocity, zero_gradient)
         imposed = self._imposed_velocity_gradient(velocity)
-        columns = [
-            self.gradient_scheme.gradients(
-                velocity[:, i],
-                self.mesh,
-                self.geometry,
-                leading[:, i],
-                imposed=ImposedGradient(self.wall_cells, imposed[:, i, :]),
-                boundary_values_at=lambda g, i=i: self._boundary_velocity_component(velocity, i, g),
-                boundary_gradient_weight=self._velocity_boundary_gradient_weight(
-                    velocity, i, zero_gradient
-                ),
-            )
-            for i in range(self.mesh.dim)
-        ]
-        gradient = jnp.stack(columns, axis=1)
-        if self.first_pass_cells is not None:
-            first_pass = FirstPassOnly(self.gradient_scheme)
-            first = jnp.stack(
+
+        def reconstructed(scheme):
+            return jnp.stack(
                 [
-                    first_pass.gradients(
+                    self._velocity_closure(velocity, i).reconstruct(
+                        scheme,
                         velocity[:, i],
                         self.mesh,
                         self.geometry,
-                        leading[:, i],
                         imposed=ImposedGradient(self.wall_cells, imposed[:, i, :]),
-                        boundary_gradient_weight=self._velocity_boundary_gradient_weight(
-                            velocity, i, zero_gradient
-                        ),
-                    )
+                    )[0]
                     for i in range(self.mesh.dim)
                 ],
                 axis=1,
             )
+
+        gradient = reconstructed(self.gradient_scheme)
+        if self.first_pass_cells is not None:
+            first = reconstructed(FirstPassOnly(self.gradient_scheme))
             cells = self.first_pass_cells
             gradient = gradient.at[cells].set(first[cells])
         return gradient, self._boundary_velocity(velocity, gradient)
