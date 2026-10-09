@@ -160,8 +160,10 @@ The control reproduces the shipped march exactly (31 / 99 / 203). The looser cor
 inner Newton iteration per step and the cheaper solves pay for it twice over. ⚠️ **Not a pure stop
 effect:** the residual stop reports cycles run where `lineax` reports cycles run minus one, so the
 `refresh_on_cycles = 3` trigger fired 4 times against 12; part of the wall gain is fewer rebuilds.
-**Still open before any default moves:** bfs3d (its mesh is not in this container), the slow and
-validation tiers, the cost thresholds' re-calibration, and the follow-ups below.
+**In the library (2026-10-09):** `LinearSolveSettings.stop: residual` selects it from a case file or a
+builder (`PITZ_FORWARD_STOP=residual` edits pitzDaily's file); the default is still `lineax`.
+**Still open before the default moves:** bfs3d (its mesh is not in this container), the slow and
+validation tiers, the cost thresholds' re-calibration, and the project owner's decision.
 
 **Follow-ups.** Two were measured on the replay and are closed (ledger: "Weighted inner product and
 longer restarts for the residual-stop GMRES"): neither a measure-weighted inner product nor a restart of

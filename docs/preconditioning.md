@@ -560,6 +560,13 @@ relative residual rather than `lineax`'s componentwise test. On a coupled system
 right-hand side has near-zero entries, the componentwise test quietly becomes an absolute
 demand and drives the solve orders of magnitude past the tolerance requested.
 
+It keeps the rest of `lineax`'s rule, though: the residual is tested only at the end of a
+restart cycle, and the solve also runs until its solution has stopped moving over a whole
+cycle, so every solve runs at least two cycles. For a loose forcing term that is most of the
+work. {func}`~aquaflux.solve.residual_stop_gmres` stops the moment the residual meets the
+tolerance, tested after every iteration; a march selects it with
+`linear_solve: {stop: residual}` ({class}`~aquaflux.solve.LinearSolveSettings`).
+
 ## Gradients
 
 The preconditioner is part of the forward solve, and the reverse-mode gradient is a single

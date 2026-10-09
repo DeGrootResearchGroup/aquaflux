@@ -140,7 +140,7 @@ cfd/                                  # repo root
 │   │   ├── newton.py                 #   newton_step: the Newton correction on the cell residual
 │   │   ├── implicit.py               #   RootSolver: Newton to convergence on stopped inputs (marching with newton_march), differentiable through the root it reaches; assembler_residual
 │   │   ├── root_adjoint.py           #   root_adjoint: the implicit-function-theorem adjoint (one transpose solve) attached to a root found by any means
-│   │   ├── linear.py                 #   solve_linear: differentiable matrix-free linear solve, optional left/right preconditioning; relative_residual_gmres
+│   │   ├── linear.py                 #   solve_linear: differentiable matrix-free linear solve, optional left/right preconditioning; relative_residual_gmres, residual_stop_gmres
 │   │   ├── norm.py                   #   ResidualNorm → BlockScaledNorm / RowScaledNorm: the convergence and globalization measures
 │   │   ├── march.py                  #   newton_march: the observed forward-only Newton march every solve runs on + the staleness trigger watching it
 │   │   ├── strategy.py               #   NewtonStrategy / ShiftedNewtonStrategy + StepOutcome / StepReport / StepControl: the contracts the march is written against

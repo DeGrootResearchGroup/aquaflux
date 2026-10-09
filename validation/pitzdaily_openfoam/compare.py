@@ -230,8 +230,15 @@ def _solver_with_overrides(solver):
     # The inexact-Newton forcing term of every inner linear solve, in the row-scaled measure. Swept to
     # bound what an adaptive (Eisenstat--Walker) forcing term could buy over the file's fixed value.
     forward_rtol = _environment("FORWARD_RTOL", float)
-    if forward_rtol is not None:
-        edits["linear_solve"] = dataclasses.replace(solver.linear_solve, rtol=forward_rtol)
+    # And which rule ends it (`LinearSolveSettings.stop`): `residual` stops the moment the residual
+    # meets the tolerance, `lineax` also waits for the solution to stop moving.
+    forward_stop = _environment("FORWARD_STOP", str)
+    if forward_rtol is not None or forward_stop is not None:
+        edits["linear_solve"] = dataclasses.replace(
+            solver.linear_solve,
+            **({} if forward_rtol is None else {"rtol": forward_rtol}),
+            **({} if forward_stop is None else {"stop": forward_stop}),
+        )
     return dataclasses.replace(solver, **edits)
 
 
@@ -489,11 +496,11 @@ _TURB_DAMPING_SHAPE = (
 RAMP_SCALE = SOLVER.continuation.scale
 RAMP_COMPANION = _RAMP_SCALINGS[RAMP_SCALE]
 
-#: Which stop the inner Krylov solve uses. Unset: the case file's (``lineax``'s, which tests only at a
-#: restart boundary and also waits for the solution to stop moving). ``shipped``: the same solver, but
-#: run through the study path, so it is the control for the next. ``residual``: stop on the residual
-#: alone, tested every iteration (``residual_stop_gmres``), at the file's tolerance, restart and cap.
-#: Both arms count their operator applications, since a cycle no longer means the same work in both.
+#: The instrument that COUNTS operator applications under each Krylov stop, kept because a cycle does
+#: not mean the same work under the two. To RUN a stop, set `PITZ_FORWARD_STOP` (an edit of the file's
+#: `linear_solve.stop`); this study arm exists only to count. Unset: off. ``shipped``: the file's solver
+#: through the study path, counted from its cycles. ``residual``: ``residual_stop_gmres`` at the file's
+#: tolerance, restart and cap, counting its own applications.
 KRYLOV_STOP = os.environ.get("PITZ_KRYLOV_STOP") or None
 if KRYLOV_STOP not in (None, "shipped", "residual"):
     raise SystemExit(f"PITZ_KRYLOV_STOP is 'shipped' or 'residual', got {KRYLOV_STOP!r}")

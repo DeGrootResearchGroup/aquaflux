@@ -358,6 +358,9 @@ halves of the decision are now separated:
 | `_VCYCLE_LINEAR_SOLVE` | `MaterializedJacobian(MonolithicVCycle \| FieldSplit)` (3D `bfs3d`) | 0.3 | 15 | 60 |
 | `_CONSTRAINED_LINEAR_SOLVE` | `mass_flow_coupled_continuation` | **1e-2, Euclidean** | 120 | 15 |
 
+Every regime also carries `stop` (`"lineax"` unset), the rule a solve ends by — see measurement
+discipline item 5 for what `lineax`'s costs and `residual_stop_gmres` for the alternative.
+
 Both coupled builders take the regime as one value, `linear_solve=LinearSolveSettings(rtol=…, restart=…,
 max_restarts=…)` (#388 — there are no `forward_*` keywords any more). ⚠️ **Move the tolerance or the
 restart with that value, never by passing a whole solver as `linear_solve`** — a solver also replaces the
@@ -838,9 +841,14 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
      march's solver used 2186 applications where a residual-only stop checked every iteration needs 514.
      **`residual_stop_gmres` (BUILT, opt-in, 2026-10-08)** stops on the residual alone, tested every
      iteration in the same measure (`norm=None` binds the step's, like `relative_residual_gmres`). On a
-     pitzDaily march it took 693 s against 1306 s to the same root (open-directions 6b). Not the default:
-     its reported count is cycles RUN, one more than `lineax`'s for the same work, so the cost triggers
-     need re-calibrating, and bfs3d is unmeasured.
+     pitzDaily march it took 693 s against 1306 s to the same root (open-directions 6b). **Selected by
+     `LinearSolveSettings.stop` / `LinearSolveRegime.stop` (`"lineax"` | `"residual"`, 2026-10-09)**, so a
+     case file writes `linear_solve: {stop: residual}`; `LinearSolveRegime.solver()` is the ONE place a
+     regime becomes a solver (`shifted_step` calls it), so every march family reaches it. **The default is
+     still `lineax`**: flipping it is a shipped-default change awaiting the project owner, its reported count
+     is cycles RUN (one more than `lineax`'s for the same work) so the cost triggers fire at a different
+     difficulty, `max_restarts` counts cycles under it rather than raw `lineax` steps, and bfs3d is
+     unmeasured. Pinned by `test_the_stop_reaches_the_step_s_solver_with_the_regime_and_the_step_s_measure`.
   6. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
      Jacobian are **field-major**: DOF `(cell i, field f)` sits at `f·n_cells + i`, fields ordered
      `[u, v, w, p, k, ω]`. Slicing it cell-major silently yields a *different matrix* that still looks

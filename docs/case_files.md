@@ -218,7 +218,8 @@ The two marches share their settings, each a value of the solver library written
   {class}`~aquaflux.turbulence.BlockDiagonal`, with the settings
   {func}`~aquaflux.turbulence.preconditioner_spec_from_mapping` reads;
 - `dual_time` — run each outer step as an inner loop, {class}`~aquaflux.solve.DualTimeLoop`;
-- `linear_solve` — each step's Krylov regime, {class}`~aquaflux.solve.LinearSolveSettings`;
+- `linear_solve` — each step's Krylov regime, {class}`~aquaflux.solve.LinearSolveSettings`:
+  its tolerance, restart length and cap, and `stop`, which rule ends a solve;
 - `step_control` — how the pseudo-time shift adapts: {class}`~aquaflux.solve.DualTimeControl`,
   {class}`~aquaflux.solve.ResidualRatioDualTimeControl` or
   {class}`~aquaflux.solve.CflResidualDualTimeControl`;
