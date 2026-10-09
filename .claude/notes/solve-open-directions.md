@@ -246,6 +246,30 @@ a float32 hierarchy *forces* a change (the small-block pivoting at §1313): trea
 float64 vs float32 PC. Pass is cycles within +10 % at lower wall. The real measurement is on a GPU
 (next entry).
 
+**Measured on pitzDaily, CPU (2026-10-09) — convergence is unchanged, and the CPU apply is SLOWER.**
+⚠️ A substitution for the pre-registered bfs3d measurement (its mesh is not in this container), made on
+the user's instruction. `precision_replay_probe.py` replays the march's own 75 target-station systems
+(steps 17–31, capture of the shipped `case.yaml`: residual stop, `rtol` 0.3, restart 15, `refresh_on_cycles`
+2, field split `SimpleSmoothed` / `JacobiSmoothed`; jax 0.11.2, CPU, 4-core Linux) with both block
+inverses' V-cycles in float32 — hierarchy, smoothers and right-hand side; the split's coupling product,
+`J + s`, the Krylov recurrences and the measure stay float64. The float64 arm reproduces every recorded
+cycle count.
+- **Convergence: identical.** 76 cycles / 899 applications in both precisions, every solve equal. Both
+  float32 cycles are float32 throughout (0 of 350 and 0 of 94 traced equations produce float64).
+- **Apply cost: 2.0× slower in float32** (best-of-10 split apply, mean over 15 steps: 371.5 ms against
+  183.7 ms), and it is not a conversion: casting the whole hierarchy is 6 ms and is cached, and the
+  directly-jitted flow V-cycle alone is 215.6 against 111.5 ms.
+- **The cause is one JAX kernel** (`csr_kernel_precision.py`): the level operators' CSR product
+  (`BCSR @ x`, which lowers to the custom call `cpu_csr_sparse_dense_ffi` in both precisions) is
+  **2.6× slower in float32** on the finest flow level (17.1 against 6.6 ms; every level the same way),
+  while the block solves, the prolongation and the coarse dense solve are sub-millisecond either way.
+  On a synthetic matrix of the same shape and density it is 21.1 against 6.4 ms, so it is the kernel,
+  not this operator. A gather plus sorted segment sum IS faster in float32 (8.9 against 10.7 ms) but is
+  still slower than the float64 CSR kernel, so no CPU kernel choice makes float32 pay here.
+- **So the CPU half is answered and closes nothing:** precision does not cost convergence on this case,
+  and the bandwidth gain cannot show on CPU through this kernel. The GPU measurement (entry 8), where the
+  CSR product is a different kernel, remains the deciding one; bfs3d's convergence is unmeasured.
+
 ## 8. The GPU path, and what it rules out
 
 Not a new idea — it is the stated plan — but worth stating as a solver direction because it decides
