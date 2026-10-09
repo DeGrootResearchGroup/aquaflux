@@ -160,6 +160,22 @@ The control reproduces the shipped march exactly (31 / 99 / 203). The looser cor
 inner Newton iteration per step and the cheaper solves pay for it twice over. ⚠️ **Not a pure stop
 effect:** the residual stop reports cycles run where `lineax` reports cycles run minus one, so the
 `refresh_on_cycles = 3` trigger fired 4 times against 12; part of the wall gain is fewer rebuilds.
+**The rebuild threshold re-tuned under the new stop (2026-10-09, same configuration,
+`PITZ_FORWARD_STOP=residual PITZ_REFRESH_ON_CYCLES=n`, one run each, all `x_r/h` 8.0686, no retries):**
+
+| `refresh_on_cycles` | mid-step rebuilds | rebuild time | restart cycles | wall |
+|---|---|---|---|---|
+| 1 | 31 | 217 s | 158 | 695 s |
+| **2** | 14 | 143 s | 159 | **637 s** |
+| 3 (shipped) | 4 | 94 s | 208 | 693 s |
+| 4 | 2 | 87 s | 202 | 694 s |
+
+2 rebuilds about as often as the shipped stop did at 3 (12) and is the fastest, **2.05×** the shipped
+configuration's 1306 s. `abort_above_cycles` (10), `cycle_budget` (42) and `max_restarts` (14) bound in no
+run at 0.3; `max_restarts` stays above the abort threshold under the new count, so they are left. With the
+default flip the case files would carry `stop: residual, refresh_on_cycles: 2` (bfs3d's own value
+re-measured there).
+
 **In the library (2026-10-09):** `LinearSolveSettings.stop: residual` selects it from a case file or a
 builder (`PITZ_FORWARD_STOP=residual` edits pitzDaily's file); the default is still `lineax`.
 **Still open before the default moves:** bfs3d (its mesh is not in this container), the slow and
