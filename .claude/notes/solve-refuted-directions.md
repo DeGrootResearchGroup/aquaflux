@@ -565,6 +565,30 @@ solve runs at least two full cycles (33 applications) and the corrected count (`
 that as "1 cycle". Opened as `solve-open-directions.md` item 6b; the docstrings that called a reported
 "1 cycle" an ideal one-cycle solve were corrected.
 
+## Weighted inner product and longer restarts for the residual-stop GMRES — NO GAIN (2026-10-09)
+
+**What was proposed** (follow-ups to `solve-open-directions.md` 6b): (a) have GMRES minimize the residual
+in the norm it is judged by rather than the 2-norm, whose coupled residual is ~100 % `omega`; (b) restart
+at 30 or 60 instead of 15, since with a per-iteration stop a longer restart costs only memory.
+
+**Probe:** the replay (`krylov_recycling_probe.py`, `PITZ_REPLAY_ARMS`) on pitzDaily's 42 final-station
+systems, same configuration as the recycling entry above, applications of `A M`:
+
+| arm | applications |
+|---|---|
+| GMRES(15), residual stop every iteration | 514 |
+| the same, weighted inner product, restart 15 / 30 | 529 / 496 |
+| GMRES(30) / GMRES(60) (first 23 systems; the run was killed there) | within a few applications of GMRES(15) on every system |
+
+**Why:** the march's measure is an L1 mean per field block, which no inner product reproduces; the
+nearest weighted 2-norm (the measure's own row and field scales, `1/sqrt(block size)`) wins 12 systems
+and loses 21. And a solve at `rtol = 0.3` rarely needs more than 15 iterations, so a longer restart
+rarely restarts anything.
+**⚠️ Trap that cost a run:** weighting by scaling the system on the LEFT (`W A M`, `W b`) builds a
+different Krylov space, and on this operator it did not converge on any system within 400 applications
+(60 unrestarted iterations: weighted residual 0.97). The weighted inner product over plain GMRES's space
+is the similar operator `W A M W^-1` from `W b`.
+
 ## `jax.linearize` in place of the per-matvec `jax.jvp` — REFUTED, and it looks obviously right
 
 `solve/continuation.py`'s `shifted_jacobian` builds the Krylov matvec as

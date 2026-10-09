@@ -160,10 +160,11 @@ effect:** the residual stop reports cycles run where `lineax` reports cycles run
 **Still open before any default moves:** bfs3d (its mesh is not in this container), the slow and
 validation tiers, the cost thresholds' re-calibration, and the follow-ups below.
 
-**Follow-ups planned on the replay harness, then marches:** minimize the residual in the stop's own
-(row-scaled) measure rather than the 2-norm; sweep the restart length; re-measure 4b and the
-Eisenstat–Walker refutation under the new stop (both were measured under `lineax`'s, whose
-solution-change test is likely most of what loosening `rtol` relaxed).
+**Follow-ups.** Two were measured on the replay and are closed (ledger: "Weighted inner product and
+longer restarts for the residual-stop GMRES"): neither a measure-weighted inner product nor a restart of
+30–60 changes the work. Still to measure, as marches: 4b and the Eisenstat–Walker refutation under the
+new stop (both were measured under `lineax`'s, whose solution-change test is likely most of what loosening
+`rtol` relaxed).
 
 ## 7. Mixed precision: float64 outside, float32 inside the preconditioner
 
