@@ -87,6 +87,20 @@ class Drive(eqx.Module):
         """
 
     @abc.abstractmethod
+    def held_speed(self) -> float | None:
+        """The bulk speed this drive holds the flow at, or ``None`` when it holds none.
+
+        A drive that constrains the flow to a known speed states the flow's velocity scale exactly,
+        where one that does not leaves it to be read from the boundary conditions and the sources
+        (:func:`~aquaflux.flow.reference_speed`).
+
+        Returns
+        -------
+        float or None
+            The held speed, non-negative, or ``None``.
+        """
+
+    @abc.abstractmethod
     def layout(self, fields: FieldLayout) -> FieldLayout:
         """The solved state's layout, given the layout of the fields alone.
 
@@ -167,6 +181,10 @@ class BoundaryDriven(Drive):
         del dim
         return None
 
+    def held_speed(self) -> None:
+        """``None`` -- the boundary conditions and the sources set the speed, not this drive."""
+        return None
+
     def layout(self, fields: FieldLayout) -> FieldLayout:
         """``fields`` unchanged -- there is no border."""
         return fields
@@ -227,6 +245,10 @@ class MassFlow(Drive):
     def volumetric_force(self, dim: int) -> jnp.ndarray:
         """The current multiplier as a force vector, shape ``(dim,)``, zero off ``flow_direction``."""
         return jnp.zeros(dim).at[self.flow_direction].set(self.force)
+
+    def held_speed(self) -> float:
+        """The magnitude of :attr:`target`, the bulk velocity the solve holds."""
+        return abs(float(self.target))
 
     def layout(self, fields: FieldLayout) -> FieldLayout:
         """``fields`` with one more block: the single global dof holding the force."""

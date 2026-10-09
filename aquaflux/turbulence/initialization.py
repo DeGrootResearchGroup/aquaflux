@@ -57,6 +57,7 @@ from aquaflux.flow.initialization import laplace_field, potential_flow
 from aquaflux.flow.scales import friction_velocity, hydraulic_length
 
 from .boundary import equilibrium_k, inlet_omega, omega_wall
+from .scales import OUTER_MIXING_LENGTH_FACTOR
 
 if TYPE_CHECKING:
     from aquaflux.flow import MomentumContinuity
@@ -70,7 +71,7 @@ def sst_initial_fields(
     *,
     k_floor: float = 1e-8,
     omega_floor: float = 1e-8,
-    length_scale_factor: float = 0.09,
+    length_scale_factor: float = OUTER_MIXING_LENGTH_FACTOR,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Build a hybrid initial ``(flow, k, omega)`` that lets the coupled RANS solve self-start.
 

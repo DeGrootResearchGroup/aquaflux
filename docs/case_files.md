@@ -163,6 +163,16 @@ laminar one) and
 meshes, and {class}`~aquaflux.schemes.ProjectedStencilGradient`, the one to use on a
 tetrahedral mesh. {doc}`gradient_reconstruction` compares them.
 
+A {class}`~aquaflux.schemes.VenkatakrishnanLimiter` states only its `softening` (default `0.05`): the
+size of a variation it leaves unlimited, as a fraction of the advected field's magnitude. The
+magnitude is not a setting -- it is taken from the case. For the momentum it is the flow's speed:
+the bulk velocity a `BulkVelocity` drive holds, else the fastest inlet or moving-wall speed, else the
+speed a body force sustains against the walls (see {func}`~aquaflux.flow.reference_speed`). For
+`k` and `omega` it is derived from that speed and the domain's volume over its wall area, rather
+than from the inlet turbulence, which is no guide to the turbulence the flow develops (see
+{func}`~aquaflux.turbulence.turbulence_scales`). So the same `softening` means the same thing in any
+units and on any mesh.
+
 **`drive`** — what sets the flow in motion when the boundary conditions do not. Unset, they
 do. A streamwise-periodic channel prescribes the velocity nowhere, and is held at a bulk
 (volume-averaged) velocity instead, by a uniform streamwise force solved for with the flow:

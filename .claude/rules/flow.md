@@ -56,7 +56,7 @@ Engineering Principles.
   `body_force` leaf**, which meant a prescribed input on one case and a live solve unknown on another
   (#224). Two members, not three: a *prescribed* uniform force is a `UniformBodyForce` source, so it is
   not a drive at all, and the union is only "the unknowns are the fields" against "the unknowns are the
-  fields plus a multiplier". `Drive` is abstract in all five members on purpose — a default would let a
+  fields plus a multiplier". `Drive` is abstract in all six members on purpose (`held_speed`, the speed a drive holds, added 2026-10-09 for the limiter scale) — a default would let a
   bordered drive inherit an answer that drops its multiplier.
   `MassFlow` owns everything the bordered form needs, so the flow-only solve
   (`mean_velocity.bulk_velocity_flow_solve`) and the coupled one
@@ -635,6 +635,22 @@ Engineering Principles.
   viscous block. `BlockPreconditioner.build` now warns (`RuntimeWarning`) when the convection block is
   asked for but the reference mass flux is zero. A caller that *knows* the speed (a bulk-velocity
   constraint targets `U_bar`) should pass `reference_state=` explicitly instead.
+- **`reference_speed(assembler)` — the speed as ONE positive number, and the one reader of
+  `flow/scales.py` that ENTERS THE RESIDUAL (2026-10-09, #144).** `MomentumContinuity.build` sets a
+  scaled momentum advection (`with_reference_scale`, `schemes.md`) from it, so a softened
+  Venkatakrishnan limiter's `eps` is a fraction of this speed. Order: **`Drive.held_speed()`** (a new
+  abstract member on both drives: `MassFlow` → `|target|`, `BoundaryDriven` → `None`) — the held bulk
+  velocity is the speed exactly, whatever the multiplier's seed force says — else
+  `|characteristic_velocity|` (fastest prescribed boundary speed, else the body-force balance). It is a
+  **constant of the discretization**, fixed at build: `with_scaled_molecular_viscosity` does not
+  re-derive it, so a Reynolds-ramp companion keeps the target's scale (deliberate — the ramp changes
+  the viscosity, not the limiter). A domain nothing drives refuses a scaled scheme at build (`ValueError`
+  naming the remedy) and builds anything else. ⚠️ **Not covered: a flow driven only by a pressure
+  difference between two `PressureOutlet`s** — `characteristic_velocity` reads no pressure, so such a
+  case with a limited momentum advection is refused and must state the limiter's scale.
+  `wetted_length(mesh, geometry, patches)` is the geometric half of `hydraulic_length`, for a caller
+  that lists its walls itself (the turbulence closure). Pinned in
+  `tests/unit/test_advection_reference_scales.py`, mutation-checked.
 - **Validated:**
   - Poiseuille (`test_poiseuille.py`) — parabolic `u`, `v≈0`, linear `p`; **2nd-order**; Stokes
     is linear so **one Newton step**; differentiable.

@@ -44,7 +44,7 @@ from .march import flow_march_step, open_flow_session, solve_flow_march
 from .measures import FlowMeasures, flow_equation_names, flow_row_scales
 from .initialization import bernoulli_pressure, laplace_field, potential_flow
 from .mean_velocity import bulk_velocity_flow_solve
-from .scales import body_force_velocity, characteristic_velocity
+from .scales import body_force_velocity, characteristic_velocity, reference_speed, wetted_length
 from .momentum import FlowFields, MomentumContinuity, PressureForce, VelocityFields
 from .source import MomentumSource, UniformBodyForce
 from .preconditioner import damped_jacobi_solve, pressure_schur_laplacian
@@ -94,10 +94,12 @@ __all__ = [
     "open_flow_session",
     "potential_flow",
     "pressure_schur_laplacian",
+    "reference_speed",
     "refuse_a_constraint_this_solve_cannot_hold",
     "refuse_an_unsuitable_pressure_datum",
     "reused_flow_solve",
     "sheared_patches",
     "solve_flow_march",
     "volume_flux",
+    "wetted_length",
 ]

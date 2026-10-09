@@ -20,6 +20,7 @@ for constant density; the variable-density (conservative) form is deferred, as i
 
 from __future__ import annotations
 
+import functools
 from typing import TYPE_CHECKING, NamedTuple
 
 import equinox as eqx
@@ -41,7 +42,7 @@ from aquaflux.discretization import (
     FixedValueCells,
     ResidualAssembler,
 )
-from aquaflux.flow import volume_flux
+from aquaflux.flow import volume_flux, wetted_length
 from aquaflux.flow.boundary import sheared_patches
 from aquaflux.mesh import distance_to_patches
 from aquaflux.properties import FieldProperty, PropertyModel
@@ -65,6 +66,7 @@ from .preconditioner import (
     scalar_transport_preconditioner,
     scalar_transport_shift_diagonal_parts,
 )
+from .scales import TurbulenceScales, turbulence_scales
 from .sources import (
     KDestruction,
     KProduction,
@@ -89,6 +91,30 @@ if TYPE_CHECKING:
     from aquaflux.schemes import GradientScheme
 
     from .sst import SSTModel
+
+
+def _turbulence_scales(
+    velocity_scale: float | None,
+    mesh: Mesh,
+    geometry: MeshGeometry,
+    wall_patches: Sequence[str],
+    model: SSTModel,
+) -> TurbulenceScales:
+    """The reference ``k`` and ``omega`` an advection scheme scaled by its field reads, at build.
+
+    Called only by a scheme that reads a scale, so a closure built with first-order advection and no
+    velocity scale is not refused.
+    """
+    if velocity_scale is None:
+        raise ValueError(
+            "SSTTurbulence.build: the turbulence advection's limiter is softened by a fraction of "
+            "k's and omega's magnitudes, which are derived from the flow's speed -- pass "
+            "velocity_scale (the momentum assembler's aquaflux.flow.reference_speed)."
+        )
+    try:
+        return turbulence_scales(velocity_scale, wetted_length(mesh, geometry, wall_patches), model)
+    except ValueError as error:
+        raise ValueError(f"SSTTurbulence.build: {error}") from error
 
 
 def _bound_field_scheme(
@@ -251,8 +277,10 @@ class SSTTurbulence(eqx.Module):
         Topology and metrics.
     gradient_scheme : GradientScheme
         Reconstruction for the non-orthogonal diffusion correction.
-    advection_scheme : AdvectionScheme
-        The k / omega convection scheme (e.g. first-order upwind).
+    k_advection_scheme, omega_advection_scheme : AdvectionScheme
+        The k and omega convection schemes: the one scheme :meth:`build` is given, each set for its
+        own field's magnitude (a softened slope limiter is a fraction of it, and ``k`` and ``omega``
+        differ in units and size), so they differ only when the scheme reads a scale.
     density : float
         The (constant) fluid density, used to form the volume flux ``mdot / rho``. Derived at
         :meth:`build` time from the ``properties`` argument (the same kind of ``PropertyModel``
@@ -338,7 +366,8 @@ class SSTTurbulence(eqx.Module):
     mesh: Mesh
     geometry: MeshGeometry
     gradient_scheme: GradientScheme
-    advection_scheme: AdvectionScheme
+    k_advection_scheme: AdvectionScheme
+    omega_advection_scheme: AdvectionScheme
     density: float
     molecular_viscosity: jnp.ndarray
     wall_distance: jnp.ndarray
@@ -368,6 +397,7 @@ class SSTTurbulence(eqx.Module):
         gradient_scheme: GradientScheme = DEFAULT_GRADIENT_SCHEME,
         explicit_production_limiter: bool = False,
         explicit_production_viscosity: bool = False,
+        velocity_scale: float | None = None,
     ) -> SSTTurbulence:
         """Build the assembler, deriving the wall distance and wall-adjacent cell set.
 
@@ -402,6 +432,12 @@ class SSTTurbulence(eqx.Module):
             class attribute); ``False`` (default) is the exact operator. ⚠️ Unlike the limiter above
             this term is active *everywhere*, never only where a cap bites, so a copy carrying it is
             for a **Jacobian stand-in** and never for the residual a sensitivity is taken through.
+        velocity_scale : float or None
+            The speed of the flow the closure is coupled to (:func:`~aquaflux.flow.reference_speed`
+            of its momentum assembler). An advection scheme scaled by the field it advects -- a
+            softened slope limiter -- is set for ``k`` and ``omega`` from it and the walls'
+            hydraulic length (:func:`~aquaflux.turbulence.turbulence_scales`); read only by such a
+            scheme, so a first-order one needs none.
 
         The remaining arguments are stored directly (see the class attributes).
 
@@ -409,7 +445,9 @@ class SSTTurbulence(eqx.Module):
         ------
         ValueError
             If ``properties`` does not supply ``"viscosity"``/``"density"``, or its density is not
-            uniform across cells (variable-density turbulent transport is not supported).
+            uniform across cells (variable-density turbulent transport is not supported); or if the
+            advection scheme reads a scale and ``velocity_scale`` is unset, or the walls give no
+            hydraulic length.
         """
         properties.require("viscosity", "density")
         for field, closures in (("k", k_boundary), ("omega", omega_boundary)):
@@ -444,6 +482,9 @@ class SSTTurbulence(eqx.Module):
             _bound_field_scheme(mesh, geometry, gradient_scheme, boundary)
             for boundary in (k_boundary, omega_boundary)
         )
+        field_scales = functools.cache(
+            lambda: _turbulence_scales(velocity_scale, mesh, geometry, wall_patches, model)
+        )
         return cls(
             model=model,
             mesh=mesh,
@@ -451,7 +492,10 @@ class SSTTurbulence(eqx.Module):
             gradient_scheme=gradient_scheme,
             k_gradient_scheme=k_scheme,
             omega_gradient_scheme=omega_scheme,
-            advection_scheme=advection_scheme,
+            k_advection_scheme=advection_scheme.with_reference_scale(lambda: field_scales().k),
+            omega_advection_scheme=advection_scheme.with_reference_scale(
+                lambda: field_scales().omega
+            ),
             density=density,
             molecular_viscosity=molecular_viscosity,
             wall_distance=wall_distance,
@@ -940,7 +984,7 @@ class SSTTurbulence(eqx.Module):
         assembler = self._assembler(
             PropertyModel({"diffusivity": diffusivity}),
             (
-                AdvectionFlux(self._volume_flux(mdot), self.advection_scheme),
+                AdvectionFlux(self._volume_flux(mdot), self.k_advection_scheme),
                 DiffusionFlux(
                     boundary_coefficient=self._wall_k_diffusivity(diffusivity, closure.k)
                 ),
@@ -1044,7 +1088,7 @@ class SSTTurbulence(eqx.Module):
         assembler = self._assembler(
             PropertyModel({"diffusivity": diffusivity}),
             (
-                AdvectionFlux(self._volume_flux(mdot), self.advection_scheme),
+                AdvectionFlux(self._volume_flux(mdot), self.omega_advection_scheme),
                 DiffusionFlux(),
             ),
             self.omega_boundary,

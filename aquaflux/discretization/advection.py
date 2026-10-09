@@ -37,6 +37,8 @@ from aquaflux.vectors import dot
 from .face_flux import FaceFluxOperator
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from aquaflux.context import FieldContext
     from aquaflux.mesh import FaceCellConnectivity
 
@@ -106,6 +108,26 @@ class AdvectionScheme(eqx.Module):
         """
         return False
 
+    def with_reference_scale(self, scale: Callable[[], float]) -> AdvectionScheme:
+        """This scheme for a field of reference magnitude ``scale()``; unchanged if it reads none.
+
+        An equation's assembler calls this with the magnitude of the field it solves for, so a
+        scheme whose numerics are scaled by it (a softened slope limiter) is set for that field.
+        ``scale`` is called only by a scheme that needs it.
+
+        Parameters
+        ----------
+        scale : callable
+            Returns the field's reference magnitude (see
+            :meth:`~aquaflux.schemes.Limiter.with_reference_scale`).
+
+        Returns
+        -------
+        AdvectionScheme
+            This scheme, by default.
+        """
+        return self
+
 
 class FirstOrderUpwind(AdvectionScheme):
     """The upwind cell value: ``phi_f = phi_C``, ``C`` the upwind cell.
@@ -153,6 +175,12 @@ class LimitedUpwind(AdvectionScheme):
         not a limiter is set (an unlimited ``LimitedUpwind`` is still linear upwind, not upwind).
         """
         return True
+
+    def with_reference_scale(self, scale: Callable[[], float]) -> LimitedUpwind:
+        """This scheme with its limiter set for a field of magnitude ``scale()`` (see the base)."""
+        if self.limiter is None:
+            return self
+        return LimitedUpwind(limiter=self.limiter.with_reference_scale(scale))
 
     def face_value(self, field, context, mass_flux):
         fc = context.mesh.face_cells

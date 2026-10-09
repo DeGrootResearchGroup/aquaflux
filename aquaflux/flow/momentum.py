@@ -60,6 +60,7 @@ from .rhie_chow import (
     momentum_diagonal,
     momentum_diagonal_parts,
 )
+from .scales import reference_speed
 from .source import MomentumSource, UniformBodyForce, reject_unsupported_face_force
 from .state import flow_state_layout
 
@@ -93,6 +94,22 @@ class VelocityFields(NamedTuple):
     velocity: jnp.ndarray  # (n_cells, dim)
     boundary_velocity: jnp.ndarray  # (n_faces, dim)
     gradient: jnp.ndarray  # (n_cells, dim, dim), [c, i, j] = d u_i/d x_j
+
+
+def _velocity_scale(assembler: MomentumContinuity) -> float:
+    """The flow's speed as a velocity field's reference magnitude, refused when nothing sets one.
+
+    Read by a momentum advection scheme scaled by the field it advects (see
+    :meth:`~aquaflux.discretization.AdvectionScheme.with_reference_scale`), and only by one.
+    """
+    speed = reference_speed(assembler)
+    if not speed > 0.0:
+        raise ValueError(
+            "MomentumContinuity.build: the momentum advection's limiter is softened by a fraction "
+            "of the flow's speed, and nothing in this problem sets one -- no inlet or moving-wall "
+            "velocity, no held bulk velocity, no body force. Give the limiter its scale."
+        )
+    return speed
 
 
 class FlowFields(NamedTuple):
@@ -204,7 +221,8 @@ class MomentumContinuity(eqx.Module):
         conditions as well as the geometry; what the pressure-gradient reconstruction applies.
     advection_scheme : AdvectionScheme or None
         Momentum convection scheme; ``None`` gives Stokes flow (no convection). A limited scheme
-        (``LimitedUpwind``) carries its own slope limiter.
+        (``LimitedUpwind``) carries its own slope limiter, whose softening :meth:`build` has set
+        for this flow's speed.
     boundary : BoundaryConditions
         The named per-patch flow closures, resolved to their boundary-face indices.
     interp_factor, normal_distance : jnp.ndarray
@@ -276,6 +294,14 @@ class MomentumContinuity(eqx.Module):
         reconstruction's first pass has to be prepared from the operator that pass actually applies,
         and the boundary conditions enter that operator differently for each of them.
 
+        ``advection_scheme`` is set for this flow's speed
+        (:meth:`~aquaflux.discretization.AdvectionScheme.with_reference_scale`): a slope limiter
+        softened by a fraction of the velocity's magnitude takes that magnitude from
+        :func:`~aquaflux.flow.reference_speed` -- the held bulk velocity, the fastest prescribed
+        boundary velocity, or a body force's force-balance speed -- unless it was given a scale of
+        its own. A scheme that reads no scale is kept as it is; one that reads a scale in a domain
+        nothing drives raises ``ValueError``.
+
         ``pressure_datum`` fixes the pressure level (a :class:`~aquaflux.flow.PinnedPoint`: the cell
         nearest a point has its continuity equation replaced by ``p = value``). It is required exactly
         when no patch prescribes the pressure -- a closed domain such as a lid-driven cavity or a
@@ -343,6 +369,13 @@ class MomentumContinuity(eqx.Module):
         # pressure and leaves the velocity to extrapolate; a wall does the reverse).
         return dataclasses.replace(
             assembled,
+            # A scheme scaled by the field it advects (a softened limiter) is set for this flow's
+            # speed, read off the assembler that now holds the drive and the boundary closures.
+            advection_scheme=(
+                None
+                if advection_scheme is None
+                else advection_scheme.with_reference_scale(lambda: _velocity_scale(assembled))
+            ),
             velocity_gradient_schemes=tuple(
                 gradient_scheme.bind(mesh, geometry, linearization)
                 for linearization in assembled._build_time_velocity_linearizations()
