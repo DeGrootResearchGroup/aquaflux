@@ -1,6 +1,6 @@
 """Should the flow saddle's frozen Jacobian blocks be linearized once per iterate?
 
-:class:`aquaflux.flow.FlowBlocks` applies each of its blocks (``F``, ``G``, ``B``, ``Ĉ``) as a
+``aquaflux.flow.block_preconditioner.FlowBlocks`` applies each of its blocks (``F``, ``G``, ``B``, ``Ĉ``) as a
 ``jax.jvp`` through the frozen residual, so every application of the block preconditioner -- once per
 Krylov iteration -- re-runs the residual's primal pass alongside its tangent. ``jax.linearize`` would
 run the primal pass once per Newton iterate and keep its intermediates, leaving only the tangent pass
@@ -24,7 +24,10 @@ Two things about the method are load-bearing:
 * **Both arms must give the same preconditioner.** ``jax.linearize`` is the same linear map, so the
   applications are compared to roundoff before anything is timed, and the GMRES cycle counts must agree.
 
-Three measurements per (mesh, composition):
+First, why the answer comes out as it does: the bare residual decomposed -- the primal pass alone,
+one unlooped ``jvp``, and the per-application cost of a ``jvp`` and of a linearized map inside a
+compiled loop, where a loop-invariant primal pass can be hoisted. Then three measurements per
+(mesh, composition):
 
 1. per-application cost of ``M``: a compiled loop applying ``M`` ``K`` times from one build, timed at
    ``K = 1`` and ``K = 1 + REPEATS``, the difference divided by ``REPEATS`` (so the build is excluded),
@@ -34,7 +37,8 @@ Three measurements per (mesh, composition):
 3. the compiled solve's temporary-buffer footprint, where the backend reports one.
 
 Run: ``validation/run_case.sh validation/flow_blocks_linearize.py`` sweeps ``MESHES`` in one process
-(``simple_type_composition.py``'s channel at ``mu = 4e-4``, marched to rel 1e-3, at three sizes);
+(``simple_type_composition.py``'s channel at ``mu = 4e-4``, marched to rel 1e-3, at two sizes -- a
+256x128 mesh's march alone ran past half an hour on a 4-core machine);
 ``python3 validation/flow_blocks_linearize.py nx ny [mu march_rtol]`` runs one mesh.
 """
 
@@ -67,7 +71,7 @@ MAX_RESTARTS = 200
 REPEATS = 30
 TIMINGS = 7
 ARMS = (("msimple", "triangular"), ("msimple", "simpler"))
-MESHES = ((64, 32), (128, 64), (256, 128))
+MESHES = ((64, 32), (128, 64))
 MU = 4e-4
 MARCH_RTOL = 1e-3
 
@@ -132,6 +136,28 @@ def _jvp_loop(assembler, state, v, count):
         return y / jnp.linalg.norm(y)
 
     return jax.lax.fori_loop(0, count, body, v)
+
+
+@eqx.filter_jit
+def _linear_loop(assembler, state, v, count):
+    """The bare loop again, over a map linearized once before it -- the tangent pass alone."""
+    _, linear = jax.linearize(assembler.residual, state)
+
+    def body(_, x):
+        y = linear(x)
+        return y / jnp.linalg.norm(y)
+
+    return jax.lax.fori_loop(0, count, body, v)
+
+
+@eqx.filter_jit
+def _residual(assembler, state):
+    return assembler.residual(state)
+
+
+@eqx.filter_jit
+def _jvp_once(assembler, state, v):
+    return jax.jvp(assembler.residual, (state,), (v,))[1]
 
 
 @eqx.filter_jit
@@ -202,9 +228,13 @@ def main(nx: int, ny: int, mu: float, march_rtol: float) -> None:
     v = v / jnp.linalg.norm(v)
 
     jvp_cost = _per_application(_jvp_loop, assembler, state, v)
+    linear_cost = _per_application(_linear_loop, assembler, state, v)
+    print(f"residual (primal pass) alone:      {1e3 * _time(_residual, assembler, state):8.3f} ms")
     print(
-        f"bare residual jvp (the outer matvec): {1e3 * jvp_cost:.3f} ms/application\n", flush=True
+        f"one jvp, not in a loop:            {1e3 * _time(_jvp_once, assembler, state, v):8.3f} ms"
     )
+    print(f"jvp per application in a loop:     {1e3 * jvp_cost:8.3f} ms  (the outer matvec)")
+    print(f"linearized map, same loop:         {1e3 * linear_cost:8.3f} ms\n", flush=True)
     header = (
         f"{'schur':<9}{'composition':<12}{'arm':<11}{'M ms/app':>10}{'/jvp':>7}"
         f"{'cycles':>8}{'TRUE rel':>11}{'solve s':>9}{'temp MB':>9}"

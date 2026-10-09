@@ -689,6 +689,15 @@ class FlowBlocks(eqx.Module):
     resulting operators are constant — a preconditioner built from them changes only the Krylov
     iteration, never the converged solution or its adjoint.
 
+    Each application re-runs the ``jvp``, primal pass included, rather than linearizing the residual
+    once per iterate with ``jax.linearize`` and applying the stored map. That is deliberate. The state
+    is a runtime value inside the compiled march step, so the primal pass is not folded away at compile
+    time; but it is loop-invariant inside the Krylov solve that applies these blocks, and inside a
+    compiled loop a repeated ``jvp`` costs the same as applying a stored linearization. Measured on a
+    developed plane channel, the preconditioner was no faster to apply linearized, the Krylov solve took
+    the same iterations and no less time, and the memory footprint moved by a few percent
+    (``validation/flow_blocks_linearize.py`` re-measures it).
+
     The two combined methods are the primitives (each is a *single* ``jvp`` yielding both blocks of a
     column); the four named single-block accessors compose them, so a caller that needs both halves of
     a column pays for one residual linearization rather than two.

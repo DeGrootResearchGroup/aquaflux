@@ -863,6 +863,37 @@ a control for a solver question: the control had to run on a weaker driver.
   +D-coupling 4→8 ~O(N^0.25).) The tiny residual growth is the 1-cycle-AMG block approximation, not the
   structure. **Two cheaper diagonals were measured and rejected** — velocity block-Jacobi and
   inverse-volume-Jacobi on the gradient solve; see `solve.md`, do not re-attempt.
+- **`FlowBlocks` re-runs its `jvp` per application ON PURPOSE — `jax.linearize` once per iterate was
+  measured and buys nothing (2026-10-09, #55; do not re-attempt without re-running the harness).** Every
+  block (`F`, `G`, `B`, `Ĉ`) is a fresh `jax.jvp` through the frozen residual, primal pass included, on
+  every Krylov iteration. The issue's defence of that ("`frozen_state` is constant, so XLA constant-folds
+  the primal") is **wrong**: `newton_step` builds the preconditioner inside the jitted `_march_step`, so
+  the state is a *traced* runtime value and nothing folds. The real reason is that the primal pass is
+  **loop-invariant inside the Krylov `while_loop`**, and the compiled loop pays only the tangent pass per
+  iteration either way. Harness: `validation/flow_blocks_linearize.py` (builds `M` from a traced state
+  inside the compiled solve; the `linearize` arm is a `FlowBlocks` subclass swapped in for that arm only;
+  `M(v)` is bit-identical between arms). Configuration: `simple_type_composition.py`'s plane channel,
+  `mu` 4e-4, marched to rel 1e-3, `ConvectionTwoLevel` velocity, `msimple` Schur, right-preconditioned
+  GMRES restart 30 to TRUE `rtol` 1e-8; jax 0.11.2, CPU, x86_64, 4 cores, one run, median of 7 timings.
+
+  | cells | primal alone | one `jvp` (no loop) | `jvp` / linearized, per apply in a loop |
+  |---|---|---|---|
+  | 2048 | 1.37 ms | 2.08 ms | 0.76 / 0.79 ms |
+  | 8192 | 3.96 ms | 6.38 ms | 3.64 / 3.70 ms |
+
+  | cells | composition | `M` ms/apply, jvp / linearize | cycles (both) | solve s, jvp / linearize | temp MB |
+  |---|---|---|---|---|---|
+  | 2048 | triangular | 2.12 / 2.07 | 10 | 0.91 / 0.99 | 8.1 / 7.8 |
+  | 2048 | simpler | 3.77 / 4.11 | 6 | 0.88 / 0.84 | 10.8 / 9.9 |
+  | 8192 | triangular | 7.99 / 8.39 | 13 | 5.67 / 5.77 | 31.9 / 30.7 |
+  | 8192 | simpler | 18.05 / 17.48 | 6 | 3.85 / 4.25 | 42.7 / 39.3 |
+
+  So the primal pass is most of an *unlooped* `jvp` (and so would matter for a caller applying a block
+  once outside a loop), but in the loop the two arms cost the same, within this instrument's spread in
+  both directions; an earlier run of the same arms (same machine, same day) agreed, linearize never
+  faster on the solve. **Not measured**: a 256x128 mesh (its march ran past 30 min and the container
+  restarted), GPU, the coupled RANS residual, and whether the hoisting is visible in the compiled HLO —
+  the mechanism is inferred from the timings, not read off the program.
 - **Outer block preconditioner — Stage 3: the remaining limit IS the Schur approximation, and no amount
   of inner accuracy reaches it (measured on a developed Re=1e5 SST channel; binding, do not re-attempt).**
   The `v_cycles` knob and the MSIMPLE scale are both exhausted: **velocity-AMG V-cycles ×2/×4/×8 leave
