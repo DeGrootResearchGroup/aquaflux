@@ -207,8 +207,9 @@ class Scene:
         it, say -- with the medium's own index and absorption. Light between a source and a point in
         different media is gathered along its refracted path
         (:mod:`~aquaflux.radiation.refracted`); light between two in the same medium is gathered
-        along the straight line in that medium's own absorption, through whatever regions it passes
-        straight through (:attr:`~aquaflux.radiation.visibility.Visibility.through`). Every facet and
+        along the straight line in that medium's own absorption where the line meets no region
+        (:attr:`~aquaflux.radiation.visibility.Visibility.straight`), and along a path bent through
+        the region otherwise. Every facet and
         every point must lie in one medium. Not yet carried between surfaces: a scene with media
         must have nothing to exchange -- no reflectors, and no lamp that reflects.
     volume : VolumeReceivers or None

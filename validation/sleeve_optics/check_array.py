@@ -4,15 +4,15 @@ Four lamps -- arc, air gap, quartz sleeve, as in ``tracer.py`` -- on the corners
 emitting one watt per metre from its arc, in water inside a black wall. The tracer follows every
 interface of every sleeve. aquaflux is :func:`aquaflux.radiation.solve_scene` given the four sleeves as
 :class:`aquaflux.radiation.refraction.Media`: each arc's light reaches a point in the water along its
-refracted path out of its own sleeve, and a neighbour's sleeve that path passes is crossed **straight**,
-its Fresnel losses and absorption taken at the straight line's angles, the path not bent there. The
-neighbours' arcs shadow the light, through the ray test of the lamps' own triangles.
+refracted path out of its own sleeve, and through a neighbour's sleeve along a path bent there too
+(the shortest one through it). The neighbours' arcs shadow the light, through the ray test of the
+lamps' own triangles.
 
 As in ``check_refraction.py``, aquaflux follows no reflection, so it is compared with the trace that
 ends every ray at its first reflection (``reflections=False``); the full trace is shown beside it for
 what the reflections left out are worth. What this check adds to that one is the neighbours: at a
 point whose light from some lamp passes another lamp's sleeve, the difference between aquaflux and the
-transmitted trace is the straight-through approximation's error, and the tracer's own split of the light
+transmitted trace is the error in how that sleeve is crossed, and the tracer's own split of the light
 by path (``CLASSES``) says how much of the point's light that is.
 
 Each point's traced value is the mean over the water pixels within ``SLEEVE_ARRAY_DISC`` of it, with

@@ -345,9 +345,10 @@ medium's absorption along its own leg. Three things are approximated, and each i
   light agrees within its statistical error at every radius from 12.5 to 60 mm, and the reflected
   paths left out are worth under half a percent; the straight-line gather, for comparison, reads 12
   to 25% high.
-- **A region holding neither end of a path — a neighbouring lamp's sleeve — is crossed straight**:
-  its Fresnel losses and absorption are taken at the angles the straight line meets it, and the path
-  is not bent there.
+- **A path passes through at most one region holding neither of its ends** — a neighbouring lamp's
+  sleeve, say — and is bent there as anywhere else. The path is found by shortening its optical
+  length, so only the shortest path through that region is found: behind a sleeve acting as a lens,
+  past where its rays cross, further paths exist and are left out.
 - **Each source triangle is seen through its corners**: the solid angle it fills is the closed form
   on the directions its three corners' paths arrive from, which is exact as the triangles become
   small, the limit the refinement criterion already drives an emitter towards.
