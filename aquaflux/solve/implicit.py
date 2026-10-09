@@ -30,6 +30,7 @@ from .linear import in_progress_measure
 from .march import MarchResult, newton_march, refuse_a_transform_the_march_cannot_run_in
 from .newton import newton_correction
 from .norm import ResidualNorm
+from .resumption import Resumption
 from .root_adjoint import root_adjoint, stop_array_gradients
 from .settings_value import SettingsValue, _merged
 from .strategy import LineSearchStep, NewtonStrategy, StepFn, StepOutcome
@@ -745,6 +746,8 @@ class RootSolver(eqx.Module):
         residual_fn: Callable[[jnp.ndarray, object], jnp.ndarray],
         phi0: jnp.ndarray,
         theta: object,
+        *,
+        resume: Resumption | None = None,
     ) -> jnp.ndarray:
         """Solve ``residual_fn(phi, theta) = 0``; reverse-differentiable in ``theta`` by IFT.
 
@@ -760,6 +763,11 @@ class RootSolver(eqx.Module):
             Initial guess, shape ``(n_cells,)``.
         theta : pytree
             Differentiable parameters the residual depends on.
+        resume : Resumption, optional
+            The history of an interrupted march this solve resumes from ``phi0``: its reference
+            residual is the stopping target's scale and its damping anchor the schedule's, so the
+            solve stops and damps where the interrupted one would have. A root solve has no step
+            control, so a shift in it is not used. ``None`` measures both at ``phi0``.
 
         Returns
         -------
@@ -801,6 +809,8 @@ class RootSolver(eqx.Module):
                 else convergence.measure._builder(self.measures, start)
             ),
             solver=solver,
+            reference_norm=None if resume is None else resume.reference_residual,
+            damping_reference=None if resume is None else resume.anchor,
         )
         # The march carries no guard of its own -- stopping short is part of what it is for -- so the
         # convergence test is owned here, on the path that produces the returned field. It must run

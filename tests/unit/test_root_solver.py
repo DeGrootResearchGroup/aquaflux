@@ -11,7 +11,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
-from aquaflux.solve import Convergence, RootSolver
+from aquaflux.solve import Convergence, Resumption, RootSolver
 from aquaflux.solve.implicit import _ROOT_CONVERGENCE, DampedNewtonStep
 from aquaflux.solve.implicit import newton_march as _production_forward_march
 from aquaflux.solve.strategy import within_tolerance
@@ -233,6 +233,52 @@ def test_the_solver_hands_the_march_the_settings_it_was_built_with(monkeypatch) 
     # The residual reaches the march bound to the parameter, as the one-argument form it steps.
     assert seen["residual"].residual_fn is _residual
     assert jnp.array_equal(seen["residual"].theta, theta)
+
+
+def test_a_resumed_root_solve_stops_and_damps_by_the_history_it_is_given(monkeypatch) -> None:
+    """The interrupted march's reference is the stopping target's scale and its anchor the damping's.
+
+    Wrong answers this catches: a ``resume`` the solve takes and drops (the march is handed none), one
+    that reaches the stopping scale but not the damping anchor, and the reverse. Unset, the march
+    measures both itself, so neither is passed.
+    """
+    from aquaflux.solve import implicit
+
+    seen = []
+
+    def spy(step, residual, phi0, **kwargs):
+        seen.append(kwargs)
+        return _production_forward_march(step, residual, phi0, **kwargs)
+
+    monkeypatch.setattr(implicit, "newton_march", spy)
+    solver = RootSolver()
+    theta = jnp.array([2.0])
+    solver.solve(_residual, jnp.zeros(1), theta)
+    solver.solve(
+        _residual,
+        jnp.zeros(1),
+        theta,
+        resume=Resumption(reference_residual=3.0, damping_reference=5.0, shift=0.1),
+    )
+    unset, given = seen
+    assert (unset["reference_norm"], unset["damping_reference"]) == (None, None)
+    assert (given["reference_norm"], given["damping_reference"]) == (3.0, 5.0)
+
+
+def test_a_root_solve_resumed_against_a_large_reference_has_already_met_its_target() -> None:
+    """The stopping target is ``atol + rtol * reference``, so the reference moves where it stops.
+
+    Against a reference 1e6 times the starting residual a relative tolerance of 1e-3 is met by the
+    state it is handed, so the solve takes no step and returns it; measured at that state it must
+    step. This isolates the stopping scale, since a march that takes no step has no damping to differ.
+    """
+    solver = RootSolver(convergence=Convergence(rtol=1e-3, atol=0.0))
+    theta = jnp.array([2.0])
+    start = jnp.zeros(1)
+    reference = float(jnp.linalg.norm(_residual(start, theta)))
+    resumed = solver.solve(_residual, start, theta, resume=Resumption(reference * 1.0e6))
+    assert jnp.array_equal(resumed, start)
+    assert not jnp.array_equal(solver.solve(_residual, start, theta), start)
 
 
 def test_a_stable_residual_keeps_repeated_solves_on_one_compiled_step() -> None:

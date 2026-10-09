@@ -42,6 +42,7 @@ from aquaflux.solve import (
     PreconditionerSession,
     RefreshPolicy,
     ResidualHomotopy,
+    Resumption,
     RetryPolicy,
     RowScaled,
     SessionSource,
@@ -432,6 +433,7 @@ def solve_flow_march(
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
+    resume: Resumption | None = None,
     on_residuals: Callable[[Mapping[str, float]], None] | None = None,
     **march: object,
 ) -> jnp.ndarray:
@@ -486,6 +488,9 @@ def solve_flow_march(
         As for :func:`~aquaflux.turbulence.solve_coupled`. A dual-time march given no ``step_control``
         defaults to the Courant ramp. ``on_residuals`` arrives under
         :func:`flow_equation_names`, and only under the row-scaled measure (the default).
+    resume : Resumption or None
+        The history of an interrupted march, for a solve **resuming** it from the state it stopped at;
+        see :func:`~aquaflux.solve.staged_march`. ``None`` measures at the initial state.
     **march
         The settings of :func:`flow_march_step` (``globalization``, ``dual_time``, ``linear_solve``,
         ``shift``, ...), handed to every build and refresh; an unknown keyword raises.
@@ -545,6 +550,7 @@ def solve_flow_march(
         on_retry=on_retry,
         homotopy=homotopy,
         station_step=station_step,
+        resume=resume,
         on_residuals=on_residuals,
         caller="solve_flow_march",
     )

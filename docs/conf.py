@@ -52,7 +52,16 @@ SUBPACKAGE_GROUPS = {
         ("Reading, writing and checking a case file", ["case_file", "spec"]),
         (
             "The sections of a case",
-            ["mesh_source", "fluid", "physics", "boundaries", "forcing", "solver", "outputs"],
+            [
+                "mesh_source",
+                "fluid",
+                "physics",
+                "boundaries",
+                "forcing",
+                "solver",
+                "initial",
+                "outputs",
+            ],
         ),
         ("Running a case file", ["run"]),
     ],

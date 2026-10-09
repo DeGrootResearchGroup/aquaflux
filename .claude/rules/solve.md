@@ -514,7 +514,9 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   `root_adjoint` stays the caller's, because only the caller holds the differentiable parameter pytree.
   `solve.explicit_source` picks `FinishedSource` / `CallerBuiltSource` when the caller gave a strategy or
   a `RefreshPolicy(builder=…)` and **refuses** (`refuse_unforwardable_settings`) any step-configuring
-  setting beside them rather than dropping it. **`solve.shifted_step(policy, *, globalization, dual_time,
+  setting beside them rather than dropping it. A resumed march passes `resume=` (a `Resumption`: the
+  interrupted march's `|R0|`, its damping anchor and its step control's shift, `resumption.py`), which sets
+  the stopping scale, the first segment's damping anchor and the control's opening shift (`solve-march.md`). **`solve.shifted_step(policy, *, globalization, dual_time,
   regime, krylov_solver, adjoint_preconditioner_factory, …, line_search)`** is the tail every builder
   ends in: single shifted step vs dual-time loop, the refusal of inner-loop hooks with no loop and of a
   `refresh_on_cycles` with nothing to fire, and the default `relative_residual_gmres(norm=None)` built

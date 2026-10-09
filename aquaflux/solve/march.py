@@ -524,6 +524,7 @@ def newton_march(
     rtol: float,
     atol: float,
     reference_norm: float | None = None,
+    damping_reference: float | None = None,
     trigger: RefreshTrigger | None = None,
     step_control: StepControl | None = None,
     control_state: object = None,
@@ -573,6 +574,14 @@ def newton_march(
         a staged solve. Defaults to the norm at ``phi0``, which is correct for a single segment.
         This is deliberately *not* the same quantity as the damping schedule's reference, which is
         always recomputed per segment from ``phi0`` (see the module docstring).
+    damping_reference : float, optional
+        The scale the damping schedule ramps against, in place of the norm measured at ``phi0``. It is
+        for a march **resuming** one that stopped short: the interrupted march's schedule was ramping
+        against the norm at *its* first state, and measuring afresh at the resumed state re-bases the
+        ramp there, which opens it at its starting strength again. Giving the interrupted march's own
+        reference continues the ramp where it left off. The march still starts from the residual it
+        actually measures at ``phi0`` -- only the schedule's anchor is replaced. ``None`` (the default)
+        measures at ``phi0``, byte-identical to a march that was never resumed.
     trigger : RefreshTrigger, optional
         Consulted after every step; when it fires the march stops and reports ``triggered=True``.
         ``None`` marches to convergence or ``max_steps``.
@@ -585,7 +594,9 @@ def newton_march(
         segment per refresh passes the previous segment's :attr:`MarchResult.control_state` here, so a
         stateful control continues across the refresh instead of resetting — the same discipline the
         *global* ``reference_norm`` follows, and the opposite of the deliberately segment-local damping
-        reference and ``drift_measure``. Ignored when ``step_control is None``.
+        reference and ``drift_measure``. A march resuming an interrupted one passes the control's own
+        ``resumed_at(shift)`` here (see :class:`~aquaflux.solve.Resumption`). Ignored when
+        ``step_control is None``.
     observer : callable, optional
         Called with each :class:`StepReport` as it is produced, for streaming progress out of a long
         march. The full history is also returned, so an observer is only needed for live reporting.
@@ -725,10 +736,13 @@ def newton_march(
     # starting strength and freezing the march.
     # The anchor is the scale the FIRST step's inner loop is judged against, so it is taken at the
     # station that step actually runs. With no homotopy that is `residual_fn` and this is unchanged.
-    residual_norm_0 = jnp.asarray(
+    measured_norm_0 = jnp.asarray(
         norm(residual_fn(phi0) if homotopy is None else homotopy.enter(0)(phi0))
     )
-    reference = float(residual_norm_0) if reference_norm is None else float(reference_norm)
+    residual_norm_0 = (
+        measured_norm_0 if damping_reference is None else jnp.asarray(float(damping_reference))
+    )
+    reference = float(measured_norm_0) if reference_norm is None else float(reference_norm)
 
     # Both thresholds are knowable INSIDE a step -- the cost one the moment a solve returns, the
     # step-length one the moment a line search collapses -- but the reaction below only runs once the
@@ -740,7 +754,7 @@ def newton_march(
     tight_solver = None if retry.solver is None else retry.solver.build()
 
     state = phi0
-    current = float(residual_norm_0)
+    current = float(measured_norm_0)
     reports: list[StepReport] = []
     triggered = False
     stalled = 0
@@ -994,6 +1008,7 @@ def newton_march(
             shift=0.0 if step_shift is None else float(step_shift),
             escalations=int(retries),
             diverged_retry=bool(diverged_retry),
+            damping_reference=float(residual_norm_0),
             station=0 if homotopy is None else int(homotopy.station(len(reports))),
             arrived=bool(arrived),
         )

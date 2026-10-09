@@ -285,6 +285,11 @@ class StepReport(NamedTuple):
         report would cost the replay property that makes trigger calibration cheap (see
         ``newton_march``'s ``checkpoint``). Reducing it to a number here keeps a trigger a pure
         function of numbers while still letting it see the physics.
+    damping_reference : float
+        The residual norm the step's damping was anchored at: the segment's first state's (or the
+        interrupted march's, for a resumed first segment), in the measure the step was steered by. The
+        switched-evolution shift is judged against it, so a march resumed from this step needs it to
+        continue the ramp. ``0.0`` is "not recorded".
     station : int
         Which station of the march's homotopy the step drove (:meth:`~aquaflux.solve.ResidualHomotopy.station`), ``0``
         for a march without one. Only equality between adjacent steps means anything: a change marks the
@@ -307,6 +312,7 @@ class StepReport(NamedTuple):
     shift: float = 0.0
     escalations: int = 0
     diverged_retry: bool = False
+    damping_reference: float = 0.0
     station: int = 0
     arrived: bool = True
 

@@ -51,6 +51,7 @@ from aquaflux.solve import (
     MonolithicVCycle,
     PseudoTransientStep,
     RefreshPolicy,
+    Resumption,
     RowScaledNorm,
     SessionSource,
     ShiftTerm,
@@ -456,6 +457,29 @@ def test_the_constrained_solve_refuses_configuration_beside_a_finished_continuat
     given = {name: state if value == "state" else value for name, value in configuration.items()}
     with pytest.raises(TypeError, match=r"configure the continuation `solve_coupled_mass_flow`"):
         solve_coupled_mass_flow(coupled, strategy=continuation, **given)
+
+
+def test_the_constrained_solve_hands_a_resumption_to_its_root_solve(monkeypatch) -> None:
+    """``resume`` is the interrupted march's history, and it must reach the march that uses it."""
+    from aquaflux.solve import RootSolver
+
+    mesh, coupled = _mass_flow_cavity(4)
+    state = _healthy_state(mesh, coupled)
+    seen = []
+
+    def stop_at_the_call(self, residual_fn, phi0, theta, **kwargs):
+        seen.append(kwargs)
+        raise StopIteration
+
+    monkeypatch.setattr(RootSolver, "solve", stop_at_the_call)
+    continuation = mass_flow_coupled_continuation(
+        coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+    )
+    history = Resumption(reference_residual=0.25, damping_reference=0.5)
+    for given in ({}, {"resume": history}):
+        with pytest.raises(StopIteration):
+            solve_coupled_mass_flow(coupled, strategy=continuation, **given)
+    assert seen == [{"resume": None}, {"resume": history}]
 
 
 def test_a_monolithic_builder_takes_the_injected_velocity_shift_source() -> None:
@@ -1071,6 +1095,45 @@ def _recorded_measure_builders(
     else:
         call()
     return builders
+
+
+def test_a_resumed_solve_anchors_its_first_segment_to_the_reference_and_every_segment_stops_by_it(
+    monkeypatch,
+) -> None:
+    """The reference residual of a march being resumed sets the stopping target throughout and the
+    damping anchor on the first segment only.
+
+    A later segment follows a refresh, which re-bases the damping at its own starting state, so
+    anchoring it to the interrupted march's residual would hand it a ramp measured against a different
+    state; and a stopping target taken from the reference in only some segments would put the bar in
+    different places across refreshes.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    calls: list[dict] = []
+
+    def recording_march(step, residual_fn, at, **kwargs):
+        from aquaflux.solve import MarchResult
+
+        calls.append(kwargs)
+        return MarchResult(at, (), True, kwargs["trigger"] is not None, None)
+
+    monkeypatch.setattr(driver_module, "newton_march", recording_march)
+    step = coupled_step(
+        coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+    )
+    solve_coupled(
+        coupled,
+        *coupled.physical_fields(state),
+        convergence=Convergence(rtol=1.0, atol=1e30),
+        strategy=step,
+        refresh=RefreshPolicy(trigger=object(), limit=1, builder=lambda s: step),
+        resume=Resumption(reference_residual=0.25, damping_reference=0.125),
+    )
+    first, second = calls
+    # The first segment's anchor is the interrupted march's own segment's, not the global reference.
+    assert first["damping_reference"] == 0.125 and second["damping_reference"] is None
+    assert first["reference_norm"] == 0.25 and second["reference_norm"] == 0.25
 
 
 def test_a_coupled_solve_rebuilds_its_row_scaled_measure_at_the_state_each_iteration_starts(

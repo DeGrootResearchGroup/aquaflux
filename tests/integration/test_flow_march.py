@@ -36,6 +36,7 @@ from aquaflux.solve import (
     MonolithicFactorShiftPolicy,
     PseudoTransientStep,
     RefreshPolicy,
+    Resumption,
     RetryPolicy,
     RootSolver,
     RowScaled,
@@ -487,3 +488,166 @@ def test_the_block_preconditioner_is_an_approximate_inverse_and_transposes_exact
     v = jnp.asarray(rng.standard_normal(state.shape))
     shifted_v = jacobian_matvec(assembler, state, v) + jnp.asarray(shift) * v
     assert float(jnp.linalg.norm(apply(shifted_v) - v) / jnp.linalg.norm(v)) < 0.7
+
+
+@pytest.fixture(scope="module")
+def shared_step(channel):
+    """One finished step every march below runs, so each is a cache hit on the first one's compile."""
+    assembler, _ = channel
+    return flow_march_step(assembler, assembler.initial_state())
+
+
+def _march_with_states(assembler, step, state=None, **march):
+    """Marches ``assembler`` with ``step`` and returns the reports and the state after each step."""
+    reports, states = [], []
+
+    def record(report, step_state):
+        reports.append(report)
+        states.append(jnp.asarray(step_state))
+
+    solve_flow_march(
+        assembler, state, strategy=step, on_checkpoint=record, convergence=TIGHT, **march
+    )
+    return reports, states
+
+
+def test_a_march_resumed_with_its_history_continues_the_one_it_resumes(
+    channel, shared_step
+) -> None:
+    """Resuming at a step's state with the original ``|R0|`` reproduces the steps that followed it.
+
+    The wrong answers this catches: a resume that re-bases the damping ramp at the resumed state (the
+    steps then differ from the original's), one that ignores the reference in the stopping target (the
+    resumed march stops at a different residual), and one that applies it to the ramp but not to the
+    stopping bar.
+    """
+    assembler, _ = channel
+    fresh_reports, fresh_states = _march_with_states(assembler, shared_step)
+    resumed_at = 3
+    last = fresh_reports[resumed_at - 1]
+    reference = float(last.residual_norm) / float(last.residual_ratio)
+
+    control_reports, _ = _march_with_states(assembler, shared_step, fresh_states[resumed_at - 1])
+    reports, states = _march_with_states(
+        assembler,
+        shared_step,
+        fresh_states[resumed_at - 1],
+        resume=Resumption(reference_residual=reference),
+    )
+
+    expected = fresh_reports[resumed_at:]
+    # Without the reference the resumed march is a different one: this is what the carry repairs.
+    assert [r.residual_norm for r in control_reports] != pytest.approx(
+        [r.residual_norm for r in expected], rel=1e-6
+    )
+    assert len(reports) == len(expected)
+    assert [r.residual_norm for r in reports] == pytest.approx(
+        [r.residual_norm for r in expected], rel=1e-8
+    )
+    assert [r.residual_ratio for r in reports] == pytest.approx(
+        [r.residual_ratio for r in expected], rel=1e-8
+    )
+    assert float(jnp.max(jnp.abs(states[-1] - fresh_states[-1]))) < 1e-9
+
+
+def test_a_resumptions_reference_is_the_stopping_targets_scale(channel, shared_step) -> None:
+    """A march stops against ``atol + rtol * reference``, so the reference moves where it stops."""
+    assembler, _ = channel
+    reports, states = _march_with_states(assembler, shared_step)
+    start = states[1]
+    loose = Convergence(measure=RowScaled(), rtol=1e-2, atol=0.0)
+    tight = Convergence(measure=RowScaled(), rtol=1e-6, atol=0.0)
+
+    def steps(reference, convergence):
+        taken = []
+        solve_flow_march(
+            assembler,
+            start,
+            strategy=shared_step,
+            convergence=convergence,
+            max_steps=120,
+            resume=Resumption(reference_residual=reference),
+            on_checkpoint=lambda report, _: taken.append(report),
+        )
+        return taken
+
+    reference = float(reports[0].residual_norm) / float(reports[0].residual_ratio)
+    # Against a reference 1e4 times larger the target (here 100 x the starting residual) is already met,
+    # so the march takes no step at all -- and with no step the damping anchor cannot be what differs,
+    # so this isolates the stopping scale. Against the original reference it has work to do.
+    assert steps(reference * 1e4, loose) == []
+    assert len(steps(reference, loose)) > 0
+    assert len(steps(reference, tight)) > len(steps(reference, loose))
+
+
+def test_a_march_resumed_at_its_root_takes_no_step_whatever_history_it_is_given(
+    channel, shared_step
+) -> None:
+    """The march starts from the residual it measures at the state it is handed, not from the reference.
+
+    A resume at a converged state has nothing left to do; a march that took its starting residual
+    from the reference (here far above the target) would think the state unconverged and step.
+    """
+    assembler, _ = channel
+    _, states = _march_with_states(assembler, shared_step)
+    reports, _ = _march_with_states(
+        assembler, shared_step, states[-1], resume=Resumption(reference_residual=1.0e3)
+    )
+    assert reports == []
+
+
+def test_a_march_cannot_resume_beside_a_homotopy(channel) -> None:
+    assembler, _ = channel
+    with pytest.raises(ValueError, match="cannot resume an interrupted one beside a homotopy"):
+        solve_flow_march(
+            assembler, resume=Resumption(reference_residual=1.0), homotopy=object(), max_steps=1
+        )
+
+
+def test_a_resumed_march_damps_against_the_anchor_it_is_given_and_reports_it(
+    channel, shared_step
+) -> None:
+    """The first segment's damping anchor is the resumption's, and each step's report says what it was.
+
+    Wrong answers this catches: an anchor taken at the resumed state whatever the resumption says (the
+    reports then read the residual measured there), one that uses the reference where a separate
+    anchor was given (a march that has refreshed its preconditioner has two), and a report that records
+    the stopping reference rather than the anchor the damping was judged against.
+    """
+    assembler, _ = channel
+    reports, states = _march_with_states(assembler, shared_step)
+    reference = float(reports[0].residual_norm) / float(reports[0].residual_ratio)
+    # A fresh march damps against the residual it measured at its first state: the reference itself.
+    assert {round(r.damping_reference, 9) for r in reports} == {round(reference, 9)}
+
+    def anchors(resume):
+        taken, _ = _march_with_states(assembler, shared_step, states[2], resume=resume)
+        return {round(r.damping_reference, 9) for r in taken}
+
+    # Control: with no history the march re-bases at the state it resumes, a different residual.
+    assert anchors(None) != {round(reference, 9)}
+    assert anchors(Resumption(reference)) == {round(reference, 9)}
+    assert anchors(Resumption(reference, damping_reference=2.0 * reference)) == {
+        round(2.0 * reference, 9)
+    }
+
+
+def test_a_resumed_shift_is_not_used_by_a_march_with_no_step_control(channel, shared_step) -> None:
+    """A single-step march damps by a memoryless schedule, so there is no shift to resume.
+
+    The wrong answer this catches: the shift reaching the march some other way and changing it. The
+    resumed march must be exactly the one resumed without a shift.
+    """
+    assembler, _ = channel
+    reports, states = _march_with_states(assembler, shared_step)
+    reference = float(reports[2].residual_norm) / float(reports[2].residual_ratio)
+    plain, _ = _march_with_states(
+        assembler, shared_step, states[2], resume=Resumption(reference_residual=reference)
+    )
+    shifted, _ = _march_with_states(
+        assembler,
+        shared_step,
+        states[2],
+        resume=Resumption(reference_residual=reference, shift=0.3),
+    )
+    assert [r.residual_norm for r in shifted] == [r.residual_norm for r in plain]
