@@ -118,3 +118,11 @@ def test_an_array_that_does_not_match_the_graph_is_refused(overrides, message) -
     coefficient = settings.pop("coefficient")
     with pytest.raises(ValueError, match=message):
         ConvectionDiffusionStencil(OWNER, NB, coefficient, 3, **settings)
+
+
+def test_a_scalar_coefficient_is_a_uniform_one() -> None:
+    uniform = ConvectionDiffusionStencil(OWNER, NB, 2.0, 3, flux=FLUX, boundary_diagonal=BOUNDARY)
+    explicit = ConvectionDiffusionStencil(
+        OWNER, NB, np.full(2, 2.0), 3, flux=FLUX, boundary_diagonal=BOUNDARY
+    )
+    np.testing.assert_array_equal(uniform.assemble().toarray(), explicit.assemble().toarray())

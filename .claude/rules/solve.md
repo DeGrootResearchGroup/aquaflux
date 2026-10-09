@@ -393,10 +393,17 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     `decouple_dof`**, which zeroes an *assembled* row and column and leaves the neighbours' diagonals
     holding the dropped edge's contribution; `flow/initialization.py` uses that one, and the two were
     deliberately not unified (it would change an operator).
-  Value-identity at migration is being checked by recording every operator handed to a hierarchy
-  builder and every scalar shift diagonal across 16 unit modules, before and after, and comparing them
-  with `np.array_equal` (result pending at this commit). Pinned by `tests/unit/test_convection_diffusion_stencil.py` (hand-written
-  three-cell operator, mutation-checked eight ways — the "drops only owner-side edges" mutation
+  **Verified value-identical at migration (2026-10-09):** a throwaway pytest plugin wrapped the three
+  hierarchy builders and `scalar_transport_shift_diagonal_parts` in every `aquaflux` module that
+  imports them, and recorded each operator (canonical CSR) and shift pair per test over 16 unit modules
+  (343 tests, `-m "not slow and not validation"`, jax 0.10.2, Linux, Python 3.13); all **1744** arrays
+  were `np.array_equal` before and after. ⚠️ **The comparison's first run caught a behaviour change
+  that no review had:** the first version refused a **scalar** coefficient by shape, which the deleted
+  function had quietly broadcast, and five `test_multigrid.py` equilibration tests that build a chain
+  with `coefficient=2.0` failed — read as missing recordings, not as differing ones, so a comparison
+  that counted only mismatches would have reported clean. A scalar now broadcasts to a uniform array
+  (pinned); an array of the wrong length is still refused. Pinned by `tests/unit/test_convection_diffusion_stencil.py` (hand-written
+  three-cell operator, mutation-checked nine ways — the "drops only owner-side edges" mutation
   survived until a neighbour-only detach test was added).
 
 - **`state.py` — BUILT (#285): `FieldLayout` is the ONE flat field-major state layout, and nothing

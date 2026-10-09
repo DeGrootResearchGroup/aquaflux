@@ -235,15 +235,16 @@ class ConvectionDiffusionStencil:
     not carry (Dirichlet wall/inlet stiffness, outflow convection, a reaction linearization).
 
     The graph is validated at construction (:func:`require_valid_graph`), and every per-edge and
-    per-cell array is checked against it, so a malformed stencil is refused before it is assembled and
-    coarsened -- where it would otherwise bake ``inf``/``NaN`` into a frozen preconditioner.
+    per-cell array is checked against it -- a scalar is broadcast to a uniform array, an array of the
+    wrong length is refused -- so a malformed stencil fails before it is assembled and coarsened, where
+    it would otherwise bake ``inf``/``NaN`` into a frozen preconditioner.
 
     Attributes
     ----------
     owner, nb : np.ndarray
         Interior-face edge endpoints, shape ``(n_edges,)`` each.
     coefficient : np.ndarray
-        Per-edge symmetric diffusive coefficient, shape ``(n_edges,)``.
+        Per-edge symmetric diffusive coefficient, shape ``(n_edges,)``, or a scalar for a uniform one.
     n : int
         Number of cells.
     flux : np.ndarray or None
@@ -288,10 +289,12 @@ class ConvectionDiffusionStencil:
             if value is None:
                 continue
             value = np.asarray(value)
-            if value.shape != shape:
+            try:  # a scalar is a uniform value; an array of the wrong length is refused
+                value = np.broadcast_to(value, shape).copy()
+            except ValueError:
                 raise ValueError(
                     f"{type(self).__name__}: {name} must have shape {shape}, got {value.shape}."
-                )
+                ) from None
             set_field(self, name, value)
 
     def assemble(self) -> sp.csr_matrix:
