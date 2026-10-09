@@ -63,6 +63,9 @@ tighten most of the time. The gain is the loose end, which needs no schedule.
 **What.** Raise `LinearSolveSettings.rtol` (the `_VCYCLE_LINEAR_SOLVE` / `VCYCLE_LINEAR_SOLVE` family
 value, and the case files' `linear_solve.rtol`) from 0.3 to ~0.6.
 
+⚠️ **Under the residual-only stop of 6b the gain shrinks to 13 % of wall, with 2 extra steps and a
+retry** (see 6b). The figures below are under `lineax`'s stop.
+
 **Why.** On pitzDaily, 0.6 took 166 restart cycles against 203 (−18 %), 0.9 took 161, with identical steps,
 inner-solve counts and `x_r/h` (table in the ledger entry above). 0.3 was calibrated on bfs3d's
 multigrid family and carried to the others.
@@ -162,9 +165,21 @@ validation tiers, the cost thresholds' re-calibration, and the follow-ups below.
 
 **Follow-ups.** Two were measured on the replay and are closed (ledger: "Weighted inner product and
 longer restarts for the residual-stop GMRES"): neither a measure-weighted inner product nor a restart of
-30–60 changes the work. Still to measure, as marches: 4b and the Eisenstat–Walker refutation under the
-new stop (both were measured under `lineax`'s, whose solution-change test is likely most of what loosening
-`rtol` relaxed).
+30–60 changes the work. The forcing term was re-measured under the new stop (2026-10-09, same configuration,
+`PITZ_KRYLOV_STOP=residual PITZ_FORWARD_RTOL=…`, one run each):
+
+| `rtol` | steps | inner solves | applications | refreshes (mid-step) | retries | wall |
+|---|---|---|---|---|---|---|
+| 0.1 | 31 | 110 | 2380 | 12 | 0 | 863 s |
+| **0.3** | 31 | 137 | 2147 | 4 | 0 | 693 s |
+| 0.6 | 33 | 169 | 1747 | 2 | **1** | 604 s |
+
+All reach `x_r/h` 8.0686. **Tightening still loses** (0.1 is 25 % slower), so the Eisenstat–Walker
+refutation stands under either stop. **Loosening still gains, but less and at a cost:** 0.6 is 13 % faster
+than 0.3 where it was 18–21 % fewer cycles under `lineax`'s stop, and it is the only arm that takes extra
+outer steps and a retry (whose tight solve the application count omits). So most of 4b's gain was the
+stop; what is left is modest and comes with the first sign of fragility — 4b (#637) stays deferred, now
+to be measured on top of 6b rather than instead of it.
 
 ## 7. Mixed precision: float64 outside, float32 inside the preconditioner
 
