@@ -35,12 +35,12 @@ from jax.ops import segment_sum
 
 from aquaflux.discretization import flux_continuous_conductance
 from aquaflux.solve import (
+    ConvectionDiffusionStencil,
     SettingsValue,
     air_multigrid_solve,
     build_air_hierarchy,
     build_convection_hierarchy,
     build_smoothed_hierarchy,
-    convection_diffusion_operator,
     convection_multigrid_solve,
     decouple_dof,
     smoothed_multigrid_solve,
@@ -314,9 +314,9 @@ class SmoothedAmgSchur(InnerSchurSolver):
         # A pressure-fixing outlet adds a boundary diagonal that de-singularises the Schur; freeze it
         # at the reference diagonal (all-zero for a closed all-wall domain, which the pin handles).
         reference_boundary = np.asarray(geometry.boundary_diagonal(reference_diagonal))
-        a = convection_diffusion_operator(
+        a = ConvectionDiffusionStencil(
             owner_e, nb_e, reference_coeff, n_cells, boundary_diagonal=reference_boundary
-        )
+        ).assemble()
         if geometry.pressure_pin is not None:  # closed domain: regularize by decoupling the pin
             a = decouple_dof(a, geometry.pressure_pin)
         hierarchy = build_smoothed_hierarchy(a, strength_threshold=strength_threshold)
@@ -401,13 +401,13 @@ class SmoothedAmgVelocity(_RescaledAmgVelocity):
         # cells via the connectivity's own scatter rather than a hand-rolled index add.
         boundary_owner = jnp.where(face_cells.interior, 0.0, over_distance)
         boundary_diagonal = face_cells.scatter(boundary_owner, jnp.zeros_like(over_distance))
-        a = convection_diffusion_operator(
+        a = ConvectionDiffusionStencil(
             owner_e,
             nb_e,
             np.asarray(over_distance)[interior],
             n_cells,
             boundary_diagonal=np.asarray(boundary_diagonal),
-        )
+        ).assemble()
         hierarchy = build_smoothed_hierarchy(a, strength_threshold=strength_threshold)
         return cls(hierarchy, geometry.dim, v_cycles)
 
@@ -438,14 +438,14 @@ def _convection_operator(
     )
     boundary_owner = jnp.where(face_cells.interior, 0.0, viscous + jnp.maximum(reference_mdot, 0.0))
     boundary_diagonal = face_cells.scatter(boundary_owner, jnp.zeros_like(boundary_owner))
-    return convection_diffusion_operator(
+    return ConvectionDiffusionStencil(
         owner_e,
         nb_e,
         np.asarray(viscous)[interior],
         n_cells,
         flux=np.asarray(reference_mdot)[interior],
         boundary_diagonal=np.asarray(boundary_diagonal),
-    )
+    ).assemble()
 
 
 class TwoLevelConvectionVelocity(_RescaledAmgVelocity):

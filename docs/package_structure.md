@@ -155,7 +155,7 @@ cfd/                                  # repo root
 │   │   ├── shift_basis.py            #   ShiftBasis: how the pseudo-transient shift's spatial distribution is built from a cell's operator parts
 │   │   ├── line_search_growth.py     #   LineSearchGrowth: how much the residual may grow and still be accepted
 │   │   ├── multigrid.py              #   matrix-free algebraic multigrid for the inner solves (smoothed/plain aggregation, AIR; scipy RAP off the jit path)
-│   │   ├── frozen_operator.py        #   convection_diffusion_operator / decouple_dof: the one assembler of the frozen operator every AMG consumer coarsens
+│   │   ├── frozen_operator.py        #   ConvectionDiffusionStencil / decouple_dof: the one description of the frozen operator every AMG consumer coarsens
 │   │   ├── amg_preconditioner.py     #   MonolithicAmgPreconditioner for the coupled saddle-point solve
 │   │   ├── lu_preconditioner.py      #   MonolithicLuPreconditioner (complete sparse LU)
 │   │   ├── field_split.py            #   FieldGroups (a two-group partition view over a FieldLayout) + BlockTriangularFieldSplit: block-triangular field-split preconditioning for flow-plus-transport

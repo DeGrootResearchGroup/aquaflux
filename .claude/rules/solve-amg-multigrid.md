@@ -2052,13 +2052,14 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   `build_convection_hierarchy(a)`, `build_air_hierarchy(a)` — and none takes a mesh, edge arrays, or
   flow quantities. Assembly lives beside it in `aquaflux/solve/frozen_operator.py`
   (numpy + scipy only — no mesh, no field, no `jax`):
-  `convection_diffusion_operator(owner, nb, coefficient, n, *, flux=None, boundary_diagonal=None)` —
+  `ConvectionDiffusionStencil(owner, nb, coefficient, n, *, flux=None, boundary_diagonal=None).assemble()` —
   symmetric graph Laplacian when `flux is None`, first-order-upwind convection-diffusion otherwise —
   plus `decouple_dof(a, index)` for the closed-domain pressure pin. It is the **one** assembler for
   all four consumers (pressure Schur, viscous velocity block, convection velocity block, k/ω scalar
   transport). Do not reintroduce a `(owner, nb, coeff, …)` signature into `multigrid.py`, and do not
-  add a second stencil assembler — the old `_laplacian_csr` was exactly `convection_diffusion_operator`
-  at `flux=None` and was deleted. `build_convection_air_hierarchy` was likewise **deleted**: once it
+  add a second stencil assembler — the old `_laplacian_csr` was exactly the stencil's assembly
+  at `flux=None` and was deleted (and the free function `convection_diffusion_operator` became the
+  stencil's `assemble`, #89). `build_convection_air_hierarchy` was likewise **deleted**: once it
   took `a` it was a pure alias for `build_air_hierarchy`.
   *Why it is a solver concern, not a flow one:* the first-order-upwind stencil is the
   **preconditioner's** choice, independent of what the residual discretizes advection with — it is
@@ -2305,7 +2306,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   hierarchies are built once off-jit and then frozen, a degenerate mesh must fail *there*, not as a
   silently stalling runtime V-cycle. Now that the builders are operator-in, the **graph** check lives
   with the assembler: `frozen_operator.require_valid_graph` (`n ≥ 1`, matched `owner`/`nb`, in-range
-  endpoints) runs inside `convection_diffusion_operator`; the two build loops
+  endpoints) runs when a `ConvectionDiffusionStencil` is constructed; the two build loops
   (`_build_aggregation_hierarchy` for smoothed/convection, `build_air_hierarchy` for lAIR) call
   `_require_positive_diagonal` on **every** level's operator diagonal before inverting/freezing it,
   so a zero diagonal (disconnected component, isolated/zero-volume cell, degenerate `R A P` row)

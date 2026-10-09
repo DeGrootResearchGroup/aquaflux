@@ -556,9 +556,12 @@ left more pairs undecided and slowed the transfer build (#574, `.claude/rules/ra
 **Frozen preconditioner operators are assembled in one place, `aquaflux/solve/frozen_operator.py`.**
 The AMG preconditioners coarsen a *frozen* linearization of a transport equation — a symmetric
 diffusive edge coupling, optionally plus first-order-upwind convection at a reference flux —
-assembled once, off the jit path, as a `scipy.sparse` matrix. `convection_diffusion_operator(...)`
-(with `decouple_dof` for the closed-domain pressure pin) is the single assembler for all four
-consumers: the pressure Schur, both velocity blocks, and the k/ω scalar transport. It sits **beside**
+assembled once, off the jit path, as a `scipy.sparse` matrix. `ConvectionDiffusionStencil` — the
+interior-face graph with its per-edge coefficients and per-cell boundary diagonal, as one value that
+`assemble()`s itself, reports its `diagonal_parts()` and `detached(cells)` a fixation — is the single
+description for all four consumers (with `decouple_dof` for the closed-domain pressure pin): the
+pressure Schur, both velocity blocks, and the k/ω scalar transport, whose pseudo-time shift reads the
+same stencil's diagonal rather than re-deriving it. It sits **beside**
 `solve/multigrid.py`, not inside it: every multigrid builder takes an assembled operator `a` and
 knows nothing about meshes or fluxes. The first-order-upwind stencil is the **preconditioner's**
 choice, not the model's — whatever scheme the residual uses for advection, the frozen operator always

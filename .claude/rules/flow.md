@@ -678,8 +678,8 @@ Engineering Principles.
     call site's convenience; the function is the one home.
 - **Frozen operators are assembled by `aquaflux/solve/frozen_operator.py`, not here (#45).** All three preconditioner hierarchies (pressure Schur, viscous velocity block,
   convection velocity block) build their scipy CSR operator with
-  `convection_diffusion_operator(owner, nb, coefficient, n, *, flux=None, boundary_diagonal=None)` and
-  regularize the closed-domain pin with `decouple_dof`, then hand the **assembled matrix** to the
+  `ConvectionDiffusionStencil(owner, nb, coefficient, n, *, flux=None, boundary_diagonal=None).assemble()`
+  (#89 — there is no `convection_diffusion_operator`) and regularize the closed-domain pin with `decouple_dof`, then hand the **assembled matrix** to the
   coarsening builders. Do not re-assemble a stencil inside `block_preconditioner.py`.
 - **The symmetric rescaling and the per-component lift are single-homed (binding — Principle 2).** Every
   block here freezes a multigrid hierarchy at a reference operator and tracks the current one by the

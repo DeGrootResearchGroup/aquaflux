@@ -62,7 +62,8 @@ unit tests. The surface is five groups:
   triggers (a costly solve, a collapsed step length, a diverged correction), the shift factor and
   escalation limit, and the optional tighter linear solver that is the fallback for a step more
   damping cannot fix. The default policy retries nothing.
-* **Frozen algebraic multigrid** — the operator assembler `convection_diffusion_operator` (plus
+* **Frozen algebraic multigrid** — the operator description `ConvectionDiffusionStencil`, which
+  assembles itself and reports its diagonal (plus
   `decouple_dof` for a closed-domain pressure pin and `symmetrically_equilibrate` for the
   square-root-diagonal rescaling a factorization or a coarsening may want), the hierarchy builders
   `build_smoothed_hierarchy` / `build_convection_hierarchy` / `build_air_hierarchy`, and their
@@ -84,8 +85,8 @@ from .continuation import (
     StepAcceptance,
 )
 from .frozen_operator import (
+    ConvectionDiffusionStencil,
     cell_major_permutation,
-    convection_diffusion_operator,
     equilibrate_cell_major,
     decouple_dof,
     symmetrically_equilibrate,
@@ -292,6 +293,7 @@ __all__ = [
     "CompleteLu",
     "ConstantRelaxation",
     "ContinuationSource",
+    "ConvectionDiffusionStencil",
     "Convergence",
     "CycleGrowthTrigger",
     "DampedNewtonStep",
@@ -402,7 +404,6 @@ __all__ = [
     "column_probe_plan",
     "combine_metrics",
     "combine_observers",
-    "convection_diffusion_operator",
     "convection_multigrid_solve",
     "decouple_dof",
     "default_dual_time_control",

@@ -375,6 +375,37 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
 
 ## Contracts — the API boundary
 
+- **`frozen_operator.py` — `ConvectionDiffusionStencil` is the ONE description of a frozen
+  convection-diffusion operator (BUILT 2026-10-09, #89).** ⚠️ **There is no
+  `convection_diffusion_operator` and no `_scalar_operator_pieces`** — the free function became the
+  stencil's `assemble()`, and the turbulence six-tuple `(owner_e, nb_e, visc_int, mdot_int,
+  boundary_diagonal, n)` that was unpacked only to be re-passed into it became `_scalar_stencil(...)`
+  returning one. A frozen dataclass (`eq=False`; numpy, off the jit path — not an `equinox.Module`)
+  of `owner, nb, coefficient, n` plus keyword-only `flux`, `boundary_diagonal`; the graph is checked
+  by `require_valid_graph` and every array against it **at construction**. Three operations live on it
+  so no caller open-codes them on loose arrays:
+  - `assemble()` — the CSR operator, entries unchanged from the deleted function.
+  - `diagonal_parts()` → `(convective, dissipative)`, whose sum is `assemble().diagonal()` (pinned on an
+    irregular graph with mixed-sign fluxes). The k/ω pseudo-time shift is this split — it used to
+    rebuild it with `np.add.at` beside the assembler, a second copy of the diagonal.
+  - `detached(cells)` — drops every edge incident to the cells (from **both** ends) and gives them a
+    unit diagonal; the k/ω preconditioner's fixed-cell treatment. ⚠️ **Not the same as
+    `decouple_dof`**, which zeroes an *assembled* row and column and leaves the neighbours' diagonals
+    holding the dropped edge's contribution; `flow/initialization.py` uses that one, and the two were
+    deliberately not unified (it would change an operator).
+  **Verified value-identical at migration (2026-10-09):** a throwaway pytest plugin wrapped the three
+  hierarchy builders and `scalar_transport_shift_diagonal_parts` in every `aquaflux` module that
+  imports them, and recorded each operator (canonical CSR) and shift pair per test over 16 unit modules
+  (343 tests, `-m "not slow and not validation"`, jax 0.10.2, Linux, Python 3.13); all **1744** arrays
+  were `np.array_equal` before and after. ⚠️ **The comparison's first run caught a behaviour change
+  that no review had:** the first version refused a **scalar** coefficient by shape, which the deleted
+  function had quietly broadcast, and five `test_multigrid.py` equilibration tests that build a chain
+  with `coefficient=2.0` failed — read as missing recordings, not as differing ones, so a comparison
+  that counted only mismatches would have reported clean. A scalar now broadcasts to a uniform array
+  (pinned); an array of the wrong length is still refused. Pinned by `tests/unit/test_convection_diffusion_stencil.py` (hand-written
+  three-cell operator, mutation-checked nine ways — the "drops only owner-side edges" mutation
+  survived until a neighbour-only detach test was added).
+
 - **`state.py` — BUILT (#285): `FieldLayout` is the ONE flat field-major state layout, and nothing
   else may re-derive `f * n_cells + i` (binding).** A coupled state is one flat vector, field-major,
   described by an ordered tuple of named `StateBlock`s over a cell count. Three block kinds cover

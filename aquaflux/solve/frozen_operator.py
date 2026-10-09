@@ -8,10 +8,12 @@ The first-order-upwind stencil is the *preconditioner's* choice, not the model's
 residual discretizes advection with, the frozen operator always upwinds first-order, because that is
 what makes it a diagonally dominant M-matrix an aggregation hierarchy can coarsen.
 
-Every consumer of a frozen operator builds it through this one assembler: the pressure Schur and the
-viscous velocity block (symmetric, ``flux=None``), the convection-aware velocity block, and the k/omega
-scalar-transport preconditioner. The multigrid builders in :mod:`aquaflux.solve.multigrid` then take
-the assembled matrix, so they stay a pure operator-coarsening library.
+Every consumer of a frozen operator describes it as a :class:`ConvectionDiffusionStencil` -- the
+interior-face graph with its per-edge coefficients and per-cell boundary diagonal -- and assembles it
+through that object: the pressure Schur and the viscous velocity block (symmetric, ``flux=None``), the
+convection-aware velocity block, and the k/omega scalar-transport preconditioner, whose pseudo-time
+shift reads the same stencil's diagonal. The multigrid builders in :mod:`aquaflux.solve.multigrid` then
+take the assembled matrix, so they stay a pure operator-coarsening library.
 
 It also holds the **symmetric square-root-diagonal equilibration rule**
 (:func:`equilibration_scale`), because a frozen operator is rescaled before it is factored *or*
@@ -27,6 +29,7 @@ builds a hierarchy.
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 
 import numpy as np
@@ -209,16 +212,13 @@ def require_valid_graph(n: int, owner: np.ndarray, nb: np.ndarray, where: str) -
         raise ValueError(f"{where}: edge endpoints out of range for n={n} cells.")
 
 
-def convection_diffusion_operator(
-    owner: np.ndarray,
-    nb: np.ndarray,
-    coefficient: np.ndarray,
-    n: int,
-    *,
-    flux: np.ndarray | None = None,
-    boundary_diagonal: np.ndarray | None = None,
-) -> sp.csr_matrix:
-    """Frozen convection-diffusion operator ``A`` on an interior-face graph, as a scipy CSR matrix.
+@dataclasses.dataclass(frozen=True, eq=False)
+class ConvectionDiffusionStencil:
+    """A frozen convection-diffusion operator on an interior-face graph, before it is assembled.
+
+    The per-edge coefficients and the per-cell boundary diagonal that define the operator ``A``, held
+    together with the graph they live on, so the operations over them -- assembling ``A``, reading its
+    diagonal, detaching cells -- are written once here rather than by every caller on loose arrays.
 
     Each interior edge ``(owner P, neighbour N)`` carries a symmetric diffusive coupling
     ``coefficient`` (e.g. ``Gamma_face A / (d.n)``). With a ``flux`` it also carries a
@@ -234,39 +234,147 @@ def convection_diffusion_operator(
     case). ``boundary_diagonal`` adds the per-cell boundary-face contributions the interior edges do
     not carry (Dirichlet wall/inlet stiffness, outflow convection, a reaction linearization).
 
-    Parameters
+    The graph is validated at construction (:func:`require_valid_graph`), and every per-edge and
+    per-cell array is checked against it -- a scalar is broadcast to a uniform array, an array of the
+    wrong length is refused -- so a malformed stencil fails before it is assembled and coarsened, where
+    it would otherwise bake ``inf``/``NaN`` into a frozen preconditioner.
+
+    Attributes
     ----------
     owner, nb : np.ndarray
         Interior-face edge endpoints, shape ``(n_edges,)`` each.
     coefficient : np.ndarray
-        Per-edge symmetric diffusive coefficient, shape ``(n_edges,)``.
+        Per-edge symmetric diffusive coefficient, shape ``(n_edges,)``, or a scalar for a uniform one.
     n : int
         Number of cells.
-    flux : np.ndarray, optional
+    flux : np.ndarray or None
         Per-edge owner-outward convective face flux (the frozen convective linearization), shape
-        ``(n_edges,)``. Omit for a symmetric (pure diffusion) operator.
-    boundary_diagonal : np.ndarray, optional
-        Per-cell boundary-face diagonal contribution, shape ``(n_cells,)``.
+        ``(n_edges,)``. ``None`` for a symmetric (pure diffusion) operator.
+    boundary_diagonal : np.ndarray or None
+        Per-cell boundary-face diagonal contribution, shape ``(n,)``. ``None`` for none.
 
-    Returns
-    -------
-    scipy.sparse.csr_matrix
-        The assembled operator, shape ``(n, n)``.
+    Raises
+    ------
+    ValueError
+        If the graph is malformed (see :func:`require_valid_graph`), or ``coefficient``, ``flux`` or
+        ``boundary_diagonal`` does not match it in shape.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> stencil = ConvectionDiffusionStencil(np.array([0]), np.array([1]), np.array([2.0]), 2)
+    >>> stencil.assemble().toarray()
+    array([[ 2., -2.],
+           [-2.,  2.]])
     """
-    require_valid_graph(n, owner, nb, "convection_diffusion_operator")
-    o, m = np.asarray(owner), np.asarray(nb)
-    c = np.asarray(coefficient)
-    zero = np.zeros_like(c)
-    f = zero if flux is None else np.asarray(flux)
-    up_out = np.maximum(f, 0.0)  # outflow leaves the owner: owner value is upwind
-    up_in = np.maximum(-f, 0.0)  # inflow enters the owner: neighbour value is upwind
-    rows = np.concatenate([o, m, o, m])
-    cols = np.concatenate([m, o, o, m])
-    vals = np.concatenate([-(c + up_in), -(c + up_out), c + up_out, c + up_in])
-    a = sp.csr_matrix((vals, (rows, cols)), shape=(n, n))
-    if boundary_diagonal is not None:
-        a = a + sp.diags(np.asarray(boundary_diagonal))
-    return a.tocsr()
+
+    owner: np.ndarray
+    nb: np.ndarray
+    coefficient: np.ndarray
+    n: int
+    flux: np.ndarray | None = dataclasses.field(default=None, kw_only=True)
+    boundary_diagonal: np.ndarray | None = dataclasses.field(default=None, kw_only=True)
+
+    def __post_init__(self) -> None:
+        require_valid_graph(self.n, self.owner, self.nb, type(self).__name__)
+        set_field = object.__setattr__  # the dataclass is frozen; normalize once, here
+        set_field(self, "owner", np.asarray(self.owner))
+        set_field(self, "nb", np.asarray(self.nb))
+        for name, shape in (
+            ("coefficient", self.owner.shape),
+            ("flux", self.owner.shape),
+            ("boundary_diagonal", (self.n,)),
+        ):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            value = np.asarray(value)
+            try:  # a scalar is a uniform value; an array of the wrong length is refused
+                value = np.broadcast_to(value, shape).copy()
+            except ValueError:
+                raise ValueError(
+                    f"{type(self).__name__}: {name} must have shape {shape}, got {value.shape}."
+                ) from None
+            set_field(self, name, value)
+
+    def assemble(self) -> sp.csr_matrix:
+        """The assembled operator ``A`` as a scipy compressed-sparse-row (CSR) matrix.
+
+        Returns
+        -------
+        scipy.sparse.csr_matrix
+            The operator, shape ``(n, n)``.
+        """
+        o, m, c = self.owner, self.nb, self.coefficient
+        f = np.zeros_like(c) if self.flux is None else self.flux
+        up_out = np.maximum(f, 0.0)  # outflow leaves the owner: owner value is upwind
+        up_in = np.maximum(-f, 0.0)  # inflow enters the owner: neighbour value is upwind
+        rows = np.concatenate([o, m, o, m])
+        cols = np.concatenate([m, o, o, m])
+        vals = np.concatenate([-(c + up_in), -(c + up_out), c + up_out, c + up_in])
+        a = sp.csr_matrix((vals, (rows, cols)), shape=(self.n, self.n))
+        if self.boundary_diagonal is not None:
+            a = a + sp.diags(self.boundary_diagonal)
+        return a.tocsr()
+
+    def diagonal_parts(self) -> tuple[np.ndarray, np.ndarray]:
+        """The diagonal of ``A`` split into its convective and dissipative parts, per cell.
+
+        ``convective`` is the first-order-upwind outflow -- ``max(flux, 0)`` at the owner and
+        ``max(-flux, 0)`` at the neighbour, zero without a flux. ``dissipative`` is the diffusive
+        coefficient on both incident cells plus the boundary diagonal. Their sum is the diagonal of
+        :meth:`assemble`, computed without assembling it -- the split a pseudo-time shift weights.
+
+        Returns
+        -------
+        tuple of np.ndarray
+            ``(convective, dissipative)``, each shape ``(n,)``.
+        """
+        dissipative = (
+            np.zeros(self.n) if self.boundary_diagonal is None else self.boundary_diagonal.copy()
+        )
+        np.add.at(dissipative, self.owner, self.coefficient)
+        np.add.at(dissipative, self.nb, self.coefficient)
+        convective = np.zeros(self.n)
+        if self.flux is not None:
+            np.add.at(convective, self.owner, np.maximum(self.flux, 0.0))
+            np.add.at(convective, self.nb, np.maximum(-self.flux, 0.0))
+        return convective, dissipative
+
+    def detached(self, cells: np.ndarray) -> ConvectionDiffusionStencil:
+        """This stencil with ``cells`` detached from the graph: their edges dropped, a unit diagonal.
+
+        For cells whose equation is a value fixation rather than a transport balance: their rows become
+        the identity, and since every edge incident to them is dropped, their neighbours also lose that
+        edge's diagonal contribution -- so an aggregation sees each such cell as an isolated singleton.
+        That is what distinguishes it from :func:`decouple_dof`, which zeroes the row and column of an
+        *assembled* operator and leaves the neighbours' diagonals as they were.
+
+        Parameters
+        ----------
+        cells : np.ndarray
+            Integer indices of the cells to detach, shape ``(n_detached,)``.
+
+        Returns
+        -------
+        ConvectionDiffusionStencil
+            The detached stencil; this one is unchanged.
+        """
+        is_detached = np.zeros(self.n, dtype=bool)
+        is_detached[np.asarray(cells)] = True
+        keep = ~(is_detached[self.owner] | is_detached[self.nb])
+        diagonal = (
+            np.zeros(self.n) if self.boundary_diagonal is None else self.boundary_diagonal.copy()
+        )
+        diagonal[is_detached] = 1.0
+        return ConvectionDiffusionStencil(
+            self.owner[keep],
+            self.nb[keep],
+            self.coefficient[keep],
+            self.n,
+            flux=None if self.flux is None else self.flux[keep],
+            boundary_diagonal=diagonal,
+        )
 
 
 def decouple_dof(a: sp.csr_matrix, index: int) -> sp.csr_matrix:
