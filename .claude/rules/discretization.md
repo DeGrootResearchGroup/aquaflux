@@ -40,12 +40,38 @@ Principles.
   self-describing about its inputs (what a declarative/DSL assembler consumes). The old fixed
   `FaceState` union-of-all-operators bundle + free `gather_face_state` are **deleted** — do not
   reintroduce a god-bundle that every operator must agree on.
-  **"Self-describing" is now checked, not only asserted (issue #280 steps 2+3).**
-  `FaceFluxOperator`/`VolumeSource` carry `requires() -> tuple[str, ...]` (named properties,
-  default `()`) and `FaceFluxOperator`/`AdvectionScheme` carry `uses_gradient() -> bool` (default
-  `False`); `ResidualAssembler.build` validates both — `properties.require(*names)` over every
-  operator's `requires()`, and refuses `gradient_scheme=None` when any flux operator's
-  `uses_gradient()` is `True`. ⚠️ **`gradient_scheme=None` means NO reconstruction here and keeps
+  **"Self-describing" is now checked, not only asserted (#280 steps 2+3; one shared contract since
+  #362, 2026-10-09).** `requires() -> tuple[str, ...]` (named properties, default `()`) and
+  `uses_gradient() -> bool` (default `False`) live **once**, on `term.py::DeclaredInputs`, which
+  **every** term family inherits: `FaceFluxOperator`, `AdvectionScheme`, `VolumeSource`,
+  `TransientTerm` and the flow's `MomentumSource`. Before #362 each family carried the subset it
+  happened to need (sources had no `uses_gradient`, schemes no `requires`, transient and momentum
+  sources neither). `AdvectionFlux` delegates **both** to its scheme. `ResidualAssembler.build`
+  validates both over **every term it holds — fluxes, sources and the transient** (it was flux-only
+  for `uses_gradient` until #362): `properties.require(*declared_properties(terms))`, and refuses
+  `gradient_scheme=None` when any term's `uses_gradient()` is `True`, naming the term class.
+  `declared_properties` is the one union helper, also called by `MomentumContinuity.build`.
+  - **What `uses_gradient()` means, precisely: on an orthogonal grid, does replacing the gradient by
+    zero change the answer?** Not "reads `context.gradient`" — `DiffusionFlux` reads it and answers
+    `False`. That definition is what makes it testable both ways.
+  - **Declarations are falsified, not trusted — `tests/unit/test_declared_inputs.py`.** It imports
+    the whole package, requires a case in `CASES` for **every concrete `DeclaredInputs` subclass**
+    (a new term without one fails the fast gate; a stale case fails too), and per term checks:
+    evaluates finitely against **exactly** its declared properties (an undeclared read is a
+    `KeyError`); each declared property **NaN-poisoned** makes the answer non-finite (a stale
+    declaration stays finite — NaN, not zero, because a silent zero is the defect being guarded);
+    and `uses_gradient()` equals "a zero gradient changes the answer on an orthogonal grid".
+    Mutation-checked 2026-10-09: emptying `DiffusionFlux.requires`, flipping `LimitedUpwind`'s or
+    `DiffusionFlux`'s `uses_gradient`, and adding a stale `requires` to `UniformBodyForce` each fail
+    it; the assembler-level sweeps (sources, transient, `AdvectionFlux`'s `requires` delegation) are
+    pinned in `test_residual_assembler_validation.py`, each mutation-checked the same way.
+  - ⚠️ **No shipped `VolumeSource` reads `context.gradient`** — the SST sources take their strain
+    rate and `grad k`/`grad ω` as frozen constructor fields — so the widened source sweep has no
+    shipped term to refuse yet. It exists so the first one that does is caught.
+  - **`TransientTerm` declares nothing because it reads nothing** — and it has no accumulation
+    coefficient at all, so `ρ c_p dT/dt` / `d(εRC)/dt` cannot be written (#655). When that lands, its
+    coefficient is a named property declared through `requires()`, and `build` already checks it.
+  ⚠️ **`gradient_scheme=None` means NO reconstruction here and keeps
   meaning that (#361, 2026-09-16)** — it is a checked state, and the right one for pure diffusion on
   an orthogonal mesh, so this builder (and `ScalarTransport.build`) deliberately did **not** take the
   library default that `MomentumContinuity.build`/`SSTTurbulence.build` now carry. One sentinel, one

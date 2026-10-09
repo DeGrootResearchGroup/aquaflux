@@ -41,6 +41,7 @@ from aquaflux.discretization import (
     DiffusionFlux,
     FaceFluxOperator,
     FixedValueCells,
+    declared_properties,
 )
 from aquaflux.properties import PropertyModel
 from aquaflux.schemes import DEFAULT_GRADIENT_SCHEME, BoundaryClosure, BoundaryLinearization
@@ -284,7 +285,7 @@ class MomentumContinuity(eqx.Module):
         ``boundary`` is a :class:`~aquaflux.boundary.BoundaryConditions` collection of per-patch
         flow closures (``BoundaryConditions({name: FlowBoundary})``), bound to ``mesh.face_patches``
         internally. ``properties`` must supply ``"viscosity"`` and ``"density"``, and every property a
-        source names in its :meth:`~aquaflux.flow.MomentumSource.requires`.
+        source names in its :meth:`~aquaflux.discretization.DeclaredInputs.requires`.
         ``gradient_scheme`` reconstructs the velocity and pressure gradients this residual cannot do
         without; omitting it takes :data:`~aquaflux.schemes.DEFAULT_GRADIENT_SCHEME`, which is where
         that choice is written down. Whatever it ends up being is carried on the built assembler, so
@@ -316,7 +317,7 @@ class MomentumContinuity(eqx.Module):
         :class:`~aquaflux.flow.MassFlow` solve, which needs a leaf of its own to write each iterate
         into and a border column ``dR/dbeta = −V`` a source cannot supply.
         """
-        needed = {"viscosity", "density"} | {n for source in sources for n in source.requires()}
+        needed = {"viscosity", "density"} | declared_properties(sources)
         properties.require(*sorted(needed))
         refuse_a_closure_that_closes_other_fields(boundary, FLOW_FIELDS, "MomentumContinuity.build")
         refuse_an_unsuitable_pressure_datum(boundary, pressure_datum, "MomentumContinuity.build")

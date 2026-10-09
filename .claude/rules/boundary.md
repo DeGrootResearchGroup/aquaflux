@@ -79,7 +79,7 @@ absorbed form becomes a linearization of it.
   - An object declaring **nothing** is refused too, not skipped: skipping is how a bare value reaches
     `apply` and gets folded into the residual as whatever it happens to be.
 - **`BoundaryCondition.requires_coefficient() -> bool` (binding, #360), the same self-describing
-  shape as `FaceFluxOperator.requires()`.** Default `False`; `Neumann` and `Convective` override to
+  shape as `DeclaredInputs.requires()`** (the term contract every flux/source/scheme/transient family inherits, #362). Default `False`; `Neumann` and `Convective` override to
   `True` because they read the assembler's diffusion coefficient as `gamma_owner` in their closed
   forms (`Dirichlet`/`DirichletField`/`ZeroGradient` never touch it). `ResidualAssembler.build`
   checks this over every closure in the `boundary` set and, if any is `True`, adds the assembler's
