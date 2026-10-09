@@ -33,6 +33,7 @@ __all__ = [
     "remove_at",
     "set_kind",
     "set_value",
+    "setting",
     "unset",
     "without_unread",
 ]
@@ -561,6 +562,42 @@ def field_at(schema: CaseSchema, document: Mapping, path: Sequence) -> dict | No
         node = node.get(step) if isinstance(node, Mapping) else None
         kind = _resolved_kind(node, field["accepts"], _default(field))
     return field
+
+
+def setting(schema: CaseSchema, document: Mapping, path: Sequence[str]) -> object:
+    """The value a case runs with at ``path``: the one it states, else the default it takes.
+
+    Each value on the way that the document leaves unset is its default, so a setting inside an unset
+    section is the section default's -- unless the section is one whose unset means off, in which case
+    nothing inside it applies.
+
+    Parameters
+    ----------
+    schema : CaseSchema
+        The case-file schema.
+    document : mapping
+        The case file's content.
+    path : sequence of str
+        Field names from the top of the file, ``("solver", "dual_time", "inner_steps")``.
+
+    Returns
+    -------
+    object
+        The value, or ``None`` when it is off, not set with no stated default, or not a setting the
+        schema describes.
+    """
+    node: object = document
+    for depth, step in enumerate(path):
+        field = field_at(schema, document, path[: depth + 1])
+        if field is None:
+            return None
+        value = node.get(step) if isinstance(node, Mapping) else None
+        if value is None:
+            if field.get("off"):
+                return None
+            value = _default(field)
+        node = value
+    return node
 
 
 def _resolved_kind(node: object, accepts: Sequence[dict], default: object) -> str | None:

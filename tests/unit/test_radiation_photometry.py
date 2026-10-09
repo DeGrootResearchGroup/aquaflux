@@ -447,6 +447,58 @@ def test_the_fluence_rate_is_differentiable_in_the_table(b1):
     )
 
 
+def test_a_receiver_on_a_facet_s_axis_has_a_finite_position_gradient(b1):
+    """Straight below a ceiling lamp is a standard receiver, and on a facet's axis ``h`` is
+    ``arctan2(0, 0)``: zero in value, ``0/0`` in its derivative.
+
+    The field there has a kink -- a bilinear table in the two polar angles is a cone at the pole --
+    so the only derivative that exists on the axis is the one ALONG it, which is what is compared
+    with a finite difference: the receiver moved along the axis, and the window moved along its
+    normal. Every other component must merely be finite. Off the axis the whole gradient is checked.
+    """
+    profile = read_ies(b1).profile(up=(1.0, 0.0, 0.0))
+    triangles = _window(0.05)
+    surfaces = Surfaces.from_triangles(triangles, emission=1000.0, profiles=(profile,))
+    on_axis = np.asarray(surfaces.centroid)[0] + [0.0, 0.0, -0.4]
+
+    def fluence(vertices, point):
+        return direct_fluence_rate(surfaces.with_geometry(vertices), point[None])[0]
+
+    def derivative_along(vertex_step, point_step, point):
+        step = 1e-6
+        ahead = fluence(
+            jnp.asarray(triangles + step * vertex_step), jnp.asarray(point + step * point_step)
+        )
+        behind = fluence(
+            jnp.asarray(triangles - step * vertex_step), jnp.asarray(point - step * point_step)
+        )
+        return (float(ahead) - float(behind)) / (2 * step)
+
+    gradients = jax.grad(fluence, argnums=(0, 1))(jnp.asarray(triangles), jnp.asarray(on_axis))
+    for gradient in gradients:
+        assert bool(jnp.all(jnp.isfinite(gradient)))
+    down = np.array([0.0, 0.0, -1.0])
+    no_move = np.zeros_like(triangles)
+    assert float(gradients[1] @ down) == pytest.approx(
+        derivative_along(no_move, down, on_axis), rel=1e-6
+    )
+    lowered = np.broadcast_to(down, triangles.shape)
+    assert float(jnp.sum(gradients[0] * lowered)) == pytest.approx(
+        derivative_along(lowered, np.zeros(3), on_axis), rel=1e-6
+    )
+
+    off_axis = on_axis + np.array([0.07, -0.04, 0.0])
+    rng = np.random.default_rng(11)
+    along_vertices, along_point = rng.normal(size=triangles.shape), rng.normal(size=3)
+    vertex_gradient, point_gradient = jax.grad(fluence, argnums=(0, 1))(
+        jnp.asarray(triangles), jnp.asarray(off_axis)
+    )
+    measured = float(jnp.sum(vertex_gradient * along_vertices) + point_gradient @ along_point)
+    assert measured == pytest.approx(
+        derivative_along(along_vertices, along_point, off_axis), rel=1e-6
+    )
+
+
 def test_a_mirror_image_sends_along_each_reflected_direction_what_the_source_sends_along_it(b1):
     """What an image source must do for a specular bounce to be gathered as a direct one.
 

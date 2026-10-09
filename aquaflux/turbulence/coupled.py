@@ -33,7 +33,7 @@ import abc
 import dataclasses
 import inspect
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING
 
 import equinox as eqx
@@ -46,7 +46,6 @@ from aquaflux.discretization import DifferenceRow, FixationRow, LogRatioRow
 from aquaflux.flow import (
     BlockPreconditioner,
     ConvectionTwoLevel,
-    flow_row_scales,
     frozen_momentum_diagonal_parts,
 )
 
@@ -92,6 +91,7 @@ from aquaflux.solve import (
     RefreshPolicy,
     RefreshTiming,
     ResidualHomotopy,
+    Resumption,
     RetryPolicy,
     RootSolver,
     RowScaled,
@@ -121,6 +121,7 @@ from aquaflux.solve import (
 
 from .initialization import wall_consistent_omega
 from .march_settings import CoupledShiftSettings
+from .measures import coupled_scaled_norm
 from .preconditioner import (
     ScalarBlock,
     ScalarTransportPreconditioner,
@@ -1445,98 +1446,6 @@ def _k_positivity_guards(
     return step_limit, step_projection
 
 
-def coupled_scaled_norm(
-    coupled: CoupledRANS,
-    shift_policy: CoupledShiftPolicy,
-    state: jnp.ndarray,
-) -> RowScaledNorm:
-    """Build the row-equilibrated residual measure for the coupled state at ``state``.
-
-    Assembles the two scales :class:`~aquaflux.solve.RowScaledNorm` needs, per block of the coupled
-    layout ``[vel_0..vel_{dim-1}, pressure, k, omega]``:
-
-    * **Row scale** -- each row's own diagonal coefficient, taken from the pseudo-transient shift's
-      base diagonal, which is exactly that quantity per block (the momentum ``a_P`` on velocity, the
-      transport diagonal on ``k`` and ``omega``) and so cannot drift from it. ⚠️ **The base diagonal,
-      not the shift** -- the strength ``beta`` and any per-block multiplier on it
-      (:attr:`CoupledShiftPolicy.turbulence_damping`) are solver settings, and folding one into the row
-      scale would divide that block's reported residual by it: the march would be steered, stopped and
-      compared on a measure that moves with its own damping, so two damping settings could not be
-      compared at all. Two rows are not covered by the diagonal and are supplied here:
-
-      - **Continuity carries no diagonal** -- it is a constraint, so the shift leaves it at zero. Its
-        residual is a mass imbalance, and the natural scale of the same units is the cell's mass
-        throughput ``sum_f max(mdot_f, 0)``. Dividing by it needs no pressure difference, so it stays
-        well posed on a periodic or closed domain where a pressure scale degenerates.
-      - **The near-wall fixed ``omega`` rows** hold an algebraic constraint rather than a balance, and
-        the shift zeroes them. Their derivative comes from the row itself
-        (:meth:`~aquaflux.discretization.FixationRow.jacobian_scale`) -- one, for a fixation written in
-        the solved variable -- so they pass through unscaled rather than being divided by a
-        neighbouring transport row's diagonal, which would misreport them by orders of magnitude.
-
-    * **Field scale** -- ``mean(phi / (dphi/dw))``, which turns the stage-1 quotient (a change in the
-      *solved* unknown) into a fractional change in the *physical* field. For a directly-solved field
-      this is the familiar ``mean|phi|``; for a log-solved one ``dphi/dw = phi``, so the scale is
-      exactly **one** -- a change in ``log phi`` already *is* a fractional change, and dividing by
-      ``mean|phi|`` a second time would be wrong. Continuity likewise takes one, being dimensionless
-      after stage 1.
-
-    Parameters
-    ----------
-    coupled : CoupledRANS
-        The coupled assembler, for the layout and the physical fields.
-    shift_policy : ShiftPolicy
-        Any policy whose base shift diagonal supplies the per-row diagonals -- the block
-        :class:`CoupledShiftPolicy`, or a :class:`MonolithicFactorShiftPolicy` wrapping one.
-    state : jnp.ndarray
-        The coupled state the scales are measured at, shape ``((dim + 3) n_cells,)``.
-
-    Returns
-    -------
-    RowScaledNorm
-        The measure, with its scales frozen at ``state``. Only the block ``sizes`` are static, so the
-        scales ride as ordinary array leaves and **re-deriving the measure at a new state is a
-        compilation cache hit** -- the block structure is unchanged, only the numbers move. Rebuild it
-        every outer iteration, and hold it fixed across a line search (otherwise a candidate could be
-        preferred for shrinking its own denominator rather than its residual).
-    """
-    layout = coupled.layout
-    n, dim = layout.n_cells, coupled.momentum.mesh.dim
-    tiny = 1e-300
-
-    diagonal = jax.lax.stop_gradient(shift_policy.shift_term(state).diagonal)
-    flow_diag, k_diag, omega_diag = layout.unpack(diagonal)
-
-    flow, k, omega = coupled.physical_fields(state)
-    flow_row_scale, flow_field_scale = flow_row_scales(coupled.momentum, flow_diag, flow)
-
-    k_chain = coupled.k_transform.jacobian_scale(k)
-    omega_chain = coupled.omega_transform.jacobian_scale(omega)
-    # A zeroed shift entry marks a row the shift does not own -- the fixed near-wall omega cells. Ask
-    # the fixation row for its own derivative there instead of borrowing a transport row's.
-    omega_fixed = coupled.omega_transform.fixation_row().jacobian_scale(omega, omega_chain)
-    omega_rows = jnp.where(omega_diag > 0.0, omega_diag, omega_fixed)
-    k_rows = jnp.where(
-        k_diag > 0.0, k_diag, coupled.k_transform.fixation_row().jacobian_scale(k, k_chain)
-    )
-
-    row_scale = layout.pack(flow_row_scale, jnp.abs(k_rows) + tiny, jnp.abs(omega_rows) + tiny)
-    field_scale = jnp.concatenate(
-        [
-            flow_field_scale,
-            # phi / (dphi/dw) converts a change in the solved unknown into a fractional change in the
-            # physical field: mean|phi| for a directly-solved field, exactly one for a log-solved one.
-            jnp.mean(jnp.abs(k) / jnp.maximum(k_chain, tiny))[None],
-            jnp.mean(jnp.abs(omega) / jnp.maximum(omega_chain, tiny))[None],
-        ]
-    )
-    return RowScaledNorm(
-        sizes=(n,) * (dim + 3),
-        row_scale=jax.lax.stop_gradient(row_scale),
-        field_scale=jax.lax.stop_gradient(field_scale),
-    )
-
-
 def _coupled_shift_policy(
     coupled: CoupledRANS,
     reference_state: jnp.ndarray,
@@ -2707,6 +2616,8 @@ def solve_coupled(
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
+    resume: Resumption | None = None,
+    on_residuals: Callable[[Mapping[str, float]], None] | None = None,
     **strategy_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system ``R(u, p, k, omega) = 0`` by one monolithic Newton march.
@@ -2872,9 +2783,8 @@ def solve_coupled(
         :func:`~aquaflux.solve.newton_march`: called before a step is redone, with why. A log without it
         shows a step's work twice and never says what triggered the redo.
     homotopy : ResidualHomotopy, optional
-        Walk a sequence of related problems within this one march, ending at the target (see
-        :func:`~aquaflux.solve.newton_march`). The solve converges only once the homotopy has arrived:
-        a converged intermediate station is not an answer.
+        Walk related problems within this one march, ending at the target (see
+        :func:`~aquaflux.solve.newton_march`); it converges only once the homotopy has arrived.
     station_step : callable, optional
         ``(step, station, arrived) -> step``, forwarded to
         :func:`~aquaflux.solve.newton_march`: reshape the Newton step for the continuation station it
@@ -2884,6 +2794,11 @@ def solve_coupled(
         reached, and no signal a shift policy can read for itself distinguishes those. It reshapes the
         path, not the root, and ``None`` (the default) is byte-identical.
         ⚠️ It must swap **array** leaves over a fixed structure or every station recompiles the solve.
+    resume : Resumption or None
+        The interrupted march this one resumes; see :func:`~aquaflux.solve.staged_march`.
+    on_residuals : callable, optional
+        Forwarded to :func:`~aquaflux.solve.newton_march`; named by :func:`coupled_equation_names`
+        under the default row-scaled measure, and not called under the block-scaled one.
     **strategy_kwargs
         The march settings of :func:`coupled_step` (``dual_time``, ``positivity_floor``, ``linear_solve``,
         ...), handed to every build and refresh of the internally-built continuation; an unknown
@@ -2967,6 +2882,8 @@ def solve_coupled(
         on_retry=on_retry,
         homotopy=homotopy,
         station_step=station_step,
+        resume=resume,
+        on_residuals=on_residuals,
         caller="solve_coupled",
     )
     root = _reject_a_root_the_frozen_cap_invalidates(frozen, staged.state)
@@ -3097,14 +3014,11 @@ def mass_flow_coupled_continuation(
             f"must be a BlockDiagonal, not {type(preconditioner).__name__}: a materialized Jacobian "
             "has no constraint row for the bordered solve to eliminate."
         )
-    # Checked before any preconditioner is fitted: a misconfigured floor is a caller mistake, not a
-    # reason to pay for a build that the raise below would then discard.
+    # Checked before a preconditioner is fitted: a misconfigured floor should not cost a build.
     step_limit, step_projection = _k_positivity_guards(
         coupled, positivity_floor, positivity_projection
     )
-    # No `reuse` here: the mass-flow-constrained path has no staged-refresh driver (there is no
-    # a refresh on `solve_coupled_mass_flow`), so a policy is always built from scratch. Thread
-    # `reuse` through if that driver is ever added -- the bordered policy wraps this one unchanged.
+    # No `reuse`: this path has no staged-refresh driver, so the policy is always built from scratch.
     policy = _coupled_shift_policy(
         coupled,
         reference_state,
@@ -3180,6 +3094,7 @@ def solve_coupled_mass_flow(
     max_steps: int = 60,
     convergence: Convergence | None = None,
     adjoint_solver: lx.AbstractLinearSolver | None = None,
+    resume: Resumption | None = None,
     **strategy_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system holding the bulk velocity at ``target``, in one monolithic Newton.
@@ -3195,8 +3110,7 @@ def solve_coupled_mass_flow(
     construction**, and (the point of putting the constraint *in* the coupled residual) the coupled
     implicit-function-theorem adjoint carries it: ``jax.grad`` through the converged constrained solve is
     the exact sensitivity of the whole turbulent flow at fixed bulk velocity. The forward solve is
-    monolithic here, but the same bordered residual is what a *segregated* forward loop would need its
-    coupled adjoint to transpose (segregated forward, coupled adjoint).
+    monolithic here; a segregated forward loop would need this bordered residual for its adjoint.
 
     What is held, along which axis, and the ``beta`` the march starts from are ``coupled.momentum``'s
     own :class:`~aquaflux.flow.MassFlow` drive -- the same value the residual writes each iterate into,
@@ -3215,6 +3129,8 @@ def solve_coupled_mass_flow(
     preconditioner : BlockDiagonal or None
         The block-diagonal preconditioner the constrained step is built with; ``None`` takes
         ``BlockDiagonal()``. See :func:`mass_flow_coupled_continuation` for why no other family applies.
+    resume : Resumption or None
+        The interrupted march this one resumes; see :meth:`~aquaflux.solve.RootSolver.solve`.
 
     Returns
     -------
@@ -3269,15 +3185,12 @@ def solve_coupled_mass_flow(
         measures=_MassFlowMeasures(stop_array_gradients(coupled)),
         max_steps=max_steps,
         strategy=strategy,
-        # Exposed for the same reason `solve_coupled` exposes it, and this path needs it more: the
-        # transpose solve here runs at zero shift against a block-diagonal preconditioner, which is
-        # where that preconditioner is weakest, and the default solver's stagnation detector sits close
-        # enough to the edge that a perturbation of the warm state in the last few bits decides whether
-        # it fires. `None` keeps `RootSolver`'s own default.
+        # Exposed as `solve_coupled` exposes it, and this path needs it more: the zero-shift transpose
+        # solve is where the block-diagonal preconditioner is weakest. `None` keeps the default.
         **({} if adjoint_solver is None else {"adjoint_solver": adjoint_solver}),
     )
 
-    solved = solver.solve(_MassFlowConstrainedResidual(drive), augmented0, coupled)
+    solved = solver.solve(_MassFlowConstrainedResidual(drive), augmented0, coupled, resume=resume)
     fields, beta = drive.split(coupled.layout, solved)
     flow_s, k_s, omega_s = coupled.physical_fields(fields)
     return flow_s, k_s, omega_s, beta

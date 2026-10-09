@@ -30,10 +30,11 @@ family contributes only its ops:
 
 Every builder takes an **assembled operator** ``a`` (a ``scipy.sparse`` matrix) and returns a frozen
 hierarchy: this module coarsens operators and knows nothing about meshes, fluxes, or which face value
-a scheme upwinds. Callers assemble with :func:`aquaflux.solve.frozen_operator.convection_diffusion_operator`
-(and regularize a closed-domain pressure system with
-:func:`aquaflux.solve.frozen_operator.decouple_dof` before building, so the AMG null space matches the
-pinned outer Jacobian; the pin only affects preconditioner quality, never the converged solution).
+a scheme upwinds. Callers assemble with
+:meth:`aquaflux.solve.frozen_operator.ConvectionDiffusionStencil.assemble` (and regularize a
+closed-domain pressure system with :func:`aquaflux.solve.frozen_operator.decouple_dof` before
+building, so the AMG null space matches the pinned outer Jacobian; the pin only affects
+preconditioner quality, never the converged solution).
 
 The coefficients are frozen at a reference field at build time (the standard "AMG setup once, reuse
 across nonlinear iterates" practice), with the per-iterate operator scale restored by a symmetric

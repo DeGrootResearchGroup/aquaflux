@@ -8,6 +8,7 @@ preconditioner), plus the degenerate-mesh build guards.
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 
 import aquaflux  # noqa: F401  (enables x64)
@@ -18,7 +19,7 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 from aquaflux.mesh import structured_grid_2d
-from aquaflux.solve.frozen_operator import convection_diffusion_operator, decouple_dof
+from aquaflux.solve.frozen_operator import ConvectionDiffusionStencil, decouple_dof
 from aquaflux.solve.multigrid import (
     _cell_graph,
     _chebyshev_smooth,
@@ -78,7 +79,7 @@ def _pinned_v_cycle_factor(owner, nb, ncell, pin, *, seed=0):
     ordering-invariance checks.
     """
     a_pinned = decouple_dof(
-        convection_diffusion_operator(owner, nb, np.ones(len(owner)), ncell), pin
+        ConvectionDiffusionStencil(owner, nb, np.ones(len(owner)), ncell).assemble(), pin
     )
     hierarchy = build_smoothed_hierarchy(a_pinned)
     a = _dense_laplacian(owner, nb, ncell)
@@ -102,7 +103,7 @@ def _smoothed_residual_factor(n):
     """Geometric-mean V-cycle residual factor of the smoothed hierarchy on a singular Poisson."""
     owner, nb, ncell = _poisson(n)
     hierarchy = build_smoothed_hierarchy(
-        convection_diffusion_operator(owner, nb, np.ones(owner.shape[0]), ncell)
+        ConvectionDiffusionStencil(owner, nb, np.ones(owner.shape[0]), ncell).assemble()
     )
     o, m = jnp.asarray(owner), jnp.asarray(nb)
 
@@ -160,7 +161,9 @@ def test_smoothed_multigrid_is_linear_in_rhs() -> None:
     """A fixed cycle count makes the smoothed V-cycle a constant linear operator."""
     owner, nb, ncell = _poisson(8)
     hierarchy = build_smoothed_hierarchy(
-        decouple_dof(convection_diffusion_operator(owner, nb, np.ones(owner.shape[0]), ncell), 0)
+        decouple_dof(
+            ConvectionDiffusionStencil(owner, nb, np.ones(owner.shape[0]), ncell).assemble(), 0
+        )
     )
     rng = np.random.default_rng(1)
     r1 = jnp.asarray(rng.standard_normal(ncell))
@@ -192,9 +195,9 @@ def _anisotropic_poisson(nx: int, ny: int, aspect_ratio: float) -> sp.csr_matrix
                 bd[c] += 2 * cx
             if j in (0, ny - 1):
                 bd[c] += 2 * cy
-    return convection_diffusion_operator(
+    return ConvectionDiffusionStencil(
         np.asarray(owner), np.asarray(nb), np.asarray(coeff, float), nx * ny, boundary_diagonal=bd
-    )
+    ).assemble()
 
 
 def test_strength_of_connection_aggregation_fixes_an_anisotropic_operator() -> None:
@@ -361,7 +364,7 @@ def test_sparse_level_inv_diagonal_matches_the_reciprocal_diagonal() -> None:
     """``inv_diagonal`` is exactly ``1.0 / diagonal``, derived once at construction."""
     owner, nb, ncell = _poisson(8)
     hierarchy = build_smoothed_hierarchy(
-        convection_diffusion_operator(owner, nb, np.ones(owner.shape[0]), ncell)
+        ConvectionDiffusionStencil(owner, nb, np.ones(owner.shape[0]), ncell).assemble()
     )
     for level in hierarchy.levels:
         np.testing.assert_array_equal(
@@ -371,8 +374,8 @@ def test_sparse_level_inv_diagonal_matches_the_reciprocal_diagonal() -> None:
 
 def test_air_level_inv_diagonal_matches_the_reciprocal_diagonal() -> None:
     """The lAIR level carries the same derived reciprocal, for the FC-Jacobi smoother."""
-    owner, nb, visc, mdot, n, bd = _convective_grid(8, mu=1e-2, speed=1.0)
-    hierarchy = build_air_hierarchy(_operator(owner, nb, visc, mdot, n, bd))
+    stencil = _convective_grid(8, mu=1e-2, speed=1.0)
+    hierarchy = build_air_hierarchy(stencil.assemble())
     for level in hierarchy.levels:
         np.testing.assert_array_equal(
             np.asarray(level.inv_diagonal), np.asarray(1.0 / level.diagonal)
@@ -393,7 +396,7 @@ def test_smoother_bodies_never_close_over_the_raw_diagonal() -> None:
     """
     owner, nb, ncell = _poisson(6)
     smoothed = build_smoothed_hierarchy(
-        convection_diffusion_operator(owner, nb, np.ones(owner.shape[0]), ncell)
+        ConvectionDiffusionStencil(owner, nb, np.ones(owner.shape[0]), ncell).assemble()
     )
     fine = smoothed.levels[0]
     b, x = jnp.zeros(fine.n), jnp.ones(fine.n)
@@ -410,8 +413,8 @@ def test_smoother_bodies_never_close_over_the_raw_diagonal() -> None:
         assert not any(c is fine.diagonal for c in consts), f"{name} closes over the raw diagonal"
         assert any(c is fine.inv_diagonal for c in consts), f"{name} does not read inv_diagonal"
 
-    o, nb2, visc, mdot, n, bd = _convective_grid(6, mu=1e-2, speed=1.0)
-    air = build_air_hierarchy(_operator(o, nb2, visc, mdot, n, bd))
+    stencil = _convective_grid(6, mu=1e-2, speed=1.0)
+    air = build_air_hierarchy(stencil.assemble())
     air_fine = air.levels[0]
     b2, x2 = jnp.zeros(air_fine.n), jnp.ones(air_fine.n)
     fc_jacobi_jaxpr = jax.make_jaxpr(lambda b, x: _fc_jacobi(air_fine, b, x, 2, 2, 0.8))(b2, x2)
@@ -426,9 +429,9 @@ def test_smoother_bodies_never_close_over_the_raw_diagonal() -> None:
 def _convective_grid(n, mu, speed):
     """Interior edges of an ``n x n`` grid with a uniform streamwise mass flux (strong convection).
 
-    Returns ``(owner, nb, viscous, mdot, n_cells, boundary_diagonal)`` for a convection-diffusion
-    operator whose x-faces carry the flux ``speed / n`` (cell Peclet ``speed / (n mu)``) and whose
-    boundary diagonal makes it a nonsingular M-matrix (Dirichlet on all sides, outflow at the right).
+    Returns the stencil of a convection-diffusion operator whose x-faces carry the flux ``speed / n``
+    (cell Peclet ``speed / (n mu)``) and whose boundary diagonal makes it a nonsingular M-matrix
+    (Dirichlet on all sides, outflow at the right).
     """
     mesh = structured_grid_2d(n, n)
     owner = np.asarray(mesh.face_cells.owner)
@@ -450,28 +453,23 @@ def _convective_grid(n, mu, speed):
     )
     bd[on_border] += mu
     bd[coords[:, 0] > 1 - h] += speed * h  # outflow leaves the owner at the right boundary
-    return o, m, viscous, mdot, ncell, bd
+    return ConvectionDiffusionStencil(o, m, viscous, ncell, flux=mdot, boundary_diagonal=bd)
 
 
-def _operator(owner, nb, visc, mdot, n, bd):
-    """The assembled frozen convection-diffusion operator (flow-side builder), as a scipy CSR matrix."""
-    return convection_diffusion_operator(owner, nb, visc, n, flux=mdot, boundary_diagonal=bd)
-
-
-def _dense(owner, nb, visc, mdot, n, bd):
-    return jnp.asarray(np.asarray(_operator(owner, nb, visc, mdot, n, bd).toarray()))
+def _dense(stencil):
+    return jnp.asarray(stencil.assemble().toarray())
 
 
 def test_convection_operator_is_a_nonsymmetric_m_matrix() -> None:
     """The convection-diffusion operator has a positive diagonal, non-positive off-diagonals, and is
     nonsymmetric exactly when there is a mass flux (symmetric viscous limit at zero flux)."""
-    owner, nb, visc, mdot, n, bd = _convective_grid(6, mu=1e-2, speed=1.0)
-    a = np.asarray(_dense(owner, nb, visc, mdot, n, bd))
+    stencil = _convective_grid(6, mu=1e-2, speed=1.0)
+    a = np.asarray(_dense(stencil))
     off = a - np.diag(np.diag(a))
     assert np.all(np.diag(a) > 0.0)
     assert np.all(off <= 1e-12)  # M-matrix: off-diagonals non-positive
     assert not np.allclose(a, a.T)  # convection makes it nonsymmetric
-    a0 = np.asarray(_dense(owner, nb, visc, np.zeros_like(mdot), n, bd))
+    a0 = np.asarray(_dense(dataclasses.replace(stencil, flux=np.zeros_like(stencil.flux))))
     assert np.allclose(a0, a0.T)  # zero flux -> symmetric viscous operator
 
 
@@ -480,9 +478,10 @@ def test_convection_v_cycle_preconditions_gmres_at_high_peclet() -> None:
     its actual role as a left preconditioner. On a fixed, small Krylov budget the preconditioned solve
     reaches a residual orders of magnitude below the unpreconditioned one, at a cell Peclet number
     where the operator is convection-dominated."""
-    owner, nb, visc, mdot, n, bd = _convective_grid(24, mu=1e-3, speed=1.0)  # cell Peclet ~40
-    hierarchy = build_convection_hierarchy(_operator(owner, nb, visc, mdot, n, bd))
-    a = _dense(owner, nb, visc, mdot, n, bd)
+    stencil = _convective_grid(24, mu=1e-3, speed=1.0)  # cell Peclet ~40
+    n = stencil.n
+    hierarchy = build_convection_hierarchy(stencil.assemble())
+    a = _dense(stencil)
     b = jnp.asarray(np.random.default_rng(0).standard_normal(n))
 
     def matvec(x):
@@ -504,8 +503,9 @@ def test_convection_v_cycle_preconditions_gmres_at_high_peclet() -> None:
 def test_convection_multigrid_is_linear_in_rhs() -> None:
     """A fixed cycle/sweep count makes the convection V-cycle a constant linear operator (so it is a
     valid frozen left preconditioner that transposes cleanly for the adjoint)."""
-    owner, nb, visc, mdot, n, bd = _convective_grid(8, mu=1e-2, speed=1.0)
-    hierarchy = build_convection_hierarchy(_operator(owner, nb, visc, mdot, n, bd))
+    stencil = _convective_grid(8, mu=1e-2, speed=1.0)
+    n = stencil.n
+    hierarchy = build_convection_hierarchy(stencil.assemble())
     rng = np.random.default_rng(1)
     r1 = jnp.asarray(rng.standard_normal(n))
     r2 = jnp.asarray(rng.standard_normal(n))
@@ -526,8 +526,9 @@ def test_convection_hierarchy_is_two_level_with_a_contractive_fine_smoother() ->
     smoothed level is the diagonally dominant M-matrix fine level, and the coarse level is solved
     directly. (Deep, mesh-independent convection coarsening is the reduction-based lAIR hierarchy.)
     """
-    owner, nb, visc, mdot, n, bd = _convective_grid(24, mu=1e-3, speed=1.0)  # cell Peclet ~40
-    hierarchy = build_convection_hierarchy(_operator(owner, nb, visc, mdot, n, bd))
+    stencil = _convective_grid(24, mu=1e-3, speed=1.0)  # cell Peclet ~40
+    n = stencil.n
+    hierarchy = build_convection_hierarchy(stencil.assemble())
     assert (
         len(hierarchy.levels) == 2
     )  # fine + one direct-solve coarse level; no smoothed coarse level
@@ -547,11 +548,10 @@ def _air_contractions(restriction_theta=None) -> list[float]:
     """Per-cycle lAIR contraction on the strongly-convective operator, at two mesh sizes."""
     contractions = []
     for n in (24, 48):  # cell Peclet ~40; a 4x change in cell count
-        owner, nb, visc, mdot, ncell, bd = _convective_grid(n, mu=1e-3, speed=1.0)
-        hierarchy = build_air_hierarchy(
-            _operator(owner, nb, visc, mdot, ncell, bd), restriction_theta=restriction_theta
-        )
-        a = _dense(owner, nb, visc, mdot, ncell, bd)
+        stencil = _convective_grid(n, mu=1e-3, speed=1.0)
+        ncell = stencil.n
+        hierarchy = build_air_hierarchy(stencil.assemble(), restriction_theta=restriction_theta)
+        a = _dense(stencil)
         b = jnp.asarray(np.random.default_rng(0).standard_normal(ncell))
         x = jnp.zeros(ncell)
         norms = [1.0]
@@ -598,8 +598,8 @@ def test_a_wider_restriction_neighbourhood_buys_accuracy_and_costs_density() -> 
     widest = _air_contractions(restriction_theta=0.0)
     assert max(widest) < 0.1 * max(default), "the wider neighbourhood is no longer more accurate"
 
-    owner, nb, visc, mdot, ncell, bd = _convective_grid(48, mu=1e-3, speed=1.0)
-    operator = _operator(owner, nb, visc, mdot, ncell, bd)
+    stencil = _convective_grid(48, mu=1e-3, speed=1.0)
+    operator = stencil.assemble()
 
     def peak_density(**kwargs):
         levels = build_air_hierarchy(operator, **kwargs).levels
@@ -614,8 +614,9 @@ def test_air_multigrid_is_linear_and_transposable() -> None:
     """A fixed cycle/sweep count makes the lAIR V-cycle a constant linear operator that transposes
     cleanly (``R != Pᵀ``), so it is a valid frozen left preconditioner for the forward solve and its
     ``M^T`` adjoint."""
-    owner, nb, visc, mdot, n, bd = _convective_grid(12, mu=1e-2, speed=1.0)
-    hierarchy = build_air_hierarchy(_operator(owner, nb, visc, mdot, n, bd))
+    stencil = _convective_grid(12, mu=1e-2, speed=1.0)
+    n = stencil.n
+    hierarchy = build_air_hierarchy(stencil.assemble())
     rng = np.random.default_rng(1)
     r1 = jnp.asarray(rng.standard_normal(n))
     r2 = jnp.asarray(rng.standard_normal(n))
@@ -804,20 +805,20 @@ def _triangle_with_isolated_cell():
 def test_assembly_rejects_empty_mesh() -> None:
     """The graph is validated where it is consumed — at assembly, before any coarsening."""
     with pytest.raises(ValueError, match="at least one cell"):
-        convection_diffusion_operator(
+        ConvectionDiffusionStencil(
             np.array([], dtype=int), np.array([], dtype=int), np.array([]), 0
-        )
+        ).assemble()
 
 
 def test_assembly_rejects_out_of_range_edge() -> None:
     with pytest.raises(ValueError, match="out of range"):
         # endpoint 5 >= n = 4
-        convection_diffusion_operator(np.array([0, 5]), np.array([1, 1]), np.ones(2), 4)
+        ConvectionDiffusionStencil(np.array([0, 5]), np.array([1, 1]), np.ones(2), 4).assemble()
 
 
 def test_assembly_rejects_mismatched_edge_arrays() -> None:
     with pytest.raises(ValueError, match="same shape"):
-        convection_diffusion_operator(np.array([0, 1]), np.array([1]), np.ones(2), 4)
+        ConvectionDiffusionStencil(np.array([0, 1]), np.array([1]), np.ones(2), 4).assemble()
 
 
 def test_isolated_cell_zero_diagonal_is_rejected_at_build() -> None:
@@ -825,7 +826,9 @@ def test_isolated_cell_zero_diagonal_is_rejected_at_build() -> None:
     bake ``1/0 = inf`` into the frozen operator and silently stall the runtime V-cycle."""
     owner, nb, n = _triangle_with_isolated_cell()
     with pytest.raises(ValueError, match="strictly positive"):
-        build_smoothed_hierarchy(convection_diffusion_operator(owner, nb, np.ones(len(owner)), n))
+        build_smoothed_hierarchy(
+            ConvectionDiffusionStencil(owner, nb, np.ones(len(owner)), n).assemble()
+        )
 
 
 def _distance_two_operator(n_side: int) -> sp.csr_matrix:
@@ -889,7 +892,14 @@ def test_air_build_rejects_isolated_cell() -> None:
     owner, nb, n = _triangle_with_isolated_cell()
     with pytest.raises(ValueError, match="strictly positive"):
         build_air_hierarchy(
-            _operator(owner, nb, np.ones(len(owner)), np.zeros(len(owner)), n, np.zeros(n))
+            ConvectionDiffusionStencil(
+                owner,
+                nb,
+                np.ones(len(owner)),
+                n,
+                flux=np.zeros(len(owner)),
+                boundary_diagonal=np.zeros(n),
+            ).assemble()
         )
 
 
@@ -899,9 +909,9 @@ def test_boundary_stiffened_cell_is_allowed() -> None:
     owner, nb, n = _triangle_with_isolated_cell()
     boundary_diagonal = np.array([0.0, 0.0, 0.0, 1.0])  # cell 3 gets a boundary stiffness
     hierarchy = build_smoothed_hierarchy(
-        convection_diffusion_operator(
+        ConvectionDiffusionStencil(
             owner, nb, np.ones(len(owner)), n, boundary_diagonal=boundary_diagonal
-        )
+        ).assemble()
     )
     assert len(hierarchy.levels) >= 1  # builds without raising
 
@@ -909,9 +919,9 @@ def test_boundary_stiffened_cell_is_allowed() -> None:
 def _chain_operator(n, flux_scale, diffusivity):
     """A 1-D chain convection-diffusion operator: same graph, caller-chosen coefficients."""
     owner, nb = np.arange(n - 1), np.arange(1, n)
-    return convection_diffusion_operator(
+    return ConvectionDiffusionStencil(
         owner, nb, diffusivity, n, flux=flux_scale * np.ones(n - 1)
-    )
+    ).assemble()
 
 
 def test_aggregation_hierarchy_structure_is_value_independent() -> None:
@@ -1151,14 +1161,14 @@ def _badly_scaled_chain(n: int) -> sp.csr_matrix:
     boundary[0] = boundary[-1] = 1.0  # both ends pinned: a chain with no boundary term is singular
     # Moderate cell Peclet, so the Galerkin coarse operator stays positive-diagonal and these tests
     # measure the rescaling rather than the separate two-level convection limit.
-    base = convection_diffusion_operator(
+    base = ConvectionDiffusionStencil(
         np.arange(n - 1),
         np.arange(1, n),
         2.0,
         n,
         flux=np.linspace(1.0, 5.0, n - 1),
         boundary_diagonal=boundary,
-    )
+    ).assemble()
     weight = sp.diags(np.exp(np.linspace(-4.0, 4.0, n)))
     return (weight @ base @ weight).tocsr()
 

@@ -77,7 +77,7 @@ cfd/                                  # repo root
 │   │       ├── records.py            #     FoamPatch / CellZone / PolyMeshData value records
 │   │       ├── foamfile.py           #     FoamFile envelope: comment strip, header dict, ASCII/binary detection; read_foam_body() is the one file->body entry
 │   │       ├── grammar.py            #     body parsers (points/faces/labels/boundary/cellZones) sharing one list envelope
-│   │       ├── fields.py             #     read a scalar field written on an imported mesh (phi, nut): parse_scalar_field (pure) + read_surface_scalar_field (faces, placed by index, ordering checked) + read_volume_scalar_field (cells)
+│   │       ├── fields.py             #     read fields written on an imported mesh: parse_scalar_field / parse_vector_field (pure) + read_surface_scalar_field (faces, placed by index, ordering checked) + read_volume_scalar_field (cells) + read_openfoam_time (a time directory's scalars and vectors, a 2D vector's dropped axis checked zero)
 │   │       ├── assembler.py          #     assemble(PolyMeshData) → Mesh: neighbour pad, n_cells, patches/zones, from_csr
 │   │       └── reader.py             #     OpenFOAMReader: file I/O; parse → assemble → collapse (empty-patch 2D)
 │   │
@@ -96,6 +96,7 @@ cfd/                                  # repo root
 │   │
 │   ├── schemes/                      # first-class swappable numerics (physics-free; one-way discretization → schemes)
 │   │   ├── gradient.py               #   GradientScheme → CompactGreenGauss, CorrectedGreenGauss (injected GradientSolve: GmresGradientSolve / SweptGradientSolve fixed-sweep; injected GradientPreconditioner: InverseVolume / CellBlockJacobi, extracted by cell_diagonal_block), HessianCorrectedGradient (separate outer + hessian_solver)
+│   │   ├── boundary_closure.py       #   BoundaryClosure: one field's boundary values as a function of (field, gradient) — the two-pass reconstruct + the jvp weight probes/linearization, shared by ResidualAssembler and MomentumContinuity
 │   │   ├── interpolation.py          #   face interpolation in one place: interpolation_factor(g), interpolate_owner_neighbour ((1-g)·a + g·b), blend_owner_neighbour (the two-field form, each side from its own field)
 │   │   └── limiter.py                #   Limiter → VenkatakrishnanLimiter (per-cell psi for bounded second-order reconstruction; held by LimitedUpwind)
 │   │
@@ -106,7 +107,7 @@ cfd/                                  # repo root
 │   ├── flow/                         # the coupled pressure–velocity (u, v[, w], p) block
 │   │   ├── state.py                  #   flow_state_layout: the flow system's named [velocity, pressure] blocks over solve/state.py's FieldLayout
 │   │   ├── momentum.py               #   MomentumContinuity: the coupled residual (each momentum component is a CellBalance over Diffusion/PressureForce/Advection; Rhie–Chow continuity; pressure pin; takes a PropertyModel → viscosity/density) + PressureForce
-│   │   ├── source.py                 #   MomentumSource (vector volume source: source/face_force/diagonal, the diagonal added to a_P) + UniformBodyForce; where buoyancy, porous drag, rotating-frame terms attach
+│   │   ├── source.py                 #   MomentumSource (vector volume source: source/face_force/diagonal, the diagonal added to a_P; requires() validated at build) + UniformBodyForce; where buoyancy, porous drag, rotating-frame terms attach
 │   │   ├── rhie_chow.py              #   interior_mass_flux + momentum_diagonal / frozen_momentum_diagonal_parts (viscous + convective)
 │   │   ├── boundary.py               #   FlowBoundary → NoSlipWall, MovingWall, VelocityInlet, PressureOutlet
 │   │   ├── preconditioner.py         #   SIMPLE Schur pieces: pressure_schur_laplacian (a_P-based), damped_jacobi_solve
@@ -146,14 +147,15 @@ cfd/                                  # repo root
 │   │   ├── strategy.py               #   NewtonStrategy / ShiftedNewtonStrategy + StepOutcome / StepReport / StepControl: the contracts the march is written against
 │   │   ├── march_log.py              #   MarchLogger: the streaming per-step log (the reporting half of the on_step seam)
 │   │   ├── march_history.py          #   StepHistory: the same steps as CSV rows, for a program (a convergence plot) to read
-│   │   ├── checkpoint.py             #   StateCheckpointer: periodic state persistence (the on_checkpoint seam)
+│   │   ├── checkpoint.py             #   StateCheckpointer: periodic state persistence (the on_checkpoint seam), find_checkpoint to look one up again
 │   │   ├── step_control.py           #   feedback step controls for the eager march (DualTimeControl and friends)
+│   │   ├── resumption.py             #   Resumption: an interrupted march's reference residual, damping anchor and shift, for the march resuming it
 │   │   ├── continuation.py           #   PseudoTransientStep / NewtonStrategy: continuation as a residual-agnostic Newton step
 │   │   ├── relaxation.py             #   RelaxationSchedule → SwitchedEvolutionRelaxation, ConstantRelaxation: how the shift strength beta is set each step
 │   │   ├── shift_basis.py            #   ShiftBasis: how the pseudo-transient shift's spatial distribution is built from a cell's operator parts
 │   │   ├── line_search_growth.py     #   LineSearchGrowth: how much the residual may grow and still be accepted
 │   │   ├── multigrid.py              #   matrix-free algebraic multigrid for the inner solves (smoothed/plain aggregation, AIR; scipy RAP off the jit path)
-│   │   ├── frozen_operator.py        #   convection_diffusion_operator / decouple_dof: the one assembler of the frozen operator every AMG consumer coarsens
+│   │   ├── frozen_operator.py        #   ConvectionDiffusionStencil / decouple_dof: the one description of the frozen operator every AMG consumer coarsens
 │   │   ├── amg_preconditioner.py     #   MonolithicAmgPreconditioner for the coupled saddle-point solve
 │   │   ├── lu_preconditioner.py      #   MonolithicLuPreconditioner (complete sparse LU)
 │   │   ├── field_split.py            #   FieldGroups (a two-group partition view over a FieldLayout) + BlockTriangularFieldSplit: block-triangular field-split preconditioning for flow-plus-transport
@@ -167,8 +169,12 @@ cfd/                                  # repo root
 │   │   ├── case_file.py              #   read_case / write_case (YAML 1.2 scalars, duplicate keys refused); CaseFile.check() -> CheckedCase
 │   │   ├── mesh_source.py            #   MeshSource.read(directory) -> Mesh: OpenFOAMMesh (read) / StructuredGrid + GeometricGrading (generated)
 │   │   ├── fluid.py                  #   Fluid: density and exactly one of the kinematic / dynamic viscosity
+│   │   ├── axes.py                   #   the axis letters a file names (x, y, z) and the extruded-axis refusal for a three-dimensional mesh
 │   │   ├── forcing.py                #   DriveSpec -> BulkVelocity (builds MassFlow); SourceSpec -> BodyForce (builds UniformBodyForce)
 │   │   ├── physics.py                #   Physics -> Laminar / RANS (k-omega SST settings live inside RANS)
+│   │   ├── initial.py                #   InitialState -> Checkpoint / Fields: what a case starts from instead of its own initial condition
+│   │   ├── kinematic.py              #   pressure per unit density, the form OpenFOAM's incompressible solvers hold (both directions of the factor)
+│   │   ├── restart_file.py           #   the checkpoint file a case writes (physical fields + a header: physics, cells, mesh digest, case digests) and reads back, with the march history its step record carries
 │   │   └── boundaries.py             #   PatchCondition -> Inlet / Outlet / Wall, one per patch for every field; FixedTurbulence
 │   └── parallel/                     # distributed memory: decomposition and halo exchange (the concern kept out of Mesh)
 │       ├── partitioner.py            #   Partitioner → BlockPartitioner (RCM-block, dependency-free default) / ScotchCLIPartitioner / ScotchPartitioner; consumes cell_adjacency_csr

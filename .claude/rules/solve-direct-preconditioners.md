@@ -600,7 +600,7 @@ complete LU and the AMG's coloured probe both still depend on it.
         Laplacian. **So "which fill is right" may be the wrong question and "what is the probed operator's
         cell Péclet number" the right one.**
         **This bears directly on a seam this codebase already has, and on an asymmetry nobody has read as
-        one.** `frozen_operator.convection_diffusion_operator` **always upwinds first order** — a deliberate
+        one.** `frozen_operator.ConvectionDiffusionStencil` **always upwinds first order** — a deliberate
         preconditioner-only choice, recorded in `CLAUDE.md` as what makes it an M-matrix a hierarchy can
         coarsen — so the *block* preconditioner factorizes an operator Elman proves is unconditionally
         stable. The **monolithic AMG path does not**: it materializes the *true* Jacobian by coloured

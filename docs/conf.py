@@ -52,7 +52,16 @@ SUBPACKAGE_GROUPS = {
         ("Reading, writing and checking a case file", ["case_file", "spec"]),
         (
             "The sections of a case",
-            ["mesh_source", "fluid", "physics", "boundaries", "forcing", "solver", "outputs"],
+            [
+                "mesh_source",
+                "fluid",
+                "physics",
+                "boundaries",
+                "forcing",
+                "solver",
+                "initial",
+                "outputs",
+            ],
         ),
         ("Running a case file", ["run"]),
     ],
@@ -117,7 +126,10 @@ SUBPACKAGE_GROUPS = {
         ("Initialization and flow scales", ["initialization", "scales"]),
     ],
     "schemes": [
-        ("Gradient reconstruction", ["gradient", "multiple_correction", "projected_stencil"]),
+        (
+            "Gradient reconstruction",
+            ["gradient", "multiple_correction", "projected_stencil", "boundary_closure"],
+        ),
         ("Face interpolation", ["interpolation"]),
         ("Slope limiting", ["limiter"]),
     ],
@@ -134,6 +146,7 @@ SUBPACKAGE_GROUPS = {
         ("Direct gathers and the medium between", ["gather", "absorption"]),
         ("Surface-to-surface transfer", ["transfer", "quadrature"]),
         ("Specular reflection", ["mirrors", "images", "mirror_visibility"]),
+        ("Transparent solids", ["refraction", "refracted"]),
         (
             "What stands in the way",
             [

@@ -106,6 +106,85 @@ def test_an_outputs_section_reads_without_its_kind_and_writes_back_equal() -> No
     assert case_spec_from_mapping(case_spec_to_mapping(spec)) == spec
 
 
+def _slab_case_with_a_velocity_template(root: Path) -> Path:
+    """An OpenFOAM case on the slab -- whose extents leave its extruded axis ambiguous -- with a ``U`` template."""
+    shutil.copytree(SLAB, root / "of" / "constant" / "polyMesh")
+    (root / "of" / "0").mkdir()
+    (root / "of" / "0" / "U").write_text(
+        "FoamFile\n{\n    format ascii;\n    class volVectorField;\n    object U;\n}\n"
+        "dimensions [0 1 -1 0 0 0 0];\ninternalField uniform (0 0 0);\n"
+        "boundaryField\n{\n    left { type fixedValue; value uniform (1 0 0); }\n}\n"
+    )
+    return root
+
+
+def test_an_openfoam_time_writes_a_vector_with_its_zero_on_the_axis_the_file_states(
+    tmp_path,
+) -> None:
+    """A slab whose extents cannot say which axis was extruded is written where the file says.
+
+    Wrong answers this catches: a stated axis that is ignored (the ambiguous slab then raises), the
+    letters mapped to the wrong component (the zero lands one slot over, so reading the file back
+    along ``z`` refuses it), and the axis not reaching the writer at all.
+    """
+    from aquaflux.case import RunFields
+    from aquaflux.io import read_openfoam, read_openfoam_time
+
+    root = _slab_case_with_a_velocity_template(tmp_path)
+    mesh = read_openfoam(root / "of")
+    velocity = np.array([[1.0, 2.0], [3.0, 4.0]])
+    fields = RunFields(cells={"U": velocity})
+
+    with pytest.raises(ValueError, match="pass extruded_axis explicitly"):
+        OpenFOAMTime(case="of", time="1").write(tmp_path, root, mesh, fields)
+
+    OpenFOAMTime(case="of", time="2", extruded_axis="y").write(tmp_path, root, mesh, fields)
+    read_back = read_openfoam_time(root / "of", "2", ["U"], mesh, extruded_axis=1)
+    np.testing.assert_array_equal(read_back["U"], velocity)
+    with pytest.raises(ValueError, match="nonzero component along axis 2"):
+        read_openfoam_time(root / "of", "2", ["U"], mesh, extruded_axis=2)
+
+    OpenFOAMTime(case="of", time="3", extruded_axis="z").write(tmp_path, root, mesh, fields)
+    np.testing.assert_array_equal(
+        read_openfoam_time(root / "of", "3", ["U"], mesh, extruded_axis=2)["U"], velocity
+    )
+
+
+def test_an_extruded_axis_is_refused_for_a_three_dimensional_mesh_and_only_then() -> None:
+    writer = OpenFOAMTime(case="of", time="1", extruded_axis="z")
+    with pytest.raises(ValueError, match=r"outputs.fields: extruded_axis .* three-dimensional"):
+        writer.refuse_for_dimension(3)
+    writer.refuse_for_dimension(2)
+    OpenFOAMTime(case="of", time="1").refuse_for_dimension(3)
+
+
+def test_the_case_refuses_an_extruded_axis_its_mesh_has_no_use_for(tmp_path) -> None:
+    """The check against the mesh reports it with the rest, from the writers and the starting state."""
+    sections = _sections(
+        outputs={
+            "fields": [{"kind": "OpenFOAMTime", "case": "of", "time": "1", "extruded_axis": "z"}]
+        },
+        initial={"kind": "Fields", "path": "of", "time": "0", "extruded_axis": "z"},
+    )
+    spec = case_spec_from_mapping(sections)
+    mesh = spec.mesh.read(tmp_path)
+    spec.check_against(mesh)  # a two-dimensional mesh takes both
+    three = shutil.copytree(
+        REPO / "tests" / "fixtures" / "polymesh_3d_two_cubes", tmp_path / "three" / "polyMesh"
+    )
+    spec_3d = case_spec_from_mapping(
+        _sections(
+            mesh={"kind": "OpenFOAMMesh", "path": str(three)},
+            outputs=sections["outputs"],
+            initial=sections["initial"],
+        )
+    )
+    with pytest.raises(ValueError) as refused:
+        spec_3d.check_against(spec_3d.mesh.read(tmp_path))
+    assert "outputs.fields: extruded_axis" in str(refused.value)
+    assert "initial: extruded_axis" in str(refused.value)
+
+
 @pytest.mark.parametrize(
     ("outputs", "match"),
     [
@@ -230,16 +309,51 @@ def test_a_march_logs_each_step_retry_and_inner_iteration_it_has() -> None:
     assert observed == {"on_checkpoint": "step", "on_retry": "retry", "inner_observer": "inner"}
 
 
-def test_a_march_hands_each_step_to_the_log_and_to_the_checkpoints() -> None:
+def _hooks(seen: list, who: str, **extra: object) -> types.SimpleNamespace:
+    """A log or a recorder whose every march hook records who heard what."""
+    return types.SimpleNamespace(
+        on_checkpoint=lambda report, state: seen.append((who, "step", state)),
+        on_retry=lambda reason, attempt, beta: seen.append((who, "retry", reason)),
+        on_refresh=lambda timing: seen.append((who, "refresh", timing)),
+        on_inner=None,
+        **extra,
+    )
+
+
+def test_a_march_hands_each_step_and_retry_to_the_log_and_to_the_recorder() -> None:
     seen = []
-    logger = types.SimpleNamespace(
-        on_checkpoint=lambda report, state: seen.append(("log", state)), on_retry=None
+    observers = FlowMarch().observers_for(_hooks(seen, "log"), _hooks(seen, "file"))
+    observers["on_checkpoint"]("report", "state")
+    observers["on_retry"]("alpha", 1, 0.5)
+    assert seen == [
+        ("log", "step", "state"),
+        ("file", "step", "state"),
+        ("log", "retry", "alpha"),
+        ("file", "retry", "alpha"),
+    ]
+
+
+def test_the_per_equation_residuals_are_asked_for_only_when_a_recorder_keeps_them() -> None:
+    # Each costs a residual evaluation per step, so a march without a taker must not be handed the hook.
+    seen = []
+    assert "on_residuals" not in FlowMarch().observers_for(_Logger(), None)
+    assert "on_residuals" not in FlowMarch().observers_for(
+        _Logger(), _hooks(seen, "file", on_residuals=None)
     )
-    checkpointer = types.SimpleNamespace(
-        on_checkpoint=lambda report, state: seen.append(("file", state))
+    observers = FlowMarch().observers_for(
+        _Logger(), _hooks(seen, "file", on_residuals=lambda terms: seen.append(terms))
     )
-    FlowMarch().observers_for(logger, checkpointer)["on_checkpoint"]("report", "state")
-    assert seen == [("log", "state"), ("file", "state")]
+    observers["on_residuals"]({"u": 1.0})
+    assert seen == [{"u": 1.0}]
+
+
+def test_a_coupled_march_hands_each_refit_to_the_log_and_to_the_recorder() -> None:
+    seen = []
+    observers = CoupledMarch(
+        preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed()))
+    ).observers_for(_hooks(seen, "log"), _hooks(seen, "file"))
+    observers["session_options"]["observer"]("timing")
+    assert seen == [("log", "refresh", "timing"), ("file", "refresh", "timing")]
 
 
 def test_a_coupled_march_also_logs_its_refreshes_and_its_ramp() -> None:
@@ -411,3 +525,33 @@ def test_the_package_runs_as_the_aquaflux_command() -> None:
     )
     assert result.returncode == 0
     assert "check" in result.stdout and "run" in result.stdout
+
+
+def test_the_run_hands_each_march_hook_to_every_recorder_that_has_it() -> None:
+    from aquaflux.case.run import _StepCount
+
+    seen = []
+    history = types.SimpleNamespace(
+        on_checkpoint=lambda report, state: seen.append(("history", "step")),
+        on_retry=lambda reason, attempt, beta: seen.append(("history", reason)),
+        on_refresh=lambda timing: seen.append(("history", timing)),
+        on_residuals=lambda terms: seen.append(("history", terms)),
+    )
+    checkpoints = types.SimpleNamespace(
+        on_checkpoint=lambda report, state: seen.append(("checkpoints", "step"))
+    )
+    steps = _StepCount([history, checkpoints])
+    steps.on_retry("alpha", 1, 0.5)
+    steps.on_refresh("timing")
+    steps.on_residuals({"u": 1.0})
+    steps.on_checkpoint(types.SimpleNamespace(residual_norm=0.25), None)
+    assert seen == [
+        ("history", "alpha"),
+        ("history", "timing"),
+        ("history", {"u": 1.0}),
+        ("history", "step"),
+        ("checkpoints", "step"),
+    ]
+    assert (steps.count, steps.residual) == (1, 0.25)
+    # With no recorder keeping them, the per-equation residuals are not asked for at all.
+    assert _StepCount([checkpoints]).on_residuals is None

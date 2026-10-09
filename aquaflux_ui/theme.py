@@ -69,17 +69,51 @@ class PlotStyle:
     text, grid : str
         The axes' text and grid lines. The plot's own background is transparent, so it takes the
         page's.
+    equations : tuple of str
+        One colour per equation of a per-equation residual plot, in the order the equations come.
+        Six hues of a palette validated for colour-vision deficiency on adjacent lines, in its own
+        order, leaving out the two the event marks use; on the light surface the worst adjacent pair
+        is legal only beside a second encoding, which is why each line is labelled at its end.
+    retry, refit : str
+        The marks of a redone step and of a preconditioner refit.
+    band : str
+        The shading behind the steps a continuation spends before it reaches the case's own problem.
+    muted : str
+        Limit lines (a target, a budget) and secondary bars.
     """
 
     lines: tuple[str, ...]
     text: str
     grid: str
+    equations: tuple[str, ...]
+    retry: str
+    refit: str
+    band: str
+    muted: str
 
 
-#: The convergence plot's palette by theme name.
+#: The plots' palette by theme name.
 PLOT_STYLES: dict[str, PlotStyle] = {
-    LIGHT: PlotStyle(("#0E7490", "#94A3B8"), "#334155", "#E2E8F0"),
-    DARK: PlotStyle(("#22D3EE", "#64748B"), "#CBD5E1", "#1F2937"),
+    LIGHT: PlotStyle(
+        ("#0E7490", "#94A3B8"),
+        "#334155",
+        "#E2E8F0",
+        ("#2A78D6", "#1BAF7A", "#EDA100", "#E87BA4", "#008300", "#E34948"),
+        "#EA580C",
+        "#4A3AA7",
+        "rgba(148, 163, 184, 0.16)",
+        "#64748B",
+    ),
+    DARK: PlotStyle(
+        ("#22D3EE", "#64748B"),
+        "#CBD5E1",
+        "#1F2937",
+        ("#3987E5", "#199E70", "#C98500", "#D55181", "#008300", "#E66767"),
+        "#FB923C",
+        "#9085E9",
+        "rgba(100, 116, 139, 0.18)",
+        "#94A3B8",
+    ),
 }
 
 
@@ -155,6 +189,33 @@ html, body, .v-application {
 .af-patch-selected { color: rgb(var(--v-theme-warning)); font-weight: 600; }
 .af-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem;
   padding: 1px 6px; border-radius: 4px; background: rgba(var(--v-theme-primary), 0.1); }
+/* The Run section: headline tiles, the plots two by two, the key/value lists, the events. */
+.af-tiles { display: grid; grid-template-columns: 1.6fr repeat(4, minmax(0, 1fr)); gap: 12px; }
+.af-plot-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 1100px) {
+  .af-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .af-plot-grid { grid-template-columns: minmax(0, 1fr); }
+}
+.af-number { font-variant-numeric: tabular-nums; }
+.af-kv { display: grid; grid-template-columns: auto 1fr; column-gap: 12px; row-gap: 6px;
+  font-size: 0.8125rem; }
+.af-kv > :nth-child(even) { text-align: right; }
+.af-legend { display: flex; align-items: center; gap: 14px; font-size: 0.75rem;
+  color: rgba(var(--v-theme-on-surface), 0.7); }
+.af-mark { display: inline-block; vertical-align: middle; margin-right: 5px; }
+.af-mark-dash { width: 16px; border-top: 2px dashed var(--af-muted); }
+.af-mark-retry { width: 10px; height: 10px; border-radius: 50%; background: var(--af-retry); }
+.af-mark-refit { width: 2px; height: 12px; background: var(--af-refit); }
+.af-event { display: grid; grid-template-columns: 64px 12px 1fr auto; gap: 8px; align-items: center;
+  padding: 6px 0; font-size: 0.8125rem; border-top: 1px solid rgba(var(--v-theme-on-surface), 0.08); }
+.af-event:first-child { border-top: 0; }
+.af-event-dot { width: 10px; height: 10px; border-radius: 50%; }
+.af-event-retry { background: var(--af-retry); }
+.af-event-refit { background: var(--af-refit); }
+.af-event-arrived { background: var(--af-muted); }
+.af-log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.75rem;
+  max-height: 320px; overflow: auto; white-space: pre; padding: 8px;
+  background: rgba(var(--v-theme-on-surface), 0.04); border-radius: 6px; }
 """
 
 
@@ -217,3 +278,15 @@ def colormap_gradient(name: str, stops: int = 8) -> str:
     rgb = np.rint(255 * colormaps[name](np.linspace(0.0, 1.0, stops))[:, :3]).astype(int)
     colours = ", ".join("#{:02x}{:02x}{:02x}".format(*row) for row in rgb)
     return f"linear-gradient(90deg, {colours})"
+
+
+def _mark_colours(theme: str) -> str:
+    """The Run section's legend and event marks in ``theme``, from the same colours as its plots."""
+    style = PLOT_STYLES[theme]
+    return (
+        f".v-theme--{theme} {{ --af-retry: {style.retry}; --af-refit: {style.refit}; "
+        f"--af-muted: {style.muted}; }}\n"
+    )
+
+
+PAGE_CSS += "".join(_mark_colours(theme) for theme in PLOT_STYLES)

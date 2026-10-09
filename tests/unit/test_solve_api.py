@@ -65,7 +65,7 @@ def test_the_multigrid_surface_is_complete() -> None:
     consumers into deep imports in the first place; a partial surface is what re-creates the problem.
     """
     required = {
-        "convection_diffusion_operator",
+        "ConvectionDiffusionStencil",
         "decouple_dof",
         "build_smoothed_hierarchy",
         "build_convection_hierarchy",

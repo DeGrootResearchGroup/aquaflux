@@ -513,8 +513,8 @@ def test_the_grid_changes_what_the_ray_test_COSTS_and_not_what_it_ANSWERS(grid):
     facet_of = np.arange(len(receivers))
     near = 1e-6 * np.sqrt(np.asarray(surfaces.area))
 
-    plain = RayCastOcclusion().field(surfaces, receivers, near, facet_of)
-    culled = RayCastOcclusion(grid=grid).field(surfaces, receivers, near, facet_of)
+    plain = RayCastOcclusion().field(surfaces, receivers, near, facet_of, None)
+    culled = RayCastOcclusion(grid=grid).field(surfaces, receivers, near, facet_of, None)
     np.testing.assert_array_equal(np.asarray(culled.fraction), np.asarray(plain.fraction))
     blocked = np.asarray(plain.fraction) > 0.0
     assert 0.2 < blocked.mean() < 0.9, f"fixture is one-sided: {blocked.mean()}"

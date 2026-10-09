@@ -248,6 +248,7 @@ def build_visibility(
     points,
     *,
     receiver_facet=None,
+    receiver_normal=None,
     self_occlusion: SelfOcclusion | None = None,
     body_culling: BodyCulling | None = None,
     offset_scale: float = 1e-6,
@@ -279,6 +280,20 @@ def build_visibility(
         its interreflection silently switched off. Use ``-1`` for a receiver that is not on a
         facet, and omit the argument entirely for receivers in the volume, which is the case it
         does not apply to.
+
+        It says where a receiver *lies*, not which way it *faces*: a point on a wall that is not
+        one of ``surfaces`` -- a reflecting wall lit by a set of lamps -- lies on none of these
+        facets and still faces a way. That is ``receiver_normal``.
+    receiver_normal : array_like, shape ``(n_receivers, 3)``, optional
+        Which way each receiver faces, for receivers that gather an irradiance: a fraction hidden
+        is then a share of each source's **projected** solid angle about this normal, as an
+        irradiance weights it, rather than of its plain solid angle, as a fluence rate in the
+        volume weights it. Only :class:`~aquaflux.radiation.self_occlusion.SilhouetteOcclusion`
+        reads it -- a ray test hides all of a source or none, and every measure agrees about all
+        and none -- but the mask belongs to its receivers whatever the strategy, so give it
+        wherever the receivers are oriented. Need not be of unit length. Omitted, a receiver
+        named in ``receiver_facet`` faces the way that facet does and every other receiver is a
+        point in the volume.
     offset_scale : float, optional
         How far along each segment to start looking for hits, as a fraction of the facet's own
         size -- specifically of the square root of its area. **Relative rather than absolute**,
@@ -319,7 +334,8 @@ def build_visibility(
     ValueError
         If any facet centroid or receiver lies inside one of the bodies. Such a point is
         embedded in the solid, and every answer computed there would be meaningless rather than
-        merely small.
+        merely small. If ``receiver_normal`` is not one normal per receiver, or one of them has
+        no length.
     """
     points = jnp.asarray(points, dtype=float)
     occluders = tuple(occluders)
@@ -329,6 +345,7 @@ def build_visibility(
         surfaces,
         points,
         receiver_facet=receiver_facet,
+        receiver_normal=receiver_normal,
         self_occlusion=self_occlusion,
         body_culling=body_culling,
         offset_scale=offset_scale,
@@ -342,6 +359,7 @@ def _unchecked_visibility(
     points,
     *,
     receiver_facet=None,
+    receiver_normal=None,
     self_occlusion: SelfOcclusion | None = None,
     body_culling: BodyCulling | None = None,
     offset_scale: float = 1e-6,
@@ -361,8 +379,14 @@ def _unchecked_visibility(
     # area and no surface to shadow itself with, so it needs no exclusion.
     near = offset_scale * jnp.sqrt(surfaces.area)
 
-    # A receiver in the volume behind a source that is dark behind itself gets nothing from it,
-    # so the bodies need not be asked about that pair; the mask then says it did not ask.
+    receiver_normal = _unit_normals(receiver_normal, n_receivers)
+
+    # A receiver behind a source that is dark behind itself gets nothing from it, so the bodies
+    # need not be asked about that pair; the mask then says it did not ask. That holds for a point
+    # in the volume and for an oriented point alike -- both are gathered directly, weighted by the
+    # source's radiance towards them -- but not for a receiver on one of the facets, which the
+    # facet-to-facet transfer weights by other means. So it turns on `receiver_facet` and never
+    # on `receiver_normal`.
     facing = BackFaces.of(surfaces) if receiver_facet is None and surfaces.dark_behind else None
     culling = culling_or_default(body_culling)
     blocked = (
@@ -370,7 +394,7 @@ def _unchecked_visibility(
         if occluders
         else jnp.zeros((0, n_receivers, n_facets), dtype=bool)
     )
-    geometry = strategy.field(surfaces, points, near, receiver_facet)
+    geometry = strategy.field(surfaces, points, near, receiver_facet, receiver_normal)
     return Visibility(
         blocked=blocked,
         receivers=points,
@@ -378,3 +402,30 @@ def _unchecked_visibility(
         overlapping=geometry.overlapping,
         clear_behind=geometry.clear_behind or (facing is not None and bool(occluders)),
     )
+
+
+def _unit_normals(receiver_normal, n_receivers: int) -> np.ndarray | None:
+    """``receiver_normal`` as one unit normal per receiver, on the host, or ``None``.
+
+    Raises
+    ------
+    ValueError
+        If there is not one normal per receiver, or one has no length to give a direction.
+    """
+    if receiver_normal is None:
+        return None
+    normal = np.asarray(receiver_normal, dtype=float)
+    if normal.shape != (n_receivers, 3):
+        raise ValueError(
+            f"receiver_normal must be one normal per receiver, shape ({n_receivers}, 3); "
+            f"got {normal.shape}."
+        )
+    length = np.linalg.norm(normal, axis=-1)
+    unusable = ~(length > 0.0) | ~np.isfinite(length)
+    if np.any(unusable):
+        raise ValueError(
+            f"receiver_normal has {int(np.count_nonzero(unusable))} normal(s) of no length or "
+            "not finite. A receiver that faces no way is a point in the volume: build its mask "
+            "without receiver_normal."
+        )
+    return normal / length[:, None]

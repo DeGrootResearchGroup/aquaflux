@@ -57,6 +57,35 @@ def test_dual_time_control_first_step_uses_beta_start() -> None:
     assert jnp.allclose(step.relaxation_schedule.beta, 2.0)
 
 
+def test_a_control_resumed_at_a_shift_holds_it_for_the_first_step_then_adapts_from_it() -> None:
+    """The resumed march opens at the shift the interrupted one had reached, not at ``beta_start``.
+
+    Wrong answers this catches: a resume that reseeds ``beta_start`` (the ramp walked again), one that
+    adapts the shift before running a step it has no report for, and one that keeps a stale memo.
+    """
+    control = DualTimeControl(beta_start=2.0, beta_min=0.02, beta_max=4.0, grow=1.5)
+    state = control.resumed_at(0.3)
+    assert state == (0.3, None)
+    first, state = control.next_step(_dual_step(), None, state)
+    assert jnp.allclose(first.relaxation_schedule.beta, 0.3)
+    # With a step to adapt from it grows the timestep as it would have, a comfortable alpha lowering beta.
+    second, _ = control.next_step(_dual_step(), _report(alpha=1.0), state)
+    assert jnp.allclose(second.relaxation_schedule.beta, 0.3 / 1.5)
+
+
+@pytest.mark.parametrize(("shift", "held"), [(1.0e-6, 0.02), (50.0, 4.0)])
+def test_a_resumed_shift_is_held_inside_this_controls_bounds(shift, held) -> None:
+    """The resumed march's control may be bounded differently from the interrupted one's."""
+    assert DualTimeControl(beta_min=0.02, beta_max=4.0).resumed_at(shift) == (held, None)
+
+
+def test_a_residual_keyed_control_resumes_with_no_remembered_residual() -> None:
+    """The residual its ratio is formed against belongs to the interrupted march; alpha alone drives
+    the first adaptation, the path a rule with no reference already takes."""
+    control = ResidualRatioDualTimeControl()
+    assert control.resumed_at(0.3) == (0.3, None)
+
+
 def test_dual_time_control_grows_the_timestep_when_comfortable() -> None:
     """α ≥ grow_above (inner loop comfortable) grows the pseudo-timestep: β ← β/grow."""
     control = DualTimeControl(grow=1.5, grow_above=0.5)

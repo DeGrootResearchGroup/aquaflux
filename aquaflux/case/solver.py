@@ -18,7 +18,7 @@ re-fits its preconditioner from states the file never sees, at each continuation
 refresh, and it does so from the same settings every time.
 
 A solve can be observed without being reconfigured. :meth:`SolverSpec.solve` takes the problem the case
-built and, optionally, observers -- a logger, a checkpointer -- which it passes to the library solve
+built and, optionally, observers -- a logger, a recorder -- which it passes to the library solve
 beside the file's settings. It refuses an observer keyword that is also a setting, so a script that
 runs a case cannot change what the case says.
 """
@@ -40,10 +40,10 @@ from aquaflux.solve import (
     LinearSolveSettings,
     MarchLogger,
     MaterializedJacobian,
+    Resumption,
     RetryPolicy,
     RootSolveSettings,
     ShiftStrengthControl,
-    StateCheckpointer,
     combine_observers,
     relative_residual_gmres,
 )
@@ -62,6 +62,7 @@ from aquaflux.turbulence import (
 )
 
 from .forcing import DriveSpec
+from .initial import InitialState
 from .physics import RANS, Laminar, Physics, Radiation, _set
 
 __all__ = [
@@ -86,18 +87,19 @@ class SolverSpec(abc.ABC):
     :class:`RadiationSolve`."""
 
     @abc.abstractmethod
-    def observers_for(
-        self, logger: MarchLogger, checkpointer: StateCheckpointer | None
-    ) -> dict[str, object]:
-        """The observer keywords that attach ``logger`` and ``checkpointer`` to this solve.
+    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
+        """The observer keywords that attach ``logger`` and ``recorder`` to this solve.
 
         Parameters
         ----------
         logger : MarchLogger
             Writes one row per outer step.
-        checkpointer : StateCheckpointer or None
-            Receives each step and its state -- anything with a ``StateCheckpointer``'s
-            ``on_checkpoint(report, state)``; ``None`` for nothing.
+        recorder : object or None
+            Records each step for a program to read: anything with the march hooks
+            ``on_checkpoint(report, state)``, ``on_retry(reason, attempt, beta)`` and
+            ``on_refresh(timing)``, and an ``on_residuals`` that is ``{equation: term} -> None``, or
+            ``None`` when nothing wants the per-equation residuals (each costs a residual evaluation
+            per step). ``None`` for no recorder.
 
         Returns
         -------
@@ -122,14 +124,47 @@ class SolverSpec(abc.ABC):
             If the solve is not one for this physics, or cannot hold this drive.
         """
 
+    def refuse_initial(self, initial: InitialState) -> None:
+        """Refuse a starting state this solve cannot start from.
+
+        Every solve can by default; one that opens on a seed of its own says so here.
+
+        Parameters
+        ----------
+        initial : InitialState
+            The case's ``initial`` section.
+
+        Raises
+        ------
+        ValueError
+            If this solve cannot start from a given state.
+        """
+        del initial
+
     @abc.abstractmethod
-    def solve(self, problem: object, **observers: object) -> object:
+    def solve(
+        self,
+        problem: object,
+        *,
+        initial: object | None = None,
+        resume: Resumption | None = None,
+        **observers: object,
+    ) -> object:
         """Solve ``problem``, the problem the case built.
 
         Parameters
         ----------
         problem : object
             What :meth:`~aquaflux.case.CheckedCase.build` returned.
+        initial : object, optional
+            The state to start from, in the form the physics' :meth:`~aquaflux.case.Physics.initial_fields`
+            gives: the flow state for a laminar case, ``(flow, k, omega)`` for a Reynolds-averaged one.
+            Unset, the solve builds its own starting state.
+        resume : Resumption, optional
+            The history of a march that stopped short, for a solve resuming it from ``initial``: the
+            scale its damping ramp and stopping bar are measured against and the shift its step control
+            had reached, so the resumed march continues the stopped one. Only a march has any; a solve
+            that does not march refuses it. Unset, the march begins at ``initial``.
         **observers
             Keywords of the library solve that observe it without changing it -- ``on_checkpoint``,
             ``on_retry``, ``inner_observer`` and the like. See each solve for which it accepts.
@@ -237,16 +272,14 @@ class _March(SolverSpec):
                 f"{type(self).__name__}.max_steps must be >= 1, got {self.max_steps!r}."
             )
 
-    def observers_for(
-        self, logger: MarchLogger, checkpointer: StateCheckpointer | None
-    ) -> dict[str, object]:
-        """Each step to the log and the checkpoints, retries and inner iterations to the log -- see :meth:`SolverSpec.observers_for`."""
+    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
+        """Each step and retry to the log and the recorder, inner iterations to the log -- see :meth:`SolverSpec.observers_for`."""
         observers = {
-            "on_checkpoint": logger.on_checkpoint
-            if checkpointer is None
-            else combine_observers(logger.on_checkpoint, checkpointer.on_checkpoint),
-            "on_retry": logger.on_retry,
+            "on_checkpoint": _both(logger.on_checkpoint, recorder, "on_checkpoint"),
+            "on_retry": _both(logger.on_retry, recorder, "on_retry"),
         }
+        if (on_residuals := getattr(recorder, "on_residuals", None)) is not None:
+            observers["on_residuals"] = on_residuals
         # The inner-loop observer exists only with an inner loop to observe; the step refuses it otherwise.
         if self.dual_time is not None:
             observers["inner_observer"] = logger.on_inner
@@ -257,6 +290,11 @@ class _March(SolverSpec):
         return _set(
             **{field.name: getattr(self, field.name) for field in dataclasses.fields(_March)}
         )
+
+
+def _both(log: Callable, recorder: object | None, hook: str) -> Callable:
+    """The march hook ``hook`` as the log's ``log`` and then, when there is one, the recorder's."""
+    return log if recorder is None else combine_observers(log, getattr(recorder, hook))
 
 
 #: The viscosity a ramp station scales, by the name a file gives it; unset leaves the ramp's own.
@@ -339,6 +377,14 @@ class ViscosityRamp:
         )
 
 
+#: Why a ramp refuses a starting state, said both when a file is read and when a script passes one.
+_RAMP_TAKES_NO_STARTING_STATE = (
+    "solver: a viscosity ramp opens on a seed fitted to its anchor station's viscosity, so it cannot "
+    "start from a given state. Remove the initial section to run the ramp, or remove the continuation "
+    "to start from the state at the case's own viscosity."
+)
+
+
 def _no_point_setup(companion: object, seed_state: object, point: object) -> dict[str, object]:
     """A ramp's per-station configuration: none, since every setting is the case's."""
     del companion, seed_state, point
@@ -417,13 +463,24 @@ class CoupledMarch(_March):
             "CoupledMarch", drive, "Solve it with a Segregated solver, which holds it."
         )
 
-    def observers_for(
-        self, logger: MarchLogger, checkpointer: StateCheckpointer | None
-    ) -> dict[str, object]:
+    def refuse_initial(self, initial: InitialState) -> None:
+        """Refuse a starting state when the march is a ramp -- see :meth:`SolverSpec.refuse_initial`.
+
+        A ramp opens on a seed it builds from its anchor station, because the seed must match the
+        anchor's viscosity: a state fitted to the case's own viscosity would sit off the anchor's own
+        wall condition by the viscosity ratio. So a ramp has no starting state to take.
+        """
+        del initial
+        if self.continuation is not None:
+            raise ValueError(_RAMP_TAKES_NO_STARTING_STATE)
+
+    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
         """The march's, the preconditioner's refreshes and the ramp's anchor too -- see :meth:`SolverSpec.observers_for`."""
-        observers = super().observers_for(logger, checkpointer)
+        observers = super().observers_for(logger, recorder)
         if isinstance(self.preconditioner, MaterializedJacobian):
-            observers["session_options"] = {"observer": logger.on_refresh}
+            observers["session_options"] = {
+                "observer": _both(logger.on_refresh, recorder, "on_refresh")
+            }
         if self.continuation is not None:
             observers["point_setup"] = lambda companion, seed_state, point: logger.note(
                 f"[{point.label}]"
@@ -450,6 +507,8 @@ class CoupledMarch(_March):
         self,
         problem: object,
         *,
+        initial: tuple[object, object, object] | None = None,
+        resume: Resumption | None = None,
         session_options: Mapping[str, object] | None = None,
         point_setup: Callable | None = None,
         **observers: object,
@@ -463,6 +522,11 @@ class CoupledMarch(_March):
         ----------
         problem : CoupledRANS
             The case's coupled problem.
+        initial : tuple of jnp.ndarray, optional
+            The ``(flow, k, omega)`` to start from, physical fields. Refused with a continuation.
+        resume : Resumption, optional
+            The stopped march's history -- see :meth:`SolverSpec.solve`. Refused with a
+            continuation, which has no state to resume.
         session_options : mapping, optional
             Observers for that session -- ``observer``, ``reports``, ``on_build`` and the other
             keywords of :func:`~aquaflux.turbulence.open_session` beyond the spec. Refused for a
@@ -497,7 +561,14 @@ class CoupledMarch(_March):
             )
         options = settings | observers
         if self.continuation is None:
-            return solve_coupled(problem, **options)
+            return solve_coupled(
+                problem,
+                *(() if initial is None else initial),
+                **_set(resume=resume),
+                **options,
+            )
+        if initial is not None or resume is not None:
+            raise ValueError(_RAMP_TAKES_NO_STARTING_STATE)
         return self.continuation.solve(
             problem,
             options,
@@ -554,13 +625,24 @@ class FlowMarch(_March):
         """
         return self._march_settings()
 
-    def solve(self, problem: object, **observers: object) -> object:
+    def solve(
+        self,
+        problem: object,
+        *,
+        initial: object | None = None,
+        resume: Resumption | None = None,
+        **observers: object,
+    ) -> object:
         """March ``problem`` -- see :meth:`SolverSpec.solve`.
 
         Parameters
         ----------
         problem : MomentumContinuity
             The case's flow problem.
+        initial : jnp.ndarray, optional
+            The flow state to start from, shape ``((dim + 1) n_cells,)``; unset, a potential flow.
+        resume : Resumption, optional
+            The stopped march's history -- see :meth:`SolverSpec.solve`.
         **observers
             Observer keywords of :func:`~aquaflux.flow.solve_flow_march` (``on_step``,
             ``on_checkpoint``, ``on_retry``, ...).
@@ -572,7 +654,12 @@ class FlowMarch(_March):
         """
         settings = self.settings()
         _refuse_settings_as_observers("FlowMarch", self._owned(), observers)
-        return solve_flow_march(problem, **settings, **observers)
+        return solve_flow_march(
+            problem,
+            **settings,
+            **_set(state=initial, resume=resume),
+            **observers,
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -676,11 +763,9 @@ class Segregated(SolverSpec):
             if value is not None and not isinstance(value, family):
                 raise TypeError(f"Segregated.{name} got {value!r}.")
 
-    def observers_for(
-        self, logger: MarchLogger, checkpointer: StateCheckpointer | None
-    ) -> dict[str, object]:
+    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
         """None: the segregated loop takes no observer -- see :meth:`SolverSpec.observers_for`."""
-        del logger, checkpointer
+        del logger, recorder
         return {}
 
     def refuse_for(self, physics: Physics, drive: DriveSpec | None) -> None:
@@ -688,13 +773,26 @@ class Segregated(SolverSpec):
         del drive
         _refuse_physics("Segregated", physics, RANS, "FlowMarch")
 
-    def solve(self, problem: object, **observers: object) -> object:
+    def solve(
+        self,
+        problem: object,
+        *,
+        initial: tuple[object, object, object] | None = None,
+        resume: Resumption | None = None,
+        **observers: object,
+    ) -> object:
         """Solve ``problem`` -- see :meth:`SolverSpec.solve`. It takes no observers.
 
         Parameters
         ----------
         problem : CoupledRANS
             The case's coupled problem, whose flow and closure are solved in turn.
+        initial : tuple of jnp.ndarray, optional
+            The ``(flow, k, omega)`` to start from, physical fields; unset,
+            :func:`~aquaflux.turbulence.sst_initial_fields`.
+        resume : None
+            The loop stops on the change between sweeps and has no residual history to resume;
+            anything else is refused.
 
         Returns
         -------
@@ -705,7 +803,14 @@ class Segregated(SolverSpec):
         ------
         NotConverged
             If the sweeps ran out before a sweep changed the fields by less than ``increment_tol``.
+        ValueError
+            If a march history to resume is given.
         """
+        if resume is not None:
+            raise ValueError(
+                "a segregated solve stops on the change between sweeps, so it has no march history "
+                "to resume."
+            )
         if observers:
             raise TypeError(f"Segregated takes no observers, got {sorted(observers)}.")
         momentum, turbulence = problem.momentum, problem.turbulence
@@ -732,7 +837,7 @@ class Segregated(SolverSpec):
                     turbulence,
                     build_flow_solve(momentum, **flow_root),
                     scalar_pseudo_transient_solve(**scalar_root),
-                    *sst_initial_fields(momentum, turbulence),
+                    *(sst_initial_fields(momentum, turbulence) if initial is None else initial),
                     max_sweeps=self.sweeps,
                     **_set(
                         relaxation=self.relaxation,
@@ -770,11 +875,9 @@ class RadiationSolve(SolverSpec):
         if self.rtol is not None and not 0.0 < self.rtol < 1.0:
             raise ValueError(f"RadiationSolve.rtol must lie in (0, 1), got {self.rtol!r}.")
 
-    def observers_for(
-        self, logger: MarchLogger, checkpointer: StateCheckpointer | None
-    ) -> dict[str, object]:
-        """The log's notes, one line as each stage starts; there are no steps to checkpoint."""
-        del checkpointer
+    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
+        """The log's notes, one line as each stage starts; there are no steps to record."""
+        del recorder
         return {"report": logger.note}
 
     def refuse_for(self, physics: Physics, drive: DriveSpec | None) -> None:
@@ -784,13 +887,38 @@ class RadiationSolve(SolverSpec):
             "RadiationSolve", physics, Radiation, "FlowMarch, CoupledMarch or Segregated"
         )
 
-    def solve(self, problem: object, **observers: object) -> object:
+    def solve(
+        self,
+        problem: object,
+        *,
+        initial: object | None = None,
+        resume: Resumption | None = None,
+        **observers: object,
+    ) -> object:
         """Light the scene the case built; ``report`` is the one observer.
+
+        Parameters
+        ----------
+        problem : Scene
+            The scene the case built.
+        initial : None
+            Nothing is marched, so there is no state to start from; anything else is refused.
+        resume : None
+            Nothing is marched, so there is no march to resume; anything else is refused.
+        **observers
+            ``report`` alone.
 
         Returns
         -------
         SceneSolution
+
+        Raises
+        ------
+        ValueError
+            If a starting state is given.
         """
+        if initial is not None or resume is not None:
+            raise ValueError("a radiation solve marches nothing, so it has no state to start from.")
         _refuse_settings_as_observers("RadiationSolve", frozenset({"solver"}), observers)
         unknown = sorted(set(observers) - {"report"})
         if unknown:

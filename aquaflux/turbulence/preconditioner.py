@@ -40,12 +40,12 @@ from aquaflux.mesh import Mesh
 from aquaflux.mesh.geometry import MeshGeometry
 from aquaflux.solve import (
     AirHierarchy,
+    ConvectionDiffusionStencil,
     SettingsValue,
     SmoothedHierarchy,
     air_multigrid_solve,
     build_air_hierarchy,
     build_convection_hierarchy,
-    convection_diffusion_operator,
     convection_multigrid_solve,
     refresh_air_hierarchy,
 )
@@ -255,24 +255,24 @@ class UnpreconditionedScalars(ScalarBlock):
 _DEFAULT_SCALAR_BLOCK = ScalarTwoLevel()
 
 
-def _scalar_operator_pieces(
+def _scalar_stencil(
     mesh: Mesh,
     geometry: MeshGeometry,
     diffusivity: jnp.ndarray,
     volume_flux: jnp.ndarray,
     residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
     reference: jnp.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
-    """The frozen scalar convection-diffusion-reaction operator, as sparse pieces (no fixed cells).
+) -> ConvectionDiffusionStencil:
+    """The frozen scalar convection-diffusion-reaction operator, before assembly (no fixed cells).
 
     Shared by the AMG preconditioner and the pseudo-time shift diagonal: both need the same interior
     stencil (``viscous + first-order-upwind convection``) and the same reaction-plus-boundary diagonal.
+    The preconditioner assembles it; the shift reads its diagonal.
 
-    Returns ``(owner_e, nb_e, visc_int, mdot_int, boundary_diagonal, n)`` -- the interior-face edge
-    endpoints, the per-edge flux-continuous diffusion conductance ``Gamma_P A / denom`` and owner-outward volume flux
-    ``mdot``, the clamped reaction+boundary diagonal, and the cell count. Value fixations (e.g. the
-    omega near-wall cells) are *not* applied here -- each consumer imposes its own (the preconditioner
-    detaches them from the aggregation; the shift zeroes them).
+    Its edges carry the flux-continuous diffusion conductance ``Gamma_P A / denom`` and the
+    owner-outward volume flux ``mdot``, and its boundary diagonal is the clamped reaction+boundary
+    diagonal. Value fixations (e.g. the omega near-wall cells) are *not* applied here -- each consumer
+    imposes its own (the preconditioner detaches them from the aggregation; the shift zeroes them).
     """
     face_cells = mesh.face_cells
     owner_e, nb_e, interior_faces = face_cells.interior_edges()
@@ -302,7 +302,9 @@ def _scalar_operator_pieces(
     # already made explicit) would make the operator indefinite and its V-cycle diverge; dropping it
     # keeps an M-matrix and only softens the preconditioner (it approximates the Jacobian).
     boundary_diagonal = np.maximum(boundary_diagonal, 0.0)
-    return owner_e, nb_e, visc_int, mdot_int, boundary_diagonal, n
+    return ConvectionDiffusionStencil(
+        owner_e, nb_e, visc_int, n, flux=mdot_int, boundary_diagonal=boundary_diagonal
+    )
 
 
 def scalar_transport_shift_diagonal(
@@ -386,15 +388,9 @@ def scalar_transport_shift_diagonal_parts(
     tuple of jnp.ndarray
         ``(convective, dissipative)``, each shape ``(n_cells,)`` and ``>= 0``.
     """
-    owner_e, nb_e, visc_int, mdot_int, boundary_diagonal, n = _scalar_operator_pieces(
+    convective, dissipative = _scalar_stencil(
         mesh, geometry, diffusivity, volume_flux, residual_fn, reference
-    )
-    dissipative = boundary_diagonal.copy()  # reaction + Dirichlet boundary stiffness (>= 0)
-    np.add.at(dissipative, owner_e, visc_int)  # diffusion stiffness on both incident cells
-    np.add.at(dissipative, nb_e, visc_int)
-    convective = np.zeros(n)
-    np.add.at(convective, owner_e, np.maximum(mdot_int, 0.0))  # upwind outflow: owner when mdot>0
-    np.add.at(convective, nb_e, np.maximum(-mdot_int, 0.0))  # neighbour when mdot<0
+    ).diagonal_parts()
     if fixed_cells is not None:
         fixed = np.asarray(fixed_cells)
         dissipative[fixed] = 0.0
@@ -474,26 +470,15 @@ def scalar_transport_preconditioner(
         )
 
     def operator() -> sp.csr_matrix:
-        owner_e, nb_e, visc_int, mdot_int, boundary_diagonal, n = _scalar_operator_pieces(
-            mesh, geometry, diffusivity, volume_flux, residual_fn, reference
-        )
+        stencil = _scalar_stencil(mesh, geometry, diffusivity, volume_flux, residual_fn, reference)
         if fixed_cells is not None:
-            fixed = np.asarray(fixed_cells)
-            is_fixed = np.zeros(n, dtype=bool)
-            is_fixed[fixed] = True
-            keep = ~(is_fixed[owner_e] | is_fixed[nb_e])
-            owner_e, nb_e = owner_e[keep], nb_e[keep]
-            visc_int, mdot_int = visc_int[keep], mdot_int[keep]
-            boundary_diagonal = boundary_diagonal.copy()
             # Identity rows: the residual there is the value fixation, not a transport balance. A unit
             # diagonal presumes the fixation row has unit derivative in the solved unknown -- true of
             # the row forms in use, but a caller rescaling this operator for a reparametrized block
             # must take each row's own derivative rather than the block-wide chain factor, or these
             # rows come out mis-scaled by the field itself.
-            boundary_diagonal[fixed] = 1.0
-        return convection_diffusion_operator(
-            owner_e, nb_e, visc_int, n, flux=mdot_int, boundary_diagonal=boundary_diagonal
-        )
+            stencil = stencil.detached(np.asarray(fixed_cells))
+        return stencil.assemble()
 
     return scalar._build(operator, reuse)
 

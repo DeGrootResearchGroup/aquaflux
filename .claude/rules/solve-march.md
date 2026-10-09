@@ -21,18 +21,57 @@ paths:
 
 ## `StepHistory` — the per-step record for a program to read (BUILT 2026-10-05)
 
-`march_history.py::StepHistory(path, clock=)` is an `on_checkpoint(report, state)` observer writing one
-CSV row per observed step: `step` (1-based, counting on across continuation segments), `seconds`
-(since construction, injected clock), every `StepReport` field under its own name with the report's
-own `step` renamed `segment_step` (it restarts per segment), and `restart_cycles`. Floats are written
-by `repr` (exact round trip), booleans as 0/1, and NumPy/JAX scalars are unwrapped with `.item()`
-first — **a `np.float64` IS a `float` subclass and its repr in NumPy 2 is `np.float64(0.1)`**, which is
-what that unwrap prevents. Header and each row are flushed as written, so a viewer or monitor can read
-an unfinished run. It is the machine-readable sibling of `MarchLogger` (which formats for a person),
-not a replacement: the case runner writes both (`Outputs.log`, `Outputs.history`, default
-`history.csv`), and `aquaflux_ui` plots the history. `COLUMNS` is derived from
-`StepReport._fields`, so a field added to the report reaches the file without an edit here.
-Pinned by `tests/unit/test_march_history.py` (six targeted mutations each turn it red).
+`march_history.py::StepHistory(path, clock=)` is a host-side observer with the march hooks'
+names — `on_checkpoint(report, state)` writes a row; `on_refresh(timing)`, `on_retry(reason, attempt,
+beta)` and `on_residuals(terms)`, called while the step is under way, fill in the row it then writes
+and are reset after it. Columns: `step` (1-based, counting on across continuation segments), `seconds`
+(since construction, injected clock), every `StepReport` field under its own name with the report's own
+`step` renamed `segment_step` (it restarts per segment), `restart_cycles`, then (2026-10-07, for the
+browser interface's Run section) `refits` / `refit_seconds` (refreshes of kind `full` or `inner`; a
+`none` reused the standing preconditioner and is not counted), `retry_reasons` (`;`-joined, empty for a
+step taken as-is), and one `residual_of_<equation>` per equation the march's measure names. Floats are
+written by `repr` (exact round trip), booleans as 0/1, and NumPy/JAX scalars are unwrapped with
+`.item()` first — **a `np.float64` IS a `float` subclass and its repr in NumPy 2 is `np.float64(0.1)`**,
+which is what that unwrap prevents. `COLUMNS` is derived from `StepReport._fields`, so a field added to
+the report reaches the file without an edit here.
+- **⚠️ The header is written with the FIRST ROW, not at construction** (changed 2026-10-07): the
+  equation columns are known only once the march reports them, so until the first step the file exists
+  and is empty. `aquaflux_ui.ConvergenceHistory.read` reads an empty file as zero steps. A step naming
+  other equations than the header is refused (`ValueError`); one naming none leaves its cells empty.
+- **⚠️ The prefix is `residual_of_`, NOT `residual_`** — the first version used `residual_`, and the
+  existing `residual_norm` / `residual_ratio` columns matched it, so a reader took them for two more
+  equations. Caught by `test_the_residual_columns_of_the_total_are_not_taken_for_equations` (UI side).
+- It is the machine-readable sibling of `MarchLogger` (which formats for a person), not a replacement:
+  the case runner writes both (`Outputs.log`, `Outputs.history`, default `history.csv`), and
+  `aquaflux_ui` plots the history (Results' convergence plot, Run's five plots and events).
+Pinned by `tests/unit/test_march_history.py`.
+
+## `StepReport.station` / `.arrived` and `newton_march(on_residuals=)` (BUILT 2026-10-07)
+
+- **`station`** (the homotopy's station index, `0` without one; only equality between adjacent steps
+  means anything) and **`arrived`** (whether the step drove the TARGET problem; `True` throughout a march
+  without a homotopy) are set from the same `homotopy.station` / `arrived` the march already reads, so a
+  record can mark where a continuation ended. Pinned by
+  `test_each_report_says_which_station_its_step_drove_and_whether_that_was_the_target`.
+- **`on_residuals({equation: term})`** is called after each step, before `observer` and `checkpoint`,
+  with each named block's term of **the measure the step was judged in** (`active_step.norm()`) at the
+  station residual the step drove — the numbers whose Euclidean combination IS the report's
+  `residual_norm` (pinned to `rel=1e-12` on a real flow march,
+  `test_each_steps_residual_is_reported_by_equation_and_the_terms_make_up_its_norm`). It comes from
+  `solve.named_blocks(measure, residual_fn, state)`, one compiled call per block structure
+  (`_block_terms`, `filter_jit`), and is skipped for a measure with unnamed blocks: `RowScaledNorm` /
+  `BlockScaledNorm` gained a static `names` (empty by default, refused unless it names each block once),
+  and only the two row-scaled builders set it — `coupled_scaled_norm` (`coupled_equation_names`; both in
+  `turbulence/measures.py`) and `FlowMeasures.row_scaled` (`flow.flow_equation_names`). The block-scaled
+  coupled measure's flow block holds every flow equation, so it stays unnamed. Costs one residual
+  evaluation per step, and nothing when `None`. Threaded through `staged_march`, `solve_coupled` and
+  `solve_flow_march` beside `on_retry`; `solve_reynolds_ramp` reaches it through `**solve_kwargs`.
+  - **This overlaps `turbulence.coupled_residuals` + `MarchLogger(detail={"residuals"})`**, which
+    computes the same per-block numbers by re-deriving the measure from outside the march (stateful,
+    needs the continuation's shift policy and a reference state, coupled RANS only, no caller in the
+    package or `validation/`). The hook is the residual-agnostic form; whether the logger's `residuals`
+    detail should be fed from it and `coupled_residuals` deleted as dominated is an open question, not
+    decided here.
 
 ## The observed march — newton_march, triggers, controls, logging
 
@@ -269,6 +308,35 @@ Pinned by `tests/unit/test_march_history.py` (six targeted mutations each turn i
     `reference_norm` is **global** (fixed across segments, used for the convergence test and the reported
     ratio). Substituting the second for the first pairs a refreshed, larger shift diagonal with the small
     β belonging to the pre-refresh residual — the over-damping freeze documented in `turbulence.md`.
+    - **Resuming a march (2026-10-07; shift and anchor 2026-10-08): `resume=Resumption(...)` on `staged_march`,
+      `solve_flow_march`, `solve_coupled`, `RootSolver.solve` and `solve_coupled_mass_flow`, built on
+      `newton_march(reference_norm=, damping_reference=)`.** A march resumed at a state re-measures
+      `residual_norm_0` there, so the ratio `‖R‖/‖R₀‖` is ~1 and beta reopens at `beta0` — the reason a
+      resumed default march did not continue the interrupted one (the memoryless SER schedule holds no other
+      history; a report's `shift` reads 0.0 for it, which looked like a reset and was not). A `Resumption`
+      carries `reference_residual` (the stopping scale, `atol + rtol * reference`, and the first segment's
+      damping anchor unless `damping_reference` is given), `damping_reference` (the anchor of the segment the
+      march was in — differs from the reference once it has refreshed, since a later segment re-bases) and
+      `shift` (what a dual-time march's `ShiftStrengthControl` had walked to). The march still STARTS from
+      the residual it measures at `phi0` (`current`, the loop's own test) — only the schedule's anchor and,
+      via `reference_norm`, the stopping bar change. `StepReport.damping_reference` records the anchor each
+      step was damped against, and `report_record` writes it, so a checkpoint carries it.
+      - **The shift goes through `ShiftStrengthControl.resumed_at(shift)` → `(clamp(shift), None)`**, which
+        `staged_march` calls on the control it ends up with (the default Courant ramp for a dual-time march) when the
+        `Resumption` has a shift and the control has the hook. The first step then HOLDS the shift (there
+        is no previous report to adapt from — the refresh boundary's treatment) and the ramp continues from it;
+        the memo is dropped, so a ratio-keyed control forms its first ratio a step later. A march with no
+        control (the single-step SER march) has no shift to seed; a custom control without `resumed_at`
+        starts afresh. **Measured 2026-10-08** (24 x 16 laminar channel, `mu = 5e-3`, `DualTimeLoop(inner_steps=3)`,
+        default `DualTimeControl` — `beta_start` 2, `beta_min` 0.02, grow 1.5 —, row-scaled `atol = 1e-9`): fresh
+        17 steps, shift 2.0 → 0.02; resumed at step 3 / 6 / 10 with the reference only, 16 / 16 / 14 steps
+        (14 / 11 / 7 left), each opening at 2.0; with the shift, the first step runs at the shift the stopped
+        march's last step ran at and the next two follow its ramp.
+      - Refused beside a `homotopy` (its anchor is the first station's). Carried by `Checkpoint` from a step
+        record (`case.md`). ⚠️ **Not carried:** the refresh budget (`refresh.limit` restarts) and a retry's
+        escalation history beyond the shift the march ended on. Pinned in `tests/integration/test_flow_march.py`,
+        `test_flow_march_resume.py` (the dual-time shift),
+        `tests/unit/test_coupled_rans.py`, `test_root_solver.py` and `test_step_control.py`.
   - **Per-step jit cache hit is mandatory, not an optimization (top implementation risk).** The per-step
     call goes through the module-level `eqx.filter_jit`'d `_march_step`, taking the `NewtonStrategy` **and**
     the residual as *arguments*. Two caller obligations: pass the **same** `strategy` object across a
@@ -824,7 +892,16 @@ Pinned by `tests/unit/test_march_history.py` (six targeted mutations each turn i
     checkpointer so a driver does not hand-roll a lambda one of them can be dropped from.
     **Known defect, not yet fixed:** the checkpointer writes whatever the march reports *including the
     failed step*, so the newest file can be the poisoned state — and a driver calling it "last good
-    state" is then lying. Skip a non-finite report, or do not claim "good".
+    state" is then lying. Skip a non-finite report, or do not claim "good". (A case's `initial:
+    Checkpoint` refuses non-finite fields when it reads one, so a restart does not start from poison;
+    the writer itself is unchanged.)
+    **Finding one again (2026-10-02):** a new process has no `StateCheckpointer.latest`, so
+    `find_checkpoint(directory, step="latest", prefix=...)` looks files up by name — the highest observed
+    step (not the newest by mtime), ignoring the `.partial` staging name, matching the prefix exactly.
+    `checkpoint_name` is the one place the `<prefix>-<step:05d>.npz` pattern lives, shared by writer and
+    finder, and `report_record(report)` the one place a step's numbers are listed, shared by the default
+    serializer and the case layer's. The default serializer still writes a bare `state` array; a case's run
+    injects its own `save=` (physical fields + header, `aquaflux/case/restart_file.py`).
   - **`on_retry(reason, attempt, beta)` — say WHY a step is being redone (BUILT).** `newton_march`
   calls it immediately before a redo with `"diverged"`, `"cycles"` or `"alpha"` — the three
   `RetryPolicy.retry_reason` returns (⚠️ only `"diverged"`/`"alpha"` escalate β since 2026-08-17;

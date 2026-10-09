@@ -19,14 +19,18 @@ import numpy as np
 import pytest
 from aquaflux.io.openfoam import (
     parse_scalar_field,
+    parse_vector_field,
+    read_openfoam_time,
     read_surface_scalar_field,
     read_volume_scalar_field,
+    write_openfoam_time,
 )
 from aquaflux.io.openfoam.assembler import assemble
 from aquaflux.io.openfoam.reader import read_openfoam
-from aquaflux.mesh import structured_grid_2d
+from aquaflux.mesh import structured_grid_2d, structured_grid_3d
 
 from tests.support.polymesh import two_cube_polymesh_data
+from tests.unit.test_openfoam_field_writer import _polymesh_with_extents
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "polymesh_3d_two_cubes"
 
@@ -216,3 +220,143 @@ def test_a_volume_field_of_the_wrong_length_is_refused(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="internalField"):
         read_volume_scalar_field(path, mesh)
+
+
+# --- reading a time directory's cell fields ---------------------------------------------------------
+
+
+def _field_file(directory: Path, name: str, kind: str, internal: str) -> None:
+    """A field file with the given ``internalField`` text and one patch, as a case would hold."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / name).write_text(
+        f"FoamFile\n{{\n    format ascii;\n    class {kind};\n    object {name};\n}}\n"
+        "dimensions [0 0 0 0 0 0 0];\n"
+        f"internalField {internal};\n"
+        "boundaryField\n{\n    wall\n    {\n        type fixedValue;\n"
+        "        value uniform (7 7 7);\n    }\n}\n"
+    )
+
+
+def _vector_list(rows) -> str:
+    return (
+        f"nonuniform List<vector> {len(rows)}\n(\n"
+        + "\n".join(f"({x:.17g} {y:.17g} {z:.17g})" for x, y, z in rows)
+        + "\n)"
+    )
+
+
+class TestParseVectorField:
+    def test_it_reads_the_list_form_with_each_vector_in_cell_order(self):
+        body = "internalField " + _vector_list([(1, 2, 3), (4, 5, 6)]) + ";\nboundaryField { }"
+        np.testing.assert_array_equal(parse_vector_field(body, 2), [[1, 2, 3], [4, 5, 6]])
+
+    def test_it_reads_a_uniform_vector_onto_every_cell(self):
+        np.testing.assert_array_equal(
+            parse_vector_field("internalField uniform (1 0 -2.5);", 3),
+            np.tile([1, 0, -2.5], (3, 1)),
+        )
+
+    def test_it_reads_the_internal_block_not_a_patchs_value(self):
+        """A patch's own ``value`` in the same file is a different quantity and must not be read."""
+        body = (
+            "internalField uniform (1 2 3);\nboundaryField\n{\n  wall\n  {\n"
+            "    value nonuniform List<vector> 1((9 9 9));\n  }\n}\n"
+        )
+        np.testing.assert_array_equal(parse_vector_field(body, 2), np.tile([1, 2, 3], (2, 1)))
+
+    def test_it_refuses_the_wrong_number_of_vectors(self):
+        body = "internalField " + _vector_list([(1, 2, 3), (4, 5, 6)]) + ";"
+        with pytest.raises(ValueError, match="2 values but the mesh has 3 cells"):
+            parse_vector_field(body, 3)
+
+    def test_it_refuses_a_uniform_entry_that_is_not_a_vector(self):
+        with pytest.raises(ValueError, match="neither a 'uniform' nor a 'nonuniform' vector"):
+            parse_vector_field("internalField uniform 5;", 3)
+
+    def test_it_refuses_a_field_with_no_internal_entry(self):
+        with pytest.raises(ValueError, match="no internalField"):
+            parse_vector_field("boundaryField { }", 3)
+
+
+class TestReadOpenfoamTime:
+    @staticmethod
+    def _slab(tmp_path):
+        """A 3 x 2 collapsed mesh and a time directory ``5`` of fields whose values encode their cell."""
+        mesh = structured_grid_2d(3, 2)
+        n = mesh.n_cells
+        index = np.arange(n, dtype=float)
+        time = tmp_path / "5"
+        scalars = "\n".join(f"{v:.17g}" for v in index * 1.5 + 0.25)
+        _field_file(time, "p", "volScalarField", f"nonuniform List<scalar> {n}\n(\n{scalars}\n)")
+        # A planar velocity extruded along y: the dropped component sits in the middle slot.
+        _field_file(
+            time, "U", "volVectorField", _vector_list([(i, 0.0, 10.0 + i) for i in range(n)])
+        )
+        return mesh, index
+
+    def test_a_scalar_lands_on_the_cell_it_was_written_for(self, tmp_path):
+        mesh, index = self._slab(tmp_path)
+        fields = read_openfoam_time(tmp_path, 5, ["p"], mesh)
+        np.testing.assert_array_equal(fields["p"], index * 1.5 + 0.25)
+
+    def test_a_2d_vector_drops_the_axis_it_is_told_to(self, tmp_path):
+        mesh, index = self._slab(tmp_path)
+        fields = read_openfoam_time(tmp_path, "5", ["U"], mesh, extruded_axis=1)
+        np.testing.assert_array_equal(fields["U"], np.column_stack([index, 10.0 + index]))
+
+    def test_a_2d_vector_recovers_the_axis_from_the_cases_polymesh(self, tmp_path):
+        mesh, index = self._slab(tmp_path)
+        planar = np.ptp(np.asarray(mesh.node_coords, dtype=float), axis=0)
+        _polymesh_with_extents(tmp_path, np.insert(planar, 1, 0.01))  # extruded along y
+        fields = read_openfoam_time(tmp_path, 5, ["U"], mesh)
+        np.testing.assert_array_equal(fields["U"], np.column_stack([index, 10.0 + index]))
+
+    def test_the_wrong_axis_is_refused_rather_than_dropping_a_real_component(self, tmp_path):
+        """Dropping z here would silently discard the velocity the file holds in that slot."""
+        mesh, _ = self._slab(tmp_path)
+        with pytest.raises(ValueError, match="nonzero component along axis 2"):
+            read_openfoam_time(tmp_path, 5, ["U"], mesh, extruded_axis=2)
+
+    def test_a_scalar_only_read_never_consults_the_polymesh(self, tmp_path):
+        mesh, _ = self._slab(tmp_path)  # no polyMesh exists: passes only if none was opened
+        assert read_openfoam_time(tmp_path, 5, ["p"], mesh)["p"].shape == (mesh.n_cells,)
+
+    def test_a_3d_vector_keeps_all_three_components(self, tmp_path):
+        mesh = structured_grid_3d(2, 1, 1)
+        _field_file(tmp_path / "1", "U", "volVectorField", _vector_list([(1, 2, 3), (4, 5, 6)]))
+        fields = read_openfoam_time(tmp_path, 1, ["U"], mesh)
+        np.testing.assert_array_equal(fields["U"], [[1, 2, 3], [4, 5, 6]])
+
+    def test_a_field_written_by_the_writer_reads_back_exactly(self, tmp_path):
+        """The two directions agree, on a vector as well, with a value in every slot a swap would show."""
+        mesh = structured_grid_2d(3, 2)
+        zero = tmp_path / "0"
+        _field_file(zero, "U", "volVectorField", "uniform (0 0 0)")
+        _field_file(zero, "p", "volScalarField", "uniform 0")
+        planar = np.ptp(np.asarray(mesh.node_coords, dtype=float), axis=0)
+        _polymesh_with_extents(tmp_path, np.insert(planar, 2, 0.01))
+        rng = np.random.default_rng(0)
+        written = {"U": rng.normal(size=(mesh.n_cells, 2)), "p": rng.normal(size=mesh.n_cells)}
+        write_openfoam_time(tmp_path, 7, written, mesh)
+        read = read_openfoam_time(tmp_path, 7, ["U", "p"], mesh)
+        for name, values in written.items():
+            np.testing.assert_allclose(read[name], values, rtol=1e-11, err_msg=name)
+
+    def test_a_missing_field_lists_what_the_directory_holds(self, tmp_path):
+        mesh, _ = self._slab(tmp_path)
+        with pytest.raises(FileNotFoundError, match=r"no field 'k' in .*; it holds \['U', 'p'\]"):
+            read_openfoam_time(tmp_path, 5, ["p", "k"], mesh)
+
+    def test_a_missing_time_directory_is_named(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="no time directory"):
+            read_openfoam_time(tmp_path, 9, ["p"], structured_grid_2d(3, 2))
+
+    def test_a_field_of_the_wrong_size_is_refused(self, tmp_path):
+        self._slab(tmp_path)
+        with pytest.raises(ValueError, match=r"internalField has 6 values but 4 are expected"):
+            read_openfoam_time(tmp_path, 5, ["p"], structured_grid_2d(2, 2))
+
+    def test_a_surface_field_is_refused_as_not_a_cell_field(self, tmp_path):
+        _field_file(tmp_path / "3", "phi", "surfaceScalarField", "uniform 0")
+        with pytest.raises(ValueError, match="'surfaceScalarField', not a cell field"):
+            read_openfoam_time(tmp_path, 3, ["phi"], structured_grid_2d(2, 2))

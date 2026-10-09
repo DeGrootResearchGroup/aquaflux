@@ -230,6 +230,18 @@ bound), `Difference` the body's. `HalfSpace` stays `inf`: its face is its only w
   **throughout** each certified hull, not only its corners, since a hull can pass through a body all
   its corners miss.
 
+## `ConvexSolid.face_distances`: which face, and its normal (#604 step 2a, 2026-10-08)
+
+`face_distances(position) -> (..., n_faces)` is each of `constraints`' own signed distance; the body's
+`signed_distance` is their maximum. Radiation's refracted-path solve (`radiation/refraction.py`) holds
+each crossing to ONE face -- the one the straight line leaves or enters by, the column at zero there --
+because the maximum has kinks at the edges and its gradient is not a face normal everywhere; the
+column's gradient is. A crossing whose other columns come out positive is on a face's extension, not on
+the body, and the path is reported absent. Pinned by
+`test_the_largest_face_distance_is_the_body_s_signed_distance` (every convex fixture) and
+`test_a_boundary_point_is_at_zero_on_its_own_face_whose_gradient_is_that_face_s_normal` (side and both
+ends of a cylinder). Generic geometry, so it lives here; what light does at the face is radiation's.
+
 ## What is NOT built here, and why each was left out rather than forgotten
 
 - **Torus.** An elbow is a torus and the bent-duct case wants one, but a torus *tube is not

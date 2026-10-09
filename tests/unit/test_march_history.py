@@ -10,30 +10,80 @@ import csv
 
 import jax.numpy as jnp
 import numpy as np
-from aquaflux.solve import StepHistory, StepReport
+import pytest
+from aquaflux.solve import RefreshTiming, StepHistory, StepReport
 
 
 def _rows(path):
     return list(csv.DictReader(path.open(newline="")))
 
 
-def test_the_header_is_written_before_any_step(tmp_path):
-    # A monitor following an unfinished run reads the columns before the first step lands.
-    history = StepHistory(tmp_path / "history.csv")
-    try:
-        header = (tmp_path / "history.csv").read_text().strip().split(",")
-        assert tuple(header) == StepHistory.COLUMNS
-        assert _rows(tmp_path / "history.csv") == []
-    finally:
-        history.close()
+def test_the_file_is_empty_until_the_first_step_and_the_header_comes_with_it(tmp_path):
+    # The equation columns are known only once the march reports them, so the header waits for them.
+    with StepHistory(tmp_path / "history.csv") as history:
+        assert (tmp_path / "history.csv").read_text() == ""
+        history.on_checkpoint(StepReport(0, 3, 1.0, 1.0, 1.0))
+        header = (tmp_path / "history.csv").read_text().splitlines()[0].split(",")
+    assert tuple(header) == StepHistory.COLUMNS
 
 
 def test_every_report_field_is_a_column_and_the_segment_index_is_renamed():
     columns = StepHistory.COLUMNS
     assert columns[:3] == ("step", "seconds", "segment_step")
-    assert set(columns) == {"step", "seconds", "restart_cycles"} | {
-        "segment_step" if name == "step" else name for name in StepReport._fields
-    }
+    assert columns[-3:] == ("refits", "refit_seconds", "retry_reasons")
+    assert set(columns) == {
+        "step",
+        "seconds",
+        "restart_cycles",
+        "refits",
+        "refit_seconds",
+        "retry_reasons",
+    } | {"segment_step" if name == "step" else name for name in StepReport._fields}
+
+
+def test_a_steps_refits_are_counted_and_timed_and_a_reused_preconditioner_is_not_one(tmp_path):
+    with StepHistory(tmp_path / "h.csv") as history:
+        history.on_refresh(RefreshTiming("full", 1.5))
+        history.on_refresh(RefreshTiming("none", 0.25))
+        history.on_refresh(RefreshTiming("inner", 2.0))
+        history.on_checkpoint(StepReport(0, 3, 1.0, 1.0, 1.0))
+        history.on_checkpoint(StepReport(1, 3, 1.0, 1.0, 1.0))
+    first, second = _rows(tmp_path / "h.csv")
+    assert (first["refits"], float(first["refit_seconds"])) == ("2", 3.5)
+    # What was heard for one step is not carried onto the next.
+    assert (second["refits"], float(second["refit_seconds"])) == ("0", 0.0)
+
+
+def test_a_redone_step_records_each_reason_in_order(tmp_path):
+    with StepHistory(tmp_path / "h.csv") as history:
+        history.on_retry("alpha", 1, 0.2)
+        history.on_retry("solver", 2, 0.2)
+        history.on_checkpoint(StepReport(0, 3, 1.0, 1.0, 1.0, escalations=1))
+        history.on_checkpoint(StepReport(1, 3, 1.0, 1.0, 1.0))
+    first, second = _rows(tmp_path / "h.csv")
+    assert first["retry_reasons"] == "alpha;solver"
+    assert second["retry_reasons"] == ""
+
+
+def test_each_equations_residual_is_a_column_after_the_fixed_ones(tmp_path):
+    with StepHistory(tmp_path / "h.csv") as history:
+        history.on_residuals({"u": 1.0 / 3.0, "p": 2.0e-7})
+        history.on_checkpoint(StepReport(0, 3, 1.0, 1.0, 1.0))
+        # A step whose measure named nothing leaves its cells empty rather than repeating the last.
+        history.on_checkpoint(StepReport(1, 3, 1.0, 1.0, 1.0))
+    header = (tmp_path / "h.csv").read_text().splitlines()[0].split(",")
+    assert tuple(header[-2:]) == ("residual_of_u", "residual_of_p")
+    first, second = _rows(tmp_path / "h.csv")
+    assert float(first["residual_of_u"]) == 1.0 / 3.0 and float(first["residual_of_p"]) == 2.0e-7
+    assert (second["residual_of_u"], second["residual_of_p"]) == ("", "")
+
+
+def test_a_step_naming_other_equations_than_the_header_is_refused(tmp_path):
+    with StepHistory(tmp_path / "h.csv") as history:
+        history.on_residuals({"u": 1.0, "p": 1.0})
+        history.on_checkpoint(StepReport(0, 3, 1.0, 1.0, 1.0))
+        with pytest.raises(ValueError, match=r"records the equations \('u', 'p'\)"):
+            history.on_residuals({"u": 1.0, "k": 1.0})
 
 
 def test_a_row_carries_every_value_exactly(tmp_path):

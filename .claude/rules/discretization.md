@@ -164,8 +164,11 @@ Principles.
   - **Why split:** the coupled flow needs the balance but *cannot* share the context step.
     `MomentumContinuity` reconstructs one velocity-gradient **tensor** shared across its components,
     from vector-valued `FlowBoundary` closures rather than a single-field one — it arrives already
-    holding a context, having run its own copy of the leading-order two-pass (`_velocity_gradient` /
-    `_pressure_gradient`, #313). It therefore drives a `CellBalance` per component directly. That is
+    holding a context. Its two-pass reconstructions (`_velocity_gradient` / `_pressure_gradient`) are
+    **not** a copy of `_gradient`: both assemblers compose `schemes.BoundaryClosure` (#58), the one
+    home of the leading-order → reconstruct → re-evaluate passes and of the `jvp` weight probes
+    (`linearization`), so `_gradient` and `_build_time_boundary_linearization` are one-liners over it.
+    It therefore drives a `CellBalance` per component directly. That is
     what let the momentum pressure term stop being hand-added and become an ordinary operator
     (`flow.PressureForce`); see `.claude/rules/flow.md`.
   - **⚠️ The flux-operator tuple order IS the summation order, and floating-point addition is not

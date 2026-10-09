@@ -100,3 +100,25 @@ def test_a_mesh_that_cannot_be_read_says_why():
     runner = Recorder(CommandResult(2, json.dumps({"error": "no polyMesh there"})))
     export = SolverCommands(runner).mesh({}, ".", "out")
     assert export.error == "no polyMesh there" and export.directory is None
+
+
+def test_plan_reads_the_run_s_output_paths_and_what_it_would_replace(tmp_path):
+    reply = {
+        "error": None,
+        "directory": str(tmp_path / "results"),
+        "log": str(tmp_path / "results" / "march.log"),
+        "history": None,
+        "occupied": [str(tmp_path / "results")],
+    }
+    runner = Recorder(CommandResult(0, json.dumps(reply)))
+    plan = SolverCommands(runner).plan(tmp_path / "case.yaml")
+    assert runner.calls == [(["plan", str(tmp_path / "case.yaml")], None)]
+    assert plan.error is None and plan.directory == tmp_path / "results"
+    assert plan.log == tmp_path / "results" / "march.log" and plan.history is None
+    assert plan.occupied == (tmp_path / "results",)
+
+
+def test_a_refused_plan_says_why():
+    runner = Recorder(CommandResult(2, json.dumps({"error": "case.yaml: no such file"})))
+    plan = SolverCommands(runner).plan("case.yaml")
+    assert plan.error == "case.yaml: no such file" and plan.directory is None

@@ -11,7 +11,7 @@ A case file's ``outputs`` section names a directory, relative to the case file, 
 * ``history`` -- the same steps as a comma-separated-values file, every number at full precision, for
   a program to read (a convergence plot, a comparison of runs);
 * ``checkpoints`` -- the march state every few steps (:class:`Checkpoints`), so a run that stops
-  has not lost its work.
+  has not lost its work and a later run can start from it.
 
 Every part is optional. A file with no ``outputs`` section writes the fields as VTK, the log and the
 history into ``results/`` beside the case file.
@@ -28,6 +28,9 @@ from typing import ClassVar
 from aquaflux.io import write_openfoam_time, write_patches, write_vtu
 from aquaflux.mesh import Mesh
 
+from .axes import AXES, AxisName, refuse_an_extruded_axis_of_a_three_dimensional_mesh
+from .kinematic import kinematic_pressure
+
 __all__ = ["Checkpoints", "FieldWriter", "OpenFOAMTime", "Outputs", "PatchVtk", "RunFields", "Vtk"]
 
 
@@ -42,10 +45,14 @@ class RunFields:
     patches : mapping of {str: mapping of {str: array-like}}
         Per patch, its face fields by name, in the patch's own face order; empty for a physics with
         nothing to write on a boundary.
+    density : float or None
+        The fluid's density, for a writer whose format holds the pressure per unit density
+        (:class:`OpenFOAMTime`); ``None`` for a case with no fluid.
     """
 
     cells: Mapping[str, object]
     patches: Mapping[str, Mapping[str, object]] = dataclasses.field(default_factory=dict)
+    density: float | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -88,6 +95,21 @@ class FieldWriter(abc.ABC):
                 f"it produces {list(fields)}."
             )
         return {name: fields[name] for name in self.fields}
+
+    def refuse_for_dimension(self, dim: int) -> None:
+        """Refuse a setting the mesh's dimension cannot take; none by default.
+
+        Parameters
+        ----------
+        dim : int
+            The case mesh's dimension.
+
+        Raises
+        ------
+        ValueError
+            If the writer states something a mesh of this dimension has no meaning for.
+        """
+        del dim
 
     @abc.abstractmethod
     def targets(self, directory: Path, case_directory: Path) -> tuple[Path, ...]:
@@ -169,6 +191,10 @@ class OpenFOAMTime(FieldWriter):
     hold a template for every field written -- name the ones it has in ``fields``. It writes into
     ``case``, not into the run's output directory.
 
+    The pressure ``p`` is written per unit density, as an incompressible OpenFOAM solver holds it
+    (``p / density``; the file's own dimensions say so), whereas every other format of this package
+    writes the pressure itself. The two differ unless the density is one.
+
     Attributes
     ----------
     case : str
@@ -179,6 +205,11 @@ class OpenFOAMTime(FieldWriter):
         bare number reads as a number.
     template_time : str or None
         The time directory whose fields are the templates; unset, ``0``.
+    extruded_axis : {"x", "y", "z"} or None
+        For a two-dimensional mesh, the axis it was extruded along, where the zero component of each
+        vector field goes; unset, recovered from the case's mesh points, which decide it for any real
+        extrusion. A mesh whose extents leave it ambiguous needs it stated. Refused for a
+        three-dimensional mesh.
 
     Raises
     ------
@@ -191,6 +222,7 @@ class OpenFOAMTime(FieldWriter):
     case: str
     time: str
     template_time: str | None = None
+    extruded_axis: AxisName | None = None
 
     #: Where an unset setting takes its default from (read by the case-file schema).
     unset_resolves_to: ClassVar[tuple[Callable, ...]] = (write_openfoam_time,)
@@ -207,13 +239,22 @@ class OpenFOAMTime(FieldWriter):
         del directory
         return (case_directory / self.case / self.time,)
 
+    def refuse_for_dimension(self, dim: int) -> None:
+        """Refuse an extruded axis for a three-dimensional mesh -- see :meth:`FieldWriter.refuse_for_dimension`."""
+        refuse_an_extruded_axis_of_a_three_dimensional_mesh(
+            "outputs.fields", self.extruded_axis, dim
+        )
+
     def write(self, directory: Path, case_directory: Path, mesh: Mesh, fields: RunFields) -> Path:
         """Write the time directory -- see :meth:`FieldWriter.write`."""
         del directory
         options = {} if self.template_time is None else {"template_time": self.template_time}
-        return write_openfoam_time(
-            case_directory / self.case, self.time, self.chosen(fields.cells), mesh, **options
-        )
+        if self.extruded_axis is not None:
+            options["extruded_axis"] = AXES.index(self.extruded_axis)
+        cells = self.chosen(fields.cells)
+        if "p" in cells and fields.density is not None:
+            cells["p"] = kinematic_pressure(cells["p"], fields.density)
+        return write_openfoam_time(case_directory / self.case, self.time, cells, mesh, **options)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -277,9 +318,10 @@ class PatchVtk(FieldWriter):
 class Checkpoints:
     """Write the march state every few steps, keeping the most recent, in ``checkpoints/``.
 
-    Each file holds the solved-variable state (``omega`` in log form when it is solved so), which is
-    what a march resumes from. They are written only by a march; the segregated solve has no steps to
-    checkpoint.
+    Each file holds the physical fields (``U``, ``p`` and, under RANS, ``k`` and ``omega``) and what
+    they belong to -- the physics, the number of cells and a digest of the mesh -- so a later case can
+    start from one with an ``initial`` section (:class:`~aquaflux.case.Checkpoint`). They are written
+    only by a march; the segregated solve has no steps to checkpoint.
 
     Attributes
     ----------

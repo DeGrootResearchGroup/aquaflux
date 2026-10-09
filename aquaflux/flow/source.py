@@ -38,6 +38,10 @@ outside the residual, and a default answer would let a new source inherit a wron
   -- the damping is differentiated and solution-affecting, so the converged answer and its adjoint are
   wrong too. Pin any non-trivial implementation against automatic differentiation of the source's own
   :meth:`~MomentumSource.source`, so the two cannot drift.
+
+A source also names the properties it reads (:meth:`MomentumSource.requires`), which the assembler
+checks against its property model when it is built. That one does have a default -- none -- because
+leaving it out costs only where the error surfaces, not the answer.
 """
 
 from __future__ import annotations
@@ -92,6 +96,17 @@ class MomentumSource(eqx.Module):
         jnp.ndarray
             The force integrated over each cell's volume, shape ``(n_cells, dim)``.
         """
+
+    def requires(self) -> tuple[str, ...]:
+        """Names this source reads from the evaluated ``properties`` (default: none).
+
+        Override when the source reads a property by key -- ``"density"`` for a buoyancy term,
+        ``"viscosity"`` for a drag -- so that :meth:`~aquaflux.flow.MomentumContinuity.build` can
+        check the property model supplies it, and a missing or mistyped name is refused when the
+        assembler is built rather than raising a ``KeyError`` inside a residual evaluation. The
+        momentum counterpart of :meth:`~aquaflux.discretization.VolumeSource.requires`.
+        """
+        return ()
 
     @abc.abstractmethod
     def face_force(

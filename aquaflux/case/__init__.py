@@ -25,8 +25,10 @@ of the wrong form or inconsistent with the rest of the case, with the path to it
 patch, and every patch fits the mesh -- without computing any geometry, so a case can be checked
 cheaply before anything expensive is built.
 
-The file's ``solver`` section says how the case is solved and its ``outputs`` section what a run
-writes; :func:`prepare_run` reads and checks a file for a run, and :meth:`PreparedRun.run` builds,
+The file's ``solver`` section says how the case is solved, its optional ``initial`` section what it
+starts from (a :class:`Checkpoint` of an earlier run, to resume one that stopped short, or the
+:class:`Fields` of an OpenFOAM time directory) and its
+``outputs`` section what a run writes; :func:`prepare_run` reads and checks a file for a run, and :meth:`PreparedRun.run` builds,
 solves and writes it -- what ``aquaflux run case.yaml`` does.
 
 Each boundary patch is described once for every field: an :class:`Inlet`, an :class:`Outlet`, a
@@ -69,6 +71,7 @@ from .boundaries import (
 from .case_file import CaseFile, CheckedCase, read_case, read_case_document, write_case
 from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
+from .initial import Checkpoint, Fields, InitialState, StartingFields
 from .mesh_source import AxisGrading, GeometricGrading, MeshSource, OpenFOAMMesh, StructuredGrid
 from .outputs import Checkpoints, FieldWriter, OpenFOAMTime, Outputs, PatchVtk, RunFields, Vtk
 from .physics import RANS, Laminar, Physics, Radiation
@@ -91,7 +94,7 @@ from .radiation import (
     SurfaceSource,
     UniformMedium,
 )
-from .run import PreparedRun, RunRecord, prepare_run
+from .run import PreparedRun, RunPlan, RunRecord, plan_run, prepare_run
 from .solver import (
     CoupledMarch,
     FlowMarch,
@@ -124,17 +127,20 @@ __all__ = [
     "CaseFile",
     "CaseSpec",
     "CheckedCase",
+    "Checkpoint",
     "Checkpoints",
     "Coarsen",
     "CosinePowerProfile",
     "CoupledMarch",
     "DriveSpec",
     "FieldWriter",
+    "Fields",
     "FixedTurbulence",
     "FlowMarch",
     "Fluid",
     "GeometricGrading",
     "IesProfile",
+    "InitialState",
     "Inlet",
     "InletTurbulence",
     "IntensityLength",
@@ -161,10 +167,12 @@ __all__ = [
     "Receivers",
     "RootSolve",
     "RunFields",
+    "RunPlan",
     "RunRecord",
     "Segregated",
     "SolverSpec",
     "SourceSpec",
+    "StartingFields",
     "StlBody",
     "StlSurface",
     "StructuredGrid",
@@ -177,6 +185,7 @@ __all__ = [
     "case_spec_from_mapping",
     "case_spec_to_mapping",
     "mesh_source_from_mapping",
+    "plan_run",
     "prepare_run",
     "read_case",
     "read_case_document",

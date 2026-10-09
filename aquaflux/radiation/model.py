@@ -88,6 +88,7 @@ nothing about cells, fluxes or residuals. Keeping that fence one-way is why
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from collections.abc import Sequence
 
@@ -200,6 +201,52 @@ class RadiationSettings(eqx.Module):
     def _passed(self, **named):
         """Drop the unset entries, so each reaches its own default rather than a copy of it."""
         return {name: value for name, value in named.items() if value is not None}
+
+    def _occlusions(self) -> dict:
+        """The self-occlusion choices that are set, by field name."""
+        return self._passed(
+            self_occlusion=self.self_occlusion, receiver_occlusion=self.receiver_occlusion
+        )
+
+    def for_bodies(self, names) -> RadiationSettings:
+        """These settings as they apply to masks whose sources are a set holding the bodies ``names``.
+
+        For one set of settings serving several surface sets, whose self-occlusion choices may name
+        a body of any of them (a zero-thickness sheet declared two-sided, say): each choice is cut
+        down to the bodies of this set by
+        :meth:`~aquaflux.radiation.self_occlusion.SelfOcclusion.for_bodies`, and nothing else
+        changes.
+
+        Parameters
+        ----------
+        names : sequence of str
+            The set's :attr:`~aquaflux.radiation.surfaces.Surfaces.solid_names`.
+
+        Returns
+        -------
+        RadiationSettings
+        """
+        return dataclasses.replace(
+            self,
+            **{field: choice.for_bodies(names) for field, choice in self._occlusions().items()},
+        )
+
+    def check_bodies(self, names) -> None:
+        """Refuse a body named by a self-occlusion choice that is not among ``names``.
+
+        Parameters
+        ----------
+        names : sequence of str
+            Every body these settings may be applied to: one surface set's, or the union of several.
+
+        Raises
+        ------
+        ValueError
+            If a choice names a body not in ``names`` -- a misspelling, which would otherwise leave
+            that body out without an error.
+        """
+        for choice in self._occlusions().values():
+            choice.check_bodies(names)
 
     def visibility_options(self) -> dict:
         """The subset the facet-to-facet shadow mask reads."""

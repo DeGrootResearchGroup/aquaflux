@@ -41,6 +41,7 @@ from .gradient import (
     fastest_boundary_closure,
     narrow_gradient_sweeps,
 )
+from .boundary_closure import BoundaryClosure
 from .projected_stencil import ProjectedStencilGradient
 from .multiple_correction import (
     DEFAULT_GRADIENT_SCHEME,
@@ -63,6 +64,7 @@ __all__ = [
     "DEFAULT_GRADIENT_SCHEME",
     "AveragedInteriorHessian",
     "AveragedNeighbourHessian",
+    "BoundaryClosure",
     "BoundaryLinearization",
     "CellBlockJacobi",
     "CellPreconditioner",

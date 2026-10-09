@@ -379,6 +379,37 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
 
 ## Contracts — the API boundary
 
+- **`frozen_operator.py` — `ConvectionDiffusionStencil` is the ONE description of a frozen
+  convection-diffusion operator (BUILT 2026-10-09, #89).** ⚠️ **There is no
+  `convection_diffusion_operator` and no `_scalar_operator_pieces`** — the free function became the
+  stencil's `assemble()`, and the turbulence six-tuple `(owner_e, nb_e, visc_int, mdot_int,
+  boundary_diagonal, n)` that was unpacked only to be re-passed into it became `_scalar_stencil(...)`
+  returning one. A frozen dataclass (`eq=False`; numpy, off the jit path — not an `equinox.Module`)
+  of `owner, nb, coefficient, n` plus keyword-only `flux`, `boundary_diagonal`; the graph is checked
+  by `require_valid_graph` and every array against it **at construction**. Three operations live on it
+  so no caller open-codes them on loose arrays:
+  - `assemble()` — the CSR operator, entries unchanged from the deleted function.
+  - `diagonal_parts()` → `(convective, dissipative)`, whose sum is `assemble().diagonal()` (pinned on an
+    irregular graph with mixed-sign fluxes). The k/ω pseudo-time shift is this split — it used to
+    rebuild it with `np.add.at` beside the assembler, a second copy of the diagonal.
+  - `detached(cells)` — drops every edge incident to the cells (from **both** ends) and gives them a
+    unit diagonal; the k/ω preconditioner's fixed-cell treatment. ⚠️ **Not the same as
+    `decouple_dof`**, which zeroes an *assembled* row and column and leaves the neighbours' diagonals
+    holding the dropped edge's contribution; `flow/initialization.py` uses that one, and the two were
+    deliberately not unified (it would change an operator).
+  **Verified value-identical at migration (2026-10-09):** a throwaway pytest plugin wrapped the three
+  hierarchy builders and `scalar_transport_shift_diagonal_parts` in every `aquaflux` module that
+  imports them, and recorded each operator (canonical CSR) and shift pair per test over 16 unit modules
+  (343 tests, `-m "not slow and not validation"`, jax 0.10.2, Linux, Python 3.13); all **1744** arrays
+  were `np.array_equal` before and after. ⚠️ **The comparison's first run caught a behaviour change
+  that no review had:** the first version refused a **scalar** coefficient by shape, which the deleted
+  function had quietly broadcast, and five `test_multigrid.py` equilibration tests that build a chain
+  with `coefficient=2.0` failed — read as missing recordings, not as differing ones, so a comparison
+  that counted only mismatches would have reported clean. A scalar now broadcasts to a uniform array
+  (pinned); an array of the wrong length is still refused. Pinned by `tests/unit/test_convection_diffusion_stencil.py` (hand-written
+  three-cell operator, mutation-checked nine ways — the "drops only owner-side edges" mutation
+  survived until a neighbour-only detach test was added).
+
 - **`state.py` — BUILT (#285): `FieldLayout` is the ONE flat field-major state layout, and nothing
   else may re-derive `f * n_cells + i` (binding).** A coupled state is one flat vector, field-major,
   described by an ordered tuple of named `StateBlock`s over a cell count. Three block kinds cover
@@ -518,7 +549,9 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   `root_adjoint` stays the caller's, because only the caller holds the differentiable parameter pytree.
   `solve.explicit_source` picks `FinishedSource` / `CallerBuiltSource` when the caller gave a strategy or
   a `RefreshPolicy(builder=…)` and **refuses** (`refuse_unforwardable_settings`) any step-configuring
-  setting beside them rather than dropping it. **`solve.shifted_step(policy, *, globalization, dual_time,
+  setting beside them rather than dropping it. A resumed march passes `resume=` (a `Resumption`: the
+  interrupted march's `|R0|`, its damping anchor and its step control's shift, `resumption.py`), which sets
+  the stopping scale, the first segment's damping anchor and the control's opening shift (`solve-march.md`). **`solve.shifted_step(policy, *, globalization, dual_time,
   regime, krylov_solver, adjoint_preconditioner_factory, …, line_search)`** is the tail every builder
   ends in: single shifted step vs dual-time loop, the refusal of inner-loop hooks with no loop and of a
   `refresh_on_cycles` with nothing to fire, and the default `relative_residual_gmres(norm=None)` built
@@ -534,6 +567,11 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     now calls it.
   - `block_reference_scales(layout, residual)` (`norm.py`) is the per-block scale a `BlockScaledNorm` is
     built from — one home for what `_coupled_block_scales` and the flow measure both need.
+  - **Both block measures carry a static `names` (2026-10-07)** — the equation each block holds, empty by
+    default and refused unless it names every block once; `BlockScaledNorm` gained `per_block` to match
+    `RowScaledNorm`'s. `named_blocks(measure, residual_fn, state)` (exported) reads the per-block terms
+    under those names, which is what `newton_march(on_residuals=)` reports (see `solve-march.md`). Only the
+    row-scaled flow and coupled builders name their blocks.
   - **`BlockScaledNorm.scales` is an ordinary array leaf, not static (#368, 2026-09-29)** — only `sizes`
     is static, as on `RowScaledNorm`, so rebuilding it at a new reference state is a compilation cache
     hit rather than a recompile. It accepts any float sequence (the builders pass tuples) and stores

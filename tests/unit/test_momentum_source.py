@@ -383,3 +383,58 @@ def test_a_declared_face_force_is_refused_rather_than_silently_dropped() -> None
             pressure_datum=PinnedPoint((0.0, 0.0)),
             sources=(_SpatiallyVaryingForce(),),
         )
+
+
+class _PorosityDrag(MomentumSource):
+    """A drag ``-(mu / K) u`` reading the viscosity and a per-cell ``"permeability"`` by key."""
+
+    def requires(self):
+        return ("permeability", "viscosity")
+
+    def source(self, fields, geometry, properties):
+        rate = properties["viscosity"] / properties["permeability"]
+        return scale(-rate[:, None] * fields.velocity, geometry.cell.volume)
+
+    def face_force(self, geometry, properties):
+        return None
+
+    def diagonal(self, velocity, geometry, properties):
+        rate = properties["viscosity"] / properties["permeability"]
+        return jnp.broadcast_to((rate * geometry.cell.volume)[:, None], velocity.shape)
+
+
+def _cavity_with(properties, sources):
+    mesh = structured_grid_2d(3, 3, named_boundaries=True)
+    return MomentumContinuity.build(
+        mesh,
+        mesh.geometry(),
+        PropertyModel(properties),
+        BoundaryConditions({name: NoSlipWall() for name in mesh.face_patches.names}),
+        gradient_scheme=CompactGreenGauss(),
+        pressure_datum=PinnedPoint((0.0, 0.0)),
+        sources=sources,
+    )
+
+
+def test_a_property_a_source_names_is_required_when_the_assembler_is_built() -> None:
+    """A source reading a property the model lacks is refused at build, naming the property.
+
+    Without the check the source's own ``properties["permeability"]`` raises a bare ``KeyError`` on
+    the first residual evaluation, inside whatever traced solve reached it. The match names the
+    missing property, which only the source's declaration can have put in the message: the flow's
+    own requirements (viscosity and density) are both supplied here.
+    """
+    fluid = {"viscosity": Constant(1e-3), "density": Constant(1.0)}
+
+    with pytest.raises(ValueError, match="permeability"):
+        _cavity_with(fluid, (_PorosityDrag(),))
+
+    momentum = _cavity_with({**fluid, "permeability": Constant(1e-2)}, (_PorosityDrag(),))
+    state = momentum.initial_state().at[:9].set(1.0)
+    assert jnp.all(jnp.isfinite(momentum.residual(state)))
+
+
+def test_a_source_reads_no_property_unless_it_says_so() -> None:
+    """The default declaration is empty, so a source that reads nothing adds no requirement."""
+    assert UniformBodyForce(jnp.zeros(2)).requires() == ()
+    assert _LinearDrag(rate=1.0).requires() == ()

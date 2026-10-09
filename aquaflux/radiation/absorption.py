@@ -44,7 +44,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import lax
 
-from aquaflux.vectors import dot
+from aquaflux.vectors import norm
 
 __all__ = ["Absorption", "UniformAbsorption", "VoxelAbsorption"]
 
@@ -103,9 +103,14 @@ class UniformAbsorption(Absorption):
         self.coefficient = jnp.asarray(coefficient, dtype=float)
 
     def optical_depth(self, origin: jnp.ndarray, target: jnp.ndarray) -> jnp.ndarray:
-        """``a`` times the straight-line distance."""
+        """``a`` times the straight-line distance.
+
+        A segment of zero length -- a receiver at an emitting facet's own centroid -- has zero
+        optical depth and a finite gradient; :func:`~aquaflux.vectors.norm` guards the root inside
+        its argument, since a guard applied after it still leaves a NaN gradient.
+        """
         offset = jnp.asarray(target, dtype=float) - jnp.asarray(origin, dtype=float)
-        return self.coefficient * jnp.sqrt(dot(offset, offset))
+        return self.coefficient * norm(offset)
 
     def sample(self, position: jnp.ndarray) -> jnp.ndarray:
         """``a``, at every position."""
@@ -222,7 +227,8 @@ class VoxelAbsorption(Absorption):
         target = jnp.asarray(target, dtype=float)
         origin, target = jnp.broadcast_arrays(origin, target)
         offset = target - origin
-        length = jnp.sqrt(dot(offset, offset))
+        # Zero for a segment of zero length, with a finite gradient there too (see ``norm``).
+        length = norm(offset)
 
         # In cell units, the parameter distance between successive face crossings on each axis.
         step_in_cells = offset / self.spacing

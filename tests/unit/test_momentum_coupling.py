@@ -17,6 +17,7 @@ from __future__ import annotations
 import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.flow import (
@@ -134,6 +135,19 @@ def test_flow_fields_accessors_agree_with_the_bundle() -> None:
     assert jnp.array_equal(asm.mass_flux(state), fields.mdot)
     assert jnp.array_equal(asm.velocity_fields(state).gradient, fields.velocity_fields.gradient)
     assert jnp.array_equal(asm.residual(state), asm.residual_from_fields(fields))
+
+
+def test_the_flow_fields_take_a_host_state() -> None:
+    """A NumPy state gives the same fields as the same state on the device.
+
+    Output writers hand the converged state over as a host array, and the per-component boundary
+    closures write into the velocity with ``.at``, which a NumPy array does not have.
+    """
+    mesh, asm = _assembler()
+    state = _arbitrary_state(mesh)
+    host = np.asarray(state)
+    assert jnp.array_equal(asm.velocity_fields(host).gradient, asm.velocity_fields(state).gradient)
+    assert jnp.array_equal(asm.residual(host), asm.residual(state))
 
 
 def test_velocity_fields_skips_the_rhie_chow_assembly(monkeypatch) -> None:

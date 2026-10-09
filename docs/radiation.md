@@ -349,6 +349,13 @@ E = direct_irradiance(surfaces, points, normals, absorption=medium, visibility=s
 height facing the fixture, say. In a uniformly glowing box this gives `E = B` at any point and any
 orientation, as it should.
 
+When the points lie **on** the walls themselves, name the facet each lies on — several, in rows
+padded with `-1`, for a point on a shared edge or vertex — as `receiver_facet`, to both
+`build_visibility` and both `direct_irradiance` calls. A flat facet sends nothing into its own
+plane, and that is what the gather then counts; left unnamed, a point inside a facet that is not
+aligned with a coordinate plane can read that facet's whole exitance, because its corners'
+heights above the receiver's plane are only rounding noise there.
+
 ### Mirror-like walls
 
 A reflectance of 0.95 does not say whether a wall scatters in every direction or reflects like a
@@ -732,7 +739,8 @@ $$
   and walls alike — which are opaque. {class}`~aquaflux.radiation.RayCastOcclusion` casts the one segment and records $0$ or
   $1$. {class}`~aquaflux.radiation.SilhouetteOcclusion` clips the source's image on the sphere
   against each blocking triangle's silhouette and records the covered fraction of $\Omega_j$ for a
-  point in the fluid, or of $\Omega^\perp_j$ for a receiver on a facet. The covered shares of
+  point in the fluid, or of $\Omega^\perp_j$ for a receiver that faces a way: one on a facet of the
+  set, or a point on another surface, such as a reflecting wall lit by a separate set of lamps. The covered shares of
   separate blockers are added and capped at one, so two blockers covering the same part of a
   source are counted twice. {class}`~aquaflux.radiation.NoOcclusion` sets $h_j = 0$.
 

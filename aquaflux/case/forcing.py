@@ -18,16 +18,14 @@ from __future__ import annotations
 import abc
 import dataclasses
 import math
-from typing import Literal
 
 import jax.numpy as jnp
 
 from aquaflux.flow import Drive, MassFlow, MomentumSource, UniformBodyForce
 
-__all__ = ["BodyForce", "BulkVelocity", "DriveSpec", "SourceSpec"]
+from .axes import AXES, AxisName
 
-#: The coordinate axes a direction may name, in order.
-_AXES = ("x", "y", "z")
+__all__ = ["BodyForce", "BulkVelocity", "DriveSpec", "SourceSpec"]
 
 
 def _refuse_non_finite(owner: str, values: tuple[float, ...]) -> None:
@@ -76,7 +74,7 @@ class BulkVelocity(DriveSpec):
     """
 
     target: float
-    direction: Literal["x", "y", "z"] | None = None
+    direction: AxisName | None = None
     initial_force: float | None = None
 
     def __post_init__(self) -> None:
@@ -88,14 +86,14 @@ class BulkVelocity(DriveSpec):
         """A :class:`~aquaflux.flow.MassFlow` holding :attr:`target`."""
         options: dict[str, object] = {}
         if self.direction is not None:
-            options["flow_direction"] = _AXES.index(self.direction)
+            options["flow_direction"] = AXES.index(self.direction)
         if self.initial_force is not None:
             options["force"] = self.initial_force
         return MassFlow(target=self.target, **options)
 
     def refuse_for_dimension(self, dim: int) -> None:
         """Refuse a direction the mesh has no axis for."""
-        if self.direction is not None and _AXES.index(self.direction) >= dim:
+        if self.direction is not None and AXES.index(self.direction) >= dim:
             raise ValueError(
                 f"drive: the bulk velocity is held along {self.direction}, but the mesh is "
                 f"{dim}-dimensional."
