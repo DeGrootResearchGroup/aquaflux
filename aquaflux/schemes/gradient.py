@@ -89,8 +89,8 @@ class _CorrectedTerms(NamedTuple):
     skew: jnp.ndarray  # (n_faces, dim) skewness offset D_g,ip from the P–N line to the face
     area_vector: jnp.ndarray  # (n_faces, dim) owner-outward S_f = A_f n_f
     volume: jnp.ndarray  # (n_cells,) cell volumes
-    # (n_cells, dim, dim) V_P B_P: the boundary faces' dependence on their owner's own gradient, in
-    # the operator's volume units (see `boundary_gradient_block`); None where no condition reads it.
+    # (n_cells, dim, dim) B_P: the boundary faces' dependence on their owner's own gradient, per unit
+    # volume (see `boundary_gradient_block`); None where no condition reads it.
     boundary_block: jnp.ndarray | None = None
 
 
@@ -263,10 +263,57 @@ def boundary_gradient_block(
     """
     weight = jnp.where(face_cells.interior[:, None], 0.0, boundary_gradient_weight)
     area = scale(geometry.face.normal, geometry.face.area)
-    # `scatter_conservative` is the accumulation the Green--Gauss sum itself uses, so the two cannot
-    # disagree about which faces belong to which cell.
-    block = face_cells.scatter_conservative(weight[:, :, None] * area[:, None, :])
+    # A boundary face contributes to its owner only, so the owner-only scatter is the whole sum; the
+    # conservative one would also reduce a neighbour side that is zero by construction.
+    block = face_cells.scatter_to_owner(weight[:, :, None] * area[:, None, :])
     return jnp.swapaxes(block, 1, 2) / geometry.cell.volume[:, None, None]
+
+
+def _small_inverse(matrix: jnp.ndarray) -> jnp.ndarray:
+    """Per-cell inverse of a batch of 1x1, 2x2 or 3x3 matrices, by the adjugate.
+
+    Written out because these inverses run inside every reconstruction, so inside every residual
+    evaluation and every Jacobian--vector product: a batched library inverse is one call per cell
+    batch that the compiler cannot fuse with anything around it, while the adjugate is a handful of
+    elementwise products it fuses freely, an order of magnitude cheaper here. Fine for the
+    well-conditioned ``I - B`` blocks it serves; not a general-purpose inverse.
+
+    Parameters
+    ----------
+    matrix : jnp.ndarray
+        Shape ``(n, dim, dim)`` with ``dim`` 1, 2 or 3.
+
+    Returns
+    -------
+    jnp.ndarray
+        The inverses, shape ``(n, dim, dim)``.
+    """
+    dim = matrix.shape[-1]
+    if dim == 1:
+        return 1.0 / matrix
+    if dim == 2:
+        a, b = matrix[:, 0, 0], matrix[:, 0, 1]
+        c, d = matrix[:, 1, 0], matrix[:, 1, 1]
+        adjugate = jnp.stack([jnp.stack([d, -b], -1), jnp.stack([-c, a], -1)], -2)
+        return adjugate / (a * d - b * c)[:, None, None]
+    # The adjugate is the transposed cofactor matrix; cofactor (i, j) is the signed minor of the 2x2
+    # left after deleting row i and column j, read here with cyclic indices so the sign is built in.
+    cofactor = jnp.stack(
+        [
+            jnp.stack(
+                [
+                    matrix[:, (i + 1) % 3, (j + 1) % 3] * matrix[:, (i + 2) % 3, (j + 2) % 3]
+                    - matrix[:, (i + 1) % 3, (j + 2) % 3] * matrix[:, (i + 2) % 3, (j + 1) % 3]
+                    for j in range(3)
+                ],
+                -1,
+            )
+            for i in range(3)
+        ],
+        -2,
+    )
+    determinant = jnp.sum(matrix[:, 0, :] * cofactor[:, 0, :], axis=-1)
+    return jnp.swapaxes(cofactor, 1, 2) / determinant[:, None, None]
 
 
 class GradientScheme(eqx.Module):
@@ -453,8 +500,8 @@ class CompactGreenGauss(GradientScheme):
         if boundary_gradient_weight is None:
             return gradient
         block = boundary_gradient_block(boundary_gradient_weight, face_cells, geometry)
-        identity = jnp.eye(mesh.dim, dtype=gradient.dtype)
-        return jnp.linalg.solve(identity - block, gradient[..., None])[..., 0]
+        inverse = _small_inverse(jnp.eye(mesh.dim, dtype=gradient.dtype) - block)
+        return jnp.einsum("nij,nj->ni", inverse, gradient)
 
 
 def symmetric_components(dim: int) -> int:
@@ -834,9 +881,11 @@ class InverseCellVolume(CellPreconditioner):
     def build(self, terms: _CorrectedTerms) -> GradientPreconditioner:
         if terms.boundary_block is None:
             return InverseVolume(1.0 / terms.volume)
+        # (V (I - B))^-1 = (I - B)^-1 / V, inverted in that order so that a cell with no such face
+        # gets exactly 1/V -- the same scaling as without a block, to the last bit.
         dim = terms.area_vector.shape[-1]
-        own = terms.volume[:, None, None] * jnp.eye(dim) - terms.boundary_block
-        return CellBlockJacobi(jnp.linalg.inv(own))
+        inverse = _small_inverse(jnp.eye(dim) - terms.boundary_block)
+        return CellBlockJacobi(inverse / terms.volume[:, None, None])
 
 
 class ExactCellBlock(CellPreconditioner):
@@ -877,7 +926,7 @@ class ExactCellBlock(CellPreconditioner):
 
         block = cell_diagonal_block(owner_column, neighbour_column, terms.volume, n_cells, dim)
         if terms.boundary_block is not None:
-            block = block - terms.boundary_block
+            block = block - terms.boundary_block * terms.volume[:, None, None]
         return CellBlockJacobi(jnp.linalg.inv(block))
 
 
@@ -1950,7 +1999,6 @@ class CorrectedGreenGauss(GradientScheme):
             None
             if boundary_gradient_weight is None
             else boundary_gradient_block(boundary_gradient_weight, face_cells, geometry)
-            * cell_geometry.volume[:, None, None]
         )
         return _CorrectedTerms(
             face_cells, g, skew, area_vector, cell_geometry.volume, boundary_block
@@ -1978,7 +2026,7 @@ class CorrectedGreenGauss(GradientScheme):
             applied = scale(grad, t.volume) - correction
             if t.boundary_block is None:
                 return applied
-            return applied - jnp.einsum("nij,nj->ni", t.boundary_block, grad)
+            return applied - scale(jnp.einsum("nij,nj->ni", t.boundary_block, grad), t.volume)
 
         return matvec
 

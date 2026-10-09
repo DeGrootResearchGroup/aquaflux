@@ -276,7 +276,7 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
     without taking the whole `Mesh` (`CellBalance`'s face-flux sum). Note `FaceNodeConnectivity`
     stores its own `n_faces` as a static field instead — its CSR row count is a construction input,
     not a length. The *scatter* side is where the class earns its keep:
-    `scatter(owner_contrib, neighbour_contrib)`, `scatter_conservative(flux)` (owner `+`, neighbour
+    `scatter(owner_contrib, neighbour_contrib)`, `scatter_to_owner(contrib)` (owner only, no zero neighbour array formed or reduced — for what a boundary condition adds to the cell it closes; `schemes.boundary_gradient_block`, #648), `scatter_conservative(flux)` (owner `+`, neighbour
     `−`; FVM conservation), `scatter_symmetric(contrib)` (both cells `+`; means / symmetric
     coefficients), and `scatter_max`/`scatter_min` (extremum reductions). **None of the four masks
     the boundary neighbour side with a `jnp.where` any more (issue #109).** A boundary face's

@@ -2587,8 +2587,8 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   tet fixtures under both closures. Compact solves `(I − B_P) g = raw/V` per cell. Corrected adds
   `− V B` to `A_g` (`_CorrectedTerms.boundary_block`, set by `terms(mesh, geometry, weight)`; `None`
   leaves the terms geometry-only, which is what `calibrated` and the contraction-rate tools measure),
-  and **both `CellPreconditioner`s include it**: `InverseCellVolume` builds `CellBlockJacobi(inv(V(I −
-  B)))` when a block is present and plain `1/V` otherwise; `ExactCellBlock` subtracts it from the
+  and **both `CellPreconditioner`s include it**: `InverseCellVolume` builds `CellBlockJacobi((I −
+  B)⁻¹ / V)` when a block is present and plain `1/V` otherwise; `ExactCellBlock` subtracts it from the
   probed block. Measured (`tests/unit/test_gradient_boundary_block.py`, x64 CPU): a linear field
   satisfying zero-gradient / Neumann / Robin data on two walls of an 8×8 grid perturbed 0.3 is off by
   **0.15–0.17** of its gradient before and roundoff after (corrected, GMRES); same on columnwise 3D
@@ -2606,6 +2606,18 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     sweep. With only the two horizontal walls zero-gradient (single-face cells, nilpotent `B`) plain
     `1/V` is exact in two sweeps. On randomly perturbed grids the interior skewness dominates and the two
     preconditioners agree to two figures.
+  - **⚠️ THE FIRST VERSION COST 8–9× PER COMPACT RECONSTRUCTION ON EVERY MESH, ORTHOGONAL INCLUDED —
+    and timed out slow shard 1 (PR #652).** Assemblers always pass the weight, so the block is built and
+    inverted on every residual evaluation and every `jvp`, even where it is exactly zero. A batched
+    `jnp.linalg.solve`/`inv` of the `(n, dim, dim)` blocks is a LAPACK call XLA cannot fuse: 5.8 ms
+    against 0.43 ms for the adjugate at 13824 3×3 blocks (jax 0.10.2, x64, CPU, one core). Now
+    `_small_inverse` (closed-form 1/2/3-dim adjugate, private to `gradient.py`) and an owner-only scatter
+    (`FaceCellConnectivity.scatter_to_owner`) build it. Measured with/without the weight on orthogonal
+    meshes, min of 15, warm: compact 2D 80×40 0.158/0.141 ms, 3D 24³ ~1.1–1.6×; corrected 2D ~1.2–1.3×,
+    3D ~1.4× — noisy single runs in a shared container. **`InverseCellVolume` inverts `I − B` and then
+    divides by `V`, in that order**: inverting `V(I − B)` directly broke bit-identity on orthogonal meshes
+    (`V/(V·V)` is not `1/V` to the last bit, 1.8e-15). `_CorrectedTerms.boundary_block` therefore holds
+    `B` per volume, and the operator and `ExactCellBlock` scale it by `V`.
   - **Gate C now holds with flux walls**: one Newton step reproduces a linear field to 1e-9 on a 25 %
     skewed grid with Neumann top/bottom (`test_gate_c_holds_with_flux_walls_on_a_skewed_mesh`); the
     control without the block misses by 1.1e-3.

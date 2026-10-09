@@ -41,7 +41,7 @@ from aquaflux.schemes import (
     boundary_gradient_block,
     contraction_rate,
 )
-from aquaflux.schemes.gradient import CellPreconditioner, InverseVolume
+from aquaflux.schemes.gradient import CellPreconditioner, InverseVolume, _small_inverse
 from aquaflux.vectors import dot, scale
 
 from tests.support.meshes import (
@@ -328,3 +328,21 @@ def test_the_block_is_the_boundary_faces_reading_their_owners_gradient() -> None
     np.testing.assert_allclose(
         np.asarray(jnp.einsum("nij,nj->ni", block, gradient)), np.asarray(expected), atol=1e-14
     )
+
+
+@pytest.mark.parametrize("dim", [1, 2, 3])
+def test_the_closed_form_inverse_matches_a_library_inverse_and_keeps_the_identity_exact(
+    dim,
+) -> None:
+    """The adjugate inverse the reconstructions use in place of a batched library call.
+
+    It must agree with ``jnp.linalg.inv`` on a general well-conditioned batch, and return the identity
+    exactly for the identity -- that is what keeps every scheme bit-identical where no boundary
+    condition reads the gradient.
+    """
+    matrix = jnp.eye(dim) + 0.3 * jax.random.normal(jax.random.PRNGKey(dim), (64, dim, dim))
+    np.testing.assert_allclose(
+        np.asarray(_small_inverse(matrix)), np.asarray(jnp.linalg.inv(matrix)), atol=1e-12
+    )
+    identity = jnp.broadcast_to(jnp.eye(dim), (8, dim, dim))
+    assert jnp.array_equal(_small_inverse(identity), identity)
