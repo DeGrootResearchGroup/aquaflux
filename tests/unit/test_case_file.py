@@ -44,6 +44,7 @@ from aquaflux.flow import (
     PressureOutlet,
     UniformBodyForce,
     VelocityInlet,
+    wetted_length,
 )
 from aquaflux.io import read_openfoam
 from aquaflux.io.openfoam.cyclic import DEFAULT_MATCH_TOLERANCE
@@ -55,7 +56,13 @@ from aquaflux.schemes import (
     MultipleCorrectionGradient,
     VenkatakrishnanLimiter,
 )
-from aquaflux.turbulence import CoupledRANS, LogScalars, SSTModel, SSTTurbulence
+from aquaflux.turbulence import (
+    CoupledRANS,
+    LogScalars,
+    SSTModel,
+    SSTTurbulence,
+    turbulence_scales,
+)
 
 REPO = Path(__file__).resolve().parents[2]
 #: A one-cell-thick slab between `empty` front and back patches, read as 2D: left, right, bottom, top.
@@ -809,6 +816,41 @@ def test_a_rans_case_builds_the_coupled_system_written_by_hand() -> None:
     _same_problem(built, reference)
     # Both equations read one fluid, not two equal ones.
     assert built.turbulence.molecular_viscosity[0] == pytest.approx(2.0e-3)
+
+
+def test_a_limited_turbulence_advection_takes_k_and_omega_scales_from_the_flow_s_speed() -> None:
+    """The case build hands the closure the flow's speed, so a limited k/omega advection is scaled.
+
+    A first-order turbulence advection reads no scale, which is why the coupled-system test above
+    cannot see whether the speed reaches the closure at all.
+    """
+    sections = _sections(
+        fluid=_SLAB_FLUID,
+        physics={"kind": "RANS"},
+        boundaries={
+            **_SLAB_PATCHES,
+            "left": {
+                "kind": "Inlet",
+                "velocity": [3.0, 4.0],
+                "turbulence": {"kind": "FixedTurbulence", "k": 0.02, "omega": 30.0},
+            },
+        },
+        numerics={
+            "momentum_advection": {"kind": "FirstOrderUpwind"},
+            "turbulence_advection": {
+                "kind": "LimitedUpwind",
+                "limiter": {"kind": "VenkatakrishnanLimiter"},
+            },
+            "gradient": {"kind": "CorrectedGreenGauss"},
+        },
+    )
+    built = CaseFile(case_spec_from_mapping(sections), REPO).check().build()
+    turbulence = built.turbulence
+    expected = turbulence_scales(
+        5.0, wetted_length(turbulence.mesh, turbulence.geometry, ["bottom", "top"]), SSTModel()
+    )
+    assert float(turbulence.k_advection_scheme.limiter.scale) == pytest.approx(expected.k)
+    assert float(turbulence.omega_advection_scheme.limiter.scale) == pytest.approx(expected.omega)
 
 
 @_DEFAULT_GRADIENT_ON_TWO_CELLS

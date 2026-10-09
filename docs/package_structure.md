@@ -98,7 +98,7 @@ cfd/                                  # repo root
 │   │   ├── gradient.py               #   GradientScheme → CompactGreenGauss, CorrectedGreenGauss (injected GradientSolve: GmresGradientSolve / SweptGradientSolve fixed-sweep; injected GradientPreconditioner: InverseVolume / CellBlockJacobi, extracted by cell_diagonal_block), HessianCorrectedGradient (separate outer + hessian_solver)
 │   │   ├── boundary_closure.py       #   BoundaryClosure: one field's boundary values as a function of (field, gradient) — the two-pass reconstruct + the jvp weight probes/linearization, shared by ResidualAssembler and MomentumContinuity
 │   │   ├── interpolation.py          #   face interpolation in one place: interpolation_factor(g), interpolate_owner_neighbour ((1-g)·a + g·b), blend_owner_neighbour (the two-field form, each side from its own field)
-│   │   └── limiter.py                #   Limiter → VenkatakrishnanLimiter (per-cell psi for bounded second-order reconstruction; held by LimitedUpwind)
+│   │   └── limiter.py                #   Limiter → VenkatakrishnanLimiter (per-cell psi for bounded second-order reconstruction; softened by a fraction of the field's reference scale, set by the equation's assembler; held by LimitedUpwind)
 │   │
 │   ├── boundary/                     # weak boundary-face-value closures (a BC is a special face interpolator)
 │   │   ├── conditions.py             #   BoundaryCondition → Dirichlet, DirichletField, ZeroGradient, Neumann, Convective
@@ -117,7 +117,7 @@ cfd/                                  # repo root
 │   │   ├── datum.py                  #   PressureDatum → PinnedPoint: where a closed domain's pressure level is fixed, and the rule for when one is needed
 │   │   ├── drive.py                  #   Drive → BoundaryDriven / MassFlow: what forces the momentum equation, and what that makes of the state
 │   │   ├── mean_velocity.py          #   bulk_velocity_flow_solve: the driving body force is a solve unknown, not a feedback loop
-│   │   └── scales.py                 #   characteristic_velocity: the flow's velocity scale, derived from what drives it
+│   │   └── scales.py                 #   characteristic_velocity / reference_speed: the flow's velocity scale, derived from what drives it; wetted_length
 │   │
 │   ├── transport/                    # scalar transport by a converged flow (species, temperature, tracers); the aquakin reaction seam
 │   │   └── scalar.py                 #   ScalarTransport (composes Advection/Diffusion/sources/transient) + effective_diffusivity (D + nu_t/Sc_t)
@@ -127,6 +127,7 @@ cfd/                                  # repo root
 │   │   ├── transport.py              #   assembly of the k and ω transport equations on a configured mesh (ScalarVariableTransform → DirectScalars / LogScalars)
 │   │   ├── sources.py                #   the SST source terms as VolumeSource operators: KProduction/KDestruction, OmegaProduction/OmegaDestruction/OmegaCrossDiffusion
 │   │   ├── strain.py                 #   strain_rate_magnitude: the scalar invariant the closure consumes
+│   │   ├── scales.py                 #   turbulence_scales: reference k and ω from the flow's speed and hydraulic length (sizes a scaled k/ω advection)
 │   │   ├── boundary.py               #   wall and inlet values: omega_wall, nut_wall, inlet_k/inlet_omega, wall_y_star, wall_shear_stress (y+-insensitive wall treatment)
 │   │   ├── coupled.py                #   CoupledRANS: the monolithic residual R(u, p, k, ω) + coupled_rans_layout
 │   │   ├── driver.py                 #   solve_segregated: the segregated outer loop coupling the flow solve to the closure

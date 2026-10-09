@@ -27,7 +27,12 @@ import jax.numpy as jnp
 import numpy as np
 
 from aquaflux.boundary import BoundaryConditions
-from aquaflux.flow import MomentumContinuity, refuse_an_unsuitable_pressure_datum, sheared_patches
+from aquaflux.flow import (
+    MomentumContinuity,
+    reference_speed,
+    refuse_an_unsuitable_pressure_datum,
+    sheared_patches,
+)
 from aquaflux.mesh import patch_triangles
 from aquaflux.radiation import (
     RadiationSettings,
@@ -469,7 +474,8 @@ class RANS(_Flow):
 
         The closure's walls are the patches whose flow closure is a wall, and its ``k`` and ``omega``
         closures are each patch's own, so neither is stated a second time. Both equations read the one
-        property model the fluid gives, and the same gradient reconstruction.
+        property model the fluid gives, and the same gradient reconstruction; a limited turbulence
+        advection takes its ``k`` and ``omega`` scales from the flow's speed.
         """
         del directory
         momentum = _momentum(spec, mesh, geometry)
@@ -494,6 +500,8 @@ class RANS(_Flow):
             omega_boundary=BoundaryConditions(
                 {name: omega for name, (_, omega) in closures.items()}
             ),
+            # The flow's speed, from which a scaled turbulence advection takes its k and omega scales.
+            velocity_scale=reference_speed(momentum),
             **options,
         )
         return CoupledRANS.build(

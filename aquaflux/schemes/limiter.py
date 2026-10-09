@@ -12,9 +12,20 @@ of cell ``i`` with unlimited increment ``d- = grad phi_i . (x_f - x_i)`` and ava
 
     psi_face = [ (d+^2 + eps^2) d- + 2 d-^2 d+ ] / [ (d+^2 + 2 d-^2 + d+ d- + eps^2) d- ],
 
-and ``psi_i = min_face psi_face``. The softening parameter ``eps^2 = vol_i K^3`` (``K`` a
-constant) switches limiting off in smooth regions, where the classic (non-smooth) min/max
-limiters would clip and stall convergence — the whole reason to prefer this one.
+and ``psi_i = min_face psi_face``. The softening ``eps`` switches limiting off where the field varies
+by less than it -- in smooth regions, where the classic (non-smooth) min/max limiters would clip and
+stall convergence, which is the whole reason to prefer this one.
+
+**The softening is a fraction of the field's reference magnitude**: ``eps = K phi_ref``, with ``K``
+dimensionless and ``phi_ref`` the size of the variations the field carries (an inlet speed for a
+velocity, an inlet concentration for a species). ``eps^2`` is then in the units of ``d+^2``, which it is
+added to, so ``K`` means the same thing in any system of units and on any mesh of the same problem:
+changing the units of the field changes ``phi_ref`` with it, and refining the mesh changes neither.
+This replaces Venkatakrishnan's mesh-length form ``eps^2 = (K dx)^3`` (``K^3`` times a cell volume),
+which adds a volume to a squared field increment and so makes ``K`` depend on the mesh's absolute
+size and the field's units. ``phi_ref`` is a fixed property of the problem rather than the
+range of the current iterate: a range read from the state would change the residual as the solve
+progresses, and its derivative would couple every cell to the two cells holding the extrema.
 
 Unlike the classic implementation, which **freezes** ``psi`` at the previous iterate and adds
 the limited correction as an explicit source, here ``psi(phi, grad phi)`` is written into the
@@ -26,7 +37,9 @@ linearizes it and places it in the Jacobian.
 from __future__ import annotations
 
 import abc
-from typing import TYPE_CHECKING
+import dataclasses
+import math
+from typing import TYPE_CHECKING, ClassVar
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -34,7 +47,14 @@ import jax.numpy as jnp
 from aquaflux.vectors import dot
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from aquaflux.context import FieldContext
+
+
+def _optional_float_leaf(value: object) -> jnp.ndarray | None:
+    """A reference scale as a floating array leaf, or ``None`` for unset."""
+    return None if value is None else jnp.asarray(value, dtype=float)
 
 
 class Limiter(eqx.Module):
@@ -58,22 +78,87 @@ class Limiter(eqx.Module):
             caller (:class:`~aquaflux.discretization.advection.LimitedUpwind`) already holds.
         """
 
+    def with_reference_scale(self, scale: Callable[[], float]) -> Limiter:
+        """This limiter for a field of reference magnitude ``scale()``; unchanged if it needs none.
+
+        The assembler of an equation knows the magnitude of the field it solves for (the speed of a
+        flow, the inlet value of a species); a limiter whose softening is a fraction of that
+        magnitude takes it from there. ``scale`` is a function rather than a number so the assembler
+        derives the magnitude only for a limiter that reads it -- deriving it can fail on a problem
+        that states none, which must not refuse a limiter that never needed one.
+
+        Parameters
+        ----------
+        scale : callable
+            Returns the field's reference magnitude, in the field's own units.
+
+        Returns
+        -------
+        Limiter
+            This limiter, by default: a limiter with no softening needs no scale.
+        """
+        return self
+
 
 class VenkatakrishnanLimiter(Limiter):
-    """The smooth Venkatakrishnan (1993) limiter.
+    """The smooth Venkatakrishnan (1993) limiter, softened by a fraction of the field's magnitude.
 
     Attributes
     ----------
-    k : float
-        The softening constant ``K`` in ``eps^2 = vol K^3``. Larger ``K`` limits less (smoother,
-        less bounded); ``K -> 0`` recovers a strict limiter. An ordinary pytree leaf, like the
-        closure constants of a turbulence model: the limiter only does arithmetic with it, so it can
-        be a differentiation target.
+    softening : float
+        The dimensionless coefficient ``K`` in ``eps = K scale``: the size of a variation the limiter
+        leaves alone, as a fraction of the field's reference magnitude. Larger ``K`` limits less
+        (smoother, less bounded); ``K -> 0`` recovers a strict limiter. An ordinary pytree leaf: the
+        limiter only does arithmetic with it, so it can be a differentiation target.
+    scale : jnp.ndarray or None
+        The field's reference magnitude ``phi_ref``, in the field's units, stored as a floating
+        array leaf (so a new value is not a recompile). Unset, the assembler of
+        the equation the limiter is used in supplies it (see :meth:`with_reference_scale`); a value
+        given here is kept. Evaluated with no scale it raises: a softening of zero would be a strict
+        limiter, which divides zero by zero on a uniform field.
     """
 
-    k: float = 5.0
+    softening: float = 0.05
+    scale: jnp.ndarray | None = eqx.field(default=None, converter=_optional_float_leaf)
+
+    #: The assembler supplies the scale, so a case file does not state it.
+    not_settings: ClassVar[tuple[str, ...]] = ("scale",)
+
+    def with_reference_scale(self, scale: Callable[[], float]) -> VenkatakrishnanLimiter:
+        """This limiter with its reference magnitude set to ``scale()``, unless one is set already.
+
+        Parameters
+        ----------
+        scale : callable
+            Returns the field's reference magnitude.
+
+        Returns
+        -------
+        VenkatakrishnanLimiter
+            ``self`` when :attr:`scale` is set; otherwise a copy carrying ``scale()``.
+
+        Raises
+        ------
+        ValueError
+            If the magnitude is not positive and finite.
+        """
+        if self.scale is not None:
+            return self
+        magnitude = float(scale())
+        if not magnitude > 0.0 or not math.isfinite(magnitude):
+            raise ValueError(
+                f"VenkatakrishnanLimiter: a reference scale must be positive and finite, got "
+                f"{magnitude!r}."
+            )
+        return dataclasses.replace(self, scale=magnitude)
 
     def limit(self, field, context):
+        if self.scale is None:
+            raise ValueError(
+                "VenkatakrishnanLimiter has no reference scale: its softening is a fraction of the "
+                "field's magnitude. Build the equation through its assembler, which supplies the "
+                "magnitude of the field it solves for, or give the limiter a scale."
+            )
         face_cells = context.mesh.face_cells
         gradient = context.gradient
         face_geometry, cell_geometry = context.mesh.geometry.face, context.mesh.geometry.cell
@@ -88,7 +173,10 @@ class VenkatakrishnanLimiter(Limiter):
         phi_max = jnp.maximum(phi, face_cells.scatter_max(phi[neighbour], phi[owner]))
         phi_min = jnp.minimum(phi, face_cells.scatter_min(phi[neighbour], phi[owner]))
 
-        eps2 = cell_geometry.volume * self.k**3  # eps^2 = vol K^3 (Venkatakrishnan softening)
+        # eps = K phi_ref, so eps^2 is in the units of the squared headroom it is added to.
+        eps2 = (self.softening * self.scale) ** 2
+        # A vanishing increment is moved away from zero by an amount negligible against the field.
+        tiny = 1e-12 * self.scale
         x_face = face_geometry.centroid
 
         def face_limiter(cell, x_cell):
@@ -103,14 +191,13 @@ class VenkatakrishnanLimiter(Limiter):
             # Regularize away from zero, treating zero as positive (sign of +1 at x == 0) so a
             # vanishing increment (constant field) gives psi -> 1 rather than 0/0.
             sign = jnp.where(delta_minus >= 0.0, 1.0, -1.0)
-            delta_minus = sign * (jnp.abs(delta_minus) + 1e-12)
+            delta_minus = sign * (jnp.abs(delta_minus) + tiny)
             headroom = jnp.where(
                 delta_minus > 0.0, phi_max[cell] - phi[cell], phi_min[cell] - phi[cell]
             )
-            e2 = eps2[cell]
-            numerator = (headroom**2 + e2) * delta_minus + 2.0 * delta_minus**2 * headroom
+            numerator = (headroom**2 + eps2) * delta_minus + 2.0 * delta_minus**2 * headroom
             denominator = (
-                headroom**2 + 2.0 * delta_minus**2 + headroom * delta_minus + e2
+                headroom**2 + 2.0 * delta_minus**2 + headroom * delta_minus + eps2
             ) * delta_minus
             return numerator / denominator
 

@@ -43,6 +43,44 @@ orthogonal one the diffusion's non-orthogonal correction vanishes and the k equa
 gradient at all. Mutation-verified four ways.
 
 
+## The advection scheme is bound PER FIELD too, for its field's magnitude (2026-10-09, #144)
+
+`SSTTurbulence` carries `k_advection_scheme` and `omega_advection_scheme` — **there is no
+`advection_scheme` field any more**; `build` still takes one positional scheme and binds it twice
+with `with_reference_scale` (see `schemes.md`). A scheme that reads no scale (first-order upwind,
+what both step cases run) comes back unchanged in both slots; a softened Venkatakrishnan limiter gets
+`k_ref` in one and `omega_ref` in the other, because the two fields differ by units and by orders of
+magnitude. `build(velocity_scale=...)` supplies the flow's speed; the case's `RANS.build` passes
+`flow.reference_speed(momentum)`. Unset, a scaled scheme is refused at build naming the keyword; an
+unscaled one needs nothing. Pinned by substitution
+(`test_each_turbulence_equation_advects_with_its_own_scheme`) and by the case build
+(`test_a_limited_turbulence_advection_takes_k_and_omega_scales_from_the_flow_s_speed`), both
+mutation-checked.
+
+**The scales (`turbulence/scales.py`, `turbulence_scales(U, h, model)`), decided with the project
+owner, who asked for them to come from the velocity rather than the inlet turbulence** — an inlet's
+`k`/`omega` is not representative of the domain (pitzDaily's inlet k is 0.375; OpenFOAM's shear-layer
+peak is ~5.0):
+- **`k_ref = 1.5 (0.1 U)² = 0.015 U²`** (`REFERENCE_INTENSITY = 0.1`, through `inlet_k`). Peak `k`
+  in developed flows is roughly 0.01 U² (plane channel, bulk U; peak k⁺ ≈ 4.5 at u_τ ≈ 0.05 U_b) to
+  0.05 U² (mixing layer / separated shear layer); 0.015 sits at the low end, where an error makes the
+  limiter stricter, which is the safe side for `k`'s positivity. pitzDaily: `k_ref` = 1.5 against the
+  OpenFOAM peak of 5.0 (U = 10).
+- **`omega_ref = sqrt(k_ref) / (β*^¼ · 0.09 h)`**, `h = flow.wetted_length(mesh, geometry,
+  wall_patches)` = V / A_wall (the same hydraulic length `flow.hydraulic_length` and the body-force
+  initializer use), through `inlet_omega`; `OUTER_MIXING_LENGTH_FACTOR = 0.09` is now the one home of
+  the 0.09 `sst_initial_fields` defaults to. It is the **outer-flow** level on purpose: `omega`'s
+  range is set by the first cell height (`~6ν/(β₁y₁²)`, pitzDaily OF range 160–1.1e5), so a range-based
+  scale would be mesh-dependent and would turn limiting off everywhere but the near-wall cells.
+  pitzDaily estimate (h ≈ 0.02 m, not measured from the mesh): `omega_ref` ≈ 2000 /s against shear-layer
+  values ~10³ and the inlet's 440.
+- **No wall** (h = 0) or **no speed** → refused, only when a scaled scheme asks. A wall-less RANS
+  domain with a limited turbulence advection must state the scale on the limiter itself.
+- **Not measured on any case.** Both step cases run first-order turbulence advection, so nothing
+  shipped reaches these scales; the choice is argued, not calibrated. The alternative considered and
+  not built: a softening relative to the LOCAL value (`eps = K |phi_i|`), which suits ω's dynamic range
+  but collapses for `k → 0` at walls.
+
 ## How to read this file (read this before grepping it)
 
 Same three rules as `.claude/rules/solve.md`: **every entry sits under a `##` section** (scan up to the
@@ -1865,11 +1903,12 @@ Many entries below are dated history written against the old API. Read them thro
     case that genuinely exercises `LimitedUpwind` (Poiseuille / cavity / smooth channels never activate a
     limiter), so it was the natural suspect for the second-order march being slower than first-order.
     Measured over an identical 14-step march: first-order rel 6.96e-2, limited `K=5` 9.39e-2, limited
-    `K=100` 9.63e-2, **unlimited (`limiter=None`, ψ≡1) 9.71e-2**. Removing the limiter entirely
+    `K=100` 9.63e-2, **unlimited (`limiter=None`, ψ≡1) 9.71e-2** — the `K`s are of the OLD
+    `eps² = vol K³` softening, deleted 2026-10-09 (#144). Removing the limiter entirely
     reproduces the limited result, so the first-vs-second-order difference is inherent to the
     *reconstruction*, not to limiting. (Two genuine limiter defects were found in that audit and filed —
-    a periodic-image inconsistency, and a dimensionally inconsistent `eps²` softening — but neither
-    causes this, and neither should be pursued as a convergence fix.)
+    a periodic-image inconsistency (#143) and the dimensionally inconsistent `eps²` softening (#144),
+    both since fixed — but neither caused this, and neither was a convergence fix.)
   - **The per-scalar transform is layout-consistent through both coupled solves (binding).** `solve_coupled`
     and `solve_coupled_mass_flow` both map the physical IC into the solved space with `state_from_physical`
     and return `physical_fields` — so `LogScalars` is correct through the mass-flow-constrained path too

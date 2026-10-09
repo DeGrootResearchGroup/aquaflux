@@ -261,9 +261,10 @@ Principles.
   (`tests/integration/test_advection_diffusion.py`). `LimitedUpwind` reconstructs
   `phi_f = phi_C + psi_C ∇φ_C·(x_f − x_C)` from the upwind cell `C`.
 - **Slope limiter — BUILT, but lives in `schemes/` (`aquaflux/schemes/limiter.py`), not here.**
-  `Limiter` (interface) → `VenkatakrishnanLimiter(k)` is physics-free reconstruction numerics
-  (a **per-cell** slope limiter `psi ∈ [0,1]`, smooth Venkatakrishnan 1993, `eps² = vol K³`,
-  matching `coeff.F90`), so it sits beside the gradient/interpolation schemes — keeping the
+  `Limiter` (interface) → `VenkatakrishnanLimiter(softening, scale)` is physics-free reconstruction
+  numerics (a **per-cell** slope limiter `psi ∈ [0,1]`, smooth Venkatakrishnan 1993, softened by
+  `eps = softening · scale` — a fraction of the field's reference magnitude, #144; it was
+  `coeff.F90`'s dimensionally inconsistent `eps² = vol K³` until 2026-10-09, see `schemes.md`), so it sits beside the gradient/interpolation schemes — keeping the
   `discretization → schemes` dependency one-way (a `schemes/` scheme could want limiting; it must
   not import *up* into `discretization`). ⚠️ **`advection.py` imports `Limiter` at RUN TIME, not under
   `TYPE_CHECKING` (2026-09-24, #437) — do not move it back.** `LimitedUpwind.limiter` is annotated with
@@ -281,10 +282,16 @@ Principles.
   reference **lags** the limiter (freezes `psi`, adds the limited term as an explicit RHS,
   `coeff.F90` line 326) and converges only *linearly*. Writing `psi(phi)` into the residual and
   letting AD linearize it puts the limiter in the Jacobian and recovers **quadratic** Newton
-  convergence (measured: ~3 steps vs the lagged ~5), while staying differentiable (IFT) and
-  giving 2nd-order accuracy — the "after" to the reference's "before". Boundedness: the smooth
-  limiter *damps* over/undershoot (~halves it) rather than strictly eliminating it — the
-  smoothness is what makes it AD-linearizable.
+  convergence (measured: ~3 steps vs the lagged ~5 — under the old `eps² = vol K³` softening at
+  K = 1, 40 cells; the test now runs `softening` 0.05 at scale 1 and still asserts AD < lagged),
+  while staying differentiable (IFT) and giving 2nd-order accuracy — the "after" to the reference's
+  "before". Boundedness: the smooth limiter *damps* over/undershoot rather than strictly eliminating
+  it — the smoothness is what makes it AD-linearizable. (The "~halves it" once recorded here was at
+  K = 0.3 under the old form; the top-hat test now runs `softening` 0.01 and asserts < 0.7×.)
+  - **`AdvectionScheme.with_reference_scale(provider)`** (default: self; `LimitedUpwind` forwards
+    to its limiter) is how an assembler sets a scaled scheme for its field — see `schemes.md`.
+    `ResidualAssembler` does NOT call it: it knows nothing of what its field is, so a caller using
+    the generic assembler with a scale-free Venkatakrishnan limiter gets the limiter's refusal.
 - **Sign convention (binding, matches the C++ `FaceFluxAccumulator`).** Every `FaceFluxOperator`
   returns the **owner-outward flux of the conserved quantity**; the residual is the finite-volume
   balance `R = accumulation + Σ scatter(outward flux)` (owner `+`, neighbour `−`). So advection

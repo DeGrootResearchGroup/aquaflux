@@ -245,8 +245,8 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   field, check the convergence rate). All physics-free numerics live here — including the slope
   limiter — so the dependency stays one-way `discretization → schemes` (an operator/scheme injects
   a limiter; nothing in `schemes/` imports up into `discretization`).
-- **`limiter.py` — BUILT.** `Limiter` (interface) → `VenkatakrishnanLimiter(k)`: a per-cell slope
-  limiter `psi ∈ [0,1]` (smooth Venkatakrishnan 1993, `eps² = vol K³`), `limit(field, context)`
+- **`limiter.py` — BUILT.** `Limiter` (interface) → `VenkatakrishnanLimiter(softening, scale)`: a
+  per-cell slope limiter `psi ∈ [0,1]` (smooth Venkatakrishnan 1993), `limit(field, context)`
   taking the shared `aquaflux.context.FieldContext` (issue #280 step 4 — reads `context.gradient`
   for this field's own cell gradient and `context.mesh.face_cells` / `context.mesh.geometry` for the
   connectivity and metrics; reads no boundary value and no property, so a `MeshContext` would also
@@ -254,12 +254,45 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   holds). Physics-free (verified in `tests/unit/test_limiter.py`), injected into
   `LimitedUpwind(limiter=…)` in `discretization/advection.py`, and evaluated only when that scheme
   runs (a diffusion-only or first-order solve never forms `psi`). See `.claude/rules/discretization.md`.
-  **`k` is an ordinary pytree leaf, not a static field (#368, 2026-09-29)**, like `SSTModel`'s closure
-  constants: the limiter only does arithmetic with it, so it can be a differentiation target and moving
-  it does not change the tree's structure. Pinned (leaf membership and `eqx.filter_grad` against a
-  central difference on a step) by `test_the_softening_constant_is_a_differentiable_leaf`. Note that
-  under `filter_jit` a plain Python-float `k` is still hashed as static; pass an array to trace it.
-  #144 (what the softening *means*) is separate and still open.
+  **`softening` is an ordinary pytree leaf, not a static field (#368, 2026-09-29, when it was `k`)**:
+  pinned (leaf membership and `eqx.filter_grad` against a central difference on a step) by
+  `test_the_softening_constant_is_a_differentiable_leaf`. Under `filter_jit` a plain Python-float
+  softening is still hashed as static; pass an array to trace it.
+  - **⚠️ THE SOFTENING IS `eps = softening · scale`, NOT `eps² = vol K³` (#144, 2026-10-09). There is
+    no `k` field any more** (it was renamed `softening` with the change of meaning; default **0.05**,
+    the low end of the 0.01–0.2 range the field-range form is used with). `vol K³` added a volume to
+    a squared field increment, so `K` meant nothing portable: measured in the issue on pitzDaily
+    (`u_x` in m/s, K=5), `eps²/headroom²` had median 0.57 but was < 0.01 in 15 % of cells, and K=100
+    moved the median to 4.5e3. `scale` is the field's reference magnitude (`phi_ref`, the field's
+    units), a floating array leaf (a new value is a cache hit), **not a case-file setting**
+    (`not_settings`). The regularization of a vanishing `d-` is `1e-12 · scale`, for the same reason.
+  - **The scale is a fixed property of the PROBLEM, deliberately not the iterate's range** (the
+    Venkatakrishnan–Wang `eps = K (q_max − q_min)` proposed on the issue). Reading the range from the
+    state changes the residual as the march develops (a uniform start has range 0, so the first steps
+    run a strict limiter), and its exact derivative couples every row to the two cells holding the
+    extrema; a `stop_gradient` on it instead makes the Jacobian inexact, so Newton loses quadratic
+    convergence and the IFT adjoint drops a term wherever the limiter is active. A fixed scale also
+    needs no global reduction in the distributed residual. Decided with the project owner.
+  - **Who supplies it: `with_reference_scale(provider)` on `Limiter` and on `AdvectionScheme`**
+    (default: return self; `LimitedUpwind` forwards to its limiter; Venkatakrishnan fills an UNSET
+    scale only — a stated one wins). `provider` is a zero-argument callable so the magnitude is
+    derived only for a scheme that reads one: first-order, unlimited and Stokes builds in a problem
+    with no derivable magnitude are not refused. Each assembler binds it for its own field:
+    `MomentumContinuity.build` (the flow's `reference_speed`, `flow.md`), `SSTTurbulence.build`
+    (per field, `k_advection_scheme` / `omega_advection_scheme`, from `velocity_scale=`;
+    `turbulence.md`), `ScalarTransport.build` (`prescribed_range`, `transport.md`). The generic
+    `ResidualAssembler` binds nothing — a caller using it with this limiter states `scale` (the
+    tests do). An unset scale at `limit()` raises naming the remedy.
+  - **Invariance is pinned directly**, the test gap the issue named: the same field in units 1000×
+    smaller with its scale likewise, and the same problem on a mesh 1000× larger, give `psi` equal to
+    `1e-10` (`test_psi_does_not_depend_on_the_units_of_the_field` / `..._size_of_the_mesh`, on a
+    `tanh` step chosen so `psi` is in its softened range). Mutation-checked 2026-10-09: restoring the
+    volume form fails both; dropping `eps²` from the numerator or the denominator, or ignoring
+    `softening`, each fails the softening test.
+  - **⚠️ The periodic-seam test changed fixture from a cosine to a sine.** A cosine peaks ON the seam,
+    and with a softening that no longer swamps the field a smooth extremum is limited by design (its
+    headroom is ~0): `psi` there was 0.064 whatever the seam did. With the sine (monotone across the
+    seam) the fixed code gives 0.947 and the reverted seam bug 0.11, so the test still discriminates.
   **The per-face unlimited increment gathers its neighbour-side position through
   `face_cells.neighbour_centroid`, not by indexing the cell centroid directly (issue #143, fixed
   2026-09-09).** A raw `cell_geometry.centroid[neighbour]` is the neighbour's true position, which
