@@ -289,6 +289,15 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     `tanh` step chosen so `psi` is in its softened range). Mutation-checked 2026-10-09: restoring the
     volume form fails both; dropping `eps²` from the numerator or the denominator, or ignoring
     `softening`, each fails the softening test.
+  - **pitzDaily under the new softening (2026-10-09, commit `f084c65`, Linux x86_64, 4 cores, jax
+    0.11.2, the case's own `case.yaml` defaults — Venkatakrishnan on momentum only, `softening` 0.05,
+    scale = inlet speed 10 m/s, so `eps` = 0.5 m/s; one run):** 31 steps, 202 restart cycles, final
+    row-scaled `|R|` 8.511e-06, `x_r/h` 8.07, peak `nu_t/nu` 418, rel. L2 against the OpenFOAM field
+    `U_x` **0.017** / `U_y` **0.009** — against the last recorded run under `vol K³` (K = 5): 31 / 202,
+    7.84e-06, 8.07, 418, **0.019 / 0.010**. As the issue predicted, at this scale the limiter is all
+    but inactive on this smooth flow, and the velocity field moves slightly toward OpenFOAM's.
+    `bfs3d` and `bfs3d_species` (which also limit) are NOT re-run: their meshes are not in the
+    repository, so their recorded numbers predate this change.
   - **⚠️ The periodic-seam test changed fixture from a cosine to a sine.** A cosine peaks ON the seam,
     and with a softening that no longer swamps the field a smooth extremum is limited by design (its
     headroom is ~0): `psi` there was 0.064 whatever the seam did. With the sine (monotone across the
