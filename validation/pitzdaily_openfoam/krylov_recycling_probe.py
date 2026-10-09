@@ -48,7 +48,8 @@ end); ``PITZ_REPLAY_ARMS`` the arms (default ``lineax,gmres-15,gcro-5,gcro-10``)
 ``weighted-R`` asks whether GMRES should minimize what it is judged by. It cannot minimize the measure
 itself, an L1 mean per field block, since GMRES minimizes an inner-product norm; it minimizes the
 nearest one, ``||W r||`` with ``W`` the measure's own row and field scales and ``1/sqrt(block size)``,
-by running on ``W A M`` and ``W b``. The stop is still the measure, on the true residual.
+over the same Krylov space as plain GMRES, by running on ``W A M W^-1`` from ``W b`` (left scaling
+alone builds a different space). The stop is still the measure, on the true residual.
 """
 
 from __future__ import annotations
@@ -334,8 +335,11 @@ def main():
                 elif kind == "gmres":
                     counts[arm] = gcro_dr(apply, bn, norm, rtol, int(number), 0, None)[1]
                 elif kind == "weighted":
+                    # The same Krylov space as plain GMRES, orthogonalized in the weighted inner product:
+                    # GMRES on the similar operator W A M W^-1 from W b. Scaling on the left alone
+                    # (W A M) builds a different space, and on this operator it does not converge.
                     counts[arm] = gcro_dr(
-                        lambda v, apply=apply, w=weights: w * apply(v),
+                        lambda v, apply=apply, w=weights: w * apply(v / w),
                         weights * bn,
                         lambda v, norm=norm, w=weights: norm(v / w),
                         rtol,
