@@ -159,9 +159,11 @@ def test_a_route_through_a_region_enters_it_from_a_leg_s_medium_and_leaves_it_th
     )
     assert routes[2].legs == (1, 0, -1, 2, 3, 2, -1)
     assert routes[1].pass_at == routes[2].pass_at == 2
-    # The route through nothing must miss the second sleeve; the routes through it miss nothing.
+    # The route through nothing must miss the second sleeve; the one through its quartz alone must
+    # miss its gap, in the quartz too; the one across the gap misses nothing.
     assert routes[0].beside[-1] == (2, 3)
-    assert routes[1].beside[-1] == routes[2].beside[-1] == ()
+    assert routes[1].beside[3] == routes[1].beside[-1] == (3,)
+    assert routes[2].beside[-1] == ()
     assert [chain.n_starts for chain in routes] == [1, 4, 4]
     in_water = Chain.routes(parents, -1, -1)
     assert [chain.passing for chain in in_water] == [(0,), (0, 1), (2,), (2, 3)]

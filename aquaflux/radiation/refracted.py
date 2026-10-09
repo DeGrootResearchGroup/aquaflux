@@ -50,7 +50,12 @@ from aquaflux.radiation.visibility import (
     same_receivers,
     surviving_fraction,
 )
-from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, in_passes, receivers_per_pass
+from aquaflux.radiation.work import (
+    DEFAULT_PAIR_LIMIT,
+    in_passes,
+    receivers_per_pass,
+    receivers_per_step,
+)
 
 __all__ = [
     "RefractedVisibility",
@@ -226,7 +231,9 @@ def build_refracted_visibility(
             part = slice(first, first + per_pass)
             rows = group.rows[part]
             # (starts, rows, facets, crossings, 3)
-            paths = _centroid_paths(media, group.chain, centroid[group.facets], host_points[rows])
+            paths = _centroid_paths(
+                media, group.chain, centroid[group.facets], host_points[rows], pair_limit
+            )
             shape = paths.shape[:3]
             corners = np.concatenate(
                 [
@@ -268,11 +275,27 @@ def build_refracted_visibility(
     )
 
 
-def _centroid_paths(media: Media, chain: Chain, sources, receivers) -> np.ndarray:
-    """``(n_starts, n_receivers, n_sources, n_crossings, 3)`` crossing points, on the host."""
-    paths = solve_paths(media, chain, jnp.asarray(sources)[None], jnp.asarray(receivers)[:, None])
-    points = np.asarray(paths.points)
-    return points if chain.passing else points[None]
+def _centroid_paths(media: Media, chain: Chain, sources, receivers, pair_limit) -> np.ndarray:
+    """``(n_starts, n_receivers, n_sources, n_crossings, 3)`` crossing points, on the host.
+
+    Solved a step of receivers at a time: a path's solve holds a few kilobytes of intermediates,
+    more the more surfaces it crosses, so a whole pass of paths at once would hold gigabytes. Every
+    step has one shape -- the last is filled out by repeating its last receiver, whose answers are
+    dropped -- so the solve compiles once.
+    """
+    sources, receivers = np.asarray(sources), np.asarray(receivers)
+    step = receivers_per_step(pair_limit, chain.n_starts * len(sources))
+    step = min(step, len(receivers))
+    found = []
+    for first in range(0, len(receivers), step):
+        rows = np.minimum(np.arange(first, first + step), len(receivers) - 1)
+        paths = solve_paths(
+            media, chain, jnp.asarray(sources)[None], jnp.asarray(receivers[rows])[:, None]
+        )
+        points = np.asarray(paths.points)
+        points = points if chain.passing else points[None]
+        found.append(points[:, : len(receivers) - first])
+    return np.concatenate(found, axis=1)
 
 
 def refracted_fluence_rate(
