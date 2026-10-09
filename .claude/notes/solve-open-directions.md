@@ -178,6 +178,11 @@ re-measured there).
 
 **In the library (2026-10-09):** `LinearSolveSettings.stop: residual` selects it from a case file or a
 builder (`PITZ_FORWARD_STOP=residual` edits pitzDaily's file); the default is still `lineax`.
+**pitzDaily opts in (2026-10-09, project owner's decision):** its `case.yaml` carries `stop: residual`
+and `refresh_on_cycles: 2`. ⚠️ So "the shipped `case.yaml`" in any pitzDaily entry dated before
+2026-10-09 means the `lineax` stop at `refresh_on_cycles` 3; `PITZ_FORWARD_STOP=lineax
+PITZ_REFRESH_ON_CYCLES=3` restores it. Making `residual` the library default without breaking the
+tight-tolerance tests below is #645.
 **Still open before the default moves:** bfs3d (its mesh is not in this container), the cost
 thresholds' re-calibration, the end-of-march failures below, and the project owner's decision.
 

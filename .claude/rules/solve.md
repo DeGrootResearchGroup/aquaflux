@@ -847,8 +847,10 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
      regime becomes a solver (`shifted_step` calls it), so every march family reaches it. **The default is
      still `lineax`**: flipping it is a shipped-default change awaiting the project owner, its reported count
      is cycles RUN (one more than `lineax`'s for the same work) so the cost triggers fire at a different
-     difficulty, `max_restarts` counts cycles under it rather than raw `lineax` steps, and bfs3d is
-     unmeasured. Pinned by `test_the_stop_reaches_the_step_s_solver_with_the_regime_and_the_step_s_measure`.
+     difficulty, `max_restarts` counts cycles under it rather than raw `lineax` steps, bfs3d is
+     unmeasured, and forced as the default it fails three slow tests (linear convergence at the end of
+     the march, and one Reynolds-continuation march that goes erratic; #645). **pitzDaily's `case.yaml`
+     opts in** (`stop: residual`, `refresh_on_cycles: 2`, 2026-10-09). Pinned by `test_the_stop_reaches_the_step_s_solver_with_the_regime_and_the_step_s_measure`.
   6. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
      Jacobian are **field-major**: DOF `(cell i, field f)` sits at `f·n_cells + i`, fields ordered
      `[u, v, w, p, k, ω]`. Slicing it cell-major silently yields a *different matrix* that still looks

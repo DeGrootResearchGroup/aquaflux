@@ -682,10 +682,12 @@ def _pitzdaily_march_as_its_script_passed_it() -> tuple[dict, dict]:
             probe=JacobianProbeSpec(stencil_reach=3, column_reach=None, gradient_sweeps=None),
             refit_beta_floor=0.05,
         ),
+        # The residual-only Krylov stop and its re-tuned refresh threshold, the case's own since the
+        # script stopped building its march.
         "dual_time": DualTimeLoop(
-            inner_steps=5, inner_tol=1e-2, cycle_budget=42, refresh_on_cycles=3
+            inner_steps=5, inner_tol=1e-2, cycle_budget=42, refresh_on_cycles=2
         ),
-        "linear_solve": LinearSolveSettings(rtol=0.3, restart=15, max_restarts=14),
+        "linear_solve": LinearSolveSettings(rtol=0.3, restart=15, max_restarts=14, stop="residual"),
         "positivity_floor": 0.0,
         "positivity_projection": True,
         "step_control": CflResidualDualTimeControl(
