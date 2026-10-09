@@ -296,5 +296,5 @@ def test_every_member_of_the_interface_is_abstract() -> None:
     abstract declaration fails here instead of silently acquiring whichever behaviour the base had.
     """
     assert Drive.__abstractmethods__ == frozenset(
-        {"volumetric_force", "layout", "driven_state", "fields_state", "settled"}
+        {"volumetric_force", "held_speed", "layout", "driven_state", "fields_state", "settled"}
     )

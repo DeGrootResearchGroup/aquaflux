@@ -56,7 +56,7 @@ Engineering Principles.
   `body_force` leaf**, which meant a prescribed input on one case and a live solve unknown on another
   (#224). Two members, not three: a *prescribed* uniform force is a `UniformBodyForce` source, so it is
   not a drive at all, and the union is only "the unknowns are the fields" against "the unknowns are the
-  fields plus a multiplier". `Drive` is abstract in all five members on purpose — a default would let a
+  fields plus a multiplier". `Drive` is abstract in all six members on purpose (`held_speed`, the speed a drive holds, added 2026-10-09 for the limiter scale) — a default would let a
   bordered drive inherit an answer that drops its multiplier.
   `MassFlow` owns everything the bordered form needs, so the flow-only solve
   (`mean_velocity.bulk_velocity_flow_solve`) and the coupled one
