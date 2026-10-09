@@ -231,8 +231,10 @@ class _ResidualStopGMRES(_RelativeResidualGMRES):
     bound on the linear residual alone, so this solver tests that and nothing else, after every
     iteration, in the same injected measure: ``norm(b - A x) <= rtol norm(b)``.
 
-    The residual is formed from the Arnoldi relation, ``r = V_{j+1} (beta e_1 - H_j y_j)``, so testing it
-    costs no operator application. The basis is orthogonalized by classical Gram--Schmidt applied twice,
+    Within a cycle the residual is formed from the Arnoldi relation, ``r = V_{j+1} (beta e_1 - H_j y_j)``,
+    so testing it costs no operator application; at the end of each cycle the true residual ``b - A x``
+    is recomputed (one application) and is what the next cycle starts from and the final verdict reads,
+    because the recurrence drifts from it as the basis loses orthogonality. The basis is orthogonalized by classical Gram--Schmidt applied twice,
     and the small least-squares problem is re-solved at every iteration (its size is at most the restart
     length, so this is negligible beside one application of the operator).
 
@@ -247,8 +249,9 @@ class _ResidualStopGMRES(_RelativeResidualGMRES):
     Attributes
     ----------
     on_solve : callable or None
-        ``(iterations, cycles) -> None``, called on the host after each solve with the operator
-        applications it made and the cycles it ran. ``None`` (default) elides it. An observer for
+        ``(applications, cycles) -> None``, called on the host after each solve with the operator
+        applications it made (one per Krylov iteration plus one per cycle for its true residual) and
+        the cycles it ran. ``None`` (default) elides it. An observer for
         studies that count work: the cycle count alone cannot, since a cycle may stop part way.
     """
 
@@ -295,13 +298,14 @@ class _ResidualStopGMRES(_RelativeResidualGMRES):
                 lambda inner: (inner[0] < size) & jnp.logical_not(inner[4]), iterate, inner
             )
             x = x + y @ basis[:size]
-            rhs = jnp.zeros(size + 1, dtype=r.dtype).at[0].set(beta)
-            r = (rhs - hessenberg @ y) @ basis
-            return x, r, cycles + 1, applications + j, done
+            # The true residual, not the Arnoldi one: the recurrence drifts from b - A x as the basis
+            # loses orthogonality, and near a tight target that drift is the whole residual.
+            r = vector - operator.mv(x)
+            return x, r, cycles + 1, applications + j + 1, done
 
         def keep_going(outer):
-            _, r, cycles, _, done = outer
-            return jnp.logical_not(done) & (cycles < self.max_steps) & (norm(r) > target)
+            _, r, cycles, _, _ = outer
+            return (cycles < self.max_steps) & (norm(r) > target)
 
         start = (jnp.zeros_like(vector), vector, 0, 0, norm(vector) <= target)
         x, r, cycles, applications, _ = jax.lax.while_loop(keep_going, cycle, start)
@@ -337,7 +341,7 @@ def residual_stop_gmres(
     max_restarts : int
         The most restart cycles a solve may run (default ``14``).
     on_solve : callable or None
-        ``(iterations, cycles) -> None``, told each solve's operator applications and cycles run.
+        ``(applications, cycles) -> None``, told each solve's operator applications and cycles run.
 
     Returns
     -------

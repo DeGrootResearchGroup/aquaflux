@@ -510,7 +510,8 @@ class _KrylovWork:
     """Applications of the preconditioned operator over a march, counted per inner solve.
 
     ``lineax``'s count follows from its cycles (one start-up application, then ``restart + 1`` per
-    cycle); the residual stop reports its own, since it may stop part way through a cycle.
+    cycle); the residual stop reports its own, since it may stop part way through a cycle, and it
+    includes the one application per cycle that recomputes the true residual.
     """
 
     def __init__(self):
@@ -522,8 +523,8 @@ class _KrylovWork:
             self.applications += 1 + (FORWARD_RESTART + 1) * (int(cycles) - 1)
             self.solves += 1
 
-    def on_solve(self, iterations, cycles):
-        self.applications += int(iterations)
+    def on_solve(self, applications, cycles):
+        self.applications += int(applications)
         self.solves += 1
 
 

@@ -50,7 +50,8 @@ def test_it_meets_its_tolerance_in_its_own_measure_and_no_further(rtol):
     x, cycles = _solve(solver, a, m, b)
     achieved = float(norm(b - jnp.asarray(a) @ x) / norm(b))
     assert achieved <= rtol
-    iterations, run = (int(v) for v in counted[-1])
+    applications, run = (int(v) for v in counted[-1])
+    iterations = applications - run  # each cycle also applies the operator once for its residual
     # It stopped at the first iteration that met the tolerance: one fewer would not have.
     assert run == restart_cycles(int(cycles)) == -(-iterations // 6)
     if iterations > 1:
