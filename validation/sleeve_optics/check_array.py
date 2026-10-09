@@ -23,6 +23,12 @@ Configuration by environment: ``SLEEVE_ARRAY_RAYS`` per lamp (default 20,000,000
 percent through 1 cm (default 95), ``SLEEVE_SECTORS`` around each arc (default 128),
 ``SLEEVE_ARRAY_PITCH`` the half-side of the square, metres (default 0.025), ``SLEEVE_ARRAY_PIXEL``
 (default 0.5 mm) and ``SLEEVE_ARRAY_DISC`` (default 1 mm).
+
+``SLEEVE_ARRAY_NEIGHBOURS=invisible`` separates what the neighbours' sleeves do from everything else:
+the tracer then leaves every lamp's sleeve out of the other lamps' light (their arcs still absorb), and
+aquaflux sums four scenes, each lamp alone emitting through its own sleeve with the other arcs dark and
+shadowing. Only the transmitted trace is run in that mode, and no straight gather. The output is
+``work/check_array-<mode>.json``.
 """
 
 from __future__ import annotations
@@ -44,6 +50,7 @@ SECTORS = int(os.environ.get("SLEEVE_SECTORS", 128))
 PITCH = float(os.environ.get("SLEEVE_ARRAY_PITCH", 0.025))
 PIXEL = float(os.environ.get("SLEEVE_ARRAY_PIXEL", 5e-4))
 DISC = float(os.environ.get("SLEEVE_ARRAY_DISC", 1e-3))
+NEIGHBOURS = os.environ.get("SLEEVE_ARRAY_NEIGHBOURS", "optics")
 HALF_LENGTH = 1.5
 
 
@@ -86,7 +93,9 @@ def main() -> None:
 
     absorption = -np.log(UVT / 100.0) / 0.01
     centres = PITCH * np.array([[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]])
-    traced_scene = Traced(centres=centres, wall=0.1, absorption=absorption)
+    if NEIGHBOURS not in ("optics", "invisible"):
+        raise ValueError(f"SLEEVE_ARRAY_NEIGHBOURS must be optics or invisible, got {NEIGHBOURS!r}")
+    traced_scene = Traced(centres=centres, wall=0.1, absorption=absorption, neighbours=NEIGHBOURS)
     n = int(2 * traced_scene.wall / PIXEL)
     grid = (-traced_scene.wall, -traced_scene.wall, PIXEL, n, n)
     # Between the lamps; beside one; beyond one lamp as seen from another (along the square's edge
@@ -109,10 +118,10 @@ def main() -> None:
         assert clearance > 2 * DISC, f"point {point} is {clearance:.4f} m from a sleeve"
 
     traced = {}
-    for name, variant in (
-        ("full", traced_scene),
-        ("transmitted", dataclasses.replace(traced_scene, reflections=False)),
-    ):
+    variants = [("transmitted", dataclasses.replace(traced_scene, reflections=False))]
+    if NEIGHBOURS == "optics":
+        variants.insert(0, ("full", traced_scene))
+    for name, variant in variants:
         started = time.perf_counter()
         tally = trace(variant, RAYS, grid, seed=3)
         by_class = fluence(variant, tally, grid, water_fraction(variant, grid))
@@ -151,26 +160,39 @@ def main() -> None:
     receivers = np.concatenate([points, np.zeros((len(points), 1))], axis=1)
     settings = RadiationSettings(self_occlusion=RayCastOcclusion(grid=True))
     started = time.perf_counter()
-    solved = solve_scene(
-        Scene(
-            lamps,
-            media=Media(WATER, sleeves, water),
-            volume=VolumeReceivers(receivers),
-            settings=settings,
-        ),
-        report=_say,
-    )
+    if NEIGHBOURS == "optics":
+        scenes = [(lamps, sleeves)]
+    else:
+        # Each lamp alone emitting, through its own sleeve only; the other arcs dark, still shadowing.
+        own = np.asarray(lamps.solid_id)
+        scenes = [
+            (lamps.with_optics(emission=jnp.where(own == k, lamps.emission, 0.0)), (sleeves[k],))
+            for k in range(len(centres))
+        ]
+    mine = np.zeros(len(points))
+    for emitting, regions in scenes:
+        solved = solve_scene(
+            Scene(
+                emitting,
+                media=Media(WATER, regions, water),
+                volume=VolumeReceivers(receivers),
+                settings=settings,
+            ),
+            report=_say,
+        )
+        mine = mine + np.asarray(solved.fluence_rate_direct)
     seconds = time.perf_counter() - started
-    mine = np.asarray(solved.fluence_rate_direct)
     _say(f"aquaflux: {lamps.n_facets} facets, {len(points)} points, {seconds:.0f} s")
     # The straight gather with nothing transparent in the way -- the neighbours' arcs shadowing --
     # for scale: what the sleeves change.
-    plain = Scene(lamps, absorption=water, volume=VolumeReceivers(receivers), settings=settings)
-    straight = np.asarray(solve_scene(plain).fluence_rate_direct)
+    straight = np.full(len(points), np.nan)
+    if NEIGHBOURS == "optics":
+        plain = Scene(lamps, absorption=water, volume=VolumeReceivers(receivers), settings=settings)
+        straight = np.asarray(solve_scene(plain).fluence_rate_direct)
 
     rows = []
     for k, point in enumerate(points):
-        full, full_error = traced["full"]["total"][k]
+        full, full_error = traced["full"]["total"][k] if "full" in traced else (np.nan, np.nan)
         alone, alone_error = traced["transmitted"]["total"][k]
         shares = [
             traced["transmitted"]["classes"][c][k][0] / alone if alone > 0 else float("nan")
@@ -193,6 +215,7 @@ def main() -> None:
         )
         _say(json.dumps(rows[-1]))
     result = {
+        "neighbours": NEIGHBOURS,
         "rays_per_lamp": RAYS,
         "uvt_percent": UVT,
         "absorption_per_m": absorption,
@@ -214,7 +237,7 @@ def main() -> None:
         },
         "rows": rows,
     }
-    out = HERE / "work" / "check_array.json"
+    out = HERE / "work" / f"check_array-{NEIGHBOURS}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, indent=2))
     _say(f"written {out}")
