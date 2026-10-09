@@ -270,11 +270,13 @@ Many entries below are dated history written against the old API. Read them thro
   recomputed once per outer sweep.
 - **`preconditioner.py`** — the convection-diffusion AMG preconditioner for the stiff k/ω scalar
   Krylov solves at high Reynolds number (the scalar analogue of the velocity-block work). It assembles
-  its frozen operator with the shared `aquaflux.solve.frozen_operator.convection_diffusion_operator` and
+  its frozen operator as the shared `aquaflux.solve.ConvectionDiffusionStencil` (#89) and
   hands the **assembled matrix** to `build_convection_hierarchy` / `build_air_hierarchy` (the coarsening
   library is operator-in, #45); its reaction+boundary diagonal still comes from its own `J·1`
   derivation, which is a genuinely different source, not a copy of the interior stencil. Its interior
-  diffusion coupling (`_scalar_operator_pieces`, feeding both the AMG operator and the pseudo-time shift)
+  diffusion coupling (`_scalar_stencil`, one stencil feeding both the AMG operator — `assemble()`, with
+  the fixed cells `detached` — and the pseudo-time shift — `diagonal_parts()`; it was a six-tuple
+  `_scalar_operator_pieces` unpacked at both and the shift re-derived the diagonal with `np.add.at`)
   is `discretization.flux_continuous_conductance(Γ, geometry, face_cells)` — the scalar transport
   operator's own diagonal contribution, harmonic on a graded diffusivity `Γ = ν + σν_t`, the *same*
   conductance the k/ω residual's `DiffusionFlux` carries (binding, #154). It replaced a g-weighted
@@ -808,7 +810,7 @@ Many entries below are dated history written against the old API. Read them thro
       not evidence about it.
     - **What was NOT refuted, and is worth re-landing on its own:** `KProduction.feedback_rate` (exact
       against AD in both cap branches under either linearization, an estimate only under the near-wall
-      blend), and returning the reaction diagonal **unclamped** from `_scalar_operator_pieces` with the
+      blend), and returning the reaction diagonal **unclamped** from `_scalar_stencil` (was `_scalar_operator_pieces`) with the
       preconditioner keeping its own `max(·, 0)` — that pair is a behaviour-preserving separation. What
       is refuted is `abs(·)` on the shift and `live_eddy_viscosity=True` on the coupled path.
     - **The untried variant is `|r| + |f|`** — add the destabilizing magnitude rather than net it, which

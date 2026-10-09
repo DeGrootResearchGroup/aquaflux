@@ -375,6 +375,30 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
 
 ## Contracts — the API boundary
 
+- **`frozen_operator.py` — `ConvectionDiffusionStencil` is the ONE description of a frozen
+  convection-diffusion operator (BUILT 2026-10-09, #89).** ⚠️ **There is no
+  `convection_diffusion_operator` and no `_scalar_operator_pieces`** — the free function became the
+  stencil's `assemble()`, and the turbulence six-tuple `(owner_e, nb_e, visc_int, mdot_int,
+  boundary_diagonal, n)` that was unpacked only to be re-passed into it became `_scalar_stencil(...)`
+  returning one. A frozen dataclass (`eq=False`; numpy, off the jit path — not an `equinox.Module`)
+  of `owner, nb, coefficient, n` plus keyword-only `flux`, `boundary_diagonal`; the graph is checked
+  by `require_valid_graph` and every array against it **at construction**. Three operations live on it
+  so no caller open-codes them on loose arrays:
+  - `assemble()` — the CSR operator, entries unchanged from the deleted function.
+  - `diagonal_parts()` → `(convective, dissipative)`, whose sum is `assemble().diagonal()` (pinned on an
+    irregular graph with mixed-sign fluxes). The k/ω pseudo-time shift is this split — it used to
+    rebuild it with `np.add.at` beside the assembler, a second copy of the diagonal.
+  - `detached(cells)` — drops every edge incident to the cells (from **both** ends) and gives them a
+    unit diagonal; the k/ω preconditioner's fixed-cell treatment. ⚠️ **Not the same as
+    `decouple_dof`**, which zeroes an *assembled* row and column and leaves the neighbours' diagonals
+    holding the dropped edge's contribution; `flow/initialization.py` uses that one, and the two were
+    deliberately not unified (it would change an operator).
+  Value-identity at migration is being checked by recording every operator handed to a hierarchy
+  builder and every scalar shift diagonal across 16 unit modules, before and after, and comparing them
+  with `np.array_equal` (result pending at this commit). Pinned by `tests/unit/test_convection_diffusion_stencil.py` (hand-written
+  three-cell operator, mutation-checked eight ways — the "drops only owner-side edges" mutation
+  survived until a neighbour-only detach test was added).
+
 - **`state.py` — BUILT (#285): `FieldLayout` is the ONE flat field-major state layout, and nothing
   else may re-derive `f * n_cells + i` (binding).** A coupled state is one flat vector, field-major,
   described by an ordered tuple of named `StateBlock`s over a cell count. Three block kinds cover

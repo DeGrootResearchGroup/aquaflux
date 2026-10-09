@@ -28,8 +28,8 @@ from aquaflux.discretization import DiffusionFlux, FixedValueCells, ResidualAsse
 from aquaflux.initialization import hybrid_initialize
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.solve import (
+    ConvectionDiffusionStencil,
     build_smoothed_hierarchy,
-    convection_diffusion_operator,
     decouple_dof,
     newton_step,
     smoothed_multigrid_solve,
@@ -84,9 +84,9 @@ def _laplace_preconditioner(
     # decoupled below), and any negative entry would make the V-cycle diverge.
     boundary_diagonal = np.maximum(np.asarray(jax.lax.stop_gradient(j_dot_one)), 0.0)
 
-    a = convection_diffusion_operator(
+    a = ConvectionDiffusionStencil(
         owner_e, nb_e, coefficient_int, n, boundary_diagonal=boundary_diagonal
-    )
+    ).assemble()
     for cell in np.atleast_1d(np.asarray(fixed_cells)) if fixed_cells is not None else ():
         a = decouple_dof(a, int(cell))
     hierarchy = build_smoothed_hierarchy(a)

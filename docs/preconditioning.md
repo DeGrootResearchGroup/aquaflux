@@ -462,9 +462,11 @@ Each has a matching apply — {func}`~aquaflux.solve.smoothed_multigrid_solve`,
 {func}`~aquaflux.solve.air_multigrid_solve` — that runs a fixed number of V-cycles, which
 is what keeps the result a fixed linear map.
 
-{func}`~aquaflux.solve.convection_diffusion_operator` assembles the frozen operator these
-coarsen: a symmetric diffusive edge coupling, optionally plus first-order-upwind convection
-at a reference flux. The first-order upwinding is the *preconditioner's* choice and not the
+{class}`~aquaflux.solve.ConvectionDiffusionStencil` describes the frozen operator these
+coarsen — a symmetric diffusive edge coupling, optionally plus first-order-upwind convection
+at a reference flux — and assembles it. It also reports the operator's diagonal without
+assembling it, which is how a scalar equation's pseudo-time shift is built from the same
+operator its preconditioner coarsens. The first-order upwinding is the *preconditioner's* choice and not the
 model's — whatever advection scheme the residual uses, this operator upwinds first order,
 because that is what makes it an M-matrix an aggregation hierarchy can coarsen.
 
