@@ -697,6 +697,7 @@ class MomentumContinuity(eqx.Module):
         component : int
             The velocity component this closure describes.
         """
+        velocity = jnp.asarray(velocity)  # a caller may hand over a host (NumPy) state
         tensor = jnp.zeros((self.mesh.n_cells, self.mesh.dim, self.mesh.dim))
 
         def values(field: jnp.ndarray, gradient: jnp.ndarray) -> jnp.ndarray:
