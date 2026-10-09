@@ -301,6 +301,25 @@ class FaceCellConnectivity(eqx.Module):
         )[: self.n_cells]
         return owner_sum + neighbour_sum
 
+    def scatter_to_owner(self, owner_contrib: jnp.ndarray) -> jnp.ndarray:
+        """Scatter per-face contributions to each face's owner only.
+
+        :meth:`scatter` with a zero neighbour side, without forming or reducing that zero array --
+        for a quantity that by construction lives only on a face's owner, such as what a boundary
+        condition contributes to the cell it closes.
+
+        Parameters
+        ----------
+        owner_contrib : jnp.ndarray
+            Per-face contributions, shape ``(n_faces, ...)``.
+
+        Returns
+        -------
+        jnp.ndarray
+            Per-cell sum, shape ``(n_cells, ...)``.
+        """
+        return segment_sum(owner_contrib, self.owner, self.n_cells)
+
     def scatter_conservative(self, face_flux: jnp.ndarray) -> jnp.ndarray:
         """Scatter an owner-outward face flux conservatively: owner ``+flux``, neighbour ``−flux``.
 

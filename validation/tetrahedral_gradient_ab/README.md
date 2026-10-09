@@ -158,7 +158,9 @@ mesh is the least accurate one measured.
 - **Laminar, from rest** (`LAM_START=rest LAM_MEASURE=euclid LAM_ARMS=lu`, 60-step cap): **converges in
   13 steps to `|R|` 5.6e-9, 287 s**, 3 linear cycles per step after the first -- the same step count
   and final residual as `CorrectedGreenGauss` (13, 5.4e-9), where `MultipleCorrectionGradient` never
-  converges (above).
+  converges (above). ⚠️ The `CorrectedGreenGauss` figure predates that scheme reading its boundary
+  conditions' dependence on the owner gradient (2026-10-09); the duct's zero-gradient pressure walls
+  are exactly where that changes its answer, and it has not been re-run.
 - **Coupled RANS** (`compare.py`, `TET_ARMS=hessian`, anchor rung at Re/10 then the target, dual time,
   complete LU): **converges -- 9 anchor steps and 16 target steps, `alpha = 1` at every step with no
   escalation, to 4.9e-6 against the 1e-5 stop, 1583 s** (`TET_MAX_STEPS=20`; at the shipped cap of 15

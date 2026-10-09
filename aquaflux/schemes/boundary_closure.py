@@ -7,11 +7,14 @@ mesh that extrapolation carries a tangential correction ``grad(phi)_P . d_t`` th
 :class:`BoundaryClosure` holds that map -- ``(field, gradient) -> boundary face values`` -- and is
 the one place both directions of the dependence are resolved:
 
-- :meth:`BoundaryClosure.reconstruct` breaks the circularity in two passes. The reconstruction is
-  fed the **leading-order** boundary values (the closures at a zero gradient), which keeps a residual
-  built on it a single pass over the field; the returned boundary values are the closures
-  re-evaluated at the reconstructed gradient, which is what a face flux consumes. On an orthogonal
-  mesh the correction vanishes and the two passes agree exactly.
+- :meth:`BoundaryClosure.reconstruct` resolves the circularity. Every shipped closure is affine in
+  its owner's gradient, ``phi_f = phi_f0 + w . grad phi_P``, so the reconstruction is handed the
+  constant part ``phi_f0`` (the closures at a zero gradient) and the gradient weight ``w``; a
+  Green--Gauss scheme moves ``w . grad phi_P`` to its left-hand side and returns a gradient that
+  satisfies the conditions exactly (see :func:`~aquaflux.schemes.boundary_gradient_block`). The
+  returned boundary values are the closures evaluated at that gradient, which is what a face flux
+  consumes. A scheme that does not use the weight reconstructs against ``phi_f0`` alone, a
+  leading-order approximation that is exact on an orthogonal mesh, where ``w`` vanishes.
 - :meth:`BoundaryClosure.linearization` reads how each face value depends on its owner -- the
   :class:`~aquaflux.schemes.BoundaryLinearization` a scheme is bound against -- by differentiating
   the map, so it cannot disagree with the conditions it describes.
@@ -139,13 +142,13 @@ class BoundaryClosure:
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         """The cell gradient of ``field`` and the boundary values consistent with it.
 
-        The reconstruction is fed the leading-order boundary values (:attr:`values` at a zero
-        gradient), and also handed the corrected values at any gradient it asks for
-        (``boundary_values_at``) and the gradient weight at zero gradient: a scheme that
-        **differentiates** a boundary value needs the corrected one, because a gradient-type
-        condition's whole content is its correction, and a scheme that reconstructs against the
-        conditions themselves needs the weight. The returned boundary values are :attr:`values`
-        re-evaluated at the reconstructed gradient.
+        The reconstruction is fed :attr:`values` at a zero gradient -- the constant part of each
+        affine closure -- with the gradient weight that completes it, and also the closures at any
+        gradient it asks for (``boundary_values_at``): a scheme that reconstructs against the
+        conditions themselves needs the weight, and a scheme that **differentiates** a boundary
+        value in a later pass needs the evaluated closures, because a gradient-type condition's
+        whole content is its gradient term. The returned boundary values are :attr:`values` at the
+        reconstructed gradient.
 
         Parameters
         ----------
