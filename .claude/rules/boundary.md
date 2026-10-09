@@ -52,8 +52,11 @@ correction `corr = grad·(d − (d·n)n)` (zero on orthogonal grids). `Convectiv
 Gate-B sensitivity target — and enforces the Robin balance `Gamma dphi/dn = h(Tinf − phi_ip)`.
 Verified (`test_boundary.py`): each closure vs its closed form on a single face, the Robin
 balance holds, and high-`h` convective → Dirichlet. The closures are consumed by
-`ResidualAssembler` both as the flux's boundary value and (leading-order) as the gradient
-reconstruction's boundary input.
+`ResidualAssembler` both as the flux's boundary value and as the gradient reconstruction's boundary
+input — the latter as the value at zero gradient plus its gradient weight, which the Green–Gauss
+schemes absorb exactly because each closure is affine in the owner gradient (see
+`schemes.boundary_gradient_block`). **A new closure must stay affine in the owner gradient** or the
+absorbed form becomes a linearization of it.
 
 - **`BoundaryCondition.closes() -> tuple[str, ...]` (binding, #355), the same self-describing shape
   as `requires_coefficient()` below.** A scalar closure returns `HOST_EQUATION_FIELD` — the empty

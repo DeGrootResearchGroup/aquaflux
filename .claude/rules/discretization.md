@@ -297,16 +297,18 @@ Principles.
   `.claude/rules/solve.md`). The residual is **affine in φ** with the gradient scheme injected
   (the gradient solve and the correction are both linear in φ), which is *why* one step is
   exact.
-- **Gradient-boundary circularity (documented, still open for non-Dirichlet skewed boundaries):**
-  a non-Dirichlet boundary value depends on the owner gradient (`corr`), and the gradient
-  reconstruction depends on boundary values — circular off-orthogonal. Resolved for now by
-  feeding the gradient scheme a leading-order boundary value (its `corr` dropped, i.e. gradient
-  = 0) while the *flux* uses the full boundary value at the reconstructed gradient. **Exact when
-  boundary values are gradient-independent** — orthogonal grids (Gate A/B) and any all-Dirichlet
-  problem (Gate C uses a `DirichletField` linear manufactured solution to stay exact). The
-  fully-implicit boundary-gradient fold-in (needed for `ZeroGradient`/`Convective`/`Neumann`
-  boundaries at 2nd order on *skewed* grids) couples the gradient scheme to the boundary
-  closures and is the scoped follow-up — do not entangle scheme↔BC casually when it lands.
+- **Gradient-boundary circularity — RESOLVED for every Green–Gauss scheme but the Hessian-corrected
+  one (#648, 2026-10-09).** A non-Dirichlet boundary value depends on the owner gradient (`corr`), and
+  the reconstruction depends on boundary values. Every shipped closure is **affine** in the owner
+  gradient, `phi_f = phi_f0 + w·∇φ_P`, so the reconstruction is handed `phi_f0` (the closures at zero
+  gradient) and `w` (`BoundaryClosure.gradient_weight`), and `CompactGreenGauss`,
+  `CorrectedGreenGauss` and `MultipleCorrectionGradient` move `w·∇φ_P` to their left-hand side through
+  `schemes.boundary_gradient_block` — so their gradient satisfies the conditions exactly, and Gate C
+  (one Newton step, linear-exact) now holds with Neumann walls on a skewed grid too
+  (`test_gate_c_holds_with_flux_walls_on_a_skewed_mesh`). The flux still uses the closures evaluated
+  at the reconstructed gradient. `HessianCorrectedGradient` still reconstructs against `phi_f0` alone
+  (the leading-order treatment, exact only for gradient-independent boundary values — orthogonal grids
+  and all-Dirichlet problems); that is #648's open follow-up. See `.claude/rules/schemes.md`.
 
 ## Binding decisions
 - **No hand-derived linearization. Ever.** The reference codes carry `coeff0`/`coeff1`

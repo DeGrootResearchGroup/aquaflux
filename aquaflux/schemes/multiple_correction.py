@@ -101,6 +101,7 @@ from .gradient import (
     BoundaryLinearization,
     GradientScheme,
     ImposedGradient,
+    boundary_gradient_block,
     contract_symmetric,
     expand_symmetric,
     symmetric_components,
@@ -760,20 +761,16 @@ def _boundary_condition_first_pass(
     *not* the boundary condition on a skewed boundary cell, and the Green--Gauss sum is wrong there by
     a term of the size of the dropped correction.
 
-    **Why it costs nothing.** Every boundary closure is affine in the owner gradient, so the face value
-    is exactly ``phi_given + w . grad phi_P`` with ``w = d(boundary value)/d(grad phi_P)``. Each such
-    face adds ``(w . grad phi_P) A_f / V`` to the sum, i.e. ``B_P grad phi_P`` for a per-cell matrix,
-    so the pass is ``(M1 - B) grad phi = raw`` -- one per-cell inverse, exactly what ``M1`` already was.
+    **Why it costs nothing.** That dependence is affine, so it moves to the left-hand side as the
+    per-cell block :func:`~aquaflux.schemes.boundary_gradient_block` builds, and the pass is
+    ``(M1 - B) grad phi = raw`` -- one per-cell inverse, exactly what ``M1`` already was.
 
-    **Why the weight is the tangential offset and not the whole displacement ``d``.** An earlier form
-    used ``w = d`` -- the owner's full linear extrapolation to the face. That reads no information from
-    the boundary condition at all: the face value simply follows whatever gradient the cell has,
-    normal component included. On a cell whose interior faces do not span every direction -- a
-    tetrahedron owning two such boundary faces has only two interior faces for three gradient
-    components -- the system is then singular: measured ``cond(M1 - B)`` up to ``4e18`` on every such
-    cell of a real tetrahedral mesh, and ``1e16`` on some cells owning only one. With the boundary
-    condition's own weight the same cells are at most ``2.5`` and ``8.3``, because the condition
-    supplies exactly the normal direction the interior faces lack.
+    **Why the weight is the condition's and not the owner's whole displacement ``d``.** An earlier
+    form used ``w = d``, which reads nothing from the boundary condition, and left ``M1 - B``
+    singular wherever a cell's interior faces do not span every direction: measured ``cond(M1 - B)``
+    up to ``4e18`` on every tetrahedron owning two such faces on a real tetrahedral mesh, and ``1e16``
+    on some cells owning only one. With the condition's own weight the same cells are at most ``2.5``
+    and ``8.3``.
 
     Parameters
     ----------
@@ -790,14 +787,9 @@ def _boundary_condition_first_pass(
     jnp.ndarray
         ``(M1 - B)^-1``, shape ``(n_cells, dim, dim)``.
     """
-    weight = jnp.where(face_cells.interior[:, None], 0.0, boundary_gradient_weight)
-    area = scale(geometry.face.normal, geometry.face.area)
-    # B_P = sum over the cell's own boundary faces of (A_f (x) w_f) / V, scattered to the owner.
-    # `scatter_conservative` is the same accumulation the sum itself uses, so the two cannot disagree
-    # about which faces belong to which cell.
-    b = face_cells.scatter_conservative(weight[:, :, None] * area[:, None, :])
-    b = jnp.swapaxes(b, 1, 2) / geometry.cell.volume[:, None, None]
-    return jnp.linalg.inv(m1 - b)
+    return jnp.linalg.inv(
+        m1 - boundary_gradient_block(boundary_gradient_weight, face_cells, geometry)
+    )
 
 
 def _symmetrize(tensor: jnp.ndarray) -> jnp.ndarray:

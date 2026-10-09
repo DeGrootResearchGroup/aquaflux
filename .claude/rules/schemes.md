@@ -273,9 +273,10 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
 - **`boundary_closure.py` — BUILT (2026-10-09, #58). `BoundaryClosure(values)`: one scalar field's
   boundary face values as a function `(field, gradient) -> (n_faces,)`, and the one home of
   everything a reconstruction needs from them** — `reconstruct(scheme, field, mesh, geometry, *,
-  operator_hook, imposed)` (leading-order values at a zero gradient into the scheme, plus
-  `boundary_values_at` and `boundary_gradient_weight`; returns the gradient and the values
-  re-evaluated at it; `scheme=None` → a zero gradient), `value_weight` / `gradient_weight` (the `jvp`
+  operator_hook, imposed)` (the closures' constant part at a zero gradient into the scheme, plus
+  `boundary_gradient_weight` — which a Green–Gauss scheme absorbs, making that constant part exact
+  rather than leading-order — and `boundary_values_at` for a later pass that differentiates a boundary
+  value; returns the gradient and the values at it; `scheme=None` → a zero gradient), `value_weight` / `gradient_weight` (the `jvp`
   probes), and `linearization(n_cells, dim)` (both at rest — the `BoundaryLinearization` `bind`
   takes). `ResidualAssembler` wraps `boundary_values`; `MomentumContinuity` wraps the pressure and
   a per-component view of each velocity component. Before it, those were written three times
@@ -2579,12 +2580,45 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   wall is **one run**, and this case has no measured march-level noise floor -- read it as neutral,
   not as a cost, until a repeat says otherwise.
 
-  ⚠️ **Scope, stated because "standard treatment" over-describes what is built.** Only
-  `MultipleCorrectionGradient` acts on `boundary_gradient_weight`; `CorrectedGreenGauss` and
-  `HessianCorrectedGradient` accept and ignore it. Since pitzDaily's shipped scheme is corrected
-  Green--Gauss, **the main validation case is unaffected by this change today.** Extending it to the
-  other two means folding `B` into an iterated operator rather than a per-cell matrix — a bigger
-  change, not attempted.
+  **✅ EXTENDED TO `CompactGreenGauss` AND `CorrectedGreenGauss` (2026-10-09, #648); STILL NOT
+  `HessianCorrectedGradient`.** `B_P` has one home, `schemes.boundary_gradient_block(weight,
+  face_cells, geometry)` (`(n_cells, dim, dim)`, per volume, its docstring carrying the affine
+  contract); `_boundary_condition_first_pass` calls it, **bit-identical** to before on quad, hex and
+  tet fixtures under both closures. Compact solves `(I − B_P) g = raw/V` per cell. Corrected adds
+  `− V B` to `A_g` (`_CorrectedTerms.boundary_block`, set by `terms(mesh, geometry, weight)`; `None`
+  leaves the terms geometry-only, which is what `calibrated` and the contraction-rate tools measure),
+  and **both `CellPreconditioner`s include it**: `InverseCellVolume` builds `CellBlockJacobi(inv(V(I −
+  B)))` when a block is present and plain `1/V` otherwise; `ExactCellBlock` subtracts it from the
+  probed block. Measured (`tests/unit/test_gradient_boundary_block.py`, x64 CPU): a linear field
+  satisfying zero-gradient / Neumann / Robin data on two walls of an 8×8 grid perturbed 0.3 is off by
+  **0.15–0.17** of its gradient before and roundoff after (corrected, GMRES); same on columnwise 3D
+  hexahedra, on tetrahedra with two flux faces, and for compact on a sheared parallelogram grid (0.30–
+  0.34 before). Orthogonal mesh: **bit-identical** for every scheme (`w` is exactly zero there).
+  - **The asymptotic sweep rate does not move, and that is structural**: for a cell owning one such
+    face `B_P = s wᵀ/V` with `w ⟂ s`, so `B_P² = 0` — no eigenvalue. Gelfand rate, `InverseCellVolume`,
+    before → after: quad 0.3 16² 0.1817 → 0.1816, quad 0.4 0.3699 → 0.3699, hex 0.3 6³ 0.1894 → 0.1894,
+    tet n=3 0.6773 → 0.6804; `ExactCellBlock` likewise. **So a count calibrated on the geometry alone
+    stays valid** and `calibrated` was left geometry-only.
+  - **But a FIXED sweep count sees the transient, and corner cells are not nilpotent** — which is why
+    the default preconditioner carries `B`. Sheared parallelograms (interior skew exactly zero, so
+    `A_g = V(I − B)`), 16², all four walls zero-gradient, error vs the exact solve after 2/4/8 sweeps:
+    aspect 50 (`max|B_P|` 10): plain `1/V` **3.9e-2 / 9.7e-3 / 6.0e-4**, `V(I − B)` roundoff from one
+    sweep. With only the two horizontal walls zero-gradient (single-face cells, nilpotent `B`) plain
+    `1/V` is exact in two sweeps. On randomly perturbed grids the interior skewness dominates and the two
+    preconditioners agree to two figures.
+  - **Gate C now holds with flux walls**: one Newton step reproduces a linear field to 1e-9 on a 25 %
+    skewed grid with Neumann top/bottom (`test_gate_c_holds_with_flux_walls_on_a_skewed_mesh`); the
+    control without the block misses by 1.1e-3.
+  - ⚠️ **Every `CorrectedGreenGauss`/`CompactGreenGauss` measurement in these files that ran under
+    derivative-type conditions on a skewed mesh predates this and was not re-run** — the tetrahedral
+    duct's corrected **march** (laminar 13 steps / 5.4e-9), pitzDaily's corrected arms and its gradient
+    A/B tables (near-orthogonal walls, so `w` is small there), bfs3d (skew-free to `1.9e-12`, so
+    effectively unchanged). Measurements taken under Dirichlet values only are **unaffected** (`w = 0`):
+    the duct's "misses a quadratic by 7x" (exact Dirichlet values) and its damping-operator rows
+    (Dirichlet-zero values, eigenvalue `9.0e-4`) among them.
+  - **`HessianCorrectedGradient` still ignores the weight** — `B` would enter the gradient equation's
+    own block and must reach the bound outer preconditioner (`local_schur_block`, `bind`'s
+    `prepared_outer`). Left open on #648 as its separable follow-up.
 
   ⚠️ **It reaches the first pass and the closure, not `M2`.** The correction matrices are still probed
   against exact face values, so a quadratic keeps a second-order inconsistency — measured at 1.6 % of
