@@ -85,13 +85,13 @@ from aquaflux.turbulence.coupled import (
     _row_jacobian_scale,
     coupled_jacobian_probe,
     coupled_rans_layout,
-    coupled_scaled_norm,
     frozen_production_viscosity,
     mass_flow_coupled_continuation,
     solve_coupled,
     solve_coupled_mass_flow,
     wall_consistent_state,
 )
+from aquaflux.turbulence.measures import coupled_scaled_norm
 
 from tests.support.meshes import perturbed_grid_2d
 from tests.unit.test_gradient import _cell_graph_distance

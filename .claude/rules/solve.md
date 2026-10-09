@@ -532,6 +532,11 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     now calls it.
   - `block_reference_scales(layout, residual)` (`norm.py`) is the per-block scale a `BlockScaledNorm` is
     built from — one home for what `_coupled_block_scales` and the flow measure both need.
+  - **Both block measures carry a static `names` (2026-10-07)** — the equation each block holds, empty by
+    default and refused unless it names every block once; `BlockScaledNorm` gained `per_block` to match
+    `RowScaledNorm`'s. `named_blocks(measure, residual_fn, state)` (exported) reads the per-block terms
+    under those names, which is what `newton_march(on_residuals=)` reports (see `solve-march.md`). Only the
+    row-scaled flow and coupled builders name their blocks.
   - **`BlockScaledNorm.scales` is an ordinary array leaf, not static (#368, 2026-09-29)** — only `sizes`
     is static, as on `RowScaledNorm`, so rebuilding it at a new reference state is a compilation cache
     hit rather than a recompile. It accepts any float sequence (the builders pass tuples) and stores

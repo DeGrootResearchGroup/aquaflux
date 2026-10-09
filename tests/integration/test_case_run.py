@@ -153,6 +153,22 @@ def test_a_run_that_stops_short_writes_no_fields_and_says_so(tmp_path) -> None:
     assert "did not converge" in (results / "march.log").read_text()
 
 
+def test_an_interrupted_run_is_recorded_as_one_that_stopped_short(tmp_path, monkeypatch) -> None:
+    """Ctrl-C, or the browser interface's Stop, leaves the same record as a run that ran out of steps."""
+
+    def interrupted(self, problem, **observers):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(FlowMarch, "solve", interrupted)
+    case = _write(tmp_path / "case.yaml", _CHANNEL | {"solver": {"kind": "FlowMarch"}})
+    assert main(["run", str(case)]) == 1
+    results = tmp_path / "results"
+    record = yaml.safe_load((results / "run.yaml").read_text())
+    assert (record["converged"], record["message"]) == (False, "interrupted before it converged")
+    assert not (results / "fields.vtu").exists()
+    assert "interrupted before it converged" in (results / "march.log").read_text()
+
+
 def test_a_run_writes_an_openfoam_time_directory_the_case_can_restart_from(tmp_path) -> None:
     of = tmp_path / "of"
     shutil.copytree(SLAB, of / "constant" / "polyMesh")

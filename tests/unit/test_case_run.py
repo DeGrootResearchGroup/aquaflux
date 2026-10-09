@@ -309,16 +309,51 @@ def test_a_march_logs_each_step_retry_and_inner_iteration_it_has() -> None:
     assert observed == {"on_checkpoint": "step", "on_retry": "retry", "inner_observer": "inner"}
 
 
-def test_a_march_hands_each_step_to_the_log_and_to_the_checkpoints() -> None:
+def _hooks(seen: list, who: str, **extra: object) -> types.SimpleNamespace:
+    """A log or a recorder whose every march hook records who heard what."""
+    return types.SimpleNamespace(
+        on_checkpoint=lambda report, state: seen.append((who, "step", state)),
+        on_retry=lambda reason, attempt, beta: seen.append((who, "retry", reason)),
+        on_refresh=lambda timing: seen.append((who, "refresh", timing)),
+        on_inner=None,
+        **extra,
+    )
+
+
+def test_a_march_hands_each_step_and_retry_to_the_log_and_to_the_recorder() -> None:
     seen = []
-    logger = types.SimpleNamespace(
-        on_checkpoint=lambda report, state: seen.append(("log", state)), on_retry=None
+    observers = FlowMarch().observers_for(_hooks(seen, "log"), _hooks(seen, "file"))
+    observers["on_checkpoint"]("report", "state")
+    observers["on_retry"]("alpha", 1, 0.5)
+    assert seen == [
+        ("log", "step", "state"),
+        ("file", "step", "state"),
+        ("log", "retry", "alpha"),
+        ("file", "retry", "alpha"),
+    ]
+
+
+def test_the_per_equation_residuals_are_asked_for_only_when_a_recorder_keeps_them() -> None:
+    # Each costs a residual evaluation per step, so a march without a taker must not be handed the hook.
+    seen = []
+    assert "on_residuals" not in FlowMarch().observers_for(_Logger(), None)
+    assert "on_residuals" not in FlowMarch().observers_for(
+        _Logger(), _hooks(seen, "file", on_residuals=None)
     )
-    checkpointer = types.SimpleNamespace(
-        on_checkpoint=lambda report, state: seen.append(("file", state))
+    observers = FlowMarch().observers_for(
+        _Logger(), _hooks(seen, "file", on_residuals=lambda terms: seen.append(terms))
     )
-    FlowMarch().observers_for(logger, checkpointer)["on_checkpoint"]("report", "state")
-    assert seen == [("log", "state"), ("file", "state")]
+    observers["on_residuals"]({"u": 1.0})
+    assert seen == [{"u": 1.0}]
+
+
+def test_a_coupled_march_hands_each_refit_to_the_log_and_to_the_recorder() -> None:
+    seen = []
+    observers = CoupledMarch(
+        preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed()))
+    ).observers_for(_hooks(seen, "log"), _hooks(seen, "file"))
+    observers["session_options"]["observer"]("timing")
+    assert seen == [("log", "refresh", "timing"), ("file", "refresh", "timing")]
 
 
 def test_a_coupled_march_also_logs_its_refreshes_and_its_ramp() -> None:
@@ -490,3 +525,33 @@ def test_the_package_runs_as_the_aquaflux_command() -> None:
     )
     assert result.returncode == 0
     assert "check" in result.stdout and "run" in result.stdout
+
+
+def test_the_run_hands_each_march_hook_to_every_recorder_that_has_it() -> None:
+    from aquaflux.case.run import _StepCount
+
+    seen = []
+    history = types.SimpleNamespace(
+        on_checkpoint=lambda report, state: seen.append(("history", "step")),
+        on_retry=lambda reason, attempt, beta: seen.append(("history", reason)),
+        on_refresh=lambda timing: seen.append(("history", timing)),
+        on_residuals=lambda terms: seen.append(("history", terms)),
+    )
+    checkpoints = types.SimpleNamespace(
+        on_checkpoint=lambda report, state: seen.append(("checkpoints", "step"))
+    )
+    steps = _StepCount([history, checkpoints])
+    steps.on_retry("alpha", 1, 0.5)
+    steps.on_refresh("timing")
+    steps.on_residuals({"u": 1.0})
+    steps.on_checkpoint(types.SimpleNamespace(residual_norm=0.25), None)
+    assert seen == [
+        ("history", "alpha"),
+        ("history", "timing"),
+        ("history", {"u": 1.0}),
+        ("history", "step"),
+        ("checkpoints", "step"),
+    ]
+    assert (steps.count, steps.residual) == (1, 0.25)
+    # With no recorder keeping them, the per-equation residuals are not asked for at all.
+    assert _StepCount([checkpoints]).on_residuals is None

@@ -78,7 +78,8 @@ from aquaflux.solve import (  # noqa: E402  # noqa: E402
 from aquaflux.solve.amg_preconditioner import ShiftedCellMajorOperator  # noqa: E402
 from aquaflux.turbulence import ScalarTwoLevel, coupled_step
 from aquaflux.solve import MaterializedJacobian, MonolithicVCycle
-from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy, coupled_scaled_norm
+from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy
+from aquaflux.turbulence.measures import coupled_scaled_norm
 from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, frozen_shift_diagonal, jacobian_matvec
 
 FLOOR = compare.PC_BETA_FLOOR

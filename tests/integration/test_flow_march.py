@@ -244,6 +244,41 @@ def test_every_measure_a_convergence_can_name_is_supplied_and_converges(channel,
     assert float(jnp.linalg.norm(state - root) / jnp.linalg.norm(root)) < 1e-5
 
 
+def test_each_steps_residual_is_reported_by_equation_and_the_terms_make_up_its_norm(
+    channel,
+) -> None:
+    """Under the default row-scaled measure each step's terms arrive named, and combine to its ``R``.
+
+    The terms are the very numbers the march's scalar measure is the Euclidean combination of, at the
+    same state and in the same scales, so they must reproduce the reported norm to rounding -- which is
+    what makes a per-equation plot of a run a decomposition of its residual rather than a second,
+    differently-scaled measurement. A plain Euclidean measure has no blocks to name and reports none.
+    """
+    assembler, _ = channel
+    reports, terms = [], []
+    solve_flow_march(
+        assembler,
+        convergence=Convergence(measure=RowScaled(), rtol=1e-6, atol=0.0),
+        max_steps=150,
+        on_checkpoint=lambda report, state: reports.append(report),
+        on_residuals=terms.append,
+    )
+    assert len(terms) == len(reports) > 1
+    assert all(tuple(step) == ("u", "v", "p") for step in terms)
+    for report, step in zip(reports, terms, strict=True):
+        combined = float(jnp.linalg.norm(jnp.asarray(list(step.values()))))
+        assert combined == pytest.approx(report.residual_norm, rel=1e-12)
+
+    unnamed = []
+    solve_flow_march(
+        assembler,
+        convergence=Convergence(measure=Euclidean(), rtol=1e-6, atol=0.0),
+        max_steps=150,
+        on_residuals=unnamed.append,
+    )
+    assert unnamed == []
+
+
 def test_a_lid_driven_cavity_marches_from_rest_under_the_default_measure() -> None:
     """A state at rest is a legitimate start, and the default row-scaled measure must accept it.
 

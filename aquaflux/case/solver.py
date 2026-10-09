@@ -18,7 +18,7 @@ re-fits its preconditioner from states the file never sees, at each continuation
 refresh, and it does so from the same settings every time.
 
 A solve can be observed without being reconfigured. :meth:`SolverSpec.solve` takes the problem the case
-built and, optionally, observers -- a logger, a checkpointer -- which it passes to the library solve
+built and, optionally, observers -- a logger, a recorder -- which it passes to the library solve
 beside the file's settings. It refuses an observer keyword that is also a setting, so a script that
 runs a case cannot change what the case says.
 """
@@ -44,7 +44,6 @@ from aquaflux.solve import (
     RetryPolicy,
     RootSolveSettings,
     ShiftStrengthControl,
-    StateCheckpointer,
     combine_observers,
     relative_residual_gmres,
 )
@@ -88,18 +87,19 @@ class SolverSpec(abc.ABC):
     :class:`RadiationSolve`."""
 
     @abc.abstractmethod
-    def observers_for(
-        self, logger: MarchLogger, checkpointer: StateCheckpointer | None
-    ) -> dict[str, object]:
-        """The observer keywords that attach ``logger`` and ``checkpointer`` to this solve.
+    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
+        """The observer keywords that attach ``logger`` and ``recorder`` to this solve.
 
         Parameters
         ----------
         logger : MarchLogger
             Writes one row per outer step.
-        checkpointer : StateCheckpointer or None
-            Receives each step and its state -- anything with a ``StateCheckpointer``'s
-            ``on_checkpoint(report, state)``; ``None`` for nothing.
+        recorder : object or None
+            Records each step for a program to read: anything with the march hooks
+            ``on_checkpoint(report, state)``, ``on_retry(reason, attempt, beta)`` and
+            ``on_refresh(timing)``, and an ``on_residuals`` that is ``{equation: term} -> None``, or
+            ``None`` when nothing wants the per-equation residuals (each costs a residual evaluation
+            per step). ``None`` for no recorder.
 
         Returns
         -------
@@ -272,16 +272,14 @@ class _March(SolverSpec):
                 f"{type(self).__name__}.max_steps must be >= 1, got {self.max_steps!r}."
             )
 
-    def observers_for(
-        self, logger: MarchLogger, checkpointer: StateCheckpointer | None
-    ) -> dict[str, object]:
-        """Each step to the log and the checkpoints, retries and inner iterations to the log -- see :meth:`SolverSpec.observers_for`."""
+    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
+        """Each step and retry to the log and the recorder, inner iterations to the log -- see :meth:`SolverSpec.observers_for`."""
         observers = {
-            "on_checkpoint": logger.on_checkpoint
-            if checkpointer is None
-            else combine_observers(logger.on_checkpoint, checkpointer.on_checkpoint),
-            "on_retry": logger.on_retry,
+            "on_checkpoint": _both(logger.on_checkpoint, recorder, "on_checkpoint"),
+            "on_retry": _both(logger.on_retry, recorder, "on_retry"),
         }
+        if (on_residuals := getattr(recorder, "on_residuals", None)) is not None:
+            observers["on_residuals"] = on_residuals
         # The inner-loop observer exists only with an inner loop to observe; the step refuses it otherwise.
         if self.dual_time is not None:
             observers["inner_observer"] = logger.on_inner
@@ -292,6 +290,11 @@ class _March(SolverSpec):
         return _set(
             **{field.name: getattr(self, field.name) for field in dataclasses.fields(_March)}
         )
+
+
+def _both(log: Callable, recorder: object | None, hook: str) -> Callable:
+    """The march hook ``hook`` as the log's ``log`` and then, when there is one, the recorder's."""
+    return log if recorder is None else combine_observers(log, getattr(recorder, hook))
 
 
 #: The viscosity a ramp station scales, by the name a file gives it; unset leaves the ramp's own.
@@ -471,13 +474,13 @@ class CoupledMarch(_March):
         if self.continuation is not None:
             raise ValueError(_RAMP_TAKES_NO_STARTING_STATE)
 
-    def observers_for(
-        self, logger: MarchLogger, checkpointer: StateCheckpointer | None
-    ) -> dict[str, object]:
+    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
         """The march's, the preconditioner's refreshes and the ramp's anchor too -- see :meth:`SolverSpec.observers_for`."""
-        observers = super().observers_for(logger, checkpointer)
+        observers = super().observers_for(logger, recorder)
         if isinstance(self.preconditioner, MaterializedJacobian):
-            observers["session_options"] = {"observer": logger.on_refresh}
+            observers["session_options"] = {
+                "observer": _both(logger.on_refresh, recorder, "on_refresh")
+            }
         if self.continuation is not None:
             observers["point_setup"] = lambda companion, seed_state, point: logger.note(
                 f"[{point.label}]"
@@ -760,11 +763,9 @@ class Segregated(SolverSpec):
             if value is not None and not isinstance(value, family):
                 raise TypeError(f"Segregated.{name} got {value!r}.")
 
-    def observers_for(
-        self, logger: MarchLogger, checkpointer: StateCheckpointer | None
-    ) -> dict[str, object]:
+    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
         """None: the segregated loop takes no observer -- see :meth:`SolverSpec.observers_for`."""
-        del logger, checkpointer
+        del logger, recorder
         return {}
 
     def refuse_for(self, physics: Physics, drive: DriveSpec | None) -> None:
@@ -874,11 +875,9 @@ class RadiationSolve(SolverSpec):
         if self.rtol is not None and not 0.0 < self.rtol < 1.0:
             raise ValueError(f"RadiationSolve.rtol must lie in (0, 1), got {self.rtol!r}.")
 
-    def observers_for(
-        self, logger: MarchLogger, checkpointer: StateCheckpointer | None
-    ) -> dict[str, object]:
-        """The log's notes, one line as each stage starts; there are no steps to checkpoint."""
-        del checkpointer
+    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
+        """The log's notes, one line as each stage starts; there are no steps to record."""
+        del recorder
         return {"report": logger.note}
 
     def refuse_for(self, physics: Physics, drive: DriveSpec | None) -> None:

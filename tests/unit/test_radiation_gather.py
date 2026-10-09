@@ -19,6 +19,7 @@ from aquaflux.radiation.gather import (
     summed_fluence_rate,
 )
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian
+from aquaflux.radiation.scene import subtriangle_centroids
 from aquaflux.radiation.subdivide import refine_for_receivers
 from aquaflux.radiation.surfaces import Surfaces
 from scipy.integrate import quad
@@ -28,7 +29,9 @@ from tests.unit.radiation_references import (
     cylinder_triangles,
     disc_triangles,
     finite_line_fluence_rate,
+    inward_box,
     rectangle_triangles,
+    tilted,
 )
 
 POWER = 100.0
@@ -261,6 +264,86 @@ def test_a_facet_cannot_illuminate_what_is_behind_it():
     behind = float(direct_fluence_rate(surfaces, np.array([[0.0, 0.0, -1.0]]))[0])
     assert in_front > 0.0
     assert behind == 0.0
+
+
+def _points_on_own_facets(surfaces: Surfaces, per_side: int):
+    """Points spread over each facet, with that facet's normal and index, one row per point."""
+    points = subtriangle_centroids(np.asarray(surfaces.vertices), per_side)
+    per_facet = points.shape[1]
+    normals = np.repeat(np.asarray(surfaces.normal)[:, None, :], per_facet, axis=1)
+    own = np.repeat(np.arange(surfaces.n_facets), per_facet)
+    return points.reshape(-1, 3), normals.reshape(-1, 3), own
+
+
+def test_a_point_on_a_tilted_facet_is_lit_by_the_others_and_not_by_its_own_facet():
+    """A facet sends nothing into its own plane, so a point on it is lit by the rest alone.
+
+    The reference moves each point a hair in front of its facet, where every height the clip asks
+    about is decidable and the own facet lies behind the receiver. Left in the sum at the point
+    itself, the own facet's corners sit at heights of rounding noise off an axis-aligned plane, and
+    the projected solid angle can come back as the whole hemisphere: ``E`` gains the facet's own
+    exitance.
+    """
+    triangles = tilted(inward_box(3))
+    # Every facet emits, each at its own exitance, so a wrong facet left out or let in shows.
+    exitance = 1.0 + np.arange(len(triangles)) / len(triangles)
+    surfaces = Surfaces.from_triangles(triangles, emission=exitance)
+    points, normals, own = _points_on_own_facets(surfaces, 4)
+    hair = 1e-9
+    reference = direct_irradiance(surfaces, points + hair * normals, normals)
+    on_facet = direct_irradiance(surfaces, points, normals, receiver_facet=own)
+    np.testing.assert_allclose(np.asarray(on_facet), np.asarray(reference), rtol=1e-6)
+    # Without naming the facets, points do read their own facet's light: the case is reached.
+    unnamed = np.asarray(direct_irradiance(surfaces, points, normals)) - np.asarray(reference)
+    assert np.sum(np.isclose(unnamed, exitance[own], rtol=1e-6)) > len(points) // 4
+
+
+def test_every_facet_a_row_names_is_left_out_and_a_minus_one_names_none():
+    """A point on a shared edge lies on several facets, so a row may name several, padded by -1.
+
+    Naming a second facet that does light the point must remove exactly that facet's share, which
+    is checked against the gather of that facet alone; a ``-1`` must remove nothing.
+    """
+    triangles = tilted(inward_box(3))
+    exitance = 1.0 + np.arange(len(triangles)) / len(triangles)
+    surfaces = Surfaces.from_triangles(triangles, emission=exitance)
+    points, normals, own = _points_on_own_facets(surfaces, 2)
+    # The points on one face of the box, and a facet of the face opposite, which lights them all.
+    facing = np.asarray(surfaces.normal) @ np.asarray(surfaces.normal)[0]
+    on_face = np.isclose(facing[own], 1.0)
+    points, normals, own = points[on_face], normals[on_face], own[on_face]
+    second = int(np.argmin(facing))
+    hair = 1e-9
+    reference = np.asarray(direct_irradiance(surfaces, points + hair * normals, normals))
+    only = np.zeros(len(triangles))
+    only[second] = exitance[second]
+    share = np.asarray(
+        direct_irradiance(surfaces.with_optics(emission=jnp.asarray(only)), points, normals)
+    )
+    assert np.all(share > 1e-3 * reference)
+    rows = np.stack([own, np.full_like(own, second), np.full_like(own, -1)], axis=1)
+    both = direct_irradiance(surfaces, points, normals, receiver_facet=rows)
+    np.testing.assert_allclose(np.asarray(both), reference - share, rtol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "receiver_facet",
+    [
+        np.zeros(2, dtype=int),
+        np.zeros((2, 3), dtype=int),
+        np.array([5, 0, 0]),
+        np.array([0.0, 0.0, 0.0]),
+    ],
+)
+def test_naming_facets_that_are_not_one_row_per_point_or_not_facets_is_refused(receiver_facet):
+    surfaces = Surfaces.from_triangles(
+        rectangle_triangles([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), emission=1.0
+    )
+    points = np.tile([0.2, 0.2, 1.0], (3, 1))
+    with pytest.raises(ValueError, match="receiver_facet must"):
+        direct_irradiance(
+            surfaces, points, np.tile([0.0, 0.0, 1.0], (3, 1)), receiver_facet=receiver_facet
+        )
 
 
 @pytest.mark.parametrize(("radius", "height"), [(1.0, 1.0), (1.0, 0.25), (4.0, 0.5)])
@@ -752,6 +835,122 @@ def test_the_gradient_reaches_every_vertex_of_every_facet():
     assert jacobian.shape == facet.shape
     assert bool(jnp.all(jnp.isfinite(jacobian)))
     assert float(jnp.min(jnp.abs(jacobian).sum(axis=(1, 2)))) > 0.0
+
+
+#: Every distribution an areal facet can emit with, including the exponents in ``[1, 2)`` whose
+#: radiance raises the cosine to a power below one.
+AREAL_PROFILES = [
+    Lambertian(),
+    CosinePower(1.0),
+    CosinePower(1.5),
+    CosinePower(2.0),
+    CosinePower(40.0),
+]
+
+
+def _directional_derivative(function, point, direction, step=1e-6):
+    """Central difference of ``function`` at ``point`` along ``direction``."""
+    return (
+        float(function(point + step * direction)) - float(function(point - step * direction))
+    ) / (2.0 * step)
+
+
+@pytest.mark.parametrize("profile", AREAL_PROFILES, ids=lambda p: repr(p)[:24])
+def test_a_source_can_be_moved_under_a_gradient_whatever_it_emits_with(profile):
+    """The position derivative of every areal profile, with receivers behind a facet and on another's
+    axis, against a finite difference.
+
+    Two parallel squares face up, one above the other, and the receivers sit between them: behind
+    the upper square, in front of the lower one, one of them on the lower square's axis. Behind a
+    facet every profile here sends nothing, and the selection that makes it nothing used to leave a
+    NaN in the gradient for a cosine-power exponent in ``[1, 2)`` -- with the field itself right. So
+    the gradient is compared with a finite difference, not only checked to be finite, and over the
+    vertices and the receivers at once.
+    """
+    upper = rectangle_triangles([0.3, 0.1, 0.0], [0.05, 0.0, 0.0], [0.0, 0.05, 0.0])
+    lower = rectangle_triangles([0.0, 0.0, -2.0], [0.1, 0.0, 0.0], [0.0, 0.08, 0.0])
+    facets = np.concatenate([upper, lower])
+    surfaces = Surfaces.from_triangles(facets, emission=100.0, profiles=(profile,))
+    lower_centroid = np.asarray(surfaces.centroid)[2]
+    probes = np.array([lower_centroid + np.array([0.0, 0.0, 1.0]), [0.25, 0.05, -1.3]])
+
+    def total(vertices, points):
+        return jnp.sum(direct_fluence_rate(surfaces.with_geometry(vertices), points))
+
+    vertex_gradient, point_gradient = jax.grad(total, argnums=(0, 1))(
+        jnp.asarray(facets), jnp.asarray(probes)
+    )
+    assert bool(jnp.all(jnp.isfinite(vertex_gradient)))
+    assert bool(jnp.all(jnp.isfinite(point_gradient)))
+    # The upper square lights neither receiver, so its vertices carry exactly nothing.
+    np.testing.assert_array_equal(vertex_gradient[:2], 0.0)
+
+    rng = np.random.default_rng(7)
+    along_vertices, along_points = rng.normal(size=facets.shape), rng.normal(size=probes.shape)
+    expected = _directional_derivative(
+        lambda t: total(
+            jnp.asarray(facets + t * along_vertices), jnp.asarray(probes + t * along_points)
+        ),
+        0.0,
+        1.0,
+    )
+    measured = float(
+        jnp.sum(vertex_gradient * along_vertices) + jnp.sum(point_gradient * along_points)
+    )
+    assert expected != 0.0
+    assert measured == pytest.approx(expected, rel=1e-6)
+
+
+@pytest.mark.parametrize(
+    "absorption",
+    [
+        None,
+        UniformAbsorption(3.0),
+        VoxelAbsorption(
+            np.random.default_rng(2).uniform(0.5, 4.0, (4, 4, 5)), [-0.6, -0.6, -0.1], 0.3
+        ),
+    ],
+    ids=["vacuum", "uniform", "voxel"],
+)
+@pytest.mark.parametrize("profile", [Lambertian(), CosinePower(1.5)], ids=["lambertian", "cosine"])
+def test_a_receiver_at_a_facet_s_own_centroid_takes_nothing_from_it_and_has_a_finite_gradient(
+    absorption, profile
+):
+    """Irradiance with reflection is gathered at the facets' own centroids, so a receiver sitting
+    exactly on an emitting facet's centroid is the main path, not a degenerate one.
+
+    Its own facet sends it nothing (the direction to it is zero, so the facet is seen edge-on), so
+    the field and its gradient must be exactly those of the other facets alone. Two guards make
+    that so: the zero direction in the gather, without which the field is NaN, and the zero-length
+    path through the medium, whose square root left a NaN gradient once a medium was present --
+    and none in vacuum, which is why both are tested. A Lambertian radiance is a constant that never
+    reads the direction, so it hides a NaN direction in value and gradient alike; a cosine-power one
+    reads it, which is what lets this test see the first guard.
+    """
+    own = rectangle_triangles([0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [0.0, 0.1, 0.0])
+    other = rectangle_triangles([0.1, 0.05, 0.6], [0.1, 0.0, 0.0], [0.0, -0.1, 0.0])  # faces down
+    both = Surfaces.from_triangles(np.concatenate([own, other]), emission=50.0, profiles=(profile,))
+    alone = Surfaces.from_triangles(other, emission=50.0, profiles=(profile,))
+    centroid = np.asarray(both.centroid)[:1]
+
+    def field(surfaces, points):
+        return jnp.sum(direct_fluence_rate(surfaces, points, absorption=absorption))
+
+    value = float(field(both, jnp.asarray(centroid)))
+    assert np.isfinite(value)
+    assert value > 0.0
+    assert value == pytest.approx(float(field(alone, jnp.asarray(centroid))), rel=1e-14)
+
+    gradient = jax.grad(lambda p: field(both, p))(jnp.asarray(centroid))
+    np.testing.assert_allclose(
+        gradient, jax.grad(lambda p: field(alone, p))(jnp.asarray(centroid)), rtol=1e-12, atol=0.0
+    )
+    assert float(jnp.max(jnp.abs(gradient))) > 0.0
+
+    vertex_gradient = jax.grad(lambda v: field(both.with_geometry(v), jnp.asarray(centroid)))(
+        jnp.asarray(both.vertices)
+    )
+    assert bool(jnp.all(jnp.isfinite(vertex_gradient)))
 
 
 # ---------------------------------------------------------------------------------------

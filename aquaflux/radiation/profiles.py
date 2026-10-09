@@ -273,14 +273,29 @@ class CosinePower(AxisymmetricProfile):
 
     def intensity_fraction_at(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
         """``(n + 1) max(cos theta, 0)^n / (2 pi)``."""
-        forward = jnp.maximum(jnp.asarray(cos_theta, dtype=float), 0.0)
-        return (self.exponent + 1.0) * forward**self.exponent / (2.0 * jnp.pi)
+        return (self.exponent + 1.0) * _forward_power(cos_theta, self.exponent) / (2.0 * jnp.pi)
 
     def radiance_per_exitance_at(self, cos_theta: jnp.ndarray) -> jnp.ndarray:
         """``(n + 1) max(cos theta, 0)^(n - 1) / (2 pi)`` — one power of the cosine cancelled."""
-        cos_theta = jnp.asarray(cos_theta, dtype=float)
-        forward = jnp.maximum(cos_theta, 0.0)
         # The cancelled power is taken analytically rather than by dividing, so that n = 1 is
         # the exact constant 1/pi instead of a zero over a zero at grazing incidence.
-        magnitude = (self.exponent + 1.0) * forward ** (self.exponent - 1.0) / (2.0 * jnp.pi)
-        return jnp.where(cos_theta > 0.0, magnitude, 0.0)
+        power = _forward_power(cos_theta, self.exponent - 1.0)
+        return (self.exponent + 1.0) * power / (2.0 * jnp.pi)
+
+
+def _forward_power(cos_theta, power) -> jnp.ndarray:
+    """``cos_theta ** power`` in front of the facet and zero behind it, with finite gradients.
+
+    ⚠️ The base is substituted **inside** the power, not the result selected after it. Behind the
+    facet the base would be zero, and the derivative of ``x ** p`` there is ``p x ** (p - 1)``,
+    infinite for ``0 < p < 1`` -- that is, for every radiance exponent ``n - 1`` with ``n`` in
+    ``[1, 2)`` -- and its derivative in ``p`` is ``x ** p log x``, a zero times an infinity. A
+    ``where`` applied afterwards keeps the forward value right and does not stop either NaN: reverse
+    mode still differentiates the unselected branch and multiplies its infinite slope by the zero
+    the selection sends back. Raising one instead gives a finite slope that the selection then
+    discards. Around a tube lamp about half the receivers are behind any one facet, so this is the
+    main path of a lamp-position derivative, not an edge case.
+    """
+    cos_theta = jnp.asarray(cos_theta, dtype=float)
+    in_front = cos_theta > 0.0
+    return jnp.where(in_front, jnp.where(in_front, cos_theta, 1.0) ** power, 0.0)

@@ -12,16 +12,22 @@ the same comparison holds for a lamp that reflects and for one that stands in th
 
 from __future__ import annotations
 
+import ast
+import re
+import warnings
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.radiation import (
+    DEFAULT_LAMP_SAMPLES,
     Isotropic,
     Lambertian,
     NoOcclusion,
     RadiationSettings,
     RayCastOcclusion,
     Scene,
+    SilhouetteOcclusion,
     SurfaceReceivers,
     Surfaces,
     UniformAbsorption,
@@ -38,7 +44,14 @@ from aquaflux.radiation import (
 from aquaflux.radiation.gather import summed_fluence_rate
 from aquaflux.solids import Box, Cylinder, Difference, Outside, Sphere
 
-from tests.unit.radiation_references import closed_drum, inward_box
+from tests.unit.radiation_references import (
+    closed_drum,
+    inward_box,
+    rectangle_triangles,
+    sampled_fraction,
+    tilt_rotation,
+    tilted,
+)
 
 LAMP_EXITANCE = 7.0
 REFLECTANCE = 0.6
@@ -189,6 +202,37 @@ def test_a_point_on_a_reflecting_wall_is_not_shadowed_by_the_facet_it_lies_on() 
     unshadowed = reflected(NoOcclusion(), None)
     np.testing.assert_allclose(reflected(RayCastOcclusion(), "walls"), unshadowed, rtol=1e-12)
     assert np.all(reflected(RayCastOcclusion(), None) < 0.5 * unshadowed)
+
+
+def test_a_point_inside_a_tilted_reflecting_facet_is_not_lit_by_that_facet() -> None:
+    # Off an axis-aligned plane, a point inside a facet's triangle sees that facet's corners at
+    # heights of rounding noise, and the gather can read it the whole hemisphere: the facet's own
+    # radiosity, at full strength. The reference moves each point a hair in front of its wall,
+    # where nothing is undecidable and its own facet is behind it.
+    triangles, top = _box_split()
+    triangles = tilted(triangles)
+    lamps = Surfaces.from_triangles(triangles[top], emission=LAMP_EXITANCE)
+    reflectors = Surfaces.from_triangles(
+        triangles[~top], solid_names=("walls",), diffuse_reflectance=REFLECTANCE
+    )
+    floor = np.isclose(np.asarray(reflectors.normal) @ np.asarray(lamps.normal)[0], -1.0)
+    points = subtriangle_centroids(np.asarray(reflectors.vertices)[floor], 3).reshape(-1, 3)
+    normals = np.tile(np.asarray(reflectors.normal)[floor][0], (len(points), 1))
+
+    def reflected(occlusion, at, on):
+        settings = RadiationSettings(receiver_quadrature=1, self_occlusion=occlusion)
+        scene = Scene(
+            lamps=lamps,
+            reflectors=reflectors,
+            surfaces={"floor": SurfaceReceivers(at, normals, reflector=on)},
+            settings=settings,
+        )
+        return solve_scene(scene).irradiance_reflected["floor"]
+
+    reference = reflected(NoOcclusion(), points + 1e-9 * normals, None)
+    np.testing.assert_allclose(reflected(NoOcclusion(), points, "walls"), reference, rtol=1e-6)
+    # The ray test takes the other path through the scene, which must leave the facets out too.
+    np.testing.assert_allclose(reflected(RayCastOcclusion(), points, "walls"), reference, rtol=1e-6)
 
 
 def test_the_wall_irradiance_is_the_same_however_many_points_a_pass_holds() -> None:
@@ -487,10 +531,55 @@ def test_points_on_a_lamp_are_not_shadowed_by_the_facet_they_lie_on() -> None:
     assert np.mean(irradiance(points, None) < 0.5 * off) > 0.5
 
 
+def test_one_lamp_s_light_on_another_lands_as_the_model_with_both_inside_says() -> None:
+    # Two drums under the ray test. The points one lamp's light is averaged over on the other lie in
+    # that lamp's facets, so a ray from the first ends in the facet under the point: left in the
+    # test, that facet cuts it, and the second lamp reads dark where the first lights it. The model
+    # carries both lamps in its surface set, where each facet is left out of its own rays, so it says
+    # what lands with that done. One sample and one quadrature point per facet: the same points.
+    walls = inward_box(3)
+    drums = np.concatenate(
+        [
+            closed_drum(8, radius=0.1, half_height=0.25) + np.array([0.3, 0.5, 0.5]),
+            closed_drum(8, radius=0.1, half_height=0.25) + np.array([0.7, 0.5, 0.5]),
+        ]
+    )
+    is_lamp = np.arange(len(walls) + len(drums)) >= len(walls)
+    settings = RadiationSettings(receiver_quadrature=1, self_occlusion=RayCastOcclusion())
+    whole = Surfaces.from_triangles(
+        np.concatenate([walls, drums]),
+        emission=np.where(is_lamp, LAMP_EXITANCE, 0.0),
+        diffuse_reflectance=np.where(is_lamp, LAMP_REFLECTANCE, REFLECTANCE),
+    )
+    landing, _ = surface_irradiance(
+        build_radiation_model(np.zeros((0, 3)), whole, settings=settings), whole
+    )
+    lamps = Surfaces.from_triangles(
+        drums, solid_names=("lamps",), emission=LAMP_EXITANCE, diffuse_reflectance=LAMP_REFLECTANCE
+    )
+    reflectors = Surfaces.from_triangles(
+        walls, solid_names=("walls",), diffuse_reflectance=REFLECTANCE
+    )
+    solution = solve_scene(
+        Scene(lamps=lamps, reflectors=reflectors, lamp_samples=1, settings=settings)
+    )
+    np.testing.assert_allclose(solution.lamp_irradiance, np.asarray(landing)[is_lamp], rtol=1e-11)
+    # Each lamp lights the other directly: the walls alone, black, leave the lamps far darker.
+    dark = solve_scene(
+        Scene(
+            lamps=lamps,
+            reflectors=reflectors.with_optics(diffuse_reflectance=0.0),
+            lamp_samples=1,
+            settings=settings,
+        )
+    )
+    assert np.max(dark.lamp_irradiance) > 0.1 * np.max(solution.lamp_irradiance)
+
+
 def test_the_lamps_light_on_a_lamp_is_taken_on_the_fluid_s_side_of_it() -> None:
     # The water as a body -- the box less a cylinder standing inside the drum, its caps on the
     # drum's caps, as a drawing's fluid leaves out its lamp. The points the lamps' light is averaged
-    # over on a lamp facet must lie in that water: a hair behind a cap they are inside the lamp,
+    # over on a lamp facet must not be moved off it into the lamp: a hair behind a cap they are
     # outside the water, and the scene refuses them. Standing wholly behind the lamp's facets, the
     # cylinder shadows nothing the lamp does not, so what lands on the lamp is what it was without
     # the water.
@@ -515,3 +604,201 @@ def test_the_lamps_light_on_a_lamp_is_taken_on_the_fluid_s_side_of_it() -> None:
         return solve_scene(scene).lamp_irradiance
 
     np.testing.assert_allclose(landing((water,)), landing(()), rtol=1e-12)
+
+
+def test_a_tilted_lamp_flush_with_the_water_s_wall_is_lit_as_without_the_water() -> None:
+    # A box lamp whose facets are the faces of the box the water leaves out, turned off every axis.
+    # The points the lamps' light is averaged over then lie in those faces, at heights above the
+    # water's wall that are rounding noise of either sign -- the same noise as the facet centroids,
+    # which the scene checks too. A water body with a tolerance above that rounding admits the
+    # facets, and so admits their sample points as they are: none needs moving off its facet. And
+    # its own facet, named and left out, does not light it, so what lands is what it was without
+    # the water.
+    half = np.array([0.08, 0.08, 0.2])
+    turn = tilt_rotation()
+    # The unit box's inward triangles, wound to face outward, sized to the lamp and turned.
+    lamp_triangles = ((inward_box(1)[:, ::-1, :] - 0.5) * 2.0 * half) @ turn.T + 0.5
+    lamps = Surfaces.from_triangles(
+        lamp_triangles,
+        solid_names=("lamp",),
+        emission=LAMP_EXITANCE,
+        diffuse_reflectance=LAMP_REFLECTANCE,
+    )
+    reflectors = Surfaces.from_triangles(
+        inward_box(3), solid_names=("walls",), diffuse_reflectance=REFLECTANCE
+    )
+    lamp = Box(centre=[0.5, 0.5, 0.5], half_sizes=half, axes=turn.T)
+    water = Outside(Difference(Box(centre=[0.5, 0.5, 0.5], half_sizes=0.5), lamp), tolerance=1e-12)
+    samples = subtriangle_centroids(np.asarray(lamps.vertices), DEFAULT_LAMP_SAMPLES)
+    off_by_rounding = np.abs(np.asarray(lamp.signed_distance(jnp.asarray(samples.reshape(-1, 3)))))
+    # The samples do lie in the lamp's faces, and some on the lamp's side of them by a rounding:
+    # without the tolerance those would be refused.
+    assert np.max(off_by_rounding) < 1e-14
+    assert np.any(np.asarray(Outside(water.fluid).contains(jnp.asarray(samples.reshape(-1, 3)))))
+    settings = RadiationSettings(self_occlusion=RayCastOcclusion())
+
+    def landing(occluders):
+        scene = Scene(lamps=lamps, reflectors=reflectors, occluders=occluders, settings=settings)
+        return solve_scene(scene).lamp_irradiance
+
+    unbounded = landing(())
+    assert np.all(unbounded > 0.0)
+    np.testing.assert_allclose(landing((water,)), unbounded, rtol=1e-12)
+
+
+def _scene_with_a_sheet_in_each_set(occlusion) -> Scene:
+    """A lamp with a baffle among the lamps, and a ceiling with a shelf among the reflectors.
+
+    Each sheet faces away from the point it is meant to shade, so counted from the side it faces it
+    hides nothing, and only its declaration as two-sided darkens that point. The first volume point
+    sits above the baffle, on the far side of it from the lamp, and away from the shelf; the second
+    sits under the shelf, which hides the whole ceiling from it, and away from the baffle. The baffle
+    is clear of every line from the lamp to the ceiling, so the ceiling is lit either way.
+    """
+    up, down = ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), ([0.0, 1.0, 0.0], [1.0, 0.0, 0.0])
+    lamp = rectangle_triangles([0.0, 0.0, 0.0], *[0.1 * np.asarray(e) for e in up])
+    baffle = rectangle_triangles([0.55, 0.0, 0.3], [0.0, 0.4, 0.0], [0.25, 0.0, 0.0])
+    ceiling = rectangle_triangles([0.0, 0.0, 2.0], *down)
+    shelf = rectangle_triangles([-3.0, 0.0, 1.5], [1.75, 0.0, 0.0], [0.0, 1.5, 0.0])
+    lamps = Surfaces.from_triangles(
+        np.concatenate([lamp, baffle]),
+        emission=[LAMP_EXITANCE] * 2 + [0.0] * 2,
+        solid_id=[0, 0, 1, 1],
+        solid_names=("lamp", "baffle"),
+    )
+    reflectors = Surfaces.from_triangles(
+        np.concatenate([ceiling, shelf]),
+        diffuse_reflectance=[REFLECTANCE] * 2 + [0.0] * 2,
+        solid_id=[0, 0, 1, 1],
+        solid_names=("ceiling", "shelf"),
+    )
+    return Scene(
+        lamps=lamps,
+        reflectors=reflectors,
+        volume=VolumeReceivers(np.array([[1.0, 0.0, 0.6], [-3.0, 0.0, 1.2]])),
+        settings=RadiationSettings(receiver_quadrature=1, self_occlusion=occlusion),
+    )
+
+
+@pytest.mark.parametrize(
+    ("two_sided", "dark"),
+    [((), ()), (("baffle",), (0,)), (("shelf",), (1,)), (("baffle", "shelf"), (0, 1))],
+    ids=["neither", "baffle", "shelf", "both"],
+)
+def test_a_sheet_declared_two_sided_shades_from_behind_whichever_set_it_belongs_to(
+    two_sided, dark
+) -> None:
+    # The lamp and the ceiling are sheets too, open at every edge; declaring them keeps the build
+    # from warning about them, and changes nothing, since nothing lies behind either.
+    sheets = ("lamp", "ceiling", *two_sided)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        solution = solve_scene(
+            _scene_with_a_sheet_in_each_set(SilhouetteOcclusion(two_sided=sheets))
+        )
+    # Every build warns about the open sheets of its own set that were left undeclared, and only
+    # about those.
+    warned = {
+        name
+        for w in caught
+        for match in re.findall(r"facet\(s\) of (\[[^\]]*\]) belong", str(w.message))
+        for name in ast.literal_eval(match)
+    }
+    assert warned == {"baffle", "shelf"} - set(two_sided)
+    clear = solve_scene(_scene_with_a_sheet_in_each_set(NoOcclusion()))
+    # The baffle is among the lamps, so it shades the lamps' light; the shelf is among the
+    # reflectors, so it shades theirs. Each point is shaded only by the part its sheet can hide.
+    shaded = (solution.fluence_rate_direct[0], solution.fluence_rate_reflected[1])
+    unshaded = (clear.fluence_rate_direct[0], clear.fluence_rate_reflected[1])
+    for point, (field, reference) in enumerate(zip(shaded, unshaded, strict=True)):
+        assert reference > 0.0
+        if point in dark:
+            assert field == pytest.approx(0.0, abs=1e-12 * reference)
+        else:
+            assert field == pytest.approx(reference, rel=1e-12)
+    # A sheet among the lamps blocks no lamp light from the ceiling, so the reflected light is the
+    # same whatever the lamps declare.
+    np.testing.assert_allclose(solution.radiosity, clear.radiosity, rtol=1e-12)
+
+
+@pytest.mark.parametrize("field", ["self_occlusion", "receiver_occlusion"])
+def test_a_scene_refuses_a_sheet_that_neither_set_has(field) -> None:
+    scene = _scene_with_a_sheet_in_each_set(NoOcclusion())
+    misspelt = RadiationSettings(**{field: SilhouetteOcclusion(two_sided=("baffle", "shelff"))})
+    with pytest.raises(
+        ValueError,
+        match=r"two_sided names no body of these surfaces: \['shelff'\]; "
+        r"have \['ceiling', 'shelf', 'lamp', 'baffle'\]",
+    ):
+        Scene(lamps=scene.lamps, reflectors=scene.reflectors, settings=misspelt)
+
+
+def test_settings_cut_down_to_a_set_keep_its_own_sheets_and_nothing_else_changes() -> None:
+    settings = RadiationSettings(
+        receiver_quadrature=3,
+        self_occlusion=SilhouetteOcclusion(two_sided=("baffle", "shelf"), cluster_size=8),
+        receiver_occlusion=SilhouetteOcclusion(two_sided=("shelf", "lamp")),
+        gather_pair_limit=1234,
+    )
+    lamps = settings.for_bodies(("lamp", "baffle"))
+    assert lamps.self_occlusion == SilhouetteOcclusion(two_sided=("baffle",), cluster_size=8)
+    assert lamps.receiver_occlusion == SilhouetteOcclusion(two_sided=("lamp",))
+    assert (lamps.receiver_quadrature, lamps.gather_pair_limit) == (3, 1234)
+    walls = settings.for_bodies(("shelf",))
+    assert walls.self_occlusion.two_sided == walls.receiver_occlusion.two_sided == ("shelf",)
+    # A choice that names no bodies is the same choice on every set, and an unset one stays unset.
+    plain = RadiationSettings(self_occlusion=RayCastOcclusion())
+    assert plain.for_bodies(("anything",)) == plain
+
+
+#: A lamp seen obliquely from the origin, behind a baffle that hides its overhead end. Wound to
+#: face the origin, so the lamp shines on it and the baffle stands in front of it.
+OBLIQUE_LAMP = np.array([[-0.5, -1.0, 1.0], [4.0, -1.0, 1.0], [4.0, 1.5, 1.0]])
+BAFFLE = np.array([[-9.0, -9.0, 0.5], [0.5, -9.0, 0.5], [0.5, 9.0, 0.5]])
+UP = np.array([0.0, 0.0, 1.0])
+
+
+def test_a_partly_shadowed_lamp_lights_a_wall_by_the_share_of_its_projected_solid_angle() -> None:
+    """The lamps' light on a reflecting wall, and on a set of wall points, under the silhouette clip.
+
+    Neither kind of point lies on a lamp facet, and both face a way. The baffle is one of the lamp
+    set's own triangles, so the clip hides a share of the lamp, and the share an irradiance wants
+    is of the lamp's projected solid angle -- which on this oblique fixture differs from the share
+    of its plain solid angle by twenty times the sampler's noise. A point's irradiance is its
+    unshadowed irradiance less that share, Lambertian radiance being the same in every direction;
+    the share is checked against the brute-force sampler, which never reads a mask.
+    """
+    lamps = Surfaces.from_triangles(
+        np.stack([OBLIQUE_LAMP[::-1], BAFFLE[::-1]]),
+        solid_names=("lamp",),
+        emission=np.array([LAMP_EXITANCE, 0.0]),
+    )
+    # One small reflecting facet whose centroid is the origin, sampled once, at that centroid.
+    wall = np.array([[[-0.01, -0.01, 0.0], [0.02, -0.01, 0.0], [-0.01, 0.02, 0.0]]])
+    reflectors = Surfaces.from_triangles(
+        wall, solid_names=("wall",), diffuse_reflectance=REFLECTANCE
+    )
+    origin = np.zeros((1, 3))
+    solution = solve_scene(
+        Scene(
+            lamps=lamps,
+            reflectors=reflectors,
+            surfaces={"floor": SurfaceReceivers(origin, UP[None])},
+            lamp_samples=1,
+            # Every body is one open sheet; each faces the points it lights or shadows, so this only
+            # says they are meant as sheets.
+            settings=RadiationSettings(
+                receiver_quadrature=1,
+                self_occlusion=SilhouetteOcclusion(two_sided=("lamp", "wall")),
+            ),
+        )
+    )
+    unshadowed = float(direct_irradiance(lamps, jnp.asarray(origin), jnp.asarray(UP[None]))[0])
+    projected = sampled_fraction(np.zeros(3), UP, OBLIQUE_LAMP, BAFFLE, samples=400_000)
+    plain = sampled_fraction(np.zeros(3), None, OBLIQUE_LAMP, BAFFLE, samples=400_000)
+    assert abs(projected - plain) > 0.08
+    for name, landed in (
+        ("on the reflecting facet", float(solution.reflector_irradiance[0])),
+        ("at the floor point", float(solution.irradiance_direct["floor"][0])),
+    ):
+        assert landed / unshadowed == pytest.approx(1.0 - projected, abs=4e-3), name

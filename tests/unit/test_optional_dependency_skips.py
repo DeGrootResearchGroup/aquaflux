@@ -102,6 +102,18 @@ GATED_MODULES: dict[str, tuple[str, str]] = {
         "trame",
         "the viewer's page and its independence from the solver; fast tier. CI installs it through the `test` extra, as for `pyvista`",
     ),
+    "ui/test_run_monitor.py": (
+        "plotly",
+        "the Run section's plots, tiles and events, drawn from a march's history; fast tier. CI installs it through the `test` extra, as for `pyvista`",
+    ),
+    "ui/test_run_process.py": (
+        "trame",
+        "the viewer's page and its independence from the solver; fast tier. CI installs it through the `test` extra, as for `pyvista`",
+    ),
+    "ui/test_run_section.py": (
+        "trame",
+        "the viewer's page and its independence from the solver; fast tier. CI installs it through the `test` extra, as for `pyvista`",
+    ),
     "ui/test_independence.py": (
         "trame",
         "the viewer's page and its independence from the solver; fast tier. CI installs it through the `test` extra, as for `pyvista`",

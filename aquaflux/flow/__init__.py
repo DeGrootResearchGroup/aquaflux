@@ -41,7 +41,7 @@ from .continuation import (
     reused_flow_solve,
 )
 from .march import flow_march_step, open_flow_session, solve_flow_march
-from .measures import FlowMeasures, flow_row_scales
+from .measures import FlowMeasures, flow_equation_names, flow_row_scales
 from .initialization import bernoulli_pressure, laplace_field, potential_flow
 from .mean_velocity import bulk_velocity_flow_solve
 from .scales import body_force_velocity, characteristic_velocity
@@ -80,6 +80,7 @@ __all__ = [
     "bulk_velocity_flow_solve",
     "characteristic_velocity",
     "damped_jacobi_solve",
+    "flow_equation_names",
     "flow_march_step",
     "flow_row_scales",
     "frozen_momentum_diagonal_parts",

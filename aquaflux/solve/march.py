@@ -41,7 +41,7 @@ reported ratio mean the same thing throughout. The first must never be substitut
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NamedTuple, Protocol
 
 import equinox as eqx
@@ -50,6 +50,7 @@ import jax.numpy as jnp
 import lineax as lx
 
 from .convergence import MeasureBuilder
+from .norm import named_blocks
 from .retry import ESCALATING_REASONS, NO_RETRIES, RetryPolicy
 from .root_adjoint import stop_array_gradients
 from .strategy import NewtonStrategy, StepControl, StepOutcome, StepReport, within_tolerance
@@ -538,6 +539,7 @@ def newton_march(
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
+    on_residuals: Callable[[Mapping[str, float]], None] | None = None,
 ) -> MarchResult:
     """March the residual eagerly, reporting each step and stopping early if the trigger fires.
 
@@ -708,6 +710,14 @@ def newton_march(
         the real shift from ``retry.beta_factor``, which is exactly what a log must not have to guess.
         Without it a log shows a step's work twice with nothing saying why, leaving a reader to infer
         the trigger from the numbers. ``None`` (default) elides the call.
+    on_residuals : callable, optional
+        ``{equation: term} -> None``, called after each step, before ``observer`` and ``checkpoint``,
+        with each equation's term of the measure the step was judged in -- the numbers whose Euclidean
+        combination is the report's ``residual_norm`` -- so a record of the march can say which
+        equation is holding it up. Called only when that measure names its blocks
+        (:func:`~aquaflux.solve.named_blocks`); a plain Euclidean measure has nothing to split.
+        Costs one residual evaluation per step, at the station the step drove; ``None`` (default)
+        costs nothing.
 
     Returns
     -------
@@ -999,9 +1009,15 @@ def newton_march(
             escalations=int(retries),
             diverged_retry=bool(diverged_retry),
             damping_reference=float(residual_norm_0),
+            station=0 if homotopy is None else int(homotopy.station(len(reports))),
+            arrived=bool(arrived),
         )
         stalled = stalled + 1 if _limit_collapsing(reports[-1] if reports else None, report) else 0
         reports.append(report)
+        if on_residuals is not None:
+            terms = named_blocks(active_step.norm(), step_residual, state)
+            if terms is not None:
+                on_residuals(terms)
         if observer is not None:
             observer(report)
         if checkpoint is not None:

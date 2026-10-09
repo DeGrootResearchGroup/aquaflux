@@ -670,3 +670,41 @@ def test_a_body_that_cannot_vouch_for_anything_has_no_witnesses():
     witnesses = Bespoke().clearance(jnp.zeros((7, 3)))
     assert witnesses.shape == (7, 0)
     assert not _certified(Bespoke(), np.zeros((3, 3)))
+
+
+# ---------------------------------------------------------------------------------------
+# Each face's own distance: which face a boundary point is on, and that face's normal
+# ---------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name", ["half space", "sphere", "cylinder", "cone", "frustum", "turned box"]
+)
+def test_the_largest_face_distance_is_the_body_s_signed_distance(name):
+    """The faces are the body's inequalities taken apart, so the worst of them is the body's."""
+    body = _bodies()[name]
+    points = jnp.asarray(np.random.default_rng(3).uniform(-1.2, 1.2, (400, 3)))
+    faces = np.asarray(body.face_distances(points))
+    assert faces.shape == (400, len(body.constraints))
+    np.testing.assert_allclose(faces.max(axis=1), np.asarray(body.signed_distance(points)), atol=0)
+
+
+def test_a_boundary_point_is_at_zero_on_its_own_face_whose_gradient_is_that_face_s_normal():
+    """A point on a cylinder's side is on the tube, and one on its end on that end's plane.
+
+    The gradient of the column is what a path held to the face moves along; on the side it is
+    radial, on an end it is along the axis -- the two faces a wrong column would swap.
+    """
+    import jax
+
+    body = Cylinder(centre=[0, 0, 1.0], axis=[0, 0, 1], radius=0.5, half_length=2.0)
+    for point, own, normal in (
+        ([0.3, 0.4, 2.0], 0, [0.6, 0.8, 0.0]),
+        ([0.1, 0.2, 3.0], 1, [0.0, 0.0, 1.0]),
+        ([0.1, -0.2, -1.0], 2, [0.0, 0.0, -1.0]),
+    ):
+        faces = np.asarray(body.face_distances(jnp.asarray(point)))
+        assert faces[own] == pytest.approx(0.0, abs=1e-15)
+        assert np.all(np.delete(faces, own) < 0.0)
+        gradient = jax.grad(lambda x, k=own: body.face_distances(x)[k])(jnp.asarray(point))
+        np.testing.assert_allclose(np.asarray(gradient), normal, atol=1e-15)

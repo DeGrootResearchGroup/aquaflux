@@ -21,18 +21,57 @@ paths:
 
 ## `StepHistory` — the per-step record for a program to read (BUILT 2026-10-05)
 
-`march_history.py::StepHistory(path, clock=)` is an `on_checkpoint(report, state)` observer writing one
-CSV row per observed step: `step` (1-based, counting on across continuation segments), `seconds`
-(since construction, injected clock), every `StepReport` field under its own name with the report's
-own `step` renamed `segment_step` (it restarts per segment), and `restart_cycles`. Floats are written
-by `repr` (exact round trip), booleans as 0/1, and NumPy/JAX scalars are unwrapped with `.item()`
-first — **a `np.float64` IS a `float` subclass and its repr in NumPy 2 is `np.float64(0.1)`**, which is
-what that unwrap prevents. Header and each row are flushed as written, so a viewer or monitor can read
-an unfinished run. It is the machine-readable sibling of `MarchLogger` (which formats for a person),
-not a replacement: the case runner writes both (`Outputs.log`, `Outputs.history`, default
-`history.csv`), and `aquaflux_ui` plots the history. `COLUMNS` is derived from
-`StepReport._fields`, so a field added to the report reaches the file without an edit here.
-Pinned by `tests/unit/test_march_history.py` (six targeted mutations each turn it red).
+`march_history.py::StepHistory(path, clock=)` is a host-side observer with the march hooks'
+names — `on_checkpoint(report, state)` writes a row; `on_refresh(timing)`, `on_retry(reason, attempt,
+beta)` and `on_residuals(terms)`, called while the step is under way, fill in the row it then writes
+and are reset after it. Columns: `step` (1-based, counting on across continuation segments), `seconds`
+(since construction, injected clock), every `StepReport` field under its own name with the report's own
+`step` renamed `segment_step` (it restarts per segment), `restart_cycles`, then (2026-10-07, for the
+browser interface's Run section) `refits` / `refit_seconds` (refreshes of kind `full` or `inner`; a
+`none` reused the standing preconditioner and is not counted), `retry_reasons` (`;`-joined, empty for a
+step taken as-is), and one `residual_of_<equation>` per equation the march's measure names. Floats are
+written by `repr` (exact round trip), booleans as 0/1, and NumPy/JAX scalars are unwrapped with
+`.item()` first — **a `np.float64` IS a `float` subclass and its repr in NumPy 2 is `np.float64(0.1)`**,
+which is what that unwrap prevents. `COLUMNS` is derived from `StepReport._fields`, so a field added to
+the report reaches the file without an edit here.
+- **⚠️ The header is written with the FIRST ROW, not at construction** (changed 2026-10-07): the
+  equation columns are known only once the march reports them, so until the first step the file exists
+  and is empty. `aquaflux_ui.ConvergenceHistory.read` reads an empty file as zero steps. A step naming
+  other equations than the header is refused (`ValueError`); one naming none leaves its cells empty.
+- **⚠️ The prefix is `residual_of_`, NOT `residual_`** — the first version used `residual_`, and the
+  existing `residual_norm` / `residual_ratio` columns matched it, so a reader took them for two more
+  equations. Caught by `test_the_residual_columns_of_the_total_are_not_taken_for_equations` (UI side).
+- It is the machine-readable sibling of `MarchLogger` (which formats for a person), not a replacement:
+  the case runner writes both (`Outputs.log`, `Outputs.history`, default `history.csv`), and
+  `aquaflux_ui` plots the history (Results' convergence plot, Run's five plots and events).
+Pinned by `tests/unit/test_march_history.py`.
+
+## `StepReport.station` / `.arrived` and `newton_march(on_residuals=)` (BUILT 2026-10-07)
+
+- **`station`** (the homotopy's station index, `0` without one; only equality between adjacent steps
+  means anything) and **`arrived`** (whether the step drove the TARGET problem; `True` throughout a march
+  without a homotopy) are set from the same `homotopy.station` / `arrived` the march already reads, so a
+  record can mark where a continuation ended. Pinned by
+  `test_each_report_says_which_station_its_step_drove_and_whether_that_was_the_target`.
+- **`on_residuals({equation: term})`** is called after each step, before `observer` and `checkpoint`,
+  with each named block's term of **the measure the step was judged in** (`active_step.norm()`) at the
+  station residual the step drove — the numbers whose Euclidean combination IS the report's
+  `residual_norm` (pinned to `rel=1e-12` on a real flow march,
+  `test_each_steps_residual_is_reported_by_equation_and_the_terms_make_up_its_norm`). It comes from
+  `solve.named_blocks(measure, residual_fn, state)`, one compiled call per block structure
+  (`_block_terms`, `filter_jit`), and is skipped for a measure with unnamed blocks: `RowScaledNorm` /
+  `BlockScaledNorm` gained a static `names` (empty by default, refused unless it names each block once),
+  and only the two row-scaled builders set it — `coupled_scaled_norm` (`coupled_equation_names`; both in
+  `turbulence/measures.py`) and `FlowMeasures.row_scaled` (`flow.flow_equation_names`). The block-scaled
+  coupled measure's flow block holds every flow equation, so it stays unnamed. Costs one residual
+  evaluation per step, and nothing when `None`. Threaded through `staged_march`, `solve_coupled` and
+  `solve_flow_march` beside `on_retry`; `solve_reynolds_ramp` reaches it through `**solve_kwargs`.
+  - **This overlaps `turbulence.coupled_residuals` + `MarchLogger(detail={"residuals"})`**, which
+    computes the same per-block numbers by re-deriving the measure from outside the march (stateful,
+    needs the continuation's shift policy and a reference state, coupled RANS only, no caller in the
+    package or `validation/`). The hook is the residual-agnostic form; whether the logger's `residuals`
+    detail should be fed from it and `coupled_residuals` deleted as dominated is an open question, not
+    decided here.
 
 ## The observed march — newton_march, triggers, controls, logging
 

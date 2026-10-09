@@ -848,6 +848,7 @@ def direct_irradiance(
     transmittance=None,
     pair_limit: int = DEFAULT_PAIR_LIMIT,
     point_sources_only: bool = False,
+    receiver_facet=None,
 ):
     """Irradiance on an oriented receiving surface at each point, with no reflection.
 
@@ -883,6 +884,19 @@ def direct_irradiance(
         outside its transfer matrix, which already carries every areal facet; and the areal
         pairs are nearly all of the cost, since a clipped projected solid angle is formed for
         each.
+    receiver_facet : array_like of int, shape ``(n_points,)`` or ``(n_points, k)``, optional
+        When a receiver point lies on one of ``surfaces``' own facets, that facet's index; when it
+        lies on several (on a shared edge or vertex), each of them, ``-1`` filling a row that names
+        fewer. Those facets are left out of that point's sum. A flat facet sends nothing into its
+        own plane, so this is the right answer and not an approximation -- the same convention as
+        the zero diagonal of the facet-to-facet transfer.
+        ⚠️ **Omitting it where it applies can count a facet's whole exitance at a point on it.** A
+        point inside a facet's triangle is in that facet's plane, where the corners' heights above
+        the receiver's plane are rounding noise. Off an axis-aligned plane the clip cannot always
+        decide them, keeps the in-plane triangle, and the projected solid angle is then the full
+        hemisphere, ``E = B``: measured on a rotated plane at sub-triangle centres, over half the
+        points did so. A point at a facet's centroid or on a shared vertex happens to read zero, so
+        this goes unseen on face-centre receivers.
 
     Returns
     -------
@@ -892,7 +906,8 @@ def direct_irradiance(
     Raises
     ------
     ValueError
-        If ``normals`` and ``points`` disagree in shape, if ``pair_limit`` is less than one, or
+        If ``normals`` and ``points`` disagree in shape, if ``pair_limit`` is less than one, if
+        ``receiver_facet`` is not one row per point naming facets of ``surfaces`` (or ``-1``), or
         if the visibility mask was built for a different set of receivers.
     """
     layers, transmittance = _shadow_rows(visibility, transmittance, points, (surfaces,))
@@ -901,9 +916,18 @@ def direct_irradiance(
     if normals.shape != points.shape:
         msg = f"normals must match points in shape; got {normals.shape} and {points.shape}"
         raise ValueError(msg)
+    # Cut into chunks only when named, so a gather with none adds nothing per receiver.
+    named = (
+        ()
+        if receiver_facet is None
+        else ((_own_facet_rows(receiver_facet, len(points), surfaces.n_facets), 0),)
+    )
     partition = _groups(surfaces)
 
     def at(receivers, receiver_normal, *chunk_layers):
+        own_facets, chunk_layers = (
+            (chunk_layers[0], chunk_layers[1:]) if named else (None, chunk_layers)
+        )
         surviving_all = _surviving(chunk_layers, transmittance)
         total = jnp.zeros(receivers.shape[0])
         for profile, areal, point in partition:
@@ -924,7 +948,13 @@ def direct_irradiance(
                     jnp.take(surfaces.centroid, areal, axis=0)[None],
                     receivers[:, None, :],
                 ) * _masked(surviving_all, areal)
-                total = total + jnp.sum(radiance * projected * surviving, axis=1)
+                lit = radiance * projected * surviving
+                if own_facets is not None:
+                    # A facet lights nothing in its own plane; at a point inside its triangle the
+                    # clip can instead return the whole hemisphere, so the point's own are dropped.
+                    own = jnp.any(areal[None, :, None] == own_facets[:, None, :], axis=-1)
+                    lit = jnp.where(own, 0.0, lit)
+                total = total + jnp.sum(lit, axis=1)
             if len(point):
                 centroid = jnp.take(surfaces.centroid, point, axis=0)
                 direction, distance_squared = _emitter_direction(
@@ -947,4 +977,25 @@ def direct_irradiance(
                 )
         return total
 
-    return in_passes(((points, 0), (normals, 0), *layers), pair_limit, surfaces.n_facets, at)
+    return in_passes(
+        ((points, 0), (normals, 0), *named, *layers), pair_limit, surfaces.n_facets, at
+    )
+
+
+def _own_facet_rows(receiver_facet, n_points: int, n_facets: int) -> np.ndarray:
+    """The facets each receiver lies on, as ``(n_points, k)`` rows padded with ``-1``, checked."""
+    rows = np.asarray(receiver_facet)
+    if not np.issubdtype(rows.dtype, np.integer):
+        msg = f"receiver_facet must hold integer facet indices; got dtype {rows.dtype}"
+        raise ValueError(msg)
+    rows = rows[:, None] if rows.ndim == 1 else rows
+    if rows.ndim != 2 or rows.shape[0] != n_points:
+        msg = (
+            f"receiver_facet must have one row per point, shape ({n_points},) or ({n_points}, k); "
+            f"got {np.shape(receiver_facet)}"
+        )
+        raise ValueError(msg)
+    if rows.size and (rows.min() < -1 or rows.max() >= n_facets):
+        msg = f"receiver_facet must name facets in [0, {n_facets}) or be -1"
+        raise ValueError(msg)
+    return rows

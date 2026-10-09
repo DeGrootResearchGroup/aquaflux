@@ -702,6 +702,25 @@ class ConvexSolid(Solid):
             jnp.maximum, [bound.signed_distance(position) for bound in self.constraints]
         )
 
+    def face_distances(self, position) -> jnp.ndarray:
+        """Each bounding surface's own signed distance, in the order of :attr:`constraints`.
+
+        The body's :meth:`signed_distance` is the largest of these. Apart they say **which face**
+        a point lies on -- a point of the boundary is at zero on its own face and inside every
+        other -- and each column is a smooth function of position whose gradient is that face's
+        outward normal, which is what a consumer finding a path *across* a chosen face needs and
+        the maximum, with its kinks at the edges, does not give.
+
+        Parameters
+        ----------
+        position : jnp.ndarray, shape ``(..., 3)``
+
+        Returns
+        -------
+        jnp.ndarray, shape ``(..., n_faces)``
+        """
+        return jnp.stack([bound.signed_distance(position) for bound in self.constraints], axis=-1)
+
     def intervals(self, origin, direction) -> tuple[jnp.ndarray, jnp.ndarray]:
         """The overlap of the inequalities' intervals, as a single interval."""
         enter, exit_ = functools.reduce(
