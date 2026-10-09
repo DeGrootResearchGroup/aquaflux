@@ -163,7 +163,10 @@ Specific traps that are now closed, and must stay closed:
   number of faces per partition (possibly zero). `_uniform_boundary_faces` pads each resolved index
   array to the max over partitions, filling with the null face. This is safe because the boundary
   fold writes with `.at[faces].set(...)` — the padded entries write a value at a zero-area,
-  null-cell-owned face.
+  null-cell-owned face. Since #113 the fold is **one** scatter over every patch's indices
+  concatenated, so the null face repeats across patches as well as within one and which write lands
+  there is unspecified. That is inert for the same reason. It is also why `apply` must never pass
+  `unique_indices=True` (`.claude/rules/boundary.md`).
 - **The padded mesh is deliberately not `validate()`-d.** Padding faces list no nodes and padding
   cells are touched by no face; `Mesh.validate()` rejects both, correctly, for a mesh describing
   real geometry. A padded mesh is device-axis bookkeeping and its geometry is *gathered*, so the
