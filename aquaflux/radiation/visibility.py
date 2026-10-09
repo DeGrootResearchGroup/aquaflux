@@ -41,7 +41,7 @@ import numpy as np
 
 from aquaflux.radiation.back_faces import BackFaces
 from aquaflux.radiation.culling import BodyCulling, culling_or_default
-from aquaflux.radiation.refraction import Media, straight_through
+from aquaflux.radiation.refraction import Media, straight_reach
 from aquaflux.radiation.self_occlusion import (
     RayCastOcclusion,
     SelfOcclusion,
@@ -58,7 +58,7 @@ __all__ = [
 ]
 
 
-def surviving_fraction(blocked, hidden_by_geometry, transmittance, through=None) -> jnp.ndarray:
+def surviving_fraction(blocked, hidden_by_geometry, transmittance, straight=None) -> jnp.ndarray:
     """Fraction of light getting through, from a mask's layers and each body's transmittance.
 
     The one expression of it, evaluated by :meth:`Visibility.surviving` over a whole mask and by
@@ -75,9 +75,9 @@ def surviving_fraction(blocked, hidden_by_geometry, transmittance, through=None)
         the widened copy is never the size of the problem. ``None`` hides nothing.
     transmittance : array_like, shape ``(n_occluders,)``
         What fraction each body transmits, in ``[0, 1]``. Differentiable.
-    through : jnp.ndarray, shape ``pairs``, or None
-        What the transparent regions along each segment let past
-        (:attr:`Visibility.through`). ``None`` where there are none.
+    straight : jnp.ndarray of bool, shape ``pairs``, or None
+        Whether each straight segment carries its light past the transparent regions
+        (:attr:`Visibility.straight`). ``None`` where there are none.
 
     Returns
     -------
@@ -89,8 +89,8 @@ def surviving_fraction(blocked, hidden_by_geometry, transmittance, through=None)
     surviving = jnp.prod(attenuation, axis=0)
     if hidden_by_geometry is not None:
         surviving = surviving * (1.0 - jnp.asarray(hidden_by_geometry, dtype=float))
-    if through is not None:
-        surviving = surviving * through
+    if straight is not None:
+        surviving = surviving * jnp.asarray(straight, dtype=float)
     return surviving
 
 
@@ -101,7 +101,7 @@ def surviving_from_layers(kinds, arrays, transmittance) -> jnp.ndarray:
     ----------
     kinds : tuple of str
         What each of ``arrays`` is: ``"blocked"`` first, then any of ``"hidden_by_geometry"`` and
-        ``"through"``.
+        ``"straight"``.
     arrays : sequence of jnp.ndarray
         The layers, whole or a chunk or a gathering of their pairs.
     transmittance : array_like, shape ``(n_occluders,)``
@@ -112,7 +112,7 @@ def surviving_from_layers(kinds, arrays, transmittance) -> jnp.ndarray:
     """
     named = dict(zip(kinds, arrays, strict=True))
     return surviving_fraction(
-        named["blocked"], named.get("hidden_by_geometry"), transmittance, named.get("through")
+        named["blocked"], named.get("hidden_by_geometry"), transmittance, named.get("straight")
     )
 
 
@@ -143,13 +143,12 @@ class Visibility(eqx.Module):
         and is the common benign case -- so this reports "not proven", not "wrong". ``None``
         where no pair can be such an addition: from a ray test, whose ``or`` is idempotent, and
         where nothing is hidden at all.
-    through : jnp.ndarray, shape ``(n_receivers, n_facets)``, or None
+    straight : jnp.ndarray of bool, shape ``(n_receivers, n_facets)``, or None
         Where the scene has transparent regions (:class:`~aquaflux.radiation.refraction.Media`),
-        what the regions the straight segment passes through let past -- the Fresnel losses where
-        it enters and leaves each, and its absorption in excess of the medium's own -- and
-        **zero** where the facet and the receiver lie in different media, whose light is gathered
-        along refracted paths instead (:func:`~aquaflux.radiation.refraction.straight_through`).
-        Frozen, like the rest of the mask. ``None`` where there are no regions.
+        whether the straight segment carries the pair's light: the facet and the receiver lie in
+        one medium and the segment meets no region. Elsewhere the light goes by refracted paths
+        (:func:`~aquaflux.radiation.refraction.straight_reach`), gathered apart. Frozen, like the
+        rest of the mask. ``None`` where there are no regions.
     clear_behind : bool
         Whether pairs whose source faces away from the receiver were recorded clear without
         being tested -- in :attr:`blocked`, as every mask of receivers in the volume does when
@@ -173,7 +172,7 @@ class Visibility(eqx.Module):
     receivers: jnp.ndarray
     hidden_by_geometry: jnp.ndarray | None
     overlapping: jnp.ndarray | None
-    through: jnp.ndarray | None = None
+    straight: jnp.ndarray | None = None
     clear_behind: bool = eqx.field(static=True, default=False)
 
     @property
@@ -194,7 +193,7 @@ class Visibility(eqx.Module):
         jnp.ndarray, shape ``(n_receivers, n_facets)``
         """
         return surviving_fraction(
-            self.blocked, self.hidden_by_geometry, transmittance, self.through
+            self.blocked, self.hidden_by_geometry, transmittance, self.straight
         )
 
     def layers(self) -> tuple[tuple[str, ...], tuple]:
@@ -211,7 +210,7 @@ class Visibility(eqx.Module):
         layers : tuple of (jnp.ndarray, int)
         """
         named = [("blocked", self.blocked, 1)]
-        for name in ("hidden_by_geometry", "through"):
+        for name in ("hidden_by_geometry", "straight"):
             array = getattr(self, name)
             if array is not None:
                 named.append((name, array, 0))
@@ -388,11 +387,11 @@ def build_visibility(
         whatever the facet count. Each self-occlusion strategy carries its own bound, because
         what has to be bounded differs between them.
     media : Media, optional
-        The transparent regions, if the scene has any. Each segment is then also weighed by what
-        the regions it passes through let past, and a pair whose ends lie in different media is
-        recorded as getting nothing along it (:attr:`Visibility.through`): its light goes by a
-        refracted path, which :func:`~aquaflux.radiation.refracted.build_refracted_visibility`
-        masks. The positions must be concrete.
+        The transparent regions, if the scene has any. A pair whose ends lie in different media,
+        or whose segment passes through a region, is then recorded as getting nothing along the
+        straight line (:attr:`Visibility.straight`): its light goes by refracted paths, which
+        :func:`~aquaflux.radiation.refracted.build_refracted_visibility` masks. The positions must
+        be concrete.
 
     Returns
     -------
@@ -466,17 +465,17 @@ def _unchecked_visibility(
         else jnp.zeros((0, n_receivers, n_facets), dtype=bool)
     )
     geometry = strategy.field(surfaces, points, near, receiver_facet, receiver_normal)
-    through = (
+    straight = (
         None
         if media is None or not media.regions
-        else jnp.asarray(straight_through(media, surfaces, points, pair_limit=pair_limit))
+        else jnp.asarray(straight_reach(media, surfaces, points, pair_limit=pair_limit))
     )
     return Visibility(
         blocked=blocked,
         receivers=points,
         hidden_by_geometry=geometry.fraction,
         overlapping=geometry.overlapping,
-        through=through,
+        straight=straight,
         clear_behind=geometry.clear_behind or (facing is not None and bool(occluders)),
     )
 

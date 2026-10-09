@@ -28,11 +28,16 @@ distribution), the direction it arrives from (for the solid angle the source fil
 receiver), the product of the Fresnel transmittances at its crossings, and the absorption along
 each leg in that leg's medium.
 
-**Regions the path does not cross by construction** -- a transparent solid that holds neither the
-source nor the receiver, such as a neighbouring lamp's sleeve -- are crossed **straight**: the leg
-is attenuated by their absorption along its chord and by the Fresnel loss at the angles the straight
-chord meets their surfaces, and is not bent. That is an approximation, and its size depends on the
-scene; it is exact only when such a region's index matches its surroundings.
+**A region holding neither end** -- a neighbouring lamp's sleeve -- is either missed or passed
+**through**: the light from a source to a point beyond a neighbour reaches it by every path that does
+one or the other, so each is a **route** of its own (:meth:`Chain.routes`). A route through a region
+enters it and leaves it again, at whatever depth of its nesting -- through a sleeve's quartz alone, or
+across its air gap too -- each crossing bent and each counted by its Fresnel transmittance. A path on
+a route that meets a region it does not pass through carries nothing: that light belongs to the route
+through it. At most one such region is passed by one path; light that would have to pass two is not
+followed. A route through a region can join two points by more than one path -- past either side of
+a lamp's arc inside a sleeve -- so it is solved from several starting points across the region and
+every distinct path found is kept.
 
 **What is not here.** Light that reflects on its way -- off the inside of a sleeve and out the far
 side, or back and forth inside the quartz -- is counted as lost at each reflection, not followed.
@@ -61,7 +66,7 @@ __all__ = [
     "Transparent",
     "fresnel_transmittance",
     "solve_paths",
-    "straight_through",
+    "straight_reach",
 ]
 
 #: Steps allowed per path. A path that exists converges quadratically once near it, in a handful;
@@ -83,6 +88,14 @@ _PATH_TOLERANCE = 1e-10
 #: How far a crossing may stand outside the body's other faces, relative to the separation of the
 #: path's ends, before it is not on the body's boundary at all but on the extension of a face.
 _ON_BOUNDARY = 1e-9
+
+#: Where a route through a region starts its search, across the region from the straight line: a
+#: fraction of the way to the region's edge, either way along two directions across the line.
+_START_REACH = 0.6
+
+#: Two paths on one route closer than this, relative to the separation of their ends, are one path
+#: found from two starting points, and counted once.
+_SAME_PATH = 1e-6
 
 #: How close a source or receiver may come to a region's surface, relative to the scene's size. A
 #: point there has no well-defined medium, and a path from it has a leg of zero length.
@@ -343,51 +356,132 @@ class Chain:
     legs : tuple of int
         The region each leg runs in, ``-1`` the surroundings; one more than the crossings.
     beside : tuple of tuple of int
-        For each leg, the regions it may pass straight through: every region that is not crossed,
-        does not hold the leg's medium and is not that medium.
+        For each leg, the regions it must miss: every region that is not crossed, does not hold the
+        leg's medium and is not that medium. A leg meeting one is on another route.
+    passing : tuple of int
+        The regions the path passes through, holding neither end, outermost first: entered in this
+        order and left in the reverse. Empty for the route that passes through none.
+    pass_at : int
+        Where in :attr:`crossings` the pass begins; meaningless when :attr:`passing` is empty.
     """
 
     crossings: tuple
     legs: tuple
     beside: tuple
+    passing: tuple = ()
+    pass_at: int = 0
 
     @classmethod
-    def between(cls, parents: np.ndarray, source: int, receiver: int) -> Chain:
-        """The chain from a source in region ``source`` to a receiver in region ``receiver``."""
+    def between(
+        cls, parents: np.ndarray, source: int, receiver: int, through: int | None = None
+    ) -> Chain:
+        """The chain from a source in region ``source`` to a receiver in region ``receiver``.
 
-        def lineage(node):
-            line = []
-            while node >= 0:
-                line.append(int(node))
-                node = parents[node]
-            return line
+        Parameters
+        ----------
+        parents : numpy.ndarray of int
+            :attr:`Media.parents`.
+        source, receiver : int
+            The regions the ends are in, ``-1`` the surroundings.
+        through : int, optional
+            A region holding neither end, to pass through: the path enters every region holding it
+            down from one in a leg's own medium, then leaves them again. Unset, the path passes
+            through none.
 
-        up, down = lineage(source), lineage(receiver)
+        Raises
+        ------
+        ValueError
+            If ``through`` holds an end, or no leg's medium holds it.
+        """
+        up, down = _lineage(parents, source), _lineage(parents, receiver)
         common = next((node for node in up if node in down), -1)
         leaving = up[: up.index(common)] if common >= 0 else up
         entering = down[: down.index(common)] if common >= 0 else down
-        crossings = tuple((node, True) for node in leaving) + tuple(
+        crossings = [(node, True) for node in leaving] + [
             (node, False) for node in reversed(entering)
-        )
-        legs = (source, *(parents[node] if out else node for node, out in crossings))
-        legs = tuple(int(leg) for leg in legs)
-        # A crossed region is never beside a leg: one leaving it starts on its surface and one
-        # entering it ends there, and neither goes through it, convex as it is.
+        ]
+        legs = [source, *(int(parents[node]) if out else node for node, out in crossings)]
+        passing, pass_at = (), 0
+        if through is not None:
+            line = _lineage(parents, through)
+            if set(line) & (set(up) | set(down)):
+                msg = f"region {through} holds an end of the path, so it is not passed through"
+                raise ValueError(msg)
+            top = next((k for k, node in enumerate(line) if int(parents[node]) in legs), None)
+            if top is None:
+                msg = f"no leg of the path runs in a medium holding region {through}"
+                raise ValueError(msg)
+            passing = tuple(reversed(line[: top + 1]))
+            pass_at = legs.index(int(parents[passing[0]]))
+            pass_crossings = [(node, False) for node in passing] + [
+                (node, True) for node in reversed(passing)
+            ]
+            crossings[pass_at:pass_at] = pass_crossings
+            legs = [source, *(int(parents[node]) if out else node for node, out in crossings)]
         crossed = {node for node, _ in crossings}
         beside = tuple(
             tuple(
                 node
                 for node in range(len(parents))
-                if node not in lineage(leg) and node not in crossed
+                if node not in _lineage(parents, leg) and node not in crossed
             )
             for leg in legs
         )
-        return cls(crossings=crossings, legs=legs, beside=beside)
+        return cls(
+            crossings=tuple(crossings),
+            legs=tuple(int(leg) for leg in legs),
+            beside=beside,
+            passing=passing,
+            pass_at=pass_at,
+        )
+
+    @classmethod
+    def routes(cls, parents: np.ndarray, source: int, receiver: int) -> tuple[Chain, ...]:
+        """Every route between two media: through no region, then through each region it can pass.
+
+        A route through a region holding neither end is one per depth of that region's nesting: a
+        sleeve gives one through its quartz alone and one across its air gap too. Between two
+        points in one medium there is no route through nothing -- that is a straight line, the
+        direct gather's -- so only the routes through a region are listed.
+
+        Parameters
+        ----------
+        parents : numpy.ndarray of int
+        source, receiver : int
+
+        Returns
+        -------
+        tuple of Chain
+        """
+        held = set(_lineage(parents, source)) | set(_lineage(parents, receiver))
+        found = [] if source == receiver else [cls.between(parents, source, receiver)]
+        for node in range(len(parents)):
+            if node in held:
+                continue
+            try:
+                found.append(cls.between(parents, source, receiver, through=node))
+            except ValueError:
+                continue
+        return tuple(found)
 
     @property
     def n_crossings(self) -> int:
         """How many surfaces the path crosses."""
         return len(self.crossings)
+
+    @property
+    def n_starts(self) -> int:
+        """How many starting points the path is solved from: four through a region, else one."""
+        return 4 if self.passing else 1
+
+
+def _lineage(parents, node) -> list[int]:
+    """``node`` and every region holding it, innermost first; empty for the surroundings."""
+    line = []
+    while node >= 0:
+        line.append(int(node))
+        node = parents[node]
+    return line
 
 
 class Paths(eqx.Module):
@@ -401,11 +495,13 @@ class Paths(eqx.Module):
         Unit direction from the receiver back along the path's last leg: where the light seems to
         come from.
     transmittance : jnp.ndarray, shape ``(...)``
-        What gets across: the Fresnel transmittances of the crossings, the absorption of each leg
-        in its own medium, and whatever the legs pass straight through.
+        What gets across: the Fresnel transmittances of the crossings and the absorption of each
+        leg in its own medium.
     valid : jnp.ndarray of bool, shape ``(...)``
         Whether the path exists: the solve converged, every crossing is on its body's boundary and
-        goes the way the chain says. A path that does not exist carries nothing.
+        goes the way the chain says, no leg meets a region it must miss, and -- on a route through a
+        region -- no earlier starting point found the same path. A path that does not exist carries
+        nothing.
     points : jnp.ndarray, shape ``(..., n_crossings, 3)``
         Where it crosses each surface.
     """
@@ -426,13 +522,16 @@ def solve_paths(media: Media, chain: Chain, sources, receivers) -> Paths:
         Its indices, absorptions and region geometry are live: the path's derivative with respect
         to each comes from the implicit function theorem on the converged path.
     chain : Chain
-        The crossings, from :meth:`Chain.between`; every pair given must have it.
+        The crossings, from :meth:`Chain.between` or :meth:`Chain.routes`; every pair given must have
+        it.
     sources, receivers : array_like, shape ``(..., 3)``
         Broadcast against each other.
 
     Returns
     -------
     Paths
+        Shaped as the broadcast pairs; on a route through a region, with one more leading axis of
+        :attr:`Chain.n_starts`, a path per starting point, each distinct path valid once.
     """
     return _solve_paths(
         media, chain, jnp.asarray(sources, dtype=float), jnp.asarray(receivers, dtype=float)
@@ -450,12 +549,98 @@ def _solve_paths(media: Media, chain: Chain, sources, receivers) -> Paths:
     shape = jnp.broadcast_shapes(sources.shape, receivers.shape)
     flat_sources = jnp.broadcast_to(sources, shape).reshape(-1, 3)
     flat_receivers = jnp.broadcast_to(receivers, shape).reshape(-1, 3)
-    paths = jax.vmap(lambda s, r: _one_path(media, chain, s, r))(flat_sources, flat_receivers)
-    return jax.tree.map(lambda leaf: leaf.reshape(*shape[:-1], *leaf.shape[1:]), paths)
+    if not chain.passing:
+        paths = jax.vmap(lambda s, r: _one_path(media, chain, s, r, None))(
+            flat_sources, flat_receivers
+        )
+        return jax.tree.map(lambda leaf: leaf.reshape(*shape[:-1], *leaf.shape[1:]), paths)
+
+    def from_every_start(source, receiver):
+        aims = jax.lax.stop_gradient(_starts(media, chain, source, receiver))
+        return jax.vmap(lambda aim: _one_path(media, chain, source, receiver, aim))(aims)
+
+    paths = jax.vmap(from_every_start)(flat_sources, flat_receivers)
+    paths = jax.tree.map(lambda leaf: jnp.moveaxis(leaf, 1, 0), paths)
+    paths = _distinct(paths, norm(flat_receivers - flat_sources))
+    return jax.tree.map(
+        lambda leaf: leaf.reshape(leaf.shape[0], *shape[:-1], *leaf.shape[2:]), paths
+    )
 
 
-def _one_path(media: Media, chain: Chain, source, receiver) -> Paths:
-    """One pair's path, its crossings found by minimizing the optical length (Fermat's principle)."""
+def _distinct(paths: Paths, separation) -> Paths:
+    """``paths`` from every start, each valid only where no earlier start found the same path."""
+    scale = jnp.where(separation > 0.0, separation, 1.0)
+    valid = [paths.valid[0]]
+    for start in range(1, paths.valid.shape[0]):
+        repeated = jnp.zeros_like(paths.valid[start])
+        for earlier in range(start):
+            apart = jnp.max(norm(paths.points[start] - paths.points[earlier]), axis=-1)
+            repeated = repeated | (paths.valid[earlier] & (apart <= _SAME_PATH * scale))
+        valid.append(paths.valid[start] & ~repeated)
+    valid = jnp.stack(valid)
+    return Paths(
+        departure=paths.departure,
+        arrival=paths.arrival,
+        transmittance=jnp.where(valid, paths.transmittance, 0.0),
+        valid=valid,
+        points=paths.points,
+    )
+
+
+def _starts(media: Media, chain: Chain, source, receiver) -> jnp.ndarray:
+    """``(n_starts, 3)`` points inside the deepest region passed, where a route's search begins.
+
+    The search starts from the polyline ``source -> aim -> receiver``. The aims stand about the
+    point ``b`` where the straight line is deepest in the region passed -- the middle of its chord
+    through it, or the line's nearest point to it where it misses -- moved across the line either way
+    along two directions perpendicular to it: through a sleeve, past both sides of its arc. They
+    reach :data:`_START_REACH` of the way to the region's edge, or, for a route that stops short of
+    a region nested inside, halfway between that region's edge and the inner one's, which is where
+    such a path runs.
+    """
+    nodes = media.nodes
+    outer = nodes[chain.passing[0]].body
+    deepest = nodes[chain.passing[-1]]
+    straight = receiver - source
+    enter, exit_ = outer.intervals(source, straight)
+    meets = jnp.isfinite(enter[0]) & jnp.isfinite(exit_[0]) & (exit_[0] > enter[0])
+    fraction = jnp.linspace(0.0, 1.0, 33)
+    along = source + fraction[:, None] * straight
+    nearest = along[jnp.argmin(outer.signed_distance(along))]
+    middle = 0.5 * (jnp.where(meets, enter[0], 0.0) + jnp.where(meets, exit_[0], 0.0))
+    b = jnp.where(meets, source + middle * straight, nearest)
+    unit = straight / jnp.where(norm(straight) > 0.0, norm(straight), 1.0)
+    axis = jnp.eye(3)[jnp.argmin(jnp.abs(unit))]
+    across = jnp.cross(unit, axis)
+    across = across / norm(across)
+    other = jnp.cross(unit, across)
+
+    def reach(body, direction):
+        """How far from ``b`` the body's boundary is along ``direction``, the nearer way."""
+        low, high = body.intervals(b, direction)
+        inside = (low[0] < 0.0) & (high[0] > 0.0)
+        return jnp.where(inside, jnp.minimum(-low[0], high[0]), 0.0)
+
+    def offset(direction):
+        edge = reach(deepest.body, direction)
+        if deepest.inside:
+            inner = jnp.max(jnp.stack([reach(child.body, direction) for child in deepest.inside]))
+            return 0.5 * (edge + inner)
+        return _START_REACH * edge
+
+    distance = jnp.minimum(offset(across), offset(other))
+    return jnp.stack(
+        [b + distance * across, b - distance * across, b + distance * other, b - distance * other]
+    )
+
+
+def _one_path(media: Media, chain: Chain, source, receiver, aim) -> Paths:
+    """One pair's path, its crossings found by minimizing the optical length (Fermat's principle).
+
+    ``aim`` is ``None`` for a route through no region, whose search starts from the straight line;
+    otherwise a point inside the deepest region passed, and the search starts from the polyline
+    through it.
+    """
     nodes = media.nodes
     bodies = [nodes[node].body for node, _ in chain.crossings]
     indices = jnp.stack([media.index_of(leg) for leg in chain.legs])
@@ -463,14 +648,26 @@ def _one_path(media: Media, chain: Chain, source, receiver) -> Paths:
     separation = norm(receiver - source)
     length_scale = jnp.where(separation > 0.0, separation, 1.0)
 
-    # The face each crossing is held to, read off the straight line: it is the face the line
-    # leaves or enters the body by, which is where the path starts its search.
+    # The face each crossing is held to, read off the straight line -- or, on a route through a
+    # region, off the polyline through the aim: it is the face the line leaves or enters the body
+    # by, which is where the path starts its search.
     straight = receiver - source
+    split = chain.pass_at + len(chain.passing)
     guess, faces = [], []
-    for body, (_, out) in zip(bodies, chain.crossings, strict=True):
-        enter, exit_ = body.intervals(source, straight)
+    for k, (body, (_, out)) in enumerate(zip(bodies, chain.crossings, strict=True)):
+        if aim is None:
+            origin, step = source, straight
+        elif k < split:
+            origin, step = source, aim - source
+        else:
+            origin, step = aim, receiver - aim
+        enter, exit_ = body.intervals(origin, step)
         t = exit_[0] if out else enter[0]
-        point = source + t * straight
+        point = origin + t * step
+        if aim is not None:
+            # A start whose line misses the body begins at the aim, inside it, and is moved onto the
+            # nearest face from there.
+            point = jnp.where(jnp.isfinite(t), point, aim)
         guess.append(point)
         faces.append(jnp.argmax(body.face_distances(point)))
     faces = jnp.stack(faces)
@@ -677,9 +874,7 @@ def _one_path(media: Media, chain: Chain, source, receiver) -> Paths:
         medium = media.absorption_of(chain.legs[leg])
         if medium is not None:
             depth = depth + medium.optical_depth(start_point, end_point)
-        through, extra = _straight_through(media, chain.beside[leg], start_point, end_point)
-        transmittance = transmittance * through
-        depth = depth + extra
+        valid = valid & ~_meets_any(media, chain.beside[leg], start_point, end_point)
     transmittance = transmittance * jnp.exp(-depth)
 
     return Paths(
@@ -691,19 +886,29 @@ def _one_path(media: Media, chain: Chain, source, receiver) -> Paths:
     )
 
 
-def straight_through(media: Media, surfaces, points, *, pair_limit: int = DEFAULT_PAIR_LIMIT):
-    """What the straight segment from each facet's centroid to each point gets past.
+def _meets_any(media: Media, regions, origin, target) -> jnp.ndarray:
+    """Whether the segment from ``origin`` to ``target`` passes through any of ``regions``.
 
-    The factor a mask of straight segments carries for the transparent regions: where a facet and a
-    point lie in the same medium, the product over every region the segment passes through of the
-    Fresnel transmittances where the segment enters and leaves it, at the angles it meets the
-    region's surface there, and of the region's absorption along its chord in excess of the
-    medium's own -- which the gather already counts along the whole segment. Where the two lie in
-    different media it is **zero**: their light crosses a surface that bends it, and goes by a
-    refracted path (:mod:`~aquaflux.radiation.refracted`) instead.
+    Through, not touching: the part of the segment inside must be longer than a rounding of the
+    segment's own length, so a leg that only grazes a region's surface is not counted as meeting it.
+    """
+    step = target - origin
+    meets = jnp.asarray(False)
+    for node in regions:
+        enter, exit_ = media.nodes[node].body.intervals(origin, step)
+        inside = jnp.minimum(exit_[0], 1.0) - jnp.maximum(enter[0], 0.0)
+        meets = meets | (inside > _ON_BOUNDARY)
+    return meets
 
-    Taken along the centroid's segment, as every shadow is, and frozen: worked out on the host from
-    the indices and absorptions given, with no derivative.
+
+def straight_reach(media: Media, surfaces, points, *, pair_limit: int = DEFAULT_PAIR_LIMIT):
+    """Whether the straight segment from each facet's centroid to each point carries its light.
+
+    It does where the facet and the point lie in one medium and the segment meets no transparent
+    region: there the light goes straight. Where they lie in different media, or the segment passes
+    through a region, their light goes by refracted paths instead
+    (:mod:`~aquaflux.radiation.refracted`), and the straight segment carries none. Taken along the
+    centroid's segment, as every shadow is, and frozen.
 
     Parameters
     ----------
@@ -718,7 +923,7 @@ def straight_through(media: Media, surfaces, points, *, pair_limit: int = DEFAUL
 
     Returns
     -------
-    numpy.ndarray, shape ``(n_points, n_facets)``
+    numpy.ndarray of bool, shape ``(n_points, n_facets)``
 
     Raises
     ------
@@ -729,7 +934,7 @@ def straight_through(media: Media, surfaces, points, *, pair_limit: int = DEFAUL
     facet_region = media.region_of_facets(surfaces)
     point_region = media.region_of(points, "receiver")
     centroid = np.asarray(surfaces.centroid, dtype=float)
-    through = np.zeros((points.shape[0], surfaces.n_facets))
+    reach = np.zeros((points.shape[0], surfaces.n_facets), dtype=bool)
     parents = media.parents
     for medium in np.unique(point_region):
         rows = np.flatnonzero(point_region == medium)
@@ -737,83 +942,36 @@ def straight_through(media: Media, surfaces, points, *, pair_limit: int = DEFAUL
         if not len(columns):
             continue
         beside = Chain.between(parents, int(medium), int(medium)).beside[0]
-        if not beside:
-            through[np.ix_(rows, columns)] = 1.0
-            continue
-        count = len(rows) * len(columns)
-        chunk = padded_length(min(count, max(1, pair_limit), PASS_PAIRS))
-        for start in range(0, count, chunk):
-            # Padded to the chunk by repeating the last pair, so every pass shares one program.
-            flat = np.minimum(np.arange(start, start + chunk), count - 1)
-            row, column = rows[flat // len(columns)], columns[flat % len(columns)]
-            got = np.asarray(
-                _through_pairs(
-                    media, beside, jnp.asarray(centroid[column]), jnp.asarray(points[row])
-                )
-            )
-            kept = slice(0, min(chunk, count - start))
-            through[row[kept], column[kept]] = got[kept]
-    return through
+        met = _pairs_meet(media, beside, centroid[columns], points[rows], pair_limit=pair_limit)
+        reach[np.ix_(rows, columns)] = ~met
+    return reach
+
+
+def _pairs_meet(media: Media, regions, origins, targets, *, pair_limit: int) -> np.ndarray:
+    """``(n_targets, n_origins)``: whether each segment from an origin to a target meets a region.
+
+    Host work on concrete positions, a pass of pairs at a time.
+    """
+    origins, targets = np.asarray(origins, dtype=float), np.asarray(targets, dtype=float)
+    met = np.zeros((len(targets), len(origins)), dtype=bool)
+    count = met.size
+    if not regions or not count:
+        return met
+    regions = tuple(int(node) for node in regions)
+    chunk = padded_length(min(count, max(1, pair_limit), PASS_PAIRS))
+    for start in range(0, count, chunk):
+        # Padded to the chunk by repeating the last pair, so every pass shares one program.
+        flat = np.minimum(np.arange(start, start + chunk), count - 1)
+        row, column = flat // len(origins), flat % len(origins)
+        got = np.asarray(
+            _segments_meet(media, regions, jnp.asarray(origins[column]), jnp.asarray(targets[row]))
+        )
+        kept = slice(0, min(chunk, count - start))
+        met[row[kept], column[kept]] = got[kept]
+    return met
 
 
 @eqx.filter_jit
-def _through_pairs(media: Media, beside: tuple, origin, target) -> jnp.ndarray:
-    """:func:`_straight_through` for many segments, as one factor each, compiled per shape."""
-
-    def one(start, end):
-        through, depth = _straight_through(media, beside, start, end)
-        return through * jnp.exp(-depth)
-
-    return jax.vmap(one)(origin, target)
-
-
-def _straight_through(media: Media, beside, origin, target):
-    """What the regions a leg passes straight through let past: Fresnel losses, and extra depth.
-
-    Each region the segment crosses is entered and left along the straight line, at the angles the
-    line meets its surface there, and absorbs along its chord **less what the medium holding it
-    would have absorbed there**: the leg's own medium is already counted along the whole leg, so a
-    nested region's excess over its holder is what remains. Telescoping over a region and the ones
-    inside it, that is each piece of the chord absorbed by its own medium.
-    """
-    parents = media.parents
-    nodes = media.nodes
-    through = jnp.asarray(1.0)
-    depth = jnp.asarray(0.0)
-    step = target - origin
-    span = norm(step)
-    for node in beside:
-        region = nodes[node]
-        holder = int(parents[node])
-        enter, exit_ = region.body.intervals(origin, step)
-        enter, exit_ = jnp.maximum(enter[0], 0.0), jnp.minimum(exit_[0], 1.0)
-        crossed = exit_ > enter
-        # Points to evaluate the surfaces at, moved somewhere finite where the line misses, so
-        # nothing infinite reaches a gradient the selection below would not stop.
-        enter_at = origin + jnp.where(crossed, enter, 0.5) * step
-        exit_at = origin + jnp.where(crossed, exit_, 0.5) * step
-        inner, outer = region.refractive_index, media.index_of(holder)
-        unit = step / jnp.where(span > 0.0, span, 1.0)
-        through = through * jnp.where(
-            crossed,
-            fresnel_transmittance(dot(unit, _outward(region.body, enter_at)), outer, inner)
-            * fresnel_transmittance(dot(unit, _outward(region.body, exit_at)), inner, outer),
-            1.0,
-        )
-        chord = jnp.where(crossed, (exit_ - enter) * span, 0.0)
-        middle = 0.5 * (enter_at + exit_at)
-        own = _coefficient(region.absorption, middle)
-        surrounding = _coefficient(media.absorption_of(holder), middle)
-        depth = depth + (own - surrounding) * chord
-    return through, depth
-
-
-def _outward(body: ConvexSolid, position) -> jnp.ndarray:
-    """The outward unit normal of the face of ``body`` nearest to holding ``position``."""
-    gradient = jax.grad(body.signed_distance)(position)
-    return gradient / norm(gradient)
-
-
-def _coefficient(absorption: Absorption | None, position) -> jnp.ndarray:
-    """An absorbing medium's coefficient at a position, zero for none."""
-    return jnp.asarray(0.0) if absorption is None else absorption.sample(position)
+def _segments_meet(media: Media, regions: tuple, origin, target) -> jnp.ndarray:
+    """:func:`_meets_any` for many segments, compiled per shape."""
+    return jax.vmap(lambda start, end: _meets_any(media, regions, start, end))(origin, target)

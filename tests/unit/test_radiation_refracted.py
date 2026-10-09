@@ -28,7 +28,7 @@ from aquaflux.radiation.refracted import (
 )
 from aquaflux.radiation.refraction import Media, Transparent, fresnel_transmittance
 from aquaflux.radiation.visibility import build_visibility
-from aquaflux.solids import Cylinder, HalfSpace, Sphere
+from aquaflux.solids import Box, Cylinder, HalfSpace, Sphere
 from scipy import integrate, optimize
 
 WATER, QUARTZ, AIR = 1.376, 1.5048, 1.0003
@@ -97,37 +97,19 @@ def test_with_every_index_equal_it_is_the_direct_gather():
     )
 
 
-def _through_a_plane(
-    n_source, n_receiver, a_source, a_receiver, depth, height, half_width, exitance, cosine=False
-):
-    """Fluence rate on the axis above a square Lambertian emitter seen through the plane ``z = 0``.
+def _over_directions(reach, carried, widest, half_width, cosine=False):
+    """Integrate what arrives over the receiver's directions, from a square emitter centred below it.
 
-    With ``cosine``, the irradiance on a surface there facing down at the emitter instead: each
-    direction weighted by its cosine to the vertical.
-
-    Integrated over the receiver's directions: each arrives with the source's radiance, times
-    ``(n_receiver / n_source)^2``, the Fresnel transmittance and both legs' absorption, wherever the
-    refracted ray lands on the square. Eight symmetric sectors; for each azimuth the polar limit is
-    where the ray's lateral reach meets the square's edge.
+    ``reach(theta)`` is how far sideways a ray arriving at polar angle ``theta`` meets the emitter's
+    plane, and ``carried(theta)`` what radiance it brings per unit of the emitter's; ``widest`` is the
+    largest polar angle any ray arrives at. Eight symmetric sectors; for each azimuth the polar limit
+    is where the reach meets the square's edge. With ``cosine``, each direction is weighted by its
+    cosine to the vertical, as on a surface facing down at the emitter.
     """
 
-    def source_angle(theta):
-        return np.arcsin(np.clip(n_receiver * np.sin(theta) / n_source, -1.0, 1.0))
-
-    widest = np.pi / 2 if n_source >= n_receiver else np.arcsin(n_source / n_receiver)
-
-    def reach(theta):
-        return height * np.tan(theta) + depth * np.tan(source_angle(theta))
-
     def radiance(theta):
-        inside = source_angle(theta)
-        crossing = float(fresnel_transmittance(np.cos(inside), n_source, n_receiver))
-        legs = a_source * depth / np.cos(inside) + a_receiver * height / np.cos(theta)
         weight = np.cos(theta) if cosine else 1.0
-        return (
-            (n_receiver / n_source) ** 2 * crossing * exitance / np.pi * np.exp(-legs)
-            * np.sin(theta) * weight
-        )  # fmt: skip
+        return carried(theta) * np.sin(theta) * weight
 
     def sector(phi):
         top = widest * (1 - 1e-12)
@@ -138,6 +120,32 @@ def _through_a_plane(
         return integrate.quad(radiance, 0.0, top, epsabs=0, epsrel=1e-11, limit=200)[0]
 
     return 8.0 * integrate.quad(sector, 0.0, np.pi / 4, epsabs=0, epsrel=1e-10)[0]
+
+
+def _through_a_plane(
+    n_source, n_receiver, a_source, a_receiver, depth, height, half_width, exitance, cosine=False
+):
+    """Fluence rate on the axis above a square Lambertian emitter seen through the plane ``z = 0``.
+
+    With ``cosine``, the irradiance on a surface there facing down at the emitter instead. Each
+    direction arrives with the source's radiance, times ``(n_receiver / n_source)^2``, the Fresnel
+    transmittance and both legs' absorption, wherever the refracted ray lands on the square.
+    """
+
+    def source_angle(theta):
+        return np.arcsin(np.clip(n_receiver * np.sin(theta) / n_source, -1.0, 1.0))
+
+    def reach(theta):
+        return height * np.tan(theta) + depth * np.tan(source_angle(theta))
+
+    def carried(theta):
+        inside = source_angle(theta)
+        crossing = float(fresnel_transmittance(np.cos(inside), n_source, n_receiver))
+        legs = a_source * depth / np.cos(inside) + a_receiver * height / np.cos(theta)
+        return (n_receiver / n_source) ** 2 * crossing * exitance / np.pi * np.exp(-legs)
+
+    widest = np.pi / 2 if n_source >= n_receiver else np.arcsin(n_source / n_receiver)
+    return _over_directions(reach, carried, widest, half_width, cosine)
 
 
 @pytest.mark.parametrize(
@@ -200,6 +208,48 @@ def test_through_a_flat_interface_the_error_falls_at_second_order():
         got = float(refracted_fluence_rate(surfaces, media, np.array([[0.0, 0.0, height]]))[0])
         errors.append(abs(got / expected - 1.0))
     assert errors[0] / errors[1] > 3.0
+
+
+def test_a_slab_between_an_emitter_and_a_point_in_one_medium_is_the_quadrature_over_directions():
+    """A thick absorbing quartz slab across all the light from a square emitter, all in water.
+
+    The light reaches the point only by routes through the slab, at every angle up to grazing on
+    the wide emitter: each direction enters and leaves the slab at the same angle, so it arrives
+    parallel to how it left, shifted sideways, with the source's radiance times both crossings'
+    Fresnel transmittance and the absorption along both water legs and the slab. Each of the four
+    starting points of a route finds the one path there is, and it is counted once.
+    """
+    n_water, n_slab, a_water, a_slab = WATER, QUARTZ, 5.0, 12.0
+    below, thickness, above, half_width, exitance = 0.015, 0.03, 0.055, 0.2, 10.0
+    height = below + thickness + above
+
+    def slab_angle(theta):
+        return np.arcsin(n_water * np.sin(theta) / n_slab)
+
+    def reach(theta):
+        return (height - thickness) * np.tan(theta) + thickness * np.tan(slab_angle(theta))
+
+    def carried(theta):
+        inside = slab_angle(theta)
+        crossings = float(fresnel_transmittance(np.cos(theta), n_water, n_slab)) * float(
+            fresnel_transmittance(np.cos(inside), n_slab, n_water)
+        )
+        legs = a_water * (height - thickness) / np.cos(theta) + a_slab * thickness / np.cos(inside)
+        return crossings * exitance / np.pi * np.exp(-legs)
+
+    expected = _over_directions(reach, carried, np.pi / 2, half_width)
+    slab = Box([0.0, 0.0, -above - thickness / 2], [1.0, 1.0, thickness / 2])
+    media = Media(
+        n_water,
+        (Transparent(slab, n_slab, UniformAbsorption(a_slab)),),
+        UniformAbsorption(a_water),
+    )
+    triangles = _square(half_width, 32, -height)
+    surfaces = Surfaces.from_triangles(triangles).with_optics(
+        emission=jnp.full(len(triangles), exitance)
+    )
+    got = float(refracted_fluence_rate(surfaces, media, np.zeros((1, 3)))[0])
+    assert got == pytest.approx(expected, rel=2.5e-3)
 
 
 def test_a_triangle_with_a_corner_that_has_no_path_carries_nothing():
@@ -293,7 +343,9 @@ def test_the_fluence_rate_s_derivative_with_respect_to_an_index_is_the_finite_di
 def test_what_it_cannot_gather_is_refused():
     media = _sleeve()
     lamp = Surfaces.from_triangles(_drum(0.0075, 0.2, 6, 1), point_sources=[0])
-    with pytest.raises(ValueError, match="a point source and a receiver are in different media"):
+    with pytest.raises(
+        ValueError, match="a point source's light would cross the surface of a transparent region"
+    ):
         refracted_fluence_rate(lamp, media, _POINTS[:1])
     straddling = Surfaces.from_triangles(
         np.array([[[0.01, 0.0, 0.0], [0.012, 0.0, 0.0], [0.011, 0.001, 0.0]]])

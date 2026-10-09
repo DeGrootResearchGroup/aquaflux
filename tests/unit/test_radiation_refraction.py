@@ -19,7 +19,7 @@ from aquaflux.radiation.refraction import (
     Transparent,
     fresnel_transmittance,
     solve_paths,
-    straight_through,
+    straight_reach,
 )
 from aquaflux.solids import Cylinder, HalfSpace, Sphere, Union
 from scipy import optimize
@@ -132,6 +132,46 @@ def test_a_chain_leaves_every_region_round_the_source_and_enters_every_one_round
     assert across.legs == (1, 0, 2)
     # The leg through the tank may pass straight through nothing it crossed, nor the tank.
     assert across.beside == ((), (), ())
+
+
+def test_a_route_through_a_region_enters_it_from_a_leg_s_medium_and_leaves_it_the_same_way():
+    """Two sleeves side by side: from one's air gap to the water, and from the water to the water.
+
+    Regions 0 and 2 are the quartz of each, 1 and 3 their gaps. Out of the first gap the path may
+    pass through nothing, through the second sleeve's quartz, or through its quartz and gap; each
+    pass sits on the water leg, entered outermost first and left in the reverse. A region holding an
+    end is never passed, and between two points in one medium there is no route through nothing --
+    that is the straight line.
+    """
+    parents = np.array([-1, 0, -1, 2])
+    routes = Chain.routes(parents, 1, -1)
+    assert [chain.passing for chain in routes] == [(), (2,), (2, 3)]
+    assert routes[0].crossings == ((1, True), (0, True))
+    assert routes[1].crossings == ((1, True), (0, True), (2, False), (2, True))
+    assert routes[1].legs == (1, 0, -1, 2, -1)
+    assert routes[2].crossings == (
+        (1, True),
+        (0, True),
+        (2, False),
+        (3, False),
+        (3, True),
+        (2, True),
+    )
+    assert routes[2].legs == (1, 0, -1, 2, 3, 2, -1)
+    assert routes[1].pass_at == routes[2].pass_at == 2
+    # The route through nothing must miss the second sleeve; the routes through it miss nothing.
+    assert routes[0].beside[-1] == (2, 3)
+    assert routes[1].beside[-1] == routes[2].beside[-1] == ()
+    assert [chain.n_starts for chain in routes] == [1, 4, 4]
+    in_water = Chain.routes(parents, -1, -1)
+    assert [chain.passing for chain in in_water] == [(0,), (0, 1), (2,), (2, 3)]
+    assert in_water[0].crossings == ((0, False), (0, True))
+    # From the first gap to the first gap nothing can be passed without leaving it.
+    assert Chain.routes(parents, 1, 1) == ()
+    with pytest.raises(ValueError, match="holds an end of the path"):
+        Chain.between(parents, 1, -1, through=0)
+    with pytest.raises(ValueError, match="no leg of the path runs in a medium holding region 3"):
+        Chain.between(parents, 1, 1, through=3)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -268,11 +308,14 @@ def test_the_path_s_derivative_with_respect_to_an_index_is_the_finite_difference
     assert derivative == pytest.approx(finite, rel=1e-6)
 
 
-def test_a_region_beside_the_path_is_crossed_straight_with_its_fresnel_losses_and_absorption():
-    """A sphere centred on a leg's straight line is crossed at normal incidence both ways.
+def test_a_region_holding_neither_end_is_passed_through_bent_and_a_path_meeting_it_otherwise_is_none():
+    """A sphere centred on the line between two points, both outside it, is a route of its own.
 
-    So what gets past it is ``(1 - R)^2`` at normal incidence times its own absorption along the
-    diameter, less what the water would have absorbed there.
+    On that route the axial path crosses it at normal incidence both ways, so what gets past is
+    ``(1 - R)^2`` times the sphere's own absorption along the diameter, less what the water would have
+    absorbed there; its several starting points find that one path once. On the route that goes
+    round the sphere the only stationary path is the same straight line, which meets the sphere and
+    so belongs to the other route: there it is no path at all.
     """
     absorbing, water = 7.0, 2.0
     lens = Transparent(Sphere([0.0, 0.0, 0.05], 0.01), QUARTZ, UniformAbsorption(absorbing))
@@ -280,11 +323,17 @@ def test_a_region_beside_the_path_is_crossed_straight_with_its_fresnel_losses_an
     source, receiver = jnp.array([0.0, 0.0, 0.0002]), jnp.array([0.0, 0.0, 0.1])
     with_lens = Media(WATER, (box, lens), UniformAbsorption(water))
     without = Media(WATER, (box,), UniformAbsorption(water))
-    chain = Chain.between(with_lens.parents, 0, -1)
-    assert chain.beside[-1] == (1,)
-    ratio = float(solve_paths(with_lens, chain, source, receiver).transmittance) / float(
-        solve_paths(without, Chain.between(without.parents, 0, -1), source, receiver).transmittance
-    )
+    routes = Chain.routes(with_lens.parents, 0, -1)
+    assert [chain.passing for chain in routes] == [(), (1,)]
+    assert routes[0].beside[-1] == (1,)
+    around = solve_paths(with_lens, routes[0], source, receiver)
+    assert not bool(around.valid)
+    assert float(around.transmittance) == 0.0
+    through = solve_paths(with_lens, routes[1], source, receiver)
+    assert through.valid.shape == (routes[1].n_starts,)
+    assert int(np.sum(np.asarray(through.valid))) == 1
+    plain = solve_paths(without, Chain.between(without.parents, 0, -1), source, receiver)
+    ratio = float(jnp.sum(through.transmittance)) / float(plain.transmittance)
     normal = 1.0 - ((WATER - QUARTZ) / (WATER + QUARTZ)) ** 2
     assert ratio == pytest.approx(normal**2 * np.exp(-(absorbing - water) * 0.02), rel=1e-12)
 
@@ -295,38 +344,29 @@ def _tiny_facets(centroids) -> Surfaces:
     return Surfaces.from_triangles(np.asarray(centroids)[:, None, :] + corners[None])
 
 
-def test_a_straight_segment_through_a_sleeve_s_axis_loses_each_interface_and_each_excess_depth():
-    """Across a sleeve through its axis every crossing is at normal incidence.
+def test_a_straight_segment_carries_light_only_in_one_medium_and_clear_of_every_region():
+    """Which centroid-to-point segments the straight gather takes, across a sleeve and beside it.
 
-    So what gets past is ``(1 - R)^2`` at the water-quartz surfaces and at the quartz-air ones, and the
-    quartz and the air each absorb their excess over the water along their own chords -- the nesting
-    telescoped, the air's chord counted once in the air and not again in the quartz. A pair with its
-    two ends in different media gets nothing along the straight line, and one whose line misses the
-    sleeve gets it all.
+    A line through the sleeve's axis passes the quartz and the air gap, so its light goes by a route
+    through them, bent, and not straight; one that misses the sleeve goes straight; a pair whose two
+    ends lie in different media is the refracted gather's; and two ends in the air gap with nothing
+    inside it are joined straight.
     """
-    water, quartz, air = 3.0, 11.0, 0.5
-    inner, outer = 0.01025, 0.0115
     axis = [0.0, 0.0, 1.0]
-    gap = Transparent(Cylinder([0, 0, 0], axis, inner, 0.5), AIR, UniformAbsorption(air))
-    sleeve = Transparent(
-        Cylinder([0, 0, 0], axis, outer, 0.5), QUARTZ, UniformAbsorption(quartz), inside=(gap,)
-    )
-    media = Media(WATER, (sleeve,), UniformAbsorption(water))
+    gap = Transparent(Cylinder([0, 0, 0], axis, 0.01025, 0.5), AIR)
+    sleeve = Transparent(Cylinder([0, 0, 0], axis, 0.0115, 0.5), QUARTZ, inside=(gap,))
+    media = Media(WATER, (sleeve,))
     facets = _tiny_facets([[-0.05, 0.0, 0.0], [0.0, 0.0, 0.002], [-0.05, 0.08, 0.0]])
     points = np.array([[0.05, 0.0, 0.0], [0.05, 0.08, 0.0], [0.0, 0.005, 0.0]])
-    through = straight_through(media, facets, points)
-
-    def kept(n1, n2):
-        return 1.0 - ((n1 - n2) / (n1 + n2)) ** 2
-
-    expected = (
-        kept(WATER, QUARTZ) ** 2
-        * kept(QUARTZ, AIR) ** 2
-        * np.exp(-(quartz - water) * 2 * (outer - inner) - (air - water) * 2 * inner)
+    reach = straight_reach(media, facets, points)
+    assert reach.dtype == bool
+    expected = np.array(
+        [
+            [False, False, True],  # Through the sleeve's axis; another medium; misses it.
+            [True, False, True],  # Both lines from the water miss the sleeve.
+            [False, True, False],  # From the gap to the water is refracted; in the gap, straight.
+        ]
     )
-    assert through[0, 0] == pytest.approx(expected, rel=1e-12)
-    assert through[1, 0] == through[0, 2] == through[1, 2] == 1.0  # These lines miss the sleeve.
-    assert through[0, 1] == 0.0 and through[2, 0] == 0.0  # Different media: refracted instead.
-    assert through[2, 1] == 1.0  # Both in the air gap, nothing inside it.
+    np.testing.assert_array_equal(reach, expected)
     # However the pairs are cut into passes.
-    np.testing.assert_array_equal(straight_through(media, facets, points, pair_limit=2), through)
+    np.testing.assert_array_equal(straight_reach(media, facets, points, pair_limit=2), reach)

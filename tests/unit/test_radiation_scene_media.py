@@ -27,7 +27,7 @@ from aquaflux.radiation import (
     solve_scene,
 )
 from aquaflux.radiation.refraction import Media, Transparent
-from aquaflux.solids import Cylinder, Sphere
+from aquaflux.solids import Box, Cylinder
 
 from tests.unit.radiation_references import inward_box
 
@@ -134,20 +134,28 @@ def test_a_point_is_lit_through_its_own_medium_s_absorption():
     )
 
 
-def test_a_region_between_a_source_and_a_point_in_one_medium_is_crossed_straight():
-    """A quartz ball centred on the line from a small lamp to a point, all in water.
+def test_a_slab_between_a_small_lamp_and_a_point_in_one_medium_brings_the_lamp_nearer():
+    """A thick quartz slab across the line from a small lamp to a point, all in water.
 
-    The line crosses the ball at normal incidence both ways, so the light is the straight gather's
-    times ``(1 - R)^2`` and the quartz's excess absorption along the diameter.
+    The light is bent through the slab, not taken straight: near the axis a slab of thickness ``t``
+    shows the lamp ``t (1 - n_water / n_quartz)`` nearer, so its solid angle grows by the square of
+    the distance over the apparent distance. Times ``(1 - R)^2`` at normal incidence and the
+    quartz's excess absorption across the slab. The lamp is a millimetre at a tenth of a metre, so
+    the near-axis form holds to about one part in ten thousand; straight through the slab would be
+    9 % lower.
     """
     lamp = Surfaces.from_triangles(
         np.array([[[0.0, -1.0, -1.0], [0.0, 2.0, -1.0], [0.0, -1.0, 2.0]]]) * 1e-3 / 3
     ).with_optics(emission=jnp.array([20.0]))
     point = np.array([[0.1, 0.0, 0.0]])
-    water, quartz, radius = 4.0, 9.0, 0.02
+    water, quartz, half = 4.0, 9.0, 0.02
     media = Media(
         WATER,
-        (Transparent(Sphere([0.05, 0.0, 0.0], radius), QUARTZ, UniformAbsorption(quartz)),),
+        (
+            Transparent(
+                Box([0.05, 0.0, 0.0], [half, 0.05, 0.05]), QUARTZ, UniformAbsorption(quartz)
+            ),
+        ),
         UniformAbsorption(water),
     )
     solved = solve_scene(
@@ -160,8 +168,9 @@ def test_a_region_between_a_source_and_a_point_in_one_medium_is_crossed_straight
     )
     straight = float(direct_fluence_rate(lamp, point, absorption=UniformAbsorption(water))[0])
     kept = 1.0 - ((WATER - QUARTZ) / (WATER + QUARTZ)) ** 2
-    expected = straight * kept**2 * np.exp(-(quartz - water) * 2 * radius)
-    assert solved.fluence_rate_direct[0] == pytest.approx(expected, rel=1e-12)
+    nearer = (0.1 / (0.1 - 2 * half * (1.0 - WATER / QUARTZ))) ** 2
+    expected = straight * kept**2 * np.exp(-(quartz - water) * 2 * half) * nearer
+    assert solved.fluence_rate_direct[0] == pytest.approx(expected, rel=1e-3)
 
 
 def test_points_on_a_lamp_take_another_lamp_s_light_as_points_just_off_it_do():

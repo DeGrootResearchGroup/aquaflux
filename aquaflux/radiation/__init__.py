@@ -165,7 +165,7 @@ from aquaflux.radiation.refraction import (
     Transparent,
     fresnel_transmittance,
     solve_paths,
-    straight_through,
+    straight_reach,
 )
 from aquaflux.radiation.receiver_shadows import FrozenShadows, ReceiverShadows, StreamedShadows
 from aquaflux.radiation.scene import (
@@ -280,7 +280,7 @@ __all__ = [
     "solve_paths",
     "solve_scene",
     "stored_normal_disagreement",
-    "straight_through",
+    "straight_reach",
     "subdivide_to_width",
     "subtriangle_centroids",
     "surface_irradiance",
