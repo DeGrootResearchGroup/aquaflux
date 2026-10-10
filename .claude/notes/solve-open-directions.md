@@ -286,21 +286,12 @@ sequential global sweep that does not parallelize.
 the first GPU march's step/cycle counts against the CPU march's — counts should match; clocks are the
 result.
 
-## 9. Batch the parameter sweep with `vmap` over the whole Newton step
+## 9. CLOSED ON CPU — batching a parameter sweep with `vmap`; reopen with entry 8
 
-**What.** For calibration and gradient sweeps (`uvreactor_openfoam/gradient_sweep_calibration.py`,
-Reynolds sweeps), `jax.vmap` the compiled Newton step over 4–8 parameter values and march them in
-lock-step, with per-member convergence masks.
-
-**Why it should win.** The ledger already measured per-call overhead amortizing under `vmap`
-(9.08 → 3.22 ms per matvec in 2D, 33 → 17 ms in 3D). On GPU the amortization is far larger because
-each member is too small to fill the device alone. Independent solves at nearby parameters also share
-their compile.
-
-**Caveats.** `RootSolver` reads residual norms back as Python numbers and refuses to run under
-`vmap`/`jit` by design (`steady_state_solving.md`); this needs a batched march driver with traced
-convergence masks — a new driver, not a wrapper. Members converging at different step counts waste
-work on the finished ones; members starting closer together would help (entry 3, a predictor, is closed).
+Bounded on pitzDaily (2026-10-10, `batch_bound_probe.py`) at **at most 1.10x on the Krylov work at 8
+members**, because the preconditioner is ~80 % of each application and does not batch. Recorded in
+`solve-refuted-directions.md` ("Batching a parameter sweep with `vmap`"). It is a GPU question, where
+the preconditioner would be traced and a member too small to fill the device; reopen it there.
 
 ## 10. Nonlinear elimination of the ω stiffness
 

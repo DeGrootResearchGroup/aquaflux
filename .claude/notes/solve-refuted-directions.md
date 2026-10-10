@@ -589,6 +589,37 @@ different Krylov space, and on this operator it did not converge on any system w
 (60 unrestarted iterations: weighted residual 0.97). The weighted inner product over plain GMRES's space
 is the similar operator `W A M W^-1` from `W b`.
 
+## Batching a parameter sweep with `vmap` over the Newton step — NOT WORTH A DRIVER ON CPU (2026-10-10)
+
+**What was proposed** (`solve-open-directions.md` item 9): march 4–8 parameter values in lock-step, `vmap`ing
+the compiled step over the members with per-member convergence masks — a new batched march driver, since
+the march is an eager Python loop that refuses `vmap` by design.
+
+**Probe, no implementation** (`validation/pitzdaily_openfoam/batch_bound_probe.py`). Only the work that is
+one JAX program for every member batches: the residual and its Jacobian-vector product (JVP). The
+preconditioner is a host object behind a callback, fitted per member, and its refits are per member too.
+So one Krylov application costs `pc + jvp` alone and at best `pc + jvp_B / B` per member batched. Measured
+at the march's own target-station states (capture of the shipped `case.yaml`: residual stop, `rtol` 0.3,
+restart 15, `refresh_on_cycles` 2, field split `SimpleSmoothed` / `JacobiSmoothed`; jax 0.11.2, CPU,
+4-core Linux, best of 10):
+
+| | per member |
+|---|---|
+| field-split preconditioner apply | 197.6 ms (196.0–200.5 over steps 17, 24, 31) |
+| coupled-residual JVP, alone | 45.4 ms |
+| JVP under `vmap`, B = 2 / 4 / 8 | 31.8 / 27.3 / 23.7 ms |
+| one Krylov application, B = 1 / 2 / 4 / 8 | 243.0 / 229.4 / 224.9 / 221.3 ms → **at most 1.06 / 1.08 / 1.10x** |
+
+**Why it loses:** the JVP does amortize (1.9x at 8 members), but it is a fifth of an application, and
+the remaining four fifths cannot batch. The march-level bound is lower still: the preconditioner
+refreshes (196 s of the 850 s capture march) are per member, and members converging at different step
+counts idle the finished ones. Nothing in the repository runs such a sweep either:
+`uvreactor_openfoam/gradient_sweep_calibration.py`, which the open note named, calibrates a gradient
+reconstruction and runs no solve, and the channel study's three Reynolds numbers are 2–200x apart.
+
+**When to reopen:** on a GPU with a traced preconditioner (open direction 8), where every part of an
+application is one program and a single member does not fill the device.
+
 ## `jax.linearize` in place of the per-matvec `jax.jvp` — REFUTED, and it looks obviously right
 
 `solve/continuation.py`'s `shifted_jacobian` builds the Krylov matvec as
