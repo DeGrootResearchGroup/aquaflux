@@ -162,9 +162,19 @@ def test_the_irradiance_on_a_wall_is_what_the_solved_radiosity_sends_it() -> Non
         Scene(
             lamps=lamps,
             reflectors=reflectors,
-            surfaces={"floor": SurfaceReceivers(points, normals, reflector="walls")},
+            surfaces={
+                "floor": SurfaceReceivers(
+                    points, normals, reflectance=REFLECTANCE, reflector="walls"
+                )
+            },
             settings=SETTINGS,
         )
+    )
+    # What the floor keeps is what it does not reflect of everything arriving, direct and reflected.
+    np.testing.assert_allclose(
+        solution.irradiance_absorbed["floor"],
+        (1.0 - REFLECTANCE) * solution.irradiance("floor"),
+        rtol=1e-15,
     )
     emission = np.full(len(triangles), LAMP_EXITANCE)
     emission[~top] = solution.radiosity
@@ -188,7 +198,8 @@ def test_a_point_on_a_reflecting_wall_is_not_shadowed_by_the_facet_it_lies_on() 
     )
     up = np.tile([0.0, 0.0, 1.0], (len(points), 1))
 
-    def reflected(occlusion, on):
+    def parts(occlusion, on):
+        """The lamps' direct light on the points and the reflected light, side by side."""
         settings = RadiationSettings(receiver_quadrature=1, self_occlusion=occlusion)
         scene = Scene(
             lamps=lamps,
@@ -196,12 +207,17 @@ def test_a_point_on_a_reflecting_wall_is_not_shadowed_by_the_facet_it_lies_on() 
             surfaces={"floor": SurfaceReceivers(points, up, reflector=on)},
             settings=settings,
         )
-        return solve_scene(scene).irradiance_reflected["floor"]
+        solution = solve_scene(scene)
+        return np.stack(
+            [solution.irradiance_direct["floor"], solution.irradiance_reflected["floor"]]
+        )
 
-    # A box is convex, so nothing shadows anything: the ray test must change nothing.
-    unshadowed = reflected(NoOcclusion(), None)
-    np.testing.assert_allclose(reflected(RayCastOcclusion(), "walls"), unshadowed, rtol=1e-12)
-    assert np.all(reflected(RayCastOcclusion(), None) < 0.5 * unshadowed)
+    # A box is convex, so nothing shadows anything: the ray test must change nothing. The walls'
+    # triangles stand in the way of the lamps' light as well as the walls', so both parts need the
+    # facet under each point left out.
+    unshadowed = parts(NoOcclusion(), None)
+    np.testing.assert_allclose(parts(RayCastOcclusion(), "walls"), unshadowed, rtol=1e-12)
+    assert np.all(parts(RayCastOcclusion(), None) < 0.5 * unshadowed)
 
 
 def test_a_point_inside_a_tilted_reflecting_facet_is_not_lit_by_that_facet() -> None:
@@ -417,6 +433,109 @@ def test_a_lamp_shadows_the_light_the_walls_reflect_past_it() -> None:
     assert np.max(np.asarray(unshadowed) / solution.fluence_rate_reflected) > 1.05
 
 
+def _lamp_under_a_plate_under_a_ceiling():
+    """A lamp facing up, a black plate over it facing down, and a reflecting ceiling over both.
+
+    The plate hides the lamp from the middle of the ceiling and from the points above it, and leaves
+    the outer ceiling tiles and the points beside it partly or wholly lit. It is black, so that no
+    light it might send back from behind itself reaches the ceiling: what is compared below is the
+    shadow it casts and nothing else.
+    """
+    x, y = np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
+    lamp = rectangle_triangles([0.0, 0.0, 0.0], 0.1 * x, 0.1 * y)
+    plate = rectangle_triangles([0.0, 0.0, 1.0], 0.5 * y, 0.5 * x)
+    ceiling = np.concatenate(
+        [
+            rectangle_triangles([i, j, 2.0], 0.5 * y, 0.5 * x)
+            for i in (-1.0, 0.0, 1.0)
+            for j in (-1.0, 0.0, 1.0)
+        ]
+    )
+    grid = np.linspace(-1.2, 1.2, 5)
+    points = np.array([[a, b, z] for a in grid for b in grid for z in (0.5, 1.5)])
+    return lamp, plate, ceiling, points
+
+
+def test_a_reflector_between_a_lamp_and_a_point_shadows_the_lamp_s_direct_light() -> None:
+    # The plate is a reflector, and a reflector's triangles stand in the way of the lamps' own light
+    # as they do of the reflected light: the field in the room, the light landing on the ceiling and
+    # the ceiling points' irradiance all equal the model's, which holds every facet in one set.
+    lamp, plate, ceiling, points = _lamp_under_a_plate_under_a_ceiling()
+    settings = RadiationSettings(receiver_quadrature=1, self_occlusion=RayCastOcclusion())
+    walls = np.concatenate([plate, ceiling])
+    reflectance = np.r_[np.zeros(len(plate)), np.full(len(ceiling), REFLECTANCE)]
+    whole = Surfaces.from_triangles(
+        np.concatenate([lamp, walls]),
+        emission=np.r_[np.full(len(lamp), LAMP_EXITANCE), np.zeros(len(walls))],
+        diffuse_reflectance=np.r_[np.zeros(len(lamp)), reflectance],
+    )
+    model = build_radiation_model(points, whole, settings=settings)
+    expected, _ = fluence_rate(model, whole)
+    landing, _ = surface_irradiance(model, whole)
+
+    lamps = Surfaces.from_triangles(lamp, solid_names=("lamp",), emission=LAMP_EXITANCE)
+    reflectors = Surfaces.from_triangles(
+        walls,
+        solid_id=np.r_[np.zeros(len(plate), int), np.ones(len(ceiling), int)],
+        solid_names=("plate", "ceiling"),
+        diffuse_reflectance=reflectance,
+    )
+    centres = np.asarray(reflectors.centroid)[len(plate) :]
+    down = np.tile([0.0, 0.0, -1.0], (len(centres), 1))
+    solution = solve_scene(
+        Scene(
+            lamps=lamps,
+            reflectors=reflectors,
+            volume=VolumeReceivers(points),
+            surfaces={"ceiling": SurfaceReceivers(centres, down, reflector="ceiling")},
+            lamp_samples=1,
+            settings=settings,
+        )
+    )
+    np.testing.assert_allclose(solution.fluence_rate, np.asarray(expected), rtol=1e-11)
+    np.testing.assert_allclose(
+        solution.reflector_irradiance, np.asarray(landing)[len(lamp) :], rtol=1e-11
+    )
+    # The transfer leaves the shadowed tiles a rounding of zero from their coplanar neighbours.
+    on_tiles = np.asarray(landing)[len(lamp) + len(plate) :]
+    np.testing.assert_allclose(
+        solution.irradiance("ceiling"), on_tiles, rtol=1e-11, atol=1e-14 * on_tiles.max()
+    )
+    # The plate hides the lamp wholly from some points and some ceiling tiles and leaves others lit,
+    # so the agreement is its shadow on the direct light, not a field it does not reach.
+    direct = solution.fluence_rate_direct
+    unshadowed = np.asarray(summed_fluence_rate((lamps,), jnp.asarray(points)))
+    assert np.sum(direct == 0.0) >= 5 and np.sum(np.isclose(direct, unshadowed, rtol=1e-12)) >= 5
+    on_ceiling = solution.irradiance_direct["ceiling"]
+    assert np.sum(on_ceiling == 0.0) >= 3 and np.sum(on_ceiling > 0.0) >= 3
+
+
+def test_a_point_source_under_a_reflector_is_shadowed_by_it_and_lights_the_rest_as_a_point() -> (
+    None
+):
+    # A point source gathered among the reflectors' facets stays a point source: beside the plate it
+    # delivers P / (4 pi r^2), the isotropic point source's closed form, and over the plate nothing.
+    _, plate, _, points = _lamp_under_a_plate_under_a_ceiling()
+    power = 2.0
+    lamps = Surfaces.from_triangles(
+        np.zeros((1, 3, 3)), solid_names=("bulb",), power=power, profiles=(Isotropic(),)
+    )
+    reflectors = Surfaces.from_triangles(plate, solid_names=("plate",))
+    solution = solve_scene(
+        Scene(
+            lamps=lamps,
+            reflectors=reflectors,
+            volume=VolumeReceivers(points),
+            settings=RadiationSettings(self_occlusion=RayCastOcclusion()),
+        )
+    )
+    direct = solution.fluence_rate_direct
+    hidden = (points[:, 2] > 1.0) & np.all(np.abs(points[:, :2]) < 0.5 * points[:, 2:], axis=1)
+    closed_form = power / (4.0 * np.pi * np.sum(points**2, axis=1))
+    np.testing.assert_allclose(direct[~hidden], closed_form[~hidden], rtol=1e-12)
+    assert np.all(direct[hidden] == 0.0) and hidden.sum() >= 5
+
+
 def test_what_the_lamps_and_the_walls_absorb_is_what_the_lamps_emit() -> None:
     # A closed box with nothing in it to absorb but its walls and its lamp: every watt the lamp
     # emits ends on one of them. Leave the lamp's share out, or take its reflectance for what it
@@ -434,8 +553,10 @@ def test_what_the_lamps_and_the_walls_absorb_is_what_the_lamps_emit() -> None:
         np.sum((1.0 - LAMP_REFLECTANCE) * solution.lamp_irradiance * np.asarray(lamps.area))
     )
     assert solution.lamp_absorbed_power == pytest.approx(lamp_absorbs, rel=1e-12)
+    assert solution.reflector_absorbed_power == pytest.approx(walls_absorb, rel=1e-12)
     assert lamp_absorbs > 0.1 * solution.lamp_power
-    assert walls_absorb + solution.lamp_absorbed_power == pytest.approx(
+    # The books close from the solution alone.
+    assert solution.reflector_absorbed_power + solution.lamp_absorbed_power == pytest.approx(
         solution.lamp_power, rel=0.025
     )
 
