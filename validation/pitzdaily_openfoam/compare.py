@@ -208,6 +208,7 @@ def _solver_with_overrides(solver):
         for name, value in (
             ("beta_start", _environment("BETA_START", float)),
             ("release_floor", _environment("RELEASE_FLOOR", float)),
+            ("grow", _environment("GROW", float)),
         )
         if value is not None
     }
@@ -873,6 +874,12 @@ CONTROL = SOLVER.step_control
 #: the state after that first full step, one zero-shift step reached the stopping tolerance; from the
 #: state the ramp arrived at, it did not descend.
 RELEASE_FLOOR = CONTROL.release_floor
+#: How fast the control walks the shift down on a comfortable step (`PITZ_GROW`, the factor beta is
+#: divided by; unset keeps the file's). Every recorded march ran the class default of 1.5, at which the
+#: descent from `beta_start` to `beta_min` takes twelve steps -- the length the station sweep's optimum
+#: coincides with, so this is the axis that separates "the ramp needs this many stations" from "the
+#: ramp needs this many steps for beta to come down".
+GROW = CONTROL.grow
 
 #: ⚠️ REFRESH THE FROZEN PRECONDITIONER, ON SOLVE COST, EXACTLY AS THE THREE-DIMENSIONAL CASE DOES.
 #: Frozen at the cold reference state for a whole march, the preconditioner goes stale precisely as the
@@ -1172,7 +1179,7 @@ def solve_aquaflux(
         (
             "step control",
             f"{type(CONTROL).__name__} (beta_start {BETA_START} cold / {BETA_START_WARM} warm, "
-            f"beta_min {CONTROL.beta_min}, release "
+            f"beta_min {CONTROL.beta_min}, grow {CONTROL.grow}, release "
             f"{'off' if RELEASE_FLOOR is None else f'to {RELEASE_FLOOR:g}'})",
         ),
         ("seed repair (warm rungs)", SEED_REPAIR),
