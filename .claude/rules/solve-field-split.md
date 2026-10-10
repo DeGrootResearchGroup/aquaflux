@@ -1,6 +1,7 @@
 ---
 paths:
   - "aquaflux/solve/field_split.py"
+  - "aquaflux/solve/traced_field_split.py"
 ---
 
 # Rules — `aquaflux/solve/field_split.py` (the block-triangular field split)
@@ -74,8 +75,9 @@ deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` fr
    policy — that is what keeps a mid-march refresh a compilation-cache hit. `TracedFieldSplit` is a
    Module with traced leaves and must ride as a jit **argument** instead. These are different plumbing
    shapes and the second is not a drop-in for the first.
-3. It reaches the block inverses through the private `_solve`. A declared traced-cycle contract is the
-   right seam — see `solve-refuted-directions.md`'s pointer to the duck-typing issue.
+3. ✅ **Done (2026-10-10, #281):** it reaches the block inverses through the declared `TracedFactors`
+   protocol (`apply_traced`), no longer the private `_solve`, and refuses a host-only inverse with a
+   `TypeError` by `isinstance` rather than `hasattr`.
 4. No GPU measurement exists.
 
 ## The field split — a saddle plus two transported scalars
@@ -150,6 +152,14 @@ monolithic `AmgVCycle` is unchanged.
       swallows that raise as a plausible `False` — an exact-solve capability flag did exactly this until the
       host exact forward solve was deleted (2026-09-13, #371). A test of such a property must read it
       **directly**, never through `getattr` with a default.
+    - **The split's refresh is `refactor_block`, and the preconditioner's refresh is the base's (#281,
+      2026-10-10).** `BlockTriangularFieldSplit.refactor` is renamed `refactor_block` — the name every
+      block inverse uses — so the split is a `RefactorableFactors` itself, and
+      `FieldSplitAmgPreconditioner` and `MaterializedBlockPreconditioner` no longer carry their own
+      (identical) `refresh_in_place`: both inherit `MaterializedJacobianPreconditioner.refresh_in_place`
+      (materialize, shift, `factors.refactor_block`). A block inverse without `refactor_block` is refused
+      with a `TypeError` before either block is touched (was an `AttributeError` after a `getattr`). See
+      `solve-direct-preconditioners.md`'s capability-protocol entry.
     - **⚠️ `FieldSplitAmgPreconditioner` NO LONGER SUBCLASSES `MonolithicAmgPreconditioner` — its base is
       the extracted `MaterializedJacobianPreconditioner` (`amg_preconditioner.py`, #287, 2026-09-11).**
       The underlying cause of that raise was inheriting the whole monolithic class — including the fixed-pattern cell-major

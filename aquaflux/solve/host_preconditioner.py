@@ -16,8 +16,17 @@ field splits. :class:`HostFactors` is that pair, written down, rather than each 
 
 **Naming it also closes a class of silent failure.** A base that reads anything off ``self.factors``
 beyond this pair is making an assumption only some factorizations satisfy, and on the others the
-lookup raises -- which a ``getattr`` default at the call site quietly turns into a plausible value. If a capability is not in :class:`HostFactors`, do
-not reach for it through ``self.factors``; give the subclass an explicit answer instead.
+lookup raises -- which a ``getattr`` default at the call site quietly turns into a plausible value. If a
+capability is not in :class:`HostFactors`, do not reach for it through ``self.factors``; give the
+subclass an explicit answer instead.
+
+**The capabilities only some inverses have are declared too, one protocol each.** Re-fitting in place to
+a new operator (:class:`RefactorableFactors`), releasing held resources (:class:`ReleasableFactors`) and
+applying the inverse as a traced map that stays on device (:class:`TracedFactors`) are each offered by
+some members of the family and not others. A consumer asks with ``isinstance`` against the protocol,
+never with ``getattr(inverse, name, default)``: the protocol is where the capability's signature is
+written down, so an inverse that offers it under another name or another signature is reported as not
+offering it, rather than being probed for and silently answered "no".
 """
 
 from __future__ import annotations
@@ -28,6 +37,7 @@ from typing import Protocol, runtime_checkable
 import jax
 import jax.numpy as jnp
 import numpy as np
+import scipy.sparse as sp
 
 
 @runtime_checkable
@@ -52,6 +62,108 @@ class HostFactors(Protocol):
         one; a factorization that cannot supply it cheaply is not usable as an adjoint preconditioner.
         """
         ...
+
+
+@runtime_checkable
+class RefactorableFactors(HostFactors, Protocol):
+    """A frozen inverse that can be re-fitted to a new operator in place.
+
+    What a mid-march refresh needs: the preconditioner object rides as a static field of a compiled
+    solve, so a refresh must mutate the inverse it holds rather than replace it, and an inverse that
+    cannot do so cannot be refreshed at all -- only rebuilt, which recompiles the solve.
+    """
+
+    def refactor_block(self, block: sp.spmatrix) -> None:
+        """Re-fit to ``block``, IN PLACE, keeping this object's identity.
+
+        Parameters
+        ----------
+        block : scipy.sparse matrix
+            The new operator in the raw field-major form the inverse was built from, of the shape it was
+            built at, shape ``(n_dofs, n_dofs)``.
+        """
+        ...
+
+
+@runtime_checkable
+class ReleasableFactors(Protocol):
+    """An inverse holding resources (a host solver's handles) that it can release on request.
+
+    Garbage collection releases them eventually, but a caller building several preconditioners in turn
+    -- each holding a copy of a large coupled operator and its factors -- needs the release to happen on
+    its own schedule.
+    """
+
+    def destroy(self) -> None:
+        """Release the held resources. The object must not be used afterwards."""
+        ...
+
+
+@runtime_checkable
+class TracedFactors(HostFactors, Protocol):
+    """A frozen inverse that can also be applied as a traced map, so a vector need not leave the device.
+
+    The host ``apply`` marshals a ``numpy`` vector in and out; a composition of several inverses that are
+    all traced (a block-triangular split over two multigrid cycles, say) can instead stay on device
+    throughout by calling each one's traced form.
+    """
+
+    def apply_traced(self, residual: jnp.ndarray) -> jnp.ndarray:
+        """Apply ``M ~= A^-1`` to a traced vector, returning a traced vector.
+
+        Parameters
+        ----------
+        residual : jnp.ndarray
+            The right-hand side, shape ``(n_dofs,)``.
+
+        Returns
+        -------
+        jnp.ndarray
+            ``M residual``, shape ``(n_dofs,)``. Linear in ``residual``, so its transpose is available
+            from :func:`jax.linear_transpose`.
+        """
+        ...
+
+
+def release(factors: object) -> None:
+    """Release ``factors``' held resources if it holds any; do nothing otherwise.
+
+    Parameters
+    ----------
+    factors : object
+        A frozen inverse. Released when it is a :class:`ReleasableFactors`.
+    """
+    if isinstance(factors, ReleasableFactors):
+        factors.destroy()
+
+
+def require_refactorable(factors: object, owner: str) -> RefactorableFactors:
+    """``factors``, checked to be re-fittable in place, for a refresh that is about to re-fit it.
+
+    Parameters
+    ----------
+    factors : object
+        The inverse a refresh is about to re-fit.
+    owner : str
+        What is being refreshed, named in the error.
+
+    Returns
+    -------
+    RefactorableFactors
+        ``factors`` itself.
+
+    Raises
+    ------
+    TypeError
+        If ``factors`` offers no ``refactor_block``. An injected inverse need not be refreshable, so this
+        is raised when a refresh is attempted rather than when the inverse is built.
+    """
+    if not isinstance(factors, RefactorableFactors):
+        raise TypeError(
+            f"{type(factors).__name__} offers no refactor_block, so {owner} cannot be refreshed "
+            "mid-march; rebuild it instead, or inject an inverse that can re-fit in place."
+        )
+    return factors
 
 
 class HostPreconditioner:
@@ -109,3 +221,7 @@ class HostPreconditioner:
             )
 
         return apply
+
+    def destroy(self) -> None:
+        """Release the frozen inverse's held resources, if it holds any (:func:`release`)."""
+        release(self.factors)

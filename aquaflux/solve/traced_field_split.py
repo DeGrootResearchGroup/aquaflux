@@ -21,8 +21,8 @@ so it grows as a share of the solve rather than shrinking.
 
 This module removes it. The algebra is identical to the host split's; what changes is that the vector is
 a traced array throughout, the coupling is a :class:`~aquaflux.solve.multigrid._CsrOperator` rather than
-a ``scipy`` matrix, and the two inverses are entered through their traced cycle rather than through
-their host-shaped ``apply``. Nothing crosses the device boundary between the Krylov solve and the
+a ``scipy`` matrix, and the two inverses are entered through their traced ``apply_traced`` rather than
+through their host-shaped ``apply``. Nothing crosses the device boundary between the Krylov solve and the
 preconditioned vector it gets back.
 
 **Both blocks must be traced.** A host factorization -- a sequential triangular solve -- has no traced
@@ -38,6 +38,7 @@ import jax.numpy as jnp
 import scipy.sparse as sp
 
 from .field_split import FieldGroups
+from .host_preconditioner import TracedFactors
 from .multigrid import _CsrOperator
 
 __all__ = ["TracedFieldSplit", "traced_field_split"]
@@ -131,8 +132,8 @@ class TracedFieldSplit(eqx.Module):
 def traced_field_split(
     matrix: sp.spmatrix,
     groups: FieldGroups,
-    leading,
-    trailing,
+    leading: TracedFactors,
+    trailing: TracedFactors,
 ) -> TracedFieldSplit:
     """Build a :class:`TracedFieldSplit` from an assembled operator and two traced block inverses.
 
@@ -143,10 +144,10 @@ def traced_field_split(
         block is read here; each inverse was fitted to its own diagonal block by its own builder.
     groups : FieldGroups
         The partition.
-    leading, trailing : object
-        The two block inverses. Each must expose a **traced** cycle -- ``_solve(vector)`` returning a
-        traced array -- which :class:`~aquaflux.solve.HierarchyBlockInverse` and
-        :class:`~aquaflux.solve.AirBlockInverse` both do. The leading group is solved first, retaining
+    leading, trailing : TracedFactors
+        The two block inverses. Each must be a :class:`~aquaflux.solve.TracedFactors` -- offer
+        ``apply_traced`` -- which :class:`~aquaflux.solve.HierarchyBlockInverse` and
+        :class:`~aquaflux.solve.AirBlockInverse` both are. The leading group is solved first, retaining
         the trailing-by-leading coupling, as in the host split.
 
     Returns
@@ -155,20 +156,20 @@ def traced_field_split(
 
     Raises
     ------
-    AttributeError
+    TypeError
         If either inverse offers no traced cycle -- a host factorization cannot be composed on device,
         and silently falling back to the host split would hide the round trip this exists to remove.
     """
     for name, inverse in (("leading", leading), ("trailing", trailing)):
-        if not hasattr(inverse, "_solve"):
-            raise AttributeError(
+        if not isinstance(inverse, TracedFactors):
+            raise TypeError(
                 f"the {name} inverse {type(inverse).__name__} offers no traced cycle, so this bundle "
                 "cannot be composed on device; use BlockTriangularFieldSplit for a host inverse."
             )
     _, _, trailing_leading, _ = groups.blocks(matrix)
     return TracedFieldSplit(
-        leading_cycle=leading._solve,
-        trailing_cycle=trailing._solve,
+        leading_cycle=leading.apply_traced,
+        trailing_cycle=trailing.apply_traced,
         coupling=_CsrOperator.from_scipy(sp.csr_matrix(trailing_leading)),
         groups=groups,
     )

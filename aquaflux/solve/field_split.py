@@ -51,6 +51,7 @@ import scipy.sparse as sp
 
 from .amg_preconditioner import MaterializedJacobianPreconditioner
 from .hierarchy_inverse import HierarchyBlockInverse
+from .host_preconditioner import HostFactors, release, require_refactorable
 from .multigrid import (
     SmoothedHierarchy,
     air_multigrid_solve,
@@ -58,7 +59,6 @@ from .multigrid import (
     convection_multigrid_solve,
     refresh_air_hierarchy,
 )
-from .refresh_timing import PhaseTimer
 from .state import FieldLayout
 
 __all__ = [
@@ -284,9 +284,10 @@ class BlockTriangularFieldSplit:
 
     Parameters
     ----------
-    leading, trailing : object
-        The two block inverses, each exposing ``apply(residual, *, transpose=False) -> np.ndarray`` over
-        its own group's degrees of freedom. :class:`~aquaflux.solve.HierarchyBlockInverse` satisfies this.
+    leading, trailing : HostFactors
+        The two block inverses, each over its own group's degrees of freedom. A refresh additionally needs
+        each to be a :class:`~aquaflux.solve.RefactorableFactors`, which
+        :class:`~aquaflux.solve.HierarchyBlockInverse` and :class:`AirBlockInverse` are.
     coupling : scipy.sparse matrix
         The retained off-diagonal block, mapping the **leading** group's degrees of freedom to the
         **trailing** group's equations, shape ``(n_trailing_dofs, n_leading_dofs)``. Taken from the
@@ -296,17 +297,25 @@ class BlockTriangularFieldSplit:
 
     Raises
     ------
+    TypeError
+        If either block inverse is not a :class:`~aquaflux.solve.HostFactors`.
     ValueError
         If ``coupling`` does not have the shape the partition implies.
     """
 
     def __init__(
         self,
-        leading: object,
-        trailing: object,
+        leading: HostFactors,
+        trailing: HostFactors,
         coupling: sp.spmatrix,
         groups: FieldGroups,
     ) -> None:
+        for name, inverse in (("leading", leading), ("trailing", trailing)):
+            if not isinstance(inverse, HostFactors):
+                raise TypeError(
+                    f"the {name} block inverse {type(inverse).__name__} is not a frozen inverse: it must "
+                    "offer `n_dofs` and `apply(residual, *, transpose=...)`."
+                )
         expected = (groups.n_dofs - groups.n_leading_dofs, groups.n_leading_dofs)
         if coupling.shape != expected:
             raise ValueError(
@@ -377,57 +386,52 @@ class BlockTriangularFieldSplit:
         out[second_dofs] = y_second
         return out
 
-    def refactor(self, matrix: sp.spmatrix) -> None:
+    def refactor_block(self, block: sp.spmatrix) -> None:
         """Re-fit both blocks and the retained coupling to a new operator, IN PLACE.
 
-        The counterpart of :meth:`~aquaflux.solve.AmgVCycle.refactor` for a split, and used for the same
-        reason: a march's mid-run refresh must re-preconditioner the **same** compiled Krylov solve, which
-        means mutating this object rather than replacing it. Each block re-fits through its own
-        ``refactor``, so each keeps its own aggregation and re-computes only the coarse operators and the
-        smoother's factor values — the economy the monolithic refresh relies on, preserved per block.
+        A march's mid-run refresh must re-precondition the **same** compiled Krylov solve, which means
+        mutating this object rather than replacing it. Each block inverse re-fits through its own
+        ``refactor_block``, so each keeps its own coarsening and re-computes only what depends on the
+        operator's values.
 
-        Each inverse takes its new block through ``refactor_block(block)``, in the raw field-major form it
-        was built from: a nodal coarsening recovers each cell as ``index % n_cells``, which only holds
-        field-major.
+        This is the same capability, under the same name, that each block inverse offers, so a split is
+        itself a :class:`~aquaflux.solve.RefactorableFactors` and refreshes through the same path as a
+        single block inverse.
 
         Parameters
         ----------
-        matrix : scipy.sparse matrix
-            The new assembled field-major operator, already shifted, of this partition's shape.
+        block : scipy.sparse matrix
+            The new assembled field-major operator, already shifted, of this partition's shape. Each
+            block inverse is handed its diagonal block in that raw field-major form, which a nodal
+            coarsening needs: it recovers each cell as ``index % n_cells``.
 
         Raises
         ------
-        AttributeError
+        TypeError
             If a block inverse offers no ``refactor_block`` (an injected inverse need not be refreshable
-            at all).
+            at all). Both are checked before either is re-fitted, so a refusal leaves the split as it was.
         """
-        blocks = self._groups.blocks(matrix)
-        for inverse, block in ((self._leading, blocks[0]), (self._trailing, blocks[3])):
-            if (refit := getattr(inverse, "refactor_block", None)) is not None:
-                refit(block)
-            else:
-                raise AttributeError(
-                    f"{type(inverse).__name__} cannot refactor in place, so this split cannot be "
-                    "refreshed mid-march; rebuild it instead, or inject an inverse that can."
-                )
+        blocks = self._groups.blocks(block)
+        leading = require_refactorable(self._leading, "this field split's leading block")
+        trailing = require_refactorable(self._trailing, "this field split's trailing block")
+        leading.refactor_block(blocks[0])
+        trailing.refactor_block(blocks[3])
         # Solving the leading group first corrects the trailing equations: the block retained is
         # trailing-by-leading.
         self._set_coupling(blocks[2])
 
     def destroy(self) -> None:
         """Release both block inverses' resources, if they hold any."""
-        for block in (self._leading, self._trailing):
-            release = getattr(block, "destroy", None)
-            if release is not None:
-                release()
+        release(self._leading)
+        release(self._trailing)
 
 
 def build_block_triangular_field_split(
     matrix: sp.spmatrix,
     groups: FieldGroups,
     *,
-    leading_inverse: Callable[[sp.csr_matrix, int], object],
-    trailing_inverse: Callable[[sp.csr_matrix, int], object],
+    leading_inverse: Callable[[sp.csr_matrix, int], HostFactors],
+    trailing_inverse: Callable[[sp.csr_matrix, int], HostFactors],
 ) -> BlockTriangularFieldSplit:
     """Build a block-triangular field split, fitting each diagonal block with its own injected inverse.
 
@@ -447,8 +451,8 @@ def build_block_triangular_field_split(
         ``(sub_matrix, n_fields_in_group) -> inverse`` for that block -- for example
         :class:`~aquaflux.solve.SimpleSmoothed` on a pressure-velocity saddle and
         :class:`~aquaflux.solve.JacobiSmoothed` on a pair of transported scalars. The returned
-        object must expose ``n_dofs`` and ``apply(residual, *, transpose=...)``, be a fixed linear map
-        (the outer Krylov solve is not flexible) and transpose exactly (the adjoint's solve uses it).
+        object must be a :class:`~aquaflux.solve.HostFactors`, be a fixed linear map (the outer Krylov
+        solve is not flexible) and transpose exactly (the adjoint's solve uses it).
 
     Returns
     -------
@@ -509,8 +513,8 @@ class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
         shift_diagonal: np.ndarray,
         groups: FieldGroups,
         *,
-        leading_inverse: Callable[[sp.csr_matrix, int], object],
-        trailing_inverse: Callable[[sp.csr_matrix, int], object],
+        leading_inverse: Callable[[sp.csr_matrix, int], HostFactors],
+        trailing_inverse: Callable[[sp.csr_matrix, int], HostFactors],
         batched_matvec: Callable | None = None,
         probe_batch_size: int | None = None,
         structure: ProbeGather | None = None,
@@ -527,8 +531,8 @@ class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
             The partition to split on.
         leading_inverse, trailing_inverse : callable
             ``(sub_matrix, n_fields_in_group) -> inverse`` for that block, exactly as
-            :func:`build_block_triangular_field_split` takes them. An injected inverse must offer
-            ``refactor_block`` or ``refactor`` to survive a mid-march refresh.
+            :func:`build_block_triangular_field_split` takes them. An injected inverse must be a
+            :class:`~aquaflux.solve.RefactorableFactors` to survive a mid-march refresh.
 
         Returns
         -------
@@ -545,34 +549,6 @@ class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
             trailing_inverse=trailing_inverse,
         )
         return cls(split, groups)
-
-    def refresh_in_place(
-        self,
-        matvec: Callable,
-        plan,
-        shift_diagonal: np.ndarray,
-        *,
-        batched_matvec: Callable | None = None,
-        probe_batch_size: int | None = None,
-        structure: ProbeGather | None = None,
-    ) -> tuple[tuple[str, float], ...]:
-        """Re-materialize at the developed state and re-fit both blocks IN PLACE.
-
-        The smoother configuration is fixed at :meth:`build` and cannot be changed by a refresh. Returns
-        the same ``("probe", s), ("assemble", s), ("refactor", s)`` breakdown the monolithic refresh
-        reports, so a march log reads identically for either preconditioner. Here "assemble" is only the
-        diagonal shift — the per-block equilibration is inside the refactor.
-        """
-        timer = PhaseTimer()
-        jacobian = self._materialize_jacobian(
-            matvec, plan, batched_matvec, probe_batch_size, structure
-        )
-        timer.lap("probe")
-        shifted = self._shifted(jacobian, shift_diagonal)
-        timer.lap("assemble")
-        self.factors.refactor(shifted)
-        timer.lap("refactor")
-        return timer.phases()
 
 
 class _NodalSmoother(NamedTuple):
@@ -802,8 +778,9 @@ class AirBlockInverse:
         """Degrees of freedom in this block."""
         return self._n_dofs
 
-    def _solve(self, vector: jnp.ndarray) -> jnp.ndarray:
-        return self._cycle(self._hierarchy, vector)
+    def apply_traced(self, residual: jnp.ndarray) -> jnp.ndarray:
+        """Approximate ``A^-1 r`` as a traced map, so a composition of traced inverses stays on device."""
+        return self._cycle(self._hierarchy, residual)
 
     def refactor_block(self, block: sp.spmatrix) -> None:
         """Re-derive the values on the frozen coarsening, IN PLACE — required to survive a refresh.
@@ -825,10 +802,10 @@ class AirBlockInverse:
         """
         vector = jnp.asarray(residual, dtype=jnp.float64)
         if not transpose:
-            return np.asarray(self._solve(vector), dtype=np.float64)
+            return np.asarray(self.apply_traced(vector), dtype=np.float64)
         if self._transpose_fn is None:
             self._transpose_fn = jax.linear_transpose(
-                self._solve, jnp.zeros(self._n_dofs, dtype=jnp.float64)
+                self.apply_traced, jnp.zeros(self._n_dofs, dtype=jnp.float64)
             )
         return np.asarray(self._transpose_fn(vector)[0], dtype=np.float64)
 

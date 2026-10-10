@@ -198,17 +198,20 @@ class HierarchyBlockInverse:
         # describes the hierarchy this call has just replaced.
         self._transpose_fn = None
 
-    def _solve(self, residual: jnp.ndarray) -> jnp.ndarray:
-        """The cycle over what this inverse currently holds, traced in and not captured."""
+    def apply_traced(self, residual: jnp.ndarray) -> jnp.ndarray:
+        """Approximate ``A^-1 r`` as a traced map: the cycle over what this inverse currently holds.
+
+        The hierarchy is traced in as an argument, not captured, so a re-fit is a compilation-cache hit.
+        A composition of traced inverses calls this rather than :meth:`apply` to stay on device.
+        """
         return self.cycle()(self._hierarchy, self._extras, residual, self.smoother())
 
     def refactor_block(self, block: sp.spmatrix) -> None:
         """Re-fit to a new operator on the same graph, IN PLACE. Required to survive a march refresh.
 
-        The field split refuses to refresh an inverse offering neither this nor ``refactor``, because
-        replacing the object would recompile the whole coupled solve -- so without it this
-        preconditioner cannot be used in a march at all, and a single-state probe never reaches the
-        code path.
+        A refresh refuses an inverse that does not offer this, because replacing the object would
+        recompile the whole coupled solve -- so without it this preconditioner cannot be used in a march
+        at all, and a single-state probe never reaches the code path.
 
         Takes the **raw field-major** block rather than the equilibrated cell-major form a host solver
         would want, because the nodal coarsening recovers each cell as ``index % n_cells``.
@@ -253,10 +256,10 @@ class HierarchyBlockInverse:
         """Approximate ``A^-1 r`` (or ``A^-T r``) with one hierarchy over the whole group."""
         vector = jnp.asarray(residual, dtype=jnp.float64)
         if not transpose:
-            return np.asarray(self._solve(vector), dtype=np.float64)
+            return np.asarray(self.apply_traced(vector), dtype=np.float64)
         if self._transpose_fn is None:
             self._transpose_fn = jax.linear_transpose(
-                self._solve, jnp.zeros(self._n_dofs, dtype=jnp.float64)
+                self.apply_traced, jnp.zeros(self._n_dofs, dtype=jnp.float64)
             )
         return np.asarray(self._transpose_fn(vector)[0], dtype=np.float64)
 

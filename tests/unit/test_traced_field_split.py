@@ -152,7 +152,7 @@ def test_a_host_only_inverse_is_refused_rather_than_silently_composed_on_the_hos
         trailing_inverse=JacobiSmoothed(max_coarse=150),
     )
 
-    with pytest.raises(AttributeError, match="no traced cycle"):
+    with pytest.raises(TypeError, match="no traced cycle"):
         traced_field_split(matrix, groups, host._leading, host._trailing)
 
 
