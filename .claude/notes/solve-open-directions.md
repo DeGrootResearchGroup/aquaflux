@@ -318,9 +318,8 @@ operator (the warm-start refutation is the cautionary tale).
 - **Compile on the critical path — CLOSED (2026-10-10), nothing station-specific to overlap.** See the
   ledger ("Compiling the next station ahead of time"). The 396 s quoted here first is gone: a cold
   pitzDaily run now compiles 115 s, 77 s of it before step 1, and a station change compiles ~1–2 s.
-- **First-order seed for the second-order residual.** March the `FirstOrderUpwind` residual to a loose
-  tolerance and hand the state to the second-order residual as a seed (defect-correction seeding). Not
-  recorded as tried; cheap to measure on pitzDaily's opening residual.
+- **First-order seed for the second-order residual — CLOSED (2026-10-10), even at best.** See the
+  ledger ("Seeding the second-order march from a first-order solve").
 - **Gradient reconstruction `sweeps`.** `schemes.md` is explicit that `sweeps=4` must not be lowered
   globally; the open question is whether the *tangent* reconstruction inside the JVP needs the same
   count as the primal (still open: entry 2, which would have made this moot, is closed).

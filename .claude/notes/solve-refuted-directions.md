@@ -589,6 +589,33 @@ different Krylov space, and on this operator it did not converge on any system w
 (60 unrestarted iterations: weighted residual 0.97). The weighted inner product over plain GMRES's space
 is the similar operator `W A M W^-1` from `W b`.
 
+## Seeding the second-order march from a first-order solve — NOT WORTH BUILDING (2026-10-10)
+
+**What was proposed** (`solve-open-directions.md`, housekeeping): defect-correction seeding — march the
+residual with first-order upwind momentum advection to a loose tolerance, and start the shipped
+second-order march from that state instead of from the viscosity ramp.
+
+**Measured** (`validation/pitzdaily_openfoam/seed_study.py`: case files derived from the shipped
+`case.yaml` — residual stop, `refresh_on_cycles` 2, `LimitedUpwind` + Venkatakrishnan momentum,
+first-order `k`/`omega` — each run through `aquaflux run` in its own process; jax 0.11.2, CPU, 4-core
+Linux, one run per arm, compile seconds from JAX's compile log). The seed keeps the ramp (a first-order
+march from the hybrid start needs it as much as the second-order one), and the second-order march from it
+drops the ramp:
+
+| arm | steps | wall | compiling | without |
+|---|---|---|---|---|
+| first-order seed, `atol` 1e-3 | 20 | 474 s | 100 s | 374 s |
+| second-order from it | 18 | 290 s | 36 s | 254 s |
+| first-order seed, `atol` 1e-2 | 17 | 371 s | 49 s | 322 s |
+| second-order from it | 19 | 299 s | 34 s | 265 s |
+| **shipped (ramp, then target)** | **31** | **676 s** | 59 s | **617 s** |
+
+Seeded totals 765 / 670 s (628 / 587 s without compiling) against 676 / 617 s. **Why it loses:** the
+ramp's 16 stations are paid either way, and a first-order root is a WORSE start for the second-order
+target than the ramp's own last station — 18–19 steps from the seed against 15 for the shipped target
+station. The best arm is within the ~15 % single-run spread of the baseline, and it doubles the compiled
+programs and adds a second problem to every solve.
+
 ## Compiling the next station ahead of time — NOT WORTH BUILDING (2026-10-10)
 
 **What was proposed** (`solve-open-directions.md`, housekeeping): lower and compile the next viscosity
