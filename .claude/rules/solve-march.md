@@ -208,6 +208,13 @@ or whose blocks are unnamed: `RowScaledNorm` /
       which the preconditioner **stops following** the operator, and that is `PC_BETA_FLOOR = 0.05`, a
       value chosen against no recorded evidence on this case. Whether 0.05 is right, and whether the
       floor should track the ramp rather than sit still, is open and unmeasured.
+      ⚠️ **"Fine" means stable, not fast (measured 2026-10-10).** `beta_min = 0.005` is reached at ramp
+      step 13 and then sets the whole target station's rate: a dual-time step at a fixed shift contracts
+      each mode by `beta / (lambda + beta)`, and on pitzDaily the slowest mode sits at 0.5-0.8 of the
+      floor, so the station converges linearly at 0.55-0.84 per step for 15 steps. From a settled target
+      state (steps 21 and 27) ONE zero-shift step reaches the stopping bar; from the arrival state it does
+      not descend at all. Table, configuration and the pre-registered march in
+      `.claude/notes/solve-open-directions.md` entry 11.
     - `shift_factor` defaults to `1.0` on the protocol, so a homotopy indifferent to the shift pays
       nothing and the march is byte-identical to one that never asks.
   - **`station_step(step, station, arrived) -> step` — reshape the STEP for the station, the counterpart
