@@ -344,7 +344,7 @@ def beta_tracking_refresh(
             if isinstance(pc, MaterializedJacobianPreconditioner)
             else {}
         )
-        return pc.refresh_in_place(lambda v: matvec_at(frozen, v), plan, shift, **extra) or ()
+        return pc.refresh_in_place(lambda v: matvec_at(frozen, v), plan, shift, **extra)
 
     def refresh_at(iterate) -> None:
         """``inner_refresh`` hook: rebuild the preconditioner at this mid-step iterate.

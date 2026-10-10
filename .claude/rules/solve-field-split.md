@@ -103,7 +103,12 @@ public method on a published class, so export them when the split is wired.
    split, and a jit over that closure captures the split's arrays as constants again** — a new closure per
    split is a new cache key, so that is a recompile per refresh rather than a stale answer, but it is the
    shape option 1 must replace, not reuse.
-3. The protocol is the narrow form; #281's `FrozenInverse` contract is still the place for it to live.
+3. **Settled (#281, 2026-10-10): `OffersTracedCycle` stays in `traced_cycle.py`, beside its value type.**
+   #281 part 1 had added a `TracedFactors` protocol (`apply_traced`) in `host_preconditioner.py` for the
+   same capability; it was **dropped in favour of this one** when the two met in a merge, because handing
+   the split a bound `apply_traced` is exactly the stale-constant shape #665 fixed. There is no
+   `TracedFactors` and no `apply_traced`. The other two capabilities (`RefactorableFactors`,
+   `ReleasableFactors`) are in `host_preconditioner.py`; see `solve-direct-preconditioners.md`.
 4. No GPU measurement exists.
 
 ## The field split — a saddle plus two transported scalars
@@ -178,6 +183,14 @@ monolithic `AmgVCycle` is unchanged.
       swallows that raise as a plausible `False` — an exact-solve capability flag did exactly this until the
       host exact forward solve was deleted (2026-09-13, #371). A test of such a property must read it
       **directly**, never through `getattr` with a default.
+    - **The split's refresh is `refactor_block`, and the preconditioner's refresh is the base's (#281,
+      2026-10-10).** `BlockTriangularFieldSplit.refactor` is renamed `refactor_block` — the name every
+      block inverse uses — so the split is a `RefactorableFactors` itself, and
+      `FieldSplitAmgPreconditioner` and `MaterializedBlockPreconditioner` no longer carry their own
+      (identical) `refresh_in_place`: both inherit `MaterializedJacobianPreconditioner.refresh_in_place`
+      (materialize, shift, `factors.refactor_block`). A block inverse without `refactor_block` is refused
+      with a `TypeError` before either block is touched (was an `AttributeError` after a `getattr`). See
+      `solve-direct-preconditioners.md`'s capability-protocol entry.
     - **⚠️ `FieldSplitAmgPreconditioner` NO LONGER SUBCLASSES `MonolithicAmgPreconditioner` — its base is
       the extracted `MaterializedJacobianPreconditioner` (`amg_preconditioner.py`, #287, 2026-09-11).**
       The underlying cause of that raise was inheriting the whole monolithic class — including the fixed-pattern cell-major

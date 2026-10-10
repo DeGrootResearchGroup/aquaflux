@@ -224,7 +224,7 @@ def test_a_split_rebuilt_after_a_refresh_reuses_the_compiled_solve_and_applies_t
     before = apply(traced_field_split(matrix, groups, host._leading, host._trailing), r)
 
     refreshed = _perturbed(matrix, seed=9)
-    host.refactor(refreshed)
+    host.refactor_block(refreshed)
     split = traced_field_split(refreshed, groups, host._leading, host._trailing)
     after = apply(split, r)
     expected = split.apply(r)

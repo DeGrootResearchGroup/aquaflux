@@ -27,6 +27,7 @@ import scipy.sparse as sp
 
 from .field_split import AirBlockInverse, JacobiSmoothedInverse
 from .hierarchy_inverse import HierarchyBlockInverse
+from .host_preconditioner import RefactorableFactors
 from .multigrid import build_air_hierarchy
 from .saddle_multigrid import SimpleSmoothedInverse
 from .settings_value import SettingsValue
@@ -62,11 +63,11 @@ class BlockInverse(SettingsValue, abc.ABC):
 
     def _build(
         self, block: sp.spmatrix, n_fields: int, report: Callable[[str], None] | None
-    ) -> object:
+    ) -> RefactorableFactors:
         extra = {} if report is None else {"report": report}
         return self._inverse_class()(block, n_fields, **self.settings(), **extra)
 
-    def __call__(self, block: sp.spmatrix, n_fields: int) -> object:
+    def __call__(self, block: sp.spmatrix, n_fields: int) -> RefactorableFactors:
         """Build the inverse for ``block``, the ``(block, n_fields) -> inverse`` a field split calls.
 
         Parameters
@@ -78,15 +79,14 @@ class BlockInverse(SettingsValue, abc.ABC):
 
         Returns
         -------
-        object
-            The inverse, exposing ``n_dofs``, ``apply(residual, *, transpose=...)`` and
-            ``refactor_block``.
+        RefactorableFactors
+            The inverse, re-fittable in place so that a march can refresh it.
         """
         return self._build(block, n_fields, None)
 
     def bound(
         self, *, report: Callable[[str], None] | None
-    ) -> Callable[[sp.spmatrix, int], object]:
+    ) -> Callable[[sp.spmatrix, int], RefactorableFactors]:
         """The same factory with the inverse's build record sent to ``report``.
 
         Parameters
@@ -110,7 +110,7 @@ class BlockInverse(SettingsValue, abc.ABC):
                 "nothing to send to `report`."
             )
 
-        def build(block: sp.spmatrix, n_fields: int) -> object:
+        def build(block: sp.spmatrix, n_fields: int) -> RefactorableFactors:
             return self._build(block, n_fields, report)
 
         return build

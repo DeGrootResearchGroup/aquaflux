@@ -11,12 +11,16 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import scipy.sparse as sp
 from aquaflux.solve import (
     HostFactors,
     HostPreconditioner,
+    MaterializedJacobianPreconditioner,
     MonolithicAmgPreconditioner,
     MonolithicLuPreconditioner,
+    RefactorableFactors,
+    ReleasableFactors,
 )
 
 FAMILY = (
@@ -30,6 +34,10 @@ class _ExactInverse:
 
     def __init__(self, block: np.ndarray) -> None:
         self._inverse = np.linalg.inv(np.asarray(block, dtype=np.float64))
+
+    @property
+    def n_dofs(self) -> int:
+        return self._inverse.shape[0]
 
     def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
         matrix = self._inverse.T if transpose else self._inverse
@@ -149,3 +157,74 @@ def test_the_base_asks_its_factors_for_nothing_beyond_the_declared_contract() ->
 
     # And the pair really is sufficient: a stub offering exactly it builds and applies.
     assert np.allclose(np.asarray(HostPreconditioner(_Doubling()).matvec()(jnp.ones(4))), 2.0)
+
+
+def test_each_inverse_declares_exactly_the_capabilities_it_has() -> None:
+    """The optional capabilities are protocols, asked by ``isinstance``, so each must answer truthfully.
+
+    The failure this replaces was an inverse probed by ``getattr(inverse, name, default)``: one offering
+    a capability under another name answered "no" silently. Checked in both directions, so an inverse
+    claiming a capability it lacks fails as surely as one that stopped declaring a capability it has.
+    """
+    from aquaflux.solve import AirReduction, JacobiSmoothed
+    from aquaflux.solve.field_split import BlockTriangularFieldSplit, FieldGroups
+    from aquaflux.solve.lu_preconditioner import factorize_lu
+    from aquaflux.solve.traced_cycle import OffersTracedCycle
+
+    n_cells = 40
+    chain = sp.diags(
+        [-np.ones(n_cells - 1), np.full(n_cells, 4.0), -np.ones(n_cells - 1)], [-1, 0, 1]
+    )
+    block = sp.block_diag([chain, chain], format="csr")
+    hierarchy = JacobiSmoothed(max_coarse=8)(block, 2)
+    reduction = AirReduction(max_coarse=8)(block, 2)
+    lu = factorize_lu(block, backend="scipy")
+    groups = FieldGroups.by_counts(n_cells=n_cells, n_leading_fields=1, n_trailing_fields=1)
+    leading, _, coupling, trailing = groups.blocks(block)
+    split = BlockTriangularFieldSplit(
+        factorize_lu(leading, backend="scipy"),
+        factorize_lu(trailing, backend="scipy"),
+        coupling,
+        groups,
+    )
+
+    expected = {
+        hierarchy: (RefactorableFactors, ReleasableFactors, OffersTracedCycle),
+        reduction: (RefactorableFactors, ReleasableFactors, OffersTracedCycle),
+        lu: (RefactorableFactors, ReleasableFactors),
+        split: (RefactorableFactors, ReleasableFactors),
+        _Doubling(): (),
+    }
+    for inverse, has in expected.items():
+        for capability in (RefactorableFactors, ReleasableFactors, OffersTracedCycle):
+            assert isinstance(inverse, capability) == (capability in has), (
+                f"{type(inverse).__name__} {'lacks' if capability in has else 'claims'} "
+                f"{capability.__name__}"
+            )
+
+
+def test_destroying_a_preconditioner_releases_its_inverse_when_it_holds_anything() -> None:
+    """Every family member's ``destroy`` releases the frozen inverse -- and tolerates one with nothing.
+
+    The materialized-Jacobian base once carried a ``destroy`` with no body, so destroying a monolithic
+    V-cycle or a field-split preconditioner released nothing: the PETSc hierarchy a caller destroys
+    precisely to bound its memory stayed live until the collector found it.
+    """
+    released = []
+
+    class _Releasable(_Doubling):
+        def destroy(self) -> None:
+            released.append(True)
+
+    for cls in (HostPreconditioner, MaterializedJacobianPreconditioner):
+        released.clear()
+        cls(_Releasable()).destroy()
+        assert released == [True], f"{cls.__name__}.destroy did not release its inverse"
+        cls(_Doubling()).destroy()  # nothing to release, and no lookup to fail
+
+
+def test_the_shared_refresh_refuses_an_inverse_that_cannot_refit() -> None:
+    """Refused by name before anything is materialized, rather than failing after a costly probe."""
+    preconditioner = MaterializedJacobianPreconditioner(_Doubling())
+    with pytest.raises(TypeError, match="_Doubling offers no refactor_block"):
+        preconditioner.refresh_in_place(lambda v: v, None, np.zeros(4))

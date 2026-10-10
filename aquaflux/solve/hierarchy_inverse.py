@@ -240,10 +240,9 @@ class HierarchyBlockInverse:
     def refactor_block(self, block: sp.spmatrix) -> None:
         """Re-fit to a new operator on the same graph, IN PLACE. Required to survive a march refresh.
 
-        The field split refuses to refresh an inverse offering neither this nor ``refactor``, because
-        replacing the object would recompile the whole coupled solve -- so without it this
-        preconditioner cannot be used in a march at all, and a single-state probe never reaches the
-        code path.
+        A refresh refuses an inverse that does not offer this, because replacing the object would
+        recompile the whole coupled solve -- so without it this preconditioner cannot be used in a march
+        at all, and a single-state probe never reaches the code path.
 
         Takes the **raw field-major** block rather than the equilibrated cell-major form a host solver
         would want, because the nodal coarsening recovers each cell as ``index % n_cells``.

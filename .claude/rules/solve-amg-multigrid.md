@@ -42,6 +42,13 @@ paths:
     now subclass directly — see `solve-direct-preconditioners.md`'s `HostFactors` entry for why this
     matters (a base reading anything off `self.factors` beyond `n_dofs`+`apply` is a requirement on every
     subclass, and the pre-extraction shape of this exact pair is the worked example).
+    **Since #281 (2026-10-10) the base also owns the refresh and the release:**
+    `MaterializedJacobianPreconditioner.refresh_in_place` is the one materialize → shift →
+    `factors.refactor_block` body (the split and the single-block preconditioner deleted their identical
+    copies), and `destroy` is inherited from `HostPreconditioner`, which releases a `ReleasableFactors`.
+    The base's old `destroy` had an empty body, so `MonolithicAmgPreconditioner.destroy()` freed no PETSc
+    object. `MonolithicAmgPreconditioner` overrides the refresh, since its V-cycle re-fits to the
+    equilibrated cell-major matrix through `AmgVCycle.refactor(cell_major, scale, perm)`.
   - **The V-cycle is a fixed LINEAR operator (one `pc.apply`, not an inner Krylov solve), so it is a
     drop-in for the same callback-matvec interface as the complete LU and — being linear and transposable —
     serves the adjoint's transpose solve through the multigrid's own transpose (`pc.applyTranspose`), with
@@ -1892,7 +1899,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   - **There is no `PerFieldNativeInverse` — deleted 2026-08-15 (binding).** It had no production caller
     (only its own tests and one sweep arm), its own docstring recorded it as superseded by
     `JacobiSmoothedInverse` wherever that works, and it was never ported onto `HierarchyBlockInverse` — so
-    it had neither `refactor_block` nor `refactor` and `BlockTriangularFieldSplit.refactor` **raised**
+    it had neither `refactor_block` nor `refactor` and `BlockTriangularFieldSplit.refactor` (since #281
+    `refactor_block`; there is no `split.refactor`) **raised**
     the first time a march refreshed with it, while being exported from `__all__` as public API. It also
     re-committed two costs the shared base was written to remove (eager per-field transposes; a fresh
     closure per apply). Its measurements never transferred to the nodal inverse in any case — a
