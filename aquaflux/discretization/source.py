@@ -20,14 +20,15 @@ from __future__ import annotations
 import abc
 from typing import TYPE_CHECKING
 
-import equinox as eqx
 import jax.numpy as jnp
+
+from .term import DeclaredInputs
 
 if TYPE_CHECKING:
     from aquaflux.context import FieldContext
 
 
-class VolumeSource(eqx.Module):
+class VolumeSource(DeclaredInputs):
     """Strategy interface: the volume-integrated source of a cell field.
 
     A concrete source returns one value per cell -- the source integrated over the cell volume,
@@ -35,6 +36,10 @@ class VolumeSource(eqx.Module):
     shared :class:`~aquaflux.context.FieldContext` it gathers its inputs from. It is
     an immutable ``equinox.Module``, so any coefficient or frozen field it carries is a
     differentiable leaf and gradients flow through it.
+
+    What it reads from the context beyond the field -- named properties, a reconstructed gradient --
+    is declared through :class:`~aquaflux.discretization.term.DeclaredInputs`, and checked by
+    :meth:`~aquaflux.discretization.residual.ResidualAssembler.build` exactly as a flux operator's is.
     """
 
     @abc.abstractmethod
@@ -55,12 +60,3 @@ class VolumeSource(eqx.Module):
         jnp.ndarray
             The source integrated over each cell's volume, shape ``(n_cells,)``.
         """
-
-    def requires(self) -> tuple[str, ...]:
-        """Names this source reads from ``context.properties`` (default: none).
-
-        Override when the source names a property it reads by key, mirroring
-        :meth:`~aquaflux.discretization.face_flux.FaceFluxOperator.requires`; validated by
-        :meth:`~aquaflux.discretization.residual.ResidualAssembler.build`.
-        """
-        return ()

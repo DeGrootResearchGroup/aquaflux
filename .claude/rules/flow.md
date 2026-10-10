@@ -119,9 +119,13 @@ Engineering Principles.
     level in `_momentum_residual`, after the per-component balances are stacked — a momentum source
     is coupled across components (a rotating-frame term is `−2ρΩ×u`), so it is not a per-component
     quantity and cannot ride in a `CellBalance`'s scalar `source_operators`.
-    - **`requires()` names the properties a source reads (default `()`)**, mirroring
-      `VolumeSource.requires`; `MomentumContinuity.build` unions them with `viscosity`/`density` into
-      one `properties.require(...)`, so a drag reading a mistyped `"permeability"` is a build-time
+    - **`requires()` names the properties a source reads (default `()`)** — inherited, with
+      `uses_gradient()`, from `discretization.DeclaredInputs`, the contract every term family shares
+      (#362); `MomentumContinuity.build` unions them (`declared_properties`) with
+      `viscosity`/`density` into one `properties.require(...)`. `uses_gradient()` (does the source
+      need the velocity-gradient tensor?) has **nothing to check here**: the flow always reconstructs
+      — `gradient_scheme` is not optional — so it is declared, and falsified by
+      `tests/unit/test_declared_inputs.py`, but not enforced at build, so a drag reading a mistyped `"permeability"` is a build-time
       `ValueError` rather than a `KeyError` inside a traced residual. Not abstract, unlike the three
       below: a missing declaration only moves where the error surfaces, never the answer.
     - **It does NOT take a `FieldContext` (binding).** That context carries *one* scalar component's

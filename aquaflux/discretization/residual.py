@@ -61,6 +61,8 @@ from aquaflux.boundary import (
 from aquaflux.context import FieldContext, MeshContext
 from aquaflux.schemes import BoundaryClosure, BoundaryLinearization
 
+from .term import declared_properties
+
 if TYPE_CHECKING:
     from aquaflux.mesh import Mesh, MeshGeometry
     from aquaflux.properties import PropertyModel
@@ -229,8 +231,8 @@ class ResidualAssembler(eqx.Module):
         geometry : MeshGeometry
             Geometry from ``mesh.geometry()``.
         properties : PropertyModel
-            The named per-cell physical properties. Each operator's own
-            :meth:`~aquaflux.discretization.face_flux.FaceFluxOperator.requires` names what it reads
+            The named per-cell physical properties. Each term's own
+            :meth:`~aquaflux.discretization.term.DeclaredInputs.requires` names what it reads
             (the diffusion term its coefficient); a flux-type boundary closure in ``boundary``
             declares it reads ``coefficient`` via :meth:`~aquaflux.boundary.conditions.
             BoundaryCondition.requires_coefficient`. Checked against the operators and closures
@@ -272,17 +274,19 @@ class ResidualAssembler(eqx.Module):
         Raises
         ------
         ValueError
-            If an operator names a property (:meth:`~aquaflux.discretization.face_flux.
-            FaceFluxOperator.requires`) that ``properties`` does not supply, if a flux-type boundary
-            closure needs ``coefficient`` (:meth:`~aquaflux.boundary.conditions.BoundaryCondition.
-            requires_coefficient`) and ``properties`` does not supply it, or if a flux operator needs
-            a reconstructed gradient (:meth:`~aquaflux.discretization.face_flux.
-            FaceFluxOperator.uses_gradient`) but ``gradient_scheme`` is ``None`` -- all three would
+            If a term -- flux operator, volume source, or the transient -- names a property
+            (:meth:`~aquaflux.discretization.term.DeclaredInputs.requires`) that ``properties`` does
+            not supply, if a flux-type boundary closure needs ``coefficient``
+            (:meth:`~aquaflux.boundary.conditions.BoundaryCondition.requires_coefficient`) and
+            ``properties`` does not supply it, or if a term needs a reconstructed gradient
+            (:meth:`~aquaflux.discretization.term.DeclaredInputs.uses_gradient`) but
+            ``gradient_scheme`` is ``None`` -- all three would
             otherwise surface only inside a jitted residual evaluation, as a bare ``KeyError``, a
             non-finite result (a divide by the coefficient's zero fallback), or a silently degraded
             (1st-order) result respectively.
         """
-        needed = {name for op in (*flux_operators, *source_operators) for name in op.requires()}
+        terms = (*flux_operators, *source_operators, *(() if transient is None else (transient,)))
+        needed = declared_properties(terms)
         if any(bc.requires_coefficient() for bc in boundary.conditions.values()):
             needed.add(coefficient)
         if needed:
@@ -291,13 +295,13 @@ class ResidualAssembler(eqx.Module):
             boundary, HOST_EQUATION_FIELD, "ResidualAssembler.build"
         )
         if gradient_scheme is None:
-            needing = [op for op in flux_operators if op.uses_gradient()]
+            needing = [term for term in terms if term.uses_gradient()]
             if needing:
-                names = ", ".join(sorted({type(op).__name__ for op in needing}))
+                names = ", ".join(sorted({type(term).__name__ for term in needing}))
                 raise ValueError(
-                    f"flux operator(s) [{names}] need a reconstructed gradient, but no "
+                    f"term(s) [{names}] need a reconstructed gradient, but no "
                     "gradient_scheme was given -- with none, context.gradient is exactly zero "
-                    "everywhere, which silently degrades such an operator rather than failing"
+                    "everywhere, which silently degrades such a term rather than failing"
                 )
         assembled = cls(
             mesh=mesh,

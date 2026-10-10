@@ -10,17 +10,20 @@ backward Euler (BDF2) thereafter, for a constant timestep ``dt``:
 
 This is the accumulation half of ``R = accumulation - transport``; it vanishes for a
 steady problem. It carries no physical coefficient (the diffusivity lives on the flux
-side); a heat-capacity/porosity coefficient, when needed, is supplied externally as a
-per-cell array, never baked in here.
+side), so it forms ``V_P dphi/dt`` alone: an accumulation with a coefficient -- a heat
+capacity ``rho c_p dT/dt``, a porosity ``d(eps C)/dt`` -- cannot be expressed with it yet.
+It reads no property and no gradient, so it overrides neither member of the
+:class:`~aquaflux.discretization.term.DeclaredInputs` contract it shares with every other term.
 """
 
 from __future__ import annotations
 
-import equinox as eqx
 import jax.numpy as jnp
 
+from .term import DeclaredInputs
 
-class TransientTerm(eqx.Module):
+
+class TransientTerm(DeclaredInputs):
     """Backward-difference accumulation term ``V_P dphi/dt`` (BDF1 then BDF2).
 
     ``first_step`` is a static flag chosen by the time-integration driver: the very first
