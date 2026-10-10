@@ -65,3 +65,4 @@ validation/**/run-*.exit
 # (one ramp, minutes) and a checkpoint is a snapshot of a measurement rather than a source.
 validation/**/stall-*.npz
 validation/**/stall-*.log
+validation/pitzdaily_openfoam/seed_study/
