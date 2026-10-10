@@ -41,8 +41,8 @@ error.
 multiplier, not a function of ``w``, so -- unlike a nested gradient sub-solve -- it cannot be absorbed
 inside the residual; the border is eliminated one layer down, in the **preconditioner**. Given a flow-
 block preconditioner ``M ~ J^{-1}`` (the block-SIMPLE algebraic multigrid, AMG),
-:func:`_bordered_preconditioner` wraps it into a preconditioner for the ``(dim+1) n_cells + 1``
-augmented system by Schur-eliminating the scalar ``beta``:
+:func:`~aquaflux.solve.bordered_preconditioner` wraps it into a preconditioner for the
+``(dim+1) n_cells + 1`` augmented system by Schur-eliminating the scalar ``beta``:
 
     y   = M r_flow
     dbeta = (c^T y - r_beta) / (c^T M a)      # the 1x1 Schur complement c^T J^{-1} a, approximated
@@ -75,8 +75,8 @@ import jax.numpy as jnp
 from aquaflux.solve import (
     DEFAULT_ROOT_SOLVE,
     DampedNewtonStep,
-    FieldLayout,
     RootSolveSettings,
+    bordered_preconditioner,
 )
 
 from .drive import FlowSolve, MassFlow, mass_flow_drive
@@ -86,54 +86,6 @@ if TYPE_CHECKING:
 
 _Matvec = Callable[[jnp.ndarray], jnp.ndarray]
 _Preconditioner = Callable[[jnp.ndarray], _Matvec]
-
-
-def _bordered_preconditioner(
-    flow_preconditioner: _Preconditioner,
-    drive: MassFlow,
-    fields: FieldLayout,
-    force: jnp.ndarray,
-    average: jnp.ndarray,
-) -> _Preconditioner:
-    """Wrap a flow-block preconditioner ``M ~ J^{-1}`` into one for the augmented ``[w, beta]`` system.
-
-    Constraint (Schur) preconditioning: eliminate the scalar ``beta`` via the 1x1 Schur complement
-    ``c^T M a`` and apply ``M`` to the flow block (see the module docstring). Exact when ``M = J^{-1}``.
-
-    Parameters
-    ----------
-    flow_preconditioner : callable
-        Factory ``w -> (matvec ~ J^{-1})`` for the un-augmented flow block (e.g.
-        :meth:`aquaflux.flow.BlockPreconditioner.factory`).
-    drive : MassFlow
-        The drive whose layout says where the border entry sits; the same one the residual borders by,
-        so the preconditioner and the operator it approximates cannot disagree about the split.
-    fields : FieldLayout
-        The layout of the un-augmented block ``M`` inverts -- the flow alone here, the whole coupled
-        state when a coupled solve borders itself.
-    force, average : jnp.ndarray
-        The border column ``a`` and row ``c``, shape ``(fields.size,)``.
-
-    Returns
-    -------
-    callable
-        Factory ``augmented -> (matvec ~ J_aug^{-1})`` for the augmented system.
-    """
-
-    def factory(augmented: jnp.ndarray) -> _Matvec:
-        flow_matvec = flow_preconditioner(drive.fields_state(fields, augmented))
-        m_force = flow_matvec(force)  # M a
-        schur = jnp.dot(average, m_force)  # c^T M a  (approximates c^T J^{-1} a)
-
-        def apply(residual: jnp.ndarray) -> jnp.ndarray:
-            block, border = drive.split(fields, residual)
-            y = flow_matvec(block)  # M r_flow
-            d_beta = (jnp.dot(average, y) - border) / schur
-            return drive.join(fields, y - d_beta * m_force, d_beta)
-
-        return apply
-
-    return factory
 
 
 class _BulkVelocityResidual(eqx.Module):
@@ -216,7 +168,7 @@ def bulk_velocity_flow_solve(
     preconditioner : callable or None
         Factory ``w -> (matvec ~ J^{-1})`` for the **un-augmented flow block** (e.g. a frozen
         :meth:`aquaflux.flow.BlockPreconditioner.factory`, built off-jit from a reference). When given,
-        it is wrapped by :func:`_bordered_preconditioner` into a constraint preconditioner for the
+        it is wrapped by :func:`~aquaflux.solve.bordered_preconditioner` into a constraint preconditioner for the
         augmented Krylov solve -- the mesh-independent path for a large iterative solve. ``None`` solves
         unpreconditioned (a direct or small solve needs nothing).
 
@@ -236,7 +188,7 @@ def bulk_velocity_flow_solve(
     augmented_preconditioner = None
     if preconditioner is not None:
         force, average = drive.constraint_vectors(reference)
-        augmented_preconditioner = _bordered_preconditioner(
+        augmented_preconditioner = bordered_preconditioner(
             preconditioner, drive, fields, force, average
         )
 

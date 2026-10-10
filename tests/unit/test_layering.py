@@ -17,11 +17,15 @@ before anyone moved a line of it out, because no check looked at how large a phy
 * :func:`test_nothing_below_the_case_layer_imports_it` -- ``case/`` is the opposite end: it composes
   every physics package into a described case, so a package it composes that imported it back would
   make the description a dependency of the thing described.
+* :func:`test_one_package_reaches_another_only_through_its_public_surface` -- a package's ``__all__``
+  is what other packages may use. Seven imports once reached past it, three of them of private names,
+  so each could be renamed inside its own module with nothing in the importing package failing.
 """
 
 from __future__ import annotations
 
 import ast
+import functools
 import pathlib
 
 import pytest
@@ -137,3 +141,65 @@ def test_a_physics_module_stays_below_the_size_at_which_generic_machinery_hides_
     assert not grown, f"{grown} grew past their budget; move code out instead of raising it."
     stale = sorted(name for name in BUDGETS if name not in over)
     assert not stale, f"{stale} are back under {LINE_LIMIT} lines; delete their budget."
+
+
+def _package_of(parts: list[str]) -> list[str]:
+    """The deepest package along the dotted ``parts``: the module path with any submodule dropped."""
+    depth = max(
+        n
+        for n in range(1, len(parts) + 1)
+        if (PACKAGE.parent.joinpath(*parts[:n]) / "__init__.py").exists()
+    )
+    return parts[:depth]
+
+
+@functools.cache
+def _exports(package: tuple[str, ...]) -> frozenset[str]:
+    """The names ``package``'s ``__init__`` lists in ``__all__``, read without importing it."""
+    tree = ast.parse((PACKAGE.parent.joinpath(*package) / "__init__.py").read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            getattr(t, "id", None) == "__all__" for t in node.targets
+        ):
+            return frozenset(ast.literal_eval(node.value))
+    return frozenset()
+
+
+def _surface_breaches(path: pathlib.Path) -> list[str]:
+    """Each import in ``path`` that reaches another package past its ``__init__`` or its ``__all__``."""
+    own = path.relative_to(PACKAGE).parts
+    own_package = own[0] if len(own) > 1 else None
+    found = []
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.ImportFrom):
+            targets = [(_absolute(path, node.module, node.level), [a.name for a in node.names])]
+        elif isinstance(node, ast.Import):
+            targets = [(alias.name.split("."), []) for alias in node.names]
+        else:
+            continue
+        for target, names in targets:
+            if target[0] != "aquaflux" or len(target) < 2 or target[1] == own_package:
+                continue
+            if not (PACKAGE / target[1]).is_dir():
+                continue  # a neutral leaf module, which has no package surface to go through
+            package = _package_of(target)
+            where = f"{path.relative_to(PACKAGE)}:{node.lineno}"
+            if len(package) < len(target):
+                found.append(f"{where} imports from the submodule {'.'.join(target)}")
+                continue
+            hidden = sorted(set(names) - _exports(tuple(package)))
+            if hidden:
+                found.append(f"{where} imports {hidden}, absent from {'.'.join(package)}.__all__")
+    return found
+
+
+def test_one_package_reaches_another_only_through_its_public_surface() -> None:
+    offenders = [
+        breach for path in sorted(PACKAGE.rglob("*.py")) for breach in _surface_breaches(path)
+    ]
+    assert not offenders, (
+        "a package is used through its __init__, and only for what its __all__ lists. Export the name "
+        "(and import it from the package), or move it to the package that needs it; a submodule or a "
+        "name outside __all__ can change with nothing in the importing package failing:\n"
+        + "\n".join(offenders)
+    )

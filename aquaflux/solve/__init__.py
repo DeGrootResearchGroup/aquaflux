@@ -68,7 +68,10 @@ unit tests. The surface is five groups:
   square-root-diagonal rescaling a factorization or a coarsening may want), the hierarchy builders
   `build_smoothed_hierarchy` / `build_convection_hierarchy` / `build_air_hierarchy`, and their
   matching fixed-cycle applies. Callers assemble an operator, build a hierarchy once off the jit
-  path, and apply it as a frozen matrix-free V-cycle preconditioner.
+  path, and apply it as a frozen matrix-free V-cycle preconditioner. `bordered_preconditioner`
+  extends any preconditioner to the same system bordered by one scalar unknown (a Lagrange
+  multiplier), eliminating it through its 1x1 Schur complement; where the scalar sits is a
+  `ScalarBorder`'s to say.
 """
 
 from __future__ import annotations
@@ -104,6 +107,7 @@ from .field_split import (
     FieldSplitAmgPreconditioner,
     build_block_triangular_field_split,
 )
+from .bordered import ScalarBorder, bordered_preconditioner
 from .block_inverse import AirReduction, BlockInverse, JacobiSmoothed, SimpleSmoothed
 from .settings_mapping import SettingsMapping
 from .settings_value import SettingsValue, filled_from
@@ -377,6 +381,7 @@ __all__ = [
     "RootSolver",
     "RowScaled",
     "RowScaledNorm",
+    "ScalarBorder",
     "SessionSource",
     "SettingsMapping",
     "SettingsValue",
@@ -411,6 +416,7 @@ __all__ = [
     "block_reference_scales",
     "block_stencil_colouring",
     "block_stencil_gather_map",
+    "bordered_preconditioner",
     "build_air_hierarchy",
     "build_amg_vcycle",
     "build_block_triangular_field_split",

@@ -36,8 +36,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from aquaflux.discretization import flux_continuous_conductance
-from aquaflux.mesh import Mesh
-from aquaflux.mesh.geometry import MeshGeometry
+from aquaflux.mesh import Mesh, MeshGeometry
 from aquaflux.solve import (
     AirHierarchy,
     ConvectionDiffusionStencil,

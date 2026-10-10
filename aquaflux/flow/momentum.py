@@ -44,8 +44,10 @@ from aquaflux.discretization import (
     declared_properties,
 )
 from aquaflux.properties import PropertyModel
-from aquaflux.schemes import DEFAULT_GRADIENT_SCHEME, BoundaryClosure, BoundaryLinearization
-from aquaflux.schemes.interpolation import (
+from aquaflux.schemes import (
+    DEFAULT_GRADIENT_SCHEME,
+    BoundaryClosure,
+    BoundaryLinearization,
     interpolate_to_face,
     interpolation_factor,
 )

@@ -53,8 +53,7 @@ from typing import TYPE_CHECKING
 
 import jax.numpy as jnp
 
-from aquaflux.flow.initialization import laplace_field, potential_flow
-from aquaflux.flow.scales import friction_velocity, hydraulic_length
+from aquaflux.flow import friction_velocity, hydraulic_length, laplace_field, potential_flow
 
 from .boundary import equilibrium_k, inlet_omega, omega_wall
 from .scales import OUTER_MIXING_LENGTH_FACTOR

@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 
-from aquaflux.schemes.interpolation import interpolate_owner_neighbour
+from aquaflux.schemes import interpolate_owner_neighbour
 
 if TYPE_CHECKING:
     from aquaflux.mesh import FaceCellConnectivity, MeshGeometry

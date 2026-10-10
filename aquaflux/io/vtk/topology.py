@@ -63,9 +63,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import numpy as np
 from scipy.spatial import cKDTree
 
-from aquaflux.mesh.cell import CellGeometry
-from aquaflux.mesh.connectivity import index_dtype
-from aquaflux.mesh.face import face_geometry_scheme
+from aquaflux.mesh import CellGeometry, face_geometry_scheme, index_dtype
 from aquaflux.vectors import dot
 
 if TYPE_CHECKING:  # pragma: no cover

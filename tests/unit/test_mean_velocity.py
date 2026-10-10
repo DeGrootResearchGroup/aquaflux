@@ -28,11 +28,10 @@ from aquaflux.flow import (
     PinnedPoint,
     bulk_velocity_flow_solve,
 )
-from aquaflux.flow.mean_velocity import _bordered_preconditioner
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import RootSolveSettings, solve_linear
+from aquaflux.solve import RootSolveSettings, bordered_preconditioner, solve_linear
 
 H, MU, RHO, U_TARGET = 2.0, 0.1, 1.0, 1.0  # h = H/2 = 1; beta_analytic = 12 mu U_b / H^2 = 3 mu
 _DIRECT = lx.AutoLinearSolver(well_posed=True)
@@ -95,7 +94,7 @@ def test_bordered_preconditioner_inverts_the_augmented_jacobian() -> None:
 
     This checks two things at once: that AD assembles the border ``[[J, a], [c^T, 0]]`` the hand-built
     ``(a, c)`` claim (the ``e_beta`` column and the constraint row), and that the Schur elimination in
-    :func:`_bordered_preconditioner` inverts it (right formula, right signs).
+    :func:`~aquaflux.solve.bordered_preconditioner` inverts it (right formula, right signs).
     """
     momentum = _channel(beta_initial=0.05)
     flow0 = momentum.initial_state()
@@ -134,7 +133,7 @@ def test_bordered_preconditioner_inverts_the_augmented_jacobian() -> None:
 
         return solve_flow
 
-    m_augmented = _bordered_preconditioner(flow_inverse, drive, fields, force, average)(augmented0)
+    m_augmented = bordered_preconditioner(flow_inverse, drive, fields, force, average)(augmented0)
     v = jax.random.normal(jax.random.PRNGKey(1), augmented0.shape)
     assert jnp.allclose(m_augmented(j_augmented(v)), v, atol=1e-6)
 
@@ -142,7 +141,7 @@ def test_bordered_preconditioner_inverts_the_augmented_jacobian() -> None:
 def test_preconditioned_iterative_solve_matches_the_direct_solve() -> None:
     """The block-preconditioned augmented Krylov solve reaches the same root as a direct solve.
 
-    Exercises the production path -- the block-SIMPLE AMG wrapped by :func:`_bordered_preconditioner`,
+    Exercises the production path -- the block-SIMPLE AMG wrapped by :func:`~aquaflux.solve.bordered_preconditioner`,
     driving an iterative (GMRES) augmented solve -- and checks it lands on the direct solve's answer
     (the constraint met, the same body force).
     """

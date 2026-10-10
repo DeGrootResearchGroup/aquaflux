@@ -26,8 +26,10 @@ from .boundary import (
 )
 from .datum import PinnedPoint, PressureDatum, refuse_an_unsuitable_pressure_datum
 from .drive import (
+    MASS_FLOW_CONVERGENCE,
     BoundaryDriven,
     Drive,
+    FlowSolve,
     MassFlow,
     mass_flow_drive,
     refuse_a_constraint_this_solve_cannot_hold,
@@ -44,13 +46,21 @@ from .march import flow_march_step, open_flow_session, solve_flow_march
 from .measures import FlowMeasures, flow_equation_names, flow_row_scales
 from .initialization import bernoulli_pressure, laplace_field, potential_flow
 from .mean_velocity import bulk_velocity_flow_solve
-from .scales import body_force_velocity, characteristic_velocity, reference_speed, wetted_length
+from .scales import (
+    body_force_velocity,
+    characteristic_velocity,
+    friction_velocity,
+    hydraulic_length,
+    reference_speed,
+    wetted_length,
+)
 from .momentum import FlowFields, MomentumContinuity, PressureForce, VelocityFields
 from .source import MomentumSource, UniformBodyForce
 from .preconditioner import damped_jacobi_solve, pressure_schur_laplacian
 from .rhie_chow import interior_mass_flux, momentum_diagonal, volume_flux
 
 __all__ = [
+    "MASS_FLOW_CONVERGENCE",
     "BlockPreconditioner",
     "BoundaryDriven",
     "ConvectionAir",
@@ -59,6 +69,7 @@ __all__ = [
     "FlowBoundary",
     "FlowFields",
     "FlowMeasures",
+    "FlowSolve",
     "FrozenViscosityVelocityParts",
     "MassFlow",
     "MomentumContinuity",
@@ -83,7 +94,9 @@ __all__ = [
     "flow_equation_names",
     "flow_march_step",
     "flow_row_scales",
+    "friction_velocity",
     "frozen_momentum_diagonal_parts",
+    "hydraulic_length",
     "interior_mass_flux",
     "laplace_field",
     "mass_flow_drive",

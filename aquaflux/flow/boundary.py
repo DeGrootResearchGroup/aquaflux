@@ -44,8 +44,14 @@ import abc
 import equinox as eqx
 import jax.numpy as jnp
 
-from aquaflux.boundary import BoundaryConditions, Dirichlet, DirichletField, ZeroGradient
-from aquaflux.boundary.conditions import as_float_leaf, as_position_function
+from aquaflux.boundary import (
+    BoundaryConditions,
+    Dirichlet,
+    DirichletField,
+    ZeroGradient,
+    as_float_leaf,
+    as_position_function,
+)
 from aquaflux.vectors import dot
 
 
