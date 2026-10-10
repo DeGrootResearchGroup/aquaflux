@@ -342,15 +342,18 @@ class StepControl(Protocol):
     leaf so :func:`_march_step` stays a compilation-cache hit) plus its own updated state. The march
     threads that state and stays ignorant of what the control adjusts, so it works for any
     ``NewtonStrategy`` — the control, not the march, knows about β.
+
+    The protocol is typed on :class:`~aquaflux.solve.NewtonStrategy` because a control need not drive
+    a shift at all: one that leaves the step unchanged, or reshapes something else on it, works with
+    any strategy. A control that does drive β needs more of the step than that, and says so -- the
+    shipped ones (:class:`~aquaflux.solve.ShiftStrengthControl` and its subclasses) take a
+    :class:`ShiftedNewtonStrategy` and refuse any other step on the march's first call, before a step
+    is taken.
     """
 
     def next_step(
         self, base_step: NewtonStrategy, previous: StepReport | None, state: object
     ) -> tuple[NewtonStrategy, object]:
-        # NOTE: the shipped control reshapes the shift strength, so it requires a
-        # `PseudoTransientStep` specifically -- the annotation is wider than the real contract, and
-        # passing a `DampedNewtonStep` raises `AttributeError` inside the march loop rather than
-        # being rejected at the seam. Narrow this if a second, step-agnostic control ever appears.
         """The step to run next, and the control's carried state.
 
         Parameters

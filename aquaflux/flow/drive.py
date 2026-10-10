@@ -29,6 +29,7 @@ vectors, the bulk-velocity average and the stopping test are one definition used
 from __future__ import annotations
 
 import abc
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import equinox as eqx
@@ -49,6 +50,14 @@ __all__ = [
     "mass_flow_drive",
     "refuse_a_constraint_this_solve_cannot_hold",
 ]
+
+#: The signature of a flow solve a segregated outer loop calls: ``solve(momentum, state) ->
+#: (momentum, state)``. The assembler comes back with the state because a solve may change it -- a
+#: bulk-velocity-constrained solve carries its converged body force out on the drive -- and an
+#: unconstrained solve returns it unchanged. Both flow-solve builders
+#: (:func:`~aquaflux.flow.reused_flow_solve`, :func:`~aquaflux.flow.bulk_velocity_flow_solve`) return
+#: one, so either can be handed to the loop as it stands.
+FlowSolve = Callable[["MomentumContinuity", jnp.ndarray], tuple["MomentumContinuity", jnp.ndarray]]
 
 #: The bordered state's name for the solved body force -- the block :class:`MassFlow` appends.
 BODY_FORCE = "body_force"

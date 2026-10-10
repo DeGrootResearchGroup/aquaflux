@@ -37,7 +37,7 @@ import jax.numpy as jnp
 
 from .continuation import DualTimeStep
 from .relaxation import ConstantRelaxation
-from .strategy import NewtonStrategy, StepControl, StepReport
+from .strategy import NewtonStrategy, ShiftedNewtonStrategy, StepControl, StepReport
 
 
 class ShiftStrengthControl(eqx.Module):
@@ -104,8 +104,8 @@ class ShiftStrengthControl(eqx.Module):
         return float(min(max(beta, self.beta_min), self.beta_max))
 
     def next_step(
-        self, base_step: NewtonStrategy, previous: StepReport | None, state: object
-    ) -> tuple[NewtonStrategy, tuple[float, object]]:
+        self, base_step: ShiftedNewtonStrategy, previous: StepReport | None, state: object
+    ) -> tuple[ShiftedNewtonStrategy, tuple[float, object]]:
         """The base step carrying a constant β, and the ``(beta, memo)`` state to carry forward.
 
         ``state`` is ``None`` only on the very first step of the whole march; β is :attr:`beta_start`
@@ -118,8 +118,25 @@ class ShiftStrengthControl(eqx.Module):
         β rides as a :class:`~aquaflux.solve.ConstantRelaxation` on a **dynamic** leaf, so a controlled
         step differs from the base one only in that leaf's *value* and
         :func:`~aquaflux.solve.newton_march`'s jitted step stays a compilation-cache hit. ``base_step``
-        must therefore carry a ``relaxation_schedule`` to replace -- these are shift-strength controls.
+        must therefore carry a ``relaxation_schedule`` to replace -- a
+        :class:`~aquaflux.solve.ShiftedNewtonStrategy`, which is narrower than the
+        :class:`~aquaflux.solve.StepControl` protocol asks for, since a control may legitimately leave a
+        step with no shift unchanged.
+
+        Raises
+        ------
+        TypeError
+            If ``base_step`` has no ``relaxation_schedule`` -- a
+            :class:`~aquaflux.solve.DampedNewtonStep`, say, which globalizes by backtracking alone and so
+            has no shift for this control to drive. Refused here, on the march's first call and before
+            any step is taken, rather than surfacing as an ``AttributeError`` from inside the swap.
         """
+        if not hasattr(base_step, "relaxation_schedule"):
+            raise TypeError(
+                f"{type(self).__name__} drives the pseudo-transient shift strength, so the step it "
+                f"controls must carry a `relaxation_schedule` (a PseudoTransientStep or DualTimeStep); "
+                f"{type(base_step).__name__} has none."
+            )
         if state is None:  # the very first step of the whole march
             beta, memo = self.beta_start, None
         else:

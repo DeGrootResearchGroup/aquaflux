@@ -192,8 +192,14 @@ What to take from it, none of which is specific to that mechanism:
       never touches beta, so it works on any step; its *reporting* goes through `_shift_of`, which
       returns `None` for a step with no shift rather than inventing one. A `StepControl` is **not**
       gated either: the protocol only asks it to return a ready-to-run step, a step-agnostic one is
-      legitimate (and exercised), and a control that *does* drive beta already fails loudly from its
-      own `tree_at`. Gating those would reject what the protocol permits.
+      legitimate (and exercised), so the protocol stays typed on `NewtonStrategy`. A control that
+      *does* drive beta refuses for itself: `ShiftStrengthControl.next_step` is typed on
+      `ShiftedNewtonStrategy` and raises a `TypeError` naming the control and the step when the step
+      has no `relaxation_schedule` (#158, 2026-10-10). It used to "fail loudly" only as a bare
+      `AttributeError` from inside its `tree_at`, naming neither. The march calls it before its first
+      step, so nothing is taken first (pinned by `test_step_control.py`, all three controls,
+      mutation-checked). It tests the field's presence, not a readable beta, because it replaces the
+      schedule rather than reading it. Gating at the march would reject what the protocol permits.
     - **The runtime check tests the SHIFT, not `isinstance(..., ShiftedNewtonStrategy)`.** The argument is
       already typed `NewtonStrategy`, so re-testing those four methods at runtime would reject a
       legitimate duck-typed step for a reason unrelated to the feature asked for — which it did, on

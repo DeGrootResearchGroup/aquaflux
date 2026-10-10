@@ -1204,24 +1204,20 @@ class SSTTurbulence(eqx.Module):
         )
         return shift_basis.local_diagonal(convective, dissipative)
 
-    def k_shift_policy(
+    def k_shift_diagonal(
         self,
         mdot: jnp.ndarray,
         closure: SSTClosureFields,
         reference: jnp.ndarray,
         *,
-        preconditioner: ScalarTransportPreconditioner | None = None,
         shift_basis: ShiftBasis = DEFAULT_SHIFT_BASIS,
-    ) -> ScalarShiftPolicy:
-        """The pseudo-transient continuation policy for the k-equation solve.
+    ) -> jnp.ndarray:
+        """The k-equation's base pseudo-time shift diagonal: its transport operator's diagonal.
 
-        Bundles the transport-operator shift diagonal (the ``a_P`` analogue that damps the reactive
-        k-solve from a cold start) with the preconditioner for the shifted operator -- the two
-        problem-specific inputs
-        :class:`~aquaflux.turbulence.continuation.ScalarShiftPolicy` supplies to the continuation
-        engine. The shift diagonal is built for the sweep's ``closure`` and ``mdot`` (the same fields
-        ``k_residual`` uses), so it tracks the current operator; the preconditioner is passed in
-        because it is built once and reused (see :meth:`k_preconditioner`).
+        The ``a_P`` analogue that damps a reactive k-solve, built for the sweep's ``closure`` and
+        ``mdot`` (the same fields ``k_residual`` uses) and combined from its convective and dissipative
+        parts through ``shift_basis``. The segregated solve bundles it with a preconditioner
+        (:meth:`k_shift_policy`); the coupled solve folds it into the shift of the whole state.
 
         Parameters
         ----------
@@ -1231,17 +1227,50 @@ class SSTTurbulence(eqx.Module):
             The frozen closure fields of the current sweep.
         reference : jnp.ndarray
             The field the shift diagonal linearizes at (the current ``k``), shape ``(n_cells,)``.
-        preconditioner : ScalarTransportPreconditioner, optional
-            The preconditioner for the shifted solve (from :meth:`k_preconditioner`), or ``None`` for
-            a shift-only (unpreconditioned) continuation solve.
+        shift_basis : ShiftBasis
+            How the convective and dissipative parts combine (the full operator diagonal by default).
+
+        Returns
+        -------
+        jnp.ndarray
+            The non-negative per-cell shift, shape ``(n_cells,)``.
         """
         diffusivity = self._diffusivity(
             closure.nu_t, closure.f1, self.model.sigma_k1, self.model.sigma_k2
         )
-        shift_diagonal = self._scalar_shift_diagonal(
+        return self._scalar_shift_diagonal(
             diffusivity.values, mdot, self.k_residual(mdot, closure), reference, shift_basis
         )
-        return ScalarShiftPolicy(shift_diagonal, preconditioner)
+
+    def k_shift_policy(
+        self,
+        mdot: jnp.ndarray,
+        closure: SSTClosureFields,
+        reference: jnp.ndarray,
+        *,
+        preconditioner: ScalarTransportPreconditioner | None = None,
+        shift_basis: ShiftBasis = DEFAULT_SHIFT_BASIS,
+    ) -> ScalarShiftPolicy:
+        """The pseudo-transient continuation policy for the segregated k-equation solve.
+
+        Bundles :meth:`k_shift_diagonal` with the preconditioner for the shifted operator -- the two
+        problem-specific inputs
+        :class:`~aquaflux.turbulence.continuation.ScalarShiftPolicy` supplies to the continuation
+        engine. The diagonal is rebuilt for each sweep, so it tracks the current operator; the
+        preconditioner is passed in because it is built once and reused (see
+        :meth:`k_preconditioner`).
+
+        Parameters
+        ----------
+        mdot, closure, reference, shift_basis
+            As :meth:`k_shift_diagonal`.
+        preconditioner : ScalarTransportPreconditioner, optional
+            The preconditioner for the shifted solve (from :meth:`k_preconditioner`), or ``None`` for
+            a shift-only (unpreconditioned) continuation solve.
+        """
+        return ScalarShiftPolicy(
+            self.k_shift_diagonal(mdot, closure, reference, shift_basis=shift_basis), preconditioner
+        )
 
     def omega_preconditioner(
         self,
@@ -1272,6 +1301,32 @@ class SSTTurbulence(eqx.Module):
             reuse=reuse,
         )
 
+    def omega_shift_diagonal(
+        self,
+        mdot: jnp.ndarray,
+        closure: SSTClosureFields,
+        reference: jnp.ndarray,
+        *,
+        shift_basis: ShiftBasis = DEFAULT_SHIFT_BASIS,
+    ) -> jnp.ndarray:
+        """The omega-equation's base pseudo-time shift diagonal.
+
+        As :meth:`k_shift_diagonal`, with the omega diffusivity and the near-wall fixed cells, whose
+        shift is zero: an exact value fixation needs no pseudo-time damping (a full Newton step
+        converges it in one), and shifting an identity row only slows it.
+        """
+        diffusivity = self._diffusivity(
+            closure.nu_t, closure.f1, self.model.sigma_omega1, self.model.sigma_omega2
+        )
+        return self._scalar_shift_diagonal(
+            diffusivity.values,
+            mdot,
+            self.omega_residual(mdot, closure),
+            reference,
+            shift_basis,
+            fixed_cells=self.wall_cells,
+        )
+
     def omega_shift_policy(
         self,
         mdot: jnp.ndarray,
@@ -1281,21 +1336,11 @@ class SSTTurbulence(eqx.Module):
         preconditioner: ScalarTransportPreconditioner | None = None,
         shift_basis: ShiftBasis = DEFAULT_SHIFT_BASIS,
     ) -> ScalarShiftPolicy:
-        """The pseudo-transient continuation policy for the omega-equation solve.
+        """The pseudo-transient continuation policy for the segregated omega-equation solve.
 
-        As :meth:`k_shift_policy`, with the omega diffusivity and the near-wall fixed cells: their
-        shift is zeroed, since an exact value fixation needs no pseudo-time damping (a full Newton
-        step converges it in one) and shifting an identity row only slows it.
+        As :meth:`k_shift_policy`, bundling :meth:`omega_shift_diagonal` with its preconditioner.
         """
-        diffusivity = self._diffusivity(
-            closure.nu_t, closure.f1, self.model.sigma_omega1, self.model.sigma_omega2
+        return ScalarShiftPolicy(
+            self.omega_shift_diagonal(mdot, closure, reference, shift_basis=shift_basis),
+            preconditioner,
         )
-        shift_diagonal = self._scalar_shift_diagonal(
-            diffusivity.values,
-            mdot,
-            self.omega_residual(mdot, closure),
-            reference,
-            shift_basis,
-            fixed_cells=self.wall_cells,
-        )
-        return ScalarShiftPolicy(shift_diagonal, preconditioner)

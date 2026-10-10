@@ -79,16 +79,13 @@ from aquaflux.solve import (
     RootSolveSettings,
 )
 
-from .drive import MassFlow, mass_flow_drive
+from .drive import FlowSolve, MassFlow, mass_flow_drive
 
 if TYPE_CHECKING:
     from .momentum import MomentumContinuity
 
 _Matvec = Callable[[jnp.ndarray], jnp.ndarray]
 _Preconditioner = Callable[[jnp.ndarray], _Matvec]
-_ConstrainedSolve = Callable[
-    ["MomentumContinuity", jnp.ndarray], tuple["MomentumContinuity", jnp.ndarray]
-]
 
 
 def _bordered_preconditioner(
@@ -182,7 +179,7 @@ def bulk_velocity_flow_solve(
     *,
     root_solve: RootSolveSettings = DEFAULT_ROOT_SOLVE,
     preconditioner: _Preconditioner | None = None,
-) -> _ConstrainedSolve:
+) -> FlowSolve:
     """Build a ``solve(momentum, state) -> (momentum, state)`` that holds ``reference``'s bulk target.
 
     Solves the flow with the body force ``beta`` treated as a Lagrange multiplier for the constraint

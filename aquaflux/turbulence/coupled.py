@@ -814,9 +814,10 @@ class CoupledShiftPolicy(eqx.Module):
 
     Composes the three subsystems' pseudo-transient choices block-diagonally: the momentum block's
     ``a_P`` velocity shift + block-SIMPLE preconditioner (:class:`~aquaflux.flow.MomentumShiftPolicy`),
-    and the k and omega transport-operator shift diagonals + convection-diffusion algebraic-multigrid
-    (AMG) preconditioners
-    (:class:`~aquaflux.turbulence.continuation.ScalarShiftPolicy`). The full-state shift diagonal is
+    and the k and omega transport-operator shift diagonals
+    (:meth:`~aquaflux.turbulence.SSTTurbulence.k_shift_diagonal`,
+    :meth:`~aquaflux.turbulence.SSTTurbulence.omega_shift_diagonal`) + convection-diffusion
+    algebraic-multigrid (AMG) preconditioners. The full-state shift diagonal is
     ``[a_P on u, 0 on p, d_k on k, d_omega on omega]`` and the preconditioner is the block-diagonal
     matvec gluing the flow preconditioner to the two scalar AMGs.
 
@@ -1603,12 +1604,10 @@ def _coupled_shift_policy(
     # factor below, which a refresh carries frozen, so the temporal ratio transport(state)/transport(ref)
     # has the range cancel and the shift does not inherit omega's growth (the freeze the old carried
     # product suffered -- see the docstring).
-    k_transport = coupled.turbulence.k_shift_policy(
-        mdot, closure, k_ref, shift_basis=basis
-    ).shift_diagonal
-    omega_transport = coupled.turbulence.omega_shift_policy(
+    k_transport = coupled.turbulence.k_shift_diagonal(mdot, closure, k_ref, shift_basis=basis)
+    omega_transport = coupled.turbulence.omega_shift_diagonal(
         mdot, closure, omega_ref, shift_basis=basis
-    ).shift_diagonal
+    )
 
     # The coordinate factor d(phi)/d(w) is the transform between the physical field and the solved
     # variable, not physics: a refresh carries it frozen (the preconditioner's copy, `k_scale`/

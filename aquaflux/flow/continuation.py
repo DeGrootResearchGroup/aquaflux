@@ -75,7 +75,7 @@ from aquaflux.solve import (
 )
 
 from .block_preconditioner import BlockPreconditioner, frozen_momentum_diagonal_parts
-from .drive import refuse_a_constraint_this_solve_cannot_hold
+from .drive import FlowSolve, refuse_a_constraint_this_solve_cannot_hold
 
 if TYPE_CHECKING:
     from .momentum import MomentumContinuity
@@ -340,8 +340,8 @@ def reused_flow_solve(
     *,
     root_solve: RootSolveSettings = DEFAULT_ROOT_SOLVE,
     **build_kwargs: object,
-) -> Callable[[MomentumContinuity, jnp.ndarray], jnp.ndarray]:
-    """A ``solve_flow(momentum, state)`` that builds its preconditioned continuation **once** and
+) -> FlowSolve:
+    """A ``solve_flow(momentum, state) -> (momentum, state)`` that builds its preconditioned continuation **once** and
     reuses it across calls whose effective viscosity differs.
 
     A segregated outer loop (e.g. the k--omega SST driver) re-solves the momentum system every sweep
@@ -375,21 +375,27 @@ def reused_flow_solve(
     Returns
     -------
     callable
-        ``solve_flow(momentum, state) -> state`` solving ``momentum.residual`` from ``state`` with the
-        frozen preconditioned continuation. Reverse-differentiable in ``momentum`` (the
-        implicit-function-theorem adjoint is one transpose solve at the root, whatever path the march
-        took to reach it). Like every march, it steps in Python and so cannot itself be called from inside
-        a traced program -- ``jax.jit``, ``jax.vmap``, or a traced loop such as ``jax.lax.scan``.
+        ``solve_flow(momentum, state) -> (momentum, state)`` solving ``momentum.residual`` from
+        ``state`` with the frozen preconditioned continuation. ``momentum`` comes back unchanged --
+        an unconstrained solve adjusts nothing on the assembler -- which is the shape a segregated
+        outer loop (:func:`~aquaflux.turbulence.solve_segregated`) calls, the same as
+        :func:`~aquaflux.flow.bulk_velocity_flow_solve`'s, so either can be handed to it as it stands.
+        Reverse-differentiable in ``momentum`` (the implicit-function-theorem adjoint is one transpose
+        solve at the root, whatever path the march took to reach it). Like every march, it steps in
+        Python and so cannot itself be called from inside a traced program -- ``jax.jit``,
+        ``jax.vmap``, or a traced loop such as ``jax.lax.scan``.
     """
     refuse_a_constraint_this_solve_cannot_hold(reference, "reused_flow_solve")
     continuation = momentum_continuation(reference, **build_kwargs)
     solver = root_solve.filled_from(_REUSED_FLOW_SOLVE).solver(continuation)
 
-    def solve_flow(momentum: MomentumContinuity, state: jnp.ndarray) -> jnp.ndarray:
+    def solve_flow(
+        momentum: MomentumContinuity, state: jnp.ndarray
+    ) -> tuple[MomentumContinuity, jnp.ndarray]:
         # `assembler_residual` rather than a lambda: the march compiles its step with the residual as
         # an argument, so a closure built here would be a fresh cache key on every sweep and recompile
         # the solve this helper exists to reuse. `momentum` rides as the parameter, whose arrays are
         # dynamic leaves, so a sweep that changes only the viscosity is a cache hit.
-        return solver.solve(assembler_residual, state, momentum)
+        return momentum, solver.solve(assembler_residual, state, momentum)
 
     return solve_flow
