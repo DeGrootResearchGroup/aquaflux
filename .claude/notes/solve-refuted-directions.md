@@ -589,6 +589,37 @@ different Krylov space, and on this operator it did not converge on any system w
 (60 unrestarted iterations: weighted residual 0.97). The weighted inner product over plain GMRES's space
 is the similar operator `W A M W^-1` from `W b`.
 
+## Compiling the next station ahead of time — NOT WORTH BUILDING (2026-10-10)
+
+**What was proposed** (`solve-open-directions.md`, housekeeping): lower and compile the next viscosity
+station's program in a background thread while the current station marches, against "396 s of XLA
+compilation before step 1".
+
+**Measured** (`validation/pitzdaily_openfoam/compile_timeline.py` over a march logged with
+`JAX_LOG_COMPILES=1`). pitzDaily, shipped `case.yaml` (residual stop, `refresh_on_cycles` 2), jax 0.11.2,
+CPU, 4-core Linux, one run per arm, all `x_r/h` 8.0686:
+
+| run | compile before step 1 | compile after it | step 1 at | march |
+|---|---|---|---|---|
+| cold (empty `AQUAFLUX_COMPILATION_CACHE_DIR`) | 76.7 s (986 programs) | 38.0 s (1697) | 110 s | 748 s |
+| default cache, first run after `main` moved | 64.4 s | 37.8 s | 99 s | 736 s |
+| default cache, warm (stopped after step 1) | — | — | 62 s | — |
+
+- **A station change is already a cache hit.** After step 1, steps compile 0.4–2 s each, almost all of
+  it small eager programs; the exceptions are the flow V-cycle (~0.4 s whenever a refresh moves the
+  thresholded coarsening, which is documented) and one 7.1 s recompile of `batched_jacobian_matvec` at
+  step 9, whose signature differs from step 1's only in one argument being committed to the device
+  rather than uncommitted. So overlapping a next station's compile hides at most ~38 s (5 % of a cold
+  run) and nothing on a warm one.
+- **The persistent cache works, including for programs holding the preconditioner's host callback**
+  (checked on a toy and on the march step itself, which a warm run took from the cache). The
+  "default cache" row above is partly cold only because every library change re-keys its programs.
+  Programs compiling in under 2 s (aquaflux's `jax_persistent_cache_min_compile_time_secs`) are never
+  written, so ~1700 small ones (~30 s) recompile every run.
+- ⚠️ **A trap met while measuring:** "the cache did not serve the march step" was first read as JAX
+  refusing to persist host-callback programs. It was a key change from the library moving under the
+  cache; a warm run settled it. Read a cache miss against what changed since the cache was written.
+
 ## Batching a parameter sweep with `vmap` over the Newton step — NOT WORTH A DRIVER ON CPU (2026-10-10)
 
 **What was proposed** (`solve-open-directions.md` item 9): march 4–8 parameter values in lock-step, `vmap`ing

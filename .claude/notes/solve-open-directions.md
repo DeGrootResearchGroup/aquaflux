@@ -315,10 +315,9 @@ operator (the warm-start refutation is the cautionary tale).
 
 ## Smaller housekeeping
 
-- **Compile on the critical path.** 396 s of XLA compilation before step 1 on pitzDaily. Ahead-of-time
-  lower-and-compile the *next* station's program (new viscosity leaf, new measure) in a background
-  thread while the current station marches; the persistent cache already makes repeat runs cheap, so
-  this is for first runs and parameter changes.
+- **Compile on the critical path — CLOSED (2026-10-10), nothing station-specific to overlap.** See the
+  ledger ("Compiling the next station ahead of time"). The 396 s quoted here first is gone: a cold
+  pitzDaily run now compiles 115 s, 77 s of it before step 1, and a station change compiles ~1–2 s.
 - **First-order seed for the second-order residual.** March the `FirstOrderUpwind` residual to a loose
   tolerance and hand the state to the second-order residual as a seed (defect-correction seeding). Not
   recorded as tried; cheap to measure on pitzDaily's opening residual.
