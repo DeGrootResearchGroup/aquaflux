@@ -847,9 +847,9 @@ class Radiation(Physics):
         """Per receiving patch: the irradiance ``E``, what the wall absorbs of it, ``E_absorbed``, and
         the parts ``E_direct`` and ``E_reflected`` when something reflects."""
         out = {}
-        for name, receivers in problem.surfaces.items():
+        for name in problem.surfaces:
             total = solution.irradiance(name)
-            fields = {"E": total, "E_absorbed": (1.0 - receivers.reflectance) * total}
+            fields = {"E": total, "E_absorbed": solution.irradiance_absorbed[name]}
             if solution.irradiance_reflected is not None:
                 fields["E_direct"] = solution.irradiance_direct[name]
                 fields["E_reflected"] = solution.irradiance_reflected[name]
@@ -875,7 +875,7 @@ class Radiation(Physics):
                 "area": float(np.sum(receivers.areas)),
                 "incident_power": float(np.sum(total * receivers.areas)),
                 "absorbed_power": float(
-                    np.sum((1.0 - receivers.reflectance) * total * receivers.areas)
+                    np.sum(solution.irradiance_absorbed[name] * receivers.areas)
                 ),
             }
         medium = 0.0 if problem.absorption is None else solution.medium_absorbed_power

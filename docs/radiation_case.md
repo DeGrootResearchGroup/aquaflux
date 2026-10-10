@@ -120,17 +120,18 @@ file is one patch's own, so it cannot be given under the name of a patch group.
 - {class}`~aquaflux.case.PatchBody` — mesh patches. `sheet: true` treats them as a sheet with the
   medium on both sides.
 
-```{note}
-The walls of the domain shadow nothing unless they are listed here. In a convex room that is exact;
-a domain with a wall that can stand between a lamp and a point — an L-shaped room, a baffle drawn as
-part of the boundary — must name it as an occluder.
-```
+Neither the lamps nor the reflecting walls need be listed: their own triangles shadow all of the
+light, the lamps' and the light the walls reflect, whenever the surfaces shadow themselves (that is,
+unless `self_occlusion` is `NoOcclusion`). Do not list a solid drawn round a lamp as well: the lamp's
+triangles lie on its surface, which a solid can count as inside it, and a surface inside a body is
+refused as a geometry error.
 
-The lamps need not be listed: their own triangles shadow the light of the other lamps and the light the
-walls reflect, whenever the surfaces shadow themselves (that is, unless `self_occlusion` is
-`NoOcclusion`). Do not list a solid drawn round a lamp as well: the lamp's triangles lie on its
-surface, which a solid can count as inside it, and a surface inside a body is refused as a geometry
-error.
+```{note}
+A wall with no `reflectance` only absorbs, and is not one of the surfaces that exchange light, so it
+shadows nothing unless it is listed here. In a convex room that is exact; a domain with such a wall
+that can stand between a lamp and a point — an L-shaped room, a baffle drawn as part of the boundary —
+must name it as an occluder, or give it a reflectance.
+```
 
 ## The medium, and where the light is gathered
 
